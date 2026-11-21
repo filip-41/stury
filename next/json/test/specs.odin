@@ -155,8 +155,7 @@ trailing_commas :: proc(t: ^testing.T) {
 		{"1,", .Bad_Char, .Bad_Char, 1},
 	}
 	for c in cases {
-		s, _ := build_as(t, c.src, .Json)
-		_, serr := build_as(t, c.src, .Json)
+		s, serr := build_as(t, c.src, .Json)
 		k, _ := fault_of(serr)
 		testing.expectf(t, k == c.strict, "%q as JSON: %v", c.src, serr)
 		tape.destroy(&s)
@@ -269,13 +268,17 @@ json5_numbers :: proc(t: ^testing.T) {
 		{"0x10000000000000801", .Float, 0, 18446744073709555712.0},
 		{"0x10000000000000800", .Float, 0, 18446744073709551616.0},
 		{"0x100000000000008001", .Float, 0, 295147905179352891392.0},
+		// Loose decimals longer than a short buffer, read from the text.
+		{fmt.tprintf("+1e%s2", strings.repeat("0", 200, context.temp_allocator)), .Float, 0, 100},
+		{fmt.tprintf("-.5%s", strings.repeat("0", 200, context.temp_allocator)), .Float, 0, -0.5},
+		{"+1234567890123456789012345.", .Float, 0, 1234567890123456789012345.0},
 	}
 	for c in cases {
 		src := fmt.tprintf("[%s]", c.text)
 		doc, err := build_as(t, src, .Json5)
 		testing.expectf(t, err == nil, "%q: %v", src, err)
 		if err == nil {
-			v, ok := json.node_number(doc.src, doc.nodes[1])
+			v, ok := tape.node_number(&doc, doc.nodes[1])
 			testing.expect(t, ok)
 			switch c.kind {
 			case .Int:
@@ -287,12 +290,12 @@ json5_numbers :: proc(t: ^testing.T) {
 		tape.destroy(&doc)
 	}
 	doc, _ := build_as(t, "NaN", .Json5)
-	v, _ := json.node_number(doc.src, doc.nodes[0])
+	v, _ := tape.node_number(&doc, doc.nodes[0])
 	testing.expect(t, v.kind == .Float && math.is_nan(transmute(f64)v.bits))
 	tape.destroy(&doc)
 	for text in ([]string{"-0.", "-0.0", "-.0"}) {
 		doc, _ = build_as(t, text, .Json5)
-		v, _ = json.node_number(doc.src, doc.nodes[0])
+		v, _ = tape.node_number(&doc, doc.nodes[0])
 		testing.expectf(t, v.kind == .Float && v.bits == 1 << 63, "%s: %v", text, v)
 		tape.destroy(&doc)
 	}
@@ -312,7 +315,7 @@ json5_text :: proc(t: ^testing.T) {
 	buf: [256]u8
 	for n in doc.nodes {
 		if n.kind == .String {
-			s, ok := json.node_text(doc.src, n, buf[:])
+			s, ok := tape.node_text(&doc, n, buf[:])
 			testing.expect(t, ok)
 			append(&texts, strings.clone(s, context.temp_allocator))
 		}

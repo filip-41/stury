@@ -77,12 +77,24 @@ Gaps :: struct {
 	misses: u64, // members read with no match
 }
 
-// The first slot of the row for objects in slot `m`'s value, or 0 before one opens; `m` without gaps.
+// The gap slot of a walk that matches no more gaps, past the table and its own successor, so the objects in its
+// value and its members have it too.
 @(private)
-gap_child :: #force_inline proc "contextless" (w: ^Walk($S, $H), m: u64, $G: bool) -> u64 #no_bounds_check {
-	when !G {
-		return m
-	}
+GAP_OFF :: GAP_ROWS * GAP_MEMBERS + GAP_MEMBERS - 1
+
+// The gap slot a walk starts with.
+@(private)
+GAP_START :: 0 when GAPS else GAP_OFF
+
+// Whether slot `m` matches gaps.
+@(private)
+gaps_on :: #force_inline proc "contextless" (m: u64) -> bool {
+	return m < GAP_ROWS * GAP_MEMBERS
+}
+
+// The first slot of the row for objects in slot `m`'s value, or 0 before one opens.
+@(private)
+gap_child :: #force_inline proc "contextless" (w: ^Walk($S, $H), m: u64) -> u64 #no_bounds_check {
 	return u64(w.gaps.child[m]) * GAP_MEMBERS
 }
 
@@ -99,12 +111,9 @@ gap_new_row :: #force_no_inline proc "contextless" (g: ^Gaps, m: u64) -> u64 #no
 	return row
 }
 
-// The slot after `m`, `m` without gaps. A row's last slot is its own successor.
+// The slot after `m`. A row's last slot is its own successor.
 @(private)
-gap_next :: #force_inline proc "contextless" (m: u64, $G: bool) -> u64 {
-	when !G {
-		return m
-	}
+gap_next :: #force_inline proc "contextless" (m: u64) -> u64 {
 	return m + u64((m + 1) & (GAP_MEMBERS - 1) != 0)
 }
 

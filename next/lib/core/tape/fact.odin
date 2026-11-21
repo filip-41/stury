@@ -1,8 +1,8 @@
 package tape
 
-// Facts are the parts of a text that describe values without being values: comments, tags, anchors, styles, markup
-// names, attributes and declarations. Any document can hold any fact; a write reports the facts its target format
-// cannot hold.
+// Facts are the parts of a text that describe values without being values: comments, tags, anchors, styles,
+// element names, attributes and declarations. Any document can hold any fact kind, and `Format.facts` says which a
+// format holds.
 
 // A comment, property or attribute of a node.
 Fact :: struct {

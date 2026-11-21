@@ -12,8 +12,8 @@ Kind :: enum u8 {
 	Bytes,
 	String,
 	Plain,
-	Array, // in dsv also the document, and a record with no header
-	Object, // in dsv also a record with a header
+	Array,
+	Object,
 	End, // closes the innermost container; never stored in a document
 }
 
@@ -34,7 +34,6 @@ Role :: enum u8 {
 	Doctype,
 	Directive,
 	Attribute,
-	Partial, // a container a path read kept only part of; no walk emits it
 }
 
 // Facts come after `Key`, so a hook tells a fact from a value or key with one compare.
@@ -47,19 +46,25 @@ Token :: struct {
 	n:        u32,
 	kind:     Kind,
 	role:     Role,
-	// The format's detail. In a document a container's is its child count instead, saturated at `MAX_CHILDREN`.
+	// The format's detail. In a document a container's is its child count instead, saturated at `MAX_CHILDREN`, and
+	// `CONTAINER_PARTIAL`.
 	spelling: u16,
 }
 
 Node :: Token
 
-// An index into `Document.nodes`. A build refuses a text whose node count could reach `NO_NODE`.
+// An index into `Document.nodes`. A build refuses a text that makes `NO_NODE` nodes.
 Node_Index :: distinct u32
 
 ROOT :: Node_Index(0)
 NO_NODE :: Node_Index(max(u32))
 
-MAX_CHILDREN :: u16(0xFFFF)
+MAX_CHILDREN :: u16(0x7FFF)
+
+// In a container's spelling in a document, a container a path read kept only part of. Its `n` covers the children kept,
+// and its count is every child it has. One passed unread keeps none, and with its count saturated and no entry in
+// `Document.counts` its count is not known.
+CONTAINER_PARTIAL :: u16(0x8000)
 
 // A container's true child count, where `spelling` saturated.
 Child_Count :: struct {

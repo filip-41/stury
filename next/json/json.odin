@@ -17,7 +17,7 @@ Spec :: enum u8 {
 
 // Options of a JSON read.
 Options :: struct {
-	budget: tape.Budget, // only `depth` applies to a JSON read
+	budget: tape.Budget, // only `depth` and `nodes` apply to a JSON read
 }
 
 @(private, rodata)
@@ -25,9 +25,22 @@ RULES := tape.Rules{"json", {}}
 
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Json  = {name = "json", id = 1},
-	.Jsonc = {name = "jsonc", id = 2, facts = tape.COMMENTS},
-	.Json5 = {name = "json5", id = 3, facts = tape.COMMENTS},
+	.Json  = {name = "json", id = 1, bounds = quotes, decode = text_decoded, number = number_value},
+	.Jsonc = {name = "jsonc", id = 2, facts = tape.COMMENTS, bounds = quotes, decode = text_decoded, number = number_value},
+	.Json5 = {name = "json5", id = 3, facts = tape.COMMENTS, bounds = quotes, decode = text_decoded, number = number_value},
+}
+
+// The format handle of `spec`, to read nodes of a text of `spec` with `tape.node_text` and `tape.node_number`, and to
+// pass a document's format to a call that takes one. Nil for a `spec` out of range.
+as :: proc "contextless" (spec: Spec) -> ^tape.Format {
+	return &FORMATS[spec] if spec <= max(Spec) else nil
+}
+
+// The quotes of a string token, one byte on each side, and none around another scalar.
+@(private)
+quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
+	q := u8(t.kind == .String && t.spelling & tape.SPELLING_QUOTED != 0)
+	return q, q
 }
 
 // The error in `src`, nil when it is one text of `spec`. An optimized build with a constant `spec` links only that
@@ -76,6 +89,22 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read
 	panic("json: spec out of range")
 }
 
+// The nodes of `src` that the paths of `demand` reach, read as `spec`, with each path's answers in text order. A
+// value a path ends at is kept whole. Containers off the paths are judged and not stored. With `read.stop_early` the
+// walk ends once no answer can come or go, and the text past it is not read. Its nodes point into `src`.
+@(require_results)
+scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Partial_Result, tape.Error) {
+	switch spec {
+	case .Json:
+		return scan_as(src, demand, .Json, read, opts, allocator)
+	case .Jsonc:
+		return scan_as(src, demand, .Jsonc, read, opts, allocator)
+	case .Json5:
+		return scan_as(src, demand, .Json5, read, opts, allocator)
+	}
+	panic("json: spec out of range")
+}
+
 @(private)
 validate_as :: proc "contextless" (src: []u8, $S: Spec, opts: Options) -> tape.Error {
 	h: tape.No_Hooks
@@ -88,16 +117,9 @@ validate_as :: proc "contextless" (src: []u8, $S: Spec, opts: Options) -> tape.E
 build_as :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocator) -> (tape.Document, tape.Error) {
 	limit := depth_limit(opts)
 	depth := min(limit, u64(len(src)))
-	// A text makes at most `(len(src) + 1 + depth) / 2` nodes, so the hook checks no capacity. Each node spends two
-	// bytes (a container its brackets, a key its colon, a scalar the comma or close after it), except a container left
-	// open and the token before a fault, which may spend one.
-	nodes := (len(src) + int(depth)) / 2 + 16
-	// A node index and a container's child count are 32 bits, so a larger count is refused.
-	if u64(nodes) >= u64(tape.NO_NODE) {
-		return {}, tape.Exceeded{kind = .Nodes}
-	}
+	most := node_most(node_bound(src, depth), opts)
 	frames: [FRAME_DEPTH]u64 = ---
-	b := build.builder_start(src, &FORMATS[S], nodes, frames[:min(depth, FRAME_DEPTH)], allocator)
+	b := build.builder_start(src, &FORMATS[S], len(src) / BUILD_BYTES_PER_NODE, most, frames[:min(depth, FRAME_DEPTH)], allocator)
 	if b.err != nil {
 		return {}, b.err
 	}
@@ -107,19 +129,75 @@ build_as :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocato
 	return build.builder_end(&b, regs, root_close, err)
 }
 
+// Settles `.Default` duplicates to the format's own policy, the last.
 @(private)
-find_as :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Options, opts: Options, allocator: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
-	read := read
+json_dups :: proc "contextless" (read: ^tape.Read_Options) {
 	if read.dups == .Default {
 		read.dups = .Last
 	}
+}
+
+@(private)
+scan_as :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_Options, opts: Options, allocator: runtime.Allocator) -> (tape.Partial_Result, tape.Error) {
+	read := read
+	json_dups(&read)
+	limit := depth_limit(opts)
+	depth := min(limit, u64(len(src)))
+	most := node_most(node_bound(src, depth), opts)
+	frames: [FRAME_DEPTH]u64 = ---
 	// The value at `lo` walked again, which the first walk judged within the depth limit.
-	rewalk :: proc "contextless" (h: ^build.Finder, lo: u64) {
+	rewalk :: proc "contextless" (h: ^build.Scanner, regs: ^tape.Hook_Regs, lo: u64) -> tape.Walk_Result {
+		src := h.b.doc.src
+		return walk_value(src, raw_data(src)[lo:], S, u64(max(u32)), h, regs, build.scanner_hook)
+	}
+	room: build.Scan_Room = ---
+	h, err := build.scanner_start(src, &FORMATS[S], demand, read, key_is, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator)
+	if err != nil {
+		return {}, err
+	}
+	regs := build.builder_regs(&h.b)
+	root_close, werr := walk_text(src, S, limit, &h, &regs, build.scanner_hook)
+	return build.scanner_end(&h, regs, root_close, werr)
+}
+
+// Open levels a build or scan keeps in its own frame before its builder's stack grows.
+@(private)
+FRAME_DEPTH :: 1024
+
+// The room a build starts with, a node per this many bytes.
+@(private)
+BUILD_BYTES_PER_NODE :: 16
+
+// The room a scan starts with, which holds the answers of a few paths with no growth.
+@(private)
+SCAN_NODES :: 1024
+
+// The most nodes a text of `src` can make, at most `(len(src) + 1 + depth) / 2`. Each node spends two bytes (a
+// container its brackets, a key its colon, a scalar the comma or close after it), except a container left open and
+// the token before a fault, which may spend one.
+@(private)
+node_bound :: #force_inline proc "contextless" (src: []u8, depth: u64) -> u64 {
+	return (u64(len(src)) + depth) / 2 + 16
+}
+
+// The most nodes a read may make, `bound` within `Budget.nodes`, a 32-bit node index and an `int` of bytes.
+@(private)
+node_most :: #force_inline proc "contextless" (bound: u64, opts: Options) -> int {
+	budget := u64(opts.budget.nodes) if opts.budget.nodes != 0 else max(u64)
+	return int(min(bound, budget, u64(tape.NO_NODE) - 1, u64(max(int) / size_of(tape.Node))))
+}
+
+@(private)
+find_as :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Options, opts: Options, allocator: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
+	read := read
+	json_dups(&read)
+	// The value at `lo` walked again, which the first walk judged within the depth limit.
+	rewalk :: proc "contextless" (h: ^build.Finder, lo: u64) -> tape.Walk_Result {
 		regs: tape.Hook_Regs
-		_ = walk_value(h.src, raw_data(h.src)[lo:], S, u64(max(u32)), h, &regs, build.finder_hook)
+		return walk_value(h.src, raw_data(h.src)[lo:], S, u64(max(u32)), h, &regs, build.finder_hook)
 	}
 	room: build.Find_Room = ---
-	f, err := build.finder_start(src, path, read, key_is, respell, rewalk, &room, allocator)
+	f, err := build.finder_start(src, &FORMATS[S], path, read, key_is, respell, rewalk, &room, allocator)
 	if err != nil {
 		return {}, err
 	}
@@ -127,6 +205,9 @@ find_as :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Options,
 	regs: tape.Hook_Regs
 	if _, err := walk_text(src, S, depth_limit(opts), &f, &regs, build.finder_hook); err != nil {
 		return {}, err
+	}
+	if f.refused {
+		return {}, runtime.Allocator_Error.Out_Of_Memory
 	}
 	return build.finder_answer(&f), nil
 }

@@ -96,6 +96,65 @@ expect_key_spans :: proc(t: ^testing.T, text: string, doc: ^tape.Document, loc :
 	}
 }
 
+// A build's room for nodes starts small and grows as it fills, and a growth at any node past the first room keeps the
+// nodes of a build that never grows. Leading white space sizes the first room, so each pad grows it at other nodes.
+@(test)
+room_grows_at_any_node :: proc(t: ^testing.T) {
+	Text :: struct {
+		spec: json.Spec,
+		src:  string,
+	}
+	records := strings.builder_make(context.temp_allocator)
+	strings.write_string(&records, "[")
+	join_each(&records, 6, ",\n ", "{{\"id\": %[0]d, \"name\": \"n%[0]d\", \"ok\": true, \"tags\": [1, [2, 3]], \"e\": \"\\u00e9\"}}")
+	strings.write_string(&records, ",\n")
+	join_each(&records, 6, ",", `{{"a":%[0]d,"b":-%[0]d.5,"c":"x"}}`)
+	strings.write_string(&records, "]")
+	numbers := strings.builder_make(context.temp_allocator)
+	strings.write_string(&numbers, "[[0],")
+	join_each(&numbers, 40, ",", "[%[0]d,-%[0]d.5],[[7,8]]")
+	strings.write_string(&numbers, "]")
+	texts := []Text {
+		{.Json, strings.to_string(records)},
+		{.Json, strings.to_string(numbers)},
+		{.Json, `[[[[[[1]]]]],{"a":{"b":{"c":[[],{}]}}},{"x":1,"y":2,"z":3},"s",null]`},
+		{.Jsonc, "{\"a\": 1, /* c */ \"b\": [1, 2, // d\n3,], \"c\": {\"d\": null}} // e"},
+		{.Json5, `{a: 'x', b: +1, c: [.5, Infinity, 0x10,], 'd': {e: NaN}, "f": [1, 2],}`},
+	}
+	for x in texts {
+		pad := strings.repeat(" ", 16 * len(x.src), context.temp_allocator)
+		ref, err := json.build(transmute([]u8)strings.concatenate({pad, x.src}, context.temp_allocator), x.spec)
+		defer tape.destroy(&ref)
+		if !testing.expectf(t, err == nil, "%v: %v", x.spec, err) {
+			continue
+		}
+		for k in 0 ..= len(ref.nodes) {
+			src := strings.concatenate({pad[:16 * k], x.src}, context.temp_allocator)
+			doc, derr := json.build(transmute([]u8)src, x.spec)
+			testing.expectf(t, derr == nil && len(doc.nodes) == len(ref.nodes) && len(doc.facts) == len(ref.facts), "%v pad %d: %v", x.spec, k, derr)
+			for i in 0 ..< min(len(doc.nodes), len(ref.nodes)) {
+				a, b := doc.nodes[i], ref.nodes[i]
+				a.lo += u64(len(pad) - 16 * k)
+				if a != b {
+					testing.expectf(t, false, "%v pad %d node %d: %v, want %v", x.spec, k, i, doc.nodes[i], b)
+					break
+				}
+			}
+			tape.destroy(&doc)
+		}
+	}
+}
+
+// Writes `count` items to `b` joined by `sep`, each `format` with its number, `first` and up, as argument 0.
+join_each :: proc(b: ^strings.Builder, count: int, sep, format: string, first := 0) {
+	for i in 0 ..< count {
+		if i > 0 {
+			strings.write_string(b, sep)
+		}
+		fmt.sbprintf(b, format, first + i)
+	}
+}
+
 // A record that breaks where the records before it taught the walk a member gap is refused at the byte that breaks
 // it, compact or pretty printed.
 @(test)
@@ -138,11 +197,7 @@ learned_gaps_judge_every_byte :: proc(t: ^testing.T) {
 			doc, err := build(t, text)
 			if c.at < 0 {
 				testing.expectf(t, err == nil, "%q after its records: %v", c.last, err)
-				for node in doc.nodes {
-					if node.role == .Key {
-						testing.expectf(t, text[node.lo - 1] == '"' && text[node.lo + u64(node.n)] == '"', "key %v of %q", node, c.last)
-					}
-				}
+				expect_key_spans(t, text, &doc)
 			} else {
 				f, faulted := err.(tape.Fault)
 				testing.expectf(t, faulted && f.kind == c.kind && f.at == u64(at + c.at), "%q after its records: %v, want %v at %d", c.last, err, c.kind, at + c.at)
@@ -158,9 +213,7 @@ learned_gaps_judge_every_byte :: proc(t: ^testing.T) {
 gaps_stop_on_keys_that_never_repeat :: proc(t: ^testing.T) {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, `[{`)
-	for i in 0 ..< 3000 {
-		fmt.sbprintf(&b, `%s"k%d":%d`, "," if i > 0 else "", i, i)
-	}
+	join_each(&b, 3000, ",", `"k%[0]d":%[0]d`)
 	strings.write_string(&b, `},`)
 	tail, at := records(`{"id":1,"name":"a"}`, ",", `{"id":1"name":"a"}`, 8)
 	strings.write_string(&b, tail[1:])
@@ -190,12 +243,28 @@ depth_limit :: proc(t: ^testing.T) {
 		}
 		tape.destroy(&doc)
 	}
-	// Past the walk's frame stack, the stacks move to the heap.
-	deep := strings.concatenate({strings.repeat("[", 5000, context.temp_allocator), strings.repeat("]", 5000, context.temp_allocator)}, context.temp_allocator)
-	doc, err := build(t, deep)
-	testing.expect_value(t, err, nil)
-	testing.expect_value(t, len(doc.nodes), 5000)
-	tape.destroy(&doc)
+	// Around the builder's frame stack and the default limit, arrays and objects. A deeper `Budget.depth` reads past the
+	// default, the walk's levels on the heap.
+	for depth in ([]int{1024, 1025, tape.DEFAULT_DEPTH, tape.DEFAULT_DEPTH + 1}) {
+		for open, i in ([]string{"[", `{"a":`}) {
+			close := "]" if i == 0 else "}"
+			text := strings.concatenate({strings.repeat(open, depth, context.temp_allocator), "0", strings.repeat(close, depth, context.temp_allocator)}, context.temp_allocator)
+			for limit in ([]u32{0, 2 * tape.DEFAULT_DEPTH}) {
+				doc, err := build(t, text, {budget = {depth = limit}})
+				if depth > tape.DEFAULT_DEPTH && limit == 0 {
+					e, exceeded := err.(tape.Exceeded)
+					testing.expectf(t, exceeded && e.kind == .Depth && e.at == u64(tape.DEFAULT_DEPTH * len(open)), "%s depth %d: %v", open, depth, err)
+				} else {
+					testing.expectf(t, err == nil && len(doc.nodes) == depth * (1 + i) + 1, "%s depth %d: %v", open, depth, err)
+				}
+				tape.destroy(&doc)
+				_, ferr := json.find(transmute([]u8)text, {tape.Name("b")}, opts = {budget = {depth = limit}})
+				testing.expectf(t, fmt.tprint(ferr) == fmt.tprint(err), "find %s depth %d: %v", open, depth, ferr)
+				verr := json.validate(transmute([]u8)text, opts = {budget = {depth = limit}})
+				testing.expectf(t, fmt.tprint(verr) == fmt.tprint(err), "validate %s depth %d: %v", open, depth, verr)
+			}
+		}
+	}
 }
 
 // Mixed pretty-printed outer objects and compact inner objects preserve exact node spans and indentation tracking.
@@ -203,12 +272,7 @@ depth_limit :: proc(t: ^testing.T) {
 mixed_pretty_and_compact_gaps :: proc(t: ^testing.T) {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "[\n")
-	for i in 0 ..< 16 {
-		if i > 0 {
-			strings.write_string(&b, ",\n")
-		}
-		fmt.sbprintf(&b, "  {{\n    \"id\": %d,\n    \"meta\": {{\"a\":1,\"b\":2,\"c\":3}},\n    \"tail\": true\n  }}", i)
-	}
+	join_each(&b, 16, ",\n", "  {{\n    \"id\": %[0]d,\n    \"meta\": {{\"a\":1,\"b\":2,\"c\":3}},\n    \"tail\": true\n  }}")
 	strings.write_string(&b, "\n]")
 	text := strings.to_string(b)
 	doc, err := build(t, text)
@@ -224,12 +288,7 @@ wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
 	// 45 keys repeated across 11 records.
 	wb := strings.builder_make(context.temp_allocator)
 	strings.write_string(&wb, "{")
-	for k in 0 ..< 45 {
-		if k > 0 {
-			strings.write_string(&wb, ",")
-		}
-		fmt.sbprintf(&wb, "\"k%d\":%d", k, k)
-	}
+	join_each(&wb, 45, ",", "\"k%[0]d\":%[0]d")
 	strings.write_string(&wb, "}")
 	rec := strings.to_string(wb)
 	wide_text, _ := records(rec, ",", rec, 5)
@@ -242,12 +301,7 @@ wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
 	// Over 64 distinct nested object rows share the last row safely, including polymorphic elements.
 	pb := strings.builder_make(context.temp_allocator)
 	strings.write_string(&pb, `[{"rows":[`)
-	for i in 0 ..< 80 {
-		if i > 0 {
-			strings.write_string(&pb, ",")
-		}
-		fmt.sbprintf(&pb, `{{"f%d":{{"v":%d}}}}`, i, i)
-	}
+	join_each(&pb, 80, ",", `{{"f%[0]d":{{"v":%[0]d}}}}`)
 	strings.write_string(&pb, `]},{"rows":[{"f0":[{"v":1},{"v":2}]},{"f0":{"v":3}}]}]`)
 	poly_text := strings.to_string(pb)
 	pdoc, perr := build(t, poly_text)
@@ -291,12 +345,7 @@ wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
 	// Pretty record array, nested record arrays, object-in-object with identical keys, and polymorphic shrink/grow.
 	pb2 := strings.builder_make(context.temp_allocator)
 	strings.write_string(&pb2, "[\n")
-	for i in 0 ..< 8 {
-		if i > 0 {
-			strings.write_string(&pb2, ",\n")
-		}
-		fmt.sbprintf(&pb2, "  {{\n    \"id\": %d,\n    \"ok\": true\n  }}", i)
-	}
+	join_each(&pb2, 8, ",\n", "  {{\n    \"id\": %[0]d,\n    \"ok\": true\n  }}")
 	strings.write_string(&pb2, ",\n  {\n    \"id\": 9\n  },\n  {\n    \"id\": 10,\n    \"ok\": false,\n    \"extra\": 1\n  }\n]")
 	pretty_text := strings.to_string(pb2)
 	pdoc2, perr2 := build(t, pretty_text)
@@ -306,19 +355,9 @@ wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
 
 	nb := strings.builder_make(context.temp_allocator)
 	strings.write_string(&nb, `{"outer":{"a":{"id":1},"b":{"id":2}},"grid":[[`)
-	for i in 0 ..< 8 {
-		if i > 0 {
-			strings.write_string(&nb, ",")
-		}
-		fmt.sbprintf(&nb, `{{"id":%d}}`, i)
-	}
+	join_each(&nb, 8, ",", `{{"id":%[0]d}}`)
 	strings.write_string(&nb, `],[`)
-	for i in 0 ..< 8 {
-		if i > 0 {
-			strings.write_string(&nb, ",")
-		}
-		fmt.sbprintf(&nb, `{{"id":%d}}`, i + 10)
-	}
+	join_each(&nb, 8, ",", `{{"id":%[0]d}}`, 10)
 	strings.write_string(&nb, `]]}`)
 	nested_text := strings.to_string(nb)
 	ndoc, nerr := build(t, nested_text)
@@ -329,12 +368,7 @@ wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
 	// Uniform object arrays preserve every container's child count, subtree size, key span, and root close.
 	long_recs := strings.builder_make(context.temp_allocator)
 	strings.write_string(&long_recs, "[")
-	for i in 0 ..< 12 {
-		if i > 0 {
-			strings.write_string(&long_recs, ",")
-		}
-		fmt.sbprintf(&long_recs, `{{"id":"v%d"}}`, i)
-	}
+	join_each(&long_recs, 12, ",", `{{"id":"v%[0]d"}}`)
 	strings.write_string(&long_recs, "]")
 	long_text := strings.to_string(long_recs)
 	ldoc, lerr := build(t, long_text)
@@ -351,4 +385,50 @@ wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
 		testing.expectf(t, key.role == .Key && long_text[key.lo:][:key.n] == "id" && long_text[key.lo - 1] == '"' && long_text[key.lo + u64(key.n)] == '"', "key %d: %v", i, key)
 		testing.expectf(t, val.kind == .String && long_text[val.lo] == 'v', "val %d: %v", i, val)
 	}
+}
+
+// A read making more nodes than `Budget.nodes` is refused at the first node past it, kept whole in a scan or not, and
+// a room that grows keeps every node.
+@(test)
+node_limit :: proc(t: ^testing.T) {
+	text := transmute([]u8)string(`{"a":[1,2,3],"b":4}`)
+	for most in ([]u32{0, 7, 8}) {
+		doc, err := json.build(text, .Json, {budget = {nodes = most}})
+		if most == 7 {
+			e, exceeded := err.(tape.Exceeded)
+			testing.expectf(t, exceeded && e.kind == .Nodes && e.at == 17, "nodes %d: %v", most, err)
+		} else {
+			testing.expectf(t, err == nil && len(doc.nodes) == 8, "nodes %d: %v", most, err)
+		}
+		tape.destroy(&doc)
+	}
+	commented := transmute([]u8)string(`{"a":1 /*c*/}`)
+	for most in ([]u32{2, 3}) {
+		doc, err := json.build(commented, .Jsonc, {budget = {nodes = most}})
+		if most == 2 {
+			e, exceeded := err.(tape.Exceeded)
+			testing.expectf(t, exceeded && e.kind == .Nodes && e.at == 5, "jsonc nodes %d: %v", most, err)
+		} else {
+			testing.expectf(t, err == nil && len(doc.nodes) == 3 && len(doc.facts) == 1, "jsonc nodes %d: %v", most, err)
+		}
+		tape.destroy(&doc)
+	}
+	d, _ := tape.demand_of([][]tape.Step{{tape.Name("a")}})
+	defer tape.destroy(&d)
+	r, err := json.scan(text, &d, opts = {budget = {nodes = 4}})
+	e, exceeded := err.(tape.Exceeded)
+	testing.expectf(t, exceeded && e.kind == .Nodes && e.at == 8, "%v", err)
+	tape.destroy(&r)
+
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"a":[`)
+	join_each(&b, 5000, ",", "%[0]d")
+	strings.write_string(&b, `]}`)
+	big := strings.to_string(b)
+	doc, berr := build(t, big)
+	testing.expect(t, berr == nil && len(doc.nodes) == 5003 && doc.nodes[2].n == 5001)
+	tape.destroy(&doc)
+	r, err = json.scan(transmute([]u8)big, &d)
+	testing.expect(t, err == nil && len(r.doc.nodes) == 5003 && len(r.answers) == 1)
+	tape.destroy(&r)
 }

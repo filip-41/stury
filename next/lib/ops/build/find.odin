@@ -9,11 +9,12 @@ import "stury:lib/core/tape"
 Finder :: struct {
 	src:       []u8,
 	steps:     []tape.Step,
-	key_is:    proc "contextless" (src: []u8, t: tape.Token, name: string) -> bool, // for a key that needs decoding
+	key_is:    Key_Is, // for a key that needs decoding
+	bounds:    proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8), // the format's `Format.bounds`
 	answer:    tape.Span_Answer, // `FIND_NONE` while the value taken last has given no answer
 	levels:    [^]Find_Level, // the entered containers, the root's first, one per step
 	answers:   [^]tape.Span_Answer, // the rings of negative `Index` arrays, of answers or elements' spans
-	rewalk:    proc "contextless" (h: ^Finder, lo: u64), // gives this hook the tokens of the value at `lo` again
+	rewalk:    proc "contextless" (h: ^Finder, lo: u64) -> tape.Walk_Result, // gives this hook the value at `lo` again
 	block:     []u8, // what `levels` and `answers` are allocated in when the room has no space for them
 	allocator: runtime.Allocator,
 	alls_end:  int, // one past the last `All` step, 0 for none
@@ -30,6 +31,7 @@ Finder :: struct {
 	replay:    bool, // the next value is an element its array counted, given again by `rewalk`
 	replaying: bool, // inside a `rewalk`, where the arrays met follow the path through every element
 	settled:   bool, // the answer is final, so the walk needs no more tokens
+	refused:   bool, // a walk read again could not grow its stack, so the walk stopped with no answer
 	// From `key` to `count_to`, what `finder_hook` reads of every token, which `finder_focus` sets.
 	key:       string, // with `named`, the one key the open container takes
 	key_head:  u64, // the first eight bytes of `key`
@@ -60,7 +62,8 @@ FIND_ROOM :: 64
 Find_Level :: struct {
 	lo:      u64, // its open bracket
 	count:   u64,
-	ring:    u32, // where its ring starts in `answers`, `-step` entries under a negative `Index` that needs one
+	ring:    u32, // where its ring starts in `answers`, under a negative `Index` that needs one
+	size:    u32, // its ring's entries, as `finder_ring_size` gives them
 	slot:    u32, // the entry of its ring written next, which holds the oldest answer once the ring is full
 	chosen:  bool, // a child was taken
 	replays: bool, // its elements are passed whole and the one picked read again, as `finder_replays` judges
@@ -74,18 +77,18 @@ FIND_NONE :: tape.Span_Answer{outcome = .Not_Loaded}
 // A finder for `steps` over `src`, its levels and rings in `room` when they fit, else allocated. `read.dups` is the
 // format's resolved policy, never `.Default`.
 @(require_results)
-finder_start :: proc(src: []u8, steps: []tape.Step, read: tape.Read_Options, key_is: proc "contextless" (src: []u8, t: tape.Token, name: string) -> bool, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64), room: ^Find_Room, allocator: runtime.Allocator) -> (f: Finder, err: runtime.Allocator_Error) {
+finder_start :: proc(src: []u8, format: ^tape.Format, steps: []tape.Step, read: tape.Read_Options, key_is: Key_Is, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> tape.Walk_Result, room: ^Find_Room, allocator: runtime.Allocator) -> (f: Finder, err: runtime.Allocator_Error) {
 	// The most ring entries, as an entry's place is a `u32` and the bytes of the levels and rings fit an `int`.
 	MAX_ANSWERS :: int(min(u64(max(u32)), u64(max(int) / (2 * size_of(tape.Span_Answer)))))
 	answers := 0
 	for step, i in steps {
 		#partial switch v in step {
 		case tape.Index:
-			if finder_ring_size(steps, i) > 0 {
-				if int(v) < answers - MAX_ANSWERS {
+			if size := finder_ring_size(steps, i, len(src)); size > 0 {
+				if size > MAX_ANSWERS - answers {
 					return {}, .Out_Of_Memory
 				}
-				answers -= int(v)
+				answers += size
 			}
 		case tape.All:
 			f.alls_end = i + 1
@@ -98,6 +101,7 @@ finder_start :: proc(src: []u8, steps: []tape.Step, read: tape.Read_Options, key
 		f.levels, f.answers = ([^]Find_Level)(raw_data(f.block)), ([^]tape.Span_Answer)(raw_data(f.block[level_bytes:]))
 	}
 	f.src, f.steps, f.key_is, f.respell, f.rewalk, f.answer, f.allocator = src, steps, key_is, respell, rewalk, FIND_NONE, allocator
+	f.bounds = format.bounds
 	f.first, f.stop, f.want = read.dups == .First, read.stop_early, true
 	return f, nil
 }
@@ -206,13 +210,13 @@ finder_step :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token) -> t
 		h.skip_end = false
 		if h.ringing {
 			h.pending, h.ringing = false, false
-			h.held.hi = t.lo + 1
+			h.held.hi = t.lo + u64(t.n)
 			finder_ring_put(h, &h.levels[h.entered - 1], h.held)
 			return .Next
 		}
 		if h.pending {
 			h.pending = false
-			h.answer.hi = t.lo + 1
+			h.answer.hi = t.lo + u64(t.n)
 			return finder_settle(h)
 		}
 		return .Next
@@ -260,8 +264,11 @@ finder_value :: proc "contextless" (h: ^Finder, t: tape.Token) -> tape.Action #n
 			if lv.replays && !h.replaying {
 				// The path goes on through only the element its array picks at the close, so each element is passed
 				// whole and kept as a span, and the one picked is read again.
-				quoted := u64(t.kind == .String && t.spelling & tape.SPELLING_QUOTED != 0)
-				span := tape.Span_Answer{lo = t.lo - quoted, hi = t.lo + u64(t.n) + quoted, kind = t.kind}
+				head, tail: u8
+				if t.kind <= .Plain {
+					head, tail = h.bounds(h.src, t)
+				}
+				span := tape.Span_Answer{lo = t.lo - u64(head), hi = t.lo + u64(t.n) + u64(tail), kind = t.kind, head = head, tail = tail}
 				if t.kind == .Array || t.kind == .Object {
 					h.held, h.skip_end, h.pending, h.ringing = span, true, true, true
 					return .Skip
@@ -304,7 +311,7 @@ finder_value :: proc "contextless" (h: ^Finder, t: tape.Token) -> tape.Action #n
 		}
 	case tape.Index:
 		if t.kind == .Array {
-			return finder_enter(h, step < 0, t.lo, u32(finder_ring_size(h.steps, at)), finder_replays(h.steps, at))
+			return finder_enter(h, step < 0, t.lo, u32(finder_ring_size(h.steps, at, len(h.src))), finder_replays(h.steps, at))
 		}
 	case tape.All:
 		if container {
@@ -322,20 +329,20 @@ finder_value :: proc "contextless" (h: ^Finder, t: tape.Token) -> tape.Action #n
 // Takes the value of `t` as the answer, a container's at its `End`.
 @(private)
 finder_reach :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, outcome: tape.Presence) -> tape.Action {
-	quoted := u64(t.kind == .String && t.spelling & tape.SPELLING_QUOTED != 0)
-	h.answer = {lo = t.lo - quoted, kind = t.kind, outcome = outcome, spelling = t.spelling}
 	if t.kind == .Array || t.kind == .Object {
+		h.answer = {lo = t.lo, kind = t.kind, outcome = outcome, spelling = t.spelling}
 		h.pending, h.skip_end = true, true
 		return .Skip
 	}
-	h.answer.hi = t.lo + u64(t.n) + quoted
+	head, tail := h.bounds(h.src, t)
+	h.answer = {lo = t.lo - u64(head), hi = t.lo + u64(t.n) + u64(tail), kind = t.kind, outcome = outcome, spelling = t.spelling, head = head, tail = tail}
 	return finder_settle(h)
 }
 
 // Enters the container opened at `lo`, with a ring of `ring` entries.
 @(private)
 finder_enter :: #force_inline proc "contextless" (h: ^Finder, replaces: bool, lo: u64, ring: u32, replays: bool) -> tape.Action {
-	h.levels[h.entered] = {lo = lo, ring = h.ring_top, replays = replays}
+	h.levels[h.entered] = {lo = lo, ring = h.ring_top, size = ring, replays = replays}
 	h.ring_top += ring
 	h.replacers += int(replaces)
 	h.entered += 1
@@ -361,10 +368,8 @@ finder_key :: proc "contextless" (h: ^Finder, t: tape.Token) -> tape.Action #no_
 
 @(private)
 finder_key_is :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, name: string) -> bool {
-	if t.spelling & tape.SPELLING_DECODE == 0 {
-		return int(t.n) == len(name) && string(h.src[t.lo:][:t.n]) == name
-	}
-	return h.key_is(h.src, t, name)
+	// A `Name` takes a string key only, as a format whose keys may be numbers holds `1` and `"1"` apart.
+	return t.kind == .String && key_spelled(h.src, t, name, h.key_is)
 }
 
 // The answer of a container on the path at its `End` `t`, the one its taken child gave or why none was taken.
@@ -374,8 +379,12 @@ finder_close :: proc "contextless" (h: ^Finder, t: tape.Token) -> tape.Action #n
 	if picked := &h.levels[h.entered - 1]; picked.replays && !h.replaying {
 		if picked.count >= u64(-h.steps[h.entered - 1].(tape.Index)) {
 			h.want, h.replay, h.replaying, h.answer, picked.chosen = true, true, true, FIND_NONE, true
-			h.rewalk(h, h.answers[picked.ring + picked.slot].lo)
+			r := h.rewalk(h, h.answers[picked.ring + picked.slot].lo)
 			h.replaying = false
+			if u8(r) == tape.WALK_NO_MEMORY {
+				h.refused = true
+				return .Stop
+			}
 		}
 	}
 	h.entered -= 1
@@ -443,7 +452,7 @@ finder_spent :: proc "contextless" (h: ^Finder) -> bool #no_bounds_check {
 @(private)
 finder_miss :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level, t: tape.Token, kind: tape.Kind) {
 	if h.entered + 1 < h.alls_end {
-		h.answer = {lo = lv.lo, hi = t.lo + 1, kind = kind, outcome = .Wrong_Kind}
+		h.answer = {lo = lv.lo, hi = t.lo + u64(t.n), kind = kind, outcome = .Wrong_Kind}
 	} else {
 		h.answer = {outcome = .Missing}
 	}
@@ -453,9 +462,8 @@ finder_miss :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level, t:
 // `-step` elements' entries.
 @(private)
 finder_ring_put :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level, entry: tape.Span_Answer) #no_bounds_check {
-	size := u32(-h.steps[intrinsics.ptr_sub(lv, &h.levels[0])].(tape.Index))
 	h.answers[lv.ring + lv.slot] = entry
-	lv.slot = 0 if lv.slot + 1 == size else lv.slot + 1
+	lv.slot = 0 if lv.slot + 1 == lv.size else lv.slot + 1
 }
 
 // Whether the elements of the array at negative `Index` step `at` are passed whole and the one picked read again: when
@@ -471,13 +479,14 @@ finder_replays :: #force_inline proc "contextless" (steps: []tape.Step, at: int)
 	return named
 }
 
-// The ring entries the negative `Index` step `at` needs: one per element it reaches back to, but none for `-1` when
-// it keeps answers, as the last element's is in hand at the close.
+// The ring entries the negative `Index` step `at` needs over a text of `n` bytes: one per element it reaches back to,
+// but none for `-1` when it keeps answers, as the last element's is in hand at the close. An element spends a byte at
+// least, so a ring past `n` entries holds nothing more.
 @(private)
-finder_ring_size :: #force_inline proc "contextless" (steps: []tape.Step, at: int) -> int {
+finder_ring_size :: #force_inline proc "contextless" (steps: []tape.Step, at: int, n: int) -> int {
 	step, ok := steps[at].(tape.Index)
 	if !ok || step >= 0 || step == -1 && !finder_replays(steps, at) {
 		return 0
 	}
-	return -int(step)
+	return int(min(0 - u64(int(step)), u64(n)))
 }

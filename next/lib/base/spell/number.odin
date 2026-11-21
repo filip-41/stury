@@ -62,7 +62,18 @@ Number_Lex :: struct {
 // The value of `src[lo:hi]` read with RFC 8259's number grammar, false for a span that is no number.
 @(require_results)
 number_strict :: proc "contextless" (src: []u8, lo, hi: u64) -> (Number, bool) {
-	n := lex_decimal(src, lo, hi)
+	n := lex_decimal(src, lo, hi, false)
+	if !n.ok {
+		return {}, false
+	}
+	return number_of_lex(src, lo, hi, n), true
+}
+
+// The value of `src[lo:hi]` read with JSON5's decimal grammar, which also takes a `+` and a point with digits on one
+// side only, false for a span that is no number.
+@(require_results)
+number_loose :: proc "contextless" (src: []u8, lo, hi: u64) -> (Number, bool) {
+	n := lex_decimal(src, lo, hi, true)
 	if !n.ok {
 		return {}, false
 	}
@@ -180,33 +191,37 @@ number_significand :: #force_inline proc "contextless" (mant: u64, e: i64, neg: 
 // The value of `src[lo:hi]`, which a walk accepted as a number, read with no digit counts.
 @(private, require_results)
 number_decimal :: proc "contextless" (src: []u8, lo, hi: u64) -> Number {
-	return number_of_lex(src, lo, hi, lex_decimal(src, lo, hi))
+	return number_of_lex(src, lo, hi, lex_decimal(src, lo, hi, false))
 }
 
 @(private)
-lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64) -> (n: Number_Lex) {
+lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64, $LOOSE: bool) -> (n: Number_Lex) {
 	if lo >= hi || hi > u64(len(src)) {
 		return
 	}
 	base := raw_data(src)
 	p := lo
-	if src[p] == '-' {
-		n.neg = true
+	if src[p] == '-' || LOOSE && src[p] == '+' {
+		n.neg = src[p] == '-'
 		p += 1
 	}
 	if p >= hi {
 		return
 	}
 	n.int_at = p
-	if src[p] == '0' {
-		p += 1
-		if p < hi && src[p] - '0' < 10 {
-			return
-		}
-	} else if src[p] - '1' < 9 {
+	when LOOSE {
 		p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant), base))
 	} else {
-		return
+		if src[p] == '0' {
+			p += 1
+			if p < hi && src[p] - '0' < 10 {
+				return
+			}
+		} else if src[p] - '1' < 9 {
+			p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant), base))
+		} else {
+			return
+		}
 	}
 	n.int_digits = p - n.int_at
 	if p < hi && src[p] == '.' {
@@ -215,9 +230,12 @@ lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64) -> (n: Number_Lex) {
 		n.frac_at = p
 		p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant), base))
 		n.frac_digits = p - n.frac_at
-		if n.frac_digits == 0 {
+		if n.frac_digits == 0 && !LOOSE {
 			return
 		}
+	}
+	if LOOSE && n.int_digits + n.frac_digits == 0 {
+		return
 	}
 	if p < hi && src[p] | 0x20 == 'e' {
 		n.has_exp = true
@@ -341,8 +359,12 @@ number_hex :: proc "contextless" (digits: []u8, neg: bool) -> Number #no_bounds_
 			return {u64(0) - mant, .Int}
 		}
 	}
-	// The digits past the first sixteen scale the value and only break a tie in its rounding.
+	// The digits past the first sixteen scale the value and only break a tie in its rounding. Past 240 of them the
+	// value is at least `2^1024`.
 	rest := len(digits) - i
+	if rest > 240 {
+		return {0, .Wide}
+	}
 	sticky := false
 	for ; i < len(digits); i += 1 {
 		sticky ||= digits[i] != '0'

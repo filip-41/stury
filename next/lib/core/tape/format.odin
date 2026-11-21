@@ -1,7 +1,9 @@
 package tape
 
-// A format is one text format stury reads and writes, with one `Format` per spec. Its facts say what its writer emits
-// beyond plain values, and its caps what else it can do.
+import "stury:lib/base/spell"
+
+// A format is one text format stury reads, with one `Format` per spec. Its facts say which fact kinds it holds beyond
+// plain values, its caps what else it can do, and its readers turn a node into an Odin value.
 
 // A format capability other than a fact it holds.
 Cap :: enum u8 {
@@ -27,6 +29,13 @@ Format_Id :: distinct u16
 Format :: struct {
 	name:  string,
 	id:    Format_Id,
-	facts: Facts, // the facts its writer emits, every fact being readable
-	caps:  Caps,
+	facts:  Facts, // the fact kinds it holds
+	caps:   Caps,
+	// The bytes of a scalar token's authored span before and after the token's own, as a string's quotes.
+	bounds: proc "contextless" (src: []u8, t: Token) -> (head, tail: u8),
+	// The text of a string node whose spelling has `SPELLING_DECODE`, decoded into `buf`, false when `buf` is shorter
+	// than the node's span.
+	decode: proc "contextless" (src: []u8, t: Node, buf: []u8) -> (s: string, ok: bool),
+	// The value of a number node.
+	number: proc "contextless" (src: []u8, t: Node) -> spell.Number,
 }

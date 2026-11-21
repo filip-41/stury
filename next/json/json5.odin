@@ -64,13 +64,13 @@ Number_Spelling :: enum u16 {
 
 #assert(u16(max(Number_Spelling)) <= tape.NUMBER_KIND)
 
-// The spelling bit of a JSON5 string or key that holds an escape JSON lacks, which `node_text` decodes with `decode5`.
+// The spelling bit of a JSON5 string or key that holds an escape JSON lacks, which `text_decoded` decodes with `decode5`.
 @(private)
 SPELLING_JSON5 :: u16(8)
 
 // The state at a JSON5 number that JSON's grammar refused, or that starts with `+`, `.`, `I` or `N`.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	q, spelling, kind := number5(p, end)
 	if kind != .None {
@@ -79,10 +79,14 @@ st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	if emit(w, on, &hs, .Number, .Value, p, q, spelling) == .Stop {
+	a := emit(w, on, &hs, .Number, .Value, p, q, spelling)
+	if a == .Stop {
 		return stopped(w, hs, q)
 	}
-	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+	if grows(H, a) {
+		return #must_tail st_grow_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // The end and spelling of the JSON5 number at `p`, or the fault and the byte it is at. Past JSON's grammar it may start
@@ -219,44 +223,9 @@ escape5 :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: tape.Fault_Kin
 	return spell.utf8_char(q, end)
 }
 
-// One past the closing quote of the JSON5 string at `p` and its spelling, or the fault at the first byte that breaks
-// it. The string closes at its own quote, `"` or `'`, uses the escapes of `escape5`, and holds any byte but CR and LF.
-@(private, cold)
-string5 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
-	quote := p[0]
-	q = p[1:]
-	for {
-		if q >= end {
-			return end, 0, .Truncated
-		}
-		c := q[0]
-		switch {
-		case c == quote:
-			return q[1:], spelling, .None
-		case c == '\\':
-			r, k := escape5(q, end)
-			if k != .None {
-				return r, 0, k
-			}
-			spelling |= tape.SPELLING_DECODE | (0 if spell.ESCAPED[q[1]] != 0 || q[1] == 'u' else SPELLING_JSON5)
-			q = r
-		case c == '\n' || c == '\r':
-			return q, 0, .Bad_Char
-		case c < 0x80:
-			q = q[1:]
-		case:
-			r, k := spell.utf8_char(q, end)
-			if k != .None {
-				return r, 0, k
-			}
-			q = r
-		}
-	}
-}
-
 // The state at a single-quoted JSON5 string value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	q, _, _ := string_short(p, end, '\'')
 	if q == nil {
@@ -270,42 +239,53 @@ st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 	}
 	if q == nil {
 		kind: tape.Fault_Kind
-		if q, spelling, kind = string5(p, end); kind != .None {
+		if q, spelling, kind = string_exact(true, p, end); kind != .None {
 			return fault(w, hs, q, kind)
 		}
 	}
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	if emit_string(w, on, &hs, .Value, p, q, spelling) == .Stop {
+	a := emit_string(w, on, &hs, .Value, p, q, spelling)
+	if a == .Stop {
 		return stopped(w, hs, q)
 	}
-	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+	if grows(H, a) {
+		return #must_tail st_grow_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // The state at a JSON5 key that opens with no `"`. Reads a plain ASCII identifier through the colon to the value, and
 // passes any other key to `st_spec_key`. No gap is learned around an unquoted key, so a walk with gaps counts the
 // member as a miss when its colon follows flush.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_ident :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_key_ident :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	q := ident_ascii(p, end)
 	if q == nil {
-		return #must_tail st_spec_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+		return #must_tail st_spec_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	if emit(w, on, &hs, .String, .Key, p, q, 0) == .Stop {
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	a := emit(w, on, &hs, .String, .Key, p, q, 0)
+	if a == .Stop {
 		return stopped(w, hs, q)
+	}
+	if grows(H, a) {
+		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	r := colon_fast(q, end)
 	if r == nil {
-		return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m, G), G, on)
+		return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 	}
-	when G {
+	if gaps_on(m) {
 		if gap_miss(w, p) {
-			return #must_tail st_stop_gaps(r, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			return #must_tail st_stop_gaps(r, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 	}
-	return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m, G), G, on)
+	return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }
 
 // One past the unquoted key at `p` when it is plain ASCII, a letter, `$` or `_` and then those or digits, and an ASCII
@@ -328,14 +308,14 @@ ident_ascii :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bou
 // The state at a JSON5 key that JSON refused, a single-quoted string or an ECMAScript 5.1 IdentifierName, which reads on
 // through the colon to the value. A byte that starts no key faults `Bad_Char`.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	quoted := p[0] == '\''
 	q: [^]u8
 	spelling: u16
 	kind: tape.Fault_Kind
 	if quoted {
-		q, spelling, kind = string5(p, end)
+		q, spelling, kind = string_exact(true, p, end)
 	} else {
 		esc: bool
 		q, esc, kind = ident5(p, end)
@@ -360,10 +340,13 @@ st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
-	if r := colon_fast(q, end); r != nil {
-		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m, G), G, on)
+	if grows(H, a) {
+		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m, G), G, on)
+	if r := colon_fast(q, end); r != nil {
+		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+	}
+	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }
 
 // The character of an identifier at `q` that is no ASCII identifier byte, a `\u` escape or a UTF-8 character, which

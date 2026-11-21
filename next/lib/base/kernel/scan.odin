@@ -63,7 +63,7 @@ count_lanes :: #force_inline proc "contextless" ($T: Tier, src: []u8, $CONT: boo
 	at := 0
 	for whole := len(src) &~ 63; at < whole; {
 		acc: [64 / N]U
-		for end := min(at + 64 * 255, whole); at < end; at += 64 {
+		for end := at + min(64 * 255, whole - at); at < end; at += 64 {
 			w := transmute([64 / N]U)load(p[at:])
 			#unroll for k in 0 ..< 64 / N {
 				acc[k] -= hits(w[k], CONT, c)
@@ -295,6 +295,9 @@ scan_loop :: #force_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) ->
 				return i + int(last_lane16(e))
 			}
 		}
+		if i == 0 {
+			return -1
+		}
 		if v, live, ok := head16(p, i); ok {
 			e := simd.bit_and(simd.lanes_eq(v, V(c)), live)
 			return int(last_lane16(e)) if any_lane16(e) else -1
@@ -316,6 +319,9 @@ scan_loop :: #force_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) ->
 			if e := simd.lanes_eq(load16(p[i:]), V(c)); any_lane16(e) {
 				return i + int(first_lane16(e))
 			}
+		}
+		if i == n {
+			return -1
 		}
 		if v, live, ok := head16(p[i:], n - i); ok {
 			e := simd.bit_and(simd.lanes_eq(v, V(c)), live)

@@ -186,19 +186,19 @@ find_answers_read_as_nodes :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"s":"x\u0041","n":-2.5}`)
 	f, _ := json.find(src, {tape.Name("s")})
 	buf: [8]u8
-	s, ok := json.node_text(src, tape.answer_node(f), buf[:])
+	s, ok := tape.node_text(json.as(.Json), src, tape.answer_node(f), buf[:])
 	testing.expectf(t, ok && s == "xA", "%q %v", s, ok)
 	f, _ = json.find(src, {tape.Name("n")})
-	num, is_number := json.node_number(src, tape.answer_node(f))
+	num, is_number := tape.node_number(json.as(.Json), src, tape.answer_node(f))
 	testing.expectf(t, is_number && transmute(f64)num.bits == -2.5, "%v", num)
 	src = transmute([]u8)string(`[7,{"a":[1,25e-1]}]`)
 	f, _ = json.find(src, {tape.Index(-1), tape.Name("a"), tape.Index(-1)})
-	num, is_number = json.node_number(src, tape.answer_node(f))
+	num, is_number = tape.node_number(json.as(.Json), src, tape.answer_node(f))
 	testing.expectf(t, is_number && transmute(f64)num.bits == 2.5, "%v", num)
 	src = transmute([]u8)string(`{a: [.5, 5.]}`)
 	for want, i in ([]f64{0.5, 5}) {
 		f, _ = json.find(src, {tape.Name("a"), tape.Index(i)}, .Json5)
-		num, is_number = json.node_number(src, tape.answer_node(f))
+		num, is_number = tape.node_number(json.as(.Json5), src, tape.answer_node(f))
 		testing.expectf(t, is_number && transmute(f64)num.bits == want, "json5 %v: %v", want, num)
 	}
 }

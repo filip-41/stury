@@ -14,7 +14,7 @@ FLOOR_LEVELS :: 8
 // that byte leaves it in, or from `p`, so the states read every byte the masks did not judge. Only a hook that answers
 // every token with `Next` enters it.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result #no_bounds_check {
+st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result #no_bounds_check {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	dep := d >> 1
 	// The depth a close may bring the walk down to, with every container from it to `dep` an array. Depth 0 is the
@@ -39,6 +39,12 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind
 		start, dot_at: [^]u8
 	}
 	for intrinsics.ptr_sub(end, q) >= 64 {
+		// A block gives at most a node per byte with no room check, so the room must have place for that many first.
+		when intrinsics.type_has_field(H, tape.ROOMS_FIELD) {
+			if w.rooms - uintptr(hs.a) < 64 * size_of(tape.Node) {
+				break
+			}
+		}
 		b := kernel.load(q)
 		ms := kernel.pack_n([4]kernel.Block{digits(b), kernel.eq(b, '-'), kernel.eq(b, '.'), kernel.eq(b, ',')})
 		n := kernel.pack_n([3]kernel.Block{kernel.eq(b, '['), kernel.eq(b, ']'), kernel.eq(b, '0')})
@@ -96,12 +102,12 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind
 	// No `,`, `[` or `]` follows the last one judged before the block's end, so the walk is at depth `dep` in an array.
 	slot := u64(w.stack[dep - 1] >> 8)
 	if last == nil {
-		return #must_tail st_after(p, end, dep << 1, ind, w, hs.a, hs.b, hs.c, slot, G, on)
+		return #must_tail st_after(p, end, dep << 1, ind, w, hs.a, hs.b, hs.c, slot, on)
 	}
 	if last[0] == '[' {
-		return #must_tail st_open(last[1:], end, dep << 1, ind, w, hs.a, hs.b, hs.c, slot, G, on)
+		return #must_tail st_open(last[1:], end, dep << 1, ind, w, hs.a, hs.b, hs.c, slot, on)
 	}
-	return #must_tail st_after(last[1:] if last[0] == ']' else last, end, dep << 1, ind, w, hs.a, hs.b, hs.c, slot, G, on)
+	return #must_tail st_after(last[1:] if last[0] == ']' else last, end, dep << 1, ind, w, hs.a, hs.b, hs.c, slot, on)
 }
 
 // The token masks of a block.
@@ -137,12 +143,12 @@ block_tokens :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "c
 				int_end, frac = dot, u64(intrinsics.ptr_sub(x, dot)) - 1
 			}
 			spelling := tape.number_spelling(0, u64(intrinsics.ptr_sub(int_end, digits_at)), frac)
-			emit(w, on, hs, .Number, .Value, s, x, spelling)
+			give(w, on, hs, tape.Token{at(w, s), u32(intrinsics.ptr_sub(x, s)), .Number, .Value, spelling})
 		}
 		if t.opens & bit != 0 {
-			emit(w, on, hs, .Array, .Value, x, x[1:], 0)
+			give(w, on, hs, tape.Token{at(w, x), 1, .Array, .Value, 0})
 		} else if t.closes & bit != 0 {
-			emit(w, on, hs, .End, .Value, x, x[1:], 0)
+			give(w, on, hs, tape.Token{at(w, x), 1, .End, .Value, 0})
 		}
 	}
 }

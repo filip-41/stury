@@ -266,9 +266,9 @@ SURROGATE_CLASSES := kernel.Nibble_Table {
 }
 
 // One past the closing quote of the string at `p` and its spelling, or the fault. The CPU's block reader tries first,
-// and `string_exact` settles what it refuses, or in JSON5 `string5`. A string the block reader accepts is a JSON5
-// string of the same span. The tier switch is `string_block`'s written out, because a call through `string_block`
-// leaves a dead fault test on the block reader's path.
+// and `string_exact` settles what it refuses. A string the block reader accepts is a JSON5 string of the same span.
+// The tier switch is `string_block`'s written out, because a call through `string_block` leaves a dead fault test on
+// the block reader's path.
 @(private)
 string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
 	esc: bool
@@ -283,13 +283,9 @@ string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8
 		q, esc = string_span_base(p, end, '"')
 	}
 	if q == nil {
-		when S == .Json5 {
-			return string5(p, end)
-		} else {
-			q, esc, kind = string_exact(p, end)
-		}
+		return string_exact(S == .Json5, p, end)
 	}
-	return q, tape.SPELLING_DECODE if esc else 0, kind
+	return q, tape.SPELLING_DECODE if esc else 0, .None
 }
 
 // The `string_span` of the CPU's tier, for a string closed by `quote`.
@@ -399,36 +395,47 @@ escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 {
 	return u64(n)
 }
 
-// One past the closing quote of the string at `p` and whether it holds an escape, or the fault at the first byte that
-// breaks it, read one byte at a time.
+// One past the closing quote of the string at `p` and its spelling, or the fault at the first byte that breaks it, read
+// one byte at a time. JSON's string closes at `"`, holds no control byte and uses the escapes of `escape_exact`. A JSON5
+// string closes at its own quote, `"` or `'`, uses the escapes of `escape5` and holds any byte but CR and LF.
 @(private, cold)
-string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: tape.Fault_Kind) #no_bounds_check {
+string_exact :: #force_no_inline proc "contextless" ($json5: bool, p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
+	quote := p[0] if json5 else '"'
 	q = p[1:]
 	for {
 		if q >= end {
-			return end, false, .Truncated
+			return end, 0, .Truncated
 		}
 		c := q[0]
 		switch {
-		case c == '"':
-			return q[1:], esc, .None
+		case c == quote:
+			return q[1:], spelling, .None
 		case c == '\\':
-			esc = true
-			q2, k := escape_exact(q, end)
-			if k != .None {
-				return q2, false, k
+			r: [^]u8
+			k: tape.Fault_Kind
+			when json5 {
+				r, k = escape5(q, end)
+			} else {
+				r, k = escape_exact(q, end)
 			}
-			q = q2
-		case c < 0x20:
-			return q, false, .Bad_Char
+			if k != .None {
+				return r, 0, k
+			}
+			spelling |= tape.SPELLING_DECODE
+			when json5 {
+				spelling |= 0 if spell.ESCAPED[q[1]] != 0 || q[1] == 'u' else SPELLING_JSON5
+			}
+			q = r
+		case (c == '\n' || c == '\r') if json5 else c < 0x20:
+			return q, 0, .Bad_Char
 		case c < 0x80:
 			q = q[1:]
 		case:
-			q2, k := spell.utf8_char(q, end)
+			r, k := spell.utf8_char(q, end)
 			if k != .None {
-				return q2, false, k
+				return r, 0, k
 			}
-			q = q2
+			q = r
 		}
 	}
 }

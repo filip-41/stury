@@ -1,33 +1,29 @@
 package json
 
 import "base:intrinsics"
-import "base:runtime"
 import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
-// The value of the number node `t` of the JSON text `src`, false for a node that is no number.
-@(require_results)
-node_number :: #force_inline proc "contextless" (src: []u8, t: tape.Node) -> (spell.Number, bool) {
-	if t.kind != .Number {
-		return {}, false
-	}
+// The value of the number node `t` of the JSON text `src`.
+@(private)
+number_value :: #force_inline proc "contextless" (src: []u8, t: tape.Node) -> spell.Number {
 	lo, hi := t.lo, t.lo + u64(t.n)
 	int_digits, frac_digits := tape.number_digits(t.spelling)
 	// Bits 9 and up hold the fraction digits and the exponent bit, so 0 there and in the kind is a plain integer.
 	if t.spelling & (tape.NUMBER_KIND | ~u16(0x1FF)) == 0 {
 		if num, ok := spell.number_int(src, lo, hi, int_digits); ok {
-			return num, true
+			return num
 		}
-		return number_long(src, lo, hi), true
+		return number_long(src, lo, hi)
 	}
 	if t.spelling & tape.NUMBER_KIND != 0 {
-		return number5_value(src, lo, hi, t.spelling), true
+		return number5_value(src, lo, hi, t.spelling)
 	}
 	if t.spelling & tape.NUMBER_EXP != 0 {
-		return spell.number_exponent(src, lo, hi, int_digits, frac_digits), true
+		return spell.number_exponent(src, lo, hi, int_digits, frac_digits)
 	}
-	return spell.number_fraction(src, lo, hi, int_digits, frac_digits), true
+	return spell.number_fraction(src, lo, hi, int_digits, frac_digits)
 }
 
 // The value of an integer past 19 digits or below `i64`'s minimum.
@@ -37,16 +33,10 @@ number_long :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64) -> s
 	return num
 }
 
-// The text of the string node `t` of the JSON text `src`: its bytes in the text when it holds no escape, else decoded
-// into `buf`. False for a node that is no string, or a `buf` shorter than the node's span.
-@(require_results)
-node_text :: #force_inline proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: string, ok: bool) #no_bounds_check {
-	if t.kind != .String {
-		return "", false
-	}
-	if t.spelling & tape.SPELLING_DECODE == 0 {
-		return string(src[t.lo:][:t.n]), true
-	}
+// The text of the string node `t` of the JSON text `src`, which holds an escape, decoded into `buf`. False for a `buf`
+// shorter than the node's span.
+@(private)
+text_decoded :: #force_inline proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: string, ok: bool) #no_bounds_check {
 	// An escape decodes to no more bytes than it spells, so a buffer as long as the span holds the text.
 	if int(t.n) > len(buf) {
 		return "", false
@@ -55,14 +45,14 @@ node_text :: #force_inline proc "contextless" (src: []u8, t: tape.Node, buf: []u
 		return string(buf[:decode5(buf, src, t.lo, t.lo + u64(t.n))]), true
 	}
 	if t.n < 256 {
-		return string(buf[:decode_bytes(buf, 0, src, t.lo, t.lo + u64(t.n))]), true
+		return string(buf[:decode_bytes(buf, 0, src, t.lo, t.lo + u64(t.n), false)]), true
 	}
 	return decode_blocks(src, t, buf)
 }
 
-// The end in `dst` of `src[p:end]` decoded from `dst[w]` one byte at a time.
+// The end in `dst` of `src[p:end]` decoded from `dst[w]` one byte at a time, the escapes of JSON5 when `json5`.
 @(private)
-decode_bytes :: #force_inline proc "contextless" (dst: []u8, w: int, src: []u8, p, end: u64) -> int #no_bounds_check {
+decode_bytes :: #force_inline proc "contextless" (dst: []u8, w: int, src: []u8, p, end: u64, $json5: bool) -> int #no_bounds_check {
 	base := raw_data(src)
 	out := raw_data(dst)
 	p, w := p, w
@@ -74,18 +64,23 @@ decode_bytes :: #force_inline proc "contextless" (dst: []u8, w: int, src: []u8, 
 			p += 1
 			continue
 		}
-		if p + 1 >= end {
-			out[w] = '\\'
-			return w + 1
+		when json5 {
+			w, p = decode5_escape(base, p, end, out, w)
+		} else {
+			w, p = decode_escape(base, p, end, out, w)
 		}
-		w, p = decode_escape(base, p, end, out, w)
 	}
 	return w
 }
 
-// The ends in `out` and in `base` of the escape at `base[p]`, followed by at least one byte, decoded into `out[w:]`.
+// The ends in `out` and in `base` of the escape at `base[p]` decoded into `out[w:]`. A backslash that ends the text
+// spells itself.
 @(private)
 decode_escape :: #force_inline proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: int) -> (int, u64) #no_bounds_check {
+	if p + 1 >= end {
+		out[w] = '\\'
+		return w + 1, p + 1
+	}
 	if eb := spell.ESCAPED[base[p + 1]]; eb != 0 {
 		out[w] = eb
 		return w + 1, p + 2
@@ -105,7 +100,7 @@ decode_blocks :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (str
 	w := 0
 	for p < end {
 		if p + 64 > limit {
-			w = decode_bytes(buf, w, src, p, end)
+			w = decode_bytes(buf, w, src, p, end, false)
 			break
 		}
 		b := kernel.load(base[p:])
@@ -135,19 +130,8 @@ decode_blocks :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (str
 				copy_run(buf, w, base, int(p + cur), int(k - cur))
 				w += int(k - cur)
 			}
-			ep := p + k
 			next: u64
-			if ep + 1 >= end {
-				out[w] = '\\'
-				w += 1
-				next = ep + 1
-			} else if eb := spell.ESCAPED[base[ep + 1]]; eb != 0 {
-				out[w] = eb
-				w += 1
-				next = ep + 2
-			} else {
-				w, next = decode_unicode_into(base, ep, end, out, w)
-			}
+			w, next = decode_escape(base, p + k, end, out, w)
 			cur = next - p
 			if cur >= 64 {
 				// The escape runs past this block, so the next block starts after it.
@@ -246,8 +230,7 @@ copy_short :: #force_inline proc "contextless" (dst: []u8, w: int, src: [^]u8, p
 	}
 }
 
-// The value of a JSON5 number past JSON's grammar: a loose decimal, hex, `Infinity` or `NaN`. `Wide` when memory for a
-// long decimal is refused.
+// The value of a JSON5 number past JSON's grammar: a loose decimal, hex, `Infinity` or `NaN`.
 @(private, cold)
 number5_value :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, spelling: u16) -> spell.Number #no_bounds_check {
 	k := Number_Spelling(spelling & tape.NUMBER_KIND)
@@ -262,75 +245,24 @@ number5_value :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, sp
 	case .Hex:
 		return spell.number_hex(src[p + 2:hi], neg)
 	}
-	// A decimal JSON refuses for its `+`, or for a point with no digit before or after it, is read as its digits
-	// respelled in JSON, at most one byte longer.
-	room: [128]u8
-	buf := room[:]
-	if int(hi - lo) + 1 > len(room) {
-		when !HEAP {
-			return {0, .Wide}
-		}
-		long := runtime.heap_alloc(int(hi - lo) + 1, false)
-		if long == nil {
-			return {0, .Wide}
-		}
-		buf = ([^]u8)(long)[:int(hi - lo) + 1]
-	}
-	defer if raw_data(buf) != raw_data(room[:]) {
-		runtime.heap_free(raw_data(buf))
-	}
-	n := 0
-	if neg {
-		buf[0] = '-'
-		n = 1
-	}
-	if src[p] == '.' {
-		buf[n] = '0'
-		n += 1
-	}
-	for i := p; i < hi; i += 1 {
-		if src[i] == '.' && (i + 1 == hi || src[i + 1] | 0x20 == 'e') {
-			continue
-		}
-		buf[n] = src[i]
-		n += 1
-	}
-	num, _ := spell.number_strict(buf[:n], 0, u64(n))
-	if spelling & tape.NUMBER_POINT != 0 {
-		// A trailing point (`5.`) makes a float, and `-0.` keeps its sign.
-		if num.kind == .Int {
-			num = {transmute(u64)f64(i64(num.bits)) | u64(neg) << 63, .Float}
-		} else if num.kind == .Uint {
-			num = {transmute(u64)f64(num.bits), .Float}
-		}
-	}
+	num, _ := spell.number_loose(src, lo, hi)
 	return num
 }
 
 // The end in `dst` of JSON5's text `src[p:end]` decoded from `dst[0]`.
 @(private, cold)
-decode5 :: #force_no_inline proc "contextless" (dst: []u8, src: []u8, p, end: u64) -> int #no_bounds_check {
-	base := raw_data(src)
-	out := raw_data(dst)
-	p := p
-	w := 0
-	for p < end {
-		c := base[p]
-		if c != '\\' || p + 1 >= end {
-			out[w] = c
-			w += 1
-			p += 1
-			continue
-		}
-		w, p = decode5_escape(base, p, end, out, w)
-	}
-	return w
+decode5 :: #force_no_inline proc "contextless" (dst: []u8, src: []u8, p, end: u64) -> int {
+	return decode_bytes(dst, 0, src, p, end, true)
 }
 
 // `decode_escape` for JSON5, which adds `\v`, `\0`, `\x` and two hex digits, a backslash before a line end, which
 // spells nothing, and a backslash before any other character, which spells that character.
 @(private)
 decode5_escape :: proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: int) -> (int, u64) #no_bounds_check {
+	if p + 1 >= end {
+		out[w] = '\\'
+		return w + 1, p + 1
+	}
 	e := base[p + 1]
 	switch {
 	case spell.ESCAPED[e] != 0:
@@ -338,7 +270,7 @@ decode5_escape :: proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: i
 		return w + 1, p + 2
 	case e == 'u':
 		return decode_unicode_into(base, p, end, out, w)
-	case e == 'x':
+	case e == 'x' && p + 4 <= end:
 		unit := u32(spell.HEX_NIBBLE[base[p + 2]]) << 4 | u32(spell.HEX_NIBBLE[base[p + 3]])
 		if unit < 0x80 {
 			out[w] = u8(unit)
@@ -377,7 +309,7 @@ key_is :: proc "contextless" (src: []u8, t: tape.Token, name: string) -> bool #n
 	i := 0
 	for p < end {
 		c := base[p]
-		if c != '\\' || p + 1 >= end {
+		if c != '\\' {
 			if i == len(name) || name[i] != c {
 				return false
 			}

@@ -34,16 +34,17 @@ Read_Options :: struct {
 
 // The value a path reached in a text with no document, or why none was reached.
 Span_Answer :: struct {
-	lo, hi:   u64, // the value's authored span, a string's quotes inside it, zero for a `.Missing`
+	lo, hi:   u64, // the value's authored span, zero for a `.Missing`
 	kind:     Kind,
 	outcome:  Presence, // `.Found`, `.Wrong_Kind` for the value a step could not enter, or `.Missing`
 	spelling: u16,
+	head:     u8, // the bytes of the authored span before the value's own, as a string's opening quote
+	tail:     u8, // the bytes of the authored span after the value's own
 }
 
 #assert(size_of(Span_Answer) == 24)
 
 // The node of a scalar answer, which the format's readers take with the text it is in.
 answer_node :: proc "contextless" (a: Span_Answer) -> Node {
-	quoted := u64(a.kind == .String && a.spelling & SPELLING_QUOTED != 0)
-	return {lo = a.lo + quoted, n = u32(a.hi - a.lo - 2 * quoted), kind = a.kind, role = .Value, spelling = a.spelling}
+	return {lo = a.lo + u64(a.head), n = u32(a.hi - a.lo - u64(a.head) - u64(a.tail)), kind = a.kind, role = .Value, spelling = a.spelling}
 }

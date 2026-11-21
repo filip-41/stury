@@ -5,8 +5,7 @@ import "base:runtime"
 // Documents are stury's parsed form of a text. Queries, writes, edits and format conversions read them, and a path
 // query returns a partial one holding only the nodes it reached.
 
-// Nodes and facts over the source bytes of parsed text. Immutable, so threads share it without locks. Array
-// elements hold no pointers, so the arrays save and map as raw bytes.
+// Nodes and facts over the source bytes of parsed text. Immutable, so threads share it without locks.
 Document :: struct {
 	src:        []u8, // borrowed unless `.Owns_Src`
 	nodes:      []Node,
@@ -21,11 +20,25 @@ Document :: struct {
 	flags:      Doc_Flags,
 }
 
+destroy :: proc {
+	destroy_document,
+	destroy_result,
+	destroy_demand,
+}
+
 // Frees what `doc` holds and leaves it zero. The source is freed only under `.Owns_Src`.
-destroy :: proc(doc: ^Document) {
+destroy_document :: proc(doc: ^Document) {
 	free(raw_data(doc.nodes), doc.allocator)
 	free(raw_data(doc.facts), doc.allocator)
 	free(raw_data(doc.counts), doc.allocator)
+	switch ext in doc.ext {
+	case ^Tabular_Ext:
+		free(raw_data(ext.tables), doc.allocator)
+		free(raw_data(ext.slots), doc.allocator)
+		free(ext, doc.allocator)
+	case ^Yaml_Ext:
+		free(ext, doc.allocator)
+	}
 	if .Owns_Src in doc.flags {
 		free(raw_data(doc.src), doc.allocator)
 	}
@@ -71,13 +84,21 @@ Yaml_Ext :: struct {
 	clash: u64, // first key whose text equals another key's in its object (`1` and `"1"`), 0 for none
 }
 
-// A document of only the nodes a path query reached, with each path's answers.
+// A document of only the nodes a path query reached, with no facts, and each path's answers.
 Partial_Result :: struct {
 	doc:     Document,
-	answers: []Answer,
+	answers: []Answer, // the answers in text order, those at one byte by path
 	kept:    []Kept_Child, // sorted by node
 	missing: []Missing_Name, // sorted by node
 	block:   []u8, // backs the three lists and the missing names' bytes
+}
+
+// Frees what `r` holds and leaves it zero.
+destroy_result :: proc(r: ^Partial_Result) {
+	allocator := r.doc.allocator
+	destroy_document(&r.doc)
+	free(raw_data(r.block), allocator)
+	r^ = {}
 }
 
 // Whether a path read found a value.
