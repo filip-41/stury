@@ -1,0 +1,354 @@
+package json_tests
+
+import "core:fmt"
+import "core:strings"
+import "core:testing"
+import "stury:json"
+import "stury:lib/core/tape"
+
+// The document and error of building `src`, checked against `validate`'s answer.
+build :: proc(t: ^testing.T, src: string, opts := json.Options{}) -> (tape.Document, tape.Error) {
+	doc, err := json.build(transmute([]u8)src, opts)
+	testing.expectf(t, fmt.tprint(json.validate(transmute([]u8)src, opts)) == fmt.tprint(err), "validate and build disagree on %q", src)
+	return doc, err
+}
+
+// The suite's `y_` texts build and its `n_` texts are refused; `i_` texts may go either way.
+@(test)
+suite_accepts_and_refuses :: proc(t: ^testing.T) {
+	for f in #load_directory("conformance/JSONTestSuite/test_parsing") {
+		doc, err := build(t, string(f.data))
+		switch f.name[:2] {
+		case "y_":
+			testing.expectf(t, err == nil, "%s refused: %v", f.name, err)
+		case "n_":
+			testing.expectf(t, err != nil, "%s accepted", f.name)
+		}
+		tape.destroy(&doc)
+	}
+}
+
+// A document's nodes are in text order. A container's `n` is its subtree's node count and its `spelling` its child
+// count, and a key is a node but not a child.
+@(test)
+nodes_of_a_text :: proc(t: ^testing.T) {
+	src := `{"a": [1, "x\n", true], "b": null}`
+	doc, err := build(t, src)
+	defer tape.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	Want :: struct {
+		text:     string,
+		kind:     tape.Kind,
+		role:     tape.Role,
+		n:        u32,
+		spelling: u16,
+	}
+	want := []Want {
+		{"{", .Object, .Value, 8, 2},
+		{"a", .String, .Key, 1, tape.SPELLING_QUOTED},
+		{"[", .Array, .Value, 4, 3},
+		{"1", .Number, .Value, 1, tape.number_spelling(0, 1, 0)},
+		{`x\n`, .String, .Value, 3, tape.SPELLING_QUOTED | tape.SPELLING_DECODE},
+		{"true", .True, .Value, 4, 0},
+		{"b", .String, .Key, 1, tape.SPELLING_QUOTED},
+		{"null", .Null, .Value, 4, 0},
+	}
+	if !testing.expect_value(t, len(doc.nodes), len(want)) {
+		return
+	}
+	for w, i in want {
+		node := doc.nodes[i]
+		testing.expectf(t, node.kind == w.kind && node.role == w.role && node.spelling == w.spelling, "node %d: %v", i, node)
+		if node.kind < .Array {
+			testing.expectf(t, src[node.lo:][:node.n] == w.text && node.n == w.n, "node %d spans %q", i, src[node.lo:][:node.n])
+		} else {
+			testing.expectf(t, src[node.lo:][:1] == w.text && node.n == w.n, "node %d: %v", i, node)
+		}
+	}
+	testing.expect_value(t, doc.root_close, u64(len(src)))
+}
+
+// A text of `count` copies of `record` joined by `sep` in an array, then `last` and `count` more copies, and where
+// `last` starts. The copies after `last` keep the walk far from the text's end where it reads `last`.
+records :: proc(record, sep, last: string, count: int) -> (text: string, at: int) {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "[")
+	for _ in 0 ..< count {
+		strings.write_string(&b, record)
+		strings.write_string(&b, sep)
+	}
+	at = strings.builder_len(b)
+	strings.write_string(&b, last)
+	for _ in 0 ..< count {
+		strings.write_string(&b, sep)
+		strings.write_string(&b, record)
+	}
+	strings.write_string(&b, "]")
+	return strings.to_string(b), at
+}
+
+// Expects every key node of `doc` to span a quoted string of `text`.
+expect_key_spans :: proc(t: ^testing.T, text: string, doc: ^tape.Document, loc := #caller_location) {
+	for node in doc.nodes {
+		if node.role == .Key {
+			testing.expectf(t, text[node.lo - 1] == '"' && text[node.lo + u64(node.n)] == '"', "key span %v", node, loc = loc)
+		}
+	}
+}
+
+// A record that breaks where the records before it taught the walk a member gap is refused at the byte that breaks
+// it, compact or pretty printed.
+@(test)
+learned_gaps_judge_every_byte :: proc(t: ^testing.T) {
+	Case :: struct {
+		record, last: string,
+		at:           int, // the fault's offset in `last`, -1 for a record that reads
+		kind:         tape.Fault_Kind,
+	}
+	cases := []Case {
+		{`{"id":1,"name":"a"}`, `{"id":1"name":"a"}`, 7, .Bad_Char},
+		{`{"id":1,"name":"a"}`, `{"id":1,"name""a"}`, 14, .Bad_Char},
+		{`{"id":1,"name":"a"}`, `{,"id":1,"name":"a"}`, 1, .Bad_Char},
+		{`{"id":1,"name":"a"}`, `{"id":1,,"name":"a"}`, 8, .Bad_Char},
+		{`{"id":1,"name":"a"}`, "{\"id\":1,\"na\x01e\":\"a\"}", 11, .Bad_Char},
+		{`{"id":1,"name":"a"}`, `{"id":1,"name":}`, 15, .Bad_Char},
+		{`{"id":1,"name":"a"}`, `{"id":1,"name": "a"}`, -1, .None},
+		{`{"id":1,"name":"a"}`, `{"id":1,"nbme":"a"}`, -1, .None},
+		{`{"id":1,"name":"a"}`, `{"id":1,"name":"a","x":2}`, -1, .None},
+		{`{"id":1,"name":"a"}`, `{"name":"a","id":1}`, -1, .None},
+		{"{\n  \"id\": 1,\n  \"name\": \"a\"\n}", "{\n  \"id\": 1\n  \"name\": \"a\"\n}", 14, .Bad_Char},
+		{"{\n  \"id\": 1,\n  \"name\": \"a\"\n}", "{\n  \"id\": 1,\n  \"name\" \"a\"\n}", 22, .Bad_Char},
+		{"{\n  \"id\": 1,\n  \"name\": \"a\"\n}", "{\n  \"id\": 1,\n   \"name\": \"a\"\n}", -1, .None},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":01,"name":"a","ok":true}`, 7, .Bad_Number},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":-,"name":"a","ok":true}`, 7, .Bad_Number},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":1.,"name":"a","ok":true}`, 8, .Bad_Number},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":1e,"name":"a","ok":true}`, 8, .Bad_Number},
+		{`{"id":1,"name":"a","ok":true}`, "{\"id\":1,\"name\":\"a\x01\",\"ok\":true}", 17, .Bad_Char},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":1,"name":"a\q","ok":true}`, 18, .Bad_Escape},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":1,"name":"a","ok":tru}`, 27, .Bad_Char},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":1,"name":"a","ok":nulle}`, 28, .Bad_Char},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":1,"name":"a","ok":true]`, 28, .Bad_Char},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":-1.5e3,"name":"a\nb","ok":false}`, -1, .None},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":"1","name":2,"ok":null}`, -1, .None},
+		{`{"id":1,"name":"a","ok":true}`, `{"id":[1],"name":{"a":1},"ok":true}`, -1, .None},
+	}
+	for c in cases {
+		for sep in ([]string{",", ",\n"}) {
+			text, at := records(c.record, sep, c.last, 4)
+			doc, err := build(t, text)
+			if c.at < 0 {
+				testing.expectf(t, err == nil, "%q after its records: %v", c.last, err)
+				for node in doc.nodes {
+					if node.role == .Key {
+						testing.expectf(t, text[node.lo - 1] == '"' && text[node.lo + u64(node.n)] == '"', "key %v of %q", node, c.last)
+					}
+				}
+			} else {
+				f, faulted := err.(tape.Fault)
+				testing.expectf(t, faulted && f.kind == c.kind && f.at == u64(at + c.at), "%q after its records: %v, want %v at %d", c.last, err, c.kind, at + c.at)
+			}
+			tape.destroy(&doc)
+		}
+	}
+}
+
+// Keys that never repeat end gap matching for the rest of the walk; records after them still read, and a broken
+// one is still refused where it breaks.
+@(test)
+gaps_stop_on_keys_that_never_repeat :: proc(t: ^testing.T) {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `[{`)
+	for i in 0 ..< 3000 {
+		fmt.sbprintf(&b, `%s"k%d":%d`, "," if i > 0 else "", i, i)
+	}
+	strings.write_string(&b, `},`)
+	tail, at := records(`{"id":1,"name":"a"}`, ",", `{"id":1"name":"a"}`, 8)
+	strings.write_string(&b, tail[1:])
+	text := strings.to_string(b)
+	offset := len(text) - len(tail) + 1
+	doc, err := build(t, text)
+	f, faulted := err.(tape.Fault)
+	testing.expectf(t, faulted && f.kind == .Bad_Char && f.at == u64(offset + at - 1 + 7), "%v", err)
+	tape.destroy(&doc)
+	good, _ := records(`{"id":1,"name":"a"}`, ",", `{"id":2,"name":"b"}`, 8)
+	doc, err = build(t, strings.concatenate({text[:offset], good[1:]}, context.temp_allocator))
+	testing.expect_value(t, err, nil)
+	tape.destroy(&doc)
+}
+
+// A text nesting past `Budget.depth` is refused at the bracket past the limit.
+@(test)
+depth_limit :: proc(t: ^testing.T) {
+	for depth in ([]int{9, 10, 2000}) {
+		text := strings.concatenate({strings.repeat("[", 10, context.temp_allocator), strings.repeat("]", 10, context.temp_allocator)}, context.temp_allocator)
+		doc, err := build(t, text, {budget = {depth = u32(depth)}})
+		if depth < 10 {
+			e, exceeded := err.(tape.Exceeded)
+			testing.expectf(t, exceeded && e.kind == .Depth && e.at == u64(depth), "depth %d: %v", depth, err)
+		} else {
+			testing.expectf(t, err == nil, "depth %d: %v", depth, err)
+		}
+		tape.destroy(&doc)
+	}
+	// Past the walk's frame stack, the stacks move to the heap.
+	deep := strings.concatenate({strings.repeat("[", 5000, context.temp_allocator), strings.repeat("]", 5000, context.temp_allocator)}, context.temp_allocator)
+	doc, err := build(t, deep)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(doc.nodes), 5000)
+	tape.destroy(&doc)
+}
+
+// Mixed pretty-printed outer objects and compact inner objects preserve exact node spans and indentation tracking.
+@(test)
+mixed_pretty_and_compact_gaps :: proc(t: ^testing.T) {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "[\n")
+	for i in 0 ..< 16 {
+		if i > 0 {
+			strings.write_string(&b, ",\n")
+		}
+		fmt.sbprintf(&b, "  {{\n    \"id\": %d,\n    \"meta\": {{\"a\":1,\"b\":2,\"c\":3}},\n    \"tail\": true\n  }}", i)
+	}
+	strings.write_string(&b, "\n]")
+	text := strings.to_string(b)
+	doc, err := build(t, text)
+	defer tape.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(doc.nodes), 1 + 16 * 13)
+	expect_key_spans(t, text, &doc)
+}
+
+// Repeating wide objects, more than `GAP_ROWS` distinct object places, and polymorphic or broken record boundaries.
+@(test)
+wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
+	// 45 keys repeated across 11 records.
+	wb := strings.builder_make(context.temp_allocator)
+	strings.write_string(&wb, "{")
+	for k in 0 ..< 45 {
+		if k > 0 {
+			strings.write_string(&wb, ",")
+		}
+		fmt.sbprintf(&wb, "\"k%d\":%d", k, k)
+	}
+	strings.write_string(&wb, "}")
+	rec := strings.to_string(wb)
+	wide_text, _ := records(rec, ",", rec, 5)
+	doc, err := build(t, wide_text)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(doc.nodes), 1 + 11 * (1 + 2 * 45))
+	expect_key_spans(t, wide_text, &doc)
+	tape.destroy(&doc)
+
+	// Over 64 distinct nested object rows share the last row safely, including polymorphic elements.
+	pb := strings.builder_make(context.temp_allocator)
+	strings.write_string(&pb, `[{"rows":[`)
+	for i in 0 ..< 80 {
+		if i > 0 {
+			strings.write_string(&pb, ",")
+		}
+		fmt.sbprintf(&pb, `{{"f%d":{{"v":%d}}}}`, i, i)
+	}
+	strings.write_string(&pb, `]},{"rows":[{"f0":[{"v":1},{"v":2}]},{"f0":{"v":3}}]}]`)
+	poly_text := strings.to_string(pb)
+	pdoc, perr := build(t, poly_text)
+	testing.expect_value(t, perr, nil)
+	expect_key_spans(t, poly_text, &pdoc)
+	tape.destroy(&pdoc)
+
+	// Record-boundary faults after learned records.
+	Bad_Case :: struct {
+		last: string,
+		at:   int,
+		kind: tape.Fault_Kind,
+	}
+	bads := []Bad_Case {
+		{`{"id":1,"name":"a"}{"id":2,"name":"b"}`, 19, .Bad_Char},
+		{`{"id":1,"name":"a"},`, 20, .Bad_Char},
+		{`{"id":1,"name":"a"},}`, 20, .Bad_Char},
+		{`{"id":1,"name":"a"},:{"id":2,"name":"b"}`, 20, .Bad_Char},
+		{`{"id":1,"name":"a"},{"id":2,"name":1}`, -1, .None},
+	}
+	for bc in bads {
+		text, at := records(`{"id":1,"name":"a"}`, ",", bc.last, 6)
+		bdoc, berr := build(t, text)
+		if bc.kind == .None {
+			testing.expectf(t, berr == nil, "%q: got %v", bc.last, berr)
+			expect_key_spans(t, text, &bdoc)
+		} else {
+			f, faulted := berr.(tape.Fault)
+			testing.expectf(t, faulted && f.kind == bc.kind && f.at == u64(at + bc.at), "%q: got %v, want %v at %d", bc.last, berr, bc.kind, at + bc.at)
+		}
+		tape.destroy(&bdoc)
+	}
+	// Truncation right after a learned record-boundary key prefix.
+	head, _ := records(`{"id":1,"name":"a"}`, ",", `{"id":2,"name":"b"}`, 6)
+	trunc := head[:len(head) - 10]
+	tdoc, terr := build(t, trunc)
+	tf, tfaulted := terr.(tape.Fault)
+	testing.expectf(t, tfaulted && tf.kind == .Truncated, "truncated record: got %v", terr)
+	tape.destroy(&tdoc)
+
+	// Pretty record array, nested record arrays, object-in-object with identical keys, and polymorphic shrink/grow.
+	pb2 := strings.builder_make(context.temp_allocator)
+	strings.write_string(&pb2, "[\n")
+	for i in 0 ..< 8 {
+		if i > 0 {
+			strings.write_string(&pb2, ",\n")
+		}
+		fmt.sbprintf(&pb2, "  {{\n    \"id\": %d,\n    \"ok\": true\n  }}", i)
+	}
+	strings.write_string(&pb2, ",\n  {\n    \"id\": 9\n  },\n  {\n    \"id\": 10,\n    \"ok\": false,\n    \"extra\": 1\n  }\n]")
+	pretty_text := strings.to_string(pb2)
+	pdoc2, perr2 := build(t, pretty_text)
+	testing.expect_value(t, perr2, nil)
+	expect_key_spans(t, pretty_text, &pdoc2)
+	tape.destroy(&pdoc2)
+
+	nb := strings.builder_make(context.temp_allocator)
+	strings.write_string(&nb, `{"outer":{"a":{"id":1},"b":{"id":2}},"grid":[[`)
+	for i in 0 ..< 8 {
+		if i > 0 {
+			strings.write_string(&nb, ",")
+		}
+		fmt.sbprintf(&nb, `{{"id":%d}}`, i)
+	}
+	strings.write_string(&nb, `],[`)
+	for i in 0 ..< 8 {
+		if i > 0 {
+			strings.write_string(&nb, ",")
+		}
+		fmt.sbprintf(&nb, `{{"id":%d}}`, i + 10)
+	}
+	strings.write_string(&nb, `]]}`)
+	nested_text := strings.to_string(nb)
+	ndoc, nerr := build(t, nested_text)
+	testing.expect_value(t, nerr, nil)
+	expect_key_spans(t, nested_text, &ndoc)
+	tape.destroy(&ndoc)
+
+	// Uniform object arrays preserve every container's child count, subtree size, key span, and root close.
+	long_recs := strings.builder_make(context.temp_allocator)
+	strings.write_string(&long_recs, "[")
+	for i in 0 ..< 12 {
+		if i > 0 {
+			strings.write_string(&long_recs, ",")
+		}
+		fmt.sbprintf(&long_recs, `{{"id":"v%d"}}`, i)
+	}
+	strings.write_string(&long_recs, "]")
+	long_text := strings.to_string(long_recs)
+	ldoc, lerr := build(t, long_text)
+	defer tape.destroy(&ldoc)
+	testing.expect_value(t, lerr, nil)
+	testing.expect_value(t, ldoc.nodes[0].n, u32(1 + 12 * 3))
+	testing.expect_value(t, ldoc.nodes[0].spelling, u16(12))
+	testing.expect_value(t, ldoc.root_close, u64(len(long_text)))
+	for i in 0 ..< 12 {
+		obj := ldoc.nodes[1 + i * 3]
+		key := ldoc.nodes[2 + i * 3]
+		val := ldoc.nodes[3 + i * 3]
+		testing.expectf(t, obj.kind == .Object && obj.n == 3 && obj.spelling == 1, "obj %d: %v", i, obj)
+		testing.expectf(t, key.role == .Key && long_text[key.lo:][:key.n] == "id" && long_text[key.lo - 1] == '"' && long_text[key.lo + u64(key.n)] == '"', "key %d: %v", i, key)
+		testing.expectf(t, val.kind == .String && long_text[val.lo] == 'v', "val %d: %v", i, val)
+	}
+}

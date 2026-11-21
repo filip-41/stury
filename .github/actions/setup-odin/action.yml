@@ -1,8 +1,8 @@
 name: Set up Odin
-description: Odin at a pinned release, built against a pinned LLVM
+description: Odin at a pinned commit, built against a pinned LLVM (Windows links the LLVM Odin bundles)
 inputs:
-  version:
-    default: dev-2026-11a
+  commit:
+    default: 94ef2a5de5f3340a31f1e08bf62b2f6663a70022
   llvm:
     default: "22"
 runs:
@@ -44,22 +44,13 @@ runs:
           Windows-X64) os=windows-amd64 ;;
           *) echo "no Odin build for ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;
         esac
-        # The commit each release tag names, and the SHA-256 of its Windows asset from the release's published
-        # digests. A version not listed here fails until both are added.
-        case "${{ inputs.version }}" in
-          dev-2026-11a) commit=9a6991685ddf663956d9836602eb421e141fc443 windows=259effedf2997293c8fa4a5e497496f8ebce9f826652d9dd353a9dd2113c31fd ;;
-          *) echo "no pinned commit for ${{ inputs.version }}: add it to .github/actions/setup-odin/action.yml"; exit 1 ;;
-        esac
-        echo "commit=$commit" >> "$GITHUB_OUTPUT"
-        echo "windows_sha256=$windows" >> "$GITHUB_OUTPUT"
-        echo "asset=odin-$os-${{ inputs.version }}" >> "$GITHUB_OUTPUT"
         # The OS release is in the key: an Odin built on a newer Ubuntu needs a newer glibc than an older one has.
         case "${{ runner.os }}" in
           Linux) release=$(. /etc/os-release && echo "$ID$VERSION_ID") ;;
           macOS) release=macos$(sw_vers -productVersion | cut -d. -f1) ;;
           *) release=any ;;
         esac
-        echo "key=odin-$os-$release-${{ inputs.version }}-llvm${{ inputs.llvm }}" >> "$GITHUB_OUTPUT"
+        echo "key=odin-$os-$release-${{ inputs.commit }}-llvm${{ inputs.llvm }}" >> "$GITHUB_OUTPUT"
 
     - name: Cache Odin
       id: cache
@@ -69,32 +60,19 @@ runs:
         key: ${{ steps.source.outputs.key }}
 
     - name: Build Odin
-      if: runner.os != 'Windows' && steps.cache.outputs.cache-hit != 'true'
+      if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
         git init -q ~/odin
         cd ~/odin
-        git fetch -q --depth 1 https://github.com/odin-lang/Odin.git "${{ steps.source.outputs.commit }}"
+        git fetch -q --depth 1 https://github.com/odin-lang/Odin.git "${{ inputs.commit }}"
         git checkout -q FETCH_HEAD
-        if [ "${{ runner.os }}" = macOS ]; then
-          export LLVM_CONFIG="$(brew --prefix "llvm@${{ inputs.llvm }}")/bin/llvm-config"
-        else
-          export LLVM_CONFIG="/usr/lib/llvm-${{ inputs.llvm }}/bin/llvm-config"
-        fi
-        ./build_odin.sh release
-
-    - name: Download Odin (Windows)
-      if: runner.os == 'Windows' && steps.cache.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        mkdir -p ~/odin
-        archive="$RUNNER_TEMP/odin.zip"
-        curl -fsSL -o "$archive" \
-          "https://github.com/odin-lang/Odin/releases/download/${{ inputs.version }}/${{ steps.source.outputs.asset }}.zip"
-        got=$(openssl dgst -sha256 "$archive" | awk '{ print $NF }')
-        [ "$got" = "${{ steps.source.outputs.windows_sha256 }}" ] ||
-          { echo "sha256 of ${{ steps.source.outputs.asset }} is $got, expected ${{ steps.source.outputs.windows_sha256 }}"; exit 1; }
-        unzip -q "$archive" -d ~/odin
+        case "${{ runner.os }}" in
+          macOS) LLVM_CONFIG="$(brew --prefix "llvm@${{ inputs.llvm }}")/bin/llvm-config" ./build_odin.sh release ;;
+          Linux) LLVM_CONFIG="/usr/lib/llvm-${{ inputs.llvm }}/bin/llvm-config" ./build_odin.sh release ;;
+          # build.bat finds MSVC through vswhere and links bin/llvm/windows.
+          Windows) cmd //c "build.bat release" ;;
+        esac
 
     - name: Put Odin on PATH
       shell: bash
