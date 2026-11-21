@@ -10,9 +10,9 @@ FLOOR_LEVELS :: 8
 
 // The state for arrays of arrays of numbers, at the close bracket after a number where `,[` follows. It judges 64-byte
 // blocks with masks while each holds only digits, `-`, `.`, `,`, `[` and `]` and a comma, and gives the tokens of each
-// judged block up to its last comma. At the first block it cannot judge, the walk goes on in `st_after` from the last
-// comma given, or from `p`, so the states read every byte the masks did not judge. Only a hook that answers every token
-// with `Next` enters it.
+// judged block. At the first block it cannot judge, the walk goes on past the last `,`, `[` or `]` judged, in the state
+// that byte leaves it in, or from `p`, so the states read every byte the masks did not judge. Only a hook that answers
+// every token with `Next` enters it.
 @(private, enable_target_feature = STATE_FEATURES)
 st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result #no_bounds_check {
 	hs := tape.Hook_Regs{s0, s1, s2}
@@ -26,17 +26,16 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind
 	// The stack's levels from `floor` up to `zeroed` hold arrays. An array passes on the gap slot it opened with, so each
 	// level holds the slot of the one below, and `m` is read back from the level the walk goes on in.
 	zeroed := dep
-	at, at_dep := p, dep
 	q := p
+	// The last `,`, `[` or `]` of the blocks judged, nil before one is judged.
+	last: [^]u8
 	// The previous block's masks, whose top bits carry into this block's first byte. The byte before `p` is a digit,
 	// whose number the hook was given.
 	pn, pd, pm, pp, pl, po, pc, pk: u64 = 1 << 63, 1 << 63, 0, 0, 0, 0, 0, 0
 	// The carry of the fraction runs' sum out of the previous block.
 	frac_carry: u64
 	when H != tape.No_Hooks {
-		// The previous block's tokens past its last comma, which the hook has not been given, and where the number
-		// after its last `[` or `,` starts and has its `.`.
-		tail: Block_Tokens
+		// Where the number after the last `[` or `,` judged starts and has its `.`.
 		start, dot_at: [^]u8
 	}
 	for intrinsics.ptr_sub(end, q) >= 64 {
@@ -78,32 +77,34 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind
 			zeroed += 1
 		}
 		dep = dep + opens - closes
-		last := 63 - u64(intrinsics.count_leading_zeros(comma))
-		past := ~u64(0) << last << 1
 		when H != tape.No_Hooks {
 			// A number's end is the byte after its last, a comma or a close. The end at `p` is the number the hook was
 			// given before this state.
-			t := Block_Tokens{q, after_num & ~num & ~u64(q == p), dot, open | comma, open, close, ~past}
-			block_tokens(w, on, &hs, tail, start, dot_at)
+			t := Block_Tokens{q, after_num & ~num & ~u64(q == p), dot, open | comma, open, close}
 			block_tokens(w, on, &hs, t, start, dot_at)
-			tail = t
-			tail.keep = past
 			top := 63 - u64(intrinsics.count_leading_zeros(t.seps))
 			start, dot_at = q[top + 1:], nil
 			if dots := dot & (~u64(0) << top << 1); dots != 0 {
 				dot_at = q[63 - intrinsics.count_leading_zeros(dots):]
 			}
 		}
-		at = q[last:]
-		at_dep = dep - u64(intrinsics.count_ones(open & past)) + u64(intrinsics.count_ones(close & past))
+		last = q[63 - intrinsics.count_leading_zeros(open | comma | close):]
 		frac_carry = u64(c1 | c2)
 		pn, pd, pm, pp, pl, po, pc, pk = num, dg, mi, dot, lead_zero, open, comma, close
 		q = q[64:]
 	}
-	return #must_tail st_after(at, end, at_dep << 1, ind, w, hs.a, hs.b, hs.c, u64(w.stack[at_dep - 1] >> 8), G, on)
+	// No `,`, `[` or `]` follows the last one judged before the block's end, so the walk is at depth `dep` in an array.
+	slot := u64(w.stack[dep - 1] >> 8)
+	if last == nil {
+		return #must_tail st_after(p, end, dep << 1, ind, w, hs.a, hs.b, hs.c, slot, G, on)
+	}
+	if last[0] == '[' {
+		return #must_tail st_open(last[1:], end, dep << 1, ind, w, hs.a, hs.b, hs.c, slot, G, on)
+	}
+	return #must_tail st_after(last[1:] if last[0] == ']' else last, end, dep << 1, ind, w, hs.a, hs.b, hs.c, slot, G, on)
 }
 
-// The token masks of a block. Only the tokens in `keep` are given.
+// The token masks of a block.
 @(private)
 Block_Tokens :: struct {
 	base:   [^]u8,
@@ -112,14 +113,13 @@ Block_Tokens :: struct {
 	seps:   u64, // the `[` or `,` before each number
 	opens:  u64,
 	closes: u64,
-	keep:   u64,
 }
 
 // Gives the hook the tokens of `t` in text order. A number's end and a close at one byte give the number first. A
 // number with no `[` or `,` before it in `t` starts at `start` and has its `.` at `dot_at`, from the block before.
 @(private = "file")
 block_tokens :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, t: Block_Tokens, start, dot_at: [^]u8) #no_bounds_check {
-	for ev := (t.ends | t.opens | t.closes) & t.keep; ev != 0; ev &= ev - 1 {
+	for ev := t.ends | t.opens | t.closes; ev != 0; ev &= ev - 1 {
 		bit := ev & -ev
 		x := t.base[intrinsics.count_trailing_zeros(ev):]
 		if t.ends & bit != 0 {
