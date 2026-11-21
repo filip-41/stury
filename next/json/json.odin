@@ -32,6 +32,7 @@ FORMATS := [Spec]tape.Format {
 
 // The error in `src`, nil when it is one text of `spec`. An optimized build with a constant `spec` links only that
 // spec's walk.
+@(require_results)
 validate :: #force_inline proc "contextless" (src: []u8, spec := Spec.Json, opts := Options{}) -> tape.Error {
 	switch spec {
 	case .Json:
@@ -46,6 +47,7 @@ validate :: #force_inline proc "contextless" (src: []u8, spec := Spec.Json, opts
 
 // A document of every value in `src` read as `spec`, with keys and duplicates as written and comments as facts. Its
 // nodes point into `src`.
+@(require_results)
 build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	switch spec {
 	case .Json:
@@ -54,6 +56,22 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 		return build_as(src, .Jsonc, opts, allocator)
 	case .Json5:
 		return build_as(src, .Json5, opts, allocator)
+	}
+	panic("json: spec out of range")
+}
+
+// The first value `path` reaches in `src`, a text of `spec`, read with no document, or why none was reached.
+// Only a path longer than `build.FIND_ROOM` steps, or whose negative indexes reach further in sum, allocates.
+// An optimized build with a constant `spec` links only that spec's walk.
+@(require_results)
+find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
+	switch spec {
+	case .Json:
+		return find_as(src, path, .Json, read, opts, allocator)
+	case .Jsonc:
+		return find_as(src, path, .Jsonc, read, opts, allocator)
+	case .Json5:
+		return find_as(src, path, .Json5, read, opts, allocator)
 	}
 	panic("json: spec out of range")
 }
@@ -73,8 +91,13 @@ build_as :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocato
 	// A text makes at most `(len(src) + 1 + depth) / 2` nodes, so the hook checks no capacity. Each node spends two
 	// bytes (a container its brackets, a key its colon, a scalar the comma or close after it), except a container left
 	// open and the token before a fault, which may spend one.
+	nodes := (len(src) + int(depth)) / 2 + 16
+	// A node index and a container's child count are 32 bits, so a larger count is refused.
+	if u64(nodes) >= u64(tape.NO_NODE) {
+		return {}, tape.Exceeded{kind = .Nodes}
+	}
 	frames: [FRAME_DEPTH]u64 = ---
-	b := build.builder_start(src, &FORMATS[S], (len(src) + int(depth)) / 2 + 16, frames[:min(depth, FRAME_DEPTH)], allocator)
+	b := build.builder_start(src, &FORMATS[S], nodes, frames[:min(depth, FRAME_DEPTH)], allocator)
 	if b.err != nil {
 		return {}, b.err
 	}
@@ -82,6 +105,30 @@ build_as :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocato
 	on :: build.builder_hook_facts when S != .Json else build.builder_hook
 	root_close, err := walk_text(src, S, limit, &b, &regs, on)
 	return build.builder_end(&b, regs, root_close, err)
+}
+
+@(private)
+find_as :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Options, opts: Options, allocator: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
+	read := read
+	if read.dups == .Default {
+		read.dups = .Last
+	}
+	// The value at `lo` walked again, which the first walk judged within the depth limit.
+	rewalk :: proc "contextless" (h: ^build.Finder, lo: u64) {
+		regs: tape.Hook_Regs
+		_ = walk_value(h.src, raw_data(h.src)[lo:], S, u64(max(u32)), h, &regs, build.finder_hook)
+	}
+	room: build.Find_Room = ---
+	f, err := build.finder_start(src, path, read, key_is, respell, rewalk, &room, allocator)
+	if err != nil {
+		return {}, err
+	}
+	defer build.finder_end(&f)
+	regs: tape.Hook_Regs
+	if _, err := walk_text(src, S, depth_limit(opts), &f, &regs, build.finder_hook); err != nil {
+		return {}, err
+	}
+	return build.finder_answer(&f), nil
 }
 
 @(private)

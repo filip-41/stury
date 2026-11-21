@@ -49,9 +49,9 @@ numbers_read_exact_or_rounded :: proc(t: ^testing.T) {
 	for c in all {
 		doc, err := build(t, strings.concatenate({"[", c.text, "]"}, context.temp_allocator))
 		testing.expect_value(t, err, nil)
-		num, ok := json.node_number(&doc, first_value(t, &doc))
+		num, ok := json.node_number(doc.src, first_value(t, &doc))
 		testing.expectf(t, ok && num.kind == c.kind && num.bits == c.bits, "%s: %v %x, want %v %x", c.text, num.kind, num.bits, c.kind, c.bits)
-		_, is_text := json.node_text(&doc, first_value(t, &doc), nil)
+		_, is_text := json.node_text(doc.src, first_value(t, &doc), nil)
 		testing.expectf(t, !is_text, "%s read as a string", c.text)
 		tape.destroy(&doc)
 	}
@@ -78,7 +78,7 @@ strings_decode_their_escapes :: proc(t: ^testing.T) {
 		doc, err := build(t, strings.concatenate({"[", c.text, "]"}, context.temp_allocator))
 		testing.expect_value(t, err, nil)
 		buf := make([]u8, len(c.text), context.temp_allocator)
-		s, ok := json.node_text(&doc, first_value(t, &doc), buf)
+		s, ok := json.node_text(doc.src, first_value(t, &doc), buf)
 		testing.expectf(t, ok && s == c.want, "%q read as %q", c.text, s)
 		tape.destroy(&doc)
 	}
@@ -91,11 +91,11 @@ keys_and_short_buffers :: proc(t: ^testing.T) {
 	defer tape.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	buf: [16]u8
-	key, ok := json.node_text(&doc, doc.nodes[1], buf[:])
+	key, ok := json.node_text(doc.src, doc.nodes[1], buf[:])
 	testing.expectf(t, ok && key == "kéy", "key %q", key)
-	_, fits := json.node_text(&doc, doc.nodes[2], buf[:2])
+	_, fits := json.node_text(doc.src, doc.nodes[2], buf[:2])
 	testing.expect(t, !fits)
-	_, is_number := json.node_number(&doc, doc.nodes[0])
+	_, is_number := json.node_number(doc.src, doc.nodes[0])
 	testing.expect(t, !is_number)
 }
 
@@ -115,7 +115,7 @@ strings_decode_boundaries :: proc(t: ^testing.T) {
 		doc, err := build(t, c.text)
 		testing.expect_value(t, err, nil)
 		buf := make([]u8, doc.nodes[0].n, context.temp_allocator)
-		s, ok := json.node_text(&doc, doc.nodes[0], buf)
+		s, ok := json.node_text(doc.src, doc.nodes[0], buf)
 		testing.expectf(t, ok && s == c.want, "%q read as %q, want %q", c.text, s, c.want)
 		tape.destroy(&doc)
 	}
@@ -125,7 +125,7 @@ strings_decode_boundaries :: proc(t: ^testing.T) {
 		doc, err := build(t, src)
 		testing.expect_value(t, err, nil)
 		buf := make([]u8, doc.nodes[0].n, context.temp_allocator)
-		s, ok := json.node_text(&doc, doc.nodes[0], buf)
+		s, ok := json.node_text(doc.src, doc.nodes[0], buf)
 		testing.expectf(t, ok && s == want, "off %d failed", off)
 		tape.destroy(&doc)
 	}
@@ -156,7 +156,7 @@ numbers_decode_boundaries :: proc(t: ^testing.T) {
 			doc, err := build(t, wrap)
 			testing.expect_value(t, err, nil)
 			node := first_value(t, &doc) if wrap[0] == '[' else doc.nodes[0]
-			num, ok := json.node_number(&doc, node)
+			num, ok := json.node_number(doc.src, node)
 			testing.expectf(t, ok && num.kind == .Float && num.bits == want_bits, "%q: %v %x, want Float %x", wrap, num.kind, num.bits, want_bits)
 			tape.destroy(&doc)
 		}
@@ -187,7 +187,7 @@ numbers_decode_boundaries :: proc(t: ^testing.T) {
 			doc, err := build(t, wrap)
 			testing.expect_value(t, err, nil)
 			node := first_value(t, &doc) if wrap[0] == '[' else doc.nodes[0]
-			num, ok := json.node_number(&doc, node)
+			num, ok := json.node_number(doc.src, node)
 			testing.expectf(t, ok && num.kind == c.kind && num.bits == c.bits, "%q: %v %x, want %v %x", wrap, num.kind, num.bits, c.kind, c.bits)
 			tape.destroy(&doc)
 		}
@@ -275,7 +275,7 @@ numbers_read_as_strconv_reads_them :: proc(t: ^testing.T) {
 		testing.expect_value(t, err, nil)
 		for node in doc.nodes[1:] {
 			s := text[node.lo:][:node.n]
-			num, ok := json.node_number(&doc, node)
+			num, ok := json.node_number(doc.src, node)
 			want := strconv_number(s)
 			testing.expectf(t, ok && num == want, "%s: %v %x, want %v %x", s, num.kind, num.bits, want.kind, want.bits)
 		}
@@ -294,7 +294,7 @@ numbers_read_as_strconv_reads_them :: proc(t: ^testing.T) {
 		}
 		doc, err := build(t, strings.to_string(b))
 		testing.expect_value(t, err, nil)
-		num, ok := json.node_number(&doc, doc.nodes[0])
+		num, ok := json.node_number(doc.src, doc.nodes[0])
 		want := strconv_number(s)
 		testing.expectf(t, ok && num == want, "%q at %d: %v %x, want %v %x", s, lo, num.kind, num.bits, want.kind, want.bits)
 		tape.destroy(&doc)

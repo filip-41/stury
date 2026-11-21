@@ -17,6 +17,9 @@ Kind :: enum u8 {
 	End, // closes the innermost container; never stored in a document
 }
 
+// Scalars come before containers, and containers before `End`, so a hook tells them apart with one compare.
+#assert(Kind.Plain < Kind.Array && Kind.Array < Kind.Object && Kind.Object < Kind.End)
+
 // A token's place in its container. Group facts with other roles.
 Role :: enum u8 {
 	Value,
@@ -34,6 +37,9 @@ Role :: enum u8 {
 	Partial, // a container a path read kept only part of; no walk emits it
 }
 
+// Facts come after `Key`, so a hook tells a fact from a value or key with one compare.
+#assert(Role.Value < Role.Key && Role.Key < Role.Comment)
+
 // A token from a walk, also stored as a document node.
 Token :: struct {
 	lo:       u64,
@@ -47,7 +53,7 @@ Token :: struct {
 
 Node :: Token
 
-// An index into `Document.nodes`. A build refuses a text whose node count would reach `NO_NODE`.
+// An index into `Document.nodes`. A build refuses a text whose node count could reach `NO_NODE`.
 Node_Index :: distinct u32
 
 ROOT :: Node_Index(0)

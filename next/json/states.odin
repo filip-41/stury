@@ -27,7 +27,7 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 			}
 			// A byte past ASCII or a control byte, which `st_string` would only find again.
 			if stop != nil {
-				return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+				return #must_tail st_string_utf8(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 			}
 			return #must_tail st_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 		}
@@ -36,7 +36,7 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 		}
 		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	case .Number:
-		q, spelling, kind := number(p, end, H != tape.No_Hooks, S)
+		q, spelling, kind := hook_number(p, end, H, S)
 		if kind != .None {
 			when S == .Json5 {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
@@ -69,8 +69,17 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 			return #must_tail st_deepen(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 		}
 		w.stack[d >> 1] = level(d, m)
-		if emit(w, on, &hs, .Object, .Value, p, p[1:], 0) == .Stop {
+		a := emit(w, on, &hs, .Object, .Value, p, p[1:], 0)
+		if a == .Stop {
 			return stopped(w, hs, p[1:])
+		}
+		when intrinsics.type_has_field(H, tape.SKIPS_FIELD) {
+			if a == .Skip {
+				return #must_tail st_skip_open(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
+			if a == .Rest {
+				return #must_tail st_rest(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
 		}
 		when G {
 			child := gap_child(w, m, G)
@@ -86,8 +95,17 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 			return #must_tail st_deepen(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 		}
 		w.stack[d >> 1] = level(d, m)
-		if emit(w, on, &hs, .Array, .Value, p, p[1:], 0) == .Stop {
+		a := emit(w, on, &hs, .Array, .Value, p, p[1:], 0)
+		if a == .Stop {
 			return stopped(w, hs, p[1:])
+		}
+		when intrinsics.type_has_field(H, tape.SKIPS_FIELD) {
+			if a == .Skip {
+				return #must_tail st_skip_open(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
+			if a == .Rest {
+				return #must_tail st_rest(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
 		}
 		return #must_tail st_open(p[1:], end, (d | 1) + 1, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	}
@@ -199,6 +217,20 @@ st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, in
 		return fault(w, hs, p, .Too_Wide)
 	}
 	if emit_string(w, on, &hs, .Value, p, q, tape.SPELLING_DECODE) == .Stop {
+		return stopped(w, hs, q)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+}
+
+// The state at a value string whose first byte past printable ASCII is no backslash, within 32 bytes.
+@(private, enable_target_feature = STATE_FEATURES)
+st_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+	hs := tape.Hook_Regs{s0, s1, s2}
+	q := string_utf8(p)
+	if q == nil {
+		return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+	}
+	if emit_string(w, on, &hs, .Value, p, q, 0) == .Stop {
 		return stopped(w, hs, q)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
@@ -345,6 +377,7 @@ st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 // The stack entry of a container opened in container `d`, whose gap slot is `m`.
 @(private)
 level :: #force_inline proc "contextless" (d, m: u64) -> u32 {
+	#assert(']' | 1 << 5 == '}')
 	return u32(']' | (d & 1) << 5 | m << 8)
 }
 
@@ -366,6 +399,32 @@ st_stop_gaps :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 @(private, cold)
 enter_no_gaps :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	return st_value(p, end, d, ind, w, s0, s1, s2, m, false, on)
+}
+
+// The state at the open bracket `p` of a container a hook skips. Judges what it holds with no hooks, gives its `End`
+// and goes on after it.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_skip_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+	hs := tape.Hook_Regs{s0, s1, s2}
+	r := pass_over(w, p, end, d, ind, hs, m, G)
+	if u8(r) != 0 {
+		w.regs^ = hs
+		return r
+	}
+	q := w.base[u64(r) >> 16:]
+	if emit(w, on, &hs, .End, .Value, q[-1:], q, 0) == .Stop {
+		return stopped(w, hs, q)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+}
+
+// The state at the open bracket `p` of a container once a hook wants no more tokens. Judges the rest of the text in
+// the same walk with no hooks.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_rest :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+	// A walk's hooks are behind a pointer, so the walk is the same with `No_Hooks`, its stack and gaps included.
+	#assert(size_of(Walk(S, H)) == size_of(Walk(S, tape.No_Hooks)))
+	return st_value(p, end, d, ind, (^Walk(S, tape.No_Hooks))(w), s0, s1, s2, m, G, tape.no_hook)
 }
 
 // The state at an object's open bracket whose parent slot has no row yet.
@@ -405,8 +464,17 @@ st_open_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 		stack[d >> 1] = level(0, m)
 		d += 2
 		p = p[1:]
-		if emit(w, on, &hs, .Array, .Value, p[-1:], p, 0) == .Stop {
+		a := emit(w, on, &hs, .Array, .Value, p[-1:], p, 0)
+		if a == .Stop {
 			return stopped(w, hs, p)
+		}
+		when intrinsics.type_has_field(H, tape.SKIPS_FIELD) {
+			if a == .Skip {
+				return #must_tail st_skip_open(p[-1:], end, d - 2, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
+			if a == .Rest {
+				return #must_tail st_rest(p[-1:], end, d - 2, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
 		}
 		if p >= end || p[0] != '[' {
 			break
@@ -520,7 +588,7 @@ st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 			return #must_tail st_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 		}
 		if stop != nil {
-			return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			return #must_tail st_string_utf8(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 		}
 		return #must_tail st_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	}
@@ -551,7 +619,7 @@ st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	#assert(G)
 	hs := tape.Hook_Regs{s0, s1, s2}
-	q, spelling, kind := number(p, end, H != tape.No_Hooks, S)
+	q, spelling, kind := hook_number(p, end, H, S)
 	if kind != .None {
 		when S == .Json5 {
 			return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
@@ -720,7 +788,7 @@ st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	for {
 		spelling: u16
 		kind: tape.Fault_Kind
-		q, spelling, kind = number(p, end, H != tape.No_Hooks, S)
+		q, spelling, kind = hook_number(p, end, H, S)
 		if kind != .None {
 			when S == .Json5 {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
@@ -783,7 +851,7 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		if r[0] != '-' && r[0] - '0' >= 10 {
 			return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 		}
-		n, spelling, kind := number(r, end, H != tape.No_Hooks, S)
+		n, spelling, kind := hook_number(r, end, H, S)
 		if kind != .None {
 			when S == .Json5 {
 				return #must_tail st_number5(r, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)

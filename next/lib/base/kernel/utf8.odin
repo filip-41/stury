@@ -93,6 +93,7 @@ utf8_ok :: proc "contextless" (s: Utf8_State) -> bool {
 	return simd.reduce_or(simd.bit_or(s.err, open_sequence(s.prev))) == 0
 }
 
+@(require_results)
 utf8_valid :: #force_inline proc "contextless" (text: []u8) -> bool {
 	return scan(text, 0, nil, .Utf8) != 0
 }
@@ -196,7 +197,7 @@ leads :: #force_inline proc "contextless" (v, p1: #simd[$N]u8) -> #simd[N]u8 {
 // Lane i is the byte `K` before byte i of `v`, taken from the end of `prev` for the first `K` lanes. One `ext` at 16
 // lanes; at 32, a select of two rotations.
 @(private = "file")
-before :: #force_inline proc "contextless" (prev, v: #simd[$N]u8, $K: int) -> #simd[N]u8 where 0 < K && K < N {
+before :: #force_inline proc "contextless" (prev, v: #simd[$N]u8, $K: int) -> #simd[N]u8 where 0 < K, K < N {
 	when N == 16 {
 		return simd.shuffle(
 			prev, v,

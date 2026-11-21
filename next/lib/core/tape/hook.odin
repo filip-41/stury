@@ -8,8 +8,25 @@ import "base:runtime"
 // A hook's answer to a token.
 Action :: enum u8 {
 	Next,
+	// On an `Array` or `Object`, pass what it holds with no tokens up to its `End`, while the walk still judges its
+	// bytes. `Next` on any other token. Only a hook with a `skips` field gives it.
+	Skip,
+	// On an `Array` or `Object`, judge it and the rest of the text with no more tokens. Only a hook with a `skips`
+	// field gives it.
+	Rest,
 	Stop, // end the walk after this token; the text past it is not read
 }
+
+// The field that lets a hook answer `Skip` and `Rest`. The walks compile the checks only for a hook that has it.
+Skips :: struct {}
+
+// The names of the fields a walk looks for in a hook, of types `Skips` and `Unspelled`.
+SKIPS_FIELD :: "skips"
+UNSPELLED_FIELD :: "unspelled"
+
+// The field of a hook that reads no number's spelling, so the walk gives a plain decimal `Number` token a spelling
+// of 0 and any other number its own.
+Unspelled :: struct {}
 
 // Three words of a hook's state that the walk's states carry in argument registers. They suit what changes with every
 // token, such as a cursor or a count.

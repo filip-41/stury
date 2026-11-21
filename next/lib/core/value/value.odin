@@ -1,8 +1,10 @@
-package tape
+package value
 
 import "core:math/big"
+import "stury:lib/core/tape"
 
-// Values are the data queries and builders work on, whether read from a document or built by a query.
+// Values are the data queries and builders work on, whether read from a document or built by a query. The package is
+// apart from `tape`, so a program that only reads a text links no big integers.
 
 // A document node or a value built in memory. An integer is `i64` when it fits, else a `^big.Int` from
 // `integer_value`.
@@ -35,8 +37,8 @@ integer_value :: proc(n: ^big.Int) -> (Value, big.Error) {
 Bytes :: distinct []u8
 
 Node_Ref :: struct {
-	doc:  ^Document,
-	node: Node_Index,
+	doc:  ^tape.Document,
+	node: tape.Node_Index,
 }
 
 // A number's unparsed digits, kept so output preserves its spelling.
@@ -57,7 +59,7 @@ Array :: struct {
 Object :: struct {
 	slot_keys: [dynamic]string,
 	slot_vals: [dynamic]Value,
-	index:     map[string]int, // built for wide objects; only an indexed object has dead slots
+	index:     map[string]int, // built for wide objects, and only an indexed object has dead slots
 	dead:      i32,
 	repeats:   bool,
 }

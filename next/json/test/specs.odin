@@ -275,7 +275,7 @@ json5_numbers :: proc(t: ^testing.T) {
 		doc, err := build_as(t, src, .Json5)
 		testing.expectf(t, err == nil, "%q: %v", src, err)
 		if err == nil {
-			v, ok := json.node_number(&doc, doc.nodes[1])
+			v, ok := json.node_number(doc.src, doc.nodes[1])
 			testing.expect(t, ok)
 			switch c.kind {
 			case .Int:
@@ -287,12 +287,12 @@ json5_numbers :: proc(t: ^testing.T) {
 		tape.destroy(&doc)
 	}
 	doc, _ := build_as(t, "NaN", .Json5)
-	v, _ := json.node_number(&doc, doc.nodes[0])
+	v, _ := json.node_number(doc.src, doc.nodes[0])
 	testing.expect(t, v.kind == .Float && math.is_nan(transmute(f64)v.bits))
 	tape.destroy(&doc)
 	for text in ([]string{"-0.", "-0.0", "-.0"}) {
 		doc, _ = build_as(t, text, .Json5)
-		v, _ = json.node_number(&doc, doc.nodes[0])
+		v, _ = json.node_number(doc.src, doc.nodes[0])
 		testing.expectf(t, v.kind == .Float && v.bits == 1 << 63, "%s: %v", text, v)
 		tape.destroy(&doc)
 	}
@@ -312,7 +312,7 @@ json5_text :: proc(t: ^testing.T) {
 	buf: [256]u8
 	for n in doc.nodes {
 		if n.kind == .String {
-			s, ok := json.node_text(&doc, n, buf[:])
+			s, ok := json.node_text(doc.src, n, buf[:])
 			testing.expect(t, ok)
 			append(&texts, strings.clone(s, context.temp_allocator))
 		}

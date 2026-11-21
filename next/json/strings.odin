@@ -50,6 +50,36 @@ string_short :: #force_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> 
 	return p[2 + k:], false, nil
 }
 
+// One past the closing quote of the string at `p` when it closes within 32 bytes with no backslash or control byte
+// and its bytes are UTF-8, else nil. The text must hold more than 32 bytes from `p`. The bytes from the quote on
+// are zeroed before the UTF-8 check, so a sequence the quote cuts fails on the zeros after it, which a quote at lane 31
+// or before leaves in `w1`.
+@(private)
+string_utf8 :: #force_inline proc "contextless" (p: [^]u8) -> [^]u8 #no_bounds_check {
+	v0, v1 := kernel.load16(p[1:]), kernel.load16(p[17:])
+	stops :: #force_inline proc "contextless" (v: V) -> V {
+		return simd.bit_or(simd.bit_or(simd.lanes_eq(v, V('"')), simd.lanes_eq(v, V('\\'))), simd.lanes_lt(v, V(0x20)))
+	}
+	k := kernel.first_lane16(stops(v0))
+	if k == 16 {
+		k = 16 + kernel.first_lane16(stops(v1))
+		if k == 32 {
+			return nil
+		}
+	}
+	if p[1 + k] != '"' {
+		return nil
+	}
+	i := simd.indices(V)
+	w0 := simd.bit_and(v0, simd.lanes_lt(i, V(u8(k))))
+	w1 := simd.bit_and(v1, simd.lanes_lt(i + 16, V(u8(k))))
+	err := simd.bit_or(kernel.utf8_window(V{}, w0), kernel.utf8_window(w0, w1))
+	if !kernel.all_zero(err) {
+		return nil
+	}
+	return p[2 + k:]
+}
+
 // The longest key `string_probe` reads.
 @(private)
 PROBE_MAX :: 32

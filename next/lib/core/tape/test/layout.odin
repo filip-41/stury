@@ -11,6 +11,5 @@ layout_sizes :: proc(t: ^testing.T) {
 	testing.expect_value(t, size_of(tape.Table), 28)
 	when size_of(uintptr) == 8 {
 		testing.expect_value(t, size_of(tape.Document), 128)
-		testing.expect_value(t, size_of(tape.Value), 24)
 	}
 }

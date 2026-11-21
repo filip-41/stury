@@ -28,7 +28,7 @@ pack :: #force_inline proc "contextless" (m: Block) -> u64 {
 }
 
 // `pack` of 2 to 4 masks, sharing the last round of adds between pairs.
-pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2 <= N && N <= 4 {
+pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2 <= N, N <= 4 {
 	ab := transmute([2]u64)addp(fold(m[0]), fold(m[1]))
 	r[0], r[1] = ab[0], ab[1]
 	when N == 3 {

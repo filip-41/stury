@@ -44,25 +44,29 @@ GAP_MISS_FLOOR :: 512 // misses a walk allows on top of those
 Gap :: struct {
 	lo:    u32, // the gap's offset in the text
 	n:     u8, // the gap's length, 0 for none learned, `GAP_DEAD` for a retired slot
-	key:   u8, // the key's offset in the gap in bits 0..5; `GAP_NEWLINE` when the gap begins with a line break
+	key:   Gap_Key,
 	key_n: u8, // the key's length
-	miss:  u8, // `GAP_SUSPECT` after a miss, and below it the relearns since the last match
+	miss:  Gap_Miss,
+}
+
+@(private)
+Gap_Key :: bit_field u8 {
+	offset:  u8   | 6, // the key's offset in the gap
+	_:       u8   | 1,
+	newline: bool | 1, // the gap begins with a line break
+}
+
+@(private)
+Gap_Miss :: bit_field u8 {
+	relearns: u8   | 7, // since the last match
+	suspect:  bool | 1, // after a miss, which keeps the gap until a second miss in a row
 }
 
 @(private)
 GAP_DEAD :: u8(0xFF)
-// The mark of a slot that missed once, which keeps its gap until a second miss in a row.
-@(private)
-GAP_SUSPECT :: u8(0x80)
-// The mark in a slot's `key` of a gap that begins with a line break.
-@(private)
-GAP_NEWLINE :: u8(0x80)
-// The bits of a slot's `key` that hold the key's offset.
-@(private)
-GAP_KEY_MASK :: u8(0x3F)
 
-// A key's offset in its gap leaves room for its quotes and the colon.
-#assert(GAP_MAX - 3 <= int(GAP_KEY_MASK))
+// A key's offset in its gap leaves room for its quotes and the colon, so its six bits in `Gap_Key` hold it.
+#assert(GAP_MAX - 3 < 1 << 6)
 
 // A walk's gap table.
 @(private)
@@ -118,11 +122,11 @@ gap_match :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, 
 	if r == nil {
 		return nil, {}, false
 	}
-	if s.miss != 0 {
-		s.miss = 0
+	if s.miss != {} {
+		s.miss = {}
 	}
-	key_raw := s.key
-	return r, tape.Token{at(w, p) + u64(key_raw & GAP_KEY_MASK) + 1, u32(s.key_n), .String, .Key, tape.SPELLING_QUOTED}, key_raw & GAP_NEWLINE != 0
+	learned := s.key
+	return r, tape.Token{at(w, p) + u64(learned.offset) + 1, u32(s.key_n), .String, .Key, tape.SPELLING_QUOTED}, learned.newline
 }
 
 // One past the `n`-byte gap at `p` matching `e` followed by a value-start byte, or nil on mismatch.
@@ -191,11 +195,11 @@ gap_learn :: #force_inline proc "contextless" (w: ^Walk($S, $H), m: u64, p, q, r
 		return
 	}
 	if s.n != 0 {
-		if s.miss & GAP_SUSPECT == 0 {
-			s.miss |= GAP_SUSPECT
+		if !s.miss.suspect {
+			s.miss.suspect = true
 			return
 		}
-		if s.miss & ~GAP_SUSPECT >= GAP_RELEARNS {
+		if s.miss.relearns >= GAP_RELEARNS {
 			s.n = GAP_DEAD
 			return
 		}
@@ -205,7 +209,7 @@ gap_learn :: #force_inline proc "contextless" (w: ^Walk($S, $H), m: u64, p, q, r
 	if n <= GAP_MAX && lo <= u64(max(u32)) {
 		key_off := at(w, p) - lo
 		nl := key_off > 0 && (w.base[lo] == '\n' || (key_off >= 2 && w.base[lo] == '\r' && w.base[lo + 1] == '\n'))
-		s^ = {u32(lo), u8(n), u8(key_off) | (GAP_NEWLINE if nl else 0), u8(intrinsics.ptr_sub(q, p) - 2), (s.miss & ~GAP_SUSPECT) + 1}
+		s^ = {u32(lo), u8(n), {offset = u8(key_off), newline = nl}, u8(intrinsics.ptr_sub(q, p) - 2), {relearns = s.miss.relearns + 1}}
 	}
 	return
 }

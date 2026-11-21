@@ -16,6 +16,7 @@ Builder :: struct {
 	borrowed:  bool, // `stack` is the caller's, which `builder_end` does not free
 	wide:      tape.Child_Count, // the first container whose `spelling` saturated, count 0 for none
 	wide_more: bool, // a second container saturated, so `builder_end` counts the children of each
+	ctx:       runtime.Context, // the caller's, for the allocations the contextless hook makes
 }
 
 #assert(size_of(tape.Node) == 16)
@@ -29,7 +30,7 @@ builder_regs :: #force_inline proc "contextless" (h: ^Builder) -> tape.Hook_Regs
 // open stack. A refused allocation leaves `err` set.
 builder_start :: proc(src: []u8, format: ^tape.Format, nodes: int, frames: []u64, allocator: runtime.Allocator) -> (b: Builder) {
 	b.doc = {src = src, format = format, allocator = allocator, flags = {.Kinds_Stored, .In_Order}}
-	b.stack, b.borrowed, b.closed = frames, true, tape.NO_NODE
+	b.stack, b.borrowed, b.closed, b.ctx = frames, true, tape.NO_NODE, context
 	raw, err := runtime.mem_alloc_non_zeroed(max(nodes, 16) * size_of(tape.Node), align_of(tape.Node), allocator)
 	if err != nil {
 		b.err = err
@@ -132,7 +133,7 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: tape.Hook_R
 // Doubles the room for facts, or sets `err` when memory is refused.
 @(private, cold)
 builder_grow_facts :: proc "contextless" (h: ^Builder) -> bool {
-	context = runtime.default_context()
+	context = h.ctx
 	want := max(2 * len(h.facts), 16)
 	raw, err := runtime.non_zero_mem_resize(raw_data(h.facts), len(h.facts) * size_of(tape.Fact), want * size_of(tape.Fact), align_of(tape.Fact), h.doc.allocator)
 	if err != nil {
@@ -228,7 +229,7 @@ child_count :: proc(nodes: []tape.Node) -> (count: u32) #no_bounds_check {
 // Grows the open stack to `want` frames, for a walk about to nest past it.
 @(cold)
 builder_deepen :: #force_no_inline proc "contextless" (h: ^Builder, want: int) -> bool {
-	context = runtime.default_context()
+	context = h.ctx
 	stack, err := make([]u64, want, h.doc.allocator)
 	if err != nil {
 		return false
@@ -243,6 +244,7 @@ builder_deepen :: #force_no_inline proc "contextless" (h: ^Builder, want: int) -
 
 // The document the walk built, or the error that ended it, with everything freed. `regs` are the hook's registers at
 // the walk's end and `root_close` the end of the root value.
+@(require_results)
 builder_end :: proc(h: ^Builder, regs: tape.Hook_Regs, root_close: u64, err: tape.Error) -> (doc: tape.Document, e: tape.Error) {
 	e = err
 	if e == nil && h.err != nil {
@@ -266,7 +268,12 @@ builder_end :: proc(h: ^Builder, regs: tape.Hook_Regs, root_close: u64, err: tap
 		return {}, e
 	}
 	doc = h.doc
-	doc.nodes = doc.nodes[:count]
+	// The room holds the most nodes a text of this length can make, often several times the nodes it made.
+	if raw, err := runtime.non_zero_mem_resize(raw_data(doc.nodes), len(doc.nodes) * size_of(tape.Node), count * size_of(tape.Node), align_of(tape.Node), doc.allocator); err == nil {
+		doc.nodes = ([^]tape.Node)(raw_data(raw))[:count]
+	} else {
+		doc.nodes = doc.nodes[:count]
+	}
 	doc.root_close = root_close
 	return doc, nil
 }

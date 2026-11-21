@@ -1,6 +1,7 @@
 package spell
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:math"
 import "core:strconv"
 
@@ -59,7 +60,8 @@ Number_Lex :: struct {
 }
 
 // The value of `src[lo:hi]` read with RFC 8259's number grammar, false for a span that is no number.
-number_strict :: proc(src: []u8, lo, hi: u64) -> (Number, bool) {
+@(require_results)
+number_strict :: proc "contextless" (src: []u8, lo, hi: u64) -> (Number, bool) {
 	n := lex_decimal(src, lo, hi)
 	if !n.ok {
 		return {}, false
@@ -69,7 +71,8 @@ number_strict :: proc(src: []u8, lo, hi: u64) -> (Number, bool) {
 
 // The value of the signed integer `src[lo:hi]` of `digits` digits, at most 19, which a walk counted. False for a span
 // of another length or a value below `i64`'s minimum.
-number_int :: #force_inline proc(src: []u8, lo, hi: u64, digits: int) -> (Number, bool) {
+@(require_results)
+number_int :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, digits: int) -> (Number, bool) {
 	p, neg := skip_sign(raw_data(src), lo)
 	if digits <= 0 || digits > 19 || p + u64(digits) != hi {
 		return {}, false
@@ -79,7 +82,8 @@ number_int :: #force_inline proc(src: []u8, lo, hi: u64, digits: int) -> (Number
 
 // The value of the decimal `src[lo:hi]` with a point and no exponent, from the digit counts a walk found. Only the
 // point's place is checked against them.
-number_fraction :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number #no_bounds_check {
+@(require_results)
+number_fraction :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number #no_bounds_check {
 	base := raw_data(src)
 	total := int_digits + frac_digits
 	// A point at most 19 bytes before `hi` leaves both digit runs ending past `FOLD_WORDS_FROM`.
@@ -115,7 +119,8 @@ number_fraction :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_d
 
 // The value of the decimal `src[lo:hi]` with an exponent, from the digit counts a walk found. A span the counts do
 // not match is read again whole.
-number_exponent :: #force_no_inline proc(src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number #no_bounds_check {
+@(require_results)
+number_exponent :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number #no_bounds_check {
 	if int_digits + frac_digits > 19 {
 		return number_decimal(src, lo, hi)
 	}
@@ -155,7 +160,7 @@ number_exponent :: #force_no_inline proc(src: []u8, lo, hi: u64, int_digits, fra
 
 // The correctly rounded binary64 of `mant` × 10^`e` with sign `neg`, or `Wide` on overflow. Below 2^53 both `mant`
 // and `10^|e|` (for `|e| <= 22`) are exact in binary64, so Clinger's single operation holds.
-number_significand :: #force_inline proc(mant: u64, e: i64, neg: bool) -> Number {
+number_significand :: #force_inline proc "contextless" (mant: u64, e: i64, neg: bool) -> Number {
 	if mant < 1 << 53 && e >= -22 && e <= 22 {
 		f := f64(mant)
 		v := f * POW10_F64[e] if e >= 0 else f / POW10_F64[-e]
@@ -173,8 +178,8 @@ number_significand :: #force_inline proc(mant: u64, e: i64, neg: bool) -> Number
 }
 
 // The value of `src[lo:hi]`, which a walk accepted as a number, read with no digit counts.
-@(private)
-number_decimal :: proc(src: []u8, lo, hi: u64) -> Number {
+@(private, require_results)
+number_decimal :: proc "contextless" (src: []u8, lo, hi: u64) -> Number {
 	return number_of_lex(src, lo, hi, lex_decimal(src, lo, hi))
 }
 
@@ -245,7 +250,7 @@ exponent_value :: #force_inline proc "contextless" (base: [^]u8, p, hi: u64) -> 
 
 // The value of a lexed number. An integer that fits `i64` or `u64` stays exact.
 @(private)
-number_of_lex :: #force_inline proc(src: []u8, lo, hi: u64, n: Number_Lex) -> Number {
+number_of_lex :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, n: Number_Lex) -> Number {
 	digits := n.int_digits + n.frac_digits
 	e := n.exp - i64(n.frac_digits)
 	if digits > MAX_NUMBER_DIGITS || scale_wide(n.exp, e) {
@@ -255,7 +260,10 @@ number_of_lex :: #force_inline proc(src: []u8, lo, hi: u64, n: Number_Lex) -> Nu
 		// `mant` is exact up to 19 digits. Only a non-negative 20-digit integer can fit `u64`.
 		mag, fits := n.mant, true
 		if !n.neg && n.int_digits == 20 {
-			mag, fits = strconv.parse_u64_of_base(string(src[n.int_at:][:n.int_digits]), 10)
+			tens, over := intrinsics.overflow_mul(fold_digits_end(src, n.int_at + 19, 19), 10)
+			carry: bool
+			mag, carry = intrinsics.overflow_add(tens, u64(src[n.int_at + 19] - '0'))
+			fits = !over && !carry
 		} else if n.int_digits > 19 {
 			fits = false
 		}
@@ -280,7 +288,7 @@ skip_sign :: #force_inline proc "contextless" (base: [^]u8, lo: u64) -> (p: u64,
 
 // `mag` with sign `neg` as an `Int` or a `Uint`, false for a negative magnitude past `i64`'s minimum.
 @(private)
-integer_number :: #force_inline proc(mag: u64, neg: bool) -> (Number, bool) {
+integer_number :: #force_inline proc "contextless" (mag: u64, neg: bool) -> (Number, bool) {
 	if neg {
 		if mag <= u64(1) << 63 {
 			return {u64(0) - mag, .Int}, true
@@ -301,7 +309,9 @@ scale_wide :: #force_inline proc "contextless" (exp, e: i64) -> bool {
 
 // The value of a decimal of more than 19 digits, `Wide` on overflow.
 @(private, cold)
-wide_number :: #force_no_inline proc(span: string) -> Number {
+wide_number :: #force_no_inline proc "contextless" (span: string) -> Number {
+	// `parse_f64` allocates nothing, so the default context serves it.
+	context = runtime.default_context()
 	v, ok := strconv.parse_f64(span)
 	if !ok || transmute(u64)v & F64_INF_BITS == F64_INF_BITS {
 		return {0, .Wide}
@@ -311,7 +321,8 @@ wide_number :: #force_no_inline proc(span: string) -> Number {
 
 // The value of the hex digits `digits`, negated when `neg`: an integer while one holds it, else the correctly rounded
 // binary64, `Wide` past its range.
-number_hex :: proc(digits: []u8, neg: bool) -> Number #no_bounds_check {
+@(require_results)
+number_hex :: proc "contextless" (digits: []u8, neg: bool) -> Number #no_bounds_check {
 	i := 0
 	for i < len(digits) && digits[i] == '0' {
 		i += 1

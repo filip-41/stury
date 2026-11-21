@@ -17,7 +17,7 @@ eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
 	return transmute(Block)simd.lanes_eq(transmute(W)b, W(c))
 }
 
-pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2 <= N && N <= 4 {
+pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2 <= N, N <= 4 {
 	#unroll for i in 0 ..< N {
 		r[i] = pack(m[i])
 	}

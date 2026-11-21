@@ -27,7 +27,12 @@ Walk :: struct($S: Spec, $H: typeid) {
 	gaps:   Gaps,
 	owned:  bool, // `stack` is on the heap
 	tier:   kernel.Tier,
+	_:      [6]u8, // leaves no gap, as Odin zeroes a struct with one that is declared `---`
 }
+
+// Whether the target has a heap for the walk's own memory, which JS, WASI and freestanding lack.
+@(private)
+HEAP :: ODIN_OS != .JS && ODIN_OS != .WASI && ODIN_OS != .Freestanding
 
 // The kernel tier the states are built for. The floor, as the walk's 16-byte reads gain nothing from a wider tier.
 @(private)
@@ -78,6 +83,24 @@ when .Address in ODIN_SANITIZER_FLAGS {
 	}
 }
 
+// Judges the container at `p`, opened in the level `d` names with gap slot `m`, with no hooks, as the root of the same
+// walk read as one with `No_Hooks` whose stack starts at that level. It learns into and predicts from the walk's own
+// gaps and indent. Its result's offset is where the container ends, as a walk's root ends with no look at what follows
+// it. It is a call because `#must_tail` cannot jump between walks.
+@(private, cold)
+pass_over :: #force_no_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, hs: tape.Hook_Regs, m: u64, $G: bool) -> tape.Walk_Result {
+	#assert(size_of(Walk(S, H)) == size_of(Walk(S, tape.No_Hooks)))
+	slot := d >> 1
+	stack, depth, limit, owned := w.stack, w.depth, w.limit, w.owned
+	w.stack, w.depth, w.limit, w.owned = stack[slot:], depth - slot, limit - slot, false
+	r := st_value(p, end, 0, ind, (^Walk(S, tape.No_Hooks))(w), hs.a, hs.b, hs.c, m, G, tape.no_hook)
+	if w.owned {
+		runtime.heap_free(w.stack)
+	}
+	w.stack, w.depth, w.limit, w.owned = stack, depth, limit, owned
+	return r
+}
+
 @(private)
 emit :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, kind: tape.Kind, role: tape.Role, p, q: [^]u8, spelling: u16) -> tape.Action {
 	a: tape.Action
@@ -109,6 +132,9 @@ deepen :: #force_no_inline proc "contextless" (w: ^Walk($S, $H)) -> u8 {
 		if !build.builder_deepen(w.hooks, int(want) + len(w.hooks.stack) - int(w.depth)) {
 			return tape.WALK_NO_MEMORY
 		}
+	}
+	when !HEAP {
+		return tape.WALK_NO_MEMORY
 	}
 	size := int(want) * size_of(u32)
 	stack := runtime.heap_resize(w.stack, size) if w.owned else runtime.heap_alloc(size, false)

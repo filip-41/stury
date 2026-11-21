@@ -1,8 +1,8 @@
-package tape_test
+package value_test
 
 import "core:math/big"
 import "core:testing"
-import "stury:lib/core/tape"
+import "stury:lib/core/value"
 
 // `integer_value` at and just past the `i64` limits.
 @(test)
@@ -26,15 +26,23 @@ integer_value_narrows :: proc(t: ^testing.T) {
 		n: big.Int
 		defer big.destroy(&n)
 		testing.expect_value(t, big.atoi(&n, c.decimal), nil)
-		v, err := tape.integer_value(&n)
+		v, err := value.integer_value(&n)
 		testing.expect_value(t, err, nil)
 		switch x in v {
 		case i64:
 			testing.expectf(t, c.fits && x == c.small, "%s gave i64 %d", c.decimal, x)
 		case ^big.Int:
 			testing.expectf(t, !c.fits && x == &n, "%s stayed big", c.decimal)
-		case bool, f64, tape.Number_View, string, tape.Bytes, ^tape.Array, ^tape.Object, tape.Node_Ref:
+		case bool, f64, value.Number_View, string, value.Bytes, ^value.Array, ^value.Object, value.Node_Ref:
 			testing.expectf(t, false, "%s gave %v", c.decimal, v)
 		}
+	}
+}
+
+// The size a value takes in arrays and objects, which changes only on purpose.
+@(test)
+value_size :: proc(t: ^testing.T) {
+	when size_of(uintptr) == 8 {
+		testing.expect_value(t, size_of(value.Value), 24)
 	}
 }

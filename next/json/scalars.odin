@@ -62,6 +62,19 @@ number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool, $S: S
 	return q, digit_spelling(int_digits, frac_digits, SPELLED), .None
 }
 
+// `number` as the walk of hook `H` reads it: spelled unless `H` reads no hooks or no number's spelling.
+@(private)
+hook_number :: #force_inline proc "contextless" (p, end: [^]u8, $H: typeid, $S: Spec) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
+	return number(p, end, H != tape.No_Hooks && !intrinsics.type_has_field(H, tape.UNSPELLED_FIELD), S)
+}
+
+// The spelling of the JSON number `src[lo:hi]`.
+@(private)
+respell :: proc "contextless" (src: []u8, lo, hi: u64) -> u16 {
+	_, spelling, _ := number(raw_data(src)[lo:], raw_data(src)[hi:], true, .Json)
+	return spelling
+}
+
 // A plain decimal's spelling, 0 unless `SPELLED`.
 @(private)
 digit_spelling :: #force_inline proc "contextless" (int_digits, frac_digits: u64, $SPELLED: bool) -> u16 {
