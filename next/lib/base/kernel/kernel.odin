@@ -44,14 +44,13 @@ live16 :: #force_inline proc "contextless" (n: int) -> V #no_bounds_check {
 }
 
 // Whether `size` bytes at `p` may be read past the end of the slice they start: they stay in `p`'s 4096-byte page,
-// `p` is not nil, and no sanitizer watches the bytes past the end. The `- 1` makes a nil `p` wrap, so one test refuses
-// both, and a page-aligned `p` too.
+// `p` is not nil, and no sanitizer watches the bytes past the end.
 @(private)
 over_read :: #force_inline proc "contextless" (p: [^]u8, $size: uintptr) -> bool {
 	when ODIN_SANITIZER_FLAGS & {.Address, .Thread} != {} {
 		return false
 	} else {
-		return (uintptr(p) - 1) & 4095 < 4096 - size
+		return p != nil && uintptr(p) & 4095 <= 4096 - size
 	}
 }
 

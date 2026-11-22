@@ -2,28 +2,46 @@ package spell
 
 import "base:intrinsics"
 
-// The end of the run of decimal digits at `p`, with the run's digits added to `mant`.
+// The end of the run of decimal digits at `p`, with the run's first `room` digits added to `mant`. The digits of a
+// longer run past `room` are passed over, so `mant` is exact only while every digit folded in all fit `u64`.
 @(private)
-digit_fold :: #force_inline proc "contextless" (p, end: [^]u8, mant: ^u64) -> [^]u8 #no_bounds_check {
+digit_fold :: #force_inline proc "contextless" (p, end: [^]u8, mant: ^u64, room: int) -> [^]u8 #no_bounds_check {
+	m := mant^
 	q := p
-	for intrinsics.ptr_sub(end, q) >= 8 {
-		w := u64(intrinsics.unaligned_load((^u64le)(q)))
-		// The first byte below '0' or above '9' sets its high bit in one of the two.
-		m := ((w - 0x3030_3030_3030_3030) | (w + 0x4646_4646_4646_4646)) & 0x8080_8080_8080_8080
-		if m != 0 {
-			tz := intrinsics.count_trailing_zeros(m)
-			k := tz >> 3
-			mant^ = mant^ * POW10_U64[k] + digits8_value((w << (~tz & 0x38)) << 8)
-			return q[k:]
+	run: {
+		for intrinsics.ptr_sub(end, q) >= 8 {
+			w := u64(intrinsics.unaligned_load((^u64le)(q)))
+			nd := non_digit_bytes(w)
+			if nd != 0 {
+				tz := intrinsics.count_trailing_zeros(nd)
+				k := tz >> 3
+				m = m * POW10_U64[k] + digits8_value((w << (~tz & 0x38)) << 8)
+				q = q[k:]
+				break run
+			}
+			m = m * POW10_U64[8] + digits8_value(w)
+			q = q[8:]
 		}
-		mant^ = mant^ * POW10_U64[8] + digits8_value(w)
-		q = q[8:]
+		for q < end && q[0] - '0' < 10 {
+			m = m * 10 + u64(q[0] - '0')
+			q = q[1:]
+		}
 	}
-	for q < end && q[0] - '0' < 10 {
-		mant^ = mant^ * 10 + u64(q[0] - '0')
-		q = q[1:]
+	// The fold above is unbounded, so a run past `room` digits is folded again within it.
+	if intrinsics.ptr_sub(q, p) > room {
+		m = mant^
+		for i in 0 ..< room {
+			m = m * 10 + u64(p[i] - '0')
+		}
 	}
+	mant^ = m
 	return q
+}
+
+// The high bits set for bytes of `w` that are no ASCII digit. The lowest one is exact, those above it may carry.
+@(private)
+non_digit_bytes :: #force_inline proc "contextless" (w: u64) -> u64 {
+	return ((w - 0x3030_3030_3030_3030) | (w + 0x4646_4646_4646_4646)) & 0x8080_8080_8080_8080
 }
 
 // The least end `fold_digits_end_words` reads at, as its loads start up to 24 bytes before it.

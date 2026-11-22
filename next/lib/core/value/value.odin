@@ -1,19 +1,18 @@
 package value
 
-import "core:math/big"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
-// Values are the data queries and builders work on, whether read from a document or built by a query. The package is
-// apart from `tape`, so a program that only reads a text links no big integers.
+// Values are the data queries and builders work on, whether read from a document or built by a query. A number read
+// from a text keeps its spelling, and `lib/core/value/bigint` turns one past `i64` into a big integer, so a program
+// that only reads values links no big integers.
 
-// A document node or a value built in memory. An integer is `i64` when it fits, else a `^big.Int` from
-// `integer_value`.
+// A document node or a value built in memory.
 Value :: union {
 	bool,
 	i64,
-	^big.Int,
 	f64,
-	Number_View,
+	Number,
 	string,
 	Bytes,
 	^Array,
@@ -21,34 +20,38 @@ Value :: union {
 	Node_Ref,
 }
 
-// The canonical `Value` of `n`: an `i64` when it fits, else `n` itself.
-@(require_results)
-integer_value :: proc(n: ^big.Int) -> (Value, big.Error) {
-	small, err := big.get_i64(n)
-	if err == nil {
-		return small, nil
-	}
-	if err == .Integer_Overflow || err == .Integer_Underflow {
-		return n, nil
-	}
-	return nil, err
-}
-
 Bytes :: distinct []u8
 
+// A node of a document taken as a value with no copy, which a query reads as it needs, so passing a container on
+// reads none of it.
 Node_Ref :: struct {
 	doc:  ^tape.Document,
 	node: tape.Node_Index,
 }
 
-// A number's unparsed digits, kept so output preserves its spelling.
-Number_View :: struct {
+// A number of a text with its spelling, which it borrows from the text, so output writes it as read. The fields are
+// `spell.Number`'s, laid out with the span so that a `Value` stays 32 bytes.
+Number :: struct {
+	bits: u64, // as `kind` reads them
 	text: [^]u8,
 	len:  u32,
-	mark: u32, // `NUMBER_HELD`: the parsed f64 sits in the 8 bytes before `text`
+	kind: spell.Number_Kind,
 }
 
-NUMBER_HELD :: max(u32)
+// The `Number` of `n`, spelled `text` in a text that outlives it.
+number_of :: #force_inline proc "contextless" (n: spell.Number, text: string) -> Number {
+	return {bits = n.bits, text = raw_data(text), len = u32(len(text)), kind = n.kind}
+}
+
+// The value of `n`.
+number_value :: #force_inline proc "contextless" (n: Number) -> spell.Number {
+	return {bits = n.bits, kind = n.kind}
+}
+
+// The spelling of `n` in its text.
+number_text :: #force_inline proc "contextless" (n: Number) -> string {
+	return string(n.text[:n.len])
+}
 
 Array :: struct {
 	items: [dynamic]Value,

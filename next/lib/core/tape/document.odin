@@ -15,15 +15,17 @@ Document :: struct {
 	format:     ^Format,
 	allocator:  runtime.Allocator,
 	root_close: u64, // end of the root value, so writing the root needs no scan
-	origin:     u64, // offset of `src[0]` in the whole input
+	partial:    ^Partial, // what a path read kept and knows it lacks, nil for a document of every value
 	present:    Facts, // fact kinds in `facts`
 	flags:      Doc_Flags,
 }
 
 destroy :: proc {
 	destroy_document,
-	destroy_result,
 	destroy_demand,
+	destroy_index,
+	destroy_children,
+	destroy_pieces,
 }
 
 // Frees what `doc` holds and leaves it zero. The source is freed only under `.Owns_Src`.
@@ -42,17 +44,22 @@ destroy_document :: proc(doc: ^Document) {
 	if .Owns_Src in doc.flags {
 		free(raw_data(doc.src), doc.allocator)
 	}
+	free(doc.partial, doc.allocator)
 	doc^ = {}
 }
 
 // How a document was built.
 Doc_Flag :: enum u8 {
-	Kinds_Stored, // every cell has its final kind: a `Plain` cell is a string or null
-	Spelled_Tags, // some token carries a tag in its spelling (TOML datetimes)
-	In_Order, // no aliases or merge keys, so children follow their container
 	Owns_Src,
-	Partial, // a path read kept only part of the text
 	Stopped, // the read stopped early; the text past the stop was not validated
+	Tolerated, // the text broke a rule the read's tolerances let it break
+	// The text ended inside its root value, and the containers `Pieces.open` names were closed at the cut. A scalar
+	// cut short is left out, and so is a key whose value had not started.
+	Cut,
+	// The read copied the bytes of each key, scalar and fact out of the text as it went, so the text may be gone. Their
+	// offsets stay the text's, and `src` holds their bytes where `Partial.held` places them. No byte between them is
+	// held.
+	Held,
 }
 
 Doc_Flags :: bit_set[Doc_Flag; u8]
@@ -69,36 +76,45 @@ Tabular_Ext :: struct {
 	slots:  []u16,
 }
 
-// A container whose members are rows of cells.
+// An array whose elements are rows, each an object of scalar cells and no keys, which the header's keys name by
+// place: cell `j` of a row is the member whose key is the header's element `j`, and a row of fewer cells lacks the
+// members past them. The header, when there is one, is the array's first child and no element of it, so the array's
+// count is its rows'. Tables are sorted by node, and an object inside a table's node is one of its rows.
 Table :: struct {
 	node:        Node_Index,
 	header:      Node_Index, // the keys' `Array` node, 0 for none
 	first_row:   Node_Index, // row `k` is at `first_row + k * (width + 1)`
 	width:       u32, // 0 for ragged rows
-	slots_lo:    u32, // this table's key slots: `Tabular_Ext.slots[slots_lo:][:slots_len]`
+	// This table's key slots, `Tabular_Ext.slots[slots_lo:][:slots_len]`, a power of two of them or none: a key's
+	// column plus one, by `Format.key_hash` of its text, 0 for an empty slot.
+	slots_lo:    u32,
 	slots_len:   u32,
 	unique_keys: b32, // no two keys decode equal, so a lookup stops at the first match
 }
 
 Yaml_Ext :: struct {
-	clash: u64, // first key whose text equals another key's in its object (`1` and `"1"`), 0 for none
+	// The first key whose text another key of its object of another kind has (`1` and `"1"`), 0 for none, so the
+	// readers look for such a pair only in a document that has one.
+	clash: u64,
 }
 
-// A document of only the nodes a path query reached, with no facts, and each path's answers.
-Partial_Result :: struct {
-	doc:     Document,
-	answers: []Answer, // the answers in text order, those at one byte by path
+// What a path read kept of a text beyond its nodes, in one block with its lists and the missing names' bytes. A
+// scan's document holds only the nodes its paths reached, with no facts.
+Partial :: struct {
+	answers: []Answer, // by path, each path's in document order, the order of their nodes
+	starts:  []u32, // path `i`'s answers are `answers[starts[i]:starts[i + 1]]`
 	kept:    []Kept_Child, // sorted by node
 	missing: []Missing_Name, // sorted by node
-	block:   []u8, // backs the three lists and the missing names' bytes
+	names:   []u8, // the missing names' bytes
+	// Under `.Held`, where the bytes of each token are in `Document.src`, sorted by offset: a token's span starts at
+	// the last `lo` at or before its own.
+	held:    []Held_Span,
+	dups:    Duplicates, // the policy the read took repeated keys by, never `.Default`
 }
 
-// Frees what `r` holds and leaves it zero.
-destroy_result :: proc(r: ^Partial_Result) {
-	allocator := r.doc.allocator
-	destroy_document(&r.doc)
-	free(raw_data(r.block), allocator)
-	r^ = {}
+// The bytes of one token's authored span, from offset `lo` of the text, at `at` in `Document.src`.
+Held_Span :: struct {
+	lo, at: u64,
 }
 
 // Whether a path read found a value.
@@ -107,27 +123,28 @@ Presence :: enum u8 {
 	Missing,
 	Wrong_Kind, // a step cannot enter this value
 	Not_Loaded, // a partial read did not keep it, so it may or may not exist
+	Ambiguous, // keys of two kinds read as the name, as YAML's `1` and `"1"`, so a read by name under `.Last` refuses it
 }
 
-// One value a path reached.
+// One value a path reached, or the node a path stopped at: the deepest container reached for `.Missing`, or the value
+// a step could not enter for `.Wrong_Kind`.
+@(private)
 Answer :: struct {
-	node:    Node_Index, // set only for `.Found`
-	// The found value's container (`NO_NODE` at the root), the deepest container reached for `.Missing`, or the value a
-	// step could not enter for `.Wrong_Kind`.
-	owner:   Node_Index,
-	path:    u32,
+	node:    Node_Index,
 	outcome: Presence,
 }
 
 // A kept child's position in its original container.
+@(private)
 Kept_Child :: struct {
 	node:  Node_Index,
 	index: u32,
 }
 
 // A name looked up in `node` and not found.
+@(private)
 Missing_Name :: struct {
 	node: Node_Index,
-	lo:   u32, // the name is `block[lo:][:n]`
+	lo:   u32, // the name is `Partial.names[lo:][:n]`
 	n:    u32,
 }

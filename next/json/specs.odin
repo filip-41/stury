@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "core:simd"
 import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // The states of the specs past RFC 8259, which the strict states pass a byte they refuse, and the comments of those
@@ -158,7 +159,7 @@ comment_run :: #force_inline proc "contextless" (p, end: [^]u8, comma: bool, $S:
 // first line is `Comment_Inline` and the rest have role `rest`. Returns one past the last comment emitted and whether
 // the hook stopped the walk.
 @(private)
-emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, p, q: [^]u8, inline: bool, rest: tape.Role) -> (r: [^]u8, stop: bool) #no_bounds_check {
+emit_comments :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, p, q: [^]u8, inline: bool, rest: tape.Role) -> (r: [^]u8, stop: bool) #no_bounds_check {
 	r = p
 	x := p
 	next_line := !inline
@@ -181,7 +182,7 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 
 // The start of the JSON white space that ends at `p`, and the byte before it, 0 at the text's start.
 @(private)
-ws_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> (q: [^]u8, prev: u8) #no_bounds_check {
+ws_before :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p: [^]u8) -> (q: [^]u8, prev: u8) #no_bounds_check {
 	q = p
 	for q > w.base && kernel.is_ws(q[-1]) {
 		q = q[-1:]
@@ -194,7 +195,7 @@ ws_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> (q
 
 // The end of the value before the comma that the JSON white space ending at `p` follows, nil when no comma does.
 @(private)
-value_before_comma :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> [^]u8 {
+value_before_comma :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p: [^]u8) -> [^]u8 {
 	c, prev := ws_before(w, p)
 	if prev != ',' {
 		return nil
@@ -206,7 +207,7 @@ value_before_comma :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]
 // The state at a byte `st_value` refused, in a spec past RFC 8259: a run of comments or an array's close after a
 // trailing comma. Any other byte faults.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_spec_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_spec_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	if opens_run(p, end, S) {
 		// A run after an array's comma starts after the value before the comma, whose line it may share.
 		if v := value_before_comma(w, p); v != nil {
@@ -225,7 +226,7 @@ st_spec_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 // The state at a byte `st_key` refused, in a spec past RFC 8259: a run of comments, the object's close after a trailing
 // comma, or one of JSON5's own keys. Any other byte faults.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_spec_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_spec_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	if opens_run(p, end, S) {
 		if v := value_before_comma(w, p); v != nil {
 			w.resume = p
@@ -239,43 +240,56 @@ st_spec_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 	when S == .Json5 {
 		return #must_tail st_key5(p, end, d, ind, w, s0, s1, s2, m, on)
 	} else {
-		return fault(w, tape.Hook_Regs{s0, s1, s2}, p, .Bad_Char)
+		return fault(w, hook.Regs{s0, s1, s2}, p, .Bad_Char)
 	}
 }
 
 // The state at the byte past white space that `st_colon` refused after a key, in a spec past RFC 8259: a run of
 // comments before the colon. Any other byte faults.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_spec_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_spec_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	if opens_run(p, end, S) {
 		return #must_tail st_comments_colon(p, end, d, ind, w, s0, s1, s2, m, on)
 	}
-	return fault(w, tape.Hook_Regs{s0, s1, s2}, p, .Bad_Char)
+	return fault(w, hook.Regs{s0, s1, s2}, p, piece_short(w, p, end, .Bad_Char))
 }
 
 // The state after the value ending at `p` whose next byte past JSON white space the states after a value refused, in a
 // spec past RFC 8259: a run of comments. Any other byte faults.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_spec_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_spec_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	q := kernel.skip_ws(p, end)
 	if opens_run(q, end, S) {
 		w.resume = q
 		return #must_tail st_comments_after(p, end, d, ind, w, s0, s1, s2, m, on)
 	}
-	return fault(w, tape.Hook_Regs{s0, s1, s2}, q, .Bad_Char)
+	return fault(w, hook.Regs{s0, s1, s2}, q, piece_short(w, q, end, .Bad_Char))
 }
 
 // Reads the run of comments at `p` up to the next token and emits each as `Comment`, or as `Comment_Foot` when the token
-// is the byte `close`, 0 for none. Returns the token's byte, or `done` with the result the state returns.
+// is the byte `close`, 0 for none. Returns the token's byte, or `done` with the result the state returns. `run` names
+// the state for a run the window's end cuts short.
 @(private)
-comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, p, end: [^]u8, close: u8) -> (q: [^]u8, done: bool, result: tape.Walk_Result) {
+comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, p, end: [^]u8, close: u8, $run: u8) -> (q: [^]u8, done: bool, result: hook.Walk_Result) {
 	w.gap_lo = GAP_UNLEARNABLE
 	kind: tape.Fault_Kind
 	q, _, kind = comment_run(p, end, false, S)
 	if kind != .None {
+		kind = piece_short(w, q, end, kind)
+		when LAX {
+			if kind == .Truncated && piece_more(w) {
+				return q, true, piece_hold_run(w, hs^, p, run, end, on)
+			}
+		}
 		return q, true, fault(w, hs^, q, kind)
 	}
-	when H != tape.No_Hooks {
+	// The token past the run decides its comments' roles, and a window more bytes may follow has none past it.
+	when LAX {
+		if q >= end && piece_more(w) {
+			return q, true, piece_hold_run(w, hs^, p, run, end, on)
+		}
+	}
+	when H != hook.No_Hooks {
 		foot := close != 0 && q < end && q[0] == close
 		r, stop := emit_comments(w, on, hs, p, q, false, .Comment_Foot if foot else .Comment)
 		if stop {
@@ -288,9 +302,9 @@ comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc
 // The state at a comment where a value must start. Each comment of the run is a `Comment`, or the array's
 // `Comment_Foot` before its close. Then reads the value.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_comments_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
-	hs := tape.Hook_Regs{s0, s1, s2}
-	q, done, result := comments_before(w, on, &hs, p, end, ']' if d & 1 == 0 && d >= 2 else 0)
+st_comments_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q, done, result := comments_before(w, on, &hs, p, end, ']' if d & 1 == 0 && d >= 2 else 0, RUN_VALUE)
 	if done {
 		return result
 	}
@@ -300,9 +314,9 @@ st_comments_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, in
 // The state at a comment where an object's key must start. Each comment of the run is a `Comment`, or the object's
 // `Comment_Foot` before its close. Then reads the key.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_comments_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
-	hs := tape.Hook_Regs{s0, s1, s2}
-	q, done, result := comments_before(w, on, &hs, p, end, '}')
+st_comments_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q, done, result := comments_before(w, on, &hs, p, end, '}', RUN_KEY)
 	if done {
 		return result
 	}
@@ -311,9 +325,9 @@ st_comments_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 
 // The state at a comment between a key and its colon. Each comment of the run is a `Comment`. Then reads the colon.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_comments_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
-	hs := tape.Hook_Regs{s0, s1, s2}
-	q, done, result := comments_before(w, on, &hs, p, end, 0)
+st_comments_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q, done, result := comments_before(w, on, &hs, p, end, 0, RUN_COLON)
 	if done {
 		return result
 	}
@@ -323,8 +337,8 @@ st_comments_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, in
 // The state right after the value ending at `p`, where a run of comments starts at `w.resume`. Reads the run, and one
 // comma in it, then the next token.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_comments_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
-	hs := tape.Hook_Regs{s0, s1, s2}
+st_comments_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
 	q, comma, done, result := comments_after(w, on, &hs, p, end, d, false)
 	if done {
 		return result
@@ -337,8 +351,8 @@ st_comments_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, in
 
 // `st_comments_after` where the run starts past the comma after the value.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_comments_member :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
-	hs := tape.Hook_Regs{s0, s1, s2}
+st_comments_member :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
 	q, _, done, result := comments_after(w, on, &hs, p, end, d, true)
 	if done {
 		return result
@@ -351,16 +365,27 @@ st_comments_member :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 // the next member's when a comma and a member follow, else the container's foot. Returns the token's byte and whether a
 // comma lies before it, or `done` with the result the state returns.
 @(private)
-comments_after :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, p, end: [^]u8, d: u64, crossed: bool) -> (q: [^]u8, comma, done: bool, result: tape.Walk_Result) {
+comments_after :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, p, end: [^]u8, d: u64, crossed: bool) -> (q: [^]u8, comma, done: bool, result: hook.Walk_Result) {
 	w.gap_lo = GAP_UNLEARNABLE
 	more: bool
 	kind: tape.Fault_Kind
 	q, more, kind = comment_run(w.resume, end, !crossed, S)
 	if kind != .None {
+		kind = piece_short(w, q, end, kind)
+		when LAX {
+			if kind == .Truncated && piece_more(w) {
+				return q, false, true, piece_hold_run(w, hs^, p, RUN_AFTER, end, on)
+			}
+		}
 		return q, false, true, fault(w, hs^, q, kind)
 	}
+	when LAX {
+		if q >= end && piece_more(w) {
+			return q, false, true, piece_hold_run(w, hs^, p, RUN_AFTER, end, on)
+		}
+	}
 	comma = crossed || more
-	when H != tape.No_Hooks {
+	when H != hook.No_Hooks {
 		close := ']' | u8(d & 1) << 5
 		rest := tape.Role.Comment if comma && q < end && q[0] != close else .Comment_Foot
 		r, stop := emit_comments(w, on, hs, p, q, true, rest)
@@ -369,29 +394,4 @@ comments_after :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc 
 		}
 	}
 	return
-}
-
-// The fault or nil for what follows the root value that ends at `at`, past the white space up to `q`. Its comments are
-// emitted, the root's inline comments on its line and its foot past it.
-@(private, cold)
-root_tail :: #force_no_inline proc "contextless" (src: []u8, at: u64, q: [^]u8, $S: Spec, h: ^$H, regs: ^tape.Hook_Regs, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Error {
-	base := raw_data(src)
-	end := base[len(src):]
-	r := q
-	if opens_run(q, end, S) {
-		kind: tape.Fault_Kind
-		r, _, kind = comment_run(q, end, false, S)
-		if kind != .None {
-			return tape.Fault{at = u64(intrinsics.ptr_sub(r, base)), rules = &RULES, kind = kind}
-		}
-	}
-	if r < end {
-		return tape.Fault{at = u64(intrinsics.ptr_sub(r, base)), rules = &RULES, kind = .Bad_Char}
-	}
-	when H != tape.No_Hooks {
-		w := Walk(S, H){base = base, hooks = h}
-		root_close := base[at:]
-		emit_comments(&w, on, regs, root_close, end, true, .Comment_Foot)
-	}
-	return nil
 }

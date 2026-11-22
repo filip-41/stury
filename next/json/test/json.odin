@@ -5,17 +5,19 @@ import "core:strings"
 import "core:testing"
 import "stury:json"
 import "stury:lib/core/tape"
+import "stury:testkit"
 
 // The document and error of building `src`, checked against `validate`'s answer.
-build :: proc(t: ^testing.T, src: string, opts := json.Options{}) -> (tape.Document, tape.Error) {
-	doc, err := json.build(transmute([]u8)src, .Json, opts)
-	testing.expectf(t, fmt.tprint(json.validate(transmute([]u8)src, .Json, opts)) == fmt.tprint(err), "validate and build disagree on %q", src)
+build :: proc(t: ^testing.T, src: string, opts := json.Options{}, spec := json.Spec.Json, loc := #caller_location) -> (tape.Document, tape.Error) {
+	doc, err := json.build(transmute([]u8)src, spec, opts)
+	testing.expectf(t, fmt.tprint(json.validate(transmute([]u8)src, spec, opts)) == fmt.tprint(err), "validate and build disagree on %q", src, loc = loc)
 	return doc, err
 }
 
 // The suite's `y_` texts build and its `n_` texts are refused; `i_` texts may go either way.
 @(test)
 suite_accepts_and_refuses :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	for f in #load_directory("conformance/JSONTestSuite/test_parsing") {
 		doc, err := build(t, string(f.data))
 		switch f.name[:2] {
@@ -32,6 +34,7 @@ suite_accepts_and_refuses :: proc(t: ^testing.T) {
 // count, and a key is a node but not a child.
 @(test)
 nodes_of_a_text :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	src := `{"a": [1, "x\n", true], "b": null}`
 	doc, err := build(t, src)
 	defer tape.destroy(&doc)
@@ -100,6 +103,7 @@ expect_key_spans :: proc(t: ^testing.T, text: string, doc: ^tape.Document, loc :
 // nodes of a build that never grows. Leading white space sizes the first room, so each pad grows it at other nodes.
 @(test)
 room_grows_at_any_node :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	Text :: struct {
 		spec: json.Spec,
 		src:  string,
@@ -130,8 +134,12 @@ room_grows_at_any_node :: proc(t: ^testing.T) {
 		}
 		for k in 0 ..= len(ref.nodes) {
 			src := strings.concatenate({pad[:16 * k], x.src}, context.temp_allocator)
-			doc, derr := json.build(transmute([]u8)src, x.spec)
+			guarded: testkit.Guarded
+			testkit.guarded_init(&guarded, context.allocator)
+			defer testkit.guarded_destroy(&guarded)
+			doc, derr := json.build(transmute([]u8)src, x.spec, allocator = testkit.guarded_allocator(&guarded))
 			testing.expectf(t, derr == nil && len(doc.nodes) == len(ref.nodes) && len(doc.facts) == len(ref.facts), "%v pad %d: %v", x.spec, k, derr)
+			testing.expectf(t, testkit.guarded_check(&guarded), "%v pad %d: a write past a block", x.spec, k)
 			for i in 0 ..< min(len(doc.nodes), len(ref.nodes)) {
 				a, b := doc.nodes[i], ref.nodes[i]
 				a.lo += u64(len(pad) - 16 * k)
@@ -159,6 +167,7 @@ join_each :: proc(b: ^strings.Builder, count: int, sep, format: string, first :=
 // it, compact or pretty printed.
 @(test)
 learned_gaps_judge_every_byte :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	Case :: struct {
 		record, last: string,
 		at:           int, // the fault's offset in `last`, -1 for a record that reads
@@ -207,12 +216,14 @@ learned_gaps_judge_every_byte :: proc(t: ^testing.T) {
 	}
 }
 
-// Keys that never repeat end gap matching for the rest of the walk; records after them still read, and a broken
-// one is still refused where it breaks.
+// Keys that never repeat retire their row of gaps, and the array holding them reads on without gaps. Records after
+// them still read, and a broken one is still refused where it breaks. The wide object is the array's second, as the
+// first object at a place learns nothing.
 @(test)
 gaps_stop_on_keys_that_never_repeat :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, `[{`)
+	strings.write_string(&b, `[{"k0":0},{`)
 	join_each(&b, 3000, ",", `"k%[0]d":%[0]d`)
 	strings.write_string(&b, `},`)
 	tail, at := records(`{"id":1,"name":"a"}`, ",", `{"id":1"name":"a"}`, 8)
@@ -232,6 +243,7 @@ gaps_stop_on_keys_that_never_repeat :: proc(t: ^testing.T) {
 // A text nesting past `Budget.depth` is refused at the bracket past the limit.
 @(test)
 depth_limit :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	for depth in ([]int{9, 10, 2000}) {
 		text := strings.concatenate({strings.repeat("[", 10, context.temp_allocator), strings.repeat("]", 10, context.temp_allocator)}, context.temp_allocator)
 		doc, err := build(t, text, {budget = {depth = u32(depth)}})
@@ -270,6 +282,7 @@ depth_limit :: proc(t: ^testing.T) {
 // Mixed pretty-printed outer objects and compact inner objects preserve exact node spans and indentation tracking.
 @(test)
 mixed_pretty_and_compact_gaps :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "[\n")
 	join_each(&b, 16, ",\n", "  {{\n    \"id\": %[0]d,\n    \"meta\": {{\"a\":1,\"b\":2,\"c\":3}},\n    \"tail\": true\n  }}")
@@ -285,6 +298,7 @@ mixed_pretty_and_compact_gaps :: proc(t: ^testing.T) {
 // Repeating wide objects, more than `GAP_ROWS` distinct object places, and polymorphic or broken record boundaries.
 @(test)
 wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	// 45 keys repeated across 11 records.
 	wb := strings.builder_make(context.temp_allocator)
 	strings.write_string(&wb, "{")
@@ -298,11 +312,24 @@ wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
 	expect_key_spans(t, wide_text, &doc)
 	tape.destroy(&doc)
 
-	// Over 64 distinct nested object rows share the last row safely, including polymorphic elements.
+	// Over 64 distinct nested object rows share the last row safely, including polymorphic elements. The records hold
+	// objects at 106 places, which their repeats match.
+	rb := strings.builder_make(context.temp_allocator)
+	strings.write_string(&rb, "{")
+	join_each(&rb, 21, ",", `"a%[0]d":{{"b0":{{}},"b1":{{"v":%[0]d}},"b2":{{}},"b3":{{"v":%[0]d}}}}`)
+	strings.write_string(&rb, "}")
 	pb := strings.builder_make(context.temp_allocator)
-	strings.write_string(&pb, `[{"rows":[`)
-	join_each(&pb, 80, ",", `{{"f%[0]d":{{"v":%[0]d}}}}`)
-	strings.write_string(&pb, `]},{"rows":[{"f0":[{"v":1},{"v":2}]},{"f0":{"v":3}}]}]`)
+	strings.write_string(&pb, "[")
+	for _ in 0 ..< 6 {
+		strings.write_string(&pb, strings.to_string(rb))
+		strings.write_string(&pb, ",")
+	}
+	for i in 0 ..< 3 {
+		strings.write_string(&pb, `{"rows":[`)
+		join_each(&pb, 80, ",", `{{"f%[0]d":{{"v":%[0]d}}}}`)
+		strings.write_string(&pb, `]},{"rows":[{"f0":[{"v":1},{"v":2}]},{"f0":{"v":3}}]}`)
+		strings.write_string(&pb, "," if i < 2 else "]")
+	}
 	poly_text := strings.to_string(pb)
 	pdoc, perr := build(t, poly_text)
 	testing.expect_value(t, perr, nil)
@@ -391,6 +418,7 @@ wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
 // a room that grows keeps every node.
 @(test)
 node_limit :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	text := transmute([]u8)string(`{"a":[1,2,3],"b":4}`)
 	for most in ([]u32{0, 7, 8}) {
 		doc, err := json.build(text, .Json, {budget = {nodes = most}})
@@ -429,6 +457,55 @@ node_limit :: proc(t: ^testing.T) {
 	testing.expect(t, berr == nil && len(doc.nodes) == 5003 && doc.nodes[2].n == 5001)
 	tape.destroy(&doc)
 	r, err = json.scan(transmute([]u8)big, &d)
-	testing.expect(t, err == nil && len(r.doc.nodes) == 5003 && len(r.answers) == 1)
+	testing.expect(t, err == nil && len(r.nodes) == 5003 && len(r.partial.answers) == 1)
 	tape.destroy(&r)
+}
+
+// A read whose blocks would hold more than `Budget.memory` bytes is refused as `Exceeded`, with what it held freed, and
+// one within it gives a document of the caller's allocator.
+@(test)
+memory_limit :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"a":[`)
+	join_each(&b, 5000, ",", "%[0]d")
+	strings.write_string(&b, `],"b":`)
+	for _ in 0 ..< 2000 {
+		strings.write_byte(&b, '[')
+	}
+	for _ in 0 ..< 2000 {
+		strings.write_byte(&b, ']')
+	}
+	strings.write_string(&b, `}`)
+	text := transmute([]u8)strings.to_string(b)
+	d, _ := tape.demand_of([][]tape.Step{{tape.Name("a"), tape.Index(-3)}})
+	defer tape.destroy(&d)
+	path := []tape.Step{tape.Name("a"), tape.Index(-3000)}
+
+	exceeded :: proc(err: tape.Error) -> bool {
+		e, ok := err.(tape.Exceeded)
+		return ok && e.kind == .Memory && e.at == 0
+	}
+	for memory in ([]u64{1, 1024, 4096}) {
+		opts := json.Options{budget = {memory = memory}}
+		doc, err := json.build(text, .Json, opts)
+		testing.expectf(t, exceeded(err) && len(doc.nodes) == 0, "build %d: %v", memory, err)
+		r, serr := json.scan(text, &d, opts = opts)
+		testing.expectf(t, exceeded(serr) && len(r.nodes) == 0, "scan %d: %v", memory, serr)
+		_, ferr := json.find(text, path, opts = opts)
+		testing.expectf(t, exceeded(ferr), "find %d: %v", memory, ferr)
+		verr := json.validate(text, opts = opts)
+		testing.expectf(t, exceeded(verr), "validate %d: %v", memory, verr)
+	}
+	opts := json.Options{budget = {memory = 1 << 30}}
+	doc, err := json.build(text, .Json, opts)
+	testing.expectf(t, err == nil && doc.allocator == context.allocator && len(doc.nodes) == 5003 + 2001, "build: %v", err)
+	tape.destroy(&doc)
+	r, serr := json.scan(text, &d, opts = opts)
+	answer, p, _ := tape.answer({doc = &r}, 0, 0)
+	testing.expectf(t, serr == nil && r.allocator == context.allocator && p == .Found && text[r.nodes[answer].lo] == '4', "scan: %v", serr)
+	tape.destroy(&r)
+	found, ferr := json.find(text, path, opts = opts)
+	testing.expectf(t, ferr == nil && found.outcome == .Found && text[found.lo] == '2', "find: %v %v", ferr, found)
+	testing.expect(t, json.validate(text, opts = opts) == nil)
 }

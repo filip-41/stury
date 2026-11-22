@@ -17,15 +17,24 @@ Number_Kind :: enum u8 {
 	Int, // fits `i64`; `-0` is 0
 	Uint, // fits only `u64`
 	Float, // the correctly rounded binary64, keeping the sign of `-0.0` and of an underflow to zero
-	Wide, // past binary64, `MAX_NUMBER_DIGITS` or `MAX_NUMBER_SCALE`; the caller reads its text
+	Wide, // past binary64's range, or a span of more than `MAX_NUMBER_DIGITS` digits whose size does not settle it
 }
 
-// The most digits a number reads as a binary64, zeros included.
+// The most digits, zeros included, that a decimal of more than `FOLDED_DIGITS` digits is read from, as a bound on the
+// work. It keeps every exponent such a decimal's value allows below the 10^4 `strconv.parse_f64` reads.
 @(private)
-MAX_NUMBER_DIGITS :: 256
-// The largest exponent and scale, either sign, a number reads as a binary64.
+MAX_NUMBER_DIGITS :: 4096
+// The most digits `Number_Lex.mant` holds exactly.
 @(private)
-MAX_NUMBER_SCALE :: 4096
+FOLDED_DIGITS :: 19
+// The decimal order, 10^`order`, at or above which a value is past binary64's largest and below which it rounds to zero.
+@(private)
+OVERFLOW_ORDER :: 310
+@(private)
+UNDERFLOW_ORDER :: -324
+// The scale past which `strconv.fast_float_compute_float` answers the same, bounding the `int` it takes.
+@(private)
+SCALE_CLAMP :: 1000
 // The value an exponent stops growing at, past the `i32` range so it still reads as out of range.
 @(private)
 EXP_SATURATED :: i64(max(i32)) + 1
@@ -54,7 +63,7 @@ Number_Lex :: struct {
 	int_at, int_digits:   u64,
 	frac_at, frac_digits: u64,
 	exp:                  i64,
-	mant:                 u64, // both digit runs folded, exact up to 19 digits in all
+	mant:                 u64, // the first `FOLDED_DIGITS` digits of both runs, all of them when there are no more
 	neg, has_frac:        bool,
 	has_exp, ok:          bool, // `ok`: the span is exactly one number
 }
@@ -161,27 +170,34 @@ number_exponent :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, 
 		return number_decimal(src, lo, hi)
 	}
 	e := exp - i64(frac_digits)
-	if scale_wide(exp, e) {
-		return {0, .Wide}
-	}
 	whole := fold_digits_end(src, int_at + u64(int_digits), u64(int_digits)) if int_digits > 0 else 0
 	frac := fold_digits_end(src, frac_at + u64(frac_digits), u64(frac_digits)) if frac_digits > 0 else 0
 	return number_significand(whole * POW10_U64[frac_digits] + frac, e, neg)
 }
 
-// The correctly rounded binary64 of `mant` × 10^`e` with sign `neg`, or `Wide` on overflow. Below 2^53 both `mant`
-// and `10^|e|` (for `|e| <= 22`) are exact in binary64, so Clinger's single operation holds.
+// The correctly rounded binary64 of `mant` × 10^`e` with sign `neg`, or `Wide` on overflow. Up to 2^53 both `mant` and
+// `10^|e|` (for `|e| <= 22`) are exact in binary64, so Clinger's single operation holds. A positive `e` to 37 moves the
+// excess powers into `mant`, which stays an exact integer while it is at most 10^15.
 number_significand :: #force_inline proc "contextless" (mant: u64, e: i64, neg: bool) -> Number {
-	if mant < 1 << 53 && e >= -22 && e <= 22 {
-		f := f64(mant)
-		v := f * POW10_F64[e] if e >= 0 else f / POW10_F64[-e]
-		return {transmute(u64)(-v if neg else v), .Float}
+	if mant <= 1 << 53 {
+		if e >= -22 && e <= 22 {
+			f := f64(mant)
+			v := f * POW10_F64[e] if e >= 0 else f / POW10_F64[-e]
+			return {transmute(u64)(-v if neg else v), .Float}
+		}
+		if e > 22 && e <= 37 {
+			f := f64(mant) * POW10_F64[e - 22]
+			if f <= 1e15 {
+				v := f * POW10_F64[22]
+				return {transmute(u64)(-v if neg else v), .Float}
+			}
+		}
 	}
 	if e == 0 {
 		v := f64(mant)
 		return {transmute(u64)(-v if neg else v), .Float}
 	}
-	b := #force_inline strconv.fast_float_compute_float(f64, int(e), mant)
+	b := #force_inline strconv.fast_float_compute_float(f64, int(clamp(e, -SCALE_CLAMP, SCALE_CLAMP)), mant)
 	if b == F64_INF_BITS {
 		return {0, .Wide}
 	}
@@ -210,7 +226,7 @@ lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64, $LOOSE: bool) -> (n: 
 	}
 	n.int_at = p
 	when LOOSE {
-		p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant), base))
+		p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant, FOLDED_DIGITS), base))
 	} else {
 		if src[p] == '0' {
 			p += 1
@@ -218,7 +234,7 @@ lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64, $LOOSE: bool) -> (n: 
 				return
 			}
 		} else if src[p] - '1' < 9 {
-			p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant), base))
+			p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant, FOLDED_DIGITS), base))
 		} else {
 			return
 		}
@@ -228,7 +244,8 @@ lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64, $LOOSE: bool) -> (n: 
 		n.has_frac = true
 		p += 1
 		n.frac_at = p
-		p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant), base))
+		room := FOLDED_DIGITS - int(min(n.int_digits, FOLDED_DIGITS))
+		p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant, room), base))
 		n.frac_digits = p - n.frac_at
 		if n.frac_digits == 0 && !LOOSE {
 			return
@@ -271,14 +288,12 @@ exponent_value :: #force_inline proc "contextless" (base: [^]u8, p, hi: u64) -> 
 number_of_lex :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, n: Number_Lex) -> Number {
 	digits := n.int_digits + n.frac_digits
 	e := n.exp - i64(n.frac_digits)
-	if digits > MAX_NUMBER_DIGITS || scale_wide(n.exp, e) {
-		return {0, .Wide}
-	}
 	if !n.has_frac && !n.has_exp {
-		// `mant` is exact up to 19 digits. Only a non-negative 20-digit integer can fit `u64`.
+		// `mant` holds the first 19 digits, which is all of them up to 19. Only a non-negative 20-digit integer can
+		// fit `u64`.
 		mag, fits := n.mant, true
 		if !n.neg && n.int_digits == 20 {
-			tens, over := intrinsics.overflow_mul(fold_digits_end(src, n.int_at + 19, 19), 10)
+			tens, over := intrinsics.overflow_mul(n.mant, 10)
 			carry: bool
 			mag, carry = intrinsics.overflow_add(tens, u64(src[n.int_at + 19] - '0'))
 			fits = !over && !carry
@@ -291,10 +306,10 @@ number_of_lex :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, n: Nu
 			}
 		}
 	}
-	if digits <= 19 {
+	if digits <= FOLDED_DIGITS {
 		return number_significand(n.mant, e, n.neg)
 	}
-	return wide_number(string(src[lo:hi]))
+	return long_number(src, lo, hi, n)
 }
 
 // The place past an optional `-` at `lo`, and whether there is one.
@@ -319,22 +334,40 @@ integer_number :: #force_inline proc "contextless" (mag: u64, neg: bool) -> (Num
 	return {}, false
 }
 
-// Whether an exponent `exp`, or the scale `e` it gives the significand's digits, is past ±`MAX_NUMBER_SCALE`.
-@(private)
-scale_wide :: #force_inline proc "contextless" (exp, e: i64) -> bool {
-	return exp > MAX_NUMBER_SCALE || exp < -MAX_NUMBER_SCALE || e > MAX_NUMBER_SCALE || e < -MAX_NUMBER_SCALE
-}
-
-// The value of a decimal of more than 19 digits, `Wide` on overflow.
+// The value of a decimal of more than 19 digits. Its size settles an overflow or an underflow to zero whatever its
+// length, as an exponent of any size scales the digits it follows.
 @(private, cold)
-wide_number :: #force_no_inline proc "contextless" (span: string) -> Number {
+long_number :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, n: Number_Lex) -> Number {
+	order, any_nonzero := decimal_order(src, n)
+	switch {
+	case !any_nonzero, order <= UNDERFLOW_ORDER:
+		return {u64(n.neg) << 63, .Float}
+	case order >= OVERFLOW_ORDER, n.int_digits + n.frac_digits > MAX_NUMBER_DIGITS:
+		return {0, .Wide}
+	}
 	// `parse_f64` allocates nothing, so the default context serves it.
 	context = runtime.default_context()
-	v, ok := strconv.parse_f64(span)
+	v, ok := strconv.parse_f64(string(src[lo:hi]))
 	if !ok || transmute(u64)v & F64_INF_BITS == F64_INF_BITS {
 		return {0, .Wide}
 	}
 	return {transmute(u64)v, .Float}
+}
+
+// The order of a lexed decimal, the `k` with its value in [10^(k-1), 10^k), and whether any digit is nonzero.
+@(private)
+decimal_order :: proc "contextless" (src: []u8, n: Number_Lex) -> (order: i64, any_nonzero: bool) #no_bounds_check {
+	for i in 0 ..< n.int_digits {
+		if src[n.int_at + i] != '0' {
+			return i64(n.int_digits - i) + n.exp, true
+		}
+	}
+	for i in 0 ..< n.frac_digits {
+		if src[n.frac_at + i] != '0' {
+			return n.exp - i64(i), true
+		}
+	}
+	return 0, false
 }
 
 // The value of the hex digits `digits`, negated when `neg`: an integer while one holds it, else the correctly rounded

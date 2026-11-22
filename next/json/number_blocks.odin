@@ -2,6 +2,7 @@ package json
 
 import "base:intrinsics"
 import "stury:lib/base/kernel"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // The levels below an array's depth `st_number_blocks` looks at for arrays it may close.
@@ -11,11 +12,12 @@ FLOOR_LEVELS :: 8
 // The state for arrays of arrays of numbers, at the close bracket after a number where `,[` follows. It judges 64-byte
 // blocks with masks while each holds only digits, `-`, `.`, `,`, `[` and `]` and a comma, and gives the tokens of each
 // judged block. At the first block it cannot judge, the walk goes on past the last `,`, `[` or `]` judged, in the state
-// that byte leaves it in, or from `p`, so the states read every byte the masks did not judge. Only a hook that answers
-// every token with `Next` enters it.
+// that byte leaves it in, or from `p`, so the states read every byte the masks did not judge. Only a hook with
+// `.Number_Blocks` enters it, and a `Stop` ends the walk at its token. It answers no `Grow`, as a block is given only
+// while the room has place for it, nor `Skip`, `Rest` or `Keep`, which such a hook never gives.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result #no_bounds_check {
-	hs := tape.Hook_Regs{s0, s1, s2}
+st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
+	hs := hook.Regs{s0, s1, s2}
 	dep := d >> 1
 	// The depth a close may bring the walk down to, with every container from it to `dep` an array. Depth 0 is the
 	// root's end.
@@ -34,13 +36,13 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind
 	pn, pd, pm, pp, pl, po, pc, pk: u64 = 1 << 63, 1 << 63, 0, 0, 0, 0, 0, 0
 	// The carry of the fraction runs' sum out of the previous block.
 	frac_carry: u64
-	when H != tape.No_Hooks {
+	when H != hook.No_Hooks {
 		// Where the number after the last `[` or `,` judged starts and has its `.`.
 		start, dot_at: [^]u8
 	}
 	for intrinsics.ptr_sub(end, q) >= 64 {
 		// A block gives at most a node per byte with no room check, so the room must have place for that many first.
-		when intrinsics.type_has_field(H, tape.ROOMS_FIELD) {
+		when .Rooms in C {
 			if w.rooms - uintptr(hs.a) < 64 * size_of(tape.Node) {
 				break
 			}
@@ -83,11 +85,13 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind
 			zeroed += 1
 		}
 		dep = dep + opens - closes
-		when H != tape.No_Hooks {
+		when H != hook.No_Hooks {
 			// A number's end is the byte after its last, a comma or a close. The end at `p` is the number the hook was
 			// given before this state.
 			t := Block_Tokens{q, after_num & ~num & ~u64(q == p), dot, open | comma, open, close}
-			block_tokens(w, on, &hs, t, start, dot_at)
+			if stop := block_tokens(w, on, &hs, t, start, dot_at); stop != nil {
+				return stopped(w, hs, stop)
+			}
 			top := 63 - u64(intrinsics.count_leading_zeros(t.seps))
 			start, dot_at = q[top + 1:], nil
 			if dots := dot & (~u64(0) << top << 1); dots != 0 {
@@ -121,10 +125,11 @@ Block_Tokens :: struct {
 	closes: u64,
 }
 
-// Gives the hook the tokens of `t` in text order. A number's end and a close at one byte give the number first. A
-// number with no `[` or `,` before it in `t` starts at `start` and has its `.` at `dot_at`, from the block before.
+// Gives the hook the tokens of `t` in text order, and returns nil or one past the token the hook stopped at. A number's
+// end and a close at one byte give the number first. A number with no `[` or `,` before it in `t` starts at `start` and
+// has its `.` at `dot_at`, from the block before.
 @(private = "file")
-block_tokens :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, t: Block_Tokens, start, dot_at: [^]u8) #no_bounds_check {
+block_tokens :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, t: Block_Tokens, start, dot_at: [^]u8) -> [^]u8 #no_bounds_check {
 	for ev := t.ends | t.opens | t.closes; ev != 0; ev &= ev - 1 {
 		bit := ev & -ev
 		x := t.base[intrinsics.count_trailing_zeros(ev):]
@@ -143,14 +148,21 @@ block_tokens :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "c
 				int_end, frac = dot, u64(intrinsics.ptr_sub(x, dot)) - 1
 			}
 			spelling := tape.number_spelling(0, u64(intrinsics.ptr_sub(int_end, digits_at)), frac)
-			give(w, on, hs, tape.Token{at(w, s), u32(intrinsics.ptr_sub(x, s)), .Number, .Value, spelling})
+			if give(w, on, hs, tape.Token{at(w, s), u32(intrinsics.ptr_sub(x, s)), .Number, .Value, spelling}) == .Stop {
+				return x
+			}
 		}
 		if t.opens & bit != 0 {
-			give(w, on, hs, tape.Token{at(w, x), 1, .Array, .Value, 0})
+			if give(w, on, hs, tape.Token{at(w, x), 1, .Array, .Value, 0}) == .Stop {
+				return x[1:]
+			}
 		} else if t.closes & bit != 0 {
-			give(w, on, hs, tape.Token{at(w, x), 1, .End, .Value, 0})
+			if give(w, on, hs, tape.Token{at(w, x), 1, .End, .Value, 0}) == .Stop {
+				return x[1:]
+			}
 		}
 	}
+	return nil
 }
 
 // The mask `x` moved one byte later, with the previous block's last byte from `prev` in its first.

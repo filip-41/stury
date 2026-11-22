@@ -6,7 +6,7 @@ Budget :: struct {
 	depth:  u32, // deepest nesting
 	nodes:  u32, // most nodes a build keeps
 	memory: u64, // bytes, counted per allocator block
-	steps:  u64, // regex backtracks, schema branches, evaluator calls and loop turns
+	steps:  u64, // containers a walk opens, regex backtracks, schema branches, evaluator calls and loop turns
 }
 
 // Which `Budget` limit an `Exceeded` ran out of.

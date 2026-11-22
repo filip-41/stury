@@ -5,6 +5,7 @@ import "core:strings"
 import "core:testing"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
+import "stury:testkit"
 
 // The value node of a one-value text's root array.
 first_value :: proc(t: ^testing.T, doc: ^tape.Document) -> tape.Node {
@@ -16,6 +17,7 @@ first_value :: proc(t: ^testing.T, doc: ^tape.Document) -> tape.Node {
 // `Wide` past binary64's range.
 @(test)
 numbers_read_exact_or_rounded :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	Case :: struct {
 		text: string,
 		kind: spell.Number_Kind,
@@ -60,6 +62,7 @@ numbers_read_exact_or_rounded :: proc(t: ^testing.T) {
 // on either side of a 64-byte block's edge.
 @(test)
 strings_decode_their_escapes :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	long := strings.repeat(`ab\n`, 120, context.temp_allocator)
 	long_want := strings.repeat("ab\n", 120, context.temp_allocator)
 	Case :: struct {
@@ -86,6 +89,7 @@ strings_decode_their_escapes :: proc(t: ^testing.T) {
 // A key reads as a string does, and a buffer shorter than an escaped string's span is refused.
 @(test)
 keys_and_short_buffers :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	doc, err := build(t, `{"kéy": "v\n", "n": 1}`)
 	defer tape.destroy(&doc)
 	testing.expect_value(t, err, nil)
@@ -102,6 +106,7 @@ keys_and_short_buffers :: proc(t: ^testing.T) {
 // buffers and sources.
 @(test)
 strings_decode_boundaries :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	Case :: struct {
 		text, want: string,
 	}
@@ -133,6 +138,7 @@ strings_decode_boundaries :: proc(t: ^testing.T) {
 // Fractions, integers, and Clinger/Eisel-Lemire boundaries decode accurately in both tight root inputs and arrays.
 @(test)
 numbers_decode_boundaries :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	pad := strings.repeat(" ", 44, context.temp_allocator)
 	floats := []string {
 		"0.5", "-0.0", "1.2", "12.345", "123456.7", "1.234567",
@@ -258,6 +264,7 @@ strconv_number :: proc(s: string) -> spell.Number {
 // end of a text.
 @(test)
 numbers_read_as_strconv_reads_them :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	g := Number_Gen{0x9E37_79B9_7F4A_7C15}
 	for sep in ([]string{",", ",\n  "}) {
 		b := strings.builder_make(context.temp_allocator)

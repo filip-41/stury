@@ -84,9 +84,9 @@ string_utf8 :: #force_inline proc "contextless" (p: [^]u8) -> [^]u8 #no_bounds_c
 @(private)
 PROBE_MAX :: 32
 
-// One past the closing quote of the key at `p` when it closes within `PROBE_MAX` bytes as printable ASCII; otherwise
-// nil, and whether a backslash came first, at `stop`. Reads byte by byte, as keys are short and a vector's mask waits
-// on its reduction.
+// One past the closing quote of the key at `p` when it closes within `PROBE_MAX` bytes as printable ASCII. Otherwise
+// nil, whether a backslash came first, and the first byte that is neither printable ASCII nor a quote, nil when none is
+// within `PROBE_MAX` bytes. Reads byte by byte, as keys are short and a vector's mask waits on its reduction.
 @(private)
 string_probe :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, escaped: bool, stop: [^]u8) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) <= PROBE_MAX {
@@ -97,10 +97,7 @@ string_probe :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, e
 			if p[k] == '"' {
 				return p[k + 1:], false, nil
 			}
-			if p[k] == '\\' {
-				return nil, true, p[k:]
-			}
-			return nil, false, nil
+			return nil, p[k] == '\\', p[k:]
 		}
 	}
 	return nil, false, nil
@@ -157,16 +154,16 @@ string_lean :: #force_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> (
 	return nil, nil
 }
 
-// One past the closing quote of the string read on from `bs`, while its bytes are ASCII and each escape is one
+// One past the closing quote `quote` of the string read on from `bs`, while its bytes are ASCII and each escape is one
 // `escape_len` accepts within a block; otherwise nil. No escape may run into the first block.
 @(private)
-string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8) -> [^]u8 #no_bounds_check {
+string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8, $quote: u8) -> [^]u8 #no_bounds_check {
 	bs := bs
 	// 1 when an odd run of backslashes ends the previous block, escaping the first byte of this one.
 	odd: u64
 	for intrinsics.ptr_sub(end, bs) >= 64 {
 		b := kernel.load(bs)
-		sv := string_stops_block(b, '"')
+		sv := string_stops_block(b, quote)
 		if odd == 0 && !kernel.any_lane(sv) {
 			bs = bs[64:]
 			continue
@@ -175,8 +172,8 @@ string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8) -> [^]u8 #no
 		if !kernel.is_ascii(b) {
 			return nil
 		}
-		m := kernel.pack_n([3]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, '\\'), kernel.below(b, 0x20)})
-		quote, slash, ctl := m[0], m[1], m[2]
+		m := kernel.pack_n([3]kernel.Block{kernel.eq(b, quote), kernel.eq(b, '\\'), kernel.below(b, 0x20)})
+		quotes, slash, ctl := m[0], m[1], m[2]
 		// A block with at most one backslash and no escape running into it reads that escape alone and skips the
 		// class masks. Sparse escapes are the common case.
 		if odd == 0 && slash & (slash - 1) == 0 {
@@ -189,7 +186,7 @@ string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8) -> [^]u8 #no
 				}
 				covered = (u64(1) << n - 1) << k
 			}
-			real := quote &~ covered
+			real := quotes &~ covered
 			if real == 0 {
 				if ctl != 0 {
 					return nil
@@ -220,7 +217,7 @@ string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8) -> [^]u8 #no
 		}
 		// A `\u` escape whose digits run past the block returns nil, for the byte reader to settle.
 		bad := escaped &~ letter | digits &~ hex | high &~ (low >> 6) | low &~ (high << 6) | u >> 60 << 60 | ctl
-		real := quote &~ escaped &~ digits
+		real := quotes &~ escaped &~ digits
 		if real == 0 {
 			if bad != 0 {
 				return nil
@@ -270,7 +267,7 @@ SURROGATE_CLASSES := kernel.Nibble_Table {
 // The tier switch is `string_block`'s written out, because a call through `string_block` leaves a dead fault test on
 // the block reader's path.
 @(private)
-string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
+string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
 	esc: bool
 	when ODIN_ARCH == .amd64 {
 		switch w.tier {
@@ -283,14 +280,27 @@ string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8
 		q, esc = string_span_base(p, end, '"')
 	}
 	if q == nil {
-		return string_exact(S == .Json5, p, end)
+		return string_exact_in(w, p, end)
 	}
 	return q, tape.SPELLING_DECODE if esc else 0, .None
 }
 
+// `string_exact` for the walk `w`, which marks the walk when its tolerances took a byte of the string.
+@(private)
+string_exact_in :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
+	q, spelling, kind = string_exact(S == .Json5, LAX, p, end, w.tolerate when LAX else {})
+	when LAX {
+		w.tolerated ||= spelling & tape.SPELLING_LAX != 0
+		if kind == .Truncated && piece_more(w) {
+			piece_cut_string(w, p, end)
+		}
+	}
+	return
+}
+
 // The `string_span` of the CPU's tier, for a string closed by `quote`.
 @(private)
-string_block :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
+string_block :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
 	when ODIN_ARCH == .amd64 {
 		switch w.tier {
 		case .V3:
@@ -361,7 +371,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 			}
 			c := bs[k]
 			if c == quote {
-				// The string ends in this block, so only the vectors up to its quote are read.
+				// The string ends in this block, so `utf8_stop` judges its bytes up to the quote and none past it.
 				if !kernel.utf8_stop(T, b, ascii, &u, high, k) {
 					return nil, false
 				}
@@ -397,15 +407,33 @@ escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 {
 
 // One past the closing quote of the string at `p` and its spelling, or the fault at the first byte that breaks it, read
 // one byte at a time. JSON's string closes at `"`, holds no control byte and uses the escapes of `escape_exact`. A JSON5
-// string closes at its own quote, `"` or `'`, uses the escapes of `escape5` and holds any byte but CR and LF.
+// string closes at its own quote, `"` or `'`, uses the escapes of `escape5` and holds any byte but CR and LF. With
+// `LAX` and `.Invalid_Utf8` in `tol` an ill-formed sequence is passed by its maximal subpart and the string is
+// `SPELLING_LAX`, while a sequence the text's end cuts short leaves the string open, `Truncated`. With
+// `.Lone_Surrogate` an escape of a surrogate half with no partner is passed and the string is `SPELLING_LAX` as well.
+// Without `LAX`, `tol` is not read.
 @(private, cold)
-string_exact :: #force_no_inline proc "contextless" ($json5: bool, p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
-	quote := p[0] if json5 else '"'
-	q = p[1:]
+string_exact :: #force_no_inline proc "contextless" ($json5, $LAX: bool, p, end: [^]u8, tol: tape.Tolerances) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
+	q, spelling, kind = string_exact_on(json5, LAX, p[0] if json5 else '"', p[1:], end, tol, 0)
+	if kind == .Truncated {
+		return end, 0, .Truncated
+	}
+	return
+}
+
+// `string_exact` read on from `q` inside a string closed by `quote`, outside an escape and a UTF-8 sequence, with the
+// spelling so far. A string the text's end cuts short gives `Truncated` and the spelling so far at the place it can be
+// read on from: the escape or sequence the end cuts, or else the last character, as a JSON5 escape is judged by the
+// byte after it.
+@(private)
+string_exact_on :: #force_inline proc "contextless" ($json5, $LAX: bool, quote: u8, q, end: [^]u8, tol: tape.Tolerances, spelling: u16) -> ([^]u8, u16, tape.Fault_Kind) #no_bounds_check {
+	q, spelling := q, spelling
+	last := q
 	for {
 		if q >= end {
-			return end, 0, .Truncated
+			return last, spelling, .Truncated
 		}
+		last = q
 		c := q[0]
 		switch {
 		case c == quote:
@@ -413,15 +441,22 @@ string_exact :: #force_no_inline proc "contextless" ($json5: bool, p, end: [^]u8
 		case c == '\\':
 			r: [^]u8
 			k: tape.Fault_Kind
+			lone: bool
 			when json5 {
-				r, k = escape5(q, end)
+				r, k, lone = escape5(q, end, LAX, tol)
 			} else {
-				r, k = escape_exact(q, end)
+				r, k, lone = escape_exact(q, end, LAX, tol)
+			}
+			if k == .Truncated {
+				return q, spelling, k
 			}
 			if k != .None {
 				return r, 0, k
 			}
 			spelling |= tape.SPELLING_DECODE
+			when LAX {
+				spelling |= tape.SPELLING_LAX if lone else 0
+			}
 			when json5 {
 				spelling |= 0 if spell.ESCAPED[q[1]] != 0 || q[1] == 'u' else SPELLING_JSON5
 			}
@@ -432,6 +467,15 @@ string_exact :: #force_no_inline proc "contextless" ($json5: bool, p, end: [^]u8
 			q = q[1:]
 		case:
 			r, k := spell.utf8_char(q, end)
+			when LAX {
+				if k == .Bad_Char && .Invalid_Utf8 in tol {
+					spelling |= tape.SPELLING_DECODE | tape.SPELLING_LAX
+					r, k = spell.utf8_subpart(q, end), .None
+				}
+			}
+			if k == .Truncated {
+				return q, spelling, k
+			}
 			if k != .None {
 				return r, 0, k
 			}
@@ -441,42 +485,53 @@ string_exact :: #force_no_inline proc "contextless" ($json5: bool, p, end: [^]u8
 }
 
 // One past the escape at the backslash `e`, or `Bad_Escape` at a bad letter or hex digit or at the backslash of a lone
-// surrogate half, or `Truncated` when the text ends first.
+// surrogate half, or `Truncated` when the text ends first. With `LAX` and `.Lone_Surrogate` in `tol` a lone half is
+// passed, one past its four digits, and `lone` says so. Without `LAX`, `tol` is not read.
 @(private)
-escape_exact :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: tape.Fault_Kind) #no_bounds_check {
+escape_exact :: #force_inline proc "contextless" (e, end: [^]u8, $LAX: bool, tol: tape.Tolerances) -> (q: [^]u8, kind: tape.Fault_Kind, lone: bool) #no_bounds_check {
 	q = e[1:]
 	if q >= end {
-		return end, .Truncated
+		return end, .Truncated, false
 	}
 	if spell.ESCAPED[q[0]] != 0 {
-		return q[1:], .None
+		return q[1:], .None, false
 	}
 	if q[0] != 'u' {
-		return q, .Bad_Escape
+		return q, .Bad_Escape, false
 	}
 	unit: u32
 	if unit, q, kind = escape_digits(q[1:], end, 4); kind != .None {
-		return q, kind
+		return q, kind, false
 	}
 	if spell.low_surrogate(unit) {
-		return e, .Bad_Escape
+		when LAX {
+			if .Lone_Surrogate in tol {
+				return q, .None, true
+			}
+		}
+		return e, .Bad_Escape, false
 	}
 	if spell.high_surrogate(unit) {
 		// `\`, `u` and a low half's four digits in turn, each refused at its own byte, so a text cut inside them gives
 		// `Truncated` where a wrong byte gives `Bad_Escape`.
 		for i in 0 ..< 6 {
 			if q[i:] >= end {
-				return end, .Truncated
+				return end, .Truncated, false
 			}
 			h := spell.HEX_NIBBLE[q[i]]
 			ok := q[i] == ('\\' if i == 0 else 'u') if i < 2 else (h == 0xd if i == 2 else (h - 0xc < 4 if i == 3 else h != 0xff))
 			if !ok {
-				return e, .Bad_Escape
+				when LAX {
+					if .Lone_Surrogate in tol {
+						return q, .None, true
+					}
+				}
+				return e, .Bad_Escape, false
 			}
 		}
 		q = q[6:]
 	}
-	return q, .None
+	return q, .None, false
 }
 
 // The value of the `n` hex digits at `q` and one past them, or `Bad_Escape` at the first that is no hex digit, or

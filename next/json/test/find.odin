@@ -5,6 +5,7 @@ import "core:strings"
 import "core:testing"
 import "stury:json"
 import "stury:lib/core/tape"
+import "stury:testkit"
 
 Find_Case :: struct {
 	src:     string,
@@ -27,6 +28,7 @@ expect_find :: proc(t: ^testing.T, c: Find_Case, spec := json.Spec.Json, loc := 
 // that gives an answer.
 @(test)
 find_follows_paths :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	A :: tape.All{}
 	cases := []Find_Case {
 		{`{"a":1}`, {tape.Name("a")}, .Default, .Found, "1"},
@@ -55,6 +57,7 @@ find_follows_paths :: proc(t: ^testing.T) {
 // after the last `All`, as in jq.
 @(test)
 find_answers_why_none_was_found :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	A :: tape.All{}
 	cases := []Find_Case {
 		{`{"a":1}`, {tape.Name("a"), tape.Name("b")}, .Default, .Wrong_Kind, "1"},
@@ -73,6 +76,7 @@ find_answers_why_none_was_found :: proc(t: ^testing.T) {
 // A repeated key answers through its last member, or with `.First` its first.
 @(test)
 find_takes_a_repeated_key_by_policy :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	cases := []Find_Case {
 		{`{"a":1,"a":2}`, {tape.Name("a")}, .Default, .Found, "2"},
 		{`{"a":1,"a":2}`, {tape.Name("a")}, .First, .Found, "1"},
@@ -87,6 +91,7 @@ find_takes_a_repeated_key_by_policy :: proc(t: ^testing.T) {
 // Every byte is judged, a skipped value's too, unless `stop_early` ends the read at a known answer.
 @(test)
 find_judges_the_text :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	path := []tape.Step{tape.Name("a")}
 	f, err := json.find(transmute([]u8)string(`{"a":1,`), path, .Json, {dups = .First, stop_early = true})
 	testing.expectf(t, err == nil && f.outcome == .Found, "%v %v", f, err)
@@ -104,6 +109,7 @@ find_judges_the_text :: proc(t: ^testing.T) {
 // A key with escapes is compared as it decodes.
 @(test)
 find_matches_decoded_keys :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	expect_find(t, {`{"a\u0062":1}`, {tape.Name("ab")}, .Default, .Found, "1"})
 	expect_find(t, {`{"\u00e9\n":1}`, {tape.Name("\u00e9\n")}, .Default, .Found, "1"})
 	expect_find(t, {`{"\ud83d\ude00":1}`, {tape.Name("\U0001F600")}, .Default, .Found, "1"})
@@ -116,6 +122,7 @@ find_matches_decoded_keys :: proc(t: ^testing.T) {
 // A path holds any number of steps, and a negative index reaches any distance from the end.
 @(test)
 find_takes_any_path :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	b: strings.Builder
 	strings.builder_init(&b, context.temp_allocator)
 	strings.write_byte(&b, '[')
@@ -149,6 +156,7 @@ find_takes_any_path :: proc(t: ^testing.T) {
 // Under a negative index followed by a name, the element picked at the close is read again for the rest of the path.
 @(test)
 find_reads_a_picked_element_again :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	recs := `[{"a":1},{"a":2},{"b":3}]`
 	expect_find(t, {recs, {tape.Index(-2), tape.Name("a")}, .Default, .Found, "2"})
 	expect_find(t, {recs, {tape.Index(-3), tape.Name("a")}, .Default, .Found, "1"})
@@ -165,6 +173,7 @@ find_reads_a_picked_element_again :: proc(t: ^testing.T) {
 // A skipped container may nest past the levels a walk's frame holds, inside or below a path that does too.
 @(test)
 find_passes_deep_containers :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	deep := strings.concatenate({strings.repeat("[", 1500, context.temp_allocator), strings.repeat("]", 1500, context.temp_allocator)}, context.temp_allocator)
 	src := strings.concatenate({`{"a":`, deep, `,"b":7}`}, context.temp_allocator)
 	expect_find(t, {src, {tape.Name("b")}, .Default, .Found, "7"})
@@ -183,6 +192,7 @@ find_passes_deep_containers :: proc(t: ^testing.T) {
 // A scalar answer's node is read by the format's readers.
 @(test)
 find_answers_read_as_nodes :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	src := transmute([]u8)string(`{"s":"x\u0041","n":-2.5}`)
 	f, _ := json.find(src, {tape.Name("s")})
 	buf: [8]u8
@@ -206,7 +216,112 @@ find_answers_read_as_nodes :: proc(t: ^testing.T) {
 // JSONC and JSON5 texts are read by the same paths.
 @(test)
 find_reads_every_spec :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	expect_find(t, {"{/*c*/\"a\"://x\n 1}", {tape.Name("a")}, .Default, .Found, "1"}, .Jsonc)
 	expect_find(t, {"{a:'s', b: [1,],}", {tape.Name("a")}, .Default, .Found, "'s'"}, .Json5)
 	expect_find(t, {"{a:'s', b: [1,],}", {tape.Name("b"), tape.Index(-1)}, .Default, .Found, "1"}, .Json5)
+}
+
+// A limit cuts the children an `All` takes, an object's under `.First` only, and a slice takes elements by place from
+// either end: the first one in it that gives an answer.
+@(test)
+find_takes_limits_and_slices :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	N :: proc(s: string) -> tape.Step {return tape.Name(s)}
+	S :: proc(lo: i32, hi: Maybe(i32), limit: i32 = 0) -> tape.Step {return tape.Slice{lo, hi, limit}}
+	nums := `[0,1,2,3,4]`
+	cases := []Find_Case {
+		{nums, {S(1, 3)}, .Default, .Found, "1"},
+		{nums, {S(-2, nil)}, .Default, .Found, "3"},
+		{nums, {S(-3, -1)}, .Default, .Found, "2"},
+		{nums, {S(3, -1)}, .Default, .Found, "3"},
+		{nums, {S(4, -1)}, .Default, .Missing, ""},
+		{nums, {S(3, 1)}, .Default, .Missing, ""},
+		{nums, {S(-9, 1)}, .Default, .Found, "0"},
+		{nums, {S(9, nil)}, .Default, .Missing, ""},
+		{`[[],[],[5],[6]]`, {S(1, nil), tape.All{}}, .Default, .Found, "5"},
+		{`[[],[],[5],[6]]`, {S(-3, nil), tape.All{}}, .Default, .Found, "5"},
+		{`[[],[],[5],[6]]`, {S(0, -1), tape.All{}}, .Default, .Found, "5"},
+		{`[[],[],[5],[6]]`, {S(0, -2), tape.All{}}, .Default, .Missing, ""},
+		{`[[],[],[5],[6]]`, {S(1, nil, 1), tape.All{}}, .Default, .Missing, ""},
+		{`[[],[],[5],[6]]`, {S(-4, nil, 2), tape.All{}}, .Default, .Missing, ""},
+		{`[[],[],[5],[6]]`, {tape.All{2}, tape.All{}}, .Default, .Missing, ""},
+		{`[[],[],[5],[6]]`, {tape.All{3}, tape.All{}}, .Default, .Found, "5"},
+		{`[{"b":1},{"a":2}]`, {S(-1, nil), N("a")}, .Default, .Found, "2"},
+		{`{"x":[],"y":[1]}`, {tape.All{1}, tape.All{}}, .First, .Missing, ""},
+		{`{"x":[],"y":[1]}`, {tape.All{1}, tape.All{}}, .Default, .Found, "1"},
+		{`{"a":[1]}`, {S(0, nil)}, .Default, .Wrong_Kind, `{"a":[1]}`},
+		{`{"a":null}`, {N("a"), S(0, nil)}, .Default, .Missing, ""},
+		{`{"a":1}`, {N("b"), S(-1, nil)}, .Default, .Missing, ""},
+	}
+	for c in cases {
+		expect_find(t, c)
+	}
+	expect_find(t, {"[1, /* x */ 2, 3,]", {S(-2, nil)}, .Default, .Found, "2"}, .Jsonc)
+	expect_find(t, {"[1, 2, 3,]", {S(1, -1)}, .Default, .Found, "2"}, .Json5)
+}
+
+// What a ring takes is bounded by the elements its array has, whatever the text's length or the index's reach, and
+// what a find allocates is given back at the size it was taken.
+@(test)
+find_rings_take_memory_by_elements :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	PAD :: 1 << 20
+	array :: proc(count: int, element: proc(i: int) -> string) -> string {
+		b: strings.Builder
+		strings.builder_init(&b, context.temp_allocator)
+		strings.write_byte(&b, '[')
+		for i in 0 ..< count {
+			strings.write_string(&b, "," if i > 0 else "")
+			strings.write_string(&b, element(i))
+		}
+		strings.write_string(&b, strings.repeat(" ", PAD, context.temp_allocator))
+		strings.write_byte(&b, ']')
+		return strings.to_string(b)
+	}
+	record :: proc(i: int) -> string {return fmt.tprintf(`{{"x":%d}}`, i)}
+	inner :: proc(i: int) -> string {return "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29]"}
+	N :: proc(s: string) -> tape.Step {return tape.Name(s)}
+	deep := strings.concatenate({strings.repeat(`{"a":`, 70, context.temp_allocator), "1", strings.repeat("}", 70, context.temp_allocator)}, context.temp_allocator)
+	deep_path := make([]tape.Step, 70, context.temp_allocator)
+	for &step in deep_path {
+		step = N("a")
+	}
+	ENTRY :: size_of(tape.Span_Answer)
+	Case :: struct {
+		src:      string,
+		path:     []tape.Step,
+		outcome:  tape.Presence,
+		text:     string,
+		most:     int, // the bytes the find may hold at once
+	}
+	cases := []Case {
+		// Fewer elements than the room's entries, so nothing is allocated.
+		{array(3, record), {tape.Index(-100000), N("x")}, .Missing, "", 0},
+		{array(3, record), {tape.Slice{lo = -100000}, N("x")}, .Found, "0", 0},
+		// More elements than the room's entries: the ring has as many as the elements, doubled at most.
+		{array(200, record), {tape.Index(-100000), N("x")}, .Missing, "", 2 * 200 * ENTRY},
+		{array(200, record), {tape.Index(-150), N("x")}, .Found, "50", 2 * 200 * ENTRY},
+		{array(200, record), {tape.Slice{lo = -100000}, N("x")}, .Found, "0", 2 * 200 * ENTRY},
+		{array(200, record), {tape.Slice{lo = -150}, N("x")}, .Found, "50", 2 * 200 * ENTRY},
+		{array(200, record), {tape.Slice{lo = 0, hi = -100000}, N("x")}, .Missing, "", 2 * 200 * ENTRY},
+		// Two rings open at once, the inner growing above the outer.
+		{array(100, inner), {tape.Index(-100), tape.Index(-30)}, .Found, "0", 2 * 2 * 100 * ENTRY},
+		{array(100, inner), {tape.Index(-90), tape.Index(-20)}, .Found, "10", 2 * 2 * 100 * ENTRY},
+		// A path past the room's levels.
+		{deep, deep_path, .Found, "1", 70 * (size_of(u64) + 40)},
+	}
+	for c, i in cases {
+		s: Sized
+		sized_init(&s)
+		allocator := sized_allocator(&s)
+		for stop in ([]bool{false, true}) {
+			f, err := json.find(transmute([]u8)c.src, c.path, .Json, {stop_early = stop}, allocator = allocator)
+			text := c.src[f.lo:f.hi] if f.hi <= u64(len(c.src)) else "?"
+			testing.expectf(t, err == nil && f.outcome == c.outcome && (c.text == "" || text == c.text), "case %d stop %v: %v %q, %v", i, stop, f.outcome, text, err)
+			testing.expectf(t, s.live == 0 && s.mismatch == 0, "case %d: %d bytes live, %d sizes mismatched", i, s.live, s.mismatch)
+			testing.expectf(t, s.peak <= c.most + 64, "case %d: %d bytes held at once, at most %d", i, s.peak, c.most)
+		}
+		sized_destroy(&s)
+	}
 }

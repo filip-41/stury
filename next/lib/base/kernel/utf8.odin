@@ -20,7 +20,8 @@ utf8_after :: proc "contextless" (prev: Block) -> Utf8_State {
 	return {prev = p, lead = leads(p, simd.lanes_rotate_right(p, 1))}
 }
 
-// Adds the errors of `b`'s registers up to the one holding byte `last`, read after `s.prev`.
+// Adds the errors of `b`'s bytes up to byte `last`, read after `s.prev`. The register holding `last` counts only its
+// lanes up to it.
 @(private)
 utf8_head :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_State, last: u64) {
 	N :: VECTOR_BYTES[T]
@@ -34,7 +35,11 @@ utf8_head :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_Stat
 		if u64(i * N) <= last {
 			p1 := before(prev, w[i], 1)
 			l[i] = leads(w[i], p1)
-			err = simd.bit_or(err, errors(T, p1, w[i], before(lead, l[i], 2)))
+			found := errors(T, p1, w[i], before(lead, l[i], 2))
+			if live := last - u64(i * N) + 1; live < u64(N) {
+				found = simd.bit_and(found, simd.lanes_lt(simd.indices(U), U(u8(live))))
+			}
+			err = simd.bit_or(err, found)
 			prev, lead = w[i], l[i]
 		}
 	}
@@ -82,7 +87,9 @@ utf8_stop :: #force_inline proc "contextless" ($T: Tier, b: Block, ascii: bool, 
 	return utf8_clean(T, s^)
 }
 
-// Whether the blocks so far hold no error, ignoring a sequence the last one leaves open. Bytes past a stop count.
+// Whether the blocks so far hold no error, ignoring a sequence the last one leaves open. A lead byte that ends the
+// last block is judged only beside the byte after it, so even one no byte completes is not an error yet. Bytes past
+// a stop count.
 utf8_clean :: #force_inline proc "contextless" ($T: Tier, s: Utf8_State) -> bool {
 	N :: VECTOR_BYTES[T]
 	return all_zero((transmute([64 / N]#simd[N]u8)s.err)[0])
@@ -106,7 +113,8 @@ utf8_blocks :: #force_inline proc "contextless" ($T: Tier, text: []u8) -> bool #
 	high: bool
 	p := raw_data(text)
 	j := 0
-	// At V3 LLVM rebuilds the overlapping loads through general registers, so V3 keeps the shifts.
+	// The overlapping loads read faster than the shifts on arm64 and at V2. At V3 LLVM rebuilds them through general
+	// registers, so V3 keeps the shifts.
 	when N == 16 {
 		if len(text) >= 64 {
 			b := load(p)

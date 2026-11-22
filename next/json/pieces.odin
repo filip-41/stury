@@ -1,0 +1,1009 @@
+package json
+
+import "base:intrinsics"
+import "base:runtime"
+import "stury:lib/base/kernel"
+import "stury:lib/base/spell"
+import "stury:lib/core/hook"
+import "stury:lib/core/tape"
+
+// The walk of a text in pieces. It runs the `LAX` walk over one window, follows each token's place in the grammar and
+// the open containers, and ends at the window's end as at a token: the walk of the next window goes on from the place
+// past the last token, reading again from there. A string, number or JSON5 unquoted key the window cuts short is read
+// on in the next from where the last stopped, with what its bytes so far spelled, and so is a run of white space and
+// comments, whose comments wait for the token past it. Any other token is read again whole.
+//
+// Inside a container its hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest` for, the walk goes on in the same
+// states and gives each token to no hook, or to the inner hook of the hook's `Keeps`, so that a window ends inside it
+// as anywhere else.
+
+// The places a walk of a text in pieces goes on from, past the last token it gave.
+@(private)
+PLACE_ROOT :: u8(0) // before the root value
+@(private)
+PLACE_OPEN :: u8(1) // past an open bracket
+@(private)
+PLACE_AFTER :: u8(2) // past a value
+@(private)
+PLACE_COLON :: u8(3) // past a key, before its colon
+@(private)
+PLACE_VALUE :: u8(4) // past a key's colon, which a comment followed
+@(private)
+PLACE_MEMBER :: u8(5) // past a comma, which a comment followed
+@(private)
+PLACE_TAIL :: u8(6) // past the root value, whose foot only the last window judges
+
+// A walk's view of the window of a text in pieces it reads.
+@(private)
+Piece_Walk :: struct {
+	s:       ^hook.Piece_State,
+	from:    u64, // the window's first byte in the whole text
+	end:     u64, // one past its last
+	more:    bool, // bytes may follow the window
+	cut:     bool, // set by the walk: a scalar reached the window's end, so the next window reads it again
+	refused: bool, // set by the walk: memory for an open container was refused
+	ended:   bool, // set by the walk: the window ended the read inside its root value, or before its foot
+	foot:    bool, // set by the walk: it read the root's foot on from a run of comments the last window held back
+	ctx:     ^runtime.Context,
+}
+
+// Gives the hook token `t` of a text in pieces, or stops the walk at a scalar the window's end cuts, which a later
+// window may make longer. It counts `Budget.steps` as `give` does.
+@(private)
+give_piece :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, t: tape.Token) -> hook.Action {
+	if t.kind <= .Plain && t.role <= .Key && (t.kind != .String || t.spelling & tape.SPELLING_QUOTED == 0) && t.lo + u64(t.n) >= pw.end && pw.more {
+		pw.cut = true
+		if t.kind == .Number {
+			piece_cut_number(w, pw, t)
+		}
+		when S == .Json5 {
+			if t.kind == .String {
+				pw.s.cut = {lo = t.lo, on = t.lo + u64(t.n), spelling = t.spelling, part = CUT_IDENT}
+			}
+		}
+		return .Stop
+	}
+	opens := t.kind > .Plain && t.kind != .End
+	if opens {
+		w.steps[0] -= 1
+		if w.steps[0] == 0 {
+			return .Stop
+		}
+	}
+	if !piece_track(w, pw, t) {
+		return .Stop
+	}
+	when .Skips in C {
+		if pw.s.nest != .None {
+			return piece_nested(w, pw, on, hs, t)
+		}
+	}
+	a: hook.Action
+	hs^, a = on(w.hooks, hs^, t)
+	when .Skips in C {
+		if opens && a >= .Skip && a <= .Keep_Stubs {
+			return piece_nest(w, pw, hs, t, a)
+		}
+	}
+	return a
+}
+
+// Follows token `t` in the open containers and sets the place past it. False when memory for one more container is
+// refused.
+@(private)
+piece_track :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, t: tape.Token) -> bool #no_bounds_check {
+	s := pw.s
+	opened := (^runtime.Raw_Dynamic_Array)(&s.opened)
+	levels := ([^]hook.Open_Level)(opened.data)
+	n := opened.len
+	if t.role > .Key {
+		piece_fact(w, pw, t)
+		return true
+	}
+	if t.kind == .End {
+		opened.len = n - 1
+		if n > 1 {
+			levels[n - 2].key.kind = .End
+		}
+		s.place, s.last = PLACE_AFTER, t.lo + 1
+		return true
+	}
+	if n > 0 && t.role == .Value {
+		levels[n - 1].count += 1
+	}
+	if t.kind > .Plain {
+		if n == opened.cap {
+			if !piece_open_grow(pw) {
+				pw.refused = true
+				return false
+			}
+			levels = ([^]hook.Open_Level)(opened.data)
+		}
+		levels[n] = {key = {kind = .End}, object = t.kind == .Object, name = -1}
+		opened.len = n + 1
+		s.place, s.last = PLACE_OPEN, t.lo + 1
+		return true
+	}
+	s.last = t.lo + u64(t.n) + u64(t.kind == .String && t.spelling & tape.SPELLING_QUOTED != 0)
+	if t.role == .Key {
+		levels[n - 1].key, levels[n - 1].name = t, -1
+		s.place = PLACE_COLON
+	} else {
+		if n > 0 {
+			levels[n - 1].key.kind = .End
+		}
+		s.place = PLACE_AFTER
+	}
+	return true
+}
+
+// Follows comment `t`, which moves the place past a colon or a comma that lies before it.
+@(private, cold)
+piece_fact :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, t: tape.Token) #no_bounds_check {
+	s := pw.s
+	for k := s.last; k < t.lo; k += 1 {
+		switch w.base[k] {
+		case ':':
+			s.place = PLACE_VALUE
+		case ',':
+			s.place = PLACE_MEMBER
+		}
+	}
+	s.last = t.lo + u64(t.n)
+}
+
+@(private, cold)
+piece_open_grow :: #force_no_inline proc "contextless" (pw: ^Piece_Walk) -> bool {
+	context = pw.ctx^
+	return reserve(&pw.s.opened, max(2 * cap(pw.s.opened), 16)) == nil
+}
+
+// Takes the hook's `a` for the container token `t` opens: the walk reads the container in the same states, and gives
+// its tokens to the inner hook for `Keep` and `Keep_Stubs`, which takes the open bracket first, and to no hook else.
+@(private, cold)
+piece_nest :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, hs: ^hook.Regs, t: tape.Token, a: hook.Action) -> hook.Action {
+	s := pw.s
+	s.nest_open = 0
+	#partial switch a {
+	case .Skip:
+		s.nest = .Skip
+	case .Rest:
+		s.nest = .Rest
+		w.rested = true
+	case .Keep, .Keep_Stubs:
+		when .Keeps in C {
+			s.nest = .Keep if a == .Keep else .Keep_Stubs
+			return piece_keep(w, hs, t, s.nest, true)
+		}
+	}
+	return .Next
+}
+
+// Gives token `t` of a container the hook passed to the hook that takes it.
+@(private)
+piece_nested :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, t: tape.Token) -> hook.Action {
+	s := pw.s
+	nest := s.nest
+	if nest == .Rest {
+		return .Next
+	}
+	if t.kind == .End {
+		if s.nest_open == 0 {
+			s.nest = .None
+			when .Keeps in C {
+				if nest != .Skip && piece_keep(w, hs, t, nest, false) == .Stop {
+					return .Stop
+				}
+				when .Rooms in C {
+					w.rooms = hook.rooms_end(w.hooks)
+				}
+			}
+			a: hook.Action
+			hs^, a = on(w.hooks, hs^, t)
+			return a
+		}
+		s.nest_open -= 1
+	} else if t.kind > .Plain {
+		s.nest_open += 1
+	}
+	when .Keeps in C {
+		if nest != .Skip {
+			return piece_keep(w, hs, t, nest, false)
+		}
+	}
+	return .Next
+}
+
+// Gives token `t` to the inner hook of the hook's `Keeps`, `Stubs` for `Keep_Stubs`, as `keep_through` does, after
+// the inner hook's room check that the walk makes only for a hook with `.Rooms`. With `opens` it is the open bracket of
+// the container kept, and the walk's room check moves to the inner hook's room.
+@(private)
+piece_keep :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: ^hook.Regs, t: tape.Token, nest: hook.Nest, opens: bool) -> hook.Action {
+	K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 3)
+	Inner :: intrinsics.type_polymorphic_record_parameter_value(K, 0)
+	IC :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(Inner, hook.PROTOCOL_FIELD), 0)
+	when .Rooms in IC {
+		inner := (^Inner)(hook.keeps_inner(w.hooks))
+		if t.kind != .End && t.role <= .Key && uintptr(hs.a) == hook.rooms_end(inner) && !hook.rooms_grow(inner, hs, t.lo) {
+			w.piece[0].refused = true
+			return .Stop
+		}
+		when .Rooms in C {
+			if opens {
+				w.rooms = hook.rooms_end(inner)
+			}
+		}
+	}
+	a: hook.Action
+	if nest == .Keep_Stubs {
+		hs^, a = hook.keeps_give(w.hooks, hs^, t, true)
+	} else {
+		hs^, a = hook.keeps_give(w.hooks, hs^, t, false)
+	}
+	return a
+}
+
+// Whether more bytes may follow the walk's window.
+@(private)
+piece_more :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> bool {
+	when LAX {
+		return w.piece[0] != nil && w.piece[0].more
+	} else {
+		return false
+	}
+}
+
+// The fault `kind` at `q` a walk of a window more bytes may follow takes as `Truncated`: a `/` that may open a comment,
+// and in JSON5 a lead byte of white space past ASCII, whose next bytes the window does not hold.
+@(private)
+piece_short :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), q, end: [^]u8, kind: tape.Fault_Kind) -> tape.Fault_Kind {
+	when LAX && S != .Json {
+		if kind == .Bad_Char && piece_more(w) && q < end && (q[0] == '/' && q[1:] == end || S == .Json5 && q[0] >= 0xc2 && intrinsics.ptr_sub(end, q) < 3) {
+			return .Truncated
+		}
+	}
+	return kind
+}
+
+// Whether the walk is inside a container its hook passed, whose tokens no hook stores.
+@(private)
+piece_passes :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> bool {
+	when LAX && .Skips in C {
+		return w.piece[0] != nil && (w.piece[0].s.nest == .Skip || w.piece[0].s.nest == .Rest)
+	} else {
+		return false
+	}
+}
+
+// Whether the walk is inside a container its hook keeps through its `Keeps`.
+@(private)
+piece_keeps :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> bool {
+	when LAX {
+		return w.piece[0] != nil && (w.piece[0].s.nest == .Keep || w.piece[0].s.nest == .Keep_Stubs)
+	} else {
+		return false
+	}
+}
+
+// Grows the room of the inner hook a kept container's tokens go to, after `Grow`.
+@(private, cold)
+piece_grow_inner :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: ^hook.Regs) -> bool {
+	K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 3)
+	Inner :: intrinsics.type_polymorphic_record_parameter_value(K, 0)
+	IC :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(Inner, hook.PROTOCOL_FIELD), 0)
+	when .Rooms in IC {
+		inner := (^Inner)(hook.keeps_inner(w.hooks))
+		if !hook.rooms_grow(inner, hs, w.grow) {
+			return false
+		}
+		w.rooms = hook.rooms_end(inner)
+	}
+	return true
+}
+
+// Walks the window of a text in pieces from its place, `p` past the root's white space for a window that starts the
+// text. The walk goes on with the levels, gaps, budget and nest the last window left, and with no gaps in the
+// containers still open, as their slots were in registers.
+@(private)
+piece_walk :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, p, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
+	s := pw.s
+	if !s.started || s.place == PLACE_ROOT && s.last == 0 && s.cut.on == 0 && s.run.state == 0 {
+		return enter(p, end, INDENT_START, w, w.regs^, GAP_START, on)
+	}
+	when ODIN_DEBUG || ODIN_SANITIZER_FLAGS != {} {
+		if (piece_cut_keep(s.cut) if s.cut.on != 0 else piece_keep_from(s, S)) < pw.from {
+			runtime.panic_contextless("json: a read of a text in pieces resumes before its window")
+		}
+	}
+	when .Skips in C {
+		w.rested = s.rested
+	}
+	w.tolerated, w.steps[0] = s.tolerated, s.steps
+	if len(s.memo) == size_of(Gaps) {
+		intrinsics.mem_copy_non_overlapping(&w.gaps, raw_data(s.memo), size_of(Gaps))
+		// A gap is matched against the bytes it was learned from, so one learned before the window is forgotten.
+		for bits := w.gaps.live; bits != 0; bits &= bits - 1 {
+			row := u64(intrinsics.count_trailing_zeros(bits))
+			for &g in w.gaps.slots[row * GAP_MEMBERS:(row + 1) * GAP_MEMBERS] {
+				if g.n != GAP_DEAD && u64(g.lo) < pw.from {
+					g.n = 0
+				}
+			}
+		}
+	}
+	open := u64(len(s.opened))
+	if open > w.room && !levels_room(w, open) {
+		return too_deep(w, w.regs^, w.base[s.last:], hook.WALK_NO_MEMORY)
+	}
+	intrinsics.mem_copy_non_overlapping(w.stack, raw_data(s.levels), int(open) * size_of(u32))
+	w.depth = min(w.room, w.limit)
+	when .Levels in C {
+		w.depth = min(w.depth, open + u64(hook.levels_held(w.hooks)) - w.regs.c)
+	}
+	when .Keeps in C {
+		if s.nest == .Keep || s.nest == .Keep_Stubs {
+			piece_keep_rooms(w)
+		}
+	}
+	if s.cut.on != 0 {
+		return piece_resume(w, pw, end, on)
+	}
+	if s.run.state != 0 {
+		return piece_run(w, pw, w.regs^, end, on)
+	}
+	q := w.base[s.last:]
+	if s.place == PLACE_TAIL || s.place == PLACE_AFTER && open == 0 {
+		return done(w, w.regs^, q)
+	}
+	if s.place == PLACE_ROOT {
+		// Past the comments before the root value, which the hook was given.
+		return enter_place(PLACE_VALUE, kernel.skip_ws(q, end), end, 0, w, w.regs^, on)
+	}
+	d := open << 1 | u64(s.opened[open - 1].object)
+	return enter_place(s.place, q, end, d, w, w.regs^, on)
+}
+
+// The parts of a token a window cut short, `hook.Cut_Token.part`.
+@(private)
+CUT_STRING :: u8(0)
+@(private)
+CUT_INT :: u8(1) // a number's integer digits
+@(private)
+CUT_FRAC :: u8(2) // its fraction digits
+@(private)
+CUT_EXP :: u8(3) // its exponent digits
+@(private)
+CUT_HEX :: u8(4) // a JSON5 number's hex digits
+@(private)
+CUT_IDENT :: u8(5) // a JSON5 unquoted key
+
+// Keeps where the string at `p`, which the window's end cut short, can be read on from.
+@(private, cold)
+piece_cut_string :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) {
+	quote := p[0] if S == .Json5 else '"'
+	q, spelling, _ := string_exact_on(S == .Json5, LAX, quote, p[1:], end, w.tolerate, 0)
+	w.piece[0].s.cut = {lo = at(w, p), on = at(w, q), spelling = spelling, part = CUT_STRING, quote = quote}
+}
+
+// Keeps where the number token `t`, which the window's end cut short in a run of digits, can be read on from. A number
+// cut after its first integer digit, or after its point, is read again whole, as the next byte judges a lone `0` and
+// changes the spelling of a JSON5 `5.`.
+@(private, cold)
+piece_cut_number :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, t: tape.Token) #no_bounds_check {
+	b, k, e := w.base, t.lo, t.lo + u64(t.n)
+	c := hook.Cut_Token{lo = t.lo, on = e}
+	if b[k] == '-' || b[k] == '+' {
+		c.spelling = u16(Number_Spelling.Decimal) if b[k] == '+' else 0
+		k += 1
+	}
+	if b[k] - '0' >= 10 && b[k] != '.' {
+		return
+	}
+	if t.spelling & tape.NUMBER_KIND == u16(Number_Spelling.Hex) {
+		c.spelling, c.part = u16(Number_Spelling.Hex), CUT_HEX
+	} else {
+		run := k
+		for k < e && b[k] - '0' < 10 {
+			k += 1
+		}
+		c.digits[0], c.part = k - run, CUT_INT
+		if k < e && b[k] == '.' {
+			k += 1
+			run = k
+			for k < e && b[k] - '0' < 10 {
+				k += 1
+			}
+			c.digits[1], c.part = k - run, CUT_FRAC
+			if c.digits[0] == 0 || c.digits[1] == 0 {
+				c.spelling = u16(Number_Spelling.Decimal)
+			}
+		}
+		if k < e {
+			c.part = CUT_EXP
+		} else if c.digits[c.part - CUT_INT] < 1 + u64(c.part == CUT_INT) {
+			return
+		}
+	}
+	pw.s.cut = c
+}
+
+// Reads on the token the last window cut short, gives it to the hook once it ends, and walks on past it.
+@(private, cold)
+piece_resume :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	s := pw.s
+	c := s.cut
+	s.cut = {}
+	hs := w.regs^
+	open := u64(len(s.opened))
+	object := open > 0 && s.opened[open - 1].object
+	q: [^]u8
+	t: tape.Token
+	kind: tape.Fault_Kind
+	if c.part == CUT_STRING {
+		q, t.spelling, kind = string_exact_on(S == .Json5, LAX, c.quote, w.base[c.on:], end, w.tolerate, c.spelling)
+		if kind == .Truncated && pw.more {
+			s.cut, s.cut.on, s.cut.spelling = c, at(w, q), t.spelling
+		}
+		if kind != .None {
+			return fault(w, hs, end if kind == .Truncated else q, kind)
+		}
+		w.tolerated ||= t.spelling & tape.SPELLING_LAX != 0
+		key := object && s.place != PLACE_COLON && s.place != PLACE_VALUE
+		t = {c.lo + 1, u32(at(w, q) - c.lo - 2), .String, .Key if key else .Value, t.spelling | tape.SPELLING_QUOTED}
+	} else if c.part == CUT_IDENT {
+		when S == .Json5 {
+			esc: bool
+			q, esc, kind = ident5_on(w.base[c.lo:], w.base[c.on:], end, c.spelling != 0)
+			if q >= end && pw.more && (kind == .None || kind == .Truncated) {
+				from := at(w, end) if kind == .None else piece_ident_cut(w, c.on, end)
+				s.cut, s.cut.on, s.cut.spelling, kind = c, from, tape.SPELLING_DECODE if esc else 0, .Truncated
+			}
+			if kind != .None {
+				return fault(w, hs, end if kind == .Truncated else q, kind)
+			}
+			t = {c.lo, u32(at(w, q) - c.lo), .String, .Key, tape.SPELLING_DECODE if esc else 0}
+		}
+	} else {
+		if q, t.spelling, kind = piece_number_on(w, pw, c, end); kind != .None {
+			return fault(w, hs, q, kind)
+		}
+		t = {c.lo, u32(at(w, q) - c.lo), .Number, .Value, t.spelling}
+	}
+	if too_wide(w.base[c.lo:], q) {
+		return fault(w, hs, w.base[c.lo:], .Too_Wide)
+	}
+	for {
+		a := emit_token(w, on, &hs, t)
+		if a == .Stop {
+			return stopped(w, hs, q)
+		}
+		if !grows(C, a) {
+			break
+		}
+		if !grow_room(w, &hs) {
+			return stopped(w, hs, w.base[c.lo:])
+		}
+	}
+	if open == 0 {
+		return done(w, hs, q)
+	}
+	return enter_place(PLACE_COLON if t.role == .Key else PLACE_AFTER, q, end, open << 1 | u64(object), w, hs, on)
+}
+
+// One past the number `c` and its spelling, read on from its digits at `c.on`, or the fault. A number the window's end
+// cuts short again is kept for the next window, `Truncated`, so that every window after one that cut a number reads
+// on from bytes past the last one's. Past its run of digits, the grammar reads on from the run's last digit, which
+// spells the rest as it would after the whole run.
+@(private)
+piece_number_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, c: hook.Cut_Token, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
+	c := c
+	p := w.base[c.on:]
+	q = spell.hex_digit_end(p, end) if c.part == CUT_HEX else spell.digit_end(p, end)
+	if c.part == CUT_INT || c.part == CUT_FRAC {
+		c.digits[c.part - CUT_INT] += u64(intrinsics.ptr_sub(q, p))
+	}
+	if q >= end && pw.more {
+		pw.s.cut, pw.s.cut.on = c, at(w, q)
+		return end, 0, .Truncated
+	}
+	k := c.spelling & tape.NUMBER_KIND
+	flags := tape.NUMBER_EXP if c.part == CUT_EXP else 0
+	if q < end && (c.part == CUT_INT && (q[0] == '.' || q[0] | 0x20 == 'e') || c.part == CUT_FRAC && q[0] | 0x20 == 'e') {
+		run := q
+		tail: u16
+		when S == .Json5 {
+			q, tail, kind = number5(run[-1:], end)
+		} else {
+			q, tail, kind = number(run[-1:], end, true, S)
+		}
+		if kind == .Truncated && pw.more {
+			pw.s.cut, pw.s.cut.on = c, at(w, run)
+		}
+		if kind != .None {
+			return
+		}
+		_, frac := tape.number_digits(tail)
+		if c.part == CUT_INT {
+			c.digits[1] = u64(frac)
+		}
+		k = max(k, tail & tape.NUMBER_KIND)
+		if q >= end && pw.more {
+			// A point with no digit after it yet reads on from the point, as a digit after it changes the spelling.
+			at_run := tail & tape.NUMBER_EXP == 0 && frac == 0
+			if !at_run {
+				c.part, c.spelling = CUT_EXP if tail & tape.NUMBER_EXP != 0 else CUT_FRAC, k
+			}
+			pw.s.cut, pw.s.cut.on = c, at(w, run if at_run else q)
+			return end, 0, .Truncated
+		}
+		flags |= tail & (tape.NUMBER_EXP | tape.NUMBER_POINT)
+	}
+	when H == hook.No_Hooks || .Unspelled in C {
+		if k == u16(Number_Spelling.Json) {
+			return q, 0, .None
+		}
+	}
+	return q, tape.number_spelling(k, c.digits[0], c.digits[1]) | flags, .None
+}
+
+// Keeps where the unquoted key at `p`, whose escape or UTF-8 sequence the window's end cut short, can be read on from.
+// A key whose first character is cut is not kept, as that character may be white space, which the walk of the next
+// window reads from the last token.
+@(private, cold)
+piece_cut_ident :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) {
+	lo := at(w, p)
+	on := piece_ident_cut(w, lo, end)
+	if on == lo {
+		return
+	}
+	_, esc, _ := ident5_on(p, p, end, false)
+	w.piece[0].s.cut = {lo = lo, on = on, spelling = tape.SPELLING_DECODE if esc else 0, part = CUT_IDENT}
+}
+
+// The first byte of the `\u` escape or UTF-8 sequence the window's `end` cuts in an identifier read on from `on`: the
+// last `\` or lead byte, as neither a hex digit nor a continuation byte is one.
+@(private)
+piece_ident_cut :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), on: u64, end: [^]u8) -> u64 #no_bounds_check {
+	e := at(w, end)
+	for k := e; k > on && k + 6 > e; k -= 1 {
+		if w.base[k - 1] == '\\' || w.base[k - 1] >= 0xc0 {
+			return k - 1
+		}
+	}
+	return on
+}
+
+// The lowest offset a read past a window that ended inside token `c` needs of the token: the bytes from where it reads
+// on, and before a number's the digit the grammar reads on from. An unquoted key keeps the byte before as well, as the
+// key may end where the next window starts, whose read then keeps from the byte before the key's end.
+@(private)
+piece_cut_keep :: proc "contextless" (c: hook.Cut_Token) -> u64 {
+	return c.on - u64(c.part != CUT_STRING)
+}
+
+// Moves the walk's room check to the room of the inner hook a kept container's tokens go to.
+@(private)
+piece_keep_rooms :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) {
+	K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 3)
+	Inner :: intrinsics.type_polymorphic_record_parameter_value(K, 0)
+	IC :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(Inner, hook.PROTOCOL_FIELD), 0)
+	when .Rooms in IC && .Rooms in C {
+		w.rooms = hook.rooms_end((^Inner)(hook.keeps_inner(w.hooks)))
+	}
+}
+
+// Enters the walk at `place` of container `d` at `p`. A call of its own, whose frame has no base pointer, as `enter`
+// is in a sanitizer's build.
+@(private)
+enter_place :: #force_no_inline proc "contextless" (place: u8, p, end: [^]u8, d: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	switch place {
+	case PLACE_OPEN:
+		return st_open(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case PLACE_COLON:
+		return st_colon(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case PLACE_VALUE:
+		return st_value(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case PLACE_MEMBER:
+		return st_member_ws(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	}
+	return st_after(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+}
+
+// What follows the root value ending at `p` in a window that more bytes may follow: a run of comments, held back as
+// only the last window ends the foot, or a fault.
+@(private, cold)
+piece_tail :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, q, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := w.regs^
+	when S != .Json {
+		if opens_run(q, end, S) || piece_short(w, q, end, .Bad_Char) == .Truncated {
+			return piece_hold_run(w, hs, p, RUN_FOOT, end, on)
+		}
+	}
+	return fault(w, hs, q, .Bad_Char)
+}
+
+// The states a run of white space and comments is read in, `hook.Cut_Run.state`: where a value, a key or a key's colon
+// must start, past a value, where a comma may lie in the run, and past the root value.
+@(private)
+RUN_VALUE :: u8(1)
+@(private)
+RUN_KEY :: u8(2)
+@(private)
+RUN_COLON :: u8(3)
+@(private)
+RUN_AFTER :: u8(4)
+@(private)
+RUN_FOOT :: u8(5)
+
+// The parts of a run `hook.Cut_Run.on` is in: between its comments, or in a `//` or a `/* */` comment.
+@(private)
+RUN_GAP :: u8(0)
+@(private)
+RUN_LINE :: u8(1)
+@(private)
+RUN_BLOCK :: u8(2)
+
+// Holds back the run of white space and comments the window's end cuts short, read in state `run` from `p`: the value's
+// end in `RUN_AFTER` and `RUN_FOOT`, whose line a comment may share, and the run's first byte else.
+@(private, cold)
+piece_hold_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, p: [^]u8, run: u8, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	pw := w.piece[0]
+	s := pw.s
+	r := &s.run
+	open := len(s.opened)
+	object := open > 0 && s.opened[open - 1].object
+	r.state, r.part, r.lo, r.on = run, RUN_GAP, 0, at(w, p)
+	r.line, r.crossed, r.held, r.comma = run < RUN_AFTER, false, false, 0
+	// After a key's colon, as a comment past it would set.
+	r.place = PLACE_VALUE if run == RUN_VALUE && object else s.place
+	return piece_run(w, pw, hs, end, on)
+}
+
+// Reads on the run of white space and comments `s.run` from where it stopped, judging each byte once, as `comment_run`
+// does, and keeping each comment for the hook with what its role needs: whether a line ended before it in the run, and
+// whether the run's comma did. At the window's end, more bytes may follow, it holds the run back again. Past the run it
+// gives the hook its comments, with their roles as `emit_comments` gives them, and walks on from the token there.
+@(private, cold)
+piece_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, hs: hook.Regs, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
+	s := pw.s
+	r := &s.run
+	w.gap_lo = GAP_UNLEARNABLE
+	q := w.base[r.on:]
+	for {
+		if r.part != RUN_GAP {
+			body := q
+			nl: bool
+			kind: tape.Fault_Kind
+			if r.part == RUN_BLOCK {
+				q, nl, kind = comment_body(q, end, true, S)
+			} else {
+				q, nl, kind = comment_body(q, end, false, S)
+			}
+			r.held ||= nl
+			// A `//` comment the window's end ends may go on in the next.
+			if pw.more && (kind == .Truncated || kind == .None && q >= end && r.part == RUN_LINE) {
+				r.on = piece_comment_on(w, body, end, r.part == RUN_BLOCK)
+				return piece_run_held(w, pw, hs, end)
+			}
+			if kind != .None {
+				return fault(w, hs, q, kind)
+			}
+			c := w.base[r.lo:]
+			if too_wide(c, q) {
+				return fault(w, hs, c, .Too_Wide)
+			}
+			when H != hook.No_Hooks {
+				if !piece_passes(w) {
+					role := tape.Role.Comment if r.line else .Comment_Inline
+					spelling := BLOCK_COMMENT if r.part == RUN_BLOCK else LINE_COMMENT
+					t := tape.Token{r.lo, u32(intrinsics.ptr_sub(q, c)), .Plain, role, spelling}
+					context = pw.ctx^
+					if _, err := append(&r.comments, t); err != nil {
+						pw.refused = true
+						return stopped(w, hs, q)
+					}
+				}
+			}
+			r.line ||= r.held
+			r.part, r.held = RUN_GAP, false
+		}
+		g := q
+		q = kernel.skip_ws(q, end)
+		for x := g; !r.line && x < q; x = x[1:] {
+			r.line = x[0] == '\n' || x[0] == '\r'
+		}
+		if q >= end {
+			if pw.more {
+				r.on = at(w, q)
+				return piece_run_held(w, pw, hs, end)
+			}
+			break
+		}
+		when S == .Json5 {
+			if n := ws5_len(q, end); n > 0 {
+				r.line ||= line_end(q, end, S)
+				q = q[n:]
+				continue
+			}
+		}
+		if piece_short(w, q, end, .Bad_Char) == .Truncated {
+			r.on = at(w, q)
+			return piece_run_held(w, pw, hs, end)
+		}
+		when S != .Json {
+			if q[0] == '/' {
+				if intrinsics.ptr_sub(end, q) < 2 || q[1] != '/' && q[1] != '*' {
+					return fault(w, hs, q, .Bad_Char)
+				}
+				r.part, r.lo = RUN_BLOCK if q[1] == '*' else RUN_LINE, at(w, q)
+				q = q[2:]
+				continue
+			}
+		}
+		if r.state == RUN_AFTER && !r.crossed && q[0] == ',' {
+			r.crossed, r.comma = true, u32(len(r.comments))
+			q = q[1:]
+			continue
+		}
+		break
+	}
+	return piece_run_end(w, pw, hs, q, end, on)
+}
+
+// The offset a comment's body or a run of white space read from `body` reads on from past a window that ended at
+// `end`: the `*` the window's end leaves, which may close a `/* */` comment, or the first byte of the UTF-8 character it
+// may cut, else `end`.
+@(private)
+piece_comment_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), body, end: [^]u8, star: bool) -> u64 #no_bounds_check {
+	if star && end > body && end[-1] == '*' {
+		return at(w, end) - 1
+	}
+	for k := end; k > body && intrinsics.ptr_sub(end, k) < 4; k = k[-1:] {
+		if k[-1] >= 0xc0 {
+			return at(w, k) - 1
+		}
+		if k[-1] < 0x80 {
+			break
+		}
+	}
+	return at(w, end)
+}
+
+// The result of a walk of a window that ends inside run `s.run`, held back for the next: a run past the root value
+// ends the walk past it, and any other a fault `Truncated`.
+@(private)
+piece_run_held :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, hs: hook.Regs, end: [^]u8) -> hook.Walk_Result {
+	if pw.s.run.state == RUN_FOOT {
+		pw.foot = true
+		return done(w, hs, w.base[pw.s.last:])
+	}
+	return fault(w, hs, end, .Truncated)
+}
+
+// Gives the hook the comments of run `s.run`, which ends at `q`, and walks on from the token there in the run's state.
+// The place past each comment is set as `piece_fact` sets it, and the place past the run is that before its token.
+@(private)
+piece_run_end :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, hs: hook.Regs, q, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
+	s := pw.s
+	r := &s.run
+	hs := hs
+	state, crossed, root := r.state, r.crossed, s.last
+	r.state = 0
+	if state == RUN_FOOT && q < end {
+		return fault(w, hs, q, .Bad_Char)
+	}
+	open := u64(len(s.opened))
+	object := open > 0 && s.opened[open - 1].object
+	d := open << 1 | u64(object)
+	when H != hook.No_Hooks {
+		rest := tape.Role.Comment
+		switch state {
+		case RUN_VALUE:
+			rest = .Comment_Foot if !object && open > 0 && q < end && q[0] == ']' else .Comment
+		case RUN_KEY:
+			rest = .Comment_Foot if q < end && q[0] == '}' else .Comment
+		case RUN_AFTER:
+			rest = .Comment if crossed && q < end && q[0] != ']' | u8(object) << 5 else .Comment_Foot
+		case RUN_FOOT:
+			rest = .Comment_Foot
+		}
+		for t, i in r.comments {
+			t := t
+			if t.role != .Comment_Inline {
+				t.role = rest
+			}
+			s.place, s.last = PLACE_MEMBER if crossed && u32(i) >= r.comma else r.place, t.lo
+			if emit_token(w, on, &hs, t) == .Stop {
+				clear(&r.comments)
+				return stopped(w, hs, w.base[t.lo + u64(t.n):])
+			}
+		}
+		clear(&r.comments)
+	}
+	if state == RUN_FOOT {
+		pw.foot = true
+		return done(w, hs, w.base[root:])
+	}
+	s.place, s.last = PLACE_MEMBER if crossed else r.place, at(w, q)
+	return enter_run(state, crossed, q, end, d, w, hs, on)
+}
+
+// Enters the walk at the token `p` past a run of comments read in state `run`, which crossed its comma for `crossed`,
+// in container `d`. A call of its own, whose frame has no base pointer, as `enter` is in a sanitizer's build.
+@(private)
+enter_run :: #force_no_inline proc "contextless" (run: u8, crossed: bool, p, end: [^]u8, d: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	switch run {
+	case RUN_VALUE:
+		return st_value(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case RUN_KEY:
+		return st_key(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case RUN_COLON:
+		return st_colon(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	}
+	if crossed {
+		return st_member_ws(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	}
+	return st_after_ws(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+}
+
+// The first byte of the comments run `s.run` holds back, which a hook needs that reads a comment's bytes in the window
+// that gives it, or `max(u64)` for none.
+@(private)
+piece_run_facts :: proc "contextless" (s: ^hook.Piece_State) -> u64 {
+	r := &s.run
+	switch {
+	case r.state == 0:
+		return max(u64)
+	case len(r.comments) > 0:
+		return r.comments[0].lo
+	case r.part != RUN_GAP:
+		return r.lo
+	}
+	return max(u64)
+}
+
+// The result of a walk of a window that ended as `r`. A window more bytes may follow ends the read inside its root
+// value, or before its foot, at a fault `Truncated`, at a scalar it cut and past the root value, and then the walk's
+// state is kept for the next window.
+@(private, cold)
+piece_end :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, r: hook.Walk_Result) -> hook.Walk_Result {
+	s := pw.s
+	s.started = true
+	if pw.refused {
+		return hook.walk_result(u64(r) >> 16, hook.WALK_NO_MEMORY)
+	}
+	outcome := u8(r)
+	if !pw.more || !(outcome == u8(tape.Fault_Kind.Truncated) || outcome == hook.WALK_STOPPED && pw.cut || outcome == 0) {
+		return r
+	}
+	if outcome == 0 && s.run.state == 0 {
+		s.place, s.last = PLACE_TAIL, u64(r) >> 16
+		piece_pass_white(w, pw)
+	} else if outcome == u8(tape.Fault_Kind.Truncated) && !pw.cut && s.cut.on == 0 && s.run.state == 0 {
+		piece_pass_white(w, pw)
+	}
+	context = pw.ctx^
+	open := len(s.opened)
+	if resize(&s.levels, open) != nil {
+		return hook.walk_result(s.last, hook.WALK_NO_MEMORY)
+	}
+	intrinsics.mem_copy_non_overlapping(raw_data(s.levels), w.stack, open * size_of(u32))
+	if GAPS {
+		if s.memo == nil {
+			memo, err := make([]u8, size_of(Gaps), s.opened.allocator)
+			if err != nil {
+				return hook.walk_result(s.last, hook.WALK_NO_MEMORY)
+			}
+			s.memo = memo
+		}
+		intrinsics.mem_copy_non_overlapping(raw_data(s.memo), &w.gaps, size_of(Gaps))
+	}
+	s.regs, s.steps, s.tolerated = w.regs^, w.steps[0], w.tolerated
+	when .Skips in C {
+		s.rested = w.rested
+	}
+	pw.ended = true
+	return hook.walk_result(s.last, hook.WALK_MORE)
+}
+
+// Moves where the next window reads on from past the white space that ends this window after the last token, so a
+// run longer than a window is read once. Past the root value, past a value's comma and past a key's colon, the run is
+// held as a run of comments is, and read on in the next window. Else the place stays, and in a spec with comments its
+// read goes on from the run's last line end, which tells a comment past the run whether a line ended before it.
+@(private)
+piece_pass_white :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk) #no_bounds_check {
+	s := pw.s
+	p, end := w.base[s.last:], w.base[pw.end:]
+	// A character the window's end may cut is read in the next window.
+	when S == .Json5 {
+		if s.place != PLACE_TAIL {
+			end = w.base[piece_comment_on(w, p, end, false):]
+		}
+	}
+	run: u8
+	// Past the root value, `walk_tail` judged the rest of the window white space.
+	if s.place == PLACE_TAIL {
+		run = RUN_FOOT
+	} else if q := piece_skip_white(p, end, S); q < end {
+		mark := u8(':') if s.place == PLACE_COLON else ','
+		if s.place != PLACE_COLON && s.place != PLACE_AFTER || q[0] != mark || piece_skip_white(q[1:], end, S) != end {
+			return
+		}
+		run = RUN_VALUE if s.place == PLACE_COLON else RUN_AFTER
+	} else if s.place == PLACE_VALUE {
+		return
+	} else {
+		when S != .Json {
+			for k := end; k > p; k = k[-1:] {
+				if k[-1] == '\n' || k[-1] == '\r' {
+					s.last = at(w, k) - 1
+					return
+				}
+				if S == .Json5 && intrinsics.ptr_sub(k, p) >= 3 && line_sep5(k[-3:], k) {
+					s.last = at(w, k) - 3
+					return
+				}
+			}
+		}
+		s.last = at(w, end)
+		return
+	}
+	r := &s.run
+	r.state, r.part, r.lo, r.on, r.crossed, r.held, r.comma = run, RUN_GAP, 0, at(w, end), run == RUN_AFTER, false, 0
+	r.place = PLACE_VALUE if run == RUN_VALUE else s.place
+	r.line = run == RUN_VALUE
+	for x := p; !r.line && x < end; x = x[1:] {
+		r.line = line_end(x, end, S)
+	}
+}
+
+// The first byte past the white space from `p`, JSON5's own in `S`.
+@(private = "file")
+piece_skip_white :: proc "contextless" (p, end: [^]u8, $S: Spec) -> [^]u8 {
+	q := kernel.skip_ws(p, end)
+	when S == .Json5 {
+		for q < end {
+			n := ws5_len(q, end)
+			if n == 0 {
+				break
+			}
+			q = kernel.skip_ws(q[n:], end)
+		}
+	}
+	return q
+}
+
+// The lowest offset a window after one that ended at place `place`, past `last`, needs: the bytes from `last`, and in
+// a spec with comments the byte before, which the states read back to for a comment after a comma. A run of comments
+// the window ended inside needs the bytes from where it reads on, and keeps the byte before, as the run may end where
+// the next window starts, whose read then keeps from the byte before the token past it.
+@(private)
+piece_keep_from :: proc "contextless" (s: ^hook.Piece_State, $S: Spec) -> u64 {
+	if s.run.state != 0 {
+		return max(s.run.on, 1) - 1
+	}
+	if s.last == 0 {
+		return 0
+	}
+	when S != .Json {
+		return s.last - 1
+	} else {
+		return s.last
+	}
+}
+
+// Whether the `n` bytes of a window that starts a text, more of which may follow, hold too few bytes to tell a byte
+// order mark from none.
+@(private)
+piece_bom_open :: proc "contextless" (src: []u8) -> bool {
+	BOM := [3]u8{0xEF, 0xBB, 0xBF}
+	if len(src) >= 3 {
+		return false
+	}
+	for b, k in src {
+		if b != BOM[k] {
+			return false
+		}
+	}
+	return true
+}

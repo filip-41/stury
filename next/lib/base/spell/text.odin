@@ -31,6 +31,20 @@ utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind
 	return p[need:], .None
 }
 
+// One past the maximal subpart of the ill-formed UTF-8 sequence at `p`, where `p < end`: its longest start that some
+// well-formed sequence starts with, or its first byte when none does. A decoder that replaces each such subpart with
+// U+FFFD reads ill-formed text as Unicode's "substitution of maximal subparts" does.
+utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 {
+	n := 1
+	for n < 3 && p[n:] < end {
+		if _, k := utf8_char(p, p[n + 1:]); k != .Truncated {
+			break
+		}
+		n += 1
+	}
+	return p[n:]
+}
+
 // The end of the run of decimal digits at `p`.
 digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
 	q := p

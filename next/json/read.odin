@@ -33,31 +33,54 @@ number_long :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64) -> s
 	return num
 }
 
-// The text of the string node `t` of the JSON text `src`, which holds an escape, decoded into `buf`. False for a `buf`
-// shorter than the node's span.
+// The text of the string node `t` of the JSON text `src`, which holds an escape or a tolerated byte, decoded into
+// `buf`. False for a `buf` shorter than `text_room` gives.
 @(private)
 text_decoded :: #force_inline proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: string, ok: bool) #no_bounds_check {
 	// An escape decodes to no more bytes than it spells, so a buffer as long as the span holds the text.
 	if int(t.n) > len(buf) {
 		return "", false
 	}
-	if t.spelling & SPELLING_JSON5 != 0 {
+	if t.spelling & (SPELLING_JSON5 | tape.SPELLING_LAX) != 0 {
+		if t.spelling & tape.SPELLING_LAX != 0 {
+			return text_lax(src, t, buf)
+		}
 		return string(buf[:decode5(buf, src, t.lo, t.lo + u64(t.n))]), true
 	}
 	if t.n < 256 {
-		return string(buf[:decode_bytes(buf, 0, src, t.lo, t.lo + u64(t.n), false)]), true
+		return string(buf[:decode_bytes(buf, 0, src, t.lo, t.lo + u64(t.n), false, false)]), true
 	}
 	return decode_blocks(src, t, buf)
 }
 
-// The end in `dst` of `src[p:end]` decoded from `dst[w]` one byte at a time, the escapes of JSON5 when `json5`.
+// The text of a `SPELLING_LAX` string node, each maximal subpart of an ill-formed sequence decoded as U+FFFD.
+@(private, cold)
+text_lax :: #force_no_inline proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: string, ok: bool) {
+	if text_room(src, t) > len(buf) {
+		return "", false
+	}
+	lo, hi := t.lo, t.lo + u64(t.n)
+	if t.spelling & SPELLING_JSON5 != 0 {
+		return string(buf[:decode_bytes(buf, 0, src, lo, hi, true, true)]), true
+	}
+	return string(buf[:decode_bytes(buf, 0, src, lo, hi, false, true)]), true
+}
+
+// The end in `dst` of `src[p:end]` decoded from `dst[w]` one byte at a time, the escapes of JSON5 when `json5`, and
+// each maximal subpart of an ill-formed sequence as U+FFFD when `lax`.
 @(private)
-decode_bytes :: #force_inline proc "contextless" (dst: []u8, w: int, src: []u8, p, end: u64, $json5: bool) -> int #no_bounds_check {
+decode_bytes :: #force_inline proc "contextless" (dst: []u8, w: int, src: []u8, p, end: u64, $json5, $lax: bool) -> int #no_bounds_check {
 	base := raw_data(src)
 	out := raw_data(dst)
 	p, w := p, w
 	for p < end {
 		c := base[p]
+		when lax {
+			if c >= 0x80 {
+				w, p = decode_lax_char(base, p, end, out, w)
+				continue
+			}
+		}
 		if c != '\\' {
 			out[w] = c
 			w += 1
@@ -71,6 +94,22 @@ decode_bytes :: #force_inline proc "contextless" (dst: []u8, w: int, src: []u8, 
 		}
 	}
 	return w
+}
+
+// The ends in `out` and in `base` of the character whose lead `base[p]` is past ASCII, copied to `out[w:]`, or U+FFFD
+// for the maximal subpart of an ill-formed sequence. `out` has room for three bytes per byte of `base` read.
+@(private, cold)
+decode_lax_char :: #force_no_inline proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: int) -> (int, u64) #no_bounds_check {
+	q, kind := spell.utf8_char(base[p:], base[end:])
+	if kind != .None {
+		out[w], out[w + 1], out[w + 2] = 0xEF, 0xBF, 0xBD
+		return w + 3, u64(intrinsics.ptr_sub(spell.utf8_subpart(base[p:], base[end:]), base))
+	}
+	n := intrinsics.ptr_sub(q, base[p:])
+	for i in 0 ..< n {
+		out[w + i] = base[p + u64(i)]
+	}
+	return w + n, p + u64(n)
 }
 
 // The ends in `out` and in `base` of the escape at `base[p]` decoded into `out[w:]`. A backslash that ends the text
@@ -100,7 +139,7 @@ decode_blocks :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (str
 	w := 0
 	for p < end {
 		if p + 64 > limit {
-			w = decode_bytes(buf, w, src, p, end, false)
+			w = decode_bytes(buf, w, src, p, end, false, false)
 			break
 		}
 		b := kernel.load(base[p:])
@@ -196,7 +235,7 @@ decode_surrogate_into :: #force_no_inline proc "contextless" (base: [^]u8, p, en
 			return w + 4, p + 12
 		}
 	}
-	// The walk refuses a lone surrogate half, so this is a node no JSON walk made.
+	// A walk passes a lone surrogate half only under `.Lone_Surrogate`, which marks the string `SPELLING_LAX`.
 	out[w], out[w + 1], out[w + 2] = 0xEF, 0xBF, 0xBD
 	return w + 3, p + 6
 }
@@ -240,8 +279,8 @@ number5_value :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, sp
 	case .Infinity:
 		return {0x7ff0_0000_0000_0000 | u64(neg) << 63, .Float}
 	case .Nan:
-		// A quiet NaN with a zero sign, whatever sign it is written with.
-		return {0x7ff8_0000_0000_0000, .Float}
+		// A quiet NaN with the sign it is written with.
+		return {0x7ff8_0000_0000_0000 | u64(neg) << 63, .Float}
 	case .Hex:
 		return spell.number_hex(src[p + 2:hi], neg)
 	}
@@ -252,7 +291,7 @@ number5_value :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, sp
 // The end in `dst` of JSON5's text `src[p:end]` decoded from `dst[0]`.
 @(private, cold)
 decode5 :: #force_no_inline proc "contextless" (dst: []u8, src: []u8, p, end: u64) -> int {
-	return decode_bytes(dst, 0, src, p, end, true)
+	return decode_bytes(dst, 0, src, p, end, true, false)
 }
 
 // `decode_escape` for JSON5, which adds `\v`, `\0`, `\x` and two hex digits, a backslash before a line end, which
@@ -296,38 +335,79 @@ decode5_escape :: proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: i
 	return w + 1, p + 2
 }
 
-// Whether the key token `t`, whose spelling needs decoding, decodes to `name`. It decodes one escape at a time, as an
-// escape decodes to at most four bytes.
-@(private, cold)
-key_is :: proc "contextless" (src: []u8, t: tape.Token, name: string) -> bool #no_bounds_check {
-	if int(t.n) < len(name) {
-		return false
-	}
-	base := raw_data(src)
-	json5 := t.spelling & SPELLING_JSON5 != 0
-	p, end := t.lo, t.lo + u64(t.n)
-	i := 0
-	for p < end {
-		c := base[p]
-		if c != '\\' {
-			if i == len(name) || name[i] != c {
-				return false
-			}
-			i += 1
-			p += 1
-			continue
-		}
-		one: [4]u8
-		n: int
-		if json5 {
-			n, p = decode5_escape(base, p, end, raw_data(one[:]), 0)
-		} else {
-			n, p = decode_escape(base, p, end, raw_data(one[:]), 0)
-		}
-		if n > len(name) - i || string(one[:n]) != name[i:][:n] {
+// Whether string `t` of `src` and string `o` of `other` read as the same text, decoding one escape at a time.
+@(private)
+same_text :: proc
+ "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {
+	a, b := key_reader(src, t), key_reader(other, o)
+	for {
+		x, more := key_byte(&a)
+		y, other_more := key_byte(&b)
+		if more != other_more || x != y {
 			return false
 		}
-		i += n
+		if !more {
+			return true
+		}
 	}
-	return i == len(name)
+}
+
+// `tape.text_hash` of the text string `t` of `src` reads as, decoding one escape at a time.
+@(private)
+key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {
+	if t.spelling & tape.SPELLING_DECODE == 0 {
+		return tape.text_hash(src[t.lo:][:t.n])
+	}
+	x := tape.text_hasher()
+	k := key_reader(src, t)
+	for {
+		b, more := key_byte(&k)
+		if !more {
+			return tape.text_hasher_end(&x)
+		}
+		tape.text_hash_byte(&x, b)
+	}
+}
+
+// The bytes a key token reads as.
+
+@(private)
+Key_Reader :: struct {
+	base:   [^]u8,
+	p, end: u64,
+	json5:  bool,
+	decode: bool,
+	lax:    bool,
+	one:    [4]u8, // the bytes of the escape or character last decoded, at most four
+	at, n:  int,
+}
+
+@(private)
+key_reader :: #force_inline proc "contextless" (src: []u8, t: tape.Token) -> Key_Reader {
+	return {base = raw_data(src), p = t.lo, end = t.lo + u64(t.n), json5 = t.spelling & SPELLING_JSON5 != 0, decode = t.spelling & tape.SPELLING_DECODE != 0, lax = t.spelling & tape.SPELLING_LAX != 0}
+}
+
+// The next byte key `k` reads as, false past its end. A JSON5 line continuation reads as no byte.
+@(private)
+key_byte :: proc "contextless" (k: ^Key_Reader) -> (u8, bool) #no_bounds_check {
+	for k.at == k.n {
+		if k.p >= k.end {
+			return 0, false
+		}
+		c := k.base[k.p]
+		if !k.decode || c != '\\' && (c < 0x80 || !k.lax) {
+			k.p += 1
+			return c, true
+		}
+		k.at = 0
+		if c != '\\' {
+			k.n, k.p = decode_lax_char(k.base, k.p, k.end, raw_data(k.one[:]), 0)
+		} else if k.json5 {
+			k.n, k.p = decode5_escape(k.base, k.p, k.end, raw_data(k.one[:]), 0)
+		} else {
+			k.n, k.p = decode_escape(k.base, k.p, k.end, raw_data(k.one[:]), 0)
+		}
+	}
+	k.at += 1
+	return k.one[k.at - 1], true
 }

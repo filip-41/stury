@@ -5,15 +5,8 @@ import "core:fmt"
 import "core:math"
 import "core:strings"
 import "core:testing"
-import "stury:json"
 import "stury:lib/core/tape"
-
-// The document and error of building `src` in spec `S`, checked against `validate`'s answer.
-build_as :: proc(t: ^testing.T, src: string, $S: json.Spec, loc := #caller_location) -> (tape.Document, tape.Error) {
-	doc, err := json.build(transmute([]u8)src, S)
-	testing.expectf(t, fmt.tprint(json.validate(transmute([]u8)src, S)) == fmt.tprint(err), "validate and build disagree on %q", src, loc = loc)
-	return doc, err
-}
+import "stury:testkit"
 
 // The fault `err` holds, or `.None`.
 fault_of :: proc(err: tape.Error) -> (tape.Fault_Kind, u64) {
@@ -26,13 +19,14 @@ fault_of :: proc(err: tape.Error) -> (tape.Fault_Kind, u64) {
 // JSONC and JSON5 read every text RFC 8259 accepts, with the same nodes.
 @(test)
 specs_read_every_json_text :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	for f in #load_directory("conformance/JSONTestSuite/test_parsing") {
 		if f.name[:2] != "y_" {
 			continue
 		}
-		strict, _ := build_as(t, string(f.data), .Json)
-		c, cerr := build_as(t, string(f.data), .Jsonc)
-		f5, ferr := build_as(t, string(f.data), .Json5)
+		strict, _ := build(t, string(f.data))
+		c, cerr := build(t, string(f.data), spec = .Jsonc)
+		f5, ferr := build(t, string(f.data), spec = .Json5)
 		testing.expectf(t, cerr == nil && ferr == nil, "%s: %v, %v", f.name, cerr, ferr)
 		testing.expectf(t, fmt.tprint(c.nodes) == fmt.tprint(strict.nodes) && fmt.tprint(f5.nodes) == fmt.tprint(strict.nodes), "%s nodes differ", f.name)
 		tape.destroy(&strict)
@@ -44,6 +38,7 @@ specs_read_every_json_text :: proc(t: ^testing.T) {
 // json5-tests' verdicts: a `.json` or `.json5` text reads as JSON5, and a `.js` or `.txt` text is refused.
 @(test)
 json5_suite_verdicts :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	dirs := [][]runtime.Load_Directory_File {
 		#load_directory("conformance/json5-tests/arrays"),
 		#load_directory("conformance/json5-tests/comments"),
@@ -61,7 +56,7 @@ json5_suite_verdicts :: proc(t: ^testing.T) {
 			if !reads && !strings.has_suffix(f.name, ".js") && !strings.has_suffix(f.name, ".txt") {
 				continue
 			}
-			doc, err := build_as(t, string(f.data), .Json5)
+			doc, err := build(t, string(f.data), spec = .Json5)
 			testing.expectf(t, (err == nil) == reads, "%s: %v", f.name, err)
 			tape.destroy(&doc)
 			count += 1
@@ -75,8 +70,9 @@ json5_suite_verdicts :: proc(t: ^testing.T) {
 // a container's close, or past the root's line, is the container's foot.
 @(test)
 comments_have_kinds :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	src := "// head\n{\"a\": 1, // one\n /* b */ \"b\": [2, /* two */ 3,], \"c\" /*k*/ : /*v*/ 4\n // foot\n} // root\n// tail"
-	doc, err := build_as(t, src, .Jsonc)
+	doc, err := build(t, src, spec = .Jsonc)
 	defer tape.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	Want :: struct {
@@ -110,6 +106,7 @@ comments_have_kinds :: proc(t: ^testing.T) {
 // container is its foot.
 @(test)
 comments_after_containers :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	Case :: struct {
 		src:  string,
 		node: tape.Node_Index,
@@ -125,7 +122,7 @@ comments_after_containers :: proc(t: ^testing.T) {
 		{"{\"a\": [] // c\n}", 2, .Comment_Inline},
 	}
 	for c in cases {
-		doc, err := build_as(t, c.src, .Jsonc)
+		doc, err := build(t, c.src, spec = .Jsonc)
 		testing.expectf(t, err == nil && len(doc.facts) == 1, "%q: %v, %d facts", c.src, err, len(doc.facts))
 		if len(doc.facts) == 1 {
 			f := doc.facts[0]
@@ -138,6 +135,7 @@ comments_after_containers :: proc(t: ^testing.T) {
 // JSONC and JSON5 take a comma before a close; no spec takes a comma with no value before it, and RFC 8259 neither.
 @(test)
 trailing_commas :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	Case :: struct {
 		src:    string,
 		strict: tape.Fault_Kind,
@@ -155,7 +153,7 @@ trailing_commas :: proc(t: ^testing.T) {
 		{"1,", .Bad_Char, .Bad_Char, 1},
 	}
 	for c in cases {
-		s, serr := build_as(t, c.src, .Json)
+		s, serr := build(t, c.src)
 		k, _ := fault_of(serr)
 		testing.expectf(t, k == c.strict, "%q as JSON: %v", c.src, serr)
 		tape.destroy(&s)
@@ -163,9 +161,9 @@ trailing_commas :: proc(t: ^testing.T) {
 			doc: tape.Document
 			err: tape.Error
 			if spec == 0 {
-				doc, err = build_as(t, c.src, .Jsonc)
+				doc, err = build(t, c.src, spec = .Jsonc)
 			} else {
-				doc, err = build_as(t, c.src, .Json5)
+				doc, err = build(t, c.src, spec = .Json5)
 			}
 			kind, at := fault_of(err)
 			testing.expectf(t, kind == c.spec && (kind == .None || at == c.at), "%q: %v, want %v at %d", c.src, err, c.spec, c.at)
@@ -177,6 +175,7 @@ trailing_commas :: proc(t: ^testing.T) {
 // A comment refused where it stands, and one the text ends in.
 @(test)
 comment_faults :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	Case :: struct {
 		src:  string,
 		kind: tape.Fault_Kind,
@@ -194,7 +193,7 @@ comment_faults :: proc(t: ^testing.T) {
 		{"/* a */\n", .Truncated, 8},
 	}
 	for c in cases {
-		doc, err := build_as(t, c.src, .Jsonc)
+		doc, err := build(t, c.src, spec = .Jsonc)
 		kind, at := fault_of(err)
 		testing.expectf(t, kind == c.kind && at == c.at, "%q: %v, want %v at %d", c.src, err, c.kind, c.at)
 		tape.destroy(&doc)
@@ -205,6 +204,7 @@ comment_faults :: proc(t: ^testing.T) {
 // it, and no gap is learned across it.
 @(test)
 comments_in_learned_gaps :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	lasts := []string {
 		`{"id":1,/* c */"name":"a"}`,
 		`{"id":1,"name":/* c */"a"}`,
@@ -216,7 +216,7 @@ comments_in_learned_gaps :: proc(t: ^testing.T) {
 	for last in lasts {
 		for sep in ([]string{",", ",\n"}) {
 			text, _ := records(`{"id":1,"name":"a"}`, sep, last, 4)
-			doc, err := build_as(t, text, .Jsonc)
+			doc, err := build(t, text, spec = .Jsonc)
 			testing.expectf(t, err == nil && len(doc.facts) == 1, "%q after its records: %v, %d facts", last, err, len(doc.facts))
 			expect_key_spans(t, text, &doc)
 			tape.destroy(&doc)
@@ -231,7 +231,7 @@ comments_in_learned_gaps :: proc(t: ^testing.T) {
 			}
 			strings.write_string(&b, "]")
 			all := strings.to_string(b)
-			doc, err = build_as(t, all, .Jsonc)
+			doc, err = build(t, all, spec = .Jsonc)
 			testing.expectf(t, err == nil && len(doc.facts) == 12, "%q in every record: %v, %d facts", last, err, len(doc.facts))
 			for f in doc.facts {
 				testing.expectf(t, all[f.lo:][:f.n] == "/* c */" || all[f.lo:][:f.n] == "// c", "fact spans %q", all[f.lo:][:f.n])
@@ -245,6 +245,7 @@ comments_in_learned_gaps :: proc(t: ^testing.T) {
 // digit after it makes a float.
 @(test)
 json5_numbers :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	Case :: struct {
 		text: string,
 		kind: enum {Int, Float},
@@ -275,7 +276,7 @@ json5_numbers :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		src := fmt.tprintf("[%s]", c.text)
-		doc, err := build_as(t, src, .Json5)
+		doc, err := build(t, src, spec = .Json5)
 		testing.expectf(t, err == nil, "%q: %v", src, err)
 		if err == nil {
 			v, ok := tape.node_number(&doc, doc.nodes[1])
@@ -289,13 +290,15 @@ json5_numbers :: proc(t: ^testing.T) {
 		}
 		tape.destroy(&doc)
 	}
-	doc, _ := build_as(t, "NaN", .Json5)
-	v, _ := tape.node_number(&doc, doc.nodes[0])
-	testing.expect(t, v.kind == .Float && math.is_nan(transmute(f64)v.bits))
-	tape.destroy(&doc)
+	for text in ([]string{"NaN", "+NaN", "-NaN"}) {
+		doc, _ := build(t, text, spec = .Json5)
+		v, _ := tape.node_number(&doc, doc.nodes[0])
+		testing.expectf(t, v.kind == .Float && v.bits == 0x7ff8_0000_0000_0000 | u64(text[0] == '-') << 63, "%s: %v", text, v)
+		tape.destroy(&doc)
+	}
 	for text in ([]string{"-0.", "-0.0", "-.0"}) {
-		doc, _ = build_as(t, text, .Json5)
-		v, _ = tape.node_number(&doc, doc.nodes[0])
+		doc, _ := build(t, text, spec = .Json5)
+		v, _ := tape.node_number(&doc, doc.nodes[0])
 		testing.expectf(t, v.kind == .Float && v.bits == 1 << 63, "%s: %v", text, v)
 		tape.destroy(&doc)
 	}
@@ -305,8 +308,9 @@ json5_numbers :: proc(t: ^testing.T) {
 // line continuation, and an escaped character that spells itself. An unquoted key's span is its bare name.
 @(test)
 json5_text :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	src := "{unq\\u0061: 'a\\x41\\u00e9\\xe9\\v\\0\\'\\\nb\\q\\\r\nc', $_x: \"d\\\"\\'\", 'k': ''}"
-	doc, err := build_as(t, src, .Json5)
+	doc, err := build(t, src, spec = .Json5)
 	defer tape.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	want := []string{"unqa", "aAéé\v\x00'bqc", "$_x", "d\"'", "k", ""}
@@ -331,12 +335,13 @@ json5_text :: proc(t: ^testing.T) {
 // JSON5's own white space and comments stand wherever JSON's white space does.
 @(test)
 json5_white_space :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	src := "\u00a0{\va\u2028:\ufeff1\u3000,\fb\t: // c\u2029 2 /* d */}\u2003"
-	doc, err := build_as(t, src, .Json5)
+	doc, err := build(t, src, spec = .Json5)
 	defer tape.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(doc.nodes), 5)
 	testing.expect_value(t, len(doc.facts), 2)
-	_, serr := build_as(t, src, .Jsonc)
+	_, serr := build(t, src, spec = .Jsonc)
 	testing.expect(t, serr != nil)
 }

@@ -26,7 +26,13 @@ pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2
 
 // One bit per lane of `m`, by `pmovmskb` per register.
 pack :: #force_inline proc "contextless" (m: Block) -> u64 {
-	return transmute(u64)simd.extract_msbs(transmute(W)m)
+	// LLVM's wasm32 backend cannot widen a 64-lane compare joined to an `i64` mask, so each register packs alone.
+	when ODIN_ARCH == .wasm32 {
+		return u64(transmute(u16)simd.extract_msbs(m[0])) | u64(transmute(u16)simd.extract_msbs(m[1])) << 16 |
+			u64(transmute(u16)simd.extract_msbs(m[2])) << 32 | u64(transmute(u16)simd.extract_msbs(m[3])) << 48
+	} else {
+		return transmute(u64)simd.extract_msbs(transmute(W)m)
+	}
 }
 
 // By one `pmovmskb` of the block's registers ORed together: a 64-lane `extract_msbs` takes one per register and joins

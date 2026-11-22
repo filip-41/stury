@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:unicode"
 import "core:unicode/utf8"
 import "stury:lib/base/spell"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // JSON5 1.0.0's forms past JSON's, in a spec with `.Es5`: its numbers, strings and escapes, unquoted keys and white
@@ -68,11 +69,23 @@ Number_Spelling :: enum u16 {
 @(private)
 SPELLING_JSON5 :: u16(8)
 
-// The state at a JSON5 number that JSON's grammar refused, or that starts with `+`, `.`, `I` or `N`.
+// The state at a JSON5 number that JSON's grammar refused, or that starts with `+`, `.`, `I` or `N`. In JSON and JSONC,
+// a walk with `LAX` reads JSON5's non-finite numbers here.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
-	hs := tape.Hook_Regs{s0, s1, s2}
-	q, spelling, kind := number5(p, end)
+st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	when S == .Json5 {
+		q, spelling, kind := number5(p, end)
+	} else {
+		q, spelling, kind := non_finite(p, end, w.tolerate, S)
+		w.tolerated ||= kind == .None
+		// A word of `.Non_Finite` the window cuts short may end in the next.
+		if kind != .None && piece_more(w) && .Non_Finite in w.tolerate {
+			if r, _, k := number5(p, end); k == .Truncated {
+				q, kind = r, k
+			}
+		}
+	}
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
@@ -83,10 +96,28 @@ st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
-	if grows(H, a) {
+	if grows(C, a) {
 		return #must_tail st_grow_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// The end and spelling of JSON5's `Infinity` or `NaN` at `p`, with an optional sign, in a JSON or JSONC text read with
+// `.Non_Finite` in `tol`. Otherwise the fault JSON's grammar finds at `p`, so a tolerance changes no fault.
+@(private, cold)
+non_finite :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: tape.Tolerances, $S: Spec) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
+	if .Non_Finite in tol {
+		r := p[1:] if p[0] == '-' || p[0] == '+' else p
+		if r < end && (r[0] == 'I' || r[0] == 'N') {
+			if q, spelling, kind = number5(p, end); kind == .None {
+				return
+			}
+		}
+	}
+	if p[0] == '-' || p[0] - '0' < 10 {
+		return number(p, end, false, S)
+	}
+	return p, 0, .Bad_Char
 }
 
 // The end and spelling of the JSON5 number at `p`, or the fault and the byte it is at. Past JSON's grammar it may start
@@ -191,55 +222,84 @@ word5 :: proc "contextless" (p, end: [^]u8, word: string) -> (q: [^]u8, kind: ta
 // One past the JSON5 escape at the backslash `e`, or the fault. Valid are `\0` before no digit, `\x` and two hex
 // digits, a backslash before a line end (CR LF as one), a `\u` escape with its surrogate halves paired, and a backslash
 // before any other character but a digit, which spells that character. A digit after `\0`, and `\1` to `\9`, fault
-// `Bad_Escape` at the digit.
+// `Bad_Escape` at the digit. `LAX`, `tol` and `lone` are those of `escape_exact`.
 @(private)
-escape5 :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: tape.Fault_Kind) #no_bounds_check {
+escape5 :: #force_inline proc "contextless" (e, end: [^]u8, $LAX: bool, tol: tape.Tolerances) -> (q: [^]u8, kind: tape.Fault_Kind, lone: bool) #no_bounds_check {
 	q = e[1:]
 	if q >= end {
-		return end, .Truncated
+		return end, .Truncated, false
 	}
 	c := q[0]
 	switch {
 	case c == 'u':
-		return escape_exact(e, end)
+		return escape_exact(e, end, LAX, tol)
 	case c == 'x':
 		_, q, kind = escape_digits(q[1:], end, 2)
-		return
+		return q, kind, false
 	case c == '0':
 		if intrinsics.ptr_sub(end, q) > 1 && q[1] - '0' < 10 {
-			return q[1:], .Bad_Escape
+			return q[1:], .Bad_Escape, false
 		}
-		return q[1:], .None
+		return q[1:], .None, false
 	case c - '1' < 9:
-		return q, .Bad_Escape
+		return q, .Bad_Escape, false
 	case c == '\r':
 		if intrinsics.ptr_sub(end, q) > 1 && q[1] == '\n' {
-			return q[2:], .None
+			return q[2:], .None, false
 		}
-		return q[1:], .None
+		return q[1:], .None, false
 	case c < 0x80:
-		return q[1:], .None
+		return q[1:], .None, false
 	}
-	return spell.utf8_char(q, end)
+	q, kind = spell.utf8_char(q, end)
+	return q, kind, false
 }
 
 // The state at a single-quoted JSON5 string value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
-	hs := tape.Hook_Regs{s0, s1, s2}
-	q, _, _ := string_short(p, end, '\'')
+st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q, _, stop := string_short(p, end, '\'')
 	if q == nil {
-		q, _ = string_lean(p, end, '\'')
+		w.resume = stop
+		return #must_tail st_string5_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	a := emit_string(w, on, &hs, .Value, p, q, 0)
+	if a == .Stop {
+		return stopped(w, hs, q)
+	}
+	if grows(C, a) {
+		return #must_tail st_grow_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// The state at a single-quoted JSON5 string that `string_short` refused, at the first byte it stopped at, `w.resume`,
+// nil for none within 32 bytes.
+@(private, enable_target_feature = STATE_FEATURES)
+st_string5_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q: [^]u8
+	stop := w.resume
+	if stop == nil {
+		q, stop = string_lean(p, end, '\'')
 	}
 	spelling: u16
-	if q == nil {
+	// The block readers take only JSON's escapes, so a first escape of JSON5's alone goes to `string_exact`.
+	escaped := stop != nil && stop[0] == '\\'
+	json_escape := !escaped || intrinsics.ptr_sub(end, stop) > 1 && (spell.ESCAPED[stop[1]] != 0 || stop[1] == 'u')
+	if q == nil && escaped && json_escape {
+		q = string_escaped(stop, end, '\'')
+		spelling = tape.SPELLING_DECODE
+	}
+	if q == nil && json_escape {
 		esc: bool
 		q, esc = string_block(w, p, end, '\'')
 		spelling = tape.SPELLING_DECODE if esc else 0
 	}
 	if q == nil {
 		kind: tape.Fault_Kind
-		if q, spelling, kind = string_exact(true, p, end); kind != .None {
+		if q, spelling, kind = string_exact_in(w, p, end); kind != .None {
 			return fault(w, hs, q, kind)
 		}
 	}
@@ -250,18 +310,18 @@ st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
-	if grows(H, a) {
+	if grows(C, a) {
 		return #must_tail st_grow_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // The state at a JSON5 key that opens with no `"`. Reads a plain ASCII identifier through the colon to the value, and
-// passes any other key to `st_spec_key`. No gap is learned around an unquoted key, so a walk with gaps counts the
-// member as a miss when its colon follows flush.
+// passes any other key to `st_spec_key`. No gap is learned around an unquoted key, so a walk with gaps counts its
+// member as a miss.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_ident :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
-	hs := tape.Hook_Regs{s0, s1, s2}
+st_key_ident :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
 	q := ident_ascii(p, end)
 	if q == nil {
 		return #must_tail st_spec_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
@@ -273,19 +333,18 @@ st_key_ident :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
-	if grows(H, a) {
+	if grows(C, a) {
 		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
-	}
-	r := colon_fast(q, end)
-	if r == nil {
-		return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 	}
 	if gaps_on(m) {
 		if gap_miss(w, p) {
-			return #must_tail st_stop_gaps(r, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			return #must_tail st_stop_gaps(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 	}
-	return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+	if r := colon_fast(q, end); r != nil {
+		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+	}
+	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }
 
 // One past the unquoted key at `p` when it is plain ASCII, a letter, `$` or `_` and then those or digits, and an ASCII
@@ -308,18 +367,23 @@ ident_ascii :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bou
 // The state at a JSON5 key that JSON refused, a single-quoted string or an ECMAScript 5.1 IdentifierName, which reads on
 // through the colon to the value. A byte that starts no key faults `Bad_Char`.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
-	hs := tape.Hook_Regs{s0, s1, s2}
+st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
 	quoted := p[0] == '\''
 	q: [^]u8
 	spelling: u16
 	kind: tape.Fault_Kind
 	if quoted {
-		q, spelling, kind = string_exact(true, p, end)
+		q, spelling, kind = string_exact_in(w, p, end)
 	} else {
 		esc: bool
 		q, esc, kind = ident5(p, end)
 		spelling = tape.SPELLING_DECODE if esc else 0
+		when LAX {
+			if kind == .Truncated && piece_more(w) {
+				piece_cut_ident(w, p, end)
+			}
+		}
 	}
 	if kind != .None {
 		return fault(w, hs, q, kind)
@@ -330,7 +394,7 @@ st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	a: tape.Action
+	a: hook.Action
 	if quoted {
 		a = emit_string(w, on, &hs, .Key, p, q, spelling)
 	} else {
@@ -340,7 +404,7 @@ st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
-	if grows(H, a) {
+	if grows(C, a) {
 		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	if r := colon_fast(q, end); r != nil {
@@ -384,10 +448,17 @@ ident5_char :: #force_no_inline proc "contextless" (q, end: [^]u8, start: bool) 
 // identifier starts there. It ends before the first character that cannot continue it. A malformed `\u` escape, or one
 // that writes a character not allowed there, faults `Bad_Escape`, and malformed UTF-8 faults as in a string.
 @(private)
-ident5 :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: tape.Fault_Kind) #no_bounds_check {
-	q = p
+ident5 :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: tape.Fault_Kind) {
+	return ident5_on(p, p, end, false)
+}
+
+// `ident5` read on from `from`, a character's first byte in the identifier that starts at `p`, with `escaped` for an
+// escape before it. Only `from == p` reads `p`.
+@(private)
+ident5_on :: #force_inline proc "contextless" (p, from, end: [^]u8, escaped: bool) -> (q: [^]u8, esc: bool, kind: tape.Fault_Kind) #no_bounds_check {
+	q, esc = from, escaped
 	// A digit may not be the first character.
-	if q < end && q[0] - '0' < 10 {
+	if q == p && q < end && q[0] - '0' < 10 {
 		return
 	}
 	for q < end {

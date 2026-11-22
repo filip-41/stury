@@ -62,8 +62,8 @@ NO_NODE :: Node_Index(max(u32))
 MAX_CHILDREN :: u16(0x7FFF)
 
 // In a container's spelling in a document, a container a path read kept only part of. Its `n` covers the children kept,
-// and its count is every child it has. One passed unread keeps none, and with its count saturated and no entry in
-// `Document.counts` its count is not known.
+// and its count is every child it has. With its count saturated and no entry in `Document.counts` its count is not
+// known, as for one passed unread, which keeps none, and one a stop left open.
 CONTAINER_PARTIAL :: u16(0x8000)
 
 // A container's true child count, where `spelling` saturated.
@@ -74,7 +74,22 @@ Child_Count :: struct {
 
 SPELLING_DECODE :: u16(1)
 SPELLING_QUOTED :: u16(2)
+// In a text's spelling, beside `SPELLING_DECODE`, the text holds bytes a tolerance took, so its decode may be longer
+// than its span, as `text_room` says.
 SPELLING_LAX :: u16(4)
+
+// A rule of a format a read may let a text break, each with one fixed reading. A rule a format has no instance of is
+// never broken there, so one set serves every format.
+Tolerance :: enum u8 {
+	// Ill-formed UTF-8 in a string or key. Each maximal subpart of an ill-formed sequence reads as U+FFFD.
+	Invalid_Utf8,
+	// `NaN`, `Infinity` and either with a sign, in a format whose numbers have no such words, read as those IEEE values.
+	Non_Finite,
+	// A `\u` escape of a surrogate half that no other half pairs with. It reads as U+FFFD.
+	Lone_Surrogate,
+}
+
+Tolerances :: bit_set[Tolerance; u8]
 
 NUMBER_KIND :: u16(0xF) // in a number's spelling, the format's number kind, 0 for its plain decimal
 NUMBER_EXP :: u16(1 << 14) // in a number's spelling, the number has an exponent

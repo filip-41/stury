@@ -1,10 +1,13 @@
-"""Fails when an x86-64 object's procedures outside the V3 tier hold instructions an x86-64-v2 CPU lacks: VEX or EVEX, BMI1 and BMI2
-but `tzcnt`, LZCNT, PCLMULQDQ and MOVBE.
+"""Fails when an x86-64 object holds an instruction past x86-64-v2 where only a V2 CPU's code may run: VEX or EVEX, BMI1 and
+BMI2 but `tzcnt`, LZCNT, PCLMULQDQ and MOVBE.
 
-usage: tier_check.py OBJDUMP OBJECT
+usage: tier_check.py OBJDUMP OBJECT [--inlined]
 
-A procedure is in the V3 tier by its name's `_v3` suffix; every other one is held to x86-64-v2. The check also fails when no V3 procedure holds one of
-these instructions, since then the disassembly is not being read as expected.
+The V3 tier is the procedures `lib/base/kernel/tier_amd64.odin` declares for it, `TIER_ROOTS`, and the procedures only
+those call, which at -o:none include the kernels `scan_v3` does not inline. Every other procedure is held to x86-64-v2,
+so a callee that a V2 path also reaches fails even though a V3 procedure calls it too. The disassembly must hold a
+`scan_v3` and some root that reaches an instruction past x86-64-v2, so one not read as expected fails instead of passing
+empty. With `--inlined`, for an optimized build, every root must reach one.
 """
 
 import re
@@ -12,12 +15,31 @@ import subprocess
 import sys
 
 SYMBOL = re.compile(r"^[0-9a-f]+ <(.+)>:$")
-V3 = re.compile(r"(?:^|::)\w+_v3(?!\w)")
+# The procedures the kernel builds with the V3 tier's features. `scan_v3` has one copy per scan op.
+TIER_ROOTS = (
+    re.compile(r"kernel::scan_v3:"),
+    re.compile(r"kernel::\[tier_amd64\.odin\]::lookup_v3"),
+    re.compile(r"kernel::\[tier_amd64\.odin\]::clmul_prefix_xor"),
+)
+REQUIRED_ROOT = TIER_ROOTS[0]
 # AT&T mnemonics past x86-64-v2. `lzcnt` runs as `bsr` on a CPU without it and answers differently. `tzcnt` is not
 # here: LLVM emits it as `rep bsf` for a non-zero input on any CPU, where it runs as `bsf` with the same answer.
 BEYOND_V2 = re.compile(r"v\w+|(andn|bextr|blsi|blsmsk|blsr|bzhi|lzcnt|movbe|mulx|pdep|pext|rorx|sarx|shlx|shrx)[wlq]?|pclmul\w*")
 # A disassembly line: address, colon, then the mnemonic (raw bytes are not shown).
 INSTRUCTION = re.compile(r"^\s+[0-9a-f]+:\s+(\S+)")
+# A symbol an instruction names, with the offset into it dropped.
+REFERENCE = re.compile(r"<(.+?)(?:\+0x[0-9a-f]+)?>$")
+
+
+def reach(root: str, callees: dict[str, set[str]], tier: set[str]) -> set[str]:
+    """The procedures of `tier` that `root` calls, directly or not, and `root`."""
+    seen, todo = {root}, [root]
+    while todo:
+        for callee in callees.get(todo.pop(), ()):
+            if callee in tier and callee not in seen:
+                seen.add(callee)
+                todo.append(callee)
+    return seen
 
 
 def main() -> int:
@@ -25,26 +47,46 @@ def main() -> int:
     text = subprocess.run(
         [objdump, "-d", "--no-show-raw-insn", obj], check=True, capture_output=True, text=True
     ).stdout
-    v3, symbol = False, ""
-    bad: dict[str, set[str]] = {}
-    v3_beyond = 0
+    beyond: dict[str, set[str]] = {}
+    callers: dict[str, set[str]] = {}
+    callees: dict[str, set[str]] = {}
+    symbol = ""
     for line in text.splitlines():
         if m := SYMBOL.match(line):
             symbol = m.group(1)
-            v3 = V3.search(symbol) is not None
             continue
-        if not (m := INSTRUCTION.match(line)) or not BEYOND_V2.fullmatch(m.group(1)):
+        if not (m := INSTRUCTION.match(line)):
             continue
-        if v3:
-            v3_beyond += 1
-        else:
-            bad.setdefault(symbol, set()).add(m.group(1))
-    for symbol, ops in bad.items():
-        print(f"{obj}: {symbol} holds {', '.join(sorted(ops))}")
-    if v3_beyond == 0:
-        print(f"{obj}: no V3 procedure holds an instruction past x86-64-v2")
-        return 1
-    return 1 if bad else 0
+        if BEYOND_V2.fullmatch(m.group(1)):
+            beyond.setdefault(symbol, set()).add(m.group(1))
+        if (ref := REFERENCE.search(line)) and ref.group(1) != symbol:
+            callers.setdefault(ref.group(1), set()).add(symbol)
+            callees.setdefault(symbol, set()).add(ref.group(1))
+    roots = {s for s in beyond.keys() | callers.keys() | {symbol} if any(r.search(s) for r in TIER_ROOTS)}
+    tier = set(roots)
+    grew = True
+    while grew:
+        grew = False
+        for s in beyond.keys() - tier:
+            if callers.get(s) and callers[s] <= tier:
+                tier.add(s)
+                grew = True
+    failed = False
+    for s in sorted(beyond.keys() - tier):
+        print(f"{obj}: {s} holds {', '.join(sorted(beyond[s]))}")
+        failed = True
+    reaching = {s for s in roots if any(r in beyond for r in reach(s, callees, tier))}
+    if "--inlined" in sys.argv[3:]:
+        for s in sorted(roots - reaching):
+            print(f"{obj}: tier procedure {s} reaches no instruction past x86-64-v2")
+            failed = True
+    elif not reaching:
+        print(f"{obj}: no tier procedure reaches an instruction past x86-64-v2")
+        failed = True
+    if not any(REQUIRED_ROOT.search(s) for s in roots):
+        print(f"{obj}: no scan_v3 procedure in the disassembly")
+        failed = True
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

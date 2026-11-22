@@ -6,6 +6,7 @@ import "core:simd"
 import "core:testing"
 import "core:unicode/utf8"
 import k "stury:lib/base/kernel"
+import "stury:testkit"
 
 // Returns whether the kernel finds `src` valid UTF-8, a 64-byte block at a time, skipping ASCII blocks when
 // `skip_ascii` is set.
@@ -35,6 +36,7 @@ check_utf8 :: proc(t: ^testing.T, src: []u8, loc := #caller_location) {
 // ends and where the 128-byte text ends.
 @(test)
 utf8_every_pair :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	buf: [128]u8
 	for &b in buf {
 		b = 'a'
@@ -62,6 +64,7 @@ utf8_every_pair :: proc(t: ^testing.T) {
 // sequence ends a full block or a padded tail.
 @(test)
 utf8_sequence_at_end :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	buf: [192]u8
 	for n in 1 ..= len(buf) {
 		for lead in ([]u8{0xc2, 0xdf, 0xe0, 0xe1, 0xed, 0xef, 0xf0, 0xf3, 0xf4}) {
@@ -88,11 +91,12 @@ utf8_sequence_at_end :: proc(t: ^testing.T) {
 // Random text of valid characters of every UTF-8 size, with a random run of ASCII bytes, then 0 to 2 random bytes.
 @(test)
 utf8_random_text :: proc(t: ^testing.T) {
-	state := rand.create(6)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 6)
 	chars := []rune{'a', 'a', 'a', 0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xfffd, 0xffff, 0x10000, 0x10ffff}
 	buf: [64 * 6]u8
-	for _ in 0 ..< 20000 {
+	for _ in 0 ..< testkit.rounds(20000) {
 		n := 1 + rand.int_max(len(buf))
 		ascii_from, ascii_to := rand.int_max(n), rand.int_max(n)
 		for i := 0; i < n; {
@@ -112,13 +116,22 @@ utf8_random_text :: proc(t: ^testing.T) {
 }
 
 // Returns whether `src` holds no error, with a sequence open at its end allowed. It is clean when `src` plus one of
-// the shortest completions of a lead byte is valid UTF-8.
+// the shortest completions of a lead byte is valid UTF-8. A last byte that is a lead no byte completes, 0xC0, 0xC1 or
+// 0xF5 and up, reads as the lead of its length that some byte does.
 reference_clean :: proc(src: []u8) -> bool {
 	if utf8.valid_string(string(src)) {
 		return true
 	}
 	buf: [64 * 4 + 3]u8
 	copy(buf[:], src)
+	if n := len(src); n > 0 {
+		switch buf[n - 1] {
+		case 0xc0, 0xc1:
+			buf[n - 1] = 0xc2
+		case 0xf5 ..= 0xff:
+			buf[n - 1] = 0xf0
+		}
+	}
 	for second in ([]u8{0x80, 0x90, 0xa0}) {
 		for rest in 0 ..< 3 {
 			buf[len(src)] = second
@@ -137,11 +150,12 @@ reference_clean :: proc(src: []u8) -> bool {
 // the whole blocks against `reference_clean`.
 @(test, enable_target_feature = FEATURES)
 utf8_clean_at_block_end :: proc(t: ^testing.T) {
-	state := rand.create(9)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 9)
 	chars := []rune{'a', 0x80, 0x7ff, 0x800, 0xffff, 0x10000, 0x10ffff}
 	buf: [64 * 4 + 3]u8
-	for _ in 0 ..< 20000 {
+	for _ in 0 ..< testkit.rounds(20000) {
 		n := 64 * (1 + rand.int_max(4))
 		for i := 0; i < len(buf); {
 			bytes, size := utf8.encode_rune(rand.choice(chars))
@@ -183,6 +197,7 @@ window_utf8 :: proc(src: []u8) -> bool {
 // Every pair of bytes followed by two others, placed across a 16-byte window edge, against `core:unicode/utf8`.
 @(test)
 utf8_window_every_pair :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	buf: [48]u8
 	for &b in buf {
 		b = 'a'
@@ -209,6 +224,7 @@ utf8_window_every_pair :: proc(t: ^testing.T) {
 // bytes it makes continuations cross every register and block boundary, and ASCII blocks follow it.
 @(test)
 utf8_lead_every_position :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	buf: [300]u8
 	for at in 0 ..< len(buf) {
 		for lead in ([]u8{0xc2, 0xe1, 0xed, 0xf0, 0xf4}) {
@@ -243,6 +259,7 @@ utf8_after :: proc(prev, next: [64]u8) -> bool {
 // open: E2 at its end, then 82 41 or 82 AC.
 @(test)
 utf8_after_reads_open_sequence :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	prev, next: [64]u8
 	for i in 0 ..< 64 {
 		prev[i], next[i] = 'a', 'a'
@@ -251,4 +268,60 @@ utf8_after_reads_open_sequence :: proc(t: ^testing.T) {
 	testing.expect(t, !utf8_after(prev, next), "E2 82 41 read as UTF-8")
 	next[1] = 0xac
 	testing.expect(t, utf8_after(prev, next), "E2 82 AC read as an error")
+}
+
+// Whether `utf8_stop` of the register holding byte `last` finds `buf[:last + 1]` clean, as a text of one block.
+@(enable_target_feature = FEATURES)
+stop_clean :: proc(buf: ^[64]u8, last: int) -> bool {
+	s: k.Utf8_State
+	b := k.load(raw_data(buf[:]))
+	return k.utf8_stop(T, b, k.is_ascii(b), &s, false, u64(last))
+}
+
+// `utf8_stop` judges the bytes up to its stop and none past it, though they share the register: random text with a
+// stop at each place, then bytes that are no UTF-8, or begin or continue a sequence, right after it.
+@(test)
+utf8_stop_ignores_bytes_past_the_stop :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 23)
+	chars := []rune{'a', 0x80, 0x7ff, 0x800, 0xffff, 0x10000, 0x10ffff}
+	junk := []u8{0xff, 0x80, 0xc0, 0xc3, 0xe2, 0xf5, 0xed, 0xa0, 0xf4}
+	buf: [64]u8
+	for _ in 0 ..< testkit.rounds(4000) {
+		for i := 0; i < len(buf); {
+			bytes, size := utf8.encode_rune(rand.choice(chars))
+			size = min(size, len(buf) - i)
+			copy(buf[i:], bytes[:size])
+			i += size
+		}
+		last := rand.int_max(len(buf))
+		for &b in buf[last + 1:] {
+			b = rand.choice(junk)
+		}
+		// A fault in the stop byte itself shows only once a byte follows it, so the damage lies before it.
+		for _ in 0 ..< rand.int_max(2) {
+			if last > 0 {
+				buf[rand.int_max(last)] = u8(rand.int_max(256))
+			}
+		}
+		want := reference_clean(buf[:last + 1])
+		testing.expectf(t, stop_clean(&buf, last) == want, "last %d: % x, want %v", last, buf, want)
+	}
+}
+
+// A valid string followed in its register by bytes that are no UTF-8, as in a JSONC comment after a string.
+@(test)
+utf8_stop_after_a_quote :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for last in 0 ..< 63 {
+		for tail in ([]string{"\xff", "\xc3", "\x80\x80", "\xe2\x82", "\xed\xa0\x80", "\xc3\xa9\xff"}) {
+			buf: [64]u8
+			for &b in buf {
+				b = 'a'
+			}
+			copy(buf[last + 1:], transmute([]u8)tail)
+			testing.expectf(t, stop_clean(&buf, last), "last %d, tail % x", last, transmute([]u8)tail)
+		}
+	}
 }

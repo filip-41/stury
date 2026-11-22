@@ -2,6 +2,7 @@ package json
 
 import "base:intrinsics"
 import "stury:lib/base/spell"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // The end and spelling of the number at `p`, which starts with `-` or a digit, or the fault and the byte it is at. The
@@ -64,8 +65,8 @@ number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool, $S: S
 
 // `number` as the walk of hook `H` reads it: spelled unless `H` reads no hooks or no number's spelling.
 @(private)
-hook_number :: #force_inline proc "contextless" (p, end: [^]u8, $H: typeid, $S: Spec) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
-	return number(p, end, H != tape.No_Hooks && !intrinsics.type_has_field(H, tape.UNSPELLED_FIELD), S)
+hook_number :: #force_inline proc "contextless" (p, end: [^]u8, $H: typeid, $C: hook.Capabilities, $S: Spec) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
+	return number(p, end, H != hook.No_Hooks && .Unspelled not_in C, S)
 }
 
 // The spelling of the JSON number `src[lo:hi]`.

@@ -5,6 +5,7 @@ import "core:math/rand"
 import "core:mem/virtual"
 import "core:testing"
 import k "stury:lib/base/kernel"
+import "stury:testkit"
 
 // The table sorting bytes into `sets`, and each set's bits.
 nibble_table :: proc(sets: []string) -> (t: k.Nibble_Table, bits: [8]u8) {
@@ -45,8 +46,9 @@ reference :: proc(src: []u8, c: u8) -> (m: u64) {
 
 @(test, enable_target_feature = FEATURES)
 pack_every_byte_and_lane :: proc(t: ^testing.T) {
-	state := rand.create(1)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 1)
 	buf: [64]u8
 	for v in 0 ..< 256 {
 		c := u8(v)
@@ -128,12 +130,13 @@ check_sets :: proc(t: ^testing.T, sets: []string) {
 
 @(test)
 classes_of_every_byte :: proc(t: ^testing.T) {
-	state := rand.create(3)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 3)
 	check_sets(t, {"\"", "\\", ",:[]{}", " \t\n\r"})
 	check_sets(t, {",", "\"", "\n\r"})
 	// 500 random families with up to eight pairs of a set and a high nibble, bytes above 0x7f, and bytes in two sets.
-	for _ in 0 ..< 500 {
+	for _ in 0 ..< testkit.rounds(500) {
 		bytes: [8][16]u8
 		lens: [8]int
 		nsets := 1 + rand.int_max(8)
@@ -174,6 +177,7 @@ reference_escaped :: proc(src: []u8, quotes: []u64) {
 // Checks `escaped` on a run of 1 to 128 backslashes ending at each byte of the third block, then a quote.
 @(test, enable_target_feature = FEATURES)
 escaped_across_blocks :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	buf: [64 * 4]u8
 	for run in 1 ..= 128 {
 		for end in 0 ..< 64 {
@@ -200,6 +204,7 @@ escaped_across_blocks :: proc(t: ^testing.T) {
 
 @(test, enable_target_feature = FEATURES)
 below_every_byte_and_lane :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	buf: [64]u8
 	for v in 0 ..< 256 {
 		c := u8(v)
@@ -227,8 +232,9 @@ below_every_byte_and_lane :: proc(t: ^testing.T) {
 // each lane, and `first_lane16` on each lane under random lanes above it.
 @(test, enable_target_feature = FEATURES)
 first_lane16_every_lane :: proc(t: ^testing.T) {
-	state := rand.create(8)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 8)
 	testing.expect_value(t, k.first_lane16(#simd[16]u8{}), 16)
 	testing.expect(t, !k.any_lane16(#simd[16]u8{}))
 	for lane in 0 ..< 16 {
@@ -239,7 +245,7 @@ first_lane16_every_lane :: proc(t: ^testing.T) {
 		testing.expectf(t, !k.is_ascii16(transmute(#simd[16]u8)single), "lane %d", lane)
 		single[lane] = 0x7f
 		testing.expectf(t, k.is_ascii16(transmute(#simd[16]u8)single), "lane %d", lane)
-		for round in 0 ..< 64 {
+		for round in 0 ..< testkit.rounds(64) {
 			m: [16]u8
 			m[lane] = 0xff
 			for above in lane + 1 ..< 16 {
@@ -257,8 +263,9 @@ first_lane16_every_lane :: proc(t: ^testing.T) {
 // their count, and stores nothing past 64 bytes from its start.
 @(test, enable_target_feature = FEATURES)
 compress_keeps_lanes_in_order :: proc(t: ^testing.T) {
-	state := rand.create(9)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 9)
 	src: [64]u8
 	for lane in 0 ..< 64 {
 		src[lane] = u8(lane + 1)
@@ -266,7 +273,7 @@ compress_keeps_lanes_in_order :: proc(t: ^testing.T) {
 	masks: [dynamic]u64
 	defer delete(masks)
 	append(&masks, 0, ~u64(0), 0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555, 1, 1 << 63, 0xFF, 0xFF00_0000_0000_0000)
-	for _ in 0 ..< 4096 {
+	for _ in 0 ..< testkit.rounds(4096) {
 		append(&masks, rand.uint64())
 	}
 	for keep in masks {
@@ -296,12 +303,13 @@ compress_keeps_lanes_in_order :: proc(t: ^testing.T) {
 // quote.
 @(test)
 index_byte_every_cut :: proc(t: ^testing.T) {
-	state := rand.create(7)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 7)
 	buf: [200]u8
 	for c in ([3]u8{'\n', 0x1E, '"'}) {
 		near := [3]u8{c + 1, c - 1, c ~ 0x80}
-		for round in 0 ..< 40 {
+		for round in 0 ..< testkit.rounds(40) {
 			// Early rounds are dense and later ones sparse, so the first hit falls in every block or in none.
 			for &b in buf {
 				b = c if rand.int_max(2 + round * 4) == 0 else near[rand.int_max(3)]
@@ -330,11 +338,12 @@ index_byte_every_cut :: proc(t: ^testing.T) {
 // escapes, brackets and separators, from both starts and both escape carries.
 @(test)
 quote_scan_every_stretch :: proc(t: ^testing.T) {
-	state := rand.create(9)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 9)
 	alphabet := "\"\\[]{},\nab"
 	buf: [160]u8
-	for round in 0 ..< 24 {
+	for round in 0 ..< testkit.rounds(24) {
 		for &b in buf {
 			b = alphabet[rand.int_max(len(alphabet) if round % 2 == 0 else 4)]
 		}
@@ -379,8 +388,9 @@ quote_scan_every_stretch :: proc(t: ^testing.T) {
 // bytes, at lengths around the block and round sizes.
 @(test)
 count_across_counter_rounds :: proc(t: ^testing.T) {
-	state := rand.create(10)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 10)
 	buf := make([]u8, 64 * 255 * 2 + 70)
 	defer delete(buf)
 	for fill in ([3]u8{'\n', 0x80, 'a'}) {
@@ -411,6 +421,7 @@ count_across_counter_rounds :: proc(t: ^testing.T) {
 // through it, at lengths that end in each part of the loop.
 @(test)
 skip_ws_stops_at_other_byte :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	ws := [4]u8{' ', '\n', '\t', '\r'}
 	buf: [200]u8
 	for n in ([]int{0, 3, 4, 5, 64, 67, 68, 69, 131, 132, 200}) {
@@ -433,6 +444,7 @@ skip_ws_stops_at_other_byte :: proc(t: ^testing.T) {
 // Checks `skip_ws` with every byte value stopping a run of white space, in and past the first block.
 @(test)
 skip_ws_stops_at_every_byte :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	ws := [4]u8{' ', '\n', '\t', '\r'}
 	buf: [140]u8
 	for other in 0 ..< 256 {
@@ -458,11 +470,12 @@ skip_ws_stops_at_every_byte :: proc(t: ^testing.T) {
 // odd run of escapes.
 @(test)
 quote_cut_flat_matches_bytewise :: proc(t: ^testing.T) {
-	state := rand.create(11)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 11)
 	alphabet := "\"\\[]{},\nab"
 	buf: [200]u8
-	for round in 0 ..< 40 {
+	for round in 0 ..< testkit.rounds(40) {
 		for &b in buf {
 			b = alphabet[rand.int_max(len(alphabet) if round % 2 == 0 else 7)]
 		}
@@ -494,11 +507,12 @@ quote_cut_flat_matches_bytewise :: proc(t: ^testing.T) {
 // Checks `quote_cut` with `nest` from a level at or above `want` against a scan a byte at a time.
 @(test)
 quote_cut_from_above_want :: proc(t: ^testing.T) {
-	state := rand.create(13)
-	context.random_generator = rand.default_random_generator(&state)
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 13)
 	alphabet := "\"\\[]{},\nab[[{"
 	buf: [260]u8
-	for _ in 0 ..< 60 {
+	for _ in 0 ..< testkit.rounds(60) {
 		for &b in buf {
 			b = alphabet[rand.int_max(len(alphabet))]
 		}
@@ -541,6 +555,7 @@ quote_cut_from_above_want :: proc(t: ^testing.T) {
 // end shows.
 @(test)
 scans_ignore_bytes_around :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	buf: [160]u8
 	for c in ([2]u8{0, 0x80}) {
 		for n in 0 ..< 140 {
@@ -571,6 +586,7 @@ scans_ignore_bytes_around :: proc(t: ^testing.T) {
 // a page end, where the tail loads read past the text. Every other text is whole UTF-8 sequences.
 @(test)
 scans_stop_at_unmapped_memory :: proc(t: ^testing.T) {
+	testkit.deadline(t)
 	SIZE :: 64 * 1024
 	region, err := virtual.reserve(2 * SIZE)
 	if !testing.expect_value(t, err, nil) {
@@ -580,8 +596,8 @@ scans_stop_at_unmapped_memory :: proc(t: ^testing.T) {
 	if !testing.expect_value(t, virtual.commit(raw_data(region), SIZE), nil) {
 		return
 	}
-	state := rand.create(17)
-	context.random_generator = rand.default_random_generator(&state)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 17)
 	pieces := [?]string{"\"", "\\", "[", "]", "{", "}", ",", " ", "\xc3\xa9", "\xe2\x82\xac", "a", "b"}
 	for n in 0 ..< 280 {
 		edge := region[SIZE - n:SIZE]
@@ -609,5 +625,48 @@ scans_stop_at_unmapped_memory :: proc(t: ^testing.T) {
 		}
 		p, q := raw_data(edge), raw_data(mid)
 		testing.expectf(t, intrinsics.ptr_sub(k.skip_ws(p, p[n:]), p) == intrinsics.ptr_sub(k.skip_ws(q, q[n:]), q), "skip_ws %d", n)
+	}
+}
+
+// `head16` and `load_padded` read past a text's end wherever the load stays in its page, which includes a text that
+// starts at the page's first byte, and wherever it does not they copy.
+@(test)
+reads_past_the_end_stay_in_the_page :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	PAGE :: 4096
+	region, err := virtual.reserve(2 * PAGE)
+	if !testing.expect_value(t, err, nil) {
+		return
+	}
+	defer virtual.release(raw_data(region), 2 * PAGE)
+	if !testing.expect_value(t, virtual.commit(raw_data(region), 2 * PAGE), nil) {
+		return
+	}
+	for &b, i in region {
+		b = u8(i % 251 + 1)
+	}
+	sanitized := ODIN_SANITIZER_FLAGS & {.Address, .Thread} != {}
+	// A load of 16 bytes at `at` may read past the text where it ends in the page.
+	for at in ([]int{0, 1, 2, PAGE - 17, PAGE - 16, PAGE - 15, PAGE - 1, PAGE, PAGE + 1}) {
+		_, _, ok := k.head16(raw_data(region)[at:], 5)
+		want := !sanitized && at % PAGE <= PAGE - 16
+		testing.expectf(t, ok == want, "head16 at page offset %d: %v, want %v", at % PAGE, ok, want)
+	}
+	_, _, ok := k.head16(nil, 5)
+	testing.expect(t, !ok, "head16 of nil")
+	// The block is the text's bytes then zeros, wherever the text lies against the page.
+	for at in ([]int{0, 1, PAGE - 64, PAGE - 63, PAGE - 40, PAGE, PAGE + 1}) {
+		for n in 1 ..< 64 {
+			text := region[at:at + n]
+			b := k.load_padded(text, 0)
+			got := transmute([64]u8)b
+			for i in 0 ..< 64 {
+				want := text[i] if i < n else 0
+				if got[i] != want {
+					testing.expectf(t, false, "load_padded of %d bytes at %d: byte %d is %d, want %d", n, at, i, got[i], want)
+					break
+				}
+			}
+		}
 	}
 }

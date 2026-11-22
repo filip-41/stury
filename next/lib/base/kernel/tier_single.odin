@@ -3,6 +3,7 @@
 #+vet !unused-imports
 package kernel
 
+import "base:intrinsics"
 import "core:simd"
 
 // The one tier of a target with no x86 tiers: NEON on arm64, LLVM's lowering elsewhere.
@@ -23,10 +24,21 @@ tier :: proc "contextless" () -> Tier {
 	return .Base
 }
 
-// Lane j is `t[i[j]]`, for indices below 16.
+// Lane j is `t[i[j]]`, for indices below 16. WebAssembly without `simd128` has no variable shuffle to lower
+// `runtime_swizzle` to, so its lanes are read one at a time.
 @(private)
 lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
-	return simd.runtime_swizzle(t, i)
+	when ODIN_ARCH == .wasm32 && !intrinsics.has_target_feature("simd128") {
+		table := transmute([16]u8)t
+		index := transmute([16]u8)i
+		r: [16]u8
+		#unroll for j in 0 ..< 16 {
+			r[j] = table[index[j] & 15]
+		}
+		return transmute(V)r
+	} else {
+		return simd.runtime_swizzle(t, i)
+	}
 }
 
 @(private)

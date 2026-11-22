@@ -5,7 +5,7 @@ import "stury:lib/base/spell"
 
 // A `Budget` limit that ran out.
 Exceeded :: struct {
-	at:   u64, // 0 for memory and steps, which name no byte
+	at:   u64, // 0 for memory, which names no byte
 	kind: Budget_Kind,
 }
 
@@ -35,4 +35,5 @@ Error :: union {
 	Fault,
 	runtime.Allocator_Error,
 	Exceeded,
+	Piece_Gap,
 }
