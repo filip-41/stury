@@ -72,7 +72,7 @@ format_finds_a_close_end :: proc(t: ^testing.T) {
 	}
 }
 
-// The node readers a binding takes: a key's span and escape, a number's form and exact value, and whether a text is
+// The node readers of a binding: a key's span and escape, a number's form and exact value, and whether a text is
 // ASCII.
 @(test)
 format_node_readers :: proc(t: ^testing.T) {

@@ -7,8 +7,8 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// The bytes a memory budget holds count each block it gave, a resize by its change and a free by its size, and refuse a
-// block past the limit, which is a block that takes the budget over by one byte.
+// A memory budget counts each block it allocates, a resize by its change and a free by its size, and refuses a block
+// that takes it one byte past the limit.
 @(test)
 memory_budget_counts_what_it_holds :: proc(t: ^testing.T) {
 	testkit.deadline(t)

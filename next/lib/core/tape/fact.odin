@@ -13,8 +13,8 @@ Fact :: struct {
 	spelling: u16, // a comment's: opening marker length in the low byte, closing in the high byte
 }
 
-// Data that only describes a value and means nothing on its own is considered a fact. The kinds with a span come
-// first, in the order of their roles.
+// The kinds of fact, which describe a value and mean nothing on their own. The kinds with a span come first, in the
+// order of their `Role`s.
 Fact_Kind :: enum u8 {
 	Comment,
 	Comment_Inline,

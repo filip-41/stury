@@ -3,7 +3,7 @@ package tape
 import "base:runtime"
 import "stury:lib/base/spell"
 
-// A format is one text format stury reads, with one `Format` per spec. Its facts say which fact kinds it holds beyond
+// A format is a text format stury reads, with a `Format` per spec. Its facts say which fact kinds it holds beyond
 // plain values, its caps what else it can do, and its readers turn a node into an Odin value.
 
 // A format capability other than a fact it holds.
@@ -32,7 +32,7 @@ Options :: struct {
 	runner:   ^Runner,
 }
 
-// One spec of a format (e.g. JSON, JSONC and JSON5 are three), in rodata, holding what a document of it needs to be
+// A spec of a format (e.g. JSON, JSONC and JSON5 are three), in rodata, holding what a document of it needs to be
 // read. `Reads` holds the reads of its texts.
 Format :: struct {
 	name:  string,

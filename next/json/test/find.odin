@@ -15,7 +15,7 @@ Find_Case :: struct {
 	text:    string, // the answer's span for `.Found` and `.Wrong_Kind`
 }
 
-// What `find` answers with and without `stop_early`, which changes no answer of a text that parses.
+// Checks that `find` gives the case's outcome and span with and without `stop_early`.
 expect_find :: proc(t: ^testing.T, c: Find_Case, spec := json.Spec.Json, loc := #caller_location) {
 	for stop in ([]bool{false, true}) {
 		f, err := json.find(transmute([]u8)c.src, c.path, spec, {dups = c.dups, stop_early = stop})
@@ -88,7 +88,7 @@ find_takes_a_repeated_key_by_policy :: proc(t: ^testing.T) {
 	}
 }
 
-// Every byte is judged, a skipped value's too, unless `stop_early` ends the read at a known answer.
+// Every byte is checked for validity, a skipped value's too, unless `stop_early` ends the read at a known answer.
 @(test)
 find_judges_the_text :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -261,8 +261,8 @@ find_takes_limits_and_slices :: proc(t: ^testing.T) {
 	expect_find(t, {"[1, 2, 3,]", {S(1, -1)}, .Default, .Found, "2"}, .Json5)
 }
 
-// What a ring takes is bounded by the elements its array has, whatever the text's length or the index's reach, and
-// what a find allocates is given back at the size it was taken.
+// The memory a ring takes is bounded by the number of elements its array has, whatever the text's length or the
+// index's reach, and a find frees each block at the size it allocated.
 @(test)
 find_rings_take_memory_by_elements :: proc(t: ^testing.T) {
 	testkit.deadline(t)

@@ -82,7 +82,7 @@ many_tasks_share_the_pool :: proc(t: ^testing.T) {
 	testing.expect(t, count <= 400 * 3 * (pool.runner.threads + 1) / 2)
 }
 
-// Every call waits for a second one to start, so a pool that hands the task to no helper leaves it waiting.
+// Every call waits for a second one to start, so a pool that gives the task to no helper leaves it waiting.
 meet :: proc(arg: rawptr) {
 	sync.atomic_add((^int)(arg), 1)
 	began := time.tick_now()
@@ -102,14 +102,14 @@ helpers_run_the_task_beside_the_caller :: proc(t: ^testing.T) {
 	testing.expect(t, started >= 2)
 }
 
-// A nil task is handed to no helper, which keeps every helper for the next call and for `pool_destroy`.
+// A nil task is given to no helper, so every helper stays for the next call and for `pool_destroy`.
 @(test)
 nil_task_runs_nowhere :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	pool: host.Pool
 	host.pool_init(&pool, 3)
 	defer host.pool_destroy(&pool)
-	// Every width the pool learns names a task, so nil is a task it has not met.
+	// These four tasks fill the pool's four-entry width table, so nil has no width entry yet.
 	count: int
 	for task in ([]proc(arg: rawptr){bump, bump_twice, meet, proc(arg: rawptr) {}}) {
 		run(&pool.runner, pool.runner.threads, task, &count)
@@ -122,7 +122,7 @@ nil_task_runs_nowhere :: proc(t: ^testing.T) {
 	testing.expect(t, started >= 2)
 }
 
-// A call ended before its helpers woke: none runs the task after `finish`, and a negative count hands out none.
+// A call ended before its helpers woke: none runs the task after `finish`, and a negative count gives out none.
 @(test)
 no_call_runs_after_finish :: proc(t: ^testing.T) {
 	testkit.deadline(t)

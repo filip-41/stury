@@ -6,46 +6,48 @@ import "core:slice"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// A part of one text's build, which a builder of its own makes from a seam: a place past a comma inside containers
-// opened before it. Builds of a text's parts run at once into one room for nodes and one for facts, each from the
-// place the one build stores its first node and fact at, and join into the document one build makes.
+// A part of a text's build, made by a builder of its own from a seam: a position past a comma inside containers opened
+// before it. The builds of a text's segments run concurrently into a shared room for nodes and one for facts, each
+// from the node and fact index where a single build would store its first node and fact, and are joined into the
+// document a single build would make.
 //
-// A segment that starts inside containers has a node past every segment's nodes for each, outermost first, where the
-// builder writes the subtree size and child count of each that closes in the part, and one node for the value completed
-// before the seam, which an inline comment at the part's start belongs to.
+// A segment that starts inside containers has a scratch node for each, outermost first, placed past every segment's
+// nodes. The builder writes into it the subtree size and child count of each container that closes in the segment. A
+// further node represents the value completed before the seam, which an inline comment at the segment's start belongs
+// to.
 Segment :: struct {
 	b:          Builder,
-	allocator:  runtime.Allocator, // what its counts were allocated with, as its builder's refuses every block
-	regs:       hook.Regs, // the builder's registers where its walk ended
-	depth:      int, // the containers open at its seam
-	first:      int, // the node its walk stores first
-	scratch:    int, // the node of the outermost container open at its seam
-	containers: int, // its containers of its own, counted for `Budget.steps`
-	// Set by the join: its first node and fact in the document, the node of the value before its seam and the nodes
-	// of the containers open at its seam, outermost first.
+	allocator:  runtime.Allocator, // allocator of its `counts` (its builder's own allocator refuses every block)
+	regs:       hook.Regs, // the builder's registers at the end of its walk
+	depth:      int, // number of containers open at its seam
+	first:      int, // index of the first node its walk stores
+	scratch:    int, // index of the scratch node of the outermost container open at its seam
+	containers: int, // containers opened in the segment itself, counted for `Budget.steps`
+	// Set by the join: the segment's first node and first fact in the document, the node of the value before its seam
+	// and the nodes of the containers open at its seam, outermost first.
 	at, fact:   int,
 	before:     tape.Node_Index,
 	seam:       []tape.Node_Index,
 }
 
-// The node in a segment's room that stands for the value completed before its seam.
+// The index in a segment's room of the node representing the value completed before its seam.
 @(private)
 segment_before :: #force_inline proc "contextless" (s: ^Segment) -> int {
 	return s.scratch + s.depth
 }
 
-// A segment storing up to `nodes` nodes in `room` from node `first` and its facts in `facts`, with `frames` for its
-// open stack, from a seam inside containers of `kinds`, outermost first, whose nodes it keeps from node `scratch` on
-// and whose nodes in the document the join gives `seam`. With no kinds it starts at the text's start, as a builder
-// does. Its builder is refused any more memory, so that its walk, which may run on another thread, calls no
-// allocator. A refused allocation leaves `b.err` set.
+// Returns a segment that stores up to `nodes` nodes in `room` from index `first`, its facts in `facts` and its open
+// stack in `frames`. It starts at a seam inside containers of `kinds`, outermost first, whose scratch nodes it keeps
+// from index `scratch` on, and the join writes the containers' document nodes into `seam`. With no kinds it starts at
+// the text's start, as a builder does. Its builder is refused any more memory, so that its walk, which may run on
+// another thread, calls no allocator. A refused allocation for `counts` leaves `b.err` set.
 segment_start :: proc(src: []u8, format: ^tape.Format, room: []tape.Node, first, nodes, scratch: int, kinds: []tape.Kind, facts: []tape.Fact, frames: []u64, seam: []tape.Node_Index, allocator: runtime.Allocator) -> (s: Segment) {
 	s.depth, s.first, s.scratch, s.seam, s.allocator = len(kinds), first, scratch, seam, allocator
 	b := &s.b
 	b.doc = {src = src, format = format, nodes = room, facts = facts[:0], allocator = {refuse_blocks, nil}}
 	b.stack, b.facts, b.borrowed, b.closed, b.ctx, b.most = frames, facts, true, tape.NO_NODE, context, max(int)
 	b.end = u64(uintptr(raw_data(room))) + u64((first + nodes) * size_of(tape.Node))
-	// A container with `MAX_CHILDREN` children in the part has a node of the part for each.
+	// At most `nodes / MAX_CHILDREN` containers have `MAX_CHILDREN` children in the segment, and each gets one entry.
 	b.counts.allocator = allocator
 	if wide := nodes / int(tape.MAX_CHILDREN); wide > 0 {
 		if b.err = reserve(&b.counts, wide); b.err == nil && cap(b.counts) < wide {
@@ -63,8 +65,8 @@ segment_start :: proc(src: []u8, format: ^tape.Format, room: []tape.Node, first,
 		room[scratch + i] = {kind = k}
 	}
 	before := segment_before(&s)
-	// An inline comment before the part's first node belongs to the value before the seam, as `builder_fact` finds it
-	// closed just before node `first`.
+	// An inline comment before the segment's first node belongs to the value before the seam. `n` and `b.closed` make
+	// `builder_fact` find that value closed just before node `first`.
 	room[before] = {n = u32(first) - u32(before)}
 	b.closed = tape.Node_Index(before)
 	b.stack[0] = u64(tape.NO_NODE) << 32
@@ -80,7 +82,7 @@ segment_nodes :: proc "contextless" (s: ^Segment) -> []tape.Node {
 	return s.b.doc.nodes[s.first:builder_cursor(&s.b, s.regs)]
 }
 
-// Frees what a segment holds but its rooms.
+// Frees everything a segment holds except its rooms.
 segment_free :: proc(s: ^Segment) {
 	delete(s.b.counts)
 	s.b = {}
@@ -98,12 +100,12 @@ Open_Across :: struct {
 	count: u64,
 }
 
-// The document of a text whose segments `segs`, in text order, each walked from its seam to the next into `room` and
-// `facts`, the last to the root value's end at `root_close`. A segment that stored fewer nodes or facts than the one
-// before it planned for moves down to follow it. Then one pass over the containers open at each seam gives those that
-// cross it their sizes and counts, and the threads of `runner` give each fact its node. False when a segment does not
-// start inside the containers the one before it leaves open, which a read of the text in one walk would have found.
-// The document holds the rooms once joined, else they and the segments are left to the caller.
+// Joins the segments `segs`, in text order, into a document. Each was walked from its seam to the next into `room` and
+// `facts`, the last to the root value's end at `root_close`. A segment that stored fewer nodes or facts than planned
+// moves down to follow the one before it. A pass over the containers open at each seam then gives those that cross it
+// their sizes and counts, and the threads of `runner` give each fact its node. `joined` is false when a segment does
+// not start inside the containers the one before it leaves open, which a read of the text in one walk would have
+// found. When joined the document holds the rooms, else the rooms and the segments are left to the caller.
 segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, root_close: u64, runner: ^tape.Runner, allocator: runtime.Allocator) -> (doc: tape.Document, joined: bool, err: runtime.Allocator_Error) {
 	at, fact := 0, 0
 	for &s in segs {
@@ -154,8 +156,8 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 		if s.b.closed != tape.NO_NODE && (s.depth == 0 || int(s.b.closed) != segment_before(&s)) {
 			closed = segment_place(&s, s.b.closed)
 		}
-		// The containers the segment closes, innermost first, of which a scratch node holds where each closed, as an
-		// offset from the scratch node that wraps below it.
+		// The containers the segment closes, innermost first. The scratch node of each holds in `n` where it closed, as
+		// an offset from that scratch node.
 		for i := s.depth - 1; i >= 0 && nodes[s.scratch + i].n != 0; i -= 1 {
 			scratch := nodes[s.scratch + i]
 			count := u64(scratch.spelling)
@@ -178,7 +180,7 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 			}
 			pop(&open)
 		}
-		// The levels open at its end: the outer ones it left open, which gained its children, then its own.
+		// The levels open at the segment's end: the outer ones it left open, which gained its children, then its own.
 		levels := int(s.regs.c)
 		if levels < len(open) {
 			return {}, false, nil
@@ -213,9 +215,9 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 	} else {
 		delete(counts)
 	}
-	// The document keeps the room whole, which `destroy` frees as one block from its start, unless the parts stored
-	// far fewer nodes than planned. The room's resize then moves its nodes to an exact block when the allocator cannot
-	// shrink one in place, so it fails only when that block is refused too.
+	// The document keeps the room whole, since `destroy` frees it as one block from its start, unless the unused part
+	// exceeds a quarter of `total`. Then the room is resized to `total` nodes, which moves them to an exact block when
+	// the allocator cannot shrink in place. A failed resize leaves the room whole.
 	doc.nodes = room[:total]
 	if len(room) - total > total / 4 {
 		if raw, rerr := runtime.non_zero_mem_resize(raw_data(room), len(room) * size_of(tape.Node), total * size_of(tape.Node), align_of(tape.Node), allocator); rerr == nil {

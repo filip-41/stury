@@ -3,8 +3,8 @@ package json
 import "base:runtime"
 import "stury:lib/core/tape"
 
-// The services of the JSON formats past their readers of nodes, which `json.reads` hands a caller picking the format
-// at run time, and where a container's close lies.
+// The services of the JSON formats beyond the node readers: the reads that `json.reads` returns to a caller picking the
+// format at run time, and where a container closes.
 
 // The spec of a JSON format handle.
 @(private)
@@ -32,8 +32,8 @@ scan_of :: proc(f: ^tape.Format, src: []u8, demand: ^tape.Demand, read: tape.Rea
 	return scan(src, demand, spec_of(f), read, opts, allocator)
 }
 
-// The byte just past the close of the whole container node `at` of `doc`: past the closes of the containers its last
-// descendant ends inside, and the white space, commas and comments before each, none of which holds a node. False for
+// The offset just past the close of container node `at` of `doc`, counting the closes of the containers its last
+// descendant ends inside, with the white space, commas and comments before each, none of which holds a node. False for
 // a container other than the root of a `.Held` document, which holds no byte between its nodes.
 @(private)
 close_end :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u64, bool) #no_bounds_check {
@@ -107,8 +107,8 @@ line_comment_end :: proc "contextless" (src: []u8, p: u64, json5: bool) -> u64 #
 	return u64(len(src))
 }
 
-// The bytes that hold the decode of text node `t`: its span, as an escape decodes to no more bytes than it spells,
-// or three times it for a `SPELLING_LAX` node, as a tolerated byte reads as U+FFFD.
+// The size in bytes of a buffer that holds the decoded text of node `t`: its span, since an escape decodes to no more
+// bytes than it spells, or three times the span for a `SPELLING_LAX` node, since a tolerated byte reads as U+FFFD.
 @(private)
 text_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
 	return int(t.n) * (3 if t.spelling & tape.SPELLING_LAX != 0 else 1)

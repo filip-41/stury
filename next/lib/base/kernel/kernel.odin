@@ -3,9 +3,9 @@ package kernel
 import "base:intrinsics"
 import "core:simd"
 
-// Kernels are the format-neutral SIMD pieces every format's walk and bulk loops build on: 64-byte blocks, their lane
-// masks packed to `u64`, and scans over whole texts. Walks use the 16-byte operations on every target; on x86 only the bulk
-// loops, string spans and whole-text scans, pick a wider tier.
+// Format-neutral SIMD operations for every format's walk and bulk loops: 64-byte blocks, their lane masks packed to
+// `u64`, and scans over whole texts. Walks use the 16-byte operations on every target. On x86 only the bulk loops
+// (string spans and whole-text scans) pick a wider tier.
 
 // 64 bytes, or the 64 lane masks (0x00 or 0xFF) made from them. An array of 16-byte vectors, so a block crosses a call
 // between procedures of different tiers in the same registers.

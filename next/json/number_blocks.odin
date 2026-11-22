@@ -10,7 +10,7 @@ import "stury:lib/core/tape"
 FLOOR_LEVELS :: 8
 
 // The state for arrays of arrays of numbers, at the close bracket after a number where `,[` follows. It judges 64-byte
-// blocks with masks while each holds only digits, `-`, `.`, `,`, `[` and `]` and a comma, and gives the tokens of each
+// blocks with masks while each holds only digits, `-`, `.`, `,`, `[` and `]`, and gives the tokens of each
 // judged block. At the first block it cannot judge, the walk goes on past the last `,`, `[` or `]` judged, in the state
 // that byte leaves it in, or from `p`, so the states read every byte the masks did not judge. Only a hook with
 // `.Number_Blocks` enters it, and a `Stop` ends the walk at its token. It answers no `Grow`, as a block is given only
@@ -58,7 +58,7 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind
 		after_dot := after(dot, pp)
 		// The first digit of each integer part that is a 0.
 		lead_zero := (dg & ~after_num | after_minus) & zero
-		// One past each fraction's digits. `after_dot` lands on the fraction's first digit, so the sum carries
+		// One past each fraction's digits. `after_dot` marks the fraction's first digit, so the sum carries
 		// through the fraction's run of digits.
 		part, c1 := intrinsics.overflow_add(dg, after_dot)
 		sum, c2 := intrinsics.overflow_add(part, frac_carry)
@@ -131,7 +131,7 @@ Block_Tokens :: struct {
 //
 // The number an end closes starts at `num`, one past the `[` or `,` before it, which the tokens pass as they give it, and
 // holds its `.` among `dots`, the block's `.`s at or after the numbers given, so no number reads either back from a mask.
-// `dot_at` is the one `.` no token of this block passes, the one of a number whose `[` or `,` is in the block before.
+// `dot_at` is the `.` no token of this block passes, that of a number whose `[` or `,` is in the block before.
 @(private = "file")
 block_tokens :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, t: Block_Tokens, start, dot_at: [^]u8) -> [^]u8 #no_bounds_check {
 	num, dot, dots := start, dot_at, t.dots

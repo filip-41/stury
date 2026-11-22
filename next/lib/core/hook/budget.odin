@@ -3,7 +3,7 @@ package hook
 import "base:runtime"
 import "stury:lib/core/tape"
 
-// What a read holds of `Budget.memory`: the blocks it took from `backing` through `memory_budget`, which refuses a
+// The blocks a read holds against `Budget.memory`, taken from `backing` through `memory_budget`, which refuses a
 // block past `limit`. A block freed with no size is counted as still held.
 Memory_Budget :: struct {
 	backing: runtime.Allocator,

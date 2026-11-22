@@ -212,7 +212,7 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 }
 
 // The start of a member's value when the colon after the key at `p` is flush against it or a pretty printer's `": "`,
-// `" : "` or `" :"`; nil when `st_colon` must read the colon.
+// `" : "` or `" :"`, else nil, when `st_colon` must read the colon.
 @(private)
 colon_fast :: #force_inline proc "contextless" (q, end: [^]u8) -> [^]u8 {
 	if intrinsics.ptr_sub(end, q) > 2 && q[0] == ':' {
@@ -560,7 +560,7 @@ st_keep_stubs_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 // the same walk with no hooks.
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_rest :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
-	// A walk's hooks are behind a pointer, so the walk is the same with `No_Hooks`, its stack and gaps included.
+	// A walk's hooks are behind a pointer, so a walk with `No_Hooks` has the same layout, its stack and gaps included.
 	#assert(size_of(Walk(S, H, LAX, C)) == size_of(Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS)))
 	when LAX {
 		w.steps[0] += 1 // the container's step, taken again as its bracket is read again
@@ -578,7 +578,7 @@ st_open_new_row :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 }
 
 // The state at an object's open bracket that is the second object at its parent slot's place, whose row goes live:
-// its slots are zeroed, the only write they take before a learn, and its members read on them.
+// its slots are zeroed, the only write to them before a learn, and its members read on them.
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_open_row_live :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	return #must_tail st_open(p, end, d, ind, w, s0, s1, s2, gap_row_live(&w.gaps, m), on)
@@ -980,7 +980,8 @@ st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 		}
 		if d & 1 != 0 {
 			if !gaps_on(m) {
-				// The run pays when a member follows its comma flush. An indented member reads faster through `st_key`.
+				// The run is faster when a member follows its comma flush. An indented member is faster through
+				// `st_key`.
 				if r == q[1:] {
 					return #must_tail st_member_run(r, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 				}

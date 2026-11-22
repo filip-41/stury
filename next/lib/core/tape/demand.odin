@@ -43,7 +43,7 @@ Demand_Edge :: struct {
 	to:   u32,
 }
 
-// What a read needs of one path past its steps.
+// The data a read needs of one path beyond its steps.
 @(private)
 Demand_Path :: struct {
 	alls_end: u32, // one past its last `All` step, 0 for none
@@ -117,8 +117,8 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 		}
 	}
 	d.allocator, d.facts = allocator, facts
-	// An error frees what this far holds and hands the caller an empty demand: a defer would free blocks the
-	// result value, already copied, still points at.
+	// On an error, frees what is held so far and returns an empty demand. A defer would free blocks that the
+	// result value, already copied, points at.
 	free :: proc(d: ^Demand, e: runtime.Allocator_Error) -> (Demand, runtime.Allocator_Error) {
 		destroy_demand(d)
 		return {}, e

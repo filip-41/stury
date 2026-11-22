@@ -6,8 +6,8 @@ import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// JSON's walk, the one pass over a text that `validate` and `build` run. Its states are in states.odin, and the leaves
-// they read tokens with in strings.odin, scalars.odin, whitespace.odin and members.odin.
+// JSON's walk, which `validate` and `build` run over a text. Its states are in states.odin, and the leaves they read
+// tokens with are in strings.odin, scalars.odin, whitespace.odin and members.odin.
 
 // Open levels a read keeps in its frame. A deeper text moves them to memory from the read's allocator, so a `validate`
 // within this depth allocates nothing.
@@ -189,7 +189,7 @@ root_tail :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p,
 						return done(w, hs, p)
 					}
 				}
-				// A comment is a fact, which takes no room, so its token answers no `Grow`.
+				// A comment is a fact and needs no node room, so its token never answers `Grow`.
 				if last, stop := emit_comments(w, on, &hs, p, end, true, .Comment_Foot); stop {
 					return stopped(w, hs, last)
 				}

@@ -7,38 +7,38 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
-// A build of one text on the threads of a `tape.Runner`, whatever value holds its bulk. The text is cut into chunks,
-// and each chunk is read for its strings, comments and brackets from the two places its first byte is most often in:
-// outside strings and comments, and inside a `"` string. Then, in text order, each chunk starts in the place the chunk
-// before it ends in, which picks its reading, read then from a rarer place if need be. A chunk's first comma outside
-// strings and comments is a seam, where a walk starts inside the containers the brackets before it leave open. The
-// text between two seams is built by a walk of its own, and the parts join into the document one walk builds
-// (`build.segments_join`).
+// Builds a text on the threads of a `tape.Runner`, whichever value holds most of the text. The text is cut into
+// chunks, and each chunk is read for its strings, comments and brackets from the two places its first byte is most
+// often in: outside strings and comments, and inside a `"` string. Then, in text order, each chunk starts in the place
+// the chunk before it ends in, which selects its reading. A chunk whose place is a rarer one is read from that place.
+// A chunk's first comma outside strings and comments is a seam, where a walk starts inside the containers that the
+// brackets before it leave open. The text between two seams is built by its own walk, and the parts are joined
+// (`build.segments_join`) into the document that a single walk would build.
 //
-// A reading agrees with the walk over any text the walk takes, so for a text the walk takes up to a seam that seam's
-// walk is the one walk from there on, and the first part in text order whose walk does not reach the next seam gives
-// the one walk's error. A text whose readings cannot be joined, one that nests past `SEAM_LEVELS` and a build that is
-// refused memory are built on one thread, which then gives the answer.
+// A reading agrees with the single walk over any text that walk accepts. So when the single walk accepts the text up
+// to a seam, the walk from that seam continues it exactly, and the first part in text order whose walk does not reach
+// the next seam gives the error the single walk would give. A text whose readings cannot be joined, a text that nests
+// past `SEAM_LEVELS` and a build that is refused memory are built on one thread, which gives the answer.
 
-// The shortest text a build reads on a runner's threads, below which one thread builds it sooner. A chunk is at least a
-// sixteenth of it.
+// The shortest text built on a runner's threads. A shorter text is built sooner on one thread. A chunk is at least a
+// sixteenth of this length.
 @(private)
 PARALLEL_FROM :: #config(JSON_PARALLEL_FROM, 1 << 19)
 
-// The chunks a build cuts per thread, so a thread that starts late or a slow chunk leaves no thread idle long.
+// The chunks cut per thread, so that a thread that starts late or a slow chunk leaves no thread idle long.
 @(private)
 CHUNKS_PER_THREAD :: 4
 
-// The levels a part's walk holds in its frame. A text that nests deeper is built on one thread, so a part's walk
-// allocates nothing.
+// The container levels a part's walk holds in its frame, so a part's walk allocates nothing. A text that nests deeper
+// is built on one thread.
 @(private)
 SEAM_LEVELS :: WALK_LEVELS - 1
 
-// The brackets a reading of a stretch keeps open, past which no seam follows it.
+// The most open brackets a reading of a stretch records. A stretch that leaves more open makes the plan fail.
 @(private)
 SEAM_OPENS :: 64
 
-// Where a byte of a JSON text lies for its reading.
+// The places a byte of the text can lie in during a reading.
 @(private)
 Lex :: enum u8 {
 	Out, // outside strings and comments
@@ -48,21 +48,21 @@ Lex :: enum u8 {
 	Block, // in a `/* */` comment
 }
 
-// What a stretch of a text does to the containers open at its start: `pops` of them close, then the `n` brackets in
+// The effect of a stretch of a text on the containers open at its start: `pops` of them close, then the `n` brackets in
 // `opens` stay open, innermost last. `peak` is the most levels open above its start at once, `comments` the comments
-// that start in it and `nodes` the nodes its open brackets, commas and colons are followed by, or more where the
-// reading cannot tell that a close bracket follows one of them.
+// that start in it, and `nodes` the nodes that follow its open brackets, commas and colons, or more where the reading
+// cannot tell that a close bracket follows one of them.
 @(private)
 Lex_Profile :: struct {
 	pops, n, peak, comments, nodes: int,
 	opens:                          [SEAM_OPENS]u8,
 }
 
-// A chunk read from a place: the place at its end, its seam, one past its first comma outside strings and comments
-// that no comment touches, -1 for none, and the profiles of its bytes before the seam and from it. While it reads,
-// `end` is the place it has reached, `at` the first byte it has not read, `comment_end` one past the last comment's
-// last byte, `comment_from` the first byte of the comment it is in, and `comment_bytes` the comments' bytes in the
-// block it read last.
+// A chunk read from a place. Holds the place at its end, its seam (one past its first comma outside strings and
+// comments that no comment touches, -1 for none), and the profiles of its bytes before the seam and from it. While the
+// chunk is read, `end` is the place reached, `at` the first byte not yet read, `comment_end` one past the last
+// comment's last byte, `comment_from` the first byte of the comment it is in, and `comment_bytes` the comments' bytes
+// in the block read last.
 @(private)
 Lex_Run :: struct {
 	pre, post:       Lex_Profile,
@@ -72,8 +72,9 @@ Lex_Run :: struct {
 	comment_bytes:   u64,
 	end:             Lex,
 	read:            bool,
-	// A close bracket before any other byte of the chunk but white space and comments, which follows no node when
-	// the chunks before end in an open bracket or a comma, and what this chunk ends in.
+	// Set when a close bracket comes before any byte of the chunk other than white space and comments. Such a
+	// bracket follows no node when the chunks before it end in an open bracket or a comma. `tail` is what this chunk
+	// ends in.
 	lead_close:      bool,
 	tail:            Lex_Before,
 }
@@ -87,7 +88,7 @@ Lex_Chunk :: struct {
 	line:   bool,
 }
 
-// The bytes past a cut a spec with comments looks through for a line end to cut past instead.
+// The number of bytes past a cut in which a spec with comments looks for a line end, to cut after it instead.
 @(private)
 CUT_LINE :: 4096
 
@@ -156,7 +157,7 @@ build_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 	return build_as(src, S, false, one, caller)
 }
 
-// The document and error of a build of `src` in parts, or `built` false for a text the one walk builds.
+// Builds `src` in parts and returns its document and error, or `built` false for a text built on one thread.
 @(private)
 build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error, built: bool) {
 	m: hook.Memory_Budget
@@ -179,8 +180,8 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 			if k >= len(j.chunks) {
 				return
 			}
-			// A chunk past a line end is read from outside strings and comments alone, and from another place only
-			// for a text the walk refuses or a block comment across the line end.
+			// A chunk that starts past a line end is read from outside strings and comments only. It is read from
+			// another place only for a text the walk refuses or a block comment across the line end.
 			c := &j.chunks[k]
 			if k > 0 && !j.chunks[k - 1].line {
 				c.runs = lex_pair(j.src, c.lo, c.hi, S)
@@ -217,8 +218,8 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 		return {}, nil, false
 	}
 	defer delete(frames, allocator)
-	// Each part's walk stores its nodes where the one walk would, past the nodes the parts before it plan, and the
-	// nodes standing for the containers open at its seam go past every part's.
+	// Each part's walk stores its nodes where a single walk would, after the nodes the parts before it plan. The
+	// nodes for the containers open at its seam go after the nodes of all parts.
 	total, scratch, comments := 0, 0, 0
 	for p, k in parts {
 		total += max(p.nodes, 0)
@@ -343,10 +344,10 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 	return doc, nil, true
 }
 
-// Cuts `src` from `start` into `len(chunks)` chunks of about one size. A chunk starts at no byte a backslash, a `/`
-// or a `*` comes before, so no escape or comment marker is cut, and at no UTF-8 continuation byte. In a spec with
-// comments it starts past a line end when one comes within `CUT_LINE` bytes, where a text the walk takes is outside
-// strings and line comments.
+// Cuts `src` from `start` into `len(chunks)` chunks of about equal size. A chunk never starts at a byte that follows a
+// backslash, `/` or `*`, so no escape or comment marker is split, or at a UTF-8 continuation byte. In a spec with
+// comments a chunk starts after a line end when one lies within `CUT_LINE` bytes of the cut, because in a text the
+// walk accepts that position is outside strings and line comments.
 @(private)
 lex_cut :: proc "contextless" (src: []u8, start: int, chunks: []Lex_Chunk, $S: Spec) {
 	lo := start
@@ -376,9 +377,9 @@ lex_run :: proc "contextless" (src: []u8, lo, hi: int, from: Lex, $S: Spec) -> (
 	return
 }
 
-// The readings of `src[lo:hi]` from outside strings and comments and from inside a `"` string, in one pass while
-// their blocks hold no comment marker or JSON5 `'`: the two read the same quotes, and each reads the brackets and
-// commas outside its strings, which are the other's strings.
+// The readings of `src[lo:hi]` from outside strings and comments and from inside a `"` string, made in a single pass
+// while their blocks hold no comment marker or JSON5 `'`. Both readings find the same quotes, and each reads the
+// brackets and commas outside its own strings, which are the other reading's strings.
 @(private)
 lex_pair :: proc "contextless" (src: []u8, lo, hi: int, $S: Spec) -> (runs: [2]Lex_Run) #no_bounds_check {
 	runs[0] = {seam = -1, end = .Out, read = true, comment_end = -1}
@@ -467,7 +468,7 @@ lex_block :: #force_inline proc "contextless" (run: ^Lex_Run, src: []u8, lo, bas
 // Reads on from the block at `base` to `hi`, in the place `run.end`, from byte `run.at`, with `odd` set when the byte
 // before `base` escapes the one at it. A block that starts outside comments and holds no comment marker or JSON5 `'`
 // outside its `"` strings is read whole from its masks. Any other block's strings and comments are read from its
-// quotes, comment markers and line ends alone, and its brackets then from masks too.
+// quotes, comment markers and line ends only, and its brackets then from masks too.
 @(private)
 lex_on :: proc "contextless" (run: ^Lex_Run, src: []u8, lo, hi, base: int, odd: u64, $S: Spec) #no_bounds_check {
 	text := src[:hi]
@@ -503,14 +504,14 @@ lex_on :: proc "contextless" (run: ^Lex_Run, src: []u8, lo, hi, base: int, odd: 
 
 // The bytes of the block at `base` in strings and in comments, and the comments' first bytes, read from the place
 // `run.end` from byte `run.at` with masks: the strings of its quotes `q` up to the first comment marker outside them,
-// then that comment up to its end, and so on. A comment ends where `run.comment_end` says. `escaped` marks the bytes a
-// backslash escapes, which matter only for a quote, as no comment ends at a byte a backslash in it could escape. A
-// JSON5 `'` string is read from its events.
+// then that comment up to its end, and so on. `run.comment_end` records where the last comment ended. `escaped` marks
+// the bytes a backslash escapes, which matter only for a quote, since no comment ends at a byte that a backslash in it
+// could escape. A block with a JSON5 `'` string is read by `lex_events`.
 @(private)
 lex_comments :: #force_inline proc "contextless" (run: ^Lex_Run, src: []u8, hi, base: int, b: kernel.Block, q, escaped: u64, $S: Spec) -> (strings, comments, starts: u64) #no_bounds_check {
 	marks := kernel.pack_n([3]kernel.Block{kernel.eq(b, '/'), kernel.eq(b, '*'), kernel.either(kernel.eq(b, '\n'), kernel.eq(b, '\r'))})
 	slash, star, lines := marks[0], marks[1], marks[2]
-	// The byte past the block, which a marker at its last byte pairs with.
+	// The byte past the block, which a marker at the block's last byte pairs with.
 	next := src[base + 64] if base + 64 < hi else 0
 	opens := slash & ((slash | star) >> 1 | u64(next == '/' || next == '*') << 63)
 	closes := star & (slash >> 1 | u64(next == '/') << 63)
@@ -585,8 +586,8 @@ lex_comments :: #force_inline proc "contextless" (run: ^Lex_Run, src: []u8, hi, 
 	return
 }
 
-// `lex_comments` from byte `pos` of the block, in the place `run.end` since byte `from`, read event by event, for a
-// JSON5 block with a `'` string. `singles` holds its unescaped `'`.
+// Continues `lex_comments` from byte `pos` of the block, in the place `run.end` since byte `from`, reading event by
+// event. Used for a JSON5 block with a `'` string. `singles` holds its unescaped `'`.
 @(private)
 lex_events :: proc "contextless" (run: ^Lex_Run, src: []u8, hi, base: int, b: kernel.Block, q, singles: u64, pos, from: int, $S: Spec) -> (strings, comments, starts: u64) #no_bounds_check {
 	end := raw_data(src)[len(src):]
@@ -640,7 +641,7 @@ lex_events :: proc "contextless" (run: ^Lex_Run, src: []u8, hi, base: int, b: ke
 	return
 }
 
-// The bits from `lo` to `hi`, both included, of which `hi` may be 64.
+// A mask of the bits `lo` to `hi`, both included. `hi` may be 64.
 @(private)
 lex_span :: #force_inline proc "contextless" (lo, hi: int) -> u64 {
 	return (max(u64) << uint(lo)) & ~(max(u64) << uint(hi + 1)) if hi < 63 else max(u64) << uint(lo)
@@ -664,8 +665,9 @@ lex_close :: #force_inline proc "contextless" (p: ^Lex_Profile) {
 	}
 }
 
-// Whether the byte at `y`, before the block at `base` that `comments` reads for `run`, lies in a comment, or may: a
-// byte of the block before is judged by its comment bytes, and one before it by the last comment's end.
+// Whether the byte at `y` lies in a comment, or may. `comments` is the comment mask of the block at `base` that `run`
+// is reading. A `y` in that block is judged by `comments`, a `y` in the block before it by `run.comment_bytes`, and an
+// earlier `y` by `run.comment_end`.
 @(private)
 lex_in_comment :: #force_inline proc "contextless" (y, base: int, run: ^Lex_Run, comments: u64) -> bool {
 	switch {
@@ -677,16 +679,17 @@ lex_in_comment :: #force_inline proc "contextless" (y, base: int, run: ^Lex_Run,
 	return y < run.comment_end
 }
 
-// What the last byte before `k`, past white space and comments, is to the reading `run` of a chunk from `lo`, in the
-// block at `base` whose comments' bytes are `comments`.
+// What the last byte before a position is to a chunk's reading, past white space and comments.
 @(private)
 Lex_Before :: enum u8 {
 	Unknown, // a byte that may lie in a comment the reading has passed
-	Chunk, // the chunk's start
+	Chunk, // the search reached the chunk's start
 	Open, // an open bracket or a comma, which a close bracket at `k` follows with no node between
 	Other,
 }
 
+// Classifies the last byte before `k`, past white space and comments, for the reading `run` of a chunk from `lo`, in
+// the block at `base` whose comment bytes are `comments`.
 @(private)
 lex_follows_open :: #force_inline proc "contextless" (src: []u8, lo, base, k: int, run: ^Lex_Run, comments: u64, $S: Spec) -> Lex_Before #no_bounds_check {
 	for y := k - 1; y >= lo; y -= 1 {
@@ -704,9 +707,9 @@ lex_follows_open :: #force_inline proc "contextless" (src: []u8, lo, base, k: in
 	return .Chunk
 }
 
-// Whether the walks of a text cut past the comma at `k`, outside strings and comments, read it as the one walk does: a
-// comment the comma follows, past white space, would take its role from the token after the cut. A comment that
-// starts past the comma takes the same role in both.
+// Whether cutting the text after the comma at `k`, outside strings and comments, leaves the walks reading it as a
+// single walk does. A comment before the comma, with only white space between, would take its role from the token
+// after the cut, so that comma is no seam. A comment that starts after the comma takes the same role either way.
 @(private)
 seam_at :: #force_inline proc "contextless" (src: []u8, lo, base, k: int, run: ^Lex_Run, comments: u64, $S: Spec) -> bool #no_bounds_check {
 	when S == .Json {
@@ -720,8 +723,9 @@ seam_at :: #force_inline proc "contextless" (src: []u8, lo, base, k: int, run: ^
 	}
 }
 
-// The parts of the text the chunks read, each with the brackets open at its seam, kept in `opens`, or false when the
-// readings, picked in text order, cannot be joined or nest past `SEAM_LEVELS` within `limit`.
+// Plans the parts of the text from the chunks' readings, picked in text order. The brackets open at each part's seam
+// are kept in `opens`. `ok` is false when the readings cannot be joined or the text nests past `SEAM_LEVELS`, counting
+// levels up to `limit`.
 @(private)
 seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocator: runtime.Allocator) -> (parts: []Seam_Part, opens: []u8, ok: bool) {
 	list: [dynamic]Seam_Part
@@ -787,16 +791,17 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 	for &p in list {
 		p.opens = held[uintptr(raw_data(p.opens)):][:len(p.opens)]
 	}
-	// Shrunk to their lengths, so the caller's `delete` of the returned slices frees the whole blocks.
+	// Shrunk to their lengths so that the caller's `delete` of the returned slices frees the whole blocks.
 	shrink(&list)
 	shrink(&held)
 	return list[:], held[:], true
 }
 
-// The result of walking `src` from `from`, one past a comma inside the containers whose open brackets `opens` holds,
-// outermost first, for hook `h`, whose registers `regs` hold those containers, called in context `ctx`, and whether
-// it took a rule of `tolerate`. Its levels stay in its frame and its hook's, as no part nests past either, so a deeper
-// text is refused memory. A text cut at `src`'s end ends there as `Truncated`.
+// Walks `src` from `from`, one past a comma inside the containers whose open brackets `opens` holds, outermost first.
+// Returns the walk's result and whether it used a rule of `tolerate`. Hook `h`'s registers `regs` hold those
+// containers, and `ctx` is the context for the hook's calls. The levels stay in the walk's frame and the hook's,
+// because no part nests past either, so a deeper text is refused memory. A text cut at the end of `src` ends there as
+// `Truncated`.
 @(private)
 walk_seam :: proc "contextless" (src: []u8, from: int, opens: []u8, $S: Spec, $LAX: bool, tolerate: tape.Tolerances, limit: u64, h: ^$H, regs: ^hook.Regs, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (hook.Walk_Result, bool) {
 	hook.check(H)
@@ -815,8 +820,8 @@ walk_seam :: proc "contextless" (src: []u8, from: int, opens: []u8, $S: Spec, $L
 	}
 	w.gap_lo = GAP_UNLEARNABLE
 	d := u64(len(opens)) << 1 | u64(opens[len(opens) - 1] == '{')
-	// An object matches its members against a row of its own, live from its first member, as the seam's members
-	// continue the shape the part before it read, and an array gives its objects one, as the root does.
+	// An object matches its members against its own row, live from its first member, because the seam's members
+	// continue the shape the part before it read. An array gives each of its objects a row, as the root does.
 	m := u64(GAP_START)
 	if gaps_rows(m) && d & 1 != 0 {
 		gap_new_row(&w.gaps, m)

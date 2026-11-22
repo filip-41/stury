@@ -4,15 +4,15 @@ import "base:intrinsics"
 
 // The rules of a path's steps, which the readers over a document, a find over a text and a scan all follow.
 
-// What a step gives for a value it cannot enter: null reads as missing, as jq reads a member or element of null as
-// null, and any other scalar is of the wrong kind.
+// The `Presence` for a value a step cannot enter: `.Missing` for null, as jq reads a member or element of null as
+// null, and `.Wrong_Kind` for any other scalar.
 step_refused :: #force_inline proc "contextless" (kind: Kind) -> Presence {
 	return .Missing if kind == .Null else .Wrong_Kind
 }
 
-// What a path gives when the step past its first `taken` steps meets null or a child its container lacks. jq reads the
-// rest of the path through null past the last `All`, and before it the `All` cannot iterate null, so the value that
-// cannot take the path is of the wrong kind.
+// The `Presence` when the step after the first `taken` steps meets null or a child its container lacks. After the
+// path's last `All` jq reads the rest of the path through null, so the answer is `.Missing`. Before it the `All`
+// cannot iterate null, so the answer is `.Wrong_Kind`.
 path_refused :: #force_inline proc "contextless" (taken, alls_end: u64) -> Presence {
 	return .Missing if taken >= alls_end else .Wrong_Kind
 }
@@ -123,8 +123,8 @@ step_takes_one :: #force_inline proc "contextless" (step: Step, dups: Duplicates
 
 // Whether a find reads again the elements of an array its step `at` from the end picks, an `Index` or a `Slice` whose
 // start is from the end, which its walk passed whole as it went: when a `Name` follows, as a key compared in each
-// element costs more than passing it, and the format can walk a value alone. Elements before an `Index` or `All` are
-// cheaper to walk into, a last step's answer is the element itself, and a `Slice` from the start answers from its
+// element is more work than passing it, and the format can walk a value alone. Elements before an `Index` or `All` are
+// less work to walk into, a last step's answer is the element itself, and a `Slice` from the start answers from its
 // first elements.
 step_replays :: #force_inline proc "contextless" (steps: []Step, at: int, rewalks: bool) -> bool {
 	if !rewalks || at + 1 == len(steps) {
@@ -153,7 +153,7 @@ read_dups :: #force_inline proc "contextless" (f: ^Format, dups: Duplicates) -> 
 	return .Last if d == .All || d == .Refuse || d == .Default else d
 }
 
-// The steps of path `x` past which the walk being back at that depth leaves every answer of it final and none to come.
+// The step count of path `x` past which a walk back at that depth has made every answer of it final, with none to come.
 path_settles :: #force_inline proc "contextless" (x: Demand_Path, dups: Duplicates) -> u32 {
 	return x.repeats if dups == .First else min(x.repeats, x.named)
 }
@@ -197,8 +197,8 @@ same_keys :: #force_inline proc "contextless" (f: ^Format, src: []u8, a: Token, 
 	return f.same_text(src, a, other, b)
 }
 
-// The steps of path `x` past which the walk being back at that depth leaves every answer it made final, though more
-// may come.
+// The step count of path `x` past which a walk back at that depth has made every answer it made so far final, though
+// more may come.
 path_final :: #force_inline proc "contextless" (x: Demand_Path, dups: Duplicates) -> u32 {
 	return x.takes_back if dups != .Last else min(x.takes_back, x.named)
 }

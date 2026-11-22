@@ -4,8 +4,8 @@ import "base:intrinsics"
 import "core:simd"
 
 // UTF-8 validation between blocks. `prev` is the last block read, zeros after an ASCII block, and every error is in
-// the first register of `err`. The fields are a block wide, not a register: with a register-wide `prev` LLVM no
-// longer folds `before`'s select at 32 lanes into the rotation of the previous block. A state is zero, made by
+// the first register of `err`. The fields are a block wide, not a register: with a register-wide `prev` LLVM does
+// not fold `before`'s select at 32 lanes into the rotation of the previous block. A state is zero, made by
 // `utf8_next`, or made by `utf8_after`: `lead` must match `prev`, and a state made from `prev` alone misreads the
 // next block. A state after `utf8_stop` is not read again.
 Utf8_State :: struct {
@@ -180,8 +180,8 @@ BEFORE_LOW := V{231, 163, 131, 131, 139, 203, 203, 203, 203, 203, 203, 203, 203,
 OWN_HIGH := V{1, 1, 1, 1, 1, 1, 1, 1, 230, 174, 186, 186, 1, 1, 1, 1}
 
 // A non-zero lane where `v`, with the byte before each of its bytes in `p1`, is not UTF-8, after Keiser and Lemire,
-// "Validating UTF-8 in less than one instruction per byte". Three nibble tables flag the errors a pair of bytes shows;
-// bit 7 of `must`, the `leads` of the bytes two back, says a byte must be a continuation. The tables leave 0x80 on a
+// "Validating UTF-8 in less than one instruction per byte". Three nibble tables flag the errors a pair of bytes shows.
+// Bit 7 of `must`, the `leads` of the bytes two back, says a byte must be a continuation. The tables leave 0x80 on a
 // continuation after a lead and `must`'s 0x80 cancels it, so either flag alone is an error.
 @(private = "file")
 errors :: #force_inline proc "contextless" ($T: Tier, p1, v, must: #simd[$N]u8) -> #simd[N]u8 {
@@ -203,7 +203,7 @@ leads :: #force_inline proc "contextless" (v, p1: #simd[$N]u8) -> #simd[N]u8 {
 }
 
 // Lane i is the byte `K` before byte i of `v`, taken from the end of `prev` for the first `K` lanes. One `ext` at 16
-// lanes; at 32, a select of two rotations.
+// lanes, a select of two rotations at 32.
 @(private = "file")
 before :: #force_inline proc "contextless" (prev, v: #simd[$N]u8, $K: int) -> #simd[N]u8 where 0 < K, K < N {
 	when N == 16 {

@@ -7,17 +7,17 @@ import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// The walk of a text in pieces. It runs the `LAX` walk over one window, follows each token's place in the grammar and
-// the open containers, and ends at the window's end as at a token: the walk of the next window goes on from the place
-// past the last token, reading again from there. A string, number or JSON5 unquoted key the window cuts short is read
-// on in the next from where the last stopped, with what its bytes so far spelled, and so is a run of white space and
-// comments, whose comments wait for the token past it. Any other token is read again whole.
+// Walks a text in pieces. Runs the `LAX` walk over one window, tracks each token's place in the grammar and the open
+// containers, and ends at the window's end as at a token. The walk of the next window continues from the place past
+// the last token and reads again from there. A string, number or JSON5 unquoted key that the window cuts short is read
+// on in the next window from where the last stopped, with the spelling its bytes so far gave. So is a run of white
+// space and comments, whose comments wait for the token past it. Any other token is read again whole.
 //
-// Inside a container its hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest` for, the walk goes on in the same
-// states and gives each token to no hook, or to the inner hook of the hook's `Keeps`, so that a window ends inside it
-// as anywhere else.
+// Inside a container whose hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest`, the walk continues in the same
+// states and gives each token to no hook, or to the inner hook of the hook's `Keeps`. A window can end inside such a
+// container as anywhere else.
 
-// The places a walk of a text in pieces goes on from, past the last token it gave.
+// The places a walk of a text in pieces continues from, past the last token it gave.
 @(private)
 PLACE_ROOT :: u8(0) // before the root value
 @(private)
@@ -33,7 +33,7 @@ PLACE_MEMBER :: u8(5) // past a comma, which a comment followed
 @(private)
 PLACE_TAIL :: u8(6) // past the root value, whose foot only the last window judges
 
-// A walk's view of the window of a text in pieces it reads.
+// The window of a text in pieces that a walk reads.
 @(private)
 Piece_Walk :: struct {
 	s:       ^hook.Piece_State,
@@ -47,8 +47,8 @@ Piece_Walk :: struct {
 	ctx:     ^runtime.Context,
 }
 
-// Gives the hook token `t` of a text in pieces, or stops the walk at a scalar the window's end cuts, which a later
-// window may make longer. It counts `Budget.steps` as `give` does.
+// Gives token `t` of a text in pieces to the hook, or stops the walk at a scalar that the window's end cuts, which a
+// later window may make longer. Counts `Budget.steps` as `give` does.
 @(private)
 give_piece :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, t: tape.Token) -> hook.Action {
 	if t.kind <= .Plain && t.role <= .Key && (t.kind != .String || t.spelling & tape.SPELLING_QUOTED == 0) && t.lo + u64(t.n) >= pw.end && pw.more {
@@ -88,7 +88,7 @@ give_piece :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: 
 	return a
 }
 
-// Follows token `t` in the open containers and sets the place past it. False when memory for one more container is
+// Records token `t` in the open containers and sets the place past it. False when memory for one more container is
 // refused.
 @(private)
 piece_track :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, t: tape.Token) -> bool #no_bounds_check {
@@ -137,7 +137,7 @@ piece_track :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw:
 	return true
 }
 
-// Follows comment `t`, which moves the place past a colon or a comma that lies before it.
+// Records comment `t`. A colon or comma between the last token and the comment sets the place past it.
 @(private, cold)
 piece_fact :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, t: tape.Token) #no_bounds_check {
 	s := pw.s
@@ -158,8 +158,9 @@ piece_open_grow :: #force_no_inline proc "contextless" (pw: ^Piece_Walk) -> bool
 	return reserve(&pw.s.opened, max(2 * cap(pw.s.opened), 16)) == nil
 }
 
-// Takes the hook's `a` for the container token `t` opens: the walk reads the container in the same states, and gives
-// its tokens to the inner hook for `Keep` and `Keep_Stubs`, which takes the open bracket first, and to no hook else.
+// Applies the hook's action `a` for the container that token `t` opens. The walk reads the container in the same
+// states. For `Keep` and `Keep_Stubs` it gives the container's tokens to the inner hook, starting with the open
+// bracket, and for `Skip` and `Rest` to no hook.
 @(private, cold)
 piece_nest :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, hs: ^hook.Regs, t: tape.Token, a: hook.Action) -> hook.Action {
 	s := pw.s
@@ -179,7 +180,7 @@ piece_nest :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p
 	return .Next
 }
 
-// Gives token `t` of a container the hook passed to the hook that takes it.
+// Gives token `t` of a container the hook passed over to the inner hook that keeps it, if any.
 @(private)
 piece_nested :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, t: tape.Token) -> hook.Action {
 	s := pw.s
@@ -214,9 +215,9 @@ piece_nested :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk,
 	return .Next
 }
 
-// Gives token `t` to the inner hook of the hook's `Keeps`, `Stubs` for `Keep_Stubs`, as `keep_through` does, after
-// the inner hook's room check that the walk makes only for a hook with `.Rooms`. With `opens` it is the open bracket of
-// the container kept, and the walk's room check moves to the inner hook's room.
+// Gives token `t` to the inner hook of the hook's `Keeps`, with stubs for `Keep_Stubs`, as `keep_through` does. Before
+// that it checks the inner hook's room, which the walk does only for a hook with `.Rooms`. With `opens`, `t` is the
+// open bracket of the kept container, and the walk's room check moves to the inner hook's room.
 @(private)
 piece_keep :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: ^hook.Regs, t: tape.Token, nest: hook.Nest, opens: bool) -> hook.Action {
 	K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 3)
@@ -253,8 +254,9 @@ piece_more :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> b
 	}
 }
 
-// The fault `kind` at `q` a walk of a window more bytes may follow takes as `Truncated`: a `/` that may open a comment,
-// and in JSON5 a lead byte of white space past ASCII, whose next bytes the window does not hold.
+// Returns `Truncated` for fault `kind` at `q` when bytes may follow the window and `q` may be the start of a longer
+// token: a `/` that may open a comment, or in JSON5 a lead byte of non-ASCII white space whose next bytes the window
+// does not hold. Returns `kind` otherwise.
 @(private)
 piece_short :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), q, end: [^]u8, kind: tape.Fault_Kind) -> tape.Fault_Kind {
 	when LAX && S != .Json {
@@ -265,7 +267,7 @@ piece_short :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), q, 
 	return kind
 }
 
-// Whether the walk is inside a container its hook passed, whose tokens no hook stores.
+// Whether the walk is inside a container its hook passed over with `Skip` or `Rest`, whose tokens no hook stores.
 @(private)
 piece_passes :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> bool {
 	when LAX && .Skips in C {
@@ -275,7 +277,7 @@ piece_passes :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) ->
 	}
 }
 
-// Whether the walk is inside a container its hook keeps through its `Keeps`.
+// Whether the walk is inside a container whose tokens go to the inner hook of the hook's `Keeps`.
 @(private)
 piece_keeps :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> bool {
 	when LAX {
@@ -285,7 +287,7 @@ piece_keeps :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> 
 	}
 }
 
-// Grows the room of the inner hook a kept container's tokens go to, after `Grow`.
+// Grows the room of the inner hook that receives a kept container's tokens, after the hook answered `Grow`.
 @(private, cold)
 piece_grow_inner :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: ^hook.Regs) -> bool {
 	K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 3)
@@ -301,9 +303,9 @@ piece_grow_inner :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, 
 	return true
 }
 
-// Walks the window of a text in pieces from its place, `p` past the root's white space for a window that starts the
-// text. The walk goes on with the levels, gaps, budget and nest the last window left, and with no gaps in the
-// containers still open, as their slots were in registers.
+// Walks the window of a text in pieces from its place. For a window that starts the text, `p` is past the root's white
+// space. The walk continues with the levels, gaps, budget and nest the last window left. The containers still open
+// have no gaps, because their slots were in registers.
 @(private)
 piece_walk :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, p, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
 	s := pw.s
@@ -321,7 +323,7 @@ piece_walk :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, p
 	w.tolerated, w.steps[0] = s.tolerated, s.steps
 	if len(s.memo) == size_of(Gaps) {
 		intrinsics.mem_copy_non_overlapping(&w.gaps, raw_data(s.memo), size_of(Gaps))
-		// A gap is matched against the bytes it was learned from, so one learned before the window is forgotten.
+		// A gap is matched against the bytes it was recorded from, so a gap recorded before the window is dropped.
 		for bits := w.gaps.live; bits != 0; bits &= bits - 1 {
 			row := u64(intrinsics.count_trailing_zeros(bits))
 			for &g in w.gaps.slots[row * GAP_MEMBERS:(row + 1) * GAP_MEMBERS] {
@@ -377,7 +379,7 @@ CUT_HEX :: u8(4) // a JSON5 number's hex digits
 @(private)
 CUT_IDENT :: u8(5) // a JSON5 unquoted key
 
-// Keeps where the string at `p`, which the window's end cut short, can be read on from.
+// Records where the string at `p`, which the window's end cut short, is read on from.
 @(private, cold)
 piece_cut_string :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) {
 	quote := p[0] if S == .Json5 else '"'
@@ -385,9 +387,9 @@ piece_cut_string :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, 
 	w.piece[0].s.cut = {lo = at(w, p), on = at(w, q), spelling = spelling, part = CUT_STRING, quote = quote}
 }
 
-// Keeps where the number token `t`, which the window's end cut short in a run of digits, can be read on from. A number
-// cut after its first integer digit, or after its point, is read again whole, as the next byte judges a lone `0` and
-// changes the spelling of a JSON5 `5.`.
+// Records where the number token `t`, which the window's end cut short in a run of digits, is read on from. A number
+// cut after its first integer digit or after its point is read again whole, because the next byte decides whether a
+// lone `0` is valid and changes the spelling of a JSON5 `5.`.
 @(private, cold)
 piece_cut_number :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, t: tape.Token) #no_bounds_check {
 	b, k, e := w.base, t.lo, t.lo + u64(t.n)
@@ -427,7 +429,7 @@ piece_cut_number :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, 
 	pw.s.cut = c
 }
 
-// Reads on the token the last window cut short, gives it to the hook once it ends, and walks on past it.
+// Reads on the token the last window cut short, gives it to the hook once it ends, and continues past it.
 @(private, cold)
 piece_resume :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	s := pw.s
@@ -490,10 +492,10 @@ piece_resume :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C),
 	return enter_place(PLACE_COLON if t.role == .Key else PLACE_AFTER, q, end, open << 1 | u64(object), w, hs, on)
 }
 
-// One past the number `c` and its spelling, read on from its digits at `c.on`, or the fault. A number the window's end
-// cuts short again is kept for the next window, `Truncated`, so that every window after one that cut a number reads
-// on from bytes past the last one's. Past its run of digits, the grammar reads on from the run's last digit, which
-// spells the rest as it would after the whole run.
+// Returns the end of number `c` and its spelling, read on from its digits at `c.on`, or the fault. A number that the
+// window's end cuts short again is kept for the next window and answers `Truncated`, so each window after one that cut
+// a number reads on from bytes past the last window's. Past its run of digits, the grammar reads on from the run's last
+// digit, which gives the same spelling as the whole run would.
 @(private)
 piece_number_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, c: hook.Cut_Token, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
 	c := c
@@ -528,7 +530,7 @@ piece_number_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Wa
 		}
 		k = max(k, tail & tape.NUMBER_KIND)
 		if q >= end && pw.more {
-			// A point with no digit after it yet reads on from the point, as a digit after it changes the spelling.
+			// A point with no digit after it reads on from the point, because a digit after it changes the spelling.
 			at_run := tail & tape.NUMBER_EXP == 0 && frac == 0
 			if !at_run {
 				c.part, c.spelling = CUT_EXP if tail & tape.NUMBER_EXP != 0 else CUT_FRAC, k
@@ -546,9 +548,9 @@ piece_number_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Wa
 	return q, tape.number_spelling(k, c.digits[0], c.digits[1]) | flags, .None
 }
 
-// Keeps where the unquoted key at `p`, whose escape or UTF-8 sequence the window's end cut short, can be read on from.
-// A key whose first character is cut is not kept, as that character may be white space, which the walk of the next
-// window reads from the last token.
+// Records where the unquoted key at `p`, whose escape or UTF-8 sequence the window's end cut short, is read on from.
+// A key whose first character is cut is not recorded, because that character may be white space, which the walk of the
+// next window reads from the last token.
 @(private, cold)
 piece_cut_ident :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) {
 	lo := at(w, p)
@@ -560,8 +562,8 @@ piece_cut_ident :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $
 	w.piece[0].s.cut = {lo = lo, on = on, spelling = tape.SPELLING_DECODE if esc else 0, part = CUT_IDENT}
 }
 
-// The first byte of the `\u` escape or UTF-8 sequence the window's `end` cuts in an identifier read on from `on`: the
-// last `\` or lead byte, as neither a hex digit nor a continuation byte is one.
+// The offset of the first byte of the `\u` escape or UTF-8 sequence that the window's `end` cuts in an identifier read
+// on from `on`. It is the last `\` or lead byte, since a hex digit or continuation byte is neither.
 @(private)
 piece_ident_cut :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), on: u64, end: [^]u8) -> u64 #no_bounds_check {
 	e := at(w, end)
@@ -573,9 +575,10 @@ piece_ident_cut :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), on: u64, end:
 	return on
 }
 
-// The lowest offset a read past a window that ended inside token `c` needs of the token: the bytes from where it reads
-// on, and before a number's the digit the grammar reads on from. An unquoted key keeps the byte before as well, as the
-// key may end where the next window starts, whose read then keeps from the byte before the key's end.
+// The lowest offset that a read past a window ending inside token `c` needs of the token: the bytes from where it reads
+// on, and for a number also the digit before, which the grammar reads on from. An unquoted key also needs the byte
+// before, because the key may end where the next window starts, and that window's read then needs the byte before the
+// key's end.
 @(private)
 piece_cut_keep :: proc "contextless" (c: hook.Cut_Token) -> u64 {
 	return c.on - u64(c.part != CUT_STRING)
@@ -592,8 +595,8 @@ piece_keep_rooms :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) {
 	}
 }
 
-// Enters the walk at `place` of container `d` at `p`. A call of its own, whose frame has no base pointer, as `enter`
-// is in a sanitizer's build.
+// Enters the walk at `place` of container `d` at `p`. A separate call whose frame has no base pointer, as `enter` has
+// in a sanitizer build.
 @(private)
 enter_place :: #force_no_inline proc "contextless" (place: u8, p, end: [^]u8, d: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	switch place {
@@ -609,8 +612,8 @@ enter_place :: #force_no_inline proc "contextless" (place: u8, p, end: [^]u8, d:
 	return st_after(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 }
 
-// What follows the root value ending at `p` in a window that more bytes may follow: a run of comments, held back as
-// only the last window ends the foot, or a fault.
+// Handles the bytes after the root value ending at `p`, in a window that more bytes may follow. A run of comments is
+// held back, because only the last window ends the foot. Anything else is a fault.
 @(private, cold)
 piece_tail :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, q, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := w.regs^
@@ -622,8 +625,8 @@ piece_tail :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, q, end: [^]u8, 
 	return fault(w, hs, q, .Bad_Char)
 }
 
-// The states a run of white space and comments is read in, `hook.Cut_Run.state`: where a value, a key or a key's colon
-// must start, past a value, where a comma may lie in the run, and past the root value.
+// The states a run of white space and comments is read in, `hook.Cut_Run.state`: before a value, before a key, before
+// a key's colon, past a value (a comma may lie in the run), and past the root value.
 @(private)
 RUN_VALUE :: u8(1)
 @(private)
@@ -635,7 +638,7 @@ RUN_AFTER :: u8(4)
 @(private)
 RUN_FOOT :: u8(5)
 
-// The parts of a run `hook.Cut_Run.on` is in: between its comments, or in a `//` or a `/* */` comment.
+// The parts of a run that `hook.Cut_Run.on` can be in: between its comments, in a `//` comment or in a `/* */` comment.
 @(private)
 RUN_GAP :: u8(0)
 @(private)
@@ -643,8 +646,9 @@ RUN_LINE :: u8(1)
 @(private)
 RUN_BLOCK :: u8(2)
 
-// Holds back the run of white space and comments the window's end cuts short, read in state `run` from `p`: the value's
-// end in `RUN_AFTER` and `RUN_FOOT`, whose line a comment may share, and the run's first byte else.
+// Holds back the run of white space and comments that the window's end cuts short, read in state `run` from `p`. In
+// `RUN_AFTER` and `RUN_FOOT`, `p` is the end of the value, whose line a comment may share. Otherwise `p` is the run's
+// first byte.
 @(private, cold)
 piece_hold_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, p: [^]u8, run: u8, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	pw := w.piece[0]
@@ -654,15 +658,16 @@ piece_hold_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C
 	object := open > 0 && s.opened[open - 1].object
 	r.state, r.part, r.lo, r.on = run, RUN_GAP, 0, at(w, p)
 	r.line, r.crossed, r.held, r.comma = run < RUN_AFTER, false, false, 0
-	// After a key's colon, as a comment past it would set.
+	// The place past a key's colon, as a comment after the colon sets it.
 	r.place = PLACE_VALUE if run == RUN_VALUE && object else s.place
 	return piece_run(w, pw, hs, end, on)
 }
 
-// Reads on the run of white space and comments `s.run` from where it stopped, judging each byte once, as `comment_run`
-// does, and keeping each comment for the hook with what its role needs: whether a line ended before it in the run, and
-// whether the run's comma did. At the window's end, more bytes may follow, it holds the run back again. Past the run it
-// gives the hook its comments, with their roles as `emit_comments` gives them, and walks on from the token there.
+// Reads on the run of white space and comments `s.run` from where it stopped, reading each byte once, as `comment_run`
+// does. Keeps each comment for the hook with what its role needs: whether a line ended before it in the run, and
+// whether the run's comma did. When the window ends and more bytes may follow, it holds the run back again. Past the
+// run it gives the hook the comments, with their roles as `emit_comments` gives them, and continues from the token
+// there.
 @(private, cold)
 piece_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, hs: hook.Regs, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
 	s := pw.s
@@ -680,7 +685,7 @@ piece_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw
 				q, nl, kind = comment_body(q, end, false, S)
 			}
 			r.held ||= nl
-			// A `//` comment the window's end ends may go on in the next.
+			// A `//` comment that the window's end ends may continue in the next window.
 			if pw.more && (kind == .Truncated || kind == .None && q >= end && r.part == RUN_LINE) {
 				r.on = piece_comment_on(w, body, end, r.part == RUN_BLOCK)
 				return piece_run_held(w, pw, hs, end)
@@ -750,9 +755,9 @@ piece_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw
 	return piece_run_end(w, pw, hs, q, end, on)
 }
 
-// The offset a comment's body or a run of white space read from `body` reads on from past a window that ended at
-// `end`: the `*` the window's end leaves, which may close a `/* */` comment, or the first byte of the UTF-8 character it
-// may cut, else `end`.
+// The offset from which a comment body or run of white space read from `body` is read on after a window that ended at
+// `end`. It is the final `*` of the window, which may close a `/* */` comment, or the first byte of the UTF-8 character
+// the window may cut, or else `end`.
 @(private)
 piece_comment_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), body, end: [^]u8, star: bool) -> u64 #no_bounds_check {
 	if star && end > body && end[-1] == '*' {
@@ -769,8 +774,8 @@ piece_comment_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), body, end: [
 	return at(w, end)
 }
 
-// The result of a walk of a window that ends inside run `s.run`, held back for the next: a run past the root value
-// ends the walk past it, and any other a fault `Truncated`.
+// The result of a walk of a window that ends inside run `s.run`, which is held back for the next window. A run past
+// the root value ends the walk past it, and any other run gives the fault `Truncated`.
 @(private)
 piece_run_held :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, hs: hook.Regs, end: [^]u8) -> hook.Walk_Result {
 	if pw.s.run.state == RUN_FOOT {
@@ -780,8 +785,8 @@ piece_run_held :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Wal
 	return fault(w, hs, end, .Truncated)
 }
 
-// Gives the hook the comments of run `s.run`, which ends at `q`, and walks on from the token there in the run's state.
-// The place past each comment is set as `piece_fact` sets it, and the place past the run is that before its token.
+// Gives the hook the comments of run `s.run`, which ends at `q`, and continues from the token there in the run's state.
+// The place past each comment is set as `piece_fact` sets it, and the place past the run is the place before its token.
 @(private)
 piece_run_end :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, hs: hook.Regs, q, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
 	s := pw.s
@@ -828,8 +833,8 @@ piece_run_end :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk
 	return enter_run(state, crossed, q, end, d, w, hs, on)
 }
 
-// Enters the walk at the token `p` past a run of comments read in state `run`, which crossed its comma for `crossed`,
-// in container `d`. A call of its own, whose frame has no base pointer, as `enter` is in a sanitizer's build.
+// Enters the walk at the token `p` past a run of comments read in state `run`, in container `d`. `crossed` is whether
+// the run held its comma. A separate call whose frame has no base pointer, as `enter` has in a sanitizer build.
 @(private)
 enter_run :: #force_no_inline proc "contextless" (run: u8, crossed: bool, p, end: [^]u8, d: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	switch run {
@@ -846,8 +851,8 @@ enter_run :: #force_no_inline proc "contextless" (run: u8, crossed: bool, p, end
 	return st_after_ws(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 }
 
-// The first byte of the comments run `s.run` holds back, which a hook needs that reads a comment's bytes in the window
-// that gives it, or `max(u64)` for none.
+// The offset of the first byte of the comments that run `s.run` holds back, which a hook that reads a comment's bytes
+// needs in the window that gives it the comment. `max(u64)` when the run holds none.
 @(private)
 piece_run_facts :: proc "contextless" (s: ^hook.Piece_State) -> u64 {
 	r := &s.run
@@ -862,9 +867,9 @@ piece_run_facts :: proc "contextless" (s: ^hook.Piece_State) -> u64 {
 	return max(u64)
 }
 
-// The result of a walk of a window that ended as `r`. A window more bytes may follow ends the read inside its root
-// value, or before its foot, at a fault `Truncated`, at a scalar it cut and past the root value, and then the walk's
-// state is kept for the next window.
+// The result of a walk of a window that ended as `r`. When more bytes may follow the window and the walk ended inside
+// the root value, before its foot, at a `Truncated` fault, at a scalar it cut, or past the root value, the walk's state
+// is kept for the next window.
 @(private, cold)
 piece_end :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, r: hook.Walk_Result) -> hook.Walk_Result {
 	s := pw.s
@@ -906,10 +911,11 @@ piece_end :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw
 	return hook.walk_result(s.last, hook.WALK_MORE)
 }
 
-// Moves where the next window reads on from past the white space that ends this window after the last token, so a
+// Moves the offset the next window reads on from past the white space that ends this window after the last token, so a
 // run longer than a window is read once. Past the root value, past a value's comma and past a key's colon, the run is
-// held as a run of comments is, and read on in the next window. Else the place stays, and in a spec with comments its
-// read goes on from the run's last line end, which tells a comment past the run whether a line ended before it.
+// held as a run of comments is, and read on in the next window. Otherwise the place stays, and in a spec with comments
+// the next read continues from the run's last line end, which tells a comment past the run whether a line ended before
+// it.
 @(private)
 piece_pass_white :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk) #no_bounds_check {
 	s := pw.s
@@ -921,7 +927,7 @@ piece_pass_white :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_W
 		}
 	}
 	run: u8
-	// Past the root value, `walk_tail` judged the rest of the window white space.
+	// Past the root value, `walk_tail` checked that the rest of the window is white space.
 	if s.place == PLACE_TAIL {
 		run = RUN_FOOT
 	} else if q := piece_skip_white(p, end, S); q < end {
@@ -960,7 +966,7 @@ piece_pass_white :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_W
 	}
 }
 
-// The first byte past the white space from `p`, JSON5's own in `S`.
+// The first byte past the white space from `p`, including JSON5's white space when `S` is `.Json5`.
 @(private = "file")
 piece_skip_white :: proc "contextless" (p, end: [^]u8, $S: Spec) -> [^]u8 {
 	q := kernel.skip_ws(p, end)
@@ -976,10 +982,10 @@ piece_skip_white :: proc "contextless" (p, end: [^]u8, $S: Spec) -> [^]u8 {
 	return q
 }
 
-// The lowest offset a window after one that ended at place `place`, past `last`, needs: the bytes from `last`, and in
-// a spec with comments the byte before, which the states read back to for a comment after a comma. A run of comments
-// the window ended inside needs the bytes from where it reads on, and keeps the byte before, as the run may end where
-// the next window starts, whose read then keeps from the byte before the token past it.
+// The lowest offset that a window after one ending past `last` needs: the bytes from `last`, and in a
+// spec with comments the byte before, which the states read back to for a comment after a comma. A run of comments
+// that the window ended inside needs the bytes from where it reads on, and the byte before, because the run may end
+// where the next window starts, and that window's read then needs the byte before the token past the run.
 @(private)
 piece_keep_from :: proc "contextless" (s: ^hook.Piece_State, $S: Spec) -> u64 {
 	if s.run.state != 0 {
@@ -995,8 +1001,8 @@ piece_keep_from :: proc "contextless" (s: ^hook.Piece_State, $S: Spec) -> u64 {
 	}
 }
 
-// Whether the `n` bytes of a window that starts a text, more of which may follow, hold too few bytes to tell a byte
-// order mark from none.
+// Whether `src`, a window that starts a text with more bytes to follow, holds too few bytes to tell a byte order mark
+// from none: fewer than 3 bytes that all match the start of the mark.
 @(private)
 piece_bom_open :: proc "contextless" (src: []u8) -> bool {
 	BOM := [3]u8{0xEF, 0xBB, 0xBF}

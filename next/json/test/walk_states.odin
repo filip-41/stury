@@ -8,7 +8,7 @@ import "stury:json"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// Expects the nodes of `doc` from `from` on to be those of `part`, a text that sits at offset `at` of `doc`'s.
+// Expects the nodes of `doc` from `from` on to be those of `part`, a text at offset `at` of `doc`'s.
 expect_nodes_of :: proc(t: ^testing.T, doc, part: ^tape.Document, from: int, at: u64, loc := #caller_location) {
 	if !testing.expectf(t, len(doc.nodes) - from == len(part.nodes), "%d nodes, want %d", len(doc.nodes) - from, len(part.nodes), loc = loc) {
 		return
@@ -219,7 +219,7 @@ number_blocks_honour_the_hook :: proc(t: ^testing.T) {
 	}
 }
 
-// Comments past the root are its inline comment and its foot, emitted only once the text past the root is judged,
+// Comments past the root are its inline comment and its foot, emitted only once the text past the root is checked,
 // whatever room the build has left when it reaches them. A refused allocation of their facts is the build's error.
 @(test)
 root_tail_comments :: proc(t: ^testing.T) {

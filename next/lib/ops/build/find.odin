@@ -5,8 +5,8 @@ import "base:runtime"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// The hook of a `find`, which follows one path through a walk's tokens to its first answer and keeps no node. It enters
-// only the containers on the path and skips every other container, whose bytes the walk judges with no tokens.
+// The hook of a `find`. It follows one path through a walk's tokens to its first answer and stores no node. It enters
+// only the containers on the path and skips every other container, whose bytes the walk judges without giving tokens.
 Finder :: struct {
 	src:       []u8,
 	steps:     []tape.Step,
@@ -17,7 +17,7 @@ Finder :: struct {
 	answers:   [^]tape.Span_Answer, // the rings of negative `Index` arrays, of answers or elements' spans
 	rewalk:    proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, // gives this hook the value at `lo` again
 	walk:      rawptr, // the walk giving this hook its tokens, which `rewalk` reads in
-	block:     []u8, // what `levels` and `opens` are allocated in when the room has no space for it
+	block:     []u8, // what `levels` and `opens` are allocated in when the room has no space for them
 	allocator: runtime.Allocator,
 	alls_end:  int, // one past the last `All` step, 0 for none
 	ring_top:  u32, // where in `answers` the next ring starts
@@ -37,7 +37,7 @@ Finder :: struct {
 	replaying: bool, // inside a `rewalk`, where the arrays met follow the path through every element
 	settled:   bool, // the answer is final, so the walk needs no more tokens
 	refused:   bool, // a walk read again could not grow its stack, so the walk stopped with no answer
-	// From `key` to `count_to`, what `finder_hook` reads of every token, which `finder_focus` sets.
+	// `key` to `count_to` are the fields `finder_hook` reads for every token. `finder_focus` sets them.
 	key:       string, // with `named`, the one key the open container takes
 	key_head:  u64, // the first eight bytes of `key`
 	key_tail:  u64, // the last eight bytes of `key`
@@ -56,18 +56,18 @@ Finder :: struct {
 
 FINDER_CAPS :: hook.Capabilities{.Skips, .Unspelled, .Walk}
 
-// Space for a `Finder`'s levels and the start of its rings, which a caller can leave unset as each entry is written
-// before it is read.
+// Space for a `Finder`'s levels and the first entries of its rings. A caller can leave it uninitialized, since each
+// entry is written before it is read.
 Find_Room :: struct {
 	levels:  [FIND_ROOM]Find_Level,
 	opens:   [FIND_ROOM]u64,
 	answers: [FIND_ROOM]tape.Span_Answer,
 }
 
-// The levels, and the ring entries, a `Find_Room` has space for. A ring takes more only as its array has elements.
+// The number of levels, and of ring entries, a `Find_Room` holds. A ring uses more only as its array has more elements.
 FIND_ROOM :: 64
 
-// One container a `Finder` entered, and the children it has passed.
+// A container a `Finder` entered and the children it has passed.
 @(private)
 Find_Level :: struct {
 	count:   u64,
@@ -75,7 +75,7 @@ Find_Level :: struct {
 	size:    u32, // its ring's entries once full, as `finder_ring_size` gives them
 	// Wide, so that a load of it is never part of a pair load that follows its store, which a core cannot forward.
 	slot:    u64, // the entry of its ring written next, which holds the oldest answer once the ring is full. Under a
-	// `Slice`, the entry of the element about to pass. Always below `have`
+	// `Slice`, the entry of the element about to pass. Always below `have`.
 	have:    u32, // the entries of its ring that `answers` holds space for, at most `size`
 	chosen:  bool, // a child was taken
 	replays: bool, // its elements are passed whole and the one picked read again, as `tape.step_replays` judges
@@ -88,13 +88,13 @@ Find_Level :: struct {
 @(private)
 FIND_NONE :: tape.Span_Answer{outcome = .Not_Loaded}
 
-// A finder for `steps` over `src`, its levels in `room` when they fit, else allocated, and its rings in `room` until
-// their arrays have more elements than it has entries for. With no `rewalk` it reads values once, keeping a ring of
-// spans where a replay would read one again, as for a text whose bytes go once read, whose length `src` does not
-// bound.
+// Returns a finder for `steps` over `src`. Its levels are in `room` when they fit, else allocated, and its rings are in
+// `room` until their arrays have more elements than `room` has entries for. With no `rewalk` it reads each value once
+// and keeps a ring of spans where a replay would read a value again, as for a text whose bytes are read once and whose
+// length `src` does not bound.
 @(require_results)
 finder_start :: proc(src: []u8, format: ^tape.Format, steps: []tape.Step, read: tape.Read_Options, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, room: ^Find_Room, allocator: runtime.Allocator) -> (f: Finder, err: runtime.Allocator_Error) {
-	// The most ring entries, as an entry's place is a `u32` and the bytes of the rings fit an `int`.
+	// The most ring entries. An entry's index is a `u32`, and twice the bytes of the entries must fit an `int`.
 	MAX_ANSWERS :: int(min(u64(max(u32)), u64(max(int) / (2 * size_of(tape.Span_Answer)))))
 	answers := 0
 	rewalks := .Rewalk in format.caps && rewalk != nil
@@ -129,9 +129,9 @@ finder_start :: proc(src: []u8, format: ^tape.Format, steps: []tape.Step, read: 
 	return f, nil
 }
 
-// The lowest offset of a span the finder holds that may still be its answer: the answer whose `End` is to come, the
-// element whose span a ring keeps at its `End`, the spans its rings keep, and under a ring the answer of the element
-// last read, which the ring takes at the next element. `max(u64)` for none.
+// Returns the lowest offset of a span the finder holds that may still be its answer, or `max(u64)` for none. The spans
+// are the answer whose `End` is to come, the element whose span a ring keeps at its `End`, the spans in its rings and,
+// under a ring, the answer of the element last read, which the ring takes at the next element.
 finder_holds :: proc "contextless" (f: ^Finder) -> u64 #no_bounds_check {
 	lo := max(u64)
 	if f.pending {
@@ -162,8 +162,8 @@ finder_end :: proc(f: ^Finder) {
 	}
 }
 
-// Reads each token at the cost of a compare or two: a key the open container cannot take, or a scalar no step looks at,
-// goes on without a call.
+// Passes a key the open container cannot take, or a scalar no step looks at, with a compare or two and no call. Any
+// other token goes to `finder_token`.
 finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) #no_bounds_check {
 	if t.role == .Key {
 		if !h.keys {
@@ -197,8 +197,8 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 	return s, finder_token(h, t)
 }
 
-// Sets what `finder_hook` reads for the tokens up to the next one the finder must look at. A container skipped gives
-// only its `End` meanwhile, which the hook passes on its own unless it closes the answer.
+// Sets the fields `finder_hook` reads, for the tokens up to the next one the finder must look at. A container the
+// finder skipped gives only its `End` meanwhile, which the hook passes without a call unless it closes the answer.
 @(private)
 finder_focus :: #force_inline proc "contextless" (h: ^Finder) #no_bounds_check {
 	h.keys, h.named, h.quiet, h.count_at = false, false, false, nil
@@ -240,8 +240,9 @@ finder_focus :: #force_inline proc "contextless" (h: ^Finder) #no_bounds_check {
 	}
 }
 
-// Whether the `Name` of level `lv` may take a member, with `none` while the value taken last has given no answer: under
-// `.Last` every member of the key, under `.First` the first, and under `.Group` each until one gives an answer.
+// Whether the `Name` of level `lv` may take a member. `none` is true while the value taken last has given no answer.
+// Under `.Last` it takes every member of the key, under `.First` the first, and under `.Group` each until one gives
+// an answer.
 @(private)
 finder_names :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level, none: bool) -> bool {
 	return none if h.group else !lv.chosen || !h.first
@@ -297,8 +298,8 @@ finder_step :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token) -> h
 	return finder_value(h, t)
 }
 
-// The answer is final once it is one and no container still open on the path can replace it. Then the walk stops, or
-// with no `stop_early` judges the rest of the text with no hooks from the next container on.
+// The answer is final once there is one and no open container on the path can replace it. Then the walk stops, or,
+// without `stop_early`, judges the rest of the text from the next container on without calling the hook.
 @(private)
 finder_settle :: #force_inline proc "contextless" (h: ^Finder) -> hook.Action {
 	if h.replacers > 0 || h.answer.outcome == .Not_Loaded {
@@ -308,7 +309,7 @@ finder_settle :: #force_inline proc "contextless" (h: ^Finder) -> hook.Action {
 	return .Stop if h.stop else .Next
 }
 
-// Takes the next value as the one the path goes on through, which has given no answer yet.
+// Takes the next value as the one the path continues through. It has given no answer yet.
 @(private)
 finder_take :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level) {
 	lv.chosen, h.want, h.answer = true, true, FIND_NONE
@@ -325,8 +326,8 @@ finder_value :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #n
 				break
 			}
 			lv.count += 1
-			// An array of few elements is read as it goes, whose answer a replay would read again; past that many, an
-			// element is passed whole and the one picked read again at the close.
+			// The first `FIND_WALK_IN` elements of an array are read as they pass, whose answer a replay would read
+			// again. Past those, an element is passed whole and the one picked is read again at the close.
 			if lv.replays && !h.replaying && lv.count > FIND_WALK_IN {
 				return finder_pass(h, lv, t)
 			}
@@ -402,7 +403,7 @@ finder_pass :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level, t:
 	return .Next if finder_ring_put(h, lv, span) else .Stop
 }
 
-// Takes the value of `t` as the answer, a container's at its `End`.
+// Takes the value of `t` as the answer, for a container at its `End`.
 @(private)
 finder_reach :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, outcome: tape.Presence) -> hook.Action {
 	if t.kind == .Array || t.kind == .Object {
@@ -418,7 +419,8 @@ finder_reach :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, out
 // Enters the container `t` opens, with a ring of `ring` entries.
 @(private)
 finder_enter :: #force_inline proc "contextless" (h: ^Finder, replaces: bool, t: tape.Token, ring: u32, replays: bool) -> hook.Action {
-	// A ring that does not fit what is left of `answers` starts small and grows as its array passes elements.
+	// A ring that does not fit what is left of `answers` starts with at most `FIND_RING_START` entries and grows as its
+	// array passes elements.
 	have := ring
 	if u64(h.ring_top) + u64(ring) > u64(h.answers_cap) {
 		have = min(ring, FIND_RING_START)
@@ -451,18 +453,19 @@ finder_key :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #no_
 	return .Next
 }
 
-// The entries a ring that does not fit starts with.
+// The entries a ring starts with when it does not fit in `answers`.
 @(private)
 FIND_RING_START :: 8
 
-// The elements of an array a find reads as they pass, below which a replay would read its last elements again.
+// The first elements of an array that a find reads as they pass. Only an element picked at index `FIND_WALK_IN` or
+// later is read again by a replay.
 @(private)
 FIND_WALK_IN :: 8
 
-// The answer of a container on the path at its `End` `t`, the one its taken child gave or why none was taken.
+// Sets the answer of the container on the path at its `End` `t`: the one its taken child gave, or why none was taken.
 @(private)
 finder_close :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #no_bounds_check {
-	// One array at a time is read again, so a replay holds one more walk at most and reads each element once more.
+	// Only one array is read again at a time, so a replay holds at most one more walk and reads each element once more.
 	if picked := &h.levels[h.entered - 1]; picked.replays && !h.replaying {
 		#partial switch step in h.steps[h.entered - 1] {
 		case tape.Index:
@@ -470,8 +473,8 @@ finder_close :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #n
 				picked.chosen = true
 				e := picked.count - u64(-step)
 				if e < FIND_WALK_IN {
-					// The picked element was read as it passed: the last one's answer is in hand, an earlier one's in
-					// the ring.
+					// The picked element was read as it passed. The last element's answer is in hand, an earlier
+					// one's is in the ring.
 					if e + 1 < picked.count {
 						h.answer = h.answers[picked.ring + u32(e % u64(picked.size))]
 					}
@@ -537,7 +540,7 @@ finder_close :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #n
 }
 
 // Reads again the element of the open array whose span its ring holds at `slot`, as the one the path goes on through.
-// False when the walk read again could not grow its stack, with `h.refused`.
+// False, with `h.refused` set, when the walk read again could not grow its stack.
 @(private)
 finder_replay :: proc "contextless" (h: ^Finder, slot: u64) -> bool #no_bounds_check {
 	lv := &h.levels[h.entered - 1]
@@ -551,7 +554,7 @@ finder_replay :: proc "contextless" (h: ^Finder, slot: u64) -> bool #no_bounds_c
 	return true
 }
 
-// Whether every container open on the path has taken the one child it can, by a key under `.First` or a position from
+// Whether every container open on the path has taken the only child it can, by a key under `.First` or a position from
 // the start, so that a path that has given no answer gives none.
 @(private)
 finder_spent :: proc "contextless" (h: ^Finder) -> bool #no_bounds_check {
@@ -564,10 +567,10 @@ finder_spent :: proc "contextless" (h: ^Finder) -> bool #no_bounds_check {
 	return true
 }
 
-// Takes element `e` of the level `lv` of a `Slice` with an end from the end, whose ring holds the answers of the last
-// elements it may take, element `e` at entry `e % size`. `lv.slot` is that entry from element 1 on, and before the
-// advance the entry of element `e - 1`. Under a `lo` from the start, an element whose answer is in the ring is in the
-// slice once the ring's length of elements follows it, so the first such answer is final.
+// Takes element `e` of level `lv`, a `Slice` with an end from the end. Its ring holds the answers of the last elements
+// it may take, element `e` at entry `e % size`. `lv.slot` is that entry from element 1 on, and before the advance the
+// entry of element `e - 1`. Under a `lo` from the start, an element whose answer is in the ring is in the slice once
+// `size` more elements follow it, so the first such answer is final.
 @(private)
 finder_slice_element :: proc "contextless" (h: ^Finder, lv: ^Find_Level, step: tape.Slice, e: u64) -> hook.Action #no_bounds_check {
 	if e > 0 {
@@ -597,9 +600,9 @@ finder_slice_element :: proc "contextless" (h: ^Finder, lv: ^Find_Level, step: t
 	return .Next
 }
 
-// The answer of the level `lv` of a `Slice` with an end from the end at its close: the first of the elements it
-// takes, now that its count is known, that gave one. An element it takes was kept when the next one arrived, as no
-// count is known then, so the ring holds its entry.
+// Sets the answer of level `lv`, a `Slice` with an end from the end, at its close: the answer of the first element the
+// slice takes, now that its count is known, that gave one. An element the slice may take was kept when the next one
+// arrived, as no count is known then, so the ring holds its entry.
 @(private)
 finder_slice_close :: proc "contextless" (h: ^Finder, lv: ^Find_Level, step: tape.Slice) #no_bounds_check {
 	h.replacers -= 1
@@ -618,8 +621,9 @@ finder_slice_close :: proc "contextless" (h: ^Finder, lv: ^Find_Level, step: tap
 	}
 }
 
-// A member or element the container `t` closes, the one `h.entered` indexes, lacks, which reads as null, so with an
-// `All` to come the container is the value that cannot take the path.
+// Sets the answer when the container `t` closes, the one `h.entered` indexes, without the member or element the step
+// wants. The absent value reads as null, so when an `All` step comes later on the path the container is the value that
+// cannot take the path (`.Wrong_Kind`), else the answer is `.Missing`.
 @(private)
 finder_miss :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, kind: tape.Kind) {
 	if tape.path_refused(u64(h.entered + 1), u64(h.alls_end)) == .Wrong_Kind {
@@ -630,17 +634,17 @@ finder_miss :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, kind
 	}
 }
 
-// Keeps `entry`, the answer or the span of the element just passed, in the ring of `lv`, which holds the last
-// `-step` elements' entries. Whether the ring had room for the next, which it lacks only when growing it failed.
+// Keeps `entry`, the answer or the span of the element just passed, in the ring of `lv`, which holds the entries of the
+// last `-step` elements. Returns whether the ring has room for the next, which it lacks only when growing it failed.
 @(private)
 finder_ring_put :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level, entry: tape.Span_Answer) -> bool #no_bounds_check {
 	h.answers[lv.ring + u32(lv.slot)] = entry
 	return finder_ring_next(h, lv)
 }
 
-// Moves the entry of the ring of `lv` written next on by one, past the last of the ring's entries to its first once
-// it is full, else to the space the ring grows into. Every entry below `slot` has space, so a write at `slot` or before
-// needs no check. Whether the ring has the space, which it lacks only when growing it failed.
+// Advances `lv.slot`, the entry of the ring written next, by one. After the last entry of a full ring it goes to the
+// first, otherwise into the space the ring grows into. Every entry below `slot` has space, so a write at `slot` or
+// before needs no check. Returns whether the ring has the space, which it lacks only when growing it failed.
 @(private)
 finder_ring_next :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level) -> bool {
 	next := lv.slot + 1
@@ -653,8 +657,8 @@ finder_ring_next :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Leve
 }
 
 // Doubles the entries of the ring of `lv`, at most to its `size`, and moves `slot` into the new entries. The level is
-// the innermost with a ring, as every level inside it is closed when an element of its array passes, so its ring ends
-// where the rings in use do and extends in place. Whether the space was had, else `h.refused`.
+// the innermost with a ring, since every level inside it is closed when an element of its array passes, so its ring
+// ends where the rings in use do and extends in place. Returns whether the space was obtained, else sets `h.refused`.
 @(private, cold)
 finder_ring_grow :: #force_no_inline proc "contextless" (h: ^Finder, lv: ^Find_Level) -> bool {
 	have := u32(min(u64(lv.size), 2 * u64(lv.have)))
@@ -665,8 +669,8 @@ finder_ring_grow :: #force_no_inline proc "contextless" (h: ^Finder, lv: ^Find_L
 	return true
 }
 
-// Gives `answers` space for `entries`, in double its entries or more, by moving it to a larger block. Whether it has
-// the space, else `h.refused`.
+// Gives `answers` space for `entries`: twice its current entries or more, by moving it to a larger block. Returns
+// whether it has the space, else sets `h.refused`.
 @(private, cold)
 finder_answers_reserve :: #force_no_inline proc "contextless" (h: ^Finder, entries: u32) -> bool {
 	if entries <= h.answers_cap {
@@ -692,9 +696,9 @@ finder_answers_reserve :: #force_no_inline proc "contextless" (h: ^Finder, entri
 	return true
 }
 
-// The ring entries the negative `Index` or `Slice` end of step `at` needs over a text of `n` bytes: one per element it
-// reaches back to, but none for an `Index` of `-1` when it keeps answers, as the last element's is in hand at the
-// close. An element spends a byte at least, so a ring past `n` entries holds nothing more.
+// Returns the ring entries the negative `Index` or `Slice` end of step `at` needs over a text of `n` bytes: one per
+// element it reaches back to, but none for an `Index` of `-1` when it keeps answers, since the last element's is in
+// hand at the close. An element takes at least one byte, so a ring of more than `n` entries holds nothing more.
 @(private)
 finder_ring_size :: #force_inline proc "contextless" (steps: []tape.Step, at: int, n: int, rewalks: bool) -> int {
 	reach := tape.step_reach(steps[at])

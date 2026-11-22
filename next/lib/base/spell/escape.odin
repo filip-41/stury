@@ -2,7 +2,7 @@ package spell
 
 import "base:intrinsics"
 
-// The byte each of JSON's one-letter escapes decodes to, by the letter after the backslash; 0 for `u` and any other
+// The byte each of JSON's one-letter escapes decodes to, by the letter after the backslash. 0 for `u` and any other
 // byte.
 @(rodata)
 ESCAPED: [256]u8 = {
@@ -43,8 +43,8 @@ hex4_value :: #force_inline proc "contextless" (h: [^]u8) -> u32 #no_bounds_chec
 	return ((p >> 8) | p) & 0xFFFF
 }
 
-// The code point and length of the escape whose backslash is at `e`, `room` bytes before the end; length 0 for a bad
-// escape.
+// The code point and length of the escape whose backslash is at `e`, `room` bytes before the end. The length is 0 for
+// a bad escape.
 string_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: rune, n: int) #no_bounds_check {
 	if room < 2 {
 		return 0, 0
@@ -68,7 +68,7 @@ unicode_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: 
 	if !ok {
 		return 0, 0
 	}
-	// One range test covers both halves, so a code unit outside them takes one branch.
+	// A single range test covers both halves, so a code unit outside them needs one branch.
 	if unit - 0xD800 >= 0x800 {
 		return rune(unit), 6
 	}

@@ -14,7 +14,7 @@ Kind :: enum u8 {
 	Plain,
 	Array,
 	Object,
-	End, // closes the innermost container; never stored in a document
+	End, // closes the innermost container, never stored in a document
 }
 
 // Scalars come before containers, and containers before `End`, so a hook tells them apart with one compare.
@@ -79,7 +79,7 @@ SPELLING_QUOTED :: u16(2)
 SPELLING_LAX :: u16(4)
 
 // A rule of a format a read may let a text break, each with one fixed reading. A rule a format has no instance of is
-// never broken there, so one set serves every format.
+// never broken there, so the same set applies to every format.
 Tolerance :: enum u8 {
 	// Ill-formed UTF-8 in a string or key. Each maximal subpart of an ill-formed sequence reads as U+FFFD.
 	Invalid_Utf8,

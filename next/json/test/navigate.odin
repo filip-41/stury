@@ -383,7 +383,7 @@ navigate_finds_distinct_keys_of_wide_objects :: proc(t: ^testing.T) {
 	}
 }
 
-// What the partial reads of the agreement test answered.
+// The answers of the partial reads in the agreement test.
 Agreement :: struct {
 	texts, refused, scans, on_path, reads: int,
 	outcomes:                              [tape.Presence]int,
@@ -428,7 +428,7 @@ navigate_agrees_with_the_build_on_generated_texts :: proc(t: ^testing.T) {
 	expect_agreement(t, &a, {texts = 12, refused = 0, scans = 20_000, on_path = 60_000, shapes = 30})
 }
 
-// The least a run of the agreement law is to have read, so that a change that stops it reading fails it.
+// The least a run of the agreement test must have read. A change that stops it reading fails the test.
 Agreement_Floor :: struct {
 	texts, refused, scans, on_path, shapes: int,
 }

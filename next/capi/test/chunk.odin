@@ -10,7 +10,7 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// The chunks one walk is handed to: every token in text order, and the size of each chunk. `refuse` is the chunk whose
+// The chunks a walk delivers: every token in text order, and the size of each chunk. `refuse` is the chunk whose
 // `take` ends the walk, 1-based, 0 for none.
 Sink :: struct {
 	tokens: [dynamic]tape.Token,
@@ -78,7 +78,7 @@ chunks_match_probe :: proc(t: ^testing.T, chunk: Chunk_Walk, probe: testkit.Prob
 	if want_err != nil {
 		return
 	}
-	// A whole read hands full chunks while one is left, and the rest last.
+	// A whole read gives full chunks while one is left, and the rest last.
 	chunks := (len(want.tokens) + capi.CHUNK - 1) / capi.CHUNK
 	if !testing.expectf(t, len(sink.sizes) == chunks, "%q: %d chunks, want %d", text, len(sink.sizes), chunks) {
 		return
@@ -197,7 +197,7 @@ a_chunk_the_consumer_refuses_ends_the_walk :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil, "chunk %d: %v", refuse, err)
 		testing.expectf(t, len(sink.sizes) == refuse, "chunk %d: %d chunks, want %d", refuse, len(sink.sizes), refuse)
 		testing.expectf(t, len(sink.tokens) == refuse * int(capi.CHUNK), "chunk %d: %d tokens, want %d", refuse, len(sink.tokens), refuse * int(capi.CHUNK))
-		// The walk ends at the token that filled the refused chunk, which is not handed.
+		// The walk ends at the token after the refused chunk, which is not delivered.
 		stop := want.tokens[refuse * int(capi.CHUNK)]
 		testing.expectf(t, close == stop.lo + u64(stop.n), "chunk %d: close %d, want %d", refuse, close, stop.lo + u64(stop.n))
 		testing.expectf(t, capi.chunk_flush(&h, got_regs), "chunk %d: the flush refused", refuse)

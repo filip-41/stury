@@ -6,11 +6,12 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
-// The reads of a text in pieces, which `validate`, `build`, `find` and `scan` run for `Options.pieces`. Each keeps its
-// hook, and the memory budget its blocks are counted in, in a block of its own from the first window to the last.
+// The reads of a text in pieces that `validate`, `build`, `find` and `scan` run for `Options.pieces`. Each keeps its
+// hook, and the memory budget its blocks are counted in, in its own block from the first window to the last.
 
-// Walks the window `src` of the text in pieces `opts.pieces` for hook `h` from its registers `regs`, and sets where the
-// read stands. A window must start at or before `keep` and reach `at` at least, and the first must start the text.
+// Walks the window `src` of the text in pieces `opts.pieces` for hook `h` from its registers `regs`, and updates
+// `opts.pieces` (`more`, `at`, `keep`, `open`) for the next window. A window must start at or before `keep` and end at
+// or after `at`, and the first window must start the text.
 @(private)
 piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	p := opts.pieces
@@ -60,14 +61,14 @@ validate_pieces :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.A
 	regs := s.regs
 	ctx := context
 	_, err, _ := piece_read(src, S, opts, &h, &regs, a, &ctx, hook.no_hook)
-	// Nothing needs the bytes of a token the window cut short before where its read goes on.
+	// No later read needs the bytes of a token the window cut short that lie before the point where its read continues.
 	if p.more && s.cut.on != 0 {
 		p.keep = max(p.keep, piece_cut_keep(s.cut))
 	}
 	return hook.memory_budget_error(&s.blocks, err)
 }
 
-// A build's hook between windows.
+// The build's hook state kept between windows.
 @(private)
 Build_Piece :: struct {
 	b: build.Builder,
@@ -80,7 +81,8 @@ build_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 	free(blk, allocator)
 }
 
-// Its document's nodes point into the text, so a build keeps every byte, and each window starts the text.
+// Builds a text in pieces. The document's nodes point into the text, so the build keeps every byte, and each window
+// starts at the text's start.
 @(private)
 build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error) {
 	p := opts.pieces
@@ -125,7 +127,7 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 	return
 }
 
-// A find's hook between windows.
+// The find's hook state kept between windows.
 @(private)
 Find_Piece :: struct {
 	f:    build.Finder,
@@ -139,8 +141,8 @@ find_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 	free(blk, allocator)
 }
 
-// The answer of a find over a text in pieces. Its bytes are copied out of the window it closes in into `Pieces.text`,
-// and until then the read keeps from its first byte, and from the first of each span its rings hold.
+// Returns the answer of a find over a text in pieces. Its bytes are copied out of the window it closes in into
+// `Pieces.text`. Until then the read keeps from its first byte, and from the first byte of each span its rings hold.
 @(private)
 find_pieces :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (answer: tape.Span_Answer, err: tape.Error) {
 	p := opts.pieces
@@ -190,7 +192,7 @@ find_pieces :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Opti
 	return answer, nil
 }
 
-// Copies the bytes of the finder's answer out of the window `text` once it is whole and new.
+// Copies the bytes of the finder's answer out of the window `text` once the answer is complete and not yet copied.
 @(private)
 find_piece_copy :: proc(p: ^tape.Pieces, s: ^hook.Piece_State, f: ^build.Finder, text: []u8) -> runtime.Allocator_Error {
 	a := f.answer
@@ -205,7 +207,7 @@ find_piece_copy :: proc(p: ^tape.Pieces, s: ^hook.Piece_State, f: ^build.Finder,
 	return nil
 }
 
-// A scan's hook between windows.
+// The scan's hook state kept between windows.
 @(private)
 Scan_Piece :: struct {
 	h:    build.Scanner,
@@ -219,8 +221,8 @@ scan_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 	free(blk, allocator)
 }
 
-// The document of a scan over a text in pieces, whose keys, scalars and facts are copied out of each window as it ends,
-// so the read keeps only what the walk needs and its document is `.Held`.
+// Returns the document of a scan over a text in pieces. Its keys, scalars and facts are copied out of each window as it
+// ends, so the read keeps only what the walk needs, and the document is `.Held`.
 @(private)
 scan_pieces :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error) {
 	p := opts.pieces
@@ -248,8 +250,8 @@ scan_pieces :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_O
 		}
 	}
 	if werr == nil && p.more {
-		// A scan of facts copies a comment's bytes out of the window the walk gives it in, which may be past the window
-		// of its bytes when its run's end was not in the same window.
+		// A scan of facts copies a comment's bytes out of the window in which the walk gives it. That window may be
+		// later than the one holding its bytes, when the run's end was not in the same window.
 		if blk.h.facts {
 			p.keep = min(p.keep, piece_run_facts(s))
 		}

@@ -3,7 +3,7 @@ package hook
 import "base:runtime"
 import "stury:lib/core/tape"
 
-// What a read of a text in pieces carries from one piece to the next, the walk's and the hook's.
+// The walk's and the hook's state that a read of a text in pieces carries from one piece to the next.
 Piece_State :: struct {
 	started:   bool,
 	place:     u8, // the format's place in its grammar past the last token, 0 at the text's start
@@ -19,7 +19,7 @@ Piece_State :: struct {
 	levels:    [dynamic]u32,
 	names:     [dynamic]u8, // the open path's names
 	steps_buf: [dynamic]tape.Step,
-	memo:      []u8, // what the format's walk learned and keeps across pieces
+	memo:      []u8, // what the format's walk keeps across pieces
 	hook:      rawptr, // the read's hook, in its own block
 	hook_free: proc(hook: rawptr, allocator: runtime.Allocator),
 	answer:    [2]u64, // with `find`, the span `text` holds
@@ -58,7 +58,7 @@ Cut_Run :: struct {
 	comments: [dynamic]tape.Token,
 }
 
-// What the walk does with the tokens of a container its hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest` for.
+// How the walk treats the tokens of a container its hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest` for.
 Nest :: enum u8 {
 	None,
 	Skip,

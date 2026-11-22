@@ -21,7 +21,7 @@ eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
 }
 
 // One bit per lane of `m`. NEON has no lane-bit gather, so each lane is weighted 1 to 128 within its byte and three
-// rounds of pairwise adds fold 64 lanes into 8 bytes; the bits do not overlap, so the adds act as ORs.
+// rounds of pairwise adds fold 64 lanes into 8 bytes. The bits do not overlap, so the adds act as ORs.
 pack :: #force_inline proc "contextless" (m: Block) -> u64 {
 	s := fold(m)
 	return (transmute([2]u64)addp(s, s))[0]
@@ -77,7 +77,7 @@ last_lane16 :: #force_inline proc "contextless" (m: V) -> u64 {
 }
 
 // NEON's pairwise add, opaque to LLVM. Through `simd.pairwise_add`, LLVM sees that `pack` uses only the low half of the
-// last round and rewrites that `addp` as xtn, uzp2 and add, which costs `index_byte` about 15%.
+// last round and rewrites that `addp` as xtn, uzp2 and add, which slows `index_byte`.
 @(private = "file", default_calling_convention = "none")
 foreign _ {
 	@(link_name = "llvm.aarch64.neon.addp.v16i8")

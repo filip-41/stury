@@ -6,9 +6,9 @@ import "core:slice"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// Applies a build's policy for the members of one object that share a key, kind and text, to the built `doc`.
+// Applies a build's policy `dups` to the built `doc`, for the members of one object that share a key, kind and text.
 // `.Refuse` fails with `.Duplicate_Key` at the first key of the text that repeats one of its object's. `.First` and
-// `.Last` keep one member of each key, the other members going with their nodes and facts. Any other policy keeps
+// `.Last` keep one member of each key and remove the other members with their nodes and facts. Any other policy keeps
 // every member. On an error `doc` is destroyed.
 @(require_results)
 builder_dups :: proc(doc: ^tape.Document, dups: tape.Duplicates, rules: ^tape.Rules) -> tape.Error {
@@ -16,8 +16,8 @@ builder_dups :: proc(doc: ^tape.Document, dups: tape.Duplicates, rules: ^tape.Ru
 		return nil
 	}
 	r := Repeats{at = max(u64)}
-	// Captured before the defers: an error destroys the document, and a deferred free through `doc.allocator`
-	// would then read a zeroed allocator and leak the bitmap.
+	// Copied here because an error destroys `doc`, and a deferred free through `doc.allocator` would then use a zeroed
+	// allocator and leak the bitmap.
 	allocator := doc.allocator
 	defer delete(r.drops, allocator)
 	keys: [dynamic]Hashed_Key
@@ -51,8 +51,8 @@ dups_apply :: #force_inline proc "contextless" (doc: ^tape.Document, dups: tape.
 	return (dups == .Refuse || dups == .First || dups == .Last) && len(doc.nodes) > 0
 }
 
-// The repeated keys found: under `.Refuse` the first byte of the first repeated key in the text, else `max(u64)`, and
-// a bit per key node of a member dropped, which `dropped` says any is.
+// The repeated keys found. `at` is, under `.Refuse`, the offset of the first repeated key in the text, else
+// `max(u64)`. `drops` has a bit per key node of each dropped member, and `dropped` says whether any is set.
 @(private)
 Repeats :: struct {
 	at:      u64,
@@ -60,7 +60,8 @@ Repeats :: struct {
 	dropped: bool,
 }
 
-// Removes the members `r` drops, or gives the error `refused` or `r` holds, destroying `doc` on an error.
+// Removes the members `r` drops, or returns the error `refused` or the duplicate key `r` holds. `doc` is destroyed on
+// an error.
 @(private)
 dups_end :: proc(doc: ^tape.Document, r: ^Repeats, refused: runtime.Allocator_Error, rules: ^tape.Rules) -> tape.Error {
 	refused := refused
@@ -79,9 +80,9 @@ dups_end :: proc(doc: ^tape.Document, r: ^Repeats, refused: runtime.Allocator_Er
 	return err
 }
 
-// Marks the repeated keys among `keys`, members of one object each in node order. Two keys are one by the format's
-// `key_hash` and `same_keys`, as for the readers. Past `FEW_KEYS` keys, keys meet only in runs of one hash and object
-// once sorted by hash, object and node.
+// Marks the repeated keys among `keys`, which are in node order. Two keys are equal by the format's `key_hash` and
+// `same_keys`, as for the readers, and keys of different `object` are never equal. With more than `FEW_KEYS` keys they
+// are sorted by hash, object and node, and each is compared only within its run of one hash and object.
 @(private)
 repeats_in :: proc(doc: ^tape.Document, keys: []Hashed_Key, dups: tape.Duplicates, r: ^Repeats) -> runtime.Allocator_Error #no_bounds_check {
 	sorted := len(keys) > FEW_KEYS
@@ -95,7 +96,8 @@ repeats_in :: proc(doc: ^tape.Document, keys: []Hashed_Key, dups: tape.Duplicate
 		for past < len(keys) && keys[past].hash == keys[run].hash && keys[past].object == keys[run].object {
 			past += 1
 		}
-		// Each key of the run in text order, with its later same keys marked taken by setting their node to none.
+		// Each key of the run in text order. Its later equal keys are marked taken by setting their node to
+		// `tape.NO_NODE`.
 		for j in run ..< past {
 			first := keys[j].node
 			if first == tape.NO_NODE {
@@ -126,11 +128,12 @@ repeats_in :: proc(doc: ^tape.Document, keys: []Hashed_Key, dups: tape.Duplicate
 	return nil
 }
 
-// The keys of an object that `repeats_in` compares pairwise.
+// The most keys that `repeats_in` compares pairwise without sorting.
 @(private)
 FEW_KEYS :: 16
 
-// A key of an object, by the object's node for one that crosses a seam.
+// A key node with the hash of its key. `object` is the node of its object for a member of an object that crosses a
+// seam, else 0.
 @(private)
 Hashed_Key :: struct {
 	hash:   u32,
@@ -138,7 +141,8 @@ Hashed_Key :: struct {
 	node:   tape.Node_Index,
 }
 
-// Marks the member at key node `k` dropped, in a bitset that a build in parts allocates before its threads share it.
+// Sets the bit of key node `k` in `r.drops`, allocating the bitset on first use. A build in parts allocates it
+// beforehand, as its threads share it.
 @(private)
 drop_mark :: proc(doc: ^tape.Document, r: ^Repeats, k: tape.Node_Index) -> runtime.Allocator_Error {
 	if r.drops == nil {
@@ -149,9 +153,9 @@ drop_mark :: proc(doc: ^tape.Document, r: ^Repeats, k: tape.Node_Index) -> runti
 	return nil
 }
 
-// `builder_dups` for a document `segments_join` joined from `segs`, on the threads of `runner`. Each segment's part
-// judges the objects it holds whole, and gives the members it holds of the objects that cross its ends, which are then
-// judged by ranges of their keys' hashes.
+// `builder_dups` for a document `segments_join` joined from `segs`, run on the threads of `runner`. Each segment judges
+// the objects it holds whole and collects the members it holds of objects that cross its ends. Those members are then
+// judged in ranges of their keys' hashes.
 @(require_results)
 segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicates, rules: ^tape.Rules, runner: ^tape.Runner) -> tape.Error {
 	if !dups_apply(doc, dups) {
@@ -179,7 +183,8 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 			return dups_end(doc, &r, err, rules)
 		}
 	}
-	// A part's crossing members, appended as it reads them, and the one object it judges at a time.
+	// Each part's `keys` gets the crossing members it reads, and `scratch` the members of the one object it judges at a
+	// time.
 	for &p in j.parts {
 		p.r = {at = max(u64), drops = r.drops}
 		p.keys.allocator = allocator
@@ -195,7 +200,8 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 		}
 	}
 	if crossing > 0 && err == nil {
-		// Ranges of hashes, each with the members of crossing objects every part holds in it, sorted in each part.
+		// Splits the hashes into `n` ranges, each with the crossing members every part holds in it, sorted in each
+		// part.
 		n := max(4 * (runner.threads + 1), 1)
 		if j.keys, err = non_zero_make([]Hashed_Key, crossing, allocator); err != nil {
 			return dups_end(doc, &r, err, rules)
@@ -236,8 +242,8 @@ Dups_Job :: struct {
 	next:   int,
 }
 
-// A part's repeats and its keys: the members it holds of objects that cross its ends, appended and sorted, and the
-// members of the one object it is judging.
+// A segment's repeats `r`, its `keys` (the `crossing` members it holds of objects that cross its ends, appended and
+// then sorted) and `scratch` (the members of the one object it is judging).
 @(private)
 Dups_Part :: struct {
 	r:        Repeats,
@@ -247,7 +253,8 @@ Dups_Part :: struct {
 	err:      runtime.Allocator_Error,
 }
 
-// The crossing members with hashes up to `hash`, from `keys[lo]` on in the job's keys.
+// A range of hashes: the crossing members with hashes up to `hash` and past the previous range's, which start at
+// `keys[lo]` in the job's keys.
 @(private)
 Dups_Range :: struct {
 	hash: u32,
@@ -256,7 +263,7 @@ Dups_Range :: struct {
 	err:  runtime.Allocator_Error,
 }
 
-// The keys of sorted `keys` whose hash is at most `hash`.
+// The number of keys in sorted `keys` whose hash is at most `hash`.
 @(private)
 dups_below :: proc "contextless" (keys: []Hashed_Key, hash: u32) -> int {
 	lo, hi := 0, len(keys)
@@ -271,14 +278,15 @@ dups_below :: proc "contextless" (keys: []Hashed_Key, hash: u32) -> int {
 	return lo
 }
 
-// The keys of sorted `keys` in range `i` of `ranges`, past the hashes of the range before it.
+// The bounds `from` and `to` of the keys of sorted `keys` in range `i` of `ranges`, past the hashes of the range
+// before it.
 @(private)
 dups_range :: #force_inline proc "contextless" (keys: []Hashed_Key, ranges: []Dups_Range, i: int) -> (from, to: int) {
 	return dups_below(keys, ranges[i - 1].hash) if i > 0 else 0, dups_below(keys, ranges[i].hash)
 }
 
-// Judges each part's objects and gathers its crossing members, the containers open at its seam crossing its start
-// and those it opens and leaves open crossing its end.
+// Judges the objects each segment holds whole and gathers its crossing members. A container crosses the segment's
+// start if it is open at its seam, and its end if the segment opens it and leaves it open.
 @(private)
 dups_parts :: proc(arg: rawptr) {
 	j := (^Dups_Job)(arg)
@@ -290,7 +298,8 @@ dups_parts :: proc(arg: rawptr) {
 		}
 		s, p := &j.segs[k], &j.parts[k]
 		lo, hi := s.at, j.segs[k + 1].at if k + 1 < len(j.segs) else len(doc.nodes)
-		// The open containers, a node each with a bit for one that crosses, in the frames the part's walk used.
+		// The open containers, each as its node shifted left by one with the low bit set for one that crosses, kept in
+		// the frames the segment's walk used.
 		stack := s.b.stack
 		top := 0
 		for node in s.seam {
@@ -325,8 +334,8 @@ dups_parts :: proc(arg: rawptr) {
 			stack[top] = u64(i) << 1 | u64(!whole)
 			top += 1
 		}
-		// By hash, then node, so a range's keys of one hash come in node order, part after part, which `repeats_in`
-		// needs of a range of few keys it leaves unsorted.
+		// Sorted by hash, then node, so that a range's keys of one hash come in node order, segment after segment.
+		// `repeats_in` relies on that order for a range of `FEW_KEYS` keys or fewer, which it does not sort.
 		slice.sort_by(p.keys[:p.crossing], proc(a, b: Hashed_Key) -> bool { return a.hash < b.hash || a.hash == b.hash && a.node < b.node })
 	}
 }
@@ -411,12 +420,12 @@ drop_members :: proc(doc: ^tape.Document, drops: []u64) -> runtime.Allocator_Err
 @(private)
 Open_Moved :: struct {
 	at:      int, // its new index
-	end:     int, // one past its old subtree
+	end:     int, // index one past its old subtree
 	dropped: u16,
 }
 
-// Gives the container `o` closing at the new index `w` its subtree's size and its child count less the members dropped
-// from it, counted again where the count saturated.
+// Sets the size of container `o`, which closes at the new index `w`, and its child count less the members dropped from
+// it. A count that had saturated is counted again from the nodes.
 @(private)
 close_moved :: proc(nodes: []tape.Node, o: Open_Moved, w: int) {
 	node := &nodes[o.at]
@@ -428,7 +437,7 @@ close_moved :: proc(nodes: []tape.Node, o: Open_Moved, w: int) {
 	}
 }
 
-// The true child counts of the containers in `nodes` whose `spelling` saturated, in node order.
+// The full child counts of the containers in `nodes` whose `spelling` saturated at `MAX_CHILDREN`, in node order.
 @(private, cold)
 builder_counts :: proc(nodes: []tape.Node, allocator: runtime.Allocator) -> (counts: [dynamic]tape.Child_Count, err: runtime.Allocator_Error) #no_bounds_check {
 	counts.allocator = allocator

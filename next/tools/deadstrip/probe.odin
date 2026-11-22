@@ -1,5 +1,5 @@
-// Exported calls of one constant spec's build and handle, which `tools/deadstrip_check.py` measures: a program whose
-// only reads are one build of one spec must link that spec's walk and no read of another entry point.
+// Exports a build and a format handle for one constant spec, which `tools/deadstrip_check.py` measures. A program
+// whose only read is a build of one spec must link that spec's walk and no read of another entry point.
 package deadstrip
 
 import "stury:json"

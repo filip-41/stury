@@ -1,4 +1,4 @@
-// The tests every format's walk passes, through the hooks here.
+// Hooks that record a walk's tokens and answer actions, and the checks every format's walk must pass with them.
 package testkit
 
 import "base:runtime"

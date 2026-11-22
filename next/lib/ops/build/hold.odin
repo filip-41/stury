@@ -5,13 +5,12 @@ import "core:slice"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// A scan of a text in pieces copies the bytes of what it keeps out of each window as the window ends, so the caller may
-// drop a window once the walk is past it, and its document reads those bytes as `.Held`. The walk's tokens come in text
-// order and the nodes, facts and coming key a scan keeps follow it, so the tokens a window added are those from
-// `Scanner.hold_from` on.
+// A scan of a text in pieces copies the bytes it keeps out of each window when the window ends. The caller may drop a
+// window once the walk is past it, and the document reads the copied bytes as `.Held`. Tokens arrive in text order, so
+// the nodes, facts and coming key a window added are those from offset `Scanner.hold_from` on.
 
-// Copies out of window `text`, which the text's offsets index, the authored span of each key and scalar node, each fact
-// and the coming key that the walk gave since the last hold. `regs` are the hook's registers at the window's end.
+// Copies out of window `text` (indexed by the text's offsets) the authored span of each key and scalar node, each fact
+// and the coming key that the walk produced since the last hold. `regs` are the hook's registers at the window's end.
 scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Allocator_Error {
 	h.holds = true
 	nodes := h.b.doc.nodes[:builder_cursor(&h.b, regs)]
@@ -41,12 +40,14 @@ scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Alloca
 	return nil
 }
 
-// The bytes a scan holds past twice those it held when it last dropped the bytes of tokens it no longer keeps.
+// `scanner_hold` drops the bytes of tokens the scan no longer keeps when `h.bytes` exceeds twice `h.held_live` (the
+// bytes live after the last drop) plus this many bytes.
 @(private)
 HOLD_SLACK :: 4096
 
-// The next of the tokens from node `k^` and fact `j^` on, and then the coming key, in text order, as a token whose
-// span is the bytes it holds. A container node holds none, and is passed.
+// Returns the next token in text order among the nodes from index `k^`, the facts from index `j^` and the coming key,
+// and advances the index it came from. On equal offsets the order is node, fact, coming key. A fact comes back as a
+// token of kind `.End`. Container nodes hold no bytes and are skipped. False when none is left.
 @(private)
 hold_next :: proc "contextless" (h: ^Scanner, nodes: []tape.Node, facts: []tape.Fact, k, j: ^int) -> (tape.Token, bool) #no_bounds_check {
 	for k^ < len(nodes) && nodes[k^].kind > .Plain {
@@ -68,7 +69,8 @@ hold_next :: proc "contextless" (h: ^Scanner, nodes: []tape.Node, facts: []tape.
 	return h.key, true
 }
 
-// The bytes of token `t`'s authored span before and after its own, none for a fact's, whose span is all of it.
+// The authored bytes before (`head`) and after (`tail`) token `t`'s own span, as the format's `bounds` gives them. A
+// fact (kind `.End`) has none, its span is all of it.
 @(private)
 hold_bounds :: #force_inline proc "contextless" (h: ^Scanner, src: []u8, t: tape.Token) -> (head, tail: u64) {
 	if t.kind == .End {
@@ -78,8 +80,8 @@ hold_bounds :: #force_inline proc "contextless" (h: ^Scanner, src: []u8, t: tape
 	return u64(a), u64(b)
 }
 
-// Keeps only the held bytes of the nodes, facts and coming key the scan still keeps, as a scan that takes elements
-// back drops their nodes.
+// Rebuilds `h.held` and `h.bytes` with only the spans of the nodes, facts and coming key the scan still keeps. A scan
+// that takes elements back drops their nodes, which leaves held bytes no node reads.
 @(private, cold)
 hold_drop :: proc(h: ^Scanner, nodes: []tape.Node, facts: []tape.Fact) -> runtime.Allocator_Error {
 	held := make([dynamic]tape.Held_Span, 0, len(h.held), h.held.allocator) or_return
@@ -94,7 +96,7 @@ hold_drop :: proc(h: ^Scanner, nodes: []tape.Node, facts: []tape.Fact) -> runtim
 		if !ok || t.lo >= from {
 			break
 		}
-		// The coming key is next only once, as in `scanner_hold`.
+		// With `hold_from` past `t`, `hold_next` returns the coming key once only, as in `scanner_hold`.
 		h.hold_from = t.lo + 1
 		for span + 1 < len(h.held) && h.held[span + 1].lo <= t.lo {
 			span += 1
@@ -112,9 +114,9 @@ hold_drop :: proc(h: ^Scanner, nodes: []tape.Node, facts: []tape.Fact) -> runtim
 	return nil
 }
 
-// The document of the answers a scan of a text in pieces has so far, as `builder_so_far` gives a build's, with the
-// containers it read only part of marked `CONTAINER_PARTIAL` and every byte it reads held. `regs` are the hook's
-// registers at the cut and `cut` where more bytes are needed. The scan goes on as it was.
+// Returns the document of the answers a scan of a text in pieces has so far, as `builder_so_far` does for a build.
+// Containers read only in part are marked `CONTAINER_PARTIAL` and every byte read is held. `regs` are the hook's
+// registers at the cut and `cut` is the offset where more bytes are needed. The scan is unchanged and goes on.
 @(require_results)
 scanner_so_far :: proc(h: ^Scanner, regs: hook.Regs, cut: u64, allocator: runtime.Allocator) -> (doc: tape.Document, err: tape.Error) {
 	read, rerr := make([]u64, regs.c, allocator)
@@ -124,7 +126,7 @@ scanner_so_far :: proc(h: ^Scanner, regs: hook.Regs, cut: u64, allocator: runtim
 	defer delete(read, allocator)
 	b := regs.b
 	for c := regs.c; c > 0; c -= 1 {
-		// A level past the frames is inside a container the scan keeps whole.
+		// A level past `h.frames` is inside a container the scan keeps whole, and its count is the builder's.
 		read[c - 1] = h.frames[c - 1].count if int(c) <= len(h.frames) else u64(u32(b))
 		b = h.b.stack[c - 1]
 	}

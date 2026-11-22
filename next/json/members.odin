@@ -10,25 +10,25 @@ import "stury:lib/core/tape"
 // matches them against the next object at the same place in the tree, which judges a member's comma, white space, key
 // and colon in one compare.
 //
-// A match is as strict as the states. A gap is learned only from bytes they accepted, around a key with no escape, and
-// every gap after a value stands in the same place of the grammar. The gap after an open bracket stands elsewhere and
-// has a slot of its own.
+// A match is as strict as the states. A gap is learned only from bytes they accepted, around a key with no escape.
+// Every gap after a value has the same place in the grammar. The gap after an open bracket has a different place and
+// its own slot.
 
 // Whether the walk learns member gaps.
 @(private)
 GAPS :: #config(JSON_GAPS, true)
 
-// Rows in a walk's gap table
+// Rows in a walk's gap table.
 @(private)
 GAP_ROWS :: 64
-// Slots per row. Slot 0 holds the gap after the open bracket and slot k the gap after member k's value; members past
+// Slots per row. Slot 0 holds the gap after the open bracket and slot k the gap after member k's value. Members past
 // the last slot share it.
 @(private)
 GAP_MEMBERS :: 32
 // The longest gap learned.
 @(private)
 GAP_MAX :: 64
-// Relearns with no match between them that retire a slot.
+// Relearns of a slot with no match between them, after which the slot is retired.
 @(private)
 GAP_RELEARNS :: 8
 @(private)
@@ -74,7 +74,7 @@ Gaps :: struct {
 	slots:  [GAP_ROWS * GAP_MEMBERS]Gap,
 	// The row of the objects in slot `m`'s value, its number once a second object there has made the row live and
 	// `GAP_DORMANT_MARK` past it while only the first has, 0 before one opens and `GAP_ROW_OFF` once that row is
-	// retired
+	// retired.
 	child:  [GAP_ROWS * GAP_MEMBERS]u8,
 	rows:   u64, // rows in use, row 0 included
 	live:   u64, // one bit per row whose slots are written: the rows a second object has opened on
@@ -83,12 +83,12 @@ Gaps :: struct {
 
 // A dormant slot is a slot of the table plus this. The first object at a place in the tree makes its row and reads
 // its members on dormant slots, which neither match nor learn, as only a second object there could match what the
-// first teaches: an object read once, as a record's root or a wide object, learns nothing. The objects in a dormant
-// slot's value still take their rows from it.
+// first learned. An object read once, as a record's root or a wide object, has nothing to match. The objects in a
+// dormant slot's value still take their rows from it.
 @(private)
 GAP_DORMANT :: GAP_ROWS * GAP_MEMBERS
 
-// The gap slot of a container that matches no gaps, past the dormant slots and its own successor, so the objects in
+// The gap slot of a container that matches no gaps, past the dormant slots. Its successor is itself, so the objects in
 // its value and its members have it too.
 @(private)
 GAP_OFF :: 2 * GAP_ROWS * GAP_MEMBERS + GAP_MEMBERS - 1
@@ -99,14 +99,13 @@ GAP_ROW_OFF :: u8(0xFF)
 
 // Added to a row's number in `child` while only the first object at its place has opened: the row's slots are
 // learned into and matched only once a second object opens there (`gap_row_live`), and only such a row needs its
-// slots zeroed. A live row's `child` is its number alone, so a row's live slots cost no decoding.
+// slots zeroed. A live row's `child` is its number alone, so a live row's slots need no decoding.
 @(private)
 GAP_DORMANT_MARK :: 2 * GAP_ROWS
 
 #assert(GAP_DORMANT_MARK + GAP_ROWS < GAP_ROW_OFF)
 #assert(u64(GAP_ROW_OFF) * GAP_MEMBERS >= 2 * GAP_ROWS * GAP_MEMBERS)
 
-// The gap slot a walk starts with.
 @(private)
 // The gap slot a walk starts with: the dormant slots of the reserved row 0, whose first object at the root's place
 // takes its row as any first object does. Never a slot of the table, whose rows are made and zeroed as live rows: a
@@ -127,7 +126,7 @@ gaps_rows :: #force_inline proc "contextless" (m: u64) -> bool {
 
 // Makes the row of the objects in the value of slot `m`, of the table, and returns it. The row's slots stay
 // unzeroed until a second object opens at `m` (`gap_row_live`), as a row only one object reads is never learned into
-// or matched: an object read once, as a record's root or a wide object, teaches nothing.
+// or matched, as an object read once, such as a record's root or a wide object, has nothing to match.
 @(private, cold)
 gap_new_row :: #force_no_inline proc "contextless" (g: ^Gaps, m: u64) -> u64 #no_bounds_check {
 	row := u64(GAP_ROWS - 1)
@@ -141,7 +140,7 @@ gap_new_row :: #force_no_inline proc "contextless" (g: ^Gaps, m: u64) -> u64 #no
 }
 
 // The live row of the objects in the value of slot `m`, whose first object opened on the dormant row `child[m]`
-// names: zeroes the row's slots once, the only write they take before a learn, and marks `child[m]` live.
+// names: zeroes the row's slots once, the only write to them before a learn, and marks `child[m]` live.
 @(private, cold)
 gap_row_live :: #force_no_inline proc "contextless" (g: ^Gaps, m: u64) -> u64 #no_bounds_check {
 	row := u64(g.child[m & (GAP_DORMANT - 1)]) - GAP_DORMANT_MARK
@@ -157,8 +156,8 @@ gap_next :: #force_inline proc "contextless" (m: u64) -> u64 {
 	return m + u64((m + 1) & (GAP_MEMBERS - 1) != 0)
 }
 
-// The start of the value after `p` when the text at `p` repeats slot `m`'s gap, with the key token the gap holds; nil
-// otherwise. Each gap length has a branch with constant offsets, so the value's start does not wait on the slot's load.
+// The start of the value after `p` when the text at `p` repeats slot `m`'s gap, with the key token the gap holds, else
+// nil. Each gap length has a branch with constant offsets, so the value's start does not wait on the slot's load.
 @(private)
 gap_match :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, m: u64) -> (r: [^]u8, key: tape.Token, nl: bool) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) <= GAP_MAX + 8 {
@@ -192,8 +191,8 @@ gap_match_len :: #force_inline proc "contextless" (p, e: [^]u8, n: int) -> [^]u8
 	return nil
 }
 
-// Whether the `k` bytes at `p` and `e` are equal, compared with overlapping loads. Both `p` and `e` have over `GAP_MAX + 8`
-// readable bytes ahead, and `k` is a constant where `gap_match_len` inlines it.
+// Whether the `k` bytes at `p` and `e` are equal, compared with overlapping loads. Both `p` and `e` have over
+// `GAP_MAX + 8` readable bytes ahead, and `k` is a constant where `gap_match_len` inlines it.
 @(private)
 gap_equal :: #force_inline proc "contextless" (p, e: [^]u8, k: int) -> bool #no_bounds_check {
 	if k < 8 {

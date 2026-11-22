@@ -5,10 +5,10 @@ import "core:simd"
 import "core:simd/x86"
 import "core:sys/info"
 
-// The x86-64 tiers: `.V2` is x86-64-v2 (SSE4.2, 16-byte registers), the floor and every walk's tier; `.V3` adds AVX2,
+// The x86-64 tiers: `.V2` is x86-64-v2 (SSE4.2, 16-byte registers), the floor and every walk's tier. `.V3` adds AVX2,
 // 32-byte registers and PCLMULQDQ for bulk loops. A caller builds each bulk loop once per tier as a `#force_no_inline`
 // procedure with the tier's `FEATURES` and picks one with `tier()`. The kernels take the tier as `$T` and inline into
-// that loop; Odin refuses `#force_inline` into a procedure without the features.
+// that loop, since Odin refuses `#force_inline` into a procedure without the features.
 Tier :: enum u8 {
 	V2,
 	V3,

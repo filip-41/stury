@@ -39,8 +39,8 @@ LEAD_MASK := [2 * LEAD_MAX]u8{0 ..< LEAD_MAX = 0xff}
 @(private)
 INDENT_START :: u64(' ')
 
-// The first byte past the white space at `p` when it is none, one space, or a line break with the predicted indent; nil
-// otherwise, for `skip_indent`.
+// The first byte past the white space at `p` when it is none, one space, or a line break with the predicted indent,
+// or nil otherwise, for `skip_indent`.
 @(private)
 indent_fast :: #force_inline proc "contextless" (p, end: [^]u8, ind: ^u64, $at: Indent_At) -> [^]u8 #no_bounds_check {
 	if p < end {

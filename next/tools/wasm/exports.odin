@@ -1,4 +1,4 @@
-// Exported callers of every read `make lint` builds for WebAssembly, so the object holds each spec's walk.
+// Exported calls of every read that `make lint` builds for WebAssembly, so the object contains each spec's walk.
 package wasm_exports
 
 import "base:runtime"

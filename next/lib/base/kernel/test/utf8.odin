@@ -278,7 +278,7 @@ stop_clean :: proc(buf: ^[64]u8, last: int) -> bool {
 	return k.utf8_stop(T, b, k.is_ascii(b), &s, false, u64(last))
 }
 
-// `utf8_stop` judges the bytes up to its stop and none past it, though they share the register: random text with a
+// `utf8_stop` checks the bytes up to its stop and none past it, though they share the register: random text with a
 // stop at each place, then bytes that are no UTF-8, or begin or continue a sequence, right after it.
 @(test)
 utf8_stop_ignores_bytes_past_the_stop :: proc(t: ^testing.T) {

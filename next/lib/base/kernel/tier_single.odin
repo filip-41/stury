@@ -6,7 +6,7 @@ package kernel
 import "base:intrinsics"
 import "core:simd"
 
-// The one tier of a target with no x86 tiers: NEON on arm64, LLVM's lowering elsewhere.
+// The only tier of a target with no x86 tiers: NEON on arm64, LLVM's lowering elsewhere.
 Tier :: enum u8 {
 	Base,
 }

@@ -7,14 +7,15 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // The hook of a scan: a `Builder` that keeps only what the paths of a demand reach. Its registers are the builder's.
-// A container on the paths is a frame holding the demand nodes live in it. A value a path ends at is kept as its grain
-// says, its steps still followed when longer paths go on inside it: whole, as its keys and count, or as its node.
+// A container on the paths has a frame, which holds the demand nodes live in it. A value a path ends at is kept as its
+// grain says (whole, as its keys and count, or as its node), and its steps are still followed when longer paths go on
+// inside it.
 Scanner :: struct {
 	b:           Builder,
 	demand:      ^tape.Demand,
 	frames:      [dynamic]Scan_Frame, // the containers on the paths, the root's first, one per builder level
-	// By level, the frame an element of the array at the level above opened with, which the array's later elements of
-	// its kind reopen with, valid while the array's `element` is not `End`.
+	// By level, the frame an element of the array at the level above opened with. The array's later elements of its
+	// kind reopen with it. Valid while the array's `element` is not `End`.
 	elements:    [dynamic]Scan_Frame,
 	live:        [dynamic]u32, // the demand nodes live in the frames, each frame's from its `live`
 	picks:       [dynamic]u32, // the demand nodes that took the coming value
@@ -25,17 +26,19 @@ Scanner :: struct {
 	tokens:      [dynamic]tape.Token, // the token of each element a replaying array's negative `Index` can still take
 	rewalk:      Rewalk, // the proc that gives this hook the value at `lo` again
 	walk:        rawptr, // the walk giving this hook its tokens, which `rewalk` reads in
-	// For each demand edge whose key met a member of an object, the generation of the object's frame above the answers
-	// made before. A mark is valid only for the frame of its generation.
+	// For each demand edge whose key met a member of an object: in the high 32 bits the generation of the object's
+	// frame, in the low 32 bits the number of answers made before it. A mark is valid only for the frame of its
+	// generation.
 	marks:       []u64,
 	made:        []u32, // with a limited demand, the answers each path holds that no step took back
-	// With `facts`, the comments before the next token, from `wait_from` in the builder's facts, mark the node `wait_at`
-	// the token is stored at, unless the walk passes it with that node still the next written.
+	// With `facts`, the comments before the next token start at `wait_from` in the builder's facts. They mark the node
+	// `wait_at` that the token is stored at, unless the walk passes the token while that node is still the next one
+	// written.
 	wait_from:   int,
 	wait_at:     tape.Node_Index,
 	passed:      tape.Node_Index, // with `facts`, the node written next when the walk last passed a value
 	facts:       bool, // `Demand.facts`
-	opens:       u32, // the frames opened, the last one's generation, which a frame being a node keeps from wrapping
+	opens:       u32, // the frames opened, so the last one's generation. A frame is a node, which keeps this from wrapping
 	done:        []bool, // the paths settled under `stop_early`, a bool per path
 	pending:     int, // the paths not done
 	key:         tape.Token, // with `has_key`, the key of the coming value
@@ -51,8 +54,8 @@ Scanner :: struct {
 	rewalks:     bool, // the format has `.Rewalk`, so an array whose elements only steps from the end take replays
 	stop:        bool, // `stop_early`
 	stopped:     bool,
-	// With `holds`, a scan of a text in pieces, which copies the bytes of what it keeps out of each window: the spans,
-	// their bytes, and the offset from which the walk's tokens are not held yet.
+	// `holds` is set for a scan of a text in pieces, which copies the bytes it keeps out of each window. `held` is the
+	// spans, `bytes` their bytes, and `hold_from` the offset from which the walk's tokens are not held yet.
 	holds:       bool,
 	held:        [dynamic]tape.Held_Span,
 	bytes:       [dynamic]u8,
@@ -64,14 +67,14 @@ Scanner :: struct {
 
 SCANNER_CAPS :: hook.Capabilities{.Skips, .Levels, .Keeps, .Walk}
 
-// The container whose `End` is the next token, when this hook passed or kept it as a whole.
+// Which container's `End` is the next token, when this hook skipped it or kept it as a whole.
 Scan_End :: enum u8 {
 	None,
 	Skipped, // a container this hook skipped
 	Picked, // a container picks took, kept whole or stored as one node, its picks still in `picks`
 }
 
-// The open stack of a scanner, its builder's, to `hook.Levels`.
+// The open stack of a scanner, which is its builder's, as `hook.Levels` reads it.
 @(private)
 scanner_levels_held :: #force_inline proc "contextless" (h: rawptr) -> int {
 	return len((^Scanner)(h).b.stack)
@@ -82,7 +85,7 @@ scanner_levels_grow :: #force_inline proc "contextless" (h: rawptr, want: int) -
 	return builder_deepen(&(^Scanner)(h).b, want)
 }
 
-// The builder a scanner keeps containers with, to `hook.Keeps`.
+// The builder a scanner keeps containers with, as `hook.Keeps` reads it.
 @(private)
 scanner_builder :: #force_inline proc "contextless" (h: rawptr) -> rawptr {
 	return &(^Scanner)(h).b
@@ -98,7 +101,7 @@ builder_keep_stubs :: #force_inline proc "contextless" (h: rawptr, s: hook.Regs,
 	return builder_hook_stubs((^Builder)(h), s, t)
 }
 
-// Gives hook `h` the value at `lo` again from registers `s`, and the walk's result.
+// Gives hook `h` the value at `lo` again from registers `s`. Returns the walk's result.
 Rewalk :: #type proc "contextless" (h: ^Scanner, s: ^hook.Regs, lo: u64) -> hook.Walk_Result
 
 // A container on the paths.
@@ -116,11 +119,11 @@ Scan_Frame :: struct {
 	gen:     u32, // its generation, which the marks of its members carry
 	lengths: u64, // a bit per length its `Name` steps have, past 63 counted from 0
 	heads:   u64, // a bit per first byte its `Name` steps have, by the byte's low six bits
-	// The steps its close still has to check, as no child met them: the `Name` steps no member has met yet of an object,
-	// the `Index` steps of an array.
+	// The number of steps its close still has to check because no child has met them: the `Name` steps of an object
+	// that no member has met yet, or the `Index` steps of an array.
 	unmet:   u32,
-	// Its positional steps are all negative indexes, so each element is passed, and the ones they take are read again
-	// at its close.
+	// Its positional steps are all negative indexes, so each element is passed and the ones they take are read again at
+	// its close.
 	replays: bool,
 	// Its positional steps are all from the end and the format cannot walk an element again, so each element they may
 	// take is kept, and its nodes go once no step can take it.
@@ -128,12 +131,12 @@ Scan_Frame :: struct {
 	// An object a path ends at with grain `.Keys`, so each member no step takes is kept with its value, a container
 	// value as one unread node.
 	keys:    bool,
-	slices:  bool, // it has `Slice` steps, so it has a ring, as they pick past the ring's check in `scan_element`
-	// For an array with no positional steps, where each element picks the same demand nodes, the kind of the element
+	slices:  bool, // it has `Slice` steps, which pick past the ring's check in `scan_element`, so it has a ring
+	// For an array with no positional steps, where each element picks the same demand nodes: the kind of the element
 	// whose frame `Scanner.elements` holds at the level below, else `End`. An element of that kind reopens it.
 	element: tape.Kind,
-	// The elements from `takes_from` up to `takes_to` are those every positional step of an array takes, a `Slice`
-	// from the start or an `All` with a limit, which pick the same demand nodes.
+	// Elements `takes_from` up to `takes_to` are those every positional step of an array takes (a `Slice` from the
+	// start or an `All` with a limit), and they pick the same demand nodes.
 	takes_from:    u64,
 	takes_to:      u64,
 }
@@ -143,7 +146,7 @@ Scan_Frame :: struct {
 Scan_Answer :: struct {
 	node:    tape.Node_Index,
 	path:    u32,
-	pos:     u64, // twice the value's first byte, or one past twice a close's byte for a miss the close found
+	pos:     u64, // twice the value's node index, or twice the close's less one for a miss the close found
 	leaf:    u32, // the demand node the answer came from
 	outcome: tape.Presence,
 	dead:    bool, // a repeated key or a negative index took it back
@@ -162,14 +165,16 @@ Scan_Missing :: struct {
 	name: string,
 }
 
-// What a scan held when an element a ring keeps began, so that taking the element back drops what came after it.
+// What a scan held, as the lengths of its lists, when an element a ring keeps began. Taking the element back drops
+// what the lists gained since.
 @(private)
 Scan_Ring :: struct {
 	answers, node, kept, missing, counts, facts: u32,
 }
 
-// The room a scan's lists start in, on the caller's stack, so a scan of few paths and answers allocates no list. A
-// list that outgrows it moves to the allocator, and a demand past its marks takes them from there too.
+// The room a scan's lists start in, on the caller's stack, so that a scan of few paths and answers allocates no list.
+// A list that outgrows its part moves to the allocator, and a demand with more edges than `marks` holds, or more paths
+// than `done` holds, allocates those too.
 Scan_Room :: struct {
 	frames:  [8]Scan_Frame,
 	elements: [8]Scan_Frame,
@@ -182,8 +187,9 @@ Scan_Room :: struct {
 	done:    [32]bool,
 }
 
-// Makes `h` a scanner of `demand` over `src`, as `builder_start` with `nodes`, `most` and `frames`, its room growing as
-// it fills. With no `rewalk` it reads values once, keeping nodes where a replay would read one again.
+// Sets up `h` as a scanner of `demand` over `src`, with `nodes`, `most` and `frames` as `builder_start` takes them.
+// The node room grows as it fills. With no `rewalk` it reads each value once, keeping nodes where a replay would read a
+// value again.
 @(require_results)
 scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator) -> (err: runtime.Allocator_Error) {
 	h^ = {}
@@ -269,8 +275,7 @@ scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 		}
 		return s, .Next
 	}
-	// A key no `Name` of the open object can match takes no call.
-	// A member no step took takes none either.
+	// A key that no `Name` of the open object can match is passed without further work. So is a member no step took.
 	if t.role == .Key {
 		f := &h.frames[len(h.frames) - 1]
 		clear(&h.picks)
@@ -305,8 +310,8 @@ scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 	return scanner_value(h, s, t, false)
 }
 
-// Whether no `Name` of the object `f` can match key `t`, as none has its length, or none has its first byte. A key
-// that needs decoding has its length only once decoded.
+// Whether no `Name` of the object `f` can match key `t`, because none has its length or none has its first byte. A key
+// that needs decoding is never judged here, since its length is known only once decoded.
 @(private)
 scan_key_unmatched :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, t: tape.Token) -> bool #no_bounds_check {
 	if t.spelling & tape.SPELLING_DECODE != 0 {
@@ -315,8 +320,8 @@ scan_key_unmatched :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Fr
 	return f.lengths & (1 << (t.n & 63)) == 0 || t.n > 0 && f.heads & (1 << (h.b.doc.src[t.lo] & 63)) == 0
 }
 
-// The partial document the walk built, or the error that ended it with everything freed. `regs` are the hook's
-// registers at the walk's end and `root_close` the end of the root value.
+// Returns the partial document the walk built, or the error that ended it with everything freed. `regs` are the hook's
+// registers at the walk's end and `root_close` is the end of the root value.
 @(require_results)
 scanner_end :: proc(h: ^Scanner, regs: hook.Regs, root_close: u64, err: tape.Error) -> (doc: tape.Document, e: tape.Error) {
 	allocator := h.b.doc.allocator
@@ -485,9 +490,9 @@ scanner_value :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $
 	if h.b.err != nil {
 		return s, .Stop
 	}
-	// A value a path ends at and a child of a container kept whole are kept whole, an object a `.Keys` grain keeps as
-	// its members with each container value one node, and a container no step could enter is stored as one node. The
-	// hook is called next at its `End`, so `picks` holds until then.
+	// Kept whole: a value a path ends at, and a child of a container kept whole. An object a `.Keys` grain keeps is
+	// kept as its members, with each container value as one node. A container no step could enter is stored as one
+	// node. The hook is called next at its `End`, so `picks` holds until then.
 	h.end_of = .Picked
 	if whole || ends {
 		return s, .Keep
@@ -544,14 +549,15 @@ scan_reopen :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: t
 	if h.b.err != nil {
 		return opened, .Stop
 	}
-	// The element's live demand nodes are those it opened with past the array's, which no frame writes over between
-	// one element of the array and the next, as no other frame opens at its level.
+	// The element's live demand nodes are those it opened with, past the array's. No frame writes over them between one
+	// element of the array and the next, since no other frame opens at its level.
 	(^runtime.Raw_Dynamic_Array)(&h.live).len = int(live + g.n_live)
 	return opened, .Next
 }
 
-// Records in the array at depth `d` the frame its element of `kind` just opened, for the elements of that kind to
-// reopen when the element made no answer, while the elements are those every positional step of the array takes.
+// Records in the array at depth `d` the frame its element of `kind` just opened, for later elements of that kind to
+// reopen with. It does so only when the element made no answer and while the elements are those every positional step
+// of the array takes.
 @(private)
 scan_keep_element :: #force_inline proc "contextless" (h: ^Scanner, d: u64, kind: tape.Kind, reopens: bool) #no_bounds_check {
 	f := &h.frames[d - 1]
@@ -576,7 +582,7 @@ scan_keep_element :: #force_inline proc "contextless" (h: ^Scanner, d: u64, kind
 	h.frames[d - 1].element = kind
 }
 
-// Passes a value no step took, a container with no more tokens up to its `End`.
+// Passes a value no step took. A container is skipped, giving no more tokens up to its `End`.
 @(private)
 scan_pass :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	h.has_key = false
@@ -593,8 +599,8 @@ scan_pass :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tap
 	return s, .Next
 }
 
-// Takes the demand nodes that pick element `index` of the array `f` at depth `d`, whose token is `t`, and whether the
-// walk goes on, which a refused growth or a stop at a cut ends.
+// Takes the demand nodes that pick element `index`, whose token is `t`, of the array `f` at depth `d`. Returns whether
+// the walk goes on, which a refused growth or a stop at a cut ends.
 @(private)
 scan_element :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: ^Scan_Frame, index: u64, t: tape.Token, d: u64) -> (hook.Regs, bool) #no_bounds_check {
 	s := s
@@ -633,8 +639,8 @@ scan_element :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: 
 	if f.ring_k == 0 {
 		return s, true
 	}
-	// The ring is the end of its list while the elements arrive, as an inner frame's close cuts the list back, so it
-	// grows with the elements up to its size.
+	// The ring is at the end of its list while the elements arrive, because an inner frame's close cuts the list back,
+	// so it grows with the elements up to its size.
 	k := u64(f.ring_k)
 	slot := f.ring + u32(index % k)
 	if f.replays {
@@ -645,7 +651,8 @@ scan_element :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: 
 		scan_push(h, &h.tokens, t)
 		return s, h.b.err == nil
 	}
-	// Slices from the end pick here, past a replaying array, whose slices are all from the end and pick at its close.
+	// Slices from the end pick here, except in a replaying array, whose slices are all from the end and pick at its
+	// close.
 	if f.slices && !scan_slice_picks(h, f, index, d) {
 		return s, false
 	}
@@ -669,9 +676,9 @@ scan_ring_mark :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs) -
 	return {u32(len(h.answers)), u32(builder_cursor(&h.b, s)), u32(len(h.kept)), u32(len(h.missing)), u32(len(h.b.counts)), u32(len(h.b.doc.facts))}
 }
 
-// Drops the element of the array `f` whose nodes start at `from.node` and end at `hi`, and what the scan holds of
-// them, which `from` marks the start of. The nodes past them move down, with every entry that names one, and the ring
-// entries of the array's later elements with them.
+// Drops the element of the array `f` whose nodes run from `from.node` to `hi`, and what the scan holds of them, from
+// the list lengths `from` records. The nodes past them move down, with every entry that names one, and so do the ring
+// entries of the array's later elements.
 @(private, cold)
 scan_drop :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: ^Scan_Frame, from: Scan_Ring, hi: tape.Node_Index) -> hook.Regs #no_bounds_check {
 	s := s
@@ -685,7 +692,7 @@ scan_drop :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: 
 	copy(h.b.doc.nodes[lo:], h.b.doc.nodes[hi:end])
 	s.a -= u64(gone) * size_of(tape.Node)
 	s.b -= 1
-	// Whether the node `at` names stays, which moves it down past the nodes that go.
+	// Whether the node `at` names stays. Moves it down past the nodes that go.
 	moved :: #force_inline proc "contextless" (at: ^tape.Node_Index, lo, hi: tape.Node_Index) -> bool {
 		if at^ == tape.NO_NODE || at^ < lo {
 			return true
@@ -762,8 +769,8 @@ scan_drop :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: 
 	return s
 }
 
-// Takes the answers taken back out of the list from `from` on, so an array whose elements go as a ring passes them
-// holds the answers of the elements its ring keeps only. A ring entry or mark past one counts it no more.
+// Removes the answers taken back from the list from `from` on, so an array whose elements go as its ring passes them
+// holds only the answers of the elements its ring keeps. A ring entry or mark past a removed answer stops counting it.
 @(private)
 scan_shed :: proc "contextless" (h: ^Scanner, from: int) #no_bounds_check {
 	answers := h.answers[:]
@@ -796,7 +803,7 @@ scan_shed :: proc "contextless" (h: ^Scanner, from: int) #no_bounds_check {
 	(^runtime.Raw_Dynamic_Array)(&h.answers).len = n
 }
 
-// Whether a step from the end of the array `f` of `count` elements takes element `e`.
+// Whether a step from the end of the array `f`, which has `f.count` elements, takes element `e`.
 @(private)
 scan_ring_takes :: proc "contextless" (h: ^Scanner, f: ^Scan_Frame, e: u64) -> bool #no_bounds_check {
 	dm := h.demand
@@ -834,8 +841,8 @@ scan_slice_picks :: #force_no_inline proc "contextless" (h: ^Scanner, f: ^Scan_F
 }
 
 // Takes the demand node `to` for element `index` when `step` may take it, before its array's count is known. Past
-// the last element it can take, with `stop_early`, the paths through it that settle there are done. Whether the walk
-// goes on.
+// the last element it can take, with `stop_early`, the paths through it that settle there are done. Returns whether the
+// walk goes on.
 @(private)
 scan_slice_pick :: #force_inline proc "contextless" (h: ^Scanner, step: tape.Slice, index: u64, to: u32, d: u64) -> bool {
 	if tape.slice_takes(step, index, 0) {
@@ -847,7 +854,7 @@ scan_slice_pick :: #force_inline proc "contextless" (h: ^Scanner, step: tape.Sli
 }
 
 // Settles, with `stop_early`, the paths through demand node `to` that a positional step at depth `d` takes no more
-// elements for. Whether the walk goes on.
+// elements for. Returns whether the walk goes on.
 @(private, cold)
 scan_cut :: #force_no_inline proc "contextless" (h: ^Scanner, to: u32, d: u64) -> bool {
 	if d - 1 <= h.demand.reach {
@@ -876,7 +883,8 @@ scan_fail :: proc "contextless" (h: ^Scanner, to: u32, null: bool, d: u64, at, o
 	}
 }
 
-// Makes an answer of `path`, at the node `pos` halves, one past a close's node for a miss the close found.
+// Makes an answer of `path` at `node`. `pos` orders the answers: twice a node index, or one less for a miss a close
+// found.
 @(private)
 scan_answer :: #force_inline proc "contextless" (h: ^Scanner, node: tape.Node_Index, path: u32, outcome: tape.Presence, pos: u64, leaf: u32) {
 	if h.made != nil && !scan_limit(h, path) {
@@ -885,8 +893,8 @@ scan_answer :: #force_inline proc "contextless" (h: ^Scanner, node: tape.Node_In
 	scan_push(h, &h.answers, Scan_Answer{node, path, pos, leaf, outcome, false})
 }
 
-// Whether a limited demand keeps an answer of `path` as it is made: one past the path's limit only while a step may
-// still take back one before it. A path whose answers no step takes back is settled at its limit.
+// Whether a limited demand keeps an answer of `path` as it is made. It keeps one past the path's limit only while a
+// step may still take back an earlier one. A path whose answers no step takes back is settled at its limit.
 @(private, cold)
 scan_limit :: #force_no_inline proc "contextless" (h: ^Scanner, path: u32) -> bool #no_bounds_check {
 	x := h.demand.paths[path]
@@ -920,8 +928,8 @@ scan_kill :: #force_no_inline proc "contextless" (h: ^Scanner, lo, hi: int, to: 
 }
 
 // Takes back the answers from `lo` to `hi`, those of element `element` of the array `f`, that came through a step
-// from the end not taking it. `count` is the array's length, 0 while unknown, when the element has passed out of
-// every reach from the end, so only a `Slice` from the start up to an end from the end keeps it.
+// from the end that does not take it. `count` is the array's length, 0 while unknown. An element that has passed out of
+// every reach from the end (`element` is `max(u64)`) is kept only by a `Slice` that starts from the start.
 @(private)
 scan_kill_negatives :: proc "contextless" (h: ^Scanner, f: ^Scan_Frame, lo, hi: int, element: u64, count: u64 = 0) #no_bounds_check {
 	dm := h.demand
@@ -1010,14 +1018,14 @@ scan_open :: proc "contextless" (h: ^Scanner, t: tape.Token, live: u32, whole: b
 	if t.kind != .Array {
 		k = 0
 	}
-	// An element spends a byte at least, so a ring past the text's length holds nothing more. A scan with no `rewalk`
-	// may read a text whose length its source does not bound.
+	// An element takes at least one byte, so a ring of more entries than the text has bytes holds nothing more. A scan
+	// with no `rewalk` may read a text whose length its source does not bound.
 	if h.rewalk != nil {
 		k = min(k, u64(len(h.b.doc.src)))
 	}
-	// One array at a time is read again, so a replay holds one more walk at most and reads each element once more. A
-	// format that cannot walk an element alone keeps every element a step from the end may take, and takes back
-	// what those it does not take answered.
+	// Only one array is read again at a time, so a replay holds at most one more walk and reads each element once
+	// more. A format that cannot walk an element alone keeps every element a step from the end may take, and takes back
+	// what the elements it does not take answered.
 	f.replays = k > 0 && !others && !whole && !h.replaying && h.rewalks
 	f.drops = k > 0 && !others && !whole && !h.rewalks
 	f.ring_k = u32(k)
@@ -1040,7 +1048,7 @@ scanner_close :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -
 			s = scan_replay(h, s, f, e)
 			f = &h.frames[d - 1]
 			if h.stopped || h.b.err != nil {
-				// The array stays open, and the end closes it partial with its true count.
+				// The array stays open, and the end closes it partial with its full count.
 				return s, .Stop
 			}
 		}
@@ -1190,14 +1198,14 @@ scan_settle :: proc "contextless" (h: ^Scanner, n: u32, d: u64) #no_bounds_check
 	}
 }
 
-// Keeps the comment `t`, with `facts`, as a fact of a node the scan keeps: a comment before a token as the node that
-// token is stored at, an inline one unless the walk passed the value before it unstored, and a foot as the open
-// container's. `Stop` when memory for the facts is refused.
+// With `facts`, keeps comment `t` as a fact of a node the scan keeps. A comment before a token goes to the node that
+// token is stored at, an inline comment to the value before it unless the walk passed that value unstored, and a foot
+// to the open container. `.Stop` when memory for the facts is refused.
 @(private, cold)
 scan_fact :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> hook.Action {
 	#partial switch tape.fact_kind(t.role) {
 	case .Comment:
-		// After a key the token is its value, stored past the key.
+		// After a key, the token is its value, stored past the key's node.
 		at := builder_cursor(&h.b, s)
 		if h.wait_at != at {
 			h.wait_at, h.wait_from = at, len(h.b.doc.facts)
@@ -1229,7 +1237,7 @@ scan_unwait :: #force_no_inline proc "contextless" (h: ^Scanner) {
 	h.wait_at = tape.NO_NODE
 }
 
-// Drops the comments whose node the scan did not keep, as one before a token never read and a foot of a root not
+// Drops the comments whose node the scan did not keep, such as one before a token never read or a foot of a root not
 // kept.
 @(private, cold)
 scan_check_facts :: proc "contextless" (h: ^Scanner, regs: hook.Regs) #no_bounds_check {
@@ -1249,7 +1257,7 @@ scan_check_facts :: proc "contextless" (h: ^Scanner, regs: hook.Regs) #no_bounds
 	h.b.doc.facts = facts[:kept]
 }
 
-// Makes room in `list` for `n` more entries. False once a growth is refused, held in the builder's error.
+// Makes room in `list` for `n` more entries. False once a growth is refused, which sets the builder's error.
 @(private)
 scan_reserve :: #force_inline proc "contextless" (h: ^Scanner, list: ^[dynamic]$T, n: int) -> bool {
 	raw := (^runtime.Raw_Dynamic_Array)(list)
@@ -1278,7 +1286,8 @@ scan_push :: #force_inline proc "contextless" (h: ^Scanner, list: ^[dynamic]$T, 
 	raw.len += 1
 }
 
-// Doubles the capacity of a list of entries of `size` bytes, to `least` at least, a list in the room moving out of it.
+// Grows a list of entries of `size` bytes to twice its capacity, at least 8 entries and at least `least`. A list in the
+// room moves out of it.
 @(private, cold)
 scan_grow_to :: #force_no_inline proc "contextless" (h: ^Scanner, list: ^runtime.Raw_Dynamic_Array, size, align, least: int) -> bool {
 	context = h.b.ctx
@@ -1350,7 +1359,8 @@ scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, mis
 	x.names = block[names_at:]
 	x.held = ([^]tape.Held_Span)(raw_data(block[held_at:]))[:len(h.held)]
 	copy(x.held, h.held[:])
-	// Each path's answers in document order: the counts, then each path's start, then the answers placed.
+	// Each path's answers in document order, in three steps: count them, turn the counts into starts, place the
+	// answers.
 
 	runtime.mem_zero(raw_data(x.starts), len(x.starts) * size_of(u32))
 	if paths > 1 {

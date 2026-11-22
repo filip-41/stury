@@ -3,7 +3,7 @@ package kernel
 import "core:simd"
 
 // Two 16-byte tables sorting bytes into up to 8 sets: byte `b` is in set k when `lo[b & 15] & hi[b >> 4]` shares a bit
-// with set k's bits. Each pair of a set and a high nibble owns one bit, so membership is exact while the sets have at
+// with set k's bits. Each pair of a set and a high nibble has one bit, so membership is exact while the sets have at
 // most 8 such pairs.
 Nibble_Table :: struct {
 	lo, hi: #simd[16]u8,

@@ -77,8 +77,8 @@ render_doc :: proc(doc: ^tape.Document) -> string {
 	return strings.to_string(b)
 }
 
-// What `scan` keeps and answers with and without `stop_early`, which changes no answer of a text that parses. A
-// stopped scan keeps the document `doc` gives, or `stopped` where the read ends before its text does.
+// Checks what `scan` keeps and answers with and without `stop_early`, which changes no answer for a text that parses.
+// A stopped scan keeps the document `doc` gives, or `stopped` where the read ends before its text does.
 expect_scan :: proc(t: ^testing.T, c: Scan_Case, spec := json.Spec.Json, grains: []tape.Grain = nil, stopped := "", loc := #caller_location) {
 	d, derr := tape.demand_of(c.paths, grains)
 	testing.expect(t, derr == nil, loc = loc)
@@ -562,8 +562,7 @@ path_reads_take_any_index_and_depth :: proc(t: ^testing.T) {
 }
 
 // A grain keeps less of a container than its whole: its members with each container value one unread node, its count,
-// or only its node. A scalar, null and an
-// answer that is no value are as under `.Whole`.
+// or only its node. A scalar, null and an answer that is no value are as under `.Whole`.
 @(test)
 scan_keeps_a_grain_at_a_path_end :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -773,8 +772,8 @@ stopped_scans_leave_counts_unknown :: proc(t: ^testing.T) {
 	}
 }
 
-// A scan of no paths under `stop_early` reads no more than the first token, and so judges no more of the text, while
-// one without it judges the whole text.
+// A scan of no paths under `stop_early` reads no more than the first token, and so checks no more of the text, while
+// one without it checks the whole text.
 @(test)
 scan_of_no_paths_stops_at_once :: proc(t: ^testing.T) {
 	testkit.deadline(t)

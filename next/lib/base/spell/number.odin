@@ -14,7 +14,7 @@ Number :: struct {
 #assert(size_of(Number) == 16)
 
 Number_Kind :: enum u8 {
-	Int, // fits `i64`; `-0` is 0
+	Int, // fits `i64`, and `-0` is 0
 	Uint, // fits only `u64`
 	Float, // the correctly rounded binary64, keeping the sign of `-0.0` and of an underflow to zero
 	Wide, // past binary64's range, or a span of more than `MAX_NUMBER_DIGITS` digits whose size does not settle it

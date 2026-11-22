@@ -14,7 +14,7 @@ build :: proc(t: ^testing.T, src: string, opts := json.Options{}, spec := json.S
 	return doc, err
 }
 
-// The suite's `y_` texts build and its `n_` texts are refused; `i_` texts may go either way.
+// The suite's `y_` texts build and its `n_` texts are refused. `i_` texts may go either way.
 @(test)
 suite_accepts_and_refuses :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -312,7 +312,7 @@ wide_and_polymorphic_gaps :: proc(t: ^testing.T) {
 	expect_key_spans(t, wide_text, &doc)
 	tape.destroy(&doc)
 
-	// Over 64 distinct nested object rows share the last row safely, including polymorphic elements. The records hold
+	// Over 64 distinct nested object rows share the last row, including polymorphic elements. The records hold
 	// objects at 106 places, which their repeats match.
 	rb := strings.builder_make(context.temp_allocator)
 	strings.write_string(&rb, "{")

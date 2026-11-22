@@ -11,7 +11,7 @@ import "stury:testkit"
 
 // Checks that the nodes of a built document nest as a tree: each container's subtree ends where its last child does,
 // its `spelling` is its child count saturated at `MAX_CHILDREN`, and `counts` holds the true count of each container
-// whose count reached it, in node order, and no other.
+// whose count reached it, in node order.
 expect_well_formed :: proc(t: ^testing.T, doc: ^tape.Document, name := "", loc := #caller_location) -> bool {
 	saturated := 0
 	for node, i in doc.nodes {
@@ -278,8 +278,8 @@ check_policies :: proc(t: ^testing.T, m: Model, name := "", loc := #caller_locat
 	}
 }
 
-// `.Refuse` fails at the first key in the text that repeats an earlier one of its object, whichever key of the object is
-// repeated first in the order the build compares them, and in an object inside another that has repeats later.
+// `.Refuse` fails at the first key in the text that repeats an earlier one of its object, whichever key of the object
+// is repeated first in the order the build compares them, and in an object inside another that has repeats later.
 @(test)
 build_refuses_at_the_first_repeated_key :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -287,7 +287,7 @@ build_refuses_at_the_first_repeated_key :: proc(t: ^testing.T) {
 	state: rand.Default_Random_State
 	context.random_generator = testkit.seeded(t, &state, 0x4ef05e)
 	for _ in 0 ..< testkit.rounds(100) {
-		// Each of `keys` keys appears twice, in a random order, and the first key to appear a second time is the one.
+		// Each of `keys` keys appears twice, in a random order. The fault is at the first key seen a second time.
 		keys := 2 + rand.int_max(8)
 		order := make([]int, 2 * keys, context.temp_allocator)
 		for &k, i in order {

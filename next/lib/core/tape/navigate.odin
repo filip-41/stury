@@ -9,8 +9,8 @@ import "base:runtime"
 // so a step into it is `.Missing`, and it has no children to iterate. `.Default` duplicates are the document format's
 // policy, and a key of any scalar kind is named by its text.
 
-// What the readers read: a document, and an index of its whole containers or nil, without which they walk them. An
-// index fills as the readers read, so a reader is not shared between threads while it has one.
+// A document and an index of its whole containers, nil for none, which the readers work over. Without an index they
+// walk the containers. An index fills as the readers read, so a reader is not shared between threads while it has one.
 Reader :: struct {
 	doc:   ^Document,
 	index: ^Doc_Index,
@@ -200,9 +200,9 @@ element :: proc(r: Reader, at: Node_Index, index: int) -> (Node_Index, Presence)
 }
 
 // The length of the container at `at`, an array's elements or an object's distinct keys, 0 for null and
-// `.Wrong_Kind` for any other scalar. With no index, the keys of a wide object that may repeat one are counted through a
-// table, in `allocator` past the room `key_table` keeps it in, freed before the return, and a refused allocation is the
-// error. An index keeps that table.
+// `.Wrong_Kind` for any other scalar. With no index, the keys of a wide object that may repeat one are counted through
+// a table, in `allocator` past the room `key_table` keeps it in, freed before the return, and a refused allocation is
+// the error. An index keeps that table.
 @(require_results)
 length :: proc(r: Reader, at: Node_Index, allocator: runtime.Allocator) -> (n: int, p: Presence, err: runtime.Allocator_Error) #no_bounds_check {
 	doc := r.doc
@@ -893,7 +893,8 @@ row_cells :: #force_inline proc "contextless" (doc: ^Document, t: Table, at: Nod
 	return min(int(doc.nodes[at].n) - 1, keys)
 }
 
-// The cell of row `at` of table `t` whose key is `name` under `dups`, through the table's key slots when they settle it.
+// The cell of row `at` of table `t` whose key is `name` under `dups`, through the table's key slots when they settle
+// it.
 @(private)
 row_member :: proc "contextless" (doc: ^Document, t: Table, at: Node_Index, name: string, dups: Duplicates) -> (Node_Index, Presence) #no_bounds_check {
 	cells := row_cells(doc, t, at)

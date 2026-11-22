@@ -4,18 +4,18 @@ import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/core/tape"
 
-// The protocol between a format's walk and its hooks, which formats, the hooks of `lib/ops` and the C ABI import. A hook is
-// the consumer of a walk's tokens, such as a document's builder, or none for a validate. It is a compile-time parameter
+// The protocol between a format's walk and its hooks, imported by formats, the hooks of `lib/ops` and the C ABI. A hook
+// consumes a walk's tokens, as a document's builder does, and a validate has none. A hook is a compile-time parameter
 // of the walk, which is compiled once per hook with the hook inlined.
 
 // A hook's answer to a token.
 Action :: enum u8 {
 	Next,
-	// On an `Array` or `Object`, pass what it holds with no tokens up to its `End`, while the walk still judges its
+	// On an `Array` or `Object`, pass what it holds with no tokens up to its `End`, while the walk still validates its
 	// bytes. `Next` on any other token. Only a hook with `.Skips` gives it.
 	Skip,
-	// On an `Array` or `Object`, judge it and the rest of the text with no more tokens. Only a hook with `.Skips` gives
-	// it.
+	// On an `Array` or `Object`, validate it and the rest of the text with no more tokens. Only a hook with `.Skips`
+	// gives it.
 	Rest,
 	// On an `Array` or `Object`, store it whole through the inner hook of the hook's `Keeps`, which then gets its `End`.
 	// Only a hook with `.Keeps` gives it.
@@ -23,20 +23,20 @@ Action :: enum u8 {
 	// On an `Object`, store its members through the hook's `Keeps` as `Keep` does, each container value as one node,
 	// which then gets its `End`. Only a hook with `.Keeps` gives it.
 	Keep_Stubs,
-	Stop, // end the walk after this token; the text past it is not read
-	// The walk's answer for a hook with `.Rooms` whose room has no place for the token's node. The walk grows the
-	// room and gives the token again.
+	Stop, // end the walk after this token, and the text past it is not read
+	// Answer of a hook with `.Rooms` whose room has no place for the token's node. The walk grows the room and gives
+	// the token again.
 	Grow,
 }
 
-// What a hook does past taking tokens, which the walk compiles in only for a hook that names it.
+// Behaviors of a hook beyond taking tokens. The walk compiles in a capability's code only for a hook that names it.
 Capability :: enum u8 {
 	Skips, // answers `Skip` and `Rest`
 	Unspelled, // reads no number's spelling, so the walk gives a plain decimal `Number` a spelling of 0
 	Levels, // keeps a level per open container, through the protocol's `Levels`
 	Rooms, // stores each token's node in a room the walk checks, through the protocol's `Rooms`
 	Keeps, // answers `Keep` and `Keep_Stubs`, through the protocol's `Keeps`
-	Number_Blocks, // takes the arrays of numbers a walk reads in blocks
+	Number_Blocks, // receives the arrays of numbers a walk reads in blocks
 	Walk, // reads values again inside its calls, in the walk set in its field `walk: rawptr`
 }
 
@@ -166,8 +166,8 @@ keeps_give_by :: #force_inline proc "contextless" ($Of: proc "contextless" (h: r
 	return Give(Of(h), s, t)
 }
 
-// Three words of a hook's state that the walk's states carry in argument registers. They suit what changes with every
-// token, such as a cursor or a count.
+// Three words of a hook's state, passed in the walk's argument registers from token to token. They suit what changes
+// with every token, such as a cursor or a count.
 Regs :: struct {
 	a, b, c: u64,
 }
@@ -188,7 +188,7 @@ no_hook :: #force_inline proc "contextless" (h: ^No_Hooks, s: Regs, t: tape.Toke
 Walk_Result :: distinct u64
 
 // Walk outcomes past the `Fault_Kind` values.
-WALK_MORE :: u8(0xFB) // the walk read the window of a text in pieces to its end, and the text goes on
+WALK_MORE :: u8(0xFB) // the walk read the window of a text in pieces to its end, and the text continues
 WALK_STEPS :: u8(0xFC) // the walk opened a container past `Budget.steps`
 WALK_NO_MEMORY :: u8(0xFD) // a stack could not grow
 WALK_STOPPED :: u8(0xFE) // a hook returned `.Stop`
@@ -220,7 +220,7 @@ walk_error :: #force_inline proc "contextless" (r: Walk_Result, rules: ^tape.Rul
 }
 
 // Runs `task(arg)` on the calling thread and on the threads of `runner`, and returns once every call has. The calls
-// share the work through `arg`, as any of them may not run but the caller's.
+// share the work through `arg`, as only the caller's call is certain to run.
 fan :: proc(runner: ^tape.Runner, task: proc(arg: rawptr), arg: rawptr) {
 	runner.start(runner.data, runner.threads, task, arg)
 	task(arg)

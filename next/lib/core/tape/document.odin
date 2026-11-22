@@ -10,7 +10,7 @@ Document :: struct {
 	src:        []u8, // borrowed unless `.Owns_Src`
 	nodes:      []Node,
 	facts:      []Fact, // sorted by node, then source order
-	counts:     []Child_Count, // sorted by node; only containers whose `spelling` saturated
+	counts:     []Child_Count, // sorted by node, only containers whose `spelling` saturated
 	ext:        Format_Ext,
 	format:     ^Format,
 	allocator:  runtime.Allocator,
@@ -51,7 +51,7 @@ destroy_document :: proc(doc: ^Document) {
 // How a document was built.
 Doc_Flag :: enum u8 {
 	Owns_Src,
-	Stopped, // the read stopped early; the text past the stop was not validated
+	Stopped, // the read stopped early, and the text past the stop was not validated
 	Tolerated, // the text broke a rule the read's tolerances let it break
 	// The text ended inside its root value, and the containers `Pieces.open` names were closed at the cut. A scalar
 	// cut short is left out, and so is a key whose value had not started.
@@ -98,7 +98,7 @@ Yaml_Ext :: struct {
 	clash: u64,
 }
 
-// What a path read kept of a text beyond its nodes, in one block with its lists and the missing names' bytes. A
+// The data a path read kept beyond the document's nodes, in one block with its lists and the missing names' bytes. A
 // scan's document holds only the nodes its paths reached, with no facts.
 Partial :: struct {
 	answers: []Answer, // by path, each path's in document order, the order of their nodes

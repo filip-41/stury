@@ -6,8 +6,8 @@ import "core:slice"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// The allocation a caller may take: an error, or a nil block for a non-empty request, which a nil or an empty
-// allocator gives with no error.
+// Returns `err`, or `.Out_Of_Memory` when `p` is nil for a request of `n > 0`, which a nil or an empty allocator
+// returns without an error.
 took :: proc(err: runtime.Allocator_Error, p: rawptr, n: int) -> runtime.Allocator_Error {
 	if err != nil {
 		return err
@@ -18,27 +18,27 @@ took :: proc(err: runtime.Allocator_Error, p: rawptr, n: int) -> runtime.Allocat
 	return nil
 }
 
-// The hook that stores a walk's tokens as a document's nodes, and with `builder_hook_facts` its fact tokens as the
-// document's facts. In its registers `a` is the next node's address, `b` the open container's index above its child
-// count and `c` the count of open containers.
+// The hook that stores a walk's tokens as a document's nodes and, through `builder_hook_facts`, its fact tokens as the
+// document's facts. Registers: `a` is the address of the next node, `b` holds the open container's node index in its
+// high 32 bits and its child count in its low 32 bits, and `c` is the number of open containers.
 Builder :: struct {
 	doc:           tape.Document,
-	stack:         []u64, // the frames of the open containers' parents, `b` as it was at their open
+	stack:         []u64, // the saved `b` of each open container's parent, with the container counted as a child
 	facts:         []tape.Fact, // the facts' buffer, of which `doc.facts` is the part in use
-	end:           u64, // the address one past the room `doc.nodes`, where a node written grows the room first
+	end:           u64, // the address one past the room of `doc.nodes`, where a node written grows the room first
 	most:          int, // the most nodes the room may grow to
-	closed:        tape.Node_Index, // the container closed last, `NO_NODE` before one closes; kept by `builder_hook_facts`
+	closed:        tape.Node_Index, // the container closed last, `NO_NODE` before one closes. Kept by `builder_hook_facts`
 	err:           runtime.Allocator_Error, // a refused allocation, or `Out_Of_Memory` with `full`
-	full:          u64, // one past the first byte of the node a room of `most` nodes had no place for, else 0
+	full:          u64, // one past the offset of the token a room of `most` nodes had no place for, else 0
 	borrowed:      bool, // `stack` is the caller's, which `builder_end` does not free
-	// The true child counts of the containers whose `spelling` saturated, in the order they closed, which `builder_end`
-	// sorts by node. A container closed with every child holds a node per child, so a room of `n` nodes closes
-	// `n / MAX_CHILDREN` of them at most, and past the entries of partial containers `counts` has room for them, reserved
-	// as the room grows.
+	// The full child counts of the containers whose `spelling` saturated, in the order they closed. `builder_end` sorts
+	// them by node. A container closed with every child holds a node per child, so a room of `n` nodes closes at most
+	// `n / MAX_CHILDREN` of them. `counts` has room for those past the entries of partial containers, reserved as the
+	// room grows.
 	counts:        [dynamic]tape.Child_Count,
 	ctx:           runtime.Context, // the caller's, for the allocations the contextless hook makes
-	// For `builder_hook_stubs`, the open containers' count `c` at which each child container is stored as an unread
-	// node, and the containers open inside the one stored so.
+	// For `builder_hook_stubs`: `stubs` is the open-container count `c` at which a child container is stored as an
+	// unread node, and `unstored` counts the container stored so and the containers open inside it.
 	stubs:         u64,
 	unstored:      u64,
 	keep_facts:    bool, // a scan keeps the facts of the nodes it keeps, which its inner hooks store
@@ -49,7 +49,7 @@ BUILDER_CAPS :: hook.Capabilities{.Levels, .Rooms, .Number_Blocks}
 
 #assert(size_of(tape.Node) == 16)
 
-// The open stack of a builder to `hook.Levels`.
+// The open stack of a builder, as `hook.Levels` reads it.
 @(private)
 builder_levels_held :: #force_inline proc "contextless" (h: rawptr) -> int {
 	return len((^Builder)(h).stack)
@@ -60,7 +60,7 @@ builder_levels_grow :: #force_inline proc "contextless" (h: rawptr, want: int) -
 	return builder_deepen((^Builder)(h), want)
 }
 
-// The room of a builder to `hook.Rooms`.
+// The room of a builder, as `hook.Rooms` reads it.
 @(private)
 builder_rooms_end :: #force_inline proc "contextless" (h: rawptr) -> uintptr {
 	return uintptr((^Builder)(h).end)
@@ -74,7 +74,7 @@ builder_rooms_grow :: #force_inline proc "contextless" (h: rawptr, s: ^hook.Regs
 }
 
 
-// The node `s` writes next.
+// The index of the node `s` writes next.
 @(private)
 builder_cursor :: #force_inline proc "contextless" (b: ^Builder, s: hook.Regs) -> tape.Node_Index {
 	return tape.Node_Index((uintptr(s.a) - uintptr(raw_data(b.doc.nodes))) / size_of(tape.Node))
@@ -118,13 +118,13 @@ builder_reserve_counts :: proc(b: ^Builder, room: int) -> runtime.Allocator_Erro
 	return .Out_Of_Memory if cap(b.counts) < wide else nil
 }
 
-// Stores `t` as a node, or for an end writes its container's subtree size and child count into the container's node.
-// The walk ends only containers it opened, and gives a node only while the room has place for it.
+// Stores `t` as a node. For an end token it writes the container's subtree size and child count into the container's
+// node. The walk ends only containers it opened, and gives a node only while the room has place for it.
 builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	return builder_step(h, s, t, false, false)
 }
 
-// `builder_hook` for a walk that also gives fact tokens, a token whose role is past `Key`, which it stores as facts.
+// `builder_hook` for a walk that also gives fact tokens (role past `Key`), which it stores as facts.
 builder_hook_facts :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	if t.role > .Key {
 		return s, builder_fact(h, s, t)
@@ -132,8 +132,8 @@ builder_hook_facts :: #force_inline proc "contextless" (h: ^Builder, s: hook.Reg
 	return builder_step(h, s, t, true, false)
 }
 
-// `builder_hook` for the containers a hook holding the builder keeps through its `Keeps`, which stores fact tokens with
-// `keep_facts` and drops them without.
+// `builder_hook` for the containers that a hook holding the builder keeps through its `Keeps`. Fact tokens are stored
+// when `keep_facts` is set and dropped otherwise.
 builder_hook_kept :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	if t.role > .Key {
 		if h.keep_facts {
@@ -144,7 +144,7 @@ builder_hook_kept :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs
 	return builder_step(h, s, t, true, false)
 }
 
-// `builder_hook_kept` storing each container opened at level `stubs` as one unread node, with none of its tokens.
+// `builder_hook_kept` that stores each container opened at level `stubs` as a single unread node, without its tokens.
 builder_hook_stubs :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	if t.role > .Key {
 		if h.keep_facts && h.unstored == 0 {
@@ -169,9 +169,9 @@ builder_hook_stubs :: #force_inline proc "contextless" (h: ^Builder, s: hook.Reg
 	return builder_step(h, s, t, true, false)
 }
 
-// With `GROWS` a node that finds the room full grows it first, and a walk that ends at a refused growth is stopped.
-// Without it the walk grows the room before a node finds it full, as a growth from the inlined hook costs the walk's
-// states a stack frame each.
+// With `GROWS`, a node that finds the room full grows it first, and a refused growth stops the walk. Without it the
+// walk grows the room before a node finds it full, because growing from the inlined hook would cost each of the walk's
+// states a stack frame.
 @(private)
 builder_step :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token, $FACTS, $GROWS: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
 	s := s
@@ -185,8 +185,8 @@ builder_step :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: 
 		room_check(h, s)
 		((^tape.Node)(uintptr(s.a)))^ = t
 		s.a += size_of(tape.Node)
-		// The open container's child count is `b`'s low half, so a member is counted with one add and no node is
-		// touched. A key is not a child.
+		// The open container's child count is the low half of `b`, so a member is counted with an add and no node is
+		// read or written. A key is not a child.
 		s.b += u64(t.role == .Value)
 		return s, .Next
 	}
@@ -224,8 +224,8 @@ builder_step :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: 
 	return s, .Next
 }
 
-// Traps in a debug or sanitizer build when the node `s` writes next lies past the room, which every walk keeps from
-// happening by its room checks or by a hook that grows the room itself.
+// Panics in a debug or sanitizer build when the node `s` writes next lies past the room. Every walk prevents that
+// through its room checks or through a hook that grows the room itself.
 @(private)
 room_check :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs) {
 	when ODIN_DEBUG || ODIN_SANITIZER_FLAGS != {} {
@@ -235,8 +235,9 @@ room_check :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs) {
 	}
 }
 
-// Records the true child count of the partial container at `node`, whose `spelling` saturated, with one more entry of
-// room, so the room for the containers closed with every child stays. A refused allocation is held in `err`.
+// Records the full child count of the partial container at `node`, whose `spelling` saturated. It reserves one entry
+// beyond the current capacity, so the room for the containers closed with every child remains. A refused allocation is
+// kept in `err`.
 @(cold)
 builder_partial_count :: #force_no_inline proc "contextless" (h: ^Builder, node: tape.Node_Index, count: u32) {
 	context = h.ctx
@@ -249,8 +250,8 @@ builder_partial_count :: #force_no_inline proc "contextless" (h: ^Builder, node:
 	append(&h.counts, tape.Child_Count{node, count})
 }
 
-// Stores container token `t` as one node holding none of its children, partial with its count not known, for a walk
-// that passes it. False once the room cannot grow.
+// Stores container token `t` as a single node with none of its children, marked partial with an unknown child count,
+// for a walk that passes over the container. False once the room cannot grow.
 @(private)
 builder_unread :: proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> (hook.Regs, bool) #no_bounds_check {
 	s := s
@@ -268,10 +269,11 @@ builder_unread :: proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) 
 	return s, true
 }
 
-// Grows the room for nodes, up to `most`, and moves `s.a` with it, for the token at `at` that finds the room full. It
-// grows to what the rest of the text makes at the rate of nodes per byte so far, with a quarter more, so a read that
-// keeps nodes evenly grows once, or doubles when that is more or is refused. False once a growth is refused or the
-// room holds `most`, with `err` set, which no later growth clears.
+// Grows the room for nodes, up to `most`, and moves `s.a` with it, for the token at offset `at` that finds the room
+// full. The new size is the larger of twice the room and `have * (1 + 1.25 * rest / at)`, where `rest` is the text past
+// `at`: the nodes the rest should make at the rate per byte so far, with a quarter more. A read that keeps nodes evenly
+// therefore grows once. If that size is refused it retries with twice the room. False, with `err` set, once a growth
+// is refused or the room holds `most`. No later growth clears `err`.
 @(cold)
 builder_grow :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, at: u64) -> (hook.Regs, bool) {
 	s := s
@@ -309,9 +311,9 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 	return s, true
 }
 
-// Stores the fact token `t`, a comment, as a fact of the node it describes. A comment before a value waits in
-// `builder_end` for the node it marks, an inline comment belongs to the last value completed and a foot to the
-// innermost open container, or to the root after it. `Stop` when memory for the facts is refused.
+// Stores fact token `t`, a comment, as a fact of the node it describes. A comment before a value is placed on the node
+// it marks when `builder_end` runs `builder_place_facts`. An inline comment belongs to the last value completed, and a
+// foot to the innermost open container, or to the root past the last one. `.Stop` when memory for the facts is refused.
 @(private, cold)
 builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> hook.Action {
 	a := builder_cursor(h, s)
@@ -359,15 +361,17 @@ builder_grow_facts :: proc "contextless" (h: ^Builder) -> bool {
 	return true
 }
 
-// Gives each comment that waits for the value it marks that value's node: the node after it, or after a key the key's
-// value. A comment no node follows, past a stop, belongs to the root as its foot. Then sorts the facts by node.
+// Gives each comment that waits for the value it marks that value's node: the node after the comment, or for a comment
+// before a key, the key's value. A comment no node follows, past a stop, becomes the root's foot. Then sorts the facts
+// by node.
 @(private, cold)
 builder_place_facts :: proc(doc: ^tape.Document, count: int) {
 	doc.present += builder_place_comments(doc, doc.facts, count)
 	builder_sort_facts(doc.facts)
 }
 
-// `builder_place_facts` for the comments among `facts`, some of `doc`'s, giving the kinds they come to.
+// `builder_place_facts` for the comments among `facts`, which may be part of `doc`'s facts. Returns the fact kinds the
+// comments end as.
 @(private)
 builder_place_comments :: proc "contextless" (doc: ^tape.Document, facts: []tape.Fact, count: int) -> (present: tape.Facts) {
 	for &f in facts {
@@ -389,7 +393,7 @@ builder_place_comments :: proc "contextless" (doc: ^tape.Document, facts: []tape
 	return
 }
 
-// Sorts `facts` by node. Facts arrive mostly in node order, and a stable sort of an ordered list changes nothing.
+// Sorts `facts` by node, only when one is out of order. Facts arrive mostly in node order.
 @(private)
 builder_sort_facts :: proc(facts: []tape.Fact) {
 	for i in 1 ..< len(facts) {
@@ -427,8 +431,9 @@ builder_error :: proc "contextless" (h: ^Builder) -> tape.Error {
 	return nil
 }
 
-// The document the walk built, or the error that ended it, with everything freed. `regs` are the hook's registers at
-// the walk's end and `root_close` the end of the root value.
+// Returns the document the walk built, or the error that ended it with everything freed. `err` is the walk's own error
+// and takes precedence over the builder's. `regs` are the hook's registers at the walk's end and `root_close` is the
+// end of the root value.
 @(require_results)
 builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Error) -> (doc: tape.Document, e: tape.Error) {
 	e = err
@@ -450,17 +455,17 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 	}
 	doc = h.doc
 	if len(h.counts) > 0 {
-		// An inner container closes before the one holding it.
+		// Counts are in closing order, an inner container before the one holding it, so they need sorting by node.
 		slice.sort_by(h.counts[:], proc(a, b: tape.Child_Count) -> bool { return a.node < b.node })
 		shrink(&h.counts)
 		doc.counts = h.counts[:]
 	} else {
 		delete(h.counts)
 	}
-	// A room the nodes fill past half, or with at most `ROOM_SLACK` unused bytes, is kept whole, its tail memory no node
-	// wrote, so that the allocator can give its block to the next read of its size. A room less than half full moves its
-	// nodes to an exact block when the allocator cannot shrink it in place, so the resize fails only when that block is
-	// refused too, and the document then keeps the whole room. `destroy` frees the room as one block from its start.
+	// A room that is at least half full, or has at most `ROOM_SLACK` unused bytes, is kept whole with its unwritten
+	// tail, so that the allocator can give its block to the next read of its size. A room less than half full is
+	// resized to `count` nodes, which moves them to an exact block when the allocator cannot shrink it in place. If the
+	// resize fails the document keeps the whole room. `destroy` frees the room as one block from its start.
 	doc.nodes = doc.nodes[:count]
 	if 2 * count < len(h.doc.nodes) && (len(h.doc.nodes) - count) * size_of(tape.Node) > ROOM_SLACK {
 		if raw, err := runtime.non_zero_mem_resize(raw_data(doc.nodes), len(h.doc.nodes) * size_of(tape.Node), count * size_of(tape.Node), align_of(tape.Node), doc.allocator); took(err, raw_data(raw), count) == nil {
@@ -471,15 +476,15 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 	return doc, nil
 }
 
-// The unused bytes of a room a document keeps rather than move its nodes to an exact block.
+// The unused bytes up to which a document keeps its room whole rather than move its nodes to an exact block.
 @(private)
 ROOM_SLACK :: 1024
 
-// A copy of the document the walk has built so far, for a text that ended inside its root value: the containers still
-// open are closed at the cut, and a key whose value had not started is left out, so that the copy is a document of
-// the values given. `regs` are the hook's registers at the cut and `cut` where more bytes are needed. With `read`, the
-// children read so far of each open container by level, one that stored fewer is `CONTAINER_PARTIAL`. The builder
-// goes on as it was.
+// Returns a copy of the document the walk has built so far, for a text that ended inside its root value. The
+// containers still open are closed at the cut, and a key whose value had not started is left out, so that the copy is
+// a document of the values given. `regs` are the hook's registers at the cut and `cut` is the offset where more bytes
+// are needed. `read`, when given, holds the children read so far of each open container by level, and a container that
+// stored fewer is `CONTAINER_PARTIAL`. The builder is unchanged and goes on.
 @(require_results)
 builder_so_far :: proc(h: ^Builder, regs: hook.Regs, cut: u64, allocator: runtime.Allocator, read: []u64 = nil) -> (doc: tape.Document, err: tape.Error) {
 	if e := builder_error(h); e != nil {
@@ -527,8 +532,8 @@ builder_so_far :: proc(h: ^Builder, regs: hook.Regs, cut: u64, allocator: runtim
 	}
 	copy(facts, h.doc.facts)
 	doc = h.doc
-	// The copy owns nothing the builder keeps: its format extension and the scan's partial block stay the
-	// builder's, or the two would free them once each.
+	// The copy owns nothing the builder keeps. Its format extension and the scan's partial block stay the builder's,
+	// since otherwise both would free them.
 	doc.ext, doc.partial = nil, nil
 	doc.nodes, doc.facts, doc.allocator, doc.root_close = nodes, facts, allocator, cut
 	doc.counts = counts[:] if len(counts) > 0 else nil

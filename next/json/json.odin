@@ -7,7 +7,7 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
-// JSON as RFC 8259, and the specs past it that `Spec` names.
+// JSON as RFC 8259, and the other specs `Spec` names.
 
 // The grammar a JSON text follows.
 Spec :: enum u8 {
@@ -16,14 +16,14 @@ Spec :: enum u8 {
 	Json5, // JSON5 1.0.0
 }
 
-// Options of a JSON read, of which `budget` takes `depth`, `nodes`, `memory` and `steps`, a step per container.
+// Options of a JSON read. `budget` sets `depth`, `nodes`, `memory` and `steps` (a step is one container).
 Options :: tape.Options
 
 @(private, rodata)
 RULES := tape.Rules{"json", {}}
 
-// Whether a read may walk a value again from its first byte, which a test build turns off to read as a format without
-// `.Rewalk` reads.
+// Whether a read may walk a value again from its first byte. A test build turns it off to read as a format without
+// `.Rewalk`.
 @(private)
 REWALK :: #config(JSON_REWALK, true)
 
@@ -50,22 +50,22 @@ READS := [Spec]tape.Reads {
 	.Json5 = {validate = validate_of, build = build_of, find = find_of, scan = scan_of},
 }
 
-// The reads of `spec`, for a caller that picks the format at run time, beside `as`'s handle. Nil for a `spec` out of
-// range.
+// The reads of `spec`, for a caller that picks the format at run time, to use with the handle `as` returns. Nil for a
+// `spec` out of range.
 reads :: proc "contextless" (spec: Spec) -> ^tape.Reads {
 	return &READS[spec] if spec <= max(Spec) else nil
 }
 
-// The quotes of a string token, one byte on each side, and none around another scalar.
+// The quote bytes around token `t`: 1 on each side of a quoted string, 0 around any other scalar.
 @(private)
 quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
 	q := u8(t.kind == .String && t.spelling & tape.SPELLING_QUOTED != 0)
 	return q, q
 }
 
-// The error in `src`, nil when it is one text of `spec`. Only a text nesting past `WALK_LEVELS` allocates, its open
-// levels. It needs `READ_STACK` bytes of stack, and faults on a thread with less. An optimized build with a constant
-// `spec` links only that spec's walk.
+// Returns the error in `src`, or nil when `src` is one text of `spec`. Only a text nesting past `WALK_LEVELS`
+// allocates, for its open levels. Needs `READ_STACK` bytes of stack and faults on a thread with less. An optimized
+// build with a constant `spec` links only that spec's walk.
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	probe_stack()
@@ -90,10 +90,10 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, 
 	runtime.panic_contextless("json: spec out of range")
 }
 
-// A document of every value in `src` read as `spec`, with keys as written and comments as facts, and the members of
-// an object that repeat a key as `opts.dups` says. Its nodes point into `src`. It needs `READ_STACK` bytes of stack,
-// and faults on a thread with less. With `opts.runner` a long text is built on its threads too, which then need as
-// much stack each, and `allocator` is called on the calling thread alone.
+// Builds a document of every value in `src` read as `spec`, with keys as written and comments as facts, and the
+// members of an object that repeat a key as `opts.dups` says. Its nodes point into `src`. Needs `READ_STACK` bytes of
+// stack and faults on a thread with less. With `opts.runner` a long text is built on its threads, which each need as
+// much stack, and `allocator` is called on the calling thread only.
 @(require_results)
 build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	probe_stack()
@@ -122,10 +122,10 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 }
 
 // The first value `path` reaches in `src`, a text of `spec`, read with no document, or why none was reached.
-// Only a path longer than `build.FIND_ROOM` steps allocates, or one with negative indexes or slice ends whose arrays
-// open together hold more than `build.FIND_ROOM` elements, and then as many entries as those arrays have elements.
-// A text nesting past `WALK_LEVELS` allocates too. It needs `READ_STACK` bytes of stack, and faults on a thread with
-// less. An optimized build with a constant `spec` links only that spec's walk.
+// Allocates only for a path longer than `build.FIND_ROOM` steps, or one with negative indexes or slice ends whose
+// arrays, open together, hold more than `build.FIND_ROOM` elements (then one entry per element of those arrays). A
+// text nesting past `WALK_LEVELS` allocates too. Needs `READ_STACK` bytes of stack and faults on a thread with less.
+// An optimized build with a constant `spec` links only that spec's walk.
 @(require_results)
 find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
 	probe_stack()
@@ -150,11 +150,11 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read
 	panic("json: spec out of range")
 }
 
-// A document of the nodes of `src` that the paths of `demand` reach, read as `spec`, with each path's answers in
+// Builds a document of the nodes of `src` that the paths of `demand` reach, read as `spec`, with each path's answers in
 // document order, which `tape.answer` gives, and with `Demand.facts` the comments of its nodes. A value a path ends at
-// is kept as the path's grain says. Containers off the paths are judged and not stored. With `read.stop_early` the
-// walk ends once no answer can come or go, and the text past it is not read. Its nodes point into `src`. It needs
-// `READ_STACK` bytes of stack, and faults on a thread with less.
+// is kept as the path's grain says. Containers off the paths are validated and not stored. With `read.stop_early` the
+// walk ends once no answer can be added or removed, and the text past it is not read. Its nodes point into `src`.
+// Needs `READ_STACK` bytes of stack and faults on a thread with less.
 @(require_results)
 scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	probe_stack()
@@ -179,10 +179,10 @@ scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Json, r
 	panic("json: spec out of range")
 }
 
-// Walks `src` as `spec` for hook `h` from its registers `regs`, the walk the reads above run, and gives where its root
-// value ends, or the error, and whether it took a rule of `opts.tolerate`. A stop of the hook is no error. The hook
-// keeps the protocol `hook.check` checks, and has no `.Walk`, as a replay is the reads' own. It needs `READ_STACK`
-// bytes of stack, and faults on a thread with less.
+// Walks `src` as `S` for hook `h` from its registers `regs`, the walk the reads above run. Returns where its root value
+// ends or the error, and whether the walk used a rule of `opts.tolerate`. A stop of the hook is no error. The hook
+// keeps the protocol `hook.check` checks, and has no `.Walk`, as a replay is the reads' own. Needs `READ_STACK` bytes
+// of stack and faults on a thread with less.
 walk :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), allocator := context.allocator) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	#assert(.Walk not_in intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0))
 	probe_stack()
@@ -250,7 +250,7 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options
 @(private)
 scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
 	if read.dups == .Refuse || read.dups == .All {
-		// A path read takes one member of a key: the build-only policies are refused here.
+		// A path read takes one member of a key, so the build-only policies are refused.
 		return {}, tape.Fault{rules = &RULES, kind = .Bad_Option}
 	}
 	when LAX {
@@ -279,8 +279,8 @@ scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX
 	return doc, e
 }
 
-// The allocator a read under `opts` takes its blocks from: `allocator` through `m` with a `Budget.memory`, else
-// `allocator` itself.
+// The allocator a read under `opts` allocates its blocks from: `allocator` counted through `m` when `Budget.memory` is
+// set, else `allocator`.
 @(private)
 read_allocator :: #force_inline proc "contextless" (m: ^hook.Memory_Budget, opts: Options, allocator: runtime.Allocator) -> runtime.Allocator {
 	if opts.budget.memory == 0 {
@@ -290,8 +290,9 @@ read_allocator :: #force_inline proc "contextless" (m: ^hook.Memory_Budget, opts
 	return hook.memory_budget(m)
 }
 
-// Ends a build or scan whose document is `doc` and error `err`, giving the error as `m` names it: the document in
-// `caller`'s blocks, flagged `.Tolerated` when the text broke a rule its tolerances let it break, else zero.
+// Finishes a build or scan with document `doc` and error `err`, and returns the error as `m` names it. On an error
+// `doc` is zeroed. Otherwise `doc` is flagged `.Tolerated` when the text broke a rule its tolerances let it break, and
+// its allocator is set to `caller`.
 @(private)
 read_end :: #force_inline proc "contextless" (doc: ^tape.Document, err: tape.Error, m: ^hook.Memory_Budget, tolerated: bool, caller: runtime.Allocator) -> tape.Error {
 	if err != nil {
@@ -305,27 +306,29 @@ read_end :: #force_inline proc "contextless" (doc: ^tape.Document, err: tape.Err
 	return nil
 }
 
-// Open levels a build or scan keeps in its own frame, past which its builder's stack moves to the read's allocator.
+// The open levels a build or scan keeps in its own frame. Past them the builder's stack is allocated from the read's
+// allocator.
 @(private)
 FRAME_DEPTH :: 64
 
-// The room a build starts with, a node per this many bytes.
+// The node capacity a build starts with: one node per this many bytes of the text.
 @(private)
 BUILD_BYTES_PER_NODE :: 16
 
-// The room a scan starts with, which holds the answers of a few paths with no growth.
+// The node capacity a scan starts with, which holds the answers of a few paths without growth.
 @(private)
 SCAN_NODES :: 64
 
-// The most nodes a text of `src` can make, at most `(len(src) + 1 + depth) / 2`. Each node spends two bytes (a
-// container its brackets, a key its colon, a scalar the comma or close after it), except a container left open and
-// the token before a fault, which may spend one.
+// The most nodes a text of `src` can make, at most `(len(src) + 1 + depth) / 2`, plus 16 of slack. Each node spends
+// two bytes (a container its brackets, a key its colon, a scalar the comma or close after it), except a container
+// left open and the token before a fault, which may spend one.
 @(private)
 node_bound :: #force_inline proc "contextless" (src: []u8, depth: u64) -> u64 {
 	return (u64(len(src)) + depth) / 2 + 16
 }
 
-// The most nodes a read may make, `bound` within `Budget.nodes`, a 32-bit node index and an `int` of bytes.
+// The most nodes a read may make: `bound`, limited by `Budget.nodes`, by the 32-bit node index and by an `int` count of
+// node bytes.
 @(private)
 node_most :: #force_inline proc "contextless" (bound: u64, opts: Options) -> int {
 	budget := u64(opts.budget.nodes) if opts.budget.nodes != 0 else max(u64)
@@ -335,7 +338,7 @@ node_most :: #force_inline proc "contextless" (bound: u64, opts: Options) -> int
 @(private)
 find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
 	if read.dups == .Refuse || read.dups == .All {
-		// A path read takes one member of a key: the build-only policies are refused here.
+		// A path read takes one member of a key, so the build-only policies are refused.
 		return {}, tape.Fault{rules = &RULES, kind = .Bad_Option}
 	}
 	when LAX {
@@ -373,8 +376,9 @@ depth_limit :: #force_inline proc "contextless" (opts: Options) -> u64 {
 	return u64(opts.budget.depth) if opts.budget.depth != 0 else tape.DEFAULT_DEPTH
 }
 
-// The end of the root value of `src`, or the error in `src`, and whether the walk took a rule of `opts.tolerate`. Only
-// white space, and comments in a spec that has them, may follow the value. A walk with no `LAX` takes none.
+// Walks `src` and returns the end of its root value or the error, and whether the walk used a rule of
+// `opts.tolerate`. Only white space, and comments in a spec that has them, may follow the value. A walk without `LAX`
+// uses no tolerance.
 @(private)
 walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	p := raw_data(src)

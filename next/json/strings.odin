@@ -103,8 +103,8 @@ string_probe :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, e
 	return nil, false, nil
 }
 
-// One past the closing quote of the key read on from the backslash at `bs`, within `PROBE_MAX` bytes; otherwise nil and
-// the byte `string_escaped` reads on from. Reads byte by byte, as a key is short and `string_escaped` pays for a whole
+// One past the closing quote of the key read on from the backslash at `bs`, within `PROBE_MAX` bytes, otherwise nil and
+// the byte `string_escaped` reads on from. Reads byte by byte, as a key is short and `string_escaped` reads a whole
 // block.
 @(private)
 key_escaped_head :: #force_inline proc "contextless" (bs, end: [^]u8) -> (q, at: [^]u8) #no_bounds_check {
@@ -135,7 +135,7 @@ key_escaped_head :: #force_inline proc "contextless" (bs, end: [^]u8) -> (q, at:
 }
 
 // One past the closing quote of the string at `p`, which closes at `quote`, when it is plain ASCII, read 64 bytes a
-// step while 64 remain; otherwise nil and, when the first stop is a backslash, that backslash.
+// step while 64 remain, otherwise nil and, when the first stop is a backslash, that backslash.
 @(private)
 string_lean :: #force_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> (q, escape: [^]u8) #no_bounds_check {
 	bs := p[1:]
@@ -155,7 +155,7 @@ string_lean :: #force_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> (
 }
 
 // One past the closing quote `quote` of the string read on from `bs`, while its bytes are ASCII and each escape is one
-// `escape_len` accepts within a block; otherwise nil. No escape may run into the first block.
+// `escape_len` accepts within a block, otherwise nil. No escape may run into the first block.
 @(private)
 string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8, $quote: u8) -> [^]u8 #no_bounds_check {
 	bs := bs
@@ -332,7 +332,7 @@ when ODIN_ARCH == .amd64 {
 	}
 }
 
-// One past the closing quote `quote` of the string at `p` and whether it holds an escape; nil when the block reader
+// One past the closing quote `quote` of the string at `p` and whether it holds an escape, or nil when the block reader
 // cannot vouch for it (a control byte, an escape it does not accept, invalid UTF-8, the text's end), which
 // `string_exact` settles. Blocks are read back to back from `p + 1`, so the UTF-8 state carries from one to the next.
 @(private)
@@ -398,7 +398,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 }
 
 // The length of the escape at the backslash `e` that the block reader accepts, a one-letter escape, a `\u` escape
-// outside the surrogates or a surrogate pair; 0 for any other.
+// outside the surrogates or a surrogate pair, and 0 for any other.
 @(private)
 escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 {
 	_, n := spell.string_escape(e, intrinsics.ptr_sub(end, e))

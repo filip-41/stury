@@ -358,7 +358,7 @@ json5_identifier_keys :: proc(t: ^testing.T) {
 	}
 }
 
-// `@` stands for the backslash in a test's text, which an editor's escape handling would otherwise rewrite.
+// Replaces `@` with a backslash in a test's text, which an editor's escape handling would otherwise rewrite.
 fix_escapes :: proc(s: string) -> string {
 	out, _ := strings.replace_all(s, "@", "\\", context.temp_allocator)
 	return out

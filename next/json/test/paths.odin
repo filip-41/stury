@@ -11,7 +11,7 @@ import "stury:json"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// One answer of a path read: the value found, or the outcome, with the node the readers stopped at.
+// An answer of a path read: the value found, or the outcome, with the node the readers stopped at.
 Ref_Answer :: struct {
 	node:    tape.Node_Index,
 	outcome: tape.Presence,
@@ -144,7 +144,7 @@ Corpus_File :: struct {
 	spec: json.Spec,
 }
 
-// The JSONTestSuite files as JSON, and the JSON5 suite's as JSON5 and as JSONC, to delete.
+// The JSONTestSuite files as JSON, and the JSON5 suite's as JSON5 and as JSONC.
 corpus_files :: proc() -> [dynamic]Corpus_File {
 	files := make([dynamic]Corpus_File)
 	for f in #load_directory("conformance/JSONTestSuite/test_parsing") {
@@ -177,7 +177,7 @@ same_refusal :: proc(a, b: tape.Error) -> bool {
 	return a == b
 }
 
-// Whether every read of `src` that judges the whole text refuses it with the fault `want`, which a build gave.
+// Whether every read of `src` that checks the whole text refuses it with the fault `want`, which a build gave.
 // Returns false after reporting the first that does not.
 reads_refuse :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: json.Options, want: tape.Error, name: string, loc := #caller_location) -> bool {
 	same := true

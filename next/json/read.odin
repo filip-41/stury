@@ -33,8 +33,8 @@ number_long :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64) -> s
 	return num
 }
 
-// The text of the string node `t` of the JSON text `src`, which holds an escape or a tolerated byte, decoded into
-// `buf`. False for a `buf` shorter than `text_room` gives.
+// Decodes the text of string node `t` of the JSON text `src`, which holds an escape or a tolerated byte, into `buf`.
+// False when `buf` is shorter than `text_room` gives.
 @(private)
 text_decoded :: #force_inline proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: string, ok: bool) #no_bounds_check {
 	// An escape decodes to no more bytes than it spells, so a buffer as long as the span holds the text.
@@ -53,7 +53,7 @@ text_decoded :: #force_inline proc "contextless" (src: []u8, t: tape.Node, buf: 
 	return decode_blocks(src, t, buf)
 }
 
-// The text of a `SPELLING_LAX` string node, each maximal subpart of an ill-formed sequence decoded as U+FFFD.
+// Decodes the text of a `SPELLING_LAX` string node, reading each maximal subpart of an ill-formed sequence as U+FFFD.
 @(private, cold)
 text_lax :: #force_no_inline proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: string, ok: bool) {
 	if text_room(src, t) > len(buf) {
@@ -66,8 +66,8 @@ text_lax :: #force_no_inline proc "contextless" (src: []u8, t: tape.Node, buf: [
 	return string(buf[:decode_bytes(buf, 0, src, lo, hi, false, true)]), true
 }
 
-// The end in `dst` of `src[p:end]` decoded from `dst[w]` one byte at a time, the escapes of JSON5 when `json5`, and
-// each maximal subpart of an ill-formed sequence as U+FFFD when `lax`.
+// Decodes `src[p:end]` into `dst` from `dst[w]` one byte at a time and returns the end offset in `dst`. Reads JSON5
+// escapes when `json5` and each maximal subpart of an ill-formed sequence as U+FFFD when `lax`.
 @(private)
 decode_bytes :: #force_inline proc "contextless" (dst: []u8, w: int, src: []u8, p, end: u64, $json5, $lax: bool) -> int #no_bounds_check {
 	base := raw_data(src)
@@ -96,8 +96,9 @@ decode_bytes :: #force_inline proc "contextless" (dst: []u8, w: int, src: []u8, 
 	return w
 }
 
-// The ends in `out` and in `base` of the character whose lead `base[p]` is past ASCII, copied to `out[w:]`, or U+FFFD
-// for the maximal subpart of an ill-formed sequence. `out` has room for three bytes per byte of `base` read.
+// Copies the character whose lead `base[p]` is past ASCII to `out[w:]`, or writes U+FFFD for the maximal subpart of an
+// ill-formed sequence, and returns the ends in `out` and in `base`. `out` has room for three bytes per byte of `base`
+// read.
 @(private, cold)
 decode_lax_char :: #force_no_inline proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: int) -> (int, u64) #no_bounds_check {
 	q, kind := spell.utf8_char(base[p:], base[end:])
@@ -112,8 +113,8 @@ decode_lax_char :: #force_no_inline proc "contextless" (base: [^]u8, p, end: u64
 	return w + n, p + u64(n)
 }
 
-// The ends in `out` and in `base` of the escape at `base[p]` decoded into `out[w:]`. A backslash that ends the text
-// spells itself.
+// Decodes the escape at `base[p]` into `out[w:]` and returns the ends in `out` and in `base`. A backslash that ends
+// the text spells itself.
 @(private)
 decode_escape :: #force_inline proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: int) -> (int, u64) #no_bounds_check {
 	if p + 1 >= end {
@@ -127,7 +128,7 @@ decode_escape :: #force_inline proc "contextless" (base: [^]u8, p, end: u64, out
 	return decode_unicode_into(base, p, end, out, w)
 }
 
-// The text of a long string node decoded into `buf` 64 bytes at a time. A block with no escape is stored whole; a
+// Decodes the text of a long string node into `buf` 64 bytes at a time. A block with no escape is stored whole. A
 // block with escapes copies the run before each escape and decodes the escape, loading the block once.
 @(private)
 decode_blocks :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) #no_bounds_check {
@@ -193,8 +194,8 @@ decode_blocks :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (str
 	return string(buf[:w]), true
 }
 
-// The ends in `out` and in `base` of the `\u` escape at `base[p]` decoded into `out[w:]`. The escape's hex digits
-// must be valid, as a walk checks them.
+// Decodes the `\u` escape at `base[p]` into `out[w:]` and returns the ends in `out` and in `base`. The escape's hex
+// digits must be valid, as a walk checks them.
 @(private)
 decode_unicode_into :: #force_inline proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: int) -> (int, u64) #no_bounds_check {
 	if p + 6 > end || base[p + 1] != 'u' {
@@ -220,7 +221,7 @@ decode_unicode_into :: #force_inline proc "contextless" (base: [^]u8, p, end: u6
 	return decode_surrogate_into(base, p, end, unit, out, w)
 }
 
-// `decode_unicode_into` for a surrogate `unit`, which reads a pair as one code point and a lone half as U+FFFD.
+// `decode_unicode_into` for a surrogate `unit`. Reads a pair as one code point and a lone half as U+FFFD.
 @(private)
 decode_surrogate_into :: #force_no_inline proc "contextless" (base: [^]u8, p, end: u64, unit: u32, out: [^]u8, w: int) -> (int, u64) #no_bounds_check {
 	if unit < 0xDC00 && p + 12 <= end && base[p + 6] == '\\' && base[p + 7] == 'u' {
@@ -240,7 +241,7 @@ decode_surrogate_into :: #force_no_inline proc "contextless" (base: [^]u8, p, en
 	return w + 3, p + 6
 }
 
-// Copies `n` bytes from `src[p:]` to `dst[w:]`, 16 bytes a store while they fit.
+// Copies `n` bytes from `src[p:]` to `dst[w:]`, 16 bytes per store while they fit.
 @(private)
 copy_run :: #force_inline proc "contextless" (dst: []u8, w: int, src: [^]u8, p, n: int) #no_bounds_check {
 	i := 0
@@ -251,7 +252,7 @@ copy_run :: #force_inline proc "contextless" (dst: []u8, w: int, src: [^]u8, p, 
 	copy_short(dst, w + i, src, p + i, n - i)
 }
 
-// Copies `n` bytes, below 16, from `src[p:]` to `dst[w:]` with two overlapping stores where they fit.
+// Copies `n` bytes, fewer than 16, from `src[p:]` to `dst[w:]` with two overlapping stores where `n` is at least 2.
 @(private)
 copy_short :: #force_inline proc "contextless" (dst: []u8, w: int, src: [^]u8, p, n: int) #no_bounds_check {
 	switch {
@@ -269,7 +270,7 @@ copy_short :: #force_inline proc "contextless" (dst: []u8, w: int, src: [^]u8, p
 	}
 }
 
-// The value of a JSON5 number past JSON's grammar: a loose decimal, hex, `Infinity` or `NaN`.
+// The value of a JSON5 number outside JSON's grammar: a loose decimal, hex, `Infinity` or `NaN`.
 @(private, cold)
 number5_value :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, spelling: u16) -> spell.Number #no_bounds_check {
 	k := Number_Spelling(spelling & tape.NUMBER_KIND)
@@ -288,14 +289,14 @@ number5_value :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, sp
 	return num
 }
 
-// The end in `dst` of JSON5's text `src[p:end]` decoded from `dst[0]`.
+// Decodes the JSON5 text `src[p:end]` into `dst` from `dst[0]` and returns the end offset in `dst`.
 @(private, cold)
 decode5 :: #force_no_inline proc "contextless" (dst: []u8, src: []u8, p, end: u64) -> int {
 	return decode_bytes(dst, 0, src, p, end, true, false)
 }
 
-// `decode_escape` for JSON5, which adds `\v`, `\0`, `\x` and two hex digits, a backslash before a line end, which
-// spells nothing, and a backslash before any other character, which spells that character.
+// `decode_escape` for JSON5. It adds `\v`, `\0`, `\x` with two hex digits, a backslash before a line end (which
+// spells nothing), and a backslash before any other character (which spells that character).
 @(private)
 decode5_escape :: proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: int) -> (int, u64) #no_bounds_check {
 	if p + 1 >= end {
@@ -335,7 +336,7 @@ decode5_escape :: proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: i
 	return w + 1, p + 2
 }
 
-// Whether string `t` of `src` and string `o` of `other` read as the same text, decoding one escape at a time.
+// Whether string `t` of `src` and string `o` of `other` read as the same text, decoding an escape at a time.
 @(private)
 same_text :: proc
  "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {
@@ -352,7 +353,7 @@ same_text :: proc
 	}
 }
 
-// `tape.text_hash` of the text string `t` of `src` reads as, decoding one escape at a time.
+// `tape.text_hash` of the text that string `t` of `src` reads as, decoding an escape at a time.
 @(private)
 key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {
 	if t.spelling & tape.SPELLING_DECODE == 0 {
@@ -369,8 +370,7 @@ key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {
 	}
 }
 
-// The bytes a key token reads as.
-
+// The read position in the bytes a key token reads as, for `key_byte`.
 @(private)
 Key_Reader :: struct {
 	base:   [^]u8,

@@ -114,7 +114,7 @@ is_markup_ws :: #force_inline proc "contextless" (c: u8) -> bool {
 }
 
 // The first byte at or past `p` that is not `is_ws`, or `end`. Up to four bytes one at a time, then 64-byte blocks,
-// then the rest; inlined, since a call would make the walk's states save registers.
+// then the rest. Inlined, since a call would make the walk's states save registers.
 skip_ws :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 {
 	q := p
 	for _ in 0 ..< 4 {
@@ -144,8 +144,8 @@ WS_BY_LOW := V{0 = ' ', 9 = '\t', 10 = '\n', 13 = '\r'}
 ws_other :: #force_inline proc "contextless" (b: Block) -> Block {
 	r: Block
 	#unroll for i in 0 ..< 4 {
-		// amd64 skips the mask `lookup` asks for: `pshufb` reads only the low nibble, and gives 0 for a byte past 0x7F,
-		// which no white space byte matches.
+		// amd64 omits the mask `lookup` needs, since `pshufb` reads only the low nibble, and gives 0 for a byte past
+		// 0x7F, which no white space byte matches.
 		index := b[i] if ODIN_ARCH == .amd64 else simd.bit_and(b[i], V(0x0f))
 		r[i] = simd.bit_xor(lookup(Tier(0), WS_BY_LOW, index), b[i])
 	}

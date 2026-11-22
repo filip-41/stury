@@ -101,7 +101,7 @@ NULL_WORD :: u32('n') | u32('u') << 8 | u32('l') << 16 | u32('l') << 24
 @(private)
 FALS_WORD :: u32('f') | u32('a') << 8 | u32('l') << 16 | u32('s') << 24
 
-// One past the literal at `p`, whose first byte is `t`, `f` or `n`, and its kind; nil for no literal.
+// One past the literal at `p`, whose first byte is `t`, `f` or `n`, and its kind, or nil for no literal.
 @(private)
 literal :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: tape.Kind) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) < 5 {

@@ -3,17 +3,16 @@ package capi
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// The tokens a chunk hook hands its consumer at once. A foreign boundary that costs more than a token's copy is crossed
-// once per chunk rather than once per token.
+// The tokens a chunk hook gives its consumer per call. A foreign call costs more than copying a token, so the boundary
+// is crossed once per chunk instead of once per token.
 CHUNK :: 256
 
-// A hook that hands a consumer the walk's tokens in chunks, for a consumer across a boundary whose every call is dear.
-// `take` gets the tokens the walk gave since the last chunk, in text order, in the hook's own buffer, which the next
-// chunk overwrites: a consumer copies what it keeps. Each token is a view into the text its `lo` and `n` place it in.
-// `take` answers whether the walk goes on: `false` hands the chunk it found full and ends the walk at the next token,
-// which is not given. The cursor rides in the walk's registers, so a token costs the walk a store and an add, and no
-// call of a capability's; the registers hold the buffer's address, so the hook does not move between `chunk_regs` and
-// the walk's end.
+// A hook that gives a consumer the walk's tokens in chunks, for a consumer across a boundary where every call is
+// expensive. `take` receives the tokens the walk gave since the last chunk, in text order, in the hook's own buffer,
+// which the next chunk overwrites, so a consumer copies what it keeps. Each token is a view into the text, placed by
+// its `lo` and `n`. `take` returns whether the walk continues: `false` ends the walk at the next token, which is not
+// given. The cursor is in the walk's registers, so giving a token costs the walk a store and an add and no capability
+// call. The registers hold the buffer's address, so the hook must not move between `chunk_regs` and the walk's end.
 Chunk_Hook :: struct {
 	take:     proc "c" (ctx: rawptr, tokens: [^]tape.Token, n: int) -> bool,
 	ctx:      rawptr,
@@ -27,7 +26,7 @@ chunk_regs :: #force_inline proc "contextless" (h: ^Chunk_Hook) -> hook.Regs {
 	return hook.Regs{a = u64(start), b = u64(start) + CHUNK * size_of(tape.Token)}
 }
 
-// Gives the hook token `t`, handing the consumer the chunk first where the buffer is full.
+// Gives token `t` to the hook, first passing the chunk to the consumer when the buffer is full.
 chunk_hook :: #force_inline proc "contextless" (h: ^Chunk_Hook, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	s := s
 	if s.a == s.b {
@@ -41,8 +40,9 @@ chunk_hook :: #force_inline proc "contextless" (h: ^Chunk_Hook, s: hook.Regs, t:
 	return s, .Next
 }
 
-// Hands the consumer the tokens past the last full chunk, after the walk ended however it did, its last registers
-// `regs`, and answers `take`. A consumer that ended the walk with `false` is not called again.
+// Gives the consumer the tokens after the last full chunk, once the walk has ended for any reason. `regs` are the
+// walk's last registers. Returns what `take` returns. A consumer that ended the walk with `false` is not called
+// again.
 chunk_flush :: proc "contextless" (h: ^Chunk_Hook, regs: hook.Regs) -> bool {
 	held := int((uintptr(regs.a) - uintptr(&h.buf[0])) / size_of(tape.Token))
 	if held == 0 {

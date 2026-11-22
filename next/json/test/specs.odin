@@ -65,7 +65,7 @@ json5_suite_verdicts :: proc(t: ^testing.T) {
 	testing.expect(t, count > 100)
 }
 
-// A comment's fact kind says where it stands, and its fact belongs to the node the kind names: a comment before a
+// A comment's fact kind says where the comment is, and its fact belongs to the node the kind names: a comment before a
 // value or a member is that value's, one on the line where a value ends is the value's inline comment, and one before
 // a container's close, or past the root's line, is the container's foot.
 @(test)
@@ -132,7 +132,8 @@ comments_after_containers :: proc(t: ^testing.T) {
 	}
 }
 
-// JSONC and JSON5 take a comma before a close; no spec takes a comma with no value before it, and RFC 8259 neither.
+// JSONC and JSON5 accept a comma before a close, and strict JSON refuses it. No spec accepts a comma with no value
+// before it.
 @(test)
 trailing_commas :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -172,7 +173,8 @@ trailing_commas :: proc(t: ^testing.T) {
 	}
 }
 
-// A comment refused where it stands, and one the text ends in.
+// Malformed comments, bytes a comment may not hold, and texts that end inside a comment or with no value are refused
+// at the byte the case names.
 @(test)
 comment_faults :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -332,7 +334,7 @@ json5_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, src[doc.nodes[3].lo:][:doc.nodes[3].n], "$_x")
 }
 
-// JSON5's own white space and comments stand wherever JSON's white space does.
+// JSON5's own white space and comments read wherever JSON's white space does.
 @(test)
 json5_white_space :: proc(t: ^testing.T) {
 	testkit.deadline(t)

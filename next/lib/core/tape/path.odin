@@ -32,7 +32,7 @@ Step :: union #no_nil {
 	Slice,
 }
 
-// What a read keeps of the value at a path's end. A scalar is kept whole under every grain.
+// How much of the value at a path's end a read keeps. A scalar is kept whole under every grain.
 Grain :: enum u8 {
 	Whole,
 	Keys, // an object's members, each container value an unread node, or an array's length
@@ -54,10 +54,10 @@ Duplicates :: enum u8 {
 }
 
 // The options of a path read. Under `.Last` an answer through a key is known only at the close of the object holding
-// it, so a read that should stop at the first matching key asks for `.First`.
+// it, so a read that should stop at the first matching key uses `.First`.
 Read_Options :: struct {
 	dups:       Duplicates,
-	stop_early: bool, // once the answer is known the walk ends, and the text past it is not judged
+	stop_early: bool, // once the answer is known the walk ends, and the text past it is not validated
 }
 
 // The value a path reached in a text with no document, or why none was reached.

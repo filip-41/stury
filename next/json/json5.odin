@@ -12,7 +12,7 @@ import "stury:lib/core/tape"
 // space. A token JSON spells alike is read by JSON's states, and a state here runs only where they refuse a byte.
 
 // The length of the JSON5 white space character at `p` that JSON lacks: VT, FF, U+00A0, U+FEFF, U+2028, U+2029 and the
-// rest of Zs; 0 for any other.
+// rest of Zs, and 0 for any other.
 @(private)
 ws5_len :: proc "contextless" (p, end: [^]u8) -> int #no_bounds_check {
 	room := intrinsics.ptr_sub(end, p)
@@ -348,7 +348,7 @@ st_key_ident :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 }
 
 // One past the unquoted key at `p` when it is plain ASCII, a letter, `$` or `_` and then those or digits, and an ASCII
-// byte other than `\` follows it; nil when `ident5` must read it.
+// byte other than `\` follows it, else nil when `ident5` must read it.
 @(private)
 ident_ascii :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
 	if IDENT[p[0]] != IDENT_START {
@@ -414,7 +414,7 @@ st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 }
 
 // The character of an identifier at `q` that is no ASCII identifier byte, a `\u` escape or a UTF-8 character, which
-// `r` steps past, and whether it is an escape; `r` is `q` for a character that ends the identifier, or the fault.
+// `r` steps past, and whether it is an escape, or the fault. `r` is `q` for a character that ends the identifier.
 @(private, cold)
 ident5_char :: #force_no_inline proc "contextless" (q, end: [^]u8, start: bool) -> (r: [^]u8, esc: bool, kind: tape.Fault_Kind) #no_bounds_check {
 	if q[0] == '\\' {
@@ -444,9 +444,9 @@ ident5_char :: #force_no_inline proc "contextless" (q, end: [^]u8, start: bool) 
 	return r, false, .None
 }
 
-// One past the unquoted key at `p`, an ECMAScript 5.1 IdentifierName, and whether it holds a `\u` escape; `p` when no
-// identifier starts there. It ends before the first character that cannot continue it. A malformed `\u` escape, or one
-// that writes a character not allowed there, faults `Bad_Escape`, and malformed UTF-8 faults as in a string.
+// One past the unquoted key at `p`, an ECMAScript 5.1 IdentifierName, and whether it holds a `\u` escape, or `p` when
+// no identifier starts there. It ends before the first character that cannot continue it. A malformed `\u` escape, or
+// one that writes a character not allowed there, faults `Bad_Escape`, and malformed UTF-8 faults as in a string.
 @(private)
 ident5 :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: tape.Fault_Kind) {
 	return ident5_on(p, p, end, false)
@@ -499,8 +499,8 @@ ident_char :: #force_no_inline proc "contextless" (r: rune, start: bool) -> bool
 	return unicode.in_range(r, unicode.mn_ranges) || unicode.in_range(r, unicode.mc_ranges) || unicode.in_range(r, unicode.nd_ranges) || unicode.in_range(r, unicode.pc_ranges)
 }
 
-// The ASCII bytes an identifier may hold: `IDENT_START` for one it may start with, a letter, `$` or `_`, and 2 for a
-// digit; 0 for any other byte.
+// The ASCII bytes an identifier may hold: `IDENT_START` for one it may start with (a letter, `$` or `_`), 2 for a
+// digit and 0 for any other byte.
 @(private, rodata)
 IDENT := [256]u8 {
 	'a' ..= 'z' = IDENT_START,
