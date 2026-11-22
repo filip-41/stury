@@ -4,7 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/core/tape"
 
-// The protocol between a format's walk and its hooks, which only formats and the hooks of `lib/ops` import. A hook is
+// The protocol between a format's walk and its hooks, which formats, the hooks of `lib/ops` and the C ABI import. A hook is
 // the consumer of a walk's tokens, such as a document's builder, or none for a validate. It is a compile-time parameter
 // of the walk, which is compiled once per hook with the hook inlined.
 
