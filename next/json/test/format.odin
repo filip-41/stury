@@ -7,26 +7,27 @@ import "stury:json"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// Every read through a format handle alone gives what the spec's own call gives.
+// Every read of a spec, through its handle and its reads table alone, gives what the spec's own call gives.
 @(test)
-format_reads_through_its_handle :: proc(t: ^testing.T) {
+reads_through_each_specs_table_match_its_calls :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	for spec in json.Spec {
 		f := json.as(spec)
+		r := json.reads(spec)
 		text := transmute([]u8)string(`{"a": [1, {"b": 2}], /* c */ "d": 3}` if spec != .Json else `{"a": [1, {"b": 2}], "d": 3}`)
-		testing.expect_value(t, f.validate(f, text, {}, context.allocator), nil)
-		doc, err := f.build(f, text, {}, context.allocator)
+		testing.expect_value(t, r.validate(f, text, {}, context.allocator), nil)
+		doc, err := r.build(f, text, {}, context.allocator)
 		defer tape.destroy(&doc)
 		testing.expect(t, err == nil && len(doc.nodes) == 9 && doc.format == f)
-		found, ferr := f.find(f, text, {tape.Name("a"), tape.Index(1), tape.Name("b")}, {}, {}, context.allocator)
+		found, ferr := r.find(f, text, {tape.Name("a"), tape.Index(1), tape.Name("b")}, {}, {}, context.allocator)
 		testing.expect(t, ferr == nil && found.outcome == .Found && text[found.lo] == '2')
 		d, _ := tape.demand_of([][]tape.Step{{tape.Name("d")}})
 		defer tape.destroy(&d)
-		part, serr := f.scan(f, text, &d, {}, {}, context.allocator)
+		part, serr := r.scan(f, text, &d, {}, {}, context.allocator)
 		defer tape.destroy(&part)
 		at, p, ok := tape.answer(tape.Reader{&part, nil}, 0, 0)
 		testing.expect(t, serr == nil && ok && p == .Found && part.src[part.nodes[at].lo] == '3')
-		_, bad := f.build(f, transmute([]u8)string("[1,"), {}, context.allocator)
+		_, bad := r.build(f, transmute([]u8)string("[1,"), {}, context.allocator)
 		testing.expect(t, bad != nil)
 	}
 }

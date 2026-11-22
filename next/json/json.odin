@@ -32,15 +32,28 @@ CAPS :: tape.Caps{.Rewalk} when REWALK else tape.Caps{}
 
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Json  = {name = "json", id = 1, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = text_room, close_end = close_end, validate = validate_of, build = build_of, find = find_of, scan = scan_of},
-	.Jsonc = {name = "jsonc", id = 2, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = text_room, close_end = close_end, validate = validate_of, build = build_of, find = find_of, scan = scan_of},
-	.Json5 = {name = "json5", id = 3, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = text_room, close_end = close_end, validate = validate_of, build = build_of, find = find_of, scan = scan_of},
+	.Json  = {name = "json", id = 1, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = text_room, close_end = close_end},
+	.Jsonc = {name = "jsonc", id = 2, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = text_room, close_end = close_end},
+	.Json5 = {name = "json5", id = 3, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = text_room, close_end = close_end},
 }
 
 // The format handle of `spec`, to read nodes of a text of `spec` with `tape.node_text` and `tape.node_number`, and to
 // pass a document's format to a call that takes one. Nil for a `spec` out of range.
 as :: proc "contextless" (spec: Spec) -> ^tape.Format {
 	return &FORMATS[spec] if spec <= max(Spec) else nil
+}
+
+@(private, rodata)
+READS := [Spec]tape.Reads {
+	.Json  = {validate = validate_of, build = build_of, find = find_of, scan = scan_of},
+	.Jsonc = {validate = validate_of, build = build_of, find = find_of, scan = scan_of},
+	.Json5 = {validate = validate_of, build = build_of, find = find_of, scan = scan_of},
+}
+
+// The reads of `spec`, for a caller that picks the format at run time, beside `as`'s handle. Nil for a `spec` out of
+// range.
+reads :: proc "contextless" (spec: Spec) -> ^tape.Reads {
+	return &READS[spec] if spec <= max(Spec) else nil
 }
 
 // The quotes of a string token, one byte on each side, and none around another scalar.

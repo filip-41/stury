@@ -32,8 +32,8 @@ Options :: struct {
 	runner:   ^Runner,
 }
 
-// One spec of a format (e.g. JSON, JSONC and JSON5 are three), in rodata. Its reads take the format itself, so a
-// format reads each of its specs through one proc.
+// One spec of a format (e.g. JSON, JSONC and JSON5 are three), in rodata, holding what a document of it needs to be
+// read. `Reads` holds the reads of its texts.
 Format :: struct {
 	name:  string,
 	id:    Format_Id,
@@ -58,8 +58,11 @@ Format :: struct {
 	// The byte just past the close of the container node `at` of `doc`, which a document stores no node for. False for
 	// one other than the root of a `.Held` document, which holds no byte between its nodes.
 	close_end: proc "contextless" (doc: ^Document, at: Node_Index) -> (end: u64, ok: bool),
-	// The reads of a text of this spec, as the format's own package gives them, for a caller that picks the format at
-	// run time.
+}
+
+// The reads of one spec of a format, for a caller that picks the format at run time. They are not on `Format`: the
+// handle holds what reading a document needs, so a program that reads no text through it links no read of any spec.
+Reads :: struct {
 	validate: proc(f: ^Format, src: []u8, opts: Options, allocator: runtime.Allocator) -> Error,
 	build: proc(f: ^Format, src: []u8, opts: Options, allocator: runtime.Allocator) -> (Document, Error),
 	find: proc(f: ^Format, src: []u8, path: []Step, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Span_Answer, Error),

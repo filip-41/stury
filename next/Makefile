@@ -3,7 +3,8 @@ ODIN ?= odin
 PKGS := $(sort $(patsubst ./%/,%,$(dir $(shell find . -name '*.odin' -not -path './build/*'))))
 TEST_PKGS := $(filter %/test,$(PKGS))
 WASM_PKG := tools/wasm
-LIB_PKGS := $(filter-out $(TEST_PKGS) $(WASM_PKG) cli,$(PKGS))
+DEADSTRIP_PKG := tools/deadstrip
+LIB_PKGS := $(filter-out $(TEST_PKGS) $(WASM_PKG) $(DEADSTRIP_PKG) cli,$(PKGS))
 
 COLLECTION := -collection:stury=$(CURDIR)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
@@ -92,6 +93,9 @@ lint:
 		fi; \
 		echo "$$out" | grep -q "tail-call" || { echo "a build without tail-call failed otherwise:"; echo "$$out"; exit 1; }; \
 	done; done
+	@echo "== $(DEADSTRIP_PKG)"
+	@$(ODIN) build $(DEADSTRIP_PKG) -build-mode:obj -no-entry-point $(LINT_FLAGS) -o:speed -out:build/deadstrip.o || exit 1
+	@python3 tools/deadstrip_check.py $(NM) build/deadstrip.o || exit 1
 	@for p in $(TEST_PKGS); do \
 		echo "== $$p"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) || exit 1; \
 		for t in $(TEST_LINT_TARGETS); do \

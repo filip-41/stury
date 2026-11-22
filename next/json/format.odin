@@ -3,8 +3,8 @@ package json
 import "base:runtime"
 import "stury:lib/core/tape"
 
-// The services of the JSON formats past their readers of nodes: the reads a caller picking the format at run time
-// takes, and where a container's close lies.
+// The services of the JSON formats past their readers of nodes, which `json.reads` hands a caller picking the format
+// at run time, and where a container's close lies.
 
 // The spec of a JSON format handle.
 @(private)
