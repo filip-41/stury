@@ -219,12 +219,15 @@ walk_again :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, lo: u64
 }
 
 // Reads the `READ_STACK` bytes below the stack pointer a page at a time from the top, so that on a thread with less
-// stack the read faults on its guard page before its frames are written past it.
+// stack the read faults on its guard page before its frames are written past it. WebAssembly's shadow stack has no
+// guard page and traps at its base, which the frame alone reaches, so the probe reads nothing there.
 @(private, no_sanitize_address)
 probe_stack :: #force_no_inline proc "contextless" () {
-	sp := uintptr(intrinsics.stack_pointer())
-	for k := uintptr(STACK_PAGE); k <= READ_STACK; k += STACK_PAGE {
-		_ = intrinsics.volatile_load((^u8)(sp - k))
+	when ODIN_ARCH != .wasm32 && ODIN_ARCH != .wasm64p32 {
+		sp := uintptr(intrinsics.stack_pointer())
+		for k := uintptr(STACK_PAGE); k <= READ_STACK; k += STACK_PAGE {
+			_ = intrinsics.volatile_load((^u8)(sp - k))
+		}
 	}
 }
 
