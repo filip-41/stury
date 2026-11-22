@@ -167,7 +167,7 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 		return {}, nil, false
 	}
 	chunks, cerr := make([]Lex_Chunk, want, allocator)
-	if cerr != nil {
+	if cerr != nil || raw_data(chunks) == nil {
 		return {}, nil, false
 	}
 	defer delete(chunks, allocator)
@@ -199,7 +199,7 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 		return {}, nil, false
 	}
 	segs, serr := make([]build.Segment, len(parts), allocator)
-	if serr != nil {
+	if serr != nil || raw_data(segs) == nil {
 		return {}, nil, false
 	}
 	defer {
@@ -213,7 +213,7 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 		levels += p.levels + 1
 	}
 	frames, ferr := make([]u64, levels, allocator)
-	if ferr != nil {
+	if ferr != nil || levels > 0 && raw_data(frames) == nil {
 		return {}, nil, false
 	}
 	defer delete(frames, allocator)
@@ -229,7 +229,7 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 		return {}, nil, false
 	}
 	room, rerr := non_zero_make([]tape.Node, total + 1 + scratch, allocator)
-	if rerr != nil {
+	if rerr != nil || raw_data(room) == nil {
 		return {}, nil, false
 	}
 	joined: bool
@@ -237,14 +237,14 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 		delete(room, allocator)
 	}
 	facts, ferr2 := non_zero_make([]tape.Fact, comments, allocator)
-	if ferr2 != nil {
+	if ferr2 != nil || comments > 0 && raw_data(facts) == nil {
 		return {}, nil, false
 	}
 	defer if !joined {
 		delete(facts, allocator)
 	}
 	seams, serr2 := non_zero_make([]tape.Node_Index, scratch, allocator)
-	if serr2 != nil {
+	if serr2 != nil || scratch > 0 && raw_data(seams) == nil {
 		return {}, nil, false
 	}
 	defer delete(seams, allocator)
@@ -716,14 +716,7 @@ seam_at :: #force_inline proc "contextless" (src: []u8, lo, base, k: int, run: ^
 		for y >= lo && (kernel.is_ws(src[y]) || S == .Json5 && (src[y] == 0x0b || src[y] == 0x0c || src[y] >= 0x80)) {
 			y -= 1
 		}
-		if y < lo || lex_in_comment(y, base, run, comments) {
-			return false
-		}
-		z := k + 1
-		for z < len(src) && kernel.is_ws(src[z]) {
-			z += 1
-		}
-		return z >= len(src) || src[z] != '/'
+		return y >= lo && !lex_in_comment(y, base, run, comments)
 	}
 }
 
@@ -794,6 +787,9 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 	for &p in list {
 		p.opens = held[uintptr(raw_data(p.opens)):][:len(p.opens)]
 	}
+	// Shrunk to their lengths, so the caller's `delete` of the returned slices frees the whole blocks.
+	shrink(&list)
+	shrink(&held)
 	return list[:], held[:], true
 }
 
@@ -822,7 +818,7 @@ walk_seam :: proc "contextless" (src: []u8, from: int, opens: []u8, $S: Spec, $L
 	// An object matches its members against a row of its own, live from its first member, as the seam's members
 	// continue the shape the part before it read, and an array gives its objects one, as the root does.
 	m := u64(GAP_START)
-	if gaps_on(m) && d & 1 != 0 {
+	if gaps_rows(m) && d & 1 != 0 {
 		gap_new_row(&w.gaps, m)
 		m = gap_row_live(&w.gaps, m)
 	}

@@ -16,7 +16,10 @@ builder_dups :: proc(doc: ^tape.Document, dups: tape.Duplicates, rules: ^tape.Ru
 		return nil
 	}
 	r := Repeats{at = max(u64)}
-	defer delete(r.drops, doc.allocator)
+	// Captured before the defers: an error destroys the document, and a deferred free through `doc.allocator`
+	// would then read a zeroed allocator and leak the bitmap.
+	allocator := doc.allocator
+	defer delete(r.drops, allocator)
 	keys: [dynamic]Hashed_Key
 	keys.allocator = doc.allocator
 	defer delete(keys)
@@ -159,7 +162,8 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 	err: runtime.Allocator_Error
 	defer {
 		for p in j.parts {
-			delete(p.keys, allocator)
+			delete(p.keys)
+			delete(p.scratch)
 		}
 		delete(j.parts, allocator)
 		delete(j.keys, allocator)
@@ -175,13 +179,11 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 			return dups_end(doc, &r, err, rules)
 		}
 	}
-	// A part holds at most a key per two of its nodes.
-	for &p, k in j.parts {
-		hi := segs[k + 1].at if k + 1 < len(segs) else len(doc.nodes)
+	// A part's crossing members, appended as it reads them, and the one object it judges at a time.
+	for &p in j.parts {
 		p.r = {at = max(u64), drops = r.drops}
-		if p.keys, err = non_zero_make([]Hashed_Key, (hi - segs[k].at) / 2 + 1, allocator); err != nil {
-			return dups_end(doc, &r, err, rules)
-		}
+		p.keys.allocator = allocator
+		p.scratch.allocator = allocator
 	}
 	hook.fan(runner, dups_parts, &j)
 	crossing := 0
@@ -234,12 +236,13 @@ Dups_Job :: struct {
 	next:   int,
 }
 
-// A part's repeats and room for keys: the members it holds of objects that cross its ends, sorted, then the keys of
-// the object it judges.
+// A part's repeats and its keys: the members it holds of objects that cross its ends, appended and sorted, and the
+// members of the one object it is judging.
 @(private)
 Dups_Part :: struct {
 	r:        Repeats,
-	keys:     []Hashed_Key,
+	keys:     [dynamic]Hashed_Key,
+	scratch:  [dynamic]Hashed_Key,
 	crossing: int,
 	err:      runtime.Allocator_Error,
 }
@@ -301,7 +304,9 @@ dups_parts :: proc(arg: rawptr) {
 			node := doc.nodes[i]
 			if node.role == .Key && top > 0 && stack[top - 1] & 1 != 0 {
 				object := tape.Node_Index(stack[top - 1] >> 1)
-				p.keys[p.crossing] = {doc.format.key_hash(doc.src, node), object, tape.Node_Index(i)}
+				if _, p.err = append(&p.keys, Hashed_Key{doc.format.key_hash(doc.src, node), object, tape.Node_Index(i)}); p.err != nil {
+					return
+				}
 				p.crossing += 1
 			}
 			if node.kind <= .Plain {
@@ -309,12 +314,13 @@ dups_parts :: proc(arg: rawptr) {
 			}
 			whole := i + int(node.n) <= hi
 			if node.kind == .Object && whole && p.err == nil {
-				members := p.crossing
+				clear(&p.scratch)
 				for m := tape.Node_Index(i) + 1; int(m) < i + int(node.n); m = tape.node_after(doc, tape.node_after(doc, m)) {
-					p.keys[members] = {doc.format.key_hash(doc.src, doc.nodes[m]), 0, m}
-					members += 1
+					if _, p.err = append(&p.scratch, Hashed_Key{doc.format.key_hash(doc.src, doc.nodes[m]), 0, m}); p.err != nil {
+						return
+					}
 				}
-				p.err = repeats_in(doc, p.keys[p.crossing:members], j.dups, &p.r)
+				p.err = repeats_in(doc, p.scratch[:], j.dups, &p.r)
 			}
 			stack[top] = u64(i) << 1 | u64(!whole)
 			top += 1

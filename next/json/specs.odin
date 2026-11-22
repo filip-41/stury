@@ -283,9 +283,10 @@ comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C),
 		}
 		return q, true, fault(w, hs^, q, kind)
 	}
-	// The token past the run decides its comments' roles, and a window more bytes may follow has none past it.
+	// The token past the run decides its comments' roles, and a window more bytes may follow has none past it: neither
+	// a byte at the window's end, nor a character it cuts, which may be white space.
 	when LAX {
-		if q >= end && piece_more(w) {
+		if (q >= end || piece_short(w, q, end, .Bad_Char) == .Truncated) && piece_more(w) {
 			return q, true, piece_hold_run(w, hs^, p, run, end, on)
 		}
 	}
@@ -380,7 +381,7 @@ comments_after :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), 
 		return q, false, true, fault(w, hs^, q, kind)
 	}
 	when LAX {
-		if q >= end && piece_more(w) {
+		if (q >= end || piece_short(w, q, end, .Bad_Char) == .Truncated) && piece_more(w) {
 			return q, false, true, piece_hold_run(w, hs^, p, RUN_AFTER, end, on)
 		}
 	}

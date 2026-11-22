@@ -236,6 +236,10 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options
 
 @(private)
 scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
+	if read.dups == .Refuse || read.dups == .All {
+		// A path read takes one member of a key: the build-only policies are refused here.
+		return {}, tape.Fault{rules = &RULES, kind = .Bad_Option}
+	}
 	when LAX {
 		if opts.pieces != nil {
 			return scan_pieces(src, demand, S, read, opts, caller)
@@ -317,6 +321,10 @@ node_most :: #force_inline proc "contextless" (bound: u64, opts: Options) -> int
 
 @(private)
 find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
+	if read.dups == .Refuse || read.dups == .All {
+		// A path read takes one member of a key: the build-only policies are refused here.
+		return {}, tape.Fault{rules = &RULES, kind = .Bad_Option}
+	}
 	when LAX {
 		if opts.pieces != nil {
 			return find_pieces(src, path, S, read, opts, caller)

@@ -602,7 +602,7 @@ enter_place :: #force_no_inline proc "contextless" (place: u8, p, end: [^]u8, d:
 	case PLACE_COLON:
 		return st_colon(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	case PLACE_VALUE:
-		return st_value(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_value(piece_skip_white(p, end, S), end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	case PLACE_MEMBER:
 		return st_member_ws(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	}
@@ -927,11 +927,14 @@ piece_pass_white :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_W
 	} else if q := piece_skip_white(p, end, S); q < end {
 		mark := u8(':') if s.place == PLACE_COLON else ','
 		if s.place != PLACE_COLON && s.place != PLACE_AFTER || q[0] != mark || piece_skip_white(q[1:], end, S) != end {
+			if s.place == PLACE_VALUE {
+				s.last = at(w, q)
+			}
 			return
 		}
 		run = RUN_VALUE if s.place == PLACE_COLON else RUN_AFTER
 	} else if s.place == PLACE_VALUE {
-		return
+		run = RUN_VALUE
 	} else {
 		when S != .Json {
 			for k := end; k > p; k = k[-1:] {

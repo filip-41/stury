@@ -117,7 +117,10 @@ hold_drop :: proc(h: ^Scanner, nodes: []tape.Node, facts: []tape.Fact) -> runtim
 // registers at the cut and `cut` where more bytes are needed. The scan goes on as it was.
 @(require_results)
 scanner_so_far :: proc(h: ^Scanner, regs: hook.Regs, cut: u64, allocator: runtime.Allocator) -> (doc: tape.Document, err: tape.Error) {
-	read := make([]u64, regs.c, allocator) or_return
+	read, rerr := make([]u64, regs.c, allocator)
+	if e := took(rerr, raw_data(read), int(regs.c)); e != nil {
+		return {}, e
+	}
 	defer delete(read, allocator)
 	b := regs.b
 	for c := regs.c; c > 0; c -= 1 {

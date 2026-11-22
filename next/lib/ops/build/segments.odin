@@ -128,16 +128,15 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 	counts.allocator = allocator
 	defer if err != nil || !joined {
 		delete(counts)
-		doc = {}
 	}
 	closed := tape.NO_NODE
 	for &s in segs {
 		if len(open) != s.depth {
-			return
+			return {}, false, nil
 		}
 		for o, i in open[:s.depth] {
 			if nodes[o.node].kind != nodes[s.scratch + i].kind {
-				return
+				return {}, false, nil
 			}
 			s.seam[i] = o.node
 		}
@@ -147,7 +146,9 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 		}
 		for n in s.b.counts {
 			if s.depth == 0 || int(n.node) < s.scratch {
-				append(&counts, tape.Child_Count{segment_place(&s, n.node), n.count}) or_return
+				if _, aerr := append(&counts, tape.Child_Count{segment_place(&s, n.node), n.count}); aerr != nil {
+					return {}, false, aerr
+				}
 			}
 		}
 		if s.b.closed != tape.NO_NODE && (s.depth == 0 || int(s.b.closed) != segment_before(&s)) {
@@ -171,37 +172,43 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 			node.n = u32(s.at + int(u32(s.scratch + i) + scratch.n - u32(s.first)) - int(o.node))
 			node.spelling = u16(min(total, u64(tape.MAX_CHILDREN)))
 			if total >= u64(tape.MAX_CHILDREN) {
-				append(&counts, tape.Child_Count{o.node, u32(total)}) or_return
+				if _, aerr := append(&counts, tape.Child_Count{o.node, u32(total)}); aerr != nil {
+					return {}, false, aerr
+				}
 			}
 			pop(&open)
 		}
 		// The levels open at its end: the outer ones it left open, which gained its children, then its own.
 		levels := int(s.regs.c)
 		if levels < len(open) {
-			return
+			return {}, false, nil
 		}
 		for level in 0 ..< levels {
 			frame := s.regs.b if level == levels - 1 else s.b.stack[level + 1]
 			node := int(frame >> 32)
 			if level < len(open) {
 				if node != s.scratch + level {
-					return
+					return {}, false, nil
 				}
 				open[level].count += u64(u32(frame))
 			} else {
 				if node < s.first || s.depth > 0 && node >= s.scratch {
-					return
+					return {}, false, nil
 				}
-				append(&open, Open_Across{segment_place(&s, tape.Node_Index(node)), u64(u32(frame))}) or_return
+				if _, aerr := append(&open, Open_Across{segment_place(&s, tape.Node_Index(node)), u64(u32(frame))}); aerr != nil {
+					return {}, false, aerr
+				}
 			}
 		}
 	}
 	if len(open) != 0 {
-		return
+		return {}, false, nil
 	}
 	if len(counts) > 0 {
 		slice.sort_by(counts[:], proc(a, b: tape.Child_Count) -> bool { return a.node < b.node })
-		shrink(&counts) or_return
+		if _, serr := shrink(&counts); serr != nil {
+			return {}, false, serr
+		}
 		doc.counts = counts[:]
 	} else {
 		delete(counts)

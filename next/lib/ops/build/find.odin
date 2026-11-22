@@ -115,7 +115,11 @@ finder_start :: proc(src: []u8, format: ^tape.Format, steps: []tape.Step, read: 
 	f.levels, f.opens, f.answers, f.answers_cap = raw_data(room.levels[:]), raw_data(room.opens[:]), raw_data(room.answers[:]), FIND_ROOM
 	if len(steps) > FIND_ROOM {
 		level_bytes := len(steps) * size_of(Find_Level)
-		f.block = runtime.mem_alloc_non_zeroed(level_bytes + len(steps) * size_of(u64), align_of(Find_Level), allocator) or_return
+		block, berr := runtime.mem_alloc_non_zeroed(level_bytes + len(steps) * size_of(u64), align_of(Find_Level), allocator)
+		if e := took(berr, raw_data(block), level_bytes); e != nil {
+			return f, e
+		}
+		f.block = block
 		f.levels, f.opens = ([^]Find_Level)(raw_data(f.block)), ([^]u64)(raw_data(f.block[level_bytes:]))
 	}
 	f.src, f.steps, f.format, f.respell, f.rewalk, f.answer, f.allocator = src, steps, format, respell, rewalk, FIND_NONE, allocator
@@ -667,7 +671,7 @@ finder_answers_reserve :: #force_no_inline proc "contextless" (h: ^Finder, entri
 	} else {
 		block, err = runtime.non_zero_mem_resize(raw_data(h.ring_block), len(h.ring_block), bytes, align_of(tape.Span_Answer), h.allocator)
 	}
-	if err != nil {
+	if err = took(err, raw_data(block), bytes); err != nil {
 		h.refused = true
 		return false
 	}

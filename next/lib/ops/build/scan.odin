@@ -219,7 +219,10 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 	} else {
 		// The marks, the answers made and the settled paths share one block.
 		marks, counts := len(demand.edges) * size_of(u64), made * size_of(u32)
-		block := runtime.mem_alloc_non_zeroed(marks + counts + len(demand.paths), align_of(u64), allocator) or_return
+		block, merr := runtime.mem_alloc_non_zeroed(marks + counts + len(demand.paths), align_of(u64), allocator)
+		if e := took(merr, raw_data(block), marks + counts + len(demand.paths)); e != nil {
+			return e
+		}
 		h.marks = ([^]u64)(raw_data(block))[:len(demand.edges)]
 		if made > 0 {
 			h.made = ([^]u32)(raw_data(block[marks:]))[:made]
@@ -1289,7 +1292,7 @@ scan_grow_to :: #force_no_inline proc "contextless" (h: ^Scanner, list: ^runtime
 	} else {
 		data, err = runtime.non_zero_mem_resize(list.data, list.cap * size, want * size, align, list.allocator)
 	}
-	if err == nil {
+	if err = took(err, raw_data(data), want * size); err == nil {
 		list.data, list.cap = raw_data(data), want
 	} else {
 		if h.b.err == nil {
@@ -1333,7 +1336,10 @@ scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, mis
 	kept_at := starts_at + (paths + 1) * size_of(u32)
 	missing_at := kept_at + len(h.kept) * size_of(x.kept[0])
 	names_at := missing_at + len(missing) * size_of(x.missing[0])
-	block := runtime.mem_alloc_non_zeroed(names_at + names, align_of(tape.Partial), allocator) or_return
+	block, perr := runtime.mem_alloc_non_zeroed(names_at + names, align_of(tape.Partial), allocator)
+	if e := took(perr, raw_data(block), names_at + names); e != nil {
+		return e
+	}
 	x = (^tape.Partial)(raw_data(block))
 	x^ = {dups = h.dups}
 	doc.partial = x

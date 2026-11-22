@@ -36,6 +36,7 @@ Index_Entry :: struct {
 	node:     Node_Index,
 	elements: []Node_Index,
 	members:  []Distinct_Member,
+	room:     []Distinct_Member, // the whole block `members` is a prefix of
 	slots:    []Key_Slot,
 }
 
@@ -47,6 +48,7 @@ INDEX_ELEMENTS :: 16
 Children :: struct {
 	container: Node_Index,
 	next:      Node_Index, // the next member's key or the next element
+	room:      []Distinct_Member, // the whole block `members` is a prefix of, which `owned` frees
 	place:     u32, // the next element's index, or the next distinct key's in `members`
 	kept:      u32, // in a partial array, the first `Partial.kept` entry not passed
 	// For a wide object that may repeat a key, its distinct keys in text order, else nil.
@@ -293,7 +295,11 @@ children :: proc(r: Reader, at: Node_Index, allocator: runtime.Allocator) -> (c:
 	if c.once = r.index != nil && (keys_known_once(r, at) || keys_once(r, at)); c.once || count <= SMALL_OBJECT {
 		return c, .Found, nil
 	}
-	c.members = wide_members(doc, at, count, allocator) or_return
+	werr: runtime.Allocator_Error
+	c.members, c.room, werr = wide_members(doc, at, count, allocator)
+	if werr != nil {
+		return c, {}, werr
+	}
 	c.once, c.owned = c.members == nil, c.members != nil
 	return c, .Found, nil
 }
@@ -301,39 +307,51 @@ children :: proc(r: Reader, at: Node_Index, allocator: runtime.Allocator) -> (c:
 // The distinct keys of the whole object at `at` of `count` members, wider than `SMALL_OBJECT`, in `allocator`, or nil
 // for an object that holds each key once, whose keys are counted first so it lists none.
 @(private)
-wide_members :: proc(doc: ^Document, at: Node_Index, count: int, allocator: runtime.Allocator) -> (members: []Distinct_Member, err: runtime.Allocator_Error) {
-	room: [WIDE_ROOM]Key_Slot = ---
-	slots := key_table(count, room[:], allocator) or_return
-	defer if len(slots) > len(room) {
+wide_members :: proc(doc: ^Document, at: Node_Index, count: int, allocator: runtime.Allocator) -> (members: []Distinct_Member, room: []Distinct_Member, err: runtime.Allocator_Error) {
+	table_room: [WIDE_ROOM]Key_Slot = ---
+	slots := key_table(count, table_room[:], allocator) or_return
+	defer if len(slots) > len(table_room) {
 		delete(slots, allocator)
 	}
 	if distinct_keys(doc, at, nil, slots) == count {
-		return nil, nil
+		return nil, nil, nil
 	}
-	members = make([]Distinct_Member, count, allocator) or_return
+	made, merr2 := make([]Distinct_Member, count, allocator)
+	if merr2 == nil && (len(made) < count || count > 0 && raw_data(made) == nil) {
+		merr2 = .Out_Of_Memory
+	}
+	if merr2 != nil {
+		return nil, nil, merr2
+	}
+	members = made
 	intrinsics.mem_zero(raw_data(slots), len(slots) * size_of(Key_Slot))
-	return members[:distinct_keys(doc, at, members, slots)], nil
+	return members[:distinct_keys(doc, at, members, slots)], members, nil
 }
 
 // The slots of a key table `key_table` keeps in a caller's room, for a wide object of up to half as many members.
 @(private)
 WIDE_ROOM :: 128
 
-// An empty key table for `count` keys, in `room` when it fits and else in `allocator`, which the caller frees.
+// An empty key table for `count` keys, in `room` when it fits and else in `allocator`, which the caller frees. A
+// nil allocator's empty table is a refusal, as a key probe cannot read one.
 @(private)
 key_table :: proc(count: int, room: []Key_Slot, allocator: runtime.Allocator) -> ([]Key_Slot, runtime.Allocator_Error) {
 	size := table_size(count)
 	if size > len(room) {
-		return make([]Key_Slot, size, allocator)
+		s, err := make([]Key_Slot, size, allocator)
+		if err == nil && (len(s) < size || raw_data(s) == nil) {
+			err = .Out_Of_Memory
+		}
+		return s, err
 	}
 	intrinsics.mem_zero(raw_data(room), size * size_of(Key_Slot))
 	return room[:size], nil
 }
 
-// Frees what `children` listed for `c` and leaves it zero.
+// Frees what `children` listed for `c` and leaves it zero. The members list is a prefix of `room`, freed whole.
 destroy_children :: proc(c: ^Children) {
 	if c.owned {
-		delete(c.members, c.allocator)
+		delete(c.room, c.allocator)
 	}
 	c^ = {}
 }
@@ -446,11 +464,12 @@ index_of :: proc "contextless" (doc: ^Document, allocator: runtime.Allocator) ->
 	return {doc = doc, allocator = allocator}
 }
 
-// Frees what the readers listed in `x` and leaves it zero.
+// Frees what the readers listed in `x` and leaves it zero. A members list is a prefix of its entry's `room`,
+// freed whole.
 destroy_index :: proc(x: ^Doc_Index) {
 	for e in x.entries {
 		delete(e.elements, x.allocator)
-		delete(e.members, x.allocator)
+		delete(e.room, x.allocator)
 		delete(e.slots, x.allocator)
 	}
 	delete(x.entries)
@@ -584,9 +603,16 @@ object_entry :: proc(r: Reader, at: Node_Index, count: int) -> (e: Index_Entry, 
 	}
 	members, merr := make([]Distinct_Member, count, x.allocator)
 	slots, serr := make([]Key_Slot, table_size(count), x.allocator)
+	// A nil allocator gives no block and no error, or a shorter one, either read as a refusal.
+	if merr == nil && (len(members) < count || count > 0 && raw_data(members) == nil) {
+		merr = .Out_Of_Memory
+	}
+	if serr == nil && (len(slots) < table_size(count) || raw_data(slots) == nil) {
+		serr = .Out_Of_Memory
+	}
 	if merr == nil && serr == nil {
 		n := distinct_keys(r.doc, at, members, slots)
-		e = {node = at, members = members[:n], slots = slots}
+		e = {node = at, members = members[:n], room = members, slots = slots}
 		if index_mark(r, at, n < count) && index_add(x, e) {
 			return e, true
 		}

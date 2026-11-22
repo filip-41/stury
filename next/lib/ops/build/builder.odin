@@ -6,6 +6,18 @@ import "core:slice"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
+// The allocation a caller may take: an error, or a nil block for a non-empty request, which a nil or an empty
+// allocator gives with no error.
+took :: proc(err: runtime.Allocator_Error, p: rawptr, n: int) -> runtime.Allocator_Error {
+	if err != nil {
+		return err
+	}
+	if n > 0 && p == nil {
+		return .Out_Of_Memory
+	}
+	return nil
+}
+
 // The hook that stores a walk's tokens as a document's nodes, and with `builder_hook_facts` its fact tokens as the
 // document's facts. In its registers `a` is the next node's address, `b` the open container's index above its child
 // count and `c` the count of open containers.
@@ -85,9 +97,8 @@ builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 		return
 	}
 	raw, err := runtime.mem_alloc_non_zeroed(room * size_of(tape.Node), align_of(tape.Node), allocator)
-	if err != nil {
+	if b.err = took(err, raw_data(raw), room); b.err != nil {
 		delete(b.counts)
-		b.err = err
 		return
 	}
 	b.doc.nodes = ([^]tape.Node)(raw_data(raw))[:room]
@@ -285,8 +296,7 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 		want = double
 		raw, err = runtime.non_zero_mem_resize(raw_data(h.doc.nodes), have * size_of(tape.Node), want * size_of(tape.Node), align_of(tape.Node), h.doc.allocator)
 	}
-	if err != nil {
-		h.err = err
+	if h.err = took(err, raw_data(raw), int(want)); h.err != nil {
 		return s, false
 	}
 	base := u64(uintptr(raw_data(raw)))
@@ -341,8 +351,7 @@ builder_grow_facts :: proc "contextless" (h: ^Builder) -> bool {
 	context = h.ctx
 	want := max(2 * len(h.facts), 16)
 	raw, err := runtime.non_zero_mem_resize(raw_data(h.facts), len(h.facts) * size_of(tape.Fact), want * size_of(tape.Fact), align_of(tape.Fact), h.doc.allocator)
-	if err != nil {
-		h.err = err
+	if h.err = took(err, raw_data(raw), int(want)); h.err != nil {
 		return false
 	}
 	h.facts = ([^]tape.Fact)(raw_data(raw))[:want]
@@ -396,7 +405,7 @@ builder_sort_facts :: proc(facts: []tape.Fact) {
 builder_deepen :: #force_no_inline proc "contextless" (h: ^Builder, want: int) -> bool {
 	context = h.ctx
 	stack, err := make([]u64, want, h.doc.allocator)
-	if err != nil {
+	if took(err, raw_data(stack), want) != nil {
 		return false
 	}
 	copy(stack, h.stack)
@@ -454,7 +463,7 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 	// refused too, and the document then keeps the whole room. `destroy` frees the room as one block from its start.
 	doc.nodes = doc.nodes[:count]
 	if 2 * count < len(h.doc.nodes) && (len(h.doc.nodes) - count) * size_of(tape.Node) > ROOM_SLACK {
-		if raw, err := runtime.non_zero_mem_resize(raw_data(doc.nodes), len(h.doc.nodes) * size_of(tape.Node), count * size_of(tape.Node), align_of(tape.Node), doc.allocator); err == nil {
+		if raw, err := runtime.non_zero_mem_resize(raw_data(doc.nodes), len(h.doc.nodes) * size_of(tape.Node), count * size_of(tape.Node), align_of(tape.Node), doc.allocator); took(err, raw_data(raw), count) == nil {
 			doc.nodes = ([^]tape.Node)(raw_data(raw))[:count]
 		}
 	}
@@ -481,12 +490,18 @@ builder_so_far :: proc(h: ^Builder, regs: hook.Regs, cut: u64, allocator: runtim
 	if count > 0 && count - 1 > inner && h.doc.nodes[count - 1].role == .Key {
 		count -= 1
 	}
-	nodes := make([]tape.Node, count, allocator) or_return
+	nodes, nerr := make([]tape.Node, count, allocator)
+	if e := took(nerr, raw_data(nodes), count); e != nil {
+		return {}, e
+	}
 	defer if err != nil {
 		delete(nodes, allocator)
 	}
 	copy(nodes, h.doc.nodes[:count])
-	counts := make([dynamic]tape.Child_Count, 0, len(h.counts), allocator) or_return
+	counts, cerr := make([dynamic]tape.Child_Count, 0, len(h.counts), allocator)
+	if e := took(cerr, raw_data(counts), len(h.counts) * size_of(tape.Child_Count)); e != nil {
+		return {}, e
+	}
 	defer if err != nil {
 		delete(counts)
 	}
@@ -506,9 +521,15 @@ builder_so_far :: proc(h: ^Builder, regs: hook.Regs, cut: u64, allocator: runtim
 		b = h.stack[c - 1]
 	}
 	slice.sort_by(counts[:], proc(a, b: tape.Child_Count) -> bool { return a.node < b.node })
-	facts := make([]tape.Fact, len(h.doc.facts), allocator) or_return
+	facts, ferr := make([]tape.Fact, len(h.doc.facts), allocator)
+	if e := took(ferr, raw_data(facts), len(h.doc.facts)); e != nil {
+		return {}, e
+	}
 	copy(facts, h.doc.facts)
 	doc = h.doc
+	// The copy owns nothing the builder keeps: its format extension and the scan's partial block stay the
+	// builder's, or the two would free them once each.
+	doc.ext, doc.partial = nil, nil
 	doc.nodes, doc.facts, doc.allocator, doc.root_close = nodes, facts, allocator, cut
 	doc.counts = counts[:] if len(counts) > 0 else nil
 	if len(counts) == 0 {

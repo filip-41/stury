@@ -108,7 +108,10 @@ GAP_DORMANT_MARK :: 2 * GAP_ROWS
 
 // The gap slot a walk starts with.
 @(private)
-GAP_START :: 0 when GAPS else GAP_OFF
+// The gap slot a walk starts with: the dormant slots of the reserved row 0, whose first object at the root's place
+// takes its row as any first object does. Never a slot of the table, whose rows are made and zeroed as live rows: a
+// root reading row 0's slots would read bytes no row made.
+GAP_START :: GAP_DORMANT when GAPS else GAP_OFF
 
 // Whether slot `m` matches gaps.
 @(private)

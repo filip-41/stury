@@ -128,35 +128,48 @@ Block_Tokens :: struct {
 // Gives the hook the tokens of `t` in text order, and returns nil or one past the token the hook stopped at. A number's
 // end and a close at one byte give the number first. A number with no `[` or `,` before it in `t` starts at `start` and
 // has its `.` at `dot_at`, from the block before.
+//
+// The number an end closes starts at `num`, one past the `[` or `,` before it, which the tokens pass as they give it, and
+// holds its `.` among `dots`, the block's `.`s at or after the numbers given, so no number reads either back from a mask.
+// `dot_at` is the one `.` no token of this block passes, the one of a number whose `[` or `,` is in the block before.
 @(private = "file")
 block_tokens :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, t: Block_Tokens, start, dot_at: [^]u8) -> [^]u8 #no_bounds_check {
+	num, dot, dots := start, dot_at, t.dots
 	for ev := t.ends | t.opens | t.closes; ev != 0; ev &= ev - 1 {
 		bit := ev & -ev
 		x := t.base[intrinsics.count_trailing_zeros(ev):]
 		if t.ends & bit != 0 {
-			s, dot, from := start, dot_at, ~u64(0)
-			if seps := t.seps & (bit - 1); seps != 0 {
-				top := 63 - u64(intrinsics.count_leading_zeros(seps))
-				s, dot, from = t.base[top + 1:], nil, ~u64(0) << top
+			// A number holds one `.` at most, after its start and before its end, so the next one is its own.
+			if dots != 0 {
+				if d := t.base[intrinsics.count_trailing_zeros(dots):]; uintptr(d) < uintptr(x) {
+					dot = d
+				}
 			}
-			if dots := t.dots & (bit - 1) & from; dots != 0 {
-				dot = t.base[63 - intrinsics.count_leading_zeros(dots):]
-			}
-			digits_at := s[u64(s[0] == '-'):]
+			digits_at := num[u64(num[0] == '-'):]
 			int_end, frac := x, u64(0)
 			if dot != nil {
 				int_end, frac = dot, u64(intrinsics.ptr_sub(x, dot)) - 1
 			}
 			spelling := tape.number_spelling(0, u64(intrinsics.ptr_sub(int_end, digits_at)), frac)
-			if give(w, on, hs, tape.Token{at(w, s), u32(intrinsics.ptr_sub(x, s)), .Number, .Value, spelling}) == .Stop {
+			if give(w, on, hs, tape.Token{at(w, num), u32(intrinsics.ptr_sub(x, num)), .Number, .Value, spelling}) == .Stop {
 				return x
+			}
+			// The dots up to this number's end belong to numbers given.
+			dots &= ~(bit | (bit - 1))
+			dot = nil
+			if t.seps & bit != 0 { // a `,` ends the number: the one after it starts here
+				num = x[1:]
 			}
 		}
 		if t.opens & bit != 0 {
+			num, dot = x[1:], nil
 			if give(w, on, hs, tape.Token{at(w, x), 1, .Array, .Value, 0}) == .Stop {
 				return x[1:]
 			}
 		} else if t.closes & bit != 0 {
+			if t.seps & (bit << 1) != 0 { // a `,` after the close: the one after it starts here
+				num, dot = x[2:], nil
+			}
 			if give(w, on, hs, tape.Token{at(w, x), 1, .End, .Value, 0}) == .Stop {
 				return x[1:]
 			}

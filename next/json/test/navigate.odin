@@ -1119,3 +1119,29 @@ navigate_index_fills_per_container :: proc(t: ^testing.T) {
 	k, kp := tape.member(r, o, "k5")
 	testing.expect(t, kp == .Found && string(doc.src[doc.nodes[k].lo:][:doc.nodes[k].n]) == "35")
 }
+
+// A stopped scan's array holds an unknown count: its walk names the child it kept and then, for every place
+// past it, a child the scan did not keep, and only a caller that knows the count ends the walk.
+@(test)
+navigate_walks_a_stopped_scan_partial_array :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	demand, _ := tape.demand_of([][]tape.Step{{tape.Index(0)}}, allocator = context.temp_allocator)
+	src := transmute([]u8)string(`[1,2,3]`)
+	doc, err := json.scan(src, &demand, .Json, {stop_early = true}, {}, context.temp_allocator)
+	if !testing.expect_value(t, err != nil, false) {
+		return
+	}
+	defer tape.destroy(&doc)
+	r := tape.Reader{doc = &doc}
+	root, rp := tape.root(r)
+	c, p, cerr := tape.children(r, root, context.temp_allocator)
+	if !testing.expect_value(t, rp, .Found) || !testing.expect_value(t, p, .Found) || !testing.expect_value(t, cerr != nil, false) {
+		return
+	}
+	_, _, cp := tape.next_child(r, &c)
+	if !testing.expect_value(t, cp, .Found) {
+		return
+	}
+	_, _, cp = tape.next_child(r, &c)
+	testing.expect_value(t, cp, .Not_Loaded)
+}

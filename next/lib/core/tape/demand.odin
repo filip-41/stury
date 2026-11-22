@@ -67,7 +67,10 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 		edges: [dynamic]Demand_Edge,
 		ends:  [dynamic]u32,
 	}
-	grown := make([dynamic]Grown, 1, allocator) or_return
+	grown, gerr := make([dynamic]Grown, 1, allocator)
+	if e := block(grown[:], gerr, 1); e != nil {
+		return {}, e
+	}
 	grown[0] = {make([dynamic]Demand_Edge, allocator), make([dynamic]u32, allocator)}
 	defer {
 		for &g in grown {
@@ -97,7 +100,10 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 	// Preorder numbers, so the nodes under a node follow it.
 	order := make([dynamic]u32, 0, len(grown), allocator) or_return
 	defer delete(order)
-	renumber := make([]u32, len(grown), allocator) or_return
+	renumber, rerr := make([]u32, len(grown), allocator)
+	if e := block(renumber, rerr, len(grown)); e != nil {
+		return {}, e
+	}
 	defer delete(renumber, allocator)
 	stack := make([dynamic]u32, allocator) or_return
 	defer delete(stack)
@@ -111,13 +117,31 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 		}
 	}
 	d.allocator, d.facts = allocator, facts
-	defer if err != nil {
-		destroy_demand(&d)
+	// An error frees what this far holds and hands the caller an empty demand: a defer would free blocks the
+	// result value, already copied, still points at.
+	free :: proc(d: ^Demand, e: runtime.Allocator_Error) -> (Demand, runtime.Allocator_Error) {
+		destroy_demand(d)
+		return {}, e
 	}
-	d.nodes = make([]Demand_Node, len(grown), allocator) or_return
-	d.edges = make([]Demand_Edge, n_edges, allocator) or_return
-	d.ends = make([]u32, n_ends, allocator) or_return
-	d.paths = make([]Demand_Path, len(paths), allocator) or_return
+	block :: proc(s: []$T, e: runtime.Allocator_Error, want: int) -> runtime.Allocator_Error {
+		// An empty allocator gives no block and no error, or a shorter one, either read as a refusal.
+		if e != nil || len(s) < want || (want > 0 && raw_data(s) == nil) {
+			return e if e != nil else .Out_Of_Memory
+		}
+		return nil
+	}
+	if d.nodes, err = make([]Demand_Node, len(grown), allocator); block(d.nodes, err, len(grown)) != nil {
+		return free(&d, block(d.nodes, err, len(grown)))
+	}
+	if d.edges, err = make([]Demand_Edge, n_edges, allocator); block(d.edges, err, n_edges) != nil {
+		return free(&d, block(d.edges, err, n_edges))
+	}
+	if d.ends, err = make([]u32, n_ends, allocator); block(d.ends, err, n_ends) != nil {
+		return free(&d, block(d.ends, err, n_ends))
+	}
+	if d.paths, err = make([]Demand_Path, len(paths), allocator); block(d.paths, err, len(paths)) != nil {
+		return free(&d, block(d.paths, err, len(paths)))
+	}
 	ne, nd := 0, 0
 	for old, i in order {
 		g := grown[old]
