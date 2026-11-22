@@ -325,7 +325,9 @@ finder_value :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #n
 				break
 			}
 			lv.count += 1
-			if lv.replays && !h.replaying {
+			// An array of few elements is read as it goes, whose answer a replay would read again; past that many, an
+			// element is passed whole and the one picked read again at the close.
+			if lv.replays && !h.replaying && lv.count > FIND_WALK_IN {
 				return finder_pass(h, lv, t)
 			}
 			if step < 0 {
@@ -453,6 +455,10 @@ finder_key :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #no_
 @(private)
 FIND_RING_START :: 8
 
+// The elements of an array a find reads as they pass, below which a replay would read its last elements again.
+@(private)
+FIND_WALK_IN :: 8
+
 // The answer of a container on the path at its `End` `t`, the one its taken child gave or why none was taken.
 @(private)
 finder_close :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #no_bounds_check {
@@ -462,7 +468,14 @@ finder_close :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #n
 		case tape.Index:
 			if picked.count >= u64(-step) {
 				picked.chosen = true
-				if !finder_replay(h, picked.slot) {
+				e := picked.count - u64(-step)
+				if e < FIND_WALK_IN {
+					// The picked element was read as it passed: the last one's answer is in hand, an earlier one's in
+					// the ring.
+					if e + 1 < picked.count {
+						h.answer = h.answers[picked.ring + u32(e % u64(picked.size))]
+					}
+				} else if !finder_replay(h, picked.slot) {
 					return .Stop
 				}
 			}
