@@ -235,11 +235,13 @@ colon_fast :: #force_inline proc "contextless" (q, end: [^]u8) -> [^]u8 {
 }
 
 // The state at a value string that `string_short` refused, with no backslash in its first 32 bytes. `string_lean` is
-// inlined, so a plain ASCII string makes no call.
+// inlined, so a plain ASCII string makes no call. It reads on past those 32 bytes, which `string_short` judged, when the
+// text holds them: that is the only way it is entered, a probe that is short of the text's end returns at once without
+// judging a byte.
 @(private, enable_target_feature = STATE_FEATURES)
 st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q, escape := string_lean(p, end, '"')
+	q, escape := string_lean(p[32:] if intrinsics.ptr_sub(end, p) > 32 else p, end, '"')
 	if q == nil {
 		if escape != nil {
 			w.resume = escape
@@ -320,11 +322,12 @@ st_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
-// The state at a key `string_probe` refused, longer than `PROBE_MAX` or past printable ASCII.
+// The state at a key `string_probe` refused, longer than `PROBE_MAX` or past printable ASCII. It reads on past the
+// `PROBE_MAX` bytes the probe judged, as `st_string` does for `string_short`'s.
 @(private, enable_target_feature = STATE_FEATURES)
 st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q, escape := string_lean(p, end, '"')
+	q, escape := string_lean(p[PROBE_MAX:] if intrinsics.ptr_sub(end, p) > PROBE_MAX else p, end, '"')
 	if q == nil {
 		if escape != nil {
 			w.resume = escape
