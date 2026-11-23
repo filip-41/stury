@@ -12,9 +12,9 @@ import "stury:lib/ops/records"
 // read with the gaps the records before it taught. Each record is judged as a read of its bytes alone judges them, in
 // place in the text.
 
-// Reads the records of a text one at a time. `records_open` makes one, and each call of `records_validate`,
-// `records_find` or `records_scan` reads the next record. Once a call returns false the records have ended, and `err`
-// says why, nil at the text's end.
+// Reads the records of a text in batches. `records_open` makes one, and each call of `records_validate`, `records_find`
+// or `records_scan` reads the next records into slices the caller gives, as many as they hold. Once a call fills fewer
+// than it was given room for the records have ended, and `err` says why, nil at the text's end.
 Records :: struct {
 	src:     []u8,
 	opts:    Options,
@@ -61,197 +61,222 @@ records_open :: proc(src: []u8, framing := records.Framing.Lines, spec := Spec.J
 	return
 }
 
-// Reads the next record of `r` and judges it, as `validate` judges its bytes alone. False once the records have ended.
-// Only a record nesting past `WALK_LEVELS` allocates, for its open levels. Needs `READ_STACK` bytes of stack and faults
-// on a thread with less.
+// Reads the next records of `r` into `out` and judges each, as `validate` judges its bytes alone. Returns how many it
+// filled, and fewer than `len(out)` once the records have ended, when `err` says why, nil at the text's end. Only a
+// record nesting past `WALK_LEVELS` allocates, for its open levels. Needs `READ_STACK` bytes of stack and faults on a
+// thread with less.
 @(require_results)
-records_validate :: proc(r: ^Records, allocator := context.allocator) -> (rec: records.Record, more: bool) {
+records_validate :: proc(r: ^Records, out: []records.Record, allocator := context.allocator) -> (n: int) {
 	probe_stack()
 	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
 	switch r.spec {
 	case .Json:
 		if lax {
-			return records_validate_as(r, .Json, true, allocator)
+			return records_validate_as(r, out, .Json, true, allocator)
 		}
-		return records_validate_as(r, .Json, false, allocator)
+		return records_validate_as(r, out, .Json, false, allocator)
 	case .Jsonc:
 		if lax {
-			return records_validate_as(r, .Jsonc, true, allocator)
+			return records_validate_as(r, out, .Jsonc, true, allocator)
 		}
-		return records_validate_as(r, .Jsonc, false, allocator)
+		return records_validate_as(r, out, .Jsonc, false, allocator)
 	case .Json5:
 		if lax {
-			return records_validate_as(r, .Json5, true, allocator)
+			return records_validate_as(r, out, .Json5, true, allocator)
 		}
-		return records_validate_as(r, .Json5, false, allocator)
+		return records_validate_as(r, out, .Json5, false, allocator)
 	}
 	return
 }
 
-// Reads the next record of `r` and the first value `path` reaches in it, as `find` reads its bytes alone, with every
-// offset from the text's first byte. False once the records have ended. Under `.Elements` the walk reads each element
-// to its end whatever `read.stop_early` says, as the next starts there. Allocates as `find` does. Needs `READ_STACK`
-// bytes of stack and faults on a thread with less.
+// Reads the next records of `r` into `out`, and for each the first value `path` reaches in it into the same place of
+// `answers`, as `find` reads its bytes alone, with every offset from the text's first byte. Returns how many it filled,
+// at most the shorter of the two slices, and fewer once the records have ended. Under `.Elements` and `.Members` the
+// walk reads each value to its end whatever `read.stop_early` says, as the next starts there. Allocates as `find` does.
+// Needs `READ_STACK` bytes of stack and faults on a thread with less.
 @(require_results)
-records_find :: proc(r: ^Records, path: []tape.Step, read := tape.Read_Options{}, allocator := context.allocator) -> (rec: records.Record, answer: tape.Span_Answer, more: bool) {
+records_find :: proc(r: ^Records, path: []tape.Step, out: []records.Record, answers: []tape.Span_Answer, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	probe_stack()
+	out, answers := out, answers
+	if len(answers) < len(out) {
+		out = out[:len(answers)]
+	}
 	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
 	switch r.spec {
 	case .Json:
 		if lax {
-			return records_find_as(r, path, .Json, true, read, allocator)
+			return records_find_as(r, path, out, answers, .Json, true, read, allocator)
 		}
-		return records_find_as(r, path, .Json, false, read, allocator)
+		return records_find_as(r, path, out, answers, .Json, false, read, allocator)
 	case .Jsonc:
 		if lax {
-			return records_find_as(r, path, .Jsonc, true, read, allocator)
+			return records_find_as(r, path, out, answers, .Jsonc, true, read, allocator)
 		}
-		return records_find_as(r, path, .Jsonc, false, read, allocator)
+		return records_find_as(r, path, out, answers, .Jsonc, false, read, allocator)
 	case .Json5:
 		if lax {
-			return records_find_as(r, path, .Json5, true, read, allocator)
+			return records_find_as(r, path, out, answers, .Json5, true, read, allocator)
 		}
-		return records_find_as(r, path, .Json5, false, read, allocator)
+		return records_find_as(r, path, out, answers, .Json5, false, read, allocator)
 	}
 	return
 }
 
-// Reads the next record of `r` and builds the document of its nodes the paths of `demand` reach, as `scan` reads its
-// bytes alone. The document's nodes point into the text, and it is the caller's to free. False once the records have
-// ended. Under `.Elements` the walk reads each element to its end whatever `read.stop_early` says, as the next starts
-// there. Needs `READ_STACK` bytes of stack and faults on a thread with less.
+// Reads the next records of `r` into `out`, and for each the document of its nodes the paths of `demand` reach into the
+// same place of `docs`, as `scan` reads its bytes alone. Returns how many it filled, at most the shorter of the two
+// slices, and fewer once the records have ended. Each document's nodes point into the text, and each is the caller's to
+// free, so the memory a call holds is bounded by the slices it is given. Under `.Elements` and `.Members` the walk
+// reads each value to its end whatever `read.stop_early` says, as the next starts there. Needs `READ_STACK` bytes of
+// stack and faults on a thread with less.
 @(require_results)
-records_scan :: proc(r: ^Records, demand: ^tape.Demand, read := tape.Read_Options{}, allocator := context.allocator) -> (rec: records.Record, doc: tape.Document, more: bool) {
+records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []records.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	probe_stack()
+	out, docs := out, docs
+	if len(docs) < len(out) {
+		out = out[:len(docs)]
+	}
 	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
 	switch r.spec {
 	case .Json:
 		if lax {
-			return records_scan_as(r, demand, .Json, true, read, allocator)
+			return records_scan_as(r, demand, out, docs, .Json, true, read, allocator)
 		}
-		return records_scan_as(r, demand, .Json, false, read, allocator)
+		return records_scan_as(r, demand, out, docs, .Json, false, read, allocator)
 	case .Jsonc:
 		if lax {
-			return records_scan_as(r, demand, .Jsonc, true, read, allocator)
+			return records_scan_as(r, demand, out, docs, .Jsonc, true, read, allocator)
 		}
-		return records_scan_as(r, demand, .Jsonc, false, read, allocator)
+		return records_scan_as(r, demand, out, docs, .Jsonc, false, read, allocator)
 	case .Json5:
 		if lax {
-			return records_scan_as(r, demand, .Json5, true, read, allocator)
+			return records_scan_as(r, demand, out, docs, .Json5, true, read, allocator)
 		}
-		return records_scan_as(r, demand, .Json5, false, read, allocator)
+		return records_scan_as(r, demand, out, docs, .Json5, false, read, allocator)
 	}
 	return
 }
 
 @(private)
-records_validate_as :: #force_no_inline proc(r: ^Records, $S: Spec, $LAX: bool, caller: runtime.Allocator) -> (rec: records.Record, more: bool) {
+records_validate_as :: #force_no_inline proc(r: ^Records, out: []records.Record, $S: Spec, $LAX: bool, caller: runtime.Allocator) -> (n: int) {
 	m: hook.Memory_Budget
-	allocator := read_allocator(&m, r.opts, caller)
 	ctx := context
 	h: hook.No_Hooks
 	regs: hook.Regs
 	w := (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(&r.walk)
-	lo, cut := record_frame(r, w) or_return
-	res, hi, alone := record_first(r, w, lo, cut, &h, &regs, allocator, &ctx, hook.no_hook) or_return
-	if alone {
-		res = record_alone(r, w, lo, cut, &h, &regs, allocator, &ctx, hook.no_hook)
+	for n < len(out) {
+		allocator := read_allocator(&m, r.opts, caller)
+		lo, cut := record_frame(r, w) or_break
+		res, hi, alone := record_first(r, w, lo, cut, &h, &regs, allocator, &ctx, hook.no_hook) or_break
+		if alone {
+			res = record_alone(r, w, lo, cut, &h, &regs, allocator, &ctx, hook.no_hook)
+		}
+		_, err, _ := hook.walk_error(res, &RULES)
+		out[n] = record_end(r, lo, hi, hook.memory_budget_error(&m, err))
+		n += 1
 	}
-	_, err, _ := hook.walk_error(res, &RULES)
-	return record_end(r, lo, hi, hook.memory_budget_error(&m, err)), true
+	return
 }
 
 @(private)
-records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (rec: records.Record, answer: tape.Span_Answer, more: bool) {
+records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []records.Record, answers: []tape.Span_Answer, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (n: int) {
 	read := read
 	if !record_reads(r, &read) {
 		return
 	}
 	m: hook.Memory_Budget
-	allocator := read_allocator(&m, r.opts, caller)
 	ctx := context
 	rewalk :: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result {
 		regs: hook.Regs
 		return walk_again((^Walk(S, build.Finder, LAX, build.FINDER_CAPS))(h.walk), h.src, lo, &regs, build.finder_hook)
 	}
 	w := (^Walk(S, build.Finder, LAX, build.FINDER_CAPS))(&r.walk)
-	lo, cut := record_frame(r, w) or_return
 	room: build.Find_Room = ---
-	f: build.Finder
-	err := build.finder_start(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator)
-	defer build.finder_end(&f)
-	if err != nil {
-		records_stop(r, hook.memory_budget_error(&m, err))
-		return
-	}
-	regs: hook.Regs
-	res, hi, alone := record_first(r, w, lo, cut, &f, &regs, allocator, &ctx, build.finder_hook) or_return
-	if alone {
-		build.finder_end(&f)
-		f = {}
-		if err = build.finder_start(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator); err != nil {
+	for n < len(out) {
+		allocator := read_allocator(&m, r.opts, caller)
+		lo, cut := record_frame(r, w) or_break
+		f: build.Finder
+		err := build.finder_start(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator)
+		defer build.finder_end(&f)
+		if err != nil {
 			records_stop(r, hook.memory_budget_error(&m, err))
-			return
+			break
 		}
-		regs = {}
-		res = record_alone(r, w, lo, cut, &f, &regs, allocator, &ctx, build.finder_hook)
+		regs: hook.Regs
+		res, hi, alone := record_first(r, w, lo, cut, &f, &regs, allocator, &ctx, build.finder_hook) or_break
+		if alone {
+			build.finder_end(&f)
+			f = {}
+			if err = build.finder_start(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator); err != nil {
+				records_stop(r, hook.memory_budget_error(&m, err))
+				break
+			}
+			regs = {}
+			res = record_alone(r, w, lo, cut, &f, &regs, allocator, &ctx, build.finder_hook)
+		}
+		_, werr, _ := hook.walk_error(res, &RULES)
+		if werr == nil && f.refused {
+			werr = runtime.Allocator_Error.Out_Of_Memory
+		}
+		if werr != nil {
+			out[n], answers[n] = record_end(r, lo, hi, hook.memory_budget_error(&m, werr)), {}
+			n += 1
+			continue
+		}
+		answers[n] = build.finder_answer(&f)
+		when LAX {
+			answers[n].tolerated = w.tolerated
+		}
+		out[n] = record_end(r, lo, hi, nil)
+		n += 1
 	}
-	_, werr, _ := hook.walk_error(res, &RULES)
-	if werr == nil && f.refused {
-		werr = runtime.Allocator_Error.Out_Of_Memory
-	}
-	if werr != nil {
-		return record_end(r, lo, hi, hook.memory_budget_error(&m, werr)), {}, true
-	}
-	answer = build.finder_answer(&f)
-	when LAX {
-		answer.tolerated = w.tolerated
-	}
-	return record_end(r, lo, hi, nil), answer, true
+	return
 }
 
 @(private)
-records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (rec: records.Record, doc: tape.Document, more: bool) {
+records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out: []records.Record, docs: []tape.Document, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (n: int) {
 	read := read
 	if !record_reads(r, &read) {
 		return
 	}
 	m: hook.Memory_Budget
-	allocator := read_allocator(&m, r.opts, caller)
 	rewalk :: proc "contextless" (h: ^build.Scanner, regs: ^hook.Regs, lo: u64) -> hook.Walk_Result {
 		return walk_again((^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(h.walk), h.b.doc.src, lo, regs, build.scanner_hook)
 	}
 	w := (^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(&r.walk)
-	lo, cut := record_frame(r, w) or_return
-	depth := min(depth_limit(r.opts), cut - lo)
-	most := node_most(node_bound(r.src[lo:cut], depth), r.opts)
 	frames: [FRAME_DEPTH]u64 = ---
 	room: build.Scan_Room = ---
 	h: build.Scanner = ---
-	if err := build.scanner_start(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
-		records_stop(r, hook.memory_budget_error(&m, err))
-		return
-	}
-	regs := build.builder_regs(&h.b)
-	res, hi, alone, framed := record_first(r, w, lo, cut, &h, &regs, allocator, &h.b.ctx, build.scanner_hook)
-	if !framed || alone {
-		// The walk's tokens are dropped with what the scanner built of them.
-		_, _ = build.scanner_end(&h, regs, 0, runtime.Allocator_Error.Out_Of_Memory)
-		if !framed {
-			return
-		}
+	for n < len(out) {
+		allocator := read_allocator(&m, r.opts, caller)
+		lo, cut := record_frame(r, w) or_break
+		depth := min(depth_limit(r.opts), cut - lo)
+		most := node_most(node_bound(r.src[lo:cut], depth), r.opts)
 		if err := build.scanner_start(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
 			records_stop(r, hook.memory_budget_error(&m, err))
-			return
+			break
 		}
-		regs = build.builder_regs(&h.b)
-		res = record_alone(r, w, lo, cut, &h, &regs, allocator, &h.b.ctx, build.scanner_hook)
+		regs := build.builder_regs(&h.b)
+		res, hi, alone, framed := record_first(r, w, lo, cut, &h, &regs, allocator, &h.b.ctx, build.scanner_hook)
+		if !framed || alone {
+			// The walk's tokens are dropped with what the scanner built of them.
+			_, _ = build.scanner_end(&h, regs, 0, runtime.Allocator_Error.Out_Of_Memory)
+			if !framed {
+				break
+			}
+			if err := build.scanner_start(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
+				records_stop(r, hook.memory_budget_error(&m, err))
+				break
+			}
+			regs = build.builder_regs(&h.b)
+			res = record_alone(r, w, lo, cut, &h, &regs, allocator, &h.b.ctx, build.scanner_hook)
+		}
+		root_close, werr, _ := hook.walk_error(res, &RULES)
+		doc, e := build.scanner_end(&h, regs, root_close, werr)
+		e = read_end(&doc, e, &m, w.tolerated if LAX else false, caller)
+		out[n], docs[n] = record_end(r, lo, hi, e), doc
+		n += 1
 	}
-	root_close, werr, _ := hook.walk_error(res, &RULES)
-	e: tape.Error
-	doc, e = build.scanner_end(&h, regs, root_close, werr)
-	e = read_end(&doc, e, &m, w.tolerated if LAX else false, caller)
-	return record_end(r, lo, hi, e), doc, true
+	return
 }
 
 // Ends the records with `err`, which no record holds.

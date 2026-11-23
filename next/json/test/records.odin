@@ -8,6 +8,29 @@ import "stury:lib/core/tape"
 import "stury:lib/ops/records"
 import "stury:testkit"
 
+// The batch of one record, the form the tests follow the records through.
+@(private = "file")
+one_validate :: proc(r: ^json.Records) -> (rec: records.Record, more: bool) {
+	out: [1]records.Record
+	return out[0], json.records_validate(r, out[:]) == 1
+}
+
+@(private = "file")
+one_find :: proc(r: ^json.Records, path: []tape.Step, read := tape.Read_Options{}) -> (rec: records.Record, answer: tape.Span_Answer, more: bool) {
+	out: [1]records.Record
+	answers: [1]tape.Span_Answer
+	n := json.records_find(r, path, out[:], answers[:], read)
+	return out[0], answers[0], n == 1
+}
+
+@(private = "file")
+one_scan :: proc(r: ^json.Records, demand: ^tape.Demand, read := tape.Read_Options{}) -> (rec: records.Record, doc: tape.Document, more: bool) {
+	out: [1]records.Record
+	docs: [1]tape.Document
+	n := json.records_scan(r, demand, out[:], docs[:], read)
+	return out[0], docs[0], n == 1
+}
+
 // `err` with the offset it names moved by `by`, as a read in place in a text names what a read of a part of it alone
 // names in the part.
 @(private = "file")
@@ -112,17 +135,17 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 	for spec in json.Spec {
 		r := json.records_open(transmute([]u8)src, .Lines, spec)
 		for span, i in spans {
-			rec, more := json.records_validate(&r)
+			rec, more := one_validate(&r)
 			line := transmute([]u8)src[span[0]:span[1]]
 			want := moved(json.validate(line, spec), span[0])
 			testing.expectf(t, more && rec == {u64(i), span[0], span[1], want, {}}, "%v validate line %d %q: %v %v, want %v", spec, i, line, rec, more, want)
 		}
-		_, more := json.records_validate(&r)
+		_, more := one_validate(&r)
 		testing.expectf(t, !more && r.err == nil && r.index == u64(len(spans)), "%v validate end: %v %v", spec, r.err, r.index)
 		for stop in ([]bool{false, true}) {
 			r = json.records_open(transmute([]u8)src, .Lines, spec)
 			for span, i in spans {
-				rec, answer, ok := json.records_find(&r, path, {stop_early = stop})
+				rec, answer, ok := one_find(&r, path, {stop_early = stop})
 				line := transmute([]u8)src[span[0]:span[1]]
 				alone, err := json.find(line, path, spec, {stop_early = stop})
 				if err == nil {
@@ -136,7 +159,7 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 		}
 		r = json.records_open(transmute([]u8)src, .Lines, spec)
 		for span, i in spans {
-			rec, doc, ok := json.records_scan(&r, &demand)
+			rec, doc, ok := one_scan(&r, &demand)
 			line := transmute([]u8)src[span[0]:span[1]]
 			alone, err := json.scan(line, &demand, spec)
 			got, want := fmt.tprint(render_answers(&doc), render_doc(&doc)), fmt.tprint(render_answers(&alone), render_doc(&alone))
@@ -182,33 +205,33 @@ records_read_the_root_arrays_elements :: proc(t: ^testing.T) {
 		r := json.records_open(src, .Elements, c.spec)
 		for e, i in c.elements {
 			lo := u64(strings.index(c.src, e))
-			rec, more := json.records_validate(&r)
+			rec, more := one_validate(&r)
 			testing.expectf(t, more && rec == {u64(i), lo, lo + u64(len(e)), nil, {}}, "%q validate %d: %v %v", c.src, i, rec, more)
 		}
-		_, more := json.records_validate(&r)
+		_, more := one_validate(&r)
 		testing.expectf(t, !more && r.err == want_end, "%q validate end: %v, want %v", c.src, r.err, want_end)
 		r = json.records_open(src, .Elements, c.spec)
 		for e, i in c.elements {
 			lo := u64(strings.index(c.src, e))
-			rec, answer, ok := json.records_find(&r, path, {stop_early = true})
+			rec, answer, ok := one_find(&r, path, {stop_early = true})
 			alone, _ := json.find(transmute([]u8)e, path, c.spec)
 			if alone.outcome != .Missing {
 				alone.lo, alone.hi = alone.lo + lo, alone.hi + lo
 			}
 			testing.expectf(t, ok && rec.err == nil && answer == alone, "%q find %d: %v %v, want %v", c.src, i, rec, answer, alone)
 		}
-		_, _, more = json.records_find(&r, path)
+		_, _, more = one_find(&r, path)
 		testing.expectf(t, !more && r.err == want_end, "%q find end: %v, want %v", c.src, r.err, want_end)
 		r = json.records_open(src, .Elements, c.spec)
 		for e, i in c.elements {
-			rec, doc, ok := json.records_scan(&r, &demand)
+			rec, doc, ok := one_scan(&r, &demand)
 			alone, _ := json.scan(transmute([]u8)e, &demand, c.spec)
 			got, want := render_answers(&doc), render_answers(&alone)
 			testing.expectf(t, ok && rec.err == nil && got == want, "%q scan %d: %v %s, want %s", c.src, i, rec, got, want)
 			tape.destroy(&doc)
 			tape.destroy(&alone)
 		}
-		_, _, more = json.records_scan(&r, &demand)
+		_, _, more = one_scan(&r, &demand)
 		testing.expectf(t, !more && r.err == want_end, "%q scan end: %v, want %v", c.src, r.err, want_end)
 	}
 }
@@ -222,14 +245,18 @@ records_keep_the_budget :: proc(t: ^testing.T) {
 	opts := json.Options{budget = {depth = 2, steps = 2}}
 	r := json.records_open(transmute([]u8)lines, .Lines, .Json, opts)
 	for span in line_spans(lines) {
-		rec, _ := json.records_validate(&r)
+		rec, _ := one_validate(&r)
 		want := moved(json.validate(transmute([]u8)lines[span[0]:span[1]], .Json, opts), span[0])
 		testing.expectf(t, rec.err == want, "%q: %v, want %v", lines[span[0]:span[1]], rec.err, want)
 	}
 	for src in ([]string{`[[1],[2],[3]]`, `[[1],[[2]]]`, `[1,2,3]`, `{"a":[1],"b":[2],"c":[3]}`, `{"a":[1],"b":[[2]]}`, `{"a":1,"b":2,"c":3}`}) {
 		opts = {budget = {depth = 2, steps = 3}}
 		r = json.records_open(transmute([]u8)src, .Elements if src[0] == '[' else .Members, .Json, opts)
-		for _ in json.records_validate(&r) {
+		for {
+			_, more := one_validate(&r)
+			if !more {
+				break
+			}
 		}
 		want := json.validate(transmute([]u8)src, .Json, opts)
 		testing.expectf(t, r.err == want, "%q: %v, want %v", src, r.err, want)
@@ -243,11 +270,11 @@ records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("{\"a\":1}\n")
 	pieces: tape.Pieces
 	r := json.records_open(src, .Lines, .Json, {pieces = &pieces})
-	_, more := json.records_validate(&r)
+	_, more := one_validate(&r)
 	f, faulted := r.err.(tape.Fault)
 	testing.expectf(t, !more && faulted && f.kind == .Bad_Option, "pieces: %v", r.err)
 	r = json.records_open(src)
-	_, _, more = json.records_find(&r, {tape.Name("a")}, {dups = .Refuse})
+	_, _, more = one_find(&r, {tape.Name("a")}, {dups = .Refuse})
 	f, faulted = r.err.(tape.Fault)
 	testing.expectf(t, !more && faulted && f.kind == .Bad_Option && r.index == 0, "refuse: %v", r.err)
 }
@@ -312,15 +339,15 @@ records_read_the_root_objects_members :: proc(t: ^testing.T) {
 		}
 		r := json.records_open(src, .Members, c.spec)
 		for m, i in c.members {
-			rec, more := json.records_validate(&r)
+			rec, more := one_validate(&r)
 			testing.expectf(t, more, "%q validate %d: ended with %v", c.src, i, r.err)
 			check(t, "validate", c, rec, i, spans, m)
 		}
-		_, more := json.records_validate(&r)
+		_, more := one_validate(&r)
 		testing.expectf(t, !more && r.err == want_end, "%q validate end: %v, want %v", c.src, r.err, want_end)
 		r = json.records_open(src, .Members, c.spec)
 		for m, i in c.members {
-			rec, answer, ok := json.records_find(&r, path, {stop_early = true})
+			rec, answer, ok := one_find(&r, path, {stop_early = true})
 			alone, _ := json.find(transmute([]u8)m.value, path, c.spec)
 			if alone.outcome != .Missing {
 				alone.lo, alone.hi = alone.lo + spans[i][0], alone.hi + spans[i][0]
@@ -328,11 +355,11 @@ records_read_the_root_objects_members :: proc(t: ^testing.T) {
 			testing.expectf(t, ok && answer == alone, "%q find %d: %v, want %v", c.src, i, answer, alone)
 			check(t, "find", c, rec, i, spans, m)
 		}
-		_, _, more = json.records_find(&r, path)
+		_, _, more = one_find(&r, path)
 		testing.expectf(t, !more && r.err == want_end, "%q find end: %v, want %v", c.src, r.err, want_end)
 		r = json.records_open(src, .Members, c.spec)
 		for m, i in c.members {
-			rec, doc, ok := json.records_scan(&r, &demand)
+			rec, doc, ok := one_scan(&r, &demand)
 			alone, _ := json.scan(transmute([]u8)m.value, &demand, c.spec)
 			got, want := render_answers(&doc), render_answers(&alone)
 			testing.expectf(t, ok && got == want, "%q scan %d: %s, want %s", c.src, i, got, want)
@@ -340,7 +367,80 @@ records_read_the_root_objects_members :: proc(t: ^testing.T) {
 			tape.destroy(&doc)
 			tape.destroy(&alone)
 		}
-		_, _, more = json.records_scan(&r, &demand)
+		_, _, more = one_scan(&r, &demand)
 		testing.expectf(t, !more && r.err == want_end, "%q scan end: %v, want %v", c.src, r.err, want_end)
+	}
+}
+
+// The records come out the same whatever the size of the batches they are read in, the end of the records included.
+@(test)
+records_read_alike_in_any_batch_size :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Case :: struct {
+		src:     string,
+		framing: records.Framing,
+	}
+	lines := record_lines()
+	cases := []Case {
+		{lines, .Lines},
+		{`[1, {"status":2}, "x", [3], {"status":5,"level":"a"}, 7, {"status":8}, 9, [{"status":10}], 11,]`, .Elements},
+		{`{"a":1, "b":{"status":2}, "c":"x", "d":[3], "e":{"status":5,"level":"a"}, "f":7, "g":{"status":8}, "h":9} x`, .Members},
+	}
+	path := []tape.Step{tape.Name("status")}
+	demand, _ := tape.demand_of({path, {tape.Name("level")}})
+	defer tape.destroy_demand(&demand)
+	for c in cases {
+		src := transmute([]u8)c.src
+		want_recs := make([dynamic]records.Record, context.temp_allocator)
+		want_answers := make([dynamic]tape.Span_Answer, context.temp_allocator)
+		want_docs := make([dynamic]string, context.temp_allocator)
+		for size in ([]int{1, 2, 3, 7, 100}) {
+			recs := make([dynamic]records.Record, context.temp_allocator)
+			answers := make([dynamic]tape.Span_Answer, context.temp_allocator)
+			docs := make([dynamic]string, context.temp_allocator)
+			out := make([]records.Record, size, context.temp_allocator)
+			found := make([]tape.Span_Answer, size, context.temp_allocator)
+			scanned := make([]tape.Document, size, context.temp_allocator)
+			r := json.records_open(src, c.framing)
+			for {
+				n := json.records_validate(&r, out)
+				append(&recs, ..out[:n])
+				if n < size {
+					break
+				}
+			}
+			end := r.err
+			r = json.records_open(src, c.framing)
+			for {
+				n := json.records_find(&r, path, out, found, {stop_early = true})
+				append(&answers, ..found[:n])
+				if n < size {
+					break
+				}
+			}
+			testing.expectf(t, r.err == end, "%q size %d find end: %v, want %v", c.src, size, r.err, end)
+			r = json.records_open(src, c.framing)
+			for {
+				n := json.records_scan(&r, &demand, out, scanned)
+				for &doc in scanned[:n] {
+					append(&docs, fmt.tprint(render_answers(&doc), render_doc(&doc)))
+					tape.destroy(&doc)
+				}
+				if n < size {
+					break
+				}
+			}
+			testing.expectf(t, r.err == end, "%q size %d scan end: %v, want %v", c.src, size, r.err, end)
+			if size == 1 {
+				want_recs, want_answers, want_docs = recs, answers, docs
+				continue
+			}
+			testing.expectf(t, len(recs) == len(want_recs) && len(want_recs) > 0, "%q size %d: %d records, want %d", c.src, size, len(recs), len(want_recs))
+			for rec, i in recs {
+				if i < len(want_recs) {
+					testing.expectf(t, rec == want_recs[i] && answers[i] == want_answers[i] && docs[i] == want_docs[i], "%q size %d record %d: %v %v %s, want %v %v %s", c.src, size, i, rec, answers[i], docs[i], want_recs[i], want_answers[i], want_docs[i])
+				}
+			}
+		}
 	}
 }
