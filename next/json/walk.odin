@@ -166,15 +166,28 @@ walk_start :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src:
 	}
 }
 
-// The walk's result `r` once what follows a root value that ended before `end` is judged.
+// The walk's result `r` once what follows a root value that ended before `end` is judged, and a fault has its detail.
 @(private)
 walk_tail :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), r: hook.Walk_Result, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	if u8(r) == 0 {
 		if q := kernel.skip_ws(w.base[u64(r) >> 16:], end); q != end {
 			return root_tail(w, w.base[u64(r) >> 16:], q, end, on)
 		}
+	} else if u8(r) < hook.WALK_MORE {
+		return described(r, w.base, walk_lo(w), end, S == .Json5)
 	}
 	return r
+}
+
+// The first byte the walk holds: its window's in a text in pieces, else its text's.
+@(private)
+walk_lo :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> [^]u8 {
+	when LAX {
+		if w.piece[0] != nil {
+			return w.base[w.piece[0].from:]
+		}
+	}
+	return w.base
 }
 
 // The result for what follows the root value that ends at `p`, past the white space up to `q`. In a spec past RFC 8259
@@ -191,10 +204,11 @@ root_tail :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p,
 		if opens_run(q, end, S) {
 			r, _, kind := comment_run(q, end, false, S)
 			if kind != .None {
-				return fault(w, hs, r, kind)
+				// The fault is judged here, past the walk's tail, so the detail of a byte in a comment is chosen here too.
+				return described(fault(w, hs, r, kind, .Trailing if kind == .Bad_Char && r[0] == '/' else .None), w.base, walk_lo(w), end, S == .Json5)
 			}
 			if r < end {
-				return fault(w, hs, r, .Bad_Char)
+				return fault(w, hs, r, .Bad_Char, .Trailing)
 			}
 			when H != hook.No_Hooks {
 				when .Skips in C {
@@ -210,7 +224,7 @@ root_tail :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p,
 			return done(w, hs, p)
 		}
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return fault(w, hs, q, .Bad_Char, .Trailing)
 }
 
 // The result of walking the value at `lo` of `src` again for the hook of walk `w`, from the hook's registers `regs`,
@@ -487,9 +501,9 @@ levels_free :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) 
 }
 
 @(private)
-fault :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, p: [^]u8, kind: tape.Fault_Kind) -> hook.Walk_Result {
+fault :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, p: [^]u8, kind: tape.Fault_Kind, detail := Detail.None) -> hook.Walk_Result {
 	w.regs^ = hs
-	return hook.walk_result(at(w, p), u8(kind))
+	return hook.walk_result(at(w, p), u8(kind), u8(detail))
 }
 
 // The result `deepen` gave at the bracket `p`.

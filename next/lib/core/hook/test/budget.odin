@@ -65,7 +65,7 @@ memory_budget_names_the_last_refusal :: proc(t: ^testing.T) {
 	a := hook.memory_budget(&m)
 	_, err := runtime.mem_alloc(2048, 8, a)
 	testing.expect_value(t, err, runtime.Allocator_Error.Out_Of_Memory)
-	testing.expect(t, hook.memory_budget_error(&m, err) == tape.Error(tape.Exceeded{kind = .Memory}))
+	testing.expect(t, hook.memory_budget_error(&m, err) == tape.Error(tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}))
 	_, err = runtime.mem_alloc(512, 8, a)
 	testing.expect_value(t, err, runtime.Allocator_Error.Out_Of_Memory)
 	testing.expect(t, hook.memory_budget_error(&m, err) == tape.Error(runtime.Allocator_Error.Out_Of_Memory))
@@ -108,7 +108,7 @@ memory_budget_names_its_own_refusals :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	refused := hook.Memory_Budget{refused = true}
 	other := hook.Memory_Budget{}
-	exceeded := tape.Exceeded{kind = .Memory}
+	exceeded := tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}
 	testing.expect_value(t, hook.memory_budget_error(&refused, runtime.Allocator_Error.Out_Of_Memory), tape.Error(exceeded))
 	testing.expect_value(t, hook.memory_budget_error(&other, runtime.Allocator_Error.Out_Of_Memory), tape.Error(runtime.Allocator_Error.Out_Of_Memory))
 	testing.expect_value(t, hook.memory_budget_error(&refused, nil), nil)
@@ -131,7 +131,7 @@ memory_budget_peers_share_a_limit :: proc(t: ^testing.T) {
 	_, err = runtime.mem_alloc(41, 8, hook.memory_budget(&b))
 	testing.expect_value(t, err, runtime.Allocator_Error.Out_Of_Memory)
 	testing.expect(t, b.refused && !a.refused)
-	testing.expect_value(t, hook.memory_budget_error(&a, runtime.Allocator_Error.Out_Of_Memory), tape.Error(tape.Exceeded{kind = .Memory}))
+	testing.expect_value(t, hook.memory_budget_error(&a, runtime.Allocator_Error.Out_Of_Memory), tape.Error(tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}))
 	second, serr := runtime.mem_alloc(40, 8, hook.memory_budget(&b))
 	testing.expect_value(t, serr, nil)
 	testing.expect_value(t, runtime.mem_free_with_size(raw_data(first), 60, hook.memory_budget(&a)), nil)

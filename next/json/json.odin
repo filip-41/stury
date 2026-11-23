@@ -19,9 +19,6 @@ Spec :: enum u8 {
 // Options of a JSON read. `budget` sets `depth`, `nodes`, `memory` and `steps` (a step is one container).
 Options :: tape.Options
 
-@(private, rodata)
-RULES := tape.Rules{"json", {}}
-
 // Whether a read may walk a value again from its first byte. A test build turns it off to read as a format without
 // `.Rewalk`.
 @(private)
@@ -251,7 +248,7 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options
 scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
 	if read.dups == .Refuse || read.dups == .All {
 		// A path read takes one member of a key, so the build-only policies are refused.
-		return {}, tape.Fault{rules = &RULES, kind = .Bad_Option}
+		return {}, tape.Bad_Option{"dups"}
 	}
 	when LAX {
 		if opts.pieces != nil {
@@ -339,7 +336,7 @@ node_most :: #force_inline proc "contextless" (bound: u64, opts: Options) -> int
 find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
 	if read.dups == .Refuse || read.dups == .All {
 		// A path read takes one member of a key, so the build-only policies are refused.
-		return {}, tape.Fault{rules = &RULES, kind = .Bad_Option}
+		return {}, tape.Bad_Option{"dups"}
 	}
 	when LAX {
 		if opts.pieces != nil {

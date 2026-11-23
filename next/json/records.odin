@@ -48,14 +48,14 @@ RECORD_AHEAD :: 256
 
 // Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. The budget's limits hold
 // for each record, but `Budget.steps` under `.Elements`, which counts the containers of the whole text. A text in
-// pieces ends the records with `.Bad_Option` before any is read.
+// pieces ends the records with `tape.Bad_Option` before any is read.
 records_open :: proc(src: []u8, framing := records.Framing.Lines, spec := Spec.Json, opts := Options{}) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("json: spec out of range")
 	}
 	r.src, r.framing, r.spec, r.opts, r.pos = src, framing, spec, opts, u64(bom_length(src))
 	if opts.pieces != nil {
-		r.err, r.at = tape.Fault{rules = &RULES, kind = .Bad_Option}, .Done
+		r.err, r.at = tape.Bad_Option{"pieces"}, .Done
 	}
 	walk_init(&r.walk, src, nil, (^hook.No_Hooks)(nil), nil, {}, nil, depth_limit(opts), opts.tolerate, opts.budget.steps)
 	return
@@ -295,12 +295,12 @@ records_stop :: proc "contextless" (r: ^Records, err: tape.Error) {
 	r.err, r.at = err, .Done
 }
 
-// Whether a path read under `read` may go on, which ends the records with `.Bad_Option` for the build-only policies a
-// path read refuses. Under `.Elements` it reads each element to its end.
+// Whether a path read under `read` may go on, which ends the records with `tape.Bad_Option` for the build-only
+// policies a path read refuses. Under `.Elements` it reads each element to its end.
 @(private)
 record_reads :: proc "contextless" (r: ^Records, read: ^tape.Read_Options) -> bool {
 	if read.dups == .Refuse || read.dups == .All {
-		records_stop(r, tape.Fault{rules = &RULES, kind = .Bad_Option})
+		records_stop(r, tape.Bad_Option{"dups"})
 		return false
 	}
 	if r.framing != .Lines {

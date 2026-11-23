@@ -240,7 +240,7 @@ st_spec_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 	when S == .Json5 {
 		return #must_tail st_key5(p, end, d, ind, w, s0, s1, s2, m, on)
 	} else {
-		return fault(w, hook.Regs{s0, s1, s2}, p, .Bad_Char)
+		return #must_tail st_bad_key(p, end, d, ind, w, s0, s1, s2, m, on)
 	}
 }
 
@@ -251,7 +251,8 @@ st_spec_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	if opens_run(p, end, S) {
 		return #must_tail st_comments_colon(p, end, d, ind, w, s0, s1, s2, m, on)
 	}
-	return fault(w, hook.Regs{s0, s1, s2}, p, piece_short(w, p, end, .Bad_Char))
+	kind := piece_short(w, p, end, .Bad_Char)
+	return fault(w, hook.Regs{s0, s1, s2}, p, kind, .Colon if kind == .Bad_Char else .None)
 }
 
 // The state after the value ending at `p` whose next byte past JSON white space the states after a value refused, in a
@@ -263,7 +264,25 @@ st_spec_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		w.resume = q
 		return #must_tail st_comments_after(p, end, d, ind, w, s0, s1, s2, m, on)
 	}
-	return fault(w, hook.Regs{s0, s1, s2}, q, piece_short(w, q, end, .Bad_Char))
+	kind := piece_short(w, q, end, .Bad_Char)
+	return fault(w, hook.Regs{s0, s1, s2}, q, kind, after_detail(q, d) if kind == .Bad_Char else .None)
+}
+
+// The detail of a `/` that opens no comment in a run of state `run`: where a value, a key or a colon must start, or
+// past the root value.
+@(private)
+run_stray :: #force_inline proc "contextless" ($S: Spec, run: u8) -> Detail {
+	switch run {
+	case RUN_COLON:
+		return .Colon
+	case RUN_VALUE:
+		return .Expected_Value
+	case RUN_KEY:
+		return .Identifier if S == .Json5 else .Key_Not_String
+	case RUN_FOOT:
+		return .Trailing
+	}
+	return .None
 }
 
 // Reads the run of comments at `p` up to the next token and emits each as `Comment`, or as `Comment_Foot` when the token
@@ -281,7 +300,7 @@ comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C),
 				return q, true, piece_hold_run(w, hs^, p, run, end, on)
 			}
 		}
-		return q, true, fault(w, hs^, q, kind)
+		return q, true, fault(w, hs^, q, kind, run_stray(S, run) if kind == .Bad_Char && q[0] == '/' else .None)
 	}
 	// The token past the run decides its comments' roles, and a window more bytes may follow has none past it: neither
 	// a byte at the window's end, nor a character it cuts, which may be white space.

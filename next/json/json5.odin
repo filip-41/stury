@@ -88,6 +88,12 @@ st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 		}
 	}
 	if kind != .None {
+		// Outside JSON5 a byte that starts no number faults as `st_bad_value` refuses it.
+		when S != .Json5 {
+			if kind == .Bad_Char && q == p {
+				return fault(w, hs, q, kind, value_detail(p, end, d))
+			}
+		}
 		return fault(w, hs, q, kind)
 	}
 	if too_wide(p, q) {
@@ -390,7 +396,7 @@ st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 		return fault(w, hs, q, kind)
 	}
 	if q == p {
-		return fault(w, hs, p, .Bad_Char)
+		return fault(w, hs, p, .Bad_Char, .Identifier)
 	}
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)

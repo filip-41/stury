@@ -332,23 +332,13 @@ path_reads_refuse_a_build_only_dups_policy :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"a":1,"a":2}`)
 	for dups in ([]tape.Duplicates{.Refuse, .All}) {
 		_, ferr := json.find(src, []tape.Step{tape.Name("a")}, .Json, {dups = dups})
-		if !testing.expect_value(t, ferr != nil, true) {
+		if !testing.expect_value(t, ferr, tape.Error(tape.Bad_Option{"dups"})) {
 			return
-		}
-		if fault, ok := ferr.(tape.Fault); ok {
-			if !testing.expect_value(t, fault.kind, .Bad_Option) {
-				return
-			}
 		}
 		demand, _ := tape.demand_of([][]tape.Step{{tape.Name("a")}}, allocator = context.temp_allocator)
 		_, serr := json.scan(src, &demand, .Json, {dups = dups})
-		if !testing.expect_value(t, serr != nil, true) {
+		if !testing.expect_value(t, serr, tape.Error(tape.Bad_Option{"dups"})) {
 			return
-		}
-		if fault, ok := serr.(tape.Fault); ok {
-			if !testing.expect_value(t, fault.kind, .Bad_Option) {
-				return
-			}
 		}
 	}
 }
