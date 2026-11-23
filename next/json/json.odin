@@ -32,9 +32,9 @@ CAPS :: tape.Caps{.Rewalk} when REWALK else tape.Caps{}
 
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Json  = {name = "json", id = 1, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = text_room, close_end = close_end},
-	.Jsonc = {name = "jsonc", id = 2, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = text_room, close_end = close_end},
-	.Json5 = {name = "json5", id = 3, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = text_room, close_end = close_end},
+	.Json  = {name = "json", id = 1, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Jsonc = {name = "jsonc", id = 2, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Json5 = {name = "json5", id = 3, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
 }
 
 // The format handle of `spec`, to read nodes of a text of `spec` with `tape.node_text` and `tape.node_number`, and to
