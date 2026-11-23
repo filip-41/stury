@@ -35,9 +35,10 @@ STACK_PAGE :: 16 * 1024 when ODIN_OS == .Darwin && ODIN_ARCH == .arm64 else 4 * 
 
 #assert(READ_STACK % STACK_PAGE == 0)
 
-// A walk's state outside its registers, for hook type `H` of capabilities `C`, its protocol's. A walk with `LAX` reads
-// the rules of `tolerate` as taken, counts its containers within `Budget.steps` and reads a text in pieces, and one
-// without refuses every rule, counts nothing and reads a whole text, with none of these in its code.
+// A walk's state outside its registers, for hook type `H` of capabilities `C`, its protocol's. A walk with `LAX` counts
+// its containers within `Budget.steps` and reads a text in pieces, and one without counts nothing and reads a whole
+// text, with neither in its code. Every walk takes the rules of `tolerate`, which it tests only at a byte it would
+// refuse.
 @(private)
 Walk :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	base:      [^]u8,
@@ -57,10 +58,10 @@ Walk :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	gaps:      Gaps,
 	owned:     bool, // `stack` is the allocator's
 	tier:      kernel.Tier,
-	tolerate:  tape.Tolerances, // set only with `LAX`
-	tolerated: bool, // with `LAX`, the walk took a rule of `tolerate`
+	tolerate:  tape.Tolerances,
+	tolerated: bool, // the walk took a rule of `tolerate`
 	rested:    bool, // with `.Skips`, the hook answered `Rest`, so the root's foot comments are not its
-	refused:   u8, // with JSON5 or `LAX`, strings the block reader refused, less those it read, see `BLOCK_RETIRE`
+	refused:   u8, // with JSON5, strings the block reader refused, less those it read, see `BLOCK_RETIRE`
 	// Leaves no gap, as Odin zeroes a struct with one that is declared `---`. The fields before `depth` are eight
 	// pointers.
 	_:         [2]u8,
@@ -79,8 +80,7 @@ STATE_TIER :: kernel.Tier(0)
 STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 
 // The result of walking the text `src` from its root value at `p`, past white space, with the walk's levels in
-// `allocator` past its frame, called in context `ctx`, and whether it took a rule of `tolerate`, which only a walk with
-// `LAX` reads. A hook with `.Walk` is given the walk, which its replays borrow. Its offset is where the root value
+// `allocator` past its frame, called in context `ctx`, and whether it took a rule of `tolerate`. A hook with `.Walk` is given the walk, which its replays borrow. Its offset is where the root value
 // ends, unless the walk stopped or faulted.
 @(private)
 walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, $LAX: bool, tolerate: tape.Tolerances, limit, steps: u64, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, pw: ^Piece_Walk, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (hook.Walk_Result, bool) {
@@ -130,11 +130,11 @@ walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, $
 	if w.owned {
 		levels_free(&w)
 	}
-	return r, w.tolerated when LAX else false
+	return r, w.tolerated
 }
 
 // Sets up walk `w` of `src` with its levels in `stack`, past the frame's in `allocator` called in context `ctx`, within
-// `limit` levels, and with `LAX` the rules of `tolerate` and `steps` containers, with an empty gap table. The caller
+// `limit` levels, the rules of `tolerate` and with `LAX` `steps` containers, with an empty gap table. The caller
 // sets its depth.
 @(private)
 walk_init :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, stack: [^]u32, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, limit: u64, tolerate: tape.Tolerances, steps: u64) {
@@ -148,7 +148,7 @@ walk_init :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: 
 walk_start :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, stack: [^]u32, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, limit: u64, tolerate: tape.Tolerances, steps: u64) {
 	w.base, w.hooks, w.stack, w.regs, w.allocator, w.ctx = raw_data(src), h, stack, regs, allocator, ctx
 	w.limit, w.room, w.owned = min(limit, MAX_LEVELS), WALK_LEVELS, false
-	when S == .Json5 || LAX {
+	when S == .Json5 {
 		w.refused = 0
 	}
 	when ODIN_ARCH == .amd64 {
@@ -157,8 +157,8 @@ walk_start :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src:
 	when .Skips in C {
 		w.rested = false
 	}
+	w.tolerate, w.tolerated = tolerate, false
 	when LAX {
-		w.tolerate, w.tolerated = tolerate, false
 		w.steps[0] = steps + 1 if steps != 0 && steps < max(u64) else max(u64)
 	}
 	when .Rooms in C {

@@ -68,7 +68,7 @@ records_open :: proc(src: []u8, framing := records.Framing.Lines, spec := Spec.J
 @(require_results)
 records_validate :: proc(r: ^Records, out: []records.Record, allocator := context.allocator) -> (n: int) {
 	probe_stack()
-	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
+	lax := r.opts.budget.steps != 0
 	switch r.spec {
 	case .Json:
 		if lax {
@@ -101,7 +101,7 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []records.Record, answ
 	if len(answers) < len(out) {
 		out = out[:len(answers)]
 	}
-	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
+	lax := r.opts.budget.steps != 0
 	switch r.spec {
 	case .Json:
 		if lax {
@@ -135,7 +135,7 @@ records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []records.Record, d
 	if len(docs) < len(out) {
 		out = out[:len(docs)]
 	}
-	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
+	lax := r.opts.budget.steps != 0
 	switch r.spec {
 	case .Json:
 		if lax {
@@ -220,9 +220,7 @@ records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []
 			continue
 		}
 		answers[n] = build.finder_answer(&f)
-		when LAX {
-			answers[n].tolerated = w.tolerated
-		}
+		answers[n].tolerated = w.tolerated
 		out[n] = record_end(r, lo, hi, nil)
 		n += 1
 	}
@@ -269,7 +267,7 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 		}
 		root_close, werr, _ := hook.walk_error(res, &RULES)
 		doc, e := build.scanner_end(&h, regs, root_close, werr)
-		e = read_end(&doc, e, &m, w.tolerated if LAX else false, caller)
+		e = read_end(&doc, e, &m, w.tolerated, caller)
 		out[n], docs[n] = record_end(r, lo, hi, e), doc
 		n += 1
 	}

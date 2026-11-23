@@ -42,8 +42,12 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 	case .Number:
 		q, spelling, kind := hook_number(p, end, H, C, S)
 		if kind != .None {
-			when S == .Json5 || LAX {
+			when S == .Json5 {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			} else {
+				if .Non_Finite in w.tolerate {
+					return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+				}
 			}
 			return fault(w, hs, q, kind)
 		}
@@ -270,7 +274,7 @@ st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, 
 st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q: [^]u8
-	when S == .Json5 || LAX {
+	when S == .Json5 {
 		if w.refused < BLOCK_RETIRE {
 			q = string_escaped(w.resume, end, '"')
 		}
@@ -853,8 +857,12 @@ st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	hs := hook.Regs{s0, s1, s2}
 	q, spelling, kind := hook_number(p, end, H, C, S)
 	if kind != .None {
-		when S == .Json5 || LAX {
+		when S == .Json5 {
 			return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		} else {
+			if .Non_Finite in w.tolerate {
+				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
 		}
 		return fault(w, hs, q, kind)
 	}
@@ -1038,8 +1046,12 @@ st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		kind: tape.Fault_Kind
 		q, spelling, kind = hook_number(p, end, H, C, S)
 		if kind != .None {
-			when S == .Json5 || LAX {
+			when S == .Json5 {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			} else {
+				if .Non_Finite in w.tolerate {
+					return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+				}
 			}
 			return fault(w, hs, q, kind)
 		}
@@ -1119,8 +1131,12 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		}
 		n, spelling, kind := hook_number(r, end, H, C, S)
 		if kind != .None {
-			when S == .Json5 || LAX {
+			when S == .Json5 {
 				return #must_tail st_number5(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+			} else {
+				if .Non_Finite in w.tolerate {
+					return #must_tail st_number5(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+				}
 			}
 			return fault(w, hs, n, kind)
 		}
@@ -1157,8 +1173,8 @@ st_bad_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_bad_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
-	when LAX && S != .Json5 {
-		if p[0] == '+' || p[0] == 'I' || p[0] == 'N' {
+	when S != .Json5 {
+		if .Non_Finite in w.tolerate && (p[0] == '+' || p[0] == 'I' || p[0] == 'N') {
 			return #must_tail st_number5(p, end, d, ind, w, s0, s1, s2, m, on)
 		}
 	}

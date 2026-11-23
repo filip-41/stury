@@ -269,7 +269,7 @@ SURROGATE_CLASSES := kernel.Nibble_Table {
 // the block reader's path.
 @(private)
 string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
-	when S == .Json5 || LAX {
+	when S == .Json5 {
 		if w.refused >= BLOCK_RETIRE {
 			w.refused = w.refused + 1 if w.refused < BLOCK_RETIRE + BLOCK_RETRY else BLOCK_RETIRE - 1
 			return string_exact_in(w, p, end)
@@ -286,12 +286,12 @@ string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, 
 		q, spelling = string_span_base(p, end, '"')
 	}
 	if q == nil {
-		when S == .Json5 || LAX {
+		when S == .Json5 {
 			w.refused += 1
 		}
 		return string_exact_in(w, p, end)
 	}
-	when S == .Json5 || LAX {
+	when S == .Json5 {
 		if w.refused != 0 {
 			w.refused -= 1
 		}
@@ -299,9 +299,9 @@ string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, 
 	return q, spelling, .None
 }
 
-// `Walk.refused` counts the strings the block reader of `string_long` refused, less the strings it read. A strict JSON
-// or JSONC text is refused only at a fault, so only a JSON5 or `LAX` walk keeps the count, raised by JSON5's own
-// escapes and the bytes `LAX` tolerates. From `BLOCK_RETIRE` on, `string_long` and `st_string_escaped` leave their
+// `Walk.refused` counts the strings the block reader of `string_long` refused, less the strings it read. A JSON or
+// JSONC text is refused only at a fault or a tolerated byte, so only a JSON5 walk keeps the count, raised by JSON5's
+// own escapes. From `BLOCK_RETIRE` on, `string_long` and `st_string_escaped` leave their
 // strings to the byte reader, and each such string counts on, until `BLOCK_RETRY` of them have passed and the next
 // string tries the block reader again.
 @(private)
@@ -312,9 +312,9 @@ BLOCK_RETRY :: 64
 // `string_exact` for the walk `w`, which marks the walk when its tolerances took a byte of the string.
 @(private)
 string_exact_in :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
-	q, spelling, kind = string_exact(S == .Json5, LAX, p, end, w.tolerate when LAX else {})
+	q, spelling, kind = string_exact(S == .Json5, p, end, w.tolerate)
+	w.tolerated ||= spelling & tape.SPELLING_LAX != 0
 	when LAX {
-		w.tolerated ||= spelling & tape.SPELLING_LAX != 0
 		if kind == .Truncated && piece_more(w) {
 			piece_cut_string(w, p, end)
 		}
@@ -452,13 +452,12 @@ escape_credit :: #force_inline proc "contextless" (e, end: [^]u8) -> (n: u64, cr
 // One past the closing quote of the string at `p` and its spelling, or the fault at the first byte that breaks it, read
 // one byte at a time. JSON's string closes at `"`, holds no control byte and uses the escapes of `escape_exact`. A JSON5
 // string closes at its own quote, `"` or `'`, uses the escapes of `escape5` and holds any byte but CR and LF. With
-// `LAX` and `.Invalid_Utf8` in `tol` an ill-formed sequence is passed by its maximal subpart and the string is
+// `.Invalid_Utf8` in `tol` an ill-formed sequence is passed by its maximal subpart and the string is
 // `SPELLING_LAX`, while a sequence the text's end cuts short leaves the string open, `Truncated`. With
 // `.Lone_Surrogate` an escape of a surrogate half with no partner is passed and the string is `SPELLING_LAX` as well.
-// Without `LAX`, `tol` is not read.
 @(private, cold)
-string_exact :: #force_no_inline proc "contextless" ($json5, $LAX: bool, p, end: [^]u8, tol: tape.Tolerances) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
-	q, spelling, kind = string_exact_on(json5, LAX, p[0] if json5 else '"', p[1:], end, tol, tape.SPELLING_ASCII)
+string_exact :: #force_no_inline proc "contextless" ($json5: bool, p, end: [^]u8, tol: tape.Tolerances) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
+	q, spelling, kind = string_exact_on(json5, p[0] if json5 else '"', p[1:], end, tol, tape.SPELLING_ASCII)
 	if kind == .Truncated {
 		return end, 0, .Truncated
 	}
@@ -470,7 +469,7 @@ string_exact :: #force_no_inline proc "contextless" ($json5, $LAX: bool, p, end:
 // `Truncated` and the spelling so far at the place it can be read on from: the escape or sequence the end cuts, or else
 // the last character, as a JSON5 escape is judged by the byte after it.
 @(private)
-string_exact_on :: #force_inline proc "contextless" ($json5, $LAX: bool, quote: u8, q, end: [^]u8, tol: tape.Tolerances, spelling: u16) -> ([^]u8, u16, tape.Fault_Kind) #no_bounds_check {
+string_exact_on :: #force_inline proc "contextless" ($json5: bool, quote: u8, q, end: [^]u8, tol: tape.Tolerances, spelling: u16) -> ([^]u8, u16, tape.Fault_Kind) #no_bounds_check {
 	q, spelling := q, spelling
 	last := q
 	for {
@@ -487,9 +486,9 @@ string_exact_on :: #force_inline proc "contextless" ($json5, $LAX: bool, quote: 
 			k: tape.Fault_Kind
 			lone: bool
 			when json5 {
-				r, k, lone = escape5(q, end, LAX, tol)
+				r, k, lone = escape5(q, end, tol)
 			} else {
-				r, k, lone = escape_exact(q, end, LAX, tol)
+				r, k, lone = escape_exact(q, end, tol)
 			}
 			if k == .Truncated {
 				return q, spelling, k
@@ -498,8 +497,8 @@ string_exact_on :: #force_inline proc "contextless" ($json5, $LAX: bool, quote: 
 				return r, 0, k
 			}
 			spelling = spelling &~ tape.SPELLING_ASCII | tape.SPELLING_DECODE
-			when LAX {
-				spelling |= tape.SPELLING_LAX if lone else 0
+			if lone {
+				spelling |= tape.SPELLING_LAX
 			}
 			when json5 {
 				spelling |= 0 if spell.ESCAPED[q[1]] != 0 || q[1] == 'u' else SPELLING_JSON5
@@ -512,11 +511,9 @@ string_exact_on :: #force_inline proc "contextless" ($json5, $LAX: bool, quote: 
 		case:
 			spelling &~= tape.SPELLING_ASCII
 			r, k := spell.utf8_char(q, end)
-			when LAX {
-				if k == .Bad_Char && .Invalid_Utf8 in tol {
-					spelling |= tape.SPELLING_DECODE | tape.SPELLING_LAX
-					r, k = spell.utf8_subpart(q, end), .None
-				}
+			if k == .Bad_Char && .Invalid_Utf8 in tol {
+				spelling |= tape.SPELLING_DECODE | tape.SPELLING_LAX
+				r, k = spell.utf8_subpart(q, end), .None
 			}
 			if k == .Truncated {
 				return q, spelling, k
@@ -530,10 +527,10 @@ string_exact_on :: #force_inline proc "contextless" ($json5, $LAX: bool, quote: 
 }
 
 // One past the escape at the backslash `e`, or `Bad_Escape` at a bad letter or hex digit or at the backslash of a lone
-// surrogate half, or `Truncated` when the text ends first. With `LAX` and `.Lone_Surrogate` in `tol` a lone half is
-// passed, one past its four digits, and `lone` says so. Without `LAX`, `tol` is not read.
+// surrogate half, or `Truncated` when the text ends first. With `.Lone_Surrogate` in `tol` a lone half is passed, one
+// past its four digits, and `lone` says so.
 @(private)
-escape_exact :: #force_inline proc "contextless" (e, end: [^]u8, $LAX: bool, tol: tape.Tolerances) -> (q: [^]u8, kind: tape.Fault_Kind, lone: bool) #no_bounds_check {
+escape_exact :: #force_inline proc "contextless" (e, end: [^]u8, tol: tape.Tolerances) -> (q: [^]u8, kind: tape.Fault_Kind, lone: bool) #no_bounds_check {
 	q = e[1:]
 	if q >= end {
 		return end, .Truncated, false
@@ -549,10 +546,8 @@ escape_exact :: #force_inline proc "contextless" (e, end: [^]u8, $LAX: bool, tol
 		return q, kind, false
 	}
 	if spell.low_surrogate(unit) {
-		when LAX {
-			if .Lone_Surrogate in tol {
-				return q, .None, true
-			}
+		if .Lone_Surrogate in tol {
+			return q, .None, true
 		}
 		return e, .Bad_Escape, false
 	}
@@ -566,10 +561,8 @@ escape_exact :: #force_inline proc "contextless" (e, end: [^]u8, $LAX: bool, tol
 			h := spell.HEX_NIBBLE[q[i]]
 			ok := q[i] == ('\\' if i == 0 else 'u') if i < 2 else (h == 0xd if i == 2 else (h - 0xc < 4 if i == 3 else h != 0xff))
 			if !ok {
-				when LAX {
-					if .Lone_Surrogate in tol {
-						return q, .None, true
-					}
+				if .Lone_Surrogate in tol {
+					return q, .None, true
 				}
 				return e, .Bad_Escape, false
 			}

@@ -71,7 +71,7 @@ Number_Spelling :: enum u16 {
 SPELLING_JSON5 :: u16(1 << 11)
 
 // The state at a JSON5 number that JSON's grammar refused, or that starts with `+`, `.`, `I` or `N`. In JSON and JSONC,
-// a walk with `LAX` reads JSON5's non-finite numbers here.
+// a walk that tolerates `.Non_Finite` reads JSON5's non-finite numbers here.
 @(private, enable_target_feature = STATE_FEATURES)
 st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
@@ -231,9 +231,9 @@ word5 :: proc "contextless" (p, end: [^]u8, word: string) -> (q: [^]u8, kind: ta
 // One past the JSON5 escape at the backslash `e`, or the fault. Valid are `\0` before no digit, `\x` and two hex
 // digits, a backslash before a line end (CR LF as one), a `\u` escape with its surrogate halves paired, and a backslash
 // before any other character but a digit, which spells that character. A digit after `\0`, and `\1` to `\9`, fault
-// `Bad_Escape` at the digit. `LAX`, `tol` and `lone` are those of `escape_exact`.
+// `Bad_Escape` at the digit. `tol` and `lone` are those of `escape_exact`.
 @(private)
-escape5 :: #force_inline proc "contextless" (e, end: [^]u8, $LAX: bool, tol: tape.Tolerances) -> (q: [^]u8, kind: tape.Fault_Kind, lone: bool) #no_bounds_check {
+escape5 :: #force_inline proc "contextless" (e, end: [^]u8, tol: tape.Tolerances) -> (q: [^]u8, kind: tape.Fault_Kind, lone: bool) #no_bounds_check {
 	q = e[1:]
 	if q >= end {
 		return end, .Truncated, false
@@ -241,7 +241,7 @@ escape5 :: #force_inline proc "contextless" (e, end: [^]u8, $LAX: bool, tol: tap
 	c := q[0]
 	switch {
 	case c == 'u':
-		return escape_exact(e, end, LAX, tol)
+		return escape_exact(e, end, tol)
 	case c == 'x':
 		_, q, kind = escape_digits(q[1:], end, 2)
 		return q, kind, false

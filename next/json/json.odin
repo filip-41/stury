@@ -66,7 +66,7 @@ quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	probe_stack()
-	lax := opts.tolerate != {} || opts.budget.steps != 0 || opts.pieces != nil
+	lax := opts.budget.steps != 0 || opts.pieces != nil
 	switch spec {
 	case .Json:
 		if lax {
@@ -97,7 +97,7 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= PARALLEL_FROM {
 		return build_on_threads(src, spec, opts, allocator)
 	}
-	lax := opts.tolerate != {} || opts.budget.steps != 0 || opts.pieces != nil
+	lax := opts.budget.steps != 0 || opts.pieces != nil
 	switch spec {
 	case .Json:
 		if lax {
@@ -126,7 +126,7 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 @(require_results)
 find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
 	probe_stack()
-	lax := opts.tolerate != {} || opts.budget.steps != 0 || opts.pieces != nil
+	lax := opts.budget.steps != 0 || opts.pieces != nil
 	switch spec {
 	case .Json:
 		if lax {
@@ -155,7 +155,7 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read
 @(require_results)
 scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	probe_stack()
-	lax := opts.tolerate != {} || opts.budget.steps != 0 || opts.pieces != nil
+	lax := opts.budget.steps != 0 || opts.pieces != nil
 	switch spec {
 	case .Json:
 		if lax {
@@ -187,7 +187,7 @@ walk :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, $on: 
 	if opts.pieces != nil {
 		return piece_read(src, S, opts, h, regs, allocator, &ctx, on)
 	}
-	if opts.tolerate != {} || opts.budget.steps != 0 {
+	if opts.budget.steps != 0 {
 		return walk_text(src, S, true, opts, h, regs, allocator, &ctx, on)
 	}
 	return walk_text(src, S, false, opts, h, regs, allocator, &ctx, on)
@@ -374,8 +374,7 @@ depth_limit :: #force_inline proc "contextless" (opts: Options) -> u64 {
 }
 
 // Walks `src` and returns the end of its root value or the error, and whether the walk used a rule of
-// `opts.tolerate`. Only white space, and comments in a spec that has them, may follow the value. A walk without `LAX`
-// uses no tolerance.
+// `opts.tolerate`. Only white space, and comments in a spec that has them, may follow the value.
 @(private)
 walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	p := raw_data(src)
