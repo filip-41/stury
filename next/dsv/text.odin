@@ -24,28 +24,71 @@ text_start :: #force_inline proc "contextless" (src: []u8, lo: u64) -> u64 {
 // starts at or after `start`.
 @(private)
 record_start :: #force_inline proc "contextless" (src: []u8, start: int, comment: u8) -> int {
-	i := start
-	for i < len(src) {
+	at := Frame_At{i = start}
+	record_start_on(src, &at, comment, false)
+	return at.i
+}
+
+// Where a framing of a text in pieces stopped at a window's end, for the next window to go on from with no byte read
+// again: the next byte, and what the bytes before it left open.
+@(private)
+Frame_At :: struct {
+	i:       int,
+	comment: bool, // inside a comment line
+	quoted:  bool, // inside a quoted cell
+	first:   bool, // at a cell's first byte
+}
+
+// `record_start` from `at`, which it leaves at the record's first byte, and true, or at the text's end. With `MORE` the
+// text goes on past `src`, and a byte whose reading needs the next is left for it: a CR at the end, which may open a
+// CR LF, and the rest of a comment line the end cut, which `at.comment` keeps.
+@(private)
+record_start_on :: #force_inline proc "contextless" (src: []u8, at: ^Frame_At, comment: u8, $MORE: bool) -> bool {
+	i := at.i
+	n := len(src)
+	if at.comment {
+		for i < n && src[i] != '\n' {
+			i += 1
+		}
+		if i == n {
+			at.i = i
+			return false
+		}
+		i += 1
+		at.comment = false
+	}
+	for i < n {
 		if src[i] == '\n' {
 			i += 1
 			continue
 		}
-		if src[i] == '\r' && i + 1 < len(src) && src[i + 1] == '\n' {
-			i += 2
-			continue
+		if src[i] == '\r' {
+			if i + 1 < n {
+				if src[i + 1] == '\n' {
+					i += 2
+					continue
+				}
+			} else if MORE {
+				at.i = i
+				return false
+			}
 		}
 		if comment != 0 && src[i] == comment {
-			for i < len(src) && src[i] != '\n' {
+			for i < n && src[i] != '\n' {
 				i += 1
 			}
-			if i < len(src) {
+			if i < n {
 				i += 1
+			} else if MORE {
+				at.i, at.comment = i, true
+				return false
 			}
 			continue
 		}
 		break
 	}
-	return i
+	at.i = i
+	return i < n
 }
 
 // The cell count of the text's first record at or after `start`, 0 for a text with none. A key buffer sized from it
@@ -77,20 +120,34 @@ Record_Scan :: struct {
 @(private, cold, require_results)
 scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int, $S: Spec, delim: u8) -> Record_Scan {
 	s := Record_Scan{cells = 1, fault_at = -1}
-	i := start
+	at := Frame_At{i = start, first = true}
+	scan_record_on(src, start, width, S, delim, &s, &at, false)
+	return s
+}
+
+// `scan_record` of the record at `start` from `at`, which goes on filling `s`, and true once the record has ended. With
+// `MORE` the text goes on past `src`, and at its end `at` keeps where the scan stopped, before a byte whose reading
+// needs the next: a quote inside a quoted cell, which may be doubled, a CR, which may open a CR LF, and a TSV backslash.
+@(private)
+scan_record_on :: #force_inline proc "contextless" (src: []u8, start, width: int, $S: Spec, delim: u8, s: ^Record_Scan, at: ^Frame_At, $MORE: bool) -> bool {
+	i := at.i
 	end := len(src)
-	quoted, first := false, true
+	quoted, first := at.quoted, at.first
 	when S != .Csv {
 		_, _ = quoted, first
 	}
-	for i < end {
+	scan: for i < end {
 		c := src[i]
 		when S == .Csv {
 			if quoted {
 				if c == '"' {
-					if i + 1 < end && src[i + 1] == '"' {
-						i += 2
-						continue
+					if i + 1 < end {
+						if src[i + 1] == '"' {
+							i += 2
+							continue
+						}
+					} else if MORE {
+						break scan
 					}
 					quoted = false
 				}
@@ -100,6 +157,11 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 		}
 		when S == .Tsv {
 			if c == '\\' {
+				when MORE {
+					if i + 1 == end {
+						break scan
+					}
+				}
 				i += 2
 				continue
 			}
@@ -111,11 +173,17 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 				hi = i - 1
 			}
 			s.line_end, s.line_end_lo = i, hi
-			return s
+			at.i = i
+			return true
 		case '\r':
-			if i + 1 < end && src[i + 1] == '\n' {
-				s.line_end, s.line_end_lo = i + 1, i
-				return s
+			if i + 1 < end {
+				if src[i + 1] == '\n' {
+					s.line_end, s.line_end_lo = i + 1, i
+					at.i = i + 1
+					return true
+				}
+			} else if MORE {
+				break scan
 			}
 		case delim:
 			if s.cells == width && s.fault_at < 0 {
@@ -131,8 +199,14 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 		}
 		i += 1
 	}
-	s.line_end, s.line_end_lo = end, end
-	return s
+	when MORE {
+		at.i, at.quoted, at.first = i, quoted, first
+		return false
+	} else {
+		s.line_end, s.line_end_lo = end, end
+		at.i = end
+		return true
+	}
 }
 
 // The index of the first backslash in the block at `pos` that opens no escape, or -1. `bs` has a bit at each backslash

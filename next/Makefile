@@ -14,7 +14,7 @@ LINT_FLAGS := $(COLLECTION) $(VET) -warnings-as-errors -terse-errors -max-error-
 # `TEST_TIMEOUT_SECONDS` fails, named, instead of holding the runner.
 TEST_DEFINES ?=
 # A build on a runner's threads reads texts of any length in parts, so the tests' short texts take that route too.
-TEST_BASE_FLAGS := $(COLLECTION) -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:JSON_PARALLEL_FROM=0 $(TEST_DEFINES)
+TEST_BASE_FLAGS := $(COLLECTION) -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:BUILD_PARALLEL_FROM=0 $(TEST_DEFINES)
 TEST_FLAGS := $(TEST_BASE_FLAGS) -define:TEST_TIMEOUT_SECONDS=120
 
 

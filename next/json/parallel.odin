@@ -18,17 +18,9 @@ import "stury:lib/ops/build"
 // A reading agrees with the single walk over any text that walk accepts. So when the single walk accepts the text up
 // to a seam, the walk from that seam continues it exactly, and the first part in text order whose walk does not reach
 // the next seam gives the error the single walk would give. A text whose readings cannot be joined, a text that nests
-// past `SEAM_LEVELS`, a build that is refused memory and a build under `Budget.memory` of a text with comments or with
-// a duplicate policy past `.Default` are built on one thread, which gives the answer.
-
-// The shortest text built on a runner's threads. A shorter text is built sooner on one thread. A chunk is at least a
-// sixteenth of this length.
-@(private)
-PARALLEL_FROM :: #config(JSON_PARALLEL_FROM, 1 << 19)
-
-// The chunks cut per thread, so that a thread that starts late or a slow chunk leaves no thread idle long.
-@(private)
-CHUNKS_PER_THREAD :: 4
+// past `SEAM_LEVELS` and a build that is refused memory are built on one thread, which gives the answer. A build under
+// `Budget.memory` counts the blocks its parts take, which hold the facts and the scratch of a duplicate policy as the
+// plan counted them, so it may build a text a build on one thread is refused.
 
 // The container levels a part's walk holds in its frame, so a part's walk allocates nothing. A text that nests deeper
 // is built on one thread.
@@ -93,34 +85,11 @@ Lex_Chunk :: struct {
 @(private)
 CUT_LINE :: 4096
 
-// The text a part's walk reads, from a seam, or the text's start, to the next seam, or the text's end.
-@(private)
-Seam_Part :: struct {
-	from, to:  int,
-	opens:     []u8, // the brackets open at `from`, outermost first
-	levels:    int, // the most containers open at once in it
-	comments:  int,
-	nodes:     int, // the nodes its walk stores, or more
-	close:     u64, // where its walk ended
-	err:       tape.Error,
-	tolerated: bool,
-}
-
 @(private)
 Lex_Job :: struct {
 	src:    []u8,
 	chunks: []Lex_Chunk,
 	next:   int,
-}
-
-@(private)
-Part_Job :: struct {
-	src:      []u8,
-	parts:    []Seam_Part,
-	segs:     []build.Segment,
-	opts:     Options,
-	counting: bool,
-	next:     int,
 }
 
 // `build` on the threads of `opts.runner`.
@@ -160,7 +129,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 	m: hook.Memory_Budget
 	allocator := build.read_allocator(&m, opts, caller)
 	start := bom_length(src)
-	want := min((opts.runner.threads + 1) * CHUNKS_PER_THREAD, (len(src) - start) / max(PARALLEL_FROM / 16, 1))
+	want := build.chunk_count(opts.runner, len(src) - start)
 	if want < 2 {
 		return {}, nil, false
 	}
@@ -196,151 +165,35 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 	if !planned || len(parts) < 2 {
 		return {}, nil, false
 	}
-	segs, serr := make([]build.Segment, len(parts), allocator)
-	if serr != nil || raw_data(segs) == nil {
-		return {}, nil, false
-	}
-	defer {
-		for &s in segs {
-			build.segment_free(&s)
-		}
-		delete(segs, allocator)
-	}
-	levels := 0
-	for p in parts {
-		levels += p.levels + 1
-	}
-	frames, ferr := make([]u64, levels, allocator)
-	if ferr != nil || levels > 0 && raw_data(frames) == nil {
-		return {}, nil, false
-	}
-	defer delete(frames, allocator)
-	// Each part's walk stores its nodes where a single walk would, after the nodes the parts before it plan. The
-	// nodes for the containers open at its seam go after the nodes of all parts.
-	total, scratch, comments := 0, 0, 0
-	for p, k in parts {
-		total += max(p.nodes, 0)
-		scratch += len(p.opens) + 1 if k > 0 else 0
-		comments += p.comments
-	}
-	// Under a memory budget the facts and the scratch of a duplicate policy take blocks that one thread sizes as it
-	// reads and the parts as the plan counted, so a build that needs either is made on one thread.
-	if total > build.node_most(max(u64), opts) || opts.budget.memory != 0 && (comments > 0 || opts.dups != .Default) {
-		return {}, nil, false
-	}
-	room, rerr := non_zero_make([]tape.Node, total + 1 + scratch, allocator)
-	if rerr != nil || raw_data(room) == nil {
-		return {}, nil, false
-	}
-	joined: bool
-	defer if !joined {
-		delete(room, allocator)
-	}
-	facts, ferr2 := non_zero_make([]tape.Fact, comments, allocator)
-	if ferr2 != nil || comments > 0 && raw_data(facts) == nil {
-		return {}, nil, false
-	}
-	defer if !joined {
-		delete(facts, allocator)
-	}
-	seams, serr2 := non_zero_make([]tape.Node_Index, scratch, allocator)
-	if serr2 != nil || scratch > 0 && raw_data(seams) == nil {
-		return {}, nil, false
-	}
-	defer delete(seams, allocator)
-	levels = 0
-	first, fact, seam := 0, 0, 0
-	scratch = total + 1
-	kinds: [SEAM_LEVELS]tape.Kind
-	for p, k in parts {
-		for c, i in p.opens {
-			kinds[i] = .Object if c == '{' else .Array
-		}
-		nodes := max(p.nodes, 0)
-		segs[k] = build.segment_start(src, &FORMATS[S], room, first, nodes, scratch, kinds[:len(p.opens)], facts[fact:][:p.comments], frames[levels:][:p.levels + 1], seams[seam:][:len(p.opens)], allocator)
-		levels += p.levels + 1
-		first += nodes
-		fact += p.comments
-		seam += len(p.opens)
-		scratch += len(p.opens) + 1 if k > 0 else 0
-		if segs[k].b.err != nil {
-			return {}, nil, false
-		}
-	}
-	walk :: proc(arg: rawptr) {
-		j := (^Part_Job)(arg)
+	walk :: proc(src: []u8, parts: []build.Part, k: int, s: ^build.Segment, opts: Options, data: rawptr) {
 		ctx := context
-		for {
-			k := intrinsics.atomic_add(&j.next, 1)
-			if k >= len(j.parts) {
-				return
-			}
-			p, s := &j.parts[k], &j.segs[k]
-			on :: build.builder_hook_facts when S != .Json else build.builder_hook
-			if k == 0 {
-				p.close, p.err, p.tolerated = walk_text(j.src[:p.to], S, false, j.opts, &s.b, &s.regs, {}, &ctx, on)
-			} else {
-				r, took := walk_seam(j.src[:p.to], p.from, p.opens, S, j.opts.tolerate, build.read_depth(j.opts), &s.b, &s.regs, &ctx, on)
-				p.close, p.err, _ = hook.walk_error(r, &RULES)
-				p.tolerated = took
-			}
-			if j.counting {
-				for n in build.segment_nodes(s) {
-					s.containers += int(n.kind == .Array || n.kind == .Object)
-				}
-			}
+		p := &parts[k]
+		on :: build.builder_hook_facts when S != .Json else build.builder_hook
+		if k == 0 {
+			p.close, p.err, p.tolerated = walk_text(src[:p.to], S, false, opts, &s.b, &s.regs, {}, &ctx, on)
+		} else {
+			r, took := walk_seam(src[:p.to], p.from, p.opens, S, opts.tolerate, build.read_depth(opts), &s.b, &s.regs, &ctx, on)
+			p.close, p.err, _ = hook.walk_error(r, &RULES)
+			p.tolerated = took
 		}
-	}
-	pj := Part_Job{src = src, parts = parts, segs = segs, opts = opts, counting = opts.budget.steps != 0}
-	pj.opts.budget.steps = 0
-	hook.fan(opts.runner, walk, &pj)
-	// The first part in text order that does not reach the next seam gives the build's error, unless a container past
-	// `Budget.steps` comes first.
-	containers := 0
-	for p, k in parts {
-		s := &segs[k]
-		if opts.budget.steps != 0 && u64(containers + s.containers) > opts.budget.steps {
-			for n in build.segment_nodes(s) {
-				containers += int(n.kind == .Array || n.kind == .Object)
-				if u64(containers) > opts.budget.steps {
-					return {}, tape.Exceeded{at = n.lo + 1, kind = .Steps}, true
-				}
-			}
-		}
-		if s.b.err != nil {
-			return {}, nil, false
-		}
+		// A part before the last ends inside the containers open at the next seam, which its walk reads as a text cut
+		// short there.
 		if k < len(parts) - 1 {
 			if f, ok := p.err.(tape.Fault); ok && f.kind == .Truncated && f.at == u64(p.to) {
-				containers += s.containers
-				continue
+				p.err = nil
+			} else if p.err == nil {
+				p.astray = true
 			}
-		} else if p.err == nil {
-			break
-		}
-		if _, refused := p.err.(runtime.Allocator_Error); refused || p.err == nil {
-			return {}, nil, false
-		}
-		return {}, p.err, true
-	}
-	jerr: runtime.Allocator_Error
-	doc, joined, jerr = build.segments_join(segs, room, facts, parts[len(parts) - 1].close, opts.runner, allocator)
-	if jerr != nil || !joined {
-		return {}, nil, false
-	}
-	for p in parts {
-		if p.tolerated {
-			doc.flags += {.Tolerated}
 		}
 	}
-	if e := build.segments_dups(&doc, segs, opts.dups, &RULES, opts.runner); e != nil {
-		if _, refused := e.(runtime.Allocator_Error); refused {
-			return {}, nil, false
-		}
-		return {}, e, true
+	finish :: proc(doc: ^tape.Document, segs: []build.Segment, opts: Options, data: rawptr) -> tape.Error {
+		return build.segments_dups(doc, segs, opts.dups, &RULES, opts.runner)
 	}
-	doc.allocator = caller
-	return doc, nil, true
+	doc, err, built = build.parts_build(src, &FORMATS[S], parts, opts, 1, 0, allocator, walk, finish, nil)
+	if built && err == nil {
+		doc.allocator = caller
+	}
+	return
 }
 
 // Cuts `src` from `start` into `len(chunks)` chunks of about equal size. A chunk never starts at a byte that follows a
@@ -722,14 +575,14 @@ seam_at :: #force_inline proc "contextless" (src: []u8, lo, base, k: int, run: ^
 	}
 }
 
-// Plans the parts of the text from the chunks' readings, picked in text order. The brackets open at each part's seam
-// are kept in `opens`. `ok` is false when the readings cannot be joined or the text nests past `SEAM_LEVELS`, counting
+// Plans the parts of the text from the chunks' readings, picked in text order. The containers open at each part's
+// seam are kept in `opens`. `ok` is false when the readings cannot be joined or the text nests past `SEAM_LEVELS`, counting
 // levels up to `limit`.
 @(private)
-seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocator: runtime.Allocator) -> (parts: []Seam_Part, opens: []u8, ok: bool) {
-	list: [dynamic]Seam_Part
+seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocator: runtime.Allocator) -> (parts: []build.Part, opens: []tape.Kind, ok: bool) {
+	list: [dynamic]build.Part
 	list.allocator = allocator
-	held: [dynamic]u8
+	held: [dynamic]tape.Kind
 	held.allocator = allocator
 	open: [dynamic]u8
 	open.allocator = allocator
@@ -738,7 +591,7 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 		delete(list)
 		delete(held)
 	}
-	apply :: proc(open: ^[dynamic]u8, p: ^Lex_Profile, limit: u64, part: ^Seam_Part) -> bool {
+	apply :: proc(open: ^[dynamic]u8, p: ^Lex_Profile, limit: u64, part: ^build.Part) -> bool {
 		levels := min(len(open) + p.peak, int(limit))
 		if p.pops > len(open) || p.n > SEAM_OPENS || levels > SEAM_LEVELS {
 			return false
@@ -750,7 +603,7 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 		_, err := append(open, ..p.opens[:p.n])
 		return err == nil
 	}
-	if _, err := append(&list, Seam_Part{nodes = 1}); err != nil {
+	if _, err := append(&list, build.Part{nodes = 1}); err != nil {
 		return
 	}
 	state := Lex.Out
@@ -772,12 +625,14 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 					return
 				}
 				list[len(list) - 1].to = r.seam
-				part := Seam_Part{from = r.seam, opens = transmute([]u8)runtime.Raw_Slice{data = rawptr(uintptr(len(held))), len = len(open)}, levels = len(open)}
+				part := build.Part{from = r.seam, opens = transmute([]tape.Kind)runtime.Raw_Slice{data = rawptr(uintptr(len(held))), len = len(open)}, levels = len(open)}
 				if _, err := append(&list, part); err != nil {
 					return
 				}
-				if _, err := append(&held, ..open[:]); err != nil {
-					return
+				for c in open {
+					if _, err := append(&held, tape.Kind.Object if c == '{' else .Array); err != nil {
+						return
+					}
 				}
 			}
 			if !apply(&open, &r.post, limit, &list[len(list) - 1]) {
@@ -797,13 +652,13 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 	return list[:], held[:], true
 }
 
-// Walks `src` from `from`, one past a comma inside the containers whose open brackets `opens` holds, outermost first.
+// Walks `src` from `from`, one past a comma inside the containers of `opens`, outermost first.
 // Returns the walk's result and whether it used a rule of `tolerate`. Hook `h`'s registers `regs` hold those
 // containers, and `ctx` is the context for the hook's calls. The levels stay in the walk's frame and the hook's,
 // because no part nests past either, so a deeper text is refused memory. A text cut at the end of `src` ends there as
 // `Truncated`.
 @(private)
-walk_seam :: proc "contextless" (src: []u8, from: int, opens: []u8, $S: Spec, tolerate: tape.Tolerances, limit: u64, h: ^$H, regs: ^hook.Regs, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (hook.Walk_Result, bool) {
+walk_seam :: proc "contextless" (src: []u8, from: int, opens: []tape.Kind, $S: Spec, tolerate: tape.Tolerances, limit: u64, h: ^$H, regs: ^hook.Regs, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (hook.Walk_Result, bool) {
 	hook.check(H)
 	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
 	#assert(.Walk not_in C)
@@ -813,10 +668,10 @@ walk_seam :: proc "contextless" (src: []u8, from: int, opens: []u8, $S: Spec, to
 	w.depth = min(w.limit, u64(hook.levels_held(h)))
 	stack[0] = u32(']') | u32(GAP_OFF) << 8
 	for i in 1 ..< len(opens) {
-		stack[i] = u32(']') | u32(opens[i - 1] == '{') << 5 | u32(GAP_OFF) << 8
+		stack[i] = u32(']') | u32(opens[i - 1] == .Object) << 5 | u32(GAP_OFF) << 8
 	}
 	w.gap_lo = GAP_UNLEARNABLE
-	d := u64(len(opens)) << 1 | u64(opens[len(opens) - 1] == '{')
+	d := u64(len(opens)) << 1 | u64(opens[len(opens) - 1] == .Object)
 	// An object matches its members against its own row, live from its first member, because the seam's members
 	// continue the shape the part before it read. An array gives each of its objects a row, as the root does.
 	m := u64(GAP_START)

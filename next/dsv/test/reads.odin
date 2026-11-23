@@ -297,12 +297,12 @@ reads_refuse_bad_options :: proc(t: ^testing.T) {
 		r := dsv.records_open(src, .Lines, c.spec, opts)
 		testing.expectf(t, r.err == want, "%v records: %v", c, r.err)
 	}
-	p := tape.Pieces{allocator = context.allocator}
-	testing.expect_value(t, dsv.validate(src, .Csv, {pieces = &p}), tape.Error(tape.Bad_Option{"pieces"}))
+	// A runner is no option a read refuses: a build may run on its threads, and the other reads run on the caller's.
 	runner: tape.Runner
-	testing.expect_value(t, dsv.validate(src, .Csv, {runner = &runner}), tape.Error(tape.Bad_Option{"runner"}))
-	_, err := dsv.build(src, .Csv, {runner = &runner})
-	testing.expect_value(t, err, tape.Error(tape.Bad_Option{"runner"}))
+	testing.expect_value(t, dsv.validate(src, .Csv, {runner = &runner}), nil)
+	doc, err := dsv.build(src, .Csv, {runner = &runner})
+	testing.expect_value(t, err, nil)
+	dsv.destroy(&doc)
 }
 
 // A depth budget of one level holds the text but no record.

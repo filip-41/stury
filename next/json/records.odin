@@ -19,6 +19,11 @@ Records :: struct {
 	// What the walk learned, kept from record to record. A walk of any spec and hook is laid out as this one, or as its
 	// front when it has no `LAX`.
 	walk:          Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS),
+	// In a text in pieces, the first byte of the window the gaps were last checked against, and where the framing
+	// stopped at the last window's end: `open` once the record at `pos` has begun, its line end looked for up to `seen`.
+	window:        u64,
+	seen:          u64,
+	open:          bool,
 }
 
 #assert(size_of(Walk(.Json5, build.Scanner, false, build.SCANNER_CAPS)) <= size_of(Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS)))
@@ -31,14 +36,19 @@ RECORD_AHEAD :: 256
 
 // Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. The budget's limits hold
 // for each record, but `Budget.steps` under `.Elements`, which counts the containers of the whole text. A text in
-// pieces, or options of another format family, ends the records with `tape.Bad_Option` before any is read.
+// pieces framed other than as `.Lines`, or options of another format family, ends the records with `tape.Bad_Option`
+// before any is read. A text in pieces opens with its first window, as `tape.Records` says.
 records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json, opts := Options{}) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("json: spec out of range")
 	}
 	r.src, r.framing, r.spec, r.opts, r.pos = src, framing, spec, opts, u64(bom_length(src))
 	if opts.pieces != nil {
-		r.err, r.at = tape.Bad_Option{"pieces"}, .Done
+		// The byte order mark is judged once the first record is framed, when the window may hold it.
+		r.src, r.pos = tape.piece_src(src, opts.pieces.from), 0
+		if framing != .Lines {
+			r.err, r.at = tape.Bad_Option{"pieces"}, .Done
+		}
 	}
 	if e := tape.options_refused(&FORMATS[spec], opts); e != nil {
 		r.err, r.at = e, .Done
@@ -207,6 +217,11 @@ record_frame :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut: u64, 
 		return
 	}
 	n := u64(len(r.src))
+	when LAX {
+		if r.opts.pieces != nil {
+			return record_frame_window(r, w)
+		}
+	}
 	if r.framing == .Lines {
 		base := raw_data(r.src)
 		lo = u64(intrinsics.ptr_sub(kernel.skip_ws(base[r.pos:], base[n:]), base))
@@ -240,6 +255,55 @@ record_frame :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut: u64, 
 		records_refuse(r, nil)
 	}
 	return
+}
+
+// `record_frame` under `.Lines` in a text in pieces: a record whose line end the window does not hold ends the batch,
+// and its framing goes on in the next window where this one stopped. The record's walk reads up to its window's end, at
+// most `RECORD_AHEAD` bytes past its line, where a walk of the whole text reads that far, which judges the record alike,
+// as a walk that reads past the line walks the record again alone.
+@(private)
+record_frame_window :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut: u64, ok: bool) {
+	p := r.opts.pieces
+	n := u64(len(r.src))
+	more := !p.last
+	if p.from != r.window {
+		gaps_drop(&w.gaps, p.from)
+		r.window = p.from
+	}
+	if r.at == .Start {
+		if more && piece_bom_open(r.src) {
+			return
+		}
+		r.pos, r.at = u64(bom_length(r.src)), .Open
+	}
+	if !r.open {
+		base := raw_data(r.src)
+		from := r.pos
+		r.pos = u64(intrinsics.ptr_sub(kernel.skip_ws(base[r.pos:], base[n:]), base))
+		tape.framed_read(&r.framed, from, r.pos)
+		if r.pos == n {
+			if !more {
+				r.at = .Done
+			}
+			return
+		}
+		r.open, r.seen = true, r.pos
+	}
+	cut = n
+	if i := kernel.index_byte(r.src[r.seen:], '\n'); i >= 0 {
+		cut = r.seen + u64(i)
+	} else if more {
+		tape.framed_read(&r.framed, r.seen, n)
+		r.seen = n
+		return
+	}
+	tape.framed_read(&r.framed, r.seen, cut)
+	lo = r.pos
+	r.open, r.pos = false, min(cut + 1, n)
+	if r.src[cut - 1] == '\r' {
+		cut -= 1
+	}
+	return lo, cut, true
 }
 
 @(private)

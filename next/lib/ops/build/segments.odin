@@ -105,8 +105,9 @@ Open_Across :: struct {
 // moves down to follow the one before it. A pass over the containers open at each seam then gives those that cross it
 // their sizes and counts, and the threads of `runner` give each fact its node. `joined` is false when a segment does
 // not start inside the containers the one before it leaves open, which a read of the text in one walk would have
-// found. When joined the document holds the rooms, else the rooms and the segments are left to the caller.
-segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, root_close: u64, runner: ^tape.Runner, allocator: runtime.Allocator) -> (doc: tape.Document, joined: bool, err: runtime.Allocator_Error) {
+// found. When joined the document holds the rooms, and its block of nodes holds `tail` nodes more past them, else the
+// rooms and the segments are left to the caller.
+segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, root_close: u64, tail: int, runner: ^tape.Runner, allocator: runtime.Allocator) -> (doc: tape.Document, joined: bool, err: runtime.Allocator_Error) {
 	at, fact := 0, 0
 	for &s in segs {
 		own := segment_nodes(&s)
@@ -216,11 +217,11 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 		delete(counts)
 	}
 	// The document keeps the room whole, since `destroy` frees it as one block from its start, unless the unused part
-	// exceeds a quarter of `total`. Then the room is resized to `total` nodes, which moves them to an exact block when
-	// the allocator cannot shrink in place. A failed resize leaves the room whole.
+	// past `tail` exceeds a quarter of what it keeps. Then the room is resized to `total + tail` nodes, which moves them
+	// to an exact block when the allocator cannot shrink in place. A failed resize leaves the room whole.
 	doc.nodes = room[:total]
-	if len(room) - total > total / 4 {
-		if raw, rerr := runtime.non_zero_mem_resize(raw_data(room), len(room) * size_of(tape.Node), total * size_of(tape.Node), align_of(tape.Node), allocator); rerr == nil {
+	if keep := total + tail; len(room) - keep > keep / 4 {
+		if raw, rerr := runtime.non_zero_mem_resize(raw_data(room), len(room) * size_of(tape.Node), keep * size_of(tape.Node), align_of(tape.Node), allocator); rerr == nil {
 			doc.nodes = ([^]tape.Node)(raw_data(raw))[:total]
 		}
 	}

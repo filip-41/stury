@@ -5,7 +5,9 @@ package tape
 Budget :: struct {
 	depth:  u32, // deepest nesting
 	nodes:  u32, // most nodes a build keeps
-	memory: u64, // bytes, counted per allocator block
+	// Bytes, counted per allocator block. A build with `Options.runner` counts the blocks of its parts, which may fit a
+	// budget a build on one thread is refused.
+	memory: u64,
 	steps:  u64, // containers a walk opens, regex backtracks, schema branches, evaluator calls and loop turns
 }
 

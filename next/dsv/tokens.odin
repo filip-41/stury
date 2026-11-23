@@ -93,7 +93,7 @@ give_kept :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), hs: ^
 // judged with no tokens.
 @(private)
 open_text :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, opts: Pass_Options, hs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) {
-	if w.record {
+	if w.opened {
 		return 0, false
 	}
 	if opts.comment != 0 && !opts.no_header {
@@ -101,10 +101,16 @@ open_text :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: 
 			return
 		}
 	}
+	if !level_room(w, hs, lo) {
+		return hook.walk_result(lo, hook.WALK_NO_MEMORY), true
+	}
 	a := emit(w, hs, lo, 0, .Array, .Value, 0, on)
 	switch a {
 	case .Next, .Grow:
 	case .Skip, .Rest:
+		if piece_rests(w, a == .Skip) {
+			return 0, false
+		}
 		r = judge_from(w, src, lo, opts, 0)
 		if u8(r) == 0 && a == .Skip && emit(w, hs, u64(len(src)), 0, .End, .Value, 0, on) == .Stop {
 			r = stopped(u64(len(src)), 0)
@@ -121,11 +127,38 @@ open_text :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: 
 	return 0, false
 }
 
+// Grows the levels of a hook with `.Levels` to hold the level a container opened at `at` takes. False when the growth
+// is refused.
+@(private)
+level_room :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), hs: ^hook.Regs, at: u64) -> bool {
+	when .Levels in C {
+		if hook.levels_held(w.h) <= int(hs.c) {
+			grown := hs^
+			ok := hook.levels_grow(w.h, int(hs.c) + 1, &grown, at)
+			hs^ = grown
+			if !ok {
+				return false
+			}
+			when .Rooms in C {
+				// Growing the hook's levels may have grown its room.
+				w.rooms = hook.rooms_end(w.h)
+			}
+		}
+	}
+	return true
+}
+
 // Gives the text's `End` at `n`, after the comment lines past its last record as its foot, through the hook's `Keeps`
 // first for a text it keeps.
 @(private)
 close_text :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, comment: u8, n: int, hs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) {
-	if w.record {
+	if w.unclosed {
+		return 0, false
+	}
+	if rested, skip_end := piece_rested(w); rested {
+		if skip_end && emit(w, hs, u64(n), 0, .End, .Value, 0, on) == .Stop {
+			return stopped(u64(n), 0), true
+		}
 		return 0, false
 	}
 	if w.held != 0 {
@@ -190,25 +223,21 @@ give_head_comments :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX
 // given to the inner hook of its `Keeps`.
 @(private)
 open_record :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, opts: Pass_Options, hs: ^hook.Regs, rec_lo, width: int, muted: ^bool, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) {
+	piece_count_record(w)
+	if rested, _ := piece_rested(w); rested {
+		muted^, w.held = true, 0
+		return 0, false
+	}
 	if opts.limit < 2 {
 		return hook.walk_result(u64(rec_lo), hook.WALK_TOO_DEEP), true
 	}
 	when .Levels in C {
 		// The first record opens the walk's deepest level.
 		if !w.leveled {
-			if hook.levels_held(w.h) <= int(hs.c) {
-				grown := hs^
-				ok := hook.levels_grow(w.h, int(hs.c) + 1, &grown, u64(rec_lo))
-				hs^ = grown
-				if !ok {
-					return hook.walk_result(u64(rec_lo), hook.WALK_NO_MEMORY), true
-				}
+			if !level_room(w, hs, u64(rec_lo)) {
+				return hook.walk_result(u64(rec_lo), hook.WALK_NO_MEMORY), true
 			}
 			w.leveled = true
-			when .Rooms in C {
-				// Growing the hook's levels may have grown its room.
-				w.rooms = hook.rooms_end(w.h)
-			}
 		}
 	}
 	if w.held != 0 {
@@ -226,6 +255,10 @@ open_record :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src
 	case .Skip:
 		muted^ = true
 	case .Rest:
+		if piece_rests(w, false) {
+			muted^ = true
+			return 0, false
+		}
 		return judge_from(w, src, u64(rec_lo), opts, width), true
 	case .Keep, .Keep_Stubs:
 		w.keep = 2 if a == .Keep_Stubs else 1
@@ -242,6 +275,9 @@ open_record :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src
 // it keeps.
 @(private)
 close_record :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), hs: ^hook.Regs, lo: int, n: u32, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> bool {
+	if rested, _ := piece_rested(w); rested {
+		return true
+	}
 	when .Keeps in C {
 		if w.keep != 0 && !w.keep_root {
 			if give_kept(w, hs, {u64(lo), n, .End, .Value, 0}) == .Stop {
@@ -376,13 +412,21 @@ put_value :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), opts:
 	return emit(w, hs, t.lo, t.n, t.kind, .Value, t.spelling, on), u64(field_lo), u32(hi - field_lo)
 }
 
-// Stores the header cell from `field_lo` to `hi` at `keys[cells]` as a key token, when `cells` is below `len(keys)`.
-// A buffer sized from `header_cells` holds every header cell.
+// Stores the header cell from `field_lo` to `hi` at `w.keys[cells]` as a key token, when `cells` is below
+// `len(w.keys)`. A buffer sized from `header_cells` holds every header cell. A walk in pieces appends it to the read's
+// list of keys instead, false when the list cannot grow.
 @(private)
-put_header_key :: #force_inline proc "contextless" ($S: Spec, keys: []tape.Token, cells: int, base: [^]u8, field_lo, hi: int, esc, lax: bool) {
-	if cells < len(keys) {
-		keys[cells] = cell_token(S, base, field_lo, hi, esc, lax, .Key, false, true)
+put_header_key :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), cells: int, base: [^]u8, field_lo, hi: int, esc, lax: bool) -> bool {
+	t := cell_token(S, base, field_lo, hi, esc, lax, .Key, false, true)
+	when LAX {
+		if w.piece[0] != nil {
+			return piece_put_key(w, t)
+		}
 	}
+	if cells < len(w.keys) {
+		w.keys[cells] = t
+	}
+	return true
 }
 
 // The bits of a block mask for the byte offsets `[lo, hi)`, with `lo` and `hi` from 0 to 64. Returns 0 when `lo >= hi`.
@@ -432,15 +476,19 @@ key_at :: #force_inline proc "contextless" (keys: []tape.Token, i: int) -> tape.
 }
 
 // The `Key` token of column `c`: its header cell, or past the header's last, which only `.Ragged` reads, a key named by
-// its 1-based position. That key holds no bytes: `n` is the position, which its decode writes out, and `lo` the
-// header's first byte, so the span stays inside the text, which holds the header's line and the `c` delimiters before
-// the cell.
+// its 1-based position, its `lo`, which holds no bytes of the text.
 @(private)
 column_key :: #force_inline proc "contextless" (keys: []tape.Token, c: int) -> tape.Token {
 	if c < len(keys) {
 		return key_at(keys, c)
 	}
-	return {keys[0].lo if len(keys) > 0 else 0, u32(c + 1), .String, .Key, tape.SPELLING_DECODE | SPELLING_COLUMN}
+	return placed_key(c)
+}
+
+// The key of column `c` past the header's last, made out of line, as only `.Ragged` reads one.
+@(private, cold)
+placed_key :: #force_no_inline proc "contextless" (c: int) -> tape.Token {
+	return {u64(c + 1), 0, .String, .Key, tape.SPELLING_DECODE | tape.SPELLING_PLACED}
 }
 
 // The bit of column `c` in a pass's `columns`: its own below 63, and bit 63 for every column from 63 on.
@@ -659,7 +707,9 @@ read_tokens :: #force_inline proc "contextless" ($LAX_UTF8: bool, comments: bool
 					esc = esc_ends & (u64(1) << kk) != 0
 					lax = lax_ends & (u64(1) << kk) != 0
 				}
-				put_header_key(S, w.keys, cells, base, field_lo, at, esc, lax)
+				if !put_header_key(w, cells, base, field_lo, at, esc, lax) {
+					return hook.walk_result(u64(at), hook.WALK_NO_MEMORY), true
+				}
 				cells += 1
 				field_lo = at + 1
 			}
@@ -749,7 +799,9 @@ read_tokens :: #force_inline proc "contextless" ($LAX_UTF8: bool, comments: bool
 			lax = lax_ends & (u64(1) << k) != 0
 		}
 		if header {
-			put_header_key(S, w.keys, cells, base, field_lo, hi, esc, lax)
+			if !put_header_key(w, cells, base, field_lo, hi, esc, lax) {
+				return hook.walk_result(u64(hi), hook.WALK_NO_MEMORY), true
+			}
 		} else if !muted {
 			a, lo, n := put_cell(w, opts, hs, base, cells, field_lo, hi, esc, lax, on)
 			if a == .Stop {
@@ -816,7 +868,9 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)
 	hi := w.n
 	esc := w.field_esc
 	if w.in_header {
-		put_header_key(S, w.keys, w.cells, base, w.field_lo, hi, esc, w.open_ill)
+		if !put_header_key(w, w.cells, base, w.field_lo, hi, esc, w.open_ill) {
+			return hook.walk_result(u64(hi), hook.WALK_NO_MEMORY), true
+		}
 		_, _ = record_width(w, w.cells + 1, &w.width)
 		return 0, false
 	}

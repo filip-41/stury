@@ -34,7 +34,8 @@ Options :: struct {
 	// A text that arrives in pieces, of which the read takes the next window, nil for a whole text.
 	pieces:   ^Pieces,
 	// Threads a build of a whole text may run on beside the caller's, nil for the caller's alone. The document is the
-	// one a build on one thread gives, and so is its error.
+	// one a build on one thread gives, and so is its error, except under `Budget.memory`, which the parts count for
+	// their own blocks.
 	runner:   ^Runner,
 	// The options only one format family has, which every other family's reads refuse as `Bad_Option{"format"}`. Nil
 	// takes the family's defaults.
@@ -65,7 +66,7 @@ options_refused :: #force_inline proc "contextless" (f: ^Format, opts: Options) 
 	return nil if family == f.options else Bad_Option{"format"}
 }
 
-// The options of a delimited text. They change what the reads give, so a document records none of them.
+// The options of a delimited text. A delimited document keeps those it was built with in its `Tabular_Ext`.
 Dsv_Options :: struct {
 	delimiter: u8, // the byte between cells, 0 for the spec's own
 	comment:   u8, // a line whose first byte is this is no record, 0 for none

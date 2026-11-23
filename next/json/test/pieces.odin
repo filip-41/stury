@@ -799,3 +799,79 @@ validation_judges_number_blocks_as_a_build_does :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 }
+
+// The records of a text of lines in pieces, at every cut and in windows of every size up to past the bytes a record's
+// walk reads beyond its line: the records, answers, documents and faults of the whole text's records.
+@(test)
+records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	long := strings.repeat("x", 300, context.temp_allocator)
+	Case :: struct {
+		name: string,
+		spec: json.Spec,
+		text: string,
+	}
+	cases := []Case {
+		{"lines", .Json, "{\"a\":1,\"b\":[1,2]}\n{\"a\":\"x\"}\r\n\n  [3]\n{\"b\":true}"},
+		{"byte order mark", .Json, "\xEF\xBB\xBF{\"a\":1}\n{\"a\":2}\n"},
+		{"value past its line", .Json, "{\"a\":1}\n{\"a\":\n2}\n{\"a\":3}\n"},
+		{"fault", .Json, "{\"a\":1}\n{\"a\" 1}\n{\"a\":tru}\n{\"a\":4}\n"},
+		{"long lines", .Json, fmt.tprintf("{{\"a\":\"%s\"}}\n{{\"b\":1}}\n[\"%s\"]\n", long, long)},
+		{"comments", .Jsonc, "// head\n{\"a\":1} // tail\n/* x */ {\"a\":2}\n"},
+		{"json5", .Json5, "{a:1,}\n{a:'two'}\n"},
+	}
+	paths := [][]tape.Step{{}, {tape.Name("a")}, {tape.All{}}, {tape.Index(0)}}
+	for c in cases {
+		src := transmute([]u8)c.text
+		reads, f := json.reads(c.spec), json.as(c.spec)
+		for k in 0 ..= len(src) {
+			cuts := [1]int{k}
+			if !testkit.pieces_agree(t, reads, f, src, {}, cuts[:], paths, c.name) {
+				break
+			}
+		}
+		for size in ([]int{1, 2, 3, 7, 64, 100, 300}) {
+			cuts := make([dynamic]int, context.temp_allocator)
+			for k := size; k < len(src); k += size {
+				append(&cuts, k)
+			}
+			if !testkit.pieces_agree(t, reads, f, src, {}, cuts[:], paths, c.name) {
+				break
+			}
+		}
+	}
+}
+
+// The records of a text in pieces are read a window at a time, a record the window's end cuts read in the next, and
+// each window lets go of the records read before it.
+@(test)
+records_in_pieces_read_a_window_at_a_time :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	text := fmt.tprintf("{{\"a\":1}}\n%s{{\"a\":[2]}}\n{{\"b\":3}}\n", strings.repeat(" ", 600, context.temp_allocator))
+	src := transmute([]u8)text
+	p := json.Pieces{allocator = context.allocator}
+	defer json.destroy(&p)
+	r := json.records_open(src[:100], .Lines, .Json, {pieces = &p})
+	got := make([dynamic]string, context.temp_allocator)
+	keeps := make([dynamic]u64, context.temp_allocator)
+	for {
+		out: [4]tape.Record
+		answers: [4]tape.Span_Answer
+		n := json.records_find(&r, {tape.Name("a")}, out[:], answers[:])
+		for a in answers[:n] {
+			append(&got, string(src[a.lo:a.hi]) if a.outcome == .Found else "missing")
+		}
+		if !p.more {
+			break
+		}
+		append(&keeps, p.keep)
+		p.from = p.keep
+		end := min(p.at + 100, u64(len(src)))
+		p.last = end == u64(len(src))
+		testing.expect_value(t, tape.records_window(&r, src[p.from:end]), nil)
+	}
+	testing.expectf(t, r.err == nil && slice.equal(got[:], []string{"1", "[2]", "missing"}), "%v %q", r.err, got[:])
+	testing.expectf(t, len(keeps) > 2 && keeps[len(keeps) - 1] >= 600, "keeps %v", keeps[:])
+}

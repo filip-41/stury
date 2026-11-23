@@ -24,6 +24,9 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, caller: ru
 	if _, refused := pass_options(S, opts); refused != nil {
 		return {}, refused
 	}
+	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= build.PARALLEL_FROM {
+		return build_parallel(src, S, opts, caller)
+	}
 	if build.read_lax(opts) {
 		return build_walk(src, S, true, opts, caller)
 	}
@@ -32,6 +35,11 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, caller: ru
 
 @(private)
 build_walk :: #force_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
+	when LAX {
+		if opts.pieces != nil {
+			return build_pieces(src, S, opts, caller)
+		}
+	}
 	walk :: proc "contextless" (src: []u8, opts: Options, h: ^build.Builder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		context = ctx^
 		p, _ := pass_options(S, opts)
@@ -93,11 +101,49 @@ append_header :: proc(b: ^build.Builder, regs: ^hook.Regs, head: Head, allocator
 	return build.builder_append(b, regs, t, wide)
 }
 
-// Writes the document's table: its header, first row, width and key slots, and the policy `dups` its rows read
+// Stores the header past the root value's nodes of the settled document `doc`, as `append_header` stores it in a build:
+// an `Array` of role `Key` of `keys`, widened to `wide` keys by one for each column past them, named by its place. The
+// header is written in place when the block of `doc.nodes` holds `room` nodes more past them and they hold it, else
+// the nodes move to a block of their own. On a refused allocation `doc` is destroyed.
+@(private, cold)
+append_keys :: proc(doc: ^tape.Document, keys: []tape.Token, wide, room: int) -> tape.Error {
+	at := len(doc.nodes)
+	nodes := ([^]tape.Node)(raw_data(doc.nodes))[:at + 1 + wide]
+	if 1 + wide > room {
+		err: runtime.Allocator_Error
+		nodes, err = make([]tape.Node, at + 1 + wide, doc.allocator)
+		if e := build.took(err, raw_data(nodes), len(nodes)); e != nil {
+			tape.destroy(doc)
+			return e
+		}
+		copy(nodes, doc.nodes)
+		delete(doc.nodes, doc.allocator)
+	}
+	doc.nodes = nodes
+	nodes[at] = {lo = keys[0].lo, n = u32(wide + 1), kind = .Array, role = .Key, spelling = u16(min(wide, int(tape.MAX_CHILDREN)))}
+	for c in 0 ..< wide {
+		nodes[at + 1 + c] = column_key(keys, c)
+	}
+	if wide >= int(tape.MAX_CHILDREN) {
+		counts, cerr := make([]tape.Child_Count, len(doc.counts) + 1, doc.allocator)
+		if e := build.took(cerr, raw_data(counts), len(counts)); e != nil {
+			tape.destroy(doc)
+			return e
+		}
+		copy(counts, doc.counts)
+		counts[len(doc.counts)] = {tape.Node_Index(at), u32(wide)}
+		delete(doc.counts, doc.allocator)
+		doc.counts = counts
+	}
+	return nil
+}
+
+// Writes the document's table: its header, first row, width and key slots, the options it was read with, and the policy `dups` its rows read
 // repeated keys by, which `.Refuse` refuses at the first key the header repeats. A text read with `.Ragged` has no
-// common width, and a text with no record has no row.
+// common width, and a text with no record has no row. With `cut` the last row may be one read only in part, and a
+// table whose last row is shorter than its first has no common width.
 @(private)
-finish_table :: proc(doc: ^tape.Document, headed: bool, opts: Options) -> tape.Error {
+finish_table :: proc(doc: ^tape.Document, headed: bool, opts: Options, cut := false) -> tape.Error {
 	dups := opts.dups
 	header := tape.Node_Index(0)
 	keys: []tape.Node
@@ -125,10 +171,15 @@ finish_table :: proc(doc: ^tape.Document, headed: bool, opts: Options) -> tape.E
 	table^ = {header = header, first_row = 1 if rows > 0 else tape.Node_Index(len(doc.nodes)), slots_lo = 0, slots_len = u32(slots_len)}
 	if .Ragged not_in opts.tolerate && rows > 0 {
 		table.width = u32(len(keys)) if headed else doc.nodes[1].n - 1
+		if cut && doc.nodes[last_row(doc)].n - 1 != table.width {
+			table.width = 0
+		}
 	}
 	repeat := fill_slots(doc, keys, slots)
 	table.unique_keys = b32(headed && repeat < 0)
-	ext.format = tape.Tabular_Ext{tables = ([^]tape.Table)(table)[:1], slots = slots, dups = dups}
+	d, _ := opts.format.(tape.Dsv_Options)
+	d.delimiter = spec_delimiter(spec_of(doc.format), d.delimiter)
+	ext.format = tape.Tabular_Ext{tables = ([^]tape.Table)(table)[:1], slots = slots, dups = dups, options = d}
 	doc.ext = ext
 	if dups == .Refuse && repeat >= 0 {
 		k := keys[repeat]
@@ -138,6 +189,16 @@ finish_table :: proc(doc: ^tape.Document, headed: bool, opts: Options) -> tape.E
 		return tape.Fault{at = at, rules = &RULES, kind = .Duplicate_Key}
 	}
 	return nil
+}
+
+// The node of the root's last row.
+@(private)
+last_row :: proc(doc: ^tape.Document) -> tape.Node_Index {
+	at, end := tape.Node_Index(1), tape.Node_Index(doc.nodes[0].n)
+	for at + tape.Node_Index(doc.nodes[at].n) < end {
+		at += tape.Node_Index(doc.nodes[at].n)
+	}
+	return at
 }
 
 // Fills `slots`, a power of two of them or none, with each key's column plus one by its hash, each key's first column

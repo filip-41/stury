@@ -49,6 +49,8 @@ Pass :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	limit:     u64, // `Budget.depth`
 	// With `LAX`, one more than the containers the walk may still open, 0 once it opened one past `Budget.steps`.
 	steps:     [int(LAX)]u64,
+	// With `LAX`, the read of a text in pieces whose window the pass reads, nil for a whole text.
+	piece:     [int(LAX)]^Piece,
 	tolerate:  tape.Tolerances,
 	delim:     u8,
 	// 0, or how the hook keeps the record or the text it answered `Keep` or `Keep_Stubs` for: 1 whole, 2 as stubs.
@@ -68,9 +70,13 @@ Pass :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	// Whether the cell open at the block's end holds an ill-formed sequence `.Invalid_Utf8` tolerated, on a hooked
 	// pass, or the line open there, on a validate's.
 	open_ill:  bool,
-	// The walk reads one record as the root of a text of its bytes, with no `Array` around it.
-	record:    bool,
-	// With `record`, the walk reads a record it passed again for its hook, from the record's first byte to its `End`.
+	// The walk starts inside the text's `Array` and gives no opening of it, as a walk of one record as the root of a
+	// text of its bytes, or of a part of a text past its first, does.
+	opened:    bool,
+	// The walk ends inside the text's `Array` and gives no `End` of it, as a walk of one record, or of a part of a text
+	// before its last, does.
+	unclosed:  bool,
+	// With `opened`, the walk reads a record it passed again for its hook, from the record's first byte to its `End`.
 	again:     bool,
 	p:         Pass_Options, // the options the walk was started with, which a walk again reads under
 	leveled:   bool, // the hook's levels hold a record's
@@ -159,17 +165,24 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 	comment := opts.comment
 	_ = comment
 
-	pos := int(text_start(src, lo))
-	w.rec_lo, w.field_lo = pos, pos
-
-	when EMIT {
-		// The text's opening `Array` token, at `lo` with `n` 0.
-		if r, done := open_text(w, src, lo, opts, hs, on); done {
-			return r
+	pos, resumed := piece_resumes(w)
+	if !resumed {
+		pos = int(text_start(src, lo))
+		w.rec_lo, w.field_lo = pos, pos
+		when EMIT {
+			// The text's opening `Array` token, at `lo` with `n` 0.
+			if r, done := open_text(w, src, lo, opts, hs, on); done {
+				return r
+			}
 		}
 	}
 
 	for pos < n {
+		when LAX {
+			if piece_holds(w, pos, n) {
+				return piece_stop(w, pos)
+			}
+		}
 		rem := n - pos
 		b: kernel.Block
 		valid: u64
@@ -410,6 +423,11 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 			return fault_at(u64(fault), kind, detail)
 		}
 		pos += 64
+	}
+	when LAX {
+		if piece_holds(w, pos, n) {
+			return piece_stop(w, pos)
+		}
 	}
 
 	// Faults that only the text's end shows, in text order: a CR or backslash left open by the last block, a quoted

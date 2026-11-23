@@ -251,8 +251,8 @@ Caller_Only :: struct {
 	strays:  int,
 }
 
-// The allocator of a build on a pool is called on the calling thread alone, and a memory budget gives the error the
-// build on one thread gives.
+// The allocator of a build on a pool is called on the calling thread alone, and a memory budget gives the document of the
+// build on one thread or a refusal.
 @(test)
 parts_allocate_on_the_calling_thread :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -275,7 +275,7 @@ parts_allocate_on_the_calling_thread :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil && len(doc.nodes) > 300, "%v %v %d", spec, err, len(doc.nodes))
 		tape.destroy(&doc)
 		for memory in ([]u64{1, 4096, u64(len(src)), u64(len(src)) * 4, u64(len(src)) * 64}) {
-			if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}}, &pool.runner, "memory"); !ok {
+			if !testkit.threads_fit(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}}, &pool.runner, "memory") {
 				return
 			}
 		}
@@ -284,10 +284,11 @@ parts_allocate_on_the_calling_thread :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// A build under `Budget.memory` gives the document and the error of the build on one thread whatever the threads, for
-// budgets from far below what the text needs to far above it and every byte around the least that is enough.
+// A build under `Budget.memory` on a runner gives the document of the build on one thread or a refusal of the budget,
+// whatever the threads, for budgets from far below what the text needs to far above it and every byte around the least
+// that is enough.
 @(test)
-memory_budget_gives_one_answer_on_every_thread_count :: proc(t: ^testing.T) {
+memory_budget_gives_the_one_thread_document_or_a_refusal :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	state: rand.Default_Random_State
 	context.random_generator = testkit.seeded(t, &state, 0xb0d9)
@@ -323,14 +324,14 @@ memory_budget_gives_one_answer_on_every_thread_count :: proc(t: ^testing.T) {
 				testing.expectf(t, least != 0 || dups == .Refuse, "%v %d %v: no budget up to eight times the text builds it", spec, shape, dups)
 				for memory := u64(1); memory < 8 * u64(len(src)); memory += 1 + memory / 5 {
 					for runner in ([]^tape.Runner{&one, &many}) {
-						if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}, dups = dups}, runner, "budget"); !ok {
+						if !testkit.threads_fit(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}, dups = dups}, runner, "budget") {
 							return
 						}
 					}
 				}
 				for memory in max(least, 12) - 12 ..= least + 12 {
 					for runner in ([]^tape.Runner{&one, &many}) {
-						if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}, dups = dups}, runner, "budget near the least"); !ok {
+						if !testkit.threads_fit(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}, dups = dups}, runner, "budget near the least") {
 							return
 						}
 					}

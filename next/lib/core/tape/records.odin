@@ -40,6 +40,15 @@ Records_At :: enum u8 {
 // hold it as their first field, with what their walk learns from record to record after it. Each batch reads the next
 // records into slices the caller gives, as many as they hold. Once a batch fills fewer than it was given room for the
 // records have ended, and `err` says why, nil at the text's end.
+//
+// Under `.Lines`, the records of a text in pieces are read a window at a time: `Options.pieces` is the read's, the
+// window the records open with is the text's first, and `records_window` gives each next window. A batch reads the
+// records whose lines the window holds whole and fills fewer than it was given room for once the window holds no more,
+// or once the records have ended. It then sets the pieces' `more`, `at` and `keep`, as a read of a window does: a
+// record the window's end cut is kept from its first byte, and its framing goes on in the next window where this one
+// stopped. Each record's offsets are the whole
+// text's, a scan's documents hold the bytes they read (`.Held`), and a find's answers are spans of the window it was
+// read in.
 Records :: struct {
 	src:     []u8,
 	opts:    Options,
@@ -53,6 +62,21 @@ Records :: struct {
 	reads:     ^Records_Reads,
 	release:   proc(r: ^Records),
 	allocator: runtime.Allocator,
+	framed:    Framed, // in a text in pieces, the bytes the framing read
+}
+
+// The bytes a framing of a text in pieces read across its windows: `to` is past the last it read, and `again` the bytes
+// it read a second time, which a framing that goes on where the last window left it keeps at 0.
+Framed :: struct {
+	to, again: u64,
+}
+
+// Counts the bytes from `lo` to `hi` a framing read in `f`.
+framed_read :: #force_inline proc "contextless" (f: ^Framed, lo, hi: u64) {
+	if lo < f.to {
+		f.again += min(hi, f.to) - lo
+	}
+	f.to = max(f.to, hi)
 }
 
 // The batch reads of the records of one spec of a format, as its own records reads read them.
@@ -78,6 +102,18 @@ records_find :: proc(r: ^Records, path: []Step, out: []Record, answers: []Span_A
 // paths of `demand` reach into the same place of `docs`. Returns how many it filled.
 records_scan :: proc(r: ^Records, demand: ^Demand, out: []Record, docs: []Document, read := Read_Options{}, allocator := context.allocator) -> int {
 	return r.reads.scan(r, demand, out, docs, read, allocator)
+}
+
+// Gives the records `r` of a text in pieces the window `src`, which starts at the pieces' `from`, at or before their
+// `keep`, and ends at or after their `at`, else the window is refused with `Piece_Gap`.
+records_window :: proc "contextless" (r: ^Records, src: []u8) -> Error {
+	p := r.opts.pieces
+	to := p.from + u64(len(src))
+	if p.from > p.keep || to < p.at {
+		return Piece_Gap{p.keep, p.at, p.from, to}
+	}
+	r.src = piece_src(src, p.from)
+	return nil
 }
 
 // Frees the records `Reads.records` made.

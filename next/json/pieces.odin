@@ -388,15 +388,7 @@ piece_walk :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, p
 	w.tolerated, w.steps[0] = s.tolerated, s.steps
 	if len(s.memo) == size_of(Gaps) {
 		intrinsics.mem_copy_non_overlapping(&w.gaps, raw_data(s.memo), size_of(Gaps))
-		// A gap is matched against the bytes it was recorded from, so a gap recorded before the window is dropped.
-		for bits := w.gaps.live; bits != 0; bits &= bits - 1 {
-			row := u64(intrinsics.count_trailing_zeros(bits))
-			for &g in w.gaps.slots[row * GAP_MEMBERS:(row + 1) * GAP_MEMBERS] {
-				if g.n != GAP_DEAD && u64(g.lo) < pw.from {
-					g.n = 0
-				}
-			}
-		}
+		gaps_drop(&w.gaps, pw.from)
 	}
 	open := u64(len(s.opened))
 	if open > w.room && !levels_room(w, open) {
@@ -428,6 +420,20 @@ piece_walk :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, p
 	}
 	d := open << 1 | u64(s.opened[open - 1].object)
 	return enter_place(s.place, q, end, d, w, w.regs^, on)
+}
+
+// Drops the gaps recorded before offset `from`, the first byte of a window, as a gap is matched against the bytes it
+// was recorded from.
+@(private, cold)
+gaps_drop :: proc "contextless" (gaps: ^Gaps, from: u64) {
+	for bits := gaps.live; bits != 0; bits &= bits - 1 {
+		row := u64(intrinsics.count_trailing_zeros(bits))
+		for &g in gaps.slots[row * GAP_MEMBERS:(row + 1) * GAP_MEMBERS] {
+			if g.n != GAP_DEAD && u64(g.lo) < from {
+				g.n = 0
+			}
+		}
+	}
 }
 
 // The parts of a token a window cut short, `Cut_Token.part`.

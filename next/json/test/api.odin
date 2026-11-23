@@ -35,4 +35,10 @@ json_alone_serves_a_program :: proc(t: ^testing.T) {
 	_, bad := json.build(transmute([]u8)string(`[1,]`))
 	fault, faulted := bad.(json.Fault)
 	testing.expect(t, faulted && fault.kind == .Bad_Char && fault.at == 3)
+	msg: [64]u8
+	testing.expect_value(t, json.error_message(msg[:], bad, transmute([]u8)string(`[1,]`)), "1:4: Trailing comma before the closing bracket")
+	_, refused := json.find(src, path, .Json, {}, {dups = .All})
+	option, is_option := refused.(json.Bad_Option)
+	testing.expect(t, is_option && option.option == "dups")
+	testing.expect_value(t, json.error_message(msg[:], refused, src), "Option not taken: dups")
 }

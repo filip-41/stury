@@ -262,13 +262,13 @@ records_keep_the_budget :: proc(t: ^testing.T) {
 	}
 }
 
-// Options no records read takes end the records before any is read.
+// Options no records read takes end the records before any is read: a text in pieces framed other than as lines.
 @(test)
 records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("{\"a\":1}\n")
 	pieces: tape.Pieces
-	r := json.records_open(src, .Lines, .Json, {pieces = &pieces})
+	r := json.records_open(src, .Elements, .Json, {pieces = &pieces})
 	_, more := one_validate(&r)
 	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"pieces"}), "pieces: %v", r.err)
 	r = json.records_open(src, opts = {dups = .Refuse})

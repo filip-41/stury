@@ -25,10 +25,10 @@ quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
 
 // The size in bytes of a buffer that holds the decoded text of cell `t`: its span, since an escape decodes to no more
 // bytes than it spells, three times the span for a `SPELLING_LAX` cell, since a tolerated byte reads as U+FFFD, and a
-// column's position for a key past the header.
+// column's position for a key named by its place.
 @(private)
 decode_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
-	if t.spelling & SPELLING_COLUMN != 0 {
+	if t.spelling & tape.SPELLING_PLACED != 0 {
 		return COLUMN_ROOM
 	}
 	return int(t.n) * (3 if t.spelling & tape.SPELLING_LAX != 0 else 1)
@@ -114,9 +114,9 @@ Cell_Reader :: struct {
 @(private)
 cell_reader :: #force_inline proc "contextless" (src: []u8, t: tape.Token, $S: Spec) -> (r: Cell_Reader) {
 	r = {base = raw_data(src), p = t.lo, end = t.lo + u64(t.n), decode = t.spelling & tape.SPELLING_DECODE != 0, lax = t.spelling & tape.SPELLING_LAX != 0, tsv = S == .Tsv, csv = S == .Csv && t.spelling & tape.SPELLING_QUOTED != 0}
-	if t.spelling & SPELLING_COLUMN != 0 {
+	if t.spelling & tape.SPELLING_PLACED != 0 {
 		// The position's digits, read from the last.
-		v := u64(t.n)
+		v := t.lo
 		k := len(r.one)
 		for {
 			k -= 1

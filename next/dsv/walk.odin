@@ -13,11 +13,6 @@ import "stury:lib/core/tape"
 @(private)
 FRAME_KEYS :: 128
 
-// In a key's spelling, a column past the header's last, which only `.Ragged` reads: its text is its 1-based position
-// `n`, in decimal.
-@(private)
-SPELLING_COLUMN :: u16(1 << 11)
-
 // What a walk learned of the header: its cells as the keys it gave each row's cells, and the most cells a record had.
 @(private)
 Head :: struct {
@@ -33,20 +28,13 @@ spec_delimiter :: #force_inline proc "contextless" (spec: Spec, delimiter: u8) -
 
 // The dsv options of `opts`, or the option of `opts` spec `S` cannot read. A delimiter is refused when it is CR, LF,
 // non-ASCII or, under CSV, a quote, and under TSV also a backslash or one of `t`, `n`, `r`, `0`. A comment byte is
-// refused when it is CR, LF, the delimiter, non-ASCII or, under CSV, a quote, and under TSV also a backslash. A text in
-// pieces or a runner is refused, as a delimited text is read whole on the calling thread.
+// refused when it is CR, LF, the delimiter, non-ASCII or, under CSV, a quote, and under TSV also a backslash.
 @(private)
 pass_options :: #force_inline proc "contextless" ($S: Spec, opts: tape.Options) -> (p: Pass_Options, refused: tape.Error) {
 	if refused = tape.options_refused(&FORMATS[S], opts); refused != nil {
 		return
 	}
 	d, _ := opts.format.(tape.Dsv_Options)
-	if opts.pieces != nil {
-		return {}, tape.Bad_Option{"pieces"}
-	}
-	if opts.runner != nil {
-		return {}, tape.Bad_Option{"runner"}
-	}
 	delim, c := spec_delimiter(S, d.delimiter), d.comment
 	bad_delim := delim == '\r' || delim == '\n' || delim >= 0x80
 	bad_comment := c != 0 && (c == '\r' || c == '\n' || c == delim || c >= 0x80)
@@ -142,7 +130,7 @@ walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, $LAX: bool, 
 walk_record_again :: proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	v: Pass(S, H, LAX, C)
 	v.n, v.h, v.delim, v.tolerate, v.start, v.line, v.width, v.keys, v.p = len(src), w.h, w.delim, w.tolerate, 1, 1, w.width, w.keys, w.p
-	v.record, v.again = true, true
+	v.opened, v.unclosed, v.again = true, true, true
 	when LAX {
 		v.steps[0] = max(u64)
 	}
@@ -288,6 +276,9 @@ walk :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, $on: 
 		return 0, refused, false
 	}
 	ctx := context
+	if opts.pieces != nil {
+		return piece_read(src, S, opts, h, regs, &ctx, on, nil)
+	}
 	if opts.budget.steps != 0 {
 		return walk_text(src, S, true, p, h, regs, allocator, &ctx, on, nil, opts.budget.steps)
 	}

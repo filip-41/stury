@@ -311,11 +311,11 @@ walk_tokens :: proc(t: ^testing.T) {
 		tol:    tape.Tolerances,
 		tokens: []tape.Token,
 	}
-	COLUMN :: tape.SPELLING_DECODE | 1 << 11
+	PLACED :: tape.SPELLING_DECODE | tape.SPELLING_PLACED
 	QUOTED :: tape.SPELLING_QUOTED
 	for c in ([]Tokens {
 		{"a,b,c\n1,2\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 1, .String, .Key, 0}, {6, 1, .String, .Value, 0}, {2, 1, .String, .Key, 0}, {8, 1, .String, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
-		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .String, .Key, 0}, {4, 1, .String, .Value, 0}, {2, 1, .String, .Key, 0}, {6, 1, .String, .Value, 0}, {0, 3, .String, .Key, COLUMN}, {8, 1, .String, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
+		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .String, .Key, 0}, {4, 1, .String, .Value, 0}, {2, 1, .String, .Key, 0}, {6, 1, .String, .Value, 0}, {3, 0, .String, .Key, PLACED}, {8, 1, .String, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
 		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 3, .String, .Key, 0}, {6, 1, .String, .Value, 0}, {4, 1, .String, .Key, 0}, {9, 1, .String, .Value, QUOTED}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
 		{"a,b\n,\"\"\r\n", {}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .String, .Key, 0}, {4, 0, .Null, .Value, 0}, {2, 1, .String, .Key, 0}, {6, 0, .String, .Value, QUOTED}, {7, 2, .End, .Value, 0}, {9, 0, .End, .Value, 0}}},
 	}) {

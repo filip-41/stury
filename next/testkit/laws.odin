@@ -9,6 +9,7 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:testing"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // An answer of a path read: the value found, or the outcome, with the node the readers stopped at.
@@ -346,7 +347,9 @@ pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []
 			return err == nil
 		})
 		defer delete(window)
-		if !testing.expectf(t, got == whole_err && !p.more, "%s %v cut %v: validate %v, whole %v", name, f.name, cuts, got, whole_err) {
+		// While the first walk waits for the text's opening, each window frames only its new bytes.
+		again := (^hook.Piece_State)(p.state).framed.again if p.state != nil else 0
+		if !testing.expectf(t, got == whole_err && !p.more && again == 0, "%s %v cut %v: validate %v, whole %v, framed again %v", name, f.name, cuts, got, whole_err, again) {
 			return false
 		}
 	}
@@ -371,6 +374,35 @@ pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []
 		})
 		defer delete(window)
 		if !testing.expectf(t, got.err == berr && same_documents(got.doc, whole), "%s %v cut %v: build %v, whole %v", name, f.name, cuts, got.err, berr) {
+			return false
+		}
+	}
+	{
+		// Each document so far of a text that builds holds in its root's subtree the scalars of the whole document's,
+		// up to the cut.
+		p := tape.Pieces{so_far = true}
+		defer tape.destroy(&p)
+		Got :: struct {
+			doc:   tape.Document,
+			err:   tape.Error,
+			whole: ^tape.Document,
+			apart: bool,
+		}
+		got := Got{whole = &whole}
+		defer tape.destroy(&got.doc)
+		context.user_ptr = &got
+		window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+			g := (^Got)(context.user_ptr)
+			doc, err := r.reads.build(r.f, window, opts, context.allocator)
+			tape.destroy(&g.doc)
+			g.doc, g.err = doc, err
+			if err == nil && opts.pieces.more && len(g.whole.nodes) > 0 && !scalars_lead(&doc, g.whole) {
+				g.apart = true
+			}
+			return err == nil
+		})
+		defer delete(window)
+		if !testing.expectf(t, got.err == berr && !got.apart && same_documents(got.doc, whole), "%s %v cut %v: build so far %v, whole %v, apart %v", name, f.name, cuts, got.err, berr, got.apart) {
 			return false
 		}
 	}
@@ -404,7 +436,7 @@ pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []
 	d, derr := tape.demand_of(paths, nil, limits, f.facts != {})
 	defer tape.destroy(&d)
 	if derr != nil {
-		return true
+		return records_pieces_agree(t, r, paths, nil, name)
 	}
 	for stop in ([]bool{false, true}) {
 		read := tape.Read_Options{stop_early = stop}
@@ -434,6 +466,168 @@ pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []
 			return false
 		}
 	}
+	return records_pieces_agree(t, r, paths, &d, name)
+}
+
+// How a records law reads each record: judged, with the answer of `path`, or with the document of `demand`.
+@(private)
+Records_Read :: struct {
+	how:    enum u8 {
+		Validate,
+		Find,
+		Scan,
+	},
+	path:   []tape.Step,
+	demand: ^tape.Demand,
+	read:   tape.Read_Options,
+}
+
+// What a read of a text's records gave: each record, the answer or document of each, why the records ended, and in a
+// text in pieces the bytes the framing read twice.
+@(private)
+Records_Got :: struct {
+	records: [dynamic]tape.Record,
+	answers: [dynamic]tape.Span_Answer,
+	docs:    [dynamic]tape.Document,
+	err:     tape.Error,
+	again:   u64,
+}
+
+@(private)
+records_got_free :: proc(g: ^Records_Got) {
+	for &d in g.docs {
+		tape.destroy(&d)
+	}
+	delete(g.records)
+	delete(g.answers)
+	delete(g.docs)
+}
+
+// The records of a batch, fewer than a text holds so that a window ends between batches.
+@(private)
+RECORDS_BATCH :: 3
+
+// Reads the next batch of records of `r` as `how` says into `got`, and returns how many it read.
+@(private)
+records_batch :: proc(r: ^tape.Records, how: Records_Read, got: ^Records_Got) -> int {
+	out: [RECORDS_BATCH]tape.Record
+	n: int
+	switch how.how {
+	case .Validate:
+		n = tape.records_validate(r, out[:])
+	case .Find:
+		answers: [RECORDS_BATCH]tape.Span_Answer
+		n = tape.records_find(r, how.path, out[:], answers[:], how.read)
+		append(&got.answers, ..answers[:n])
+	case .Scan:
+		docs: [RECORDS_BATCH]tape.Document
+		n = tape.records_scan(r, how.demand, out[:], docs[:], how.read)
+		append(&got.docs, ..docs[:n])
+	}
+	append(&got.records, ..out[:n])
+	return n
+}
+
+// Reads the records of `run.src` as `how` says, the whole text at once, or with `pieces` a window at a time, each from
+// the last batch's `keep` to the next cut, of a copy whose bytes before `keep` are overwritten as `feed` overwrites them.
+@(private)
+records_read :: proc(run: Piece_Run, how: Records_Read, pieces: bool) -> (got: Records_Got) {
+	opts := run.opts
+	p := tape.Pieces{allocator = context.allocator}
+	defer tape.destroy(&p)
+	text := run.src
+	end := len(text)
+	if pieces {
+		opts.pieces = &p
+		text = slice.clone(run.src)
+		if len(run.cuts) > 0 {
+			end = run.cuts[0]
+		}
+		p.last = len(run.cuts) == 0
+	}
+	defer if pieces {
+		delete(text)
+	}
+	r, e := run.reads.records(run.f, text[:end], .Lines, opts, context.allocator)
+	if e != nil {
+		got.err = e
+		return
+	}
+	defer tape.destroy_records(r)
+	dropped: u64
+	for i := 1; ; i += 1 {
+		for records_batch(r, how, &got) == RECORDS_BATCH {
+		}
+		if !pieces || !p.more || p.last {
+			break
+		}
+		end = run.cuts[i] if i < len(run.cuts) else len(run.src)
+		p.from, p.last = p.keep, i >= len(run.cuts)
+		slice.fill(text[dropped:p.keep], 0xFF)
+		dropped = p.keep
+		if err := tape.records_window(r, text[p.keep:end]); err != nil {
+			got.err = err
+			return
+		}
+	}
+	got.err, got.again = r.err, r.framed.again
+	return
+}
+
+// Whether the records of a text read a window at a time are the whole text's, with the same answers and documents:
+// judged, with each path's answer and with the documents of `demand`, nil when the paths make none. The framing of the
+// windows reads no byte twice.
+@(private)
+records_pieces_agree :: proc(t: ^testing.T, run: Piece_Run, paths: [][]tape.Step, demand: ^tape.Demand, name: string) -> bool {
+	reads := make([dynamic]Records_Read, context.temp_allocator)
+	append(&reads, Records_Read{})
+	for path in paths {
+		append(&reads, Records_Read{how = .Find, path = path}, Records_Read{how = .Find, path = path, read = {stop_early = true}})
+	}
+	if demand != nil {
+		append(&reads, Records_Read{how = .Scan, demand = demand}, Records_Read{how = .Scan, demand = demand, read = {stop_early = true}})
+	}
+	for how in reads {
+		whole := records_read(run, how, false)
+		defer records_got_free(&whole)
+		got := records_read(run, how, true)
+		defer records_got_free(&got)
+		ok := got.err == whole.err && got.again == 0 && len(got.records) == len(whole.records) && slice.equal(got.answers[:], whole.answers[:])
+		for k := 0; ok && k < len(got.records); k += 1 {
+			a, b := got.records[k], whole.records[k]
+			ok = a.index == b.index && a.lo == b.lo && a.hi == b.hi && a.err == b.err && a.key == b.key
+			ok = ok && (how.how != .Scan || same_documents(got.docs[k], whole.docs[k]))
+		}
+		if !testing.expectf(t, ok, "%s %v cut %v: records %v %v: %v records, %v, framed again %v, whole %v records, %v", name, run.f.name, run.cuts, how.how, how.path, len(got.records), got.err, got.again, len(whole.records), whole.err) {
+			return false
+		}
+	}
+	return true
+}
+
+// Whether the scalars of the root's subtree of `part`, a document so far, are the first scalars of `whole`'s root.
+@(private)
+scalars_lead :: proc(part, whole: ^tape.Document) -> bool {
+	if len(part.nodes) == 0 {
+		return true
+	}
+	if len(whole.nodes) == 0 {
+		return false
+	}
+	k := 0
+	whole_end := int(whole.nodes[0].n) if whole.nodes[0].kind > .Plain else 1
+	for n in part.nodes[:int(part.nodes[0].n) if part.nodes[0].kind > .Plain else 1] {
+		if n.kind > .Plain {
+			continue
+		}
+		for k < whole_end && whole.nodes[k].kind > .Plain {
+			k += 1
+		}
+		if k >= whole_end || whole.nodes[k] != n {
+			return false
+		}
+		k += 1
+	}
 	return true
 }
 
@@ -454,6 +648,24 @@ threads_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 	defer tape.destroy(&got)
 	ok = testing.expectf(t, same_refusal(gerr, werr) && same_build(got, want), "%s %v %v on %d threads: %v, one thread %v (%d and %d nodes)", name, f.name, opts, runner.threads, gerr, werr, len(got.nodes), len(want.nodes))
 	return ok, werr == nil
+}
+
+// Whether the build of `src` on `runner` under a memory budget in `opts` gives the document and error of the build on one
+// thread with no budget, or the refusal of the budget, which a build that counts its parts' blocks may give. It never
+// gives another document.
+threads_fit :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, runner: ^tape.Runner, name: string) -> bool {
+	free := opts
+	free.budget.memory = 0
+	want, werr := reads.build(f, src, free, context.allocator)
+	defer tape.destroy(&want)
+	wide := opts
+	wide.runner = runner
+	got, gerr := reads.build(f, src, wide, context.allocator)
+	defer tape.destroy(&got)
+	if refused, is_exceeded := gerr.(tape.Exceeded); is_exceeded && refused.kind == .Memory {
+		return true
+	}
+	return testing.expectf(t, same_refusal(gerr, werr) && same_build(got, want), "%s %v %v on %d threads: %v, one thread %v (%d and %d nodes)", name, f.name, opts, runner.threads, gerr, werr, len(got.nodes), len(want.nodes))
 }
 
 // The answers of the partial reads in the agreement test.

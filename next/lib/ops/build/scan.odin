@@ -68,6 +68,13 @@ Scanner :: struct {
 	bytes:       [dynamic]u8,
 	hold_from:   u64,
 	held_live:   int, // the bytes held once the last `hold_drop` ran
+	// What a key token's offsets index: the document's `src`, or the bytes a read of a text in pieces holds the keys in
+	// once they lie before its window, as a delimited text's header does.
+	key_text:    []u8,
+	// The span of the text whose bytes the keys of later nodes name, as a delimited text's header names each row's
+	// cells, which a scan in pieces holds whole, once, and not per key. Empty for a text whose keys lie before their
+	// values.
+	head:        [2]u64,
 	room:        ^Scan_Room,
 	dropped:     u64, // the members the walk passed with no token since the last `End`, which the open object counts
 	protocol:    hook.Protocol(SCANNER_CAPS, hook.Levels(scanner_levels_held, scanner_levels_grow), hook.Unused, hook.Keeps(Builder, scanner_builder, builder_keep_whole, builder_keep_stubs)),
@@ -203,6 +210,7 @@ Scan_Room :: struct {
 scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator) -> (err: runtime.Allocator_Error) {
 	h^ = {}
 	builder_start(&h.b, src, format, nodes, most, frames, allocator)
+	h.key_text = src
 	if h.b.err != nil {
 		return h.b.err
 	}
@@ -412,7 +420,7 @@ scan_key_unmatched :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Fr
 		d := u64(t.n) - u64(tape.spelling_credit(t.spelling))
 		return f.lengths & (1 << (d & 63)) == 0
 	}
-	return f.lengths & (1 << (t.n & 63)) == 0 || t.n > 0 && f.heads & (1 << (h.b.doc.src[t.lo] & 63)) == 0
+	return f.lengths & (1 << (t.n & 63)) == 0 || t.n > 0 && f.heads & (1 << (h.key_text[t.lo] & 63)) == 0
 }
 
 // Returns the partial document the walk built, or the error that ended it with everything freed. `regs` are the hook's
@@ -477,7 +485,7 @@ scanner_key :: proc "contextless" (h: ^Scanner, t: tape.Token, $NAMED: bool) #no
 			edge := &dm.edges[e]
 			#partial switch step in edge.step {
 			case tape.Name:
-				if !NAMED || !tape.key_names(h.b.doc.format, h.b.doc.src, t, string(step)) {
+				if !NAMED || !tape.key_names(h.b.doc.format, h.key_text, t, string(step)) {
 					continue
 				}
 				mark := h.marks[e]
@@ -1544,6 +1552,7 @@ scanner_free :: proc(h: ^Scanner, allocator: runtime.Allocator) {
 	free_list(h, &h.tokens)
 	delete(h.held)
 	delete(h.bytes)
+	h.held, h.bytes = nil, nil
 
 	if !scan_in_room(h, raw_data(h.marks)) {
 		runtime.mem_free_with_size(raw_data(h.marks), len(h.marks) * size_of(u64) + len(h.made) * size_of(u32) + len(h.done), allocator)

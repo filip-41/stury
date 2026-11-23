@@ -72,7 +72,7 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 		on :: build.builder_hook_facts when S != .Json else build.builder_hook
 		return piece_read(src, S, opts, h, regs, a, ctx, on)
 	}
-	return build.read_build_pieces(src, &FORMATS[S], &RULES, opts, caller, Piece, walk)
+	return build.read_build_pieces(src, &FORMATS[S], &RULES, opts, caller, Piece, walk, build.builder_finish_dups)
 }
 
 @(private)

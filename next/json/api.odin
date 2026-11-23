@@ -49,10 +49,12 @@ Fault :: tape.Fault
 Fault_Kind :: tape.Fault_Kind
 Exceeded :: tape.Exceeded
 Piece_Gap :: tape.Piece_Gap
+Bad_Option :: tape.Bad_Option
 Span_Answer :: tape.Span_Answer
 Presence :: tape.Presence
 Framing :: tape.Framing
 Record :: tape.Record
+error_message :: tape.error_message
 
 // The readers over a document, or over the text a `find` answer or a record's key was read in.
 Reader :: tape.Reader

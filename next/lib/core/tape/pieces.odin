@@ -47,3 +47,11 @@ Piece_Gap :: struct {
 	keep, at: u64, // what the window had to hold
 	from, to: u64, // what it held
 }
+
+// The bytes of the window of `src` taken at offset `from`, as a slice that its tokens' offsets in the whole text index.
+// Its bytes before `from` are not to be read: a read starts at or past `keep`, which no window starts past, and a
+// hook reads only tokens of that read or bytes its `keep` holds. Its base, the window's address less `from`, is
+// computed in integers and only added to, with no bounds, so it may wrap below zero with no effect on an index past it.
+piece_src :: #force_inline proc "contextless" (src: []u8, from: u64) -> []u8 {
+	return ([^]u8)(uintptr(raw_data(src)) - uintptr(from))[:from + u64(len(src))]
+}

@@ -41,8 +41,9 @@ build_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 }
 
 // Builds a text in pieces. The document's nodes point into the text, so the build keeps every byte, and each window
-// starts at the text's start.
-read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Builder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (doc: tape.Document, err: tape.Error) {
+// starts at the text's start. `finish` settles the document once the last window ends it, as `read_build`'s does, and
+// `so_far`, when given, settles each document so far, and on an error destroys it.
+read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Builder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool), $finish: proc(doc: ^tape.Document, opts: tape.Options, rules: ^tape.Rules) -> tape.Error, so_far: proc(doc: ^tape.Document, opts: tape.Options, rules: ^tape.Rules) -> tape.Error = nil) -> (doc: tape.Document, err: tape.Error) {
 	if e := tape.options_refused(format, opts); e != nil {
 		return {}, e
 	}
@@ -72,6 +73,9 @@ read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, o
 			return {}, nil
 		}
 		doc, err = builder_so_far(&blk.b, regs, p.at, caller)
+		if err == nil && so_far != nil {
+			err = so_far(&doc, opts, rules)
+		}
 		err = read_end(&doc, err, &s.blocks, tolerated, caller)
 		return
 	}
@@ -81,7 +85,7 @@ read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, o
 	}
 	doc, err = builder_end(&blk.b, regs, root_close, werr)
 	if err == nil {
-		err = builder_dups(&doc, opts.dups, rules)
+		err = finish(&doc, opts, rules)
 	}
 	err = read_end(&doc, err, &s.blocks, tolerated, caller)
 	return
@@ -123,7 +127,7 @@ read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, rea
 		s.hook, s.hook_free = blk, find_piece_free
 	}
 	text := hook.piece_src(src, p.from)
-	blk.f.src = text
+	blk.f.src, blk.f.key_text = text, text
 	regs := s.regs
 	_, werr, tolerated := walk(src, opts, &blk.f, &regs, blk.f.allocator, &blk.f.ctx)
 	if werr == nil {
@@ -206,7 +210,7 @@ read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, 
 		s.hook, s.hook_free, s.regs = blk, scan_piece_free, builder_regs(&blk.h.b)
 	}
 	text := hook.piece_src(src, p.from)
-	blk.h.b.doc.src = text
+	blk.h.b.doc.src, blk.h.key_text = text, text
 	regs := s.regs
 	root_close, werr, tolerated := walk(src, opts, &blk.h, &regs, blk.h.b.doc.allocator, &blk.h.b.ctx)
 	if werr == nil {

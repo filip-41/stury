@@ -16,7 +16,7 @@ Detail :: enum u8 {
 	Cut_Utf8, // `Truncated`: at the text's end, inside a UTF-8 sequence
 }
 
-// A delimited text's `tape.Rules`, one rule per `Detail` in its order.
+// A delimited text's `tape.Rules`, one rule per `Detail` in its order, named for the family whichever spec read the text.
 @(private, rodata)
 RULES := tape.Rules{"dsv", {
 	{},

@@ -77,10 +77,12 @@ Child_Count :: struct {
 	count: u32,
 }
 
-// Bits 0 to 10 of a text's spelling mean the same in every format, bit 3 of them free, and bits 11 to 15 are a
-// format's own.
+// Bits 0 to 10 of a text's spelling mean the same in every format, and bits 11 to 15 are a format's own.
 SPELLING_DECODE :: u16(1)
 SPELLING_QUOTED :: u16(2)
+// In a key's spelling, beside `SPELLING_DECODE`, the key holds no bytes of the text: `n` is 0 and `lo` is its place,
+// which the format's decode writes out, as a delimited row's cell past its header is named by its position.
+SPELLING_PLACED :: u16(8)
 // In a text's spelling, beside `SPELLING_DECODE`, the text holds bytes a tolerance took, so its decode may be longer
 // than its span, as `text_room` says.
 SPELLING_LAX :: u16(4)

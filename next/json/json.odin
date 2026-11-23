@@ -17,7 +17,9 @@ Spec :: enum u8 {
 }
 
 // Options of a JSON read. `budget` sets `depth`, `nodes`, `memory` and `steps` (a step is one container). JSON has no
-// options of its own, so its reads refuse any `format`.
+// options of its own, so its reads refuse any `format`. `runner` is for `build` alone, which builds a long whole text in
+// parts on its threads: every other read ignores it, as does a build of a text in `pieces`. Under `Budget.memory` a build
+// with no runner is made on one thread, and one with a runner counts the blocks of its parts.
 Options :: tape.Options
 
 // Whether a read may walk a value again from its first byte. A test build turns it off to read as a format without
@@ -91,12 +93,14 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, 
 // Builds a document of every value in `src` read as `spec`, with keys as written and comments as facts, and the
 // members of an object that repeat a key as `opts.dups` says. Its nodes point into `src`. Needs `READ_STACK` bytes of
 // stack and faults on a thread with less. With `opts.runner` a long text is built on its threads, which each need as
-// much stack, and `allocator` is called on the calling thread only.
+// much stack, and `allocator` is called on the calling thread only. The document and the error are those of a build on
+// one thread. Under `Budget.memory` a build on a runner counts its parts' blocks, so it may build a text a build on one
+// thread is refused, and a block it is refused has the text built on one thread.
 @(require_results)
 build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	probe_stack()
 	// A text with foreign options takes the whole-text build, which refuses them.
-	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.format == nil && len(src) >= PARALLEL_FROM {
+	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.format == nil && len(src) >= build.PARALLEL_FROM {
 		return build_on_threads(src, spec, opts, allocator)
 	}
 	lax := build.read_lax(opts)

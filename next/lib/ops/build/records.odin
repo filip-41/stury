@@ -48,6 +48,7 @@ records_validate :: proc(r: ^tape.Records, out: []tape.Record, rules: ^tape.Rule
 		out[n] = record_end(r, lo, w.hi, hook.memory_budget_error(&m, err))
 		n += 1
 	}
+	records_window_end(r)
 	return
 }
 
@@ -98,6 +99,7 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 		out[n] = record_end(r, lo, w.hi, nil)
 		n += 1
 	}
+	records_window_end(r)
 	return
 }
 
@@ -138,11 +140,19 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 			w.res, w.tolerated = a.res, a.tolerated
 		}
 		root_close, werr, _ := hook.walk_error(w.res, rules)
+		if werr == nil && r.opts.pieces != nil {
+			// A window's bytes may go once the batch ends, so the document holds the bytes it reads.
+			h.held.allocator, h.bytes.allocator = allocator, allocator
+			if e := scanner_hold(&h, regs, r.src); e != nil {
+				werr = e
+			}
+		}
 		doc, e := scanner_end(&h, regs, root_close, werr)
 		e = read_end(&doc, e, &m, w.tolerated, caller)
 		out[n], docs[n] = record_end(r, lo, w.hi, e), doc
 		n += 1
 	}
+	records_window_end(r)
 	return
 }
 
@@ -177,6 +187,16 @@ record_reads :: proc "contextless" (r: ^tape.Records, read: ^tape.Read_Options) 
 		read.stop_early = false
 	}
 	return true
+}
+
+// Sets the pieces of records of a text in pieces for the next window once a batch ends: the records go on while they
+// have not ended, from `pos`, where the next record is looked for, or from the text's start while they are at their
+// start, whose bytes a format may read once its opening is whole.
+@(private)
+records_window_end :: #force_inline proc "contextless" (r: ^tape.Records) {
+	if p := r.opts.pieces; p != nil {
+		p.more, p.at, p.keep = r.at != .Done, u64(len(r.src)), r.pos if r.at != .Start else 0
+	}
 }
 
 // The record from `lo` to `hi` with error `err`, counted among those read.

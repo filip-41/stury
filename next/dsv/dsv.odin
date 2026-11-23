@@ -17,7 +17,9 @@ Spec :: enum u8 {
 }
 
 // Options of a delimited read, with its own in `format` as a `tape.Dsv_Options`. `budget` sets `depth`, `nodes`,
-// `memory` and `steps` (a step is the text or one record).
+// `memory` and `steps` (a step is the text or one record). `runner` is for `build` alone, which builds a long whole text
+// in parts on its threads: every other read ignores it, as does a build of a text in `pieces`. Under `Budget.memory` a
+// build with no runner is made on one thread, and one with a runner counts the blocks of its parts.
 Options :: tape.Options
 Dsv_Options :: tape.Dsv_Options
 
@@ -25,7 +27,7 @@ Dsv_Options :: tape.Dsv_Options
 FORMATS := [Spec]tape.Format {
 	.Csv   = {name = "csv", id = 4, facts = FACTS, caps = {.Rewalk}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_csv, number = number_value, same_text = same_csv, key_hash = hash_csv, room = decode_room, close_end = close_csv},
 	.Tsv   = {name = "tsv", id = 5, facts = FACTS, caps = {.Rewalk}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_tsv, number = number_value, same_text = same_tsv, key_hash = hash_tsv, room = decode_room, close_end = close_tsv},
-	.Plain = {name = "dsv", id = 6, facts = FACTS, caps = {.Rewalk}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_plain, number = number_value, same_text = same_plain, key_hash = hash_plain, room = decode_room, close_end = close_plain},
+	.Plain = {name = "plain", id = 6, facts = FACTS, caps = {.Rewalk}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_plain, number = number_value, same_text = same_plain, key_hash = hash_plain, room = decode_room, close_end = close_plain},
 }
 
 // A comment line is a fact of the record after it, or the root's foot past the last.
@@ -52,7 +54,8 @@ reads :: proc "contextless" (spec: Spec) -> ^tape.Reads {
 }
 
 // Returns the error in `src`, or nil when `src` is one text of `spec`. Allocates only for a walk that counts steps
-// past a header of more than `FRAME_KEYS` cells. An optimized build with a constant `spec` links only that spec's walk.
+// past a header of more than `FRAME_KEYS` cells, and for a text in `opts.pieces`, whose state `opts.pieces.allocator`
+// holds. An optimized build with a constant `spec` links only that spec's walk.
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Csv, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	switch spec {
@@ -68,8 +71,10 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Csv, opts := Options{}, a
 
 // Builds a document of every record in `src` read as `spec`, as a table: each record an object of its cells, whose
 // keys are the header's, stored once, and comment lines as facts. A header that repeats a key gives a record's cells of
-// it as `opts.dups` says, and `.Refuse` fails at the repeat. Its nodes point into `src`. The build runs on the calling thread,
-// which is the only one that calls `allocator`, and a text is read whole.
+// it as `opts.dups` says, and `.Refuse` fails at the repeat. Its nodes point into `src`. With `opts.runner` a long text
+// is built in parts on its threads, and `allocator` is called on the calling thread only. The document and the error
+// are those of a build on one thread. Under `Budget.memory` a build on a runner counts its parts' blocks, so it may build a
+// text a build on one thread is refused, and a block it is refused has the text built on one thread. A text in `opts.pieces` is built on the calling thread, and gives the table so far with `pieces.so_far`.
 @(require_results)
 build :: #force_inline proc(src: []u8, spec := Spec.Csv, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	switch spec {
@@ -128,6 +133,11 @@ validate_as :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, allocat
 
 @(private)
 validate_walk :: #force_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, allocator: runtime.Allocator) -> tape.Error {
+	when LAX {
+		if opts.pieces != nil {
+			return validate_pieces(src, S, opts, allocator)
+		}
+	}
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		p, _ := pass_options(S, opts)
 		return walk_text(src, S, LAX, p, h, regs, a, ctx, hook.no_hook, nil, opts.budget.steps)
@@ -148,6 +158,11 @@ find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, read: t
 
 @(private)
 find_walk :: #force_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
+	when LAX {
+		if opts.pieces != nil && build.path_dups(opts) {
+			return find_pieces(src, path, S, read, opts, caller)
+		}
+	}
 	rewalk :: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result {
 		regs: hook.Regs
 		return walk_record_again((^Pass(S, build.Finder, LAX, build.FINDER_CAPS))(h.walk), h.src, lo, &regs, build.finder_hook)
@@ -172,6 +187,11 @@ scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, read
 
 @(private)
 scan_walk :: #force_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
+	when LAX {
+		if opts.pieces != nil && build.path_dups(opts) {
+			return scan_pieces(src, demand, S, read, opts, caller)
+		}
+	}
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		p, _ := pass_options(S, opts)
 		return walk_text(src, S, LAX, p, h, regs, a, ctx, build.scanner_columns_hook, nil, opts.budget.steps)

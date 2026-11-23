@@ -33,6 +33,7 @@ Piece_State :: struct {
 	// (`blocks`), one count from the first window to the last.
 	lists:     Memory_Budget,
 	blocks:    Memory_Budget,
+	framed:    tape.Framed, // the bytes a format framed in the text's opening, while its first walk waited
 }
 
 // How the walk treats the tokens of a container its hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest` for, and
@@ -55,13 +56,7 @@ Open_Level :: struct {
 	name_n:   u32,
 }
 
-// The bytes of the window of `src` taken at offset `from`, as a slice that its tokens' offsets in the whole text index.
-// Its bytes before `from` are not to be read: a read starts at or past `keep`, which no window starts past, and a
-// hook reads only tokens of that read or bytes its `keep` holds. Its base, the window's address less `from`, is
-// computed in integers and only added to, with no bounds, so it may wrap below zero with no effect on an index past it.
-piece_src :: #force_inline proc "contextless" (src: []u8, from: u64) -> []u8 {
-	return ([^]u8)(uintptr(raw_data(src)) - uintptr(from))[:from + u64(len(src))]
-}
+piece_src :: tape.piece_src
 
 // The state of `p`, a block of the format's type `P` whose first field is a `Piece_State`, which its first read makes.
 // Every read of `p` names the same `P`.
@@ -77,7 +72,8 @@ piece_state :: proc(p: ^tape.Pieces, $P: typeid) -> (s: ^P, err: runtime.Allocat
 	return (^P)(p.state), nil
 }
 
-@(private)
+// Frees the state of `p` that `piece_state` made. A format whose block holds lists of its own sets `Pieces.release` to
+// a procedure that frees them, then calls this.
 piece_release :: proc(p: ^tape.Pieces) {
 	s := (^Piece_State)(p.state)
 	if s.hook != nil {

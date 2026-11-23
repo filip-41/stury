@@ -16,7 +16,7 @@ scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Alloca
 	nodes := h.b.doc.nodes[:builder_cursor(&h.b, regs)]
 	facts := h.b.doc.facts
 	k, j := len(nodes), len(facts)
-	for k > 0 && nodes[k - 1].lo >= h.hold_from {
+	for k > 0 && (nodes[k - 1].lo >= h.hold_from || hold_named(h, nodes[k - 1])) {
 		k -= 1
 	}
 	for j > 0 && facts[j - 1].lo >= h.hold_from {
@@ -28,9 +28,11 @@ scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Alloca
 			break
 		}
 		if t.lo >= h.hold_from {
-			head, tail := hold_bounds(h, text, t)
+			// The head's bytes are where the keys are read from, which may lie before the window.
+			from := h.key_text if t.kind == .End && t.lo == h.head[0] && u64(t.n) == h.head[1] - h.head[0] else text
+			head, tail := hold_bounds(h, from, t)
 			append(&h.held, tape.Held_Span{t.lo - head, u64(len(h.bytes))}) or_return
-			append(&h.bytes, ..text[t.lo - head:t.lo + u64(t.n) + tail]) or_return
+			append(&h.bytes, ..from[t.lo - head:t.lo + u64(t.n) + tail]) or_return
 			h.hold_from = t.lo + 1
 		}
 	}
@@ -45,28 +47,39 @@ scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Alloca
 @(private)
 HOLD_SLACK :: 4096
 
-// Returns the next token in text order among the nodes from index `k^`, the facts from index `j^` and the coming key,
-// and advances the index it came from. On equal offsets the order is node, fact, coming key. A fact comes back as a
-// token of kind `.End`. Container nodes hold no bytes and are skipped. False when none is left.
+// Returns the next token in text order among the nodes from index `k^`, the facts from index `j^`, the coming key and
+// `h.head`, and advances the index it came from. On equal offsets the order is node, fact, coming key, head. A fact and
+// the head come back as a token of kind `.End`. Container nodes hold no bytes and are skipped, and so are the keys
+// `hold_named` names. False when none is left.
 @(private)
 hold_next :: proc "contextless" (h: ^Scanner, nodes: []tape.Node, facts: []tape.Fact, k, j: ^int) -> (tape.Token, bool) #no_bounds_check {
-	for k^ < len(nodes) && nodes[k^].kind > .Plain {
+	for k^ < len(nodes) && (nodes[k^].kind > .Plain || hold_named(h, nodes[k^])) {
 		k^ += 1
 	}
-	key := h.key.lo if h.has_key && h.key.lo >= h.hold_from else max(u64)
+	key := h.key.lo if h.has_key && h.key.lo >= h.hold_from && !hold_named(h, h.key) else max(u64)
 	node := nodes[k^].lo if k^ < len(nodes) else max(u64)
 	fact := facts[j^].lo if j^ < len(facts) else max(u64)
+	head := h.head[0] if h.head[1] > h.head[0] && h.head[0] >= h.hold_from else max(u64)
 	switch {
-	case node == max(u64) && fact == max(u64) && key == max(u64):
+	case node == max(u64) && fact == max(u64) && key == max(u64) && head == max(u64):
 		return {}, false
-	case node <= fact && node <= key:
+	case node <= fact && node <= key && node <= head:
 		k^ += 1
 		return nodes[k^ - 1], true
-	case fact <= key:
+	case fact <= key && fact <= head:
 		j^ += 1
 		return {lo = fact, n = facts[j^ - 1].n, kind = .End}, true
+	case key <= head:
+		return h.key, true
 	}
-	return h.key, true
+	return {lo = head, n = u32(h.head[1] - head), kind = .End}, true
+}
+
+// Whether `t` is a key with no bytes of its own to hold: one inside `h.head`, up to its last byte, held with it, or one
+// named by its place.
+@(private)
+hold_named :: #force_inline proc "contextless" (h: ^Scanner, t: tape.Token) -> bool {
+	return t.role == .Key && (t.spelling & tape.SPELLING_PLACED != 0 && t.kind == .String || h.head[1] > h.head[0] && t.lo - h.head[0] <= h.head[1] - h.head[0])
 }
 
 // The authored bytes before (`head`) and after (`tail`) token `t`'s own span, as the format's `bounds` gives them. A

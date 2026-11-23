@@ -9,6 +9,9 @@ import "stury:lib/core/tape"
 // only the containers on the path and skips every other container, whose bytes the walk judges without giving tokens.
 Finder :: struct {
 	src:       []u8,
+	// What a key token's offsets index: `src`, or the bytes a read of a text in pieces holds the keys in once they lie
+	// before its window, as a delimited text's header does.
+	key_text:  []u8,
 	steps:     []tape.Step,
 	format:    ^tape.Format,
 	bounds:    proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8), // the format's `Format.bounds`
@@ -122,7 +125,7 @@ finder_start :: proc(f: ^Finder, src: []u8, format: ^tape.Format, steps: []tape.
 		f.block = block
 		f.levels, f.opens = ([^]Find_Level)(raw_data(f.block)), ([^]u64)(raw_data(f.block[level_bytes:]))
 	}
-	f.src, f.steps, f.format, f.respell, f.rewalk, f.answer, f.allocator = src, steps, format, respell, rewalk, FIND_NONE, allocator
+	f.src, f.key_text, f.steps, f.format, f.respell, f.rewalk, f.answer, f.allocator = src, src, steps, format, respell, rewalk, FIND_NONE, allocator
 	f.bounds, f.rewalks, f.ctx = format.bounds, rewalks, context
 	f.dups = tape.read_dups(format, dups)
 	f.first, f.group, f.stop, f.want = f.dups == .First, f.dups == .Group, read.stop_early, true
@@ -193,14 +196,14 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 				// `finder_key` checks its kind and takes it. Escaped keys keep that path.
 				n := int(t.n)
 				if n >= 8 {
-					at := raw_data(h.src)[t.lo:]
+					at := raw_data(h.key_text)[t.lo:]
 					head := intrinsics.unaligned_load((^u64)(at))
 					tail := intrinsics.unaligned_load((^u64)(at[n - 8:]))
 					if head != h.key_head || tail != h.key_tail {
 						return s, .Next
 					}
 				} else {
-					a, b := raw_data(h.src[t.lo:]), raw_data(h.key)
+					a, b := raw_data(h.key_text[t.lo:]), raw_data(h.key)
 					same := false
 					switch {
 					case n >= 4:
@@ -485,7 +488,7 @@ finder_key :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #no_
 	lv := &h.levels[h.entered - 1]
 	#partial switch step in h.steps[h.entered - 1] {
 	case tape.Name:
-		if finder_names(h, lv, h.answer.outcome == .Not_Loaded) && tape.key_names(h.format, h.src, t, string(step)) {
+		if finder_names(h, lv, h.answer.outcome == .Not_Loaded) && tape.key_names(h.format, h.key_text, t, string(step)) {
 			finder_take(h, lv)
 		}
 	case tape.All:
