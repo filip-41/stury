@@ -60,9 +60,10 @@ Walk :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	tolerate:  tape.Tolerances, // set only with `LAX`
 	tolerated: bool, // with `LAX`, the walk took a rule of `tolerate`
 	rested:    bool, // with `.Skips`, the hook answered `Rest`, so the root's foot comments are not its
+	refused:   u8, // with JSON5 or `LAX`, strings the block reader refused, less those it read, see `BLOCK_RETIRE`
 	// Leaves no gap, as Odin zeroes a struct with one that is declared `---`. The fields before `depth` are eight
 	// pointers.
-	_:         [3]u8,
+	_:         [2]u8,
 	// With `LAX`, one more than the containers the walk may still open, 0 once it opened one past `Budget.steps`.
 	steps:     [int(LAX)]u64,
 	ctx:       ^runtime.Context, // the caller's, for the calls of `allocator`, nil only when the frame's levels suffice
@@ -136,6 +137,9 @@ walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, $
 walk_init :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, stack: [^]u32, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, limit: u64, tolerate: tape.Tolerances, steps: u64) {
 	w.base, w.hooks, w.stack, w.regs, w.allocator, w.ctx = raw_data(src), h, stack, regs, allocator, ctx
 	w.limit, w.room, w.owned = min(limit, MAX_LEVELS), WALK_LEVELS, false
+	when S == .Json5 || LAX {
+		w.refused = 0
+	}
 	when ODIN_ARCH == .amd64 {
 		w.tier = kernel.tier()
 	}
@@ -416,22 +420,26 @@ at :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p: [^]u8) ->
 }
 
 // Doubles the levels the walk and its hook hold, up to `limit`, at the walk's deepest level with `open` levels open
-// in its hook. The walk's own levels move to its allocator only past the `room` of its frame. Returns 0, or the outcome
-// when the limit is reached or memory is refused.
+// in its hook, with registers `hs` and the text at `p`. The walk's own levels move to its allocator only past the `room`
+// of its frame. Returns 0, or the outcome when the limit is reached or memory is refused.
 @(private, cold)
-deepen :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), open: u64) -> u8 {
+deepen :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: ^hook.Regs, p: [^]u8, open: u64) -> u8 {
 	if w.depth >= w.limit {
 		return hook.WALK_TOO_DEEP
 	}
 	want := min(w.limit, 2 * w.depth + 1)
 	// Each level the walk adds opens one more in the hook at most.
 	when .Levels in C {
-		if want_held := int(open + want - w.depth); hook.levels_held(w.hooks) < want_held && !hook.levels_grow(w.hooks, want_held) {
+		if want_held := int(open + want - w.depth); hook.levels_held(w.hooks) < want_held && !hook.levels_grow(w.hooks, want_held, hs, at(w, p)) {
 			return hook.WALK_NO_MEMORY
 		}
 	}
 	if want > w.room && !levels_room(w, want) {
 		return hook.WALK_NO_MEMORY
+	}
+	when .Rooms in C {
+		// Growing the hook's levels may have grown its room.
+		w.rooms = hook.rooms_end(w.hooks)
 	}
 	w.depth = want
 	return 0

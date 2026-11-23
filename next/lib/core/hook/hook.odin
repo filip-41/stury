@@ -38,6 +38,7 @@ Capability :: enum u8 {
 	Keeps, // answers `Keep` and `Keep_Stubs`, through the protocol's `Keeps`
 	Number_Blocks, // receives the arrays of numbers a walk reads in blocks
 	Walk, // reads values again inside its calls, in the walk set in its field `walk: rawptr`
+	Credits, // reads a key's escape credit, which the walk gives a key it reads whole and no other
 }
 
 Capabilities :: bit_set[Capability; u8]
@@ -79,9 +80,10 @@ check :: #force_inline proc "contextless" ($H: typeid) {
 
 // The `Levels` of a protocol: a hook that keeps a stack with a level per container open in it, which the walk sizes to
 // its own depth and grows before it nests past it. `Held` is the levels the stack holds and `Grow` makes it hold `want`
-// or returns false when memory is refused. Both read the hook through a `rawptr`, as a proc type cannot name a type
+// or returns false when memory is refused. It is given the hook's registers and the offset of the text the walk is at,
+// so that a hook whose room the new levels would sit after can grow that room first. Both read the hook through a `rawptr`, as a proc type cannot name a type
 // that holds it.
-Levels :: struct($Held: proc "contextless" (h: rawptr) -> int, $Grow: proc "contextless" (h: rawptr, want: int) -> bool) {}
+Levels :: struct($Held: proc "contextless" (h: rawptr) -> int, $Grow: proc "contextless" (h: rawptr, want: int, s: ^Regs, at: u64) -> bool) {}
 
 // The levels the stack of `h`, a hook with `.Levels`, holds.
 levels_held :: #force_inline proc "contextless" (h: ^$H) -> int {
@@ -90,9 +92,9 @@ levels_held :: #force_inline proc "contextless" (h: ^$H) -> int {
 }
 
 // Makes the stack of `h`, a hook with `.Levels`, hold `want` levels, or returns false.
-levels_grow :: #force_inline proc "contextless" (h: ^$H, want: int) -> bool {
+levels_grow :: #force_inline proc "contextless" (h: ^$H, want: int, s: ^Regs, at: u64) -> bool {
 	L :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, PROTOCOL_FIELD), 1)
-	return levels_grow_by(intrinsics.type_polymorphic_record_parameter_value(L, 1), h, want)
+	return levels_grow_by(intrinsics.type_polymorphic_record_parameter_value(L, 1), h, want, s, at)
 }
 
 @(private)
@@ -101,8 +103,8 @@ levels_held_by :: #force_inline proc "contextless" ($Held: proc "contextless" (h
 }
 
 @(private)
-levels_grow_by :: #force_inline proc "contextless" ($Grow: proc "contextless" (h: rawptr, want: int) -> bool, h: rawptr, want: int) -> bool {
-	return Grow(h, want)
+levels_grow_by :: #force_inline proc "contextless" ($Grow: proc "contextless" (h: rawptr, want: int, s: ^Regs, at: u64) -> bool, h: rawptr, want: int, s: ^Regs, at: u64) -> bool {
+	return Grow(h, want, s, at)
 }
 
 // The `Rooms` of a protocol: a hook that stores each token's node at the address in its register `a`, in a room that

@@ -72,11 +72,40 @@ Child_Count :: struct {
 	count: u32,
 }
 
+// Bits 0 to 10 of a text's spelling mean the same in every format, bit 3 of them free, and bits 11 to 15 are a
+// format's own.
 SPELLING_DECODE :: u16(1)
 SPELLING_QUOTED :: u16(2)
 // In a text's spelling, beside `SPELLING_DECODE`, the text holds bytes a tolerance took, so its decode may be longer
 // than its span, as `text_room` says.
 SPELLING_LAX :: u16(4)
+// In a quoted text's spelling, its bytes are all below 0x80 and hold no escape. A walk sets it on every such text it
+// reads, but a text made otherwise may lack it, so its absence proves nothing.
+SPELLING_ASCII :: u16(16)
+// A text's decoded length is its `n` less its escape credit, the source bytes its escapes save. Only a hook with
+// `.Credits` is given a credit, and a document stores none. A text whose credit does not fit, or that the walk did not
+// account, has neither credit bit, which proves nothing about its length. A number uses the same bits for its digit
+// counts, kind and form, so a reader checks the token's kind first.
+SPELLING_CREDIT_EXACT :: u16(1 << 5)
+SPELLING_CREDIT :: u16(0x1F << 6) // a credit of at most 31
+
+// The spelling of a text whose escapes save `credit` bytes. It is 0 for no credit and `SPELLING_DECODE` alone for one
+// that does not fit.
+credit_spelling :: #force_inline proc "contextless" (credit: u32) -> u16 {
+	if credit == 0 do return 0
+	if credit > u32(SPELLING_CREDIT >> 6) do return SPELLING_DECODE
+	return SPELLING_DECODE | SPELLING_CREDIT_EXACT | u16(credit << 6)
+}
+
+// The spelling of a text with its credit left out, for a hook that stores a token a walk gave it a credit with.
+without_credit :: #force_inline proc "contextless" (spelling: u16) -> u16 {
+	return spelling &~ (SPELLING_CREDIT_EXACT | SPELLING_CREDIT)
+}
+
+// The escape credit in a text's spelling. A reader checks `SPELLING_CREDIT_EXACT` first.
+spelling_credit :: #force_inline proc "contextless" (spelling: u16) -> u32 {
+	return u32((spelling & SPELLING_CREDIT) >> 6)
+}
 
 // A rule of a format a read may let a text break, each with one fixed reading. A rule a format has no instance of is
 // never broken there, so the same set applies to every format.

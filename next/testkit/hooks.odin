@@ -67,8 +67,8 @@ bare_levels_held :: proc "contextless" (h: rawptr) -> int {
 }
 
 @(private)
-bare_levels_grow :: proc "contextless" (h: rawptr, want: int) -> bool {
-	return probe_levels_grow(&(^Probe_Bare)(h).probe, want)
+bare_levels_grow :: proc "contextless" (h: rawptr, want: int, s: ^hook.Regs, at: u64) -> bool {
+	return probe_levels_grow(&(^Probe_Bare)(h).probe, want, s, at)
 }
 
 @(private)
@@ -152,7 +152,7 @@ probe_levels_held :: proc "contextless" (h: rawptr) -> int {
 }
 
 @(private)
-probe_levels_grow :: proc "contextless" (h: rawptr, want: int) -> bool {
+probe_levels_grow :: proc "contextless" (h: rawptr, want: int, _: ^hook.Regs, _: u64) -> bool {
 	p := (^Probe)(h)
 	if p.refuse {
 		return false
@@ -209,8 +209,8 @@ inner_levels_held :: proc "contextless" (h: rawptr) -> int {
 }
 
 @(private)
-inner_levels_grow :: proc "contextless" (h: rawptr, want: int) -> bool {
-	return probe_levels_grow((^Probe_Inner)(h).outer, want)
+inner_levels_grow :: proc "contextless" (h: rawptr, want: int, s: ^hook.Regs, at: u64) -> bool {
+	return probe_levels_grow((^Probe_Inner)(h).outer, want, s, at)
 }
 
 @(private)

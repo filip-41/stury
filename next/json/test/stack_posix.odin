@@ -42,12 +42,17 @@ stack_job :: proc "c" (arg: rawptr) -> rawptr {
 	return nil
 }
 
-// Runs each read on a thread of `stack` bytes over a text nesting `depth` levels, and a value in it read again.
+// Runs each read on a thread of `stack` bytes over a text nesting `depth` levels, and a value in it read again. A
+// `stack` below the system's least thread stack (128 KiB on Linux arm64) is raised to it.
 expect_reads_on_thread :: proc(t: ^testing.T, stack: uint, depth: int) {
+	size := stack
+	if least := posix.sysconf(._THREAD_STACK_MIN); least > 0 {
+		size = max(size, uint(least))
+	}
 	attr: posix.pthread_attr_t
 	posix.pthread_attr_init(&attr)
 	defer posix.pthread_attr_destroy(&attr)
-	testing.expect_value(t, posix.pthread_attr_setstacksize(&attr, stack), posix.Errno.NONE)
+	testing.expect_value(t, posix.pthread_attr_setstacksize(&attr, size), posix.Errno.NONE)
 	for objects in ([]bool{false, true}) {
 		text := transmute([]u8)nested_in_root(depth, objects)
 		for read in 0 ..< 4 {
@@ -55,7 +60,7 @@ expect_reads_on_thread :: proc(t: ^testing.T, stack: uint, depth: int) {
 			thread: posix.pthread_t
 			testing.expect_value(t, posix.pthread_create(&thread, &attr, stack_job, &job), posix.Errno.NONE)
 			posix.pthread_join(thread, nil)
-			testing.expectf(t, job.ok, "read %d objects %v depth %d stack %d", read, objects, depth, stack)
+			testing.expectf(t, job.ok, "read %d objects %v depth %d stack %d", read, objects, depth, size)
 		}
 	}
 }

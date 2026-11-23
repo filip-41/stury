@@ -39,7 +39,7 @@ Scanner :: struct {
 	passed:      tape.Node_Index, // with `facts`, the node written next when the walk last passed a value
 	facts:       bool, // `Demand.facts`
 	opens:       u32, // the frames opened, so the last one's generation. A frame is a node, which keeps this from wrapping
-	done:        []bool, // the paths settled under `stop_early`, a bool per path
+	done:        []bool, // the paths settled, a bool per path, kept while `settles`
 	pending:     int, // the paths not done
 	key:         tape.Token, // with `has_key`, the key of the coming value
 	has_key:     bool,
@@ -54,6 +54,10 @@ Scanner :: struct {
 	rewalks:     bool, // the format has `.Rewalk`, so an array whose elements only steps from the end take replays
 	stop:        bool, // `stop_early`
 	stopped:     bool,
+	// Under `stop_early`, or a limit on a path or a step, the scan tracks its settled paths. Once all are, `stop_early`
+	// ends the walk, and otherwise the scan keeps nothing more while the walk judges the rest of the text. A scan of
+	// facts takes every token, as the comments past the last settled value may be a kept node's.
+	settles:     bool,
 	// `holds` is set for a scan of a text in pieces, which copies the bytes it keeps out of each window. `held` is the
 	// spans, `bytes` their bytes, and `hold_from` the offset from which the walk's tokens are not held yet.
 	holds:       bool,
@@ -65,13 +69,14 @@ Scanner :: struct {
 	protocol:    hook.Protocol(SCANNER_CAPS, hook.Levels(scanner_levels_held, scanner_levels_grow), hook.Unused, hook.Keeps(Builder, scanner_builder, builder_keep_whole, builder_keep_stubs)),
 }
 
-SCANNER_CAPS :: hook.Capabilities{.Skips, .Levels, .Keeps, .Walk}
+SCANNER_CAPS :: hook.Capabilities{.Skips, .Levels, .Keeps, .Walk, .Credits}
 
 // Which container's `End` is the next token, when this hook skipped it or kept it as a whole.
 Scan_End :: enum u8 {
 	None,
 	Skipped, // a container this hook skipped
 	Picked, // a container picks took, kept whole or stored as one node, its picks still in `picks`
+	Settled, // every path is settled without `stop_early`, so no token is taken from here on
 }
 
 // The open stack of a scanner, which is its builder's, as `hook.Levels` reads it.
@@ -81,8 +86,8 @@ scanner_levels_held :: #force_inline proc "contextless" (h: rawptr) -> int {
 }
 
 @(private)
-scanner_levels_grow :: #force_inline proc "contextless" (h: rawptr, want: int) -> bool {
-	return builder_deepen(&(^Scanner)(h).b, want)
+scanner_levels_grow :: #force_inline proc "contextless" (h: rawptr, want: int, _: ^hook.Regs, _: u64) -> bool {
+	return builder_deepen(&(^Scanner)(h).b, want, nil, 0)
 }
 
 // The builder a scanner keeps containers with, as `hook.Keeps` reads it.
@@ -206,6 +211,7 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 	h.demand, h.rewalk, h.rewalks = demand, rewalk, .Rewalk in format.caps && rewalk != nil
 	h.dups = tape.read_dups(format, read.dups)
 	h.first, h.group, h.stop, h.pending = h.dups == .First, h.dups == .Group, read.stop_early, len(demand.paths)
+	h.settles = h.stop || !demand.facts && (demand.limited || scan_cuts(demand))
 	h.b.keep_facts, h.facts, h.passed, h.wait_at = demand.facts, demand.facts, tape.NO_NODE, tape.NO_NODE
 	h.room = room
 	scan_room_list(&h.frames, room.frames[:], allocator)
@@ -246,6 +252,24 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 	return
 }
 
+// Whether a step of `demand` has a limit, which settles its paths once the step takes no more.
+@(private)
+scan_cuts :: proc "contextless" (demand: ^tape.Demand) -> bool {
+	for e in demand.edges {
+		#partial switch step in e.step {
+		case tape.All:
+			if step.limit > 0 {
+				return true
+			}
+		case tape.Slice:
+			if step.limit > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 @(private)
 scan_room_list :: proc(list: ^[dynamic]$T, room: []T, allocator: runtime.Allocator) {
 	raw := (^runtime.Raw_Dynamic_Array)(list)
@@ -269,6 +293,9 @@ scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 	}
 	if h.end_of != .None {
 		end := h.end_of
+		if end == .Settled {
+			return s, scan_rest(t)
+		}
 		h.end_of = .None
 		if end == .Picked {
 			return scan_past(h, s, h.picks[:], s.c)
@@ -283,6 +310,8 @@ scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 			return s, .Next
 		}
 		h.key, h.has_key, h.by_place = t, true, false
+		// The scan's document keeps the key, and a document carries no credit.
+		h.key.spelling = tape.without_credit(h.key.spelling)
 		// A `Name` takes a key of any scalar kind by its text.
 		if t.kind <= .Plain {
 			scanner_key(h, t, true)
@@ -311,11 +340,15 @@ scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 }
 
 // Whether no `Name` of the object `f` can match key `t`, because none has its length or none has its first byte. A key
-// that needs decoding is never judged here, since its length is known only once decoded.
+// that needs decoding is judged by its decoded length when its spelling holds an exact credit, otherwise never.
 @(private)
 scan_key_unmatched :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, t: tape.Token) -> bool #no_bounds_check {
 	if t.spelling & tape.SPELLING_DECODE != 0 {
-		return false
+		if t.spelling & tape.SPELLING_CREDIT_EXACT == 0 {
+			return false
+		}
+		d := u64(t.n) - u64(tape.spelling_credit(t.spelling))
+		return f.lengths & (1 << (d & 63)) == 0
 	}
 	return f.lengths & (1 << (t.n & 63)) == 0 || t.n > 0 && f.heads & (1 << (h.b.doc.src[t.lo] & 63)) == 0
 }
@@ -331,7 +364,7 @@ scanner_end :: proc(h: ^Scanner, regs: hook.Regs, root_close: u64, err: tape.Err
 	if e == nil {
 		e = builder_error(&h.b)
 	}
-	if e == nil && h.stopped {
+	if e == nil && (h.stopped || h.end_of == .Settled) {
 		// The containers the stop left open are on the paths, their counts not known, as their ends were not read. A
 		// replaying array stops only in its replay, with every element passed, so its count is known.
 		for regs.c > 0 {
@@ -426,7 +459,7 @@ scanner_value :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $
 		if !f.object {
 			ok: bool
 			if s, ok = scan_element(h, s, f, index, t, d); !ok {
-				return s, .Stop
+				return s, scan_halt(h, t)
 			}
 		} else if f.keys && len(h.picks) == 0 {
 			return scan_stub(h, s, t)
@@ -625,7 +658,7 @@ scan_element :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: 
 					scan_put(&h.picks, edge.to)
 					// A limit leaves the array partial, so each element it keeps holds its place.
 					h.by_place ||= step.limit > 0
-				} else if h.stop && index == u64(step.limit) && !scan_cut(h, edge.to, d) {
+				} else if h.settles && index == u64(step.limit) && !scan_cut(h, edge.to, d) {
 					return s, false
 				}
 			case tape.Slice:
@@ -841,7 +874,7 @@ scan_slice_picks :: #force_no_inline proc "contextless" (h: ^Scanner, f: ^Scan_F
 }
 
 // Takes the demand node `to` for element `index` when `step` may take it, before its array's count is known. Past
-// the last element it can take, with `stop_early`, the paths through it that settle there are done. Returns whether the
+// the last element it can take, under `settles`, the paths through it that settle there are done. Returns whether the
 // walk goes on.
 @(private)
 scan_slice_pick :: #force_inline proc "contextless" (h: ^Scanner, step: tape.Slice, index: u64, to: u32, d: u64) -> bool {
@@ -850,17 +883,17 @@ scan_slice_pick :: #force_inline proc "contextless" (h: ^Scanner, step: tape.Sli
 		h.by_place = true
 		return true
 	}
-	return !h.stop || index != tape.slice_cut(step) || scan_cut(h, to, d)
+	return !h.settles || index != tape.slice_cut(step) || scan_cut(h, to, d)
 }
 
-// Settles, with `stop_early`, the paths through demand node `to` that a positional step at depth `d` takes no more
-// elements for. Returns whether the walk goes on.
+// Settles, under `settles`, the paths through demand node `to` that a positional step at depth `d` takes no more
+// elements for. Returns whether the scan takes more tokens.
 @(private, cold)
 scan_cut :: #force_no_inline proc "contextless" (h: ^Scanner, to: u32, d: u64) -> bool {
 	if d - 1 <= h.demand.reach {
 		scan_settle(h, to, d - 1)
 		if h.pending == 0 {
-			h.stopped = true
+			scan_settled(h)
 			return false
 		}
 	}
@@ -1047,9 +1080,9 @@ scanner_close :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -
 		for e in max(f.count, k) - k ..< f.count {
 			s = scan_replay(h, s, f, e)
 			f = &h.frames[d - 1]
-			if h.stopped || h.b.err != nil {
+			if h.stopped || h.end_of == .Settled || h.b.err != nil {
 				// The array stays open, and the end closes it partial with its full count.
-				return s, .Stop
+				return s, scan_halt(h, t)
 			}
 		}
 	} else if f.ring_k > 0 {
@@ -1079,7 +1112,7 @@ scanner_close :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -
 	} else {
 		s = scan_close_partial(h, s, f^)
 	}
-	if h.stop && d - 1 <= dm.reach {
+	if h.settles && d - 1 <= dm.reach {
 		for n in h.live[f.live:][:f.n_live] {
 			scan_settle(h, n, d - 1)
 		}
@@ -1153,7 +1186,7 @@ scan_close_partial :: proc "contextless" (h: ^Scanner, s: hook.Regs, f: Scan_Fra
 // Goes on past a value the demand nodes `picks` took at depth `d`.
 @(private)
 scan_past :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, picks: []u32, d: u64) -> (hook.Regs, hook.Action) {
-	if h.stop && d <= h.demand.reach {
+	if h.settles && d <= h.demand.reach {
 		scan_settle_picks(h, picks, d)
 	}
 	return scan_left(h, s)
@@ -1171,11 +1204,38 @@ scan_left :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs) -> (ho
 	if h.b.err != nil {
 		return s, .Stop
 	}
-	if h.stop && h.pending == 0 {
-		h.stopped = true
-		return s, .Stop
+	if h.settles && h.pending == 0 {
+		scan_settled(h)
+		return s, .Stop if h.stop else .Next
 	}
 	return s, .Next
+}
+
+// Ends the scan's keeping once every path is settled: `stop_early` stops the walk, and otherwise the hook takes no
+// more tokens while the walk judges the rest of the text.
+@(private, cold)
+scan_settled :: #force_no_inline proc "contextless" (h: ^Scanner) {
+	if h.stop {
+		h.stopped = true
+	} else {
+		h.end_of = .Settled
+	}
+}
+
+// The answer to token `t` of a scan that took its last token, by a stop, a refused growth or every path settled.
+@(private)
+scan_halt :: #force_inline proc "contextless" (h: ^Scanner, t: tape.Token) -> hook.Action {
+	if h.end_of != .Settled || h.b.err != nil {
+		return .Stop
+	}
+	return scan_rest(t)
+}
+
+// The answer to token `t` once every path is settled: a container is judged with the rest of the text and no more
+// tokens, and any other token passes.
+@(private)
+scan_rest :: #force_inline proc "contextless" (t: tape.Token) -> hook.Action {
+	return .Rest if t.role == .Value && (t.kind == .Array || t.kind == .Object) else .Next
 }
 
 // Marks done each path under demand node `n` whose answers are all made once the walk is back at depth `d`.

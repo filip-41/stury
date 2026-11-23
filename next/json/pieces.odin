@@ -75,6 +75,13 @@ give_piece :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: 
 	}
 	when .Skips in C {
 		if pw.s.nest != .None {
+			// The inner hook of a kept container takes no credit.
+			t := t
+			when .Credits in C {
+				if t.role == .Key {
+					t.spelling = tape.without_credit(t.spelling)
+				}
+			}
 			return piece_nested(w, pw, on, hs, t)
 		}
 	}
@@ -383,7 +390,7 @@ CUT_IDENT :: u8(5) // a JSON5 unquoted key
 @(private, cold)
 piece_cut_string :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) {
 	quote := p[0] if S == .Json5 else '"'
-	q, spelling, _ := string_exact_on(S == .Json5, LAX, quote, p[1:], end, w.tolerate, 0)
+	q, spelling, _ := string_exact_on(S == .Json5, LAX, quote, p[1:], end, w.tolerate, tape.SPELLING_ASCII)
 	w.piece[0].s.cut = {lo = at(w, p), on = at(w, q), spelling = spelling, part = CUT_STRING, quote = quote}
 }
 
@@ -516,7 +523,9 @@ piece_number_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Wa
 		when S == .Json5 {
 			q, tail, kind = number5(run[-1:], end)
 		} else {
-			q, tail, kind = number(run[-1:], end, true, S)
+			wide: u64
+			q, wide, kind = number(run[-1:], end, true, S)
+			tail = u16(wide)
 		}
 		if kind == .Truncated && pw.more {
 			pw.s.cut, pw.s.cut.on = c, at(w, run)

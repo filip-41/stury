@@ -334,6 +334,41 @@ json5_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, src[doc.nodes[3].lo:][:doc.nodes[3].n], "$_x")
 }
 
+// Strings the block reader refuses, then strings only it reads fast, read the same while it stops trying and once it
+// tries again, and a bad string after them faults where it would alone.
+@(test)
+json5_refused_strings :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	for _ in 0 ..< 300 {
+		strings.write_string(&b, `"\x41b",`)
+	}
+	for _ in 0 ..< 300 {
+		strings.write_string(&b, `"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé\n",`)
+	}
+	strings.write_string(&b, `"x"]`)
+	src := strings.to_string(b)
+	doc, err := build(t, src, spec = .Json5)
+	defer tape.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	buf: [64]u8
+	for n, i in doc.nodes[1:][:600] {
+		s, ok := tape.node_text(&doc, n, buf[:])
+		testing.expect(t, ok)
+		want := "Ab" if i < 300 else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé\n"
+		if s != want {
+			testing.expectf(t, false, "string %d: %q, want %q", i, s, want)
+			break
+		}
+	}
+	bad := strings.concatenate({src[:len(src) - 4], `"\q`, "\n", `"]`}, context.temp_allocator)
+	_, berr := build(t, bad, spec = .Json5)
+	kind, at := fault_of(berr)
+	testing.expect_value(t, kind, tape.Fault_Kind.Bad_Char)
+	testing.expect_value(t, at, u64(len(src) - 1))
+}
+
 // JSON5's own white space and comments read wherever JSON's white space does.
 @(test)
 json5_white_space :: proc(t: ^testing.T) {

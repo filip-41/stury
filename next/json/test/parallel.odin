@@ -205,6 +205,22 @@ parts_build_the_suites :: proc(t: ^testing.T) {
 	}
 }
 
+// A text of ASCII and other strings and keys, cut at every chunk size, gives the spellings of the build on one thread.
+@(test)
+parts_spell_ascii_texts_as_one_thread :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for spec in json.Spec {
+		text := transmute([]u8)ascii_text(spec)
+		for threads in cuts_of(len(text)) {
+			r := serial_runner(threads)
+			if ok, _ := agree_on(t, text, spec, {}, &r, "ascii"); !ok {
+				return
+			}
+		}
+		free_all(context.temp_allocator)
+	}
+}
+
 @(private = "file")
 PARALLEL_FIXTURES := [?]string{"canada.json", "citm_catalog.json", "twitter.json"}
 
@@ -288,6 +304,63 @@ parts_allocate_on_the_calling_thread :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expect_value(t, c.strays, 0)
+	free_all(context.temp_allocator)
+}
+
+// A build under `Budget.memory` gives the document and the error of the build on one thread whatever the threads, for
+// budgets from far below what the text needs to far above it and every byte around the least that is enough.
+@(test)
+memory_budget_gives_one_answer_on_every_thread_count :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0xb0d9)
+	one, many := serial_runner(3), serial_runner(17)
+	for spec in json.Spec {
+		for shape in ([]int{0, 2}) {
+			src := seam_text(spec, shape, 300)
+			for dups in ([]tape.Duplicates{.Default, .Last, .Refuse}) {
+				builds :: proc(src: []u8, spec: json.Spec, dups: tape.Duplicates, memory: u64) -> bool {
+					doc, err := json.build(src, spec, {budget = {memory = memory}, dups = dups})
+					tape.destroy(&doc)
+					return err == nil
+				}
+				// The least budget that builds the text, found by bisection from the first doubling that does.
+				hi := u64(len(src))
+				for hi < 8 * u64(len(src)) && !builds(src, spec, dups, hi) {
+					hi *= 2
+				}
+				least := u64(0)
+				if builds(src, spec, dups, hi) {
+					lo := u64(0)
+					for hi - lo > 1 {
+						mid := lo + (hi - lo) / 2
+						if builds(src, spec, dups, mid) {
+							hi = mid
+						} else {
+							lo = mid
+						}
+					}
+					least = hi
+				}
+				// The text repeats keys, so `.Refuse` builds none of it and its budgets all end in the same fault.
+				testing.expectf(t, least != 0 || dups == .Refuse, "%v %d %v: no budget up to eight times the text builds it", spec, shape, dups)
+				for memory := u64(1); memory < 8 * u64(len(src)); memory += 1 + memory / 5 {
+					for runner in ([]^tape.Runner{&one, &many}) {
+						if ok, _ := agree_on(t, src, spec, {budget = {memory = memory}, dups = dups}, runner, "budget"); !ok {
+							return
+						}
+					}
+				}
+				for memory in max(least, 12) - 12 ..= least + 12 {
+					for runner in ([]^tape.Runner{&one, &many}) {
+						if ok, _ := agree_on(t, src, spec, {budget = {memory = memory}, dups = dups}, runner, "budget near the least"); !ok {
+							return
+						}
+					}
+				}
+			}
+		}
+	}
 	free_all(context.temp_allocator)
 }
 

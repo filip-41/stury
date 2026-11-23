@@ -676,6 +676,97 @@ scan_judges_the_text_past_a_cut :: proc(t: ^testing.T) {
 	testing.expect(t, n == 3 && p == .Found)
 }
 
+// Texts that break past the part `limited_paths` settle in under `.First`, the arrays for the paths from the root and
+// the objects for the path through `a`.
+LIMITED_TEXTS :: []string {
+	`[1,2,x`,
+	`[1,2,`,
+	`[1,2`,
+	`[1,2,x]`,
+	`[1,2,"a\q"]`,
+	`[1,[2,x]]`,
+	`[1,{"a":tru}]`,
+	`[1,[[[[x]]]]]`,
+	`[1,{"b":`,
+	`[1,2]x`,
+	`[1]x`,
+	`[1,2] 3`,
+	`[1,2]]`,
+	`[1,2,"\udc00"]`,
+	`{"a":[1,2,x],"b":1}`,
+	`{"a":[1,[x]]}`,
+	`{"a":[1],"b":x}`,
+	`{"a":[1]}}`,
+}
+
+// Paths a limit settles in `LIMITED_TEXTS`, the last by its path's limit of 1.
+limited_paths := [][]tape.Step{{tape.All{1}}, {tape.Slice{0, nil, 1}}, {tape.Name("a"), tape.All{1}}, {tape.All{}}}
+
+// The limit of each of `limited_paths`.
+limited_limits := []int{0, 0, 0, 1}
+
+// The demand of path `i` of `limited_paths`.
+limited_demand :: proc(i: int) -> tape.Demand {
+	d, err := tape.demand_of(limited_paths[i:][:1], nil, limited_limits[i:][:1])
+	assert(err == nil)
+	return d
+}
+
+// A limit stops what a scan and a find keep, not what they judge: past the part the limit settles every byte is judged
+// as `validate` judges it, and the scan keeps no more than a stopped one. Only `stop_early` ends the walk, with
+// `.Stopped`.
+@(test)
+limited_reads_judge_the_text_past_the_limit :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	read := tape.Read_Options{dups = .First}
+	stop := tape.Read_Options{dups = .First, stop_early = true}
+	for src in LIMITED_TEXTS {
+		text := transmute([]u8)src
+		want := json.validate(text)
+		testing.expectf(t, want != nil, "%q", src)
+		for path, i in limited_paths {
+			d := limited_demand(i)
+			defer tape.destroy(&d)
+			r, err := json.scan(text, &d, read = read)
+			tape.destroy(&r)
+			testing.expectf(t, err == want, "%q scan %v: %v, validate %v", src, path, err, want)
+			settles := (src[0] == '{') == (len(path) == 2)
+			s, serr := json.scan(text, &d, read = stop)
+			testing.expectf(t, !settles || serr == nil && .Stopped in s.flags, "%q scan %v stop: %v %v", src, path, serr, s.flags)
+			tape.destroy(&s)
+			if limited_limits[i] == 0 {
+				_, ferr := json.find(text, path, read = read)
+				testing.expectf(t, ferr == want, "%q find %v: %v, validate %v", src, path, ferr, want)
+				a, aerr := json.find(text, path, read = stop)
+				testing.expectf(t, !settles || aerr == nil && a.outcome == .Found, "%q find %v stop: %v %v", src, path, a, aerr)
+			}
+		}
+	}
+	for f in #load_directory("conformance/JSONTestSuite/test_parsing") {
+		want := json.validate(f.data)
+		for _, i in limited_paths {
+			d := limited_demand(i)
+			defer tape.destroy(&d)
+			r, err := json.scan(f.data, &d, read = read)
+			tape.destroy(&r)
+			testing.expectf(t, err == want, "%s scan %v: %v, validate %v", f.name, limited_paths[i], err, want)
+		}
+	}
+	for src in ([]string{`[1,2,3]`, `[1,[2,3],{"a":4}]`, `{"a":[1,[2]],"b":[3]}`, `{"a":[[1],2],"a":[3]}`}) {
+		for path, i in limited_paths {
+			d := limited_demand(i)
+			defer tape.destroy(&d)
+			r, err := json.scan(transmute([]u8)src, &d, read = read)
+			defer tape.destroy(&r)
+			s, serr := json.scan(transmute([]u8)src, &d, read = stop)
+			defer tape.destroy(&s)
+			testing.expectf(t, err == nil && serr == nil && .Stopped not_in r.flags, "%q %v: %v %v %v", src, path, err, serr, r.flags)
+			same := len(r.nodes) == len(s.nodes) && render_doc(&r) == render_doc(&s) && render_answers(&r) == render_answers(&s)
+			testing.expectf(t, same, "%q %v: keeps %q %q, stopped %q %q", src, path, render_doc(&r), render_answers(&r), render_doc(&s), render_answers(&s))
+		}
+	}
+}
+
 // A path `[All{limit = n}, All{}]` takes the first `n` children of the root whatever they are, those the next step
 // cannot enter as the wrong kind, and gives the second step's answers of them only.
 @(test)

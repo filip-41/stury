@@ -14,6 +14,43 @@ build :: proc(t: ^testing.T, src: string, opts := json.Options{}, spec := json.S
 	return doc, err
 }
 
+// A document carries no escape credit in its keys, and a find of a name of another decoded length, which the walk
+// rejects by that credit, finds nothing.
+@(test)
+escaped_keys_carry_no_credit_in_documents :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	pad := strings.repeat(" ", 64, context.temp_allocator)
+	src := strings.concatenate({`{"a\n":1,"\u00e9x":2,"\ud83d\ude00":3,"\u0041\u0042":4,"plain":5`, pad, `}`}, context.temp_allocator)
+	doc, err := build(t, src)
+	defer tape.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	d, _ := tape.demand_of([][]tape.Step{{tape.Name("a\n")}, {tape.Name("AB")}})
+	defer tape.destroy(&d)
+	scanned, serr := json.scan(transmute([]u8)src, &d)
+	defer tape.destroy(&scanned)
+	testing.expect_value(t, serr, nil)
+	for kept in ([]^tape.Document{&doc, &scanned}) {
+		keys := 0
+		for node in kept.nodes {
+			if node.role == .Key {
+				keys += 1
+				testing.expect_value(t, tape.without_credit(node.spelling), node.spelling)
+			}
+		}
+		testing.expect(t, keys > 0, "no keys")
+	}
+	Case :: struct {
+		name:  string,
+		value: string,
+	}
+	for c in ([]Case{{"a\n", "1"}, {"éx", "2"}, {"\U0001F600", "3"}, {"AB", "4"}, {"a", ""}, {"é", ""}}) {
+		a, ferr := json.find(transmute([]u8)src, {tape.Name(c.name)})
+		testing.expect_value(t, ferr, nil)
+		got := string(doc.src[a.lo:a.hi]) if a.outcome == .Found else ""
+		testing.expectf(t, got == c.value, "find %q gave %q, want %q", c.name, got, c.value)
+	}
+}
+
 // The suite's `y_` texts build and its `n_` texts are refused. `i_` texts may go either way.
 @(test)
 suite_accepts_and_refuses :: proc(t: ^testing.T) {
@@ -48,12 +85,12 @@ nodes_of_a_text :: proc(t: ^testing.T) {
 	}
 	want := []Want {
 		{"{", .Object, .Value, 8, 2},
-		{"a", .String, .Key, 1, tape.SPELLING_QUOTED},
+		{"a", .String, .Key, 1, tape.SPELLING_QUOTED | tape.SPELLING_ASCII},
 		{"[", .Array, .Value, 4, 3},
 		{"1", .Number, .Value, 1, tape.number_spelling(0, 1, 0)},
 		{`x\n`, .String, .Value, 3, tape.SPELLING_QUOTED | tape.SPELLING_DECODE},
 		{"true", .True, .Value, 4, 0},
-		{"b", .String, .Key, 1, tape.SPELLING_QUOTED},
+		{"b", .String, .Key, 1, tape.SPELLING_QUOTED | tape.SPELLING_ASCII},
 		{"null", .Null, .Value, 4, 0},
 	}
 	if !testing.expect_value(t, len(doc.nodes), len(want)) {
@@ -69,6 +106,51 @@ nodes_of_a_text :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expect_value(t, doc.root_close, u64(len(src)))
+}
+
+// Records of strings and keys of the lengths the readers tell apart, plain ASCII, with a byte past 0x7F first or past
+// 64 bytes, and with an escape, and in JSON5 single-quoted strings and unquoted keys too. The last copies lie near the
+// text's end.
+ascii_text :: proc(spec: json.Spec) -> string {
+	long := strings.repeat("abcdefghij", 7, context.temp_allocator)
+	cat :: proc(parts: ..string) -> string {
+		return strings.concatenate(parts, context.temp_allocator)
+	}
+	record := cat(`{"a": "b", "`, long[:40], `": "`, long[:40], `", "`, long, `é": "é`, long, `", "x\n": "`, long, `\t", "é": "`, long, `é", "ka": "`, long[:20], `"}`)
+	if spec == .Json5 {
+		record = cat(`{a: 'b', 'c`, long[:30], `': '`, long, `é', 'é': 'x\'y', "q": [`, record, `]}`)
+	}
+	text, _ := records(record, ",", record, 3)
+	return text
+}
+
+// A quoted text has `SPELLING_ASCII` exactly when its bytes are all below 0x80 and hold no escape, in each spec, far
+// from the text's end and near it. An unquoted key lacks it.
+@(test)
+ascii_texts :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for spec in json.Spec {
+		text := ascii_text(spec)
+		doc, err := build(t, text, spec = spec)
+		defer tape.destroy(&doc)
+		testing.expect_value(t, err, nil)
+		ascii, other := 0, 0
+		for n in doc.nodes {
+			if n.kind != .String {
+				continue
+			}
+			bytes := text[n.lo:][:n.n]
+			want := n.spelling & tape.SPELLING_QUOTED != 0 && strings.index_byte(bytes, '\\') < 0
+			for c in transmute([]u8)bytes {
+				want &&= c < 0x80
+			}
+			testing.expectf(t, (n.spelling & tape.SPELLING_ASCII != 0) == want, "%v: %v %q, want ASCII %v", spec, n.role, bytes, want)
+			ascii += int(want)
+			other += int(!want)
+		}
+		testing.expectf(t, ascii > 20 && other > 20, "%v: %d ASCII texts, %d others", spec, ascii, other)
+	}
+	free_all(context.temp_allocator)
 }
 
 // A text of `count` copies of `record` joined by `sep` in an array, then `last` and `count` more copies, and where

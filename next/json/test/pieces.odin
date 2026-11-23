@@ -83,7 +83,7 @@ same_docs :: proc(a, b: tape.Document) -> bool {
 // The reads of `src` in pieces cut at `cuts` give what the whole reads give: the verdict and fault, the document, the
 // answer of each path and the scan of them.
 @(private = "file")
-agree_in_pieces :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.Options, cuts: []int, paths: [][]tape.Step, name: string) -> bool {
+agree_in_pieces :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.Options, cuts: []int, paths: [][]tape.Step, name: string, limits: []int = nil) -> bool {
 	r := Piece_Run{src, spec, opts, cuts}
 	whole_err := json.validate(src, spec, opts)
 	{
@@ -145,14 +145,14 @@ agree_in_pieces :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.Op
 			})
 			defer delete(window)
 			text := string(p.text)
-			ok := got.err == ferr && got.a == want && (want.outcome != .Found || text == string(src[want.lo:want.hi]))
+			ok := got.err == ferr && (ferr != nil || got.a == want && (want.outcome != .Found || text == string(src[want.lo:want.hi])))
 			tape.destroy(&p)
 			if !testing.expectf(t, ok, "%s %v cut %v: find %v stop %v: %v %v, whole %v %v", name, spec, cuts, path, stop, got.a, got.err, want, ferr) {
 				return false
 			}
 		}
 	}
-	d, derr := tape.demand_of(paths, nil, nil, spec != .Json)
+	d, derr := tape.demand_of(paths, nil, limits, spec != .Json)
 	defer tape.destroy(&d)
 	if derr != nil {
 		return true
@@ -330,6 +330,64 @@ pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 	}
 	log.infof("%d suite texts, %d fixture texts, %d splits", sampled, c.texts - sampled, c.reads)
 	free_all(context.temp_allocator)
+}
+
+// Split at every byte, a read whose paths a limit settles judges the text past them as a read of the whole text does,
+// and a scan keeps the same nodes.
+@(test)
+pieces_judge_the_text_past_a_limit :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	whole := []string{`[1,2,3]`, `[1,[2,3],{"a":4}]`, `{"a":[1,[2]],"b":[3]}`, "[1, /* c */ 2, x", "[1,2] // c", `{"a":[1 /* c */]} /* d */`}
+	for texts in ([][]string{LIMITED_TEXTS, whole}) {
+		for src in texts {
+			for spec in ([]json.Spec{.Json, .Jsonc}) {
+				for cut in 0 ..= len(src) {
+					cuts := [1]int{cut}
+					if !agree_in_pieces(t, transmute([]u8)src, spec, {}, cuts[:], limited_paths, "limited", limited_limits) {
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
+// A text of many short escaped keys, with escaped values around them, cut at every byte: the builds, finds and scans in
+// pieces give the whole read's, wherever a key lies against a window's end.
+@(test)
+pieces_read_short_escaped_keys_as_whole_reads :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	for i in 0 ..< 12 {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		strings.write_string(&b, `{"n\u0061me":"v\u0061l","\u0069d":1,"t\u0061gs":["\n","x"],"\u00e9":{"k\u0061":null}}`)
+	}
+	strings.write_byte(&b, ']')
+	src := transmute([]u8)strings.to_string(b)
+	doc, err := json.build(src)
+	defer tape.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	paths := paths_into(&doc)
+	for k in 0 ..= len(src) {
+		cuts := [1]int{k}
+		if !agree_in_pieces(t, src, .Json, {}, cuts[:], paths, "escaped keys") {
+			return
+		}
+	}
+}
+
+// A text of ASCII and other strings and keys split anywhere gives the spellings of the whole read.
+@(test)
+pieces_spell_ascii_texts_as_whole_reads :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	c: Corpus
+	for spec in json.Spec {
+		agree_over_splits(t, transmute([]u8)ascii_text(spec), spec, {}, "ascii", &c)
+	}
 }
 
 @(private = "file")

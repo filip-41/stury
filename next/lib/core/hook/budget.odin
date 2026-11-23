@@ -18,6 +18,15 @@ memory_budget :: proc "contextless" (m: ^Memory_Budget) -> runtime.Allocator {
 	return {memory_budget_proc, m}
 }
 
+// The bytes `m` still lets its blocks grow by, counting a peer's.
+memory_budget_left :: proc "contextless" (m: ^Memory_Budget) -> u64 {
+	held := m.held
+	if m.peer != nil {
+		held += m.peer.held
+	}
+	return m.limit - min(held, m.limit)
+}
+
 // The error a read that ended with `err` gives under `m`: `Exceeded` for a refusal the budget made.
 memory_budget_error :: proc "contextless" (m: ^Memory_Budget, err: tape.Error) -> tape.Error {
 	if _, refused := err.(runtime.Allocator_Error); refused && (m.refused || m.peer != nil && m.peer.refused) {

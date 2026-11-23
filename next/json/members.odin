@@ -10,9 +10,9 @@ import "stury:lib/core/tape"
 // matches them against the next object at the same place in the tree, which judges a member's comma, white space, key
 // and colon in one compare.
 //
-// A match is as strict as the states. A gap is learned only from bytes they accepted, around a key with no escape.
-// Every gap after a value has the same place in the grammar. The gap after an open bracket has a different place and
-// its own slot.
+// A match is as strict as the states. A gap is learned only from bytes they accepted, around a key `string_probe` read,
+// which is printable ASCII with no escape. Every gap after a value has the same place in the grammar. The gap after an
+// open bracket has a different place and its own slot.
 
 // Whether the walk learns member gaps.
 @(private)
@@ -174,7 +174,7 @@ gap_match :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, en
 		s.miss = {}
 	}
 	learned := s.key
-	return r, tape.Token{at(w, p) + u64(learned.offset) + 1, u32(s.key_n), .String, .Key, tape.SPELLING_QUOTED}, learned.newline
+	return r, tape.Token{at(w, p) + u64(learned.offset) + 1, u32(s.key_n), .String, .Key, tape.SPELLING_QUOTED | tape.SPELLING_ASCII}, learned.newline
 }
 
 // One past the `n`-byte gap at `p` matching `e` followed by a value-start byte, or nil on mismatch.

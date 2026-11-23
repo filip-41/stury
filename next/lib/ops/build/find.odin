@@ -54,7 +54,7 @@ Finder :: struct {
 	ctx:        runtime.Context, // the caller's, for the allocations the contextless hook makes
 }
 
-FINDER_CAPS :: hook.Capabilities{.Skips, .Unspelled, .Walk}
+FINDER_CAPS :: hook.Capabilities{.Skips, .Unspelled, .Walk, .Credits}
 
 // Space for a `Finder`'s levels and the first entries of its rings. A caller can leave it uninitialized, since each
 // entry is written before it is read.
@@ -169,15 +169,41 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 		if !h.keys {
 			return s, .Next
 		}
-		if h.named && t.spelling & tape.SPELLING_DECODE == 0 {
-			if int(t.n) != len(h.key) {
-				return s, .Next
-			}
-			if t.n >= 8 {
-				at := raw_data(h.src)[t.lo:]
-				head := intrinsics.unaligned_load((^u64)(at))
-				tail := intrinsics.unaligned_load((^u64)(at[t.n - 8:]))
-				if head != h.key_head || tail != h.key_tail {
+		if h.named {
+			if t.spelling & tape.SPELLING_DECODE == 0 {
+				if int(t.n) != len(h.key) {
+					return s, .Next
+				}
+				// Reject a raw key whose bytes differ here, so a key shorter than a word needs no call into `finder_key`.
+				// These are the word loads `tape.key_names` would do. A key that matches still falls through, where
+				// `finder_key` checks its kind and takes it. Escaped keys keep that path.
+				n := int(t.n)
+				if n >= 8 {
+					at := raw_data(h.src)[t.lo:]
+					head := intrinsics.unaligned_load((^u64)(at))
+					tail := intrinsics.unaligned_load((^u64)(at[n - 8:]))
+					if head != h.key_head || tail != h.key_tail {
+						return s, .Next
+					}
+				} else {
+					a, b := raw_data(h.src[t.lo:]), raw_data(h.key)
+					same := false
+					switch {
+					case n >= 4:
+						same = intrinsics.unaligned_load((^u32)(a)) == intrinsics.unaligned_load((^u32)(b)) && intrinsics.unaligned_load((^u32)(a[n - 4:])) == intrinsics.unaligned_load((^u32)(b[n - 4:]))
+					case n >= 2:
+						same = intrinsics.unaligned_load((^u16)(a)) == intrinsics.unaligned_load((^u16)(b)) && a[n - 1] == b[n - 1]
+					case:
+						same = n == 0 || a[0] == b[0]
+					}
+					if !same {
+						return s, .Next
+					}
+				}
+			} else if t.spelling & tape.SPELLING_CREDIT_EXACT != 0 {
+				// An escaped key's source span is longer than its text. One subtract turns it into the decoded
+				// length, so a key of a different length needs no decode.
+				if int(t.n) - int(tape.spelling_credit(t.spelling)) != len(h.key) {
 					return s, .Next
 				}
 			}

@@ -51,5 +51,5 @@ jobs:
           mkdir -p build
           for p in $(find . -type d -name test -not -path './build/*' | sed 's|^\./||' | sort); do
             echo "== $p"
-            odin test $p -o:minimal -collection:stury=. -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -out:build/test.exe
+            odin test $p -o:minimal -collection:stury=. -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:JSON_PARALLEL_FROM=0 -define:TEST_TIMEOUT_SECONDS=120 -out:build/test.exe
           done

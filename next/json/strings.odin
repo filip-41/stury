@@ -105,11 +105,11 @@ string_probe :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, e
 
 // One past the closing quote of the key read on from the backslash at `bs`, within `PROBE_MAX` bytes, otherwise nil and
 // the byte `string_escaped` reads on from. Reads byte by byte, as a key is short and `string_escaped` reads a whole
-// block.
+// block. When the quote is found here, `credit` is the bytes its escapes save.
 @(private)
-key_escaped_head :: #force_inline proc "contextless" (bs, end: [^]u8) -> (q, at: [^]u8) #no_bounds_check {
+key_escaped_head :: #force_inline proc "contextless" (bs, end: [^]u8) -> (q, at: [^]u8, credit: u32) #no_bounds_check {
 	if intrinsics.ptr_sub(end, bs) <= PROBE_MAX {
-		return nil, bs
+		return nil, bs, 0
 	}
 	e := bs
 	stop := bs[PROBE_MAX - 12:]
@@ -120,18 +120,19 @@ key_escaped_head :: #force_inline proc "contextless" (bs, end: [^]u8) -> (q, at:
 			continue
 		}
 		if c == '"' {
-			return e[1:], nil
+			return e[1:], nil, credit
 		}
 		if c != '\\' {
 			break
 		}
-		n := escape_len(e, end)
+		n, add := escape_credit(e, end)
 		if n == 0 {
 			break
 		}
+		credit += add
 		e = e[n:]
 	}
-	return nil, e
+	return nil, e, 0
 }
 
 // One past the closing quote of the string at `p`, which closes at `quote`, when it is plain ASCII, read 64 bytes a
@@ -268,22 +269,45 @@ SURROGATE_CLASSES := kernel.Nibble_Table {
 // the block reader's path.
 @(private)
 string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
-	esc: bool
+	when S == .Json5 || LAX {
+		if w.refused >= BLOCK_RETIRE {
+			w.refused = w.refused + 1 if w.refused < BLOCK_RETIRE + BLOCK_RETRY else BLOCK_RETIRE - 1
+			return string_exact_in(w, p, end)
+		}
+	}
 	when ODIN_ARCH == .amd64 {
 		switch w.tier {
 		case .V3:
-			q, esc = string_span_v3(p, end, '"')
+			q, spelling = string_span_v3(p, end, '"')
 		case .V2:
-			q, esc = string_span_v2(p, end, '"')
+			q, spelling = string_span_v2(p, end, '"')
 		}
 	} else {
-		q, esc = string_span_base(p, end, '"')
+		q, spelling = string_span_base(p, end, '"')
 	}
 	if q == nil {
+		when S == .Json5 || LAX {
+			w.refused += 1
+		}
 		return string_exact_in(w, p, end)
 	}
-	return q, tape.SPELLING_DECODE if esc else 0, .None
+	when S == .Json5 || LAX {
+		if w.refused != 0 {
+			w.refused -= 1
+		}
+	}
+	return q, spelling, .None
 }
+
+// `Walk.refused` counts the strings the block reader of `string_long` refused, less the strings it read. A strict JSON
+// or JSONC text is refused only at a fault, so only a JSON5 or `LAX` walk keeps the count, raised by JSON5's own
+// escapes and the bytes `LAX` tolerates. From `BLOCK_RETIRE` on, `string_long` and `st_string_escaped` leave their
+// strings to the byte reader, and each such string counts on, until `BLOCK_RETRY` of them have passed and the next
+// string tries the block reader again.
+@(private)
+BLOCK_RETIRE :: 16
+@(private)
+BLOCK_RETRY :: 64
 
 // `string_exact` for the walk `w`, which marks the walk when its tolerances took a byte of the string.
 @(private)
@@ -300,7 +324,7 @@ string_exact_in :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C),
 
 // The `string_span` of the CPU's tier, for a string closed by `quote`.
 @(private)
-string_block :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
+string_block :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, $quote: u8) -> ([^]u8, u16) {
 	when ODIN_ARCH == .amd64 {
 		switch w.tier {
 		case .V3:
@@ -308,7 +332,7 @@ string_block :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p,
 		case .V2:
 			return string_span_v2(p, end, quote)
 		}
-		return nil, false
+		return nil, 0
 	} else {
 		return string_span_base(p, end, quote)
 	}
@@ -318,27 +342,30 @@ string_block :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p,
 // the floor tier.
 when ODIN_ARCH == .amd64 {
 	@(private, enable_target_feature = kernel.FEATURES[.V2])
-	string_span_v2 :: #force_no_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
+	string_span_v2 :: #force_no_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> ([^]u8, u16) {
 		return string_span(.V2, p, end, quote)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V3])
-	string_span_v3 :: #force_no_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
+	string_span_v3 :: #force_no_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> ([^]u8, u16) {
 		return string_span(.V3, p, end, quote)
 	}
 } else {
 	@(private)
-	string_span_base :: #force_no_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
+	string_span_base :: #force_no_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> ([^]u8, u16) {
 		return string_span(.Base, p, end, quote)
 	}
 }
 
-// One past the closing quote `quote` of the string at `p` and whether it holds an escape, or nil when the block reader
-// cannot vouch for it (a control byte, an escape it does not accept, invalid UTF-8, the text's end), which
-// `string_exact` settles. Blocks are read back to back from `p + 1`, so the UTF-8 state carries from one to the next.
+// One past the closing quote `quote` of the string at `p` and its spelling, `SPELLING_DECODE` or `SPELLING_ASCII`, or
+// nil when the block reader cannot vouch for it (a control byte, an escape it does not accept, invalid UTF-8, the
+// text's end), which `string_exact` settles. Blocks are read back to back from `p + 1`, so the UTF-8 state carries
+// from one to the next.
 @(private)
-string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8, $quote: u8) -> (q: [^]u8, esc: bool) #no_bounds_check {
+string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8, $quote: u8) -> (q: [^]u8, spelling: u16) #no_bounds_check {
 	bs := p[1:]
 	skip: u64
+	// Cleared by an escape or a block with a byte past 0x7F. A block with a stop before the last holds an escape.
+	spelling = tape.SPELLING_ASCII
 	u: kernel.Utf8_State
 	// Whether the last block had a byte past 0x7F. An ASCII block after one closes the UTF-8 state.
 	high: bool
@@ -352,13 +379,16 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 			// end is read.
 			b = kernel.load_padded(bs[:live], 0)
 		} else {
-			return nil, false
+			return nil, 0
 		}
 		sv := kernel.either(kernel.either(kernel.eq(b, quote), kernel.eq(b, '\\')), kernel.below(b, 0x20))
 		ascii := kernel.is_ascii(b)
 		// A block with no stop is skipped without packing its mask, unless an escape ran into it.
 		if skip == 0 && !kernel.any_lane(sv) {
 			kernel.utf8_next(T, b, ascii, &u, &high)
+			if !ascii {
+				spelling &~= tape.SPELLING_ASCII
+			}
 			bs = bs[64:]
 			continue
 		}
@@ -367,24 +397,29 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 		for stop != 0 {
 			k := intrinsics.count_trailing_zeros(stop)
 			if k >= live {
-				return nil, false
+				return nil, 0
 			}
 			c := bs[k]
 			if c == quote {
 				// The string ends in this block, so `utf8_stop` judges its bytes up to the quote and none past it.
 				if !kernel.utf8_stop(T, b, ascii, &u, high, k) {
-					return nil, false
+					return nil, 0
 				}
-				return bs[k + 1:], esc
+				if intrinsics.expect(spelling == tape.SPELLING_ASCII && !ascii, false) {
+					if ~kernel.pack(kernel.below(b, 0x80)) & (u64(1) << k - 1) != 0 {
+						spelling = 0
+					}
+				}
+				return bs[k + 1:], spelling
 			}
 			if c != '\\' {
-				return nil, false
+				return nil, 0
 			}
 			n := escape_len(bs[k:], end)
 			if n == 0 {
-				return nil, false
+				return nil, 0
 			}
-			esc = true
+			spelling = tape.SPELLING_DECODE
 			k += n
 			if k >= 64 {
 				skip = k - 64
@@ -405,6 +440,15 @@ escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 {
 	return u64(n)
 }
 
+// As `escape_len`, with the credit the escape saves: its source bytes less the bytes its code point decodes to. Only
+// a short escaped key asks for it, so no other string pays for the code point's length.
+@(private)
+escape_credit :: #force_inline proc "contextless" (e, end: [^]u8) -> (n: u64, credit: u32) {
+	r, len := spell.string_escape(e, intrinsics.ptr_sub(end, e))
+	if len == 0 do return 0, 0
+	return u64(len), u32(len) - spell.rune_len(r)
+}
+
 // One past the closing quote of the string at `p` and its spelling, or the fault at the first byte that breaks it, read
 // one byte at a time. JSON's string closes at `"`, holds no control byte and uses the escapes of `escape_exact`. A JSON5
 // string closes at its own quote, `"` or `'`, uses the escapes of `escape5` and holds any byte but CR and LF. With
@@ -414,7 +458,7 @@ escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 {
 // Without `LAX`, `tol` is not read.
 @(private, cold)
 string_exact :: #force_no_inline proc "contextless" ($json5, $LAX: bool, p, end: [^]u8, tol: tape.Tolerances) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
-	q, spelling, kind = string_exact_on(json5, LAX, p[0] if json5 else '"', p[1:], end, tol, 0)
+	q, spelling, kind = string_exact_on(json5, LAX, p[0] if json5 else '"', p[1:], end, tol, tape.SPELLING_ASCII)
 	if kind == .Truncated {
 		return end, 0, .Truncated
 	}
@@ -422,9 +466,9 @@ string_exact :: #force_no_inline proc "contextless" ($json5, $LAX: bool, p, end:
 }
 
 // `string_exact` read on from `q` inside a string closed by `quote`, outside an escape and a UTF-8 sequence, with the
-// spelling so far. A string the text's end cuts short gives `Truncated` and the spelling so far at the place it can be
-// read on from: the escape or sequence the end cuts, or else the last character, as a JSON5 escape is judged by the
-// byte after it.
+// spelling so far, which is `SPELLING_ASCII` at the string's start. A string the text's end cuts short gives
+// `Truncated` and the spelling so far at the place it can be read on from: the escape or sequence the end cuts, or else
+// the last character, as a JSON5 escape is judged by the byte after it.
 @(private)
 string_exact_on :: #force_inline proc "contextless" ($json5, $LAX: bool, quote: u8, q, end: [^]u8, tol: tape.Tolerances, spelling: u16) -> ([^]u8, u16, tape.Fault_Kind) #no_bounds_check {
 	q, spelling := q, spelling
@@ -453,7 +497,7 @@ string_exact_on :: #force_inline proc "contextless" ($json5, $LAX: bool, quote: 
 			if k != .None {
 				return r, 0, k
 			}
-			spelling |= tape.SPELLING_DECODE
+			spelling = spelling &~ tape.SPELLING_ASCII | tape.SPELLING_DECODE
 			when LAX {
 				spelling |= tape.SPELLING_LAX if lone else 0
 			}
@@ -466,6 +510,7 @@ string_exact_on :: #force_inline proc "contextless" ($json5, $LAX: bool, quote: 
 		case c < 0x80:
 			q = q[1:]
 		case:
+			spelling &~= tape.SPELLING_ASCII
 			r, k := spell.utf8_char(q, end)
 			when LAX {
 				if k == .Bad_Char && .Invalid_Utf8 in tol {

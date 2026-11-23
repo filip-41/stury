@@ -31,6 +31,9 @@ Builder :: struct {
 	err:           runtime.Allocator_Error, // a refused allocation, or `Out_Of_Memory` with `full`
 	full:          u64, // one past the offset of the token a room of `most` nodes had no place for, else 0
 	borrowed:      bool, // `stack` is the caller's, which `builder_end` does not free
+	// The budget the builder's allocator counts against, or nil. Under it the room for nodes is never sized past what
+	// the budget leaves, so a refusal comes from the nodes the text needs and not from a room sized ahead of them.
+	budget:        ^hook.Memory_Budget,
 	// The full child counts of the containers whose `spelling` saturated, in the order they closed. `builder_end` sorts
 	// them by node. A container closed with every child holds a node per child, so a room of `n` nodes closes at most
 	// `n / MAX_CHILDREN` of them. `counts` has room for those past the entries of partial containers, reserved as the
@@ -56,8 +59,8 @@ builder_levels_held :: #force_inline proc "contextless" (h: rawptr) -> int {
 }
 
 @(private)
-builder_levels_grow :: #force_inline proc "contextless" (h: rawptr, want: int) -> bool {
-	return builder_deepen((^Builder)(h), want)
+builder_levels_grow :: #force_inline proc "contextless" (h: rawptr, want: int, s: ^hook.Regs, at: u64) -> bool {
+	return builder_deepen((^Builder)(h), want, s, at)
 }
 
 // The room of a builder, as `hook.Rooms` reads it.
@@ -86,13 +89,16 @@ builder_regs :: #force_inline proc "contextless" (h: ^Builder) -> hook.Regs {
 }
 
 // Makes `b` a builder over `src` with room for `nodes` nodes, growing up to `most`, and `frames` for its open stack. A
-// refused allocation leaves `err` set.
-builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, allocator: runtime.Allocator) {
+// refused allocation leaves `err` set. `budget` is the one `allocator` counts against, if any.
+builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, allocator: runtime.Allocator, budget: ^hook.Memory_Budget = nil) {
 	b^ = {}
 	b.doc = {src = src, format = format, allocator = allocator}
-	b.stack, b.borrowed, b.closed, b.ctx, b.most = frames, true, tape.NO_NODE, context, most
+	b.stack, b.borrowed, b.closed, b.ctx, b.most, b.budget = frames, true, tape.NO_NODE, context, most, budget
 	b.counts.allocator = allocator
 	room := clamp(nodes, 1, most)
+	if !builder_affords(b, 0, room) {
+		room = builder_fit(b, 0)
+	}
 	if b.err = builder_reserve_counts(b, room); b.err != nil {
 		return
 	}
@@ -116,6 +122,33 @@ builder_reserve_counts :: proc(b: ^Builder, room: int) -> runtime.Allocator_Erro
 	}
 	reserve(&b.counts, wide) or_return
 	return .Out_Of_Memory if cap(b.counts) < wide else nil
+}
+
+// Whether the budget of `b` lets a room of `have` nodes grow to `room` nodes, counting the entries of `counts` they
+// need. True when `b` has no budget.
+@(private)
+builder_affords :: proc "contextless" (b: ^Builder, have, room: int) -> bool {
+	if b.budget == nil {
+		return true
+	}
+	counts := max(len(b.counts) + room / int(tape.MAX_CHILDREN) - cap(b.counts), 0)
+	return u64((room - have) * size_of(tape.Node) + counts * size_of(tape.Child_Count)) <= hook.memory_budget_left(b.budget)
+}
+
+// The largest room, at most `most`, that a room of `have` nodes may grow to within the budget of `b`, and at least one
+// node more than `have`, which the budget refuses when it has no place for it.
+@(private)
+builder_fit :: proc "contextless" (b: ^Builder, have: int) -> int {
+	lo, hi := have, b.most
+	for lo < hi {
+		mid := lo + (hi - lo + 1) / 2
+		if builder_affords(b, have, mid) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return max(lo, have + 1)
 }
 
 // Stores `t` as a node. For an end token it writes the container's subtree size and child count into the container's
@@ -292,6 +325,10 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 		rest := f64(u64(len(h.doc.src)) - at)
 		want = max(want, int(min(f64(h.most), f64(have) * (1 + 1.25 * rest / f64(at)))))
 	}
+	if !builder_affords(h, have, want) {
+		want = double if builder_affords(h, have, double) else builder_fit(h, have)
+		double = min(double, want)
+	}
 	old := u64(uintptr(raw_data(h.doc.nodes)))
 	raw, err := runtime.non_zero_mem_resize(raw_data(h.doc.nodes), have * size_of(tape.Node), want * size_of(tape.Node), align_of(tape.Node), h.doc.allocator)
 	if err != nil && want > double {
@@ -404,9 +441,17 @@ builder_sort_facts :: proc(facts: []tape.Fact) {
 	}
 }
 
-// Grows the open stack to `want` frames, for a walk about to nest past it.
+// Grows the open stack to `want` frames, for a walk about to nest past it. The first growth moves the stack out of the
+// caller's frame into the allocator, where it would sit right after the node room and keep the room from growing in
+// place. So the room grows first, as `s` and `at` give, which a walk that has no room of the builder's passes nil for.
 @(cold)
-builder_deepen :: #force_no_inline proc "contextless" (h: ^Builder, want: int) -> bool {
+builder_deepen :: #force_no_inline proc "contextless" (h: ^Builder, want: int, s: ^hook.Regs, at: u64) -> bool {
+	if h.borrowed && s != nil && len(h.doc.nodes) < h.most {
+		ok: bool
+		if s^, ok = builder_grow(h, s^, at); !ok {
+			return false
+		}
+	}
 	context = h.ctx
 	stack, err := make([]u64, want, h.doc.allocator)
 	if took(err, raw_data(stack), want) != nil {

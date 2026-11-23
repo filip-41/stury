@@ -66,8 +66,9 @@ Number_Spelling :: enum u16 {
 #assert(u16(max(Number_Spelling)) <= tape.NUMBER_KIND)
 
 // The spelling bit of a JSON5 string or key that holds an escape JSON lacks, which `text_decoded` decodes with `decode5`.
+// It is one of the bits a format keeps for its own, above the text bits every format shares.
 @(private)
-SPELLING_JSON5 :: u16(8)
+SPELLING_JSON5 :: u16(1 << 11)
 
 // The state at a JSON5 number that JSON's grammar refused, or that starts with `+`, `.`, `I` or `N`. In JSON and JSONC,
 // a walk with `LAX` reads JSON5's non-finite numbers here.
@@ -115,7 +116,9 @@ non_finite :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: tape.Tole
 		}
 	}
 	if p[0] == '-' || p[0] - '0' < 10 {
-		return number(p, end, false, S)
+		wide: u64
+		q, wide, kind = number(p, end, false, S)
+		return q, u16(wide), kind
 	}
 	return p, 0, .Bad_Char
 }
@@ -264,7 +267,7 @@ st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 		w.resume = stop
 		return #must_tail st_string5_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	a := emit_string(w, on, &hs, .Value, p, q, 0)
+	a := emit_string(w, on, &hs, .Value, p, q, tape.SPELLING_ASCII)
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
@@ -284,7 +287,7 @@ st_string5_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 	if stop == nil {
 		q, stop = string_lean(p, end, '\'')
 	}
-	spelling: u16
+	spelling := tape.SPELLING_ASCII
 	// The block readers take only JSON's escapes, so a first escape of JSON5's alone goes to `string_exact`.
 	escaped := stop != nil && stop[0] == '\\'
 	json_escape := !escaped || intrinsics.ptr_sub(end, stop) > 1 && (spell.ESCAPED[stop[1]] != 0 || stop[1] == 'u')
@@ -293,9 +296,7 @@ st_string5_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 		spelling = tape.SPELLING_DECODE
 	}
 	if q == nil && json_escape {
-		esc: bool
-		q, esc = string_block(w, p, end, '\'')
-		spelling = tape.SPELLING_DECODE if esc else 0
+		q, spelling = string_block(w, p, end, '\'')
 	}
 	if q == nil {
 		kind: tape.Fault_Kind

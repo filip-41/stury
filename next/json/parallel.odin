@@ -18,7 +18,8 @@ import "stury:lib/ops/build"
 // A reading agrees with the single walk over any text that walk accepts. So when the single walk accepts the text up
 // to a seam, the walk from that seam continues it exactly, and the first part in text order whose walk does not reach
 // the next seam gives the error the single walk would give. A text whose readings cannot be joined, a text that nests
-// past `SEAM_LEVELS` and a build that is refused memory are built on one thread, which gives the answer.
+// past `SEAM_LEVELS`, a build that is refused memory and a build under `Budget.memory` of a text with comments or with
+// a duplicate policy past `.Default` are built on one thread, which gives the answer.
 
 // The shortest text built on a runner's threads. A shorter text is built sooner on one thread. A chunk is at least a
 // sixteenth of this length.
@@ -226,7 +227,9 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 		scratch += len(p.opens) + 1 if k > 0 else 0
 		comments += p.comments
 	}
-	if total > node_most(max(u64), opts) {
+	// Under a memory budget the facts and the scratch of a duplicate policy take blocks that one thread sizes as it
+	// reads and the parts as the plan counted, so a build that needs either is made on one thread.
+	if total > node_most(max(u64), opts) || opts.budget.memory != 0 && (comments > 0 || opts.dups != .Default) {
 		return {}, nil, false
 	}
 	room, rerr := non_zero_make([]tape.Node, total + 1 + scratch, allocator)

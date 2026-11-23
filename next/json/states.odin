@@ -31,7 +31,7 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 			}
 			return #must_tail st_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
-		a := emit_string(w, on, &hs, .Value, p, q, 0)
+		a := emit_string(w, on, &hs, .Value, p, q, tape.SPELLING_ASCII)
 		if a == .Stop {
 			return stopped(w, hs, q)
 		}
@@ -187,7 +187,7 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 		}
 		return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	a := emit_string(w, on, &hs, .Key, p, q, 0)
+	a := emit_string(w, on, &hs, .Key, p, q, tape.SPELLING_ASCII)
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
@@ -252,7 +252,7 @@ st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, 
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	a := emit_string(w, on, &hs, .Value, p, q, 0)
+	a := emit_string(w, on, &hs, .Value, p, q, tape.SPELLING_ASCII)
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
@@ -266,7 +266,14 @@ st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, 
 @(private, enable_target_feature = STATE_FEATURES)
 st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q := string_escaped(w.resume, end, '"')
+	q: [^]u8
+	when S == .Json5 || LAX {
+		if w.refused < BLOCK_RETIRE {
+			q = string_escaped(w.resume, end, '"')
+		}
+	} else {
+		q = string_escaped(w.resume, end, '"')
+	}
 	if q == nil {
 		return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
@@ -338,7 +345,7 @@ st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	a := emit_string(w, on, &hs, .Key, p, q, 0)
+	a := emit_string(w, on, &hs, .Key, p, q, tape.SPELLING_ASCII)
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
@@ -352,9 +359,12 @@ st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 @(private, enable_target_feature = STATE_FEATURES)
 st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q, at := key_escaped_head(w.resume, end)
+	q, at, credit := key_escaped_head(w.resume, end)
+	spelling := tape.SPELLING_DECODE
 	if q == nil {
 		q = string_escaped(at, end, '"')
+	} else {
+		spelling = tape.credit_spelling(credit) if .Credits in C else tape.SPELLING_DECODE
 	}
 	if q == nil {
 		return #must_tail st_key_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
@@ -362,7 +372,7 @@ st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	a := emit_string(w, on, &hs, .Key, p, q, tape.SPELLING_DECODE)
+	a := emit_string(w, on, &hs, .Key, p, q, spelling)
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
@@ -626,18 +636,20 @@ st_grow_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 // The state at an open bracket past the levels the walk holds.
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_deepen :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
-	if k := deepen(w, s2); k != 0 {
-		return too_deep(w, {s0, s1, s2}, p, k)
+	hs := hook.Regs{s0, s1, s2}
+	if k := deepen(w, &hs, p, s2); k != 0 {
+		return too_deep(w, hs, p, k)
 	}
-	return #must_tail st_value(p, end, d, ind, w, s0, s1, s2, m, on)
+	return #must_tail st_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_deepen_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
-	if k := deepen(w, s2); k != 0 {
-		return too_deep(w, {s0, s1, s2}, p, k)
+	hs := hook.Regs{s0, s1, s2}
+	if k := deepen(w, &hs, p, s2); k != 0 {
+		return too_deep(w, hs, p, k)
 	}
-	return #must_tail st_open_run(p, end, d, ind, w, s0, s1, s2, m, on)
+	return #must_tail st_open_run(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // The state at an array's first element when it is an array, which reads the run of open brackets.
@@ -793,7 +805,7 @@ st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		}
 		return #must_tail st_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	a := emit_string(w, on, &hs, .Value, p, q, 0)
+	a := emit_string(w, on, &hs, .Value, p, q, tape.SPELLING_ASCII)
 	if a == .Stop {
 		return stopped(w, hs, q)
 	}
@@ -1056,7 +1068,12 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	hs := hook.Regs{s0, s1, s2}
 	ind := ind
 	p, m := p, m
+	// The slot advances by one a member up to its row's last slot, so it is the run's start plus the members read,
+	// clamped where the run leaves.
+	last := m | (GAP_MEMBERS - 1)
+	run := m
 	for {
+		m = min(run, last)
 		if p >= end || p[0] != '"' {
 			return #must_tail st_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
@@ -1071,7 +1088,7 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 			}
 			return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
-		a := emit_string(w, on, &hs, .Key, p, q, 0)
+		a := emit_string(w, on, &hs, .Key, p, q, tape.SPELLING_ASCII)
 		if a == .Stop {
 			return stopped(w, hs, q)
 		}
@@ -1079,7 +1096,7 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 			return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 		// The value's slot, the next, so a dormant row stays in step with the slots its later objects match.
-		value := gap_next(m)
+		value := min(run + 1, last)
 		r := colon_fast(q, end)
 		if r == nil {
 			return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
@@ -1111,7 +1128,8 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		if next == nil {
 			return #must_tail st_member_ws(n[1:], end, d, ind, w, hs.a, hs.b, hs.c, value, on)
 		}
-		p, m = next, value
+		p = next
+		run += 1
 	}
 }
 

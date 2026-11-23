@@ -8,7 +8,7 @@ import "stury:lib/core/tape"
 // The end and spelling of the number at `p`, which starts with `-` or a digit, or the fault and the byte it is at. The
 // spelling is 0 unless `SPELLED`. JSON's grammar, with a `0x` refused in JSON5, whose own numbers `st_number5` reads.
 @(private)
-number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool, $S: Spec) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
+number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool, $S: Spec) -> (q: [^]u8, spelling: u64, kind: tape.Fault_Kind) #no_bounds_check {
 	q = p
 	if q[0] == '-' {
 		q = q[1:]
@@ -31,7 +31,7 @@ number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool, $S: S
 	}
 	int_digits := u64(intrinsics.ptr_sub(q, int_at))
 	if q >= end {
-		return q, digit_spelling(int_digits, 0, SPELLED), .None
+		return q, u64(digit_spelling(int_digits, 0, SPELLED)), .None
 	}
 	frac_digits: u64
 	c := q[0]
@@ -44,7 +44,7 @@ number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool, $S: S
 		frac_digits = u64(intrinsics.ptr_sub(r, q[1:]))
 		q = r
 		if q >= end {
-			return q, digit_spelling(int_digits, frac_digits, SPELLED), .None
+			return q, u64(digit_spelling(int_digits, frac_digits, SPELLED)), .None
 		}
 		c = q[0]
 	}
@@ -58,22 +58,24 @@ number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool, $S: S
 			q, kind = bad_or_truncated(r, end)
 			return q, 0, kind
 		}
-		return r, digit_spelling(int_digits, frac_digits, SPELLED) | (tape.NUMBER_EXP when SPELLED else 0), .None
+		return r, u64(digit_spelling(int_digits, frac_digits, SPELLED) | (tape.NUMBER_EXP when SPELLED else 0)), .None
 	}
-	return q, digit_spelling(int_digits, frac_digits, SPELLED), .None
+	return q, u64(digit_spelling(int_digits, frac_digits, SPELLED)), .None
 }
 
 // `number` as the walk of hook `H` reads it: spelled unless `H` reads no hooks or no number's spelling.
 @(private)
 hook_number :: #force_inline proc "contextless" (p, end: [^]u8, $H: typeid, $C: hook.Capabilities, $S: Spec) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
-	return number(p, end, H != hook.No_Hooks && .Unspelled not_in C, S)
+	wide: u64
+	q, wide, kind = number(p, end, H != hook.No_Hooks && .Unspelled not_in C, S)
+	return q, u16(wide), kind
 }
 
 // The spelling of the JSON number `src[lo:hi]`.
 @(private)
 respell :: proc "contextless" (src: []u8, lo, hi: u64) -> u16 {
 	_, spelling, _ := number(raw_data(src)[lo:], raw_data(src)[hi:], true, .Json)
-	return spelling
+	return u16(spelling)
 }
 
 // A plain decimal's spelling, 0 unless `SPELLED`.

@@ -232,7 +232,7 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options
 	most := node_most(node_bound(src, depth), opts)
 	frames: [FRAME_DEPTH]u64 = ---
 	b: build.Builder = ---
-	build.builder_start(&b, src, &FORMATS[S], len(src) / BUILD_BYTES_PER_NODE, most, frames[:min(depth, FRAME_DEPTH)], allocator)
+	build.builder_start(&b, src, &FORMATS[S], len(src) / BUILD_BYTES_PER_NODE, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m if opts.budget.memory != 0 else nil)
 	if b.err != nil {
 		return {}, hook.memory_budget_error(&m, b.err)
 	}
@@ -309,7 +309,7 @@ read_end :: #force_inline proc "contextless" (doc: ^tape.Document, err: tape.Err
 // The open levels a build or scan keeps in its own frame. Past them the builder's stack is allocated from the read's
 // allocator.
 @(private)
-FRAME_DEPTH :: 64
+FRAME_DEPTH :: 1024
 
 // The node capacity a build starts with: one node per this many bytes of the text.
 @(private)
