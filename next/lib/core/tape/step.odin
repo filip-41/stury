@@ -164,7 +164,7 @@ key_names :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Token, 
 	if t.kind > .Plain {
 		return false
 	}
-	if t.spelling & SPELLING_DECODE != 0 {
+	if text_decodes(t) {
 		return f.same_text(src, t, transmute([]u8)name, {n = u32(len(name)), kind = .String})
 	}
 	n := len(name)
@@ -191,7 +191,7 @@ same_keys :: #force_inline proc "contextless" (f: ^Format, src: []u8, a: Token, 
 	if a.kind != b.kind {
 		return false
 	}
-	if (a.spelling | b.spelling) & SPELLING_DECODE == 0 {
+	if !text_decodes(a) && !text_decodes(b) {
 		return a.n == b.n && string(src[a.lo:][:a.n]) == string(other[b.lo:][:b.n])
 	}
 	return f.same_text(src, a, other, b)

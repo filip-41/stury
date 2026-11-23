@@ -296,3 +296,31 @@ text_hashes_every_byte :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, tape.text_hash(transmute([]u8)string("ab")) != tape.text_hash(transmute([]u8)string("ab\x00")))
 }
+
+@(private = "file")
+number_key_same :: proc "contextless" (src: []u8, a: tape.Token, other: []u8, b: tape.Token) -> bool {
+	return true
+}
+
+@(private = "file")
+number_key_room :: proc "contextless" (src: []u8, t: tape.Token) -> int {
+	return 5
+}
+
+// A number key's number kind shares a bit with `SPELLING_DECODE`, and no kind changes how the key reads: each goes to
+// the format's `same_text` and `room`.
+@(test)
+number_keys_read_the_same_for_every_number_kind :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	f := tape.Format{name = "numbers", same_text = number_key_same, room = number_key_room}
+	src := []u8{0x01}
+	for kind in 0 ..< u16(16) {
+		key := tape.Token{lo = 0, n = 1, kind = .Number, role = .Key, spelling = tape.number_spelling(kind, 0, 0)}
+		testing.expectf(t, tape.key_names(&f, src, key, "1"), "key_names, number kind %d", kind)
+		testing.expectf(t, tape.same_keys(&f, src, key, src, key), "same_keys, number kind %d", kind)
+		testing.expectf(t, tape.text_room(&f, src, key) == 5, "text_room, number kind %d", kind)
+		value := key
+		value.role = .Value
+		testing.expectf(t, tape.text_room(&f, src, value) == 0, "text_room of a number value, kind %d", kind)
+	}
+}

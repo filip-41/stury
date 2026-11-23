@@ -373,8 +373,8 @@ scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 // that needs decoding is judged by its decoded length when its spelling holds an exact credit, otherwise never.
 @(private)
 scan_key_unmatched :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, t: tape.Token) -> bool #no_bounds_check {
-	if t.spelling & tape.SPELLING_DECODE != 0 {
-		if t.spelling & tape.SPELLING_CREDIT_EXACT == 0 {
+	if tape.text_decodes(t) {
+		if t.kind == .Number || t.spelling & tape.SPELLING_CREDIT_EXACT == 0 {
 			return false
 		}
 		d := u64(t.n) - u64(tape.spelling_credit(t.spelling))

@@ -97,7 +97,7 @@ node_number :: proc {
 // for a scalar that reads as its bytes in the text.
 @(require_results)
 text_room :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node) -> int {
-	if t.kind > .Plain || t.spelling & SPELLING_DECODE == 0 {
+	if t.kind > .Plain || !text_decodes(t) {
 		return 0
 	}
 	return f.room(src, t)

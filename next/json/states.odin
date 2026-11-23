@@ -1054,7 +1054,8 @@ st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 			return #must_tail st_grow_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 		if intrinsics.ptr_sub(end, q) <= 2 || q[0] != ',' {
-			when .Number_Blocks in C {
+			// A walk with no hook gives no tokens, so only a strict one, which tracks no pieces and counts no steps, reads blocks.
+			when .Number_Blocks in C && (H != hook.No_Hooks || !LAX) {
 				if intrinsics.ptr_sub(end, q) > 2 && q[2] == '[' && q[0] == ']' && q[1] == ',' {
 					return #must_tail st_number_blocks(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 				}

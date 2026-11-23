@@ -408,3 +408,31 @@ parts_join_with_no_second_build :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 }
+
+// A text of thousands of records cut into hundreds of parts, whose seams hold the open brackets of every part, gives the
+// document of one thread at every thread count. Empty strings and keys and nested objects sit at the seams.
+@(test)
+parts_of_a_seam_heavy_text_build_as_one_thread :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// The test runner's allocator shrinks a block in place, and the heap allocator moves it.
+	context.allocator = runtime.heap_allocator()
+	for spec in json.Spec {
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, `{"data":{"items":[`)
+		for i in 0 ..< 40000 {
+			if i > 0 {
+				strings.write_byte(&b, ',')
+			}
+			fmt.sbprintf(&b, `{{"":{{"":""}},"a":[[],{{}},"",{{"":[%d]}}]}}`, i)
+		}
+		strings.write_string(&b, `]}}`)
+		src := transmute([]u8)strings.to_string(b)
+		for threads in ([]int{2, 3, 7, 16, 64, 255, 700, 1500}) {
+			r := serial_runner(threads)
+			if ok, built := agree_on(t, src, spec, {}, &r, "seam heavy"); !ok || !testing.expect(t, built) {
+				return
+			}
+		}
+		free_all(context.temp_allocator)
+	}
+}

@@ -99,9 +99,12 @@ answer :: proc "contextless" (r: Reader, path, k: int) -> (node: Node_Index, p: 
 }
 
 // The value of the member `name` of the object at `at` under `dups`, `.Missing` when the object or null has none and
-// `.Wrong_Kind` for any other value.
+// `.Wrong_Kind` for any other value. Every reader takes `NO_NODE`, which a miss gives, as a miss and answers `.Missing`.
 @(require_results)
 member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Default) -> (Node_Index, Presence) #no_bounds_check {
+	if at == NO_NODE {
+		return NO_NODE, .Missing
+	}
 	doc := r.doc
 	node := doc.nodes[at]
 	if node.kind != .Object {
@@ -153,6 +156,9 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 // null, and `.Wrong_Kind` for any other value.
 @(require_results)
 element :: proc(r: Reader, at: Node_Index, index: int) -> (Node_Index, Presence) #no_bounds_check {
+	if at == NO_NODE {
+		return NO_NODE, .Missing
+	}
 	doc := r.doc
 	node := doc.nodes[at]
 	if node.kind != .Array {
@@ -205,6 +211,9 @@ element :: proc(r: Reader, at: Node_Index, index: int) -> (Node_Index, Presence)
 // the error. An index keeps that table.
 @(require_results)
 length :: proc(r: Reader, at: Node_Index, allocator: runtime.Allocator) -> (n: int, p: Presence, err: runtime.Allocator_Error) #no_bounds_check {
+	if at == NO_NODE {
+		return 0, .Missing, nil
+	}
 	doc := r.doc
 	node := doc.nodes[at]
 	#partial switch node.kind {
@@ -255,6 +264,9 @@ length :: proc(r: Reader, at: Node_Index, allocator: runtime.Allocator) -> (n: i
 // `destroy_children`, and a refused allocation is the error.
 @(require_results)
 children :: proc(r: Reader, at: Node_Index, allocator: runtime.Allocator) -> (c: Children, p: Presence, err: runtime.Allocator_Error) #no_bounds_check {
+	if at == NO_NODE {
+		return {}, .Missing, nil
+	}
 	doc := r.doc
 	node := doc.nodes[at]
 	if node.kind < .Array {
@@ -429,6 +441,9 @@ next_child :: proc "contextless" (r: Reader, c: ^Children, dups := Duplicates.De
 // other value, and `.Not_Loaded` for a partial object that may hold a member it did not keep.
 @(require_results)
 named :: proc "contextless" (r: Reader, at: Node_Index, name: string) -> (c: Children, p: Presence) #no_bounds_check {
+	if at == NO_NODE {
+		return {}, .Missing
+	}
 	doc := r.doc
 	node := doc.nodes[at]
 	if node.kind != .Object {

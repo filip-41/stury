@@ -791,12 +791,13 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 		state = r.end
 	}
 	list[len(list) - 1].to = len(src)
-	for &p in list {
-		p.opens = held[uintptr(raw_data(p.opens)):][:len(p.opens)]
-	}
 	// Shrunk to their lengths so that the caller's `delete` of the returned slices frees the whole blocks.
 	shrink(&list)
 	shrink(&held)
+	// A part's `opens` holds an offset into `held` until the shrink has settled where `held` lives.
+	for &p in list {
+		p.opens = held[uintptr(raw_data(p.opens)):][:len(p.opens)]
+	}
 	return list[:], held[:], true
 }
 
