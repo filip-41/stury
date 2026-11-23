@@ -133,7 +133,7 @@ tolerate_invalid_utf8_keys_by_name :: proc(t: ^testing.T) {
 		defer tape.destroy(&r)
 		testing.expect_value(t, rerr, nil)
 		testing.expect(t, .Tolerated in r.flags)
-		testing.expect_value(t, render_answers(&r), `0=2 1=3`)
+		testing.expect_value(t, testkit.render_answers(&r), `0=2 1=3`)
 	}
 }
 
@@ -259,7 +259,7 @@ tolerate_lone_surrogate_keys_by_name :: proc(t: ^testing.T) {
 			defer tape.destroy(&r)
 			testing.expect_value(t, rerr, nil)
 			testing.expect(t, .Tolerated in r.flags)
-			testing.expect_value(t, render_answers(&r), `0=2 1=3`)
+			testing.expect_value(t, testkit.render_answers(&r), `0=2 1=3`)
 		}
 	}
 }

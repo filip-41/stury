@@ -4,7 +4,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math/rand"
-import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
@@ -14,179 +13,6 @@ import "stury:lib/core/tape"
 import "stury:testkit"
 
 // Reads of a text in pieces, each window starting at the read's `keep`, against reads of the whole text.
-
-@(private = "file")
-Piece_Run :: struct {
-	src:   []u8,
-	spec:  json.Spec,
-	opts:  tape.Options,
-	cuts:  []int, // where each window but the last ends
-}
-
-// Feeds `r.src` to `read` one window at a time, each from the last read's `keep` to the next cut, the last to the
-// text's end, and gives the result of the read that ended. The windows are of a copy of the text whose bytes before
-// `keep` are overwritten with a byte no text holds, so a read that reads before its window reads no byte of the text.
-// The copy, which a document may hold, is the caller's to free.
-@(private = "file")
-feed :: proc(r: Piece_Run, p: ^tape.Pieces, read: proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool) -> (text: []u8) {
-	opts := r.opts
-	opts.pieces = p
-	p.allocator = context.allocator
-	text = slice.clone(r.src)
-	dropped: u64
-	for i := 0; ; i += 1 {
-		end := r.cuts[i] if i < len(r.cuts) else len(r.src)
-		p.from, p.last = p.keep, i >= len(r.cuts)
-		assert(p.keep >= dropped, "a read needs bytes its last read let go")
-		slice.fill(text[dropped:p.keep], 0xFF)
-		dropped = p.keep
-		if !read(text[p.keep:end], r, opts) || !p.more || p.last {
-			return
-		}
-	}
-}
-
-@(private = "file")
-same_docs :: proc(a, b: tape.Document) -> bool {
-	a, b := a, b
-	same :: proc(x, y: []$T) -> bool {
-		return mem.compare(slice.to_bytes(x), slice.to_bytes(y)) == 0
-	}
-	// A read of a text in pieces may hold the bytes it keeps, whose text a whole read borrows.
-	held := tape.Doc_Flags{.Held, .Owns_Src}
-	if !same(a.nodes, b.nodes) || !same(a.facts, b.facts) || !same(a.counts, b.counts) || a.flags - held != b.flags - held {
-		return false
-	}
-	if a.root_close != b.root_close || a.present != b.present {
-		return false
-	}
-	for n in a.nodes {
-		if n.kind <= .Plain && n.n > 0 && string(tape.span_bytes(&a, n.lo, n.n)) != string(tape.span_bytes(&b, n.lo, n.n)) {
-			return false
-		}
-	}
-	for f in a.facts {
-		if string(tape.span_bytes(&a, f.lo, f.n)) != string(tape.span_bytes(&b, f.lo, f.n)) {
-			return false
-		}
-	}
-	if (a.partial == nil) != (b.partial == nil) {
-		return false
-	}
-	if a.partial == nil {
-		return true
-	}
-	x, y := a.partial, b.partial
-	return same(x.answers, y.answers) && same(x.starts, y.starts) && same(x.kept, y.kept) && same(x.missing, y.missing) && same(x.names, y.names) && x.dups == y.dups
-}
-
-// The reads of `src` in pieces cut at `cuts` give what the whole reads give: the verdict and fault, the document, the
-// answer of each path and the scan of them.
-@(private = "file")
-agree_in_pieces :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.Options, cuts: []int, paths: [][]tape.Step, name: string, limits: []int = nil) -> bool {
-	r := Piece_Run{src, spec, opts, cuts}
-	whole_err := json.validate(src, spec, opts)
-	{
-		p: tape.Pieces
-		defer tape.destroy(&p)
-		got: tape.Error
-		context.user_ptr = &got
-		window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
-			err := json.validate(window, r.spec, opts)
-			(^tape.Error)(context.user_ptr)^ = err
-			return err == nil
-		})
-		defer delete(window)
-		if !testing.expectf(t, got == whole_err && !p.more, "%s %v cut %v: validate %v, whole %v", name, spec, cuts, got, whole_err) {
-			return false
-		}
-	}
-	whole, berr := json.build(src, spec, opts)
-	defer tape.destroy(&whole)
-	{
-		p: tape.Pieces
-		defer tape.destroy(&p)
-		Got :: struct {
-			doc: tape.Document,
-			err: tape.Error,
-		}
-		got: Got
-		defer tape.destroy(&got.doc)
-		context.user_ptr = &got
-		window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
-			g := (^Got)(context.user_ptr)
-			doc, err := json.build(window, r.spec, opts)
-			tape.destroy(&g.doc)
-			g.doc, g.err = doc, err
-			return err == nil
-		})
-		defer delete(window)
-		if !testing.expectf(t, got.err == berr && same_docs(got.doc, whole), "%s %v cut %v: build %v, whole %v", name, spec, cuts, got.err, berr) {
-			return false
-		}
-	}
-	for path in paths {
-		for stop in ([]bool{false, true}) {
-			read := tape.Read_Options{stop_early = stop}
-			want, ferr := json.find(src, path, spec, read, opts)
-			p: tape.Pieces
-			Got :: struct {
-				a:    tape.Span_Answer,
-				err:  tape.Error,
-				path: []tape.Step,
-				read: tape.Read_Options,
-			}
-			got := Got{path = path, read = read}
-			context.user_ptr = &got
-			window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
-				g := (^Got)(context.user_ptr)
-				g.a, g.err = json.find(window, g.path, r.spec, g.read, opts)
-				return g.err == nil
-			})
-			defer delete(window)
-			text := string(p.text)
-			ok := got.err == ferr && (ferr != nil || got.a == want && (want.outcome != .Found || text == string(src[want.lo:want.hi])))
-			tape.destroy(&p)
-			if !testing.expectf(t, ok, "%s %v cut %v: find %v stop %v: %v %v, whole %v %v", name, spec, cuts, path, stop, got.a, got.err, want, ferr) {
-				return false
-			}
-		}
-	}
-	d, derr := tape.demand_of(paths, nil, limits, spec != .Json)
-	defer tape.destroy(&d)
-	if derr != nil {
-		return true
-	}
-	for stop in ([]bool{false, true}) {
-		read := tape.Read_Options{stop_early = stop}
-		want, serr := json.scan(src, &d, spec, read, opts)
-		defer tape.destroy(&want)
-		p: tape.Pieces
-		Got :: struct {
-			doc:  tape.Document,
-			err:  tape.Error,
-			d:    ^tape.Demand,
-			read: tape.Read_Options,
-		}
-		got := Got{d = &d, read = read}
-		context.user_ptr = &got
-		window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
-			g := (^Got)(context.user_ptr)
-			doc, err := json.scan(window, g.d, r.spec, g.read, opts)
-			tape.destroy(&g.doc)
-			g.doc, g.err = doc, err
-			return err == nil
-		})
-		defer delete(window)
-		ok := got.err == serr && same_docs(got.doc, want)
-		tape.destroy(&got.doc)
-		tape.destroy(&p)
-		if !testing.expectf(t, ok, "%s %v cut %v: scan stop %v: %v, whole %v", name, spec, cuts, stop, got.err, serr) {
-			return false
-		}
-	}
-	return true
-}
 
 // Paths that reach into most texts: the root, its first and last children, every child, and the first key's value.
 @(private = "file")
@@ -226,7 +52,7 @@ agree_over_sampled_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opt
 	for _ in 0 ..< testkit.rounds(2) {
 		cuts := [1]int{rand.int_max(len(src) + 1)}
 		c.reads += 1
-		if !agree_in_pieces(t, src, spec, opts, cuts[:], paths, name) {
+		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name) {
 			return
 		}
 	}
@@ -234,7 +60,7 @@ agree_over_sampled_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opt
 		i := rand.int_max(len(src))
 		cuts := [2]int{i, i + 1 + rand.int_max(len(src) - i)}
 		c.reads += 1
-		if !agree_in_pieces(t, src, spec, opts, cuts[:], paths, name) {
+		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name) {
 			return
 		}
 	}
@@ -261,7 +87,7 @@ agree_over_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.
 	for k := 0; k <= len(src); k += step {
 		cuts := [1]int{k}
 		c.reads += 1
-		if !agree_in_pieces(t, src, spec, opts, cuts[:], paths, name) {
+		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name) {
 			return
 		}
 	}
@@ -273,7 +99,7 @@ agree_over_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.
 		j := i + 1 + (k * 104729) % (len(src) - i)
 		cuts := [2]int{i, j}
 		c.reads += 1
-		if !agree_in_pieces(t, src, spec, opts, cuts[:], paths, name) {
+		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name) {
 			return
 		}
 	}
@@ -343,7 +169,7 @@ pieces_judge_the_text_past_a_limit :: proc(t: ^testing.T) {
 			for spec in ([]json.Spec{.Json, .Jsonc}) {
 				for cut in 0 ..= len(src) {
 					cuts := [1]int{cut}
-					if !agree_in_pieces(t, transmute([]u8)src, spec, {}, cuts[:], limited_paths, "limited", limited_limits) {
+					if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), transmute([]u8)src, {}, cuts[:], limited_paths, "limited", limited_limits) {
 						return
 					}
 				}
@@ -374,7 +200,7 @@ pieces_read_short_escaped_keys_as_whole_reads :: proc(t: ^testing.T) {
 	paths := paths_into(&doc)
 	for k in 0 ..= len(src) {
 		cuts := [1]int{k}
-		if !agree_in_pieces(t, src, .Json, {}, cuts[:], paths, "escaped keys") {
+		if !testkit.pieces_agree(t, json.reads(.Json), json.as(.Json), src, {}, cuts[:], paths, "escaped keys") {
 			return
 		}
 	}
@@ -463,7 +289,7 @@ scans_of_cut_texts :: proc(t: ^testing.T) {
 		// The document holds every byte it reads, so the text may go.
 		slice.fill(text, 0xFF)
 		delete(text)
-		answers, kept := render_answers(&doc), render_doc(&doc)
+		answers, kept := testkit.render_answers(&doc), testkit.render_doc(&doc)
 		ok := derr == nil && err == nil && p.more && doc.flags >= {.Cut, .Held} && answers == c.answers && kept == c.doc
 		testing.expectf(t, ok, "%q: %v %v %v: %q, doc %q", c.src, err, p.more, doc.flags, answers, kept)
 		tape.destroy(&doc)
@@ -501,10 +327,10 @@ scans_in_pieces_hold_a_bounded_window :: proc(t: ^testing.T) {
 	}
 	got := Got{d = &d}
 	context.user_ptr = &got
-	text := feed({src, .Json, {}, cuts[:]}, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+	text := testkit.feed({src, json.reads(.Json), json.as(.Json), {}, cuts[:]}, &p, proc(window: []u8, r: testkit.Piece_Run, opts: tape.Options) -> bool {
 		g := (^Got)(context.user_ptr)
 		g.widest = max(g.widest, len(window))
-		doc, err := json.scan(window, g.d, r.spec, {}, opts)
+		doc, err := r.reads.scan(r.f, window, g.d, {}, opts, context.allocator)
 		tape.destroy(&g.doc)
 		g.doc = doc
 		return err == nil
@@ -512,9 +338,9 @@ scans_in_pieces_hold_a_bounded_window :: proc(t: ^testing.T) {
 	defer delete(text)
 	defer tape.destroy(&got.doc)
 	defer tape.destroy(&p)
-	testing.expect(t, werr == nil && same_docs(got.doc, want) && .Held in got.doc.flags)
+	testing.expect(t, werr == nil && testkit.same_documents(got.doc, want) && .Held in got.doc.flags)
 	testing.expectf(t, got.widest <= 512, "a window of %d bytes", got.widest)
-	testing.expect_value(t, render_answers(&got.doc), render_answers(&want))
+	testing.expect_value(t, testkit.render_answers(&got.doc), testkit.render_answers(&want))
 	_, closed := got.doc.format.close_end(&got.doc, 1)
 	testing.expect(t, !closed)
 	free_all(context.temp_allocator)
@@ -550,19 +376,19 @@ read_in_pieces_within :: proc(src: []u8, cuts: []int, kind: Read_Kind, memory: u
 	context.user_ptr = &got
 	p: tape.Pieces
 	defer tape.destroy(&p)
-	window := feed(Piece_Run{src, .Json, {budget = {memory = memory}}, cuts}, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+	window := testkit.feed(testkit.Piece_Run{src, json.reads(.Json), json.as(.Json), {budget = {memory = memory}}, cuts}, &p, proc(window: []u8, r: testkit.Piece_Run, opts: tape.Options) -> bool {
 		g := (^Budgeted)(context.user_ptr)
 		switch g.kind {
 		case .Validate:
-			g.err = json.validate(window, r.spec, opts)
+			g.err = r.reads.validate(r.f, window, opts, context.allocator)
 		case .Build:
-			doc, err := json.build(window, r.spec, opts)
+			doc, err := r.reads.build(r.f, window, opts, context.allocator)
 			tape.destroy(&doc)
 			g.err = err
 		case .Find:
-			_, g.err = json.find(window, g.path, r.spec, {}, opts)
+			_, g.err = r.reads.find(r.f, window, g.path, {}, opts, context.allocator)
 		case .Scan:
-			doc, err := json.scan(window, g.demand, r.spec, {}, opts)
+			doc, err := r.reads.scan(r.f, window, g.demand, {}, opts, context.allocator)
 			tape.destroy(&doc)
 			g.err = err
 		}
@@ -632,7 +458,7 @@ long_token_agrees :: proc(t: ^testing.T, src: []u8, spec: json.Spec, paths: [][]
 	for k := PIECE; k < len(src); k += PIECE {
 		append(&cuts, k)
 	}
-	r := Piece_Run{src, spec, {}, cuts[:]}
+	r := testkit.Piece_Run{src, json.reads(spec), json.as(spec), {}, cuts[:]}
 	Got :: struct {
 		doc:    tape.Document,
 		answer: tape.Span_Answer,
@@ -643,13 +469,13 @@ long_token_agrees :: proc(t: ^testing.T, src: []u8, spec: json.Spec, paths: [][]
 	whole, werr := json.build(src, spec, {})
 	got: Got
 	context.user_ptr = &got
-	window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+	window := testkit.feed(r, &p, proc(window: []u8, r: testkit.Piece_Run, opts: tape.Options) -> bool {
 		g := (^Got)(context.user_ptr)
 		tape.destroy(&g.doc)
-		g.doc, g.err = json.build(window, r.spec, opts)
+		g.doc, g.err = r.reads.build(r.f, window, opts, context.allocator)
 		return g.err == nil
 	})
-	testing.expectf(t, werr == nil && got.err == nil && same_docs(got.doc, whole), "%s %v: build %v, whole %v", name, spec, got.err, werr)
+	testing.expectf(t, werr == nil && got.err == nil && testkit.same_documents(got.doc, whole), "%s %v: build %v, whole %v", name, spec, got.err, werr)
 	tape.destroy(&got.doc)
 	tape.destroy(&p)
 	tape.destroy(&whole)
@@ -657,9 +483,9 @@ long_token_agrees :: proc(t: ^testing.T, src: []u8, spec: json.Spec, paths: [][]
 	for path in paths {
 		want, ferr := json.find(src, path, spec, {}, {})
 		got.path = path
-		found := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+		found := testkit.feed(r, &p, proc(window: []u8, r: testkit.Piece_Run, opts: tape.Options) -> bool {
 			g := (^Got)(context.user_ptr)
-			g.answer, g.err = json.find(window, g.path, r.spec, {}, opts)
+			g.answer, g.err = r.reads.find(r.f, window, g.path, {}, opts, context.allocator)
 			return g.err == nil
 		})
 		defer delete(found)
@@ -672,14 +498,14 @@ long_token_agrees :: proc(t: ^testing.T, src: []u8, spec: json.Spec, paths: [][]
 	want, serr := json.scan(src, &d, spec, {}, {})
 	defer tape.destroy(&want)
 	got.d = &d
-	scanned := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+	scanned := testkit.feed(r, &p, proc(window: []u8, r: testkit.Piece_Run, opts: tape.Options) -> bool {
 		g := (^Got)(context.user_ptr)
 		tape.destroy(&g.doc)
-		g.doc, g.err = json.scan(window, g.d, r.spec, {}, opts)
+		g.doc, g.err = r.reads.scan(r.f, window, g.d, {}, opts, context.allocator)
 		return g.err == nil
 	})
 	defer delete(scanned)
-	ok := derr == nil && serr == nil && got.err == nil && same_docs(got.doc, want)
+	ok := derr == nil && serr == nil && got.err == nil && testkit.same_documents(got.doc, want)
 	testing.expectf(t, ok, "%s %v: scan %v, whole %v", name, spec, got.err, serr)
 	tape.destroy(&got.doc)
 	tape.destroy(&p)
@@ -956,7 +782,7 @@ validation_judges_number_blocks_as_a_build_does :: proc(t: ^testing.T) {
 		for spec in json.Spec {
 			for cut in 1 ..< len(src) {
 				got, want := read_in_two_windows(src, spec, cut, false), read_in_two_windows(src, spec, cut, true)
-				if !testing.expectf(t, same_refusal(got, want), "text %d %v cut %d: validate gives %v, build %v", i, spec, cut, got, want) {
+				if !testing.expectf(t, testkit.same_refusal(got, want), "text %d %v cut %d: validate gives %v, build %v", i, spec, cut, got, want) {
 					return
 				}
 			}
@@ -965,7 +791,7 @@ validation_judges_number_blocks_as_a_build_does :: proc(t: ^testing.T) {
 				got := json.validate(src, spec, opts)
 				doc, want := json.build(src, spec, opts)
 				tape.destroy(&doc)
-				if !testing.expectf(t, same_refusal(got, want), "text %d %v steps %d: validate gives %v, build %v", i, spec, steps, got, want) {
+				if !testing.expectf(t, testkit.same_refusal(got, want), "text %d %v steps %d: validate gives %v, build %v", i, spec, steps, got, want) {
 					return
 				}
 			}

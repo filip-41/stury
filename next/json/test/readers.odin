@@ -20,7 +20,7 @@ naive_members :: proc(doc: ^tape.Document, at: tape.Node_Index) -> []Naive_Membe
 	end := at + tape.Node_Index(doc.nodes[at].n)
 	for k := at + 1; k < end; {
 		value := k + 1
-		append(&members, Naive_Member{key_text(doc, k), value})
+		append(&members, Naive_Member{testkit.key_text(doc, k), value})
 		k = value + tape.Node_Index(doc.nodes[value].n) if doc.nodes[value].kind > .Plain else value + 1
 	}
 	return members[:]
@@ -123,7 +123,7 @@ check_readers :: proc(t: ^testing.T, r: tape.Reader, text: string, object: bool,
 			for key in order {
 				k, v, vp := tape.next_child(r, &c, dups)
 				want := first[key] if dups == .First else last[key]
-				testing.expectf(t, vp == .Found && key_text(doc, k) == key && v == want, "%s %v: child %q gives %q %v %v, want %v", text, dups, key, key_text(doc, k) if k != tape.NO_NODE else "", vp, v, want, loc = loc)
+				testing.expectf(t, vp == .Found && testkit.key_text(doc, k) == key && v == want, "%s %v: child %q gives %q %v %v, want %v", text, dups, key, testkit.key_text(doc, k) if k != tape.NO_NODE else "", vp, v, want, loc = loc)
 			}
 			_, _, end := tape.next_child(r, &c, dups)
 			testing.expectf(t, end == .Missing, "%s %v: %v past the last child", text, dups, end, loc = loc)

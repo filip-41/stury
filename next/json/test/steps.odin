@@ -167,7 +167,7 @@ answer_text :: proc(doc: ^tape.Document, path, k: int) -> string {
 		return "missing" if p == .Missing else "wrong kind"
 	}
 	b := strings.builder_make(context.temp_allocator)
-	render_node(&b, doc, int(node))
+	testkit.render_node(&b, doc, int(node))
 	return strings.to_string(b)
 }
 
@@ -392,7 +392,7 @@ build_takes_repeated_keys_by_policy :: proc(t: ^testing.T) {
 	for c in ([]Case{{.Default, `{"a":1,"b":[2,{"a":0,"a":5}],"a":{"c":3},"a":4}`}, {.All, `{"a":1,"b":[2,{"a":0,"a":5}],"a":{"c":3},"a":4}`}, {.Group, `{"a":1,"b":[2,{"a":0,"a":5}],"a":{"c":3},"a":4}`}, {.First, `{"a":1,"b":[2,{"a":0}]}`}, {.Last, `{"b":[2,{"a":5}],"a":4}`}}) {
 		doc, err := json.build(transmute([]u8)src, .Jsonc, {dups = c.dups})
 		defer tape.destroy(&doc)
-		testing.expectf(t, err == nil && render_doc(&doc) == c.doc, "%v: %s %v", c.dups, render_doc(&doc), err)
+		testing.expectf(t, err == nil && testkit.render_doc(&doc) == c.doc, "%v: %s %v", c.dups, testkit.render_doc(&doc), err)
 		n, _, _ := tape.length({doc = &doc}, tape.ROOT, context.temp_allocator)
 		testing.expect_value(t, n, 2)
 		// Each comment stays with its value, and goes with it.
@@ -428,7 +428,7 @@ scan_keeps_facts_of_kept_nodes :: proc(t: ^testing.T) {
 			s, err := json.scan(src, &d, .Jsonc, {stop_early = stop})
 			defer tape.destroy(&s)
 			testing.expect(t, err == nil)
-			agree_facts(t, &doc, &s, string(src))
+			testkit.agree_facts(t, &doc, &s, string(src))
 		}
 	}
 	d, _ := tape.demand_of([][]tape.Step{{N("a")}}, nil, nil, true)
@@ -481,7 +481,7 @@ escaped_keys_are_one_key_on_every_route :: proc(t: ^testing.T) {
 			defer tape.destroy(&once)
 			n, _, _ := tape.length({doc = &once}, tape.ROOT, context.temp_allocator)
 			testing.expectf(t, berr == nil && n == fill + 1 && len(once.nodes) == 2 * fill + 3, "%d members, %v: %s",
-				fill, dups, render_doc(&once))
+				fill, dups, testkit.render_doc(&once))
 		}
 		_, rerr := json.build(src, .Json, {dups = .Refuse})
 		kind, at := fault_of(rerr)

@@ -4,7 +4,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math/rand"
-import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
@@ -20,28 +19,6 @@ import "stury:testkit"
 @(private = "file")
 serial_runner :: proc(threads: int) -> tape.Runner {
 	return {threads = threads, start = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {}, finish = proc(data: rawptr) {}}
-}
-
-@(private = "file")
-same_build :: proc(a, b: tape.Document) -> bool {
-	same :: proc(x, y: []$T) -> bool {
-		return mem.compare(slice.to_bytes(x), slice.to_bytes(y)) == 0
-	}
-	return same(a.nodes, b.nodes) && same(a.facts, b.facts) && same(a.counts, b.counts) && a.flags == b.flags && a.root_close == b.root_close && a.present == b.present && a.partial == nil && b.partial == nil && raw_data(a.src) == raw_data(b.src)
-}
-
-// Whether the build of `src` on `runner` gives the document and error of the build on one thread, and whether that
-// build gave a document.
-@(private = "file")
-agree_on :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: json.Options, runner: ^tape.Runner, name: string) -> (ok, built: bool) {
-	want, werr := json.build(src, spec, opts)
-	defer tape.destroy(&want)
-	wide := opts
-	wide.runner = runner
-	got, gerr := json.build(src, spec, wide)
-	defer tape.destroy(&got)
-	ok = testing.expectf(t, same_refusal(gerr, werr) && same_build(got, want), "%s %v %v on %d threads: %v, one thread %v (%d and %d nodes)", name, spec, opts, runner.threads, gerr, werr, len(got.nodes), len(want.nodes))
-	return ok, werr == nil
 }
 
 // The threads of serial runners that cut a text of `n` bytes into chunks of every size from a quarter of it down to one
@@ -171,7 +148,7 @@ parts_build_what_one_thread_builds :: proc(t: ^testing.T) {
 			for threads in cuts_of(len(text)) {
 				r := serial_runner(threads)
 				builds += 1
-				ok, built := agree_on(t, text, spec, opts, &r, fmt.tprintf("round %d text %d", round, i))
+				ok, built := testkit.threads_agree(t, json.reads(spec), json.as(spec), text, opts, &r, fmt.tprintf("round %d text %d", round, i))
 				valid += int(built)
 				if !ok {
 					log.infof("%s", string(text))
@@ -194,10 +171,10 @@ parts_build_the_suites :: proc(t: ^testing.T) {
 	for f in files {
 		for threads in cuts_of(len(f.data)) {
 			r := serial_runner(threads)
-			if ok, _ := agree_on(t, f.data, f.spec, {}, &r, f.name); !ok {
+			if ok, _ := testkit.threads_agree(t, json.reads(f.spec), json.as(f.spec), f.data, {}, &r, f.name); !ok {
 				return
 			}
-			if ok, _ := agree_on(t, f.data, f.spec, tolerant, &r, f.name); !ok {
+			if ok, _ := testkit.threads_agree(t, json.reads(f.spec), json.as(f.spec), f.data, tolerant, &r, f.name); !ok {
 				return
 			}
 		}
@@ -213,7 +190,7 @@ parts_spell_ascii_texts_as_one_thread :: proc(t: ^testing.T) {
 		text := transmute([]u8)ascii_text(spec)
 		for threads in cuts_of(len(text)) {
 			r := serial_runner(threads)
-			if ok, _ := agree_on(t, text, spec, {}, &r, "ascii"); !ok {
+			if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), text, {}, &r, "ascii"); !ok {
 				return
 			}
 		}
@@ -253,13 +230,13 @@ parts_build_on_pools :: proc(t: ^testing.T) {
 		for text, i in texts {
 			spec := json.Spec.Json if i < len(texts) - 3 else .Jsonc
 			for _ in 0 ..< 3 {
-				if ok, _ := agree_on(t, text, spec, {}, &pool.runner, names[i]); !ok {
+				if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), text, {}, &pool.runner, names[i]); !ok {
 					return
 				}
 			}
 			small := pool.runner
 			small.threads = len(text) / 4096
-			if ok, _ := agree_on(t, text, spec, {}, &small, names[i]); !ok {
+			if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), text, {}, &small, names[i]); !ok {
 				return
 			}
 		}
@@ -298,7 +275,7 @@ parts_allocate_on_the_calling_thread :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil && len(doc.nodes) > 300, "%v %v %d", spec, err, len(doc.nodes))
 		tape.destroy(&doc)
 		for memory in ([]u64{1, 4096, u64(len(src)), u64(len(src)) * 4, u64(len(src)) * 64}) {
-			if ok, _ := agree_on(t, src, spec, {budget = {memory = memory}}, &pool.runner, "memory"); !ok {
+			if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}}, &pool.runner, "memory"); !ok {
 				return
 			}
 		}
@@ -346,14 +323,14 @@ memory_budget_gives_one_answer_on_every_thread_count :: proc(t: ^testing.T) {
 				testing.expectf(t, least != 0 || dups == .Refuse, "%v %d %v: no budget up to eight times the text builds it", spec, shape, dups)
 				for memory := u64(1); memory < 8 * u64(len(src)); memory += 1 + memory / 5 {
 					for runner in ([]^tape.Runner{&one, &many}) {
-						if ok, _ := agree_on(t, src, spec, {budget = {memory = memory}, dups = dups}, runner, "budget"); !ok {
+						if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}, dups = dups}, runner, "budget"); !ok {
 							return
 						}
 					}
 				}
 				for memory in max(least, 12) - 12 ..= least + 12 {
 					for runner in ([]^tape.Runner{&one, &many}) {
-						if ok, _ := agree_on(t, src, spec, {budget = {memory = memory}, dups = dups}, runner, "budget near the least"); !ok {
+						if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}, dups = dups}, runner, "budget near the least"); !ok {
 							return
 						}
 					}
@@ -400,7 +377,7 @@ parts_join_with_no_second_build :: proc(t: ^testing.T) {
 		for threads in ([]int{3, 17, 70}) {
 			starts := 0
 			r := tape.Runner{threads = threads, start = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) { (^int)(data)^ += 1 }, finish = proc(data: rawptr) {}, data = &starts}
-			if ok, _ := agree_on(t, text.src, text.spec, {dups = text.dups}, &r, fmt.tprintf("text %d", i)); !ok {
+			if ok, _ := testkit.threads_agree(t, json.reads(text.spec), json.as(text.spec), text.src, {dups = text.dups}, &r, fmt.tprintf("text %d", i)); !ok {
 				return
 			}
 			testing.expectf(t, starts >= 3, "text %d on %d threads: %d tasks", i, threads, starts)
@@ -429,7 +406,7 @@ parts_of_a_seam_heavy_text_build_as_one_thread :: proc(t: ^testing.T) {
 		src := transmute([]u8)strings.to_string(b)
 		for threads in ([]int{2, 3, 7, 16, 64, 255, 700, 1500}) {
 			r := serial_runner(threads)
-			if ok, built := agree_on(t, src, spec, {}, &r, "seam heavy"); !ok || !testing.expect(t, built) {
+			if ok, built := testkit.threads_agree(t, json.reads(spec), json.as(spec), src, {}, &r, "seam heavy"); !ok || !testing.expect(t, built) {
 				return
 			}
 		}

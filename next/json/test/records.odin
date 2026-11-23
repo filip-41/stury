@@ -162,7 +162,7 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 			rec, doc, ok := one_scan(&r, &demand)
 			line := transmute([]u8)src[span[0]:span[1]]
 			alone, err := json.scan(line, &demand, spec)
-			got, want := fmt.tprint(render_answers(&doc), render_doc(&doc)), fmt.tprint(render_answers(&alone), render_doc(&alone))
+			got, want := fmt.tprint(testkit.render_answers(&doc), testkit.render_doc(&doc)), fmt.tprint(testkit.render_answers(&alone), testkit.render_doc(&alone))
 			testing.expectf(t, ok && rec == {u64(i), span[0], span[1], moved(err, span[0]), {}} && got == want, "%v scan line %d %q: %v %s, want %v %s", spec, i, line, rec, got, err, want)
 			tape.destroy(&doc)
 			tape.destroy(&alone)
@@ -226,7 +226,7 @@ records_read_the_root_arrays_elements :: proc(t: ^testing.T) {
 		for e, i in c.elements {
 			rec, doc, ok := one_scan(&r, &demand)
 			alone, _ := json.scan(transmute([]u8)e, &demand, c.spec)
-			got, want := render_answers(&doc), render_answers(&alone)
+			got, want := testkit.render_answers(&doc), testkit.render_answers(&alone)
 			testing.expectf(t, ok && rec.err == nil && got == want, "%q scan %d: %v %s, want %s", c.src, i, rec, got, want)
 			tape.destroy(&doc)
 			tape.destroy(&alone)
@@ -361,7 +361,7 @@ records_read_the_root_objects_members :: proc(t: ^testing.T) {
 		for m, i in c.members {
 			rec, doc, ok := one_scan(&r, &demand)
 			alone, _ := json.scan(transmute([]u8)m.value, &demand, c.spec)
-			got, want := render_answers(&doc), render_answers(&alone)
+			got, want := testkit.render_answers(&doc), testkit.render_answers(&alone)
 			testing.expectf(t, ok && got == want, "%q scan %d: %s, want %s", c.src, i, got, want)
 			check(t, "scan", c, rec, i, spans, m)
 			tape.destroy(&doc)
@@ -423,7 +423,7 @@ records_read_alike_in_any_batch_size :: proc(t: ^testing.T) {
 			for {
 				n := json.records_scan(&r, &demand, out, scanned)
 				for &doc in scanned[:n] {
-					append(&docs, fmt.tprint(render_answers(&doc), render_doc(&doc)))
+					append(&docs, fmt.tprint(testkit.render_answers(&doc), testkit.render_doc(&doc)))
 					tape.destroy(&doc)
 				}
 				if n < size {
@@ -508,7 +508,7 @@ records_reset_their_readers_between_records :: proc(t: ^testing.T) {
 		for span, i in spans {
 			rec, doc, ok := one_scan(&r, &demand)
 			alone, err := json.scan(src[span[0]:span[1]], &demand, .Json)
-			got, want := fmt.tprint(render_answers(&doc), render_doc(&doc)), fmt.tprint(render_answers(&alone), render_doc(&alone))
+			got, want := fmt.tprint(testkit.render_answers(&doc), testkit.render_doc(&doc)), fmt.tprint(testkit.render_answers(&alone), testkit.render_doc(&alone))
 			testing.expectf(t, ok && rec.err == moved(err, span[0]) && got == want, "%v scan line %d: %v %s, want %v %s", path, i, rec, got, err, want)
 			tape.destroy(&doc)
 			tape.destroy(&alone)

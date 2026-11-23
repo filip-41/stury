@@ -260,7 +260,7 @@ check_policies :: proc(t: ^testing.T, m: Model, name := "", loc := #caller_locat
 		want, werr := json.build(transmute([]u8)want_text)
 		defer tape.destroy(&want)
 		ok := testing.expectf(t, gerr == nil && werr == nil, "%s %v %q: %v %v", name, dups, m.full, gerr, werr, loc = loc)
-		ok &&= testing.expectf(t, same_tree(&got, &want), "%s %v: %q builds %s, want %q", name, dups, m.full, render_doc(&got), want_text, loc = loc)
+		ok &&= testing.expectf(t, same_tree(&got, &want), "%s %v: %q builds %s, want %q", name, dups, m.full, testkit.render_doc(&got), want_text, loc = loc)
 		ok &&= expect_well_formed(t, &got, name, loc = loc)
 		if ok {
 			// The facts of a dropped member go with it.

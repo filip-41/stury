@@ -2,9 +2,7 @@ package json_tests
 
 import "base:runtime"
 import "core:fmt"
-import "core:log"
 import "core:math/rand"
-import "core:slice"
 import "core:strings"
 import "core:testing"
 import "stury:json"
@@ -33,7 +31,7 @@ describe :: proc(doc: ^tape.Document, steps: []tape.Step, dups: tape.Duplicates,
 		return fmt.tprint(p)
 	}
 	b := strings.builder_make(context.temp_allocator)
-	render_node(&b, doc, int(at))
+	testkit.render_node(&b, doc, int(at))
 	if doc.nodes[at].kind < .Array && doc.nodes[at].kind != .Null {
 		return strings.to_string(b)
 	}
@@ -54,10 +52,10 @@ describe :: proc(doc: ^tape.Document, steps: []tape.Step, dups: tape.Duplicates,
 			strings.write_byte(&b, ',')
 		}
 		if key != tape.NO_NODE {
-			render_node(&b, doc, int(key))
+			testkit.render_node(&b, doc, int(key))
 			strings.write_byte(&b, ':')
 		}
-		render_node(&b, doc, int(value))
+		testkit.render_node(&b, doc, int(value))
 	}
 	if cp != .Missing {
 		if !strings.has_suffix(strings.to_string(b), "[") {
@@ -95,7 +93,7 @@ expect_reads :: proc(t: ^testing.T, src: string, paths: [][]tape.Step, read: tap
 		full := describe(&doc, c.steps, c.dups)
 		partial := describe(&r, c.steps, c.dups)
 		testing.expectf(t, full == c.full, "%q %v %v: whole %q", src, c.steps, c.dups, full, loc = loc)
-		testing.expectf(t, partial == c.partial, "%q scan %v %v: %v %v partial %q of %q", src, paths, read, c.steps, c.dups, partial, render_doc(&r), loc = loc)
+		testing.expectf(t, partial == c.partial, "%q scan %v %v: %v %v partial %q of %q", src, paths, read, c.steps, c.dups, partial, testkit.render_doc(&r), loc = loc)
 		testing.expect_value(t, describe(&doc, c.steps, c.dups, &full_index), full, loc = loc)
 		testing.expect_value(t, describe(&r, c.steps, c.dups, &partial_index), partial, loc = loc)
 	}
@@ -383,13 +381,6 @@ navigate_finds_distinct_keys_of_wide_objects :: proc(t: ^testing.T) {
 	}
 }
 
-// The answers of the partial reads in the agreement test.
-Agreement :: struct {
-	texts, refused, scans, on_path, reads: int,
-	outcomes:                              [tape.Presence]int,
-	shapes:                                map[u64]struct{}, // the kinds of steps of each path a scan read, `shape_of`
-}
-
 // Over every text of the suites and generated ones that builds and scans by paths made of its own keys and indexes,
 // each path's own steps read the same over the partial document as over the whole one, and every other read the
 // partial document answers is the whole one's, or `.Not_Loaded` where the whole one has a value or lacks it. Every
@@ -416,496 +407,29 @@ navigate_agrees_with_the_build_on_jsonc_files :: proc(t: ^testing.T) {
 @(test)
 navigate_agrees_with_the_build_on_generated_texts :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	a: Agreement
+	a: testkit.Agreement
 	defer delete(a.shapes)
 	state: rand.Default_Random_State
 	context.random_generator = testkit.seeded(t, &state, 0xa63ee)
 	for f in FLAVORS {
 		for _ in 0 ..< testkit.rounds(4) {
-			agree_over(t, random_text(f), f.spec, flavor_options(f), "generated", &a)
+			testkit.readers_agree(t, json.reads(f.spec), json.as(f.spec), random_text(f), flavor_options(f), "generated", &a)
 		}
 	}
-	expect_agreement(t, &a, {texts = 12, refused = 0, scans = 20_000, on_path = 60_000, shapes = 30})
+	testkit.expect_agreement(t, &a, {texts = 12, refused = 0, scans = 20_000, on_path = 60_000, shapes = 30})
 }
 
-// The least a run of the agreement test must have read. A change that stops it reading fails the test.
-Agreement_Floor :: struct {
-	texts, refused, scans, on_path, shapes: int,
-}
-
-agree_files :: proc(t: ^testing.T, spec: json.Spec, floor: Agreement_Floor) {
-	a: Agreement
+agree_files :: proc(t: ^testing.T, spec: json.Spec, floor: testkit.Agreement_Floor) {
+	a: testkit.Agreement
 	defer delete(a.shapes)
 	files := corpus_files()
 	defer delete(files)
 	for file in files {
 		if file.spec == spec {
-			agree_over(t, file.data, file.spec, {}, file.name, &a)
+			testkit.readers_agree(t, json.reads(file.spec), json.as(file.spec), file.data, {}, file.name, &a)
 		}
 	}
-	expect_agreement(t, &a, floor)
-}
-
-expect_agreement :: proc(t: ^testing.T, a: ^Agreement, floor: Agreement_Floor) {
-	log.infof("agreement: %d texts, %d refused, %d scans, %d path steps, %d other reads, %d path shapes, partial outcomes %v", a.texts, a.refused, a.scans, a.on_path, a.reads, len(a.shapes), a.outcomes)
-	testing.expectf(t, a.texts >= floor.texts && a.refused >= floor.refused && a.scans >= floor.scans && a.on_path >= floor.on_path && len(a.shapes) >= floor.shapes, "%d texts, %d refused, %d scans, %d path steps, %d path shapes", a.texts, a.refused, a.scans, a.on_path, len(a.shapes))
-	testing.expect(t, a.outcomes[.Not_Loaded] > 0 && a.outcomes[.Missing] > 0 && a.outcomes[.Wrong_Kind] > 0 && a.outcomes[.Found] > 0)
-}
-
-@(private = "file")
-agree_over :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: json.Options, name: string, a: ^Agreement) {
-	defer free_all(context.temp_allocator)
-	doc, err := json.build(src, spec, opts)
-	defer tape.destroy(&doc)
-	if err != nil {
-		a.refused += 1
-		reads_refuse(t, src, spec, opts, err, name)
-		return
-	}
-	a.texts += 1
-	full_index := tape.Doc_Index{allocator = context.temp_allocator}
-	defer tape.destroy(&full_index)
-	paths := paths_of(&doc)
-	sets := make([dynamic][][]tape.Step, context.temp_allocator)
-	for i in 0 ..< len(paths) {
-		append(&sets, paths[i:][:1])
-		if i + 1 < len(paths) {
-			append(&sets, paths[i:][:2])
-		}
-	}
-	append(&sets, paths[:])
-	Grained :: struct {
-		paths:  [][]tape.Step,
-		grains: []tape.Grain,
-		limits: []int,
-		facts:  bool,
-	}
-	runs := make([dynamic]Grained, context.temp_allocator)
-	for set, i in sets {
-		append(&runs, Grained{set, nil, nil, false})
-		if len(set) == 1 || i + 1 == len(sets) {
-			for grain in ([]tape.Grain{.Keys, .Exists}) {
-				grains := make([]tape.Grain, len(set), context.temp_allocator)
-				for &g, j in grains {
-					g = grain if j % 3 != 2 else .Whole
-				}
-				append(&runs, Grained{set, grains, nil, false})
-			}
-			// Each path's first answer, or its first two, and every third path's every answer.
-			for limit in 1 ..= 2 {
-				limits := make([]int, len(set), context.temp_allocator)
-				for &l, j in limits {
-					l = limit if j % 3 != 2 else 0
-				}
-				append(&runs, Grained{set, nil, limits, false})
-			}
-		}
-	}
-	if spec != .Json {
-		append(&runs, Grained{sets[len(sets) - 1], nil, nil, true})
-	}
-	for run in runs {
-		set := run.paths
-		d, derr := tape.demand_of(set, run.grains, run.limits, run.facts)
-		testing.expect(t, derr == nil)
-		defer tape.destroy(&d)
-		for dups in ([]tape.Duplicates{.Last, .First, .Group}) {
-			for stop in ([]bool{false, true}) {
-				r, serr := json.scan(src, &d, spec, {dups = dups, stop_early = stop}, opts)
-				defer tape.destroy(&r)
-				if !testing.expectf(t, serr == nil, "%s %v: scan %v", name, spec, serr) {
-					continue
-				}
-				a.scans += 1
-				// The whole document's readers go through its index on a scan that ran to the end, and the partial one's
-				// on a stopped scan, so each path is checked against the other.
-				w := Agree_Walk{t, {&doc, nil}, {&r, nil}, dups, name, set, stop, a}
-				partial_index := tape.Doc_Index{allocator = context.temp_allocator}
-				defer tape.destroy(&partial_index)
-				if stop {
-					w.r.index = &partial_index
-				} else {
-					w.doc.index = &full_index
-				}
-				for path, i in set {
-					a.shapes[shape_of(path)] = {}
-					limit := run.limits[i] if i < len(run.limits) else 0
-					// A path past its limit keeps no more, so only its answers are checked.
-					if run.limits == nil {
-						agree_on_path(&w, tape.ROOT, tape.ROOT, path, run.grains[i] if i < len(run.grains) else .Whole)
-					}
-
-					// A stopped scan's answers are the reference's once its paths are settled, which a stop leaves them.
-					if !answers_agree(&doc, &r, i, path, dups, limit) {
-						testing.expectf(t, false, "%s %v: answers of %v under %v limit %d stop %v: %s", name, spec, path, dups, limit, stop, render_answers(&r))
-					}
-				}
-				if run.facts {
-					agree_facts(t, &doc, &r, name)
-				}
-
-				if root, p := tape.root(w.r); p == .Found {
-					agree_past(&w, tape.ROOT, root, 0)
-				}
-			}
-		}
-	}
-}
-
-// The kinds of the steps of a path, a name, an index from either end, an `All` with or without a limit, and a slice from
-// either end, in one number.
-@(private = "file")
-shape_of :: proc(path: []tape.Step) -> (shape: u64) {
-	for step in path {
-		code := u64(0)
-		switch s in step {
-		case tape.Name:
-			code = 1
-		case tape.Index:
-			code = 2 if s >= 0 else 3
-		case tape.All:
-			code = 4 if s.limit <= 0 else 5
-		case tape.Slice:
-			code = 6 if s.lo >= 0 else 7
-		}
-		shape = shape << 3 | code
-	}
-	return shape << 3 | u64(len(path))
-}
-
-@(private = "file")
-Agree_Walk :: struct {
-	t:     ^testing.T,
-	doc:   tape.Reader,
-	r:     tape.Reader,
-	dups:  tape.Duplicates,
-	name:  string,
-	paths: [][]tape.Step,
-	stop:  bool,
-	a:     ^Agreement,
-}
-
-// The paths of a scan: the whole text, indexes from either end, every element, the first ones, slices, up to twelve
-// of its keys in steps around them, with names it lacks, and the paths down to its first and its last leaf.
-@(private = "file")
-paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
-	N :: proc(s: string) -> tape.Step {return tape.Name(s)}
-	I :: proc(i: int) -> tape.Step {return tape.Index(i)}
-	A :: tape.All{}
-	out := make([dynamic][]tape.Step, context.temp_allocator)
-	add :: proc(out: ^[dynamic][]tape.Step, steps: ..tape.Step) {
-		path := make([]tape.Step, len(steps), context.temp_allocator)
-		copy(path, steps)
-		append(out, path)
-	}
-	add(&out)
-	add(&out, I(0))
-	add(&out, I(2))
-	add(&out, I(1))
-	add(&out, I(-1))
-	add(&out, I(-2))
-	add(&out, A)
-	add(&out, A, A)
-	add(&out, I(0), I(0))
-	add(&out, I(-1), I(-1))
-	add(&out, A, I(0))
-	add(&out, N(""))
-	add(&out, tape.All{1})
-	add(&out, tape.All{2}, A)
-	add(&out, A, tape.All{1})
-	add(&out, tape.Slice{1, nil, 0})
-	add(&out, tape.Slice{-2, nil, 0})
-	add(&out, tape.Slice{0, -1, 0})
-	add(&out, tape.Slice{1, 3, 1})
-	add(&out, tape.Slice{-3, -1, 0}, A)
-	keys := make([dynamic]string, context.temp_allocator)
-	for node, i in doc.nodes {
-		if node.role != .Key || len(keys) == 12 {
-			continue
-		}
-		key := key_text(doc, tape.Node_Index(i))
-		seen := false
-		for k in keys {
-			seen ||= k == key
-		}
-		if !seen {
-			append(&keys, key)
-		}
-	}
-	for k, n in keys {
-		k2 := keys[(n + 1) % len(keys)]
-		add(&out, N(k))
-		add(&out, A, N(k))
-		add(&out, I(0), N(k))
-		add(&out, I(-1), N(k))
-		add(&out, N(k), I(0))
-		add(&out, N(k), I(-1))
-		add(&out, N(k), A)
-		add(&out, N(k), N(k2))
-		add(&out, A, N(k), A)
-		add(&out, N(k), N("zz_missing"))
-		add(&out, N(k), A, N(k2))
-		add(&out, tape.All{1}, N(k))
-		add(&out, tape.Slice{-2, nil, 0}, N(k))
-		add(&out, N(k), tape.Slice{1, nil, 1})
-	}
-	for last in ([]bool{false, true}) {
-		down := make([dynamic]tape.Step, context.temp_allocator)
-		for at := tape.ROOT; len(down) < 7; {
-			node := doc.nodes[at]
-			if node.kind < .Array || node.n == 1 {
-				break
-			}
-			end := at + tape.Node_Index(node.n)
-			member := at + 1
-			for next := member; last && next < end; {
-				member = next
-				next += tape.Node_Index(doc.nodes[next].n) if doc.nodes[next].kind > .Plain else 1
-				if node.kind == .Object {
-					next += tape.Node_Index(doc.nodes[next].n) if doc.nodes[next].kind > .Plain else 1
-				}
-			}
-			if node.kind == .Object {
-				append(&down, tape.Step(tape.Name(key_text(doc, member))))
-				at = member + 1
-			} else {
-				append(&down, tape.Step(tape.Index(-1 if last else 0)))
-				at = member
-			}
-			if len(down) >= 3 {
-				add(&out, ..down[:])
-				add(&out, ..slice.concatenate([][]tape.Step{{A}, down[1:]}, context.temp_allocator))
-			}
-		}
-	}
-	return out[:]
-}
-
-key_text :: proc(doc: ^tape.Document, at: tape.Node_Index) -> string {
-	buf := make([]u8, doc.nodes[at].n, context.temp_allocator)
-	text, _ := tape.node_text(doc, at, buf)
-	return strings.clone(text, context.temp_allocator)
-}
-
-// Whether node `f` of the whole document and node `p` of the partial one are the same value of the text.
-@(private = "file")
-same_node :: proc(w: ^Agree_Walk, f, p: tape.Node_Index) -> bool {
-	if f == tape.NO_NODE || p == tape.NO_NODE {
-		return f == p
-	}
-	x, y := w.doc.doc.nodes[f], w.r.doc.nodes[p]
-	return x.lo == y.lo && x.kind == y.kind && x.role == y.role && (x.kind > .Plain || x.n == y.n && x.spelling == y.spelling)
-}
-
-// Checks a step of a path the scan read, which the partial document answers as the whole one does.
-@(private = "file")
-agree_step :: proc(w: ^Agree_Walk, what: any, f, p: tape.Node_Index, fp, pp: tape.Presence, loc := #caller_location) -> bool {
-	w.a.on_path += 1
-	if fp == pp && (fp != .Found || same_node(w, f, p)) {
-		return true
-	}
-	return testing.expectf(w.t, false, "%s scan %v %v stop %v: %v gives %v %v, whole %v %v; %s", w.name, w.paths, w.dups, w.stop, what, pp, p, fp, f, render_doc(w.r.doc), loc = loc)
-}
-
-// Checks a read past the scan's paths: the whole document's answer, or `.Not_Loaded` where the whole one has a value
-// or lacks it.
-@(private = "file")
-agree_read :: proc(w: ^Agree_Walk, what: any, f, p: tape.Node_Index, fp, pp: tape.Presence, loc := #caller_location) -> bool {
-	w.a.reads += 1
-	w.a.outcomes[pp] += 1
-	if pp == fp && (fp != .Found || same_node(w, f, p)) || pp == .Not_Loaded && fp != .Wrong_Kind {
-		return true
-	}
-	return testing.expectf(w.t, false, "%s scan %v %v stop %v: %v gives %v %v, whole %v %v; %s", w.name, w.paths, w.dups, w.stop, what, pp, p, fp, f, render_doc(w.r.doc), loc = loc)
-}
-
-// Checks the steps of a path the scan read, and at their end what `grain` keeps.
-@(private = "file")
-agree_on_path :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, steps: []tape.Step, grain: tape.Grain) {
-	if len(steps) == 0 {
-		agree_grain(w, f, p, grain)
-		return
-	}
-	switch step in steps[0] {
-	case tape.Name:
-		if w.dups == .Group {
-			fc, fp := tape.named(w.doc, f, string(step))
-			pc, pp := tape.named(w.r, p, string(step))
-			if !agree_step(w, step, tape.NO_NODE, tape.NO_NODE, fp, pp) || fp != .Found {
-				return
-			}
-			for {
-				fk, fv, fnp := tape.next_child(w.doc, &fc)
-				pk, pv, pnp := tape.next_child(w.r, &pc)
-				if !agree_step(w, "group member", fv, pv, fnp, pnp) || !same_node(w, fk, pk) || fnp != .Found {
-					return
-				}
-				agree_on_path(w, fv, pv, steps[1:], grain)
-			}
-		}
-		fv, fp := tape.member(w.doc, f, string(step), w.dups)
-
-		pv, pp := tape.member(w.r, p, string(step), w.dups)
-		if agree_step(w, step, fv, pv, fp, pp) && fp == .Found {
-			agree_on_path(w, fv, pv, steps[1:], grain)
-		}
-	case tape.Index:
-		fv, fp := tape.element(w.doc, f, int(step))
-		pv, pp := tape.element(w.r, p, int(step))
-		if agree_step(w, step, fv, pv, fp, pp) && fp == .Found {
-			agree_on_path(w, fv, pv, steps[1:], grain)
-		}
-	case tape.All:
-		node := w.doc.doc.nodes[f]
-		if step.limit > 0 && node.kind == .Object && w.dups == .First {
-			// Members past the limit are not kept, so the partial object is read by the keys of those before it.
-			end := f + tape.Node_Index(node.n)
-			for k, i := f + 1, i32(0); k < end && i < step.limit; i += 1 {
-				key := key_text(w.doc.doc, k)
-				fv, fp := tape.member(w.doc, f, key, .First)
-				pv, pp := tape.member(w.r, p, key, .First)
-				if agree_step(w, key, fv, pv, fp, pp) {
-					agree_on_path(w, fv, pv, steps[1:], grain)
-				}
-				k += 1
-				k += tape.Node_Index(w.doc.doc.nodes[k].n) if w.doc.doc.nodes[k].kind > .Plain else 1
-			}
-			return
-		}
-		fc, fp, _ := tape.children(w.doc, f, context.temp_allocator)
-		pc, pp, _ := tape.children(w.r, p, context.temp_allocator)
-		if !agree_step(w, "children", tape.NO_NODE, tape.NO_NODE, fp, pp) || fp != .Found {
-			return
-		}
-		for i := i32(0); step.limit <= 0 || node.kind == .Object || i < step.limit; i += 1 {
-			fk, fv, fnp := tape.next_child(w.doc, &fc, w.dups)
-			pk, pv, pnp := tape.next_child(w.r, &pc, w.dups)
-			if !agree_step(w, "next child", fv, pv, fnp, pnp) || !same_node(w, fk, pk) || fnp != .Found {
-				break
-			}
-			agree_on_path(w, fv, pv, steps[1:], grain)
-		}
-	case tape.Slice:
-		count, lp, _ := tape.length(w.doc, f, context.temp_allocator)
-		if w.doc.doc.nodes[f].kind != .Array || lp != .Found {
-			_, pp := tape.element(w.r, p, 0)
-			agree_step(w, step, tape.NO_NODE, tape.NO_NODE, .Wrong_Kind if w.doc.doc.nodes[f].kind != .Null else .Missing, pp)
-			return
-		}
-		lo := int(step.lo)
-		from := max(lo + count if lo < 0 else lo, 0)
-		hi := int(step.hi.? or_else i32(count))
-		to := hi + count if hi < 0 else min(hi, count)
-		if step.limit > 0 {
-			to = min(to, from + int(step.limit))
-		}
-		for i in from ..< to {
-			fv, fp := tape.element(w.doc, f, i)
-			pv, pp := tape.element(w.r, p, i)
-			if agree_step(w, step, fv, pv, fp, pp) {
-				agree_on_path(w, fv, pv, steps[1:], grain)
-			}
-		}
-	}
-}
-
-// Checks what `grain` keeps of the value `f` of the whole document and `p` of the partial one: its kind, and for a
-// `.Keys` grain an array's length and an object's keys.
-@(private = "file")
-agree_grain :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, grain: tape.Grain) {
-	if !agree_step(w, grain, f, p, .Found, .Found) || grain != .Keys || w.doc.doc.nodes[f].kind < .Array {
-		return
-	}
-	fn, fl, _ := tape.length(w.doc, f, context.temp_allocator)
-	pn, pl, _ := tape.length(w.r, p, context.temp_allocator)
-	if fl != pl || fn != pn {
-		testing.expectf(w.t, false, "%s scan %v: keys length %v %d, whole %d; %s", w.name, w.paths, pl, pn, fn, render_doc(w.r.doc))
-	}
-	if w.doc.doc.nodes[f].kind != .Object {
-		return
-	}
-	fc, _, _ := tape.children(w.doc, f, context.temp_allocator)
-	pc, pcp, _ := tape.children(w.r, p, context.temp_allocator)
-	if !agree_step(w, "keys", tape.NO_NODE, tape.NO_NODE, .Found, pcp) {
-		return
-	}
-	for {
-		fk, fv, fnp := tape.next_child(w.doc, &fc, w.dups)
-		pk, pv, pnp := tape.next_child(w.r, &pc, w.dups)
-		if fnp != .Found {
-			agree_step(w, "last key", tape.NO_NODE, tape.NO_NODE, fnp, pnp)
-			break
-		}
-		if !same_node(w, fk, pk) || pnp != .Not_Loaded && !(pnp == .Found && same_node(w, fv, pv)) {
-			testing.expectf(w.t, false, "%s scan %v: key %v %v, whole %v; %s", w.name, w.paths, pk, pnp, fk, render_doc(w.r.doc))
-			break
-		}
-	}
-}
-
-// Reads around the value `f` of the whole document and `p` of the partial one, and goes on into what both hold.
-@(private = "file")
-agree_past :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, depth: int) {
-	if !agree_read(w, "value", f, p, .Found, .Found) || depth > 64 {
-		return
-	}
-	fn, fl, _ := tape.length(w.doc, f, context.temp_allocator)
-	pn, pl, _ := tape.length(w.r, p, context.temp_allocator)
-	agree_read(w, "length", tape.NO_NODE, tape.NO_NODE, fl, pl)
-	if pl == .Found && fl == .Found {
-		if fn != pn {
-			testing.expectf(w.t, false, "%s scan %v: length %d, whole %d; %s", w.name, w.paths, pn, fn, render_doc(w.r.doc))
-		}
-	}
-	for dups in ([]tape.Duplicates{.Last, .First}) {
-		fc, fcp, _ := tape.children(w.doc, f, context.temp_allocator)
-		pc, pcp, _ := tape.children(w.r, p, context.temp_allocator)
-		if !agree_read(w, "children", tape.NO_NODE, tape.NO_NODE, fcp, pcp) || pcp != .Found {
-			continue
-		}
-		for {
-			fk, fv, fnp := tape.next_child(w.doc, &fc, dups)
-			pk, pv, pnp := tape.next_child(w.r, &pc, dups)
-			// A child the scan did not keep reads as not loaded, and the children past it go on.
-			if !agree_read(w, "next child", fv, pv, fnp, pnp) || fnp != .Found {
-				break
-			}
-			testing.expect(w.t, pnp != .Found || same_node(w, fk, pk))
-		}
-	}
-	names := make([dynamic]string, context.temp_allocator)
-	append(&names, "zz_missing", "")
-	if w.doc.doc.nodes[f].kind == .Object {
-		end := f + tape.Node_Index(w.doc.doc.nodes[f].n)
-		for k := f + 1; k < end; {
-			append(&names, key_text(w.doc.doc, k))
-			k += 1
-			k += tape.Node_Index(w.doc.doc.nodes[k].n) if w.doc.doc.nodes[k].kind > .Plain else 1
-		}
-	}
-	for name, i in names {
-		fv, fp := tape.member(w.doc, f, name, w.dups)
-		pv, pp := tape.member(w.r, p, name, w.dups)
-		if agree_read(w, name, fv, pv, fp, pp) && pp == .Found && i >= 2 {
-			agree_past(w, fv, pv, depth + 1)
-		}
-		// A read under the policy the scan did not take.
-		other := tape.Duplicates.First if w.dups == .Last else .Last
-		fv, fp = tape.member(w.doc, f, name, other)
-		pv, pp = tape.member(w.r, p, name, other)
-		agree_read(w, name, fv, pv, fp, pp)
-	}
-	count := fn if fl == .Found else 0
-	for i in -count - 2 ..= count + 1 {
-		if i >= 64 && i < count - 2 || i <= -64 && i > -count + 2 {
-			continue
-		}
-		fv, fp := tape.element(w.doc, f, i)
-		pv, pp := tape.element(w.r, p, i)
-		if agree_read(w, tape.Index(i), fv, pv, fp, pp) && pp == .Found && i >= 0 && w.doc.doc.nodes[f].kind == .Array {
-			agree_past(w, fv, pv, depth + 1)
-		}
-	}
+	testkit.expect_agreement(t, &a, floor)
 }
 
 // An object a `.Keys` grain kept answers its length, its keys and its scalar values, a container value answering only
