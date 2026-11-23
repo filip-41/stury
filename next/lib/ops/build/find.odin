@@ -236,6 +236,11 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 	} else if t.kind == .End && h.skip_end && !h.pending {
 		h.skip_end = false
 		return s, .Next
+	} else if t.role == .Value && t.kind != .End && h.count_at != nil && h.count_at^ != h.count_to && !h.quiet && !h.replay {
+		// A container before the index the path takes is counted and skipped as a scalar there is counted.
+		h.count_at^ += 1
+		h.skip_end = true
+		return s, .Skip
 	}
 	return s, finder_token(h, t)
 }

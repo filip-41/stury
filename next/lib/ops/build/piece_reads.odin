@@ -14,7 +14,7 @@ read_validate_pieces :: proc(src: []u8, format: ^tape.Format, opts: tape.Options
 	if e := tape.options_refused(format, opts); e != nil {
 		return e
 	}
-	if !validate_dups(opts) {
+	if !validate_dups(format, opts) {
 		return tape.Bad_Option{"dups"}
 	}
 	p := opts.pieces

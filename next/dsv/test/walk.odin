@@ -2,6 +2,8 @@ package dsv_tests
 
 import "base:runtime"
 import "core:fmt"
+import "core:math/rand"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "stury:dsv"
@@ -9,285 +11,6 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 import "stury:testkit"
-
-Case :: struct {
-	text:   string,
-	kind:   tape.Fault_Kind, // `.None` for a valid text
-	offset: u64,
-}
-
-// The kinds a case names for `Bad_Width` with too many and too few cells, a record wider or narrower than the first.
-TOO_MANY :: tape.Fault_Kind(0xff)
-TOO_FEW :: tape.Fault_Kind(0xfe)
-
-// The rules of `dsv`, which name the details below by their index.
-DETAIL_TOO_MANY :: 1
-DETAIL_TOO_FEW :: 2
-DETAIL_BARE_QUOTE :: 3
-DETAIL_INVALID_UTF8 :: 4
-DETAIL_LONE_CR :: 5
-DETAIL_AFTER_QUOTE :: 6
-DETAIL_OPEN_QUOTE :: 7
-DETAIL_CUT_UTF8 :: 8
-
-// CSV texts and the fault each raises, at the byte the fault's rule names.
-@(rodata)
-CSV_CASES := []Case {
-	{"", nil, 0},
-	{"a,b\n1,2\n", nil, 0},
-	{"a,b\r\n1,2", nil, 0},
-	{"\xef\xbb\xbfa\n", nil, 0},
-	{"a\n\n\r\nb\n", nil, 0},
-	{"\"a\"\"b\",c\n", nil, 0},
-	{"\"a\rb\nc,d\"\n", nil, 0},
-	{"a,\"\"\r\n", nil, 0},
-	{"a\\,b\n", nil, 0},
-	{"a,b\n1\n", TOO_FEW, 5},
-	{"a,b\n1,2,3", TOO_MANY, 7},
-	{"a\n\nb,c\n", TOO_MANY, 4},
-	{"a\"b\n", .Bad_Char, 1},
-	{"\"a\"b\n", .Bad_Char, 3},
-	{"\"a\" ,b\n", .Bad_Char, 3},
-	{"\"abc", .Truncated, 0},
-	{"a,\"b\nc", .Truncated, 2},
-	{"a,\"b\xc3", .Truncated, 2},
-	{"a,\"b\xff", .Bad_Char, 4},
-	{"a,b\n\"\"\"x\n\"\"\",\"y", .Truncated, 13},
-	{"a\rb\n", .Bad_Char, 1},
-	{"a\r", .Bad_Char, 1},
-	{"\"a\"\r", .Bad_Char, 3},
-	{"a\xff\n", .Bad_Char, 1},
-	{"a\xed\xa0\x80\n", .Bad_Char, 1},
-	{"\"\xc3\"\n", .Bad_Char, 1},
-	{"a\xc3", .Truncated, 2},
-	{"\"a\xc3", .Truncated, 0},
-	{"x,\"\xe2\x82", .Truncated, 2},
-	{"a,b\n1\r2,3\n", .Bad_Char, 5},
-}
-
-// TSV texts and the fault each raises, at the byte the fault's rule names.
-@(rodata)
-TSV_CASES := []Case {
-	{"a\tb\n1\t2\n", nil, 0},
-	{"a\\tb\\\\\\n\\r\\0\n", nil, 0},
-	{"\"a\tb\n1\t2\n", nil, 0},
-	{"a,b\r\n", nil, 0},
-	{"a\\xb\n", .Bad_Escape, 1},
-	{"a\\", .Bad_Escape, 1},
-	{"a\\\n", .Bad_Escape, 1},
-	{"a\tb\n1\n", TOO_FEW, 5},
-	{"a\rb", .Bad_Char, 1},
-	{"a\r", .Bad_Char, 1},
-	{"\\\xff", .Bad_Escape, 0},
-	{"a\xf5\n", .Bad_Char, 1},
-	{"a\xf0\x9f\x98", .Truncated, 4},
-}
-
-// The fault `c` names, shifted by `shift` bytes, with the detail its byte names.
-want_fault :: proc(c: Case, shift: int, tsv: bool) -> tape.Error {
-	if c.kind == nil {
-		return nil
-	}
-	kind, detail := c.kind, u8(0)
-	if kind == TOO_MANY || kind == TOO_FEW {
-		kind, detail = .Bad_Width, DETAIL_TOO_MANY if c.kind == TOO_MANY else DETAIL_TOO_FEW
-	} else if kind != .Bad_Escape {
-		// The rule within the kind follows the byte the fault names.
-		at := c.text[c.offset] if c.offset < u64(len(c.text)) else 0
-		switch {
-		case kind == .Truncated:
-			detail = DETAIL_OPEN_QUOTE if at == '"' else DETAIL_CUT_UTF8
-		case at == '"' && !tsv:
-			detail = DETAIL_BARE_QUOTE
-		case at == '\r':
-			detail = DETAIL_LONE_CR
-		case at >= 0x80:
-			detail = DETAIL_INVALID_UTF8
-		case !tsv:
-			detail = DETAIL_AFTER_QUOTE
-		}
-	}
-	return tape.Fault{c.offset + u64(shift), fault_rules(), kind, detail}
-}
-
-// The rules a dsv fault points to, read from one.
-fault_rules :: proc() -> ^tape.Rules {
-	err := dsv.validate(transmute([]u8)string("\"a"), .Csv)
-	return err.(tape.Fault).rules
-}
-
-spec_of :: proc(tsv: bool) -> dsv.Spec {
-	return .Tsv if tsv else .Csv
-}
-
-// Every read that checks the whole text gives the case's fault, after `shift` empty lines.
-expect_reads :: proc(t: ^testing.T, c: Case, src: []u8, shift: int, tsv: bool, opts := dsv.Options{}, loc := #caller_location) -> bool {
-	want := want_fault(c, shift, tsv)
-	spec := spec_of(tsv)
-	got := dsv.validate(src, spec, opts)
-	ok := testing.expectf(t, got == want, "validate %q shifted %d: %v, want %v", c.text, shift, got, want, loc = loc)
-	doc, berr := dsv.build(src, spec, opts)
-	tape.destroy(&doc)
-	ok &&= testing.expectf(t, berr == want, "build %q shifted %d: %v, want %v", c.text, shift, berr, want, loc = loc)
-	_, ferr := dsv.find(src, []tape.Step{tape.Index(-1)}, spec, {}, opts)
-	ok &&= testing.expectf(t, ferr == want, "find %q shifted %d: %v, want %v", c.text, shift, ferr, want, loc = loc)
-	return ok
-}
-
-@(test)
-faults_at_their_byte :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	for c in CSV_CASES {
-		expect_reads(t, c, transmute([]u8)c.text, 0, false)
-	}
-	for c in TSV_CASES {
-		expect_reads(t, c, transmute([]u8)c.text, 0, true)
-	}
-}
-
-// Each case after 0 to 129 empty lines, which are no records. Every quote, CR, escape and UTF-8 sequence of a case
-// falls on every byte of a 64-byte block and across the boundary between two, and its fault moves by the same count.
-@(test)
-faults_at_every_offset :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	buf: [dynamic]u8
-	defer delete(buf)
-	for k in 0 ..< 130 {
-		for tsv in ([]bool{false, true}) {
-			for c in (TSV_CASES if tsv else CSV_CASES) {
-				clear(&buf)
-				for _ in 0 ..< k {
-					append(&buf, '\n')
-				}
-				append(&buf, c.text)
-				if !expect_reads(t, c, buf[:], k, tsv) {
-					return
-				}
-			}
-		}
-	}
-}
-
-// A backslash at every byte of a block: each of the five escapes is valid there, and a byte no escape spells faults at
-// the backslash. A comment line's backslash opens no escape.
-@(test)
-escapes_at_every_block_byte :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	b: [dynamic]u8
-	defer delete(b)
-	for k in 0 ..< 128 {
-		for escape, valid in ([]u8{'t', 'n', 'r', '0', '\\', 'x', 'T', '\\' ~ 0x20, 0x80}) {
-			clear(&b)
-			append(&b, "h\n")
-			for _ in 0 ..< k {
-				append(&b, 'a')
-			}
-			append(&b, '\\', escape, '\n')
-			err := dsv.validate(b[:], .Tsv)
-			if valid < 5 {
-				testing.expectf(t, err == nil, "backslash at %d escapes %#x: %v", 2 + k, escape, err)
-			} else {
-				f, bad := err.(tape.Fault)
-				testing.expectf(t, bad && f.kind == .Bad_Escape && f.at == u64(2 + k), "backslash at %d escapes %#x: %v", 2 + k, escape, err)
-			}
-		}
-	}
-	comment := "h\n#a\\xb\n1\n"
-	err := dsv.validate(transmute([]u8)comment, .Tsv, {format = dsv.Dsv_Options{comment = '#'}})
-	testing.expectf(t, err == nil, "backslash in a comment line: %v", err)
-}
-
-Tolerated :: struct {
-	using c:   Case,
-	tsv:       bool,
-	no_header: bool,
-	tol:       tape.Tolerances,
-}
-
-// Texts each tolerance set accepts, and faults no tolerance in the set accepts, which stay the same without it.
-@(rodata)
-TOLERATED := []Tolerated {
-	{{"a,b,c\n1,2\n3\n", nil, 0}, false, false, {.Ragged}},
-	{{"a,b\n1", nil, 0}, false, false, {.Ragged}},
-	{{"1,2\n3\n4,5,6\n7,8,9,10", nil, 0}, false, true, {.Ragged}},
-	{{"a,b\n1,2,3\n", nil, 0}, false, false, {.Ragged}},
-	{{"a,b\n1,2,3,4", nil, 0}, false, false, {.Ragged}},
-	{{"a,b\n1,2,3\n", TOO_MANY, 7}, false, false, {.Invalid_Utf8, .Bare_Quote}},
-	{{"a,b\n1\n", TOO_FEW, 5}, false, false, {.Invalid_Utf8, .Bare_Quote}},
-	{{"a\tb\tc\n1\n", nil, 0}, true, false, {.Ragged}},
-	{{"a,5\" pipe,b\n", nil, 0}, false, false, {.Bare_Quote}},
-	{{"x\"y\"z\n", nil, 0}, false, false, {.Bare_Quote}},
-	{{"a\"\"b\n", nil, 0}, false, false, {.Bare_Quote}},
-	{{"a\"b,\"c,\"\n", nil, 0}, false, false, {.Bare_Quote}},
-	{{"ab\"", nil, 0}, false, false, {.Bare_Quote}},
-	{{"a\"b,\"c\n", .Truncated, 4}, false, false, {.Bare_Quote}},
-	{{"\"a\"b\n", .Bad_Char, 3}, false, false, {.Bare_Quote}},
-	{{"a\"\rb\n", .Bad_Char, 2}, false, false, {.Bare_Quote}},
-	{{"a\"b\n", .Bad_Char, 1}, false, false, {.Ragged, .Invalid_Utf8}},
-	{{"a\xff\n", nil, 0}, false, false, {.Invalid_Utf8}},
-	{{"a\xed\xa0\x80,\xc0\xaf\n", nil, 0}, false, false, {.Invalid_Utf8}},
-	{{"\"\xc3\",\"x\"\n", nil, 0}, false, false, {.Invalid_Utf8}},
-	{{"a\xc3", nil, 0}, false, false, {.Invalid_Utf8}},
-	{{"\"a\xc3", .Truncated, 0}, false, false, {.Invalid_Utf8}},
-	{{"a\xf5\n", nil, 0}, true, false, {.Invalid_Utf8}},
-	{{"a\xf0\x9f\x98", nil, 0}, true, false, {.Invalid_Utf8}},
-	{{"a\\xb\n", .Bad_Escape, 1}, true, false, {.Invalid_Utf8, .Ragged, .Bare_Quote}},
-	{{"a\xff\n", .Bad_Char, 1}, false, false, {.Ragged, .Bare_Quote}},
-	{{"a,b\n\xff,x\"y\n1\n", nil, 0}, false, false, {.Invalid_Utf8, .Lone_Surrogate, .Ragged, .Bare_Quote}},
-	{{"a\xff\n", .Bad_Char, 1}, false, false, {.Lone_Surrogate}},
-	{{"a\t\"b\n1\n", TOO_FEW, 6}, true, false, {.Bare_Quote}},
-}
-
-// Texts with `#` comment lines. `.Invalid_Utf8` is for cells, so an ill-formed sequence in a comment line is still a
-// fault.
-@(rodata)
-COMMENTED := []Tolerated {
-	{{"a,b\n# ok\n1,\xff\n", nil, 0}, false, false, {.Invalid_Utf8}},
-	{{"a,b\n# x\xffy\n1,2\n", .Bad_Char, 7}, false, false, {.Invalid_Utf8}},
-	{{"a,\xff\n# \xff\n", .Bad_Char, 6}, false, false, {.Invalid_Utf8}},
-	{{"a\n#\xf0\x9f\x98\n", .Bad_Char, 3}, false, false, {.Invalid_Utf8}},
-	{{"a,b\n1,2\n# x\xe2\x82", .Truncated, 13}, false, false, {.Invalid_Utf8}},
-	{{"a\tb\n# \xc3(\n", .Bad_Char, 6}, true, false, {.Invalid_Utf8}},
-	{{"a\"b,c\n#x\n1,2\n", nil, 0}, false, false, {.Bare_Quote}},
-	{{"a,b\nx\"y,1\n#c\n2,3\n", nil, 0}, false, false, {.Bare_Quote}},
-	// A tolerated bare quote opens no quoted cell, so the line after it still starts a comment.
-	{{"y\"\n#,\"\n", nil, 0}, false, false, {.Bare_Quote}},
-	{{"a,b\n1,x\"\n#\"\n2,3\n", nil, 0}, false, false, {.Bare_Quote}},
-}
-
-// Each tolerance after 0 to 129 empty lines, so what it accepts falls on every byte of a block. A text the set accepts
-// is clean with it, faulty without it, and its build is flagged `.Tolerated`. A text it does not accept keeps the kind
-// and offset it has without the set.
-@(test)
-tolerances :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	buf: [dynamic]u8
-	defer delete(buf)
-	for k in 0 ..< 130 {
-		for commented in ([]bool{false, true}) {
-			comment := u8('#') if commented else 0
-			for c in (COMMENTED if commented else TOLERATED) {
-				clear(&buf)
-				for _ in 0 ..< k {
-					append(&buf, '\n')
-				}
-				append(&buf, c.text)
-				strict := dsv.Options{format = dsv.Dsv_Options{no_header = c.no_header, comment = comment}}
-				opts := strict
-				opts.tolerate = c.tol
-				if !expect_reads(t, c, buf[:], k, c.tsv, opts) {
-					return
-				}
-				if c.kind == nil {
-					testing.expectf(t, dsv.validate(buf[:], spec_of(c.tsv), strict) != nil, "%q: a strict read takes it", c.text)
-					doc, _ := dsv.build(buf[:], spec_of(c.tsv), opts)
-					testing.expectf(t, .Tolerated in doc.flags, "%q: the build is not flagged tolerated", c.text)
-					tape.destroy(&doc)
-				}
-			}
-		}
-	}
-}
 
 // A hook that records the tokens of a walk.
 Log :: struct {
@@ -302,10 +25,12 @@ log_hook :: proc "contextless" (h: ^Log, s: hook.Regs, t: tape.Token) -> (hook.R
 }
 
 // The tokens of a walk: a ragged record's missing columns make no tokens and its extra ones are named by position, a
-// bare quote is a byte of its cell, a quoted cell's span leaves out its quotes, and an empty unquoted cell is null.
+// bare quote is a byte of its cell, a quoted cell's span leaves out its quotes, an empty unquoted cell is null, and a
+// byte order mark past the text's first byte is a byte of its cell.
 @(test)
 walk_tokens :: proc(t: ^testing.T) {
 	testkit.deadline(t)
+	// Each token is `{lo, n, kind, role, spelling}`, the form a hook is given.
 	Tokens :: struct {
 		text:   string,
 		tol:    tape.Tolerances,
@@ -317,6 +42,7 @@ walk_tokens :: proc(t: ^testing.T) {
 		{"a,b,c\n1,2\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 1, .String, .Key, 0}, {6, 1, .String, .Value, 0}, {2, 1, .String, .Key, 0}, {8, 1, .String, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
 		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .String, .Key, 0}, {4, 1, .String, .Value, 0}, {2, 1, .String, .Key, 0}, {6, 1, .String, .Value, 0}, {3, 0, .String, .Key, PLACED}, {8, 1, .String, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
 		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 3, .String, .Key, 0}, {6, 1, .String, .Value, 0}, {4, 1, .String, .Key, 0}, {9, 1, .String, .Value, QUOTED}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
+		{"a,b\n\xef\xbb\xbfx,y\n", {}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .String, .Key, 0}, {4, 4, .String, .Value, 0}, {2, 1, .String, .Key, 0}, {9, 1, .String, .Value, 0}, {10, 1, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
 		{"a,b\n,\"\"\r\n", {}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .String, .Key, 0}, {4, 0, .Null, .Value, 0}, {2, 1, .String, .Key, 0}, {6, 0, .String, .Value, QUOTED}, {7, 2, .End, .Value, 0}, {9, 0, .End, .Value, 0}}},
 	}) {
 		log: Log
@@ -385,5 +111,249 @@ walks_make_room_for_the_keys_a_hook_stores :: proc(t: ^testing.T) {
 		doc, err := build.builder_end(&b, regs, at, werr)
 		dsv.destroy(&doc)
 		testing.expect_value(t, err, nil)
+	}
+}
+
+// Walks `src` as CSV or TSV with a hook that logs every token, and returns the walk's end and error.
+walk_log :: proc(src: []u8, tsv, no_header: bool, tol: tape.Tolerances, log: ^Log) -> (u64, tape.Error) {
+	opts := tape.Options {
+		format   = dsv.Dsv_Options{no_header = no_header},
+		tolerate = tol,
+	}
+	regs: hook.Regs
+	if tsv {
+		at, err, _ := dsv.walk(src, .Tsv, opts, log, &regs, log_hook)
+		return at, err
+	}
+	at, err, _ := dsv.walk(src, .Csv, opts, log, &regs, log_hook)
+	return at, err
+}
+
+// The token of a cell at `lo` of `n` bytes as written, which a quoted CSV cell gives without its quotes.
+cell_token :: proc(lo, n: int, role: tape.Role, tsv, quoted: bool) -> tape.Token {
+	if quoted && !tsv {
+		return {u64(lo + 1), u32(n - 2), .String, role, tape.SPELLING_QUOTED}
+	}
+	return {u64(lo), u32(n), .String, role, 0}
+}
+
+// A record of cells joined by `sep` and written to `out`, each cell in quotes when `quoted`. Gives the record's start and
+// the token of each cell as `role` says.
+write_record :: proc(out: ^[dynamic]u8, cells: []string, sep: u8, quoted: bool, role: tape.Role, tsv: bool, tokens: ^[dynamic]tape.Token) -> (lo: int) {
+	lo = len(out)
+	for c, i in cells {
+		if i > 0 {
+			append(out, sep)
+		}
+		cell_lo := len(out)
+		if quoted {
+			append(out, '"')
+		}
+		append(out, c)
+		if quoted {
+			append(out, '"')
+		}
+		append(tokens, cell_token(cell_lo, len(out) - cell_lo, role, tsv, quoted))
+	}
+	return
+}
+
+// For a record wider than the header the walk gives its opening, the cells up to the header's width, and faults at the
+// delimiter that starts the next cell. For a narrower one it gives its opening and all its cells, and faults at its
+// line end. Neither has an `End`. Empty lines before the table move the record over every byte of a 64-byte block and
+// across the boundary between two.
+@(test)
+walks_stop_at_a_record_of_the_wrong_width :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	log: Log
+	defer delete(log.tokens)
+	text: [dynamic]u8
+	defer delete(text)
+	want: [dynamic]tape.Token
+	defer delete(want)
+	keys, cells: [dynamic]tape.Token
+	defer delete(keys)
+	defer delete(cells)
+	HEADER := []string{"h0", "h1", "h2"}
+	FIRST := []string{"a0", "a1", "a2"}
+	VALID := []string{"v0", "v1", "v2"}
+	for tsv in ([]bool{false, true}) {
+		sep := u8('\t') if tsv else ','
+		for header in ([]bool{false, true}) {
+			for quoted in ([]bool{false, true}) {
+				for bad in ([][]string{{"w0", "w1", "w2", "w3"}, {"w0", "w1", "w2", "w3", "w4"}, {"s0", "s1"}}) {
+					for final_lf in ([]bool{false, true}) {
+						for k in 0 ..< 130 {
+							clear(&text)
+							clear(&want)
+							for _ in 0 ..< k {
+								append(&text, '\n')
+							}
+							append(&want, tape.Token{0, 0, .Array, .Value, 0})
+							clear(&keys)
+							if header {
+								write_record(&text, HEADER, sep, quoted, .Key, tsv, &keys)
+								append(&text, '\n')
+							} else {
+								clear(&cells)
+								lo := write_record(&text, FIRST, sep, quoted, .Value, tsv, &cells)
+								append(&want, tape.Token{u64(lo), 0, .Array, .Value, 0})
+								append(&want, ..cells[:])
+								append(&want, tape.Token{u64(len(text)), 1, .End, .Value, 0})
+								append(&text, '\n')
+							}
+							clear(&cells)
+							lo := write_record(&text, VALID, sep, quoted, .Value, tsv, &cells)
+							append(&want, tape.Token{u64(lo), 0, .Object if header else .Array, .Value, 0})
+							for cell, i in cells {
+								if header {
+									append(&want, keys[i])
+								}
+								append(&want, cell)
+							}
+							append(&want, tape.Token{u64(len(text)), 1, .End, .Value, 0})
+							append(&text, '\n')
+							clear(&cells)
+							bad_lo := write_record(&text, bad, sep, quoted, .Value, tsv, &cells)
+							append(&want, tape.Token{u64(bad_lo), 0, .Object if header else .Array, .Value, 0})
+							for i in 0 ..< min(len(bad), len(HEADER)) {
+								if header {
+									append(&want, keys[i])
+								}
+								append(&want, cells[i])
+							}
+							fault_at := len(text)
+							rule := "too_few_fields"
+							if len(bad) > len(HEADER) {
+								// The delimiter after the last cell the header names starts the cell past the width.
+								last := cells[len(HEADER) - 1]
+								fault_at = int(last.lo) + int(last.n) + (1 if quoted && !tsv else 0)
+								rule = "too_many_fields"
+							}
+							if final_lf {
+								append(&text, '\n')
+							}
+							clear(&log.tokens)
+							at, err := walk_log(text[:], tsv, !header, {}, &log)
+							expected := Case{"", .Bad_Width, u64(fault_at), rule}
+							if !testing.expectf(t, at == u64(fault_at) && fault_is(err, expected, 0), "%q tsv %v header %v quoted %v lf %v: %d %v, want %d %s", text[:], tsv, header, quoted, final_lf, at, err, fault_at, rule) {
+								return
+							}
+							if !testing.expectf(t, slice.equal(log.tokens[:], want[:]), "%q tsv %v header %v quoted %v lf %v: %v, want %v", text[:], tsv, header, quoted, final_lf, log.tokens[:], want[:]) {
+								return
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// A text with no record gives the text's opening and end alone, an empty line and a byte order mark among them.
+@(test)
+walks_give_a_text_with_no_record_no_tokens_between :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	log: Log
+	defer delete(log.tokens)
+	for text in ([]string{"", "\r\n\n", "\xef\xbb\xbf"}) {
+		clear(&log.tokens)
+		at, err := walk_log(transmute([]u8)text, false, false, {}, &log)
+		want := []tape.Token{{0, 0, .Array, .Value, 0}, {u64(len(text)), 0, .End, .Value, 0}}
+		testing.expectf(t, err == nil && at == u64(len(text)) && slice.equal(log.tokens[:], want), "%q: %d %v %v", text, at, err, log.tokens[:])
+	}
+}
+
+// Stops the walk on the key numbered `target`, counting from 0.
+Key_Stopper :: struct {
+	target, keys: int,
+	protocol:     hook.Protocol({}, hook.Unused, hook.Unused, hook.Unused),
+}
+
+stop_on_key :: proc "contextless" (h: ^Key_Stopper, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	if t.role == .Key {
+		h.keys += 1
+		if h.keys > h.target {
+			return s, .Stop
+		}
+	}
+	return s, .Next
+}
+
+// A stop on a column's key ends the walk at the end of the cell the key names in the record, for a header cell's key and
+// for a ragged cell's past the header, whether the cell is last in its record or ends at a delimiter.
+@(test)
+walks_stopped_on_a_key_end_at_its_cell :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Stop_Case :: struct {
+		text: string,
+		tol:  tape.Tolerances,
+		key:  int,
+		at:   u64,
+	}
+	for c in ([]Stop_Case{{"a,b\n1,2\n", {}, 0, 5}, {"a,b\n1,2\n", {}, 1, 7}, {"a\n1,2,3\n", {.Ragged}, 1, 5}, {"a\n1,2,3\n", {.Ragged}, 2, 7}}) {
+		stopper := Key_Stopper {
+			target = c.key,
+		}
+		regs: hook.Regs
+		at, err, _ := dsv.walk(transmute([]u8)c.text, .Csv, {tolerate = c.tol}, &stopper, &regs, stop_on_key)
+		testing.expectf(t, err == nil && at == c.at, "%q key %d: stopped at %d %v, want %d", c.text, c.key, at, err, c.at)
+	}
+}
+
+// Whether a token's span holds what its kind says: a cell holds no line end or delimiter outside quotes, an opening
+// token is empty, and a record's end is its line end.
+token_spans_its_kind :: proc(src: []u8, t: tape.Token, delimiter: u8) -> bool {
+	b := src[t.lo:][:t.n]
+	switch t.kind {
+	case .String, .True, .False, .Number:
+		if t.spelling & tape.SPELLING_QUOTED == 0 {
+			for c in b {
+				if c == '\n' || c == '\r' || c == delimiter {
+					return false
+				}
+			}
+		}
+		return true
+	case .Null:
+		return t.n == 0
+	case .Array, .Object:
+		return t.n == 0 && t.role == .Value
+	case .End:
+		return string(b) == "" || string(b) == "\n" || string(b) == "\r\n"
+	case .Plain:
+		return t.role != .Value && t.role != .Key && len(b) > 0 && !slice.contains(b, u8('\n'))
+	case .Bytes:
+	}
+	return false
+}
+
+// The tokens of generated texts, valid or not, each span what its kind says up to the walk's fault.
+@(test)
+walked_tokens_span_what_their_kind_says :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0x77)
+	log: Log
+	defer delete(log.tokens)
+	defer free_all(context.temp_allocator)
+	for _ in 0 ..< testkit.rounds(300) {
+		src, spec, opts := random_text()
+		clear(&log.tokens)
+		regs: hook.Regs
+		delimiter := u8('\t') if spec == .Tsv else u8(',')
+		switch spec {
+		case .Csv:
+			_, _, _ = dsv.walk(src, .Csv, opts, &log, &regs, log_hook)
+		case .Tsv:
+			_, _, _ = dsv.walk(src, .Tsv, opts, &log, &regs, log_hook)
+		case .Plain:
+			_, _, _ = dsv.walk(src, .Plain, opts, &log, &regs, log_hook)
+		}
+		for tok in log.tokens {
+			if !testing.expectf(t, token_spans_its_kind(src, tok, delimiter), "%q: %v", src, tok) {
+				return
+			}
+		}
 	}
 }

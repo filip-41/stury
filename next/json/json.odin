@@ -3,6 +3,7 @@ package json
 import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/base/kernel"
+import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
@@ -41,19 +42,6 @@ FORMATS := [Spec]tape.Format {
 // pass a document's format to a call that takes one. Nil for a `spec` out of range.
 as :: proc "contextless" (spec: Spec) -> ^tape.Format {
 	return &FORMATS[spec] if spec <= max(Spec) else nil
-}
-
-@(private, rodata)
-READS := [Spec]tape.Reads {
-	.Json  = {validate = validate_of, build = build_of, find = find_of, scan = scan_of, records = records_of},
-	.Jsonc = {validate = validate_of, build = build_of, find = find_of, scan = scan_of, records = records_of},
-	.Json5 = {validate = validate_of, build = build_of, find = find_of, scan = scan_of, records = records_of},
-}
-
-// The reads of `spec`, for a caller that picks the format at run time, to use with the handle `as` returns. Nil for a
-// `spec` out of range.
-reads :: proc "contextless" (spec: Spec) -> ^tape.Reads {
-	return &READS[spec] if spec <= max(Spec) else nil
 }
 
 // The quote bytes around token `t`: 1 on each side of a quoted string, 0 around any other scalar.
@@ -232,7 +220,7 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options
 @(private)
 scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
 	when LAX {
-		if opts.pieces != nil && build.path_dups(opts) {
+		if opts.pieces != nil && build.path_dups(&FORMATS[S], opts) {
 			return scan_pieces(src, demand, S, read, opts, caller)
 		}
 	}
@@ -248,7 +236,7 @@ scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX
 @(private)
 find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
 	when LAX {
-		if opts.pieces != nil && build.path_dups(opts) {
+		if opts.pieces != nil && build.path_dups(&FORMATS[S], opts) {
 			return find_pieces(src, path, S, read, opts, caller)
 		}
 	}
@@ -259,7 +247,7 @@ find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: b
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, build.finder_hook)
 	}
-	return build.read_find(src, path, &FORMATS[S], read, opts, caller, respell, rewalk, walk)
+	return build.read_find(src, path, &FORMATS[S], read, opts, caller, tape.number_respell, rewalk, walk)
 }
 
 // The most nodes a JSON text of `src` can make, at most `(len(src) + 1 + depth) / 2`, plus 16 of slack. Each node
@@ -275,14 +263,8 @@ node_bound :: #force_inline proc "contextless" (src: []u8, depth: u64) -> u64 {
 @(private)
 walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	p := raw_data(src)
-	p = kernel.skip_ws(p[bom_length(src):], p[len(src):])
+	p = kernel.skip_ws(p[spell.bom_length(src):], p[len(src):])
 	r, took := walk_value(src, p, S, LAX, opts.tolerate, build.read_depth(opts), opts.budget.steps, h, regs, allocator, ctx, nil, on)
 	at, e, _ := hook.walk_error(r, &RULES)
 	return at, e, took
-}
-
-// The length of the UTF-8 byte order mark that starts `src`, 0 for none.
-@(private)
-bom_length :: #force_inline proc "contextless" (src: []u8) -> int {
-	return 3 if len(src) >= 3 && src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF else 0
 }

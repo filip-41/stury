@@ -17,8 +17,8 @@ escaped :: #force_inline proc "contextless" (escape: u64, odd: ^u64) -> u64 {
 }
 
 // Bit i is set when an odd number of bits of `x` at or below i are. From a block's quote bits, it marks each quoted
-// run, opening quote included and closing quote excluded. The floor tier shifts, since x86-64-v2 has no carry-less
-// multiply.
+// run, opening quote included and closing quote excluded. It is one carry-less multiply on x86 tiers above the floor,
+// and on a target with `PMULL`. Otherwise it shifts, as x86-64-v2 has no carry-less multiply.
 prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
 	when T != Tier(0) {
 		return clmul_prefix_xor(x)

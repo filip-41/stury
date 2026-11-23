@@ -3,7 +3,7 @@ package dsv
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
-// The names a user of a delimited text calls beside the reads, so that such a program imports this package alone. The rest of
+// Names of `lib/core/tape` re-exported so that a program reading delimited text imports this package alone. The rest of
 // `lib/core/tape` serves walks and hooks. The C header mirrors this list.
 
 // A document and the place of a node in it.
@@ -23,7 +23,7 @@ Fact :: tape.Fact
 Fact_Kind :: tape.Fact_Kind
 Facts :: tape.Facts
 
-// What a read takes beside the text.
+// Types of a read's options.
 Budget :: tape.Budget
 Budget_Kind :: tape.Budget_Kind
 Tolerance :: tape.Tolerance
@@ -43,7 +43,7 @@ Grain :: tape.Grain
 Demand :: tape.Demand
 demand_of :: tape.demand_of
 
-// What a read gives back.
+// Results and errors of a read.
 Error :: tape.Error
 Fault :: tape.Fault
 Fault_Kind :: tape.Fault_Kind
@@ -56,7 +56,7 @@ Framing :: tape.Framing
 Record :: tape.Record
 error_message :: tape.error_message
 
-// The readers over a document, or over the text a `find` answer or a record's key was read in.
+// Readers over a document, or over the text a `find` answer or a record's key was read in.
 Reader :: tape.Reader
 Doc_Index :: tape.Doc_Index
 Children :: tape.Children

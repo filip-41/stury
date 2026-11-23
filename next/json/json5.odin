@@ -123,7 +123,7 @@ non_finite :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: tape.Tole
 	}
 	if p[0] == '-' || p[0] - '0' < 10 {
 		wide: u64
-		q, wide, kind = number(p, end, false, S)
+		q, wide, kind = tape.number_scan(p, end, false, S == .Json5)
 		return q, u16(wide), kind
 	}
 	return p, 0, .Bad_Char
@@ -155,7 +155,7 @@ number5 :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind:
 	if q[0] == '0' && intrinsics.ptr_sub(end, q) > 1 && q[1] | 0x20 == 'x' {
 		r := spell.hex_digit_end(q[2:], end)
 		if r == q[2:] {
-			q, kind = bad_or_truncated(r, end)
+			q, kind = tape.number_fault(r, end)
 			return q, 0, kind
 		}
 		return r, u16(Number_Spelling.Hex), .None
@@ -183,7 +183,7 @@ number5 :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind:
 		r := spell.digit_end(q[1:], end)
 		if r == q[1:] || q == int_at {
 			if r == q[1:] && q == int_at {
-				q, kind = bad_or_truncated(r, end)
+				q, kind = tape.number_fault(r, end)
 				return q, 0, kind
 			}
 			k = .Decimal
@@ -205,7 +205,7 @@ number5 :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind:
 		}
 		r := spell.digit_end(q, end)
 		if r == q {
-			q, kind = bad_or_truncated(r, end)
+			q, kind = tape.number_fault(r, end)
 			return q, 0, kind
 		}
 		return r, tape.number_spelling(u16(k), int_digits, frac_digits) | tape.NUMBER_EXP, .None

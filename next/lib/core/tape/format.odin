@@ -12,6 +12,9 @@ Cap :: enum u8 {
 	// and walk it again once its array's count picks it. A format without it, whose values read by what came before
 	// them (a YAML block value, an HTML element in its insertion mode, a TOML table's body), keeps the nodes instead.
 	Rewalk,
+	// The names a value is read by are known before the walk reaches the values, a table's header, so every read
+	// judges `.Refuse` on them, not a build alone.
+	Names_Ahead,
 }
 
 Caps :: bit_set[Cap; u32]
@@ -27,7 +30,8 @@ Options :: struct {
 	// the others. A path read takes the member `.First`, `.Last` or `.Group` says, the format's own for `.Default`, and
 	// refuses `.All` and `.Refuse`, as it takes one member of a key. Under `.Last` an answer through a key is known only
 	// at the close of the object holding it, so a path read that should stop at the first matching key uses `.First`.
-	// A validate refuses `.Refuse`, as it does not compare keys.
+	// A validate refuses `.Refuse`, as it does not compare keys, and so does a path read, unless the format has
+	// `.Names_Ahead`.
 	dups:     Duplicates,
 	// The rules a text may break, each read as `Tolerance` says. A spec whose grammar holds a rule has it already.
 	tolerate: Tolerances,
@@ -113,4 +117,55 @@ Reads :: struct {
 	scan: proc(f: ^Format, src: []u8, demand: ^Demand, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error),
 	// Makes the records of `src` framed as `framing`, in `allocator`, which `destroy_records` frees.
 	records: proc(f: ^Format, src: []u8, framing: Framing, opts: Options, allocator: runtime.Allocator) -> (^Records, runtime.Allocator_Error),
+}
+
+// The `Reads` of a format whose entry procs take its `Spec`, the spec of a handle being its id less `first`. `R` is the
+// format's records, which hold `Records` as their first field `records`, and every spec shares the one table.
+format_reads :: proc "contextless" ($Spec: typeid, $first: Format_Id, $validate: proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> Error, $build: proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> (Document, Error), $find: proc(src: []u8, path: []Step, spec: Spec, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Span_Answer, Error), $scan: proc(src: []u8, demand: ^Demand, spec: Spec, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error), $R: typeid, $records_open: proc(src: []u8, framing: Framing, spec: Spec, opts: Options) -> R, $records_validate: proc(r: ^R, out: []Record, allocator: runtime.Allocator) -> int, $records_find: proc(r: ^R, path: []Step, out: []Record, answers: []Span_Answer, read: Read_Options, allocator: runtime.Allocator) -> int, $records_scan: proc(r: ^R, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int) -> ^Reads {
+	#assert(offset_of(R, records) == 0)
+	spec_of :: #force_inline proc "contextless" (f: ^Format) -> Spec {
+		return Spec(f.id - first)
+	}
+	@(static, rodata) reads := Reads {
+		validate = proc(f: ^Format, src: []u8, opts: Options, allocator: runtime.Allocator) -> Error {
+			return validate(src, spec_of(f), opts, allocator)
+		},
+		build = proc(f: ^Format, src: []u8, opts: Options, allocator: runtime.Allocator) -> (Document, Error) {
+			return build(src, spec_of(f), opts, allocator)
+		},
+		find = proc(f: ^Format, src: []u8, path: []Step, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Span_Answer, Error) {
+			return find(src, path, spec_of(f), read, opts, allocator)
+		},
+		scan = proc(f: ^Format, src: []u8, demand: ^Demand, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error) {
+			return scan(src, demand, spec_of(f), read, opts, allocator)
+		},
+		records = proc(f: ^Format, src: []u8, framing: Framing, opts: Options, allocator: runtime.Allocator) -> (records: ^Records, err: runtime.Allocator_Error) {
+			r := new(R, allocator) or_return
+			context.allocator = allocator
+			r^ = records_open(src, framing, spec_of(f), opts)
+			r.reads, r.allocator = records_reads(R, records_validate, records_find, records_scan), allocator
+			r.release = proc(r: ^Records) {
+				free((^R)(r), r.allocator)
+			}
+			return r, nil
+		},
+	}
+	return &reads
+}
+
+// The batch reads of records `R`, which hold `Records` as their first field.
+@(private)
+records_reads :: proc "contextless" ($R: typeid, $validate: proc(r: ^R, out: []Record, allocator: runtime.Allocator) -> int, $find: proc(r: ^R, path: []Step, out: []Record, answers: []Span_Answer, read: Read_Options, allocator: runtime.Allocator) -> int, $scan: proc(r: ^R, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int) -> ^Records_Reads {
+	@(static, rodata) reads := Records_Reads {
+		validate = proc(r: ^Records, out: []Record, allocator: runtime.Allocator) -> int {
+			return validate((^R)(r), out, allocator)
+		},
+		find = proc(r: ^Records, path: []Step, out: []Record, answers: []Span_Answer, read: Read_Options, allocator: runtime.Allocator) -> int {
+			return find((^R)(r), path, out, answers, read, allocator)
+		},
+		scan = proc(r: ^Records, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int {
+			return scan((^R)(r), demand, out, docs, read, allocator)
+		},
+	}
+	return &reads
 }

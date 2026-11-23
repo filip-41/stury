@@ -114,25 +114,19 @@ parts_build :: proc(src: []u8, format: ^tape.Format, parts: []Part, opts: tape.O
 			return {}, nil, false
 		}
 	}
-	task :: proc(arg: rawptr) {
+	task :: proc(arg: rawptr, k: int) {
 		j := (^Parts_Job)(arg)
-		for {
-			k := intrinsics.atomic_add(&j.next, 1)
-			if k >= len(j.parts) {
-				return
-			}
-			s := &j.segs[k]
-			j.walk(j.src, j.parts, k, s, j.opts, j.data)
-			if j.counting {
-				for n in segment_nodes(s) {
-					s.containers += int(n.kind == .Array || n.kind == .Object)
-				}
+		s := &j.segs[k]
+		j.walk(j.src, j.parts, k, s, j.opts, j.data)
+		if j.counting {
+			for n in segment_nodes(s) {
+				s.containers += int(n.kind == .Array || n.kind == .Object)
 			}
 		}
 	}
 	j := Parts_Job{src = src, parts = parts, segs = segs, opts = opts, walk = walk, data = data, counting = opts.budget.steps != 0}
 	j.opts.budget.steps = 0
-	hook.fan(opts.runner, task, &j)
+	hook.fan_each(opts.runner, len(parts), task, &j)
 	// The first part in text order whose walk does not reach its end gives the build's error, unless a container past
 	// `Budget.steps` comes first.
 	containers := 0
@@ -186,5 +180,4 @@ Parts_Job :: struct {
 	walk:     Part_Walk,
 	data:     rawptr,
 	counting: bool,
-	next:     int,
 }

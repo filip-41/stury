@@ -26,7 +26,7 @@ Record_Walk :: struct {
 Record_Frame :: #type proc(r: ^tape.Records) -> (lo, cut: u64, ok: bool)
 
 records_validate :: proc(r: ^tape.Records, out: []tape.Record, rules: ^tape.Rules, caller: runtime.Allocator, $frame: Record_Frame, $walk: proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> Record_Walk) -> (n: int) {
-	if !validate_dups(r.opts) {
+	if !validate_dups(nil, r.opts) {
 		records_stop(r, tape.Bad_Option{"dups"})
 		return
 	}
@@ -179,7 +179,7 @@ records_stop :: proc "contextless" (r: ^tape.Records, err: tape.Error) {
 // for the build-only policies a path read refuses. Under a framing other than `.Lines` it reads each record to its end, as the next starts there.
 @(private)
 record_reads :: proc "contextless" (r: ^tape.Records, read: ^tape.Read_Options) -> bool {
-	if !path_dups(r.opts) {
+	if !path_dups(nil, r.opts) {
 		records_stop(r, tape.Bad_Option{"dups"})
 		return false
 	}
@@ -192,7 +192,6 @@ record_reads :: proc "contextless" (r: ^tape.Records, read: ^tape.Read_Options) 
 // Sets the pieces of records of a text in pieces for the next window once a batch ends: the records go on while they
 // have not ended, from `pos`, where the next record is looked for, or from the text's start while they are at their
 // start, whose bytes a format may read once its opening is whole.
-@(private)
 records_window_end :: #force_inline proc "contextless" (r: ^tape.Records) {
 	if p := r.opts.pieces; p != nil {
 		p.more, p.at, p.keep = r.at != .Done, u64(len(r.src)), r.pos if r.at != .Start else 0

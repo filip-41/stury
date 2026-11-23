@@ -3,6 +3,7 @@ package json
 import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/base/kernel"
+import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
@@ -42,7 +43,7 @@ records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json
 	if spec > max(Spec) {
 		panic("json: spec out of range")
 	}
-	r.src, r.framing, r.spec, r.opts, r.pos = src, framing, spec, opts, u64(bom_length(src))
+	r.src, r.framing, r.spec, r.opts, r.pos = src, framing, spec, opts, u64(spell.bom_length(src))
 	if opts.pieces != nil {
 		// The byte order mark is judged once the first record is framed, when the window may hold it.
 		r.src, r.pos = tape.piece_src(src, opts.pieces.from), 0
@@ -167,7 +168,7 @@ records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []
 	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
 		return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, build.finder_hook)
 	}
-	return build.records_find(r, path, out, answers, &FORMATS[S], &RULES, read, caller, respell, rewalk, frame, walk)
+	return build.records_find(r, path, out, answers, &FORMATS[S], &RULES, read, caller, tape.number_respell, rewalk, frame, walk)
 }
 
 @(private)
@@ -274,13 +275,11 @@ record_frame_window :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut
 		if more && piece_bom_open(r.src) {
 			return
 		}
-		r.pos, r.at = u64(bom_length(r.src)), .Open
+		r.pos, r.at = u64(spell.bom_length(r.src)), .Open
 	}
 	if !r.open {
 		base := raw_data(r.src)
-		from := r.pos
 		r.pos = u64(intrinsics.ptr_sub(kernel.skip_ws(base[r.pos:], base[n:]), base))
-		tape.framed_read(&r.framed, from, r.pos)
 		if r.pos == n {
 			if !more {
 				r.at = .Done
@@ -293,11 +292,9 @@ record_frame_window :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut
 	if i := kernel.index_byte(r.src[r.seen:], '\n'); i >= 0 {
 		cut = r.seen + u64(i)
 	} else if more {
-		tape.framed_read(&r.framed, r.seen, n)
 		r.seen = n
 		return
 	}
-	tape.framed_read(&r.framed, r.seen, cut)
 	lo = r.pos
 	r.open, r.pos = false, min(cut + 1, n)
 	if r.src[cut - 1] == '\r' {

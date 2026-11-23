@@ -5,104 +5,92 @@ import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// The walk of a delimited text, in passes of 64-byte blocks. A block is reduced to masks of its delimiter, LF, CR and
-// quote bytes, `prefix_xor` of the quote mask marks the bytes inside quoted cells, and every later test is a bit test
-// on a mask: quote placement, a CR that no LF follows, the delimiters and LFs that are the text's rather than a
-// cell's, and the delimiters between two LFs that count a record's cells for the width check. UTF-8 is judged a block
-// at a time, and only for a block that is not all ASCII. A hooked walk turns the same masks into tokens (tokens.odin).
-// A validate compiles the pass with `EMIT` false, which leaves out the token code and the header's keys.
+// The walk of a delimited text, in 64-byte blocks. A block is reduced to masks of its delimiter, LF, CR and quote
+// bytes. `prefix_xor` of the quote mask marks the bytes inside quoted cells, and every later test is a bit test on a
+// mask: quote placement, a CR that no LF follows, the delimiters and LFs that are the text's rather than a cell's, and
+// the delimiters between two LFs, which count a record's cells for the width check. UTF-8 is checked a block at a
+// time, on a block that is not all ASCII or that follows a block that left a sequence open. A hooked walk turns the
+// same masks into tokens (tokens.odin). A validate compiles the pass with `EMIT` false, which leaves out the token
+// code and the header's keys.
 
-// The state a pass carries from one block to the next, for the blocks and the open record. `rec_lo` is the first byte
+// The state a pass carries from one block to the next, including the open record's. `rec_lo` is the first byte
 // of the record that holds the cursor, `field_lo` the first byte of its open cell, `cells` the number of cells it has
 // ended, and `width` the first record's cell count, 0 until a record sets it. A record opens at its first separator.
 // An empty line, or a line holding only a CR, is no record, makes no tokens and sets no width.
 @(private)
 Pass :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
-	n:         int,
-	h:         ^H,
+	n:          int,
+	h:          ^H,
 	// Masks the last block left for this one. `in_quote` is all ones while a quoted cell is open, `start` has bit 0
 	// set when byte 0 follows a separator, `close` bit 0 set after a closing quote, `cr` bit 0 set when the last byte
-	// is a CR with no LF yet, and `esc` is 1 after a backslash at the last byte. `line` has bit 0 set when the last
-	// block ended with an LF, `comment` when it ended inside a comment line.
-	in_quote:  u64,
-	start:     u64,
-	close:     u64,
-	cr:        u64,
-	esc:       u64,
-	line:      u64,
-	comment:   u64,
+	// is a CR with no LF yet, and `esc` is 1 after an odd run of backslashes at the last byte. `line` has bit 0 set
+	// when the last block ended with an LF, `in_comment` when it ended inside a comment line.
+	in_quote:   u64,
+	start:      u64,
+	close:      u64,
+	cr:         u64,
+	esc:        u64,
+	line:       u64,
+	in_comment: u64,
 	// The address one past the hook's room for nodes, for a hook with `.Rooms`.
-	rooms:     uintptr,
-	utf8:      kernel.Utf8_State,
-	rec_lo:    int,
-	field_lo:  int,
-	cells:     int,
-	width:     int,
-	widest:    int, // the most cells a record had
+	rooms:      uintptr,
+	utf8:       kernel.Utf8_State,
+	rec_lo:     int,
+	field_lo:   int,
+	cells:      int,
+	width:      int,
+	widest:     int, // the most cells a record had
 	// The header's cells as the `Key` tokens a data cell names its column with.
-	keys:      []tape.Token,
-	// With `.Columns`, the columns whose keys the hook takes, by `column_bit`, which the first record the hook read
-	// whole sets. Until then every column, and `taken` gathers the columns that record's hook did not skip.
-	columns:   u64,
-	taken:     u64,
-	learnt:    bool,
-	limit:     u64, // `Budget.depth`
+	keys:       []tape.Token,
+	// With `.Columns`, the columns whose keys the hook takes, by `column_bit`. The first record the hook read whole
+	// sets it. Until then it holds every column, and `taken` gathers the columns the hook did not skip in that record.
+	columns:    u64,
+	taken:      u64,
+	learnt:     bool,
 	// With `LAX`, one more than the containers the walk may still open, 0 once it opened one past `Budget.steps`.
-	steps:     [int(LAX)]u64,
+	steps:      [int(LAX)]u64,
 	// With `LAX`, the read of a text in pieces whose window the pass reads, nil for a whole text.
-	piece:     [int(LAX)]^Piece,
-	tolerate:  tape.Tolerances,
-	delim:     u8,
-	// 0, or how the hook keeps the record or the text it answered `Keep` or `Keep_Stubs` for: 1 whole, 2 as stubs.
-	keep:      u8,
-	keep_root: bool,
+	piece:      [int(LAX)]^Piece,
+	tolerate:   tape.Tolerances,
+	delim:      u8,
+	keep:       Kept, // how the hook keeps the open record, or the text with `keep_root`
+	keep_root:  bool,
 	// Whether the cell open at the block's end holds a backslash in a TSV text, or a `""` in a CSV text.
-	field_esc: bool,
+	field_esc:  bool,
 	// Whether the last block held a byte past 0x7F, whose sequence this block may continue.
-	prev_high: bool,
-	no_header: bool,
-	in_header: bool, // the header is the record being read
-	open:      bool, // the open record has made its opening token
-	muted:     bool, // the hook passed the open record over
-	// Whether any block so far has held a quote byte. While it is false, a block with no quote takes the path with no
-	// quote judgement and no quoted-cell state.
-	quoted:    bool,
-	// Whether the cell open at the block's end holds an ill-formed sequence `.Invalid_Utf8` tolerated, on a hooked
-	// pass, or the line open there, on a validate's.
-	open_ill:  bool,
+	prev_high:  bool,
+	in_header:  bool, // the header is the record being read
+	open:       bool, // the open record has made its opening token
+	muted:      bool, // the hook passed the open record over
+	// Whether any block so far has held a quote byte. While it is false, a block with no quote runs the path that
+	// judges no quotes and keeps no quoted-cell state.
+	quoted:     bool,
+	// Whether the cell open at the block's end holds an ill-formed sequence `.Invalid_Utf8` tolerated. Only a pass that
+	// gives tokens sets it.
+	open_ill:   bool,
 	// The walk starts inside the text's `Array` and gives no opening of it, as a walk of one record as the root of a
 	// text of its bytes, or of a part of a text past its first, does.
-	opened:    bool,
+	opened:     bool,
 	// The walk ends inside the text's `Array` and gives no `End` of it, as a walk of one record, or of a part of a text
 	// before its last, does.
-	unclosed:  bool,
+	unclosed:   bool,
 	// With `opened`, the walk reads a record it passed again for its hook, from the record's first byte to its `End`.
-	again:     bool,
-	p:         Pass_Options, // the options the walk was started with, which a walk again reads under
-	leveled:   bool, // the hook's levels hold a record's
-	// One past the first byte of the comment lines no record has followed yet, 0 when none is held.
-	held:      int,
-	given:     int, // the comment lines before this byte lie before the header and came before the text's opening
-
-	tolerated: bool, // the walk took a rule of `tolerate`
-	refused:   bool, // the hook's room could not grow
+	again:      bool,
+	p:          Pass_Options, // the options the walk was started with, which a walk again reads under
+	leveled:    bool, // the hook's levels hold a record's
+	// One past the first byte of the comment lines no record has followed yet, so 0 means none is held.
+	held:       int,
+	// The comment lines before this byte precede the header and were given as the text's own.
+	given:      int,
+	tolerated:  bool, // the walk took a rule of `tolerate`
 }
 
-// The options of one pass: `Dsv_Options` with the delimiter resolved, and the read's tolerances and depth.
+// How a hook keeps a record or the text, from its answer at the opening token.
 @(private)
-Pass_Options :: struct {
-	tolerate:  tape.Tolerances,
-	delim:     u8,
-	comment:   u8,
-	no_header: bool,
-	infer:     bool,
-	limit:     u64,
-}
-
-// The options a pass reads when a read takes every default, as constants the pass folds.
-@(private)
-default_options :: #force_inline proc "contextless" ($S: Spec) -> Pass_Options {
-	return {delim = spec_delimiter(S, 0), limit = max(u64)}
+Kept :: enum u8 {
+	None,
+	Whole, // `Keep`
+	Stubs, // `Keep_Stubs`
 }
 
 // Returns the CR bytes with no LF after them in `bad`, leaving out bit 63, whose CR the next block judges. `carried` is
@@ -112,10 +100,10 @@ cr_fault :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), cr, nl
 	return cr & ~(nl >> 1) & ~(u64(1) << 63), w.cr & ~nl != 0
 }
 
-// The masks of a CSV block's quotes `q` and separators `seps`: the bytes inside quoted cells, the closing quotes, the
-// separators outside quoted cells, and the bare quotes. A quote opens a cell only at a cell's first byte, and one that
-// opens a run anywhere else is bare. `in_quote` is all ones when the block starts inside a quoted cell, and `start`
-// and `close` have bit 0 set when its byte 0 follows a separator or a closing quote.
+// Returns the masks of a CSV block's quotes `q` and separators `seps`: the bytes inside quoted cells, the closing
+// quotes, the separators outside quoted cells, and the bare quotes. A quote opens a cell only at a cell's first byte,
+// and one that opens a run anywhere else is bare. `in_quote` is all ones when the block starts inside a quoted cell,
+// and `start` and `close` have bit 0 set when its byte 0 follows a separator or a closing quote.
 @(private)
 quote_masks :: #force_inline proc "contextless" ($T: kernel.Tier, q, seps, in_quote, start, close: u64) -> (instr, closing, outside, bare: u64) {
 	instr = kernel.prefix_xor(T, q) ~ in_quote
@@ -152,11 +140,9 @@ comment_span :: #force_inline proc "contextless" (nl, starts: u64, in_comment: b
 	return
 }
 
-// Scans the text from `lo` in 64-byte blocks and returns the walk's result. With `EMIT` false the token code is
-// compiled out, for a validate. With `COMMENTS` false the comment-line work is compiled out. `T` is the kernel tier the
-// instance is built for. `keys` holds a token per
-// header cell for a pass that reads a header, and `width` above 0 is the width a pass from a record's first byte checks
-// records against.
+// Walks `src` from `lo` in 64-byte blocks and returns the walk's result. With `EMIT` false the token code is compiled
+// out, for a validate. With `COMMENTS` false the comment-line code is compiled out. `T` is the kernel tier the
+// instance is built for. `w.keys` and `w.width` are read as `Pass` says.
 @(private)
 pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, opts: Pass_Options, hs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), $EMIT: bool, $COMMENTS: bool, $T: kernel.Tier) -> hook.Walk_Result {
 	base := raw_data(src)
@@ -210,7 +196,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 			// still ends the line. Each run is cleared from `q`, `d` and `crm` before the next line start is judged,
 			// so a quote in a comment line does not flip the quoted-cell state.
 			when COMMENTS {
-				if w.comment != 0 {
+				if w.in_comment != 0 {
 					run, lf := comment_span(nl, 0, true)
 					cb |= run
 					clfs |= lf
@@ -246,7 +232,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 					d &= ~run
 					crm &= ~run
 				}
-				w.comment = cb >> 63
+				w.in_comment = cb >> 63
 			}
 			// With no quote byte in this block and none in any earlier block, no quoted cell is open, so every
 			// separator is a delimiter or an LF, no quote placement needs judging, and `w.in_quote` stays clear.
@@ -278,6 +264,8 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 					// quote that doubles it, the delimiter, LF, CR or the end of the text.
 					after := closing << 1 | w.close
 					bare = open & ~(seps << 1 | w.start | after)
+					// `open` is a quote that starts a run of quoted bytes. `~valid` keeps the zero padding past the
+					// text's end from faulting after a closing quote at the last byte.
 					bad = bare | after & ~(q | d | nl | crm | ~valid)
 					cr_bad, c := cr_fault(w, cr, nl)
 					bad |= cr_bad
@@ -322,12 +310,12 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 			// A comment line's bytes are text, its LF ends the line, and a backslash in it opens no escape.
 			when COMMENTS {
 				starts := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment))
-				cb, clfs = comment_span(nl, starts, w.comment != 0)
+				cb, clfs = comment_span(nl, starts, w.in_comment != 0)
 				d &= ~cb
 				crm &= ~cb
 				bs &= ~cb
 				seps = d | nl
-				w.comment = cb >> 63
+				w.in_comment = cb >> 63
 			}
 			bad, carried := cr_fault(w, crm, nl)
 			if carried {
@@ -367,7 +355,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 					fault, kind, detail = at, k, dd
 				}
 			} else {
-				// The error state starts clean again, so the next block's check reports that block's errors only.
+				// Clears the error state, so the next block's check reports that block's errors only.
 				w.utf8.err = {}
 				when EMIT || COMMENTS {
 					ill, ill_back = ill_leads(base, int(lo), pos, n)
@@ -396,16 +384,20 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 			// Every cell that the block ends, except the one open at its start, is shorter than 64 bytes. That cell can
 			// exceed `max(u32)` only if it opened more than `max(u32) - 64` bytes before `pos`, so the test runs only
 			// then.
-			if pos - w.field_lo > int(max(u32)) - 64 && cell_too_wide(base, w.field_lo, pos, seps) {
+			if u64(pos - w.field_lo) > u64(max(u32)) - 64 && cell_too_wide(base, w.field_lo, pos, seps) {
 				return fault_at(u64(w.field_lo), .Too_Wide)
 			}
 			// A block that holds an ill-formed sequence, or that a cell holding one is open across, reads its cells'
 			// spellings through a cold instance, so the clean instance holds no test of them.
 			if .Invalid_Utf8 in opts.tolerate && (ill != 0 || ill_back >= 0 || w.open_ill) {
-				if r, done := read_lax_tokens(COMMENTS, w, src, opts, pos, seps, lfs, clfs, bs, ill, ill_back, hs, on); done {
+				if r, done := read_lax_tokens(COMMENTS, w, src, opts, {pos, seps, lfs, clfs, bs, ill, ill_back}, hs, on); done {
 					return r
 				}
-			} else if r, done := read_tokens(false, COMMENTS, w, src, opts, pos, seps, lfs, clfs, bs, 0, -1, hs, on); done {
+			} else if .Skips not_in C && seps == 0 {
+				// No cell or record ends in the block, so no token is made, and the open cell holds an escape if it did
+				// or the block has one.
+				w.field_esc ||= bs != 0
+			} else if r, done := read_tokens(false, COMMENTS, w, src, opts, {pos, seps, lfs, clfs, bs, 0, -1}, hs, on); done {
 				return r
 			}
 		} else {
@@ -455,7 +447,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 	if w.prev_high && !kernel.utf8_ok(w.utf8) {
 		comment_open := false
 		when COMMENTS {
-			comment_open = w.comment != 0
+			comment_open = w.in_comment != 0
 		}
 		if .Invalid_Utf8 not_in w.tolerate || comment_open {
 			if at, k, d := utf8_fault(src, int(lo), n); at >= 0 {
@@ -470,7 +462,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 		}
 	}
 	when EMIT {
-		if n - w.field_lo > int(max(u32)) {
+		if u64(n - w.field_lo) > u64(max(u32)) {
 			return fault_at(u64(w.field_lo), .Too_Wide)
 		}
 	}
@@ -479,9 +471,9 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 	// whole last line is a comment whether or not it has a line end.
 	last := w.rec_lo < n
 	when COMMENTS {
-		last = last && w.comment == 0
+		last = last && w.in_comment == 0
 		when EMIT {
-			if w.comment != 0 && w.rec_lo < n && w.held == 0 && w.rec_lo >= w.given {
+			if w.in_comment != 0 && w.rec_lo < n && w.held == 0 && w.rec_lo >= w.given {
 				w.held = w.rec_lo + 1
 			}
 		}
@@ -506,14 +498,48 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 	return hook.walk_result(u64(n), 0)
 }
 
-// The walk's result when the hook stopped on the token at `lo` of `n` bytes.
+// Returns the walk's result for a hook that stopped on the token at `lo` of `n` bytes.
 @(private)
 stopped :: #force_inline proc "contextless" (lo: u64, n: u32) -> hook.Walk_Result {
 	return hook.walk_result(lo + u64(n), hook.WALK_STOPPED)
 }
 
-// The result of a fault of `kind` at `at` with `detail`.
+// Returns the walk's result for a fault of `kind` at `at` with `detail`.
 @(private)
 fault_at :: #force_inline proc "contextless" (at: u64, kind: tape.Fault_Kind, detail := Detail.None) -> hook.Walk_Result {
 	return hook.walk_result(at, u8(kind), u8(detail))
+}
+
+// Starts walk `w` of a text of `n` bytes for hook `h` under `p`: at the first line and offset, with the steps
+// `Budget.steps` leaves, and the room and the columns the hook's capabilities ask for.
+@(private)
+pass_start :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), n: int, h: ^H, p: Pass_Options, steps: u64) {
+	w.n, w.h, w.delim, w.tolerate, w.start, w.line = n, h, p.delim, p.tolerate, 1, 1
+	when LAX {
+		w.steps[0] = steps_left(steps)
+	}
+	when .Rooms in C {
+		w.rooms = hook.rooms_end(h)
+	}
+	when .Columns in C {
+		w.columns = ~u64(0)
+	}
+}
+
+// What `Pass.steps` starts with for `Budget.steps` `steps`: one more, so that 0 says the walk opened one past them, and
+// every container for a budget of none.
+@(private)
+steps_left :: #force_inline proc "contextless" (steps: u64) -> u64 {
+	return steps + 1 if steps != 0 && steps < max(u64) else max(u64)
+}
+
+// The result `r` of walk `w`, as `WALK_STEPS` at the byte it stopped when its hook was stopped by the steps run out.
+@(private)
+steps_ended :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), r: hook.Walk_Result) -> hook.Walk_Result {
+	when LAX {
+		if u8(r) == hook.WALK_STOPPED && w.steps[0] == 0 {
+			return hook.walk_result(u64(r) >> 16, hook.WALK_STEPS)
+		}
+	}
+	return r
 }

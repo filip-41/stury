@@ -191,7 +191,7 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 		p.keys.allocator = allocator
 		p.scratch.allocator = allocator
 	}
-	hook.fan(runner, dups_parts, &j)
+	hook.fan_each(runner, len(j.segs), dups_parts, &j)
 	crossing := 0
 	for p in j.parts {
 		r.at, r.dropped = min(r.at, p.r.at), r.dropped || p.r.dropped
@@ -220,8 +220,7 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 			}
 			g.r = {at = max(u64), drops = r.drops}
 		}
-		j.next = 0
-		hook.fan(runner, dups_ranges, &j)
+		hook.fan_each(runner, len(j.ranges), dups_ranges, &j)
 		for g in j.ranges {
 			r.at, r.dropped = min(r.at, g.r.at), r.dropped || g.r.dropped
 			if g.err != nil {
@@ -240,7 +239,6 @@ Dups_Job :: struct {
 	parts:  []Dups_Part,
 	keys:   []Hashed_Key, // the crossing members of every part, by range
 	ranges: []Dups_Range,
-	next:   int,
 }
 
 // A segment's repeats `r`, its `keys` (the `crossing` members it holds of objects that cross its ends, appended and
@@ -289,76 +287,64 @@ dups_range :: #force_inline proc "contextless" (keys: []Hashed_Key, ranges: []Du
 // Judges the objects each segment holds whole and gathers its crossing members. A container crosses the segment's
 // start if it is open at its seam, and its end if the segment opens it and leaves it open.
 @(private)
-dups_parts :: proc(arg: rawptr) {
+dups_parts :: proc(arg: rawptr, k: int) {
 	j := (^Dups_Job)(arg)
 	doc := j.doc
-	for {
-		k := intrinsics.atomic_add(&j.next, 1)
-		if k >= len(j.segs) {
-			return
+	s, p := &j.segs[k], &j.parts[k]
+	lo, hi := s.at, j.segs[k + 1].at if k + 1 < len(j.segs) else len(doc.nodes)
+	// The open containers, each as its node shifted left by one with the low bit set for one that crosses, kept in
+	// the frames the segment's walk used.
+	stack := s.b.stack
+	top := 0
+	for node in s.seam {
+		stack[top] = u64(node) << 1 | 1
+		top += 1
+	}
+	for i in lo ..< hi {
+		for top > 0 && int(stack[top - 1] >> 1) + int(doc.nodes[stack[top - 1] >> 1].n) <= i {
+			top -= 1
 		}
-		s, p := &j.segs[k], &j.parts[k]
-		lo, hi := s.at, j.segs[k + 1].at if k + 1 < len(j.segs) else len(doc.nodes)
-		// The open containers, each as its node shifted left by one with the low bit set for one that crosses, kept in
-		// the frames the segment's walk used.
-		stack := s.b.stack
-		top := 0
-		for node in s.seam {
-			stack[top] = u64(node) << 1 | 1
-			top += 1
-		}
-		for i in lo ..< hi {
-			for top > 0 && int(stack[top - 1] >> 1) + int(doc.nodes[stack[top - 1] >> 1].n) <= i {
-				top -= 1
+		node := doc.nodes[i]
+		if node.role == .Key && top > 0 && stack[top - 1] & 1 != 0 {
+			object := tape.Node_Index(stack[top - 1] >> 1)
+			if _, p.err = append(&p.keys, Hashed_Key{doc.format.key_hash(doc.src, node), object, tape.Node_Index(i)}); p.err != nil {
+				return
 			}
-			node := doc.nodes[i]
-			if node.role == .Key && top > 0 && stack[top - 1] & 1 != 0 {
-				object := tape.Node_Index(stack[top - 1] >> 1)
-				if _, p.err = append(&p.keys, Hashed_Key{doc.format.key_hash(doc.src, node), object, tape.Node_Index(i)}); p.err != nil {
+			p.crossing += 1
+		}
+		if node.kind <= .Plain {
+			continue
+		}
+		whole := i + int(node.n) <= hi
+		if node.kind == .Object && whole && p.err == nil {
+			clear(&p.scratch)
+			for m := tape.Node_Index(i) + 1; int(m) < i + int(node.n); m = tape.node_after(doc, tape.node_after(doc, m)) {
+				if _, p.err = append(&p.scratch, Hashed_Key{doc.format.key_hash(doc.src, doc.nodes[m]), 0, m}); p.err != nil {
 					return
 				}
-				p.crossing += 1
 			}
-			if node.kind <= .Plain {
-				continue
-			}
-			whole := i + int(node.n) <= hi
-			if node.kind == .Object && whole && p.err == nil {
-				clear(&p.scratch)
-				for m := tape.Node_Index(i) + 1; int(m) < i + int(node.n); m = tape.node_after(doc, tape.node_after(doc, m)) {
-					if _, p.err = append(&p.scratch, Hashed_Key{doc.format.key_hash(doc.src, doc.nodes[m]), 0, m}); p.err != nil {
-						return
-					}
-				}
-				p.err = repeats_in(doc, p.scratch[:], j.dups, &p.r)
-			}
-			stack[top] = u64(i) << 1 | u64(!whole)
-			top += 1
+			p.err = repeats_in(doc, p.scratch[:], j.dups, &p.r)
 		}
-		// Sorted by hash, then node, so that a range's keys of one hash come in node order, segment after segment.
-		// `repeats_in` relies on that order for a range of `FEW_KEYS` keys or fewer, which it does not sort.
-		slice.sort_by(p.keys[:p.crossing], proc(a, b: Hashed_Key) -> bool { return a.hash < b.hash || a.hash == b.hash && a.node < b.node })
+		stack[top] = u64(i) << 1 | u64(!whole)
+		top += 1
 	}
+	// Sorted by hash, then node, so that a range's keys of one hash come in node order, segment after segment.
+	// `repeats_in` relies on that order for a range of `FEW_KEYS` keys or fewer, which it does not sort.
+	slice.sort_by(p.keys[:p.crossing], proc(a, b: Hashed_Key) -> bool { return a.hash < b.hash || a.hash == b.hash && a.node < b.node })
 }
 
 // Judges the crossing members of each range of hashes.
 @(private)
-dups_ranges :: proc(arg: rawptr) {
+dups_ranges :: proc(arg: rawptr, i: int) {
 	j := (^Dups_Job)(arg)
-	for {
-		i := intrinsics.atomic_add(&j.next, 1)
-		if i >= len(j.ranges) {
-			return
-		}
-		g := &j.ranges[i]
-		at := g.lo
-		for p in j.parts {
-			from, to := dups_range(p.keys[:p.crossing], j.ranges, i)
-			copy(j.keys[at:], p.keys[from:to])
-			at += to - from
-		}
-		g.err = repeats_in(j.doc, j.keys[g.lo:at], j.dups, &g.r)
+	g := &j.ranges[i]
+	at := g.lo
+	for p in j.parts {
+		from, to := dups_range(p.keys[:p.crossing], j.ranges, i)
+		copy(j.keys[at:], p.keys[from:to])
+		at += to - from
 	}
+	g.err = repeats_in(j.doc, j.keys[g.lo:at], j.dups, &g.r)
 }
 
 // Removes the members whose key nodes `drops` marks, with their values' subtrees and facts, moving the nodes past

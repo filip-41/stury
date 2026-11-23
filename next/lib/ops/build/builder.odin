@@ -261,7 +261,8 @@ builder_step :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: 
 			}
 		}
 		room_check(h, s)
-		((^tape.Node)(uintptr(s.a)))^ = t
+		// Two 8-byte stores, as the token's fields are packed in registers.
+		((^[2]u64)(uintptr(s.a)))^ = transmute([2]u64)t
 		s.a += size_of(tape.Node)
 		// The open container's child count is the low half of `b`, so a member is counted with an add and no node is
 		// read or written. A key is not a child.

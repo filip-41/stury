@@ -7,19 +7,11 @@ import "core:math/rand"
 import "core:os"
 import "core:slice"
 import "core:strings"
-import "core:sync"
 import "core:testing"
 import "stury:host"
 import "stury:json"
 import "stury:lib/core/tape"
 import "stury:testkit"
-
-// A runner of `threads` threads that runs no call, so the caller claims every chunk, as many as `threads` makes, each
-// in turn.
-@(private = "file")
-serial_runner :: proc(threads: int) -> tape.Runner {
-	return {threads = threads, start = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {}, finish = proc(data: rawptr) {}}
-}
 
 // The threads of serial runners that cut a text of `n` bytes into chunks of every size from a quarter of it down to one
 // byte, a few sizes per power of two past 64 chunks, and no more than 4096 chunks.
@@ -146,7 +138,7 @@ parts_build_what_one_thread_builds :: proc(t: ^testing.T) {
 				opts.tolerate = {.Invalid_Utf8, .Non_Finite, .Lone_Surrogate}
 			}
 			for threads in cuts_of(len(text)) {
-				r := serial_runner(threads)
+				r := testkit.serial_runner(threads)
 				builds += 1
 				ok, built := testkit.threads_agree(t, json.reads(spec), json.as(spec), text, opts, &r, fmt.tprintf("round %d text %d", round, i))
 				valid += int(built)
@@ -170,7 +162,7 @@ parts_build_the_suites :: proc(t: ^testing.T) {
 	tolerant := json.Options{tolerate = {.Invalid_Utf8, .Non_Finite, .Lone_Surrogate}}
 	for f in files {
 		for threads in cuts_of(len(f.data)) {
-			r := serial_runner(threads)
+			r := testkit.serial_runner(threads)
 			if ok, _ := testkit.threads_agree(t, json.reads(f.spec), json.as(f.spec), f.data, {}, &r, f.name); !ok {
 				return
 			}
@@ -189,7 +181,7 @@ parts_spell_ascii_texts_as_one_thread :: proc(t: ^testing.T) {
 	for spec in json.Spec {
 		text := transmute([]u8)ascii_text(spec)
 		for threads in cuts_of(len(text)) {
-			r := serial_runner(threads)
+			r := testkit.serial_runner(threads)
 			if ok, _ := testkit.threads_agree(t, json.reads(spec), json.as(spec), text, {}, &r, "ascii"); !ok {
 				return
 			}
@@ -244,13 +236,6 @@ parts_build_on_pools :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-@(private = "file")
-Caller_Only :: struct {
-	backing: runtime.Allocator,
-	caller:  int,
-	strays:  int,
-}
-
 // The allocator of a build on a pool is called on the calling thread alone, and a memory budget gives the document of the
 // build on one thread or a refusal.
 @(test)
@@ -261,14 +246,8 @@ parts_allocate_on_the_calling_thread :: proc(t: ^testing.T) {
 	pool: host.Pool
 	host.pool_init(&pool, 4)
 	defer host.pool_destroy(&pool)
-	c := Caller_Only{backing = context.allocator, caller = sync.current_thread_id()}
-	only := runtime.Allocator{proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
-			c := (^Caller_Only)(data)
-			if sync.current_thread_id() != c.caller {
-				sync.atomic_add(&c.strays, 1)
-			}
-			return c.backing.procedure(c.backing.data, mode, size, alignment, old_memory, old_size, loc)
-		}, &c}
+	c: testkit.Caller_Only
+	only := testkit.caller_only(&c, context.allocator)
 	for spec in json.Spec {
 		src := seam_text(spec, int(spec), 300)
 		doc, err := json.build(src, spec, {runner = &pool.runner}, only)
@@ -292,7 +271,7 @@ memory_budget_gives_the_one_thread_document_or_a_refusal :: proc(t: ^testing.T) 
 	testkit.deadline(t)
 	state: rand.Default_Random_State
 	context.random_generator = testkit.seeded(t, &state, 0xb0d9)
-	one, many := serial_runner(3), serial_runner(17)
+	one, many := testkit.serial_runner(3), testkit.serial_runner(17)
 	for spec in json.Spec {
 		for shape in ([]int{0, 2}) {
 			src := seam_text(spec, shape, 300)
@@ -323,6 +302,9 @@ memory_budget_gives_the_one_thread_document_or_a_refusal :: proc(t: ^testing.T) 
 				// The text repeats keys, so `.Refuse` builds none of it and its budgets all end in the same fault.
 				testing.expectf(t, least != 0 || dups == .Refuse, "%v %d %v: no budget up to eight times the text builds it", spec, shape, dups)
 				for memory := u64(1); memory < 8 * u64(len(src)); memory += 1 + memory / 5 {
+					if !testkit.sampled(8) {
+						continue
+					}
 					for runner in ([]^tape.Runner{&one, &many}) {
 						if !testkit.threads_fit(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}, dups = dups}, runner, "budget") {
 							return
@@ -330,6 +312,9 @@ memory_budget_gives_the_one_thread_document_or_a_refusal :: proc(t: ^testing.T) 
 					}
 				}
 				for memory in max(least, 12) - 12 ..= least + 12 {
+					if (memory + 1 < least || memory > least + 1) && !testkit.sampled(8) {
+						continue
+					}
 					for runner in ([]^tape.Runner{&one, &many}) {
 						if !testkit.threads_fit(t, json.reads(spec), json.as(spec), src, {budget = {memory = memory}, dups = dups}, runner, "budget near the least") {
 							return
@@ -406,7 +391,7 @@ parts_of_a_seam_heavy_text_build_as_one_thread :: proc(t: ^testing.T) {
 		strings.write_string(&b, `]}}`)
 		src := transmute([]u8)strings.to_string(b)
 		for threads in ([]int{2, 3, 7, 16, 64, 255, 700, 1500}) {
-			r := serial_runner(threads)
+			r := testkit.serial_runner(threads)
 			if ok, built := testkit.threads_agree(t, json.reads(spec), json.as(spec), src, {}, &r, "seam heavy"); !ok || !testing.expect(t, built) {
 				return
 			}

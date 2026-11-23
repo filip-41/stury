@@ -9,7 +9,6 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:testing"
-import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // An answer of a path read: the value found, or the outcome, with the node the readers stopped at.
@@ -347,9 +346,7 @@ pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []
 			return err == nil
 		})
 		defer delete(window)
-		// While the first walk waits for the text's opening, each window frames only its new bytes.
-		again := (^hook.Piece_State)(p.state).framed.again if p.state != nil else 0
-		if !testing.expectf(t, got == whole_err && !p.more && again == 0, "%s %v cut %v: validate %v, whole %v, framed again %v", name, f.name, cuts, got, whole_err, again) {
+		if !testing.expectf(t, got == whole_err && !p.more, "%s %v cut %v: validate %v, whole %v", name, f.name, cuts, got, whole_err) {
 			return false
 		}
 	}
@@ -482,15 +479,13 @@ Records_Read :: struct {
 	read:   tape.Read_Options,
 }
 
-// What a read of a text's records gave: each record, the answer or document of each, why the records ended, and in a
-// text in pieces the bytes the framing read twice.
+// What a read of a text's records gave: each record, the answer or document of each, and why the records ended.
 @(private)
 Records_Got :: struct {
 	records: [dynamic]tape.Record,
 	answers: [dynamic]tape.Span_Answer,
 	docs:    [dynamic]tape.Document,
 	err:     tape.Error,
-	again:   u64,
 }
 
 @(private)
@@ -570,13 +565,12 @@ records_read :: proc(run: Piece_Run, how: Records_Read, pieces: bool) -> (got: R
 			return
 		}
 	}
-	got.err, got.again = r.err, r.framed.again
+	got.err = r.err
 	return
 }
 
 // Whether the records of a text read a window at a time are the whole text's, with the same answers and documents:
-// judged, with each path's answer and with the documents of `demand`, nil when the paths make none. The framing of the
-// windows reads no byte twice.
+// judged, with each path's answer and with the documents of `demand`, nil when the paths make none.
 @(private)
 records_pieces_agree :: proc(t: ^testing.T, run: Piece_Run, paths: [][]tape.Step, demand: ^tape.Demand, name: string) -> bool {
 	reads := make([dynamic]Records_Read, context.temp_allocator)
@@ -592,14 +586,158 @@ records_pieces_agree :: proc(t: ^testing.T, run: Piece_Run, paths: [][]tape.Step
 		defer records_got_free(&whole)
 		got := records_read(run, how, true)
 		defer records_got_free(&got)
-		ok := got.err == whole.err && got.again == 0 && len(got.records) == len(whole.records) && slice.equal(got.answers[:], whole.answers[:])
+		ok := got.err == whole.err && len(got.records) == len(whole.records) && slice.equal(got.answers[:], whole.answers[:])
 		for k := 0; ok && k < len(got.records); k += 1 {
 			a, b := got.records[k], whole.records[k]
 			ok = a.index == b.index && a.lo == b.lo && a.hi == b.hi && a.err == b.err && a.key == b.key
 			ok = ok && (how.how != .Scan || same_documents(got.docs[k], whole.docs[k]))
 		}
-		if !testing.expectf(t, ok, "%s %v cut %v: records %v %v: %v records, %v, framed again %v, whole %v records, %v", name, run.f.name, run.cuts, how.how, how.path, len(got.records), got.err, got.again, len(whole.records), whole.err) {
+		if !testing.expectf(t, ok, "%s %v cut %v: records %v %v: %v records, %v, whole %v records, %v", name, run.f.name, run.cuts, how.how, how.path, len(got.records), got.err, len(whole.records), whole.err) {
 			return false
+		}
+	}
+	return true
+}
+
+// What precedes a record in its own text, in a text whose records take their shape from bytes before them.
+Alone_Head :: enum u8 {
+	Nothing, // the record's bytes alone
+	Text_Before_First, // the bytes before the first record, which hold a table's header
+	First_Record, // the first record's line, whose width the others take, for every record past the first
+}
+
+// How a record's own text is made from the text its records are read from: its bytes after `head`. With `rows` the own
+// text is a list of rows and a read of it reaches the record through its index, so that a read of a record at a path
+// answers as the own text at that index and the path does.
+Alone :: struct {
+	head: Alone_Head,
+	rows: bool,
+}
+
+// `err` with the offset it names moved by `by`, as a record read in place in a text names what the read of its own text
+// names in that text.
+@(private)
+moved_error :: proc(err: tape.Error, by: i64) -> tape.Error {
+	#partial switch e in err {
+	case tape.Fault:
+		f := e
+		f.at = u64(i64(f.at) + by)
+		return f
+	case tape.Exceeded:
+		x := e
+		if x.kind != .Memory {
+			x.at = u64(i64(x.at) + by)
+		}
+		return x
+	}
+	return err
+}
+
+// Whether the records of `run.src`, read as `how` says whole or in pieces, answer as the reads of each record's own
+// text do: the record's verdict is the verdict of its own text, with the fault's offset moved to the record's place, its
+// find answer is the own text's answer at `alone.lead` and the path, and its scan document answers the paths as the
+// own text's scan does. A text with no record has nothing to compare.
+@(private)
+records_alone_check :: proc(t: ^testing.T, run: Piece_Run, alone: Alone, how: Records_Read, own_demands: ^[2]tape.Demand, pieces: bool, name: string) -> bool {
+	got := records_read(run, how, pieces)
+	defer records_got_free(&got)
+	if len(got.records) == 0 {
+		return true
+	}
+	for rec, k in got.records {
+		head: []u8
+		switch alone.head {
+		case .Nothing:
+		case .Text_Before_First:
+			head = run.src[:got.records[0].lo]
+		case .First_Record:
+			if k > 0 {
+				head = slice.concatenate([][]u8{run.src[got.records[0].lo:got.records[0].hi], {'\n'}}, context.temp_allocator)
+			}
+		}
+		text := slice.concatenate([][]u8{head, run.src[rec.lo:rec.hi]}, context.temp_allocator)
+		// The own text holds the first record's line before a later record, which is then its row 1.
+		row := 1 if alone.head == .First_Record && k > 0 else 0
+		own_path := how.path
+		if alone.rows {
+			own_path = slice.concatenate([][]tape.Step{{tape.Index(row)}, how.path}, context.temp_allocator)
+		}
+		by := i64(rec.lo) - i64(len(head))
+		want: tape.Error
+		same := true
+		detail: string
+		switch how.how {
+		case .Validate:
+			want = run.reads.validate(run.f, text, run.opts, context.allocator)
+		case .Find:
+			a, err := run.reads.find(run.f, text, own_path, how.read, run.opts, context.allocator)
+			want = err
+			if err == nil && rec.err == nil {
+				got_answer := got.answers[k]
+				detail = fmt.tprintf("answer %v %q, own text's %v %q", got_answer, run.src[got_answer.lo:got_answer.hi], a, text[a.lo:a.hi])
+				same = a.outcome == got_answer.outcome && a.kind == got_answer.kind
+				same &&= a.outcome != .Found || string(text[a.lo:a.hi]) == string(run.src[got_answer.lo:got_answer.hi])
+			}
+		case .Scan:
+			d, err := run.reads.scan(run.f, text, &own_demands[row], how.read, run.opts, context.allocator)
+			defer tape.destroy(&d)
+			want = err
+			if err == nil && rec.err == nil {
+				detail = fmt.tprintf("answers %s, own text's %s", render_answers(&got.docs[k]), render_answers(&d))
+				same = render_answers(&d) == render_answers(&got.docs[k])
+			}
+		}
+		// A read that stops at its answer judges the bytes it reads, so it may stop before a fault that the read of the
+		// own text finds in the rest of the record.
+		if how.read.stop_early && rec.err == nil && want != nil {
+			continue
+		}
+		if !testing.expectf(t, same_refusal(rec.err, moved_error(want, by)) && same, "%s %v cut %v pieces %v: %v %v %v record %d %q: reads as %v, its own text as %v, %s", name, run.f.name, run.cuts, pieces, how.how, how.path, how.read, k, string(text), rec.err, want, detail) {
+			return false
+		}
+	}
+	return true
+}
+
+// Whether every record's answers equal the whole-text answers of that record's own text, for the verdict, each of
+// `paths` found with and without `stop_early`, and the scan of all of them, whole and read in the windows `run.cuts`
+// cut. Returns false after reporting the first record that differs.
+records_alone_agree :: proc(t: ^testing.T, run: Piece_Run, alone: Alone, paths: [][]tape.Step, name: string) -> bool {
+	reads := make([dynamic]Records_Read, context.temp_allocator)
+	append(&reads, Records_Read{})
+	for path in paths {
+		append(&reads, Records_Read{how = .Find, path = path}, Records_Read{how = .Find, path = path, read = {stop_early = true}})
+	}
+	demand, derr := tape.demand_of(paths, nil, nil, run.f.facts != {})
+	defer tape.destroy(&demand)
+	own_demands: [2]tape.Demand
+	defer for &d in own_demands {
+		tape.destroy(&d)
+	}
+	oerr: runtime.Allocator_Error
+	for &d, row in own_demands {
+		own_paths := make([][]tape.Step, len(paths), context.temp_allocator)
+		for path, i in paths {
+			own_paths[i] = path
+			if alone.rows {
+				own_paths[i] = slice.concatenate([][]tape.Step{{tape.Index(row)}, path}, context.temp_allocator)
+			}
+		}
+		d, oerr = tape.demand_of(own_paths, nil, nil, run.f.facts != {})
+	}
+	if derr == nil && oerr == nil {
+		append(&reads, Records_Read{how = .Scan, demand = &demand}, Records_Read{how = .Scan, demand = &demand, read = {stop_early = true}})
+	}
+	cut := run
+	cut.cuts = slice.clone(run.cuts, context.temp_allocator)
+	for &at in cut.cuts {
+		at = min(at, len(run.src))
+	}
+	for how in reads {
+		for pieces in ([]bool{false, true}) {
+			if !records_alone_check(t, cut, alone, how, &own_demands, pieces, name) {
+				return false
+			}
 		}
 	}
 	return true

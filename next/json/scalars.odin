@@ -1,99 +1,15 @@
 package json
 
 import "base:intrinsics"
-import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// The end and spelling of the number at `p`, which starts with `-` or a digit, or the fault and the byte it is at. The
-// spelling is 0 unless `SPELLED`. JSON's grammar, with a `0x` refused in JSON5, whose own numbers `st_number5` reads.
-@(private)
-number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool, $S: Spec) -> (q: [^]u8, spelling: u64, kind: tape.Fault_Kind) #no_bounds_check {
-	q = p
-	if q[0] == '-' {
-		q = q[1:]
-		if q >= end {
-			return end, 0, .Truncated
-		}
-	}
-	int_at := q
-	if q[0] == '0' {
-		q = q[1:]
-		if q < end && (q[0] - '0' < 10 || S == .Json5 && q[0] | 0x20 == 'x') {
-			return q, 0, .Bad_Number
-		}
-	} else {
-		r := spell.digit_end(q, end)
-		if r == q {
-			return q, 0, .Bad_Number
-		}
-		q = r
-	}
-	int_digits := u64(intrinsics.ptr_sub(q, int_at))
-	if q >= end {
-		return q, u64(digit_spelling(int_digits, 0, SPELLED)), .None
-	}
-	frac_digits: u64
-	c := q[0]
-	if c == '.' {
-		r := spell.digit_end(q[1:], end)
-		if r == q[1:] {
-			q, kind = bad_or_truncated(r, end)
-			return q, 0, kind
-		}
-		frac_digits = u64(intrinsics.ptr_sub(r, q[1:]))
-		q = r
-		if q >= end {
-			return q, u64(digit_spelling(int_digits, frac_digits, SPELLED)), .None
-		}
-		c = q[0]
-	}
-	if c | 0x20 == 'e' {
-		q = q[1:]
-		if q < end && (q[0] == '+' || q[0] == '-') {
-			q = q[1:]
-		}
-		r := spell.digit_end(q, end)
-		if r == q {
-			q, kind = bad_or_truncated(r, end)
-			return q, 0, kind
-		}
-		return r, u64(digit_spelling(int_digits, frac_digits, SPELLED) | (tape.NUMBER_EXP when SPELLED else 0)), .None
-	}
-	return q, u64(digit_spelling(int_digits, frac_digits, SPELLED)), .None
-}
-
-// `number` as the walk of hook `H` reads it: spelled unless `H` reads no hooks or no number's spelling.
+// `tape.number_scan` as the walk of hook `H` reads it: spelled unless `H` reads no hooks or no number's spelling.
 @(private)
 hook_number :: #force_inline proc "contextless" (p, end: [^]u8, $H: typeid, $C: hook.Capabilities, $S: Spec) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
 	wide: u64
-	q, wide, kind = number(p, end, H != hook.No_Hooks && .Unspelled not_in C, S)
+	q, wide, kind = tape.number_scan(p, end, H != hook.No_Hooks && .Unspelled not_in C, S == .Json5)
 	return q, u16(wide), kind
-}
-
-// The spelling of the JSON number `src[lo:hi]`.
-@(private)
-respell :: proc "contextless" (src: []u8, lo, hi: u64) -> u16 {
-	_, spelling, _ := number(raw_data(src)[lo:], raw_data(src)[hi:], true, .Json)
-	return u16(spelling)
-}
-
-// A plain decimal's spelling, 0 unless `SPELLED`.
-@(private)
-digit_spelling :: #force_inline proc "contextless" (int_digits, frac_digits: u64, $SPELLED: bool) -> u16 {
-	when SPELLED {
-		return tape.number_spelling(0, int_digits, frac_digits)
-	} else {
-		return 0
-	}
-}
-
-@(private)
-bad_or_truncated :: #force_inline proc "contextless" (q, end: [^]u8) -> ([^]u8, tape.Fault_Kind) {
-	if q >= end {
-		return end, .Truncated
-	}
-	return q, .Bad_Number
 }
 
 @(private)

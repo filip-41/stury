@@ -1,13 +1,14 @@
 package dsv
 
 import "base:intrinsics"
+import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
-// The readers of a cell's text. A cell that needs no decode is its span. One with `SPELLING_DECODE` reads, a byte at a
-// time, as its spec spells it: a quoted CSV cell's `""` as `"`, a TSV escape as the byte it names, a byte past 0x7F as
-// one UTF-8 character or, under `SPELLING_LAX`, U+FFFD for each maximal subpart of an ill-formed sequence, and a key of
-// a column past the header as its 1-based position.
+// Readers of a cell's text. A cell that needs no decode reads as its span. A cell with `SPELLING_DECODE` is read a byte
+// at a time as its spec spells it: a quoted CSV cell's `""` as `"`, a TSV escape as the byte it names, a byte past 0x7F
+// as one UTF-8 character or, under `SPELLING_LAX`, U+FFFD for each maximal subpart of an ill-formed sequence, and a key
+// of a column past the header as its 1-based position.
 
 // The value of the number cell `t` of `src`, which the walk read as an RFC 8259 number.
 @(private)
@@ -23,9 +24,9 @@ quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
 	return q, q
 }
 
-// The size in bytes of a buffer that holds the decoded text of cell `t`: its span, since an escape decodes to no more
-// bytes than it spells, three times the span for a `SPELLING_LAX` cell, since a tolerated byte reads as U+FFFD, and a
-// column's position for a key named by its place.
+// The size in bytes of a buffer that holds the decoded text of cell `t`. The span, because an escape decodes to no more
+// bytes than it spells. Three times the span for a `SPELLING_LAX` cell, because a tolerated byte reads as U+FFFD.
+// `COLUMN_ROOM` for a key named by its column's position.
 @(private)
 decode_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
 	if t.spelling & tape.SPELLING_PLACED != 0 {
@@ -41,8 +42,26 @@ decode_cell :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, $S: Spec)
 	if decode_room(src, t) > len(buf) {
 		return "", false
 	}
-	r := cell_reader(src, t, S)
 	n := 0
+	when S == .Csv {
+		// A quoted cell with no ill-formed sequence decodes as the runs between its `""` pairs, each pair one quote.
+		if t.spelling & (tape.SPELLING_LAX | tape.SPELLING_PLACED) == 0 && t.spelling & tape.SPELLING_QUOTED != 0 {
+			p, end := int(t.lo), int(t.lo) + int(t.n)
+			for p < end {
+				k := kernel.index_byte(src[p:end], '"')
+				if k < 0 {
+					intrinsics.mem_copy_non_overlapping(raw_data(buf[n:]), raw_data(src[p:]), end - p)
+					n += end - p
+					break
+				}
+				intrinsics.mem_copy_non_overlapping(raw_data(buf[n:]), raw_data(src[p:]), k + 1)
+				n += k + 1
+				p += k + 2
+			}
+			return string(buf[:n]), true
+		}
+	}
+	r := cell_reader(src, t, S)
 	for {
 		b, more := cell_byte(&r)
 		if !more {
@@ -69,7 +88,7 @@ same_cells :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape
 	}
 }
 
-// `tape.text_hash` of the text cell `t` of `src` reads as.
+// The `tape.text_hash` of the decoded text of cell `t` of `src`.
 @(private)
 cell_hash :: proc "contextless" (src: []u8, t: tape.Token, $S: Spec) -> u32 {
 	if t.spelling & tape.SPELLING_DECODE == 0 {
@@ -84,13 +103,6 @@ cell_hash :: proc "contextless" (src: []u8, t: tape.Token, $S: Spec) -> u32 {
 		}
 		tape.text_hash_byte(&x, b)
 	}
-}
-
-// The spelling of the number `src[lo:hi]` a find read with no spelling.
-@(private)
-respell :: proc "contextless" (src: []u8, lo, hi: u64) -> u16 {
-	spelling, _ := number_shape(raw_data(src), lo, hi)
-	return spelling
 }
 
 // The most digits of a column's position, a `u32`.
@@ -115,7 +127,7 @@ Cell_Reader :: struct {
 cell_reader :: #force_inline proc "contextless" (src: []u8, t: tape.Token, $S: Spec) -> (r: Cell_Reader) {
 	r = {base = raw_data(src), p = t.lo, end = t.lo + u64(t.n), decode = t.spelling & tape.SPELLING_DECODE != 0, lax = t.spelling & tape.SPELLING_LAX != 0, tsv = S == .Tsv, csv = S == .Csv && t.spelling & tape.SPELLING_QUOTED != 0}
 	if t.spelling & tape.SPELLING_PLACED != 0 {
-		// The position's digits, read from the last.
+		// Writes the position's digits from the last into the end of `one`, then copies them to its start.
 		v := t.lo
 		k := len(r.one)
 		for {
@@ -158,23 +170,16 @@ cell_byte :: proc "contextless" (r: ^Cell_Reader) -> (u8, bool) #no_bounds_check
 			return c, true
 		}
 		r.at = 0
-		q, kind := spell.utf8_char(r.base[r.p:], r.base[r.end:])
-		if kind != .None {
-			r.one[0], r.one[1], r.one[2] = 0xEF, 0xBF, 0xBD
-			r.n, r.p = 3, u64(intrinsics.ptr_sub(spell.utf8_subpart(r.base[r.p:], r.base[r.end:]), r.base))
-		} else {
-			r.n = intrinsics.ptr_sub(q, r.base[r.p:])
-			for i in 0 ..< r.n {
-				r.one[i] = r.base[r.p + u64(i)]
-			}
-			r.p += u64(r.n)
-		}
+		q: [^]u8
+		r.n, q = spell.utf8_lax(r.base[r.p:], r.base[r.end:], raw_data(r.one[:]))
+		r.p = u64(intrinsics.ptr_sub(q, r.base))
 	}
 	r.at += 1
 	return r.one[r.at - 1], true
 }
 
-// The byte each TSV escape letter reads as, 0 for a byte no escape names: `\t`, `\n`, `\r`, `\0` and `\\`.
+// The byte a TSV escape reads as, indexed by the byte after the backslash: `t`, `n`, `r`, `0` and `\` give tab, LF, CR,
+// NUL and backslash. Every other entry is 0.
 @(private, rodata)
 TSV_ESCAPED := [256]u8 {
 	't'  = '\t',
@@ -183,3 +188,30 @@ TSV_ESCAPED := [256]u8 {
 	'0'  = 0,
 	'\\' = '\\',
 }
+
+@(private)
+decode_csv :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {return decode_cell(src, t, buf, .Csv)}
+
+@(private)
+decode_tsv :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {return decode_cell(src, t, buf, .Tsv)}
+
+@(private)
+decode_plain :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {return decode_cell(src, t, buf, .Plain)}
+
+@(private)
+same_csv :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {return same_cells(src, t, other, o, .Csv)}
+
+@(private)
+same_tsv :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {return same_cells(src, t, other, o, .Tsv)}
+
+@(private)
+same_plain :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {return same_cells(src, t, other, o, .Plain)}
+
+@(private)
+hash_csv :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {return cell_hash(src, t, .Csv)}
+
+@(private)
+hash_tsv :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {return cell_hash(src, t, .Tsv)}
+
+@(private)
+hash_plain :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {return cell_hash(src, t, .Plain)}

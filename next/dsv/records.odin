@@ -6,10 +6,10 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
-// The records of a delimited text: each record past the header is one, framed to its line end outside a quoted cell,
-// as a quoted cell may hold a line end. A record reads as its object of cells keyed by the header, or its array of
-// cells under `no_header`, checked against the header's width or the first record's. A record that faults ends at its
-// line end, and the records go on at the next.
+// Each record past the header is framed to its line end outside a quoted cell, since a quoted cell may hold a line end.
+// A record reads as an object of cells keyed by the header, or under `no_header` as an array of cells, checked against
+// the header's width or the first record's. A record that faults ends at its line end, and the records go on at the
+// next.
 
 // The records of a text of a delimited spec, which `records_open` makes and each call of `records_validate`,
 // `records_find` or `records_scan` reads in batches, as `tape.Records` says.
@@ -19,6 +19,7 @@ Records :: struct {
 	p:             Pass_Options,
 	width:         int, // the cells every record has, 0 until the first record of a text with no header
 	count:         int, // the header's cells, kept in `keys` when they fit
+	refuse:        bool, // the records were opened under `.Refuse`, which their header judges and their reads take as `.Default`
 	held:          []tape.Token, // the header's keys the batch being read gives each record's cells
 	keys:          [FRAME_KEYS]tape.Token,
 	// What the header's keys index: the text, or in a text in pieces a copy of the header's bytes, from `head_lo`.
@@ -41,6 +42,9 @@ records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Csv,
 		panic("dsv: spec out of range")
 	}
 	r.src, r.framing, r.spec, r.opts = src, framing, spec, opts
+	if r.opts.dups == .Refuse {
+		r.refuse, r.opts.dups = true, .Default
+	}
 	err: tape.Error
 	switch spec {
 	case .Csv:
@@ -72,26 +76,39 @@ records_start :: proc(r: ^Records, $S: Spec) -> tape.Error {
 	if r.p.no_header {
 		return nil
 	}
-	r.count = header_cells(r.src, int(r.pos), S, r.p.delim, r.p.comment)
+	r.count = header_cells(r.src, S, r.p.delim, r.p.comment)
 	if r.count == 0 {
 		r.at = .Done
 		return nil
 	}
-	if r.count > FRAME_KEYS {
-		hi, width, err := read_header(r.src, S, r.p, nil, context.allocator)
-		r.pos, r.width = hi, width
-		return err
+	ctx := context
+	keys := header_keys(r.count, r.keys[:], context.allocator, &ctx) or_return
+	defer if len(keys) > FRAME_KEYS {
+		delete(keys)
 	}
-	hi, width, err := read_header(r.src, S, r.p, r.keys[:r.count], context.allocator)
-	r.pos, r.width = hi, width
+	err: tape.Error
+	r.pos, r.width, err = read_header(r.src, S, r.p, keys)
+	if err == nil && r.refuse {
+		err = records_names(r, S, r.src, keys, context.allocator)
+	}
 	return err
+}
+
+// The fault of a repeated name among the header's `keys`, cells of `src`, of records opened under `.Refuse`.
+@(private, cold)
+records_names :: proc(r: ^Records, $S: Spec, src: []u8, keys: []tape.Token, allocator: runtime.Allocator) -> tape.Error {
+	at, found, oom := header_repeat(src, S, keys, allocator)
+	if oom != nil {
+		return oom
+	}
+	return tape.Fault{at = at, rules = &RULES, kind = .Duplicate_Key} if found else nil
 }
 
 // Reads the header of the records `r` of a text in pieces once a window holds its line, its keys into `keys`, or past
 // `FRAME_KEYS` into the list `Pieces.state` holds, and its bytes into a copy there, and places the records at their
 // first. While the window holds too little, fewer than a byte order mark's bytes or not the header's line end, the
 // records stay at their start, and the next window goes on framing the header where this one stopped. The window
-// starts the text, as the records at their start keep its first byte.
+// starts the text, since records at their start keep its first byte.
 @(private, cold)
 records_header_window :: proc(r: ^Records, $S: Spec) -> tape.Error {
 	p := r.opts.pieces
@@ -114,18 +131,18 @@ records_header_window :: proc(r: ^Records, $S: Spec) -> tape.Error {
 	r.at = .Open
 	hi := min(r.scan.line_end + 1, len(r.src))
 	r.count, r.width = r.scan.cells, r.scan.cells
-	s := hook.piece_state(p, Piece) or_return
-	p.release = piece_free
-	lists := hook.piece_lists(p)
-	s.head.allocator, s.keys.allocator = lists, lists
+	s, lists := piece_open_state(p) or_return
 	keys := r.keys[:min(r.count, FRAME_KEYS)]
 	if r.count > FRAME_KEYS {
 		resize(&s.keys, r.count) or_return
 		keys = s.keys[:]
 	}
-	err := walk_header(r.src[:hi], S, r.p, keys, context.allocator)
+	err := walk_header(r.src[:hi], S, r.p, keys)
 	append(&s.head, ..r.src[lo:hi]) or_return
 	r.head, r.head_lo = tape.piece_src(s.head[:], lo), lo
+	if err == nil && r.refuse {
+		err = records_names(r, S, r.head, keys, lists)
+	}
 	return err
 }
 
@@ -144,24 +161,24 @@ frame_window :: proc(r: ^Records, $S: Spec, more: bool) -> (lo, cut: u64, ok: bo
 		} else {
 			found = record_start_on(r.src, f, r.p.comment, false)
 		}
-		tape.framed_read(&r.framed, u64(from), u64(f.i))
-		r.pos = u64(f.i)
+		if r.p.comment != 0 && !skipped_judged(r, from - f.pending, more) {
+			return
+		}
+		r.pos = u64(f.i - f.pending)
 		if !found {
 			if !more {
 				r.at = .Done
 			}
 			return
 		}
-		r.open, r.scan, f.quoted, f.first = true, {cells = 1, fault_at = -1}, false, true
+		r.open, r.scan, f.quoted, f.first = true, {cells = 1, wide_at = -1}, false, true
 	}
-	from := f.i
 	ended: bool
 	if more {
-		ended = scan_record_on(r.src, int(r.pos), 0, S, r.p.delim, &r.scan, f, true)
+		ended = scan_record_on(r.src, int(r.pos), 0, S, r.p.delim, &r.scan, f, true, true)
 	} else {
-		ended = scan_record_on(r.src, int(r.pos), 0, S, r.p.delim, &r.scan, f, false)
+		ended = scan_record_on(r.src, int(r.pos), 0, S, r.p.delim, &r.scan, f, false, true)
 	}
-	tape.framed_read(&r.framed, u64(from), u64(f.i))
 	if !ended {
 		return
 	}
@@ -187,67 +204,65 @@ header_stop :: proc "contextless" (h: ^Header_Stop, s: hook.Regs, t: tape.Token)
 	return s, .Next
 }
 
-// Reads the header of `src` into `keys`, or into a block of `allocator` it frees for nil `keys`, and returns the byte
-// past it, where the first record may start, and its width, or the fault in it.
+// Reads the header of `src` into `keys`, which hold its cells, and returns the byte past it, where the first record may
+// start, and its width, or the fault in it.
 @(private)
-read_header :: proc(src: []u8, $S: Spec, p: Pass_Options, keys: []tape.Token, allocator: runtime.Allocator) -> (hi: u64, width: int, err: tape.Error) {
+read_header :: proc(src: []u8, $S: Spec, p: Pass_Options, keys: []tape.Token) -> (hi: u64, width: int, err: tape.Error) {
 	at := record_start(src, int(text_start(src, 0)), p.comment)
 	s := scan_record(src, at, 0, S, p.delim)
 	hi = u64(min(s.line_end + 1, len(src)))
-	if keys != nil {
-		return hi, s.cells, walk_header(src[:hi], S, p, keys, allocator)
-	}
-	owned, e := make([]tape.Token, s.cells, allocator)
-	if e != nil {
-		return 0, 0, e
-	}
-	defer delete(owned, allocator)
-	return hi, s.cells, walk_header(src[:hi], S, p, owned, allocator)
+	return hi, s.cells, walk_header(src[:hi], S, p, keys)
 }
 
 // Walks `src`, a text up to its header's end, for the header's keys into `keys`, which hold its cells, and returns the
 // fault in it.
 @(private)
-walk_header :: proc(src: []u8, $S: Spec, p: Pass_Options, keys: []tape.Token, allocator: runtime.Allocator) -> tape.Error {
+walk_header :: proc(src: []u8, $S: Spec, p: Pass_Options, keys: []tape.Token) -> tape.Error {
 	h: Header_Stop
 	regs: hook.Regs
 	head := Head{keys = keys}
 	ctx := context
+	// The depth budget is judged by the records' walks, not by the header's.
 	hp := p
 	hp.limit = max(u64)
-	_, err, _ := walk_text(src, S, false, hp, &h, &regs, allocator, &ctx, header_stop, &head)
+	_, err, _ := walk_text(src, S, false, hp, &h, &regs, context.allocator, &ctx, header_stop, &head)
 	return err
 }
 
 // Holds the header's keys for a batch of `r` in `held`: its own, or for a header past `FRAME_KEYS` cells a block of
-// `allocator` read again from the text, which `records_release` frees. False, with the records ended, when the block is
-// refused.
+// `allocator` read again from the text, which `records_release` frees, or the keys of the text's pieces, which it does
+// not. In pieces it first reads the header from the first window. False, with the records ended, when the block is
+// refused or the header is.
 @(private)
 records_hold :: proc(r: ^Records, $S: Spec, allocator: runtime.Allocator) -> bool {
+	if r.err != nil {
+		build.records_window_end(r)
+		return false
+	}
 	if r.at == .Start && r.opts.pieces != nil {
 		if err := records_header_window(r, S); err != nil {
 			r.err, r.at = err, .Done
+			build.records_window_end(r)
 			return false
 		}
 	}
-	if r.count <= FRAME_KEYS {
-		r.held = r.keys[:r.count]
-		return true
-	}
-	if p := r.opts.pieces; p != nil {
+	if p := r.opts.pieces; p != nil && r.count > FRAME_KEYS {
 		r.held = (^Piece)(p.state).keys[:]
 		return true
 	}
-	keys, e := make([]tape.Token, r.count, allocator)
-	if e != nil {
-		r.err, r.at = e, .Done
+	ctx := context
+	keys, err := header_keys(r.count, r.keys[:], allocator, &ctx)
+	if err == nil && len(keys) > FRAME_KEYS {
+		if _, _, err = read_header(r.head, S, r.p, keys); err != nil {
+			delete(keys, allocator)
+		}
+	}
+	if err != nil {
+		r.err, r.at = err, .Done
+		build.records_window_end(r)
 		return false
 	}
 	r.held = keys
-	if _, _, err := read_header(r.head, S, r.p, keys, allocator); err != nil {
-		r.err, r.at = err, .Done
-		return false
-	}
 	return true
 }
 
@@ -259,8 +274,8 @@ records_release :: proc(r: ^Records, allocator: runtime.Allocator) {
 	r.held = nil
 }
 
-// Reads the next records of `r` into `out` and judges each. Returns how many it filled, and fewer than `len(out)` once
-// the records have ended, when `err` says why, nil at the text's end.
+// Reads the next records of `r` into `out` and judges each. Returns how many it filled. Fewer than `len(out)` means
+// the records have ended, and `err` says why, nil at the text's end.
 @(require_results)
 records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.allocator) -> (n: int) {
 	switch r.spec {
@@ -337,7 +352,7 @@ records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []
 		return 0
 	}
 	defer records_release(r, caller)
-	return build.records_find(r, path, out, answers, &FORMATS[S], &RULES, read, caller, respell, nil, frame, walk)
+	return build.records_find(r, path, out, answers, &FORMATS[S], &RULES, read, caller, tape.number_respell, nil, frame, walk)
 }
 
 @(private)
@@ -369,13 +384,39 @@ record_frame :: proc(r: ^Records, $S: Spec) -> (lo, cut: u64, ok: bool) {
 		return record_frame_window(r, S, p)
 	}
 	lo = u64(record_start(r.src, int(r.pos), r.p.comment))
+	if lo != r.pos && r.p.comment != 0 && !skipped_judged(r, int(r.pos), false, int(lo)) {
+		return
+	}
 	if lo >= u64(len(r.src)) {
 		r.at = .Done
 		return
 	}
-	s := scan_record(r.src, int(lo), 0, S, r.p.delim)
-	r.pos = u64(min(s.line_end + 1, len(r.src)))
-	return lo, u64(s.line_end_lo), true
+	end, end_lo := frame_line(r.src, int(lo), S, r.p.delim)
+	r.pos = u64(min(end + 1, len(r.src)))
+	return lo, u64(end_lo), true
+}
+
+// Judges the UTF-8 of the lines `record_frame` skipped from `from`, as a walk of the whole text judges a comment line's
+// bytes. False, with the records ended by the fault, when one is ill-formed. In a window whose text goes on, a sequence
+// the window cuts is judged by the next window, which holds its first bytes since `Frame_At.pending` counts them.
+@(private, cold)
+skipped_judged :: proc(r: ^Records, from: int, more: bool, to := -1) -> bool {
+	f := &r.frame
+	to := to if to >= 0 else f.i
+	f.pending = 0
+	at, k := first_ill_formed(raw_data(r.src), from, to, len(r.src))
+	switch {
+	case k == .None:
+		return true
+	case k == .Truncated && more && to == len(r.src):
+		f.pending = to - at
+		return true
+	case k == .Truncated:
+		at = len(r.src)
+	}
+	detail := Detail.Cut_Utf8 if k == .Truncated else .Invalid_Utf8
+	r.err, r.at = tape.Fault{at = u64(at), rules = &RULES, kind = .Truncated if k == .Truncated else .Bad_Char, detail = u8(detail)}, .Done
+	return false
 }
 
 // `record_frame` in a text in pieces: a record whose line end the window does not hold ends the batch, and its framing
@@ -389,14 +430,24 @@ record_frame_window :: proc(r: ^Records, $S: Spec, p: ^tape.Pieces) -> (lo, cut:
 	return frame_window(r, S, !p.last)
 }
 
-// Walks the record from `lo` to `cut` as the root of a text of its bytes, its cells keyed by the header's, and keeps the
-// width the first record sets.
+// A record walk's fault `res` that ends in a cut UTF-8 sequence becomes an ill-formed one when the text goes on past the
+// record, as the walk of the whole text finds the sequence's lead out of place.
+@(private, cold)
+cut_sequence_judged :: #force_no_inline proc(r: ^Records, res: hook.Walk_Result, lo, cut: u64) -> hook.Walk_Result {
+	if Detail(u64(res) >> 8) == .Cut_Utf8 && cut < u64(len(r.src)) {
+		return fault_at(u64(sequence_lead(raw_data(r.src), int(lo), int(cut))), .Bad_Char, .Invalid_Utf8)
+	}
+	return res
+}
+
+// Walks the record from `lo` to `cut` as the root of a text of its bytes, its cells keyed by the header's, and keeps
+// the width the first record sets.
 @(private)
 record_walked :: #force_inline proc(r: ^Records, $S: Spec, $LAX: bool, lo, cut: u64, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (walked: build.Record_Walk) {
 	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
 	w: Pass(S, H, LAX, C)
-	w.n, w.h, w.delim, w.tolerate, w.start, w.line, w.width, w.opened, w.unclosed = int(cut), h, r.p.delim, r.p.tolerate, 1, 1, r.width, true, true
-	w.keys = r.held
+	pass_start(&w, int(cut), h, r.p, r.opts.budget.steps)
+	w.width, w.opened, w.unclosed, w.keys = r.width, true, true, r.held
 	if r.opts.pieces != nil {
 		when H == build.Finder {
 			h.key_text = r.head
@@ -404,26 +455,20 @@ record_walked :: #force_inline proc(r: ^Records, $S: Spec, $LAX: bool, lo, cut: 
 			h.key_text, h.head = r.head, {r.head_lo, u64(len(r.head))}
 		}
 	}
-	when LAX {
-		w.steps[0] = r.opts.budget.steps + 1 if r.opts.budget.steps < max(u64) else max(u64)
-	}
-	when .Rooms in C {
-		w.rooms = hook.rooms_end(h)
-	}
-	when .Columns in C {
-		w.columns = ~u64(0)
-	}
-	// The record is the root, one level above where a text holds it.
+	// The record is the root, one level above where it lies in a text.
 	p := r.p
 	p.limit += 1
-	res := run(&w, r.src[:cut], lo, p, regs, on)
-	when LAX {
-		if u8(res) == hook.WALK_STOPPED && w.steps[0] == 0 {
-			res = hook.walk_result(u64(res) >> 16, hook.WALK_STEPS)
-		}
+	res := steps_ended(&w, run(&w, r.src[:cut], lo, p, regs, on))
+	if u8(res) == u8(tape.Fault_Kind.Truncated) {
+		res = cut_sequence_judged(r, res, lo, cut)
 	}
-	if r.width == 0 && u8(res) == 0 {
-		r.width = w.width
+	if r.width == 0 {
+		if u8(res) == 0 {
+			r.width = w.width
+		} else if u8(res) == hook.WALK_STOPPED {
+			// A walk stopped at its answer did not count the record's cells.
+			r.width = scan_record_clipped(r.src, int(lo), 0, S, r.p.delim).cells
+		}
 	}
 	return {res = res, hi = cut, tolerated = w.tolerated, ok = true}
 }

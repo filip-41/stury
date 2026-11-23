@@ -3,7 +3,7 @@ BMI2 but `tzcnt`, LZCNT, PCLMULQDQ and MOVBE.
 
 usage: tier_check.py OBJDUMP OBJECT [--inlined] [--require NAME]
 
-The V3 tier is the procedures `lib/base/kernel/tier_amd64.odin` and `dsv/tier_amd64.odin` declare for
+The V3 tier is the procedures `lib/base/kernel/tier_amd64.odin`, `dsv/tier_amd64.odin` and `json/strings.odin` declare for
 it, `TIER_ROOTS`, and the procedures only those call, which at -o:none include the kernels `scan_v3` does not inline.
 Every other procedure is held to x86-64-v2, so a callee that a V2 path also reaches fails even though a V3 procedure calls it too. The disassembly must hold a
 `scan_v3`, or the procedure `--require` names, and some root that reaches an instruction past x86-64-v2, so one not
@@ -16,12 +16,13 @@ import sys
 
 SYMBOL = re.compile(r"^[0-9a-f]+ <(.+)>:$")
 # The procedures built with the V3 tier's features: the kernel's, one `scan_v3` per scan op, and the delimited passes of
-# `dsv/tier_amd64.odin`, one per instance.
+# `dsv/tier_amd64.odin`, one per instance, and the string scans JSON builds for the V3 tier.
 TIER_ROOTS = (
     re.compile(r"kernel::scan_v3:"),
     re.compile(r"kernel::\[tier_amd64\.odin\]::lookup_v3"),
     re.compile(r"kernel::\[tier_amd64\.odin\]::clmul_prefix_xor"),
-    re.compile(r"dsv::pass_(default|options)_v3:"),
+    re.compile(r"dsv::(pass_default|pass_with|read_chunk|line_end)_v3:"),
+    re.compile(r"json::\w+_v3:"),
 )
 # AT&T mnemonics past x86-64-v2. `lzcnt` runs as `bsr` on a CPU without it and answers differently. `tzcnt` is not
 # here: LLVM emits it as `rep bsf` for a non-zero input on any CPU, where it runs as `bsf` with the same answer.

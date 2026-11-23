@@ -52,9 +52,13 @@ Scanner :: struct {
 	first:       bool, // under `.First` the first member of a repeated key answers
 	group:       bool, // under `.Group` every member of a repeated key answers
 	rewalks:     bool, // the format has `.Rewalk`, so an array whose elements only steps from the end take replays
-	// The scan neither keeps facts, which `scan_pass` places, nor reads a text in pieces, whose window may end before a
-	// value, so `scanner_columns_hook` skips a member no step takes at its key.
+	// Whether `scanner_columns_hook` skips a member no step takes at its key. A scan that keeps facts, which `scan_pass`
+	// places, does not, nor does a read in pieces of a format whose window may end between a key and its value. A
+	// delimited window never does, so its scan sets it when it keeps no facts.
 	key_skips:   bool,
+	// Every step from the root is an `All` with no limit, so the members a step takes are the same in every child of
+	// the root, as a walk of `.Columns` needs to pass the columns it learnt from one record in the rest.
+	alike:       bool,
 	stop:        bool, // `stop_early`
 	stopped:     bool,
 	// Under `stop_early`, or a limit on a path or a step, the scan tracks its settled paths. Once all are, `stop_early`
@@ -221,7 +225,7 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 		h^ = {}
 	}
 	h.demand, h.rewalk, h.rewalks = demand, rewalk, .Rewalk in format.caps && rewalk != nil
-	h.key_skips = !demand.facts
+	h.key_skips, h.alike = !demand.facts, tape.demand_children_alike(demand)
 	h.dups = tape.read_dups(format, dups)
 	h.first, h.group, h.stop, h.pending = h.dups == .First, h.dups == .Group, read.stop_early, len(demand.paths)
 	h.settles = h.stop || !demand.facts && (demand.limited || scan_cuts(demand))

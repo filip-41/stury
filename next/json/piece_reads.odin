@@ -2,6 +2,7 @@ package json
 
 import "base:runtime"
 import "stury:lib/base/kernel"
+import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
@@ -18,9 +19,9 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 	if serr != nil {
 		return 0, serr, false
 	}
-	to := p.from + u64(len(src))
-	if p.from > p.keep || to < p.at {
-		return 0, tape.Piece_Gap{p.keep, p.at, p.from, to}, false
+	to, gap := tape.piece_window(p, src)
+	if gap != nil {
+		return 0, gap, false
 	}
 	if !s.started {
 		a := hook.piece_lists(p)
@@ -35,7 +36,7 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 			p.more, p.at, p.keep, p.open = true, to, 0, nil
 			return 0, nil, false
 		}
-		start = kernel.skip_ws(start[bom_length(text):], start[to:])
+		start = kernel.skip_ws(start[spell.bom_length(text):], start[to:])
 	}
 	r, took := walk_value(text, start, S, true, opts.tolerate, build.read_depth(opts), opts.budget.steps, h, regs, allocator, ctx, &pw, on)
 	root_close, err, _ = hook.walk_error(r, &RULES)
@@ -80,7 +81,7 @@ find_pieces :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Opti
 	walk :: proc(src: []u8, opts: Options, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return piece_read(src, S, opts, h, regs, a, ctx, build.finder_hook)
 	}
-	return build.read_find_pieces(src, path, &FORMATS[S], read, opts, caller, respell, Piece, walk)
+	return build.read_find_pieces(src, path, &FORMATS[S], read, opts, caller, tape.number_respell, Piece, walk)
 }
 
 @(private)

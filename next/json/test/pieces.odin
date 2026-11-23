@@ -66,8 +66,8 @@ agree_over_sampled_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opt
 	}
 }
 
-// Splits `src` in two at every byte, or at 256 of them, and in three at a sample of byte pairs, and checks each split's
-// reads.
+// Splits `src` in two at every byte, or at a sample of them past 96 bytes, and in three at a sample of byte pairs, and
+// checks each split's reads.
 @(private = "file")
 agree_over_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.Options, name: string, c: ^Corpus) {
 	defer free_all(context.temp_allocator)
@@ -83,7 +83,7 @@ agree_over_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.
 		return
 	}
 	// A long text is split at a sample of its bytes, as each split reads it whole a few dozen times.
-	step := max(1, len(src) / 256)
+	step := max(1, len(src) / testkit.rounds(96))
 	for k := 0; k <= len(src); k += step {
 		cuts := [1]int{k}
 		c.reads += 1
@@ -94,7 +94,7 @@ agree_over_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.
 	if len(src) < 8 {
 		return
 	}
-	for k in 0 ..< 16 {
+	for k in 0 ..< testkit.rounds(6) {
 		i := (k * 7919) % len(src)
 		j := i + 1 + (k * 104729) % (len(src) - i)
 		cuts := [2]int{i, j}
@@ -511,10 +511,11 @@ long_token_agrees :: proc(t: ^testing.T, src: []u8, spec: json.Spec, paths: [][]
 	tape.destroy(&p)
 }
 
-// The bytes of a long string, fewer under a sanitizer, whose shadow memory a 64 MiB text would take past the tests'
-// memory cap. A read that went back over the string per window would pass its bound at either size.
+// The bytes of a long string, 64 MiB at `-define:ROUNDS=16` and fewer by default and under a sanitizer, whose shadow
+// memory a 64 MiB text would take past the tests' memory cap. A read that went back over the string per window would
+// pass its bound at either size.
 @(private = "file")
-LONG :: 4 << 20 when ODIN_SANITIZER_FLAGS != {} else 64 << 20
+LONG :: 64 << 20 when ODIN_SANITIZER_FLAGS == {} && testkit.ROUNDS >= 16 else 4 << 20
 
 // `src` with `body` repeated to `n` bytes in place of its `*`.
 @(private = "file")

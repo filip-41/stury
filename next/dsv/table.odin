@@ -5,80 +5,19 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
-// A build of a delimited text, as a table: the walk gives each cell its column's key, which the builder's table hook
-// drops, and the header is stored once past the root value's nodes, widened by a key for each column a ragged record
-// names by its position. The table, its key slots and the build's policy for repeated keys are the document's
-// `Tabular_Ext`.
+// Table build of a delimited text. The walk gives each cell its column's key, which the builder's table hook drops.
+// The header is stored once past the root value's nodes, widened by a key for each column a ragged record names by its
+// position. The table, its key slots and the build's policy for repeated keys are the document's `Tabular_Ext`.
 
-// The node capacity a build starts with: one node per this many bytes of the text.
+// The node capacity a build starts with, in bytes of text per node.
 @(private)
 BUILD_BYTES_PER_NODE :: 4
 
-// The fewest header keys for which a table keeps key slots, past which a row's readers find a key by hash rather than
-// by comparing each.
+// The fewest header keys for which a table keeps key slots. With slots, a row's readers find a key by hash rather than
+// by comparing each. A slot holds its key's column plus one in a `u32`, 0 for none, and the slots number a power of two
+// at least twice the keys, so the table is at most half full.
 @(private)
 SLOTTED_KEYS :: 8
-
-@(private)
-build_as :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
-	if _, refused := pass_options(S, opts); refused != nil {
-		return {}, refused
-	}
-	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= build.PARALLEL_FROM {
-		return build_parallel(src, S, opts, caller)
-	}
-	if build.read_lax(opts) {
-		return build_walk(src, S, true, opts, caller)
-	}
-	return build_walk(src, S, false, opts, caller)
-}
-
-@(private)
-build_walk :: #force_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
-	when LAX {
-		if opts.pieces != nil {
-			return build_pieces(src, S, opts, caller)
-		}
-	}
-	walk :: proc "contextless" (src: []u8, opts: Options, h: ^build.Builder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-		context = ctx^
-		p, _ := pass_options(S, opts)
-		room: [FRAME_KEYS]tape.Token = ---
-		head: Head
-		if !p.no_header {
-			err: tape.Error
-			if head.keys, err = keys_room(src, S, p, room[:], a); err != nil {
-				return 0, err, false
-			}
-		}
-		defer if len(head.keys) > len(room) {
-			delete(head.keys, a)
-		}
-		root_close, err, tolerated := walk_text(src, S, LAX, p, h, regs, a, ctx, build.builder_hook_rows, &head, opts.budget.steps)
-		if err == nil && len(head.keys) > 0 && !append_header(h, regs, head, a) {
-			err = build.builder_error(h)
-		}
-		return root_close, err, tolerated
-	}
-	finish :: proc(doc: ^tape.Document, opts: Options, rules: ^tape.Rules) -> tape.Error {
-		return finish_table(doc, len(doc.nodes) > int(doc.nodes[0].n), opts)
-	}
-	return build.read_build(src, &FORMATS[S], &RULES, opts, caller, node_bound, walk, finish, BUILD_BYTES_PER_NODE)
-}
-
-// The buffer for the header's keys: `room` when they fit it, else a block of `allocator`.
-@(private)
-keys_room :: proc(src: []u8, $S: Spec, p: Pass_Options, room: []tape.Token, allocator: runtime.Allocator) -> ([]tape.Token, tape.Error) {
-	count := header_cells(src, int(text_start(src, 0)), S, p.delim, p.comment)
-	if count <= len(room) {
-		return room[:count], nil
-	}
-	keys, err := make([]tape.Token, count, allocator)
-	if e := build.took(err, raw_data(keys), count); e != nil {
-		return nil, e
-	}
-	return keys, nil
-}
 
 // Stores the header past the root value's nodes: an `Array` of role `Key` of its keys, and one key more for each
 // column a record past the header's width names by its position. False when the room cannot grow.
@@ -103,8 +42,8 @@ append_header :: proc(b: ^build.Builder, regs: ^hook.Regs, head: Head, allocator
 
 // Stores the header past the root value's nodes of the settled document `doc`, as `append_header` stores it in a build:
 // an `Array` of role `Key` of `keys`, widened to `wide` keys by one for each column past them, named by its place. The
-// header is written in place when the block of `doc.nodes` holds `room` nodes more past them and they hold it, else
-// the nodes move to a block of their own. On a refused allocation `doc` is destroyed.
+// header is written in place when the block of `doc.nodes` has `room` nodes more past them and the header fits in
+// them, else the nodes move to a new block. On a refused allocation `doc` is destroyed.
 @(private, cold)
 append_keys :: proc(doc: ^tape.Document, keys: []tape.Token, wide, room: int) -> tape.Error {
 	at := len(doc.nodes)
@@ -138,10 +77,11 @@ append_keys :: proc(doc: ^tape.Document, keys: []tape.Token, wide, room: int) ->
 	return nil
 }
 
-// Writes the document's table: its header, first row, width and key slots, the options it was read with, and the policy `dups` its rows read
-// repeated keys by, which `.Refuse` refuses at the first key the header repeats. A text read with `.Ragged` has no
-// common width, and a text with no record has no row. With `cut` the last row may be one read only in part, and a
-// table whose last row is shorter than its first has no common width.
+// Writes the document's table: its header, first row, width and key slots, the options it was read with, and the
+// policy `dups` by which its rows read repeated keys. `.Refuse` refuses at the first key the header repeats, and a key named by its place repeats none. A text
+// read with `.Ragged` has no common width, and a text with no record has no row. With `cut` the last row may be one
+// read only in part, and a last row of another width than the header's, or the first row's with no header, leaves the
+// table no common width.
 @(private)
 finish_table :: proc(doc: ^tape.Document, headed: bool, opts: Options, cut := false) -> tape.Error {
 	dups := opts.dups
@@ -152,13 +92,7 @@ finish_table :: proc(doc: ^tape.Document, headed: bool, opts: Options, cut := fa
 		keys = doc.nodes[header + 1:][:doc.nodes[header].n - 1]
 	}
 	rows := int(doc.nodes[0].n) - 1
-	slots_len := 0
-	if len(keys) >= SLOTTED_KEYS {
-		slots_len = 2
-		for slots_len < 2 * len(keys) {
-			slots_len *= 2
-		}
-	}
+	slots_len := slots_for(len(keys)) if len(keys) >= SLOTTED_KEYS else 0
 	size := size_of(tape.Doc_Ext) + size_of(tape.Table) + slots_len * size_of(u32)
 	raw, err := runtime.mem_alloc(size, align_of(tape.Doc_Ext), doc.allocator)
 	if e := build.took(err, raw_data(raw), size); e != nil {
@@ -181,14 +115,118 @@ finish_table :: proc(doc: ^tape.Document, headed: bool, opts: Options, cut := fa
 	d.delimiter = spec_delimiter(spec_of(doc.format), d.delimiter)
 	ext.format = tape.Tabular_Ext{tables = ([^]tape.Table)(table)[:1], slots = slots, dups = dups, options = d}
 	doc.ext = ext
-	if dups == .Refuse && repeat >= 0 {
-		k := keys[repeat]
-		head, _ := quotes(doc.src, k)
-		at := k.lo - u64(head)
+	if dups == .Refuse && repeat >= 0 && keys[repeat].spelling & tape.SPELLING_PLACED == 0 {
+		at := key_start(doc.src, keys[repeat])
 		tape.destroy(doc)
 		return tape.Fault{at = at, rules = &RULES, kind = .Duplicate_Key}
 	}
 	return nil
+}
+
+// Returns `err` of a build of `src` under `p`. Under `.Refuse` it returns instead the fault of a repeated header key
+// of `keys` when that comes before the fault `err`. A fault past the header's line means the walk filled every key.
+// The header's line ends at `head_end` when it is given, as in a text in pieces, whose `src` is the header alone.
+@(private, cold)
+repeat_first :: proc(err: tape.Error, src: []u8, $S: Spec, p: Pass_Options, keys: []tape.Token, opts: Options, allocator: runtime.Allocator, head_end := -1) -> tape.Error {
+	fault, faulted := err.(tape.Fault)
+	if !faulted || opts.dups != .Refuse || len(keys) < 2 {
+		return err
+	}
+	end := head_end
+	if end < 0 {
+		end = scan_record(src, record_start(src, int(text_start(src, 0)), p.comment), 0, S, p.delim).line_end
+	}
+	if fault.at <= u64(end) {
+		return err
+	}
+	at, found, oom := header_repeat(src, S, keys, allocator)
+	if oom != nil {
+		return oom
+	}
+	if found && at < fault.at {
+		return tape.Fault{at = at, rules = &RULES, kind = .Duplicate_Key}
+	}
+	return err
+}
+
+// Returns the offset of the first header key of `keys`, cells of `src`, that repeats an earlier one, and whether there
+// is one. A key named by its place repeats none.
+@(private, cold)
+header_repeat :: proc(src: []u8, $S: Spec, keys: []tape.Token, allocator: runtime.Allocator) -> (at: u64, found: bool, err: runtime.Allocator_Error) {
+	n := slots_for(len(keys))
+	slots, e := make([]u32, n, allocator)
+	if err = build.took(e, raw_data(slots), n); err != nil {
+		return
+	}
+	defer delete(slots, allocator)
+	doc := tape.Document{src = src, format = &FORMATS[S]}
+	if r := fill_slots(&doc, keys, slots); r >= 0 && keys[r].spelling & tape.SPELLING_PLACED == 0 {
+		return key_start(src, keys[r]), true, nil
+	}
+	return
+}
+
+// Under `.Refuse`, the fault of a header that repeats a name, which a read of a whole text that builds no table judges
+// before it walks, as a build does, or nil. A text in pieces judges its header when a window first holds it.
+@(private, cold)
+refuse_repeat :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocator) -> tape.Error {
+	p, _ := pass_options(S, opts)
+	if opts.dups != .Refuse || opts.pieces != nil || p.no_header {
+		return nil
+	}
+	return header_fault(src, S, p, allocator)
+}
+
+// The fault of a repeated name among the header's keys of `src`, a text that holds the header's line, or nil. A header
+// that itself faults gives none, the read reporting that fault.
+@(private, cold)
+header_fault :: proc(src: []u8, $S: Spec, p: Pass_Options, allocator: runtime.Allocator) -> tape.Error {
+	room: [FRAME_KEYS]tape.Token = ---
+	ctx := context
+	keys := header_keys(header_cells(src, S, p.delim, p.comment), room[:], allocator, &ctx) or_return
+	defer if len(keys) > len(room) {
+		delete(keys, allocator)
+	}
+	if len(keys) < 2 {
+		return nil
+	}
+	if _, _, err := read_header(src, S, p, keys); err != nil {
+		return nil
+	}
+	at, found, oom := header_repeat(src, S, keys, allocator)
+	if oom != nil {
+		return oom
+	}
+	return tape.Fault{at = at, rules = &RULES, kind = .Duplicate_Key} if found else nil
+}
+
+// The slots of a table of `keys` keys: a power of two at least twice them.
+@(private)
+slots_for :: proc "contextless" (keys: int) -> int {
+	n := 2
+	for n < 2 * keys {
+		n *= 2
+	}
+	return n
+}
+
+// The first byte of header key `k` of `src`, its opening quote when it has one.
+@(private)
+key_start :: proc "contextless" (src: []u8, k: tape.Token) -> u64 {
+	head, _ := quotes(src, k)
+	return k.lo - u64(head)
+}
+
+// Whether a built document holds a header, which a build stores past the root value's nodes.
+@(private)
+headed :: #force_inline proc "contextless" (doc: ^tape.Document) -> bool {
+	return len(doc.nodes) > int(doc.nodes[0].n)
+}
+
+// The `finish` of a build of a table: its header, when it has one, and its slots.
+@(private)
+finish_built :: proc(doc: ^tape.Document, opts: Options, rules: ^tape.Rules) -> tape.Error {
+	return finish_table(doc, headed(doc), opts)
 }
 
 // The node of the root's last row.
@@ -201,8 +239,8 @@ last_row :: proc(doc: ^tape.Document) -> tape.Node_Index {
 	return at
 }
 
-// Fills `slots`, a power of two of them or none, with each key's column plus one by its hash, each key's first column
-// only, and returns the first key that repeats one before it, or -1.
+// Fills `slots`, a power of two of them or none, by hash with each key's column plus one, for the first column of each
+// key only. Returns the column of the first key that repeats an earlier one, or -1.
 @(private)
 fill_slots :: proc(doc: ^tape.Document, keys: []tape.Node, slots: []u32) -> int {
 	f := doc.format

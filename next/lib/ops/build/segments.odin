@@ -228,7 +228,7 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 	doc.facts = facts[:fact]
 	if fact > 0 {
 		c := Segment_Facts{segs = segs, doc = &doc}
-		hook.fan(runner, segment_facts, &c)
+		hook.fan_each(runner, len(c.segs), segment_facts, &c)
 		for p in c.present {
 			doc.present += p
 		}
@@ -258,28 +258,21 @@ Segment_Facts :: struct {
 	segs:    []Segment,
 	doc:     ^tape.Document,
 	present: [64]tape.Facts,
-	next:    int,
 }
 
 // Gives each segment's facts their nodes in the document and places its comments.
 @(private)
-segment_facts :: proc(arg: rawptr) {
+segment_facts :: proc(arg: rawptr, k: int) {
 	c := (^Segment_Facts)(arg)
-	for {
-		k := intrinsics.atomic_add(&c.next, 1)
-		if k >= len(c.segs) {
-			return
+	s := &c.segs[k]
+	facts := c.doc.facts[s.fact:][:len(s.b.doc.facts)]
+	present: tape.Facts
+	for &f in facts {
+		f.node = segment_place(s, f.node)
+		if f.kind != .Comment {
+			present += {f.kind}
 		}
-		s := &c.segs[k]
-		facts := c.doc.facts[s.fact:][:len(s.b.doc.facts)]
-		present: tape.Facts
-		for &f in facts {
-			f.node = segment_place(s, f.node)
-			if f.kind != .Comment {
-				present += {f.kind}
-			}
-		}
-		present += builder_place_comments(c.doc, facts, len(c.doc.nodes))
-		intrinsics.atomic_or((^u16)(&c.present[k % len(c.present)]), transmute(u16)present)
 	}
+	present += builder_place_comments(c.doc, facts, len(c.doc.nodes))
+	intrinsics.atomic_or((^u16)(&c.present[k % len(c.present)]), transmute(u16)present)
 }

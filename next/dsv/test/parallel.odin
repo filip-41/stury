@@ -1,13 +1,11 @@
 package dsv_tests
 
-import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math/rand"
 import "core:mem"
 import "core:slice"
 import "core:strings"
-import "core:sync"
 import "core:testing"
 import "stury:dsv"
 import "stury:host"
@@ -15,13 +13,6 @@ import "stury:lib/core/tape"
 import "stury:testkit"
 
 // Builds of delimited texts on a runner's threads against the build on one thread.
-
-// A runner of `threads` threads that runs no call, so the caller reads every chunk and walks every part, as many as
-// `threads` makes, each in turn.
-@(private = "file")
-serial_runner :: proc(threads: int) -> tape.Runner {
-	return {threads = threads, start = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {}, finish = proc(data: rawptr) {}}
-}
 
 // A runner whose `start` counts its calls and runs none, so a build that joins its parts starts a task more than one
 // that falls back to one thread.
@@ -184,7 +175,7 @@ parts_build_what_one_thread_builds :: proc(t: ^testing.T) {
 			texts := [?][]u8{src, spoil(slice.clone(src, context.temp_allocator))}
 			for text, i in texts {
 				for threads in threads_of(len(text)) {
-					r := serial_runner(threads)
+					r := testkit.serial_runner(threads)
 					builds += 1
 					ok, built := agree(t, spec, text, opts, &r, fmt.tprintf("round %d text %d", round, i))
 					valid += int(built)
@@ -237,7 +228,7 @@ parts_of_multiline_cells_build_as_one_thread :: proc(t: ^testing.T) {
 	}
 	src := transmute([]u8)strings.to_string(b)
 	for threads in ([]int{1, 2, 3, 7, 17, 70, 255, 1000}) {
-		r := serial_runner(threads)
+		r := testkit.serial_runner(threads)
 		if ok, built := agree(t, .Csv, src, {}, &r, "multiline"); !ok || !testing.expect(t, built) {
 			return
 		}
@@ -276,13 +267,6 @@ parts_build_on_pools :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-@(private = "file")
-Caller_Only :: struct {
-	backing: runtime.Allocator,
-	caller:  int,
-	strays:  int,
-}
-
 // The allocator of a build on a pool is called on the calling thread alone, and a memory budget gives the document of the
 // build on one thread or a refusal.
 @(test)
@@ -293,14 +277,8 @@ parts_allocate_on_the_calling_thread :: proc(t: ^testing.T) {
 	pool: host.Pool
 	host.pool_init(&pool, 4)
 	defer host.pool_destroy(&pool)
-	c := Caller_Only{backing = context.allocator, caller = sync.current_thread_id()}
-	only := runtime.Allocator{proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
-			c := (^Caller_Only)(data)
-			if sync.current_thread_id() != c.caller {
-				sync.atomic_add(&c.strays, 1)
-			}
-			return c.backing.procedure(c.backing.data, mode, size, alignment, old_memory, old_size, loc)
-		}, &c}
+	c: testkit.Caller_Only
+	only := testkit.caller_only(&c, context.allocator)
 	for spec in dsv.Spec {
 		src := seam_text(spec, 300, 3, true, false)
 		opts := dsv.Options{format = dsv.Dsv_Options{comment = '#'}, runner = &pool.runner}
@@ -329,7 +307,7 @@ parts_free_what_they_take :: proc(t: ^testing.T) {
 	for spec in dsv.Spec {
 		src := seam_text(spec, 200, 3, true, false)
 		bad := spoil(slice.clone(src, context.temp_allocator))
-		r := serial_runner(9)
+		r := testkit.serial_runner(9)
 		for text in ([][]u8{src, bad}) {
 			for opts in parallel_options(spec) {
 				wide := opts
@@ -351,7 +329,7 @@ memory_budget_gives_the_one_thread_document_or_a_refusal :: proc(t: ^testing.T) 
 	state: rand.Default_Random_State
 	context.random_generator = testkit.seeded(t, &state, 0xb0da)
 	defer free_all(context.temp_allocator)
-	one, many := serial_runner(3), serial_runner(17)
+	one, many := testkit.serial_runner(3), testkit.serial_runner(17)
 	builds :: proc(src: []u8, spec: dsv.Spec, opts: dsv.Options, memory: u64) -> bool {
 		wide := opts
 		wide.budget.memory = memory

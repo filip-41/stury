@@ -80,7 +80,7 @@ Format_Ext :: union {
 Tabular_Ext :: struct {
 	tables:  []Table,
 	slots:   []u32,
-	// The policy the build took a header's repeated keys by, which a row's readers take for `.Default`.
+	// The policy the build took a header's repeated keys by, which says which cells of a repeated name a row keeps.
 	dups:    Duplicates,
 	// The options the text was read with, its delimiter the spec's own byte when the build left it 0.
 	options: Dsv_Options,

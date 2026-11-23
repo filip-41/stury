@@ -42,7 +42,9 @@ Grain :: enum u8 {
 // How a read takes the members of one object that share a key. `.Default` is the format's own, `Format.dups`, which is
 // `.Last` for JSON. A path read takes one member under `.Last` and `.First`, and every one in document order under
 // `.Group`, as a repeated markup name reads. A build keeps every member under `.All` and `.Group`, one under `.Last`
-// and `.First`, and fails at the second key under `.Refuse`. A path read takes `.All` and `.Refuse` as `.Last`.
+// and `.First`, and fails at the second key under `.Refuse`. A path read takes `.All` and `.Refuse` as `.Last`. A
+// table's row, whose keys are its header's names, is such an object: under `.First` and `.Last` the cells of a name the
+// build dropped are stored and no read reaches them, and the name lists at its last place under `.Last`.
 Duplicates :: enum u8 {
 	Default,
 	Last,

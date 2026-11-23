@@ -101,16 +101,8 @@ decode_bytes :: #force_inline proc "contextless" (dst: []u8, w: int, src: []u8, 
 // read.
 @(private, cold)
 decode_lax_char :: #force_no_inline proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: int) -> (int, u64) #no_bounds_check {
-	q, kind := spell.utf8_char(base[p:], base[end:])
-	if kind != .None {
-		out[w], out[w + 1], out[w + 2] = 0xEF, 0xBF, 0xBD
-		return w + 3, u64(intrinsics.ptr_sub(spell.utf8_subpart(base[p:], base[end:]), base))
-	}
-	n := intrinsics.ptr_sub(q, base[p:])
-	for i in 0 ..< n {
-		out[w + i] = base[p + u64(i)]
-	}
-	return w + n, p + u64(n)
+	n, q := spell.utf8_lax(base[p:], base[end:], out[w:])
+	return w + n, u64(intrinsics.ptr_sub(q, base))
 }
 
 // Decodes the escape at `base[p]` into `out[w:]` and returns the ends in `out` and in `base`. A backslash that ends

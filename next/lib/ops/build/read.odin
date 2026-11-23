@@ -31,7 +31,7 @@ read_validate :: #force_inline proc(src: []u8, format: ^tape.Format, opts: tape.
 	if e := tape.options_refused(format, opts); e != nil {
 		return e
 	}
-	if !validate_dups(opts) {
+	if !validate_dups(format, opts) {
 		return tape.Bad_Option{"dups"}
 	}
 	h: hook.No_Hooks
@@ -85,7 +85,7 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 	if e := tape.options_refused(format, opts); e != nil {
 		return {}, e
 	}
-	if !path_dups(opts) {
+	if !path_dups(format, opts) {
 		return {}, tape.Bad_Option{"dups"}
 	}
 	m: hook.Memory_Budget
@@ -111,7 +111,7 @@ read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Form
 	if e := tape.options_refused(format, opts); e != nil {
 		return {}, e
 	}
-	if !path_dups(opts) {
+	if !path_dups(format, opts) {
 		return {}, tape.Bad_Option{"dups"}
 	}
 	m: hook.Memory_Budget
@@ -135,15 +135,22 @@ read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Form
 	return answer, nil
 }
 
-// Whether a path read may take the repeated keys policy of `opts`. A path read takes one member of a key, so the
-// build-only policies are refused.
-path_dups :: #force_inline proc "contextless" (opts: tape.Options) -> bool {
-	return opts.dups != .Refuse && opts.dups != .All
+// Whether a path read of `format` may take the repeated keys policy of `opts`. A path read takes one member of a key, so
+// the build-only policies are refused, `.Refuse` unless the format judges it on the names it knows ahead.
+// `format` is nil for the records of a format, which judge it at their start.
+path_dups :: #force_inline proc "contextless" (format: ^tape.Format, opts: tape.Options) -> bool {
+	return opts.dups != .All && (opts.dups != .Refuse || names_ahead(format))
 }
 
-// Whether a validate may take the repeated keys policy of `opts`. It compares no keys, so `.Refuse` is refused.
-validate_dups :: #force_inline proc "contextless" (opts: tape.Options) -> bool {
-	return opts.dups != .Refuse
+// Whether a validate of `format` may take the repeated keys policy of `opts`. It compares no keys, so `.Refuse` is
+// refused unless the format judges it on the names it knows ahead.
+validate_dups :: #force_inline proc "contextless" (format: ^tape.Format, opts: tape.Options) -> bool {
+	return opts.dups != .Refuse || names_ahead(format)
+}
+
+@(private)
+names_ahead :: #force_inline proc "contextless" (format: ^tape.Format) -> bool {
+	return format != nil && .Names_Ahead in format.caps
 }
 
 // The allocator a read under `opts` allocates its blocks from: `allocator` counted through `m` when `Budget.memory` is

@@ -48,6 +48,16 @@ Piece_Gap :: struct {
 	from, to: u64, // what it held
 }
 
+// The offset past the window `src` of the text in pieces `p`, or `Piece_Gap` when the window starts past what the last
+// read keeps, or ends before where it read to.
+piece_window :: #force_inline proc "contextless" (p: ^Pieces, src: []u8) -> (to: u64, err: Error) {
+	to = p.from + u64(len(src))
+	if p.from > p.keep || to < p.at {
+		return to, Piece_Gap{p.keep, p.at, p.from, to}
+	}
+	return to, nil
+}
+
 // The bytes of the window of `src` taken at offset `from`, as a slice that its tokens' offsets in the whole text index.
 // Its bytes before `from` are not to be read: a read starts at or past `keep`, which no window starts past, and a
 // hook reads only tokens of that read or bytes its `keep` holds. Its base, the window's address less `from`, is

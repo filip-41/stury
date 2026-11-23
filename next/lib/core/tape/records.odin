@@ -62,21 +62,6 @@ Records :: struct {
 	reads:     ^Records_Reads,
 	release:   proc(r: ^Records),
 	allocator: runtime.Allocator,
-	framed:    Framed, // in a text in pieces, the bytes the framing read
-}
-
-// The bytes a framing of a text in pieces read across its windows: `to` is past the last it read, and `again` the bytes
-// it read a second time, which a framing that goes on where the last window left it keeps at 0.
-Framed :: struct {
-	to, again: u64,
-}
-
-// Counts the bytes from `lo` to `hi` a framing read in `f`.
-framed_read :: #force_inline proc "contextless" (f: ^Framed, lo, hi: u64) {
-	if lo < f.to {
-		f.again += min(hi, f.to) - lo
-	}
-	f.to = max(f.to, hi)
 }
 
 // The batch reads of the records of one spec of a format, as its own records reads read them.
@@ -108,10 +93,7 @@ records_scan :: proc(r: ^Records, demand: ^Demand, out: []Record, docs: []Docume
 // `keep`, and ends at or after their `at`, else the window is refused with `Piece_Gap`.
 records_window :: proc "contextless" (r: ^Records, src: []u8) -> Error {
 	p := r.opts.pieces
-	to := p.from + u64(len(src))
-	if p.from > p.keep || to < p.at {
-		return Piece_Gap{p.keep, p.at, p.from, to}
-	}
+	piece_window(p, src) or_return
 	r.src = piece_src(src, p.from)
 	return nil
 }

@@ -33,7 +33,6 @@ Piece_State :: struct {
 	// (`blocks`), one count from the first window to the last.
 	lists:     Memory_Budget,
 	blocks:    Memory_Budget,
-	framed:    tape.Framed, // the bytes a format framed in the text's opening, while its first walk waited
 }
 
 // How the walk treats the tokens of a container its hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest` for, and
@@ -118,12 +117,21 @@ piece_blocks :: proc "contextless" (p: ^tape.Pieces, memory: u64, allocator: run
 piece_path :: proc(p: ^tape.Pieces, src: []u8, f: ^tape.Format) -> runtime.Allocator_Error {
 	s := (^Piece_State)(p.state)
 	names := make([dynamic]u8, 0, len(s.names), s.names.allocator) or_return
+	// Where each open level's key name lies in `names`, which the levels take once the whole path is built.
+	places, perr := make([][2]int, len(s.opened), s.names.allocator)
+	if perr != nil {
+		delete(names)
+		return perr
+	}
+	placed := false
 	defer {
-		delete(s.names)
-		s.names = names
+		delete(places, s.names.allocator)
+		if !placed {
+			delete(names)
+		}
 	}
 	clear(&s.steps_buf)
-	for &lv in s.opened {
+	for lv, i in s.opened {
 		if !lv.object || lv.key.kind == .End {
 			continue
 		}
@@ -142,7 +150,7 @@ piece_path :: proc(p: ^tape.Pieces, src: []u8, f: ^tape.Format) -> runtime.Alloc
 			}
 			resize(&names, at + len(text)) or_return
 		}
-		lv.name, lv.name_n = i32(at), u32(len(names) - at)
+		places[i] = {at, len(names) - at}
 	}
 	for lv, i in s.opened {
 		if !lv.object {
@@ -150,9 +158,16 @@ piece_path :: proc(p: ^tape.Pieces, src: []u8, f: ^tape.Format) -> runtime.Alloc
 				append(&s.steps_buf, tape.Step(tape.Index(lv.count - 1))) or_return
 			}
 		} else if lv.key.kind != .End {
-			append(&s.steps_buf, tape.Step(tape.Name(string(names[lv.name:][:lv.name_n])))) or_return
+			append(&s.steps_buf, tape.Step(tape.Name(string(names[places[i][0]:][:places[i][1]])))) or_return
 		}
 	}
+	for &lv, i in s.opened {
+		if lv.object && lv.key.kind != .End {
+			lv.name, lv.name_n = i32(places[i][0]), u32(places[i][1])
+		}
+	}
+	delete(s.names)
+	s.names, placed = names, true
 	p.open = s.steps_buf[:]
 	return nil
 }

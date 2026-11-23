@@ -1,6 +1,7 @@
 package dsv_tests
 
 import "core:fmt"
+import "core:math/rand"
 import "core:slice"
 import "core:strings"
 import "core:testing"
@@ -73,6 +74,9 @@ piece_texts :: proc() -> []Piece_Text {
 	strings.builder_reset(&b)
 	strings.write_string(&b, "a,b\n")
 	append(&texts, Piece_Text{"too many", rows(&b, 9, "%d,x\n", "1,2,3\n4,5\n"), {"a", "b"}})
+	strings.builder_reset(&b)
+	strings.write_string(&b, "a,b,a\n")
+	append(&texts, Piece_Text{"repeated header", rows(&b, 9, "%d,x,y\n", "1,\"never closed\n"), {"a", "b"}})
 	append(&texts, Piece_Text{"header only", "only,a,header,line,which,runs,past,one,block,of,sixty,four,bytes,long", {"only", "long"}})
 	append(&texts, Piece_Text{"empty", "", {"a", ""}})
 	append(&texts, Piece_Text{"blank lines", "\n\r\n\n", {"a", ""}})
@@ -89,6 +93,7 @@ piece_options :: proc() -> []tape.Options {
 			{format = dsv.Dsv_Options{comment = '#'}},
 			{format = dsv.Dsv_Options{no_header = true}},
 			{format = dsv.Dsv_Options{infer = true}},
+			{dups = .Refuse},
 			{tolerate = {.Ragged}},
 			{tolerate = {.Bare_Quote}},
 			{tolerate = {.Invalid_Utf8}},
@@ -128,45 +133,43 @@ piece_paths :: proc(keys: []string, no_header: bool) -> [][]tape.Step {
 	return paths[:]
 }
 
-// The cuts of `src` into windows of `size` bytes.
-@(private = "file")
-windows_of :: proc(src: []u8, size: int) -> []int {
-	cuts := make([dynamic]int, context.temp_allocator)
-	for k := size; k < len(src); k += size {
-		append(&cuts, k)
-	}
-	return cuts[:]
-}
-
-// Reads `src` in pieces cut in two at every byte, or at a sample of them, in three at a sample of pairs, and in windows
-// of one byte, of a few bytes and of about a block.
+// Reads `src` in pieces cut in two at the ends and at a sample of bytes from a seeded start, in three at a sample of
+// pairs, and in windows of one byte, of a few bytes and of about a block. `-define:ROUNDS` widens the sample until a
+// round of 16 reads every cut and every window size.
 @(private = "file")
 agree_in_pieces :: proc(t: ^testing.T, spec: dsv.Spec, src: []u8, opts: tape.Options, paths: [][]tape.Step, name: string) -> bool {
 	reads, f := dsv.reads(spec), dsv.as(spec)
-	step := max(1, len(src) / 160)
-	for k := 0; k <= len(src); k += step {
+	step := max(1, len(src) / testkit.rounds(8))
+	for k := rand.int_max(step); k < len(src); k += step {
+		cuts := [1]int{k}
+		testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, name) or_return
+	}
+	for k in ([]int{0, len(src)}) {
 		cuts := [1]int{k}
 		testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, name) or_return
 	}
 	if len(src) >= 8 {
-		for k in 0 ..< 12 {
-			i := (k * 7919) % len(src)
-			j := i + 1 + (k * 104729) % (len(src) - i)
+		for _ in 0 ..< testkit.rounds(2) {
+			i := rand.int_max(len(src))
+			j := i + 1 + rand.int_max(len(src) - i)
 			cuts := [2]int{i, j}
 			testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, name) or_return
 		}
 	}
-	for size in ([]int{1, 2, 3, 7, 63, 64, 65, 67, 100}) {
-		testkit.pieces_agree(t, reads, f, src, opts, windows_of(src, size), paths, name) or_return
+	sizes := []int{1, 64, 65} if testkit.ROUNDS < 16 else []int{1, 2, 3, 7, 63, 64, 65, 67, 100}
+	for size in sizes {
+		testkit.pieces_agree(t, reads, f, src, opts, testkit.cuts_by(len(src), size), paths, name) or_return
 	}
 	return true
 }
 
-// Every text of every spec under every option set, read in pieces at every cut and in windows down to one byte: the
-// same verdict and fault, document, answers and scans as the whole reads.
+// Every text of every spec under every option set, read in pieces cut at a sample of bytes and in windows down to one
+// byte: the same verdict and fault, document, answers and scans as the whole reads.
 @(test)
 pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0x91ec)
 	defer free_all(context.temp_allocator)
 	for c in piece_texts() {
 		src := transmute([]u8)c.text
@@ -185,8 +188,8 @@ pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 
 // Texts whose 64-byte blocks end at the state each window must carry: inside a quoted cell, between a CR and its LF,
 // between the two quotes of a `""`, inside the header, inside a comment line, inside a UTF-8 sequence, after a TSV
-// backslash, and at a record's end. Each is read in pieces at every cut and in windows of every size up to a block
-// and a half.
+// backslash, and at a record's end. Each is read in pieces at every cut and in windows of a few sizes around a block,
+// of every size up to a block and a half at `-define:ROUNDS=16`.
 @(test)
 pieces_carry_each_state_across_a_window :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -210,6 +213,10 @@ pieces_carry_each_state_across_a_window :: proc(t: ^testing.T) {
 		{"header", .Csv, fmt.tprintf("%s,b\n1,2\n", strings.repeat("h", 70, context.temp_allocator)), {}},
 		{"quoted header", .Csv, fmt.tprintf("\"%s\",b\n1,2\n", strings.repeat("h", 70, context.temp_allocator)), {}},
 		{"comment line", .Csv, fmt.tprintf("a,b\n1,2\n#%s\n3,4\n#foot\n", strings.repeat("c", 80, context.temp_allocator)), {format = dsv.Dsv_Options{comment = '#'}}},
+		{"comment utf8", .Csv, "a,b\n1,2\n#€€€€ x\n3,4\n", {format = dsv.Dsv_Options{comment = '#'}}},
+		{"comment bad utf8", .Csv, "a,b\n1,2\n#€€ \xe2\x82\n3,4\n", {format = dsv.Dsv_Options{comment = '#'}}},
+		{"comment cut utf8", .Csv, "a,b\n1,2\n#€€\xe2\x82", {format = dsv.Dsv_Options{comment = '#'}}},
+		{"unclosed quote", .Csv, "a,b\n1,2\n3,\"x\n4,5\r\n5,6\n", {}},
 		{"comment quote", .Csv, fmt.tprintf("a,b\n1,2\n#%s\"\n3,4\n", strings.repeat("c", 58, context.temp_allocator)), {format = dsv.Dsv_Options{comment = '#'}}},
 		{"utf8", .Csv, fmt.tprintf("%s€uro\n1,2\n", pad(62)), {}},
 		{"utf8 lead", .Csv, fmt.tprintf("%s\xF0\x9F\x98\x80\n1,2\n", pad(63)), {}},
@@ -223,6 +230,12 @@ pieces_carry_each_state_across_a_window :: proc(t: ^testing.T) {
 		{"short record", .Csv, fmt.tprintf("a,b,c\n%sy\n", strings.repeat("x", 58, context.temp_allocator)), {}},
 		{"header past the frame", .Csv, fmt.tprintf("a,b%s\n1,2%s\n3,4%s\n", strings.repeat(",k", 140, context.temp_allocator), strings.repeat(",", 140, context.temp_allocator), strings.repeat(",", 140, context.temp_allocator)), {}},
 	}
+	sizes := make([dynamic]int, context.temp_allocator)
+	for size in 1 ..= 100 {
+		if testkit.ROUNDS >= 16 || size <= 2 || size == 63 || size == 64 || size == 65 {
+			append(&sizes, size)
+		}
+	}
 	for c in cases {
 		src := transmute([]u8)c.text
 		d, _ := c.opts.format.(dsv.Dsv_Options)
@@ -235,8 +248,8 @@ pieces_carry_each_state_across_a_window :: proc(t: ^testing.T) {
 				break
 			}
 		}
-		for size in 1 ..= 100 {
-			if !testkit.pieces_agree(t, reads, f, src, c.opts, windows_of(src, size), paths, c.name) {
+		for size in sizes {
+			if !testkit.pieces_agree(t, reads, f, src, c.opts, testkit.cuts_by(len(src), size), paths, c.name) {
 				break
 			}
 		}
@@ -472,67 +485,69 @@ columns_past_the_header_are_named_by_their_place :: proc(t: ^testing.T) {
 	}
 }
 
-// The records of a text in pieces are read a window at a time, a record the window's end cuts read in the next, each
-// keyed by the header, which the windows past it need not hold.
+// Under `.Refuse` a repeated header name faults as it does in a whole read, at every cut, also when the header ends in
+// the same walk as the first fault of a later record.
 @(test)
-records_in_pieces_read_a_window_at_a_time :: proc(t: ^testing.T) {
+pieces_refuse_a_repeated_header_name_before_a_later_fault :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
-	src := transmute([]u8)string("a,b\n1,\"two\nlines\"\n3,4\n")
-	p := dsv.Pieces{allocator = context.allocator}
-	defer dsv.destroy(&p)
-	r := dsv.records_open(src[:5], .Lines, .Csv, {pieces = &p})
-	got := make([dynamic]string, context.temp_allocator)
-	windows := 1
-	for {
-		out: [4]tape.Record
-		answers: [4]tape.Span_Answer
-		n := dsv.records_find(&r, {tape.Name("b")}, out[:], answers[:])
-		for a in answers[:n] {
-			append(&got, string(src[a.lo:a.hi]))
+	texts := []string{"a,a\n1\n", "a,a\n1,2\n3\n4,5\n", "a,b,a\n1,2,3\n\"x\n4\n"}
+	opts := tape.Options{dups = .Refuse}
+	paths := [][]tape.Step{{tape.All{}, tape.Name("a")}, {tape.Index(0)}}
+	for csv in texts {
+		for spec in dsv.Spec {
+			text := csv
+			if spec == .Tsv {
+				text, _ = strings.replace_all(csv, ",", "\t", context.temp_allocator)
+			}
+			src := transmute([]u8)text
+			reads, f := dsv.reads(spec), dsv.as(spec)
+			whole, werr := dsv.build(src, spec, opts)
+			tape.destroy(&whole)
+			fault, _ := werr.(tape.Fault)
+			testing.expectf(t, fault.kind == .Duplicate_Key, "%q %v: whole %v", text, spec, werr)
+			for k in 0 ..= len(src) {
+				cuts := [1]int{k}
+				if !testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, text) {
+					return
+				}
+			}
 		}
-		if !p.more {
-			break
-		}
-		windows += 1
-		p.from = p.keep
-		end := min(p.at + 5, u64(len(src)))
-		p.last = end == u64(len(src))
-		testing.expect_value(t, tape.records_window(&r, src[p.from:end]), nil)
 	}
-	testing.expectf(t, r.err == nil && slice.equal(got[:], []string{"\"two\nlines\"", "4"}), "%v %q", r.err, got[:])
-	testing.expectf(t, windows > 2, "%v windows", windows)
 }
 
-// A header that faults ends the records of a text in pieces when a window holds its line: at open when the first window
-// does, as it ends a whole text's, else at the batch whose window first does.
+// A text fed in windows of a block is handed to the reads once and a little over: each window starts at what the last
+// read kept, the open record and the bytes a sequence at a block's end may run into, so no window restarts the text.
 @(test)
-records_in_pieces_give_a_header_fault_where_the_header_ends :: proc(t: ^testing.T) {
+pieces_hand_a_text_over_once :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := transmute([]u8)string("# note\na\xFF,b\n1,2\n")
-	opts := tape.Options{format = dsv.Dsv_Options{comment = '#'}}
-	whole := dsv.records_open(src, .Lines, .Csv, opts)
-	testing.expect(t, whole.err != nil)
-	for cut in ([]int{11, 12, 15}) {
+	defer free_all(context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "id,name,note\n")
+	for i in 0 ..< 400 {
+		fmt.sbprintf(&b, "%d,\"n%d\",\"two\nlines\"\n", i, i)
+	}
+	src := transmute([]u8)strings.to_string(b)
+	WINDOW :: 64
+	for spec in ([]dsv.Spec{.Csv}) {
 		p := dsv.Pieces{allocator = context.allocator}
 		defer dsv.destroy(&p)
-		o := opts
-		o.pieces = &p
-		r := dsv.records_open(src[:cut], .Lines, .Csv, o)
-		holds := cut >= 12
-		testing.expectf(t, r.err == (whole.err if holds else nil), "cut %v: open %v, whole %v", cut, r.err, whole.err)
+		handed, windows := 0, 0
+		for end := WINDOW; ; end += WINDOW {
+			p.from, p.last = p.keep, end >= len(src)
+			window := src[p.from:min(end, len(src))]
+			handed += len(window)
+			windows += 1
+			testing.expect_value(t, dsv.validate(window, spec, {pieces = &p}), nil)
+			if p.last || !p.more {
+				break
+			}
+		}
+		testing.expectf(t, handed <= len(src) + windows * 2 * PIECE_BYTES_KEPT, "%v: %d bytes handed over for a text of %d, in %d windows", spec, handed, len(src), windows)
 	}
-	p := dsv.Pieces{allocator = context.allocator}
-	defer dsv.destroy(&p)
-	o := opts
-	o.pieces = &p
-	r := dsv.records_open(src[:10], .Lines, .Csv, o)
-	testing.expect_value(t, r.err, nil)
-	out: [2]tape.Record
-	n := dsv.records_validate(&r, out[:])
-	testing.expect(t, n == 0 && r.err == nil && p.more)
-	p.from, p.last = p.keep, true
-	testing.expect_value(t, tape.records_window(&r, src[p.from:]), nil)
-	n = dsv.records_validate(&r, out[:])
-	testing.expectf(t, n == 0 && r.err == whole.err, "%v %v, whole %v", n, r.err, whole.err)
 }
+
+// The most a window may hold again from the last: the open record, here a line and a half, and the bytes a sequence at a
+// block's end may run into.
+@(private = "file")
+PIECE_BYTES_KEPT :: 64

@@ -1,5 +1,8 @@
 package tape
 
+import "base:intrinsics"
+import "stury:lib/base/spell"
+
 // A token is one piece of a text as a format's walk reads it: a value, a key, a fact or the end of a container. Walks
 // hand tokens to hooks in text order, and a document stores them as its nodes.
 
@@ -152,4 +155,87 @@ number_spelling :: #force_inline proc "contextless" (kind: u16, int_digits, frac
 // The integer and fraction digit counts in a number token's spelling, each saturated at 31.
 number_digits :: #force_inline proc "contextless" (spelling: u16) -> (int_digits, frac_digits: int) {
 	return int(spelling >> 4 & 31), int(spelling >> 9 & 31)
+}
+
+// The end and spelling of the RFC 8259 number at `p`, where `p < end` and `p[0]` is `-` or a digit, or the fault and
+// the byte it is at. A number ends at the first byte that cannot continue it, which the caller judges. The spelling is
+// 0 unless `SPELLED`. With `HEX_REFUSED` an `x` after a leading zero is a fault, for a grammar whose hex numbers
+// another reader takes.
+number_scan :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED, $HEX_REFUSED: bool) -> (q: [^]u8, spelling: u64, kind: Fault_Kind) #no_bounds_check {
+	q = p
+	if q[0] == '-' {
+		q = q[1:]
+		if q >= end {
+			return end, 0, .Truncated
+		}
+	}
+	int_at := q
+	if q[0] == '0' {
+		q = q[1:]
+		if q < end && (q[0] - '0' < 10 || HEX_REFUSED && q[0] | 0x20 == 'x') {
+			return q, 0, .Bad_Number
+		}
+	} else {
+		r := spell.digit_end(q, end)
+		if r == q {
+			return q, 0, .Bad_Number
+		}
+		q = r
+	}
+	int_digits := u64(intrinsics.ptr_sub(q, int_at))
+	if q >= end {
+		return q, u64(digit_spelling(int_digits, 0, SPELLED)), .None
+	}
+	frac_digits: u64
+	c := q[0]
+	if c == '.' {
+		r := spell.digit_end(q[1:], end)
+		if r == q[1:] {
+			q, kind = number_fault(r, end)
+			return q, 0, kind
+		}
+		frac_digits = u64(intrinsics.ptr_sub(r, q[1:]))
+		q = r
+		if q >= end {
+			return q, u64(digit_spelling(int_digits, frac_digits, SPELLED)), .None
+		}
+		c = q[0]
+	}
+	if c | 0x20 == 'e' {
+		q = q[1:]
+		if q < end && (q[0] == '+' || q[0] == '-') {
+			q = q[1:]
+		}
+		r := spell.digit_end(q, end)
+		if r == q {
+			q, kind = number_fault(r, end)
+			return q, 0, kind
+		}
+		return r, u64(digit_spelling(int_digits, frac_digits, SPELLED) | (NUMBER_EXP when SPELLED else 0)), .None
+	}
+	return q, u64(digit_spelling(int_digits, frac_digits, SPELLED)), .None
+}
+
+// The spelling of the number `src[lo:hi]`, which a walk read as an RFC 8259 number.
+number_respell :: proc "contextless" (src: []u8, lo, hi: u64) -> u16 {
+	_, spelling, _ := number_scan(raw_data(src)[lo:], raw_data(src)[hi:], true, false)
+	return u16(spelling)
+}
+
+// The fault of a number whose fraction or exponent has no digit at `q`: `Truncated` at `end` when the text ends there.
+number_fault :: #force_inline proc "contextless" (q, end: [^]u8) -> ([^]u8, Fault_Kind) {
+	if q >= end {
+		return end, .Truncated
+	}
+	return q, .Bad_Number
+}
+
+// A plain decimal's spelling, 0 unless `SPELLED`.
+@(private)
+digit_spelling :: #force_inline proc "contextless" (int_digits, frac_digits: u64, $SPELLED: bool) -> u16 {
+	when SPELLED {
+		return number_spelling(0, int_digits, frac_digits)
+	} else {
+		return 0
+	}
 }

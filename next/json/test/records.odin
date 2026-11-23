@@ -631,3 +631,21 @@ records_read_alike_through_the_format_handle :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// Each record of a text answers as the text of that record alone does, for its verdict, each path found and the scan of
+// them, whole and in windows of several sizes.
+@(test)
+records_answer_as_their_own_text :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	src := transmute([]u8)record_lines()
+	paths := [][]tape.Step{{tape.Name("status")}, {tape.Name("level")}, {tape.Name("id")}, {tape.Index(0)}, {tape.All{}}, {tape.Name("zz")}}
+	for spec in json.Spec {
+		for cuts in ([][]int{nil, {len(src) / 2}, {1, 2, 3}, testkit.cuts_by(len(src), 7), testkit.cuts_by(len(src), 64), testkit.cuts_by(len(src), 500)}) {
+			run := testkit.Piece_Run{src, json.reads(spec), json.as(spec), {}, cuts}
+			if !testkit.records_alone_agree(t, run, {}, paths, "lines") {
+				return
+			}
+		}
+	}
+}

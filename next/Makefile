@@ -33,6 +33,14 @@ WASM_NO_TAIL_FEATURE_SETS := none simd128
 # no tier named, so the CPU's own tier is detected and used. On an x86-64 machine these runs replace the plain one. An
 # arm64 Mac runs them through Rosetta, and skips them with a note where Rosetta is not installed.
 TIER_PKGS := lib/base/kernel/test dsv/test
+# The tests of `dsv/test` that read texts of every shape through the delimited pass. The others do not reach the pass
+# instances, and a run under Rosetta takes the whole package six times.
+comma := ,
+space := $(subst ,, )
+DSV_TIER_TESTS := $(addprefix dsv_tests.,walk_tokens walked_tokens_span_what_their_kind_says builds_read_as_tables \
+	finds_answer_cells_and_records scans_agree_with_builds scans_answer_paths_as_a_build_does pieces_agree_with_whole_reads \
+	pieces_carry_each_state_across_a_window parts_build_what_one_thread_builds records_answer_as_their_own_text)
+DSV_TIER_NAMES := -define:ODIN_TEST_NAMES=$(subst $(space),$(comma),$(DSV_TIER_TESTS))
 X86_TIERS := 0 1
 X86_OPTS ?= minimal speed
 OBJDUMP ?= $(shell command -v llvm-objdump || echo /opt/homebrew/opt/llvm@22/bin/llvm-objdump)
@@ -65,7 +73,7 @@ SAN_FLAGS := $(TEST_BASE_FLAGS) -define:TEST_TIMEOUT_SECONDS=900 -define:ODIN_TE
 DEEP_TEST := json_tests.reads_nest_100000_levels_in_one_mib
 DEEP_OPTS := none speed
 
-.PHONY: check check-all lint test test-asan test-tsan
+.PHONY: check check-all lint test test-deep test-asan test-tsan
 
 check: lint test
 
@@ -128,17 +136,27 @@ test:
 	done
 ifdef X86_RUNS
 	@for p in $(TIER_PKGS); do for o in $(X86_OPTS); do \
+		case $$p in dsv/test) names="$(DSV_TIER_NAMES)";; *) names=;; esac; \
 		for t in $(X86_TIERS); do \
 			echo "== $$p (x86-64 tier $$t, -o:$$o)"; \
-			$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) -define:TIER=$$t -out:build/test-tier$$t-$$o || exit 1; \
+			$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) $$names -define:TIER=$$t -out:build/test-tier$$t-$$o || exit 1; \
 		done; \
 		echo "== $$p (x86-64 detected tier, -o:$$o)"; \
-		$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) -out:build/test-detected-$$o || exit 1; \
+		$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) $$names -out:build/test-detected-$$o || exit 1; \
 	done; done
 endif
 ifdef X86_SKIPPED
 	@echo "== x86-64 tier runs skipped: Rosetta is not installed"
 endif
+
+# The sweeps that `test` samples, read in full: every cut, every window size, every budget around the least.
+DEEP_ROUNDS ?= 16
+DEEP_PKGS := dsv/test json/test
+test-deep:
+	@mkdir -p build; for p in $(DEEP_PKGS); do \
+		echo "== $$p (-define:ROUNDS=$(DEEP_ROUNDS))"; \
+		$(ODIN) test $$p -o:minimal $(TEST_BASE_FLAGS) -define:ROUNDS=$(DEEP_ROUNDS) -define:TEST_TIMEOUT_SECONDS=3600 -out:build/test-deep-$$(echo $$p | tr / -) || exit 1; \
+	done
 
 test-asan:
 	@mkdir -p build; for p in $(TEST_PKGS); do \

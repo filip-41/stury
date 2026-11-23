@@ -57,6 +57,21 @@ Demand_Path :: struct {
 	takes_back: u32,
 }
 
+// Whether every step of `d` from the root is an `All` with no limit, so the root's children are all reached by the same
+// steps. False for a demand with no path.
+demand_children_alike :: proc "contextless" (d: ^Demand) -> bool {
+	if len(d.nodes) == 0 || d.nodes[0].n_edges == 0 {
+		return false
+	}
+	root := d.nodes[0]
+	for e in d.edges[root.edges:][:root.n_edges] {
+		if all, ok := e.step.(All); !ok || all.limit != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // The demand of `paths`, whose answers are path `i`'s for `paths[i]`, keeping `grains[i]` of its values, every
 // value whole past the end of `grains`, and the first `limits[i]` of its answers in document order, every one for 0
 // or past the end of `limits`, as jq's `first(f)` and `limit(n; f)` read. With `facts` a read keeps the facts of the

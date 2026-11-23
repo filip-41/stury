@@ -98,7 +98,16 @@ hold_bounds :: #force_inline proc "contextless" (h: ^Scanner, src: []u8, t: tape
 @(private, cold)
 hold_drop :: proc(h: ^Scanner, nodes: []tape.Node, facts: []tape.Fact) -> runtime.Allocator_Error {
 	held := make([dynamic]tape.Held_Span, 0, len(h.held), h.held.allocator) or_return
-	bytes := make([dynamic]u8, 0, h.held_live + HOLD_SLACK, h.bytes.allocator) or_return
+	bytes, err := make([dynamic]u8, 0, h.held_live + HOLD_SLACK, h.bytes.allocator)
+	if err != nil {
+		delete(held)
+		return err
+	}
+	kept := false
+	defer if !kept {
+		delete(held)
+		delete(bytes)
+	}
 	from := h.hold_from
 	h.hold_from = 0
 	defer h.hold_from = from
@@ -123,7 +132,7 @@ hold_drop :: proc(h: ^Scanner, nodes: []tape.Node, facts: []tape.Fact) -> runtim
 	}
 	delete(h.held)
 	delete(h.bytes)
-	h.held, h.bytes, h.held_live = held, bytes, len(bytes)
+	h.held, h.bytes, h.held_live, kept = held, bytes, len(bytes), true
 	return nil
 }
 

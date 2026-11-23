@@ -44,7 +44,8 @@ Capability :: enum u8 {
 	// Answers `Skip` on a member's key the same way for the member at the same place in each object of an array, so a
 	// walk whose members are placed by position, as a delimited text's cells are, may pass such a member with no token
 	// once the hook skipped it in an earlier object. The walk adds the members it passed so to the hook's field
-	// `dropped: u64` before it gives the object's `End`.
+	// `dropped: u64` before it gives the object's `End`, and learns the columns the hook takes from the first object
+	// only when its field `alike: bool` says the hook answers the same in every object.
 	Columns,
 }
 
@@ -80,6 +81,7 @@ check :: #force_inline proc "contextless" ($H: typeid) {
 	#assert(.Columns not_in C || .Skips in C, "a hook with `.Columns` has `.Skips`, as it passes members by `Skip`")
 	when .Columns in C {
 		#assert(intrinsics.type_field_type(H, "dropped") == u64, "a hook with `.Columns` has a field `dropped: u64`")
+		#assert(intrinsics.type_field_type(H, "alike") == bool, "a hook with `.Columns` has a field `alike: bool`")
 	}
 	when .Walk in C {
 		#assert(intrinsics.type_field_type(H, "walk") == rawptr, "a hook's `walk` field is a `rawptr`")
@@ -230,6 +232,30 @@ walk_error :: #force_inline proc "contextless" (r: Walk_Result, rules: ^tape.Rul
 		err = tape.Fault{at = at, rules = rules, kind = tape.Fault_Kind(u8(r)), detail = u8(u64(r) >> 8)}
 	}
 	return
+}
+
+// What `fan_each` shares: the next index to claim, the count of them and the task each is given to.
+@(private)
+Fan_Each :: struct {
+	next, count: int,
+	task:        proc(arg: rawptr, k: int),
+	arg:         rawptr,
+}
+
+// Runs `task(arg, k)` once for each `k` below `count`, on the calling thread and on the threads of `runner`, each thread
+// claiming the next index while any is left. The calls share the work through `arg`.
+fan_each :: proc(runner: ^tape.Runner, count: int, task: proc(arg: rawptr, k: int), arg: rawptr) {
+	each := Fan_Each{count = count, task = task, arg = arg}
+	fan(runner, proc(arg: rawptr) {
+			e := (^Fan_Each)(arg)
+			for {
+				k := intrinsics.atomic_add(&e.next, 1)
+				if k >= e.count {
+					return
+				}
+				e.task(e.arg, k)
+			}
+		}, &each)
 }
 
 // Runs `task(arg)` on the calling thread and on the threads of `runner`, and returns once every call has. The calls

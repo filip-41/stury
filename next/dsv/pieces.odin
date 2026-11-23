@@ -16,8 +16,8 @@ import "stury:lib/ops/build"
 // out, so a window past it need not hold them. A hook that passes over the rest of the text has it judged by the same
 // pass with no tokens.
 
-// The bytes past a block that a window holds before its walk reads the block: a UTF-8 sequence begun in the block's
-// last byte runs at most three bytes on.
+// The bytes from a block's start that a window must hold before its walk reads the block: the 64 bytes of the block
+// and the 3 more that a UTF-8 sequence begun in its last byte may run into.
 @(private)
 PIECE_AHEAD :: 64 + 3
 
@@ -31,7 +31,7 @@ Piece :: struct {
 	// With `Piece_State.rested`, the hook passed over the rest of the text, which the walk judges with no tokens, and
 	// `skip_end` says it skipped the text, whose `End` is given at the text's end.
 	skip_end:    bool,
-	keys:        [dynamic]tape.Token, // the header's keys the walk has read, which it appends as it reads them
+	keys:        [dynamic]tape.Token, // the header's keys read so far
 	headed:      bool, // the header has ended
 	widest:      int, // the most cells a record had
 	head:        [dynamic]u8, // once the header has ended, the bytes of its keys from `head_lo`
@@ -51,6 +51,16 @@ Opening :: enum u8 {
 	Header, // the empty and comment lines before the header
 	Line, // the header's line
 	Next, // the empty and comment lines past the header
+}
+
+// The state of a read of a text in pieces, made at its first window, whose lists the read's own allocator holds.
+@(private)
+piece_open_state :: proc(p: ^tape.Pieces) -> (s: ^Piece, lists: runtime.Allocator, err: runtime.Allocator_Error) {
+	s = hook.piece_state(p, Piece) or_return
+	p.release = piece_free
+	lists = hook.piece_lists(p)
+	s.keys.allocator, s.head.allocator, s.opened.allocator, s.names.allocator, s.steps_buf.allocator = lists, lists, lists, lists, lists
+	return
 }
 
 @(private)
@@ -73,37 +83,38 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 	W :: Pass(S, H, true, C)
 	context = ctx^
 	p := opts.pieces
-	s, serr := hook.piece_state(p, Piece)
+	s, lists, serr := piece_open_state(p)
 	if serr != nil {
 		return 0, serr, false
 	}
-	p.release = piece_free
-	to := p.from + u64(len(src))
-	if p.from > p.keep || to < p.at {
-		return 0, tape.Piece_Gap{p.keep, p.at, p.from, to}, false
+	to, gap := tape.piece_window(p, src)
+	if gap != nil {
+		return 0, gap, false
 	}
 	po, _ := pass_options(S, opts)
 	text := hook.piece_src(src, p.from)
 	more := !p.last
+	// A build judges the header's repeats when it has built it. Another read judges them when a window first holds it.
+	refuse := opts.dups == .Refuse && H != build.Builder
 	if !s.started {
-		if more && !piece_starts(s, text, to, S, po) {
+		if more && !piece_starts(s, text, to, S, po, refuse) {
 			p.more, p.at, p.keep, p.open = true, to, 0, nil
 			return 0, nil, false
 		}
-		lists := hook.piece_lists(p)
-		s.keys.allocator, s.head.allocator, s.opened.allocator, s.names.allocator, s.steps_buf.allocator = lists, lists, lists, lists, lists
+		if refuse {
+			if e := header_fault(text, S, po, lists); e != nil {
+				p.more, p.open = false, nil
+				return 0, e, false
+			}
+		}
 		memo, e := make([]u8, size_of(W), lists)
-		if e != nil {
+		if e = build.took(e, raw_data(memo), size_of(W)); e != nil {
 			return 0, e, false
 		}
 		s.memo = memo
 		w := (^W)(raw_data(memo))
-		w.delim, w.tolerate, w.start, w.line, w.in_header = po.delim, po.tolerate, 1, 1, !po.no_header
-		steps := opts.budget.steps
-		w.steps[0] = steps + 1 if steps != 0 && steps < max(u64) else max(u64)
-		when .Columns in C {
-			w.columns = ~u64(0)
-		}
+		pass_start(w, int(to), h, po, opts.budget.steps)
+		w.in_header = !po.no_header
 	}
 	w := (^W)(raw_data(s.memo))
 	w.n, w.h, w.p, w.piece[0] = int(to), h, po, s
@@ -115,14 +126,11 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 	when .Walk in C {
 		h.walk = w
 	}
-	r := run_pass(w, text, 0, po, regs, on, true)
+	r := steps_ended(w, run_pass(w, text, 0, po, regs, on, true))
 	when .Walk in C {
 		h.walk = nil
 	}
 	s.started = true
-	if u8(r) == hook.WALK_STOPPED && w.steps[0] == 0 {
-		r = hook.walk_result(u64(r) >> 16, hook.WALK_STEPS)
-	}
 	s.headed, s.widest = !po.no_header && !w.in_header, w.widest
 	if head != nil {
 		head.keys, head.widest = s.keys[:], w.widest
@@ -149,35 +157,30 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 // order mark, and under comments with a header, the first byte of the record past the header, not a CR whose next
 // byte may make it an empty line. Each window goes on reading the opening where the last one stopped, in `s`.
 @(private)
-piece_starts :: proc "contextless" (s: ^Piece, src: []u8, to: u64, $S: Spec, p: Pass_Options) -> bool {
+piece_starts :: proc "contextless" (s: ^Piece, src: []u8, to: u64, $S: Spec, p: Pass_Options, refuse: bool) -> bool {
 	if to < 3 {
 		return false
 	}
-	if p.comment == 0 || p.no_header {
+	if p.no_header || p.comment == 0 && !refuse {
 		return true
 	}
 	f := &s.frame
-	from := f.i
-	defer tape.framed_read(&s.framed, u64(from), u64(f.i))
 	if s.opening == .Text {
 		f.i, s.opening = int(text_start(src, 0)), .Header
-		from = f.i
 	}
 	if s.opening == .Header {
 		if !record_start_on(src, f, p.comment, true) {
 			return false
 		}
-		s.opening, s.header_lo, s.header, f.first = .Line, f.i, {cells = 1, fault_at = -1}, true
+		s.opening, s.header_lo, s.header, f.first = .Line, f.i, {cells = 1, wide_at = -1}, true
 	}
 	if s.opening == .Line {
-		if !scan_record_on(src, s.header_lo, 0, S, p.delim, &s.header, f, true) {
+		if !scan_record_on(src, s.header_lo, 0, S, p.delim, &s.header, f, true, false) {
 			return false
 		}
 		s.opening, f.i = .Next, s.header.line_end + 1
-		tape.framed_read(&s.framed, u64(from), u64(s.header.line_end))
-		from = f.i
 	}
-	return record_start_on(src, f, p.comment, true)
+	return p.comment == 0 || record_start_on(src, f, p.comment, true)
 }
 
 // The lowest offset the walk of the next window reads: the open record's first byte, the first comment line held, and
@@ -196,9 +199,8 @@ piece_keep :: proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) -> u64 {
 @(private, cold)
 piece_hold_head :: proc(s: ^Piece, text: []u8) -> runtime.Allocator_Error {
 	first, last := s.keys[0], s.keys[len(s.keys) - 1]
-	head, _ := quotes(text, first)
 	_, tail := quotes(text, last)
-	lo, hi := first.lo - u64(head), last.lo + u64(last.n) + u64(tail)
+	lo, hi := key_start(text, first), last.lo + u64(last.n) + u64(tail)
 	resize(&s.head, int(hi - lo)) or_return
 	copy(s.head[:], text[lo:hi])
 	s.head_lo = lo
@@ -288,8 +290,8 @@ piece_rested :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) ->
 	return false, false
 }
 
-// In a walk in pieces, has the pass judge the rest of the text with no tokens, as `judge_from` does for a whole text,
-// and true. With `skip` the text's `End` is still given. False for a whole text.
+// In a walk in pieces, makes the pass judge the rest of the text with no tokens, as `judge_from` does for a whole text,
+// and returns true. With `skip` the text's `End` is still given. Returns false for a whole text.
 @(private)
 piece_rests :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), skip: bool) -> bool {
 	when LAX {
@@ -329,12 +331,17 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 				err = build.builder_error(h)
 			}
 		}
+		if s := (^Piece)(opts.pieces.state); err != nil && s != nil && len(s.head) > 0 {
+			head_end := int(s.head_lo) + len(s.head)
+			if s.head[len(s.head) - 1] == '\n' {
+				head_end -= 1
+			}
+			po, _ := pass_options(S, opts)
+			err = repeat_first(err, tape.piece_src(s.head[:], s.head_lo), S, po, head.keys, opts, a, head_end)
+		}
 		return root_close, err, tolerated
 	}
-	finish :: proc(doc: ^tape.Document, opts: Options, rules: ^tape.Rules) -> tape.Error {
-		return finish_table(doc, len(doc.nodes) > int(doc.nodes[0].n), opts)
-	}
-	return build.read_build_pieces(src, &FORMATS[S], &RULES, opts, caller, Piece, walk, finish, table_so_far)
+	return build.read_build_pieces(src, &FORMATS[S], &RULES, opts, caller, Piece, walk, finish_built, table_so_far)
 }
 
 // Settles a build's document so far as a table: its rows read whole so far and the row the cut is inside with its cells
@@ -350,7 +357,7 @@ table_so_far :: proc(doc: ^tape.Document, opts: Options, rules: ^tape.Rules) -> 
 			return e
 		}
 	}
-	return finish_table(doc, len(doc.nodes) > int(doc.nodes[0].n), opts, true)
+	return finish_table(doc, headed(doc), opts, true)
 }
 
 @(private)
@@ -359,7 +366,7 @@ find_pieces :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Opti
 		h.key_text = piece_keys(opts.pieces, h.key_text)
 		return piece_read(src, S, opts, h, regs, ctx, build.finder_hook, nil)
 	}
-	return build.read_find_pieces(src, path, &FORMATS[S], read, opts, caller, respell, Piece, walk)
+	return build.read_find_pieces(src, path, &FORMATS[S], read, opts, caller, tape.number_respell, Piece, walk)
 }
 
 @(private)

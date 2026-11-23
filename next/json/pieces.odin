@@ -588,7 +588,7 @@ piece_number_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Wa
 			q, tail, kind = number5(run[-1:], end)
 		} else {
 			wide: u64
-			q, wide, kind = number(run[-1:], end, true, S)
+			q, wide, kind = tape.number_scan(run[-1:], end, true, S == .Json5)
 			tail = u16(wide)
 		}
 		if kind == .Truncated && pw.more {

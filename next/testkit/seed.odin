@@ -22,6 +22,12 @@ deadline :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, time.Duration(TIMEOUT_SECONDS) * time.Second)
 }
 
+// Whether a run reads a point of a sweep that is too long to read in full: one point in `of` by default, every point
+// at `ROUNDS` of `of`, chosen from the test's seeded generator.
+sampled :: proc(of: int) -> bool {
+	return ROUNDS >= of || rand.int_max(of) < ROUNDS
+}
+
 // The rounds of a randomized test that has `n` by default.
 rounds :: proc "contextless" (n: int) -> int {
 	return n * ROUNDS

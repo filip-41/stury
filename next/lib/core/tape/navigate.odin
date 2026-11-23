@@ -111,7 +111,7 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 		return NO_NODE, step_refused(node.kind)
 	}
 	if t, row := row_of(doc, at); row {
-		return row_member(doc, t, at, name, table_dups(doc, dups))
+		return row_member(doc, t, at, name, row_policy(doc, dups))
 	}
 	policy := read_dups(doc.format, dups)
 	partial := node.spelling & CONTAINER_PARTIAL != 0
@@ -378,7 +378,7 @@ next_child :: proc "contextless" (r: Reader, c: ^Children, dups := Duplicates.De
 	end := c.container + Node_Index(node.n)
 	if node.kind == .Object {
 		if c.header != 0 {
-			return next_cell(doc, c, table_dups(doc, dups))
+			return next_cell(doc, c, row_policy(doc, dups))
 		}
 		policy := read_dups(doc.format, dups)
 		if c.named || policy == .Group {
@@ -866,10 +866,39 @@ row_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (
 	return table_around(ext, doc, at)
 }
 
-// The policy a table's row reads `dups` as, in a document with a table: the build's for `.Default`.
+// How a table kept the cells of a header name that repeats: the first or the last of a name under `.First` and `.Last`,
+// as an object built under them keeps one member of a key, and every one under the other policies.
 @(private)
-table_dups :: #force_inline proc "contextless" (doc: ^Document, dups: Duplicates) -> Duplicates {
-	return read_dups(doc.format, doc.ext.format.(Tabular_Ext).dups if dups == .Default else dups)
+table_kept :: #force_inline proc "contextless" (doc: ^Document) -> Duplicates {
+	d := doc.ext.format.(Tabular_Ext).dups
+	return d if d == .First || d == .Last else .All
+}
+
+// The policy a row of a table reads `dups` as. A table that kept one cell of a repeated name never reads another, so
+// its policy is the table's, and the cells of a table that kept every one are read as an object's members are.
+@(private)
+row_policy :: #force_inline proc "contextless" (doc: ^Document, dups: Duplicates) -> Duplicates {
+	if kept := table_kept(doc); kept != .All {
+		return kept
+	}
+	return read_dups(doc.format, dups)
+}
+
+// Whether cell `j` of the `cells` of a row is one a table that kept the `kept` cell of a name stored but dropped: a
+// later cell of its key under `.Last`, an earlier under `.First`.
+@(private)
+cell_dropped :: proc "contextless" (doc: ^Document, header: Node_Index, j, cells: int, kept: Duplicates) -> bool #no_bounds_check {
+	k := doc.nodes[header + 1 + Node_Index(j)]
+	lo, hi := 0, j
+	if kept == .Last {
+		lo, hi = j + 1, cells
+	}
+	for o in lo ..< hi {
+		if doc_same_keys(doc, doc.nodes[header + 1 + Node_Index(o)], k) {
+			return true
+		}
+	}
+	return false
 }
 
 // The table whose node is the array at `at`, false for an array that is no table.
@@ -954,7 +983,7 @@ row_length :: proc "contextless" (doc: ^Document, t: Table, at: Node_Index) -> i
 	}
 	c := Children{container = at, next = at + 1, header = t.header}
 	for {
-		if _, _, p := next_cell(doc, &c, .First); p != .Found {
+		if _, _, p := next_cell(doc, &c, row_policy(doc, .Default)); p != .Found {
 			return int(c.place)
 		}
 	}
@@ -966,6 +995,7 @@ row_length :: proc "contextless" (doc: ^Document, t: Table, at: Node_Index) -> i
 next_cell :: proc "contextless" (doc: ^Document, c: ^Children, dups: Duplicates) -> (key, value: Node_Index, p: Presence) #no_bounds_check {
 	t := Table{header = c.header}
 	cells := Node_Index(row_cells(doc, t, c.container))
+	kept := table_kept(doc)
 	next: for c.next < c.container + 1 + cells {
 		j := c.next - c.container - 1
 		value = c.next
@@ -973,7 +1003,11 @@ next_cell :: proc "contextless" (doc: ^Document, c: ^Children, dups: Duplicates)
 		c.next += 1
 		k := doc.nodes[key]
 		if c.named {
-			if !doc_names(doc, k, c.name) {
+			if !doc_names(doc, k, c.name) || !c.once && kept != .All && cell_dropped(doc, c.header, int(j), int(cells), kept) {
+				continue
+			}
+		} else if !c.once && kept == .Last {
+			if cell_dropped(doc, c.header, int(j), int(cells), kept) {
 				continue
 			}
 		} else if !c.once && dups != .Group {

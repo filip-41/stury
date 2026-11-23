@@ -5,7 +5,7 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
-// Delimited texts: CSV as RFC 4180, TSV, and the plain spec `Spec` names. A text is an array of records, each an
+// Delimited texts in the grammars `Spec` names: CSV as RFC 4180, TSV and Plain. A text is an array of records, each an
 // object whose keys are the header's cells, or under `Dsv_Options.no_header` an array of cells. A build keeps the
 // records as a table, its header stored once.
 
@@ -16,21 +16,22 @@ Spec :: enum u8 {
 	Plain, // no quotes and no escapes: a quote is text, and a cell cannot hold the delimiter, CR or LF
 }
 
-// Options of a delimited read, with its own in `format` as a `tape.Dsv_Options`. `budget` sets `depth`, `nodes`,
-// `memory` and `steps` (a step is the text or one record). `runner` is for `build` alone, which builds a long whole text
-// in parts on its threads: every other read ignores it, as does a build of a text in `pieces`. Under `Budget.memory` a
-// build with no runner is made on one thread, and one with a runner counts the blocks of its parts.
+// Options of a delimited read. The format's own options are in `format` as a `tape.Dsv_Options`. `budget` sets `depth`,
+// `nodes`, `memory` and `steps` (a step is the text or one record). `runner` applies to `build` alone, which builds a
+// long text in parts on its threads. Every other read ignores it, as does a build of a text in `pieces`. Under
+// `Budget.memory` a build with no runner is made on one thread, and a build with a runner counts the blocks of its
+// parts.
 Options :: tape.Options
 Dsv_Options :: tape.Dsv_Options
 
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Csv   = {name = "csv", id = 4, facts = FACTS, caps = {.Rewalk}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_csv, number = number_value, same_text = same_csv, key_hash = hash_csv, room = decode_room, close_end = close_csv},
-	.Tsv   = {name = "tsv", id = 5, facts = FACTS, caps = {.Rewalk}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_tsv, number = number_value, same_text = same_tsv, key_hash = hash_tsv, room = decode_room, close_end = close_tsv},
-	.Plain = {name = "plain", id = 6, facts = FACTS, caps = {.Rewalk}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_plain, number = number_value, same_text = same_plain, key_hash = hash_plain, room = decode_room, close_end = close_plain},
+	.Csv   = {name = "csv", id = FIRST_ID + tape.Format_Id(Spec.Csv), facts = FACTS, caps = {.Rewalk, .Names_Ahead}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_csv, number = number_value, same_text = same_csv, key_hash = hash_csv, room = decode_room, close_end = close_csv},
+	.Tsv   = {name = "tsv", id = FIRST_ID + tape.Format_Id(Spec.Tsv), facts = FACTS, caps = {.Rewalk, .Names_Ahead}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_tsv, number = number_value, same_text = same_tsv, key_hash = hash_tsv, room = decode_room, close_end = close_tsv},
+	.Plain = {name = "plain", id = FIRST_ID + tape.Format_Id(Spec.Plain), facts = FACTS, caps = {.Rewalk, .Names_Ahead}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_plain, number = number_value, same_text = same_plain, key_hash = hash_plain, room = decode_room, close_end = close_plain},
 }
 
-// A comment line is a fact of the record after it, or the root's foot past the last.
+// A comment line is a fact of the record after it, or of the root as its foot when it follows the last record.
 @(private)
 FACTS :: tape.Facts{.Comment, .Comment_Foot}
 
@@ -40,20 +41,7 @@ as :: proc "contextless" (spec: Spec) -> ^tape.Format {
 	return &FORMATS[spec] if spec <= max(Spec) else nil
 }
 
-@(private, rodata)
-READS := [Spec]tape.Reads {
-	.Csv   = {validate = validate_of, build = build_of, find = find_of, scan = scan_of, records = records_of},
-	.Tsv   = {validate = validate_of, build = build_of, find = find_of, scan = scan_of, records = records_of},
-	.Plain = {validate = validate_of, build = build_of, find = find_of, scan = scan_of, records = records_of},
-}
-
-// The reads of `spec`, for a caller that picks the format at run time, to use with the handle `as` returns. Nil for a
-// `spec` out of range.
-reads :: proc "contextless" (spec: Spec) -> ^tape.Reads {
-	return &READS[spec] if spec <= max(Spec) else nil
-}
-
-// Returns the error in `src`, or nil when `src` is one text of `spec`. Allocates only for a walk that counts steps
+// Returns the error in `src`, or nil when `src` is a valid text of `spec`. Allocates only for a walk that counts steps
 // past a header of more than `FRAME_KEYS` cells, and for a text in `opts.pieces`, whose state `opts.pieces.allocator`
 // holds. An optimized build with a constant `spec` links only that spec's walk.
 @(require_results)
@@ -69,12 +57,13 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Csv, opts := Options{}, a
 	runtime.panic_contextless("dsv: spec out of range")
 }
 
-// Builds a document of every record in `src` read as `spec`, as a table: each record an object of its cells, whose
-// keys are the header's, stored once, and comment lines as facts. A header that repeats a key gives a record's cells of
-// it as `opts.dups` says, and `.Refuse` fails at the repeat. Its nodes point into `src`. With `opts.runner` a long text
-// is built in parts on its threads, and `allocator` is called on the calling thread only. The document and the error
-// are those of a build on one thread. Under `Budget.memory` a build on a runner counts its parts' blocks, so it may build a
-// text a build on one thread is refused, and a block it is refused has the text built on one thread. A text in `opts.pieces` is built on the calling thread, and gives the table so far with `pieces.so_far`.
+// Builds a document of every record in `src` read as `spec`, as a table: each record is an object of its cells, whose
+// keys are the header's, stored once, and comment lines become facts. A header that repeats a key gives a record's
+// cells of it as `opts.dups` says, and `.Refuse` fails at the repeat. The nodes point into `src`. With `opts.runner` a
+// long text is built in parts on its threads, and `allocator` is called on the calling thread only. The document and
+// the error are those of a build on one thread. Under `Budget.memory` a build on a runner counts its parts' blocks, so
+// it may build a text that a build on one thread refuses, and when it is refused a block the text is built on one
+// thread. A text in `opts.pieces` is built on the calling thread, and gives the table so far with `pieces.so_far`.
 @(require_results)
 build :: #force_inline proc(src: []u8, spec := Spec.Csv, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	switch spec {
@@ -125,6 +114,9 @@ validate_as :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, allocat
 	if _, refused := pass_options(S, opts); refused != nil {
 		return refused
 	}
+	if e := refuse_repeat(src, S, opts, allocator); e != nil {
+		return e
+	}
 	if build.read_lax(opts) {
 		return validate_walk(src, S, true, opts, allocator)
 	}
@@ -150,6 +142,9 @@ find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, read: t
 	if _, refused := pass_options(S, opts); refused != nil {
 		return {}, refused
 	}
+	if e := refuse_repeat(src, S, opts, caller); e != nil {
+		return {}, e
+	}
 	if build.read_lax(opts) {
 		return find_walk(src, path, S, true, read, opts, caller)
 	}
@@ -159,7 +154,7 @@ find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, read: t
 @(private)
 find_walk :: #force_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
 	when LAX {
-		if opts.pieces != nil && build.path_dups(opts) {
+		if opts.pieces != nil {
 			return find_pieces(src, path, S, read, opts, caller)
 		}
 	}
@@ -171,13 +166,16 @@ find_walk :: #force_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bo
 		p, _ := pass_options(S, opts)
 		return walk_text(src, S, LAX, p, h, regs, a, ctx, build.finder_hook, nil, opts.budget.steps)
 	}
-	return build.read_find(src, path, &FORMATS[S], read, opts, caller, respell, rewalk, walk)
+	return build.read_find(src, path, &FORMATS[S], read, opts, caller, tape.number_respell, rewalk, walk)
 }
 
 @(private)
 scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
 	if _, refused := pass_options(S, opts); refused != nil {
 		return {}, refused
+	}
+	if e := refuse_repeat(src, S, opts, caller); e != nil {
+		return {}, e
 	}
 	if build.read_lax(opts) {
 		return scan_walk(src, demand, S, true, read, opts, caller)
@@ -188,7 +186,7 @@ scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, read
 @(private)
 scan_walk :: #force_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
 	when LAX {
-		if opts.pieces != nil && build.path_dups(opts) {
+		if opts.pieces != nil {
 			return scan_pieces(src, demand, S, read, opts, caller)
 		}
 	}
@@ -199,72 +197,53 @@ scan_walk :: #force_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX:
 	return build.read_scan(src, demand, &FORMATS[S], read, opts, caller, nil, node_bound, walk)
 }
 
-// The most nodes a delimited text of `src` can make, at most `3 * len(src)`, plus 8 of slack. A record spends a byte
-// per cell, its delimiter or line end, and makes a node per cell and its key, and one for itself.
+// The most nodes a delimited text of `src` can make: `3 * len(src)` plus 8 of slack. A cell takes a byte, its delimiter
+// or line end, and makes two nodes, itself and its key. A record makes one more for itself.
 @(private)
 node_bound :: #force_inline proc "contextless" (src: []u8, depth: u64) -> u64 {
 	return 3 * u64(len(src)) + 8
 }
 
 @(private)
-decode_csv :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {return decode_cell(src, t, buf, .Csv)}
-@(private)
-decode_tsv :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {return decode_cell(src, t, buf, .Tsv)}
-@(private)
-decode_plain :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {return decode_cell(src, t, buf, .Plain)}
-@(private)
-same_csv :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {return same_cells(src, t, other, o, .Csv)}
-@(private)
-same_tsv :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {return same_cells(src, t, other, o, .Tsv)}
-@(private)
-same_plain :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {return same_cells(src, t, other, o, .Plain)}
-@(private)
-hash_csv :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {return cell_hash(src, t, .Csv)}
-@(private)
-hash_tsv :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {return cell_hash(src, t, .Tsv)}
-@(private)
-hash_plain :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {return cell_hash(src, t, .Plain)}
-@(private)
-close_csv :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u64, bool) {return close_end(doc, at, .Csv)}
-@(private)
-close_tsv :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u64, bool) {return close_end(doc, at, .Tsv)}
-@(private)
-close_plain :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u64, bool) {return close_end(doc, at, .Plain)}
+build_as :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
+	if _, refused := pass_options(S, opts); refused != nil {
+		return {}, refused
+	}
+	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= build.PARALLEL_FROM {
+		return build_parallel(src, S, opts, caller)
+	}
+	if build.read_lax(opts) {
+		return build_walk(src, S, true, opts, caller)
+	}
+	return build_walk(src, S, false, opts, caller)
+}
 
-// The byte just past record `at`'s line end, CR LF included, or past its last cell at the text's end. A record kept
-// whole ends past its last cell. One a path read kept only part of is read from its first byte to the first line end
-// outside a quoted cell. The root ends at `root_close`. False for a record of a `.Held` document, which holds no byte
-// between its nodes.
 @(private)
-close_end :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index, $S: Spec) -> (u64, bool) #no_bounds_check {
-	if at == tape.ROOT {
-		return doc.root_close, true
-	}
-	if .Held in doc.flags {
-		return 0, false
-	}
-	src := doc.src
-	node := doc.nodes[at]
-	p: u64
-	if node.spelling & tape.CONTAINER_PARTIAL == 0 && node.n > 1 {
-		last := doc.nodes[at + tape.Node_Index(node.n) - 1]
-		_, tail := quotes(src, last)
-		p = last.lo + u64(last.n) + u64(tail)
-	} else {
-		p = node.lo
-		quoted := false
-		for p < u64(len(src)) && (quoted || src[p] != '\n' && src[p] != '\r') {
-			when S == .Csv {
-				quoted ~= src[p] == '"'
-			}
-			p += 1
+build_walk :: #force_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
+	when LAX {
+		if opts.pieces != nil {
+			return build_pieces(src, S, opts, caller)
 		}
 	}
-	if p < u64(len(src)) && src[p] == '\r' {
-		p += 1
+	walk :: proc "contextless" (src: []u8, opts: Options, h: ^build.Builder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
+		context = ctx^
+		p, _ := pass_options(S, opts)
+		room: [FRAME_KEYS]tape.Token = ---
+		head: Head
+		if !p.no_header {
+			err: tape.Error
+			if head.keys, err = header_keys(header_cells(src, S, p.delim, p.comment), room[:], a, ctx); err != nil {
+				return 0, err, false
+			}
+		}
+		defer if len(head.keys) > len(room) {
+			delete(head.keys, a)
+		}
+		root_close, err, tolerated := walk_text(src, S, LAX, p, h, regs, a, ctx, build.builder_hook_rows, &head, opts.budget.steps)
+		if err == nil && len(head.keys) > 0 && !append_header(h, regs, head, a) {
+			err = build.builder_error(h)
+		}
+		return root_close, repeat_first(err, src, S, p, head.keys, opts, a), tolerated
 	}
-	if p < u64(len(src)) && src[p] == '\n' {
-		p += 1
-	}
-	return p, true
+	return build.read_build(src, &FORMATS[S], &RULES, opts, caller, node_bound, walk, finish_built, BUILD_BYTES_PER_NODE)
 }
