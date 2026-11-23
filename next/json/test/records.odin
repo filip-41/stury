@@ -5,27 +5,26 @@ import "core:strings"
 import "core:testing"
 import "stury:json"
 import "stury:lib/core/tape"
-import "stury:lib/ops/records"
 import "stury:testkit"
 
 // The batch of one record, the form the tests follow the records through.
 @(private = "file")
-one_validate :: proc(r: ^json.Records) -> (rec: records.Record, more: bool) {
-	out: [1]records.Record
+one_validate :: proc(r: ^json.Records) -> (rec: tape.Record, more: bool) {
+	out: [1]tape.Record
 	return out[0], json.records_validate(r, out[:]) == 1
 }
 
 @(private = "file")
-one_find :: proc(r: ^json.Records, path: []tape.Step, read := tape.Read_Options{}) -> (rec: records.Record, answer: tape.Span_Answer, more: bool) {
-	out: [1]records.Record
+one_find :: proc(r: ^json.Records, path: []tape.Step, read := tape.Read_Options{}) -> (rec: tape.Record, answer: tape.Span_Answer, more: bool) {
+	out: [1]tape.Record
 	answers: [1]tape.Span_Answer
 	n := json.records_find(r, path, out[:], answers[:], read)
 	return out[0], answers[0], n == 1
 }
 
 @(private = "file")
-one_scan :: proc(r: ^json.Records, demand: ^tape.Demand, read := tape.Read_Options{}) -> (rec: records.Record, doc: tape.Document, more: bool) {
-	out: [1]records.Record
+one_scan :: proc(r: ^json.Records, demand: ^tape.Demand, read := tape.Read_Options{}) -> (rec: tape.Record, doc: tape.Document, more: bool) {
+	out: [1]tape.Record
 	docs: [1]tape.Document
 	n := json.records_scan(r, demand, out[:], docs[:], read)
 	return out[0], docs[0], n == 1
@@ -332,7 +331,7 @@ records_read_the_root_objects_members :: proc(t: ^testing.T) {
 			spans[i] = {u64(v), u64(v + len(m.value))}
 			at = v + len(m.value)
 		}
-		check :: proc(t: ^testing.T, what: string, c: Case, rec: records.Record, i: int, spans: [][2]u64, m: Member) {
+		check :: proc(t: ^testing.T, what: string, c: Case, rec: tape.Record, i: int, spans: [][2]u64, m: Member) {
 			raw, escaped := tape.key_raw(transmute([]u8)c.src, rec.key)
 			testing.expectf(t, rec.index == u64(i) && rec.lo == spans[i][0] && rec.hi == spans[i][1] && rec.err == nil, "%q %s %d: %v, want %v", c.src, what, i, rec, spans[i])
 			testing.expectf(t, rec.key.role == .Key && string(raw) == m.key && escaped == m.escaped, "%q %s %d key: %q %v, want %q %v", c.src, what, i, raw, escaped, m.key, m.escaped)
@@ -378,7 +377,7 @@ records_read_alike_in_any_batch_size :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	Case :: struct {
 		src:     string,
-		framing: records.Framing,
+		framing: tape.Framing,
 	}
 	lines := record_lines()
 	cases := []Case {
@@ -391,14 +390,14 @@ records_read_alike_in_any_batch_size :: proc(t: ^testing.T) {
 	defer tape.destroy_demand(&demand)
 	for c in cases {
 		src := transmute([]u8)c.src
-		want_recs := make([dynamic]records.Record, context.temp_allocator)
+		want_recs := make([dynamic]tape.Record, context.temp_allocator)
 		want_answers := make([dynamic]tape.Span_Answer, context.temp_allocator)
 		want_docs := make([dynamic]string, context.temp_allocator)
 		for size in ([]int{1, 2, 3, 7, 100}) {
-			recs := make([dynamic]records.Record, context.temp_allocator)
+			recs := make([dynamic]tape.Record, context.temp_allocator)
 			answers := make([dynamic]tape.Span_Answer, context.temp_allocator)
 			docs := make([dynamic]string, context.temp_allocator)
-			out := make([]records.Record, size, context.temp_allocator)
+			out := make([]tape.Record, size, context.temp_allocator)
 			found := make([]tape.Span_Answer, size, context.temp_allocator)
 			scanned := make([]tape.Document, size, context.temp_allocator)
 			r := json.records_open(src, c.framing)
@@ -530,7 +529,7 @@ records_go_on_after_a_record_the_budget_refuses :: proc(t: ^testing.T) {
 	big := strings.to_string(b)
 	values := []string{big, `{"a":2}`, big, `{"a":3}`}
 	Case :: struct {
-		framing: records.Framing,
+		framing: tape.Framing,
 		src:     string,
 	}
 	cases := []Case {
@@ -581,6 +580,56 @@ records_go_on_after_a_record_the_budget_refuses :: proc(t: ^testing.T) {
 			}
 			_, _, more = one_find(&r, ring_path)
 			testing.expectf(t, !more && r.err == nil, "%v %v find end: %v", c.framing, opts.budget, r.err)
+		}
+	}
+}
+
+// The records a caller picking the format at run time makes through `tape.Reads` read as `records_open`'s do.
+@(test)
+records_read_alike_through_the_format_handle :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Case :: struct {
+		src:     string,
+		framing: tape.Framing,
+		spec:    json.Spec,
+	}
+	cases := []Case {
+		{record_lines(), .Lines, .Json},
+		{`[1, {"status":2}, "x", [3], {"status":5,"level":"a"}, 7,]`, .Elements, .Jsonc},
+		{`{"a":1, b:{"status":2}, "c":[3]} x`, .Members, .Json5},
+	}
+	path := []tape.Step{tape.Name("status")}
+	demand, _ := tape.demand_of({path, {tape.Name("level")}})
+	defer tape.destroy_demand(&demand)
+	for c in cases {
+		src := transmute([]u8)c.src
+		reads := json.reads(c.spec)
+		out, want: [64]tape.Record
+		found, want_found: [64]tape.Span_Answer
+		docs, want_docs: [64]tape.Document
+		for op in 0 ..< 3 {
+			r := json.records_open(src, c.framing, c.spec)
+			made, err := reads.records(json.as(c.spec), src, c.framing, {}, context.allocator)
+			testing.expectf(t, err == nil, "%q: %v", c.src, err)
+			n, m: int
+			switch op {
+			case 0:
+				n, m = json.records_validate(&r, want[:]), tape.records_validate(made, out[:])
+			case 1:
+				n, m = json.records_find(&r, path, want[:], want_found[:]), tape.records_find(made, path, out[:], found[:])
+			case 2:
+				n, m = json.records_scan(&r, &demand, want[:], want_docs[:]), tape.records_scan(made, &demand, out[:], docs[:])
+			}
+			testing.expectf(t, n == m && n > 0 && r.err == made.err, "%q op %d: %d records ending %v, want %d ending %v", c.src, op, m, made.err, n, r.err)
+			for i in 0 ..< min(n, m) {
+				testing.expectf(t, out[i] == want[i] && found[i] == want_found[i], "%q op %d record %d: %v %v, want %v %v", c.src, op, i, out[i], found[i], want[i], want_found[i])
+				if op == 2 {
+					testing.expectf(t, render_doc(&docs[i]) == render_doc(&want_docs[i]), "%q record %d: %s, want %s", c.src, i, render_doc(&docs[i]), render_doc(&want_docs[i]))
+					tape.destroy(&docs[i])
+					tape.destroy(&want_docs[i])
+				}
+			}
+			tape.destroy_records(made)
 		}
 	}
 }

@@ -67,4 +67,6 @@ Reads :: struct {
 	build: proc(f: ^Format, src: []u8, opts: Options, allocator: runtime.Allocator) -> (Document, Error),
 	find: proc(f: ^Format, src: []u8, path: []Step, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Span_Answer, Error),
 	scan: proc(f: ^Format, src: []u8, demand: ^Demand, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error),
+	// Makes the records of `src` framed as `framing`, in `allocator`, which `destroy_records` frees.
+	records: proc(f: ^Format, src: []u8, framing: Framing, opts: Options, allocator: runtime.Allocator) -> (^Records, runtime.Allocator_Error),
 }

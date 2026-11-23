@@ -1,29 +1,182 @@
 package records
 
+import "base:runtime"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 
-// A text that holds a list of records, which a format's records read hands on one at a time, each as it closes.
+// The batch reads of a text's records over a format's framing and walk, each record judged as a read of its bytes
+// alone judges them, in place in the text. A format gives `$frame`, which finds the next record, and per hook a
+// `$walk` of one record, both procs of its own that reach the walk it keeps in its records past the `tape.Records`.
 
-// How a text holds its records.
-Framing :: enum u8 {
-	// One value per line (NDJSON). A line of white space alone holds no record. A record whose line holds more than one
-	// value, or a value that runs on past its line, is refused, and the records go on at the next line.
-	Lines,
-	// The elements of the root array. A fault ends the records, as the text holds no list past it.
-	Elements,
-	// The members of the root object. Each member's value is a record, with its key in `Record.key`. Every member is a
-	// record, repeated keys too. A fault ends the records, as under `.Elements`, and a root that is no object holds none.
-	Members,
+// What a format's walk of one record gives: the walk's result, the record's end, whether the record must be walked
+// again alone (`again`), as the walk in the whole text read it as no walk of its bytes alone would, whether the walk
+// took a rule of `Options.tolerate`, and false in `ok` once the records have ended.
+Walked :: struct {
+	res:       hook.Walk_Result,
+	hi:        u64,
+	again:     bool,
+	tolerated: bool,
+	ok:        bool,
 }
 
-// One record: the records before it, its bytes in the text, and why it does not read, nil when it does. Its bytes run
-// from its first byte that is no white space to its line's end less a CR under `.Lines`, and to its value's end under
-// `.Elements` and `.Members`. Every offset, those of `err` included, counts from the text's first byte. Under
-// `.Members` `key` is the member's key, a token of role `.Key` that `tape.key_raw` reads, and under the other framings
-// it is the zero token, whose role is `.Value`.
-Record :: struct {
-	index:  u64,
-	lo, hi: u64,
-	err:    tape.Error,
-	key:    tape.Token,
+// A format's framing: the next record's first byte and the end its walk may read to, or false once the records have
+// ended, with `err` set by the format when a fault ends them. Its `$walk` walks the record from `lo` to `cut` for the
+// read's hook, first in the walk of the whole text, or with `alone` as a text of its bytes alone, which gives only
+// `res` and `tolerated`.
+Frame :: #type proc(r: ^tape.Records) -> (lo, cut: u64, ok: bool)
+
+read_validate :: proc(r: ^tape.Records, out: []tape.Record, rules: ^tape.Rules, caller: runtime.Allocator, $frame: Frame, $walk: proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> Walked) -> (n: int) {
+	m: hook.Memory_Budget
+	ctx := context
+	h: hook.No_Hooks
+	regs: hook.Regs
+	for n < len(out) {
+		allocator := build.read_allocator(&m, r.opts, caller)
+		lo, cut := frame(r) or_break
+		w := walk(r, lo, cut, false, &h, &regs, allocator, &ctx)
+		if !w.ok {
+			break
+		}
+		if w.again {
+			w.res = walk(r, lo, cut, true, &h, &regs, allocator, &ctx).res
+		}
+		_, err, _ := hook.walk_error(w.res, rules)
+		out[n] = record_end(r, lo, w.hi, hook.memory_budget_error(&m, err))
+		n += 1
+	}
+	return
+}
+
+read_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, format: ^tape.Format, rules: ^tape.Rules, read: tape.Read_Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result, $frame: Frame, $walk: proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> Walked) -> (n: int) {
+	read := read
+	if !record_reads(r, &read, rules) {
+		return
+	}
+	out := out[:min(len(out), len(answers))]
+	m: hook.Memory_Budget
+	ctx := context
+	room: build.Find_Room = ---
+	f: build.Finder
+	defer build.finder_end(&f)
+	for n < len(out) {
+		allocator := build.read_allocator(&m, r.opts, caller)
+		lo, cut := frame(r) or_break
+		if err := find_begin(&f, r.src, format, path, read, respell, rewalk, &room, allocator); err != nil {
+			records_stop(r, hook.memory_budget_error(&m, err))
+			break
+		}
+		regs: hook.Regs
+		w := walk(r, lo, cut, false, &f, &regs, allocator, &ctx)
+		if !w.ok {
+			break
+		}
+		if w.again {
+			if err := find_begin(&f, r.src, format, path, read, respell, rewalk, &room, allocator, true); err != nil {
+				records_stop(r, hook.memory_budget_error(&m, err))
+				break
+			}
+			regs = {}
+			a := walk(r, lo, cut, true, &f, &regs, allocator, &ctx)
+			w.res, w.tolerated = a.res, a.tolerated
+		}
+		_, werr, _ := hook.walk_error(w.res, rules)
+		if werr == nil && f.refused {
+			werr = runtime.Allocator_Error.Out_Of_Memory
+		}
+		if werr != nil {
+			out[n], answers[n] = record_end(r, lo, w.hi, hook.memory_budget_error(&m, werr)), {}
+			n += 1
+			continue
+		}
+		answers[n] = build.finder_answer(&f)
+		answers[n].tolerated = w.tolerated
+		out[n] = record_end(r, lo, w.hi, nil)
+		n += 1
+	}
+	return
+}
+
+read_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, format: ^tape.Format, rules: ^tape.Rules, read: tape.Read_Options, caller: runtime.Allocator, rewalk: build.Rewalk, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $frame: Frame, $walk: proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> Walked) -> (n: int) {
+	read := read
+	if !record_reads(r, &read, rules) {
+		return
+	}
+	out := out[:min(len(out), len(docs))]
+	m: hook.Memory_Budget
+	frames: [build.FRAME_DEPTH]u64 = ---
+	room: build.Scan_Room = ---
+	h: build.Scanner
+	for n < len(out) {
+		allocator := build.read_allocator(&m, r.opts, caller)
+		lo, cut := frame(r) or_break
+		depth := min(build.read_depth(r.opts), cut - lo)
+		most := build.node_most(bound(r.src[lo:cut], depth), r.opts)
+		if err := build.scanner_restart(&h, r.src, format, demand, read, rewalk, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator); err != nil {
+			records_stop(r, hook.memory_budget_error(&m, err))
+			break
+		}
+		regs := build.builder_regs(&h.b)
+		w := walk(r, lo, cut, false, &h, &regs, allocator, &h.b.ctx)
+		if !w.ok || w.again {
+			// The walk's tokens are dropped with what the scanner built of them.
+			_, _ = build.scanner_end(&h, regs, 0, runtime.Allocator_Error.Out_Of_Memory)
+			if !w.ok {
+				break
+			}
+			if err := build.scanner_restart(&h, r.src, format, demand, read, rewalk, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator); err != nil {
+				records_stop(r, hook.memory_budget_error(&m, err))
+				break
+			}
+			regs = build.builder_regs(&h.b)
+			a := walk(r, lo, cut, true, &h, &regs, allocator, &h.b.ctx)
+			w.res, w.tolerated = a.res, a.tolerated
+		}
+		root_close, werr, _ := hook.walk_error(w.res, rules)
+		doc, e := build.scanner_end(&h, regs, root_close, werr)
+		e = build.read_end(&doc, e, &m, w.tolerated, caller)
+		out[n], docs[n] = record_end(r, lo, w.hi, e), doc
+		n += 1
+	}
+	return
+}
+
+// Readies `f` for the next record: started when it is not, or when `fresh` or its levels are allocated, otherwise reset
+// with its room kept.
+@(private)
+find_begin :: #force_inline proc(f: ^build.Finder, src: []u8, format: ^tape.Format, path: []tape.Step, read: tape.Read_Options, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result, room: ^build.Find_Room, allocator: runtime.Allocator, fresh := false) -> runtime.Allocator_Error {
+	if f.format == nil || f.block != nil || fresh {
+		build.finder_end(f)
+		f^ = {}
+		return build.finder_start(f, src, format, path, read, respell, rewalk, room, allocator)
+	}
+	build.finder_reset(f, room)
+	return nil
+}
+
+// Ends the records with `err`, which no record holds.
+@(private, cold)
+records_stop :: proc "contextless" (r: ^tape.Records, err: tape.Error) {
+	r.err, r.at = err, .Done
+}
+
+// Whether a path read under `read` may go on, which ends the records with `.Bad_Option` for the build-only policies a
+// path read refuses. Under a framing other than `.Lines` it reads each record to its end, as the next starts there.
+@(private)
+record_reads :: proc "contextless" (r: ^tape.Records, read: ^tape.Read_Options, rules: ^tape.Rules) -> bool {
+	if !build.path_dups(read^) {
+		records_stop(r, tape.Fault{rules = rules, kind = .Bad_Option})
+		return false
+	}
+	if r.framing != .Lines {
+		read.stop_early = false
+	}
+	return true
+}
+
+// The record from `lo` to `hi` with error `err`, counted among those read.
+@(private)
+record_end :: #force_inline proc "contextless" (r: ^tape.Records, lo, hi: u64, err: tape.Error) -> tape.Record {
+	r.index += 1
+	return {index = r.index - 1, lo = lo, hi = hi, err = err, key = r.key}
 }

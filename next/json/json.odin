@@ -45,9 +45,9 @@ as :: proc "contextless" (spec: Spec) -> ^tape.Format {
 
 @(private, rodata)
 READS := [Spec]tape.Reads {
-	.Json  = {validate = validate_of, build = build_of, find = find_of, scan = scan_of},
-	.Jsonc = {validate = validate_of, build = build_of, find = find_of, scan = scan_of},
-	.Json5 = {validate = validate_of, build = build_of, find = find_of, scan = scan_of},
+	.Json  = {validate = validate_of, build = build_of, find = find_of, scan = scan_of, records = records_of},
+	.Jsonc = {validate = validate_of, build = build_of, find = find_of, scan = scan_of, records = records_of},
+	.Json5 = {validate = validate_of, build = build_of, find = find_of, scan = scan_of, records = records_of},
 }
 
 // The reads of `spec`, for a caller that picks the format at run time, to use with the handle `as` returns. Nil for a
