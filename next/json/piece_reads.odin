@@ -38,7 +38,7 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 		}
 		start = kernel.skip_ws(start[bom_length(text):], start[to:])
 	}
-	r, took := walk_value(text, start, S, true, opts.tolerate, depth_limit(opts), opts.budget.steps, h, regs, allocator, ctx, &pw, on)
+	r, took := walk_value(text, start, S, true, opts.tolerate, build.read_depth(opts), opts.budget.steps, h, regs, allocator, ctx, &pw, on)
 	root_close, err, _ = hook.walk_error(r, &RULES)
 	p.more, p.at = pw.ended, to
 	if pw.ended {
@@ -94,7 +94,7 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 		}
 		blk = new(Build_Piece, p.allocator) or_return
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
-		build.builder_start(&blk.b, src, &FORMATS[S], max(len(src) / BUILD_BYTES_PER_NODE, SCAN_NODES), node_most(max(u64), opts), nil, allocator)
+		build.builder_start(&blk.b, src, &FORMATS[S], max(len(src) / build.BUILD_BYTES_PER_NODE, build.SCAN_NODES), build.node_most(max(u64), opts), nil, allocator)
 		if blk.b.err != nil {
 			e := hook.memory_budget_error(&s.blocks, blk.b.err)
 			free(blk, p.allocator)
@@ -112,7 +112,7 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 			return {}, nil
 		}
 		doc, err = build.builder_so_far(&blk.b, regs, p.at, caller)
-		err = read_end(&doc, err, &s.blocks, tolerated, caller)
+		err = build.read_end(&doc, err, &s.blocks, tolerated, caller)
 	return
 	}
 	defer {
@@ -123,7 +123,7 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 	if err == nil {
 		err = build.builder_dups(&doc, opts.dups, &RULES)
 	}
-	err = read_end(&doc, err, &s.blocks, tolerated, caller)
+	err = build.read_end(&doc, err, &s.blocks, tolerated, caller)
 	return
 }
 
@@ -234,7 +234,7 @@ scan_pieces :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_O
 		}
 		blk = new(Scan_Piece, p.allocator) or_return
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
-		if e := build.scanner_start(&blk.h, src, &FORMATS[S], demand, read, nil, SCAN_NODES, node_most(max(u64), opts), nil, &blk.room, allocator); e != nil {
+		if e := build.scanner_start(&blk.h, src, &FORMATS[S], demand, read, nil, build.SCAN_NODES, build.node_most(max(u64), opts), nil, &blk.room, allocator); e != nil {
 			free(blk, p.allocator)
 			return {}, hook.memory_budget_error(&s.blocks, e)
 		}
@@ -259,7 +259,7 @@ scan_pieces :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_O
 			return {}, nil
 		}
 		doc, err = build.scanner_so_far(&blk.h, regs, p.at, caller)
-		err = read_end(&doc, err, &s.blocks, tolerated, caller)
+		err = build.read_end(&doc, err, &s.blocks, tolerated, caller)
 	return
 	}
 	defer {
@@ -267,6 +267,6 @@ scan_pieces :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_O
 		s.hook = nil
 	}
 	doc, err = build.scanner_end(&blk.h, regs, root_close, werr)
-	err = read_end(&doc, err, &s.blocks, tolerated, caller)
+	err = build.read_end(&doc, err, &s.blocks, tolerated, caller)
 	return
 }

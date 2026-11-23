@@ -69,7 +69,7 @@ quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	probe_stack()
-	lax := opts.tolerate != {} || opts.budget.steps != 0 || opts.pieces != nil
+	lax := build.read_tolerant(opts)
 	switch spec {
 	case .Json:
 		if lax {
@@ -100,7 +100,7 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= PARALLEL_FROM {
 		return build_on_threads(src, spec, opts, allocator)
 	}
-	lax := opts.tolerate != {} || opts.budget.steps != 0 || opts.pieces != nil
+	lax := build.read_tolerant(opts)
 	switch spec {
 	case .Json:
 		if lax {
@@ -129,7 +129,7 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 @(require_results)
 find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
 	probe_stack()
-	lax := opts.tolerate != {} || opts.budget.steps != 0 || opts.pieces != nil
+	lax := build.read_tolerant(opts)
 	switch spec {
 	case .Json:
 		if lax {
@@ -158,7 +158,7 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read
 @(require_results)
 scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	probe_stack()
-	lax := opts.tolerate != {} || opts.budget.steps != 0 || opts.pieces != nil
+	lax := build.read_tolerant(opts)
 	switch spec {
 	case .Json:
 		if lax {
@@ -203,19 +203,10 @@ validate_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Opti
 			return validate_pieces(src, S, opts, allocator)
 		}
 	}
-	h: hook.No_Hooks
-	regs: hook.Regs
-	m: hook.Memory_Budget
-	a := read_allocator(&m, opts, allocator)
-	err: tape.Error
-	// Only a text longer than the frame's levels can nest past them, so only it copies the context its growth runs in.
-	if len(src) > WALK_LEVELS {
-		ctx := context
-		_, err, _ = walk_text(src, S, LAX, opts, &h, &regs, a, &ctx, hook.no_hook)
-	} else {
-		_, err, _ = walk_text(src, S, LAX, opts, &h, &regs, a, nil, hook.no_hook)
+	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
+		return walk_text(src, S, LAX, opts, h, regs, a, ctx, hook.no_hook)
 	}
-	return hook.memory_budget_error(&m, err)
+	return build.read_validate(src, opts, allocator, WALK_LEVELS, walk)
 }
 
 @(private)
@@ -225,155 +216,52 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options
 			return build_pieces(src, S, opts, caller)
 		}
 	}
-	m: hook.Memory_Budget
-	allocator := read_allocator(&m, opts, caller)
-	limit := depth_limit(opts)
-	depth := min(limit, u64(len(src)))
-	most := node_most(node_bound(src, depth), opts)
-	frames: [FRAME_DEPTH]u64 = ---
-	b: build.Builder = ---
-	build.builder_start(&b, src, &FORMATS[S], len(src) / BUILD_BYTES_PER_NODE, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m if opts.budget.memory != 0 else nil)
-	if b.err != nil {
-		return {}, hook.memory_budget_error(&m, b.err)
+	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Builder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
+		on :: build.builder_hook_facts when S != .Json else build.builder_hook
+		return walk_text(src, S, LAX, opts, h, regs, a, ctx, on)
 	}
-	regs := build.builder_regs(&b)
-	on :: build.builder_hook_facts when S != .Json else build.builder_hook
-	root_close, err, tolerated := walk_text(src, S, LAX, opts, &b, &regs, allocator, &b.ctx, on)
-	doc, e := build.builder_end(&b, regs, root_close, err)
-	if e == nil {
-		e = build.builder_dups(&doc, opts.dups, &RULES)
-	}
-	e = read_end(&doc, e, &m, tolerated, caller)
-	return doc, e
+	return build.read_build(src, &FORMATS[S], &RULES, opts, caller, node_bound, walk)
 }
 
 @(private)
 scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
-	if read.dups == .Refuse || read.dups == .All {
-		// A path read takes one member of a key, so the build-only policies are refused.
-		return {}, tape.Fault{rules = &RULES, kind = .Bad_Option}
-	}
 	when LAX {
-		if opts.pieces != nil {
+		if opts.pieces != nil && build.path_dups(read) {
 			return scan_pieces(src, demand, S, read, opts, caller)
 		}
 	}
-	m: hook.Memory_Budget
-	allocator := read_allocator(&m, opts, caller)
-	limit := depth_limit(opts)
-	depth := min(limit, u64(len(src)))
-	most := node_most(node_bound(src, depth), opts)
-	frames: [FRAME_DEPTH]u64 = ---
 	rewalk :: proc "contextless" (h: ^build.Scanner, regs: ^hook.Regs, lo: u64) -> hook.Walk_Result {
 		return walk_again((^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(h.walk), h.b.doc.src, lo, regs, build.scanner_hook)
 	}
-	room: build.Scan_Room = ---
-	h: build.Scanner = ---
-	if err := build.scanner_start(&h, src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
-		return {}, hook.memory_budget_error(&m, err)
+	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
+		return walk_text(src, S, LAX, opts, h, regs, a, ctx, build.scanner_hook)
 	}
-	regs := build.builder_regs(&h.b)
-	root_close, werr, tolerated := walk_text(src, S, LAX, opts, &h, &regs, allocator, &h.b.ctx, build.scanner_hook)
-	doc, e := build.scanner_end(&h, regs, root_close, werr)
-	e = read_end(&doc, e, &m, tolerated, caller)
-	return doc, e
-}
-
-// The allocator a read under `opts` allocates its blocks from: `allocator` counted through `m` when `Budget.memory` is
-// set, else `allocator`.
-@(private)
-read_allocator :: #force_inline proc "contextless" (m: ^hook.Memory_Budget, opts: Options, allocator: runtime.Allocator) -> runtime.Allocator {
-	if opts.budget.memory == 0 {
-		return allocator
-	}
-	m^ = {backing = allocator, limit = opts.budget.memory}
-	return hook.memory_budget(m)
-}
-
-// Finishes a build or scan with document `doc` and error `err`, and returns the error as `m` names it. On an error
-// `doc` is zeroed. Otherwise `doc` is flagged `.Tolerated` when the text broke a rule its tolerances let it break, and
-// its allocator is set to `caller`.
-@(private)
-read_end :: #force_inline proc "contextless" (doc: ^tape.Document, err: tape.Error, m: ^hook.Memory_Budget, tolerated: bool, caller: runtime.Allocator) -> tape.Error {
-	if err != nil {
-		doc^ = {}
-		return hook.memory_budget_error(m, err)
-	}
-	if tolerated {
-		doc.flags += {.Tolerated}
-	}
-	doc.allocator = caller
-	return nil
-}
-
-// The open levels a build or scan keeps in its own frame. Past them the builder's stack is allocated from the read's
-// allocator.
-@(private)
-FRAME_DEPTH :: 1024
-
-// The node capacity a build starts with: one node per this many bytes of the text.
-@(private)
-BUILD_BYTES_PER_NODE :: 16
-
-// The node capacity a scan starts with, which holds the answers of a few paths without growth.
-@(private)
-SCAN_NODES :: 64
-
-// The most nodes a text of `src` can make, at most `(len(src) + 1 + depth) / 2`, plus 16 of slack. Each node spends
-// two bytes (a container its brackets, a key its colon, a scalar the comma or close after it), except a container
-// left open and the token before a fault, which may spend one.
-@(private)
-node_bound :: #force_inline proc "contextless" (src: []u8, depth: u64) -> u64 {
-	return (u64(len(src)) + depth) / 2 + 16
-}
-
-// The most nodes a read may make: `bound`, limited by `Budget.nodes`, by the 32-bit node index and by an `int` count of
-// node bytes.
-@(private)
-node_most :: #force_inline proc "contextless" (bound: u64, opts: Options) -> int {
-	budget := u64(opts.budget.nodes) if opts.budget.nodes != 0 else max(u64)
-	return int(min(bound, budget, u64(tape.NO_NODE) - 1, u64(max(int) / size_of(tape.Node))))
+	return build.read_scan(src, demand, &FORMATS[S], &RULES, read, opts, caller, rewalk, node_bound, walk)
 }
 
 @(private)
 find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
-	if read.dups == .Refuse || read.dups == .All {
-		// A path read takes one member of a key, so the build-only policies are refused.
-		return {}, tape.Fault{rules = &RULES, kind = .Bad_Option}
-	}
 	when LAX {
-		if opts.pieces != nil {
+		if opts.pieces != nil && build.path_dups(read) {
 			return find_pieces(src, path, S, read, opts, caller)
 		}
 	}
-	m: hook.Memory_Budget
-	allocator := read_allocator(&m, opts, caller)
 	rewalk :: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result {
 		regs: hook.Regs
 		return walk_again((^Walk(S, build.Finder, LAX, build.FINDER_CAPS))(h.walk), h.src, lo, &regs, build.finder_hook)
 	}
-	room: build.Find_Room = ---
-	f: build.Finder
-	if err := build.finder_start(&f, src, &FORMATS[S], path, read, respell, rewalk, &room, allocator); err != nil {
-		return {}, hook.memory_budget_error(&m, err)
+	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
+		return walk_text(src, S, LAX, opts, h, regs, a, ctx, build.finder_hook)
 	}
-	defer build.finder_end(&f)
-	regs: hook.Regs
-	_, werr, tolerated := walk_text(src, S, LAX, opts, &f, &regs, allocator, &f.ctx, build.finder_hook)
-	if werr != nil {
-		return {}, hook.memory_budget_error(&m, werr)
-	}
-	if f.refused {
-		return {}, hook.memory_budget_error(&m, runtime.Allocator_Error.Out_Of_Memory)
-	}
-	answer := build.finder_answer(&f)
-	answer.tolerated = tolerated
-	return answer, nil
+	return build.read_find(src, path, &FORMATS[S], &RULES, read, opts, caller, respell, rewalk, walk)
 }
 
+// The most nodes a JSON text of `src` can make, at most `(len(src) + 1 + depth) / 2`, plus 16 of slack. Each node
+// spends two bytes (a container its brackets, a key its colon, a scalar the comma or close after it), except a
+// container left open and the token before a fault, which may spend one.
 @(private)
-depth_limit :: #force_inline proc "contextless" (opts: Options) -> u64 {
-	return u64(opts.budget.depth) if opts.budget.depth != 0 else tape.DEFAULT_DEPTH
+node_bound :: #force_inline proc "contextless" (src: []u8, depth: u64) -> u64 {
+	return (u64(len(src)) + depth) / 2 + 16
 }
 
 // Walks `src` and returns the end of its root value or the error, and whether the walk used a rule of
@@ -383,7 +271,7 @@ depth_limit :: #force_inline proc "contextless" (opts: Options) -> u64 {
 walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	p := raw_data(src)
 	p = kernel.skip_ws(p[bom_length(src):], p[len(src):])
-	r, took := walk_value(src, p, S, LAX, opts.tolerate, depth_limit(opts), opts.budget.steps, h, regs, allocator, ctx, nil, on)
+	r, took := walk_value(src, p, S, LAX, opts.tolerate, build.read_depth(opts), opts.budget.steps, h, regs, allocator, ctx, nil, on)
 	at, e, _ := hook.walk_error(r, &RULES)
 	return at, e, took
 }

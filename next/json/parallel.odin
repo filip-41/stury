@@ -162,7 +162,7 @@ build_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 @(private)
 build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error, built: bool) {
 	m: hook.Memory_Budget
-	allocator := read_allocator(&m, opts, caller)
+	allocator := build.read_allocator(&m, opts, caller)
 	start := bom_length(src)
 	want := min((opts.runner.threads + 1) * CHUNKS_PER_THREAD, (len(src) - start) / max(PARALLEL_FROM / 16, 1))
 	if want < 2 {
@@ -193,7 +193,7 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 	}
 	lj := Lex_Job{src = src, chunks = chunks}
 	hook.fan(opts.runner, lex, &lj)
-	limit := depth_limit(opts)
+	limit := build.read_depth(opts)
 	parts, opens, planned := seam_plan(src, chunks, S, limit, allocator)
 	defer delete(parts, allocator)
 	defer delete(opens, allocator)
@@ -229,7 +229,7 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 	}
 	// Under a memory budget the facts and the scratch of a duplicate policy take blocks that one thread sizes as it
 	// reads and the parts as the plan counted, so a build that needs either is made on one thread.
-	if total > node_most(max(u64), opts) || opts.budget.memory != 0 && (comments > 0 || opts.dups != .Default) {
+	if total > build.node_most(max(u64), opts) || opts.budget.memory != 0 && (comments > 0 || opts.dups != .Default) {
 		return {}, nil, false
 	}
 	room, rerr := non_zero_make([]tape.Node, total + 1 + scratch, allocator)
@@ -284,7 +284,7 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 			if k == 0 {
 				p.close, p.err, p.tolerated = walk_text(j.src[:p.to], S, LAX, j.opts, &s.b, &s.regs, {}, &ctx, on)
 			} else {
-				r, took := walk_seam(j.src[:p.to], p.from, p.opens, S, LAX, j.opts.tolerate, depth_limit(j.opts), &s.b, &s.regs, &ctx, on)
+				r, took := walk_seam(j.src[:p.to], p.from, p.opens, S, LAX, j.opts.tolerate, build.read_depth(j.opts), &s.b, &s.regs, &ctx, on)
 				p.close, p.err, _ = hook.walk_error(r, &RULES)
 				p.tolerated = took
 			}

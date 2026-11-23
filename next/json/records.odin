@@ -57,7 +57,7 @@ records_open :: proc(src: []u8, framing := records.Framing.Lines, spec := Spec.J
 	if opts.pieces != nil {
 		r.err, r.at = tape.Fault{rules = &RULES, kind = .Bad_Option}, .Done
 	}
-	walk_init(&r.walk, src, nil, (^hook.No_Hooks)(nil), nil, {}, nil, depth_limit(opts), opts.tolerate, opts.budget.steps)
+	walk_init(&r.walk, src, nil, (^hook.No_Hooks)(nil), nil, {}, nil, build.read_depth(opts), opts.tolerate, opts.budget.steps)
 	return
 }
 
@@ -68,7 +68,7 @@ records_open :: proc(src: []u8, framing := records.Framing.Lines, spec := Spec.J
 @(require_results)
 records_validate :: proc(r: ^Records, out: []records.Record, allocator := context.allocator) -> (n: int) {
 	probe_stack()
-	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
+	lax := build.read_tolerant(r.opts)
 	switch r.spec {
 	case .Json:
 		if lax {
@@ -101,7 +101,7 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []records.Record, answ
 	if len(answers) < len(out) {
 		out = out[:len(answers)]
 	}
-	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
+	lax := build.read_tolerant(r.opts)
 	switch r.spec {
 	case .Json:
 		if lax {
@@ -135,7 +135,7 @@ records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []records.Record, d
 	if len(docs) < len(out) {
 		out = out[:len(docs)]
 	}
-	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
+	lax := build.read_tolerant(r.opts)
 	switch r.spec {
 	case .Json:
 		if lax {
@@ -164,7 +164,7 @@ records_validate_as :: #force_no_inline proc(r: ^Records, out: []records.Record,
 	regs: hook.Regs
 	w := (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(&r.walk)
 	for n < len(out) {
-		allocator := read_allocator(&m, r.opts, caller)
+		allocator := build.read_allocator(&m, r.opts, caller)
 		lo, cut := record_frame(r, w) or_break
 		res, hi, alone := record_first(r, w, lo, cut, &h, &regs, allocator, &ctx, hook.no_hook) or_break
 		if alone {
@@ -194,7 +194,7 @@ records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []
 	f: build.Finder
 	defer build.finder_end(&f)
 	for n < len(out) {
-		allocator := read_allocator(&m, r.opts, caller)
+		allocator := build.read_allocator(&m, r.opts, caller)
 		lo, cut := record_frame(r, w) or_break
 		if err := find_begin(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator); err != nil {
 			records_stop(r, hook.memory_budget_error(&m, err))
@@ -240,15 +240,15 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 		return walk_again((^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(h.walk), h.b.doc.src, lo, regs, build.scanner_hook)
 	}
 	w := (^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(&r.walk)
-	frames: [FRAME_DEPTH]u64 = ---
+	frames: [build.FRAME_DEPTH]u64 = ---
 	room: build.Scan_Room = ---
 	h: build.Scanner
 	for n < len(out) {
-		allocator := read_allocator(&m, r.opts, caller)
+		allocator := build.read_allocator(&m, r.opts, caller)
 		lo, cut := record_frame(r, w) or_break
-		depth := min(depth_limit(r.opts), cut - lo)
-		most := node_most(node_bound(r.src[lo:cut], depth), r.opts)
-		if err := build.scanner_restart(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
+		depth := min(build.read_depth(r.opts), cut - lo)
+		most := build.node_most(node_bound(r.src[lo:cut], depth), r.opts)
+		if err := build.scanner_restart(&h, r.src, &FORMATS[S], demand, read, rewalk, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator); err != nil {
 			records_stop(r, hook.memory_budget_error(&m, err))
 			break
 		}
@@ -260,7 +260,7 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 			if !framed {
 				break
 			}
-			if err := build.scanner_restart(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
+			if err := build.scanner_restart(&h, r.src, &FORMATS[S], demand, read, rewalk, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator); err != nil {
 				records_stop(r, hook.memory_budget_error(&m, err))
 				break
 			}
@@ -269,7 +269,7 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 		}
 		root_close, werr, _ := hook.walk_error(res, &RULES)
 		doc, e := build.scanner_end(&h, regs, root_close, werr)
-		e = read_end(&doc, e, &m, w.tolerated if LAX else false, caller)
+		e = build.read_end(&doc, e, &m, w.tolerated if LAX else false, caller)
 		out[n], docs[n] = record_end(r, lo, hi, e), doc
 		n += 1
 	}
@@ -299,7 +299,7 @@ records_stop :: proc "contextless" (r: ^Records, err: tape.Error) {
 // path read refuses. Under `.Elements` it reads each element to its end.
 @(private)
 record_reads :: proc "contextless" (r: ^Records, read: ^tape.Read_Options) -> bool {
-	if read.dups == .Refuse || read.dups == .All {
+	if !build.path_dups(read^) {
 		records_stop(r, tape.Fault{rules = &RULES, kind = .Bad_Option})
 		return false
 	}
@@ -452,13 +452,13 @@ record_first :: #force_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, 
 	base := raw_data(r.src)
 	n := u64(len(r.src))
 	if r.framing == .Lines {
-		res = record_walk(r, w, lo, base[min(n, cut + RECORD_AHEAD):], depth_limit(r.opts), h, regs, allocator, ctx, false, on)
+		res = record_walk(r, w, lo, base[min(n, cut + RECORD_AHEAD):], build.read_depth(r.opts), h, regs, allocator, ctx, false, on)
 		return res, cut, !line_read(r.src, res, cut), true
 	}
 	when LAX {
 		left := w.steps[0]
 	}
-	res = record_walk(r, w, lo, base[n:], depth_limit(r.opts) - 1, h, regs, allocator, ctx, false, on)
+	res = record_walk(r, w, lo, base[n:], build.read_depth(r.opts) - 1, h, regs, allocator, ctx, false, on)
 	if u8(res) == hook.WALK_STOPPED {
 		// The hook refused the value, which leaves the walk short of its end, so a walk with no hook finds it.
 		// The refusal is the record's error, as it is for a line.
@@ -468,7 +468,7 @@ record_first :: #force_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, 
 		plain := (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(w)
 		none: hook.No_Hooks
 		none_regs: hook.Regs
-		end := record_walk(r, plain, lo, base[n:], depth_limit(r.opts) - 1, &none, &none_regs, allocator, ctx, false, hook.no_hook)
+		end := record_walk(r, plain, lo, base[n:], build.read_depth(r.opts) - 1, &none, &none_regs, allocator, ctx, false, hook.no_hook)
 		if u8(end) != 0 {
 			_, err, _ := hook.walk_error(end, &RULES)
 			records_refuse(r, err)
@@ -538,7 +538,7 @@ key_walk :: proc "contextless" (r: ^Records, w: ^Walk($S, Member_Key, $LAX, $C),
 	when LAX {
 		left := w.steps[0]
 	}
-	walk_start(w, r.src, raw_data(stack[:]), h, regs, {}, nil, depth_limit(r.opts), r.opts.tolerate, r.opts.budget.steps)
+	walk_start(w, r.src, raw_data(stack[:]), h, regs, {}, nil, build.read_depth(r.opts), r.opts.tolerate, r.opts.budget.steps)
 	when LAX {
 		w.piece[0] = nil
 		w.steps[0] = left
@@ -552,7 +552,7 @@ key_walk :: proc "contextless" (r: ^Records, w: ^Walk($S, Member_Key, $LAX, $C),
 // Walks the record from `lo` to `cut` as a text of those bytes alone, and returns the walk's result.
 @(private, cold)
 record_alone :: #force_no_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, cut: u64, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
-	return record_walk(r, w, lo, raw_data(r.src)[cut:], depth_limit(r.opts), h, regs, allocator, ctx, true, on)
+	return record_walk(r, w, lo, raw_data(r.src)[cut:], build.read_depth(r.opts), h, regs, allocator, ctx, true, on)
 }
 
 // Whether the walk in the whole text with result `res` read the record that ends at `cut` as a walk of its bytes alone
