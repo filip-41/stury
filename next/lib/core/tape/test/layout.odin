@@ -5,12 +5,12 @@ import "core:testing"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// The entries of every list a `Document` and its `Partial` hold are offsets, indexes and plain values, with no address,
+// The entries of every list a `Document`, its `Partial` and its `Doc_Ext` hold are offsets, indexes and plain values, with no address,
 // so a document's lists can be written to a file and read back.
 @(test)
 document_entries_hold_no_address :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	for holder in ([]^runtime.Type_Info{type_info_of(tape.Document), type_info_of(tape.Partial)}) {
+	for holder in ([]^runtime.Type_Info{type_info_of(tape.Document), type_info_of(tape.Partial), type_info_of(tape.Doc_Ext)}) {
 		s := runtime.type_info_base(holder).variant.(^runtime.Type_Info_Struct)
 		for i in 0 ..< s.field_count {
 			if list, ok := runtime.type_info_base(s.types[i]).variant.(^runtime.Type_Info_Slice); ok {
@@ -49,6 +49,6 @@ layout_sizes :: proc(t: ^testing.T) {
 	testing.expect_value(t, size_of(tape.Fact), 24)
 	testing.expect_value(t, size_of(tape.Table), 28)
 	when size_of(uintptr) == 8 {
-		testing.expect_value(t, size_of(tape.Document), 128)
+		testing.expect_value(t, size_of(tape.Document), 120)
 	}
 }

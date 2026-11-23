@@ -424,8 +424,12 @@ scanner_end :: proc(h: ^Scanner, regs: hook.Regs, root_close: u64, err: tape.Err
 		return {}, refused
 	}
 	if h.holds {
+		if refused := hold_spans(h, &doc); refused != nil {
+			tape.destroy(&doc)
+			return {}, refused
+		}
 		doc.src = h.bytes[:]
-		doc.flags += {.Held, .Owns_Src}
+		doc.flags += {.Owns_Src}
 		h.bytes = {}
 	}
 	return
@@ -1429,8 +1433,7 @@ scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, mis
 		names += len(m.name)
 	}
 	x: ^tape.Partial
-	held_at := size_of(tape.Partial)
-	answers_at := held_at + len(h.held) * size_of(tape.Held_Span)
+	answers_at := size_of(tape.Partial)
 	starts_at := answers_at + live * size_of(x.answers[0])
 	kept_at := starts_at + (paths + 1) * size_of(u32)
 	missing_at := kept_at + len(h.kept) * size_of(x.kept[0])
@@ -1447,8 +1450,6 @@ scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, mis
 	x.kept = ([^]type_of(x.kept[0]))(raw_data(block[kept_at:]))[:len(h.kept)]
 	x.missing = ([^]type_of(x.missing[0]))(raw_data(block[missing_at:]))[:len(missing)]
 	x.names = block[names_at:]
-	x.held = ([^]tape.Held_Span)(raw_data(block[held_at:]))[:len(h.held)]
-	copy(x.held, h.held[:])
 	// Each path's answers in document order, in three steps: count them, turn the counts into starts, place the
 	// answers.
 

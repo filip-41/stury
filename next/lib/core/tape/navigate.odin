@@ -856,7 +856,10 @@ Key_Slot :: struct {
 // The table whose row is the object at `at`, false for an object of no table.
 @(private)
 row_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (Table, bool) {
-	ext, tabular := doc.ext.(^Tabular_Ext)
+	if doc.ext == nil {
+		return {}, false
+	}
+	ext, tabular := &doc.ext.format.(Tabular_Ext)
 	if !tabular {
 		return {}, false
 	}
@@ -866,7 +869,10 @@ row_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (
 // The table whose node is the array at `at`, false for an array that is no table.
 @(private)
 table_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (Table, bool) {
-	ext, tabular := doc.ext.(^Tabular_Ext)
+	if doc.ext == nil {
+		return {}, false
+	}
+	ext, tabular := &doc.ext.format.(Tabular_Ext)
 	if !tabular {
 		return {}, false
 	}
@@ -908,7 +914,7 @@ row_member :: proc "contextless" (doc: ^Document, t: Table, at: Node_Index, name
 	f := doc.format
 	// The slots hold each key's first column, which is its only one in a table whose keys are unique.
 	if t.slots_len != 0 && (t.unique_keys || dups != .Last) {
-		slots := doc.ext.(^Tabular_Ext).slots[t.slots_lo:][:t.slots_len]
+		slots := doc.ext.format.(Tabular_Ext).slots[t.slots_lo:][:t.slots_len]
 		mask := t.slots_len - 1
 		for i := f.key_hash(transmute([]u8)name, {n = u32(len(name)), kind = .String}) & mask; slots[i] != 0; i = (i + 1) & mask {
 			col := Node_Index(slots[i]) - 1
@@ -987,7 +993,10 @@ next_cell :: proc "contextless" (doc: ^Document, c: ^Children, dups: Duplicates)
 // Whether keys of two kinds of the object at `at` read as `name`, in a document whose format records such a pair.
 @(private)
 clashes :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index, name: string) -> bool {
-	ext, yaml := doc.ext.(^Yaml_Ext)
+	if doc.ext == nil {
+		return false
+	}
+	ext, yaml := doc.ext.format.(Yaml_Ext)
 	return yaml && ext.clash != 0 && kinds_named(doc, at, name)
 }
 

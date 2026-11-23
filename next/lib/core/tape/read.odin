@@ -55,7 +55,7 @@ node_src :: #force_inline proc "contextless" (doc: ^Document, t: Token) -> ([]u8
 
 @(private, cold)
 held_src :: #force_no_inline proc "contextless" (doc: ^Document, t: Token) -> ([]u8, Token) #no_bounds_check {
-	held := doc.partial.held
+	held := doc.ext.held
 	lo, hi := 0, len(held)
 	for lo < hi {
 		mid := (lo + hi) / 2

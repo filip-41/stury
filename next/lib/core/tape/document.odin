@@ -11,7 +11,7 @@ Document :: struct {
 	nodes:      []Node,
 	facts:      []Fact, // sorted by node, then source order
 	counts:     []Child_Count, // sorted by node, only containers whose `spelling` saturated
-	ext:        Format_Ext,
+	ext:        ^Doc_Ext, // nil for a document that holds nothing beside its lists
 	format:     ^Format,
 	allocator:  runtime.Allocator,
 	root_close: u64, // end of the root value, so writing the root needs no scan
@@ -33,14 +33,7 @@ destroy_document :: proc(doc: ^Document) {
 	free(raw_data(doc.nodes), doc.allocator)
 	free(raw_data(doc.facts), doc.allocator)
 	free(raw_data(doc.counts), doc.allocator)
-	switch ext in doc.ext {
-	case ^Tabular_Ext:
-		free(raw_data(ext.tables), doc.allocator)
-		free(raw_data(ext.slots), doc.allocator)
-		free(ext, doc.allocator)
-	case ^Yaml_Ext:
-		free(ext, doc.allocator)
-	}
+	free(doc.ext, doc.allocator)
 	if .Owns_Src in doc.flags {
 		free(raw_data(doc.src), doc.allocator)
 	}
@@ -57,17 +50,26 @@ Doc_Flag :: enum u8 {
 	// cut short is left out, and so is a key whose value had not started.
 	Cut,
 	// The read copied the bytes of each key, scalar and fact out of the text as it went, so the text may be gone. Their
-	// offsets stay the text's, and `src` holds their bytes where `Partial.held` places them. No byte between them is
+	// offsets stay the text's, and `src` holds their bytes where `Doc_Ext.held` places them. No byte between them is
 	// held.
 	Held,
 }
 
 Doc_Flags :: bit_set[Doc_Flag; u8]
 
+// What a document holds beside its nodes, facts and counts, in one block with the lists it names, which `destroy` frees
+// whole.
+Doc_Ext :: struct {
+	// Under `.Held`, where the bytes of each token are in `Document.src`, sorted by offset: a token's span starts at the
+	// last `lo` at or before its own.
+	held:   []Held_Span,
+	format: Format_Ext,
+}
+
 // Per-format data beside the nodes, nil for formats that store none.
 Format_Ext :: union {
-	^Tabular_Ext,
-	^Yaml_Ext,
+	Tabular_Ext,
+	Yaml_Ext,
 }
 
 // dsv's tables and their key lookup slots.
@@ -106,9 +108,6 @@ Partial :: struct {
 	kept:    []Kept_Child, // sorted by node
 	missing: []Missing_Name, // sorted by node
 	names:   []u8, // the missing names' bytes
-	// Under `.Held`, where the bytes of each token are in `Document.src`, sorted by offset: a token's span starts at
-	// the last `lo` at or before its own.
-	held:    []Held_Span,
 	dups:    Duplicates, // the policy the read took repeated keys by, never `.Default`
 }
 
