@@ -252,6 +252,36 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 	return
 }
 
+// Starts `h` for another value of the read it was started for by `scanner_start` and ended by `scanner_end`, with the
+// same arguments. What the demand and the read fix is kept, and the lists go back to the room. A scanner never started,
+// or whose marks or picks outgrow the room, is started as `scanner_start` does.
+@(require_results)
+scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+	if h.demand != demand || !scan_in_room(h, raw_data(h.marks)) || len(demand.edges) >= len(room.picks) {
+		return scanner_start(h, src, format, demand, read, rewalk, nodes, most, frames, room, allocator)
+	}
+	builder_start(&h.b, src, format, nodes, most, frames, allocator)
+	if h.b.err != nil {
+		return h.b.err
+	}
+	h.b.keep_facts = h.facts
+	h.walk, h.stopped, h.has_key, h.by_place, h.forced, h.replaying = nil, false, false, false, false, false
+	h.end_of, h.opens, h.pending, h.passed, h.wait_at = .None, 0, len(demand.paths), tape.NO_NODE, tape.NO_NODE
+	h.wait_from, h.hold_from, h.held_live = 0, 0, 0
+	scan_room_list(&h.frames, room.frames[:], allocator)
+	scan_room_list(&h.elements, room.elements[:], allocator)
+	scan_room_list(&h.live, room.live[:], allocator)
+	scan_room_list(&h.picks, room.picks[:], allocator)
+	scan_room_list(&h.answers, room.answers[:], allocator)
+	scan_room_list(&h.kept, room.kept[:], allocator)
+	h.missing, h.ring, h.tokens = nil, nil, nil
+	h.missing.allocator, h.ring.allocator, h.tokens.allocator = allocator, allocator, allocator
+	runtime.mem_zero(raw_data(h.marks), len(h.marks) * size_of(u64))
+	runtime.mem_zero(raw_data(h.made), len(h.made) * size_of(u32))
+	runtime.mem_zero(raw_data(h.done), len(h.done))
+	return nil
+}
+
 // Whether a step of `demand` has a limit, which settles its paths once the step takes no more.
 @(private)
 scan_cuts :: proc "contextless" (demand: ^tape.Demand) -> bool {

@@ -152,6 +152,20 @@ finder_holds :: proc "contextless" (f: ^Finder) -> u64 #no_bounds_check {
 	return lo
 }
 
+// Readies `f`, which read a value, to read another with the same path and options, keeping its levels and room. The
+// rings go back to the room, and the block they grew into is freed. Not for a finder whose levels are allocated, which
+// is started again, so that each value pays for them as a read of it alone does.
+finder_reset :: proc(f: ^Finder, room: ^Find_Room) {
+	if f.ring_block != nil {
+		runtime.mem_free_with_size(raw_data(f.ring_block), len(f.ring_block), f.allocator)
+		f.ring_block, f.answers, f.answers_cap = nil, raw_data(room.answers[:]), FIND_ROOM
+	}
+	f.answer, f.want = FIND_NONE, true
+	f.entered, f.replacers, f.ring_top = 0, 0, 0
+	f.pending, f.ringing, f.skip_end, f.replay, f.replaying, f.settled, f.refused = false, false, false, false, false, false, false
+	f.keys, f.named, f.quiet, f.count_at = false, false, false, nil
+}
+
 // Frees what `finder_start` and the growth of its rings allocated.
 finder_end :: proc(f: ^Finder) {
 	if f.block != nil {

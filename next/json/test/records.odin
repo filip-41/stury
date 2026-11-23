@@ -444,3 +444,74 @@ records_read_alike_in_any_batch_size :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// A finder and a scanner kept from record to record read each record as a read of it alone does, after records that
+// left rings grown, answers made, and paths settled or not.
+@(test)
+records_reset_their_readers_between_records :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	b := strings.builder_make(context.temp_allocator)
+	long := strings.builder_make(context.temp_allocator)
+	strings.write_string(&long, `{"a":[`)
+	for i in 0 ..< 200 {
+		fmt.sbprintf(&long, `%s{"b":%d}`, "," if i > 0 else "", i)
+	}
+	strings.write_string(&long, `]}`)
+	lines := []string {
+		`{"a":[1,2,3,{"b":4}]}`,
+		strings.to_string(long),
+		`{"a":[{"b":1},{"b":2}],"c":1}`,
+		`{"a":[]}`,
+		`{"a":5}`,
+		`{"a":[{"b":1},{"c":2},{"b":3}]}`,
+		`[1,2]`,
+		`{"a":[1,2,3,4,5,6,7,8,9,10]}`,
+		`{"a":[1,2,`,
+		strings.to_string(long),
+		`{"a":[9,8]}`,
+		`{"a":[{"b":1}]}  x`,
+		`{"a":{"b":1}} `,
+	}
+	for line in lines {
+		strings.write_string(&b, line)
+		strings.write_byte(&b, '\n')
+	}
+	src := transmute([]u8)strings.to_string(b)
+	paths := [][]tape.Step {
+		{tape.Name("a"), tape.Index(-1)},
+		{tape.Name("a"), tape.Index(-150)},
+		{tape.Name("a"), tape.Index(2)},
+		{tape.Name("a"), tape.Slice{lo = -2}},
+		{tape.Name("a"), tape.All{}, tape.Name("b")},
+		{tape.Name("a")},
+	}
+	spans := line_spans(string(src))
+	for path in paths {
+		demand, _ := tape.demand_of({path, {tape.Name("c")}})
+		defer tape.destroy_demand(&demand)
+		for stop in ([]bool{false, true}) {
+			r := json.records_open(src)
+			for span, i in spans {
+				rec, answer, ok := one_find(&r, path, {stop_early = stop})
+				line := src[span[0]:span[1]]
+				alone, err := json.find(line, path, .Json, {stop_early = stop})
+				if err == nil {
+					alone.lo, alone.hi = alone.lo + span[0], alone.hi + span[0]
+				}
+				if alone.outcome == .Missing {
+					alone.lo, alone.hi = 0, 0
+				}
+				testing.expectf(t, ok && rec.err == moved(err, span[0]) && answer == alone, "%v find stop %v line %d: %v %v, want %v %v", path, stop, i, rec, answer, err, alone)
+			}
+		}
+		r := json.records_open(src)
+		for span, i in spans {
+			rec, doc, ok := one_scan(&r, &demand)
+			alone, err := json.scan(src[span[0]:span[1]], &demand, .Json)
+			got, want := fmt.tprint(render_answers(&doc), render_doc(&doc)), fmt.tprint(render_answers(&alone), render_doc(&alone))
+			testing.expectf(t, ok && rec.err == moved(err, span[0]) && got == want, "%v scan line %d: %v %s, want %v %s", path, i, rec, got, err, want)
+			tape.destroy(&doc)
+			tape.destroy(&alone)
+		}
+	}
+}

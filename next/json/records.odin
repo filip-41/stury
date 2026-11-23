@@ -191,22 +191,19 @@ records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []
 	}
 	w := (^Walk(S, build.Finder, LAX, build.FINDER_CAPS))(&r.walk)
 	room: build.Find_Room = ---
+	f: build.Finder
+	defer build.finder_end(&f)
 	for n < len(out) {
 		allocator := read_allocator(&m, r.opts, caller)
 		lo, cut := record_frame(r, w) or_break
-		f: build.Finder
-		err := build.finder_start(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator)
-		defer build.finder_end(&f)
-		if err != nil {
+		if err := find_begin(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator); err != nil {
 			records_stop(r, hook.memory_budget_error(&m, err))
 			break
 		}
 		regs: hook.Regs
 		res, hi, alone := record_first(r, w, lo, cut, &f, &regs, allocator, &ctx, build.finder_hook) or_break
 		if alone {
-			build.finder_end(&f)
-			f = {}
-			if err = build.finder_start(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator); err != nil {
+			if err := find_begin(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator, true); err != nil {
 				records_stop(r, hook.memory_budget_error(&m, err))
 				break
 			}
@@ -245,13 +242,13 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 	w := (^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(&r.walk)
 	frames: [FRAME_DEPTH]u64 = ---
 	room: build.Scan_Room = ---
-	h: build.Scanner = ---
+	h: build.Scanner
 	for n < len(out) {
 		allocator := read_allocator(&m, r.opts, caller)
 		lo, cut := record_frame(r, w) or_break
 		depth := min(depth_limit(r.opts), cut - lo)
 		most := node_most(node_bound(r.src[lo:cut], depth), r.opts)
-		if err := build.scanner_start(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
+		if err := build.scanner_restart(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
 			records_stop(r, hook.memory_budget_error(&m, err))
 			break
 		}
@@ -263,7 +260,7 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 			if !framed {
 				break
 			}
-			if err := build.scanner_start(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
+			if err := build.scanner_restart(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
 				records_stop(r, hook.memory_budget_error(&m, err))
 				break
 			}
@@ -277,6 +274,19 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 		n += 1
 	}
 	return
+}
+
+// Readies `f` for the next record: started when it is not, or when `fresh` or its levels are allocated, otherwise reset
+// with its room kept.
+@(private)
+find_begin :: #force_inline proc(f: ^build.Finder, src: []u8, format: ^tape.Format, path: []tape.Step, read: tape.Read_Options, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result, room: ^build.Find_Room, allocator: runtime.Allocator, fresh := false) -> runtime.Allocator_Error {
+	if f.format == nil || f.block != nil || fresh {
+		build.finder_end(f)
+		f^ = {}
+		return build.finder_start(f, src, format, path, read, respell, rewalk, room, allocator)
+	}
+	build.finder_reset(f, room)
+	return nil
 }
 
 // Ends the records with `err`, which no record holds.
