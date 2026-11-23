@@ -455,7 +455,29 @@ record_first :: #force_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, 
 		res = record_walk(r, w, lo, base[min(n, cut + RECORD_AHEAD):], depth_limit(r.opts), h, regs, allocator, ctx, false, on)
 		return res, cut, !line_read(r.src, res, cut), true
 	}
+	when LAX {
+		left := w.steps[0]
+	}
 	res = record_walk(r, w, lo, base[n:], depth_limit(r.opts) - 1, h, regs, allocator, ctx, false, on)
+	if u8(res) == hook.WALK_STOPPED {
+		// The hook refused the value, which leaves the walk short of its end, so a walk with no hook finds it.
+		// The refusal is the record's error, as it is for a line.
+		when LAX {
+			w.steps[0] = left
+		}
+		plain := (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(w)
+		none: hook.No_Hooks
+		none_regs: hook.Regs
+		end := record_walk(r, plain, lo, base[n:], depth_limit(r.opts) - 1, &none, &none_regs, allocator, ctx, false, hook.no_hook)
+		if u8(end) != 0 {
+			_, err, _ := hook.walk_error(end, &RULES)
+			records_refuse(r, err)
+			return
+		}
+		hi = u64(end) >> 16
+		r.pos, r.at = hi, .After
+		return res, hi, false, true
+	}
 	if u8(res) != 0 {
 		_, err, _ := hook.walk_error(res, &RULES)
 		records_refuse(r, err)
