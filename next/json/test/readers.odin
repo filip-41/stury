@@ -221,3 +221,35 @@ index_lists_objects_of_more_than_eight_members :: proc(t: ^testing.T) {
 		testing.expectf(t, bytes[0] == bytes[1] && bytes[2] != bytes[1] && bytes[2] <= bytes[3], "%v: index calls for 7 to 10 members %v", probe, bytes)
 	}
 }
+
+// A reader given the node a miss gave answers a miss and reads no node, whether or not the document has an index.
+@(test)
+readers_answer_a_miss_given_a_miss :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, err := json.build(transmute([]u8)string(`{"a": [1, 2], "b": {"c": 3}}`))
+	defer tape.destroy(&doc)
+	x := tape.index_of(&doc, context.allocator)
+	defer tape.destroy_index(&x)
+	testing.expect_value(t, err, nil)
+	for r in ([]tape.Reader{{&doc, nil}, {&doc, &x}}) {
+		miss, p := tape.member(r, tape.ROOT, "zz")
+		testing.expect_value(t, miss, tape.NO_NODE)
+		testing.expect_value(t, p, tape.Presence.Missing)
+		deeper, p2 := tape.member(r, miss, "zz")
+		testing.expect_value(t, deeper, tape.NO_NODE)
+		testing.expect_value(t, p2, tape.Presence.Missing)
+		deeper, p2 = tape.element(r, miss, 0)
+		testing.expect_value(t, deeper, tape.NO_NODE)
+		testing.expect_value(t, p2, tape.Presence.Missing)
+		n, p3, aerr := tape.length(r, miss, context.allocator)
+		testing.expect_value(t, n, 0)
+		testing.expect_value(t, p3, tape.Presence.Missing)
+		testing.expect_value(t, aerr, nil)
+		c, p4, cerr := tape.children(r, miss, context.allocator)
+		testing.expect_value(t, p4, tape.Presence.Missing)
+		testing.expect_value(t, cerr, nil)
+		tape.destroy_children(&c)
+		_, p5 := tape.named(r, miss, "a")
+		testing.expect_value(t, p5, tape.Presence.Missing)
+	}
+}
