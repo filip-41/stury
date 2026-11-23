@@ -4,14 +4,15 @@ import "base:runtime"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// The reads of a text in pieces that `validate`, `build`, `find` and `scan` run for `Options.pieces`, over a format's
-// walk of one window as `$walk`, which walks the window from the state `Options.pieces` holds and updates it (`more`,
+// The reads of a text in pieces that `validate`, `build`, `find` and `scan` run for `Options.pieces`, over the state a
+// format keeps from piece to piece as `$P`, a type whose first field is a `hook.Piece_State`, and its walk of one window
+// as `$walk`, which walks the window from the state `Options.pieces` holds and updates it (`more`,
 // `at`, `keep`, `open`) for the next window. Each read keeps its hook, and the memory budget its blocks are counted in,
 // in its own block from the first window to the last.
 
-read_validate_pieces :: proc(src: []u8, opts: tape.Options, caller: runtime.Allocator, $walk: proc(src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+read_validate_pieces :: proc(src: []u8, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
 	p := opts.pieces
-	s := hook.piece_state(p) or_return
+	s := hook.piece_state(p, P) or_return
 	h: hook.No_Hooks
 	a := hook.piece_blocks(p, opts.budget.memory, caller)
 	regs := s.regs
@@ -35,9 +36,9 @@ build_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 
 // Builds a text in pieces. The document's nodes point into the text, so the build keeps every byte, and each window
 // starts at the text's start.
-read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $walk: proc(src: []u8, opts: tape.Options, h: ^Builder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (doc: tape.Document, err: tape.Error) {
+read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Builder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (doc: tape.Document, err: tape.Error) {
 	p := opts.pieces
-	s := hook.piece_state(p) or_return
+	s := hook.piece_state(p, P) or_return
 	blk := (^Build_Piece)(s.hook)
 	if blk == nil {
 		if s.started {
@@ -93,9 +94,9 @@ find_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 
 // Returns the answer of a find over a text in pieces. Its bytes are copied out of the window it closes in into
 // `Pieces.text`. Until then the read keeps from its first byte, and from the first byte of each span its rings hold.
-read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, $walk: proc(src: []u8, opts: tape.Options, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (answer: tape.Span_Answer, err: tape.Error) {
+read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (answer: tape.Span_Answer, err: tape.Error) {
 	p := opts.pieces
-	s := hook.piece_state(p) or_return
+	s := hook.piece_state(p, P) or_return
 	blk := (^Find_Piece)(s.hook)
 	if blk == nil {
 		if s.started {
@@ -172,9 +173,9 @@ scan_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 // Returns the document of a scan over a text in pieces. Its keys, scalars and facts are copied out of each window as it
 // ends, so the read keeps only what the walk needs, and the document is `.Held`. A walk that holds comments back past a
 // window's end keeps their bytes for a scan of facts, which copies them out in the window that gives them.
-read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, $walk: proc(src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (doc: tape.Document, err: tape.Error) {
+read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (doc: tape.Document, err: tape.Error) {
 	p := opts.pieces
-	s := hook.piece_state(p) or_return
+	s := hook.piece_state(p, P) or_return
 	blk := (^Scan_Piece)(s.hook)
 	if blk == nil {
 		if s.started {

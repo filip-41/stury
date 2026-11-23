@@ -1,9 +1,11 @@
 package hook
 
+import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/core/tape"
 
-// The walk's and the hook's state that a read of a text in pieces carries from one piece to the next.
+// The walk's and the hook's state that a read of a text in pieces carries from one piece to the next. A format keeps
+// what its grammar needs past it in a block whose first field is this.
 Piece_State :: struct {
 	started:   bool,
 	place:     u8, // the format's place in its grammar past the last token, 0 at the text's start
@@ -23,39 +25,14 @@ Piece_State :: struct {
 	hook:      rawptr, // the read's hook, in its own block
 	hook_free: proc(hook: rawptr, allocator: runtime.Allocator),
 	answer:    [2]u64, // with `find`, the span `text` holds
-	cut:       Cut_Token,
-	run:       Cut_Run,
+	// The comments of a run of white space and comments the window ended inside, which wait for the token past the run
+	// to decide their roles, and are given to the hook in the window the run ends in, which may no longer hold their
+	// bytes: a hook that reads a comment's bytes holds them itself.
+	comments:  [dynamic]tape.Token,
 	// With `Budget.memory`, the count of the lists above and `Pieces.text` (`lists`) and of the read's own blocks
 	// (`blocks`), one count from the first window to the last.
 	lists:     Memory_Budget,
 	blocks:    Memory_Budget,
-}
-
-// A token the window ended inside, read up to `on`, which the next window reads on from rather than from its first
-// byte. `on` is 0 for none.
-Cut_Token :: struct {
-	lo, on:   u64,
-	digits:   [2]u64, // a number's integer and fraction digits so far
-	spelling: u16, // the spelling so far
-	part:     u8, // the format's part of the token `on` is in
-	quote:    u8, // a string's closing quote
-}
-
-// A run of white space and comments the window ended inside, read up to `on`, which the next window reads on from. Its
-// comments wait in `comments` for the token past the run, which decides their roles, and are given to the hook in the
-// window the run ends in, which may no longer hold their bytes: a hook that reads a comment's bytes holds them itself.
-Cut_Run :: struct {
-	state:    u8, // the format's state the run is read in, 0 for none
-	part:     u8, // the format's part of the run `on` is in
-	place:    u8, // the format's place in its grammar before the run's first comment
-	line:     bool, // a line ends in the run before `on`
-	crossed:  bool, // the run crossed the one comma it may hold
-	held:     bool, // the comment `on` is in holds a line end
-	comma:    u32, // with `crossed`, the comments before the comma
-	lo:       u64, // the first byte of the comment `on` is in
-	on:       u64,
-	// The run's comments so far, for a hook, each `Comment_Inline` or `Comment` for one the token past the run decides.
-	comments: [dynamic]tape.Token,
 }
 
 // How the walk treats the tokens of a container its hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest` for.
@@ -84,16 +61,18 @@ piece_src :: #force_inline proc "contextless" (src: []u8, from: u64) -> []u8 {
 	return ([^]u8)(uintptr(raw_data(src)) - uintptr(from))[:from + u64(len(src))]
 }
 
-// The state of `p`, which its first read makes.
-piece_state :: proc(p: ^tape.Pieces) -> (s: ^Piece_State, err: runtime.Allocator_Error) {
+// The state of `p`, a block of the format's type `P` whose first field is a `Piece_State`, which its first read makes.
+// Every read of `p` names the same `P`.
+piece_state :: proc(p: ^tape.Pieces, $P: typeid) -> (s: ^P, err: runtime.Allocator_Error) {
+	#assert(intrinsics.type_is_subtype_of(P, Piece_State))
 	if p.state == nil {
 		if p.allocator.procedure == nil {
 			p.allocator = context.allocator
 		}
-		p.state = new(Piece_State, p.allocator) or_return
+		p.state = new(P, p.allocator) or_return
 		p.release = piece_release
 	}
-	return (^Piece_State)(p.state), nil
+	return (^P)(p.state), nil
 }
 
 @(private)
@@ -106,7 +85,7 @@ piece_release :: proc(p: ^tape.Pieces) {
 	delete(s.levels)
 	delete(s.names)
 	delete(s.steps_buf)
-	delete(s.run.comments)
+	delete(s.comments)
 	delete(s.memo, p.allocator)
 	free(s, p.allocator)
 }

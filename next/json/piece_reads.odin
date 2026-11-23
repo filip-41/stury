@@ -14,7 +14,7 @@ import "stury:lib/ops/build"
 @(private)
 piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	p := opts.pieces
-	s, serr := hook.piece_state(p)
+	s, serr := hook.piece_state(p, Piece)
 	if serr != nil {
 		return 0, serr, false
 	}
@@ -25,7 +25,7 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 	if !s.started {
 		a := hook.piece_lists(p)
 		s.opened.allocator, s.levels.allocator, s.names.allocator, s.steps_buf.allocator = a, a, a, a
-		s.run.comments.allocator = a
+		s.comments.allocator = a
 	}
 	text := hook.piece_src(src, p.from)
 	pw := Piece_Walk{s = s, from = p.from, end = to, more = !p.last, ctx = ctx}
@@ -58,12 +58,12 @@ validate_pieces :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.A
 		// No later read needs the bytes of a token the window cut short that lie before the point where its read
 		// continues.
 		p := opts.pieces
-		if s := (^hook.Piece_State)(p.state); p.more && s.cut.on != 0 {
+		if s := (^Piece)(p.state); p.more && s.cut.on != 0 {
 			p.keep = max(p.keep, piece_cut_keep(s.cut))
 		}
 		return root_close, err, tolerated
 	}
-	return build.read_validate_pieces(src, opts, allocator, walk)
+	return build.read_validate_pieces(src, opts, allocator, Piece, walk)
 }
 
 @(private)
@@ -72,7 +72,7 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 		on :: build.builder_hook_facts when S != .Json else build.builder_hook
 		return piece_read(src, S, opts, h, regs, a, ctx, on)
 	}
-	return build.read_build_pieces(src, &FORMATS[S], &RULES, opts, caller, walk)
+	return build.read_build_pieces(src, &FORMATS[S], &RULES, opts, caller, Piece, walk)
 }
 
 @(private)
@@ -80,7 +80,7 @@ find_pieces :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Opti
 	walk :: proc(src: []u8, opts: Options, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return piece_read(src, S, opts, h, regs, a, ctx, build.finder_hook)
 	}
-	return build.read_find_pieces(src, path, &FORMATS[S], read, opts, caller, respell, walk)
+	return build.read_find_pieces(src, path, &FORMATS[S], read, opts, caller, respell, Piece, walk)
 }
 
 @(private)
@@ -90,9 +90,9 @@ scan_pieces :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_O
 		// A scan of facts copies a comment's bytes out of the window in which the walk gives it. That window may be
 		// later than the one holding its bytes, when the run's end was not in the same window.
 		if p := opts.pieces; err == nil && p.more && h.facts {
-			p.keep = min(p.keep, piece_run_facts((^hook.Piece_State)(p.state)))
+			p.keep = min(p.keep, piece_run_facts((^Piece)(p.state)))
 		}
 		return root_close, err, tolerated
 	}
-	return build.read_scan_pieces(src, demand, &FORMATS[S], read, opts, caller, walk)
+	return build.read_scan_pieces(src, demand, &FORMATS[S], read, opts, caller, Piece, walk)
 }

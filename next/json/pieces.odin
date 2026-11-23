@@ -33,10 +33,44 @@ PLACE_MEMBER :: u8(5) // past a comma, which a comment followed
 @(private)
 PLACE_TAIL :: u8(6) // past the root value, whose foot only the last window judges
 
+// What JSON's walk keeps from one piece to the next.
+@(private)
+Piece :: struct {
+	using state: hook.Piece_State,
+	cut:         Cut_Token,
+	run:         Cut_Run,
+}
+
+// A token the window ended inside, read up to `on`, which the next window reads on from rather than from its first
+// byte. `on` is 0 for none.
+@(private)
+Cut_Token :: struct {
+	lo, on:   u64,
+	digits:   [2]u64, // a number's integer and fraction digits so far
+	spelling: u16, // the spelling so far
+	part:     u8, // the part of the token `on` is in
+	quote:    u8, // a string's closing quote
+}
+
+// A run of white space and comments the window ended inside, read up to `on`, which the next window reads on from. Its
+// comments wait in `Piece_State.comments`.
+@(private)
+Cut_Run :: struct {
+	state:   u8, // the state the run is read in, 0 for none
+	part:    u8, // the part of the run `on` is in
+	place:   u8, // the place in the grammar before the run's first comment
+	line:    bool, // a line ends in the run before `on`
+	crossed: bool, // the run crossed the one comma it may hold
+	held:    bool, // the comment `on` is in holds a line end
+	comma:   u32, // with `crossed`, the comments before the comma
+	lo:      u64, // the first byte of the comment `on` is in
+	on:      u64,
+}
+
 // The window of a text in pieces that a walk reads.
 @(private)
 Piece_Walk :: struct {
-	s:       ^hook.Piece_State,
+	s:       ^Piece,
 	from:    u64, // the window's first byte in the whole text
 	end:     u64, // one past its last
 	more:    bool, // bytes may follow the window
@@ -372,7 +406,7 @@ piece_walk :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, p
 	return enter_place(s.place, q, end, d, w, w.regs^, on)
 }
 
-// The parts of a token a window cut short, `hook.Cut_Token.part`.
+// The parts of a token a window cut short, `Cut_Token.part`.
 @(private)
 CUT_STRING :: u8(0)
 @(private)
@@ -400,7 +434,7 @@ piece_cut_string :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, 
 @(private, cold)
 piece_cut_number :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, t: tape.Token) #no_bounds_check {
 	b, k, e := w.base, t.lo, t.lo + u64(t.n)
-	c := hook.Cut_Token{lo = t.lo, on = e}
+	c := Cut_Token{lo = t.lo, on = e}
 	if b[k] == '-' || b[k] == '+' {
 		c.spelling = u16(Number_Spelling.Decimal) if b[k] == '+' else 0
 		k += 1
@@ -504,7 +538,7 @@ piece_resume :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C),
 // a number reads on from bytes past the last window's. Past its run of digits, the grammar reads on from the run's last
 // digit, which gives the same spelling as the whole run would.
 @(private)
-piece_number_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, c: hook.Cut_Token, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
+piece_number_on :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, c: Cut_Token, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
 	c := c
 	p := w.base[c.on:]
 	q = spell.hex_digit_end(p, end) if c.part == CUT_HEX else spell.digit_end(p, end)
@@ -589,7 +623,7 @@ piece_ident_cut :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), on: u64, end:
 // before, because the key may end where the next window starts, and that window's read then needs the byte before the
 // key's end.
 @(private)
-piece_cut_keep :: proc "contextless" (c: hook.Cut_Token) -> u64 {
+piece_cut_keep :: proc "contextless" (c: Cut_Token) -> u64 {
 	return c.on - u64(c.part != CUT_STRING)
 }
 
@@ -634,7 +668,7 @@ piece_tail :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, q, end: [^]u8, 
 	return fault(w, hs, q, .Bad_Char)
 }
 
-// The states a run of white space and comments is read in, `hook.Cut_Run.state`: before a value, before a key, before
+// The states a run of white space and comments is read in, `Cut_Run.state`: before a value, before a key, before
 // a key's colon, past a value (a comma may lie in the run), and past the root value.
 @(private)
 RUN_VALUE :: u8(1)
@@ -647,7 +681,7 @@ RUN_AFTER :: u8(4)
 @(private)
 RUN_FOOT :: u8(5)
 
-// The parts of a run that `hook.Cut_Run.on` can be in: between its comments, in a `//` comment or in a `/* */` comment.
+// The parts of a run that `Cut_Run.on` can be in: between its comments, in a `//` comment or in a `/* */` comment.
 @(private)
 RUN_GAP :: u8(0)
 @(private)
@@ -712,7 +746,7 @@ piece_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw
 					spelling := BLOCK_COMMENT if r.part == RUN_BLOCK else LINE_COMMENT
 					t := tape.Token{r.lo, u32(intrinsics.ptr_sub(q, c)), .Plain, role, spelling}
 					context = pw.ctx^
-					if _, err := append(&r.comments, t); err != nil {
+					if _, err := append(&s.comments, t); err != nil {
 						pw.refused = true
 						return stopped(w, hs, q)
 					}
@@ -755,7 +789,7 @@ piece_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw
 			}
 		}
 		if r.state == RUN_AFTER && !r.crossed && q[0] == ',' {
-			r.crossed, r.comma = true, u32(len(r.comments))
+			r.crossed, r.comma = true, u32(len(s.comments))
 			q = q[1:]
 			continue
 		}
@@ -821,18 +855,18 @@ piece_run_end :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk
 		case RUN_FOOT:
 			rest = .Comment_Foot
 		}
-		for t, i in r.comments {
+		for t, i in s.comments {
 			t := t
 			if t.role != .Comment_Inline {
 				t.role = rest
 			}
 			s.place, s.last = PLACE_MEMBER if crossed && u32(i) >= r.comma else r.place, t.lo
 			if emit_token(w, on, &hs, t) == .Stop {
-				clear(&r.comments)
+				clear(&s.comments)
 				return stopped(w, hs, w.base[t.lo + u64(t.n):])
 			}
 		}
-		clear(&r.comments)
+		clear(&s.comments)
 	}
 	if state == RUN_FOOT {
 		pw.foot = true
@@ -863,13 +897,13 @@ enter_run :: #force_no_inline proc "contextless" (run: u8, crossed: bool, p, end
 // The offset of the first byte of the comments that run `s.run` holds back, which a hook that reads a comment's bytes
 // needs in the window that gives it the comment. `max(u64)` when the run holds none.
 @(private)
-piece_run_facts :: proc "contextless" (s: ^hook.Piece_State) -> u64 {
+piece_run_facts :: proc "contextless" (s: ^Piece) -> u64 {
 	r := &s.run
 	switch {
 	case r.state == 0:
 		return max(u64)
-	case len(r.comments) > 0:
-		return r.comments[0].lo
+	case len(s.comments) > 0:
+		return s.comments[0].lo
 	case r.part != RUN_GAP:
 		return r.lo
 	}
@@ -996,7 +1030,7 @@ piece_skip_white :: proc "contextless" (p, end: [^]u8, $S: Spec) -> [^]u8 {
 // that the window ended inside needs the bytes from where it reads on, and the byte before, because the run may end
 // where the next window starts, and that window's read then needs the byte before the token past the run.
 @(private)
-piece_keep_from :: proc "contextless" (s: ^hook.Piece_State, $S: Spec) -> u64 {
+piece_keep_from :: proc "contextless" (s: ^Piece, $S: Spec) -> u64 {
 	if s.run.state != 0 {
 		return max(s.run.on, 1) - 1
 	}
