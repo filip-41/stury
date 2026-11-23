@@ -566,7 +566,7 @@ memory_limit :: proc(t: ^testing.T) {
 
 	exceeded :: proc(err: tape.Error) -> bool {
 		e, ok := err.(tape.Exceeded)
-		return ok && e.kind == .Memory && e.at == 0
+		return ok && e.kind == .Memory && e.at == tape.NO_BYTE
 	}
 	for memory in ([]u64{1, 1024, 4096}) {
 		opts := json.Options{budget = {memory = memory}}

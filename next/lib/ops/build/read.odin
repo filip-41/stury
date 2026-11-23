@@ -7,7 +7,7 @@ import "stury:lib/core/tape"
 // The reads of a whole text, `validate`, `build`, `find` and `scan`, over a format's walk. A format gives each its walk
 // as `$walk`, a proc of its own that fixes its spec and walk variant at compile time and walks the text for the read's
 // hook, and how many nodes a text of it can make as `$bound`. A read with a runtime spec picks the variant first, which
-// `read_tolerant` decides.
+// `read_lax` decides.
 
 // The open levels a build or scan keeps in its own frame. Past them the builder's stack is allocated from the read's
 // allocator.
@@ -19,16 +19,17 @@ BUILD_BYTES_PER_NODE :: 16
 // The node capacity a scan starts with, which holds the answers of a few paths without growth.
 SCAN_NODES :: 64
 
-// Whether a read under `opts` needs the walk that takes tolerances, counts `Budget.steps` and reads a text in pieces.
-read_tolerant :: #force_inline proc "contextless" (opts: tape.Options) -> bool {
-	return opts.tolerate != {} || opts.budget.steps != 0 || opts.pieces != nil
+// Whether a read under `opts` needs the walk that counts `Budget.steps` and reads a text in pieces. Every walk takes
+// tolerances.
+read_lax :: #force_inline proc "contextless" (opts: tape.Options) -> bool {
+	return opts.budget.steps != 0 || opts.pieces != nil
 }
 
 // Returns the error in `src`, or nil. A text no longer than `frame_levels` cannot nest past the walk's frame, so its
 // walk is given no context to grow its levels in.
-read_validate :: #force_inline proc(src: []u8, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, frame_levels: int, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+read_validate :: #force_inline proc(src: []u8, opts: tape.Options, caller: runtime.Allocator, frame_levels: int, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
 	if !validate_dups(opts) {
-		return tape.Fault{rules = rules, kind = .Bad_Option}
+		return tape.Bad_Option{"dups"}
 	}
 	h: hook.No_Hooks
 	regs: hook.Regs
@@ -68,9 +69,9 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 
 // Builds the document of the nodes of `src`, a text of `format`, that the paths of `demand` reach. `rewalk` walks a
 // value again for the scanner.
-read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, rules: ^tape.Rules, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, rewalk: Rewalk, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Document, tape.Error) {
+read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, rewalk: Rewalk, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Document, tape.Error) {
 	if !path_dups(opts) {
-		return {}, tape.Fault{rules = rules, kind = .Bad_Option}
+		return {}, tape.Bad_Option{"dups"}
 	}
 	m: hook.Memory_Budget
 	allocator := read_allocator(&m, opts, caller)
@@ -91,9 +92,9 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 
 // The first value `path` reaches in `src`, a text of `format`, read with no document. `respell` gives the spelling of
 // a number the walk gave unspelled, and `rewalk` walks a value again for the finder.
-read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Format, rules: ^tape.Rules, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Span_Answer, tape.Error) {
+read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Span_Answer, tape.Error) {
 	if !path_dups(opts) {
-		return {}, tape.Fault{rules = rules, kind = .Bad_Option}
+		return {}, tape.Bad_Option{"dups"}
 	}
 	m: hook.Memory_Budget
 	allocator := read_allocator(&m, opts, caller)

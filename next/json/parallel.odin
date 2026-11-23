@@ -142,17 +142,13 @@ build_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 	doc: tape.Document
 	err: tape.Error
 	built: bool
-	if opts.tolerate != {} {
-		doc, err, built = build_parts(src, S, true, opts, caller)
-	} else {
-		doc, err, built = build_parts(src, S, false, opts, caller)
-	}
+	doc, err, built = build_parts(src, S, opts, caller)
 	if built {
 		return doc, err
 	}
 	one := opts
 	one.runner = nil
-	if one.tolerate != {} || one.budget.steps != 0 {
+	if one.budget.steps != 0 {
 		return build_as(src, S, true, one, caller)
 	}
 	return build_as(src, S, false, one, caller)
@@ -160,7 +156,7 @@ build_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 
 // Builds `src` in parts and returns its document and error, or `built` false for a text built on one thread.
 @(private)
-build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error, built: bool) {
+build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error, built: bool) {
 	m: hook.Memory_Budget
 	allocator := build.read_allocator(&m, opts, caller)
 	start := bom_length(src)
@@ -282,9 +278,9 @@ build_parts :: proc(src: []u8, $S: Spec, $LAX: bool, opts: Options, caller: runt
 			p, s := &j.parts[k], &j.segs[k]
 			on :: build.builder_hook_facts when S != .Json else build.builder_hook
 			if k == 0 {
-				p.close, p.err, p.tolerated = walk_text(j.src[:p.to], S, LAX, j.opts, &s.b, &s.regs, {}, &ctx, on)
+				p.close, p.err, p.tolerated = walk_text(j.src[:p.to], S, false, j.opts, &s.b, &s.regs, {}, &ctx, on)
 			} else {
-				r, took := walk_seam(j.src[:p.to], p.from, p.opens, S, LAX, j.opts.tolerate, build.read_depth(j.opts), &s.b, &s.regs, &ctx, on)
+				r, took := walk_seam(j.src[:p.to], p.from, p.opens, S, j.opts.tolerate, build.read_depth(j.opts), &s.b, &s.regs, &ctx, on)
 				p.close, p.err, _ = hook.walk_error(r, &RULES)
 				p.tolerated = took
 			}
@@ -807,20 +803,17 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 // because no part nests past either, so a deeper text is refused memory. A text cut at the end of `src` ends there as
 // `Truncated`.
 @(private)
-walk_seam :: proc "contextless" (src: []u8, from: int, opens: []u8, $S: Spec, $LAX: bool, tolerate: tape.Tolerances, limit: u64, h: ^$H, regs: ^hook.Regs, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (hook.Walk_Result, bool) {
+walk_seam :: proc "contextless" (src: []u8, from: int, opens: []u8, $S: Spec, tolerate: tape.Tolerances, limit: u64, h: ^$H, regs: ^hook.Regs, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (hook.Walk_Result, bool) {
 	hook.check(H)
 	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
 	#assert(.Walk not_in C)
 	stack: [WALK_LEVELS]u32 = ---
-	w: Walk(S, H, LAX, C) = ---
+	w: Walk(S, H, false, C) = ---
 	walk_init(&w, src, raw_data(stack[:]), h, regs, {}, ctx, limit, tolerate, 0)
 	w.depth = min(w.limit, u64(hook.levels_held(h)))
 	stack[0] = u32(']') | u32(GAP_OFF) << 8
 	for i in 1 ..< len(opens) {
 		stack[i] = u32(']') | u32(opens[i - 1] == '{') << 5 | u32(GAP_OFF) << 8
-	}
-	when LAX {
-		w.piece[0] = nil
 	}
 	w.gap_lo = GAP_UNLEARNABLE
 	d := u64(len(opens)) << 1 | u64(opens[len(opens) - 1] == '{')
@@ -834,5 +827,5 @@ walk_seam :: proc "contextless" (src: []u8, from: int, opens: []u8, $S: Spec, $L
 	end := raw_data(src)[len(src):]
 	r := enter_member(raw_data(src)[from:], end, d, INDENT_START, &w, regs^, m, on)
 	r = walk_tail(&w, r, end, on)
-	return r, w.tolerated when LAX else false
+	return r, w.tolerated
 }

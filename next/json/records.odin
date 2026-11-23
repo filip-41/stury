@@ -31,14 +31,14 @@ RECORD_AHEAD :: 256
 
 // Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. The budget's limits hold
 // for each record, but `Budget.steps` under `.Elements`, which counts the containers of the whole text. A text in
-// pieces ends the records with `.Bad_Option` before any is read.
+// pieces ends the records with `tape.Bad_Option` before any is read.
 records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json, opts := Options{}) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("json: spec out of range")
 	}
 	r.src, r.framing, r.spec, r.opts, r.pos = src, framing, spec, opts, u64(bom_length(src))
 	if opts.pieces != nil {
-		r.err, r.at = tape.Fault{rules = &RULES, kind = .Bad_Option}, .Done
+		r.err, r.at = tape.Bad_Option{"pieces"}, .Done
 	}
 	walk_init(&r.walk, src, nil, (^hook.No_Hooks)(nil), nil, {}, nil, build.read_depth(opts), opts.tolerate, opts.budget.steps)
 	return
@@ -51,7 +51,7 @@ records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json
 @(require_results)
 records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.allocator) -> (n: int) {
 	probe_stack()
-	lax := build.read_tolerant(r.opts)
+	lax := build.read_lax(r.opts)
 	switch r.spec {
 	case .Json:
 		if lax {
@@ -80,7 +80,7 @@ records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.a
 @(require_results)
 records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	probe_stack()
-	lax := build.read_tolerant(r.opts)
+	lax := build.read_lax(r.opts)
 	switch r.spec {
 	case .Json:
 		if lax {
@@ -110,7 +110,7 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 @(require_results)
 records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	probe_stack()
-	lax := build.read_tolerant(r.opts)
+	lax := build.read_lax(r.opts)
 	switch r.spec {
 	case .Json:
 		if lax {
@@ -190,9 +190,7 @@ record_walked :: #force_inline proc(r: ^Records, $S: Spec, $LAX: bool, lo, cut: 
 	} else {
 		walked.res, walked.hi, walked.again, walked.ok = record_first(r, w, lo, cut, h, regs, allocator, ctx, on)
 	}
-	when LAX {
-		walked.tolerated = w.tolerated
-	}
+	walked.tolerated = w.tolerated
 	return
 }
 

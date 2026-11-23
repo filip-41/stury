@@ -5,7 +5,8 @@ import "base:runtime"
 import "stury:json"
 import "stury:lib/core/tape"
 
-TOLERANT :: json.Options{tolerate = {.Invalid_Utf8, .Non_Finite, .Lone_Surrogate}}
+// Every tolerance and a step budget, which a walk with `LAX` counts, so the object holds those walks too.
+TOLERANT :: json.Options{tolerate = {.Invalid_Utf8, .Non_Finite, .Lone_Surrogate}, budget = {steps = 1 << 40}}
 
 PATH := [?]tape.Step{tape.Name("a"), tape.Index(0)}
 

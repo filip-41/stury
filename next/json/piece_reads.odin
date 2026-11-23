@@ -63,7 +63,7 @@ validate_pieces :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.A
 		}
 		return root_close, err, tolerated
 	}
-	return build.read_validate_pieces(src, &RULES, opts, allocator, Piece, walk)
+	return build.read_validate_pieces(src, opts, allocator, Piece, walk)
 }
 
 @(private)

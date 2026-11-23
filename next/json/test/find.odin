@@ -332,23 +332,13 @@ path_reads_refuse_a_build_only_dups_policy :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"a":1,"a":2}`)
 	for dups in ([]tape.Duplicates{.Refuse, .All}) {
 		_, ferr := json.find(src, []tape.Step{tape.Name("a")}, .Json, {}, {dups = dups})
-		if !testing.expect_value(t, ferr != nil, true) {
+		if !testing.expect_value(t, ferr, tape.Error(tape.Bad_Option{"dups"})) {
 			return
-		}
-		if fault, ok := ferr.(tape.Fault); ok {
-			if !testing.expect_value(t, fault.kind, .Bad_Option) {
-				return
-			}
 		}
 		demand, _ := tape.demand_of([][]tape.Step{{tape.Name("a")}}, allocator = context.temp_allocator)
 		_, serr := json.scan(src, &demand, .Json, {}, {dups = dups})
-		if !testing.expect_value(t, serr != nil, true) {
+		if !testing.expect_value(t, serr, tape.Error(tape.Bad_Option{"dups"})) {
 			return
-		}
-		if fault, ok := serr.(tape.Fault); ok {
-			if !testing.expect_value(t, fault.kind, .Bad_Option) {
-				return
-			}
 		}
 	}
 }
@@ -365,10 +355,8 @@ validate_refuses_a_dups_policy_it_cannot_honour :: proc(t: ^testing.T) {
 		out: [1]tape.Record
 		n := json.records_validate(&r, out[:])
 		if dups == .Refuse {
-			fault, ok := err.(tape.Fault)
-			testing.expectf(t, ok && fault.kind == .Bad_Option, "%v: %v", dups, err)
-			fault, ok = r.err.(tape.Fault)
-			testing.expectf(t, n == 0 && ok && fault.kind == .Bad_Option, "%v records: %d %v", dups, n, r.err)
+			testing.expectf(t, err == tape.Error(tape.Bad_Option{"dups"}), "%v: %v", dups, err)
+			testing.expectf(t, n == 0 && r.err == tape.Error(tape.Bad_Option{"dups"}), "%v records: %d %v", dups, n, r.err)
 		} else {
 			testing.expectf(t, err == nil, "%v: %v", dups, err)
 			testing.expectf(t, n == 1 && out[0].err == nil, "%v records: %d %v", dups, n, out[0])

@@ -424,7 +424,7 @@ CUT_IDENT :: u8(5) // a JSON5 unquoted key
 @(private, cold)
 piece_cut_string :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8) {
 	quote := p[0] if S == .Json5 else '"'
-	q, spelling, _ := string_exact_on(S == .Json5, LAX, quote, p[1:], end, w.tolerate, tape.SPELLING_ASCII)
+	q, spelling, _ := string_exact_on(S == .Json5, quote, p[1:], end, w.tolerate, tape.SPELLING_ASCII)
 	w.piece[0].s.cut = {lo = at(w, p), on = at(w, q), spelling = spelling, part = CUT_STRING, quote = quote}
 }
 
@@ -483,7 +483,7 @@ piece_resume :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C),
 	t: tape.Token
 	kind: tape.Fault_Kind
 	if c.part == CUT_STRING {
-		q, t.spelling, kind = string_exact_on(S == .Json5, LAX, c.quote, w.base[c.on:], end, w.tolerate, c.spelling)
+		q, t.spelling, kind = string_exact_on(S == .Json5, c.quote, w.base[c.on:], end, w.tolerate, c.spelling)
 		if kind == .Truncated && pw.more {
 			s.cut, s.cut.on, s.cut.spelling = c, at(w, q), t.spelling
 		}
@@ -665,7 +665,7 @@ piece_tail :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, q, end: [^]u8, 
 			return piece_hold_run(w, hs, p, RUN_FOOT, end, on)
 		}
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return fault(w, hs, q, .Bad_Char, .Trailing)
 }
 
 // The states a run of white space and comments is read in, `Cut_Run.state`: before a value, before a key, before
@@ -781,7 +781,7 @@ piece_run :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw
 		when S != .Json {
 			if q[0] == '/' {
 				if intrinsics.ptr_sub(end, q) < 2 || q[1] != '/' && q[1] != '*' {
-					return fault(w, hs, q, .Bad_Char)
+					return fault(w, hs, q, .Bad_Char, run_stray(S, r.state))
 				}
 				r.part, r.lo = RUN_BLOCK if q[1] == '*' else RUN_LINE, at(w, q)
 				q = q[2:]
@@ -838,7 +838,7 @@ piece_run_end :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk
 	state, crossed, root := r.state, r.crossed, s.last
 	r.state = 0
 	if state == RUN_FOOT && q < end {
-		return fault(w, hs, q, .Bad_Char)
+		return fault(w, hs, q, .Bad_Char, .Trailing)
 	}
 	open := u64(len(s.opened))
 	object := open > 0 && s.opened[open - 1].object

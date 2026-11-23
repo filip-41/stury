@@ -10,9 +10,9 @@ import "stury:lib/core/tape"
 // `at`, `keep`, `open`) for the next window. Each read keeps its hook, and the memory budget its blocks are counted in,
 // in its own block from the first window to the last.
 
-read_validate_pieces :: proc(src: []u8, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+read_validate_pieces :: proc(src: []u8, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
 	if !validate_dups(opts) {
-		return tape.Fault{rules = rules, kind = .Bad_Option}
+		return tape.Bad_Option{"dups"}
 	}
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return

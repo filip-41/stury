@@ -3,8 +3,8 @@
 usage: wasm_check.py NM OBJDUMP OBJECT EXPORTS_SOURCE
 
 Every `@(export)` procedure of EXPORTS_SOURCE must be defined in OBJECT, and every walk state `st_value`, for each spec,
-each kind of read (no hooks, finder, scanner, builder) and each of the strict and the tolerant walk (`LAX`), must be
-there and hold a `return_call`, which a walk's `#must_tail` calls become only with the `tail-call` feature.
+each kind of read (no hooks, finder, scanner, builder), with `LAX` (steps and pieces) and without, must be there and
+hold a `return_call`, which a walk's `#must_tail` calls become only with the `tail-call` feature.
 """
 
 import itertools

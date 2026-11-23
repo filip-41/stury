@@ -30,7 +30,7 @@ memory_budget_left :: proc "contextless" (m: ^Memory_Budget) -> u64 {
 // The error a read that ended with `err` gives under `m`: `Exceeded` for a refusal the budget made.
 memory_budget_error :: proc "contextless" (m: ^Memory_Budget, err: tape.Error) -> tape.Error {
 	if _, refused := err.(runtime.Allocator_Error); refused && (m.refused || m.peer != nil && m.peer.refused) {
-		return tape.Exceeded{kind = .Memory}
+		return tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}
 	}
 	return err
 }

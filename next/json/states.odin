@@ -42,8 +42,12 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 	case .Number:
 		q, spelling, kind := hook_number(p, end, H, C, S)
 		if kind != .None {
-			when S == .Json5 || LAX {
+			when S == .Json5 {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			} else {
+				if .Non_Finite in w.tolerate {
+					return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+				}
 			}
 			return fault(w, hs, q, kind)
 		}
@@ -176,7 +180,7 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 		} else when S != .Json {
 			return #must_tail st_spec_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
-		return fault(w, hs, p, .Bad_Char)
+		return #must_tail st_bad_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	q, escaped, stop := string_probe(p, end)
 	if q == nil {
@@ -270,7 +274,7 @@ st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, 
 st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q: [^]u8
-	when S == .Json5 || LAX {
+	when S == .Json5 {
 		if w.refused < BLOCK_RETIRE {
 			q = string_escaped(w.resume, end, '"')
 		}
@@ -438,7 +442,7 @@ st_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 				return #must_tail st_spec_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 			}
 		}
-		return fault(w, hs, q, kind)
+		return fault(w, hs, q, kind, .Colon if kind == .Bad_Char else .None)
 	}
 	return #must_tail st_value(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
@@ -770,7 +774,7 @@ st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 	when S != .Json {
 		return #must_tail st_spec_after(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return #must_tail st_bad_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // `st_after` once no gap matches, which reads a comma and the next member or the container's close. Only the states of
@@ -799,7 +803,7 @@ st_after_unmatched :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 	when S != .Json {
 		return #must_tail st_spec_after(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return #must_tail st_bad_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // The state at a string value whose member's gap matched, which matches the gap after it too.
@@ -853,8 +857,12 @@ st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	hs := hook.Regs{s0, s1, s2}
 	q, spelling, kind := hook_number(p, end, H, C, S)
 	if kind != .None {
-		when S == .Json5 || LAX {
+		when S == .Json5 {
 			return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		} else {
+			if .Non_Finite in w.tolerate {
+				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
 		}
 		return fault(w, hs, q, kind)
 	}
@@ -947,7 +955,7 @@ st_after_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 	when S != .Json {
 		return #must_tail st_spec_after(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return #must_tail st_bad_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // The state right after a comma, at white space or the text's end.
@@ -1023,7 +1031,7 @@ st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 	when S != .Json {
 		return #must_tail st_spec_after(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return #must_tail st_bad_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // The state at a number after a comma in an array, which reads numbers while each is followed by a comma and, after at
@@ -1038,8 +1046,12 @@ st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		kind: tape.Fault_Kind
 		q, spelling, kind = hook_number(p, end, H, C, S)
 		if kind != .None {
-			when S == .Json5 || LAX {
+			when S == .Json5 {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			} else {
+				if .Non_Finite in w.tolerate {
+					return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+				}
 			}
 			return fault(w, hs, q, kind)
 		}
@@ -1119,8 +1131,12 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		}
 		n, spelling, kind := hook_number(r, end, H, C, S)
 		if kind != .None {
-			when S == .Json5 || LAX {
+			when S == .Json5 {
 				return #must_tail st_number5(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+			} else {
+				if .Non_Finite in w.tolerate {
+					return #must_tail st_number5(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+				}
 			}
 			return fault(w, hs, n, kind)
 		}
@@ -1149,17 +1165,33 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_bad_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	q, kind := literal_fault(p, end)
-	return fault(w, hook.Regs{s0, s1, s2}, q, kind)
+	return fault(w, hook.Regs{s0, s1, s2}, q, kind, .Literal if kind == .Bad_Char else .None)
 }
+
+// `p` is where a value must start, at a byte that starts none. The fault's detail is chosen here, so the states that
+// send a fault here compile none of that choice.
 
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_bad_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
-	when LAX && S != .Json5 {
-		if p[0] == '+' || p[0] == 'I' || p[0] == 'N' {
+	when S != .Json5 {
+		if .Non_Finite in w.tolerate && (p[0] == '+' || p[0] == 'I' || p[0] == 'N') {
 			return #must_tail st_number5(p, end, d, ind, w, s0, s1, s2, m, on)
 		}
 	}
-	return fault(w, hook.Regs{s0, s1, s2}, p, piece_short(w, p, end, .Bad_Char))
+	kind := piece_short(w, p, end, .Bad_Char)
+	return fault(w, hook.Regs{s0, s1, s2}, p, kind, value_detail(p, end, d) if kind == .Bad_Char else .None)
+}
+
+// `st_bad_value` where an object's key must start.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_bad_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	return fault(w, hook.Regs{s0, s1, s2}, p, .Bad_Char, key_detail(p, end))
+}
+
+// `st_bad_value` after a value, at a byte that is no comma and no close of its container.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_bad_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	return fault(w, hook.Regs{s0, s1, s2}, p, .Bad_Char, after_detail(p, d))
 }
 
 @(private)

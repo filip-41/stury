@@ -41,7 +41,7 @@ moved :: proc(err: tape.Error, by: u64) -> tape.Error {
 		return f
 	case tape.Exceeded:
 		x := e
-		if x.at != 0 || x.kind != .Memory {
+		if x.kind != .Memory {
 			x.at += by
 		}
 		return x
@@ -270,12 +270,10 @@ records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	pieces: tape.Pieces
 	r := json.records_open(src, .Lines, .Json, {pieces = &pieces})
 	_, more := one_validate(&r)
-	f, faulted := r.err.(tape.Fault)
-	testing.expectf(t, !more && faulted && f.kind == .Bad_Option, "pieces: %v", r.err)
+	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"pieces"}), "pieces: %v", r.err)
 	r = json.records_open(src, opts = {dups = .Refuse})
 	_, _, more = one_find(&r, {tape.Name("a")})
-	f, faulted = r.err.(tape.Fault)
-	testing.expectf(t, !more && faulted && f.kind == .Bad_Option && r.index == 0, "refuse: %v", r.err)
+	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"dups"}) && r.index == 0, "refuse: %v", r.err)
 }
 
 // Each member of the root object is read as its value alone is, with its key as written and whether it needs decoding.

@@ -19,9 +19,6 @@ Spec :: enum u8 {
 // Options of a JSON read. `budget` sets `depth`, `nodes`, `memory` and `steps` (a step is one container).
 Options :: tape.Options
 
-@(private, rodata)
-RULES := tape.Rules{"json", {}}
-
 // Whether a read may walk a value again from its first byte. A test build turns it off to read as a format without
 // `.Rewalk`.
 @(private)
@@ -69,7 +66,7 @@ quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	probe_stack()
-	lax := build.read_tolerant(opts)
+	lax := build.read_lax(opts)
 	switch spec {
 	case .Json:
 		if lax {
@@ -100,7 +97,7 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= PARALLEL_FROM {
 		return build_on_threads(src, spec, opts, allocator)
 	}
-	lax := build.read_tolerant(opts)
+	lax := build.read_lax(opts)
 	switch spec {
 	case .Json:
 		if lax {
@@ -129,7 +126,7 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 @(require_results)
 find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
 	probe_stack()
-	lax := build.read_tolerant(opts)
+	lax := build.read_lax(opts)
 	switch spec {
 	case .Json:
 		if lax {
@@ -158,7 +155,7 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read
 @(require_results)
 scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	probe_stack()
-	lax := build.read_tolerant(opts)
+	lax := build.read_lax(opts)
 	switch spec {
 	case .Json:
 		if lax {
@@ -190,7 +187,7 @@ walk :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, $on: 
 	if opts.pieces != nil {
 		return piece_read(src, S, opts, h, regs, allocator, &ctx, on)
 	}
-	if opts.tolerate != {} || opts.budget.steps != 0 {
+	if opts.budget.steps != 0 {
 		return walk_text(src, S, true, opts, h, regs, allocator, &ctx, on)
 	}
 	return walk_text(src, S, false, opts, h, regs, allocator, &ctx, on)
@@ -206,7 +203,7 @@ validate_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Opti
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, hook.no_hook)
 	}
-	return build.read_validate(src, &RULES, opts, allocator, WALK_LEVELS, walk)
+	return build.read_validate(src, opts, allocator, WALK_LEVELS, walk)
 }
 
 @(private)
@@ -236,7 +233,7 @@ scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, build.scanner_hook)
 	}
-	return build.read_scan(src, demand, &FORMATS[S], &RULES, read, opts, caller, rewalk, node_bound, walk)
+	return build.read_scan(src, demand, &FORMATS[S], read, opts, caller, rewalk, node_bound, walk)
 }
 
 @(private)
@@ -253,7 +250,7 @@ find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: b
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, build.finder_hook)
 	}
-	return build.read_find(src, path, &FORMATS[S], &RULES, read, opts, caller, respell, rewalk, walk)
+	return build.read_find(src, path, &FORMATS[S], read, opts, caller, respell, rewalk, walk)
 }
 
 // The most nodes a JSON text of `src` can make, at most `(len(src) + 1 + depth) / 2`, plus 16 of slack. Each node
@@ -265,8 +262,7 @@ node_bound :: #force_inline proc "contextless" (src: []u8, depth: u64) -> u64 {
 }
 
 // Walks `src` and returns the end of its root value or the error, and whether the walk used a rule of
-// `opts.tolerate`. Only white space, and comments in a spec that has them, may follow the value. A walk without `LAX`
-// uses no tolerance.
+// `opts.tolerate`. Only white space, and comments in a spec that has them, may follow the value.
 @(private)
 walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	p := raw_data(src)
