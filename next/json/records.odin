@@ -24,6 +24,7 @@ Records :: struct {
 	err:     tape.Error,
 	pos:     u64, // where the next record is looked for
 	index:   u64, // the records read
+	key:     tape.Token, // the key of the member being read under `.Members`
 	// What the walk learned, kept from record to record. A walk of any spec and hook is laid out as this one, or as its
 	// front when it has no `LAX`.
 	walk:    Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS),
@@ -34,9 +35,9 @@ Records :: struct {
 
 @(private)
 Records_At :: enum u8 {
-	Start, // before the first line, or before the root array
-	Open, // in the root array, before its first element
-	After, // in the root array, after an element
+	Start, // before the first line, or before the root array or object
+	Open, // in the root array or object, before its first element or member
+	After, // in the root array or object, after an element or member
 	Done,
 }
 
@@ -267,15 +268,16 @@ record_reads :: proc "contextless" (r: ^Records, read: ^tape.Read_Options) -> bo
 		records_stop(r, tape.Fault{rules = &RULES, kind = .Bad_Option})
 		return false
 	}
-	if r.framing == .Elements {
+	if r.framing != .Lines {
 		read.stop_early = false
 	}
 	return true
 }
 
-// The next record's first byte, and under `.Lines` its line's end less a CR, under `.Elements` the text's end. False
-// once the records have ended. A fault in the text around the root array's elements ends them with the fault
-// `validate` gives for the text.
+// The next record's first byte, and under `.Lines` its line's end less a CR, under `.Elements` and `.Members` the text's
+// end. Under `.Members` the key is read into `r.key` and the first byte is the value's. False once the records have
+// ended. A fault in the text around the root container's elements or members ends them with the fault `validate` gives
+// for the text.
 @(private)
 record_frame :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut: u64, ok: bool) {
 	if r.at == .Done {
@@ -302,6 +304,12 @@ record_frame :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut: u64, 
 	at, next := element_next(r, w)
 	switch next {
 	case .Element:
+		if r.framing == .Members {
+			if at = record_key(r, w, at); at == 0 {
+				records_refuse(r, nil)
+				return
+			}
+		}
 		return at, n, true
 	case .End:
 		r.at = .Done
@@ -318,23 +326,27 @@ Element_Next :: enum u8 {
 	Fault,
 }
 
-// Where the root array's next element starts, past the open bracket or the comma before it, or whether the array and
-// the text end there or hold something else.
+// Where the root container's next element starts, or under `.Members` its next member's key, past the open bracket or
+// the comma before it, or whether the container and the text end there or hold something else.
 @(private)
 element_next :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (at: u64, next: Element_Next) #no_bounds_check {
 	base := raw_data(r.src)
 	end := base[len(r.src):]
+	open, close := u8('['), u8(']')
+	if r.framing == .Members {
+		open, close = '{', '}'
+	}
 	q := element_gap(base[r.pos:], end, S)
 	if q == nil || q == end {
 		return 0, .Fault
 	}
 	switch r.at {
 	case .Start:
-		if q[0] != '[' {
+		if q[0] != open {
 			return 0, .Fault
 		}
 		when LAX {
-			// The root array takes a step, as each container does.
+			// The root container takes a step, as each container does.
 			w.steps[0] -= 1
 			if w.steps[0] == 0 {
 				return 0, .Fault
@@ -346,11 +358,11 @@ element_next :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> 
 		}
 		fallthrough
 	case .Open:
-		if q[0] == ']' {
+		if q[0] == close {
 			return 0, element_close(q, end, S)
 		}
 	case .After:
-		if q[0] == ']' {
+		if q[0] == close {
 			return 0, element_close(q, end, S)
 		}
 		if q[0] != ',' {
@@ -360,7 +372,7 @@ element_next :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> 
 			return 0, .Fault
 		}
 		when S != .Json {
-			if q[0] == ']' {
+			if q[0] == close {
 				return 0, element_close(q, end, S)
 			}
 		}
@@ -369,7 +381,7 @@ element_next :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> 
 	return u64(intrinsics.ptr_sub(q, base)), .Element
 }
 
-// Whether the text ends past the root array's close bracket at `q`, with white space and comments alone after it.
+// Whether the text ends past the root container's close bracket at `q`, with white space and comments alone after it.
 @(private)
 element_close :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec) -> Element_Next {
 	return .End if element_gap(q[1:], end, S) == end else .Fault
@@ -419,6 +431,67 @@ record_first :: #force_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, 
 	return res, hi, false, true
 }
 
+// The hook of the walk that reads a member's key, which keeps the key and stops the walk.
+@(private)
+Member_Key :: struct {
+	protocol: hook.Protocol(hook.NO_HOOKS_CAPS, hook.Unused, hook.Unused, hook.Unused),
+	key:      tape.Token,
+}
+
+#assert(size_of(Walk(.Json5, Member_Key, true, hook.NO_HOOKS_CAPS)) == size_of(Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS)))
+#assert(offset_of(Walk(.Json5, Member_Key, true, hook.NO_HOOKS_CAPS), gaps) == offset_of(Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS), gaps))
+
+@(private)
+member_key_hook :: proc "contextless" (h: ^Member_Key, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	h.key = t
+	return s, .Stop
+}
+
+// The level of the root object, as the walk's states name a container: its depth and its kind bit.
+@(private)
+MEMBER_LEVEL :: u64(1 << 1 | 1)
+
+// Reads the key of the member at `at` into `r.key` with the walk's own key states, and returns where its value starts,
+// past the colon and the gaps around it, or 0 when the key, the colon or the text fails.
+@(private)
+record_key :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C), at: u64) -> u64 {
+	base := raw_data(r.src)
+	end := base[len(r.src):]
+	h: Member_Key
+	regs: hook.Regs
+	res := key_walk(r, (^Walk(S, Member_Key, LAX, hook.NO_HOOKS_CAPS))(w), at, &h, &regs)
+	if u8(res) != hook.WALK_STOPPED {
+		return 0
+	}
+	q := element_gap(base[u64(res) >> 16:], end, S)
+	if q == nil || q == end || q[0] != ':' {
+		return 0
+	}
+	if q = element_gap(q[1:], end, S); q == nil || q == end {
+		return 0
+	}
+	r.key = h.key
+	return u64(intrinsics.ptr_sub(q, base))
+}
+
+// Walks the key of the member at `at` for hook `h`, which stops on it, and returns the walk's result.
+@(private)
+key_walk :: proc "contextless" (r: ^Records, w: ^Walk($S, Member_Key, $LAX, $C), at: u64, h: ^Member_Key, regs: ^hook.Regs) -> hook.Walk_Result {
+	stack: [2]u32
+	when LAX {
+		left := w.steps[0]
+	}
+	walk_start(w, r.src, raw_data(stack[:]), h, regs, {}, nil, depth_limit(r.opts), r.opts.tolerate, r.opts.budget.steps)
+	when LAX {
+		w.piece[0] = nil
+		w.steps[0] = left
+	}
+	w.depth = min(w.limit, WALK_LEVELS)
+	res := enter_member(raw_data(r.src)[at:], raw_data(r.src)[len(r.src):], MEMBER_LEVEL, INDENT_START, w, regs^, GAP_OFF, member_key_hook)
+	w.hooks, w.regs, w.ctx, w.stack, w.allocator = nil, nil, nil, nil, {}
+	return res
+}
+
 // Walks the record from `lo` to `cut` as a text of those bytes alone, and returns the walk's result.
 @(private, cold)
 record_alone :: #force_no_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, cut: u64, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
@@ -458,7 +531,7 @@ record_walk :: #force_inline proc "contextless" (r: ^Records, w: ^Walk($S, $H, $
 	walk_start(w, r.src, raw_data(stack[:]), h, regs, allocator, ctx, limit, r.opts.tolerate, r.opts.budget.steps)
 	when LAX {
 		w.piece[0] = nil
-		if r.framing == .Elements {
+		if r.framing != .Lines {
 			w.steps[0] = left
 		}
 	}
@@ -490,5 +563,5 @@ record_walk :: #force_inline proc "contextless" (r: ^Records, w: ^Walk($S, $H, $
 @(private)
 record_end :: #force_inline proc "contextless" (r: ^Records, lo, hi: u64, err: tape.Error) -> records.Record {
 	r.index += 1
-	return {index = r.index - 1, lo = lo, hi = hi, err = err}
+	return {index = r.index - 1, lo = lo, hi = hi, err = err, key = r.key}
 }

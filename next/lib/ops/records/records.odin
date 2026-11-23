@@ -11,13 +11,19 @@ Framing :: enum u8 {
 	Lines,
 	// The elements of the root array. A fault ends the records, as the text holds no list past it.
 	Elements,
+	// The members of the root object. Each member's value is a record, with its key in `Record.key`. Every member is a
+	// record, repeated keys too. A fault ends the records, as under `.Elements`, and a root that is no object holds none.
+	Members,
 }
 
 // One record: the records before it, its bytes in the text, and why it does not read, nil when it does. Its bytes run
 // from its first byte that is no white space to its line's end less a CR under `.Lines`, and to its value's end under
-// `.Elements`. Every offset, those of `err` included, counts from the text's first byte.
+// `.Elements` and `.Members`. Every offset, those of `err` included, counts from the text's first byte. Under
+// `.Members` `key` is the member's key, a token of role `.Key` that `tape.key_raw` reads, and under the other framings
+// it is the zero token, whose role is `.Value`.
 Record :: struct {
 	index:  u64,
 	lo, hi: u64,
 	err:    tape.Error,
+	key:    tape.Token,
 }

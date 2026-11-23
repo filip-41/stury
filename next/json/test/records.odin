@@ -5,6 +5,7 @@ import "core:strings"
 import "core:testing"
 import "stury:json"
 import "stury:lib/core/tape"
+import "stury:lib/ops/records"
 import "stury:testkit"
 
 // `err` with the offset it names moved by `by`, as a read in place in a text names what a read of a part of it alone
@@ -114,7 +115,7 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 			rec, more := json.records_validate(&r)
 			line := transmute([]u8)src[span[0]:span[1]]
 			want := moved(json.validate(line, spec), span[0])
-			testing.expectf(t, more && rec == {u64(i), span[0], span[1], want}, "%v validate line %d %q: %v %v, want %v", spec, i, line, rec, more, want)
+			testing.expectf(t, more && rec == {u64(i), span[0], span[1], want, {}}, "%v validate line %d %q: %v %v, want %v", spec, i, line, rec, more, want)
 		}
 		_, more := json.records_validate(&r)
 		testing.expectf(t, !more && r.err == nil && r.index == u64(len(spans)), "%v validate end: %v %v", spec, r.err, r.index)
@@ -130,7 +131,7 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 				if alone.outcome == .Missing {
 					alone.lo, alone.hi = 0, 0
 				}
-				testing.expectf(t, ok && rec == {u64(i), span[0], span[1], moved(err, span[0])} && answer == alone, "%v find stop %v line %d %q: %v %v, want %v %v", spec, stop, i, line, rec, answer, err, alone)
+				testing.expectf(t, ok && rec == {u64(i), span[0], span[1], moved(err, span[0]), {}} && answer == alone, "%v find stop %v line %d %q: %v %v, want %v %v", spec, stop, i, line, rec, answer, err, alone)
 			}
 		}
 		r = json.records_open(transmute([]u8)src, .Lines, spec)
@@ -139,7 +140,7 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 			line := transmute([]u8)src[span[0]:span[1]]
 			alone, err := json.scan(line, &demand, spec)
 			got, want := fmt.tprint(render_answers(&doc), render_doc(&doc)), fmt.tprint(render_answers(&alone), render_doc(&alone))
-			testing.expectf(t, ok && rec == {u64(i), span[0], span[1], moved(err, span[0])} && got == want, "%v scan line %d %q: %v %s, want %v %s", spec, i, line, rec, got, err, want)
+			testing.expectf(t, ok && rec == {u64(i), span[0], span[1], moved(err, span[0]), {}} && got == want, "%v scan line %d %q: %v %s, want %v %s", spec, i, line, rec, got, err, want)
 			tape.destroy(&doc)
 			tape.destroy(&alone)
 		}
@@ -182,7 +183,7 @@ records_read_the_root_arrays_elements :: proc(t: ^testing.T) {
 		for e, i in c.elements {
 			lo := u64(strings.index(c.src, e))
 			rec, more := json.records_validate(&r)
-			testing.expectf(t, more && rec == {u64(i), lo, lo + u64(len(e)), nil}, "%q validate %d: %v %v", c.src, i, rec, more)
+			testing.expectf(t, more && rec == {u64(i), lo, lo + u64(len(e)), nil, {}}, "%q validate %d: %v %v", c.src, i, rec, more)
 		}
 		_, more := json.records_validate(&r)
 		testing.expectf(t, !more && r.err == want_end, "%q validate end: %v, want %v", c.src, r.err, want_end)
@@ -225,9 +226,9 @@ records_keep_the_budget :: proc(t: ^testing.T) {
 		want := moved(json.validate(transmute([]u8)lines[span[0]:span[1]], .Json, opts), span[0])
 		testing.expectf(t, rec.err == want, "%q: %v, want %v", lines[span[0]:span[1]], rec.err, want)
 	}
-	for src in ([]string{`[[1],[2],[3]]`, `[[1],[[2]]]`, `[1,2,3]`}) {
+	for src in ([]string{`[[1],[2],[3]]`, `[[1],[[2]]]`, `[1,2,3]`, `{"a":[1],"b":[2],"c":[3]}`, `{"a":[1],"b":[[2]]}`, `{"a":1,"b":2,"c":3}`}) {
 		opts = {budget = {depth = 2, steps = 3}}
-		r = json.records_open(transmute([]u8)src, .Elements, .Json, opts)
+		r = json.records_open(transmute([]u8)src, .Elements if src[0] == '[' else .Members, .Json, opts)
 		for _ in json.records_validate(&r) {
 		}
 		want := json.validate(transmute([]u8)src, .Json, opts)
@@ -249,4 +250,97 @@ records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	_, _, more = json.records_find(&r, {tape.Name("a")}, {dups = .Refuse})
 	f, faulted = r.err.(tape.Fault)
 	testing.expectf(t, !more && faulted && f.kind == .Bad_Option && r.index == 0, "refuse: %v", r.err)
+}
+
+// Each member of the root object is read as its value alone is, with its key as written and whether it needs decoding.
+// A fault ends the records with the fault `validate` gives for the text, after the members before it.
+@(test)
+records_read_the_root_objects_members :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Member :: struct {
+		key:     string,
+		escaped: bool,
+		value:   string,
+	}
+	Case :: struct {
+		src:     string,
+		spec:    json.Spec,
+		members: []Member,
+	}
+	cases := []Case {
+		{` { "a" : 1 , "b":{"status":2} , "c" :"x" ,"d":[3]} `, .Json, {{"a", false, "1"}, {"b", false, `{"status":2}`}, {"c", false, `"x"`}, {"d", false, "[3]"}}},
+		{`{}`, .Json, {}},
+		{"\xef\xbb\xbf{\"k\":true}", .Json, {{"k", false, "true"}}},
+		{`{"a\nb":1,"\u0073tatus":{"status":2},"":null,"é":"é"}`, .Json, {{`a\nb`, true, "1"}, {`\u0073tatus`, true, `{"status":2}`}, {``, false, "null"}, {"é", false, `"é"`}}},
+		{`{"a":1,"a":2}`, .Json, {{"a", false, "1"}, {"a", false, "2"}}},
+		{`{"a":1,}`, .Json, {{"a", false, "1"}}},
+		{`{"a":1,}`, .Jsonc, {{"a", false, "1"}}},
+		{`{"a" /* c */ : // d` + "\n" + `1 /* e */, /* f */ "b":[2]}`, .Jsonc, {{"a", false, "1"}, {"b", false, "[2]"}}},
+		{`{"a":1,"b" 2}`, .Json, {{"a", false, "1"}}},
+		{`{"a":1,"b":`, .Json, {{"a", false, "1"}}},
+		{`{"a":1,"b"`, .Json, {{"a", false, "1"}}},
+		{`{"a":1,3:4}`, .Json, {{"a", false, "1"}}},
+		{`{"a":1} x`, .Json, {{"a", false, "1"}}},
+		{`{"a":1,"b":[2,]}`, .Json, {{"a", false, "1"}}},
+		{`{"a":`, .Json, {}},
+		{`{`, .Json, {}},
+		{`[1,2]`, .Json, {}},
+		{`5`, .Json, {}},
+		{``, .Json, {}},
+		{`{status:1,'b':'x',$c_1:{status:2},"d\u0041":3,e\u0041:4}`, .Json5, {{"status", false, "1"}, {"b", false, "'x'"}, {"$c_1", false, "{status:2}"}, {`d\u0041`, true, "3"}, {`e\u0041`, true, "4"}}},
+		{`{status:1,}`, .Json5, {{"status", false, "1"}}},
+		{`{a:1,,}`, .Json5, {{"a", false, "1"}}},
+	}
+	path := []tape.Step{tape.Name("status")}
+	demand, _ := tape.demand_of({path})
+	defer tape.destroy_demand(&demand)
+	for c in cases {
+		src := transmute([]u8)c.src
+		want_end := json.validate(src, c.spec)
+		at := 0
+		spans := make([][2]u64, len(c.members), context.temp_allocator)
+		for m, i in c.members {
+			k := at + strings.index(c.src[at:], m.key)
+			v := k + len(m.key) + strings.index(c.src[k + len(m.key):], m.value)
+			spans[i] = {u64(v), u64(v + len(m.value))}
+			at = v + len(m.value)
+		}
+		check :: proc(t: ^testing.T, what: string, c: Case, rec: records.Record, i: int, spans: [][2]u64, m: Member) {
+			raw, escaped := tape.key_raw(transmute([]u8)c.src, rec.key)
+			testing.expectf(t, rec.index == u64(i) && rec.lo == spans[i][0] && rec.hi == spans[i][1] && rec.err == nil, "%q %s %d: %v, want %v", c.src, what, i, rec, spans[i])
+			testing.expectf(t, rec.key.role == .Key && string(raw) == m.key && escaped == m.escaped, "%q %s %d key: %q %v, want %q %v", c.src, what, i, raw, escaped, m.key, m.escaped)
+		}
+		r := json.records_open(src, .Members, c.spec)
+		for m, i in c.members {
+			rec, more := json.records_validate(&r)
+			testing.expectf(t, more, "%q validate %d: ended with %v", c.src, i, r.err)
+			check(t, "validate", c, rec, i, spans, m)
+		}
+		_, more := json.records_validate(&r)
+		testing.expectf(t, !more && r.err == want_end, "%q validate end: %v, want %v", c.src, r.err, want_end)
+		r = json.records_open(src, .Members, c.spec)
+		for m, i in c.members {
+			rec, answer, ok := json.records_find(&r, path, {stop_early = true})
+			alone, _ := json.find(transmute([]u8)m.value, path, c.spec)
+			if alone.outcome != .Missing {
+				alone.lo, alone.hi = alone.lo + spans[i][0], alone.hi + spans[i][0]
+			}
+			testing.expectf(t, ok && answer == alone, "%q find %d: %v, want %v", c.src, i, answer, alone)
+			check(t, "find", c, rec, i, spans, m)
+		}
+		_, _, more = json.records_find(&r, path)
+		testing.expectf(t, !more && r.err == want_end, "%q find end: %v, want %v", c.src, r.err, want_end)
+		r = json.records_open(src, .Members, c.spec)
+		for m, i in c.members {
+			rec, doc, ok := json.records_scan(&r, &demand)
+			alone, _ := json.scan(transmute([]u8)m.value, &demand, c.spec)
+			got, want := render_answers(&doc), render_answers(&alone)
+			testing.expectf(t, ok && got == want, "%q scan %d: %s, want %s", c.src, i, got, want)
+			check(t, "scan", c, rec, i, spans, m)
+			tape.destroy(&doc)
+			tape.destroy(&alone)
+		}
+		_, _, more = json.records_scan(&r, &demand)
+		testing.expectf(t, !more && r.err == want_end, "%q scan end: %v, want %v", c.src, r.err, want_end)
+	}
 }
