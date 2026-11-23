@@ -6,7 +6,6 @@ import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
-import "stury:lib/ops/records"
 
 // The records of a text read in one walk, whose gap table goes on from each record to the next, so that a record is
 // read with the gaps the records before it taught. Each record is judged as a read of its bytes alone judges them, in
@@ -137,10 +136,10 @@ records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S
 	frame :: #force_inline proc(r: ^tape.Records) -> (lo, cut: u64, ok: bool) {
 		return record_frame_of(r, S, LAX, hook.No_Hooks)
 	}
-	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> records.Walked {
+	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
 		return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, hook.no_hook)
 	}
-	return records.read_validate(r, out, &RULES, caller, frame, walk)
+	return build.records_validate(r, out, &RULES, caller, frame, walk)
 }
 
 @(private)
@@ -152,10 +151,10 @@ records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []
 	frame :: #force_inline proc(r: ^tape.Records) -> (lo, cut: u64, ok: bool) {
 		return record_frame_of(r, S, LAX, build.Finder)
 	}
-	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> records.Walked {
+	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
 		return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, build.finder_hook)
 	}
-	return records.read_find(r, path, out, answers, &FORMATS[S], &RULES, read, caller, respell, rewalk, frame, walk)
+	return build.records_find(r, path, out, answers, &FORMATS[S], &RULES, read, caller, respell, rewalk, frame, walk)
 }
 
 @(private)
@@ -166,10 +165,10 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 	frame :: #force_inline proc(r: ^tape.Records) -> (lo, cut: u64, ok: bool) {
 		return record_frame_of(r, S, LAX, build.Scanner)
 	}
-	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> records.Walked {
+	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
 		return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, build.scanner_hook)
 	}
-	return records.read_scan(r, demand, out, docs, &FORMATS[S], &RULES, read, caller, rewalk, node_bound, frame, walk)
+	return build.records_scan(r, demand, out, docs, &FORMATS[S], &RULES, read, caller, rewalk, node_bound, frame, walk)
 }
 
 // `record_frame` of the records `r` of a JSON spec, in the walk for hook `H`.
@@ -183,7 +182,7 @@ record_frame_of :: #force_inline proc(r: ^tape.Records, $S: Spec, $LAX: bool, $H
 // Walks the record from `lo` to `cut` for hook `h`, first in the walk of the whole text, or with `alone` as a text of
 // its bytes alone.
 @(private)
-record_walked :: #force_inline proc(r: ^Records, $S: Spec, $LAX: bool, lo, cut: u64, alone: bool, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (walked: records.Walked) {
+record_walked :: #force_inline proc(r: ^Records, $S: Spec, $LAX: bool, lo, cut: u64, alone: bool, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (walked: build.Record_Walk) {
 	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
 	w := (^Walk(S, H, LAX, C))(&r.walk)
 	if alone {
