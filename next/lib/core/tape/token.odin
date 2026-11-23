@@ -89,6 +89,13 @@ SPELLING_ASCII :: u16(16)
 SPELLING_CREDIT_EXACT :: u16(1 << 5)
 SPELLING_CREDIT :: u16(0x1F << 6) // a credit of at most 31
 
+// Whether the text of scalar `t` is not its bytes in the text, so that `Format.decode` or `Format.same_text` reads it.
+// A number's spelling holds its number kind in the bit a text's holds this in, so a number reads as its bytes, except
+// a key, which a format spells through `same_text` whatever its number kind.
+text_decodes :: #force_inline proc "contextless" (t: Token) -> bool {
+	return t.spelling & SPELLING_DECODE != 0 if t.kind != .Number else t.role == .Key
+}
+
 // The spelling of a text whose escapes save `credit` bytes. It is 0 for no credit and `SPELLING_DECODE` alone for one
 // that does not fit.
 credit_spelling :: #force_inline proc "contextless" (credit: u32) -> u16 {

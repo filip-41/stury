@@ -169,7 +169,7 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 		if !h.keys {
 			return s, .Next
 		}
-		if h.named {
+		if h.named && t.kind != .Number {
 			if t.spelling & tape.SPELLING_DECODE == 0 {
 				if int(t.n) != len(h.key) {
 					return s, .Next
