@@ -405,7 +405,7 @@ scanner_end :: proc(h: ^Scanner, regs: hook.Regs, root_close: u64, err: tape.Err
 			}
 			regs = scan_close_partial(h, regs, f)
 			if !f.replays {
-				h.b.doc.nodes[open].spelling = tape.CONTAINER_PARTIAL | tape.MAX_CHILDREN
+				h.b.doc.nodes[open].spelling |= tape.MAX_CHILDREN
 			}
 		}
 	}
@@ -1203,7 +1203,7 @@ scan_close_partial :: proc "contextless" (h: ^Scanner, s: hook.Regs, f: Scan_Fra
 	open := tape.Node_Index(s.b >> 32)
 	node := &h.b.doc.nodes[open]
 	node.n = u32(builder_cursor(&h.b, s) - open)
-	node.spelling = tape.CONTAINER_PARTIAL | u16(min(f.count, u64(tape.MAX_CHILDREN)))
+	node.spelling = node.spelling & tape.CONTAINER_STYLE | tape.CONTAINER_PARTIAL | u16(min(f.count, u64(tape.MAX_CHILDREN)))
 	if f.count >= u64(tape.MAX_CHILDREN) {
 		builder_partial_count(&h.b, open, u32(f.count))
 	}

@@ -112,16 +112,22 @@ builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 	return
 }
 
-// Reserves the entries of `counts` the containers closed in a room of `room` nodes may need. A room of fewer nodes
-// than `MAX_CHILDREN` needs none.
+// Reserves the entries of `counts` the containers closed in a room of `room` nodes may need.
 @(private)
 builder_reserve_counts :: proc(b: ^Builder, room: int) -> runtime.Allocator_Error {
-	wide := len(b.counts) + room / int(tape.MAX_CHILDREN)
+	wide := len(b.counts) + wide_room(room)
 	if wide <= cap(b.counts) {
 		return nil
 	}
 	reserve(&b.counts, wide) or_return
 	return .Out_Of_Memory if cap(b.counts) < wide else nil
+}
+
+// The entries of `counts` a room of `room` nodes may need, one per `MAX_CHILDREN` nodes, rounded up so that a room
+// that doubles needs at most twice as many. A room of fewer nodes than `MAX_CHILDREN` needs none.
+@(private)
+wide_room :: #force_inline proc "contextless" (room: int) -> int {
+	return (room + int(tape.MAX_CHILDREN) - 1) / int(tape.MAX_CHILDREN) if room >= int(tape.MAX_CHILDREN) else 0
 }
 
 // Whether the budget of `b` lets a room of `have` nodes grow to `room` nodes, counting the entries of `counts` they
@@ -131,7 +137,7 @@ builder_affords :: proc "contextless" (b: ^Builder, have, room: int) -> bool {
 	if b.budget == nil {
 		return true
 	}
-	counts := max(len(b.counts) + room / int(tape.MAX_CHILDREN) - cap(b.counts), 0)
+	counts := max(len(b.counts) + wide_room(room) - cap(b.counts), 0)
 	return u64((room - have) * size_of(tape.Node) + counts * size_of(tape.Child_Count)) <= hook.memory_budget_left(b.budget)
 }
 
@@ -246,7 +252,7 @@ builder_step :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: 
 	}
 	n := &h.doc.nodes[open]
 	n.n = u32(a - open)
-	n.spelling = u16(min(count, u32(tape.MAX_CHILDREN)))
+	n.spelling = n.spelling & tape.CONTAINER_STYLE | u16(min(count, u32(tape.MAX_CHILDREN)))
 	if count >= u32(tape.MAX_CHILDREN) {
 		counts := (^runtime.Raw_Dynamic_Array)(&h.counts)
 		([^]tape.Child_Count)(counts.data)[counts.len] = {tape.Node_Index(open), count}
@@ -294,7 +300,7 @@ builder_unread :: proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) 
 			return s, false
 		}
 	}
-	node := tape.Node{lo = t.lo, n = 1, kind = t.kind, role = t.role, spelling = tape.CONTAINER_PARTIAL | tape.MAX_CHILDREN}
+	node := tape.Node{lo = t.lo, n = 1, kind = t.kind, role = t.role, spelling = t.spelling & tape.CONTAINER_STYLE | tape.CONTAINER_PARTIAL | tape.MAX_CHILDREN}
 	room_check(h, s)
 	((^tape.Node)(uintptr(s.a)))^ = node
 	s.a += size_of(tape.Node)
@@ -564,7 +570,7 @@ builder_so_far :: proc(h: ^Builder, regs: hook.Regs, cut: u64, allocator: runtim
 			children = read[c - 1]
 		}
 		nodes[open].n = u32(count - open)
-		nodes[open].spelling = u16(min(children, u64(tape.MAX_CHILDREN))) | (tape.CONTAINER_PARTIAL if partial else 0)
+		nodes[open].spelling = nodes[open].spelling & tape.CONTAINER_STYLE | u16(min(children, u64(tape.MAX_CHILDREN))) | (tape.CONTAINER_PARTIAL if partial else 0)
 		if children >= u64(tape.MAX_CHILDREN) {
 			append(&counts, tape.Child_Count{tape.Node_Index(open), u32(children)}) or_return
 		}

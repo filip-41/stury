@@ -171,6 +171,40 @@ answer_text :: proc(doc: ^tape.Document, path, k: int) -> string {
 	return strings.to_string(b)
 }
 
+// A container's style bits from the token that opens it stay beside its child count, in a build and in a scan that
+// keeps the container in part.
+@(test)
+containers_keep_their_style :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	src := transmute([]u8)string(KEYED_SRC)
+	format := test_format()
+	tokens := keyed_tokens()
+	OBJECT_STYLE, ARRAY_STYLE :: u16(0x2000), u16(0x4000)
+	#assert(OBJECT_STYLE | ARRAY_STYLE == tape.CONTAINER_STYLE)
+	tokens[0].spelling, tokens[8].spelling = OBJECT_STYLE, ARRAY_STYLE
+	doc := token_build(src, &format, tokens)
+	defer tape.destroy(&doc)
+	r := tape.Reader{&doc, nil}
+	x, _ := tape.member(r, tape.ROOT, "x")
+	testing.expect_value(t, doc.nodes[tape.ROOT].spelling, OBJECT_STYLE | 4)
+	testing.expect_value(t, doc.nodes[x].spelling, ARRAY_STYLE | 2)
+	n, _, _ := tape.length(r, x, context.temp_allocator)
+	testing.expect_value(t, n, 2)
+	d, _ := tape.demand_of({{tape.Name("x"), tape.Index(0)}})
+	defer tape.destroy(&d)
+	s, err := token_scan(src, &format, tokens, &d, {dups = .First, stop_early = true})
+	defer tape.destroy(&s)
+	testing.expect_value(t, err, nil)
+	for node in s.nodes {
+		if node.kind == .Object {
+			testing.expect_value(t, node.spelling & tape.CONTAINER_STYLE, OBJECT_STYLE)
+		} else if node.kind == .Array {
+			testing.expect_value(t, node.spelling & tape.CONTAINER_STYLE, ARRAY_STYLE)
+		}
+	}
+}
+
 // A `Name` takes a key of any scalar kind by its text, while kind stays part of a key, so `12` and `"12"` are two keys
 // that both read as `12`. Scan and find read the same over a format that cannot walk a value again.
 @(test)

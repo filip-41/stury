@@ -26,7 +26,7 @@ Fact_Kind :: enum u8 {
 	Doctype,
 	Directive,
 	Attribute,
-	Style, // no span: held in the node's spelling
+	Style, // no span: a container's `CONTAINER_STYLE`, a scalar's in its format's own spelling bits
 	Name, // no span: the element's shape
 	Namespace, // no span: the element's shape
 	Content, // no span: the element's shape
