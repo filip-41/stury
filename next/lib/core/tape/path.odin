@@ -36,8 +36,7 @@ Step :: union #no_nil {
 Grain :: enum u8 {
 	Whole,
 	Keys, // an object's members, each container value an unread node, or an array's length
-	Kind, // the value's type, which tells its truthiness
-	Exists, // only whether the value exists
+	Exists, // whether the value exists, and its type, which tells its truthiness
 }
 
 // How a read takes the members of one object that share a key. `.Default` is the format's own, `Format.dups`, which is

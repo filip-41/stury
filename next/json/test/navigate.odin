@@ -484,7 +484,7 @@ agree_over :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: json.Options
 	for set, i in sets {
 		append(&runs, Grained{set, nil, nil, false})
 		if len(set) == 1 || i + 1 == len(sets) {
-			for grain in ([]tape.Grain{.Keys, .Kind}) {
+			for grain in ([]tape.Grain{.Keys, .Exists}) {
 				grains := make([]tape.Grain, len(set), context.temp_allocator)
 				for &g, j in grains {
 					g = grain if j % 3 != 2 else .Whole
@@ -931,7 +931,7 @@ navigate_reads_grains :: proc(t: ^testing.T) {
 		{{N("e"), N("x")}, .Last, `1`, `Not_Loaded`},
 	}
 	paths := [][]tape.Step{{N("a")}, {N("d")}, {N("e")}}
-	expect_reads(t, src, paths, {}, reads, grains = {.Keys, .Keys, .Kind})
+	expect_reads(t, src, paths, {}, reads, grains = {.Keys, .Keys, .Exists})
 	// A value a longer path takes is kept with the keys, and read through them.
 	expect_reads(t, src, {{N("a")}, {N("a"), N("b")}}, {}, {
 		{{N("a")}, .Last, `{"b":1,"c":[2],"b":3} #2 ["b":3,"c":[2]]`, `{"b":1,"c":~[],"b":3} #2 ["b":3,"c":~[]]`},
