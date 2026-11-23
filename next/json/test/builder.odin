@@ -303,7 +303,7 @@ build_refuses_at_the_first_repeated_key :: proc(t: ^testing.T) {
 				strings.write_byte(&b, ',')
 			}
 			if seen[k] && want < 0 {
-				want = strings.builder_len(b) + 1
+				want = strings.builder_len(b)
 			}
 			seen[k] = true
 			fmt.sbprintf(&b, `"key%d":%d`, k, i)

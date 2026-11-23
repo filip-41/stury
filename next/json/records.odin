@@ -1,0 +1,494 @@
+package json
+
+import "base:intrinsics"
+import "base:runtime"
+import "stury:lib/base/kernel"
+import "stury:lib/core/hook"
+import "stury:lib/core/tape"
+import "stury:lib/ops/build"
+import "stury:lib/ops/records"
+
+// The records of a text read in one walk, whose gap table goes on from each record to the next, so that a record is
+// read with the gaps the records before it taught. Each record is judged as a read of its bytes alone judges them, in
+// place in the text.
+
+// Reads the records of a text one at a time. `records_open` makes one, and each call of `records_validate`,
+// `records_find` or `records_scan` reads the next record. Once a call returns false the records have ended, and `err`
+// says why, nil at the text's end.
+Records :: struct {
+	src:     []u8,
+	opts:    Options,
+	spec:    Spec,
+	framing: records.Framing,
+	at:      Records_At,
+	err:     tape.Error,
+	pos:     u64, // where the next record is looked for
+	index:   u64, // the records read
+	// What the walk learned, kept from record to record. A walk of any spec and hook is laid out as this one, or as its
+	// front when it has no `LAX`.
+	walk:    Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS),
+}
+
+#assert(size_of(Walk(.Json5, build.Scanner, false, build.SCANNER_CAPS)) <= size_of(Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS)))
+#assert(offset_of(Walk(.Json5, build.Scanner, false, build.SCANNER_CAPS), gaps) == offset_of(Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS), gaps))
+
+@(private)
+Records_At :: enum u8 {
+	Start, // before the first line, or before the root array
+	Open, // in the root array, before its first element
+	After, // in the root array, after an element
+	Done,
+}
+
+// A record's walk reads at most this far past its line, so a value that runs on past its line is refused after a
+// bounded read, while every block the walk reads within the line has its bytes ahead.
+@(private)
+RECORD_AHEAD :: 256
+
+// Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. The budget's limits hold
+// for each record, but `Budget.steps` under `.Elements`, which counts the containers of the whole text. A text in
+// pieces ends the records with `.Bad_Option` before any is read.
+records_open :: proc(src: []u8, framing := records.Framing.Lines, spec := Spec.Json, opts := Options{}) -> (r: Records) {
+	if spec > max(Spec) {
+		panic("json: spec out of range")
+	}
+	r.src, r.framing, r.spec, r.opts, r.pos = src, framing, spec, opts, u64(bom_length(src))
+	if opts.pieces != nil {
+		r.err, r.at = tape.Fault{rules = &RULES, kind = .Bad_Option}, .Done
+	}
+	walk_init(&r.walk, src, nil, (^hook.No_Hooks)(nil), nil, {}, nil, depth_limit(opts), opts.tolerate, opts.budget.steps)
+	return
+}
+
+// Reads the next record of `r` and judges it, as `validate` judges its bytes alone. False once the records have ended.
+// Only a record nesting past `WALK_LEVELS` allocates, for its open levels. Needs `READ_STACK` bytes of stack and faults
+// on a thread with less.
+@(require_results)
+records_validate :: proc(r: ^Records, allocator := context.allocator) -> (rec: records.Record, more: bool) {
+	probe_stack()
+	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
+	switch r.spec {
+	case .Json:
+		if lax {
+			return records_validate_as(r, .Json, true, allocator)
+		}
+		return records_validate_as(r, .Json, false, allocator)
+	case .Jsonc:
+		if lax {
+			return records_validate_as(r, .Jsonc, true, allocator)
+		}
+		return records_validate_as(r, .Jsonc, false, allocator)
+	case .Json5:
+		if lax {
+			return records_validate_as(r, .Json5, true, allocator)
+		}
+		return records_validate_as(r, .Json5, false, allocator)
+	}
+	return
+}
+
+// Reads the next record of `r` and the first value `path` reaches in it, as `find` reads its bytes alone, with every
+// offset from the text's first byte. False once the records have ended. Under `.Elements` the walk reads each element
+// to its end whatever `read.stop_early` says, as the next starts there. Allocates as `find` does. Needs `READ_STACK`
+// bytes of stack and faults on a thread with less.
+@(require_results)
+records_find :: proc(r: ^Records, path: []tape.Step, read := tape.Read_Options{}, allocator := context.allocator) -> (rec: records.Record, answer: tape.Span_Answer, more: bool) {
+	probe_stack()
+	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
+	switch r.spec {
+	case .Json:
+		if lax {
+			return records_find_as(r, path, .Json, true, read, allocator)
+		}
+		return records_find_as(r, path, .Json, false, read, allocator)
+	case .Jsonc:
+		if lax {
+			return records_find_as(r, path, .Jsonc, true, read, allocator)
+		}
+		return records_find_as(r, path, .Jsonc, false, read, allocator)
+	case .Json5:
+		if lax {
+			return records_find_as(r, path, .Json5, true, read, allocator)
+		}
+		return records_find_as(r, path, .Json5, false, read, allocator)
+	}
+	return
+}
+
+// Reads the next record of `r` and builds the document of its nodes the paths of `demand` reach, as `scan` reads its
+// bytes alone. The document's nodes point into the text, and it is the caller's to free. False once the records have
+// ended. Under `.Elements` the walk reads each element to its end whatever `read.stop_early` says, as the next starts
+// there. Needs `READ_STACK` bytes of stack and faults on a thread with less.
+@(require_results)
+records_scan :: proc(r: ^Records, demand: ^tape.Demand, read := tape.Read_Options{}, allocator := context.allocator) -> (rec: records.Record, doc: tape.Document, more: bool) {
+	probe_stack()
+	lax := r.opts.tolerate != {} || r.opts.budget.steps != 0
+	switch r.spec {
+	case .Json:
+		if lax {
+			return records_scan_as(r, demand, .Json, true, read, allocator)
+		}
+		return records_scan_as(r, demand, .Json, false, read, allocator)
+	case .Jsonc:
+		if lax {
+			return records_scan_as(r, demand, .Jsonc, true, read, allocator)
+		}
+		return records_scan_as(r, demand, .Jsonc, false, read, allocator)
+	case .Json5:
+		if lax {
+			return records_scan_as(r, demand, .Json5, true, read, allocator)
+		}
+		return records_scan_as(r, demand, .Json5, false, read, allocator)
+	}
+	return
+}
+
+@(private)
+records_validate_as :: #force_no_inline proc(r: ^Records, $S: Spec, $LAX: bool, caller: runtime.Allocator) -> (rec: records.Record, more: bool) {
+	m: hook.Memory_Budget
+	allocator := read_allocator(&m, r.opts, caller)
+	ctx := context
+	h: hook.No_Hooks
+	regs: hook.Regs
+	w := (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(&r.walk)
+	lo, cut := record_frame(r, w) or_return
+	res, hi, alone := record_first(r, w, lo, cut, &h, &regs, allocator, &ctx, hook.no_hook) or_return
+	if alone {
+		res = record_alone(r, w, lo, cut, &h, &regs, allocator, &ctx, hook.no_hook)
+	}
+	_, err, _ := hook.walk_error(res, &RULES)
+	return record_end(r, lo, hi, hook.memory_budget_error(&m, err)), true
+}
+
+@(private)
+records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (rec: records.Record, answer: tape.Span_Answer, more: bool) {
+	read := read
+	if !record_reads(r, &read) {
+		return
+	}
+	m: hook.Memory_Budget
+	allocator := read_allocator(&m, r.opts, caller)
+	ctx := context
+	rewalk :: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result {
+		regs: hook.Regs
+		return walk_again((^Walk(S, build.Finder, LAX, build.FINDER_CAPS))(h.walk), h.src, lo, &regs, build.finder_hook)
+	}
+	w := (^Walk(S, build.Finder, LAX, build.FINDER_CAPS))(&r.walk)
+	lo, cut := record_frame(r, w) or_return
+	room: build.Find_Room = ---
+	f: build.Finder
+	err := build.finder_start(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator)
+	defer build.finder_end(&f)
+	if err != nil {
+		records_stop(r, hook.memory_budget_error(&m, err))
+		return
+	}
+	regs: hook.Regs
+	res, hi, alone := record_first(r, w, lo, cut, &f, &regs, allocator, &ctx, build.finder_hook) or_return
+	if alone {
+		build.finder_end(&f)
+		f = {}
+		if err = build.finder_start(&f, r.src, &FORMATS[S], path, read, respell, rewalk, &room, allocator); err != nil {
+			records_stop(r, hook.memory_budget_error(&m, err))
+			return
+		}
+		regs = {}
+		res = record_alone(r, w, lo, cut, &f, &regs, allocator, &ctx, build.finder_hook)
+	}
+	_, werr, _ := hook.walk_error(res, &RULES)
+	if werr == nil && f.refused {
+		werr = runtime.Allocator_Error.Out_Of_Memory
+	}
+	if werr != nil {
+		return record_end(r, lo, hi, hook.memory_budget_error(&m, werr)), {}, true
+	}
+	answer = build.finder_answer(&f)
+	when LAX {
+		answer.tolerated = w.tolerated
+	}
+	return record_end(r, lo, hi, nil), answer, true
+}
+
+@(private)
+records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (rec: records.Record, doc: tape.Document, more: bool) {
+	read := read
+	if !record_reads(r, &read) {
+		return
+	}
+	m: hook.Memory_Budget
+	allocator := read_allocator(&m, r.opts, caller)
+	rewalk :: proc "contextless" (h: ^build.Scanner, regs: ^hook.Regs, lo: u64) -> hook.Walk_Result {
+		return walk_again((^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(h.walk), h.b.doc.src, lo, regs, build.scanner_hook)
+	}
+	w := (^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(&r.walk)
+	lo, cut := record_frame(r, w) or_return
+	depth := min(depth_limit(r.opts), cut - lo)
+	most := node_most(node_bound(r.src[lo:cut], depth), r.opts)
+	frames: [FRAME_DEPTH]u64 = ---
+	room: build.Scan_Room = ---
+	h: build.Scanner = ---
+	if err := build.scanner_start(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
+		records_stop(r, hook.memory_budget_error(&m, err))
+		return
+	}
+	regs := build.builder_regs(&h.b)
+	res, hi, alone, framed := record_first(r, w, lo, cut, &h, &regs, allocator, &h.b.ctx, build.scanner_hook)
+	if !framed || alone {
+		// The walk's tokens are dropped with what the scanner built of them.
+		_, _ = build.scanner_end(&h, regs, 0, runtime.Allocator_Error.Out_Of_Memory)
+		if !framed {
+			return
+		}
+		if err := build.scanner_start(&h, r.src, &FORMATS[S], demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
+			records_stop(r, hook.memory_budget_error(&m, err))
+			return
+		}
+		regs = build.builder_regs(&h.b)
+		res = record_alone(r, w, lo, cut, &h, &regs, allocator, &h.b.ctx, build.scanner_hook)
+	}
+	root_close, werr, _ := hook.walk_error(res, &RULES)
+	e: tape.Error
+	doc, e = build.scanner_end(&h, regs, root_close, werr)
+	e = read_end(&doc, e, &m, w.tolerated if LAX else false, caller)
+	return record_end(r, lo, hi, e), doc, true
+}
+
+// Ends the records with `err`, which no record holds.
+@(private, cold)
+records_stop :: proc "contextless" (r: ^Records, err: tape.Error) {
+	r.err, r.at = err, .Done
+}
+
+// Whether a path read under `read` may go on, which ends the records with `.Bad_Option` for the build-only policies a
+// path read refuses. Under `.Elements` it reads each element to its end.
+@(private)
+record_reads :: proc "contextless" (r: ^Records, read: ^tape.Read_Options) -> bool {
+	if read.dups == .Refuse || read.dups == .All {
+		records_stop(r, tape.Fault{rules = &RULES, kind = .Bad_Option})
+		return false
+	}
+	if r.framing == .Elements {
+		read.stop_early = false
+	}
+	return true
+}
+
+// The next record's first byte, and under `.Lines` its line's end less a CR, under `.Elements` the text's end. False
+// once the records have ended. A fault in the text around the root array's elements ends them with the fault
+// `validate` gives for the text.
+@(private)
+record_frame :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut: u64, ok: bool) {
+	if r.at == .Done {
+		return
+	}
+	n := u64(len(r.src))
+	if r.framing == .Lines {
+		base := raw_data(r.src)
+		lo = u64(intrinsics.ptr_sub(kernel.skip_ws(base[r.pos:], base[n:]), base))
+		if lo == n {
+			r.at = .Done
+			return
+		}
+		cut = n
+		if i := kernel.index_byte(r.src[lo:], '\n'); i >= 0 {
+			cut = lo + u64(i)
+		}
+		r.pos = min(cut + 1, n)
+		if r.src[cut - 1] == '\r' {
+			cut -= 1
+		}
+		return lo, cut, true
+	}
+	at, next := element_next(r, w)
+	switch next {
+	case .Element:
+		return at, n, true
+	case .End:
+		r.at = .Done
+	case .Fault:
+		records_refuse(r, nil)
+	}
+	return
+}
+
+@(private)
+Element_Next :: enum u8 {
+	Element,
+	End,
+	Fault,
+}
+
+// Where the root array's next element starts, past the open bracket or the comma before it, or whether the array and
+// the text end there or hold something else.
+@(private)
+element_next :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (at: u64, next: Element_Next) #no_bounds_check {
+	base := raw_data(r.src)
+	end := base[len(r.src):]
+	q := element_gap(base[r.pos:], end, S)
+	if q == nil || q == end {
+		return 0, .Fault
+	}
+	switch r.at {
+	case .Start:
+		if q[0] != '[' {
+			return 0, .Fault
+		}
+		when LAX {
+			// The root array takes a step, as each container does.
+			w.steps[0] -= 1
+			if w.steps[0] == 0 {
+				return 0, .Fault
+			}
+		}
+		r.at, r.pos = .Open, u64(intrinsics.ptr_sub(q, base)) + 1
+		if q = element_gap(q[1:], end, S); q == nil || q == end {
+			return 0, .Fault
+		}
+		fallthrough
+	case .Open:
+		if q[0] == ']' {
+			return 0, element_close(q, end, S)
+		}
+	case .After:
+		if q[0] == ']' {
+			return 0, element_close(q, end, S)
+		}
+		if q[0] != ',' {
+			return 0, .Fault
+		}
+		if q = element_gap(q[1:], end, S); q == nil || q == end {
+			return 0, .Fault
+		}
+		when S != .Json {
+			if q[0] == ']' {
+				return 0, element_close(q, end, S)
+			}
+		}
+	case .Done:
+	}
+	return u64(intrinsics.ptr_sub(q, base)), .Element
+}
+
+// Whether the text ends past the root array's close bracket at `q`, with white space and comments alone after it.
+@(private)
+element_close :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec) -> Element_Next {
+	return .End if element_gap(q[1:], end, S) == end else .Fault
+}
+
+// The first byte past the white space and comments from `p`, nil at a comment that does not end.
+@(private)
+element_gap :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> [^]u8 {
+	when S == .Json {
+		return kernel.skip_ws(p, end)
+	} else {
+		q, _, kind := comment_run(p, end, false, S)
+		return q if kind == .None else nil
+	}
+}
+
+// Ends the records with the error `validate` gives for the text, or `err` when it gives none.
+@(private, cold)
+records_refuse :: proc(r: ^Records, err: tape.Error) {
+	r.err = validate(r.src, r.spec, r.opts)
+	if r.err == nil {
+		r.err = err
+	}
+	r.at = .Done
+}
+
+// Walks the record that `record_frame` framed from `lo` to `cut` for hook `h` from registers `regs`, and returns the
+// walk's result, the record's end, and under `.Lines` whether the record must be walked again alone, which the walk
+// in the whole text reads as no walk of its line would. False once the records have ended, as under `.Elements` a
+// fault in an element ends them.
+@(private)
+record_first :: #force_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, cut: u64, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (res: hook.Walk_Result, hi: u64, alone, ok: bool) {
+	base := raw_data(r.src)
+	n := u64(len(r.src))
+	if r.framing == .Lines {
+		res = record_walk(r, w, lo, base[min(n, cut + RECORD_AHEAD):], depth_limit(r.opts), h, regs, allocator, ctx, false, on)
+		return res, cut, !line_read(r.src, res, cut), true
+	}
+	res = record_walk(r, w, lo, base[n:], depth_limit(r.opts) - 1, h, regs, allocator, ctx, false, on)
+	if u8(res) != 0 {
+		_, err, _ := hook.walk_error(res, &RULES)
+		records_refuse(r, err)
+		return
+	}
+	hi = u64(res) >> 16
+	r.pos, r.at = hi, .After
+	return res, hi, false, true
+}
+
+// Walks the record from `lo` to `cut` as a text of those bytes alone, and returns the walk's result.
+@(private, cold)
+record_alone :: #force_no_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, cut: u64, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	return record_walk(r, w, lo, raw_data(r.src)[cut:], depth_limit(r.opts), h, regs, allocator, ctx, true, on)
+}
+
+// Whether the walk in the whole text with result `res` read the record that ends at `cut` as a walk of its bytes alone
+// reads them: its value ended, or the hook stopped the walk, within them, and only white space follows the value.
+@(private)
+line_read :: #force_inline proc "contextless" (src: []u8, res: hook.Walk_Result, cut: u64) -> bool #no_bounds_check {
+	hi := u64(res) >> 16
+	if hi > cut {
+		return false
+	}
+	switch u8(res) {
+	case 0:
+		for c in src[hi:cut] {
+			if c != ' ' && c != '\t' && c != '\r' {
+				return false
+			}
+		}
+		return true
+	case hook.WALK_STOPPED:
+		return true
+	}
+	return false
+}
+
+// Walks the value at `lo` to `end` for hook `h` from registers `regs`, in the walk of `r` with its gap table, within
+// `limit` levels. With `TAIL` what follows the value up to `end` is judged as a text's tail.
+@(private)
+record_walk :: #force_inline proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo: u64, end: [^]u8, limit: u64, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $TAIL: bool, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	stack: [WALK_LEVELS]u32 = ---
+	when LAX {
+		left := w.steps[0]
+	}
+	walk_start(w, r.src, raw_data(stack[:]), h, regs, allocator, ctx, limit, r.opts.tolerate, r.opts.budget.steps)
+	when LAX {
+		w.piece[0] = nil
+		if r.framing == .Elements {
+			w.steps[0] = left
+		}
+	}
+	w.depth = held_depth(h, regs, min(w.limit, WALK_LEVELS))
+	when .Walk in C {
+		h.walk = w
+	}
+	res := enter(raw_data(r.src)[lo:], end, INDENT_START, w, regs^, GAP_START, on)
+	when TAIL {
+		res = walk_tail(w, res, end, on)
+	}
+	when .Walk in C {
+		h.walk = nil
+	}
+	when LAX {
+		if u8(res) == hook.WALK_STOPPED && w.steps[0] == 0 {
+			res = hook.walk_result(u64(res) >> 16, hook.WALK_STEPS)
+		}
+	}
+	if w.owned {
+		levels_free(w)
+	}
+	// The records keep the walk past the call, and none of the caller's frame.
+	w.hooks, w.regs, w.ctx, w.stack, w.allocator = nil, nil, nil, nil, {}
+	return res
+}
+
+// The record from `lo` to `hi` with error `err`, counted among those read.
+@(private)
+record_end :: #force_inline proc "contextless" (r: ^Records, lo, hi: u64, err: tape.Error) -> records.Record {
+	r.index += 1
+	return {index = r.index - 1, lo = lo, hi = hi, err = err}
+}

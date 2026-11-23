@@ -155,7 +155,7 @@ find_pieces :: proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Opti
 		blk = new(Find_Piece, p.allocator) or_return
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
 		e: runtime.Allocator_Error
-		if blk.f, e = build.finder_start(src, &FORMATS[S], path, read, respell, nil, &blk.room, allocator); e != nil {
+		if e = build.finder_start(&blk.f, src, &FORMATS[S], path, read, respell, nil, &blk.room, allocator); e != nil {
 			free(blk, p.allocator)
 			return {}, hook.memory_budget_error(&s.blocks, e)
 		}

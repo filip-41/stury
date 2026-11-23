@@ -353,8 +353,8 @@ find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: b
 		return walk_again((^Walk(S, build.Finder, LAX, build.FINDER_CAPS))(h.walk), h.src, lo, &regs, build.finder_hook)
 	}
 	room: build.Find_Room = ---
-	f, err := build.finder_start(src, &FORMATS[S], path, read, respell, rewalk, &room, allocator)
-	if err != nil {
+	f: build.Finder
+	if err := build.finder_start(&f, src, &FORMATS[S], path, read, respell, rewalk, &room, allocator); err != nil {
 		return {}, hook.memory_budget_error(&m, err)
 	}
 	defer build.finder_end(&f)

@@ -95,16 +95,18 @@ walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, $
 		h.walk = &w
 	}
 	end := raw_data(src)[len(src):]
+	// A text of few bytes holds no object repeated often enough to pay for a gap table.
+	m: u64 = GAP_START if len(src) > WALK_LEVELS else GAP_OFF
 	r: hook.Walk_Result
 	when LAX {
 		w.piece[0] = pw
 		if pw != nil {
 			r = piece_walk(&w, pw, p, end, on)
 		} else {
-			r = enter(p, end, INDENT_START, &w, regs^, GAP_START, on)
+			r = enter(p, end, INDENT_START, &w, regs^, m, on)
 		}
 	} else {
-		r = enter(p, end, INDENT_START, &w, regs^, GAP_START, on)
+		r = enter(p, end, INDENT_START, &w, regs^, m, on)
 	}
 	when LAX {
 		// A foot read on from a run of comments was judged to the text's end, whose bytes before the window are gone.
@@ -132,9 +134,18 @@ walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, $
 }
 
 // Sets up walk `w` of `src` with its levels in `stack`, past the frame's in `allocator` called in context `ctx`, within
-// `limit` levels, and with `LAX` the rules of `tolerate` and `steps` containers. The caller sets its depth.
+// `limit` levels, and with `LAX` the rules of `tolerate` and `steps` containers, with an empty gap table. The caller
+// sets its depth.
 @(private)
 walk_init :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, stack: [^]u32, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, limit: u64, tolerate: tape.Tolerances, steps: u64) {
+	walk_start(w, src, stack, h, regs, allocator, ctx, limit, tolerate, steps)
+	w.gaps.rows, w.gaps.live, w.gaps.misses = 1, 0, 0
+	intrinsics.mem_zero(&w.gaps.child[0], GAP_MEMBERS)
+}
+
+// `walk_init` with the gap table kept as it is, which the walk of a text's next record goes on learning in.
+@(private)
+walk_start :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, stack: [^]u32, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, limit: u64, tolerate: tape.Tolerances, steps: u64) {
 	w.base, w.hooks, w.stack, w.regs, w.allocator, w.ctx = raw_data(src), h, stack, regs, allocator, ctx
 	w.limit, w.room, w.owned = min(limit, MAX_LEVELS), WALK_LEVELS, false
 	when S == .Json5 || LAX {
@@ -153,8 +164,6 @@ walk_init :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: 
 	when .Rooms in C {
 		w.rooms = hook.rooms_end(h)
 	}
-	w.gaps.rows, w.gaps.live, w.gaps.misses = 1, 0, 0
-	intrinsics.mem_zero(&w.gaps.child[0], GAP_MEMBERS)
 }
 
 // The walk's result `r` once what follows a root value that ended before `end` is judged.

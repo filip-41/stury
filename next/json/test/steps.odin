@@ -148,7 +148,8 @@ token_find :: proc(src: []u8, format: ^tape.Format, tokens: []tape.Token, steps:
 		return hook.walk_result(lo, hook.WALK_NO_MEMORY)
 	}
 	room: build.Find_Room
-	f, _ := build.finder_start(src, format, steps, read, respell, no_rewalk, &room, context.allocator)
+	f: build.Finder
+	_ = build.finder_start(&f, src, format, steps, read, respell, no_rewalk, &room, context.allocator)
 	defer build.finder_end(&f)
 	regs: hook.Regs
 	token_walk(tokens, &f, &regs, build.finder_hook)
@@ -370,7 +371,7 @@ build_takes_repeated_keys_by_policy :: proc(t: ^testing.T) {
 	_, err := json.build(transmute([]u8)src, .Jsonc, {dups = .Refuse})
 	kind, at := fault_of(err)
 	testing.expect_value(t, kind, tape.Fault_Kind.Duplicate_Key)
-	testing.expect_value(t, at, u64(strings.index(src, `"a":5`) + 1))
+	testing.expect_value(t, at, u64(strings.index(src, `"a":5`)))
 	once, ok := json.build(transmute([]u8)string(`{"a":1,"b":{"a":2}}`), .Json, {dups = .Refuse})
 	defer tape.destroy(&once)
 	testing.expect(t, ok == nil)
@@ -449,7 +450,7 @@ escaped_keys_are_one_key_on_every_route :: proc(t: ^testing.T) {
 		}
 		_, rerr := json.build(src, .Json, {dups = .Refuse})
 		kind, at := fault_of(rerr)
-		testing.expectf(t, kind == .Duplicate_Key && at == u64(strings.index(string(src), `"\u0062"`) + 1), "%d members: %v",
+		testing.expectf(t, kind == .Duplicate_Key && at == u64(strings.index(string(src), `"\u0062"`)), "%d members: %v",
 			fill, rerr)
 	}
 }

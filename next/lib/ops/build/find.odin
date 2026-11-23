@@ -88,12 +88,12 @@ Find_Level :: struct {
 @(private)
 FIND_NONE :: tape.Span_Answer{outcome = .Not_Loaded}
 
-// Returns a finder for `steps` over `src`. Its levels are in `room` when they fit, else allocated, and its rings are in
-// `room` until their arrays have more elements than `room` has entries for. With no `rewalk` it reads each value once
-// and keeps a ring of spans where a replay would read a value again, as for a text whose bytes are read once and whose
-// length `src` does not bound.
+// Starts `f`, which the caller zeroed, as a finder for `steps` over `src`. Its levels are in `room` when they fit,
+// else allocated, and its rings are in `room` until their arrays have more elements than `room` has entries for. With
+// no `rewalk` it reads each value once and keeps a ring of spans where a replay would read a value again, as for a
+// text whose bytes are read once and whose length `src` does not bound.
 @(require_results)
-finder_start :: proc(src: []u8, format: ^tape.Format, steps: []tape.Step, read: tape.Read_Options, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, room: ^Find_Room, allocator: runtime.Allocator) -> (f: Finder, err: runtime.Allocator_Error) {
+finder_start :: proc(f: ^Finder, src: []u8, format: ^tape.Format, steps: []tape.Step, read: tape.Read_Options, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, room: ^Find_Room, allocator: runtime.Allocator) -> runtime.Allocator_Error {
 	// The most ring entries. An entry's index is a `u32`, and twice the bytes of the entries must fit an `int`.
 	MAX_ANSWERS :: int(min(u64(max(u32)), u64(max(int) / (2 * size_of(tape.Span_Answer)))))
 	answers := 0
@@ -104,7 +104,7 @@ finder_start :: proc(src: []u8, format: ^tape.Format, steps: []tape.Step, read: 
 		case tape.Index, tape.Slice:
 			if size := finder_ring_size(steps, i, text, rewalks); size > 0 {
 				if size > MAX_ANSWERS - answers {
-					return {}, .Out_Of_Memory
+					return .Out_Of_Memory
 				}
 				answers += size
 			}
@@ -117,7 +117,7 @@ finder_start :: proc(src: []u8, format: ^tape.Format, steps: []tape.Step, read: 
 		level_bytes := len(steps) * size_of(Find_Level)
 		block, berr := runtime.mem_alloc_non_zeroed(level_bytes + len(steps) * size_of(u64), align_of(Find_Level), allocator)
 		if e := took(berr, raw_data(block), level_bytes); e != nil {
-			return f, e
+			return e
 		}
 		f.block = block
 		f.levels, f.opens = ([^]Find_Level)(raw_data(f.block)), ([^]u64)(raw_data(f.block[level_bytes:]))
@@ -126,7 +126,7 @@ finder_start :: proc(src: []u8, format: ^tape.Format, steps: []tape.Step, read: 
 	f.bounds, f.rewalks, f.ctx = format.bounds, rewalks, context
 	f.dups = tape.read_dups(format, read.dups)
 	f.first, f.group, f.stop, f.want = f.dups == .First, f.dups == .Group, read.stop_early, true
-	return f, nil
+	return nil
 }
 
 // Returns the lowest offset of a span the finder holds that may still be its answer, or `max(u64)` for none. The spans

@@ -11,9 +11,9 @@ import "stury:testkit"
 document_entries_hold_no_address :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	for holder in ([]^runtime.Type_Info{type_info_of(tape.Document), type_info_of(tape.Partial)}) {
-		s := runtime.type_info_base(holder).variant.(runtime.Type_Info_Struct)
+		s := runtime.type_info_base(holder).variant.(^runtime.Type_Info_Struct)
 		for i in 0 ..< s.field_count {
-			if list, ok := runtime.type_info_base(s.types[i]).variant.(runtime.Type_Info_Slice); ok {
+			if list, ok := runtime.type_info_base(s.types[i]).variant.(^runtime.Type_Info_Slice); ok {
 				testing.expectf(t, holds_no_address(list.elem), "%v.%s holds an address", holder, s.names[i])
 			}
 		}
@@ -24,18 +24,18 @@ document_entries_hold_no_address :: proc(t: ^testing.T) {
 @(private = "file")
 holds_no_address :: proc(info: ^runtime.Type_Info) -> bool {
 	#partial switch v in runtime.type_info_base(info).variant {
-	case runtime.Type_Info_Struct:
+	case ^runtime.Type_Info_Struct:
 		for i in 0 ..< v.field_count {
 			if !holds_no_address(v.types[i]) {
 				return false
 			}
 		}
 		return true
-	case runtime.Type_Info_Array:
+	case ^runtime.Type_Info_Array:
 		return holds_no_address(v.elem)
-	case runtime.Type_Info_Enumerated_Array:
+	case ^runtime.Type_Info_Enumerated_Array:
 		return holds_no_address(v.elem)
-	case runtime.Type_Info_Integer, runtime.Type_Info_Float, runtime.Type_Info_Boolean, runtime.Type_Info_Rune, runtime.Type_Info_Enum, runtime.Type_Info_Bit_Set, runtime.Type_Info_Bit_Field:
+	case ^runtime.Type_Info_Integer, ^runtime.Type_Info_Float, ^runtime.Type_Info_Boolean, ^runtime.Type_Info_Rune, ^runtime.Type_Info_Enum, ^runtime.Type_Info_Bit_Set, ^runtime.Type_Info_Bit_Field:
 		return true
 	}
 	return false

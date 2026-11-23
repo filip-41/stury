@@ -112,8 +112,11 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 			if c < GAP_ROWS {
 				return #must_tail st_open(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, u64(c) * GAP_MEMBERS, on)
 			}
-			if c < GAP_DORMANT_MARK + GAP_ROWS {
+			if c < GAP_SECOND_MARK + GAP_ROWS {
 				return #must_tail st_open_row_live(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+			if c < GAP_DORMANT_MARK + GAP_ROWS {
+				return #must_tail st_open_row_second(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, m, on)
 			}
 			return #must_tail st_open(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, u64(c) * GAP_MEMBERS, on)
 		} else {
@@ -587,7 +590,16 @@ st_open_new_row :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 	return #must_tail st_open(p, end, d, ind, w, s0, s1, s2, GAP_DORMANT + row * GAP_MEMBERS, on)
 }
 
-// The state at an object's open bracket that is the second object at its parent slot's place, whose row goes live:
+// The state at an object's open bracket that is the second object at its parent slot's place, which reads its
+// members on the row's dormant slots too, as a row learned from the second object pays only from the third.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_open_row_second :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	c := &w.gaps.child[m & (GAP_DORMANT - 1)]
+	c^ -= GAP_DORMANT_MARK - GAP_SECOND_MARK
+	return #must_tail st_open(p, end, d, ind, w, s0, s1, s2, GAP_DORMANT + u64(c^ - GAP_SECOND_MARK) * GAP_MEMBERS, on)
+}
+
+// The state at an object's open bracket that is the third object at its parent slot's place, whose row goes live:
 // its slots are zeroed, the only write to them before a learn, and its members read on them.
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_open_row_live :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {

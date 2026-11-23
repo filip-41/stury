@@ -1,0 +1,252 @@
+package json_tests
+
+import "core:fmt"
+import "core:strings"
+import "core:testing"
+import "stury:json"
+import "stury:lib/core/tape"
+import "stury:testkit"
+
+// `err` with the offset it names moved by `by`, as a read in place in a text names what a read of a part of it alone
+// names in the part.
+@(private = "file")
+moved :: proc(err: tape.Error, by: u64) -> tape.Error {
+	#partial switch e in err {
+	case tape.Fault:
+		f := e
+		f.at += by
+		return f
+	case tape.Exceeded:
+		x := e
+		if x.at != 0 || x.kind != .Memory {
+			x.at += by
+		}
+		return x
+	}
+	return err
+}
+
+// The spans of the lines of `src` that hold a record: from the first byte that is no white space to the line's end
+// less a CR.
+@(private = "file")
+line_spans :: proc(src: string) -> [][2]u64 {
+	spans := make([dynamic][2]u64, context.temp_allocator)
+	lo := 0
+	for lo < len(src) {
+		hi := strings.index_byte(src[lo:], '\n')
+		end := len(src) if hi < 0 else lo + hi
+		first := lo
+		for first < end && strings.index_byte(" \t\r", src[first]) >= 0 {
+			first += 1
+		}
+		cut := end
+		if cut > first && src[cut - 1] == '\r' {
+			cut -= 1
+		}
+		if first < end {
+			append(&spans, [2]u64{u64(first), u64(cut)})
+		}
+		lo = end + 1
+	}
+	return spans[:]
+}
+
+// Lines whose records repeat their members' gaps, so that the walk learns them, and lines a walk of the whole text
+// reads past, into, or differently from the line alone.
+@(private = "file")
+RECORD_LINES := []string {
+	`{"ts":"2026-10-03T04:03:24.502Z","level":"info","service":"shipping","status":338,"id":"req-04ef1962"}`,
+	`{"ts":"2026-10-03T00:44:00.944Z","level":"trace","service":"payments","status":363,"id":"req-6e6aa570"}`,
+	`{"ts":"2026-10-03T12:38:18.852Z","level":"warn","service":"inventory","status":200,"id":"req-1"}`,
+	`{"ts":"2026-10-03T12:38:18.852Z","level":"warn","service":"inventory","status":200,"id":"req-2"}  `,
+	`{"ts":"2026-10-03T12:38:18.852Z","level":"warn","service":"inventory","status":200,"id":"req-3"}` + "\r",
+	`{"ts":"2026-10-03T12:38:18.852Z", "level":"warn","service":"inventory","status":200,"id":"req-4"}`,
+	`{"ts":"2026-10-03T12:38:18.852Z","level":"warn","service":"inventory","status":201,"id":"req-5"} x`,
+	`{"ts":"2026-10-03T12:38:18.852Z","level":"warn","service":"inventory","status":`,
+	`202,"id":"req-6"}`,
+	`{"ts":"2026-10-03T12:38:18.852Z","level":"warn","service":"inventory","status":203,"id":"req-7"`,
+	`}`,
+	`{"ts":"2026-10-03T12:38:18.852Z","level":"warn","service":"inventory","status":204,"id":"req-8"}{}`,
+	`  [1, 2, {"status": 3}]  `,
+	``,
+	"  \t ",
+	`"text"`,
+	`12`,
+	`-`,
+	`true`,
+	`{"status":1,"status":2}`,
+	`{"level":"aAb","status":"\t"}`,
+	"{\"level\":\"a\tb\",\"status\":5}",
+	`{"ts":"2026-10-03T12:38:18.852Z","level":"warn","service":"inventory","status":205,"id":"req-9"} // note`,
+	`/* head */ {"status":206}`,
+	`{"status":[1,2,],}`,
+	`{status:207}`,
+	`[[[[[[[[[[{"status":208}]]]]]]]]]]`,
+	`{"ts":"2026-10-03T12:38:18.852Z","level":"warn","service":"inventory","status":209,"id":"req-10"}`,
+}
+
+@(private = "file")
+record_lines :: proc() -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for round in 0 ..< 3 {
+		for line, i in RECORD_LINES {
+			strings.write_string(&b, line)
+			strings.write_string(&b, "\r\n" if (i + round) % 5 == 0 else "\n")
+		}
+	}
+	strings.write_string(&b, RECORD_LINES[0])
+	return strings.to_string(b)
+}
+
+// Each line's record is judged, found and scanned as a read of the line alone does, with its offsets in the text, and
+// a refused record leaves the records going on at the next line.
+@(test)
+records_read_each_line_as_alone :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := record_lines()
+	spans := line_spans(src)
+	path := []tape.Step{tape.Name("status")}
+	demand, _ := tape.demand_of({path, {tape.Name("level")}})
+	defer tape.destroy_demand(&demand)
+	for spec in json.Spec {
+		r := json.records_open(transmute([]u8)src, .Lines, spec)
+		for span, i in spans {
+			rec, more := json.records_validate(&r)
+			line := transmute([]u8)src[span[0]:span[1]]
+			want := moved(json.validate(line, spec), span[0])
+			testing.expectf(t, more && rec == {u64(i), span[0], span[1], want}, "%v validate line %d %q: %v %v, want %v", spec, i, line, rec, more, want)
+		}
+		_, more := json.records_validate(&r)
+		testing.expectf(t, !more && r.err == nil && r.index == u64(len(spans)), "%v validate end: %v %v", spec, r.err, r.index)
+		for stop in ([]bool{false, true}) {
+			r = json.records_open(transmute([]u8)src, .Lines, spec)
+			for span, i in spans {
+				rec, answer, ok := json.records_find(&r, path, {stop_early = stop})
+				line := transmute([]u8)src[span[0]:span[1]]
+				alone, err := json.find(line, path, spec, {stop_early = stop})
+				if err == nil {
+					alone.lo, alone.hi = alone.lo + span[0], alone.hi + span[0]
+				}
+				if alone.outcome == .Missing {
+					alone.lo, alone.hi = 0, 0
+				}
+				testing.expectf(t, ok && rec == {u64(i), span[0], span[1], moved(err, span[0])} && answer == alone, "%v find stop %v line %d %q: %v %v, want %v %v", spec, stop, i, line, rec, answer, err, alone)
+			}
+		}
+		r = json.records_open(transmute([]u8)src, .Lines, spec)
+		for span, i in spans {
+			rec, doc, ok := json.records_scan(&r, &demand)
+			line := transmute([]u8)src[span[0]:span[1]]
+			alone, err := json.scan(line, &demand, spec)
+			got, want := fmt.tprint(render_answers(&doc), render_doc(&doc)), fmt.tprint(render_answers(&alone), render_doc(&alone))
+			testing.expectf(t, ok && rec == {u64(i), span[0], span[1], moved(err, span[0])} && got == want, "%v scan line %d %q: %v %s, want %v %s", spec, i, line, rec, got, err, want)
+			tape.destroy(&doc)
+			tape.destroy(&alone)
+		}
+	}
+}
+
+// Each element of the root array is read as its value alone is. A fault ends the records with the fault `validate`
+// gives for the text, after the elements before it.
+@(test)
+records_read_the_root_arrays_elements :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Case :: struct {
+		src:      string,
+		spec:     json.Spec,
+		elements: []string,
+	}
+	cases := []Case {
+		{` [ 1 , {"status":2} , "x" ,[3]] `, .Json, {"1", `{"status":2}`, `"x"`, "[3]"}},
+		{`[]`, .Json, {}},
+		{"\xef\xbb\xbf[true]", .Json, {"true"}},
+		{`[1,]`, .Json, {"1"}},
+		{`[1,]`, .Jsonc, {"1"}},
+		{`[1 /* c */, // d` + "\n" + `{"status":2}]`, .Jsonc, {"1", `{"status":2}`}},
+		{`[1,2 3]`, .Json, {"1", "2"}},
+		{`[1,{"status":`, .Json, {"1"}},
+		{`[1] x`, .Json, {"1"}},
+		{`[1,[2,]]`, .Json, {"1"}},
+		{`{"status":1}`, .Json, {}},
+		{`5`, .Json, {}},
+		{``, .Json, {}},
+		{`[{status:1},'x']`, .Json5, {"{status:1}", "'x'"}},
+	}
+	path := []tape.Step{tape.Name("status")}
+	demand, _ := tape.demand_of({path})
+	defer tape.destroy_demand(&demand)
+	for c in cases {
+		src := transmute([]u8)c.src
+		want_end := json.validate(src, c.spec)
+		r := json.records_open(src, .Elements, c.spec)
+		for e, i in c.elements {
+			lo := u64(strings.index(c.src, e))
+			rec, more := json.records_validate(&r)
+			testing.expectf(t, more && rec == {u64(i), lo, lo + u64(len(e)), nil}, "%q validate %d: %v %v", c.src, i, rec, more)
+		}
+		_, more := json.records_validate(&r)
+		testing.expectf(t, !more && r.err == want_end, "%q validate end: %v, want %v", c.src, r.err, want_end)
+		r = json.records_open(src, .Elements, c.spec)
+		for e, i in c.elements {
+			lo := u64(strings.index(c.src, e))
+			rec, answer, ok := json.records_find(&r, path, {stop_early = true})
+			alone, _ := json.find(transmute([]u8)e, path, c.spec)
+			if alone.outcome != .Missing {
+				alone.lo, alone.hi = alone.lo + lo, alone.hi + lo
+			}
+			testing.expectf(t, ok && rec.err == nil && answer == alone, "%q find %d: %v %v, want %v", c.src, i, rec, answer, alone)
+		}
+		_, _, more = json.records_find(&r, path)
+		testing.expectf(t, !more && r.err == want_end, "%q find end: %v, want %v", c.src, r.err, want_end)
+		r = json.records_open(src, .Elements, c.spec)
+		for e, i in c.elements {
+			rec, doc, ok := json.records_scan(&r, &demand)
+			alone, _ := json.scan(transmute([]u8)e, &demand, c.spec)
+			got, want := render_answers(&doc), render_answers(&alone)
+			testing.expectf(t, ok && rec.err == nil && got == want, "%q scan %d: %v %s, want %s", c.src, i, rec, got, want)
+			tape.destroy(&doc)
+			tape.destroy(&alone)
+		}
+		_, _, more = json.records_scan(&r, &demand)
+		testing.expectf(t, !more && r.err == want_end, "%q scan end: %v, want %v", c.src, r.err, want_end)
+	}
+}
+
+// The budget's depth and steps hold for each line's record, and under `.Elements` the steps count the whole text, as
+// `validate` counts them.
+@(test)
+records_keep_the_budget :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	lines := "[[1]]\n[[[1]]]\n{\"a\":[1],\"b\":[2]}\n"
+	opts := json.Options{budget = {depth = 2, steps = 2}}
+	r := json.records_open(transmute([]u8)lines, .Lines, .Json, opts)
+	for span in line_spans(lines) {
+		rec, _ := json.records_validate(&r)
+		want := moved(json.validate(transmute([]u8)lines[span[0]:span[1]], .Json, opts), span[0])
+		testing.expectf(t, rec.err == want, "%q: %v, want %v", lines[span[0]:span[1]], rec.err, want)
+	}
+	for src in ([]string{`[[1],[2],[3]]`, `[[1],[[2]]]`, `[1,2,3]`}) {
+		opts = {budget = {depth = 2, steps = 3}}
+		r = json.records_open(transmute([]u8)src, .Elements, .Json, opts)
+		for _ in json.records_validate(&r) {
+		}
+		want := json.validate(transmute([]u8)src, .Json, opts)
+		testing.expectf(t, r.err == want, "%q: %v, want %v", src, r.err, want)
+	}
+}
+
+// Options no records read takes end the records before any is read.
+@(test)
+records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string("{\"a\":1}\n")
+	pieces: tape.Pieces
+	r := json.records_open(src, .Lines, .Json, {pieces = &pieces})
+	_, more := json.records_validate(&r)
+	f, faulted := r.err.(tape.Fault)
+	testing.expectf(t, !more && faulted && f.kind == .Bad_Option, "pieces: %v", r.err)
+	r = json.records_open(src)
+	_, _, more = json.records_find(&r, {tape.Name("a")}, {dups = .Refuse})
+	f, faulted = r.err.(tape.Fault)
+	testing.expectf(t, !more && faulted && f.kind == .Bad_Option && r.index == 0, "refuse: %v", r.err)
+}

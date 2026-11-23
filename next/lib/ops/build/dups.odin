@@ -7,9 +7,9 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // Applies a build's policy `dups` to the built `doc`, for the members of one object that share a key, kind and text.
-// `.Refuse` fails with `.Duplicate_Key` at the first key of the text that repeats one of its object's. `.First` and
-// `.Last` keep one member of each key and remove the other members with their nodes and facts. Any other policy keeps
-// every member. On an error `doc` is destroyed.
+// `.Refuse` fails with `.Duplicate_Key` at the first byte of the first key of the text that repeats one of its
+// object's, which is a quoted key's opening quote. `.First` and `.Last` keep one member of each key and remove the
+// other members with their nodes and facts. Any other policy keeps every member. On an error `doc` is destroyed.
 @(require_results)
 builder_dups :: proc(doc: ^tape.Document, dups: tape.Duplicates, rules: ^tape.Rules) -> tape.Error {
 	if !dups_apply(doc, dups) {
@@ -113,7 +113,8 @@ repeats_in :: proc(doc: ^tape.Document, keys: []Hashed_Key, dups: tape.Duplicate
 				}
 				switch dups {
 				case .Refuse:
-					r.at = min(r.at, doc.nodes[later.node].lo)
+					head, _ := doc.format.bounds(doc.src, doc.nodes[later.node])
+					r.at = min(r.at, doc.nodes[later.node].lo - u64(head))
 				case .First:
 					drop_mark(doc, r, later.node) or_return
 				case .Last:
