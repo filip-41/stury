@@ -272,8 +272,8 @@ records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	_, more := one_validate(&r)
 	f, faulted := r.err.(tape.Fault)
 	testing.expectf(t, !more && faulted && f.kind == .Bad_Option, "pieces: %v", r.err)
-	r = json.records_open(src)
-	_, _, more = one_find(&r, {tape.Name("a")}, {dups = .Refuse})
+	r = json.records_open(src, opts = {dups = .Refuse})
+	_, _, more = one_find(&r, {tape.Name("a")})
 	f, faulted = r.err.(tape.Fault)
 	testing.expectf(t, !more && faulted && f.kind == .Bad_Option && r.index == 0, "refuse: %v", r.err)
 }

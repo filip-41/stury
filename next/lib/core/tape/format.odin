@@ -22,7 +22,13 @@ Format_Id :: distinct u16
 // Options of a read of any format.
 Options :: struct {
 	budget:   Budget,
-	dups:     Duplicates, // a build's policy for repeated keys, every member kept for `.Default`
+	// The policy for the members of an object that repeat a key, which every read honours or refuses. A build keeps one
+	// member of each key under `.First` and `.Last`, fails on a repeat under `.Refuse`, and keeps every member under
+	// the others. A path read takes the member `.First`, `.Last` or `.Group` says, the format's own for `.Default`, and
+	// refuses `.All` and `.Refuse`, as it takes one member of a key. Under `.Last` an answer through a key is known only
+	// at the close of the object holding it, so a path read that should stop at the first matching key uses `.First`.
+	// A validate refuses `.Refuse`, as it does not compare keys.
+	dups:     Duplicates,
 	// The rules a text may break, each read as `Tolerance` says. A spec whose grammar holds a rule has it already.
 	tolerate: Tolerances,
 	// A text that arrives in pieces, of which the read takes the next window, nil for a whole text.

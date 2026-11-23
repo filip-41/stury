@@ -93,7 +93,7 @@ FIND_NONE :: tape.Span_Answer{outcome = .Not_Loaded}
 // no `rewalk` it reads each value once and keeps a ring of spans where a replay would read a value again, as for a
 // text whose bytes are read once and whose length `src` does not bound.
 @(require_results)
-finder_start :: proc(f: ^Finder, src: []u8, format: ^tape.Format, steps: []tape.Step, read: tape.Read_Options, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, room: ^Find_Room, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+finder_start :: proc(f: ^Finder, src: []u8, format: ^tape.Format, steps: []tape.Step, dups: tape.Duplicates, read: tape.Read_Options, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, room: ^Find_Room, allocator: runtime.Allocator) -> runtime.Allocator_Error {
 	// The most ring entries. An entry's index is a `u32`, and twice the bytes of the entries must fit an `int`.
 	MAX_ANSWERS :: int(min(u64(max(u32)), u64(max(int) / (2 * size_of(tape.Span_Answer)))))
 	answers := 0
@@ -124,7 +124,7 @@ finder_start :: proc(f: ^Finder, src: []u8, format: ^tape.Format, steps: []tape.
 	}
 	f.src, f.steps, f.format, f.respell, f.rewalk, f.answer, f.allocator = src, steps, format, respell, rewalk, FIND_NONE, allocator
 	f.bounds, f.rewalks, f.ctx = format.bounds, rewalks, context
-	f.dups = tape.read_dups(format, read.dups)
+	f.dups = tape.read_dups(format, dups)
 	f.first, f.group, f.stop, f.want = f.dups == .First, f.dups == .Group, read.stop_early, true
 	return nil
 }

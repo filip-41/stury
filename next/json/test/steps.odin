@@ -124,14 +124,14 @@ token_build :: proc(src: []u8, format: ^tape.Format, tokens: []tape.Token) -> ta
 }
 
 @(private = "file")
-token_scan :: proc(src: []u8, format: ^tape.Format, tokens: []tape.Token, d: ^tape.Demand, read: tape.Read_Options) -> (tape.Document, tape.Error) {
+token_scan :: proc(src: []u8, format: ^tape.Format, tokens: []tape.Token, d: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options) -> (tape.Document, tape.Error) {
 	no_rewalk :: proc "contextless" (h: ^build.Scanner, s: ^hook.Regs, lo: u64) -> hook.Walk_Result {
 		return hook.walk_result(lo, hook.WALK_NO_MEMORY)
 	}
 	frames: [64]u64
 	room: build.Scan_Room
 	h: build.Scanner
-	if err := build.scanner_start(&h, src, format, d, read, no_rewalk, 16, 1024, frames[:], &room, context.allocator); err != nil {
+	if err := build.scanner_start(&h, src, format, d, dups, read, no_rewalk, 16, 1024, frames[:], &room, context.allocator); err != nil {
 		return {}, err
 	}
 	regs := build.builder_regs(&h.b)
@@ -140,7 +140,7 @@ token_scan :: proc(src: []u8, format: ^tape.Format, tokens: []tape.Token, d: ^ta
 }
 
 @(private = "file")
-token_find :: proc(src: []u8, format: ^tape.Format, tokens: []tape.Token, steps: []tape.Step, read: tape.Read_Options) -> tape.Span_Answer {
+token_find :: proc(src: []u8, format: ^tape.Format, tokens: []tape.Token, steps: []tape.Step, dups: tape.Duplicates, read: tape.Read_Options) -> tape.Span_Answer {
 	respell :: proc "contextless" (src: []u8, lo, hi: u64) -> u16 {
 		return tape.number_spelling(0, hi - lo, 0)
 	}
@@ -149,7 +149,7 @@ token_find :: proc(src: []u8, format: ^tape.Format, tokens: []tape.Token, steps:
 	}
 	room: build.Find_Room
 	f: build.Finder
-	_ = build.finder_start(&f, src, format, steps, read, respell, no_rewalk, &room, context.allocator)
+	_ = build.finder_start(&f, src, format, steps, dups, read, respell, no_rewalk, &room, context.allocator)
 	defer build.finder_end(&f)
 	regs: hook.Regs
 	token_walk(tokens, &f, &regs, build.finder_hook)
@@ -210,7 +210,7 @@ names_take_keys_of_every_kind :: proc(t: ^testing.T) {
 	d, _ := tape.demand_of(paths)
 	defer tape.destroy(&d)
 	for stop in ([]bool{false, true}) {
-		s, err := token_scan(src, &format, tokens, &d, {dups = .First, stop_early = stop})
+		s, err := token_scan(src, &format, tokens, &d, .First, {stop_early = stop})
 		defer tape.destroy(&s)
 		testing.expect(t, err == nil)
 		testing.expect_value(t, answer_text(&s, 0, 0), "1")
@@ -227,7 +227,7 @@ names_take_keys_of_every_kind :: proc(t: ^testing.T) {
 			text:  string,
 		}{{{N("ab")}, .Last, "1"}, {{N("12")}, .First, "2"}, {{N("12")}, .Last, "3"}, {{N("x"), tape.Index(-2)}, .Last, "5"}}) {
 		for stop in ([]bool{false, true}) {
-			a := token_find(src, &format, tokens, c.steps, {dups = c.dups, stop_early = stop})
+			a := token_find(src, &format, tokens, c.steps, c.dups, {stop_early = stop})
 			testing.expectf(t, a.outcome == .Found && string(src[a.lo:a.hi]) == c.text, "%v %v: %v", c.steps, c.dups, a)
 		}
 	}
@@ -245,7 +245,7 @@ scan_answers_by_node :: proc(t: ^testing.T) {
 	format := test_format()
 	d, _ := tape.demand_of([][]tape.Step{{tape.All{}}, {tape.Index(1)}})
 	defer tape.destroy(&d)
-	s, err := token_scan(src, &format, tokens, &d, {})
+	s, err := token_scan(src, &format, tokens, &d, .Default, {})
 	defer tape.destroy(&s)
 	testing.expect(t, err == nil)
 	testing.expect_value(t, answer_text(&s, 0, 0), "9")
@@ -285,7 +285,7 @@ scan_keeps_a_paths_first_answers :: proc(t: ^testing.T) {
 		d, _ := tape.demand_of([][]tape.Step{c.steps}, nil, []int{c.limit})
 		defer tape.destroy(&d)
 		for stop in ([]bool{false, true}) {
-			s, err := json.scan(transmute([]u8)c.src, &d, .Json, {dups = c.dups, stop_early = stop})
+			s, err := json.scan(transmute([]u8)c.src, &d, .Json, {stop_early = stop}, {dups = c.dups})
 			defer tape.destroy(&s)
 			got := make([dynamic]string, context.temp_allocator)
 			for k := 0; ; k += 1 {
@@ -314,7 +314,7 @@ group_takes_every_member_of_a_key :: proc(t: ^testing.T) {
 	d, _ := tape.demand_of([][]tape.Step{{N("a")}, {N("a"), N("x")}})
 	defer tape.destroy(&d)
 	for stop in ([]bool{false, true}) {
-		s, err := json.scan(src, &d, .Json, {dups = .Group, stop_early = stop})
+		s, err := json.scan(src, &d, .Json, {stop_early = stop}, {dups = .Group})
 		defer tape.destroy(&s)
 		testing.expect(t, err == nil)
 		testing.expect_value(t, answer_text(&s, 0, 0), "1")
@@ -322,9 +322,9 @@ group_takes_every_member_of_a_key :: proc(t: ^testing.T) {
 		testing.expect_value(t, answer_text(&s, 1, 0), "wrong kind")
 		testing.expect_value(t, answer_text(&s, 1, 1), "3")
 		testing.expect_value(t, answer_text(&s, 1, 2), "4")
-		a, _ := json.find(src, {N("a"), N("x")}, .Json, {dups = .Group, stop_early = stop})
+		a, _ := json.find(src, {N("a"), N("x")}, .Json, {stop_early = stop}, {dups = .Group})
 		testing.expect_value(t, a.outcome, tape.Presence.Wrong_Kind)
-		b, _ := json.find(src, {N("a"), tape.All{}}, .Json, {dups = .Group, stop_early = stop})
+		b, _ := json.find(src, {N("a"), tape.All{}}, .Json, {stop_early = stop}, {dups = .Group})
 		testing.expect(t, b.outcome == .Wrong_Kind)
 	}
 	doc, _ := json.build(src)

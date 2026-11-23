@@ -27,6 +27,10 @@ Walked :: struct {
 Frame :: #type proc(r: ^tape.Records) -> (lo, cut: u64, ok: bool)
 
 read_validate :: proc(r: ^tape.Records, out: []tape.Record, rules: ^tape.Rules, caller: runtime.Allocator, $frame: Frame, $walk: proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> Walked) -> (n: int) {
+	if !build.validate_dups(r.opts) {
+		records_stop(r, tape.Fault{rules = rules, kind = .Bad_Option})
+		return
+	}
 	m: hook.Memory_Budget
 	ctx := context
 	h: hook.No_Hooks
@@ -62,7 +66,7 @@ read_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, answe
 	for n < len(out) {
 		allocator := build.read_allocator(&m, r.opts, caller)
 		lo, cut := frame(r) or_break
-		if err := find_begin(&f, r.src, format, path, read, respell, rewalk, &room, allocator); err != nil {
+		if err := find_begin(&f, r.src, format, path, r.opts.dups, read, respell, rewalk, &room, allocator); err != nil {
 			records_stop(r, hook.memory_budget_error(&m, err))
 			break
 		}
@@ -72,7 +76,7 @@ read_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, answe
 			break
 		}
 		if w.again {
-			if err := find_begin(&f, r.src, format, path, read, respell, rewalk, &room, allocator, true); err != nil {
+			if err := find_begin(&f, r.src, format, path, r.opts.dups, read, respell, rewalk, &room, allocator, true); err != nil {
 				records_stop(r, hook.memory_budget_error(&m, err))
 				break
 			}
@@ -112,7 +116,7 @@ read_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record, do
 		lo, cut := frame(r) or_break
 		depth := min(build.read_depth(r.opts), cut - lo)
 		most := build.node_most(bound(r.src[lo:cut], depth), r.opts)
-		if err := build.scanner_restart(&h, r.src, format, demand, read, rewalk, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator); err != nil {
+		if err := build.scanner_restart(&h, r.src, format, demand, r.opts.dups, read, rewalk, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator); err != nil {
 			records_stop(r, hook.memory_budget_error(&m, err))
 			break
 		}
@@ -124,7 +128,7 @@ read_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record, do
 			if !w.ok {
 				break
 			}
-			if err := build.scanner_restart(&h, r.src, format, demand, read, rewalk, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator); err != nil {
+			if err := build.scanner_restart(&h, r.src, format, demand, r.opts.dups, read, rewalk, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator); err != nil {
 				records_stop(r, hook.memory_budget_error(&m, err))
 				break
 			}
@@ -144,11 +148,11 @@ read_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record, do
 // Readies `f` for the next record: started when it is not, or when `fresh` or its levels are allocated, otherwise reset
 // with its room kept.
 @(private)
-find_begin :: #force_inline proc(f: ^build.Finder, src: []u8, format: ^tape.Format, path: []tape.Step, read: tape.Read_Options, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result, room: ^build.Find_Room, allocator: runtime.Allocator, fresh := false) -> runtime.Allocator_Error {
+find_begin :: #force_inline proc(f: ^build.Finder, src: []u8, format: ^tape.Format, path: []tape.Step, dups: tape.Duplicates, read: tape.Read_Options, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result, room: ^build.Find_Room, allocator: runtime.Allocator, fresh := false) -> runtime.Allocator_Error {
 	if f.format == nil || f.block != nil || fresh {
 		build.finder_end(f)
 		f^ = {}
-		return build.finder_start(f, src, format, path, read, respell, rewalk, room, allocator)
+		return build.finder_start(f, src, format, path, dups, read, respell, rewalk, room, allocator)
 	}
 	build.finder_reset(f, room)
 	return nil
@@ -160,11 +164,11 @@ records_stop :: proc "contextless" (r: ^tape.Records, err: tape.Error) {
 	r.err, r.at = err, .Done
 }
 
-// Whether a path read under `read` may go on, which ends the records with `.Bad_Option` for the build-only policies a
-// path read refuses. Under a framing other than `.Lines` it reads each record to its end, as the next starts there.
+// Whether a path read under `read` and the records' options may go on, which ends the records with `.Bad_Option` for
+// the build-only policies a path read refuses. Under a framing other than `.Lines` it reads each record to its end, as the next starts there.
 @(private)
 record_reads :: proc "contextless" (r: ^tape.Records, read: ^tape.Read_Options, rules: ^tape.Rules) -> bool {
-	if !build.path_dups(read^) {
+	if !build.path_dups(r.opts) {
 		records_stop(r, tape.Fault{rules = rules, kind = .Bad_Option})
 		return false
 	}

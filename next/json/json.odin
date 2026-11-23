@@ -206,7 +206,7 @@ validate_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Opti
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, hook.no_hook)
 	}
-	return build.read_validate(src, opts, allocator, WALK_LEVELS, walk)
+	return build.read_validate(src, &RULES, opts, allocator, WALK_LEVELS, walk)
 }
 
 @(private)
@@ -226,7 +226,7 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options
 @(private)
 scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
 	when LAX {
-		if opts.pieces != nil && build.path_dups(read) {
+		if opts.pieces != nil && build.path_dups(opts) {
 			return scan_pieces(src, demand, S, read, opts, caller)
 		}
 	}
@@ -242,7 +242,7 @@ scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX
 @(private)
 find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bool, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
 	when LAX {
-		if opts.pieces != nil && build.path_dups(read) {
+		if opts.pieces != nil && build.path_dups(opts) {
 			return find_pieces(src, path, S, read, opts, caller)
 		}
 	}

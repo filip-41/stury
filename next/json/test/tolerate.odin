@@ -124,7 +124,7 @@ tolerate_invalid_utf8_keys_by_name :: proc(t: ^testing.T) {
 		testing.expect(t, serr != nil)
 		f, err := json.find(transmute([]u8)src, path, opts = LAX)
 		testing.expectf(t, err == nil && f.outcome == .Found && src[f.lo:f.hi] == "2" && f.tolerated, "%q: %v %v", src, f, err)
-		plain, _ := json.find(transmute([]u8)src, {tape.Name("a")}, opts = LAX, read = {dups = .First, stop_early = true})
+		plain, _ := json.find(transmute([]u8)src, {tape.Name("a")}, opts = {tolerate = LAX.tolerate, dups = .First}, read = {stop_early = true})
 		testing.expect(t, plain.outcome == .Found && !plain.tolerated)
 
 		d, _ := tape.demand_of([][]tape.Step{path, {tape.Name("bé")}})

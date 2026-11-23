@@ -196,7 +196,7 @@ Scan_Room :: struct {
 // The node room grows as it fills. With no `rewalk` it reads each value once, keeping nodes where a replay would read a
 // value again.
 @(require_results)
-scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator) -> (err: runtime.Allocator_Error) {
+scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator) -> (err: runtime.Allocator_Error) {
 	h^ = {}
 	builder_start(&h.b, src, format, nodes, most, frames, allocator)
 	if h.b.err != nil {
@@ -209,7 +209,7 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 		h^ = {}
 	}
 	h.demand, h.rewalk, h.rewalks = demand, rewalk, .Rewalk in format.caps && rewalk != nil
-	h.dups = tape.read_dups(format, read.dups)
+	h.dups = tape.read_dups(format, dups)
 	h.first, h.group, h.stop, h.pending = h.dups == .First, h.dups == .Group, read.stop_early, len(demand.paths)
 	h.settles = h.stop || !demand.facts && (demand.limited || scan_cuts(demand))
 	h.b.keep_facts, h.facts, h.passed, h.wait_at = demand.facts, demand.facts, tape.NO_NODE, tape.NO_NODE
@@ -256,9 +256,9 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 // same arguments. What the demand and the read fix is kept, and the lists go back to the room. A scanner never started,
 // or whose marks or picks outgrow the room, is started as `scanner_start` does.
 @(require_results)
-scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator) -> runtime.Allocator_Error {
 	if h.demand != demand || !scan_in_room(h, raw_data(h.marks)) || len(demand.edges) >= len(room.picks) {
-		return scanner_start(h, src, format, demand, read, rewalk, nodes, most, frames, room, allocator)
+		return scanner_start(h, src, format, demand, dups, read, rewalk, nodes, most, frames, room, allocator)
 	}
 	builder_start(&h.b, src, format, nodes, most, frames, allocator)
 	if h.b.err != nil {

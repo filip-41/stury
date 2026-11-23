@@ -84,7 +84,7 @@ expect_scan :: proc(t: ^testing.T, c: Scan_Case, spec := json.Spec.Json, grains:
 	testing.expect(t, derr == nil, loc = loc)
 	defer tape.destroy(&d)
 	for stop in ([]bool{false, true}) {
-		r, err := json.scan(transmute([]u8)c.src, &d, spec, {dups = c.dups, stop_early = stop})
+		r, err := json.scan(transmute([]u8)c.src, &d, spec, {stop_early = stop}, {dups = c.dups})
 		defer tape.destroy(&r)
 		answers := render_answers(&r)
 		testing.expectf(t, err == nil && answers == c.answers, "%q %v %v stop %v: %q, %v", c.src, c.paths, c.dups, stop, answers, err, loc = loc)
@@ -177,7 +177,7 @@ scan_records_what_a_partial_document_lacks :: proc(t: ^testing.T) {
 
 	first, _ := tape.demand_of([][]tape.Step{{tape.Name("x"), tape.Index(0)}})
 	defer tape.destroy(&first)
-	s, serr := json.scan(transmute([]u8)src, &first, read = {dups = .First, stop_early = true})
+	s, serr := json.scan(transmute([]u8)src, &first, read = {stop_early = true}, opts = {dups = .First})
 	defer tape.destroy(&s)
 	testing.expect(t, serr == nil && .Stopped in s.flags)
 	testing.expect_value(t, render_doc(&s), `~{"x":~[10]}`)
@@ -267,7 +267,7 @@ scan_counts_wide_containers :: proc(t: ^testing.T) {
 
 	last, _ := tape.demand_of([][]tape.Step{{tape.Name("a"), tape.Index(-1)}})
 	defer tape.destroy(&last)
-	s, serr := json.scan(src, &last, read = {dups = .First, stop_early = true})
+	s, serr := json.scan(src, &last, read = {stop_early = true}, opts = {dups = .First})
 	defer tape.destroy(&s)
 	testing.expect(t, serr == nil && .Stopped in s.flags)
 	testing.expect_value(t, render_answers(&s), `0=69999`)
@@ -718,8 +718,9 @@ limited_demand :: proc(i: int) -> tape.Demand {
 @(test)
 limited_reads_judge_the_text_past_the_limit :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	read := tape.Read_Options{dups = .First}
-	stop := tape.Read_Options{dups = .First, stop_early = true}
+	read := tape.Read_Options{}
+	stop := tape.Read_Options{stop_early = true}
+	first := json.Options{dups = .First}
 	for src in LIMITED_TEXTS {
 		text := transmute([]u8)src
 		want := json.validate(text)
@@ -727,17 +728,17 @@ limited_reads_judge_the_text_past_the_limit :: proc(t: ^testing.T) {
 		for path, i in limited_paths {
 			d := limited_demand(i)
 			defer tape.destroy(&d)
-			r, err := json.scan(text, &d, read = read)
+			r, err := json.scan(text, &d, read = read, opts = first)
 			tape.destroy(&r)
 			testing.expectf(t, err == want, "%q scan %v: %v, validate %v", src, path, err, want)
 			settles := (src[0] == '{') == (len(path) == 2)
-			s, serr := json.scan(text, &d, read = stop)
+			s, serr := json.scan(text, &d, read = stop, opts = first)
 			testing.expectf(t, !settles || serr == nil && .Stopped in s.flags, "%q scan %v stop: %v %v", src, path, serr, s.flags)
 			tape.destroy(&s)
 			if limited_limits[i] == 0 {
-				_, ferr := json.find(text, path, read = read)
+				_, ferr := json.find(text, path, read = read, opts = first)
 				testing.expectf(t, ferr == want, "%q find %v: %v, validate %v", src, path, ferr, want)
-				a, aerr := json.find(text, path, read = stop)
+				a, aerr := json.find(text, path, read = stop, opts = first)
 				testing.expectf(t, !settles || aerr == nil && a.outcome == .Found, "%q find %v stop: %v %v", src, path, a, aerr)
 			}
 		}
@@ -747,7 +748,7 @@ limited_reads_judge_the_text_past_the_limit :: proc(t: ^testing.T) {
 		for _, i in limited_paths {
 			d := limited_demand(i)
 			defer tape.destroy(&d)
-			r, err := json.scan(f.data, &d, read = read)
+			r, err := json.scan(f.data, &d, read = read, opts = first)
 			tape.destroy(&r)
 			testing.expectf(t, err == want, "%s scan %v: %v, validate %v", f.name, limited_paths[i], err, want)
 		}
@@ -756,9 +757,9 @@ limited_reads_judge_the_text_past_the_limit :: proc(t: ^testing.T) {
 		for path, i in limited_paths {
 			d := limited_demand(i)
 			defer tape.destroy(&d)
-			r, err := json.scan(transmute([]u8)src, &d, read = read)
+			r, err := json.scan(transmute([]u8)src, &d, read = read, opts = first)
 			defer tape.destroy(&r)
-			s, serr := json.scan(transmute([]u8)src, &d, read = stop)
+			s, serr := json.scan(transmute([]u8)src, &d, read = stop, opts = first)
 			defer tape.destroy(&s)
 			testing.expectf(t, err == nil && serr == nil && .Stopped not_in r.flags, "%q %v: %v %v %v", src, path, err, serr, r.flags)
 			same := len(r.nodes) == len(s.nodes) && render_doc(&r) == render_doc(&s) && render_answers(&r) == render_answers(&s)

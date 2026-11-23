@@ -18,7 +18,7 @@ Find_Case :: struct {
 // Checks that `find` gives the case's outcome and span with and without `stop_early`.
 expect_find :: proc(t: ^testing.T, c: Find_Case, spec := json.Spec.Json, loc := #caller_location) {
 	for stop in ([]bool{false, true}) {
-		f, err := json.find(transmute([]u8)c.src, c.path, spec, {dups = c.dups, stop_early = stop})
+		f, err := json.find(transmute([]u8)c.src, c.path, spec, {stop_early = stop}, {dups = c.dups})
 		text := c.src[f.lo:f.hi] if f.hi <= u64(len(c.src)) else "?"
 		testing.expectf(t, err == nil && f.outcome == c.outcome && text == c.text, "%q %v %v stop %v: %v %q, %v", c.src, c.path, c.dups, stop, f.outcome, text, err, loc = loc)
 	}
@@ -93,9 +93,9 @@ find_takes_a_repeated_key_by_policy :: proc(t: ^testing.T) {
 find_judges_the_text :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	path := []tape.Step{tape.Name("a")}
-	f, err := json.find(transmute([]u8)string(`{"a":1,`), path, .Json, {dups = .First, stop_early = true})
+	f, err := json.find(transmute([]u8)string(`{"a":1,`), path, .Json, {stop_early = true}, {dups = .First})
 	testing.expectf(t, err == nil && f.outcome == .Found, "%v %v", f, err)
-	_, err = json.find(transmute([]u8)string(`{"a":1,`), path, .Json, {dups = .First})
+	_, err = json.find(transmute([]u8)string(`{"a":1,`), path, .Json, {}, {dups = .First})
 	kind, at := fault_of(err)
 	testing.expectf(t, kind == .Truncated && at == 7, "%v", err)
 	_, err = json.find(transmute([]u8)string(`{"b":[1,2,x],"a":1}`), path)
@@ -331,7 +331,7 @@ path_reads_refuse_a_build_only_dups_policy :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string(`{"a":1,"a":2}`)
 	for dups in ([]tape.Duplicates{.Refuse, .All}) {
-		_, ferr := json.find(src, []tape.Step{tape.Name("a")}, .Json, {dups = dups})
+		_, ferr := json.find(src, []tape.Step{tape.Name("a")}, .Json, {}, {dups = dups})
 		if !testing.expect_value(t, ferr != nil, true) {
 			return
 		}
@@ -341,7 +341,7 @@ path_reads_refuse_a_build_only_dups_policy :: proc(t: ^testing.T) {
 			}
 		}
 		demand, _ := tape.demand_of([][]tape.Step{{tape.Name("a")}}, allocator = context.temp_allocator)
-		_, serr := json.scan(src, &demand, .Json, {dups = dups})
+		_, serr := json.scan(src, &demand, .Json, {}, {dups = dups})
 		if !testing.expect_value(t, serr != nil, true) {
 			return
 		}
@@ -349,6 +349,29 @@ path_reads_refuse_a_build_only_dups_policy :: proc(t: ^testing.T) {
 			if !testing.expect_value(t, fault.kind, .Bad_Option) {
 				return
 			}
+		}
+	}
+}
+
+// One policy for repeated keys reaches every read, and a read refuses the one it cannot honour: a validate compares no
+// keys, so it refuses `.Refuse` and reads under the rest as under none. Records refuse it as their reads do.
+@(test)
+validate_refuses_a_dups_policy_it_cannot_honour :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string(`{"a":1,"a":2}`)
+	for dups in tape.Duplicates {
+		err := json.validate(src, .Json, {dups = dups})
+		r := json.records_open(src, .Lines, .Json, {dups = dups})
+		out: [1]tape.Record
+		n := json.records_validate(&r, out[:])
+		if dups == .Refuse {
+			fault, ok := err.(tape.Fault)
+			testing.expectf(t, ok && fault.kind == .Bad_Option, "%v: %v", dups, err)
+			fault, ok = r.err.(tape.Fault)
+			testing.expectf(t, n == 0 && ok && fault.kind == .Bad_Option, "%v records: %d %v", dups, n, r.err)
+		} else {
+			testing.expectf(t, err == nil, "%v: %v", dups, err)
+			testing.expectf(t, n == 1 && out[0].err == nil, "%v records: %d %v", dups, n, out[0])
 		}
 	}
 }

@@ -26,7 +26,10 @@ read_tolerant :: #force_inline proc "contextless" (opts: tape.Options) -> bool {
 
 // Returns the error in `src`, or nil. A text no longer than `frame_levels` cannot nest past the walk's frame, so its
 // walk is given no context to grow its levels in.
-read_validate :: #force_inline proc(src: []u8, opts: tape.Options, caller: runtime.Allocator, frame_levels: int, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+read_validate :: #force_inline proc(src: []u8, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, frame_levels: int, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+	if !validate_dups(opts) {
+		return tape.Fault{rules = rules, kind = .Bad_Option}
+	}
 	h: hook.No_Hooks
 	regs: hook.Regs
 	m: hook.Memory_Budget
@@ -66,7 +69,7 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 // Builds the document of the nodes of `src`, a text of `format`, that the paths of `demand` reach. `rewalk` walks a
 // value again for the scanner.
 read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, rules: ^tape.Rules, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, rewalk: Rewalk, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Document, tape.Error) {
-	if !path_dups(read) {
+	if !path_dups(opts) {
 		return {}, tape.Fault{rules = rules, kind = .Bad_Option}
 	}
 	m: hook.Memory_Budget
@@ -76,7 +79,7 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 	frames: [FRAME_DEPTH]u64 = ---
 	room: Scan_Room = ---
 	h: Scanner = ---
-	if err := scanner_start(&h, src, format, demand, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
+	if err := scanner_start(&h, src, format, demand, opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
 		return {}, hook.memory_budget_error(&m, err)
 	}
 	regs := builder_regs(&h.b)
@@ -89,14 +92,14 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 // The first value `path` reaches in `src`, a text of `format`, read with no document. `respell` gives the spelling of
 // a number the walk gave unspelled, and `rewalk` walks a value again for the finder.
 read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Format, rules: ^tape.Rules, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Span_Answer, tape.Error) {
-	if !path_dups(read) {
+	if !path_dups(opts) {
 		return {}, tape.Fault{rules = rules, kind = .Bad_Option}
 	}
 	m: hook.Memory_Budget
 	allocator := read_allocator(&m, opts, caller)
 	room: Find_Room = ---
 	f: Finder
-	if err := finder_start(&f, src, format, path, read, respell, rewalk, &room, allocator); err != nil {
+	if err := finder_start(&f, src, format, path, opts.dups, read, respell, rewalk, &room, allocator); err != nil {
 		return {}, hook.memory_budget_error(&m, err)
 	}
 	defer finder_end(&f)
@@ -113,10 +116,15 @@ read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Form
 	return answer, nil
 }
 
-// Whether a path read may take the repeated keys policy of `read`. A path read takes one member of a key, so the
+// Whether a path read may take the repeated keys policy of `opts`. A path read takes one member of a key, so the
 // build-only policies are refused.
-path_dups :: #force_inline proc "contextless" (read: tape.Read_Options) -> bool {
-	return read.dups != .Refuse && read.dups != .All
+path_dups :: #force_inline proc "contextless" (opts: tape.Options) -> bool {
+	return opts.dups != .Refuse && opts.dups != .All
+}
+
+// Whether a validate may take the repeated keys policy of `opts`. It compares no keys, so `.Refuse` is refused.
+validate_dups :: #force_inline proc "contextless" (opts: tape.Options) -> bool {
+	return opts.dups != .Refuse
 }
 
 // The allocator a read under `opts` allocates its blocks from: `allocator` counted through `m` when `Budget.memory` is

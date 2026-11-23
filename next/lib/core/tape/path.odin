@@ -53,10 +53,8 @@ Duplicates :: enum u8 {
 	Group,
 }
 
-// The options of a path read. Under `.Last` an answer through a key is known only at the close of the object holding
-// it, so a read that should stop at the first matching key uses `.First`.
+// The options of a path read beyond `Options`.
 Read_Options :: struct {
-	dups:       Duplicates,
 	stop_early: bool, // once the answer is known the walk ends, and the text past it is not validated
 }
 

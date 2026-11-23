@@ -78,13 +78,13 @@ Read_Case :: struct {
 }
 
 // Each read over the build of `src` and over its scan by `paths` under `read`, each the same through an index.
-expect_reads :: proc(t: ^testing.T, src: string, paths: [][]tape.Step, read: tape.Read_Options, reads: []Read_Case, spec := json.Spec.Json, grains: []tape.Grain = nil, loc := #caller_location) {
+expect_reads :: proc(t: ^testing.T, src: string, paths: [][]tape.Step, read: tape.Read_Options, reads: []Read_Case, spec := json.Spec.Json, grains: []tape.Grain = nil, dups := tape.Duplicates.Default, loc := #caller_location) {
 	text := transmute([]u8)src
 	doc, berr := json.build(text, spec)
 	defer tape.destroy(&doc)
 	d, derr := tape.demand_of(paths, grains)
 	defer tape.destroy(&d)
-	r, serr := json.scan(text, &d, spec, read)
+	r, serr := json.scan(text, &d, spec, read, {dups = dups})
 	defer tape.destroy(&r)
 	testing.expectf(t, berr == nil && derr == nil && serr == nil, "%q: %v %v %v", src, berr, derr, serr, loc = loc)
 	full_index := tape.index_of(&doc, context.allocator)
@@ -181,21 +181,21 @@ navigate_takes_duplicates_by_policy :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	N :: proc(s: string) -> tape.Step {return tape.Name(s)}
 	src := `{"a":1,"b":0,"a":2}`
-	expect_reads(t, src, {{N("a")}}, {dups = .Last}, {
+	expect_reads(t, src, {{N("a")}}, {}, {
 		{{}, .Last, `{"a":1,"b":0,"a":2} #2 ["a":2,"b":0]`, `~{"a":1,"a":2} #Not_Loaded [Not_Loaded]`},
 		{{}, .First, `{"a":1,"b":0,"a":2} #2 ["a":1,"b":0]`, `~{"a":1,"a":2} #Not_Loaded [Not_Loaded]`},
 		{{N("a")}, .Last, `2`, `2`},
 		{{N("a")}, .First, `1`, `1`},
 		{{N("b")}, .Last, `0`, `Not_Loaded`},
-	})
-	expect_reads(t, src, {{N("a")}}, {dups = .First}, {
+	}, dups = .Last)
+	expect_reads(t, src, {{N("a")}}, {}, {
 		{{N("a")}, .First, `1`, `1`},
 		{{N("a")}, .Last, `2`, `Not_Loaded`},
-	})
+	}, dups = .First)
 	expect_reads(t, `{"a":1,"a":2}`, {{N("a")}}, {}, {{{}, .Default, `{"a":1,"a":2} #1 ["a":2]`, `{"a":1,"a":2} #1 ["a":2]`}})
-	expect_reads(t, `{"a":1,"a":2}`, {{N("a")}}, {dups = .First}, {
+	expect_reads(t, `{"a":1,"a":2}`, {{N("a")}}, {}, {
 		{{}, .Default, `{"a":1,"a":2} #1 ["a":2]`, `~{"a":1} #Not_Loaded [Not_Loaded]`},
-	})
+	}, dups = .First)
 	expect_reads(t, `{"a\n":1,"b":2,"a\u000a":3}`, {{N("a\n")}}, {}, {
 		{{}, .Default, `{"a\n":1,"b":2,"a\u000a":3} #2 ["a\n":3,"b":2]`, `~{"a\n":1,"a\u000a":3} #Not_Loaded [Not_Loaded]`},
 		{{N("a\n")}, .First, `1`, `1`},
@@ -209,7 +209,7 @@ navigate_reads_a_stopped_scan :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	N :: proc(s: string) -> tape.Step {return tape.Name(s)}
 	I :: proc(i: int) -> tape.Step {return tape.Index(i)}
-	expect_reads(t, `{"x":[10,20,30],"y":{"z":1},"w":2}`, {{N("x"), I(0)}}, {dups = .First, stop_early = true}, {
+	expect_reads(t, `{"x":[10,20,30],"y":{"z":1},"w":2}`, {{N("x"), I(0)}}, {stop_early = true}, {
 		{{}, .First, `{"x":[10,20,30],"y":{"z":1},"w":2} #3 ["x":[10,20,30],"y":{"z":1},"w":2]`, `~{"x":~[10]} #Not_Loaded [Not_Loaded]`},
 		{{N("x"), I(0)}, .First, `10`, `10`},
 		{{N("x"), I(1)}, .First, `20`, `Not_Loaded`},
@@ -218,7 +218,7 @@ navigate_reads_a_stopped_scan :: proc(t: ^testing.T) {
 		{{N("x")}, .First, `[10,20,30] #3 [10,20,30]`, `~[10] #Not_Loaded [10,Not_Loaded]`},
 		{{N("x")}, .Last, `[10,20,30] #3 [10,20,30]`, `Not_Loaded`},
 		{{N("y")}, .First, `{"z":1} #1 ["z":1]`, `Not_Loaded`},
-	})
+	}, dups = .First)
 	expect_reads(t, `[[1,2],[3]]`, {{I(0), I(0)}}, {stop_early = true}, {
 		{{}, .Default, `[[1,2],[3]] #2 [[1,2],[3]]`, `~[~[1]] #Not_Loaded [~[1],Not_Loaded]`},
 		{{I(0), I(0)}, .Default, `1`, `1`},
@@ -511,7 +511,9 @@ agree_over :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: json.Options
 		defer tape.destroy(&d)
 		for dups in ([]tape.Duplicates{.Last, .First, .Group}) {
 			for stop in ([]bool{false, true}) {
-				r, serr := json.scan(src, &d, spec, {dups = dups, stop_early = stop}, opts)
+				scan_opts := opts
+				scan_opts.dups = dups
+				r, serr := json.scan(src, &d, spec, {stop_early = stop}, scan_opts)
 				defer tape.destroy(&r)
 				if !testing.expectf(t, serr == nil, "%s %v: scan %v", name, spec, serr) {
 					continue
@@ -948,7 +950,8 @@ navigate_reads_members_a_keys_grain_kept :: proc(t: ^testing.T) {
 	N :: proc(s: string) -> tape.Step {return tape.Name(s)}
 	I :: proc(i: int) -> tape.Step {return tape.Index(i)}
 	src := `{"a":{"x":1,"y":[1,2],"z":"s","w":{"q":0}},"b":2}`
-	for read in ([]tape.Read_Options{{}, {dups = .First, stop_early = true}}) {
+	for read in ([]tape.Read_Options{{}, {stop_early = true}}) {
+		dups := tape.Duplicates.First if read.stop_early else .Default
 		expect_reads(t, src, {{N("a")}}, read, {
 			{{N("a"), N("x")}, .First, `1`, `1`},
 			{{N("a"), N("z")}, .First, `"s"`, `"s"`},
@@ -957,7 +960,7 @@ navigate_reads_members_a_keys_grain_kept :: proc(t: ^testing.T) {
 			{{N("a"), N("w"), N("q")}, .First, `0`, `Not_Loaded`},
 			{{N("a"), N("v")}, .First, `Missing`, `Missing`},
 			{{N("b")}, .First, `2`, `Not_Loaded`},
-		}, grains = {.Keys})
+		}, grains = {.Keys}, dups = dups)
 	}
 }
 

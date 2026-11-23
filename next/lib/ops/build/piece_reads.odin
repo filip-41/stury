@@ -10,7 +10,10 @@ import "stury:lib/core/tape"
 // `at`, `keep`, `open`) for the next window. Each read keeps its hook, and the memory budget its blocks are counted in,
 // in its own block from the first window to the last.
 
-read_validate_pieces :: proc(src: []u8, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+read_validate_pieces :: proc(src: []u8, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+	if !validate_dups(opts) {
+		return tape.Fault{rules = rules, kind = .Bad_Option}
+	}
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return
 	h: hook.No_Hooks
@@ -104,7 +107,7 @@ read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, rea
 		}
 		blk = new(Find_Piece, p.allocator) or_return
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
-		if e := finder_start(&blk.f, src, format, path, read, respell, nil, &blk.room, allocator); e != nil {
+		if e := finder_start(&blk.f, src, format, path, opts.dups, read, respell, nil, &blk.room, allocator); e != nil {
 			free(blk, p.allocator)
 			return {}, hook.memory_budget_error(&s.blocks, e)
 		}
@@ -183,7 +186,7 @@ read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, 
 		}
 		blk = new(Scan_Piece, p.allocator) or_return
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
-		if e := scanner_start(&blk.h, src, format, demand, read, nil, SCAN_NODES, node_most(max(u64), opts), nil, &blk.room, allocator); e != nil {
+		if e := scanner_start(&blk.h, src, format, demand, opts.dups, read, nil, SCAN_NODES, node_most(max(u64), opts), nil, &blk.room, allocator); e != nil {
 			free(blk, p.allocator)
 			return {}, hook.memory_budget_error(&s.blocks, e)
 		}

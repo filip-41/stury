@@ -186,7 +186,9 @@ reads_refuse :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: json.Optio
 	}
 	check(t, &same, "validate", json.validate(src, spec, opts), want, src, name, loc)
 	for dups in ([]tape.Duplicates{.Last, .First}) {
-		_, ferr := json.find(src, {tape.Name("a"), tape.Index(-1)}, spec, {dups = dups}, opts)
+		find_opts := opts
+		find_opts.dups = dups
+		_, ferr := json.find(src, {tape.Name("a"), tape.Index(-1)}, spec, {}, find_opts)
 		check(t, &same, "find", ferr, want, src, name, loc)
 	}
 	_, ferr := json.find(src, {}, spec, {}, opts)
@@ -226,7 +228,9 @@ find_agrees_with_the_build :: proc(t: ^testing.T) {
 				clear(&want)
 				reference_answers(&doc, steps, dups, &want)
 				for stop in ([]bool{false, true}) {
-					a, ferr := json.find(src, steps, f.spec, {dups = dups, stop_early = stop}, opts)
+					find_opts := opts
+					find_opts.dups = dups
+					a, ferr := json.find(src, steps, f.spec, {stop_early = stop}, find_opts)
 					finds^ += 1
 					ok := ferr == nil
 					if len(want) == 0 {
