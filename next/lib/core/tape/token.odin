@@ -62,7 +62,8 @@ NO_NODE :: Node_Index(max(u32))
 MAX_CHILDREN :: u16(0x1FFF)
 
 // In a container's spelling, how the format wrote it, as CBOR's definite or indefinite length, YAML's flow or block
-// and TOML's inline table, in bits a walk sets on the token that opens it and a document keeps beside the count.
+// and TOML's inline table, in bits a walk sets on the token that opens it and on the `End` that closes it, which a
+// document keeps beside the count. A build takes them from the `End`, which is in hand, rather than read the node back.
 CONTAINER_STYLE :: u16(0x6000)
 
 // In a container's spelling in a document, a container a path read kept only part of. Its `n` covers the children kept,

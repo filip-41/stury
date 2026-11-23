@@ -171,8 +171,8 @@ answer_text :: proc(doc: ^tape.Document, path, k: int) -> string {
 	return strings.to_string(b)
 }
 
-// A container's style bits from the token that opens it stay beside its child count, in a build and in a scan that
-// keeps the container in part.
+// A container's style bits from the tokens that open and close it stay beside its child count, in a build and in a scan
+// that keeps the container in part.
 @(test)
 containers_keep_their_style :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -182,7 +182,8 @@ containers_keep_their_style :: proc(t: ^testing.T) {
 	tokens := keyed_tokens()
 	OBJECT_STYLE, ARRAY_STYLE :: u16(0x2000), u16(0x4000)
 	#assert(OBJECT_STYLE | ARRAY_STYLE == tape.CONTAINER_STYLE)
-	tokens[0].spelling, tokens[8].spelling = OBJECT_STYLE, ARRAY_STYLE
+	tokens[0].spelling, tokens[12].spelling = OBJECT_STYLE, OBJECT_STYLE
+	tokens[8].spelling, tokens[11].spelling = ARRAY_STYLE, ARRAY_STYLE
 	doc := token_build(src, &format, tokens)
 	defer tape.destroy(&doc)
 	r := tape.Reader{&doc, nil}

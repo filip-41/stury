@@ -252,7 +252,7 @@ builder_step :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: 
 	}
 	n := &h.doc.nodes[open]
 	n.n = u32(a - open)
-	n.spelling = n.spelling & tape.CONTAINER_STYLE | u16(min(count, u32(tape.MAX_CHILDREN)))
+	n.spelling = t.spelling & tape.CONTAINER_STYLE | u16(min(count, u32(tape.MAX_CHILDREN)))
 	if count >= u32(tape.MAX_CHILDREN) {
 		counts := (^runtime.Raw_Dynamic_Array)(&h.counts)
 		([^]tape.Child_Count)(counts.data)[counts.len] = {tape.Node_Index(open), count}
