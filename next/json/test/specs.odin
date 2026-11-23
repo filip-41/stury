@@ -281,7 +281,7 @@ json5_numbers :: proc(t: ^testing.T) {
 		doc, err := build(t, src, spec = .Json5)
 		testing.expectf(t, err == nil, "%q: %v", src, err)
 		if err == nil {
-			v, ok := tape.node_number(&doc, doc.nodes[1])
+			v, ok := tape.node_number(&doc, 1)
 			testing.expect(t, ok)
 			switch c.kind {
 			case .Int:
@@ -294,13 +294,13 @@ json5_numbers :: proc(t: ^testing.T) {
 	}
 	for text in ([]string{"NaN", "+NaN", "-NaN"}) {
 		doc, _ := build(t, text, spec = .Json5)
-		v, _ := tape.node_number(&doc, doc.nodes[0])
+		v, _ := tape.node_number(&doc, 0)
 		testing.expectf(t, v.kind == .Float && v.bits == 0x7ff8_0000_0000_0000 | u64(text[0] == '-') << 63, "%s: %v", text, v)
 		tape.destroy(&doc)
 	}
 	for text in ([]string{"-0.", "-0.0", "-.0"}) {
 		doc, _ := build(t, text, spec = .Json5)
-		v, _ := tape.node_number(&doc, doc.nodes[0])
+		v, _ := tape.node_number(&doc, 0)
 		testing.expectf(t, v.kind == .Float && v.bits == 1 << 63, "%s: %v", text, v)
 		tape.destroy(&doc)
 	}
@@ -319,9 +319,9 @@ json5_text :: proc(t: ^testing.T) {
 	texts: [dynamic]string
 	defer delete(texts)
 	buf: [256]u8
-	for n in doc.nodes {
+	for n, i in doc.nodes {
 		if n.kind == .String {
-			s, ok := tape.node_text(&doc, n, buf[:])
+			s, ok := tape.node_text(&doc, tape.Node_Index(i), buf[:])
 			testing.expect(t, ok)
 			append(&texts, strings.clone(s, context.temp_allocator))
 		}
@@ -353,8 +353,8 @@ json5_refused_strings :: proc(t: ^testing.T) {
 	defer tape.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	buf: [64]u8
-	for n, i in doc.nodes[1:][:600] {
-		s, ok := tape.node_text(&doc, n, buf[:])
+	for _, i in doc.nodes[1:][:600] {
+		s, ok := tape.node_text(&doc, tape.Node_Index(i + 1), buf[:])
 		testing.expect(t, ok)
 		want := "Ab" if i < 300 else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé\n"
 		if s != want {

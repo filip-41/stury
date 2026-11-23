@@ -202,7 +202,7 @@ names_take_keys_of_every_kind :: proc(t: ^testing.T) {
 		append(&los, doc.nodes[value].lo)
 	}
 	testing.expect(t, len(los) == 2 && los[0] == 12 && los[1] == 21)
-	text, ok := tape.node_text(&doc, doc.nodes[1], nil)
+	text, ok := tape.node_text(&doc, 1, nil)
 	testing.expect(t, ok && text == "ab")
 
 	N :: proc(s: string) -> tape.Step {return tape.Name(s)}

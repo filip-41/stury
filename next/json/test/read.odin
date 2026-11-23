@@ -8,9 +8,9 @@ import "stury:lib/core/tape"
 import "stury:testkit"
 
 // The value node of a one-value text's root array.
-first_value :: proc(t: ^testing.T, doc: ^tape.Document) -> tape.Node {
+first_value :: proc(t: ^testing.T, doc: ^tape.Document) -> tape.Node_Index {
 	testing.expect(t, len(doc.nodes) >= 2)
-	return doc.nodes[1]
+	return 1
 }
 
 // A number reads exact as an integer while it fits `i64` or `u64`, else as the correctly rounded binary64, and as
@@ -94,11 +94,11 @@ keys_and_short_buffers :: proc(t: ^testing.T) {
 	defer tape.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	buf: [16]u8
-	key, ok := tape.node_text(&doc, doc.nodes[1], buf[:])
+	key, ok := tape.node_text(&doc, 1, buf[:])
 	testing.expectf(t, ok && key == "kéy", "key %q", key)
-	_, fits := tape.node_text(&doc, doc.nodes[2], buf[:2])
+	_, fits := tape.node_text(&doc, 2, buf[:2])
 	testing.expect(t, !fits)
-	_, is_number := tape.node_number(&doc, doc.nodes[0])
+	_, is_number := tape.node_number(&doc, 0)
 	testing.expect(t, !is_number)
 }
 
@@ -119,7 +119,7 @@ strings_decode_boundaries :: proc(t: ^testing.T) {
 		doc, err := build(t, c.text)
 		testing.expect_value(t, err, nil)
 		buf := make([]u8, doc.nodes[0].n, context.temp_allocator)
-		s, ok := tape.node_text(&doc, doc.nodes[0], buf)
+		s, ok := tape.node_text(&doc, 0, buf)
 		testing.expectf(t, ok && s == c.want, "%q read as %q, want %q", c.text, s, c.want)
 		tape.destroy(&doc)
 	}
@@ -129,7 +129,7 @@ strings_decode_boundaries :: proc(t: ^testing.T) {
 		doc, err := build(t, src)
 		testing.expect_value(t, err, nil)
 		buf := make([]u8, doc.nodes[0].n, context.temp_allocator)
-		s, ok := tape.node_text(&doc, doc.nodes[0], buf)
+		s, ok := tape.node_text(&doc, 0, buf)
 		testing.expectf(t, ok && s == want, "off %d failed", off)
 		tape.destroy(&doc)
 	}
@@ -160,7 +160,7 @@ numbers_decode_boundaries :: proc(t: ^testing.T) {
 		for wrap in wraps {
 			doc, err := build(t, wrap)
 			testing.expect_value(t, err, nil)
-			node := first_value(t, &doc) if wrap[0] == '[' else doc.nodes[0]
+			node := first_value(t, &doc) if wrap[0] == '[' else tape.ROOT
 			num, ok := tape.node_number(&doc, node)
 			testing.expectf(t, ok && num.kind == .Float && num.bits == want_bits, "%q: %v %x, want Float %x", wrap, num.kind, num.bits, want_bits)
 			tape.destroy(&doc)
@@ -191,7 +191,7 @@ numbers_decode_boundaries :: proc(t: ^testing.T) {
 		for wrap in wraps {
 			doc, err := build(t, wrap)
 			testing.expect_value(t, err, nil)
-			node := first_value(t, &doc) if wrap[0] == '[' else doc.nodes[0]
+			node := first_value(t, &doc) if wrap[0] == '[' else tape.ROOT
 			num, ok := tape.node_number(&doc, node)
 			testing.expectf(t, ok && num.kind == c.kind && num.bits == c.bits, "%q: %v %x, want %v %x", wrap, num.kind, num.bits, c.kind, c.bits)
 			tape.destroy(&doc)
@@ -279,9 +279,9 @@ numbers_read_as_strconv_reads_them :: proc(t: ^testing.T) {
 		text := strings.to_string(b)
 		doc, err := build(t, text)
 		testing.expect_value(t, err, nil)
-		for node in doc.nodes[1:] {
+		for node, i in doc.nodes[1:] {
 			s := text[node.lo:][:node.n]
-			num, ok := tape.node_number(&doc, node)
+			num, ok := tape.node_number(&doc, tape.Node_Index(i + 1))
 			want := strconv_number(s)
 			testing.expectf(t, ok && num == want, "%s: %v %x, want %v %x", s, num.kind, num.bits, want.kind, want.bits)
 		}
@@ -300,7 +300,7 @@ numbers_read_as_strconv_reads_them :: proc(t: ^testing.T) {
 		}
 		doc, err := build(t, strings.to_string(b))
 		testing.expect_value(t, err, nil)
-		num, ok := tape.node_number(&doc, doc.nodes[0])
+		num, ok := tape.node_number(&doc, 0)
 		want := strconv_number(s)
 		testing.expectf(t, ok && num == want, "%q at %d: %v %x, want %v %x", s, lo, num.kind, num.bits, want.kind, want.bits)
 		tape.destroy(&doc)

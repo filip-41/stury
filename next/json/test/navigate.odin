@@ -378,7 +378,7 @@ navigate_finds_distinct_keys_of_wide_objects :: proc(t: ^testing.T) {
 	}
 	key_value_text :: proc(doc: ^tape.Document, at: tape.Node_Index) -> string {
 		buf := make([]u8, doc.nodes[at].n, context.temp_allocator)
-		text, _ := tape.node_text(doc, doc.nodes[at], buf)
+		text, _ := tape.node_text(doc, at, buf)
 		return strings.clone(text, context.temp_allocator)
 	}
 }
@@ -683,7 +683,7 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 
 key_text :: proc(doc: ^tape.Document, at: tape.Node_Index) -> string {
 	buf := make([]u8, doc.nodes[at].n, context.temp_allocator)
-	text, _ := tape.node_text(doc, doc.nodes[at], buf)
+	text, _ := tape.node_text(doc, at, buf)
 	return strings.clone(text, context.temp_allocator)
 }
 

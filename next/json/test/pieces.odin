@@ -202,7 +202,7 @@ paths_into :: proc(doc: ^tape.Document) -> [][]tape.Step {
 	add(&paths, tape.Index(-2), tape.Index(0))
 	if len(doc.nodes) > 1 && doc.nodes[0].kind == .Object && doc.nodes[1].role == .Key {
 		buf: [256]u8
-		if name, ok := tape.node_text(doc, doc.nodes[1], buf[:]); ok {
+		if name, ok := tape.node_text(doc, 1, buf[:]); ok {
 			name := tape.Name(fmt.tprint(name))
 			add(&paths, name)
 			add(&paths, tape.All{}, name)

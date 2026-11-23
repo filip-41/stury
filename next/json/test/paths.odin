@@ -278,12 +278,12 @@ corrupt :: proc(src: []u8) {
 key_names_of :: proc(doc: ^tape.Document) -> []string {
 	names := make([dynamic]string, context.temp_allocator)
 	append(&names, "zz", "")
-	for node in doc.nodes {
+	for node, i in doc.nodes {
 		if node.role != .Key || len(names) == 14 {
 			continue
 		}
 		buf := make([]u8, node.n * 3, context.temp_allocator)
-		text, _ := tape.node_text(doc, node, buf)
+		text, _ := tape.node_text(doc, tape.Node_Index(i), buf)
 		if !slice.contains(names[:], text) {
 			append(&names, strings.clone(text, context.temp_allocator))
 		}
