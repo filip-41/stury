@@ -32,7 +32,7 @@ WASM_NO_TAIL_FEATURE_SETS := none simd128
 # Test packages whose kernels pick an x86-64 tier, run at each tier and `X86_OPTS` level, and once at each level with
 # no tier named, so the CPU's own tier is detected and used. On an x86-64 machine these runs replace the plain one. An
 # arm64 Mac runs them through Rosetta, and skips them with a note where Rosetta is not installed.
-TIER_PKGS := lib/base/kernel/test
+TIER_PKGS := lib/base/kernel/test dsv/test
 X86_TIERS := 0 1
 X86_OPTS ?= minimal speed
 OBJDUMP ?= $(shell command -v llvm-objdump || echo /opt/homebrew/opt/llvm@22/bin/llvm-objdump)
@@ -104,10 +104,11 @@ lint:
 	done
 	@mkdir -p build; for p in $(TIER_PKGS); do \
 		echo "== $$p (linux_amd64 tiers)"; \
+		case $$p in dsv/test) req="--require dsv::pass_default_v3:";; *) req=;; esac; \
 		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:none $(LINT_FLAGS) -out:build/tiers-none.o || exit 1; \
-		python3 tools/tier_check.py $(OBJDUMP) build/tiers-none.o || exit 1; \
+		python3 tools/tier_check.py $(OBJDUMP) build/tiers-none.o $$req || exit 1; \
 		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:build/tiers-speed.o || exit 1; \
-		python3 tools/tier_check.py $(OBJDUMP) build/tiers-speed.o --inlined || exit 1; \
+		python3 tools/tier_check.py $(OBJDUMP) build/tiers-speed.o --inlined $$req || exit 1; \
 	done
 
 test:

@@ -111,7 +111,7 @@ readers_read_tables :: proc(t: ^testing.T) {
 		scalar(21, 1, .Plain),
 	}
 	for slotted in ([]bool{false, true}) {
-		slots := make([]u16, 4 if slotted else 0, context.temp_allocator)
+		slots := make([]u32, 4 if slotted else 0, context.temp_allocator)
 		for col in 0 ..< len(slots) / 2 {
 			k := nodes[2 + col]
 			mask := u32(len(slots) - 1)
@@ -119,7 +119,7 @@ readers_read_tables :: proc(t: ^testing.T) {
 			for slots[i] != 0 {
 				i = (i + 1) & mask
 			}
-			slots[i] = u16(col + 1)
+			slots[i] = u32(col + 1)
 		}
 		ext := tape.Doc_Ext{format = tape.Tabular_Ext{tables = {{node = 0, header = 1, first_row = 4, slots_len = u32(len(slots)), unique_keys = true}}, slots = slots}}
 		doc := tape.Document{src = src, nodes = nodes, format = &TWICE, ext = &ext}

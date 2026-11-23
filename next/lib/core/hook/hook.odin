@@ -12,7 +12,9 @@ import "stury:lib/core/tape"
 Action :: enum u8 {
 	Next,
 	// On an `Array` or `Object`, pass what it holds with no tokens up to its `End`, while the walk still validates its
-	// bytes. `Next` on any other token. Only a hook with `.Skips` gives it.
+	// bytes. On a `Key`, pass the member's value with no token: a scalar is judged, a container is judged whole, and no
+	// `End` follows, as no opening token was given. The facts between the key and its value are still given. `Next` on
+	// any other token. Only a hook with `.Skips` gives it, and every walk honours it.
 	Skip,
 	// On an `Array` or `Object`, validate it and the rest of the text with no more tokens. Only a hook with `.Skips`
 	// gives it.
@@ -39,9 +41,14 @@ Capability :: enum u8 {
 	Number_Blocks, // receives the arrays of numbers a walk reads in blocks
 	Walk, // reads values again inside its calls, in the walk set in its field `walk: rawptr`
 	Credits, // reads a key's escape credit, which the walk gives a key it reads whole and no other
+	// Answers `Skip` on a member's key the same way for the member at the same place in each object of an array, so a
+	// walk whose members are placed by position, as a delimited text's cells are, may pass such a member with no token
+	// once the hook skipped it in an earlier object. The walk adds the members it passed so to the hook's field
+	// `dropped: u64` before it gives the object's `End`.
+	Columns,
 }
 
-Capabilities :: bit_set[Capability; u8]
+Capabilities :: bit_set[Capability; u16]
 
 // The type of the field `protocol` every hook has: its capabilities `C`, and for `.Levels`, `.Rooms` and `.Keeps` a
 // `Levels`, `Rooms` and `Keeps` type naming its procs, `Unused` for one it lacks. `check` says what is wrong.
@@ -70,6 +77,10 @@ check :: #force_inline proc "contextless" ($H: typeid) {
 	#assert(.Keeps not_in C || .Skips in C, "a hook with `.Keeps` has `.Skips`, as the walk reads its keeps where it reads its skips")
 	#assert(.Number_Blocks not_in C || .Skips not_in C, "a hook with `.Number_Blocks` answers only `Next` and `Stop`, so it has no `.Skips`")
 	#assert(.Walk not_in C || intrinsics.type_has_field(H, "walk"), "a hook with `.Walk` has a field `walk: rawptr`")
+	#assert(.Columns not_in C || .Skips in C, "a hook with `.Columns` has `.Skips`, as it passes members by `Skip`")
+	when .Columns in C {
+		#assert(intrinsics.type_field_type(H, "dropped") == u64, "a hook with `.Columns` has a field `dropped: u64`")
+	}
 	when .Walk in C {
 		#assert(intrinsics.type_field_type(H, "walk") == rawptr, "a hook's `walk` field is a `rawptr`")
 	}

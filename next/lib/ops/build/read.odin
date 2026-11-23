@@ -27,7 +27,10 @@ read_lax :: #force_inline proc "contextless" (opts: tape.Options) -> bool {
 
 // Returns the error in `src`, or nil. A text no longer than `frame_levels` cannot nest past the walk's frame, so its
 // walk is given no context to grow its levels in.
-read_validate :: #force_inline proc(src: []u8, opts: tape.Options, caller: runtime.Allocator, frame_levels: int, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+read_validate :: #force_inline proc(src: []u8, format: ^tape.Format, opts: tape.Options, caller: runtime.Allocator, frame_levels: int, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+	if e := tape.options_refused(format, opts); e != nil {
+		return e
+	}
 	if !validate_dups(opts) {
 		return tape.Bad_Option{"dups"}
 	}
@@ -45,15 +48,19 @@ read_validate :: #force_inline proc(src: []u8, opts: tape.Options, caller: runti
 	return hook.memory_budget_error(&m, err)
 }
 
-// Builds the document of `src`, a text of `format`, with repeated keys as `opts.dups` says.
-read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Builder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Document, tape.Error) {
+// Builds the document of `src`, a text of `format`, which starts with room for a node per `bytes_per_node` bytes. `finish`
+// settles the built document and on an error destroys it, as `builder_finish_dups` does for repeated keys.
+read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Builder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool), $finish: proc(doc: ^tape.Document, opts: tape.Options, rules: ^tape.Rules) -> tape.Error, bytes_per_node := BUILD_BYTES_PER_NODE) -> (tape.Document, tape.Error) {
+	if e := tape.options_refused(format, opts); e != nil {
+		return {}, e
+	}
 	m: hook.Memory_Budget
 	allocator := read_allocator(&m, opts, caller)
 	depth := min(read_depth(opts), u64(len(src)))
 	most := node_most(bound(src, depth), opts)
 	frames: [FRAME_DEPTH]u64 = ---
 	b: Builder = ---
-	builder_start(&b, src, format, len(src) / BUILD_BYTES_PER_NODE, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m if opts.budget.memory != 0 else nil)
+	builder_start(&b, src, format, len(src) / bytes_per_node, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m if opts.budget.memory != 0 else nil)
 	if b.err != nil {
 		return {}, hook.memory_budget_error(&m, b.err)
 	}
@@ -61,15 +68,23 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 	root_close, err, tolerated := walk(src, opts, &b, &regs, allocator, &b.ctx)
 	doc, e := builder_end(&b, regs, root_close, err)
 	if e == nil {
-		e = builder_dups(&doc, opts.dups, rules)
+		e = finish(&doc, opts, rules)
 	}
 	e = read_end(&doc, e, &m, tolerated, caller)
 	return doc, e
 }
 
+// The `finish` of a format whose objects hold keys: the document's repeated keys as `opts.dups` says.
+builder_finish_dups :: proc(doc: ^tape.Document, opts: tape.Options, rules: ^tape.Rules) -> tape.Error {
+	return builder_dups(doc, opts.dups, rules)
+}
+
 // Builds the document of the nodes of `src`, a text of `format`, that the paths of `demand` reach. `rewalk` walks a
 // value again for the scanner.
 read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, rewalk: Rewalk, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Document, tape.Error) {
+	if e := tape.options_refused(format, opts); e != nil {
+		return {}, e
+	}
 	if !path_dups(opts) {
 		return {}, tape.Bad_Option{"dups"}
 	}
@@ -93,6 +108,9 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 // The first value `path` reaches in `src`, a text of `format`, read with no document. `respell` gives the spelling of
 // a number the walk gave unspelled, and `rewalk` walks a value again for the finder.
 read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Span_Answer, tape.Error) {
+	if e := tape.options_refused(format, opts); e != nil {
+		return {}, e
+	}
 	if !path_dups(opts) {
 		return {}, tape.Bad_Option{"dups"}
 	}

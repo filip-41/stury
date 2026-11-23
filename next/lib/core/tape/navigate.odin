@@ -110,10 +110,10 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 	if node.kind != .Object {
 		return NO_NODE, step_refused(node.kind)
 	}
-	policy := read_dups(doc.format, dups)
 	if t, row := row_of(doc, at); row {
-		return row_member(doc, t, at, name, policy)
+		return row_member(doc, t, at, name, table_dups(doc, dups))
 	}
+	policy := read_dups(doc.format, dups)
 	partial := node.spelling & CONTAINER_PARTIAL != 0
 	if policy == .Last && clashes(doc, at, name) {
 		return NO_NODE, .Ambiguous
@@ -377,10 +377,10 @@ next_child :: proc "contextless" (r: Reader, c: ^Children, dups := Duplicates.De
 	node := doc.nodes[c.container]
 	end := c.container + Node_Index(node.n)
 	if node.kind == .Object {
-		policy := read_dups(doc.format, dups)
 		if c.header != 0 {
-			return next_cell(doc, c, policy)
+			return next_cell(doc, c, table_dups(doc, dups))
 		}
+		policy := read_dups(doc.format, dups)
 		if c.named || policy == .Group {
 			for c.next < end {
 				key = c.next
@@ -864,6 +864,12 @@ row_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (
 		return {}, false
 	}
 	return table_around(ext, doc, at)
+}
+
+// The policy a table's row reads `dups` as, in a document with a table: the build's for `.Default`.
+@(private)
+table_dups :: #force_inline proc "contextless" (doc: ^Document, dups: Duplicates) -> Duplicates {
+	return read_dups(doc.format, doc.ext.format.(Tabular_Ext).dups if dups == .Default else dups)
 }
 
 // The table whose node is the array at `at`, false for an array that is no table.

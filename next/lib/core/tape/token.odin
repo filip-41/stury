@@ -128,6 +128,11 @@ Tolerance :: enum u8 {
 	Non_Finite,
 	// A `\u` escape of a surrogate half that no other half pairs with. It reads as U+FFFD.
 	Lone_Surrogate,
+	// A record of a table with more or fewer cells than the first. Its cells past the header's are named by their
+	// 1-based column, and the cells it lacks are absent.
+	Ragged,
+	// A quote inside a cell that no quote opens, in a format that quotes whole cells. It reads as the byte it is.
+	Bare_Quote,
 }
 
 Tolerances :: bit_set[Tolerance; u8]

@@ -1,13 +1,13 @@
 """Fails when an x86-64 object holds an instruction past x86-64-v2 where only a V2 CPU's code may run: VEX or EVEX, BMI1 and
 BMI2 but `tzcnt`, LZCNT, PCLMULQDQ and MOVBE.
 
-usage: tier_check.py OBJDUMP OBJECT [--inlined]
+usage: tier_check.py OBJDUMP OBJECT [--inlined] [--require NAME]
 
-The V3 tier is the procedures `lib/base/kernel/tier_amd64.odin` declares for it, `TIER_ROOTS`, and the procedures only
-those call, which at -o:none include the kernels `scan_v3` does not inline. Every other procedure is held to x86-64-v2,
-so a callee that a V2 path also reaches fails even though a V3 procedure calls it too. The disassembly must hold a
-`scan_v3` and some root that reaches an instruction past x86-64-v2, so one not read as expected fails instead of passing
-empty. With `--inlined`, for an optimized build, every root must reach one.
+The V3 tier is the procedures `lib/base/kernel/tier_amd64.odin` and `dsv/tier_amd64.odin` declare for
+it, `TIER_ROOTS`, and the procedures only those call, which at -o:none include the kernels `scan_v3` does not inline.
+Every other procedure is held to x86-64-v2, so a callee that a V2 path also reaches fails even though a V3 procedure calls it too. The disassembly must hold a
+`scan_v3`, or the procedure `--require` names, and some root that reaches an instruction past x86-64-v2, so one not
+read as expected fails instead of passing empty. With `--inlined`, for an optimized build, every root must reach one.
 """
 
 import re
@@ -15,13 +15,14 @@ import subprocess
 import sys
 
 SYMBOL = re.compile(r"^[0-9a-f]+ <(.+)>:$")
-# The procedures the kernel builds with the V3 tier's features. `scan_v3` has one copy per scan op.
+# The procedures built with the V3 tier's features: the kernel's, one `scan_v3` per scan op, and the delimited passes of
+# `dsv/tier_amd64.odin`, one per instance.
 TIER_ROOTS = (
     re.compile(r"kernel::scan_v3:"),
     re.compile(r"kernel::\[tier_amd64\.odin\]::lookup_v3"),
     re.compile(r"kernel::\[tier_amd64\.odin\]::clmul_prefix_xor"),
+    re.compile(r"dsv::pass_(default|options)_v3:"),
 )
-REQUIRED_ROOT = TIER_ROOTS[0]
 # AT&T mnemonics past x86-64-v2. `lzcnt` runs as `bsr` on a CPU without it and answers differently. `tzcnt` is not
 # here: LLVM emits it as `rep bsf` for a non-zero input on any CPU, where it runs as `bsf` with the same answer.
 BEYOND_V2 = re.compile(r"v\w+|(andn|bextr|blsi|blsmsk|blsr|bzhi|lzcnt|movbe|mulx|pdep|pext|rorx|sarx|shlx|shrx)[wlq]?|pclmul\w*")
@@ -44,6 +45,7 @@ def reach(root: str, callees: dict[str, set[str]], tier: set[str]) -> set[str]:
 
 def main() -> int:
     objdump, obj = sys.argv[1], sys.argv[2]
+    required = sys.argv[sys.argv.index("--require") + 1] if "--require" in sys.argv else "kernel::scan_v3:"
     text = subprocess.run(
         [objdump, "-d", "--no-show-raw-insn", obj], check=True, capture_output=True, text=True
     ).stdout
@@ -83,8 +85,8 @@ def main() -> int:
     elif not reaching:
         print(f"{obj}: no tier procedure reaches an instruction past x86-64-v2")
         failed = True
-    if not any(REQUIRED_ROOT.search(s) for s in roots):
-        print(f"{obj}: no scan_v3 procedure in the disassembly")
+    if not any(required in s for s in roots):
+        print(f"{obj}: no {required} procedure in the disassembly")
         failed = True
     return 1 if failed else 0
 

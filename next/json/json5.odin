@@ -345,11 +345,27 @@ st_key_ident :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 	}
 	if gaps_on(m) {
 		if gap_miss(w, p) {
+			when .Skips in C {
+				if a == .Skip {
+					stop_gaps(w, q, d)
+					return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+				}
+			}
 			return #must_tail st_stop_gaps(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 	}
 	if r := colon_fast(q, end); r != nil {
+		when .Skips in C {
+			if a == .Skip {
+				return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+			}
+		}
 		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+		}
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }
@@ -415,7 +431,17 @@ st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	if r := colon_fast(q, end); r != nil {
+		when .Skips in C {
+			if a == .Skip {
+				return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+			}
+		}
 		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+		}
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }

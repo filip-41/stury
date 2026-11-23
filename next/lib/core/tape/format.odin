@@ -36,6 +36,42 @@ Options :: struct {
 	// Threads a build of a whole text may run on beside the caller's, nil for the caller's alone. The document is the
 	// one a build on one thread gives, and so is its error.
 	runner:   ^Runner,
+	// The options only one format family has, which every other family's reads refuse as `Bad_Option{"format"}`. Nil
+	// takes the family's defaults.
+	format:   Format_Options,
+}
+
+// The options of a read that one format family alone has, an arm per family.
+Format_Options :: union {
+	Dsv_Options,
+}
+
+// The family of `Format_Options` a format's reads take, `.None` for a format with no options of its own.
+Options_Family :: enum u8 {
+	None,
+	Dsv,
+}
+
+// `Bad_Option{"format"}` when `opts.format` holds the options of a family other than `f`'s, else nil. Every read of a
+// format passes it, so a format cannot take another family's options.
+options_refused :: #force_inline proc "contextless" (f: ^Format, opts: Options) -> Error {
+	family := Options_Family.None
+	switch _ in opts.format {
+	case Dsv_Options:
+		family = .Dsv
+	case nil:
+		return nil
+	}
+	return nil if family == f.options else Bad_Option{"format"}
+}
+
+// The options of a delimited text. They change what the reads give, so a document records none of them.
+Dsv_Options :: struct {
+	delimiter: u8, // the byte between cells, 0 for the spec's own
+	comment:   u8, // a line whose first byte is this is no record, 0 for none
+	no_header: bool, // the first record is data, and each record an array of cells
+	// An unquoted cell that is `true`, `false` or a JSON number reads as that value, not as a string.
+	infer:     bool,
 }
 
 // A spec of a format (e.g. JSON, JSONC and JSON5 are three), in rodata, holding what a document of it needs to be
@@ -45,6 +81,7 @@ Format :: struct {
 	id:    Format_Id,
 	facts:  Facts, // the fact kinds it holds
 	caps:   Caps,
+	options: Options_Family, // the options of `Options.format` its reads take
 	dups:   Duplicates, // its own policy for repeated keys, which `.Default` takes, never `.Default`
 	// The bytes of a scalar token's authored span before and after the token's own, as a string's quotes.
 	bounds: proc "contextless" (src: []u8, t: Token) -> (head, tail: u8),

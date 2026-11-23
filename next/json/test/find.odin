@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:strings"
 import "core:testing"
 import "stury:json"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
@@ -168,6 +169,37 @@ find_reads_a_picked_element_again :: proc(t: ^testing.T) {
 	expect_find(t, {`[[[1,2]],[[3,4],[5]]]`, {tape.Index(-1), tape.Index(-2), tape.Index(-1)}, .Default, .Found, "4"})
 	expect_find(t, {`{"a":[{"b":1}],"a":[{"b":2},{"c":0}]}`, {tape.Name("a"), tape.Index(-2), tape.Name("b")}, .Default, .Found, "2"})
 	expect_find(t, {"[/*c*/{\"a\":1},//x\n{\"a\":2}]", {tape.Index(-2), tape.Name("a")}, .Default, .Found, "1"}, .Jsonc)
+}
+
+// Every element counted from the end is found in arrays of every length around the elements a find reads as they pass.
+@(test)
+find_takes_every_element_from_the_end :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for length in 0 ..= 3 * 8 {
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		strings.write_byte(&sb, '[')
+		for i in 0 ..< length {
+			if i > 0 {
+				strings.write_byte(&sb, ',')
+			}
+			fmt.sbprintf(&sb, `{{"a":%d}}`, i)
+		}
+		strings.write_byte(&sb, ']')
+		src := strings.to_string(sb)
+		for back in 1 ..= length + 1 {
+			path := []tape.Step{tape.Index(-back), tape.Name("a")}
+			if back > length {
+				expect_find(t, {src, path, .Default, .Missing, ""})
+			} else {
+				expect_find(t, {src, path, .Default, .Found, fmt.tprint(length - back)})
+			}
+			nested := fmt.tprintf("[0,%s]", src)
+			if back <= length {
+				expect_find(t, {nested, {tape.Index(-1), tape.Index(-back), tape.Name("a")}, .Default, .Found, fmt.tprint(length - back)})
+			}
+		}
+	}
 }
 
 // A skipped container may nest past the levels a walk's frame holds, inside or below a path that does too.
@@ -362,4 +394,43 @@ validate_refuses_a_dups_policy_it_cannot_honour :: proc(t: ^testing.T) {
 			testing.expectf(t, n == 1 && out[0].err == nil, "%v records: %d %v", dups, n, out[0])
 		}
 	}
+}
+
+// Options another format family has are refused by every JSON read, before the text is read.
+@(test)
+reads_refuse_options_of_another_format :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string(`{"a":1}`)
+	opts := json.Options{format = tape.Dsv_Options{delimiter = ';'}}
+	want := tape.Error(tape.Bad_Option{"format"})
+	testing.expect_value(t, json.validate(src, .Json, opts), want)
+	_, berr := json.build(src, .Json, opts)
+	testing.expect_value(t, berr, want)
+	_, ferr := json.find(src, []tape.Step{tape.Name("a")}, .Json, {}, opts)
+	testing.expect_value(t, ferr, want)
+	demand, _ := tape.demand_of([][]tape.Step{{tape.Name("a")}}, allocator = context.temp_allocator)
+	_, serr := json.scan(src, &demand, .Json, {}, opts)
+	testing.expect_value(t, serr, want)
+	r := json.records_open(src, .Lines, .Json, opts)
+	out: [1]tape.Record
+	n := json.records_validate(&r, out[:])
+	testing.expectf(t, n == 0 && r.err == want, "records: %d %v", n, r.err)
+}
+
+// The walk, a text in pieces and a build on a runner's threads refuse them too.
+@(test)
+walks_refuse_options_of_another_format :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string(`{"a":1}`)
+	want := tape.Error(tape.Bad_Option{"format"})
+	other := tape.Format_Options(tape.Dsv_Options{})
+	regs: hook.Regs
+	h: hook.No_Hooks
+	_, werr, _ := json.walk(src, .Json, {format = other}, &h, &regs, hook.no_hook)
+	testing.expect_value(t, werr, want)
+	pieces := tape.Pieces{allocator = context.allocator}
+	testing.expect_value(t, json.validate(src, .Json, {format = other, pieces = &pieces}), want)
+	runner: tape.Runner
+	_, berr := json.build(src, .Json, {format = other, runner = &runner})
+	testing.expect_value(t, berr, want)
 }

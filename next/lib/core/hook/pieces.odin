@@ -35,13 +35,15 @@ Piece_State :: struct {
 	blocks:    Memory_Budget,
 }
 
-// How the walk treats the tokens of a container its hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest` for.
+// How the walk treats the tokens of a container its hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest` for, and
+// with `Pass` those of the value of a member whose key it answered `Skip` for.
 Nest :: enum u8 {
 	None,
 	Skip,
 	Keep,
 	Keep_Stubs,
 	Rest,
+	Pass,
 }
 
 // An open container of a text in pieces, and the member or element being read in it.

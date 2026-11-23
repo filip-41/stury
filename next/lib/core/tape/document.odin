@@ -8,6 +8,9 @@ import "base:runtime"
 // Nodes and facts over the source bytes of parsed text. Immutable, so threads share it without locks.
 Document :: struct {
 	src:        []u8, // borrowed unless `.Owns_Src`
+	// The root value's subtree starts at 0 and has `nodes[0].n` nodes. A format whose document holds more than the root
+	// value stores it after the subtree, in no container, as a table's header is (see `Tabular_Ext`), so a loop over all
+	// of `nodes` is no walk of the root's subtree.
 	nodes:      []Node,
 	facts:      []Fact, // sorted by node, then source order
 	counts:     []Child_Count, // sorted by node, only containers whose `spelling` saturated
@@ -72,16 +75,19 @@ Format_Ext :: union {
 	Yaml_Ext,
 }
 
-// dsv's tables and their key lookup slots.
+// dsv's tables and their key lookup slots. A table's header is an `Array` of role `Key` stored past the root value's
+// subtree, which no reader reaches from the root: they take the header's keys by its node.
 Tabular_Ext :: struct {
 	tables: []Table,
-	slots:  []u16,
+	slots:  []u32,
+	// The policy the build took a header's repeated keys by, which a row's readers take for `.Default`.
+	dups:   Duplicates,
 }
 
 // An array whose elements are rows, each an object of scalar cells and no keys, which the header's keys name by
 // place: cell `j` of a row is the member whose key is the header's element `j`, and a row of fewer cells lacks the
-// members past them. The header, when there is one, is the array's first child and no element of it, so the array's
-// count is its rows'. Tables are sorted by node, and an object inside a table's node is one of its rows.
+// members past them. The header, when there is one, is an array of keys in no container: a build stores it past the
+// root value's nodes. Tables are sorted by node, and an object inside a table's node is one of its rows.
 Table :: struct {
 	node:        Node_Index,
 	header:      Node_Index, // the keys' `Array` node, 0 for none

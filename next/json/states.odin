@@ -204,7 +204,18 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 	if r := colon_fast(q, end); r != nil {
 		if gaps_on(m) {
 			if gap_learn(w, m, p, q, r) {
+				when .Skips in C {
+					if a == .Skip {
+						stop_gaps(w, q, d)
+						return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+					}
+				}
 				return #must_tail st_stop_gaps(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+		}
+		when .Skips in C {
+			if a == .Skip {
+				return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 			}
 		}
 		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
@@ -212,7 +223,18 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 	// No gap is learned around a colon `colon_fast` refuses, so its member is a miss.
 	if gaps_on(m) {
 		if gap_miss(w, p) {
+			when .Skips in C {
+				if a == .Skip {
+					stop_gaps(w, q, d)
+					return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+				}
+			}
 			return #must_tail st_stop_gaps(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 		}
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
@@ -359,6 +381,11 @@ st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	if grows(C, a) {
 		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+		}
+	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }
 
@@ -386,6 +413,11 @@ st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d
 	if grows(C, a) {
 		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+		}
+	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }
 
@@ -403,6 +435,11 @@ st_key_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 	}
 	if grows(C, a) {
 		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+		}
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }
@@ -424,6 +461,11 @@ st_key_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 	}
 	if grows(C, a) {
 		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+		}
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }
@@ -447,6 +489,29 @@ st_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 	return #must_tail st_value(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
+// `st_colon` after a key the hook answered `Skip` on, whose value gives no token. Comments before the colon are given.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_skip_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q, kind := colon(p, end)
+	when S != .Json {
+		if kind == .Bad_Char && opens_run(q, end, S) {
+			r, done, result := comments_before(w, on, &hs, q, end, 0, RUN_COLON)
+			if done {
+				return result
+			}
+			q, kind = colon(r, end)
+		}
+		if kind == .Bad_Char {
+			kind = piece_short(w, q, end, .Bad_Char)
+		}
+	}
+	if kind != .None {
+		return fault(w, hs, q, kind, .Colon if kind == .Bad_Char else .None)
+	}
+	return #must_tail st_skip_value(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
 // The state right after an open bracket.
 @(private, enable_target_feature = STATE_FEATURES)
 st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
@@ -465,6 +530,11 @@ st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 				if nl {
 					// The members are a step deeper, as `indent_predicted` would have found at a line break.
 					ind = ind &~ 0xffff_ff00 | ((ind >> 8 + ind >> 32) & 0xff_ffff) << 8
+				}
+				when .Skips in C {
+					if a == .Skip {
+						return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+					}
 				}
 				#partial switch VALUE_CLASS[r[0]] {
 				case .String:
@@ -514,6 +584,13 @@ past_key :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), key: t
 // them, as its other objects are of that row. Other rows match on, against the limit less `GAP_MISS_FLOOR`.
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_stop_gaps :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	stop_gaps(w, p, d)
+	return #must_tail st_colon(p, end, d, ind, w, s0, s1, s2, GAP_OFF, on)
+}
+
+// Retires the row of the object `d` names, whose key ends at `p`, as `st_stop_gaps` does.
+@(private)
+stop_gaps :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p: [^]u8, d: u64) {
 	l := &w.stack[(d >> 1) - 1]
 	if parent := u64(l^ >> 8); gaps_rows(parent) {
 		w.gaps.child[parent & (GAP_DORMANT - 1)] = GAP_ROW_OFF
@@ -522,7 +599,6 @@ st_stop_gaps :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 		l^ = l^ & 0xFF | GAP_OFF << 8
 	}
 	w.gaps.misses = at(w, p) / GAP_MISS_BYTES
-	return #must_tail st_colon(p, end, d, ind, w, s0, s1, s2, GAP_OFF, on)
 }
 
 // The state at the open bracket `p` of a container a hook skips. Judges what it holds with no hooks, gives its `End`
@@ -530,7 +606,7 @@ st_stop_gaps :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_skip_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	r := pass_over(w, p, end, d, ind, hs, m)
+	r := pass_over(w, p, end, d, ind, hs, m, true)
 	if u8(r) != 0 {
 		w.regs^ = hs
 		return r
@@ -540,6 +616,58 @@ st_skip_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 		return stopped(w, hs, q)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// The state at the value of a member whose key the hook answered `Skip`, past white space. Judges it with no token: a
+// short string, a number or a literal here, any other value as `pass_over` judges it. Comments before it are given,
+// and a byte that starts no value faults as `st_value` faults it.
+@(private, enable_target_feature = STATE_FEATURES)
+st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	p := p
+	when S != .Json {
+		if opens_run(p, end, S) {
+			q, done, result := comments_before(w, on, &hs, p, end, 0, RUN_VALUE)
+			if done {
+				return result
+			}
+			p = q
+		}
+	}
+	if p >= end {
+		return fault(w, hs, end, .Truncated)
+	}
+	#partial switch VALUE_CLASS[p[0]] {
+	case .String:
+		if q, _, _ := string_short(p, end, '"'); q != nil {
+			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+	case .Number:
+		if q, _, kind := hook_number(p, end, H, C, S); kind == .None && !too_wide(p, q) {
+			if gaps_on(m) {
+				return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+			return #must_tail st_after_number(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+	case .Literal:
+		if q, _ := literal(p, end); q != nil {
+			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+	case .Map, .Array:
+	case:
+		// The bytes past JSON's that open a value of JSON5 or of `.Non_Finite`.
+		switch p[0] {
+		case '\'', '+', '.', 'I', 'N':
+		case:
+			return #must_tail st_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+	}
+	r := pass_over(w, p, end, d, ind, hs, m, false)
+	if u8(r) != 0 {
+		w.regs^ = hs
+		return r
+	}
+	return #must_tail st_after(w.base[u64(r) >> 16:], end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // The state at the open bracket `p` of a container a scan keeps whole. The scanner's builder stores the container,
@@ -741,6 +869,11 @@ st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 				if grows(C, a) {
 					return #must_tail st_grow_after(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 				}
+				when .Skips in C {
+					if a == .Skip {
+						return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+					}
+				}
 				#partial switch VALUE_CLASS[r[0]] {
 				case .String:
 					return #must_tail st_hit_string(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
@@ -840,6 +973,11 @@ st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	if grows(C, a) {
 		return #must_tail st_grow_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+		}
+	}
 	#partial switch VALUE_CLASS[r[0]] {
 	case .String:
 		return #must_tail st_hit_string(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
@@ -888,6 +1026,11 @@ st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	if grows(C, a) {
 		return #must_tail st_grow_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+		}
+	}
 	#partial switch VALUE_CLASS[r[0]] {
 	case .String:
 		return #must_tail st_hit_string(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
@@ -925,6 +1068,11 @@ st_hit_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 	}
 	if grows(C, a) {
 		return #must_tail st_grow_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	when .Skips in C {
+		if a == .Skip {
+			return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
+		}
 	}
 	#partial switch VALUE_CLASS[r[0]] {
 	case .String:
@@ -1124,13 +1272,29 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		value := min(run + 1, last)
 		r := colon_fast(q, end)
 		if r == nil {
+			when .Skips in C {
+				if a == .Skip {
+					return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+				}
+			}
 			return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
 		}
+		// A number the hook skips at its key is judged in the run with no token.
+		skip := false
+		when .Skips in C {
+			skip = a == .Skip
+		}
 		if r[0] != '-' && r[0] - '0' >= 10 {
+			if skip {
+				return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+			}
 			return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
 		}
 		n, spelling, kind := hook_number(r, end, H, C, S)
 		if kind != .None {
+			if skip {
+				return #must_tail st_skip_value(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+			}
 			when S == .Json5 {
 				return #must_tail st_number5(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
 			} else {
@@ -1143,12 +1307,14 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		if too_wide(r, n) {
 			return fault(w, hs, r, .Too_Wide)
 		}
-		a = emit(w, on, &hs, .Number, .Value, r, n, spelling)
-		if a == .Stop {
-			return stopped(w, hs, n)
-		}
-		if grows(C, a) {
-			return #must_tail st_grow_value(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+		if !skip {
+			a = emit(w, on, &hs, .Number, .Value, r, n, spelling)
+			if a == .Stop {
+				return stopped(w, hs, n)
+			}
+			if grows(C, a) {
+				return #must_tail st_grow_value(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+			}
 		}
 		if intrinsics.ptr_sub(end, n) <= 2 || n[0] != ',' {
 			return #must_tail st_after_number(n, end, d, ind, w, hs.a, hs.b, hs.c, value, on)

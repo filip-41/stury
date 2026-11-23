@@ -297,15 +297,16 @@ when .Address in ODIN_SANITIZER_FLAGS {
 	}
 }
 
-// Judges the container at `p`, opened in the level `d` names with gap slot `m`, with no hooks, as the root of the same
+// Judges the value at `p`, opened in the level `d` names with gap slot `m`, with no hooks, as the root of the same
 // walk read as one with `No_Hooks` whose stack starts at that level. It learns into and predicts from the walk's own
-// gaps and indent. Its result's offset is where the container ends, as a walk's root ends with no look at what follows
-// it. It is a call because `#must_tail` cannot jump between walks.
+// gaps and indent. Its result's offset is where the value ends, as a walk's root ends with no look at what follows
+// it. It is a call because `#must_tail` cannot jump between walks. `given` says the hook was given the value's token,
+// a container's whose step the walk took.
 @(private, cold)
-pass_over :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, d, ind: u64, hs: hook.Regs, m: u64) -> hook.Walk_Result {
+pass_over :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, d, ind: u64, hs: hook.Regs, m: u64, given: bool) -> hook.Walk_Result {
 	#assert(size_of(Walk(S, H, LAX, C)) == size_of(Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS)))
 	when LAX {
-		w.steps[0] += 1 // the container's step, taken again as its bracket is read again
+		w.steps[0] += u64(given) // the container's step, taken again as its bracket is read again
 	}
 	slot := d >> 1
 	stack, depth, limit, room, owned := w.stack, w.depth, w.limit, w.room, w.owned

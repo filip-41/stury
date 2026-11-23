@@ -264,9 +264,38 @@ same_tokens :: proc(t: ^testing.T, got, want: []tape.Token, what: string, src: [
 	return true
 }
 
+// Checks that `walk` passes the value of the member whose key is `want[i]` when the hook answers `Skip` on the key: the
+// facts before the value are given, the value is not, a container's tokens and `End` included, and the walk goes on
+// after it. The skipped containers still take their steps of `Budget.steps`, of which the text has `containers`.
+@(private)
+key_skip :: proc(t: ^testing.T, walk: Probe_Walk, src: []u8, want: []tape.Token, i, containers: int) {
+	j := i + 1
+	for want[j].role > .Key {
+		j += 1
+	}
+	end := end_of(want, j) if want[j].kind > .Plain else j
+	expected := make([dynamic]tape.Token, context.temp_allocator)
+	append(&expected, ..want[:j])
+	append(&expected, ..want[end + 1:])
+	h, e := probe_run(walk, src, {}, 1024, 1024, i, .Skip)
+	testing.expectf(t, e == nil, "Skip at key %d of %q: %v", i, string(src), e)
+	same_tokens(t, h.tokens[:], expected[:], "Skip at a key", src, i)
+	probe_end(&h)
+	h, e = probe_run(walk, src, {budget = {steps = u64(containers)}}, 1024, 1024, i, .Skip)
+	testing.expectf(t, e == nil, "Skip at key %d of %q within %d steps: %v", i, string(src), containers, e)
+	same_tokens(t, h.tokens[:], expected[:], "Skip at a key within the steps", src, i)
+	probe_end(&h)
+	if containers > 1 {
+		h, e = probe_run(walk, src, {budget = {steps = u64(containers - 1)}}, 1024, 1024, i, .Skip)
+		x, ok := e.(tape.Exceeded)
+		testing.expectf(t, ok && x.kind == .Steps, "Skip at key %d of %q within %d steps: %v", i, string(src), containers - 1, e)
+		probe_end(&h)
+	}
+}
+
 // Checks that `walk` keeps the hook protocol over each text of `texts`, which it reads: `Stop`, `Skip`, `Rest`,
-// `Keep` and `Keep_Stubs` at every token, a room that starts full or grows at every node, a stack that grows from one
-// level or is refused, and `Budget.steps` at every count of containers.
+// `Keep` and `Keep_Stubs` at every token, `Skip` at every key, a room that starts full or grows at every node, a stack
+// that grows from one level or is refused, and `Budget.steps` at every count of containers.
 hook_protocol :: proc(t: ^testing.T, walk: Probe_Walk, texts: []string) {
 	for text in texts {
 		src := transmute([]u8)text
@@ -289,6 +318,9 @@ hook_protocol :: proc(t: ^testing.T, walk: Probe_Walk, texts: []string) {
 			testing.expectf(t, e == nil, "Stop at %d of %q: %v", i, text, e)
 			same_tokens(t, h.tokens[:], want[:i + 1], "Stop", src, i)
 			probe_end(&h)
+			if want[i].role == .Key {
+				key_skip(t, walk, src, want, i, containers)
+			}
 			if !container || want[i].role > .Key {
 				continue
 			}

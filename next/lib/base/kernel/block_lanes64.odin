@@ -4,6 +4,9 @@ package kernel
 import "base:intrinsics"
 import "core:simd"
 
+// Only arm64 has a carry-less multiply on the floor tier.
+PMULL :: false
+
 // Block operations on one 64-lane vector, which LLVM splits to four SSE or two AVX2 registers.
 
 // The load goes through `v` first: Odin folds a `transmute` of the load into a load at `Block`'s alignment.

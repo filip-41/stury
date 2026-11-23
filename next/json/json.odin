@@ -16,7 +16,8 @@ Spec :: enum u8 {
 	Json5, // JSON5 1.0.0
 }
 
-// Options of a JSON read. `budget` sets `depth`, `nodes`, `memory` and `steps` (a step is one container).
+// Options of a JSON read. `budget` sets `depth`, `nodes`, `memory` and `steps` (a step is one container). JSON has no
+// options of its own, so its reads refuse any `format`.
 Options :: tape.Options
 
 // Whether a read may walk a value again from its first byte. A test build turns it off to read as a format without
@@ -94,7 +95,8 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, 
 @(require_results)
 build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	probe_stack()
-	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= PARALLEL_FROM {
+	// A text with foreign options takes the whole-text build, which refuses them.
+	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.format == nil && len(src) >= PARALLEL_FROM {
 		return build_on_threads(src, spec, opts, allocator)
 	}
 	lax := build.read_lax(opts)
@@ -182,6 +184,9 @@ scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Json, r
 // of stack and faults on a thread with less.
 walk :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), allocator := context.allocator) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	#assert(.Walk not_in intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0))
+	if e := tape.options_refused(&FORMATS[S], opts); e != nil {
+		return 0, e, false
+	}
 	probe_stack()
 	ctx := context
 	if opts.pieces != nil {
@@ -203,7 +208,7 @@ validate_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Opti
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, hook.no_hook)
 	}
-	return build.read_validate(src, opts, allocator, WALK_LEVELS, walk)
+	return build.read_validate(src, &FORMATS[S], opts, allocator, WALK_LEVELS, walk)
 }
 
 @(private)
@@ -217,7 +222,7 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options
 		on :: build.builder_hook_facts when S != .Json else build.builder_hook
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, on)
 	}
-	return build.read_build(src, &FORMATS[S], &RULES, opts, caller, node_bound, walk)
+	return build.read_build(src, &FORMATS[S], &RULES, opts, caller, node_bound, walk, build.builder_finish_dups)
 }
 
 @(private)

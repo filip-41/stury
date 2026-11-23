@@ -13,9 +13,9 @@ import "stury:lib/core/tape"
 // on in the next window from where the last stopped, with the spelling its bytes so far gave. So is a run of white
 // space and comments, whose comments wait for the token past it. Any other token is read again whole.
 //
-// Inside a container whose hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest`, the walk continues in the same
-// states and gives each token to no hook, or to the inner hook of the hook's `Keeps`. A window can end inside such a
-// container as anywhere else.
+// Inside a container whose hook answered `Skip`, `Keep`, `Keep_Stubs` or `Rest`, and in the value of a member whose key
+// it answered `Skip` for, the walk continues in the same states and gives each token to no hook, or to the inner hook
+// of the hook's `Keeps`. A window can end inside such a container as anywhere else.
 
 // The places a walk of a text in pieces continues from, past the last token it gave.
 @(private)
@@ -125,6 +125,11 @@ give_piece :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: 
 		if opens && a >= .Skip && a <= .Keep_Stubs {
 			return piece_nest(w, pw, hs, t, a)
 		}
+		// The states read the member's value as they would any other, and it gives no token.
+		if t.role == .Key && a == .Skip {
+			pw.s.nest, pw.s.nest_open = .Pass, 0
+			return .Next
+		}
 	}
 	return a
 }
@@ -229,6 +234,24 @@ piece_nested :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk,
 	if nest == .Rest {
 		return .Next
 	}
+	if nest == .Pass {
+		// The facts before the value are the hook's, and the value ends at its scalar or at the `End` of its container.
+		if t.role > .Key {
+			if s.nest_open == 0 {
+				a: hook.Action
+				hs^, a = on(w.hooks, hs^, t)
+				return a
+			}
+		} else if t.kind == .End {
+			s.nest_open -= 1
+		} else if t.kind > .Plain {
+			s.nest_open += 1
+		}
+		if s.nest_open == 0 && t.role <= .Key {
+			s.nest = .None
+		}
+		return .Next
+	}
 	if t.kind == .End {
 		if s.nest_open == 0 {
 			s.nest = .None
@@ -308,11 +331,12 @@ piece_short :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), q, 
 	return kind
 }
 
-// Whether the walk is inside a container its hook passed over with `Skip` or `Rest`, whose tokens no hook stores.
+// Whether the walk is inside a container its hook passed over with `Skip` or `Rest`, or a member's value it passed,
+// whose tokens no hook stores.
 @(private)
 piece_passes :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> bool {
 	when LAX && .Skips in C {
-		return w.piece[0] != nil && (w.piece[0].s.nest == .Skip || w.piece[0].s.nest == .Rest)
+		return w.piece[0] != nil && (w.piece[0].s.nest == .Skip || w.piece[0].s.nest == .Rest || w.piece[0].s.nest == .Pass)
 	} else {
 		return false
 	}

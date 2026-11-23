@@ -14,6 +14,15 @@ Utf8_State :: struct {
 	lead: W, // `leads` of `prev`'s last register, the only one read
 }
 
+// Stores `r` as register `i` of the state field `f`, leaving the field's other registers as they were. Only `prev`'s and
+// `lead`'s last register and `err`'s first are read, and `err`'s others stay zero, so a state is not stored whole.
+@(private = "file")
+put_register :: #force_inline proc "contextless" (f: ^W, $I: int, r: #simd[$N]u8) {
+	a := transmute([64 / N]#simd[N]u8)f^
+	a[I] = r
+	f^ = transmute(W)a
+}
+
 // The state after reading block `prev`, for a reader that keeps the last block rather than a state.
 utf8_after :: proc "contextless" (prev: Block) -> Utf8_State {
 	p := transmute(W)prev
@@ -43,10 +52,8 @@ utf8_head :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_Stat
 			prev, lead = w[i], l[i]
 		}
 	}
-	e: [64 / N]U
-	e[0] = err
-	s.err = transmute(W)e
-	s.lead = transmute(W)l
+	put_register(&s.err, 0, err)
+	put_register(&s.lead, 64 / N - 1, l[64 / N - 1])
 }
 
 // An all-ASCII block can only fail a sequence the block before left open.
@@ -54,11 +61,9 @@ utf8_head :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_Stat
 utf8_ascii_block :: #force_inline proc "contextless" ($T: Tier, s: ^Utf8_State) {
 	N :: VECTOR_BYTES[T]
 	U :: #simd[N]u8
-	e: [64 / N]U
-	e[0] = simd.bit_or((transmute([64 / N]U)s.err)[0], open_sequence((transmute([64 / N]U)s.prev)[64 / N - 1]))
-	s.err = transmute(W)e
-	s.prev = {}
-	s.lead = {}
+	put_register(&s.err, 0, simd.bit_or((transmute([64 / N]U)s.err)[0], open_sequence((transmute([64 / N]U)s.prev)[64 / N - 1])))
+	put_register(&s.prev, 64 / N - 1, U(0))
+	put_register(&s.lead, 64 / N - 1, U(0))
 }
 
 // Adds the errors of `b`, which `is_ascii` reports as `ascii`. `high` says the block before had a byte past 0x7F, and
@@ -66,7 +71,8 @@ utf8_ascii_block :: #force_inline proc "contextless" ($T: Tier, s: ^Utf8_State) 
 utf8_next :: #force_inline proc "contextless" ($T: Tier, b: Block, ascii: bool, s: ^Utf8_State, high: ^bool) -> bool {
 	if !ascii {
 		utf8_head(T, b, s, 63)
-		s.prev = transmute(W)b
+		N :: VECTOR_BYTES[T]
+		put_register(&s.prev, 64 / N - 1, (transmute([64 / N]#simd[N]u8)b)[64 / N - 1])
 	} else if high^ {
 		utf8_ascii_block(T, s)
 	} else {

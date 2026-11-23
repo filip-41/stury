@@ -52,6 +52,9 @@ Scanner :: struct {
 	first:       bool, // under `.First` the first member of a repeated key answers
 	group:       bool, // under `.Group` every member of a repeated key answers
 	rewalks:     bool, // the format has `.Rewalk`, so an array whose elements only steps from the end take replays
+	// The scan neither keeps facts, which `scan_pass` places, nor reads a text in pieces, whose window may end before a
+	// value, so `scanner_columns_hook` skips a member no step takes at its key.
+	key_skips:   bool,
 	stop:        bool, // `stop_early`
 	stopped:     bool,
 	// Under `stop_early`, or a limit on a path or a step, the scan tracks its settled paths. Once all are, `stop_early`
@@ -66,10 +69,11 @@ Scanner :: struct {
 	hold_from:   u64,
 	held_live:   int, // the bytes held once the last `hold_drop` ran
 	room:        ^Scan_Room,
+	dropped:     u64, // the members the walk passed with no token since the last `End`, which the open object counts
 	protocol:    hook.Protocol(SCANNER_CAPS, hook.Levels(scanner_levels_held, scanner_levels_grow), hook.Unused, hook.Keeps(Builder, scanner_builder, builder_keep_whole, builder_keep_stubs)),
 }
 
-SCANNER_CAPS :: hook.Capabilities{.Skips, .Levels, .Keeps, .Walk, .Credits}
+SCANNER_CAPS :: hook.Capabilities{.Skips, .Levels, .Keeps, .Walk, .Credits, .Columns}
 
 // Which container's `End` is the next token, when this hook skipped it or kept it as a whole.
 Scan_End :: enum u8 {
@@ -209,6 +213,7 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 		h^ = {}
 	}
 	h.demand, h.rewalk, h.rewalks = demand, rewalk, .Rewalk in format.caps && rewalk != nil
+	h.key_skips = !demand.facts
 	h.dups = tape.read_dups(format, dups)
 	h.first, h.group, h.stop, h.pending = h.dups == .First, h.dups == .Group, read.stop_early, len(demand.paths)
 	h.settles = h.stop || !demand.facts && (demand.limited || scan_cuts(demand))
@@ -265,7 +270,7 @@ scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^t
 		return h.b.err
 	}
 	h.b.keep_facts = h.facts
-	h.walk, h.stopped, h.has_key, h.by_place, h.forced, h.replaying = nil, false, false, false, false, false
+	h.walk, h.stopped, h.has_key, h.by_place, h.forced, h.replaying, h.dropped = nil, false, false, false, false, false, 0
 	h.end_of, h.opens, h.pending, h.passed, h.wait_at = .None, 0, len(demand.paths), tape.NO_NODE, tape.NO_NODE
 	h.wait_from, h.hold_from, h.held_live = 0, 0, 0
 	scan_room_list(&h.frames, room.frames[:], allocator)
@@ -314,7 +319,18 @@ scan_in_room :: #force_inline proc "contextless" (h: ^Scanner, p: rawptr) -> boo
 }
 
 // Takes a walk's token into the partial document.
-scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) #no_bounds_check {
+scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	return scanner_take(h, s, t, false)
+}
+
+// `scanner_hook` for a walk whose members are placed by position, as a delimited text's cells are, which passes a
+// member no step takes at its key, as `.Columns` reads. A walk of another format gives the value, which costs it less.
+scanner_columns_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	return scanner_take(h, s, t, true)
+}
+
+@(private)
+scanner_take :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $COLUMNS: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
 	if t.role > .Key {
 		if h.facts {
 			return s, scan_fact(h, s, t)
@@ -333,10 +349,19 @@ scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 		return s, .Next
 	}
 	// A key that no `Name` of the open object can match is passed without further work. So is a member no step took.
+	// With `COLUMNS` and `key_skips`, in an object whose members no step takes, a member no step took is counted and
+	// its value skipped at the key. Whether a step takes a member depends on its key and its place only, as `.Columns`
+	// needs.
 	if t.role == .Key {
 		f := &h.frames[len(h.frames) - 1]
 		clear(&h.picks)
 		if !f.alls && scan_key_unmatched(h, f, t) {
+			when COLUMNS {
+				if f.passes && h.key_skips {
+					f.count += 1
+					return s, .Skip
+				}
+			}
 			return s, .Next
 		}
 		h.key, h.has_key, h.by_place = t, true, false
@@ -348,10 +373,17 @@ scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 		} else {
 			scanner_key(h, t, false)
 		}
+		when COLUMNS {
+			if f.passes && h.key_skips && len(h.picks) == 0 {
+				h.has_key = false
+				f.count += 1
+				return s, .Skip
+			}
+		}
 		return s, .Next
 	}
 	if t.kind == .End {
-		return scanner_close(h, s, t)
+		return scanner_close(h, s, t, COLUMNS)
 	}
 	if s.c > 0 && !h.forced {
 		f := &h.frames[s.c - 1]
@@ -1103,12 +1135,16 @@ scan_open :: proc "contextless" (h: ^Scanner, t: tape.Token, live: u32, whole: b
 }
 
 @(private)
-scanner_close :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) #no_bounds_check {
+scanner_close :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $COLUMNS: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
 	s := s
 	d := s.c
 	f := &h.frames[d - 1]
 	dm := h.demand
 	open := tape.Node_Index(s.b >> 32)
+	when COLUMNS {
+		f.count += h.dropped
+		h.dropped = 0
+	}
 	if f.replays {
 		k := u64(f.ring_k)
 		for e in max(f.count, k) - k ..< f.count {

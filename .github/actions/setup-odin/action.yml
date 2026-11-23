@@ -2,7 +2,7 @@ name: Set up Odin
 description: Odin at a pinned commit, built against a pinned LLVM (Windows links the LLVM Odin bundles)
 inputs:
   commit:
-    default: 94ef2a5de5f3340a31f1e08bf62b2f6663a70022
+    default: 31ce7c0a5e2ca6662405bbdabdfff2251afeda98
   llvm:
     default: "22"
 runs:

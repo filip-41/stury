@@ -31,7 +31,7 @@ RECORD_AHEAD :: 256
 
 // Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. The budget's limits hold
 // for each record, but `Budget.steps` under `.Elements`, which counts the containers of the whole text. A text in
-// pieces ends the records with `tape.Bad_Option` before any is read.
+// pieces, or options of another format family, ends the records with `tape.Bad_Option` before any is read.
 records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json, opts := Options{}) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("json: spec out of range")
@@ -39,6 +39,9 @@ records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json
 	r.src, r.framing, r.spec, r.opts, r.pos = src, framing, spec, opts, u64(bom_length(src))
 	if opts.pieces != nil {
 		r.err, r.at = tape.Bad_Option{"pieces"}, .Done
+	}
+	if e := tape.options_refused(&FORMATS[spec], opts); e != nil {
+		r.err, r.at = e, .Done
 	}
 	walk_init(&r.walk, src, nil, (^hook.No_Hooks)(nil), nil, {}, nil, build.read_depth(opts), opts.tolerate, opts.budget.steps)
 	return

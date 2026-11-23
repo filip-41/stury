@@ -12,7 +12,7 @@ Tier :: enum u8 {
 }
 
 FEATURES :: [Tier]string {
-	.Base = "",
+	.Base = "neon,aes" when PMULL else "",
 }
 
 @(private)

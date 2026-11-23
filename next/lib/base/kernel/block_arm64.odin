@@ -3,6 +3,7 @@ package kernel
 
 import "base:intrinsics"
 import "core:simd"
+import "core:simd/arm"
 
 load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
 	return {
@@ -82,4 +83,15 @@ last_lane16 :: #force_inline proc "contextless" (m: V) -> u64 {
 foreign _ {
 	@(link_name = "llvm.aarch64.neon.addp.v16i8")
 	addp :: proc(a, b: V) -> V ---
+}
+
+// Whether the floor tier's procedures take the carry-less multiply, which every Apple silicon CPU has and another arm64
+// target has only when its build names `aes`.
+PMULL :: ODIN_OS == .Darwin || intrinsics.has_target_feature("aes")
+
+// `prefix_xor` as a carry-less multiply by all ones. A procedure built with `FEATURES` inlines it, and one that is not
+// calls it, which is safe only where `PMULL` holds.
+@(private, enable_target_feature = "neon,aes")
+pmull_prefix_xor :: proc "contextless" (x: u64) -> u64 {
+	return u64(arm.vmull_p64(x, ~u64(0)))
 }

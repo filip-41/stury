@@ -44,7 +44,6 @@ reference_from :: proc(doc: ^tape.Document, at: tape.Node_Index, steps: []tape.S
 		return
 	}
 	missing := Ref_Answer{at, tape.path_refused(taken + 1, alls_end)}
-	end := at + tape.Node_Index(node.n)
 	switch s in step {
 	case tape.Name:
 		if dups == .Group {
@@ -75,17 +74,13 @@ reference_from :: proc(doc: ^tape.Document, at: tape.Node_Index, steps: []tape.S
 		}
 		reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
 	case tape.All:
-		k := at + 1
-		for i := u64(0); k < end; i += 1 {
-			value := k
-			if node.kind == .Object {
-				value = k + 1
-			}
-			if !tape.all_takes(s.limit, i, node.kind == .Object, dups) {
+		c, _, _ := tape.children(r, at, context.temp_allocator)
+		for i := u64(0); ; i += 1 {
+			_, value, p := tape.next_child(r, &c, .Group)
+			if p != .Found || !tape.all_takes(s.limit, i, node.kind == .Object, dups) {
 				return
 			}
 			reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
-			k = value + tape.Node_Index(doc.nodes[value].n) if doc.nodes[value].kind > .Plain else value + 1
 		}
 	case tape.Slice:
 		count, _, _ := tape.length(r, at, context.temp_allocator)
@@ -163,13 +158,15 @@ reads_refuse :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []
 // value, and each fact the build gives a value the scan kept is kept, but a foot of a container the scan kept unread,
 // whose insides it passed. A stopped scan read no fact past its stop.
 agree_facts :: proc(t: ^testing.T, doc, r: ^tape.Document, name: string, loc := #caller_location) {
+	// A container may start where its first child does, as a delimited record starts at its first cell.
 	Key :: struct {
 		lo:   u64,
 		role: tape.Role,
+		kind: tape.Kind,
 	}
 	whole := make(map[Key]tape.Node_Index, context.temp_allocator)
 	for node, i in doc.nodes {
-		whole[{node.lo, node.role}] = tape.Node_Index(i)
+		whole[{node.lo, node.role, node.kind}] = tape.Node_Index(i)
 	}
 	has :: proc(facts: []tape.Fact, node: tape.Node_Index, f: tape.Fact) -> bool {
 		for g in facts {
@@ -181,7 +178,7 @@ agree_facts :: proc(t: ^testing.T, doc, r: ^tape.Document, name: string, loc := 
 	}
 	for f in r.facts {
 		node := r.nodes[f.node]
-		at, ok := whole[{node.lo, node.role}]
+		at, ok := whole[{node.lo, node.role, node.kind}]
 		testing.expectf(t, ok && has(doc.facts, at, f), "%s: scan fact %v on %v is not the build's", name, f, node, loc = loc)
 	}
 	if .Stopped in r.flags {
@@ -189,7 +186,7 @@ agree_facts :: proc(t: ^testing.T, doc, r: ^tape.Document, name: string, loc := 
 	}
 	kept := make(map[tape.Node_Index]tape.Node_Index, context.temp_allocator)
 	for node, i in r.nodes {
-		if at, ok := whole[{node.lo, node.role}]; ok {
+		if at, ok := whole[{node.lo, node.role, node.kind}]; ok {
 			kept[at] = tape.Node_Index(i)
 		}
 	}
@@ -649,7 +646,7 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 	add(&out, tape.Slice{-3, -1, 0}, A)
 	keys := make([dynamic]string, context.temp_allocator)
 	for node, i in doc.nodes {
-		if node.role != .Key || len(keys) == 12 {
+		if node.role != .Key || node.kind > .Plain || len(keys) == 12 {
 			continue
 		}
 		key := key_text(doc, tape.Node_Index(i))
@@ -685,22 +682,22 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 			if node.kind < .Array || node.n == 1 {
 				break
 			}
-			end := at + tape.Node_Index(node.n)
-			member := at + 1
-			for next := member; last && next < end; {
-				member = next
-				next += tape.Node_Index(doc.nodes[next].n) if doc.nodes[next].kind > .Plain else 1
-				if node.kind == .Object {
-					next += tape.Node_Index(doc.nodes[next].n) if doc.nodes[next].kind > .Plain else 1
+			r := tape.Reader{doc, nil}
+			c, _, _ := tape.children(r, at, context.temp_allocator)
+			key, member, _ := tape.next_child(r, &c, .Group)
+			for last {
+				k, v, p := tape.next_child(r, &c, .Group)
+				if p != .Found {
+					break
 				}
+				key, member = k, v
 			}
 			if node.kind == .Object {
-				append(&down, tape.Step(tape.Name(key_text(doc, member))))
-				at = member + 1
+				append(&down, tape.Step(tape.Name(key_text(doc, key))))
 			} else {
 				append(&down, tape.Step(tape.Index(-1 if last else 0)))
-				at = member
 			}
+			at = member
 			if len(down) >= 3 {
 				add(&out, ..down[:])
 				add(&out, ..slice.concatenate([][]tape.Step{{A}, down[1:]}, context.temp_allocator))
@@ -711,7 +708,7 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 }
 
 key_text :: proc(doc: ^tape.Document, at: tape.Node_Index) -> string {
-	buf := make([]u8, doc.nodes[at].n, context.temp_allocator)
+	buf := make([]u8, tape.text_room(doc, at), context.temp_allocator)
 	text, _ := tape.node_text(doc, at, buf)
 	return strings.clone(text, context.temp_allocator)
 }
@@ -788,16 +785,18 @@ agree_on_path :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, steps: []tape.Step,
 		node := w.doc.doc.nodes[f]
 		if step.limit > 0 && node.kind == .Object && w.dups == .First {
 			// Members past the limit are not kept, so the partial object is read by the keys of those before it.
-			end := f + tape.Node_Index(node.n)
-			for k, i := f + 1, i32(0); k < end && i < step.limit; i += 1 {
+			c, _, _ := tape.children(w.doc, f, context.temp_allocator)
+			for i := i32(0); i < step.limit; i += 1 {
+				k, _, kp := tape.next_child(w.doc, &c, .Group)
+				if kp != .Found {
+					break
+				}
 				key := key_text(w.doc.doc, k)
 				fv, fp := tape.member(w.doc, f, key, .First)
 				pv, pp := tape.member(w.r, p, key, .First)
 				if agree_step(w, key, fv, pv, fp, pp) {
 					agree_on_path(w, fv, pv, steps[1:], grain)
 				}
-				k += 1
-				k += tape.Node_Index(w.doc.doc.nodes[k].n) if w.doc.doc.nodes[k].kind > .Plain else 1
 			}
 			return
 		}

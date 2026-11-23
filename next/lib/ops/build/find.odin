@@ -369,6 +369,10 @@ finder_value :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #n
 			// The first `FIND_WALK_IN` elements of an array are read as they pass, whose answer a replay would read
 			// again. Past those, an element is passed whole and the one picked is read again at the close.
 			if lv.replays && !h.replaying && lv.count > FIND_WALK_IN {
+				// The last element read as it passed keeps its answer in the ring, as each one after it keeps its span.
+				if step < -1 && lv.count == FIND_WALK_IN + 1 && !finder_ring_put(h, lv, h.answer) {
+					return .Stop
+				}
 				return finder_pass(h, lv, t)
 			}
 			if step < 0 {
