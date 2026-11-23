@@ -164,7 +164,8 @@ parse_call :: proc(p: ^Parser, close: rune) -> ^Node {
 	}
 	j := int(sign)
 	num, _ := number(name, &j, max(int))
-	if num >= int(max(i32)) {
+	// A number past an i32 is too big. Where an int is 32 bits, a number held at the largest int is taken as one.
+	if num > int(max(i32)) || size_of(int) < 8 && num == max(int) {
 		return fail(p, "too big number")
 	}
 	if sign && num == 0 {

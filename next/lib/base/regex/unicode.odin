@@ -111,19 +111,10 @@ ecma_identifier :: proc(name: string) -> bool {
 	start, _ := ecma_prop("ID_Start")
 	part, _ := ecma_prop("ID_Continue")
 	for r, i in name {
-		if r != '$' && r != '_' && !in_table(int(start.table if i == 0 else part.table), r) && (i == 0 || r != 0x200C && r != 0x200D) {
+		known := in_table(int(start.table if i == 0 else part.table), r)
+		if r != '$' && r != '_' && !known && (i == 0 || r != 0x200C && r != 0x200D) {
 			return false
 		}
 	}
 	return true
-}
-
-// The index of the first byte of the character that holds byte `i` of `s`, or 0 when none starts at or before it.
-@(private)
-char_start :: #force_inline proc "contextless" (s: string, i: int) -> int {
-	i := i
-	for i > 0 && s[i] & 0xC0 == 0x80 {
-		i -= 1
-	}
-	return i
 }

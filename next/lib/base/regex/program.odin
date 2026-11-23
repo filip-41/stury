@@ -15,7 +15,10 @@
 // from the generated unicode_tables.odin.
 //
 // The package reaches no OS and keeps no state of its own: every allocation comes from an allocator the caller passes
-// (`compile`, `refusal`, `valid`, `sample`, `Scratch`), and a search's work is bounded by the caller's `steps`.
+// (`compile`, `refusal`, `sample`, `scratch_make`), and a failed allocation comes back as an `Error` of kind `.Memory`.
+// A search takes the work it may do as `steps`, and keeps to the engine's own limits when the caller gives none. Its
+// memory limits are fixed. The caller maps its own budget onto `steps`: it refuses a spent budget itself and passes
+// what is left.
 package regex
 
 // The most memory, in bytes, that a program may take, and that a linear search's visited sets, backtrack stack and log
@@ -27,12 +30,51 @@ MAX_BYTES :: 1 << 28 when size_of(int) == 8 else 1 << 26
 @(private)
 MEMORY_ERROR :: "fail to memory allocation"
 
-// The pattern's options: jq's `i`, `x` and `s` flags, or `ecma` alone for a JSON Schema pattern (parse.odin). `longest`
-// and `not_empty` change only the search: ONIG_OPTION_FIND_LONGEST takes the longest match of all, not the first, and
-// ONIG_OPTION_FIND_NOT_EMPTY takes no empty match.
-Flags :: struct {
-	fold, extend, dotall, multiline, ecma, longest, not_empty: bool,
+// The grammar of a pattern: Oniguruma's, as jq reads it, or ECMA-262's with the `u` flag, as a JSON Schema `pattern`.
+Syntax :: enum u8 {
+	Oniguruma,
+	Ecma,
 }
+
+// The pattern's options under Oniguruma's syntax: jq's `i`, `x` and `s` flags. `longest` and `not_empty` change only
+// the search: ONIG_OPTION_FIND_LONGEST takes the longest match of all, not the first, and ONIG_OPTION_FIND_NOT_EMPTY
+// takes no empty match. ECMA-262's syntax takes none, and `compile` refuses them with it.
+Flags :: struct {
+	fold, extend, dotall, multiline, longest, not_empty: bool,
+}
+
+// What the parser reads: the flags in force and the syntax.
+@(private)
+Options :: struct {
+	using flags: Flags,
+	ecma:        bool,
+}
+
+// Why a compile or a search gave up. `Syntax` is a pattern Oniguruma refuses. `Steps` is the caller's step limit, or
+// the engine's own limit on a search's work when the caller gave none. `Memory` is a failed allocation or a cap on what
+// a compile or search may hold. `Callout` is an error that a pattern's callout ends the search with. `message` is
+// Oniguruma's.
+Error_Kind :: enum u8 {
+	None,
+	Syntax,
+	Steps,
+	Memory,
+	Callout,
+}
+
+Error :: struct {
+	kind:    Error_Kind,
+	message: string,
+}
+
+// A search past the caller's `steps` or past a backtrack limit, the message Oniguruma gives for its retry limit.
+@(private)
+STEPS_OUT :: Error{.Steps, "retry-limit-in-match over"}
+// A linear search past the engine's own limit on its work, which the caller gave no `steps` to replace.
+@(private)
+BUDGET_OUT :: Error{.Steps, "search work limit over"}
+@(private)
+MEMORY_OUT :: Error{.Memory, MEMORY_ERROR}
 
 @(private)
 Op :: enum u8 {
@@ -43,7 +85,8 @@ Op :: enum u8 {
 	Any_All,
 	Class, // classes[a]
 	Split, // go on at a, on failure at b
-	Split_Head, // a greedy loop: go on at pc+1 with b to fall back to when the byte at the position is a, otherwise at b
+	// a greedy loop: go on at pc+1 with b to fall back to when the byte at the position is a, otherwise at b
+	Split_Head,
 	Jmp, // to a
 	Save, // slot a = the position (captures, loop marks, and \K as slot 0). b: a group's start, which unsets its end
 	Set, // slot a = the position, kept as the match backs past it: a group's bound Oniguruma writes in place
@@ -60,7 +103,9 @@ Op :: enum u8 {
 	Rep, // the one-rune instruction after this, a to b times (b -1: no bound), as many as can, then pc+2
 	Rep_Lazy, // the same, as few as can
 	Count_Reset, // slot a, a counted loop's iterations, = 0
-	Count, // a counted loop at slot a: its body at pc+2 runs while slot a is short of insts[pc+1].a, may run while short of insts[pc+1].b, as many times as can, then on to b
+	// a counted loop at slot a: its body at pc+2 runs while slot a is short of insts[pc+1].a, may run while short of
+	// insts[pc+1].b, as many times as can, then on to b
+	Count,
 	Count_Lazy, // the same, as few times as can
 	Count_Next, // slot a += 1, then to the loop's Count at b
 	Count_Check, // as Check under ECMA, failing only once the loop whose Count is at b has run its least count
@@ -96,10 +141,12 @@ Program :: struct {
 	callouts: []^Callout, // those that keep data, each at its index
 	names:    []string, // group n's name at n, "" for none. Index 0 is the whole match
 	slots:    int, // two per group with the whole match, then a mark per loop that can match empty
-	opt:      ^Search_Opt, // what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
+	// what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
+	opt:      ^Search_Opt,
 	visited:  ^Visited, // under `linear`, what the visited set needs of the program
 	dfa:      ^Dfa, // the automaton that answers a search that reads no bounds, or nil (dfa.odin)
-	counting: ^Counting, // under ECMA, the counted repeats a search that reads no bounds follows in one pass, or nil (counting.odin)
+	// under ECMA, the counted repeats a search that reads no bounds follows in one pass, or nil (counting.odin)
+	counting: ^Counting,
 	// What every match starts with, at distance 0: the literal it begins with, or one of the bytes it can begin with.
 	head:      ^Search_Opt,
 	longest:   bool, // Flags.longest
@@ -107,8 +154,9 @@ Program :: struct {
 	calls_or_limits: bool, // holds a subexpression call or an absent operator, whose tracking the match then runs
 	narrowed:  bool, // `opt` bounds the starts the search tries
 	ecma:      bool, // compiled under `Flags.ecma`, whose search refuses a text too long for the visited set
-	// A program with choices whose outcome at an instruction and a position does not depend on the way there: the search
-	// keeps the pairs it has been to, so no pair runs twice. The ECMA programs `linear_ops` allows, and the jq ones.
+	// A program with choices whose outcome at an instruction and a position does not depend on the way there: the
+	// search keeps the pairs it has been to, so no pair runs twice. The ECMA programs `linear_ops` allows, and the jq
+	// ones.
 	linear:    bool,
 }
 

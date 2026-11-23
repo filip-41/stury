@@ -8,13 +8,15 @@ Regex :: regex.Regex
 Scratch :: regex.Scratch
 
 scratch_make :: proc(allocator: mem.Allocator) -> Scratch {
-	return regex.scratch_make(allocator)
+	scratch, err := regex.scratch_make(allocator)
+	ensure(err.kind == .None)
+	return scratch
 }
 
 compile :: proc(pattern: string, allocator: mem.Allocator) -> (re: Regex, ok: bool) {
-	err: string
-	re, err = regex.compile(pattern, {ecma = true}, allocator, context.allocator)
-	return re, err == ""
+	err: regex.Error
+	re, err = regex.compile(pattern, .Ecma, {}, allocator, context.allocator)
+	return re, err.kind == .None
 }
 
 groups :: proc(re: ^Regex) -> int {

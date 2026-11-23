@@ -15,6 +15,7 @@ Class :: struct {
 	negated: bool,
 	fold:    bool,
 	ascii:   [2]u64, // bit r is set when the class matches ASCII rune r, filled in by the compiler
+	slot:    int, // 1 + the index the compiler last gave it among its classes, 0 before
 }
 
 @(rodata)
@@ -267,11 +268,33 @@ class_match_slow :: proc(cls: ^Class, r: rune) -> bool {
 	}
 }
 
+// The ASCII runes `cls` matches, bit r for rune r. A class of ranges alone is read off them, any other tests each rune.
+ascii_bits :: proc(cls: ^Class) -> (bits: [2]u64) {
+	if len(cls.props) == 0 && !cls.fold {
+		for g in cls.ranges {
+			for r in max(g[0], 0) ..= min(g[1], 0x7f) {
+				add_bit(bits[:], int(r))
+			}
+		}
+		if cls.negated {
+			bits = {~bits[0], ~bits[1]}
+		}
+		return
+	}
+	for r in rune(0) ..< 0x80 {
+		if class_match_slow(cls, r) {
+			add_bit(bits[:], int(r))
+		}
+	}
+	return
+}
+
 // Bit `i` of a set of bits held in 64-bit words.
 has_bit :: #force_inline proc(words: []u64, i: int) -> bool {
 	return words[i >> 6] & (1 << (u64(i) & 63)) != 0
 }
 
+// Sets bit `i` of a set of bits held in 64-bit words, which `has_bit` reads.
 add_bit :: #force_inline proc(words: []u64, i: int) {
 	words[i >> 6] |= 1 << (u64(i) & 63)
 }
@@ -318,7 +341,7 @@ merge_runs :: proc(runs: [][2]rune) -> [][2]rune {
 	for g, i in runs {
 		keys[i] = u64(g[0]) << 32 | u64(g[1])
 	}
-	sort_keys(keys)
+	slice.sort(keys)
 	for k, i in keys {
 		runs[i] = {rune(k >> 32), rune(u32(k))}
 	}

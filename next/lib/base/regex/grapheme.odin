@@ -4,6 +4,7 @@ package regex
 // \X's extended grapheme clusters, which the matcher steps over.
 
 import "core:unicode"
+import "stury:lib/base/spell"
 
 // \X, an extended grapheme cluster by UAX #29's rules as Oniguruma 6.9.10 keeps them (no GB9c), over the
 // break classes its \X shows (unicode_tables.odin).
@@ -16,13 +17,13 @@ grapheme :: proc(s: string, pos: int, behind: ^Grapheme_Behind) -> int {
 	p := pos + w
 	// Oniguruma's classes fail on a continuation byte, where jq's global search can start: it is no Control,
 	// and its lookbehinds see the whole character it belongs to.
-	inside := s[pos] & 0xC0 == 0x80
+	inside := spell.is_continuation(s[pos])
 	if !inside && in_table(TABLE_GCB_ALONE, prev) { // GB3, GB4
 		return p + 1 if prev == '\r' && p < len(s) && s[p] == '\n' else p
 	}
 	before_emoji, before_regional := grapheme_behind(behind, s, pos)
 	// An odd count of regional indicators so far, Extended_Pictographic Extend* so far, and a ZWJ after them.
-	whole, _ := decode(s, char_start(s, pos))
+	whole, _ := decode(s, spell.char_start(s, pos))
 	regional := !before_regional && in_table(TABLE_REGIONAL, prev)
 	emoji := in_table(TABLE_PICTOGRAPHIC, whole) || before_emoji && in_table(TABLE_GCB_EXTEND, whole)
 	zwj := before_emoji && whole == 0x200D
@@ -77,7 +78,7 @@ grapheme_behind :: proc(b: ^Grapheme_Behind, s: string, pos: int) -> (emoji, reg
 @(private = "file")
 run_back :: proc(s: string, pos, stop, table: int) -> (r: rune, n: int, found: bool) {
 	for q := pos; q > stop; n += 1 {
-		if q = char_start(s, q - 1); q < stop {
+		if q = spell.char_start(s, q - 1); q < stop {
 			return
 		}
 		if r, _ = decode(s, q); !in_table(table, r) {
@@ -95,10 +96,13 @@ hangul_joins :: proc(prev, r: rune) -> bool {
 		return unicode.is_hangul_syllable_vowel(r) || r == 0x16D63 || r >= 0x16D67 && r <= 0x16D6A
 	}
 	if unicode.is_hangul_syllable_leading(prev) {
-		return unicode.is_hangul_syllable_leading(r) || vowel(r) || unicode.is_hangul_syllable_lv(r) || unicode.is_hangul_syllable_lvt(r)
+		return unicode.is_hangul_syllable_leading(r) || vowel(r) || unicode.is_hangul_syllable_lv(
+			r,
+		) || unicode.is_hangul_syllable_lvt(r)
 	}
 	if unicode.is_hangul_syllable_lv(prev) || vowel(prev) {
 		return vowel(r) || unicode.is_hangul_syllable_trailing(r)
 	}
-	return (unicode.is_hangul_syllable_lvt(prev) || unicode.is_hangul_syllable_trailing(prev)) && unicode.is_hangul_syllable_trailing(r)
+	trailing := unicode.is_hangul_syllable_trailing
+	return (unicode.is_hangul_syllable_lvt(prev) || trailing(prev)) && trailing(r)
 }

@@ -1,45 +1,17 @@
 package regex
 
-// The backtracking matcher and the search entry point. The matcher tries a program's alternatives in order as
-// Oniguruma does, so its matches and captures are Oniguruma's. After ten million backtracks at one start it gives
-// up with an error (ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH). Its stack is capped, where Oniguruma's grows without bound.
-// `search` asks the automata of dfa.odin first where they can answer.
+// The backtracking matcher. It tries a program's alternatives in order as Oniguruma does, so its matches and captures
+// are Oniguruma's. Its stack is capped, where Oniguruma's grows without bound. search.odin runs it.
 
-import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
+import "stury:lib/base/spell"
 
-@(private)
-MAX_RETRIES :: 10_000_000 // ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH. Past it the match errors, as Oniguruma's does, when the caller gives no step budget
 @(private)
 MAX_STACK :: 1 << 23 // entries, 24 bytes each
 @(private)
-KEEP_BYTES :: 1 << 20 // scratch grown past this is freed after the search rather than kept
-@(private)
 MAX_CALL_NEST :: 20 // Oniguruma's subexp_call_nest_counter limit as jq builds it, a group in place counted
-
-// Why a search gave up. `Steps` is the caller's step budget, or the engine's own limit on the work of a search when the
-// caller gave none. `Memory` is the cap on what a search may hold. `Callout` is an error that a pattern's callout ends
-// the search with. `message` is Oniguruma's.
-Error_Kind :: enum u8 {
-	None,
-	Steps,
-	Memory,
-	Callout,
-}
-
-Error :: struct {
-	kind:    Error_Kind,
-	message: string,
-}
-
-@(private)
-STEPS_OUT :: Error{.Steps, "retry-limit-in-match over"}
-@(private)
-BUDGET_OUT :: Error{.Steps, MEMORY_ERROR}
-@(private)
-MEMORY_OUT :: Error{.Memory, MEMORY_ERROR}
 
 @(private)
 Entry_Kind :: enum u8 {
@@ -65,304 +37,6 @@ Entry :: struct {
 	kind: Entry_Kind,
 	pc:   i32,
 	a, b: int,
-}
-
-// The matcher's stack and slots. A caller keeps one for its next search, and two searches running at once must not
-// share one. It allocates from `allocator` as it grows and `scratch_destroy` frees it.
-Scratch :: struct {
-	allocator: mem.Allocator,
-	stack:  [dynamic]Entry,
-	slots:  [dynamic]int,
-	counts: [dynamic]int,
-	seen:   [dynamic]u64, // a linear search's visited pairs, one bit per instruction and position, or the counting search's sets
-	good:   [dynamic]u64, // the pairs inside a look-ahead whose body is known to match from there
-	log:    [dynamic]u32, // the pairs first visited on the way through the look-aheads being matched
-	rows:   [dynamic]int, // under counter loops, the visited set's rows and then each loop's counts (`counted_rows`), or the counting search's layout
-	resumes: int, // the alternatives the last linear search resumed, which its program and text bound
-	spent:   int, // the steps the last search took, backtracks and automaton set words, which a caller charges to its budget
-	ends:    int, // where the automaton found the last search's match to end, -1 when it did not or found none
-}
-
-scratch_make :: proc(allocator: mem.Allocator) -> Scratch {
-	return {allocator = allocator}
-}
-
-scratch_destroy :: proc(scratch: ^Scratch) {
-	delete(scratch.stack)
-	delete(scratch.slots)
-	delete(scratch.counts)
-	delete(scratch.seen)
-	delete(scratch.good)
-	delete(scratch.log)
-	delete(scratch.rows)
-	scratch^ = {}
-}
-
-@(private)
-Matcher :: struct {
-	re:       ^Regex,
-	s:        string,
-	start:    int, // where the search began, for \G
-	slots:    []int,
-	stack:    ^[dynamic]Entry,
-	retries:  int,
-	cap:      int, // the most retries the run at this start may take
-	spent:    int, // the retries of the runs before this start
-	allowed:  int, // under a step budget, the retries the runs may take in all, otherwise -1
-	err:      Error,
-	caps:     []int,
-	best_len: int, // under `longest`, the longest match so far
-	keep:     int, // under `longest`, where the last match at this start kept from (\K)
-	skip:     int, // the furthest position a (*SKIP) reached, before which the next start may not be
-	counts:   []int, // each callout's count (`Callout`)
-	limit:    int, // the end of the text the match reads to, short of its end within an absent operator
-	depth:    int, // calls not returned from
-	behind:   Grapheme_Behind,
-	seen, good: []u64, // under `Regex.linear`, good only for a program with a look-ahead
-	rows:     []int, // under `Regex.linear`, each instruction's first row of the visited set, nil when each has one
-	radix:    []int, // under counter loops, the counts each loop's count is held to
-	budget:   int, // under `Regex.linear`, the alternatives the search may resume (`SEARCH_WORK`)
-	log:      ^[dynamic]u32,
-	looking:  int, // the look-aheads being matched, under `Regex.linear`
-	room:     int, // under `Regex.linear`, the bytes the stack and the log may take beside the sets
-	// Under `Regex.linear`, the sets hold the places from `lo` on, `width` places a row. `first_start` and `last_start`
-	// are the first and last start a match can have.
-	lo, width, first_start, last_start: int,
-}
-
-// Finds the first match of `re` in `s` at or after byte `start`. `caps` receives the groups' byte bounds, 2 per group
-// with the whole match first, -1 for a group that did not take part. `err` says why the search gave up, with
-// Oniguruma's message. With no `caps` it only reports whether there is a match.
-//
-// `steps` is the most work the search may do, counted in backtracks and in the automaton's set words, and `err.kind` is
-// `.Steps` when it runs out, with the match undecided. Without it (0) the search keeps to Oniguruma's own retry limit
-// at each start, and the limits on the other searches that `MAX_RETRIES` and the constants of visited.odin and
-// counting.odin give.
-search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch, steps := 0) -> (found: bool, err: Error) {
-	context.allocator = scratch.allocator
-	scratch.ends, scratch.resumes, scratch.spent = -1, 0, 0
-	limited := steps > 0
-	left := steps
-
-	// Oniguruma's search gives up past its retry limit where the automata would still answer. So under jq they answer
-	// only where the visited set runs the program, which never gives up, or where no start can take that many retries.
-	jq_automaton := !re.ecma && re.dfa != nil && !re.longest && !re.not_empty && !re.calls_or_limits
-	jq_automaton &&= visited_room(re, total_rows(re, re.visited.rows), len(s) + 1) >= 0 if re.linear else retries_bounded(re.dfa, len(s) - min(start, len(s)), steps if limited else MAX_RETRIES)
-	// Under jq the automata start at Oniguruma's first start, which its optimizer can place past a match. The starts it
-	// skips after that cannot have a match, but when it searches windows of starts in turn (`high < last` in
-	// `try_starts`) the backtracker does the search.
-	from := start
-	if re.narrowed && start <= len(s) && jq_automaton {
-		first, last, _, high, ok := search_starts(re.opt, s, start)
-		if !ok {
-			return false, {}
-		}
-		from = first if high >= last else -1
-	}
-	if len(caps) == 0 && re.dfa != nil && (re.ecma || jq_automaton) && from >= 0 {
-		if hit, judged := dfa_search(re.dfa, s, from); judged {
-			return hit, {}
-		}
-	}
-	counted, decided, work := count_search(re, s, start, caps, scratch, false, left if limited else COUNTING_WORK)
-	if decided {
-		scratch.spent = work
-		return counted, {}
-	}
-	if limited {
-		if left -= work; left < 0 {
-			scratch.spent = work
-			return false, STEPS_OUT
-		}
-	}
-	spent := work
-	// The automata give where the match ends and starts and how far a search reads. The backtracker then runs only at
-	// that start, for the groups, and its visited set covers only that range.
-	lo, width, first_start, last_start := 0, len(s) + 1, 0, len(s)
-	if len(caps) > 0 && (jq_automaton || re.ecma && re.dfa != nil) && re.dfa.first != nil && from >= 0 {
-		if end, reach, judged := dfa_first(re.dfa, s, from); judged {
-			if end < 0 {
-				return false, {}
-			}
-			lo, width, last_start = from, reach - from + 1, end
-			scratch.ends = end
-			if begin, known := dfa_start(re.dfa, s, from, end); known {
-				if len(caps) == 2 {
-					caps[0], caps[1] = begin, end
-					return true, {}
-				}
-				lo, width, first_start, last_start = begin, reach - begin + 1, begin, begin
-			}
-		}
-	}
-	defer shrink(&scratch.stack)
-	resize(&scratch.slots, re.slots)
-	resize(&scratch.counts, len(re.callouts))
-	m := Matcher{re = re, s = s, start = start, slots = scratch.slots[:], counts = scratch.counts[:], stack = &scratch.stack, caps = caps, best_len = -1, limit = len(s), lo = lo, width = width, first_start = first_start, last_start = last_start, allowed = left if limited else -1, cap = left if limited else MAX_RETRIES}
-	slice.zero(m.counts)
-	// The visited set is bounded by the text, so the memory cap replaces the retry limit and the jq stack cap. The set
-	// persists across starts, so a search where a pair's outcome depends on the start (`longest`, `not_empty`) runs
-	// without it, and so does a jq program whose set would pass the cap.
-	linear := re.linear && !re.longest && !re.not_empty
-	words: int
-	if linear {
-		m.rows, m.radix = re.visited.rows, nil
-		plain, most := total_rows(re, m.rows), MAX_BYTES
-		if re.visited.counters != nil {
-			m.rows, m.radix, plain = counted_rows(re, len(s) + 1, scratch)
-			most = COUNTED_BYTES
-		}
-		m.budget = left if limited else max(SEARCH_RESUMES, sat_mul(sat_mul(SEARCH_WORK, plain), width)) if re.ecma else max(int)
-		rows := total_rows(re, m.rows)
-		words = set_words(rows, width)
-		m.room = visited_room(re, rows, len(s) + 1, most)
-		if m.room < 0 && re.ecma {
-			counted, decided, work = count_search(re, s, start, caps, scratch, true, left if limited else COUNTING_WORK)
-			scratch.spent = spent + work
-			if decided {
-				return counted, {}
-			}
-			return false, MEMORY_OUT
-		}
-		linear = m.room >= 0
-	}
-	if linear {
-		resize(&scratch.seen, words)
-		slice.zero(scratch.seen[:])
-		m.seen = scratch.seen[:]
-		if re.visited.owner != nil {
-			resize(&scratch.good, words)
-			slice.zero(scratch.good[:])
-			m.good = scratch.good[:]
-		}
-		clear(&scratch.log)
-		m.log = &scratch.log
-	}
-	defer if linear {
-		shrink(&scratch.seen)
-		shrink(&scratch.good)
-		shrink(&scratch.log)
-	}
-	defer {
-		scratch.resumes = m.retries
-		scratch.spent = spent + m.spent + m.retries
-	}
-	switch {
-	case re.calls_or_limits:
-		return try_starts(&m, true, false)
-	case linear:
-		found, err = try_starts(&m, false, true)
-	case:
-		found, err = try_starts(&m, false, false)
-	}
-	if err.kind != .None {
-		if counted, decided, _ = count_search(re, s, start, caps, scratch, true, left - m.spent - m.retries if limited else COUNTING_WORK); decided {
-			return counted, {}
-		}
-	}
-	return found, err
-}
-
-// The counting search's answer to a search of an ECMA program with counted repeats that reads no bounds: `after`
-// false for a program with counter loops, before the backtracker, and true for one without, once the backtracker gave
-// up. `judged` is false when it does not run or does not decide. `work` is the set words it read, which it holds to
-// `limit`.
-@(private = "file")
-count_search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch, after: bool, limit: int) -> (found, judged: bool, work: int) {
-	if len(caps) > 0 || re.counting == nil || re.counting.loops == after {
-		return
-	}
-	found, judged, work = counting_search(re, s, start, scratch, limit)
-	shrink(&scratch.seen)
-	return
-}
-
-// Frees `a` when its capacity passes KEEP_BYTES, instead of keeping it for the next search.
-@(private = "file")
-shrink :: proc(a: ^[dynamic]$T) {
-	if cap(a) * size_of(T) > KEEP_BYTES {
-		allocator := a.allocator
-		delete(a^)
-		a^ = nil
-		a.allocator = allocator
-	}
-}
-
-@(private = "file")
-try_starts :: proc(m: ^Matcher, $EXT, $SET: bool) -> (found: bool, err: Error) {
-	re, s, start := m.re, m.s, m.start
-	first, last, limit, high := start, len(s), len(s), INFINITE_LEN
-	if re.narrowed {
-		ok: bool
-		if first, last, limit, high, ok = search_starts(re.opt, s, start); !ok {
-			return false, {}
-		}
-	}
-	first, last = max(first, m.first_start), min(last, m.last_start)
-	// A string or map the optimizer finds at a bounded distance gives each window of starts, low to high, a match
-	// holding it there can have. Other searches try every start in a single window.
-	windowed := high < last
-	at := first
-	starts: for at <= last {
-		end := last
-		if windowed {
-			if at = next_window(re.opt, s, at, limit, &high); at < 0 {
-				break
-			}
-			end = min(high, last)
-		}
-		for at <= end {
-			#partial switch h := re.head; h.kind {
-			case .Exact:
-				k := strings.index(s[at:], h.exact)
-				if k < 0 {
-					break starts
-				}
-				at += k
-			case .Map:
-				for at < len(s) && !has_bit(h.set[:], int(s[at])) {
-					at += lead_width(s[at])
-				}
-				if at >= len(s) {
-					break starts
-				}
-			}
-			if at > end {
-				break
-			}
-			if run(m, at, EXT, SET) {
-				return true, {}
-			}
-			if m.err.kind != .None {
-				return false, m.err
-			}
-			if at >= len(s) {
-				break starts
-			}
-			at = max(at + lead_width(s[at]), m.skip)
-		}
-		if !windowed {
-			break
-		}
-	}
-	return m.best_len >= 0, {}
-}
-
-// Returns the bytes Oniguruma steps over from lead byte `b` to the next place a search tries. A continuation byte,
-// where jq's global search can start inside a character, gives 1.
-@(private)
-lead_width :: #force_inline proc(b: byte) -> int {
-	switch {
-	case b < 0xC0:
-		return 1
-	case b < 0xE0:
-		return 2
-	case b < 0xF0:
-		return 3
-	case b < 0xF8:
-		return 4
-	}
-	return 1
 }
 
 // Returns the character at `pos` and its width. A byte below 0xC0 is read as the code point of its value, as Oniguruma
@@ -435,7 +109,7 @@ push_branch :: #force_inline proc(m: ^Matcher, e: Entry, $SET: bool) -> bool {
 }
 
 // Runs the program from `at`: true on a match (written to m.caps), false on none or on an error in m.err.
-@(private = "file")
+@(private)
 run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 	re, s := m.re, m.s
 	insts := re.insts
@@ -452,10 +126,10 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 		m.looking = 0
 	} else {
 		if m.retries != 0 {
-			m.spent += m.retries
+			m.earlier += m.retries
 			m.retries = 0
-			if m.allowed >= 0 {
-				m.cap = m.allowed - m.spent
+			if m.limited {
+				m.retry_cap = m.allowed - m.earlier
 			}
 		}
 	}
@@ -587,8 +261,12 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 			pc += 1
 		case .Look_End:
 			k := len(m.stack) - 1
-			for m.stack[k].kind != .Barrier {
+			for k >= 0 && m.stack[k].kind != .Barrier {
 				k -= 1
+			}
+			if k < 0 { // the push of the Barrier failed
+				m.err = MEMORY_OUT
+				return false
 			}
 			bar := m.stack[k]
 			when SET {
@@ -626,7 +304,7 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 					ok = false
 					break
 				}
-				pos = char_start(s, pos - 1)
+				pos = spell.char_start(s, pos - 1)
 			}
 			pc += 1
 		case .Check:
@@ -725,7 +403,16 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 				pc = int(ins.b)
 				break
 			}
-			push_branch(m, {kind = .Branch, pc = ins.b if ins.op == .Count else i32(pc + 2), a = pos, b = len(m.log) when SET else 0}, SET) or_return
+			push_branch(
+				m,
+				{
+					kind = .Branch,
+					pc = ins.b if ins.op == .Count else i32(pc + 2),
+					a = pos,
+					b = len(m.log) when SET else 0,
+				},
+				SET,
+			) or_return
 			pc = pc + 2 if ins.op == .Count else int(ins.b)
 		case .Count_Next:
 			push(m, {kind = .Restore, a = int(ins.a), b = slots[ins.a]})
@@ -858,6 +545,16 @@ undo :: #force_inline proc(m: ^Matcher, e: Entry, $EXT: bool) {
 	}
 }
 
+// Whether the retries have used the search's budget, with the error set when they have.
+@(private = "file")
+over_budget :: #force_inline proc(m: ^Matcher) -> bool {
+	if m.retries < m.budget {
+		return false
+	}
+	m.err = STEPS_OUT if m.limited else BUDGET_OUT
+	return true
+}
+
 // Resumes at the latest alternative, undoing the captures made since. Returns false when none is left.
 @(private = "file")
 backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
@@ -877,6 +574,10 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 			continue
 		case .Branch:
 			when SET {
+				// The engine's own budget counts only the stops of bounded repeats, which can outnumber the pairs.
+				if m.limited && over_budget(m) {
+					return false
+				}
 				resize(m.log, int(e.b))
 			}
 			pc^, pos^ = int(e.pc), e.a
@@ -884,8 +585,7 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 			// Every other entry was pushed at a pair's first visit, so only a bounded repeat's stops, given back or
 			// taken lazily, can outnumber the pairs and spend the budget.
 			when SET {
-				if m.retries >= m.budget {
-					m.err = BUDGET_OUT
+				if over_budget(m) {
 					return false
 				}
 			}
@@ -893,10 +593,10 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 			// next character began, as Oniguruma steps.
 			p := e.a - 1
 			q := p
-			for q > e.b && m.s[q] & 0xC0 == 0x80 {
+			for q > e.b && spell.is_continuation(m.s[q]) {
 				q -= 1
 			}
-			if q > e.b || m.s[q] & 0xC0 != 0x80 {
+			if q > e.b || !spell.is_continuation(m.s[q]) {
 				p = q
 			}
 			if p > e.b {
@@ -905,8 +605,7 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 			pc^, pos^ = int(e.pc) + 2, p
 		case .Take_More:
 			when SET {
-				if m.retries >= m.budget {
-					m.err = BUDGET_OUT
+				if over_budget(m) {
 					return false
 				}
 			}
@@ -916,7 +615,8 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 				continue
 			}
 			when SET {
-				if rep.b < 0 && !first_visit(m, row_of(m, int(e.pc) + 1, next), next) { // as a greedy repeat marks its stops
+				// as a greedy repeat marks its stops
+				if rep.b < 0 && !first_visit(m, row_of(m, int(e.pc) + 1, next), next) {
 					continue
 				}
 			}
@@ -930,7 +630,7 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 		}
 		m.retries += 1
 		when !SET {
-			if m.retries > m.cap {
+			if m.retries > m.retry_cap {
 				m.err = STEPS_OUT
 				return false
 			}
@@ -959,7 +659,7 @@ assert_at :: proc(m: ^Matcher, kind: Assert_Kind, pos: int) -> bool {
 		if pos > 0 { 	// the character before, whole even when `pos` is inside it, as Oniguruma finds it
 			r := rune(s[pos - 1])
 			if r >= 0x80 {
-				r, _ = decode(s, char_start(s, pos - 1))
+				r, _ = decode(s, spell.char_start(s, pos - 1))
 			}
 			before = is_word(r)
 		}
@@ -1038,7 +738,7 @@ linebreak :: proc(s: string, pos: int) -> int {
 	if strings.has_prefix(s[pos:], "\r\n") {
 		return pos + 2
 	}
-	if s[pos] & 0xC0 == 0x80 {
+	if spell.is_continuation(s[pos]) {
 		return -1 // inside a character: U+0085 is not its trailing byte
 	}
 	r, w := decode(s, pos)

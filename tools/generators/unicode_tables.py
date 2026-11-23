@@ -30,8 +30,8 @@ import subprocess
 import sys
 import urllib.request
 
-OUT = pathlib.Path("core/regex/unicode_tables.odin")
-BLOBS = OUT.with_name("tables")
+# The tables of core/regex and of its port in next/lib/base/regex are the same files.
+OUTS = [pathlib.Path("core/regex/unicode_tables.odin"), pathlib.Path("next/lib/base/regex/unicode_tables.odin")]
 LIBONIG = sys.argv[1] if len(sys.argv) > 1 else "/opt/homebrew/opt/oniguruma/lib/libonig.dylib"
 UCD_DIRECTORIES = sys.argv[2:]
 UCD_URL = "https://www.unicode.org/Public/17.0.0/ucd/"
@@ -371,7 +371,8 @@ def main():
     assert all(x < 1 << FOLD_BITS for f in folds for x in f)
 
     # The tables as little-endian blobs the package `#load`s; the names one string, each ended by a NUL.
-    BLOBS.mkdir(exist_ok=True)
+    for out_path in OUTS:
+        out_path.with_name("tables").mkdir(exist_ok=True)
     blobs = {
         "ranges": struct.pack(f"<{at}I", *(x for t in packed_tables for x in t)),
         "tables": struct.pack(f"<{len(starts)}H", *starts),
@@ -383,8 +384,9 @@ def main():
         "multi_folds": struct.pack(f"<{4 * len(multi)}I", *(x for c, f in multi for x in (c, *f))),
         "errors": b"".join(e.encode() + b"\0" for e in jq(ERRORS, None)),
     }
-    for name, data in blobs.items():
-        (BLOBS / f"{name}.bin").write_bytes(data)
+    for out_path in OUTS:
+        for name, data in blobs.items():
+            (out_path.with_name("tables") / f"{name}.bin").write_bytes(data)
     out = [
         "#+private",
         "package regex",
@@ -432,8 +434,9 @@ def main():
         'ERROR_MESSAGES :: #load("tables/errors.bin", string)',
         "",
     ]
-    OUT.write_text("\n".join(out))
-    print(f"{OUT}: {len(names)} names, {len(tables)} tables, {at} ranges, {len(folds)} folding characters")
+    for out_path in OUTS:
+        out_path.write_text("\n".join(out))
+    print(f"{OUTS[0]}: {len(names)} names, {len(tables)} tables, {at} ranges, {len(folds)} folding characters")
 
 
 if __name__ == "__main__":

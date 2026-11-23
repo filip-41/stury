@@ -334,7 +334,7 @@ index_byte_every_cut :: proc(t: ^testing.T) {
 	}
 }
 
-// The bit set of the bytes `of`, bit `b` of word `b / 64` for byte `b`.
+// The bit set of the bytes `of`: bit `b % 64` of word `b / 64` for byte `b`.
 member_bits :: proc(of: []u8) -> (bits: [4]u64) {
 	for b in of {
 		bits[b >> 6] |= u64(1) << (b & 63)
@@ -343,17 +343,18 @@ member_bits :: proc(of: []u8) -> (bits: [4]u64) {
 }
 
 // Checks `index_set` against a scan a byte at a time on every cut of random texts, for sets of one byte, a few bytes
-// across the nibble rows, bytes above 0x7f, a zero byte (which a padded block holds), and every byte but a few.
+// across the nibble rows, bytes above 0x7f, a zero byte (which a padded block holds), every byte but a few, a set of
+// 16 distinct nibble rows (which has no bucket form), and one of 8 (which has).
 @(test)
 index_set_every_cut :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	state: rand.Default_Random_State
 	context.random_generator = testkit.seeded(t, &state, 11)
 	buf: [200]u8
-	for round in 0 ..< testkit.rounds(60) {
+	for round in 0 ..< testkit.rounds(80) {
 		of: [dynamic]u8
 		defer delete(of)
-		switch round % 6 {
+		switch round % 8 {
 		case 0:
 			append(&of, u8(rand.int_max(256)))
 		case 1:
@@ -373,9 +374,17 @@ index_set_every_cut :: proc(t: ^testing.T) {
 			for _ in 0 ..< 1 + rand.int_max(4) {
 				unordered_remove(&of, rand.int_max(len(of)))
 			}
-		case:
+		case 5:
 			for _ in 0 ..< 1 + rand.int_max(40) {
 				append(&of, u8(rand.int_max(128)))
+			}
+		case 6:
+			for h in 0 ..< 16 {
+				append(&of, u8(h << 4 | (h + round) % 16))
+			}
+		case:
+			for h in 0 ..< 16 {
+				append(&of, u8(h << 4 | (h % 8 + round) % 16))
 			}
 		}
 		members := member_bits(of[:])

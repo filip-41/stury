@@ -155,7 +155,9 @@ ecma_char :: proc(p: ^Parser, c: byte) -> (r: rune, ok: bool) {
 			}
 		} else if v, n := number(p.src, &p.i, 0xFFFF, 16, 4); n == 4 {
 			j := p.i + 2
-			if low, m := number(p.src, &j, 0xFFFF, 16, 4); spell.high_surrogate(u32(v)) && peek(p) == '\\' && peek(p, 1) == 'u' && m == 4 && spell.low_surrogate(u32(low)) {
+			low, m := number(p.src, &j, 0xFFFF, 16, 4)
+			pair := peek(p) == '\\' && peek(p, 1) == 'u' && m == 4
+			if spell.high_surrogate(u32(v)) && pair && spell.low_surrogate(u32(low)) {
 				p.i = j
 				v = int(spell.surrogate_pair(u32(v), u32(low)))
 			}
@@ -167,7 +169,12 @@ ecma_char :: proc(p: ^Parser, c: byte) -> (r: rune, ok: bool) {
 		}
 		_, w := utf8.decode_rune_in_string(p.src[p.i - 1:])
 		buf: [20]byte
-		fail(p, strings.concatenate({"invalid escape \\", p.src[p.i - 1:][:w], " at offset ", strconv.write_int(buf[:], i64(p.i - 2), 10)}))
+		fail(
+			p,
+			strings.concatenate(
+				{"invalid escape \\", p.src[p.i - 1:][:w], " at offset ", strconv.write_int(buf[:], i64(p.i - 2), 10)},
+			),
+		)
 		return
 	}
 	fail(p, "invalid escape")
@@ -233,9 +240,13 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 	case 'x':
 		if peek(p) == '{' && spell.HEX_NIBBLE[peek(p, 1)] < 16 {
 			p.i += 1
-			v, n := number(p.src, &p.i, int(max(i32)), 16)
+			v, n := number(p.src, &p.i, max(int), 16)
 			if n > 8 {
 				fail(p, "too long wide-char value")
+				return 0, false, false
+			}
+			if v > int(max(i32)) || size_of(int) < 8 && v == max(int) {
+				fail(p, "too big wide-char value")
 				return 0, false, false
 			}
 			if at_end(p) || peek(p) != '}' {

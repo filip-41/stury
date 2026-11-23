@@ -3,6 +3,7 @@ package regex
 
 // The linear search's visited set.
 
+import "base:intrinsics"
 import "core:slice"
 
 // The program's facts the visited set reads, kept behind a pointer since a Regex is copied.
@@ -40,8 +41,8 @@ total_rows :: proc(re: ^Regex, rows: []int) -> int {
 counted_rows :: proc(re: ^Regex, places: int, scratch: ^Scratch) -> (rows, radix: []int, plain: int) {
 	v := re.visited
 	n := len(re.insts)
-	resize(&scratch.rows, n + 1 + len(v.counters))
-	rows, radix = scratch.rows[:n + 1], scratch.rows[n + 1:]
+	resize(&scratch.held.rows, n + 1 + len(v.counters))
+	rows, radix = scratch.held.rows[:n + 1], scratch.held.rows[n + 1:]
 	for c, k in v.counters {
 		radix[k] = min(c.most, c.least + places) + 1
 	}
@@ -54,7 +55,7 @@ counted_rows :: proc(re: ^Regex, places: int, scratch: ^Scratch) -> (rows, radix
 
 // An ECMA linear search resumes at most SEARCH_WORK alternatives for each pair of its rows, with one count of each
 // counter loop, over its places, and no fewer than SEARCH_RESUMES. Each count of a counter loop multiplies the pairs,
-// and each pair may resume a bounded repeat's every stop, so past this the search ends with MEMORY_ERROR, undecided,
+// and each pair may resume a bounded repeat's every stop, so past this the search ends with BUDGET_OUT, undecided,
 // and its time stays linear in the program and the text. Its sets under counter loops take at most COUNTED_BYTES with
 // the stack.
 SEARCH_WORK :: 4
@@ -144,10 +145,10 @@ lay_out_rows :: proc(v: ^Visited, rows: []int, radix: []int) {
 		times := 1
 		if radix != nil {
 			for k := int(v.counter_of[pc]); k >= 0; k = v.counters[k].outer {
-				times = min(times * radix[k], MAX_ROWS)
+				times = min(sat_mul(times, radix[k]), MAX_ROWS)
 			}
 		}
-		rows[pc + 1] = min(rows[pc] + block * times, MAX_ROWS)
+		rows[pc + 1] = min(rows[pc] + min(sat_mul(block, times), MAX_ROWS), MAX_ROWS)
 	}
 }
 
@@ -156,7 +157,8 @@ MAX_ROWS :: MAX_BYTES * 8 + 1
 
 // `a` times `b`, held at the largest int.
 sat_mul :: #force_inline proc "contextless" (a, b: int) -> int {
-	return max(int) if a != 0 && b > max(int) / a else a * b
+	product, overflowed := intrinsics.overflow_mul(a, b)
+	return max(int) if overflowed else product
 }
 
 // The 64-bit words of a visited set of `rows` rows over `places` places, held at what an int counts.
@@ -174,7 +176,8 @@ linear_ops :: proc(insts: []Inst, ecma: bool, anchored: bool) -> bool {
 	for ins in insts {
 		allowed := ecma && ins.op != .Backref
 		#partial switch ins.op {
-		case .Match, .Str, .Char_Fold, .Any, .Any_All, .Class, .Split, .Split_Head, .Jmp, .Set, .Linebreak, .Rep, .Rep_Lazy:
+		case .Match, .Str, .Char_Fold, .Any, .Any_All, .Class, .Split, .Split_Head, .Jmp, .Set, .Linebreak, .Rep,
+		     .Rep_Lazy:
 			allowed = true
 		case .Save:
 			allowed ||= ins.a != 0 && ins.b == 0 // not \K, nor a referenced group's start

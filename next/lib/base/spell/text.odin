@@ -91,3 +91,42 @@ hex_digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_b
 	}
 	return q
 }
+
+// Whether byte `b` continues a UTF-8 character, which a character's lead byte does not.
+is_continuation :: #force_inline proc "contextless" (b: byte) -> bool {
+	return b & 0xC0 == 0x80
+}
+
+// The bytes a walk by character steps over from the byte `b` to the next place it tries: the width a lead byte gives.
+// A continuation byte, where a search can start inside a character, and a byte no UTF-8 sequence starts with, give 1.
+lead_width :: #force_inline proc "contextless" (b: byte) -> int {
+	switch {
+	case b < 0xC0:
+		return 1
+	case b < 0xE0:
+		return 2
+	case b < 0xF0:
+		return 3
+	case b < 0xF8:
+		return 4
+	}
+	return 1
+}
+
+// The index of the first byte of the character that holds byte `i` of `s`, or 0 when none starts at or before it.
+char_start :: #force_inline proc "contextless" (s: string, i: int) -> int {
+	i := i
+	for i > 0 && is_continuation(s[i]) {
+		i -= 1
+	}
+	return i
+}
+
+// The index of the first byte at or after `i` that is not a continuation byte, or `len(s)`.
+skip_continuations :: #force_inline proc "contextless" (s: string, i: int) -> int {
+	i := i
+	for i < len(s) && is_continuation(s[i]) {
+		i += 1
+	}
+	return i
+}

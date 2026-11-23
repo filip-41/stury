@@ -1,9 +1,8 @@
 // Reads the ECMA patterns for test_regex.py from the file named by the first argument, a JSON array of [pattern, text]
 // pairs, through the engine that `-collection:engine=` names, `engines/v1` for core/regex or `engines/v2` for
 // lib/base/regex. It prints one line per pair: `E` for a pattern the engine refuses (with the message when the search
-// fails),
-// `W` where a search that reads no bounds disagrees with the search that does, `-` for no match, otherwise each group's
-// start and length in code points with the whole match first, -1 -1 for a group that did not take part.
+// fails), `W` where a search that reads no bounds disagrees with the search that does, `-` for no match, otherwise
+// each group's start and length in code points with the whole match first, -1 -1 for a group that did not take part.
 package regex_oracle
 
 import "core:encoding/json"

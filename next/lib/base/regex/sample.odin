@@ -12,57 +12,84 @@ SAMPLE_MAX :: 1 << 12
 @(private = "file")
 CHOICES :: 128
 
-// A splitmix64 random number generator, which `sample` and its callers draw from.
-Source :: struct {
-	state: u64,
-}
-
-// The next number of `s`.
-random_next :: proc(s: ^Source) -> u64 {
-	s.state += 0x9e3779b97f4a7c15
-	z := s.state
+// The next number of the splitmix64 generator whose state is `state`.
+@(private = "file")
+random_next :: proc(state: ^u64) -> u64 {
+	state^ += 0x9e3779b97f4a7c15
+	z := state^
 	z = (z ~ (z >> 30)) * 0xbf58476d1ce4e5b9
 	z = (z ~ (z >> 27)) * 0x94d049bb133111eb
 	return z ~ (z >> 31)
 }
 
-// A number of `s` below `n`, which is above 0.
-random_below :: proc(s: ^Source, n: int) -> int {
-	return int(random_next(s) % u64(max(n, 1)))
+// A number of the generator below `n`, which is above 0.
+@(private = "file")
+random_below :: proc(state: ^u64, n: int) -> int {
+	return int(random_next(state) % u64(max(n, 1)))
 }
 
 @(private = "file")
 Sampler :: struct {
 	out:   strings.Builder,
-	src:   ^Source,
+	state: ^u64,
 	extra: int,
 }
 
-// A text that the ECMA pattern `pattern` may match, drawn from `src`. A repeat with no upper bound takes up to
-// `extra` more than its lower. An assertion and a look-ahead are passed over, so the text is a candidate whose match
-// the caller checks, and a pattern with a back reference, a call or a condition gives no text. A pattern is a search,
-// so a text of fewer than `least` characters grows by letters after the match, or before it where the pattern ends
-// with an assertion and starts with none. The text and what the parse allocates come from `allocator`.
-sample :: proc(pattern: string, src: ^Source, extra, least: int, allocator: mem.Allocator) -> (text: string, ok: bool) {
-	context.allocator = allocator
-	pat, err := parse(pattern, Flags{ecma = true})
-	if err != "" {
-		return
+// A text that the ECMA pattern `pattern` may match, drawn by the splitmix64 generator that `state` holds, which each
+// draw advances. A repeat with no upper bound takes up to `extra` more than its lower. An assertion and a look-ahead
+// are passed over, so the text is a candidate whose match the caller checks, and a pattern with a back reference, a
+// call or a condition gives no text, an error of kind `.Syntax`. A pattern is a search, so a text of fewer than `least`
+// characters grows by letters after the match, or before it where the pattern ends with an assertion and starts with
+// none. The text comes from `allocator`, and the parse tree from `scratch`, which it is freed to.
+sample :: proc(
+	pattern: string,
+	state: ^u64,
+	extra,
+	least: int,
+	allocator,
+	scratch: mem.Allocator,
+) -> (text: string, err: Error) {
+	spare, spare_scratch: [SPARE_BYTES]byte
+	out := Gate{inner = allocator, spare = spare[:]}
+	tmp := Gate{inner = scratch, spare = spare_scratch[:]}
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena, gate_allocator(&tmp), gate_allocator(&tmp))
+	defer mem.dynamic_arena_destroy(&arena)
+	text, err = sample_in(pattern, state, extra, least, gate_allocator(&out), mem.dynamic_arena_allocator(&arena))
+	if out.failed || tmp.failed {
+		return "", MEMORY_OUT
+	}
+	return
+}
+
+@(private = "file")
+sample_in :: proc(
+	pattern: string,
+	state: ^u64,
+	extra,
+	least: int,
+	allocator,
+	tree: mem.Allocator,
+) -> (text: string, err: Error) {
+	context.allocator = tree
+	pat, message := parse(pattern, Options{ecma = true})
+	if message != "" {
+		return "", {.Syntax, message}
 	}
 	s := Sampler {
 		out   = strings.builder_make(allocator),
-		src   = src,
+		state = state,
 		extra = extra,
 	}
-	if ok = walk(&s, pat.root); !ok {
+	if !walk(&s, pat.root) {
 		strings.builder_destroy(&s.out)
-		return
+		return "", {.Syntax, "pattern cannot be sampled"}
 	}
 	text = strings.to_string(s.out)
 	if missing := least - utf8.rune_count_in_string(text); missing > 0 {
-		pad := make([]u8, missing, allocator)
+		pad := make([]u8, missing, tree)
 		for &c in pad {
-			c = u8('a' + random_below(src, 26))
+			c = u8('a' + random_below(state, 26))
 		}
 		switch {
 		case !anchors(pat.root, last = true):
@@ -71,7 +98,7 @@ sample :: proc(pattern: string, src: ^Source, extra, least: int, allocator: mem.
 			text = strings.concatenate({string(pad), text}, allocator)
 		}
 	}
-	return text, true
+	return text, {}
 }
 
 // Whether the first (or `last`) thing the pattern `n` matches is a start (or end) of the text.
@@ -92,7 +119,8 @@ anchors :: proc(root: ^Node, last: bool) -> bool {
 				return n.assert == .End_Buf || n.assert == .Semi_End_Buf || n.assert == .End_Line
 			}
 			return n.assert == .Begin_Buf || n.assert == .Begin_Line
-		case .Empty, .Char, .Str, .Any, .Class, .Alt, .Repeat, .Look, .Backref, .Keep, .Cond, .Linebreak, .Grapheme, .Call, .Absent:
+		case .Empty, .Char, .Str, .Any, .Class, .Alt, .Repeat, .Look, .Backref, .Keep, .Cond, .Linebreak, .Grapheme,
+		     .Call, .Absent:
 			return false
 		}
 	}
@@ -111,7 +139,7 @@ walk :: proc(s: ^Sampler, n: ^Node) -> bool {
 	case .Str:
 		strings.write_string(&s.out, n.text)
 	case .Any:
-		strings.write_byte(&s.out, u8('a' + random_below(s.src, 26)))
+		strings.write_byte(&s.out, u8('a' + random_below(s.state, 26)))
 	case .Class:
 		r, ok := class_rune(s, n.class)
 		strings.write_rune(&s.out, r)
@@ -123,13 +151,13 @@ walk :: proc(s: ^Sampler, n: ^Node) -> bool {
 			}
 		}
 	case .Alt:
-		return len(n.kids) > 0 && walk(s, n.kids[random_below(s.src, len(n.kids))])
+		return len(n.kids) > 0 && walk(s, n.kids[random_below(s.state, len(n.kids))])
 	case .Group:
 		return walk(s, n.kids[0])
 	case .Repeat:
 		span := s.extra if n.max < 0 else min(n.max - n.min, s.extra)
 		// An iteration that wrote nothing can be taken for each one left, so a repeat of an empty body ends at once.
-		for _ in 0 ..< min(n.min + random_below(s.src, max(span, 0) + 1), SAMPLE_MAX) {
+		for _ in 0 ..< min(n.min + random_below(s.state, max(span, 0) + 1), SAMPLE_MAX) {
 			at := strings.builder_len(s.out)
 			if !walk(s, n.kids[0]) {
 				return false
@@ -173,5 +201,5 @@ class_rune :: proc(s: ^Sampler, cls: ^Class) -> (rune, bool) {
 	if n == 0 {
 		return 0, false
 	}
-	return choices[random_below(s.src, n)], true
+	return choices[random_below(s.state, n)], true
 }

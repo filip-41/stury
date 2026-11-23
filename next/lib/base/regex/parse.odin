@@ -20,7 +20,7 @@ MAX_PARSE_DEPTH :: 1024
 Parser :: struct {
 	src:    string,
 	i:      int,
-	flags:  Flags, // flags in force in the current group, which (?i) changes until the group's end
+	flags:  Options, // flags in force in the current group, which (?i) changes until the group's end
 	names:  [dynamic]string, // group n's name at index n, "" for none. Index 0 is the whole match
 	groups: [dynamic]^Node,
 	open:   [dynamic]int, // numbers of the groups being parsed, innermost last
@@ -34,11 +34,14 @@ Parser :: struct {
 }
 
 // Returns the pattern's tree, or Oniguruma's message when it does not compile.
-parse :: proc(src: string, flags: Flags) -> (pat: Pattern, err: string) {
+parse :: proc(src: string, flags: Options) -> (pat: Pattern, err: string) {
 	p := Parser{src = src, flags = flags}
 	append(&p.names, "")
 	append(&p.groups, nil)
 	root := parse_alt(&p)
+	if gate_failed(context.allocator) {
+		return {}, MEMORY_ERROR
+	}
 	if p.err == "" && p.i < len(src) {
 		fail(&p, "unmatched close parenthesis")
 	}
@@ -123,6 +126,10 @@ parse_cat :: proc(p: ^Parser) -> ^Node {
 	for {
 		skip_ignored(p)
 		if at_end(p) || peek(p) == '|' || peek(p) == ')' {
+			break
+		}
+		if gate_failed(context.allocator) {
+			fail(p, MEMORY_ERROR)
 			break
 		}
 		if run := plain_run(p); run != nil {
@@ -423,7 +430,8 @@ invalid_repeat_target :: proc(n: ^Node) -> bool {
 // and how many.
 number :: proc(s: string, j: ^int, cap: int, base := 10, most := max(int)) -> (n: int, digits: int) {
 	for ; digits < most && j^ < len(s) && int(spell.HEX_NIBBLE[s[j^]]) < base; digits += 1 {
-		n = int(min(i64(n) * i64(base) + i64(spell.HEX_NIBBLE[s[j^]]), i64(cap)))
+		digit := int(spell.HEX_NIBBLE[s[j^]])
+		n = cap if cap < digit || n > (cap - digit) / base else n * base + digit
 		j^ += 1
 	}
 	return
@@ -801,7 +809,10 @@ parse_cond_expr :: proc(p: ^Parser) -> ^Node {
 	}
 	atomic, absent := new_node(.Look, cond), new_node(.Look, cond)
 	atomic.look, absent.look = .Atomic, .Not_Ahead
-	return expect_close(p, new_node(.Alt, new_node(.Cat, atomic, branches.kids[0]), new_node(.Cat, absent, branches.kids[1])))
+	return expect_close(
+		p,
+		new_node(.Alt, new_node(.Cat, atomic, branches.kids[0]), new_node(.Cat, absent, branches.kids[1])),
+	)
 }
 
 // Parses a condition's yes and no branches into n.kids[0] and [1]. Alternatives past the first are the no branch. The

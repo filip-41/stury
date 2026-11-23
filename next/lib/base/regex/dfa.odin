@@ -14,7 +14,7 @@ package regex
 
 import "core:strings"
 import "core:unicode/utf8"
-import "stury:lib/base/kernel"
+import "stury:lib/base/spell"
 
 // Limits on the automaton and its build. A program past any of them gets no automaton and the visited set answers.
 DFA_MAX_ITEMS :: 2048
@@ -53,7 +53,6 @@ Dfa :: struct {
 	// may skip to the next place a match can start, the next first byte of `head`. 0 when `head` is not known.
 	start_end: u32,
 	head:      Search_Opt,
-	lead:      kernel.Byte_Set, // `head.set` as the kernel scans for it, when `head` is a set
 	anchored:  bool, // a start row is read only where a search starts, so a skip tests that byte and does not scan on
 	// The automaton that finds where the first match in the backtracker's order ends. Its rows have the same stride,
 	// and an entry has FIRST_ENDS set when a match ends before the character it reads. Nil when it is not built.
@@ -78,7 +77,7 @@ FIRST_ENDS :: u32(1) << 31
 
 // Whether `d`'s program matches in `s` at or after byte `start`. `judged` is false when the text holds a byte that does
 // not begin a valid UTF-8 character there, or `start` is inside a character. The backtracker's steps decide then.
-dfa_search :: proc(d: ^Dfa, s: string, start: int) -> (found: bool, judged: bool) {
+dfa_search :: #force_no_inline proc(d: ^Dfa, s: string, start: int) -> (found: bool, judged: bool) {
 	if start > len(s) {
 		return false, true
 	}
@@ -117,7 +116,11 @@ scan_whether :: #force_inline proc(d: ^Dfa, s: string, st: u32, i, end: int, $SK
 				if i = skip_to_lead(d, s, i); i < 0 {
 					return DEAD, true
 				}
-				if st = d.starts[class_before(d, s, i)]; i >= end {
+				before, valid := class_before(d, s, i)
+				if !valid {
+					return st, false
+				}
+				if st = d.starts[before]; i >= end {
 					break
 				}
 			}
@@ -142,15 +145,18 @@ scan_whether :: #force_inline proc(d: ^Dfa, s: string, st: u32, i, end: int, $SK
 
 // Returns where the first match in the backtracker's order of `d`'s program at or after byte `start` in `s` ends, -1
 // for none. `reach` is the byte past the last character a thread read, which bounds every place the backtracker's
-// search visits. `judged` is false as in `dfa_search`.
-dfa_first :: proc(d: ^Dfa, s: string, start: int) -> (end, reach: int, judged: bool) {
-	end = -1
+// search visits. `first` is the earliest place the match that ends at `end` can start: the place a skip last landed on
+// before that end, since the starts before it were skipped over and over invalid UTF-8 may lie inside a character.
+// `judged` is false as in `dfa_search`.
+dfa_first :: proc(d: ^Dfa, s: string, start: int) -> (end, reach, first: int, judged: bool) {
+	end, first = -1, start
+	landing := start
 	if start > len(s) {
-		return -1, start, true
+		return -1, start, start, true
 	}
 	before, ok := start_class(d, s, start)
 	if !ok {
-		return -1, start, false
+		return -1, start, start, false
 	}
 	st := d.first_starts[before]
 	table := d.first
@@ -159,9 +165,14 @@ dfa_first :: proc(d: ^Dfa, s: string, start: int) -> (end, reach: int, judged: b
 	for st != DEAD && i < last {
 		if st < d.first_end {
 			if i = skip_to_lead(d, s, i); i < 0 {
-				return -1, start, true
+				return -1, start, start, true
 			}
-			if st = d.first_starts[class_before(d, s, i)]; i >= last {
+			here, valid := class_before(d, s, i)
+			if !valid {
+				return -1, start, start, false
+			}
+			landing = i
+			if st = d.first_starts[here]; i >= last {
 				break
 			}
 		}
@@ -173,13 +184,13 @@ dfa_first :: proc(d: ^Dfa, s: string, start: int) -> (end, reach: int, judged: b
 		} else {
 			r: rune
 			if r, w = utf8.decode_rune_in_string(s[i:]); w == 1 {
-				return -1, start, false
+				return -1, start, start, false
 			}
 			sym = rune_symbol(d, r)
 		}
 		t := table[st + u32(sym)]
 		if t & FIRST_ENDS != 0 {
-			end = i
+			end, first = i, landing
 		}
 		st = t &~ FIRST_ENDS
 		i += w
@@ -187,15 +198,15 @@ dfa_first :: proc(d: ^Dfa, s: string, start: int) -> (end, reach: int, judged: b
 	if st != DEAD && last < len(s) {
 		t := table[st + d.stride - 2]
 		if t & FIRST_ENDS != 0 {
-			end = last
+			end, first = last, landing
 		}
 		st = t &~ FIRST_ENDS
 		i = len(s)
 	}
 	if st != DEAD && table[st + d.stride - 1] & FIRST_ENDS != 0 {
-		end = len(s)
+		end, first = len(s), landing
 	}
-	return end, i, true
+	return end, i, first, true
 }
 
 // Returns where the match of `d`'s program that ends at byte `end` of `s` starts: the earliest such place from byte
@@ -204,7 +215,7 @@ dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bo
 	after := EDGE
 	if end < len(s) {
 		r, w := decode(s, end)
-		if w == 1 && s[end] >= 0x80 || s[end] & 0xC0 == 0x80 {
+		if w == 1 && s[end] >= 0x80 || spell.is_continuation(s[end]) {
 			return -1, false
 		}
 		after = int(d.classes[symbol_of(d, r)])
@@ -243,10 +254,6 @@ dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bo
 	return start, start >= 0
 }
 
-// The bytes a skip tests one at a time before it scans with the kernel.
-@(private = "file")
-NEAR :: 8
-
 // Returns the next place from `i` where a match can start, `i` itself when `head` gives no first byte, or -1 for none.
 // Only a program that cannot match empty has a head.
 @(private = "file")
@@ -261,37 +268,23 @@ skip_to_lead :: #force_inline proc(d: ^Dfa, s: string, i: int) -> int {
 		k := strings.index_byte(s[i:], h.exact[0])
 		return i + k if k >= 0 else -1
 	case .Map:
-		// A candidate within a few bytes is common, and the kernel's scan costs more than testing them.
-		near := min(i + NEAR, len(s))
-		for j in i ..< near {
-			if has_bit(h.set[:], int(s[j])) {
-				return j
-			}
-		}
-		return skip_far(d, s, near)
+		return next_head_byte(h, s, i)
 	}
 	return i
 }
 
-// The next place from `from` where a match can start, for a head that is a set. It is kept out of line so the scan's
-// loops stay out of the automaton's.
+// Returns the class of the character before byte `i` of `s`, EDGE at 0. `valid` is false when the bytes before `i` do
+// not end a valid character, which the backtracker reads by other rules.
 @(private = "file")
-skip_far :: #force_no_inline proc(d: ^Dfa, s: string, from: int) -> int {
-	k := kernel.index_set(transmute([]u8)s[from:], d.lead)
-	return from + k if k >= 0 else -1
-}
-
-// Returns the class of the character before byte `i` of `s`, EDGE at 0. Above 0, `i` must start a valid character.
-@(private = "file")
-class_before :: #force_inline proc(d: ^Dfa, s: string, i: int) -> int {
+class_before :: #force_inline proc(d: ^Dfa, s: string, i: int) -> (class: int, valid: bool) {
 	if i == 0 {
-		return EDGE
+		return EDGE, true
 	}
 	if s[i - 1] < 0x80 {
-		return int(d.classes[d.ascii[s[i - 1]]])
+		return int(d.classes[d.ascii[s[i - 1]]]), true
 	}
-	r, _ := utf8.decode_last_rune_in_string(s[:i])
-	return int(d.classes[rune_symbol(d, r)])
+	r, w := utf8.decode_last_rune_in_string(s[:i])
+	return int(d.classes[rune_symbol(d, r)]), w > 1
 }
 
 // Returns the class of the character before byte `start` of `s`, EDGE at 0, and the final class for a newline that ends
@@ -302,7 +295,7 @@ start_class :: proc(d: ^Dfa, s: string, start: int) -> (before: int, ok: bool) {
 		return EDGE, true
 	}
 	r, w := utf8.decode_last_rune_in_string(s[:start])
-	if w == 1 && s[start - 1] >= 0x80 || start < len(s) && s[start] & 0xC0 == 0x80 {
+	if w == 1 && s[start - 1] >= 0x80 || start < len(s) && spell.is_continuation(s[start]) {
 		return 0, false
 	}
 	if start == len(s) && r == '\n' {

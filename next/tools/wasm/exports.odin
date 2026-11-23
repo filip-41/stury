@@ -2,6 +2,7 @@
 package wasm_exports
 
 import "base:runtime"
+import "core:mem"
 import "stury:json"
 import "stury:lib/base/regex"
 import "stury:lib/core/tape"
@@ -180,17 +181,23 @@ scan_tolerant_json5 :: proc "c" (p: [^]u8, n: int) -> int {
 	return scan_spec(p[:n], .Json5, TOLERANT)
 }
 
-// Whether an ECMA pattern matches a text, -1 for a pattern or a search that fails, so the object holds the regex engine.
+// Whether an ECMA pattern matches a text, -1 for a pattern or a search that fails, so the object holds the regex
+// engine.
 @(export)
 regex_matches :: proc "c" (pattern: [^]u8, n: int, text: [^]u8, m: int) -> int {
 	context = runtime.default_context()
-	allocator := context.allocator
-	re, err := regex.compile(string(pattern[:n]), {ecma = true}, allocator, allocator)
-	if err != "" {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena, context.allocator, context.allocator)
+	defer mem.dynamic_arena_destroy(&arena)
+	allocator := mem.dynamic_arena_allocator(&arena)
+	re, err := regex.compile(string(pattern[:n]), .Ecma, {}, allocator, allocator)
+	if err.kind != .None {
 		return -1
 	}
-	scratch := regex.scratch_make(allocator)
-	defer regex.scratch_destroy(&scratch)
+	scratch, scratch_err := regex.scratch_make(allocator)
+	if scratch_err.kind != .None {
+		return -1
+	}
 	found, search_err := regex.search(&re, string(text[:m]), 0, nil, &scratch)
 	return -1 if search_err.kind != .None else int(found)
 }

@@ -14,7 +14,6 @@ package regex
 import "core:mem"
 import "core:slice"
 import "core:unicode/utf8"
-import "stury:lib/base/kernel"
 
 Builder :: struct {
 	re:           ^Regex,
@@ -48,6 +47,7 @@ Builder :: struct {
 	todo:         [dynamic]int,
 	row_key:      [dynamic]u32,
 	work:         int,
+	gates:        [2]^Gate, // the allocators of the automaton and of the build
 }
 
 // The states found so far. `ids` maps each state's key, its threads followed by the class before them, to its row.
@@ -60,6 +60,27 @@ States :: struct {
 	stride: u32,
 }
 
+// What the automaton reads: the class of each symbol (`classes`) and of the text's end (`final`), which reads the
+// symbol of a newline (`newline_sym`) as the column past the symbols, and the symbols each atom takes.
+@(private = "file")
+Alphabet :: struct {
+	classes:     []u8,
+	final:       u8,
+	syms:        int,
+	newline_sym: int,
+	atom_syms:   [][4]u64,
+}
+
+// The symbol and class that column `col` of a row reads: the columns 0 to `syms` - 1 are the symbols, `syms` the text's
+// end.
+@(private = "file")
+column :: #force_inline proc(a: ^Alphabet, col: int) -> (sym, class: int) {
+	if col < a.syms {
+		return col, int(a.classes[col])
+	}
+	return a.newline_sym, int(a.final)
+}
+
 // A look-ahead the program begins with. The product runs an automaton of its body from the text's start.
 @(private = "file")
 Leading_Look :: struct {
@@ -67,22 +88,29 @@ Leading_Look :: struct {
 	negative: bool,
 }
 
+// Whether an allocation of the build has failed, which leaves what it asked for empty.
+broke :: #force_inline proc(b: ^Builder) -> bool {
+	return b.gates[0].failed || b.gates[1].failed
+}
+
 // Adds `steps` to the build's work, false once it passes DFA_MAX_WORK.
 charge :: #force_inline proc(b: ^Builder, steps: int) -> bool {
 	b.work += steps
-	return b.work <= DFA_MAX_WORK
+	return b.work <= DFA_MAX_WORK && !broke(b)
 }
 
 // Returns the automaton for `re`, allocated in `allocator`, or nil when the program has an instruction it does not run
 // or a cap is passed. With `spans` it also builds `first` and `last` when the program allows. The build's working
-// memory comes from `scratch` and is freed before it returns.
-build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) -> ^Dfa {
+// memory comes from `scratch` and is freed before it returns. The build gives up when an allocation of either gate has
+// failed, and the caller reads that.
+build_dfa :: proc(re: ^Regex, spans: bool, out, tmp: ^Gate) -> ^Dfa {
+	allocator, scratch := gate_allocator(out), gate_allocator(tmp)
 	arena: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&arena, scratch, scratch, block_size = 8192, out_band_size = 2048)
 	defer mem.dynamic_arena_destroy(&arena)
 	context.allocator = mem.dynamic_arena_allocator(&arena)
 
-	b := Builder{re = re}
+	b := Builder{re = re, gates = {out, tmp}}
 	if !leading_looks(&b) || !enumerate_items(&b) {
 		return nil
 	}
@@ -91,6 +119,9 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 	b.item_seen = make([]u32, n)
 	b.in_set = make([]u32, n + len(re.insts))
 	b.after = make([][]u32, n)
+	if broke(&b) {
+		return nil
+	}
 	for i in 0 ..< n {
 		if b.atom_of[i] != MATCH_ITEM {
 			b.after[i] = after_read(&b, i)
@@ -135,6 +166,7 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 	for c in classes {
 		b.used[c] = true
 	}
+	alphabet := Alphabet{classes, final, syms, newline_sym, atom_syms}
 	stride := u32(syms + 2)
 	// A search starts with one thread at the program's start and adds another after each character it reads.
 	restart := u32(n)
@@ -150,10 +182,10 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 	starts: [CLASSES]u32
 	start_end: u32
 	if ok {
-		st, starts, start_end, ok = build_rows(&b, restart, true, false, classes, final, syms, newline_sym, atom_syms)
+		st, starts, start_end, ok = build_rows(&b, restart, true, false, &alphabet)
 	}
 	if ok && len(b.looks) > 0 {
-		st, starts, ok = build_product(&b, st, starts, classes, final, syms, newline_sym, atom_syms)
+		st, starts, ok = build_product(&b, st, starts, &alphabet)
 		start_end = 0
 	}
 	if !ok {
@@ -166,10 +198,10 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 	// record. The threads of a leading look-ahead's product are not ordered.
 	has_first := spans && !b.empty_loops && !b.keeps && len(b.looks) == 0
 	if has_first {
-		first, first_starts, first_end, has_first = build_rows(&b, u32(len(b.atom_of)), true, true, classes, final, syms, newline_sym, atom_syms)
+		first, first_starts, first_end, has_first = build_rows(&b, u32(len(b.atom_of)), true, true, &alphabet)
 	}
 	if has_first {
-		last, last_starts, has_first = build_last(&b, classes, final, syms, newline_sym, atom_syms)
+		last, last_starts, has_first = build_last(&b, &alphabet)
 	}
 
 	context.allocator = allocator
@@ -195,8 +227,6 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 	// check for a skip at each byte.
 	if d.head.kind == .None {
 		d.start_end, d.first_end = 0, 0
-	} else if d.head.kind == .Map {
-		d.lead = kernel.byte_set(d.head.set)
 	}
 	reps := make([dynamic]i32)
 	loops: for ins, pc in re.insts {
@@ -226,12 +256,12 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 
 // Sets `bucket` to the threads the items `reached` go on to after reading the symbol `sym`, in their order.
 @(private = "file")
-step_bucket :: proc(b: ^Builder, bucket: ^[dynamic]u32, reached: []u32, sym: int, atom_syms: [][4]u64) -> bool {
+step_bucket :: proc(b: ^Builder, bucket: ^[dynamic]u32, reached: []u32, sym: int, a: ^Alphabet) -> bool {
 	charge(b, 1 + len(reached)) or_return
 	b.stamp += 1
 	clear(bucket)
 	for it in reached {
-		if !has_bit(atom_syms[b.atom_of[it]][:], sym) {
+		if !has_bit(a.atom_syms[b.atom_of[it]][:], sym) {
 			continue
 		}
 		charge(b, len(b.after[it])) or_return
@@ -252,9 +282,20 @@ step_bucket :: proc(b: ^Builder, bucket: ^[dynamic]u32, reached: []u32, sym: int
 // thread at the program's start that each character adds comes last, and only until a match has ended. The last match
 // end the search sees is the backtracker's: the first in its order to end, at the earliest start that has a match.
 @(private = "file")
-build_rows :: proc(b: ^Builder, start: u32, restart: bool, $first: bool, classes: []u8, final: u8, syms, newline_sym: int, atom_syms: [][4]u64) -> (st: States, starts: [CLASSES]u32, start_end: u32, ok: bool) {
+build_rows :: proc(
+	b: ^Builder,
+	start: u32,
+	restart: bool,
+	$first: bool,
+	a: ^Alphabet,
+) -> (
+	st: States,
+	starts: [CLASSES]u32,
+	start_end: u32,
+	ok: bool,
+) {
 	n := len(b.atom_of)
-	stride := u32(syms + 2)
+	stride := u32(a.syms + 2)
 	st.stride = stride
 	// Row 0 is the dead state. In the whether automaton row 1 is the matched state, which every character leads back
 	// to.
@@ -283,28 +324,25 @@ build_rows :: proc(b: ^Builder, start: u32, restart: bool, $first: bool, classes
 			}
 			reached[c], matched[c] = expand(b, threads, before, c, first) or_return
 		}
-		for col in 0 ..= syms {
-			sym, c := col, int(classes[col]) if col < syms else int(final)
-			if col == syms {
-				sym = newline_sym
-			}
+		for col in 0 ..= a.syms {
+			sym, c := column(a, col)
 			if matched[c] && !first {
 				st.table[at + col] = matched_row
 				continue
 			}
-			step_bucket(b, &bucket, reached[c], sym, atom_syms) or_return
+			step_bucket(b, &bucket, reached[c], sym, a) or_return
 			now_ended := ended || matched[c]
 			if restart && !now_ended {
 				add_item(b, &bucket, u32(n))
 			}
 			// With `$first` the threads keep the backtracker's order. Without it they are a set and are sorted.
 			if !first {
-				sort_keys(bucket[:])
+				sort_items(bucket[:])
 			}
 			target := first_row(b, &st, bucket[:], c, now_ended) or_return
 			st.table[at + col] = target | (FIRST_ENDS if matched[c] else 0)
 		}
-		st.table[at + syms + 1] = matched_row if matched[EDGE] else DEAD
+		st.table[at + a.syms + 1] = matched_row if matched[EDGE] else DEAD
 	}
 	return st, starts, start_end, true
 }
@@ -315,13 +353,22 @@ build_rows :: proc(b: ^Builder, start: u32, restart: bool, $first: bool, classes
 // negative body has a thread left. It is dead once the program or a positive body has no thread left, or a negative
 // body has matched.
 @(private = "file")
-build_product :: proc(b: ^Builder, main: States, main_starts: [CLASSES]u32, classes: []u8, final: u8, syms, newline_sym: int, atom_syms: [][4]u64) -> (st: States, starts: [CLASSES]u32, ok: bool) {
+build_product :: proc(
+	b: ^Builder,
+	main: States,
+	main_starts: [CLASSES]u32,
+	a: ^Alphabet,
+) -> (
+	st: States,
+	starts: [CLASSES]u32,
+	ok: bool,
+) {
 	n := len(b.atom_of)
 	parts := make([]States, 1 + len(b.looks))
 	part_starts := make([][CLASSES]u32, len(parts))
 	parts[0], part_starts[0] = main, main_starts
 	for look, k in b.looks {
-		parts[1 + k], part_starts[1 + k], _ = build_rows(b, u32(n + int(look.body)), false, false, classes, final, syms, newline_sym, atom_syms) or_return
+		parts[1 + k], part_starts[1 + k], _ = build_rows(b, u32(n + int(look.body)), false, false, a) or_return
 	}
 	stride := main.stride
 	st.stride = stride
@@ -429,9 +476,9 @@ first_row :: proc(b: ^Builder, st: ^States, threads: []u32, read: int, ended: bo
 // after a character when it reads that character and one item its next threads reach is in the previous state. A match
 // starts at a place when the program's start reaches one of the state's items there.
 @(private = "file")
-build_last :: proc(b: ^Builder, classes: []u8, final: u8, syms, newline_sym: int, atom_syms: [][4]u64) -> (st: States, starts: [CLASSES]u32, ok: bool) {
+build_last :: proc(b: ^Builder, a: ^Alphabet) -> (st: States, starts: [CLASSES]u32, ok: bool) {
 	n := len(b.atom_of)
-	stride := u32(syms + 2)
+	stride := u32(a.syms + 2)
 	st.stride = stride
 	resize(&st.table, int(stride))
 	ends := make([dynamic]u32)
@@ -494,22 +541,19 @@ build_last :: proc(b: ^Builder, classes: []u8, final: u8, syms, newline_sym: int
 				starts_here[c] ||= b.in_set[y] == mark
 			}
 		}
-		for col in 0 ..= syms {
-			sym, c := col, int(classes[col]) if col < syms else int(final)
-			if col == syms {
-				sym = newline_sym
-			}
+		for col in 0 ..= a.syms {
+			sym, c := column(a, col)
 			charge(b, 1 + len(reading[c])) or_return
 			clear(&bucket)
 			for it in reading[c] {
-				if has_bit(atom_syms[b.atom_of[it]][:], sym) {
+				if has_bit(a.atom_syms[b.atom_of[it]][:], sym) {
 					append(&bucket, it)
 				}
 			}
 			target := last_row(b, &st, bucket[:], c) or_return
 			st.table[at + col] = target | (FIRST_ENDS if starts_here[c] else 0)
 		}
-		st.table[at + syms + 1] = FIRST_ENDS if starts_here[EDGE] else DEAD
+		st.table[at + a.syms + 1] = FIRST_ENDS if starts_here[EDGE] else DEAD
 	}
 	return st, starts, true
 }
@@ -591,6 +635,9 @@ enumerate_items :: proc(b: ^Builder) -> bool {
 	insts := re.insts
 	b.base = make([]i32, len(insts))
 	slice.fill(b.base, -1)
+	if broke(b) {
+		return false
+	}
 	rep_body := false
 	for ins, pc in insts {
 		if rep_body {
@@ -785,7 +832,16 @@ closure_of :: proc(b: ^Builder, pc, before, after: int) -> ([]u32, bool) {
 // and whether Match is among what they reach. With `$stop` the reach ends at the first Match, since the threads after
 // it are ones the backtracker would try only if that match failed.
 @(private = "file")
-expand :: proc(b: ^Builder, threads: []u32, before, after: int, $stop: bool) -> (items: []u32, matched: bool, ok: bool) {
+expand :: proc(
+	b: ^Builder,
+	threads: []u32,
+	before, after: int,
+	$stop: bool,
+) -> (
+	items: []u32,
+	matched: bool,
+	ok: bool,
+) {
 	n := len(b.atom_of)
 	b.stamp += 1
 	set := make([dynamic]u32)
@@ -845,85 +901,20 @@ after_read :: proc(b: ^Builder, it: int) -> []u32 {
 	return out[:]
 }
 
-// Sorts `keys` in place. Up to 32 keys use insertion sort. Keys that are already sorted are left alone. Keys with at
-// most 16 descents, such as the join of sorted lists, are sorted by merging their sorted stretches. Any other keys use
-// a radix sort on bytes that skips each byte every key shares.
-sort_keys :: proc(keys: $S/[]$T) {
-	if len(keys) <= 32 {
-		for i in 1 ..< len(keys) {
-			x, j := keys[i], i
-			for j > 0 && keys[j - 1] > x {
-				keys[j] = keys[j - 1]
-				j -= 1
-			}
-			keys[j] = x
-		}
+// Sorts the items of a thread set. Most hold a few items, which an insertion sort orders faster than the general sort
+// starts.
+@(private = "file")
+sort_items :: proc(items: []u32) {
+	if len(items) > 32 {
+		slice.sort(items)
 		return
 	}
-	descents := 0
-	for i in 1 ..< len(keys) {
-		descents += int(keys[i - 1] > keys[i])
-	}
-	if descents == 0 {
-		return
-	}
-	from, to := keys, make([]T, len(keys))
-	if descents <= 16 {
-		bounds := make([dynamic]int, 0, descents + 2)
-		append(&bounds, 0)
-		for i in 1 ..< len(keys) {
-			if keys[i - 1] > keys[i] {
-				append(&bounds, i)
-			}
+	for i in 1 ..< len(items) {
+		x, j := items[i], i
+		for j > 0 && items[j - 1] > x {
+			items[j] = items[j - 1]
+			j -= 1
 		}
-		append(&bounds, len(keys))
-		for len(bounds) > 2 {
-			n := 0
-			for j := 0; j + 1 < len(bounds); j += 2 {
-				lo, mid := bounds[j], bounds[j + 1]
-				hi := bounds[j + 2] if j + 2 < len(bounds) else mid
-				a, c, k := lo, mid, lo
-				for a < mid && c < hi {
-					if from[c] < from[a] {
-						to[k], c = from[c], c + 1
-					} else {
-						to[k], a = from[a], a + 1
-					}
-					k += 1
-				}
-				k += copy(to[k:], from[a:mid])
-				copy(to[k:], from[c:hi])
-				bounds[n] = lo
-				n += 1
-			}
-			bounds[n] = len(keys)
-			resize(&bounds, n + 1)
-			from, to = to, from
-		}
-		if raw_data(from) != raw_data(keys) {
-			copy(keys, from)
-		}
-		return
-	}
-	for shift := uint(0); shift < 8 * size_of(T); shift += 8 {
-		counts: [257]int
-		for k in from {
-			counts[(k >> shift) & 0xFF + 1] += 1
-		}
-		if counts[(from[0] >> shift) & 0xFF + 1] == len(from) {
-			continue
-		}
-		for i in 1 ..< len(counts) {
-			counts[i] += counts[i - 1]
-		}
-		for k in from {
-			d := (k >> shift) & 0xFF
-			to[counts[d]] = k
-			counts[d] += 1
-		}
-		from, to = to, from
-	}
-	if raw_data(from) != raw_data(keys) {
-		copy(keys, from)
+		items[j] = x
 	}
 }

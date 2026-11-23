@@ -8,6 +8,7 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
+import "stury:lib/base/kernel"
 
 @(private)
 Compiler :: struct {
@@ -29,7 +30,8 @@ Compiler :: struct {
 	counter_of: [dynamic]i32, // under ECMA, per instruction: the index into `counters` of its counter loop, -1 for none
 	counter:    int, // the counter loop being emitted, -1 for none
 	looped:     [dynamic]^Node, // the ECMA repeats that run as counter loops, which a repeat around them emits again
-	counted:    bool, // a repeat of more than one iteration, which an ECMA search that reads no bounds counts (`counting_of`)
+	// a repeat of more than one iteration, which an ECMA search that reads no bounds counts (`counting_of`)
+	counted:    bool,
 	tuned:      int, // the highest group number Oniguruma's tune_tree has reached by now, as `fixed_length` reads it
 	slots:      int,
 	err:        string,
@@ -38,60 +40,85 @@ Compiler :: struct {
 	addr:       []int, // by group number: a called group's first instruction, -1 until emitted
 }
 
-// Whether `pattern` is well formed under `flags`. It builds no program and frees what it took from `scratch`.
-valid :: proc(pattern: string, flags: Flags, scratch: mem.Allocator) -> bool {
-	arena: mem.Dynamic_Arena
-	mem.dynamic_arena_init(&arena, scratch, scratch)
-	defer mem.dynamic_arena_destroy(&arena)
-	context.allocator = mem.dynamic_arena_allocator(&arena)
-	_, err := parse(pattern, flags)
-	return err == ""
-}
+// The bytes of a compile's own stack that serve its allocations once the caller's allocator has failed.
+@(private)
+SPARE_BYTES :: 8192
 
-// Whether `r` has the Unicode property `name`, spelled as Oniguruma spells `\p{name}`: a general category, a script or
-// a binary property. An unknown name matches no rune.
-in_property :: proc(name: string, r: rune) -> bool {
-	it, ok := named_prop(name)
-	return ok && in_table(int(it.table), r)
-}
-
-// Compiles `pattern` as jq compiles it, or returns Oniguruma's message for why not. The program, what it was built from
+// Compiles `pattern` under `syntax` and `flags`, or returns why not: `.Syntax` with Oniguruma's message for a pattern
+// it refuses, `.Memory` where an allocator failed or a program passed its capacity. The program, what it was built from
 // and any message are allocated from `allocator`, which is meant to be an arena that the caller frees whole. With
 // `automaton` the automaton that answers whether there is a match is built too, which is worth it for a regex that
 // searches more than a few short texts. With `spans` the two automata that find where a match ends and starts are built
-// too, which is worth it for a regex whose searches read bounds. Building them takes working memory from `scratch`
-// and frees it before returning.
-compile :: proc(pattern: string, flags: Flags, allocator, scratch: mem.Allocator, automaton := true, spans := false) -> (re: Regex, err: string) {
-	if re, err = program(pattern, flags, allocator); err == "" && automaton {
-		re.dfa = build_dfa(&re, spans, allocator, scratch)
+// too, which is worth it for a regex whose searches read bounds. Building them takes working memory from `scratch` and
+// frees it before returning.
+compile :: proc(
+	pattern: string,
+	syntax: Syntax,
+	flags: Flags,
+	allocator, scratch: mem.Allocator,
+	automaton := true,
+	spans := false,
+) -> (
+	re: Regex,
+	err: Error,
+) {
+	spare, spare_scratch: [SPARE_BYTES]byte = ---, ---
+	out := Gate{inner = allocator, spare = spare[:]}
+	tmp := Gate{inner = scratch, spare = spare_scratch[:]}
+	message: string
+	if re, message = program(pattern, syntax, flags, gate_allocator(&out)); message == "" && automaton {
+		re.dfa = build_dfa(&re, spans, &out, &tmp)
+	}
+	switch {
+	case out.failed || tmp.failed:
+		return {}, MEMORY_OUT
+	case message == MEMORY_ERROR:
+		return {}, MEMORY_OUT
+	case message != "":
+		return {}, {.Syntax, message}
+	}
+	return re, {}
+}
+
+// What `compile` returns for `pattern`, with no automaton, the program freed. A message is allocated from `allocator`.
+// The program is built in `scratch`.
+refusal :: proc(pattern: string, syntax: Syntax, flags: Flags, allocator, scratch: mem.Allocator) -> (err: Error) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena, scratch, scratch, block_size = 4096, out_band_size = 1024)
+	defer mem.dynamic_arena_destroy(&arena)
+	_, err = compile(pattern, syntax, flags, mem.dynamic_arena_allocator(&arena), scratch, automaton = false)
+	if err.message != "" {
+		message, cloned := strings.clone(err.message, allocator)
+		if cloned != nil {
+			return MEMORY_OUT
+		}
+		err.message = message
 	}
 	return
 }
 
-// Returns Oniguruma's message for why `pattern` does not compile under `flags`, allocated from `allocator`, or "" when
-// it does. It builds no automaton and frees the program it made, which it took from `scratch`.
-refusal :: proc(pattern: string, flags: Flags, allocator, scratch: mem.Allocator) -> string {
-	arena: mem.Dynamic_Arena
-	mem.dynamic_arena_init(&arena, scratch, scratch, block_size = 4096, out_band_size = 1024)
-	defer mem.dynamic_arena_destroy(&arena)
-	_, err := program(pattern, flags, mem.dynamic_arena_allocator(&arena))
-	return strings.clone(err, allocator) if err != "" else ""
-}
-
 // Builds the program of `compile`, without the automaton.
 @(private = "file")
-program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re: Regex, err: string) {
+program :: proc(pattern: string, syntax: Syntax, flags: Flags, allocator: mem.Allocator) -> (re: Regex, err: string) {
 	context.allocator = allocator
-	if flags.ecma && flags != {ecma = true} {
+	if syntax == .Ecma && flags != {} {
 		return {}, "ecma takes no other flag"
 	}
+	options := Options{flags = flags, ecma = syntax == .Ecma}
 	pat: Pattern
-	if pat, err = parse(pattern, flags); err != "" {
+	if pat, err = parse(pattern, options); err != "" {
 		return
 	}
 	names := pat.names
 	root := expand_folds(pat.root)
-	c := Compiler{slots = 2 * len(names), groups = pat.groups, referenced = pat.referenced, ecma = flags.ecma, loop = -1, counter = -1}
+	c := Compiler{
+		slots = 2 * len(names),
+		groups = pat.groups,
+		referenced = pat.referenced,
+		ecma = options.ecma,
+		loop = -1,
+		counter = -1,
+	}
 	c.called = make([]bool, len(names))
 	c.recursive = make([]bool, len(names))
 	c.undone = slice.clone(c.referenced)
@@ -102,7 +129,7 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 		c.addr = make([]int, len(names))
 		slice.fill(c.addr, -1)
 		slice.fill(c.undone, true)
-	} else if flags.ecma {
+	} else if options.ecma {
 		slice.fill(c.undone, true) // a failed try leaves no bounds behind
 	} else {
 		mark_undone(root, c.undone, false)
@@ -161,19 +188,22 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 		}
 		o.kind, o.threshold = .None, 0
 	}
+	if h.kind == .Map {
+		h.lead = kernel.byte_set([4]u64{h.set[0], h.set[1], max(u64), max(u64)})
+	}
 	re.narrowed = o.kind != .None || o.anchored || o.end != .None || o.threshold > 0
 	for ins in re.insts {
 		re.calls_or_limits ||= ins.op >= .Call
 	}
-	re.ecma, re.linear = flags.ecma, linear_ops(re.insts, flags.ecma, re.opt.anchored)
+	re.ecma, re.linear = options.ecma, linear_ops(re.insts, options.ecma, re.opt.anchored)
 	re.longest, re.not_empty = flags.longest, flags.not_empty
-	if flags.ecma && c.counted {
+	if options.ecma && c.counted {
 		re.counting = counting_of(re.insts)
 	}
 	if re.linear {
 		v := new(Visited)
 		re.visited = v
-		if flags.ecma {
+		if options.ecma {
 			v.owner = look_owners(re.insts)
 		}
 		if len(c.loops) > 0 || len(c.counters) > 0 {
@@ -217,7 +247,7 @@ emit_subroutines :: proc(c: ^Compiler) {
 
 @(private = "file")
 add :: proc(c: ^Compiler, op: Op, a: int = 0, b: int = 0) -> int {
-	if len(c.insts) * size_of(Inst) >= MAX_BYTES {
+	if len(c.insts) * size_of(Inst) >= MAX_BYTES || gate_failed(context.allocator) {
 		c.err = MEMORY_ERROR
 		return len(c.insts)
 	}
@@ -266,17 +296,12 @@ emit :: proc(c: ^Compiler, n: ^Node) {
 		add(c, .Any_All if n.dotall else .Any)
 	case .Class:
 		cls := n.class
-		for x, k in c.classes { 	// a repeat's copies share the class
-			if x == cls {
-				add(c, .Class, k)
-				return
-			}
+		if k := cls.slot - 1; 0 <= k && k < len(c.classes) && c.classes[k] == cls { // a repeat's copies share the class
+			add(c, .Class, k)
+			return
 		}
-		for r in rune(0) ..< 0x80 {
-			if class_match_slow(cls, r) {
-				add_bit(cls.ascii[:], int(r))
-			}
-		}
+		cls.ascii = ascii_bits(cls)
+		cls.slot = len(c.classes) + 1
 		append(&c.classes, cls)
 		add(c, .Class, len(c.classes) - 1)
 	case .Cat:
@@ -469,7 +494,8 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 	c.counted ||= n.min > 1 || n.max > 1
 	// Under ECMA no Rep is used in a look-ahead's body, because the visited set's log does not follow its alternatives
 	// (match.odin).
-	if (x.kind == .Char || x.kind == .Any || x.kind == .Class) && (n.max != n.min || c.ecma) && !(c.ecma && c.looking > 0) {
+	single := x.kind == .Char || x.kind == .Any || x.kind == .Class
+	if single && (n.max != n.min || c.ecma) && !(c.ecma && c.looking > 0) {
 		add(c, .Rep if n.greedy else .Rep_Lazy, n.min, n.max)
 		emit(c, x)
 		return
@@ -510,7 +536,12 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 	patch(c, loop, loop + 1 if n.greedy else exit, exit if n.greedy else loop + 1)
 	if empty {
 		patch(c, check, mark, -1 if c.ecma else exit)
-	} else if h := head_literal(x); h != nil && !c.leftwards && (h.kind == .Str || h.kind == .Char && !h.fold && utf8.valid_rune(h.r)) && n.greedy && n.min <= 1 {
+	} else if h := head_literal(x);
+	   h != nil &&
+	   !c.leftwards &&
+	   (h.kind == .Str || h.kind == .Char && !h.fold && utf8.valid_rune(h.r)) &&
+	   n.greedy &&
+	   n.min <= 1 {
 		// Oniguruma's OP_PUSH_OR_JUMP_EXACT1: when the body starts with an exact character (no class, no case
 		// folding), no alternative is pushed for an iteration that cannot start, and Oniguruma's retry limit counts
 		// that.

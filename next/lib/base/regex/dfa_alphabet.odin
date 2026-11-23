@@ -292,7 +292,7 @@ alphabet :: proc(b: ^Builder) -> (ascii: [128]u8, bounds: []rune, symbols: []u8,
 			}
 		}
 	}
-	sort_keys(edges[:])
+	slice.sort(edges[:])
 	runs := make([dynamic]rune)
 	syms := make([dynamic]u8)
 	slice.zero(accepting)

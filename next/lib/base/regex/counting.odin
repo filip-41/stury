@@ -20,6 +20,7 @@ package regex
 import "base:intrinsics"
 import "core:slice"
 import "core:strings"
+import "stury:lib/base/spell"
 
 // The repeats of an ECMA program that `counting_search` follows, kept behind a pointer since a Regex is copied.
 Counting :: struct {
@@ -48,7 +49,8 @@ counting_of :: proc(insts: []Inst) -> ^Counting {
 			if Assert_Kind(ins.a) >= .Fail {
 				return nil
 			}
-		case .Match, .Char_Fold, .Any, .Any_All, .Class, .Split, .Split_Head, .Jmp, .Save, .Set, .Check, .Unset, .Rep, .Rep_Lazy, .Count_Reset, .Count, .Count_Lazy, .Count_Next, .Count_Check:
+		case .Match, .Char_Fold, .Any, .Any_All, .Class, .Split, .Split_Head, .Jmp, .Save, .Set, .Check, .Unset, .Rep,
+		     .Rep_Lazy, .Count_Reset, .Count, .Count_Lazy, .Count_Next, .Count_Check:
 		case:
 			return nil
 		}
@@ -111,7 +113,13 @@ COUNTING_WORK :: 1 << 28
 // Whether `re`'s program matches in `s` at or after byte `start`, its starts those `search` tries. `judged` is false
 // when the sets the text allows would pass COUNTED_BYTES, or the search would read more than `limit` set words. `work`
 // is the words it read.
-counting_search :: proc(re: ^Regex, s: string, start: int, scratch: ^Scratch, limit: int) -> (found, judged: bool, work: int) {
+counting_search :: proc(
+	re: ^Regex,
+	s: string,
+	start: int,
+	scratch: ^Scratch,
+	limit: int,
+) -> (found, judged: bool, work: int) {
 	st := Starts{at = start, last = len(s), limit = len(s), high = INFINITE_LEN}
 	if re.narrowed {
 		ok: bool
@@ -125,8 +133,8 @@ counting_search :: proc(re: ^Regex, s: string, start: int, scratch: ^Scratch, li
 	n, k, ring := len(re.insts), len(c.repeats), c.reach + 1
 	text := max(len(s) - start, 0)
 	flags := (n + 63) / 64
-	resize(&scratch.rows, 3 * k + 2 * (n + 1) + 2 * n + ring * n + ring)
-	rows := scratch.rows[:]
+	resize(&scratch.held.rows, 3 * k + 2 * (n + 1) + 2 * n + ring * n + ring)
+	rows := scratch.held.rows[:]
 	t := Threads{re = re}
 	cells: []int // the counts of a repeat and those around it, each kept whole
 	t.radix, rows = rows[:k], rows[k:]
@@ -161,8 +169,8 @@ counting_search :: proc(re: ^Regex, s: string, start: int, scratch: ^Scratch, li
 	if ((2 + ring) * words + widest + (2 + ring) * flags + (1 + ring) * blocks) * size_of(u64) > COUNTED_BYTES {
 		return false, false, 0
 	}
-	resize(&scratch.seen, (2 + ring) * words + widest + (2 + ring) * flags + (1 + ring) * blocks)
-	sets := scratch.seen[:]
+	resize(&scratch.held.seen, (2 + ring) * words + widest + (2 + ring) * flags + (1 + ring) * blocks)
+	sets := scratch.held.seen[:]
 	slice.zero(sets)
 	slice.zero(t.arrived)
 	take :: proc(sets: ^[]u64, n: int) -> []u64 {
@@ -462,16 +470,13 @@ next_start :: proc(st: ^Starts, re: ^Regex, s: string) -> int {
 			}
 			at += k
 		case .Map:
-			for at < len(s) && !has_bit(h.set[:], int(s[at])) {
-				at += lead_width(s[at])
-			}
-			if at >= len(s) {
+			if at = next_head_byte(h, s, at); at < 0 {
 				return len(s) + 1
 			}
 		}
 		st.at = at
 		if at <= st.end {
-			st.at = at + lead_width(s[at]) if at < len(s) else st.last + 1
+			st.at = at + spell.lead_width(s[at]) if at < len(s) else st.last + 1
 			return at
 		}
 	}

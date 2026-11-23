@@ -9,6 +9,8 @@ package regex
 
 import "core:strings"
 import "core:unicode/utf8"
+import "stury:lib/base/kernel"
+import "stury:lib/base/spell"
 
 INFINITE_LEN :: max(int)
 // The most bytes of an exact string kept (OPT_EXACT_MAXLEN).
@@ -35,6 +37,7 @@ Search_Opt :: struct {
 	kind:               Search_Kind,
 	exact:              string,
 	set:                [4]u64,
+	lead:               kernel.Byte_Set, // `set` as the kernel scans for it, filled in for a head that is a set
 	dist_min, dist_max: int, // least and greatest distance from the match start to the string or set, or INFINITE_LEN
 	threshold:          int, // the fewest bytes past the search's start a match needs
 	anchored:           bool, // every match starts at \A
@@ -130,8 +133,9 @@ optimize :: proc(n: ^Node, opt: ^Opt_Node, env: Mml) {
 			opt.len = {1, MBC_MAXLEN}
 			break
 		}
-		for r in rune(0) ..< 0x80 {
-			if class_match_slow(n.class, r) {
+		bits := ascii_bits(n.class)
+		for r in 0 ..< 0x80 {
+			if has_bit(bits[:], r) {
 				add_map_byte(&opt.set, byte(r))
 			}
 		}
@@ -268,7 +272,7 @@ opt_string :: proc(opt: ^Opt_Node, s: []byte, total: int) {
 	e := &opt.sb
 	p := 0
 	for p < len(s) {
-		w := lead_width(s[p])
+		w := spell.lead_width(s[p])
 		if e.len + w > OPT_EXACT_MAXLEN || p + w > len(s) {
 			break
 		}
@@ -388,7 +392,7 @@ alt_merge :: proc(to, add: ^Opt_Node) {
 concat_exact :: proc(to, add: ^Opt_Str) -> (full: bool) {
 	p := 0
 	for p < add.len {
-		w := lead_width(add.s[p])
+		w := spell.lead_width(add.s[p])
 		if to.len + w > OPT_EXACT_MAXLEN {
 			full = true
 			break
@@ -411,7 +415,7 @@ alt_merge_exact :: proc(to, add: ^Opt_Str) {
 	}
 	i := 0
 	common: for i < min(to.len, add.len) {
-		w := lead_width(to.s[i])
+		w := spell.lead_width(to.s[i])
 		if i + w > min(to.len, add.len) {
 			break
 		}
@@ -587,11 +591,76 @@ mml_add :: proc(a, b: Mml) -> Mml {
 	return {distance_add(a.min, b.min), distance_add(a.max, b.max)}
 }
 
+// The bytes a head scan tests one at a time before it scans with the kernel: a candidate within a few bytes is common
+// and the scan's setup costs more than testing them.
+@(private = "file")
+NEAR :: 8
+
+// A rest of the text shorter than this is walked without the scan, whose setup costs more than it saves.
+@(private = "file")
+SHORT :: 128
+
+// The first place from `at` whose byte is in the set of the head `h`, or -1. The places are those a walk by character
+// reaches, stepping `lead_width` from each byte, as Oniguruma's map search does. Over invalid UTF-8 that steps past
+// bytes that a scan for the set would stop at. So the scan stops at a byte of `h.lead`, which holds every byte from
+// 0x80 too: the bytes before it are ASCII, which the walk reaches one by one, and where it stops at a byte from 0x80
+// the walk takes over. `at` must be a place the walk reaches.
+next_head_byte :: #force_inline proc(h: ^Search_Opt, s: string, at: int) -> int {
+	if len(s) - at < SHORT {
+		return walk_head_byte(h, s, at)
+	}
+	near := at + NEAR
+	for j in at ..< near {
+		c := s[j]
+		if has_bit(h.set[:], int(c)) {
+			return j
+		}
+		if c >= 0x80 {
+			return walk_to_head_byte(h, s, j)
+		}
+	}
+	return scan_to_head_byte(h, s, near)
+}
+
+@(private = "file")
+walk_head_byte :: #force_inline proc(h: ^Search_Opt, s: string, from: int) -> int {
+	at := from
+	for at < len(s) && !has_bit(h.set[:], int(s[at])) {
+		at += spell.lead_width(s[at])
+	}
+	return at if at < len(s) else -1
+}
+
+@(private = "file")
+walk_to_head_byte :: #force_no_inline proc(h: ^Search_Opt, s: string, from: int) -> int {
+	return walk_head_byte(h, s, from)
+}
+
+@(private = "file")
+scan_to_head_byte :: #force_no_inline proc(h: ^Search_Opt, s: string, from: int) -> int {
+	k := kernel.index_set(transmute([]u8)s[from:], h.lead)
+	if k < 0 {
+		return -1
+	}
+	at := from + k
+	if s[at] >= 0x80 && !has_bit(h.set[:], int(s[at])) {
+		return walk_head_byte(h, s, at)
+	}
+	return at
+}
+
 // Computes the starts onig_search tries from `start`: `first` to `last`. `limit` is how far a string or map that the
 // optimizer finds may reach. `high` is the last start of the first window, or -1 when the windows are found one at a
 // time with `next_window`. Returns ok false when no start can match. Kept out of line so that the matcher inlined into
 // `search` keeps its registers.
-search_starts :: #force_no_inline proc(o: ^Search_Opt, s: string, start: int) -> (first, last, limit, high: int, ok: bool) {
+search_starts :: #force_no_inline proc(
+	o: ^Search_Opt,
+	s: string,
+	start: int,
+) -> (
+	first, last, limit, high: int,
+	ok: bool,
+) {
 	first, last, limit, high = start, len(s), len(s), INFINITE_LEN
 	if o.anchored {
 		if start != 0 {
@@ -641,7 +710,7 @@ forward_search :: proc(o: ^Search_Opt, s: string, from, limit: int) -> (low, hig
 			return
 		}
 		for q := p + o.dist_min; p < q; {
-			p += lead_width(s[p])
+			p += spell.lead_width(s[p])
 		}
 	}
 	if o.kind == .Exact {
@@ -652,7 +721,7 @@ forward_search :: proc(o: ^Search_Opt, s: string, from, limit: int) -> (low, hig
 		p += k
 	} else {
 		for p < limit && !has_bit(o.set[:], int(s[p])) {
-			p += lead_width(s[p])
+			p += spell.lead_width(s[p])
 		}
 	}
 	if p >= limit {
@@ -664,8 +733,8 @@ forward_search :: proc(o: ^Search_Opt, s: string, from, limit: int) -> (low, hig
 	low = from
 	if o.dist_max != INFINITE_LEN {
 		low = max(p - o.dist_max, 0)
-		for low > from && low < len(s) && s[low] & 0xC0 == 0x80 {
-			low += 1
+		if low > from {
+			low = spell.skip_continuations(s, low)
 		}
 	}
 	return low, max(p - o.dist_min, 0), true
@@ -688,9 +757,7 @@ end_bounds :: proc(o: ^Search_Opt, s: string, start: int) -> (first, last: int) 
 	}
 	if o.anc_max != INFINITE_LEN && min_end - first > o.anc_max {
 		first = min_end - o.anc_max
-		for first < len(s) && s[first] & 0xC0 == 0x80 {
-			first += 1
-		}
+		first = spell.skip_continuations(s, first)
 	}
 	if max_end - (last - 1) < o.anc_min {
 		if max_end + 1 < o.anc_min {
