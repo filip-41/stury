@@ -515,3 +515,72 @@ records_reset_their_readers_between_records :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// A record the read refuses for its budget or its memory ends with that error as a read of it alone does, and the
+// records go on after it, under `.Elements` and `.Members` as under `.Lines`.
+@(test)
+records_go_on_after_a_record_the_budget_refuses :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"a":[`)
+	for i in 0 ..< 70 {
+		fmt.sbprintf(&b, "%s%d", "," if i > 0 else "", i)
+	}
+	strings.write_string(&b, `]}`)
+	big := strings.to_string(b)
+	values := []string{big, `{"a":2}`, big, `{"a":3}`}
+	Case :: struct {
+		framing: records.Framing,
+		src:     string,
+	}
+	cases := []Case {
+		{.Elements, strings.concatenate({"[", strings.join(values, ", ", context.temp_allocator), "]"}, context.temp_allocator)},
+		{.Members, strings.concatenate({`{"k0":`, strings.join(values, `, "k":`, context.temp_allocator), "}"}, context.temp_allocator)},
+		{.Lines, strings.join(values, "\n", context.temp_allocator)},
+	}
+	scan_path := []tape.Step{tape.Name("a")}
+	ring_path := []tape.Step{tape.Name("a"), tape.Index(-65)}
+	demand, _ := tape.demand_of({scan_path})
+	defer tape.destroy_demand(&demand)
+	limits := []json.Options{{budget = {nodes = 10}}, {budget = {memory = 1400}}}
+	for c in cases {
+		src := transmute([]u8)c.src
+		for opts in limits {
+			spans := make([dynamic][2]u64, context.temp_allocator)
+			at := 0
+			for v in values {
+				lo := at + strings.index(c.src[at:], v)
+				append(&spans, [2]u64{u64(lo), u64(lo + len(v))})
+				at = lo + len(v)
+			}
+			refused := 0
+			r := json.records_open(src, c.framing, .Json, opts)
+			for span, i in spans {
+				rec, doc, ok := one_scan(&r, &demand)
+				alone, err := json.scan(src[span[0]:span[1]], &demand, .Json, {}, opts)
+				if err != nil {
+					refused += 1
+				}
+				testing.expectf(t, ok && rec.index == u64(i) && rec.lo == span[0] && rec.hi == span[1] && rec.err == moved(err, span[0]), "%v %v scan %d: %v %v, want %v", c.framing, opts.budget, i, rec, ok, err)
+				tape.destroy(&doc)
+				tape.destroy(&alone)
+			}
+			_, _, more := one_scan(&r, &demand)
+			testing.expectf(t, !more && r.err == nil && refused > 0, "%v %v scan end: %v, %d refused", c.framing, opts.budget, r.err, refused)
+			refused = 0
+			r = json.records_open(src, c.framing, .Json, opts)
+			for span, i in spans {
+				rec, answer, ok := one_find(&r, ring_path)
+				alone, err := json.find(src[span[0]:span[1]], ring_path, .Json, {}, opts)
+				if err != nil {
+					refused += 1
+				} else if alone.outcome != .Missing {
+					alone.lo, alone.hi = alone.lo + span[0], alone.hi + span[0]
+				}
+				testing.expectf(t, ok && rec.index == u64(i) && rec.lo == span[0] && rec.hi == span[1] && rec.err == moved(err, span[0]) && (err != nil || answer == alone), "%v %v find %d: %v %v, want %v", c.framing, opts.budget, i, rec, ok, err)
+			}
+			_, _, more = one_find(&r, ring_path)
+			testing.expectf(t, !more && r.err == nil, "%v %v find end: %v", c.framing, opts.budget, r.err)
+		}
+	}
+}
