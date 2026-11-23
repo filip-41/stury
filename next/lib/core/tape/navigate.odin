@@ -19,9 +19,9 @@ Reader :: struct {
 // The tables the readers built over the whole containers of a document, each when a read first needed it: a wide
 // array's elements by place, a wide object's distinct keys in text order with a hash table over them, and for each
 // object the readers examined whether it repeats a key, so they take the others as written. A refused allocation
-// leaves the readers walking, which answers the same.
+// leaves the readers walking, which answers the same. An index serves the readers of one document, from its first read
+// to `destroy`, and is empty until a read needs a table, so a zero one with its allocator set starts it.
 Doc_Index :: struct {
-	doc:       ^Document,
 	examined:  []u64, // a bit per node, set for a whole object whose keys were compared
 	repeats:   []u64, // a bit per node, set for an examined object two of whose members share a key
 	entries:   [dynamic]Index_Entry,
@@ -473,12 +473,6 @@ named :: proc "contextless" (r: Reader, at: Node_Index, name: string) -> (c: Chi
 	return {}, .Not_Loaded
 }
 
-// An index of `doc` for its readers, in `allocator`, empty until a read needs a table of it.
-@(require_results)
-index_of :: proc "contextless" (doc: ^Document, allocator: runtime.Allocator) -> Doc_Index {
-	return {doc = doc, allocator = allocator}
-}
-
 // Frees what the readers listed in `x` and leaves it zero. A members list is a prefix of its entry's `room`,
 // freed whole.
 destroy_index :: proc(x: ^Doc_Index) {
@@ -587,7 +581,6 @@ index_entry :: #force_inline proc "contextless" (x: ^Doc_Index, at: Node_Index) 
 @(private)
 array_entry :: proc(r: Reader, at, first: Node_Index, count: int) -> (e: Index_Entry, ok: bool) #no_bounds_check {
 	x := r.index
-	assert_contextless(x.doc == r.doc, "an index of another document")
 	if e, ok = index_entry(x, at); ok {
 		return
 	}
@@ -612,7 +605,6 @@ array_entry :: proc(r: Reader, at, first: Node_Index, count: int) -> (e: Index_E
 @(private)
 object_entry :: proc(r: Reader, at: Node_Index, count: int) -> (e: Index_Entry, ok: bool) #no_bounds_check {
 	x := r.index
-	assert_contextless(x.doc == r.doc, "an index of another document")
 	if e, ok = index_entry(x, at); ok {
 		return
 	}
@@ -864,7 +856,10 @@ Key_Slot :: struct {
 // The table whose row is the object at `at`, false for an object of no table.
 @(private)
 row_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (Table, bool) {
-	ext, tabular := doc.ext.(^Tabular_Ext)
+	if doc.ext == nil {
+		return {}, false
+	}
+	ext, tabular := &doc.ext.format.(Tabular_Ext)
 	if !tabular {
 		return {}, false
 	}
@@ -874,7 +869,10 @@ row_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (
 // The table whose node is the array at `at`, false for an array that is no table.
 @(private)
 table_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (Table, bool) {
-	ext, tabular := doc.ext.(^Tabular_Ext)
+	if doc.ext == nil {
+		return {}, false
+	}
+	ext, tabular := &doc.ext.format.(Tabular_Ext)
 	if !tabular {
 		return {}, false
 	}
@@ -916,7 +914,7 @@ row_member :: proc "contextless" (doc: ^Document, t: Table, at: Node_Index, name
 	f := doc.format
 	// The slots hold each key's first column, which is its only one in a table whose keys are unique.
 	if t.slots_len != 0 && (t.unique_keys || dups != .Last) {
-		slots := doc.ext.(^Tabular_Ext).slots[t.slots_lo:][:t.slots_len]
+		slots := doc.ext.format.(Tabular_Ext).slots[t.slots_lo:][:t.slots_len]
 		mask := t.slots_len - 1
 		for i := f.key_hash(transmute([]u8)name, {n = u32(len(name)), kind = .String}) & mask; slots[i] != 0; i = (i + 1) & mask {
 			col := Node_Index(slots[i]) - 1
@@ -995,7 +993,10 @@ next_cell :: proc "contextless" (doc: ^Document, c: ^Children, dups: Duplicates)
 // Whether keys of two kinds of the object at `at` read as `name`, in a document whose format records such a pair.
 @(private)
 clashes :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index, name: string) -> bool {
-	ext, yaml := doc.ext.(^Yaml_Ext)
+	if doc.ext == nil {
+		return false
+	}
+	ext, yaml := doc.ext.format.(Yaml_Ext)
 	return yaml && ext.clash != 0 && kinds_named(doc, at, name)
 }
 

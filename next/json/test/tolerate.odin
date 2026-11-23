@@ -71,10 +71,10 @@ tolerate_invalid_utf8 :: proc(t: ^testing.T) {
 				testing.expectf(t, .Tolerated in doc.flags, "%q not flagged", src)
 				n := doc.nodes[1]
 				testing.expect(t, n.kind == .String && n.spelling & tape.SPELLING_LAX != 0 && n.spelling & tape.SPELLING_DECODE != 0)
-				buf := make([]u8, tape.text_room(doc.format, doc.src, n), context.temp_allocator)
-				text, ok := tape.node_text(&doc, n, buf)
+				buf := make([]u8, tape.text_room(&doc, 1), context.temp_allocator)
+				text, ok := tape.node_text(&doc, 1, buf)
 				testing.expectf(t, ok && text == want, "%v %q reads %q", spec, src, text)
-				_, short := tape.node_text(&doc, n, buf[:len(buf) - 1])
+				_, short := tape.node_text(&doc, 1, buf[:len(buf) - 1])
 				testing.expect(t, !short)
 			}
 		}
@@ -92,8 +92,8 @@ tolerate_invalid_utf8_in_json5_quotes :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, nil)
 	texts: [2]string
 	for i in 0 ..< 2 {
-		n := doc.nodes[i + 1]
-		texts[i], _ = tape.node_text(&doc, n, make([]u8, tape.text_room(doc.format, doc.src, n), context.temp_allocator))
+		n := tape.Node_Index(i + 1)
+		texts[i], _ = tape.node_text(&doc, n, make([]u8, tape.text_room(&doc, n), context.temp_allocator))
 	}
 	testing.expect_value(t, texts[0], "k" + FFFD)
 	testing.expect_value(t, texts[1], "v" + FFFD + "A")
@@ -133,7 +133,7 @@ tolerate_invalid_utf8_keys_by_name :: proc(t: ^testing.T) {
 		defer tape.destroy(&r)
 		testing.expect_value(t, rerr, nil)
 		testing.expect(t, .Tolerated in r.flags)
-		testing.expect_value(t, render_answers(&r), `0=2 1=3`)
+		testing.expect_value(t, testkit.render_answers(&r), `0=2 1=3`)
 	}
 }
 
@@ -179,10 +179,10 @@ tolerate_lone_surrogate :: proc(t: ^testing.T) {
 				testing.expectf(t, .Tolerated in doc.flags, "%q not flagged", src)
 				n := doc.nodes[1]
 				testing.expect(t, n.kind == .String && n.spelling & tape.SPELLING_LAX != 0 && n.spelling & tape.SPELLING_DECODE != 0)
-				buf := make([]u8, tape.text_room(doc.format, doc.src, n), context.temp_allocator)
-				text, ok := tape.node_text(&doc, n, buf)
+				buf := make([]u8, tape.text_room(&doc, 1), context.temp_allocator)
+				text, ok := tape.node_text(&doc, 1, buf)
 				testing.expectf(t, ok && text == want, "%v %q reads %q", spec, src, text)
-				_, short := tape.node_text(&doc, n, buf[:len(buf) - 1])
+				_, short := tape.node_text(&doc, 1, buf[:len(buf) - 1])
 				testing.expect(t, !short)
 			}
 		}
@@ -259,7 +259,7 @@ tolerate_lone_surrogate_keys_by_name :: proc(t: ^testing.T) {
 			defer tape.destroy(&r)
 			testing.expect_value(t, rerr, nil)
 			testing.expect(t, .Tolerated in r.flags)
-			testing.expect_value(t, render_answers(&r), `0=2 1=3`)
+			testing.expect_value(t, testkit.render_answers(&r), `0=2 1=3`)
 		}
 	}
 }

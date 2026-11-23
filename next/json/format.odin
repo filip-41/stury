@@ -136,6 +136,6 @@ line_comment_end :: proc "contextless" (src: []u8, p: u64, json5: bool) -> u64 #
 // The size in bytes of a buffer that holds the decoded text of node `t`: its span, since an escape decodes to no more
 // bytes than it spells, or three times the span for a `SPELLING_LAX` node, since a tolerated byte reads as U+FFFD.
 @(private)
-text_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
+decode_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
 	return int(t.n) * (3 if t.spelling & tape.SPELLING_LAX != 0 else 1)
 }

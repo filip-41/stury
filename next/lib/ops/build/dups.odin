@@ -431,10 +431,10 @@ Open_Moved :: struct {
 close_moved :: proc(nodes: []tape.Node, o: Open_Moved, w: int) {
 	node := &nodes[o.at]
 	node.n = u32(w - o.at)
-	if node.spelling < tape.MAX_CHILDREN {
+	if node.spelling & tape.MAX_CHILDREN < tape.MAX_CHILDREN {
 		node.spelling -= o.dropped
 	} else {
-		node.spelling = u16(min(child_count(nodes[o.at + 1:w]), u32(tape.MAX_CHILDREN)))
+		node.spelling = node.spelling &~ tape.MAX_CHILDREN | u16(min(child_count(nodes[o.at + 1:w]), u32(tape.MAX_CHILDREN)))
 	}
 }
 
@@ -453,7 +453,7 @@ builder_counts :: proc(nodes: []tape.Node, allocator: runtime.Allocator) -> (cou
 			i += max(int(node.n), 1)
 			continue
 		}
-		if node.spelling == tape.MAX_CHILDREN {
+		if node.spelling & tape.MAX_CHILDREN == tape.MAX_CHILDREN {
 			append(&counts, tape.Child_Count{tape.Node_Index(i), child_count(nodes[i + 1:i + int(node.n)])}) or_return
 		}
 		i += 1

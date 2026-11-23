@@ -12,69 +12,8 @@ Scan_Case :: struct {
 	src:     string,
 	paths:   [][]tape.Step,
 	dups:    tape.Duplicates,
-	answers: string, // each answer as `path=value` by path, a found value as `render_node` writes it, else its outcome
-	doc:     string, // the partial document as `render_node` writes it
-}
-
-// Writes node `i` of `doc` and its kept subtree, a partial container marked `~`, and returns the node after it.
-render_node :: proc(b: ^strings.Builder, doc: ^tape.Document, i: int) -> int {
-	n := doc.nodes[i]
-	if n.kind <= .Plain {
-		text := string(tape.span_bytes(doc, n.lo, n.n))
-		if n.kind == .String && n.spelling & tape.SPELLING_QUOTED != 0 {
-			fmt.sbprintf(b, `"%s"`, text)
-		} else {
-			strings.write_string(b, text)
-		}
-		return i + 1
-	}
-	if n.spelling & tape.CONTAINER_PARTIAL != 0 {
-		strings.write_byte(b, '~')
-	}
-	strings.write_byte(b, '[' if n.kind == .Array else '{')
-	j := i + 1
-	for first := true; j < i + int(n.n); first = false {
-		if !first {
-			strings.write_byte(b, ',')
-		}
-		if doc.nodes[j].role == .Key {
-			j = render_node(b, doc, j)
-			strings.write_byte(b, ':')
-		}
-		j = render_node(b, doc, j)
-	}
-	strings.write_byte(b, ']' if n.kind == .Array else '}')
-	return j
-}
-
-render_answers :: proc(doc: ^tape.Document) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	for path := 0; doc.partial != nil && path + 1 < len(doc.partial.starts); path += 1 {
-		for k := 0; ; k += 1 {
-			node, p, ok := tape.answer({doc = doc}, path, k)
-			if !ok {
-				break
-			}
-			if len(b.buf) > 0 {
-				strings.write_byte(&b, ' ')
-			}
-			fmt.sbprintf(&b, "%d=", path)
-			if p == .Found {
-				render_node(&b, doc, int(node))
-			} else {
-				fmt.sbprintf(&b, "%v", p)
-			}
-		}
-	}
-	return strings.to_string(b)
-}
-
-render_doc :: proc(doc: ^tape.Document) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	if len(doc.nodes) > 0 {
-		render_node(&b, doc, 0)
-	}
-	return strings.to_string(b)
+	answers: string, // each answer as `path=value` by path, a found value as `testkit.render_node` writes it, else its outcome
+	doc:     string, // the partial document as `testkit.render_node` writes it
 }
 
 // Checks what `scan` keeps and answers with and without `stop_early`, which changes no answer for a text that parses.
@@ -86,9 +25,9 @@ expect_scan :: proc(t: ^testing.T, c: Scan_Case, spec := json.Spec.Json, grains:
 	for stop in ([]bool{false, true}) {
 		r, err := json.scan(transmute([]u8)c.src, &d, spec, {stop_early = stop}, {dups = c.dups})
 		defer tape.destroy(&r)
-		answers := render_answers(&r)
+		answers := testkit.render_answers(&r)
 		testing.expectf(t, err == nil && answers == c.answers, "%q %v %v stop %v: %q, %v", c.src, c.paths, c.dups, stop, answers, err, loc = loc)
-		doc := render_doc(&r)
+		doc := testkit.render_doc(&r)
 		want := c.doc if !stop || stopped == "" else stopped
 		testing.expectf(t, doc == want, "%q %v stop %v: doc %q, want %q", c.src, c.paths, stop, doc, want, loc = loc)
 	}
@@ -158,8 +97,8 @@ scan_records_what_a_partial_document_lacks :: proc(t: ^testing.T) {
 	r, err := json.scan(transmute([]u8)src, &d)
 	defer tape.destroy(&r)
 	testing.expect(t, err == nil)
-	testing.expect_value(t, render_doc(&r), `~{"x":~[30],"y":~{}}`)
-	testing.expect_value(t, render_answers(&r), `0=30 1=Missing`)
+	testing.expect_value(t, testkit.render_doc(&r), `~{"x":~[30],"y":~{}}`)
+	testing.expect_value(t, testkit.render_answers(&r), `0=30 1=Missing`)
 	x := r.partial
 	testing.expect_value(t, len(x.kept), 1)
 	testing.expect(t, len(x.kept) == 1 && x.kept[0].index == 2 && r.nodes[x.kept[0].node].lo == 12)
@@ -180,8 +119,8 @@ scan_records_what_a_partial_document_lacks :: proc(t: ^testing.T) {
 	s, serr := json.scan(transmute([]u8)src, &first, read = {stop_early = true}, opts = {dups = .First})
 	defer tape.destroy(&s)
 	testing.expect(t, serr == nil && .Stopped in s.flags)
-	testing.expect_value(t, render_doc(&s), `~{"x":~[10]}`)
-	testing.expect_value(t, render_answers(&s), `0=10`)
+	testing.expect_value(t, testkit.render_doc(&s), `~{"x":~[10]}`)
+	testing.expect_value(t, testkit.render_answers(&s), `0=10`)
 	testing.expect_value(t, s.root_close, 0)
 }
 
@@ -250,7 +189,7 @@ scan_counts_wide_containers :: proc(t: ^testing.T) {
 	r, err := json.scan(src, &d)
 	defer tape.destroy(&r)
 	testing.expect(t, err == nil)
-	answers := render_answers(&r)
+	answers := testkit.render_answers(&r)
 	testing.expect_value(t, answers[len(answers) - 3:], `1=5`)
 	counts := make(map[tape.Node_Index]u32, context.temp_allocator)
 	for c, i in r.counts {
@@ -270,8 +209,8 @@ scan_counts_wide_containers :: proc(t: ^testing.T) {
 	s, serr := json.scan(src, &last, read = {stop_early = true}, opts = {dups = .First})
 	defer tape.destroy(&s)
 	testing.expect(t, serr == nil && .Stopped in s.flags)
-	testing.expect_value(t, render_answers(&s), `0=69999`)
-	testing.expect_value(t, render_doc(&s), `~{"a":~[69999]}`)
+	testing.expect_value(t, testkit.render_answers(&s), `0=69999`)
+	testing.expect_value(t, testkit.render_doc(&s), `~{"a":~[69999]}`)
 	testing.expect(t, len(s.counts) == 1 && s.counts[0].count == N)
 	testing.expect_value(t, s.nodes[0].spelling, tape.CONTAINER_PARTIAL | tape.MAX_CHILDREN)
 }
@@ -486,7 +425,7 @@ scan_frees_what_a_refused_allocation_leaves :: proc(t: ^testing.T) {
 	for limits in ([][]int{nil, twos}) {
 		d, _ := tape.demand_of(paths[:], limits = limits)
 		want, _ := json.scan(text, &d)
-		want_answers := render_answers(&want)
+		want_answers := testkit.render_answers(&want)
 		tape.destroy(&want)
 		tape.destroy(&d)
 
@@ -499,7 +438,7 @@ scan_frees_what_a_refused_allocation_leaves :: proc(t: ^testing.T) {
 			if derr == nil {
 				r, err = json.scan(text, &fd, allocator = allocator)
 				if err == nil {
-					testing.expect_value(t, render_answers(&r), want_answers)
+					testing.expect_value(t, testkit.render_answers(&r), want_answers)
 					tape.destroy(&r)
 				}
 				tape.destroy(&fd)
@@ -577,13 +516,13 @@ scan_keeps_a_grain_at_a_path_end :: proc(t: ^testing.T) {
 	cases := []Grain_Case {
 		{{src, {{N("a")}}, .Default, `0={"b":1,"c":~[]}`, `~{"a":{"b":1,"c":~[]}}`}, {.Keys}},
 		{{src, {{N("d")}}, .Default, `0=~[]`, `~{"d":~[]}`}, {.Keys}},
-		{{src, {{N("a")}}, .Default, `0=~{}`, `~{"a":~{}}`}, {.Kind}},
+		{{src, {{N("a")}}, .Default, `0=~{}`, `~{"a":~{}}`}, {.Exists}},
 		{{src, {{N("d")}}, .Default, `0=~[]`, `~{"d":~[]}`}, {.Exists}},
-		{{src, {{N("s")}, {N("n")}, {N("x")}}, .Default, `0="x" 1=null 2=Missing`, `~{"n":null,"s":"x"}`}, {.Keys, .Kind, .Exists}},
+		{{src, {{N("s")}, {N("n")}, {N("x")}}, .Default, `0="x" 1=null 2=Missing`, `~{"n":null,"s":"x"}`}, {.Keys, .Exists, .Exists}},
 		{{src, {{N("a"), N("b"), N("z")}}, .Default, `0=Wrong_Kind`, `~{"a":~{"b":1}}`}, {.Keys}},
 		{{src, {{N("a")}, {N("a"), N("c"), I(0)}}, .Default, `0={"b":1,"c":~[2]} 1=2`, `~{"a":{"b":1,"c":~[2]}}`}, {.Keys}},
 		{{src, {{N("a")}, {N("a")}}, .Default, `0={"b":1,"c":[2,3]} 1={"b":1,"c":[2,3]}`, `~{"a":{"b":1,"c":[2,3]}}`}, {.Keys}},
-		{{src, {{N("a")}, {N("a"), A}}, .Default, `0={"b":1,"c":~[]} 1=1 1=~[]`, `~{"a":{"b":1,"c":~[]}}`}, {.Keys, .Kind}},
+		{{src, {{N("a")}, {N("a"), A}}, .Default, `0={"b":1,"c":~[]} 1=1 1=~[]`, `~{"a":{"b":1,"c":~[]}}`}, {.Keys, .Exists}},
 		{{src, {{N("d"), A}}, .Default, `0=4 0={"e":5}`, `~{"d":[4,{"e":5}]}`}, {.Keys}},
 		{{`[{"a":1},{"b":2,"c":3},{}]`, {{A}}, .Default, `0={"a":1} 0={"b":2,"c":3} 0={}`, `[{"a":1},{"b":2,"c":3},{}]`}, {.Keys}},
 		{{`{"a":{"x":1,"x":2},"b":0}`, {{N("a")}, {N("a"), N("x")}}, .Default, `0={"x":1,"x":2} 1=2`, `~{"a":{"x":1,"x":2}}`}, {.Keys}},
@@ -665,13 +604,13 @@ scan_judges_the_text_past_a_cut :: proc(t: ^testing.T) {
 	r, serr := json.scan(src, &d, read = {stop_early = true})
 	defer tape.destroy(&r)
 	testing.expect(t, serr == nil && .Stopped in r.flags)
-	testing.expect_value(t, render_answers(&r), `0=1`)
+	testing.expect_value(t, testkit.render_answers(&r), `0=1`)
 	counted, _ := tape.demand_of([][]tape.Step{{tape.All{1}}, {}}, {.Whole, .Keys})
 	defer tape.destroy(&counted)
 	c, cerr := json.scan(transmute([]u8)string(`[1,2,3]`), &counted, read = {stop_early = true})
 	defer tape.destroy(&c)
 	testing.expect(t, cerr == nil)
-	testing.expect_value(t, render_answers(&c), `0=1 1=~[1]`)
+	testing.expect_value(t, testkit.render_answers(&c), `0=1 1=~[1]`)
 	n, p, _ := tape.length({doc = &c}, tape.ROOT, context.temp_allocator)
 	testing.expect(t, n == 3 && p == .Found)
 }
@@ -762,8 +701,8 @@ limited_reads_judge_the_text_past_the_limit :: proc(t: ^testing.T) {
 			s, serr := json.scan(transmute([]u8)src, &d, read = stop, opts = first)
 			defer tape.destroy(&s)
 			testing.expectf(t, err == nil && serr == nil && .Stopped not_in r.flags, "%q %v: %v %v %v", src, path, err, serr, r.flags)
-			same := len(r.nodes) == len(s.nodes) && render_doc(&r) == render_doc(&s) && render_answers(&r) == render_answers(&s)
-			testing.expectf(t, same, "%q %v: keeps %q %q, stopped %q %q", src, path, render_doc(&r), render_answers(&r), render_doc(&s), render_answers(&s))
+			same := len(r.nodes) == len(s.nodes) && testkit.render_doc(&r) == testkit.render_doc(&s) && testkit.render_answers(&r) == testkit.render_answers(&s)
+			testing.expectf(t, same, "%q %v: keeps %q %q, stopped %q %q", src, path, testkit.render_doc(&r), testkit.render_answers(&r), testkit.render_doc(&s), testkit.render_answers(&s))
 		}
 	}
 }
@@ -781,7 +720,7 @@ scan_limit_of_an_all_counts_every_child :: proc(t: ^testing.T) {
 	for c in cases {
 		r, err := json.scan(transmute([]u8)c.src, &d)
 		defer tape.destroy(&r)
-		testing.expectf(t, err == nil && render_answers(&r) == c.answers, "%s: %q, want %q, %v", c.src, render_answers(&r), c.answers, err)
+		testing.expectf(t, err == nil && testkit.render_answers(&r) == c.answers, "%s: %q, want %q, %v", c.src, testkit.render_answers(&r), c.answers, err)
 	}
 }
 
@@ -931,9 +870,9 @@ room_doubles_when_its_growth_is_refused :: proc(t: ^testing.T) {
 	}}
 	doc, berr := json.build(src, allocator = a)
 	defer tape.destroy(&doc)
-	testing.expectf(t, berr == nil && render_doc(&doc) == render_doc(&ref), "build: %v", berr)
+	testing.expectf(t, berr == nil && testkit.render_doc(&doc) == testkit.render_doc(&ref), "build: %v", berr)
 	r, rerr := json.scan(src, &d, allocator = a)
 	defer tape.destroy(&r)
-	testing.expectf(t, rerr == nil && render_doc(&r) == render_doc(&kept) && len(r.partial.answers) == 3000, "scan: %v", rerr)
+	testing.expectf(t, rerr == nil && testkit.render_doc(&r) == testkit.render_doc(&kept) && len(r.partial.answers) == 3000, "scan: %v", rerr)
 	testing.expectf(t, doubling.refused >= 2, "%d growths refused", doubling.refused)
 }

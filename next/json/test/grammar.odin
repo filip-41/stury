@@ -154,8 +154,7 @@ string_escapes_decode :: proc(t: ^testing.T) {
 				for p in placed(c.body, pad[0], pad[1]) {
 					doc := expect_builds(t, spec, p.src)
 					defer tape.destroy(&doc)
-					node := doc.nodes[1]
-					got, ok := tape.node_text(&doc, node, buf[:])
+					got, ok := tape.node_text(&doc, 1, buf[:])
 					plain := strings.repeat("x", pad[0], context.temp_allocator)
 					tail := strings.repeat("x", pad[1], context.temp_allocator)
 					testing.expectf(t, ok && got == strings.concatenate({plain, c.want, tail}, context.temp_allocator), "%v %q: %q", spec, p.src, got)
@@ -216,7 +215,7 @@ json5_string_bytes :: proc(t: ^testing.T) {
 		}
 		doc := expect_builds(t, .Json5, c.src)
 		defer tape.destroy(&doc)
-		got, ok := tape.node_text(&doc, doc.nodes[1], buf[:])
+		got, ok := tape.node_text(&doc, 1, buf[:])
 		testing.expectf(t, ok && got == c.want, "%q: %q, want %q", c.src, got, c.want)
 	}
 }

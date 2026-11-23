@@ -160,8 +160,8 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 		// an offset from that scratch node.
 		for i := s.depth - 1; i >= 0 && nodes[s.scratch + i].n != 0; i -= 1 {
 			scratch := nodes[s.scratch + i]
-			count := u64(scratch.spelling)
-			if scratch.spelling == tape.MAX_CHILDREN {
+			count := u64(scratch.spelling & tape.MAX_CHILDREN)
+			if count == u64(tape.MAX_CHILDREN) {
 				for n in s.b.counts {
 					if int(n.node) == s.scratch + i {
 						count = u64(n.count)
@@ -172,7 +172,7 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 			total := o.count + count
 			node := &nodes[o.node]
 			node.n = u32(s.at + int(u32(s.scratch + i) + scratch.n - u32(s.first)) - int(o.node))
-			node.spelling = u16(min(total, u64(tape.MAX_CHILDREN)))
+			node.spelling = node.spelling & tape.CONTAINER_STYLE | u16(min(total, u64(tape.MAX_CHILDREN)))
 			if total >= u64(tape.MAX_CHILDREN) {
 				if _, aerr := append(&counts, tape.Child_Count{o.node, u32(total)}); aerr != nil {
 					return {}, false, aerr

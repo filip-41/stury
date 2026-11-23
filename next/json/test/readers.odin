@@ -20,7 +20,7 @@ naive_members :: proc(doc: ^tape.Document, at: tape.Node_Index) -> []Naive_Membe
 	end := at + tape.Node_Index(doc.nodes[at].n)
 	for k := at + 1; k < end; {
 		value := k + 1
-		append(&members, Naive_Member{key_text(doc, k), value})
+		append(&members, Naive_Member{testkit.key_text(doc, k), value})
 		k = value + tape.Node_Index(doc.nodes[value].n) if doc.nodes[value].kind > .Plain else value + 1
 	}
 	return members[:]
@@ -76,7 +76,7 @@ readers_agree_with_a_read_of_the_nodes :: proc(t: ^testing.T) {
 					text := random_container(object, width, names)
 					doc, err := json.build(transmute([]u8)text)
 					defer tape.destroy(&doc)
-					x := tape.index_of(&doc, context.allocator)
+					x := tape.Doc_Index{allocator = context.allocator}
 					defer tape.destroy_index(&x)
 					if !testing.expectf(t, err == nil, "%s: %v", text, err) {
 						continue
@@ -123,7 +123,7 @@ check_readers :: proc(t: ^testing.T, r: tape.Reader, text: string, object: bool,
 			for key in order {
 				k, v, vp := tape.next_child(r, &c, dups)
 				want := first[key] if dups == .First else last[key]
-				testing.expectf(t, vp == .Found && key_text(doc, k) == key && v == want, "%s %v: child %q gives %q %v %v, want %v", text, dups, key, key_text(doc, k) if k != tape.NO_NODE else "", vp, v, want, loc = loc)
+				testing.expectf(t, vp == .Found && testkit.key_text(doc, k) == key && v == want, "%s %v: child %q gives %q %v %v, want %v", text, dups, key, testkit.key_text(doc, k) if k != tape.NO_NODE else "", vp, v, want, loc = loc)
 			}
 			_, _, end := tape.next_child(r, &c, dups)
 			testing.expectf(t, end == .Missing, "%s %v: %v past the last child", text, dups, end, loc = loc)
@@ -168,7 +168,7 @@ index_allocates_from_the_sixteenth_element :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil)
 	for i in ([]int{0, 1, 14, 15, 16, 17, 99}) {
 		c := Counting{backing = context.allocator}
-		x := tape.index_of(&doc, counting_allocator(&c))
+		x := tape.Doc_Index{allocator = counting_allocator(&c)}
 		_, found := tape.element({&doc, &x}, 0, i)
 		tape.destroy_index(&x)
 		testing.expectf(t, found == .Found, "element %d: %v", i, found)
@@ -201,7 +201,7 @@ index_lists_objects_of_more_than_eight_members :: proc(t: ^testing.T) {
 			defer tape.destroy(&doc)
 			testing.expect(t, err == nil)
 			c := Counting{backing = context.allocator}
-			x := tape.index_of(&doc, counting_allocator(&c))
+			x := tape.Doc_Index{allocator = counting_allocator(&c)}
 			r := tape.Reader{&doc, &x}
 			switch probe {
 			case .Member:
@@ -228,7 +228,7 @@ readers_answer_a_miss_given_a_miss :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	doc, err := json.build(transmute([]u8)string(`{"a": [1, 2], "b": {"c": 3}}`))
 	defer tape.destroy(&doc)
-	x := tape.index_of(&doc, context.allocator)
+	x := tape.Doc_Index{allocator = context.allocator}
 	defer tape.destroy_index(&x)
 	testing.expect_value(t, err, nil)
 	for r in ([]tape.Reader{{&doc, nil}, {&doc, &x}}) {

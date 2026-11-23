@@ -98,9 +98,9 @@ keys_past_ascii :: proc(t: ^testing.T) {
 					src := strings.concatenate(form, context.temp_allocator)
 					doc := expect_builds(t, spec, src)
 					found := 0
-					for n in doc.nodes {
+					for n, i in doc.nodes {
 						if n.role == .Key && n.n > 1 {
-							got, ok := tape.node_text(&doc, n, buf[:])
+							got, ok := tape.node_text(&doc, tape.Node_Index(i), buf[:])
 							testing.expectf(t, ok && got == key, "%v %q: key %q", spec, src, got)
 							found += 1
 						}
@@ -144,7 +144,7 @@ next`, "linenext"},
 			want := strings.concatenate({pad, c.want, pad}, context.temp_allocator)
 			src := strings.concatenate({"['", body, "', 1]", strings.repeat(" ", 80, context.temp_allocator)}, context.temp_allocator)
 			doc := expect_builds(t, .Json5, src)
-			got, ok := tape.node_text(&doc, doc.nodes[1], buf[:])
+			got, ok := tape.node_text(&doc, 1, buf[:])
 			testing.expectf(t, ok && got == want, "%q: %q", src, got)
 			tape.destroy(&doc)
 		}

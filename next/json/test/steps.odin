@@ -167,8 +167,43 @@ answer_text :: proc(doc: ^tape.Document, path, k: int) -> string {
 		return "missing" if p == .Missing else "wrong kind"
 	}
 	b := strings.builder_make(context.temp_allocator)
-	render_node(&b, doc, int(node))
+	testkit.render_node(&b, doc, int(node))
 	return strings.to_string(b)
+}
+
+// A container's style bits from the tokens that open and close it stay beside its child count, in a build and in a scan
+// that keeps the container in part.
+@(test)
+containers_keep_their_style :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	src := transmute([]u8)string(KEYED_SRC)
+	format := test_format()
+	tokens := keyed_tokens()
+	OBJECT_STYLE, ARRAY_STYLE :: u16(0x2000), u16(0x4000)
+	#assert(OBJECT_STYLE | ARRAY_STYLE == tape.CONTAINER_STYLE)
+	tokens[0].spelling, tokens[12].spelling = OBJECT_STYLE, OBJECT_STYLE
+	tokens[8].spelling, tokens[11].spelling = ARRAY_STYLE, ARRAY_STYLE
+	doc := token_build(src, &format, tokens)
+	defer tape.destroy(&doc)
+	r := tape.Reader{&doc, nil}
+	x, _ := tape.member(r, tape.ROOT, "x")
+	testing.expect_value(t, doc.nodes[tape.ROOT].spelling, OBJECT_STYLE | 4)
+	testing.expect_value(t, doc.nodes[x].spelling, ARRAY_STYLE | 2)
+	n, _, _ := tape.length(r, x, context.temp_allocator)
+	testing.expect_value(t, n, 2)
+	d, _ := tape.demand_of({{tape.Name("x"), tape.Index(0)}})
+	defer tape.destroy(&d)
+	s, err := token_scan(src, &format, tokens, &d, .First, {stop_early = true})
+	defer tape.destroy(&s)
+	testing.expect_value(t, err, nil)
+	for node in s.nodes {
+		if node.kind == .Object {
+			testing.expect_value(t, node.spelling & tape.CONTAINER_STYLE, OBJECT_STYLE)
+		} else if node.kind == .Array {
+			testing.expect_value(t, node.spelling & tape.CONTAINER_STYLE, ARRAY_STYLE)
+		}
+	}
 }
 
 // A `Name` takes a key of any scalar kind by its text, while kind stays part of a key, so `12` and `"12"` are two keys
@@ -202,7 +237,7 @@ names_take_keys_of_every_kind :: proc(t: ^testing.T) {
 		append(&los, doc.nodes[value].lo)
 	}
 	testing.expect(t, len(los) == 2 && los[0] == 12 && los[1] == 21)
-	text, ok := tape.node_text(&doc, doc.nodes[1], nil)
+	text, ok := tape.node_text(&doc, 1, nil)
 	testing.expect(t, ok && text == "ab")
 
 	N :: proc(s: string) -> tape.Step {return tape.Name(s)}
@@ -357,7 +392,7 @@ build_takes_repeated_keys_by_policy :: proc(t: ^testing.T) {
 	for c in ([]Case{{.Default, `{"a":1,"b":[2,{"a":0,"a":5}],"a":{"c":3},"a":4}`}, {.All, `{"a":1,"b":[2,{"a":0,"a":5}],"a":{"c":3},"a":4}`}, {.Group, `{"a":1,"b":[2,{"a":0,"a":5}],"a":{"c":3},"a":4}`}, {.First, `{"a":1,"b":[2,{"a":0}]}`}, {.Last, `{"b":[2,{"a":5}],"a":4}`}}) {
 		doc, err := json.build(transmute([]u8)src, .Jsonc, {dups = c.dups})
 		defer tape.destroy(&doc)
-		testing.expectf(t, err == nil && render_doc(&doc) == c.doc, "%v: %s %v", c.dups, render_doc(&doc), err)
+		testing.expectf(t, err == nil && testkit.render_doc(&doc) == c.doc, "%v: %s %v", c.dups, testkit.render_doc(&doc), err)
 		n, _, _ := tape.length({doc = &doc}, tape.ROOT, context.temp_allocator)
 		testing.expect_value(t, n, 2)
 		// Each comment stays with its value, and goes with it.
@@ -393,7 +428,7 @@ scan_keeps_facts_of_kept_nodes :: proc(t: ^testing.T) {
 			s, err := json.scan(src, &d, .Jsonc, {stop_early = stop})
 			defer tape.destroy(&s)
 			testing.expect(t, err == nil)
-			agree_facts(t, &doc, &s, string(src))
+			testkit.agree_facts(t, &doc, &s, string(src))
 		}
 	}
 	d, _ := tape.demand_of([][]tape.Step{{N("a")}}, nil, nil, true)
@@ -429,7 +464,7 @@ escaped_keys_are_one_key_on_every_route :: proc(t: ^testing.T) {
 		doc, err := json.build(src)
 		defer tape.destroy(&doc)
 		testing.expect(t, err == nil)
-		x := tape.index_of(&doc, context.allocator)
+		x := tape.Doc_Index{allocator = context.allocator}
 		defer tape.destroy_index(&x)
 		for r in ([]tape.Reader{{&doc, nil}, {&doc, &x}}) {
 			n, _, _ := tape.length(r, tape.ROOT, context.temp_allocator)
@@ -446,7 +481,7 @@ escaped_keys_are_one_key_on_every_route :: proc(t: ^testing.T) {
 			defer tape.destroy(&once)
 			n, _, _ := tape.length({doc = &once}, tape.ROOT, context.temp_allocator)
 			testing.expectf(t, berr == nil && n == fill + 1 && len(once.nodes) == 2 * fill + 3, "%d members, %v: %s",
-				fill, dups, render_doc(&once))
+				fill, dups, testkit.render_doc(&once))
 		}
 		_, rerr := json.build(src, .Json, {dups = .Refuse})
 		kind, at := fault_of(rerr)

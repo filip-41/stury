@@ -141,7 +141,22 @@ scanner_so_far :: proc(h: ^Scanner, regs: hook.Regs, cut: u64, allocator: runtim
 	made := slice.clone(h.made, allocator) or_return
 	defer delete(made, allocator)
 	scan_lists(h, &doc, answers, missing, made) or_return
+	hold_spans(h, &doc) or_return
 	doc.src = slice.clone(h.bytes[:], allocator) or_return
-	doc.flags += {.Held, .Owns_Src}
+	doc.flags += {.Owns_Src}
 	return doc, nil
+}
+
+// Gives `doc` the spans the scan held, in a block of its own, and flags it `.Held`.
+@(private)
+hold_spans :: proc(h: ^Scanner, doc: ^tape.Document) -> runtime.Allocator_Error {
+	size := size_of(tape.Doc_Ext) + len(h.held) * size_of(tape.Held_Span)
+	block, err := runtime.mem_alloc_non_zeroed(size, align_of(tape.Doc_Ext), doc.allocator)
+	took(err, raw_data(block), size) or_return
+	ext := (^tape.Doc_Ext)(raw_data(block))
+	ext^ = {held = ([^]tape.Held_Span)(raw_data(block[size_of(tape.Doc_Ext):]))[:len(h.held)]}
+	copy(ext.held, h.held[:])
+	doc.ext = ext
+	doc.flags += {.Held}
+	return nil
 }

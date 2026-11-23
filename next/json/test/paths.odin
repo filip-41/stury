@@ -11,120 +11,6 @@ import "stury:json"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// An answer of a path read: the value found, or the outcome, with the node the readers stopped at.
-Ref_Answer :: struct {
-	node:    tape.Node_Index,
-	outcome: tape.Presence,
-}
-
-// The answers of `steps` over the whole document `doc` under `dups`, in document order, by its readers and the step
-// rules: null and a child a container lacks read as missing past the last `All` and as the wrong kind before it, an
-// `All` takes an object's members as written, and a `Name` under `.Group` each member of its key.
-reference_answers :: proc(doc: ^tape.Document, steps: []tape.Step, dups: tape.Duplicates, out: ^[dynamic]Ref_Answer) {
-	alls_end := u64(0)
-	for step, i in steps {
-		if _, all := step.(tape.All); all {
-			alls_end = u64(i + 1)
-		}
-	}
-	reference_from(doc, tape.ROOT, steps, 0, alls_end, dups, out)
-}
-
-@(private = "file")
-reference_from :: proc(doc: ^tape.Document, at: tape.Node_Index, steps: []tape.Step, taken, alls_end: u64, dups: tape.Duplicates, out: ^[dynamic]Ref_Answer) {
-	if taken == u64(len(steps)) {
-		append(out, Ref_Answer{at, .Found})
-		return
-	}
-	r := tape.Reader{doc, nil}
-	node := doc.nodes[at]
-	step := steps[taken]
-	if !tape.step_enters(step, node.kind) {
-		append(out, Ref_Answer{at, tape.path_refused(taken, alls_end) if node.kind == .Null else .Wrong_Kind})
-		return
-	}
-	missing := Ref_Answer{at, tape.path_refused(taken + 1, alls_end)}
-	end := at + tape.Node_Index(node.n)
-	switch s in step {
-	case tape.Name:
-		if dups == .Group {
-			c, p := tape.named(r, at, string(s))
-			if p != .Found {
-				append(out, missing)
-				return
-			}
-			for {
-				_, value, vp := tape.next_child(r, &c)
-				if vp != .Found {
-					return
-				}
-				reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
-			}
-		}
-		value, p := tape.member(r, at, string(s), dups)
-		if p != .Found {
-			append(out, missing)
-			return
-		}
-		reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
-	case tape.Index:
-		value, p := tape.element(r, at, int(s))
-		if p != .Found {
-			append(out, missing)
-			return
-		}
-		reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
-	case tape.All:
-		k := at + 1
-		for i := u64(0); k < end; i += 1 {
-			value := k
-			if node.kind == .Object {
-				value = k + 1
-			}
-			if !tape.all_takes(s.limit, i, node.kind == .Object, dups) {
-				return
-			}
-			reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
-			k = value + tape.Node_Index(doc.nodes[value].n) if doc.nodes[value].kind > .Plain else value + 1
-		}
-	case tape.Slice:
-		count, _, _ := tape.length(r, at, context.temp_allocator)
-		for e in 0 ..< u64(count) {
-			if tape.slice_takes(s, e, u64(count)) {
-				value, _ := tape.element(r, at, int(e))
-				reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
-			}
-		}
-	}
-}
-
-// Whether node `f` of `whole` and node `p` of `part` are the same value of the text.
-same_value :: proc(whole: ^tape.Document, f: tape.Node_Index, part: ^tape.Document, p: tape.Node_Index) -> bool {
-	if f == tape.NO_NODE || p == tape.NO_NODE {
-		return f == p
-	}
-	x, y := whole.nodes[f], part.nodes[p]
-	return x.lo == y.lo && x.kind == y.kind && x.role == y.role && (x.kind > .Plain || x.n == y.n)
-}
-
-// Whether the answers of path `path` of the scan `r` are the reference's over the build `doc`, its first `limit` for a
-// limit past 0, their outcomes and found values in document order.
-answers_agree :: proc(doc, r: ^tape.Document, path: int, steps: []tape.Step, dups: tape.Duplicates, limit: int) -> bool {
-	want := make([dynamic]Ref_Answer, context.temp_allocator)
-	reference_answers(doc, steps, dups, &want)
-	if limit > 0 && len(want) > limit {
-		resize(&want, limit)
-	}
-	for w, k in want {
-		node, p, ok := tape.answer({doc = r}, path, k)
-		if !ok || p != w.outcome || p == .Found && !same_value(doc, w.node, r, node) {
-			return false
-		}
-	}
-	_, _, more := tape.answer({doc = r}, path, len(want))
-	return !more
-}
-
 // A grammar a generated text follows, and whether its read tolerates what the grammar refuses.
 Flavor :: struct {
 	spec:     json.Spec,
@@ -167,40 +53,6 @@ corpus_files :: proc() -> [dynamic]Corpus_File {
 	return files
 }
 
-// Whether two errors of reads of one text are the same: the same fault at the same byte, or the same other error.
-same_refusal :: proc(a, b: tape.Error) -> bool {
-	x, x_fault := a.(tape.Fault)
-	y, y_fault := b.(tape.Fault)
-	if x_fault || y_fault {
-		return x_fault && y_fault && x.at == y.at && x.kind == y.kind && x.detail == y.detail
-	}
-	return a == b
-}
-
-// Whether every read of `src` that checks the whole text refuses it with the fault `want`, which a build gave.
-// Returns false after reporting the first that does not.
-reads_refuse :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: json.Options, want: tape.Error, name: string, loc := #caller_location) -> bool {
-	same := true
-	check :: proc(t: ^testing.T, same: ^bool, what: string, got, want: tape.Error, src: []u8, name: string, loc: runtime.Source_Code_Location) {
-		same^ &&= testing.expectf(t, same_refusal(got, want), "%s %q: %s refuses with %v, build with %v", name, src, what, got, want, loc = loc)
-	}
-	check(t, &same, "validate", json.validate(src, spec, opts), want, src, name, loc)
-	for dups in ([]tape.Duplicates{.Last, .First}) {
-		find_opts := opts
-		find_opts.dups = dups
-		_, ferr := json.find(src, {tape.Name("a"), tape.Index(-1)}, spec, {}, find_opts)
-		check(t, &same, "find", ferr, want, src, name, loc)
-	}
-	_, ferr := json.find(src, {}, spec, {}, opts)
-	check(t, &same, "find of the root", ferr, want, src, name, loc)
-	d, _ := tape.demand_of({{tape.All{}}, {tape.Name("a")}})
-	defer tape.destroy(&d)
-	r, serr := json.scan(src, &d, spec, {}, opts)
-	tape.destroy(&r)
-	check(t, &same, "scan", serr, want, src, name, loc)
-	return same
-}
-
 // Over random texts of every grammar, strict and tolerant, and the suites' files, a find's answer is the first of the
 // paths' reference answers over the build, and a text the build refuses is refused alike by every read.
 @(test)
@@ -217,16 +69,16 @@ find_agrees_with_the_build :: proc(t: ^testing.T) {
 		defer tape.destroy(&doc)
 		if err != nil {
 			refused^ += 1
-			reads_refuse(t, src, f.spec, opts, err, name)
+			testkit.reads_refuse(t, json.reads(f.spec), json.as(f.spec), src, opts, err, name)
 			return
 		}
 		names := key_names_of(&doc)
-		want := make([dynamic]Ref_Answer, context.temp_allocator)
+		want := make([dynamic]testkit.Ref_Answer, context.temp_allocator)
 		for _ in 0 ..< paths {
 			steps := random_path(names)
 			for dups in ([]tape.Duplicates{.Last, .First, .Group}) {
 				clear(&want)
-				reference_answers(&doc, steps, dups, &want)
+				testkit.reference_answers(&doc, steps, dups, &want)
 				for stop in ([]bool{false, true}) {
 					find_opts := opts
 					find_opts.dups = dups
@@ -282,12 +134,12 @@ corrupt :: proc(src: []u8) {
 key_names_of :: proc(doc: ^tape.Document) -> []string {
 	names := make([dynamic]string, context.temp_allocator)
 	append(&names, "zz", "")
-	for node in doc.nodes {
+	for node, i in doc.nodes {
 		if node.role != .Key || len(names) == 14 {
 			continue
 		}
 		buf := make([]u8, node.n * 3, context.temp_allocator)
-		text, _ := tape.node_text(doc, node, buf)
+		text, _ := tape.node_text(doc, tape.Node_Index(i), buf)
 		if !slice.contains(names[:], text) {
 			append(&names, strings.clone(text, context.temp_allocator))
 		}
@@ -445,52 +297,4 @@ random_path :: proc(names: []string) -> []tape.Step {
 		}
 	}
 	return steps
-}
-
-// Checks the facts a scan kept with its nodes against the build's: each kept fact is the build's fact of the same
-// value, and each fact the build gives a value the scan kept is kept, but a foot of a container the scan kept unread,
-// whose insides it passed. A stopped scan read no fact past its stop.
-agree_facts :: proc(t: ^testing.T, doc, r: ^tape.Document, name: string, loc := #caller_location) {
-	Key :: struct {
-		lo:   u64,
-		role: tape.Role,
-	}
-	whole := make(map[Key]tape.Node_Index, context.temp_allocator)
-	for node, i in doc.nodes {
-		whole[{node.lo, node.role}] = tape.Node_Index(i)
-	}
-	has :: proc(facts: []tape.Fact, node: tape.Node_Index, f: tape.Fact) -> bool {
-		for g in facts {
-			if g.node == node && g.lo == f.lo && g.kind == f.kind {
-				return true
-			}
-		}
-		return false
-	}
-	for f in r.facts {
-		node := r.nodes[f.node]
-		at, ok := whole[{node.lo, node.role}]
-		testing.expectf(t, ok && has(doc.facts, at, f), "%s: scan fact %v on %v is not the build's", name, f, node, loc = loc)
-	}
-	if .Stopped in r.flags {
-		return
-	}
-	kept := make(map[tape.Node_Index]tape.Node_Index, context.temp_allocator)
-	for node, i in r.nodes {
-		if at, ok := whole[{node.lo, node.role}]; ok {
-			kept[at] = tape.Node_Index(i)
-		}
-	}
-	for f in doc.facts {
-		at, ok := kept[f.node]
-		if !ok {
-			continue
-		}
-		node := r.nodes[at]
-		unread := node.kind >= .Array && node.n == 1 && node.spelling & tape.CONTAINER_PARTIAL != 0
-		if f.kind == .Comment_Foot && unread {
-			continue
-		}
-		testing.expectf(t, has(r.facts, at, f), "%s: build fact %v of kept %v is not the scan's", name, f, node, loc = loc)
-	}
 }

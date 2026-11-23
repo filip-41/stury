@@ -82,12 +82,12 @@ readers_take_a_decode_past_its_span :: proc(t: ^testing.T) {
 	_, p = tape.member(r, tape.ROOT, "ab")
 	testing.expect_value(t, p, tape.Presence.Missing)
 	short: [2]u8
-	_, ok := tape.node_text(&doc, nodes[1], short[:])
+	_, ok := tape.node_text(&doc, 1, short[:])
 	testing.expect(t, !ok)
-	room := tape.text_room(doc.format, src, nodes[1])
+	room := tape.text_room(&doc, 1)
 	testing.expect_value(t, room, 4)
 	buf: [4]u8
-	text, fits := tape.node_text(&doc, nodes[1], buf[:room])
+	text, fits := tape.node_text(&doc, 1, buf[:room])
 	testing.expect(t, fits && text == "aabb")
 }
 
@@ -121,7 +121,7 @@ readers_read_tables :: proc(t: ^testing.T) {
 			}
 			slots[i] = u16(col + 1)
 		}
-		ext := tape.Tabular_Ext{tables = {{node = 0, header = 1, first_row = 4, slots_len = u32(len(slots)), unique_keys = true}}, slots = slots}
+		ext := tape.Doc_Ext{format = tape.Tabular_Ext{tables = {{node = 0, header = 1, first_row = 4, slots_len = u32(len(slots)), unique_keys = true}}, slots = slots}}
 		doc := tape.Document{src = src, nodes = nodes, format = &TWICE, ext = &ext}
 		r := tape.Reader{&doc, nil}
 		row, p := tape.element(r, tape.ROOT, 1)
@@ -166,7 +166,7 @@ readers_read_tables_that_repeat_a_key :: proc(t: ^testing.T) {
 		scalar(4, 1, .Plain),
 		scalar(6, 1, .Plain),
 	}
-	ext := tape.Tabular_Ext{tables = {{node = 0, header = 1, first_row = 4, width = 2}}}
+	ext := tape.Doc_Ext{format = tape.Tabular_Ext{tables = {{node = 0, header = 1, first_row = 4, width = 2}}}}
 	doc := tape.Document{src = src, nodes = nodes, format = &TWICE, ext = &ext}
 	r := tape.Reader{&doc, nil}
 	row, _ := tape.element(r, tape.ROOT, 0)
@@ -199,7 +199,7 @@ readers_refuse_a_clashing_name :: proc(t: ^testing.T) {
 		scalar(2, 1, .String, .Key),
 		scalar(3, 1, .Plain),
 	}
-	ext := tape.Yaml_Ext{clash = 2}
+	ext := tape.Doc_Ext{format = tape.Yaml_Ext{clash = 2}}
 	doc := tape.Document{src = src, nodes = nodes, format = &TWICE, ext = &ext}
 	r := tape.Reader{&doc, nil}
 	_, p := tape.member(r, tape.ROOT, "1")
