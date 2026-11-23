@@ -45,3 +45,8 @@ lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
 scan :: #force_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
 	return scan_op(.Base, src, c, s, OP)
 }
+
+@(private)
+find_set :: #force_inline proc "contextless" (src: []u8, t: Byte_Set) -> int {
+	return set_loop(.Base, src, t)
+}

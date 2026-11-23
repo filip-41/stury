@@ -1,5 +1,5 @@
-"""Random ECMA patterns and texts run through core/regex (main.odin) and Node's RegExp with the `u` flag, reporting where
-the verdict, the match or a group's bounds differ. A seeded grammar makes each pattern from what a JSON Schema's `pattern`
+"""Random ECMA patterns and texts run through core/regex (engine v1) and next/lib/base/regex (engine v2) by main.odin, and
+through Node's RegExp with the `u` flag, reporting where the verdict, the match or a group's bounds differ. A seeded grammar makes each pattern from what a JSON Schema's `pattern`
 uses, over short texts of the characters the patterns name.
 """
 
@@ -94,12 +94,19 @@ def known(p, ours, node):
     return RETRIES if ours == "E retry-limit-in-match over" and re.search(r"\\[1-9k]", p) else None
 
 
-@pytest.fixture(scope="module")
-def probe(odin, tmp_path_factory):
+HERE = os.path.dirname(__file__)
+
+
+@pytest.fixture(scope="module", params=["v1", "v2"])
+def probe(request, odin, tmp_path_factory):
     if shutil.which("node") is None:
         pytest.skip("node is not on PATH")
+    engine = request.param
     binary = str(tmp_path_factory.mktemp("regex") / "ecma_probe")
-    subprocess.run([odin, "build", os.path.dirname(__file__), "-o:speed", f"-out:{binary}"], cwd=ROOT, check=True)
+    cmd = [odin, "build", HERE, "-o:speed", f"-out:{binary}", f"-collection:engine={HERE}/engines/{engine}"]
+    if engine == "v2":
+        cmd.append(f"-collection:stury={ROOT}/next")
+    subprocess.run(cmd, cwd=ROOT, check=True)
     return binary
 
 
@@ -111,5 +118,5 @@ def test_ecma_matches_as_node(probe, seed, request, tmp_path):
     path.write_bytes(corpus)
     ours = subprocess.run([probe, str(path)], capture_output=True, check=True).stdout.decode().splitlines()
     node = subprocess.run(["node", "-e", NODE], input=corpus, capture_output=True, check=True).stdout.decode().splitlines()
-    differ = [f"{p!r} on {s!r}: core/regex {a}, node {b}" for (p, s), a, b in zip(cases, ours, node) if a != b and not known(p, a, b)]
+    differ = [f"{p!r} on {s!r}: the engine {a}, node {b}" for (p, s), a, b in zip(cases, ours, node) if a != b and not known(p, a, b)]
     assert not differ, f"{len(differ)} of {len(cases)} cases differ:\n" + "\n".join(differ[:20])

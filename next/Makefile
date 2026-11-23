@@ -32,7 +32,7 @@ WASM_NO_TAIL_FEATURE_SETS := none simd128
 # Test packages whose kernels pick an x86-64 tier, run at each tier and `X86_OPTS` level, and once at each level with
 # no tier named, so the CPU's own tier is detected and used. On an x86-64 machine these runs replace the plain one. An
 # arm64 Mac runs them through Rosetta, and skips them with a note where Rosetta is not installed.
-TIER_PKGS := lib/base/kernel/test dsv/test
+TIER_PKGS := lib/base/kernel/test lib/base/regex/test dsv/test
 # The tests of `dsv/test` that read texts of every shape through the delimited pass. The others do not reach the pass
 # instances, and a run under Rosetta takes the whole package six times.
 comma := ,
@@ -112,7 +112,7 @@ lint:
 	done
 	@mkdir -p build; for p in $(TIER_PKGS); do \
 		echo "== $$p (linux_amd64 tiers)"; \
-		case $$p in dsv/test) req="--require dsv::pass_default_v3:";; *) req=;; esac; \
+		case $$p in dsv/test) req="--require dsv::pass_default_v3:";; lib/base/regex/test) req="--require ::set_v3";; *) req=;; esac; \
 		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:none $(LINT_FLAGS) -out:build/tiers-none.o || exit 1; \
 		python3 tools/tier_check.py $(OBJDUMP) build/tiers-none.o $$req || exit 1; \
 		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:build/tiers-speed.o || exit 1; \

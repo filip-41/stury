@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks the layer direction of layout.md by path: lib/base imports nothing of stury, lib/core only lib/base and
+"""Checks the layer direction of layout.md by path: lib/base only other lib/base packages, lib/core only lib/base and
 itself, lib/ops only lib/core and lib/base and never another lib/ops package, lib/schema only the layers below it,
 and nothing under lib/ imports a package above lib/ or testkit. Above lib/: every top-level package that TOP_EDGES
 does not name is a format, and a format and host import only the layers below, a format never another package above
@@ -51,7 +51,7 @@ def allowed(src: str, dst: str) -> bool:
     s, d = layer(src), layer(dst)
     if s < len(LAYERS):
         if s == 0:
-            return False
+            return d == 0
         # The ops are independent consumers of the core, so one never builds on another.
         return d < s or d == s and LAYERS[s] != "lib/ops"
     if src in TOP_EDGES:

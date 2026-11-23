@@ -15,11 +15,12 @@ import subprocess
 import sys
 
 SYMBOL = re.compile(r"^[0-9a-f]+ <(.+)>:$")
-# The procedures built with the V3 tier's features: the kernel's, one `scan_v3` per scan op, and the delimited passes of
-# `dsv/tier_amd64.odin`, one per instance, and the string scans JSON builds for the V3 tier.
+# The procedures built with the V3 tier's features: the kernel's, one `scan_v3` per scan op, `set_v3`, the delimited
+# passes of `dsv/tier_amd64.odin`, one per instance, and the string scans JSON builds for the V3 tier.
 TIER_ROOTS = (
     re.compile(r"kernel::scan_v3:"),
     re.compile(r"kernel::\[tier_amd64\.odin\]::lookup_v3"),
+    re.compile(r"kernel::\[tier_amd64\.odin\]::set_v3"),
     re.compile(r"kernel::\[tier_amd64\.odin\]::clmul_prefix_xor"),
     re.compile(r"dsv::(pass_default|pass_with|read_chunk|line_end)_v3:"),
     re.compile(r"json::\w+_v3:"),

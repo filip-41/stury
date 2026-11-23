@@ -98,3 +98,25 @@ scan_v2 :: #force_no_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $O
 scan_v3 :: #force_no_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
 	return scan_op(.V3, src, c, s, OP)
 }
+
+// `set_loop` built for the CPU's tier, as `scan` is.
+@(private)
+find_set :: #force_inline proc "contextless" (src: []u8, t: Byte_Set) -> int {
+	if len(src) < 64 {
+		return set_loop(.V2, src, t)
+	}
+	if tier() == .V3 {
+		return set_v3(src, t)
+	}
+	return set_v2(src, t)
+}
+
+@(private, enable_target_feature = FEATURES[.V2])
+set_v2 :: #force_no_inline proc "contextless" (src: []u8, t: Byte_Set) -> int {
+	return set_loop(.V2, src, t)
+}
+
+@(private, enable_target_feature = FEATURES[.V3])
+set_v3 :: #force_no_inline proc "contextless" (src: []u8, t: Byte_Set) -> int {
+	return set_loop(.V3, src, t)
+}

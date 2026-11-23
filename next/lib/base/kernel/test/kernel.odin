@@ -334,6 +334,96 @@ index_byte_every_cut :: proc(t: ^testing.T) {
 	}
 }
 
+// The bit set of the bytes `of`, bit `b` of word `b / 64` for byte `b`.
+member_bits :: proc(of: []u8) -> (bits: [4]u64) {
+	for b in of {
+		bits[b >> 6] |= u64(1) << (b & 63)
+	}
+	return
+}
+
+// Checks `index_set` against a scan a byte at a time on every cut of random texts, for sets of one byte, a few bytes
+// across the nibble rows, bytes above 0x7f, a zero byte (which a padded block holds), and every byte but a few.
+@(test)
+index_set_every_cut :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 11)
+	buf: [200]u8
+	for round in 0 ..< testkit.rounds(60) {
+		of: [dynamic]u8
+		defer delete(of)
+		switch round % 6 {
+		case 0:
+			append(&of, u8(rand.int_max(256)))
+		case 1:
+			append(&of, 0)
+		case 2:
+			for _ in 0 ..< 1 + rand.int_max(6) {
+				append(&of, u8(rand.int_max(256)))
+			}
+		case 3:
+			for b in 0x80 ..= 0xFF {
+				append(&of, u8(b))
+			}
+		case 4:
+			for b in 0 ..< 256 {
+				append(&of, u8(b))
+			}
+			for _ in 0 ..< 1 + rand.int_max(4) {
+				unordered_remove(&of, rand.int_max(len(of)))
+			}
+		case:
+			for _ in 0 ..< 1 + rand.int_max(40) {
+				append(&of, u8(rand.int_max(128)))
+			}
+		}
+		members := member_bits(of[:])
+		set := k.byte_set(members)
+		near: [dynamic]u8
+		defer delete(near)
+		for c in of {
+			append(&near, c + 1, c - 1, c ~ 0x80, c ~ 0x10)
+		}
+		others: [dynamic]u8
+		defer delete(others)
+		for b in 0 ..< 256 {
+			if members[b >> 6] >> uint(b & 63) & 1 == 0 {
+				append(&others, u8(b))
+			}
+		}
+		if len(others) == 0 {
+			continue
+		}
+		for &b in buf {
+			b = near[rand.int_max(len(near))]
+			if members[b >> 6] >> (b & 63) & 1 == 1 {
+				b = rand.choice(others[:])
+			}
+		}
+		for cut in 0 ..= len(buf) {
+			testing.expect_value(t, k.index_set(buf[:cut], set), -1)
+			if cut == 0 {
+				continue
+			}
+			for at in ([?]int{0, cut / 2, cut - 1}) {
+				saved := buf[at]
+				buf[at] = of[rand.int_max(len(of))]
+				first := -1
+				for b, i in buf[:cut] {
+					if members[b >> 6] >> (b & 63) & 1 == 1 {
+						first = i
+						break
+					}
+				}
+				testing.expect_value(t, k.index_set(buf[:cut], set), first)
+				testing.expect_value(t, k.index_set(buf[1:cut], set), first - 1 if first > 0 else -1)
+				buf[at] = saved
+			}
+		}
+	}
+}
+
 // Checks `quote_run` and `quote_cut` against a scan a byte at a time, on every stretch of random texts of quotes,
 // escapes, brackets and separators, from both starts and both escape carries.
 @(test)
@@ -614,6 +704,8 @@ scans_stop_at_unmapped_memory :: proc(t: ^testing.T) {
 		testing.expectf(t, k.last_index_byte(edge, ',') == k.last_index_byte(mid, ','), "last_index_byte %d", n)
 		testing.expectf(t, k.count_byte(edge, '"') == k.count_byte(mid, '"'), "count_byte %d", n)
 		testing.expectf(t, k.count_chars(edge) == k.count_chars(mid), "count_chars %d", n)
+		set := k.byte_set(member_bits({',', 0, 0xC3}))
+		testing.expectf(t, k.index_set(edge, set) == k.index_set(mid, set), "index_set %d", n)
 		testing.expectf(t, k.utf8_valid(edge) == k.utf8_valid(mid), "utf8_valid %d", n)
 		for nest in ([2]bool{false, true}) {
 			cut := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = nest}

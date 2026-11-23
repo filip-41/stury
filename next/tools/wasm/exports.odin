@@ -3,6 +3,7 @@ package wasm_exports
 
 import "base:runtime"
 import "stury:json"
+import "stury:lib/base/regex"
 import "stury:lib/core/tape"
 
 // Every tolerance and a step budget, which a walk with `LAX` counts, so the object holds those walks too.
@@ -177,4 +178,19 @@ scan_tolerant_jsonc :: proc "c" (p: [^]u8, n: int) -> int {
 scan_tolerant_json5 :: proc "c" (p: [^]u8, n: int) -> int {
 	context = runtime.default_context()
 	return scan_spec(p[:n], .Json5, TOLERANT)
+}
+
+// Whether an ECMA pattern matches a text, -1 for a pattern or a search that fails, so the object holds the regex engine.
+@(export)
+regex_matches :: proc "c" (pattern: [^]u8, n: int, text: [^]u8, m: int) -> int {
+	context = runtime.default_context()
+	allocator := context.allocator
+	re, err := regex.compile(string(pattern[:n]), {ecma = true}, allocator, allocator)
+	if err != "" {
+		return -1
+	}
+	scratch := regex.scratch_make(allocator)
+	defer regex.scratch_destroy(&scratch)
+	found, search_err := regex.search(&re, string(text[:m]), 0, nil, &scratch)
+	return -1 if search_err.kind != .None else int(found)
 }
