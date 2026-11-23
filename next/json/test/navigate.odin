@@ -87,9 +87,9 @@ expect_reads :: proc(t: ^testing.T, src: string, paths: [][]tape.Step, read: tap
 	r, serr := json.scan(text, &d, spec, read)
 	defer tape.destroy(&r)
 	testing.expectf(t, berr == nil && derr == nil && serr == nil, "%q: %v %v %v", src, berr, derr, serr, loc = loc)
-	full_index := tape.index_of(&doc, context.allocator)
+	full_index := tape.Doc_Index{allocator = context.allocator}
 	defer tape.destroy(&full_index)
-	partial_index := tape.index_of(&r, context.allocator)
+	partial_index := tape.Doc_Index{allocator = context.allocator}
 	defer tape.destroy(&partial_index)
 	for c in reads {
 		full := describe(&doc, c.steps, c.dups)
@@ -343,7 +343,7 @@ navigate_finds_distinct_keys_of_wide_objects :: proc(t: ^testing.T) {
 		expect_distinct(t, &r, want[:], members)
 	}
 	expect_distinct :: proc(t: ^testing.T, doc: ^tape.Document, want: []$W, members: int) {
-		index := tape.index_of(doc, context.temp_allocator)
+		index := tape.Doc_Index{allocator = context.temp_allocator}
 		defer tape.destroy(&index)
 		for x in ([]tape.Reader{{doc, nil}, {doc, &index}}) {
 			expect_distinct_by(t, x, want, members)
@@ -463,7 +463,7 @@ agree_over :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: json.Options
 		return
 	}
 	a.texts += 1
-	full_index := tape.index_of(&doc, context.temp_allocator)
+	full_index := tape.Doc_Index{allocator = context.temp_allocator}
 	defer tape.destroy(&full_index)
 	paths := paths_of(&doc)
 	sets := make([dynamic][][]tape.Step, context.temp_allocator)
@@ -520,7 +520,7 @@ agree_over :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: json.Options
 				// The whole document's readers go through its index on a scan that ran to the end, and the partial one's
 				// on a stopped scan, so each path is checked against the other.
 				w := Agree_Walk{t, {&doc, nil}, {&r, nil}, dups, name, set, stop, a}
-				partial_index := tape.index_of(&r, context.temp_allocator)
+				partial_index := tape.Doc_Index{allocator = context.temp_allocator}
 				defer tape.destroy(&partial_index)
 				if stop {
 					w.r.index = &partial_index
@@ -1001,7 +1001,7 @@ navigate_marks_objects_that_repeat_keys :: proc(t: ^testing.T) {
 		strings.write_string(&b, "}]")
 		doc, err := json.build(transmute([]u8)strings.to_string(b))
 		defer tape.destroy(&doc)
-		index := tape.index_of(&doc, context.allocator)
+		index := tape.Doc_Index{allocator = context.allocator}
 		defer tape.destroy(&index)
 		testing.expectf(t, err == nil && repeats_in(tape.Reader{&doc, &index}, 2) == repeat, "%d members, repeat %v", members, repeat)
 	}
@@ -1030,7 +1030,7 @@ navigate_index_agrees_with_the_walk :: proc(t: ^testing.T) {
 		strings.write_string(&b, `}}`)
 		doc, err := json.build(transmute([]u8)strings.to_string(b))
 		defer tape.destroy(&doc)
-		index := tape.index_of(&doc, context.allocator)
+		index := tape.Doc_Index{allocator = context.allocator}
 		defer tape.destroy(&index)
 		testing.expectf(t, err == nil, "%v", err)
 		walk, through := tape.Reader{&doc, nil}, tape.Reader{&doc, &index}
@@ -1094,7 +1094,7 @@ navigate_index_fills_per_container :: proc(t: ^testing.T) {
 	doc, err := json.build(transmute([]u8)strings.to_string(b))
 	defer tape.destroy(&doc)
 	testing.expect(t, err == nil)
-	index := tape.index_of(&doc, context.allocator)
+	index := tape.Doc_Index{allocator = context.allocator}
 	defer tape.destroy(&index)
 	r := tape.Reader{&doc, &index}
 	a, _ := tape.member(r, tape.ROOT, "a")

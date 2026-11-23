@@ -429,7 +429,7 @@ escaped_keys_are_one_key_on_every_route :: proc(t: ^testing.T) {
 		doc, err := json.build(src)
 		defer tape.destroy(&doc)
 		testing.expect(t, err == nil)
-		x := tape.index_of(&doc, context.allocator)
+		x := tape.Doc_Index{allocator = context.allocator}
 		defer tape.destroy_index(&x)
 		for r in ([]tape.Reader{{&doc, nil}, {&doc, &x}}) {
 			n, _, _ := tape.length(r, tape.ROOT, context.temp_allocator)
