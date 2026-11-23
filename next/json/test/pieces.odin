@@ -913,3 +913,63 @@ pieces_read_json5_white_space_once :: proc(t: ^testing.T) {
 comment_run_text :: proc(body: string, n: int) -> string {
 	return strings.repeat(body, (n + len(body) - 1) / len(body))
 }
+
+// Reads `src` in two windows cut at `cut`, as a validation or as a build, and gives the error of the read that ended.
+@(private = "file")
+read_in_two_windows :: proc(src: []u8, spec: json.Spec, cut: int, build: bool) -> tape.Error {
+	p := tape.Pieces{allocator = context.allocator}
+	defer tape.destroy(&p)
+	for end := cut; ; end = len(src) {
+		p.from, p.last = p.keep, end == len(src)
+		err: tape.Error
+		if build {
+			doc: tape.Document
+			doc, err = json.build(src[p.keep:end], spec, {pieces = &p})
+			tape.destroy(&doc)
+		} else {
+			err = json.validate(src[p.keep:end], spec, {pieces = &p})
+		}
+		if err != nil || !p.more || p.last {
+			return err
+		}
+	}
+}
+
+// Arrays of numbers, whose runs the walk reads in blocks, are judged by a validation in pieces and under a steps budget
+// as by a build under the same.
+@(test)
+validation_judges_number_blocks_as_a_build_does :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "[[0")
+	for i in 1 ..< 200 {
+		fmt.sbprintf(&b, "],[%d,%d", i, i)
+	}
+	strings.write_string(&b, "]]")
+	texts := [?]string{
+		`[[[0,0],[12789012345678901234567890],123456789012345678901234567890],[false,false]]`,
+		`[[1,2],[3,4],[5.5,6],[7,8],[9,10],[11,12],[13,14],[15,16],[17,18],[19,20],[21,22],[23,24],[25,26],[27,28],[29,30]]`,
+		strings.to_string(b),
+	}
+	for text, i in texts {
+		src := transmute([]u8)text
+		for spec in json.Spec {
+			for cut in 1 ..< len(src) {
+				got, want := read_in_two_windows(src, spec, cut, false), read_in_two_windows(src, spec, cut, true)
+				if !testing.expectf(t, same_refusal(got, want), "text %d %v cut %d: validate gives %v, build %v", i, spec, cut, got, want) {
+					return
+				}
+			}
+			for steps in 1 ..< u64(300) {
+				opts := json.Options{budget = {steps = steps}}
+				got := json.validate(src, spec, opts)
+				doc, want := json.build(src, spec, opts)
+				tape.destroy(&doc)
+				if !testing.expectf(t, same_refusal(got, want), "text %d %v steps %d: validate gives %v, build %v", i, spec, steps, got, want) {
+					return
+				}
+			}
+		}
+	}
+	free_all(context.temp_allocator)
+}
