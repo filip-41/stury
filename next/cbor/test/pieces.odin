@@ -38,40 +38,6 @@ pieces_of_an_empty_text_end :: proc(t: ^testing.T) {
 	}
 }
 
-// The cuts of `src` into windows of `size` bytes.
-@(private = "file")
-windows_of :: proc(src: []u8, size: int) -> []int {
-	cuts := make([dynamic]int, context.temp_allocator)
-	for k := size; k < len(src); k += size {
-		append(&cuts, k)
-	}
-	return cuts[:]
-}
-
-// Reads `src` in pieces cut in two at every byte, in three at a sample of pairs, and in windows of every size up to
-// a few dozen bytes.
-@(private = "file")
-agree_in_pieces :: proc(t: ^testing.T, spec: cbor.Spec, src: []u8, opts: cbor.Options, name: string) -> bool {
-	reads, f := cbor.reads(spec), cbor.as(spec)
-	paths := piece_paths()
-	for k in 0 ..= len(src) {
-		cuts := [1]int{k}
-		testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated) or_return
-	}
-	if len(src) >= 8 {
-		for k in 0 ..< 12 {
-			i := (k * 7919) % len(src)
-			j := i + 1 + (k * 104729) % (len(src) - i)
-			cuts := [2]int{i, j}
-			testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated) or_return
-		}
-	}
-	for size in 1 ..= 40 {
-		testkit.pieces_agree(t, reads, f, src, opts, windows_of(src, size), paths, name, framing = .Concatenated) or_return
-	}
-	return true
-}
-
 // Every text of every spec, under the defaults, a tolerance, a step budget and a depth budget, read in pieces: the same
 // verdict and fault, document, answers and scans as the whole reads, and no byte framed twice.
 @(test)
@@ -83,7 +49,7 @@ pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 		src := hex(h)
 		for spec in cbor.Spec {
 			for opts in options {
-				if !agree_in_pieces(t, spec, src, opts, h) {
+				if !testkit.agree_in_pieces(t, cbor.reads(spec), cbor.as(spec), src, opts, piece_paths(), h) {
 					return
 				}
 			}
@@ -112,7 +78,7 @@ pieces_agree_on_generated_items :: proc(t: ^testing.T) {
 				}
 			}
 			for size in ([]int{1, 3, 16}) {
-				if !testkit.pieces_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), text, {}, windows_of(text, size), paths, fmt.tprintf("generated %x", text), framing = .Concatenated) {
+				if !testkit.pieces_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), text, {}, testkit.cuts_by(len(text), size), paths, fmt.tprintf("generated %x", text), framing = .Concatenated) {
 					return
 				}
 			}
@@ -189,7 +155,7 @@ records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
 					}
 				}
 				for size in 1 ..= 40 {
-					run.cuts = windows_of(src, size)
+					run.cuts = testkit.cuts_by(len(src), size)
 					if !testkit.records_pieces_agree(t, run, .Concatenated, paths, &d, "sequence") {
 						return
 					}

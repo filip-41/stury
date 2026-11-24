@@ -118,7 +118,7 @@ appendix_a_decoded_values :: proc(t: ^testing.T) {
 @(test)
 appendix_a_simple_24_is_refused :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	testing.expect_value(t, code_of(cbor.validate(hex(SIMPLE_24), .Cbor)), "bad_simple")
+	testing.expect_value(t, testkit.code_of(cbor.validate(hex(SIMPLE_24), .Cbor)), "bad_simple")
 }
 
 // The rows the table gives only a diagnostic notation for: the value each one reads as.
@@ -191,7 +191,7 @@ the_default_depth_is_the_boundary :: proc(t: ^testing.T) {
 		return b
 	}
 	testing.expect_value(t, cbor.validate(nest(tape.DEFAULT_DEPTH)), nil)
-	testing.expect_value(t, code_of(cbor.validate(nest(tape.DEFAULT_DEPTH + 1))), "exceeded Depth")
+	testing.expect_value(t, testkit.code_of(cbor.validate(nest(tape.DEFAULT_DEPTH + 1))), "exceeded Depth")
 }
 
 // The stock decoder reads every row of Appendix A, and refuses the malformed items this one refuses but for the ones it

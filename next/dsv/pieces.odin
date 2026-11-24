@@ -377,7 +377,7 @@ scan_pieces :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_O
 		// A window ends between two blocks, never between a key and its value, so the scan passes a member no step
 		// takes at its key, as it does in a whole text.
 		h.key_skips = !h.facts
-		root_close, err, tolerated := piece_read(src, S, opts, h, regs, ctx, build.scanner_columns_hook, nil)
+		root_close, err, tolerated := piece_read(src, S, opts, h, regs, ctx, build.scanner_key_skip_hook, nil)
 		if s := (^Piece)(p.state); s != nil && len(s.head) > 0 {
 			h.head = {s.head_lo, s.head_lo + u64(len(s.head))}
 		}

@@ -157,7 +157,7 @@ records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S
 	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
 		return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, hook.no_hook)
 	}
-	return build.records_validate(r, out, &RULES, caller, frame, walk)
+	return build.records_validate(r, out, &FORMATS[S], &RULES, caller, frame, walk)
 }
 
 @(private)

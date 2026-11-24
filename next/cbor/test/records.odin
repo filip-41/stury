@@ -75,7 +75,7 @@ sequences_read_as_records :: proc(t: ^testing.T) {
 	testing.expect(t, got.spans[1] == {1, 4} && got.spans[2] == {4, 6} && got.err == nil)
 	// A byte order mark reads as simple value 15, then a map head cut short.
 	bom := read_records(t, hex("ef bb bf 01"), .Concatenated)
-	testing.expect_value(t, code_of(bom.err), "truncated")
+	testing.expect_value(t, testkit.code_of(bom.err), "truncated")
 	testing.expect(t, len(bom.spans) == 1 && bom.spans[0] == {0, 1})
 	empty := read_records(t, nil, .Concatenated)
 	testing.expect(t, len(empty.spans) == 0 && empty.err == nil)
@@ -83,7 +83,7 @@ sequences_read_as_records :: proc(t: ^testing.T) {
 	bad := read_records(t, hex("01 82 02 61 ff"), .Concatenated)
 	testing.expect_value(t, len(bad.spans), 1)
 	f, _ := bad.err.(tape.Fault)
-	testing.expect(t, f.at == 4 && code_of(bad.err) == "invalid_utf8")
+	testing.expect(t, f.at == 4 && testkit.code_of(bad.err) == "invalid_utf8")
 }
 
 // The elements of the root array, definite or indefinite, are its records, and what follows the root is judged.
@@ -97,13 +97,13 @@ elements_are_records :: proc(t: ^testing.T) {
 	empty := read_records(t, hex("80"), .Elements)
 	testing.expect(t, len(empty.spans) == 0 && empty.err == nil)
 	trailing := read_records(t, hex("81 01 00"), .Elements)
-	testing.expect(t, len(trailing.spans) == 1 && code_of(trailing.err) == "trailing")
+	testing.expect(t, len(trailing.spans) == 1 && testkit.code_of(trailing.err) == "trailing")
 	not_array := read_records(t, hex("a0"), .Elements)
 	testing.expect(t, len(not_array.spans) == 0 && not_array.err == nil)
 	inner := read_records(t, hex("82 01 61 80"), .Elements)
-	testing.expect(t, len(inner.spans) == 1 && code_of(inner.err) == "invalid_utf8")
+	testing.expect(t, len(inner.spans) == 1 && testkit.code_of(inner.err) == "invalid_utf8")
 	preferred := read_records(t, hex("9f 01 ff"), .Elements, .Preferred)
-	testing.expect(t, len(preferred.spans) == 0 && code_of(preferred.err) == "not_preferred")
+	testing.expect(t, len(preferred.spans) == 0 && testkit.code_of(preferred.err) == "not_preferred")
 }
 
 // A tag on the root does not hide its container: the elements of a tagged array and the members of a tagged map are
@@ -140,9 +140,9 @@ members_are_records :: proc(t: ^testing.T) {
 	indefinite := read_records(t, hex("bf 61 61 01 ff"), .Members)
 	testing.expect(t, len(indefinite.keys) == 1 && indefinite.err == nil)
 	bad_key := read_records(t, hex("a1 80 01"), .Members)
-	testing.expect(t, len(bad_key.spans) == 0 && code_of(bad_key.err) == "bad_key")
+	testing.expect(t, len(bad_key.spans) == 0 && testkit.code_of(bad_key.err) == "bad_key")
 	ordered := read_records(t, hex("a2 61 62 01 61 61 02"), .Members, .Deterministic)
-	testing.expect(t, len(ordered.spans) == 1 && code_of(ordered.err) == "key_order")
+	testing.expect(t, len(ordered.spans) == 1 && testkit.code_of(ordered.err) == "key_order")
 }
 
 // The records refuse options they cannot take before any is read.

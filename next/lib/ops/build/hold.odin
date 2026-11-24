@@ -13,6 +13,9 @@ import "stury:lib/core/tape"
 // and the coming key that the walk produced since the last hold. `regs` are the hook's registers at the window's end.
 scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Allocator_Error {
 	h.holds = true
+	if h.scattered {
+		return hold_whole(h, text)
+	}
 	nodes := h.b.doc.nodes[:builder_cursor(&h.b, regs)]
 	facts := h.b.doc.facts
 	k, j := len(nodes), len(facts)
@@ -44,6 +47,19 @@ scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Alloca
 	}
 	if len(h.bytes) > 2 * h.held_live + HOLD_SLACK {
 		return hold_drop(h, nodes, facts)
+	}
+	return nil
+}
+
+// Holds the text of a scan whose tokens are out of text order: its bytes up to the end of `text`, which one span from
+// offset 0 names, each window adding the bytes past those held.
+@(private)
+hold_whole :: proc(h: ^Scanner, text: []u8) -> runtime.Allocator_Error {
+	if len(h.held) == 0 {
+		append(&h.held, tape.Held_Span{0, 0}) or_return
+	}
+	if held := len(h.bytes); len(text) > held {
+		append(&h.bytes, ..text[held:]) or_return
 	}
 	return nil
 }

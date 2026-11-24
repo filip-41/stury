@@ -1,6 +1,7 @@
 package testkit
 
 import "base:runtime"
+import "core:fmt"
 import "core:sync"
 import "stury:lib/core/tape"
 
@@ -40,4 +41,21 @@ cuts_by :: proc(n, size: int) -> []int {
 		append(&cuts, k)
 	}
 	return cuts[:]
+}
+
+// The code of `err` a test compares: a fault's rule code, or a word for each other error.
+code_of :: proc(err: tape.Error) -> string {
+	switch e in err {
+	case tape.Fault:
+		return tape.fault_rule(e).code
+	case tape.Exceeded:
+		return fmt.tprintf("exceeded %v", e.kind)
+	case tape.Bad_Option:
+		return fmt.tprintf("bad option %s", e.option)
+	case tape.Piece_Gap:
+		return "piece gap"
+	case runtime.Allocator_Error:
+		return "memory"
+	}
+	return ""
 }

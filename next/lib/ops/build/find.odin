@@ -245,6 +245,22 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 	return s, finder_token(h, t)
 }
 
+// `finder_hook` for a walk that passes the value of a member at its key when the hook answers `Skip` there, so a member
+// the path does not take gives neither its tokens nor its `End`. A level that counts its members, as the elements of an
+// `All` or the members of an object under an `All`, still has them given, for the count.
+finder_key_skip_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	if t.role != .Key {
+		return finder_hook(h, s, t)
+	}
+	passes := !h.keys
+	if h.entered > 0 {
+		_, named := h.steps[h.entered - 1].(tape.Name)
+		passes ||= named
+	}
+	r, a := finder_hook(h, s, t)
+	return r, .Skip if a == .Next && passes && !h.want else a
+}
+
 // Sets the fields `finder_hook` reads, for the tokens up to the next one the finder must look at. A container the
 // finder skipped gives only its `End` meanwhile, which the hook passes without a call unless it closes the answer.
 @(private)

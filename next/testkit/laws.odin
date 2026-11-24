@@ -330,6 +330,27 @@ same_documents :: proc(a, b: tape.Document) -> bool {
 	return same(x.answers, y.answers) && same(x.starts, y.starts) && same(x.kept, y.kept) && same(x.missing, y.missing) && same(x.names, y.names) && x.dups == y.dups
 }
 
+// `pieces_agree` over `src` cut in two at every byte, in three at a sample of pairs, and in windows of every size up
+// to a few dozen bytes, for a format whose records frame the text as one.
+agree_in_pieces :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, paths: [][]tape.Step, name: string) -> bool {
+	for k in 0 ..= len(src) {
+		cuts := [1]int{k}
+		pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated) or_return
+	}
+	if len(src) >= 8 {
+		for k in 0 ..< 12 {
+			i := (k * 7919) % len(src)
+			j := i + 1 + (k * 104729) % (len(src) - i)
+			cuts := [2]int{i, j}
+			pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated) or_return
+		}
+	}
+	for size in 1 ..= 40 {
+		pieces_agree(t, reads, f, src, opts, cuts_by(len(src), size), paths, name, framing = .Concatenated) or_return
+	}
+	return true
+}
+
 // The reads of `src` in pieces cut at `cuts` give what the whole reads give: the verdict and fault, the document, the
 // answer of each path and the scan of them, and the records of `src` framed as `framing`.
 pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, cuts: []int, paths: [][]tape.Step, name: string, limits: []int = nil, framing := tape.Framing.Lines) -> bool {

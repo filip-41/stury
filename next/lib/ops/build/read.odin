@@ -137,7 +137,6 @@ read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Form
 
 // Whether a path read of `format` may take the repeated keys policy of `opts`. A path read takes one member of a key, so
 // the build-only policies are refused, `.Refuse` unless the format judges it on the names it knows ahead.
-// `format` is nil for the records of a format, which judge it at their start.
 path_dups :: #force_inline proc "contextless" (format: ^tape.Format, opts: tape.Options) -> bool {
 	return opts.dups != .All && (opts.dups != .Refuse || names_ahead(format))
 }

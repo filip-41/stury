@@ -192,7 +192,7 @@ scan_walk :: #force_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX:
 	}
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		p, _ := pass_options(S, opts)
-		return walk_text(src, S, LAX, p, h, regs, a, ctx, build.scanner_columns_hook, nil, opts.budget.steps)
+		return walk_text(src, S, LAX, p, h, regs, a, ctx, build.scanner_key_skip_hook, nil, opts.budget.steps)
 	}
 	return build.read_scan(src, demand, &FORMATS[S], read, opts, caller, nil, node_bound, walk)
 }

@@ -21,7 +21,7 @@ expect_refused :: proc(t: ^testing.T, c: Case, spec := cbor.Spec.Cbor, opts := c
 		return
 	}
 	if c.code != "" {
-		testing.expectf(t, code_of(err) == c.code, "%s: want %s, got %s", c.hex, c.code, code_of(err), loc = loc)
+		testing.expectf(t, testkit.code_of(err) == c.code, "%s: want %s, got %s", c.hex, c.code, testkit.code_of(err), loc = loc)
 	}
 	_, berr := cbor.build(src, spec, opts, context.temp_allocator)
 	testing.expectf(t, testkit.same_refusal(berr, err), "%s: build %v, validate %v", c.hex, berr, err, loc = loc)
@@ -342,20 +342,20 @@ limits_and_repeats_come_first :: proc(t: ^testing.T) {
 	for text in ([]string{"81 98 01 00", "81 9f ff", "81 99 ffff 00", "81 bf ff"}) {
 		for spec in ([]cbor.Spec{.Preferred, .Deterministic, .Length_First}) {
 			err := cbor.validate(hex(text), spec, {budget = {depth = 1}})
-			testing.expectf(t, code_of(err) == "exceeded Depth", "%s as %v: %s", text, spec, code_of(err))
+			testing.expectf(t, testkit.code_of(err) == "exceeded Depth", "%s as %v: %s", text, spec, testkit.code_of(err))
 		}
 	}
 	for spec in ([]cbor.Spec{.Preferred, .Deterministic, .Length_First}) {
-		testing.expect_value(t, code_of(cbor.validate(hex("c0 7f 61 78 ff"), spec)), "not_preferred")
-		testing.expect_value(t, code_of(cbor.validate(hex("c0 ff"), spec)), "bad_tag_content")
+		testing.expect_value(t, testkit.code_of(cbor.validate(hex("c0 7f 61 78 ff"), spec)), "not_preferred")
+		testing.expect_value(t, testkit.code_of(cbor.validate(hex("c0 ff"), spec)), "bad_tag_content")
 	}
 	for spec in ([]cbor.Spec{.Deterministic, .Length_First}) {
 		err := cbor.validate(hex("a2 00 01 00 02"), spec)
-		testing.expectf(t, code_of(err) == "key_order", "%v: %s", spec, code_of(err))
+		testing.expectf(t, testkit.code_of(err) == "key_order", "%v: %s", spec, testkit.code_of(err))
 		_, err = cbor.build(hex("a2 00 01 00 02"), spec, {dups = .Refuse}, context.temp_allocator)
-		testing.expectf(t, code_of(err) == "duplicate_key", "%v refusing repeats: %s", spec, code_of(err))
+		testing.expectf(t, testkit.code_of(err) == "duplicate_key", "%v refusing repeats: %s", spec, testkit.code_of(err))
 		err = cbor.validate(hex("a2 01 01 00 02"), spec)
-		testing.expectf(t, code_of(err) == "key_order", "%v: %s", spec, code_of(err))
+		testing.expectf(t, testkit.code_of(err) == "key_order", "%v: %s", spec, testkit.code_of(err))
 	}
 }
 
@@ -394,8 +394,8 @@ a_repeat_before_a_fault_comes_first :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		_, err := cbor.build(hex(c.text), .Cbor, {dups = .Refuse}, context.temp_allocator)
-		testing.expectf(t, code_of(err) == c.refusing, "%s refusing repeats: %s", c.text, code_of(err))
+		testing.expectf(t, testkit.code_of(err) == c.refusing, "%s refusing repeats: %s", c.text, testkit.code_of(err))
 		_, err = cbor.build(hex(c.text), .Cbor, {dups = .Last}, context.temp_allocator)
-		testing.expectf(t, code_of(err) == c.other, "%s: %s", c.text, code_of(err))
+		testing.expectf(t, testkit.code_of(err) == c.other, "%s: %s", c.text, testkit.code_of(err))
 	}
 }

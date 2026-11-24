@@ -52,7 +52,7 @@ Scanner :: struct {
 	first:       bool, // under `.First` the first member of a repeated key answers
 	group:       bool, // under `.Group` every member of a repeated key answers
 	rewalks:     bool, // the format has `.Rewalk`, so an array whose elements only steps from the end take replays
-	// Whether `scanner_columns_hook` skips a member no step takes at its key. A scan that keeps facts, which `scan_pass`
+	// Whether `scanner_key_skip_hook` skips a member no step takes at its key. A scan that keeps facts, which `scan_pass`
 	// places, does not, nor does a read in pieces of a format whose window may end between a key and its value. A
 	// delimited window never does, so its scan sets it when it keeps no facts.
 	key_skips:   bool,
@@ -72,6 +72,9 @@ Scanner :: struct {
 	bytes:       [dynamic]u8,
 	hold_from:   u64,
 	held_live:   int, // the bytes held once the last `hold_drop` ran
+	// The walk gives its tokens out of text order, as a table of a TOML text that later statements add to does, so the
+	// scan holds the text itself, once, one span from its first byte, and not the bytes of each token.
+	scattered:   bool,
 	// What a key token's offsets index: the document's `src`, or the bytes a read of a text in pieces holds the keys in
 	// once they lie before its window, as a delimited text's header does.
 	key_text:    []u8,
@@ -335,9 +338,11 @@ scanner_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 	return scanner_take(h, s, t, false)
 }
 
-// `scanner_hook` for a walk whose members are placed by position, as a delimited text's cells are, which passes a
-// member no step takes at its key, as `.Columns` reads. A walk of another format gives the value, which costs it less.
-scanner_columns_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+// `scanner_hook` for a walk that passes a member no step takes at its key: one whose members are placed by position,
+// as a delimited text's cells are and `.Columns` reads, and one that owes a container's `End` only when it gives the
+// container, as TOML's, whose `End` is found in its table tree. A walk of another format gives the value, which costs
+// it less.
+scanner_key_skip_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	return scanner_take(h, s, t, true)
 }
 

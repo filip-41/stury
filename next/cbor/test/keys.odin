@@ -51,7 +51,7 @@ byte_string_keys_read_as_base64 :: proc(t: ^testing.T) {
 	b, _ := cbor.find(src, {tape.Name("AQID")})
 	testing.expect_value(t, src[b.lo], 0x02)
 	_, err := cbor.build(src, .Cbor, {dups = .Refuse}, context.temp_allocator)
-	testing.expect_value(t, code_of(err), "duplicate_key")
+	testing.expect_value(t, testkit.code_of(err), "duplicate_key")
 }
 
 // A key keeps its kind, so an integer key and a text key of the same digits are two keys, which a `Name` takes alike.

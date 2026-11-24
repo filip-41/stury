@@ -133,6 +133,17 @@ text_room_in :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index
 	return text_room_of(doc.format, src, t) if ok else 0
 }
 
+// The name of the fact of kind `kind` that node `at` of `doc` holds in its spelling rather than as a span, as its
+// format names it: a `.Style`, how the node is written, as a string's quotes or a number's base, or a `.Tag`, a type
+// the format gives a scalar. False for a node that holds none, for a format that names none and for `NO_NODE`.
+@(require_results)
+fact_name :: proc "contextless" (doc: ^Document, at: Node_Index, kind: Fact_Kind) -> (name: string, ok: bool) {
+	if at == NO_NODE || doc.format == nil || doc.format.fact_name == nil {
+		return "", false
+	}
+	return doc.format.fact_name(doc, at, kind)
+}
+
 // The number of tag `fact` of `doc`, a fact of kind `.Tag`, whose span is the tag's head. False for another fact.
 @(require_results)
 fact_number :: proc "contextless" (doc: ^Document, fact: Fact) -> (spell.Number, bool) {

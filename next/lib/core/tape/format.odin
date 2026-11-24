@@ -1,5 +1,6 @@
 package tape
 
+import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/base/spell"
 
@@ -117,6 +118,9 @@ Format :: struct {
 	// The byte just past the close of the container node `at` of `doc`, which a document stores no node for. False for
 	// one other than the root of a `.Held` document, which holds no byte between its nodes.
 	close_end: proc "contextless" (doc: ^Document, at: Node_Index) -> (end: u64, ok: bool),
+	// The name of the fact of kind `kind` that node `at` of `doc` holds in its spelling, nil for a format whose nodes
+	// spell none. False for a node that holds none.
+	fact_name: proc "contextless" (doc: ^Document, at: Node_Index, kind: Fact_Kind) -> (name: string, ok: bool),
 }
 
 // The reads of one spec of a format, for a caller that picks the format at run time. They are not on `Format`: the
@@ -131,7 +135,8 @@ Reads :: struct {
 }
 
 // The `Reads` of a format whose entry procs take its `Spec`, the spec of a handle being its id less `first`. `R` is the
-// format's records, which hold `Records` as their first field `records`, and every spec shares the one table.
+// format's records, which hold `Records` as their first field `records`, and every spec shares the one table. Records
+// that keep memory past a batch have a field `close: proc(r: ^R)` too, which frees it when the records are destroyed.
 format_reads :: proc "contextless" ($Spec: typeid, $first: Format_Id, $validate: proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> Error, $build: proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> (Document, Error), $find: proc(src: []u8, path: []Step, spec: Spec, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Span_Answer, Error), $scan: proc(src: []u8, demand: ^Demand, spec: Spec, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error), $R: typeid, $records_open: proc(src: []u8, framing: Framing, spec: Spec, opts: Options) -> R, $records_validate: proc(r: ^R, out: []Record, allocator: runtime.Allocator) -> int, $records_find: proc(r: ^R, path: []Step, out: []Record, answers: []Span_Answer, read: Read_Options, allocator: runtime.Allocator) -> int, $records_scan: proc(r: ^R, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int) -> ^Reads {
 	#assert(offset_of(R, records) == 0)
 	spec_of :: #force_inline proc "contextless" (f: ^Format) -> Spec {
@@ -156,6 +161,12 @@ format_reads :: proc "contextless" ($Spec: typeid, $first: Format_Id, $validate:
 			r^ = records_open(src, framing, spec_of(f), opts)
 			r.reads, r.allocator = records_reads(R, records_validate, records_find, records_scan), allocator
 			r.release = proc(r: ^Records) {
+				// Records that hold memory past a batch have a field `close`, which frees it.
+				when intrinsics.type_has_field(R, "close") {
+					if close := (^R)(r).close; close != nil {
+						close((^R)(r))
+					}
+				}
 				free((^R)(r), r.allocator)
 			}
 			return r, nil

@@ -396,6 +396,32 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 	return s, true
 }
 
+// Sizes the room of `h` for `nodes` nodes, at most `most`, for a walk that knows how many nodes it gives before it
+// gives the first, which `s` is to write. Keeps the room when it holds them, when the budget refuses the size or when
+// memory is refused, and the walk grows it as it fills.
+builder_room :: proc "contextless" (h: ^Builder, s: hook.Regs, nodes: int) -> hook.Regs {
+	have := len(h.doc.nodes)
+	want := min(nodes, h.most)
+	if want <= have || h.err != nil || !builder_affords(h, have, want) {
+		return s
+	}
+	context = h.ctx
+	if builder_reserve_counts(h, want) != nil {
+		return s
+	}
+	old := u64(uintptr(raw_data(h.doc.nodes)))
+	raw, err := runtime.non_zero_mem_resize(raw_data(h.doc.nodes), have * size_of(tape.Node), want * size_of(tape.Node), align_of(tape.Node), h.doc.allocator)
+	if took(err, raw_data(raw), want) != nil {
+		return s
+	}
+	base := u64(uintptr(raw_data(raw)))
+	h.doc.nodes = ([^]tape.Node)(raw_data(raw))[:want]
+	h.end = base + u64(want * size_of(tape.Node))
+	s := s
+	s.a = base + (s.a - old)
+	return s
+}
+
 // Stores fact token `t`, a comment or a tag, as a fact of the node it describes. A comment before a value is placed on
 // the node it marks when `builder_end` runs `builder_place_facts`, and a tag is the next node's. An inline comment
 // belongs to the last value completed, and a foot to the innermost open container, or to the root past the last one.

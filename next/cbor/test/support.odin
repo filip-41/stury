@@ -1,12 +1,12 @@
 package cbor_tests
 
-import "base:runtime"
 import "core:fmt"
 import "core:strings"
 import "stury:cbor"
 import "stury:lib/core/tape"
+import "stury:testkit"
 
-// Helpers the CBOR tests share: hex input, a neutral dump of a document, and a fault's rule code.
+// Helpers the CBOR tests share: hex input and a neutral dump of a document.
 
 // The bytes of hex text, ignoring spaces, in the temporary allocator.
 hex :: proc(text: string) -> []u8 {
@@ -33,23 +33,6 @@ hex :: proc(text: string) -> []u8 {
 		}
 	}
 	return out[:]
-}
-
-// The rule code of the fault in `err`, "" for none and the error's arm for another error.
-code_of :: proc(err: tape.Error) -> string {
-	switch e in err {
-	case tape.Fault:
-		return tape.fault_rule(e).code
-	case tape.Exceeded:
-		return fmt.tprintf("exceeded %v", e.kind)
-	case tape.Bad_Option:
-		return fmt.tprintf("bad option %s", e.option)
-	case tape.Piece_Gap:
-		return "piece gap"
-	case runtime.Allocator_Error:
-		return "memory"
-	}
-	return ""
 }
 
 // The text of node `at` of `doc`, read with a buffer `text_room` sizes.
@@ -139,7 +122,7 @@ dump :: proc(b: ^strings.Builder, doc: ^tape.Document, i: tape.Node_Index) -> ta
 dumped :: proc(src: []u8, spec := cbor.Spec.Cbor, opts := cbor.Options{}) -> string {
 	doc, err := cbor.build(src, spec, opts, context.temp_allocator)
 	if err != nil {
-		return code_of(err)
+		return testkit.code_of(err)
 	}
 	b := strings.builder_make(context.temp_allocator)
 	dump(&b, &doc, cbor.ROOT)

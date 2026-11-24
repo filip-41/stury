@@ -47,3 +47,6 @@ Facts :: bit_set[Fact_Kind; u16]
 
 // The comment facts, for a format that holds comments.
 COMMENTS :: Facts{.Comment, .Comment_Inline, .Comment_Foot}
+
+// The spelling of a comment fact that one `#` opens and its line end closes.
+HASH_COMMENT :: u16(1)

@@ -8,11 +8,6 @@ import "stury:lib/ops/build"
 // The tokens a hooked pass gives besides a record's cells: the text's and each record's opening and `End`, and the
 // comment lines. Every token reaches the hook through `emit`.
 
-// The spelling of a comment line's token, which holds the length of its markers as JSONC's does: 1 byte opens it and
-// none closes it. It is not a decode flag.
-@(private)
-COMMENT_SPELLING :: u16(1)
-
 // Gives the hook the token of `n` bytes from `lo`, through its `Keeps` inside a record or text it keeps, and otherwise
 // after growing the hook's room when it has no place for the node. A walk with `LAX` counts a step of `Budget.steps`
 // per container and stops, with no token, at the first container past it. `builder_hook_rows` stores no key, so a key
@@ -191,7 +186,7 @@ give_comments :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)
 			if end < upto && hi > lo && src[hi - 1] == '\r' {
 				hi -= 1
 			}
-			if emit(w, hs, u64(lo), u32(hi - lo), .Plain, role, COMMENT_SPELLING, on) == .Stop {
+			if emit(w, hs, u64(lo), u32(hi - lo), .Plain, role, tape.HASH_COMMENT, on) == .Stop {
 				return stopped(u64(lo), u32(hi - lo)), true
 			}
 		} else {

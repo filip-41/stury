@@ -334,7 +334,7 @@ records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S
 		return 0
 	}
 	defer records_release(r, caller)
-	return build.records_validate(r, out, &RULES, caller, frame, walk)
+	return build.records_validate(r, out, &FORMATS[S], &RULES, caller, frame, walk)
 }
 
 @(private)
