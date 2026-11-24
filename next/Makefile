@@ -32,7 +32,7 @@ WASM_NO_TAIL_FEATURE_SETS := none simd128
 # Test packages whose kernels pick an x86-64 tier, run at each tier and `X86_OPTS` level, and once at each level with
 # no tier named, so the CPU's own tier is detected and used. On an x86-64 machine these runs replace the plain one. An
 # arm64 Mac runs them through Rosetta, and skips them with a note where Rosetta is not installed.
-TIER_PKGS := lib/base/kernel/test lib/base/regex/test dsv/test
+TIER_PKGS := lib/base/kernel/test lib/base/regex/test dsv/test cbor/test
 # The tests of `dsv/test` that read texts of every shape through the delimited pass. The others do not reach the pass
 # instances, and a run under Rosetta takes the whole package six times.
 comma := ,
@@ -71,6 +71,7 @@ SAN_FLAGS := $(TEST_BASE_FLAGS) -define:TEST_TIMEOUT_SECONDS=900 -define:ODIN_TE
 
 # The test whose text nests 100,000 levels on a thread of one MiB, run at the optimization levels that change a frame.
 DEEP_TEST := json_tests.reads_nest_100000_levels_in_one_mib
+DEEP_CBOR_TEST := cbor_tests.reads_nest_100000_levels_in_one_mib
 DEEP_OPTS := none speed
 
 .PHONY: check check-all lint test test-deep test-asan test-tsan
@@ -130,9 +131,12 @@ test:
 	@for p in $(GAP_PKGS); do \
 		echo "== $$p (no gaps, no rewalk)"; $(ODIN) test $$p -o:minimal $(TEST_FLAGS) -define:JSON_GAPS=false -define:JSON_REWALK=false -out:build/test-$$(echo $$p | tr / -)-nogaps || exit 1; \
 	done
-	@for o in $(DEEP_OPTS); do \
-		echo "== json/test (100,000 levels in one MiB, -o:$$o)"; \
-		$(ODIN) test json/test -o:$$o $(TEST_FLAGS) -define:ODIN_TEST_NAMES=$(DEEP_TEST) -out:build/test-deep-$$o || exit 1; \
+	@for pkg in json cbor; do \
+		case $$pkg in json) names="$(DEEP_TEST)";; *) names="$(DEEP_CBOR_TEST)";; esac; \
+		for o in $(DEEP_OPTS); do \
+			echo "== $$pkg/test (100,000 levels in one MiB, -o:$$o)"; \
+			$(ODIN) test $$pkg/test -o:$$o $(TEST_FLAGS) -define:ODIN_TEST_NAMES=$$names -out:build/test-deep-$$pkg-$$o || exit 1; \
+		done; \
 	done
 ifdef X86_RUNS
 	@for p in $(TIER_PKGS); do for o in $(X86_OPTS); do \
@@ -151,7 +155,7 @@ endif
 
 # The sweeps that `test` samples, read in full: every cut, every window size, every budget around the least.
 DEEP_ROUNDS ?= 16
-DEEP_PKGS := dsv/test json/test
+DEEP_PKGS := cbor/test dsv/test json/test
 test-deep:
 	@mkdir -p build; for p in $(DEEP_PKGS); do \
 		echo "== $$p (-define:ROUNDS=$(DEEP_ROUNDS))"; \
