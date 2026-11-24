@@ -4,9 +4,15 @@ package testkit
 import "base:runtime"
 import "core:sys/posix"
 import "core:testing"
+import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 
 // The stack a thread spends before its first read, on its start and the job's call.
 THREAD_START :: 16 * 1024
+
+// The stack a sanitizer's build adds to a read's, whose frames keep a slot and a redzone for each local of the procs
+// they inline, which the reads' stated stack does not count.
+SANITIZER_STACK :: 32 * 1024 when ODIN_SANITIZER_FLAGS != {} else 0
 
 Stack_Read :: #type proc(read: int, text: []u8) -> bool
 
@@ -28,10 +34,10 @@ stack_job :: proc "c" (arg: rawptr) -> rawptr {
 }
 
 // Runs `run(read, text)` for each `read` below `reads`, each on a thread of `stack` bytes, and expects it to give true.
-// A `stack` below the system's least thread stack (128 KiB on Linux arm64) is raised to it. `what` names the text in a
-// failure.
+// A `stack` below the system's least thread stack (128 KiB on Linux arm64) is raised to it, and a sanitizer's build
+// adds `SANITIZER_STACK`. `what` names the text in a failure.
 expect_reads_on_thread :: proc(t: ^testing.T, stack: uint, reads: int, text: []u8, what: string, run: Stack_Read, loc := #caller_location) {
-	size := stack
+	size := stack + SANITIZER_STACK
 	if least := posix.sysconf(._THREAD_STACK_MIN); least > 0 {
 		size = max(size, uint(least))
 	}
@@ -47,3 +53,45 @@ expect_reads_on_thread :: proc(t: ^testing.T, stack: uint, reads: int, text: []u
 		testing.expectf(t, job.ok, "read %d %s stack %d", read, what, size, loc = loc)
 	}
 }
+
+// The reads of a nested text past those every format's own deep test makes, `read` 0 to `DEEP_READS - 1`: a query of
+// `paths` over its document, a scan of `paths`, the records of the container `at` reaches under `framing`, and a
+// clone of its document. `paths` descend, so each read visits every level.
+deep_read :: proc(read: int, reads: ^tape.Reads, f: ^tape.Format, text: []u8, opts: tape.Options, paths: [][]tape.Step, framing: tape.Framing, at: []tape.Step) -> bool {
+	d, derr := tape.demand_of(paths)
+	defer tape.destroy(&d)
+	doc: tape.Document
+	err: tape.Error
+	if read == 0 || read == 3 {
+		doc, err = reads.build(f, text, opts, context.allocator)
+	}
+	defer tape.destroy(&doc)
+	if derr != nil || err != nil {
+		return false
+	}
+	switch read {
+	case 0:
+		q, qerr := build.query({&doc, nil}, &d, opts)
+		defer tape.destroy(&q)
+		return qerr == nil && q.partial != nil && len(q.partial.answers) > 0
+	case 1:
+		s, serr := reads.scan(f, text, &d, {}, opts, context.allocator)
+		defer tape.destroy(&s)
+		return serr == nil
+	case 2:
+		r, rerr := reads.records(f, text, framing, opts, at, context.allocator)
+		if rerr != nil {
+			return false
+		}
+		defer tape.destroy_records(r)
+		out: [4]tape.Record
+		for tape.records_validate(r, out[:]) == len(out) {}
+		return r.err == nil && r.index > 0
+	case:
+		c, cerr := tape.clone_document(&doc)
+		defer tape.destroy(&c)
+		return cerr == nil && len(c.nodes) == len(doc.nodes)
+	}
+}
+
+DEEP_READS :: 4

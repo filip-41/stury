@@ -29,6 +29,7 @@ destroy :: proc {
 	destroy_index,
 	destroy_children,
 	destroy_pieces,
+	destroy_records,
 }
 
 // Frees what `doc` holds and leaves it zero. The source is freed only under `.Owns_Src`, and under `.Borrowed` only the
@@ -77,28 +78,45 @@ clone_document :: proc(doc: ^Document, allocator := context.allocator) -> (c: Do
 		}
 	}
 	if x := doc.partial; x != nil {
-		answers_at := size_of(Partial)
-		starts_at := answers_at + len(x.answers) * size_of(Answer)
-		kept_at := starts_at + len(x.starts) * size_of(u32)
-		missing_at := kept_at + len(x.kept) * size_of(Kept_Child)
-		names_at := missing_at + len(x.missing) * size_of(Missing_Name)
-		block := runtime.mem_alloc_non_zeroed(names_at + len(x.names), align_of(Partial), allocator) or_return
-		y := (^Partial)(raw_data(block))
-		y^ = x^
-		y.answers = ([^]Answer)(raw_data(block[answers_at:]))[:len(x.answers)]
-		y.starts = ([^]u32)(raw_data(block[starts_at:]))[:len(x.starts)]
+		owned := .Borrowed not_in doc.flags
+		y := partial_block(len(x.starts) - 1, len(x.answers), len(x.kept) if owned else 0, len(x.missing) if owned else 0, len(x.names) if owned else 0, x.dups, allocator) or_return
 		copy(y.answers, x.answers)
 		copy(y.starts, x.starts)
-		if .Borrowed not_in doc.flags {
-			y.kept = ([^]Kept_Child)(raw_data(block[kept_at:]))[:len(x.kept)]
-			y.missing = ([^]Missing_Name)(raw_data(block[missing_at:]))[:len(x.missing)]
-			y.names = block[names_at:][:len(x.names)]
+		if owned {
 			copy(y.kept, x.kept)
 			copy(y.missing, x.missing)
 			copy(y.names, x.names)
+		} else {
+			y.kept, y.missing, y.names = x.kept, x.missing, x.names
 		}
 		c.partial = y
 	}
+	return
+}
+
+// A `Partial` under `dups` in one block with its lists, which `destroy` frees whole: room for `answers` answers, the
+// starts of `paths` paths, zero, `kept` kept children, `missing` missing names and `names` bytes of their names, each
+// list of its length and unset. A refused allocation is the error.
+partial_block :: proc(paths, answers, kept, missing, names: int, dups: Duplicates, allocator: runtime.Allocator) -> (x: ^Partial, err: runtime.Allocator_Error) {
+	starts_at := size_of(Partial) + answers * size_of(Answer)
+	kept_at := starts_at + (paths + 1) * size_of(u32)
+	missing_at := kept_at + kept * size_of(Kept_Child)
+	names_at := missing_at + missing * size_of(Missing_Name)
+	block := runtime.mem_alloc_non_zeroed(names_at + names, align_of(Partial), allocator) or_return
+	// An empty allocator gives no block and no error, or a shorter one, either read as a refusal.
+	if len(block) < names_at + names || raw_data(block) == nil {
+		return nil, .Out_Of_Memory
+	}
+	x = (^Partial)(raw_data(block))
+	x^ = {
+		answers = ([^]Answer)(raw_data(block[size_of(Partial):]))[:answers],
+		starts  = ([^]u32)(raw_data(block[starts_at:]))[:paths + 1],
+		kept    = ([^]Kept_Child)(raw_data(block[kept_at:]))[:kept],
+		missing = ([^]Missing_Name)(raw_data(block[missing_at:]))[:missing],
+		names   = block[names_at:][:names],
+		dups    = dups,
+	}
+	runtime.mem_zero(raw_data(x.starts), len(x.starts) * size_of(u32))
 	return
 }
 

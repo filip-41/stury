@@ -65,7 +65,8 @@ dsv_alone_reads_records_and_pieces :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(SRC)
 	records := dsv.records_open(src, .Lines, .Csv, OPTS)
 	out: [8]dsv.Record
-	testing.expect_value(t, dsv.records_validate(&records, out[:]), 2)
+	testing.expect_value(t, dsv.records_validate(&records, out[:]), 0)
+	testing.expect_value(t, records.index, 2)
 	testing.expect_value(t, records.err, nil)
 	pieces := dsv.Pieces {
 		allocator = context.allocator,

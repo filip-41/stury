@@ -372,6 +372,11 @@ path_reads_refuse_a_build_only_dups_policy :: proc(t: ^testing.T) {
 		if !testing.expect_value(t, serr, tape.Error(tape.Bad_Option{"dups"})) {
 			return
 		}
+		doc, _ := json.build(src, allocator = context.temp_allocator)
+		_, qerr := json.query({doc = &doc}, &demand, {dups = dups})
+		if !testing.expect_value(t, qerr, tape.Error(tape.Bad_Option{"dups"})) {
+			return
+		}
 	}
 }
 
@@ -391,7 +396,7 @@ validate_refuses_a_dups_policy_it_cannot_honour :: proc(t: ^testing.T) {
 			testing.expectf(t, n == 0 && r.err == tape.Error(tape.Bad_Option{"dups"}), "%v records: %d %v", dups, n, r.err)
 		} else {
 			testing.expectf(t, err == nil, "%v: %v", dups, err)
-			testing.expectf(t, n == 1 && out[0].err == 0, "%v records: %d %v", dups, n, out[0])
+			testing.expectf(t, n == 0 && r.err == nil && r.index == 1, "%v records: %d %v %v", dups, n, out[0], r.err)
 		}
 	}
 }

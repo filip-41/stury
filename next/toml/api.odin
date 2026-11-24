@@ -2,6 +2,7 @@ package toml
 
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 
 // The names a TOML user calls beside the reads, so that a program reading TOML imports this package alone. The rest of
 // `lib/core/tape` serves walks and hooks.
@@ -36,6 +37,7 @@ Name :: tape.Name
 Index :: tape.Index
 All :: tape.All
 Slice :: tape.Slice
+Descend :: tape.Descend
 Grain :: tape.Grain
 Demand :: tape.Demand
 demand_of :: tape.demand_of
@@ -63,6 +65,7 @@ Doc_Index :: tape.Doc_Index
 Children :: tape.Children
 root :: tape.root
 answer :: tape.answer
+query :: build.query
 member :: tape.member
 element :: tape.element
 length :: tape.length
@@ -83,3 +86,5 @@ number_exact :: tape.number_exact
 fact_name :: tape.fact_name
 text_is_ascii :: tape.text_is_ascii
 destroy :: tape.destroy
+clone_document :: tape.clone_document
+records_window :: tape.records_window

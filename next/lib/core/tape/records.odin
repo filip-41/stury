@@ -9,26 +9,27 @@ Framing :: enum u8 {
 	// One value per line (NDJSON). A line of white space alone holds no record. A record whose line holds more than one
 	// value, or a value that runs on past its line, is refused, and the records go on at the next line.
 	Lines,
-	// The elements of the root array. A fault ends the records, as the text holds no list past it.
+	// The elements of the root array, or of the array `Records.path` reaches. A fault ends the records, as the text
+	// holds no list past it, and a value of another kind ends them with `Bad_Option{"framing"}`.
 	Elements,
-	// The members of the root object. Each member's value is a record, with its key in `Record.key`. Every member is a
-	// record, repeated keys too. A fault ends the records, as under `.Elements`, and a root that is no object holds none.
+	// The members of the root object, or of the object `Records.path` reaches. Each member's value is a record, with its
+	// key in `Record.key`. Every member is a record, repeated keys too. A fault ends the records, and a value of another
+	// kind ends them with `Bad_Option{"framing"}`, as under `.Elements`.
 	Members,
 	// Values one after another with nothing between them, as a CBOR sequence (RFC 8742). A fault ends the records, as
 	// the text holds no place where the next value starts.
 	Concatenated,
 }
 
-// One record: its bytes in the text, and why it does not read. Its bytes run from its first byte that is no white
-// space to its line's end less a CR under `.Lines`, and to its value's end under the other framings. Every offset,
-// those of its error included, counts from the text's first byte. Under `.Members` `key` is the member's key, a token
-// of role `.Key` that `key_raw` reads, and under the other framings it is the zero token, whose role is `.Value`. `err`
-// is 0 for a record that reads, else one past the place of its error in the records' `faults`. A find of a record
-// that does not read answers `.Missing`, and a scan of it gives an empty document.
+// One record: its bytes in the text, and why it does not read, nil when it does. Its bytes run from its first byte
+// that is no white space to its line's end less a CR under `.Lines`, and to its value's end under the other framings.
+// Every offset, those of `err` included, counts from the text's first byte. Under `.Members` `key` is the member's key,
+// a token of role `.Key` that `key_raw` reads, and under the other framings it is the zero token, whose role is
+// `.Value`.
 Record :: struct {
 	lo, hi: u64,
+	err:    Error,
 	key:    Token,
-	err:    u32,
 }
 
 // Where the records of a text are, in their framing.
@@ -41,8 +42,9 @@ Records_At :: enum u8 {
 
 // The state of a read of the records of a text that every format keeps: what is read, and how far. A format's records
 // hold it as their first field, with what their walk learns from record to record after it. Each batch reads the next
-// records into slices the caller gives, as many as they hold. Once a batch fills fewer than it was given room for the
-// records have ended, and `err` says why, nil at the text's end.
+// records into slices the caller gives, as many as they hold, but a validate, which keeps there only the records that
+// do not read and counts every record in `index`. Once a batch fills fewer than it was given room for the records have
+// ended, and `err` says why, nil at the text's end.
 //
 // The records of a text in pieces are read a window at a time, under the framings a format's records read so:
 // `Options.pieces` is the read's, the window the records open with is the text's first, and `records_window` gives each
@@ -56,20 +58,23 @@ Records :: struct {
 	opts:    Options,
 	framing: Framing,
 	// Under `.Elements` and `.Members`, the steps from the root to the container whose elements or members are the
-	// records, which it borrows, empty for the root. Each is a `Name` or an `Index` from the start, and takes the first
-	// member of its key, as the records are given before the object holding them closes.
+	// records, which it borrows, empty for the root. Each is a `Name` or an `Index` from the start. A `Name` takes the
+	// members of its key as `Options.dups` says, and the policies a path read refuses are refused. Under `.First` it
+	// takes the first, and under `.Group` each in document order, whose records follow one another. Under `.Last` it
+	// takes each in turn, as the records are given before the object holding them closes: a member met once a record
+	// was given ends the records with `.Duplicate_Key` at its key, and none given is taken back. A text the path reaches
+	// no value in holds no records.
 	path:    []Step,
 	at:      Records_At,
 	err:     Error,
-	// The errors of the records of the last batch that do not read, in their order, valid until the next batch.
-	faults:  [dynamic]Error,
 	pos:     u64, // where the next record is looked for
 	index:   u64, // the records read
 	key:     Token, // the key of the member being read under `.Members`
 	block:   Record_Block, // what the documents of the last batch of a scan are in
-	// Set by `Reads.records` for records it made: their reads, the proc that frees them and what they are in.
+	// Set by a format whose records hold memory past a batch, which frees it.
+	release: proc(r: ^Records),
+	// Set by `Reads.records` for records it made, which `destroy_records` frees from `allocator`: their reads.
 	reads:     ^Records_Reads,
-	release:   proc(r: ^Records),
 	allocator: runtime.Allocator,
 }
 
@@ -80,8 +85,8 @@ Records_Reads :: struct {
 	scan:     proc(r: ^Records, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int,
 }
 
-// Reads the next records of `r`, which `Reads.records` made, into `out`, judging each as `Reads.validate` judges its
-// bytes alone. Returns how many it filled.
+// Reads the next records of `r`, which `Reads.records` made, judging each as `Reads.validate` judges its bytes alone,
+// and keeps in `out` those that do not read. Returns how many it filled.
 records_validate :: proc(r: ^Records, out: []Record, allocator := context.allocator) -> int {
 	return r.reads.validate(r, out, allocator)
 }
@@ -117,10 +122,11 @@ destroy_records :: proc(r: ^Records) {
 		return
 	}
 	record_block_free(&r.block)
-	delete(r.faults)
-	r.faults = nil
 	if r.release != nil {
 		r.release(r)
+	}
+	if r.reads != nil {
+		free(r, r.allocator)
 	}
 }
 
@@ -151,3 +157,105 @@ record_block_free :: proc(b: ^Record_Block) {
 	b^ = {}
 }
 
+// The allocator of the documents of the next batch of `b`, whose last batch's documents it frees. `caller` gives the
+// chunks when `b` has none.
+record_block_batch :: proc(b: ^Record_Block, caller: runtime.Allocator) -> runtime.Allocator {
+	if b.backing.procedure == nil {
+		b.backing = caller
+		b.outgrown.allocator = caller
+	}
+	if len(b.outgrown) > 0 {
+		want := b.spent + b.used
+		for c in b.outgrown {
+			runtime.mem_free_with_size(raw_data(c), len(c), b.backing)
+		}
+		clear(&b.outgrown)
+		runtime.mem_free_with_size(raw_data(b.chunk), len(b.chunk), b.backing)
+		b.chunk, b.spent = nil, 0
+		if data, err := runtime.mem_alloc_non_zeroed(want, 64, b.backing); err == nil {
+			b.chunk = data
+		}
+	}
+	b.used, b.last = 0, -1
+	return {record_block_proc, b}
+}
+
+@(private)
+RECORD_CHUNK :: 64 * 1024
+
+@(private)
+record_block_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
+	b := (^Record_Block)(data)
+	#partial switch mode {
+	case .Alloc, .Alloc_Non_Zeroed:
+		out, err := record_block_take(b, size, alignment)
+		if err == nil && mode == .Alloc {
+			runtime.mem_zero(raw_data(out), size)
+		}
+		return out, err
+	case .Resize, .Resize_Non_Zeroed:
+		if old_memory == nil {
+			return record_block_proc(data, .Alloc if mode == .Resize else .Alloc_Non_Zeroed, size, alignment, nil, 0, loc)
+		}
+		at := int(uintptr(old_memory) - uintptr(raw_data(b.chunk)))
+		if at == b.last && at + size <= len(b.chunk) {
+			// The last allocation grows or shrinks where it is.
+			b.used = at + size
+			if mode == .Resize && size > old_size {
+				runtime.mem_zero(&b.chunk[at + old_size], size - old_size)
+			}
+			return b.chunk[at:][:size], nil
+		}
+		if size <= old_size {
+			return ([^]u8)(old_memory)[:size], nil
+		}
+		out, err := record_block_take(b, size, alignment)
+		if err != nil {
+			return nil, err
+		}
+		runtime.mem_copy_non_overlapping(raw_data(out), old_memory, old_size)
+		if mode == .Resize {
+			runtime.mem_zero(&out[old_size], size - old_size)
+		}
+		return out, nil
+	case .Free, .Free_All:
+		return nil, nil
+	case .Query_Features:
+		if set := (^runtime.Allocator_Mode_Set)(old_memory); set != nil {
+			set^ = {.Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed, .Free, .Free_All, .Query_Features}
+		}
+		return nil, nil
+	}
+	return nil, .Mode_Not_Implemented
+}
+
+// Takes `size` bytes aligned to `alignment` from the chunk of `b`, starting a larger chunk when it has no room.
+record_block_take :: #force_inline proc(b: ^Record_Block, size, alignment: int) -> ([]u8, runtime.Allocator_Error) {
+	align := max(alignment, 1)
+	base := uintptr(raw_data(b.chunk))
+	at := int((base + uintptr(b.used) + uintptr(align - 1)) &~ uintptr(align - 1) - base)
+	if b.chunk == nil || at + size > len(b.chunk) {
+		return record_block_grow(b, size, align)
+	}
+	b.last, b.used = at, at + size
+	return b.chunk[at:][:size], nil
+}
+
+// `record_block_take` from a larger chunk, which the chunk of `b` is kept for until the next batch.
+@(private, cold)
+record_block_grow :: proc(b: ^Record_Block, size, align: int) -> ([]u8, runtime.Allocator_Error) {
+	grown := max(2 * len(b.chunk), RECORD_CHUNK, size + align)
+	data, err := runtime.mem_alloc_non_zeroed(grown, 64, b.backing)
+	if err != nil {
+		return nil, err
+	}
+	if b.chunk != nil {
+		if _, err = append(&b.outgrown, b.chunk); err != nil {
+			runtime.mem_free_with_size(raw_data(data), grown, b.backing)
+			return nil, err
+		}
+		b.spent += b.used
+	}
+	b.chunk, b.last, b.used = data, 0, size
+	return b.chunk[:size], nil
+}

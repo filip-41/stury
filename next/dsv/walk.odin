@@ -137,7 +137,12 @@ run :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, 
 				}
 			}
 			width := w.width
-			return field_count_fault(src, lo, S, p, run_pass(w, src, lo, p, regs, on, false), width)
+			r := run_pass(w, src, lo, p, regs, on, false)
+			when H == Record_Run {
+				return field_count_fault(src, record_run_from(w.h, src, lo, r), S, p, r, width)
+			} else {
+				return field_count_fault(src, lo, S, p, r, width)
+			}
 		}
 	}
 	return run_pass(w, src, lo, p, regs, on, true)

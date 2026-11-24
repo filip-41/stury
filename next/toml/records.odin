@@ -14,7 +14,7 @@ import "stury:lib/ops/build"
 
 // The records of a text of a TOML spec, which `records_open` makes and each call of `records_validate`, `records_find`
 // or `records_scan` reads in batches, as `tape.Records` says. Under `.Members` and `.Elements` the text is read whole
-// at the first record into a tree in the records' allocator, which `close` frees.
+// at the first record into a tree in the records' allocator, which `tape.destroy_records` frees.
 Records :: struct {
 	using records: tape.Records,
 	spec:          Spec,
@@ -22,14 +22,13 @@ Records :: struct {
 	member:        u32, // under `.Members` and `.Elements`, the child read next
 	// Under `.Members` and `.Elements`, the walk's count of `Budget.steps`, which counts the containers of the text.
 	steps:         u64,
-	close:         proc(r: ^Records), // frees `held`, as the records' release calls it
 }
 
 // Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. Under `.Members` and
 // `.Elements` the records are those of the container `path` reaches, the root table for none, as `tape.Records` says,
-// and a text with no such container holds no records and ends them with the verdict `validate` gives for it. The
-// budget's limits hold for each record, but `Budget.steps` under `.Members` and `.Elements`, which counts the
-// containers of the whole text. Another format's options, `.Lines`, `.Elements` with no path, a `path` the framing does
+// a text with no value there holds no records and ends them with the verdict `validate` gives for it, and a value of
+// another kind ends them with `build.records_kind_refusal`. The budget's limits hold for each record, but
+// `Budget.steps` under `.Members` and `.Elements`, which counts the containers of the whole text. Another format's options, `.Lines`, `.Elements` with no path, a `path` the framing does
 // not take and a text in pieces under `.Members` or `.Elements` end the records with `tape.Bad_Option` before any is
 // read. Under `.Concatenated` a text in pieces holds one record, the whole text, so no batch gives it before the last
 // window, which must hold the text from its first byte.
@@ -37,7 +36,7 @@ records_open :: proc(src: []u8, framing := tape.Framing.Concatenated, spec := Sp
 	if spec > max(Spec) {
 		panic("toml: spec out of range")
 	}
-	r.src, r.framing, r.spec, r.opts, r.member, r.close, r.allocator, r.path = src, framing, spec, opts, NIL, records_close, context.allocator, path
+	r.src, r.framing, r.spec, r.opts, r.member, r.release, r.allocator, r.path = src, framing, spec, opts, NIL, records_close, context.allocator, path
 	if opts.pieces != nil {
 		r.src = tape.piece_src(src, opts.pieces.from)
 	}
@@ -45,7 +44,7 @@ records_open :: proc(src: []u8, framing := tape.Framing.Concatenated, spec := Sp
 		r.err, r.at = err, .Done
 	} else if framing == .Lines || framing == .Elements && len(path) == 0 {
 		r.err, r.at = tape.Bad_Option{"framing"}, .Done
-	} else if err = build.records_path_refused(framing, path); err != nil {
+	} else if err = build.records_path_refused(&FORMATS[spec], framing, path, opts); err != nil {
 		r.err, r.at = err, .Done
 	} else if opts.pieces != nil && framing != .Concatenated {
 		r.err, r.at = tape.Bad_Option{"pieces"}, .Done
@@ -53,8 +52,10 @@ records_open :: proc(src: []u8, framing := tape.Framing.Concatenated, spec := Sp
 	return
 }
 
-// Frees the tree the records of `r` read their text into.
-records_close :: proc(r: ^Records) {
+// Frees the tree the records `r` read their text into.
+@(private)
+records_close :: proc(records: ^tape.Records) {
+	r := (^Records)(records)
 	if r.held != nil {
 		context.allocator = r.allocator
 		parser_destroy(r.held)
@@ -63,9 +64,9 @@ records_close :: proc(r: ^Records) {
 	}
 }
 
-// Reads the next records of `r` into `out` and judges each, as `validate` judges its bytes alone, and under `.Members`
-// and `.Elements` as the child of the text it is. Returns how many it filled, and fewer than `len(out)` once the records have ended,
-// when `err` says why, nil at the text's end.
+// Reads the next records of `r` and judges each, as `validate` judges its bytes alone, and under `.Members` and
+// `.Elements` as the child of the text it is, keeping in `out` those that do not read. Returns how many it filled, and
+// fewer than `len(out)` once the records have ended, when `err` says why, nil at the text's end.
 @(require_results)
 records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.allocator) -> (n: int) {
 	lax := r.opts.budget.steps != 0
@@ -106,7 +107,8 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 }
 
 // Reads the next records of `r` into `out`, and for each the document of its nodes the paths of `demand` reach into the
-// same place of `docs`. Each document is the caller's to free.
+// same place of `docs`. The documents are in the records' block, valid until the next call or `tape.destroy_records`,
+// as `tape.Record_Block` says.
 @(require_results)
 records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	lax := r.opts.budget.steps != 0
@@ -127,7 +129,7 @@ records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs
 
 @(private)
 records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S: Spec, $LAX: bool, caller: runtime.Allocator) -> int {
-	frame :: #force_inline proc(r: ^tape.Records) -> (lo, cut: u64, ok: bool) {
+	frame :: #force_inline proc(r: ^tape.Records, _: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
 		return record_frame(container_of(r, Records, "records"), S)
 	}
 	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
@@ -138,7 +140,7 @@ records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S
 
 @(private)
 records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> int {
-	frame :: #force_inline proc(r: ^tape.Records) -> (lo, cut: u64, ok: bool) {
+	frame :: #force_inline proc(r: ^tape.Records, _: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
 		return record_frame(container_of(r, Records, "records"), S)
 	}
 	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
@@ -149,7 +151,7 @@ records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []
 
 @(private)
 records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> int {
-	frame :: #force_inline proc(r: ^tape.Records) -> (lo, cut: u64, ok: bool) {
+	frame :: #force_inline proc(r: ^tape.Records, _: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
 		return record_frame(container_of(r, Records, "records"), S)
 	}
 	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
@@ -204,8 +206,8 @@ record_frame :: proc(r: ^Records, $S: Spec) -> (lo, cut: u64, ok: bool) {
 
 // Reads the text whole into the tree `r.held` and finds the container `r.path` reaches, false with the records ended
 // when memory is refused, the text faults or holds no such container. The root takes a step, as each container does.
-// Under a path with `Budget.steps` the records end first with the verdict `validate` gives, as the containers outside
-// the one reached are not walked to count theirs.
+// Under a path with `Budget.steps` the records end first with the verdict `validate` gives, which the tree's containers
+// counted in the walk's order give, as the containers outside the one reached are not walked.
 @(private)
 members_open :: proc(r: ^Records, $S: Spec) -> bool {
 	context.allocator = r.allocator
@@ -233,18 +235,50 @@ members_open :: proc(r: ^Records, $S: Spec) -> bool {
 		return false
 	}
 	if len(r.path) > 0 && r.opts.budget.steps != 0 {
-		if err := validate(r.src, S, r.opts); err != nil {
-			r.err, r.at = err, .Done
+		if at, past := steps_past(&p.tree, r.steps); past {
+			r.err, r.at = tape.Exceeded{at = at, kind = .Steps}, .Done
 			return false
 		}
 	}
 	at := path_node(&p.tree, r.path)
 	if at == NIL || p.tree.nodes[at].kind != (.Table if r.framing == .Members else .Array) {
+		if at != NIL {
+			r.err = build.records_kind_refusal()
+		}
 		r.at = .Done
 		return false
 	}
 	r.member = p.tree.nodes[at].first
 	return true
+}
+
+// Where the walk of the whole tree `t` stops with `left` steps of `Budget.steps` left past the root: at the first
+// container in the walk's order past them. False when every container is within them.
+@(private)
+steps_past :: proc "contextless" (t: ^Table_Tree, left: u64) -> (at: u64, past: bool) {
+	left := left
+	id := t.nodes[0].first
+	for id != NIL {
+		n := &t.nodes[id]
+		if n.kind != .Scalar {
+			left -= 1
+			if left == 0 {
+				return n.value.lo, true
+			}
+			if n.first != NIL {
+				id = n.first
+				continue
+			}
+		}
+		for id != 0 && t.nodes[id].next == NIL {
+			id = t.nodes[id].parent
+		}
+		if id == 0 {
+			break
+		}
+		id = t.nodes[id].next
+	}
+	return
 }
 
 // The node `path` reaches from the root of `t`, each `Name` a table's member and each `Index` an array's element, or

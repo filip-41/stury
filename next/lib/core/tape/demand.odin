@@ -24,7 +24,10 @@ Demand_Node :: struct {
 	last:           u32, // its last descendant, so the nodes under it are those up to `last`
 	lengths:        u64, // a bit per length its `Name` steps have, past 63 counted from 0
 	heads:          u64, // a bit per first byte its `Name` steps have, by the byte's low six bits
+	tails:          u64, // a bit per last byte its `Name` steps have, by the byte's low six bits
 	neg:            u64, // the furthest back a negative `Index` or `Slice` end of it reaches, else 0
+	fills:          u64, // the fewest elements an array has for each of its `Index` steps to take one
+	places:         u64, // a bit per element below 64 one of its `Index` steps takes
 	names, indexes: u32, // how many `Name` steps it has, and how many `Index` steps
 	// The elements from `takes_from` up to `takes_to` are those all its `Slice` steps from the start and `All` steps with
 	// a limit take, every element for none.
@@ -35,6 +38,7 @@ Demand_Node :: struct {
 	whole:          bool, // it ends a path whose grain is `.Whole`
 	keys:           bool, // it ends a path whose grain is `.Keys`, and none whose grain is `.Whole`
 	slices:         bool, // it has a `Slice` step with an end from the end
+	sliced:         bool, // it has a `Slice` step
 	// It is reached through a `Descend` step, so it takes every child of a container it is live in through an `All`
 	// edge to itself, takes the members of a `Name` step as written, and a value its steps cannot follow gives no
 	// answer.
@@ -208,6 +212,10 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 			case Index:
 				n.indexes += 1
 				n.others ||= step >= 0
+				n.fills = max(n.fills, u64(step) + 1 if step >= 0 else u64(-step))
+				if step >= 0 && step < 64 {
+					n.places |= 1 << uint(step)
+				}
 				n.neg = max(n.neg, step_reach(step))
 			case All:
 				n.others, n.alls = true, true
@@ -217,6 +225,7 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 			case Slice:
 				// A slice from the end takes only elements a ring holds, as a negative `Index` does.
 				n.others ||= step.lo >= 0
+				n.sliced = true
 				n.neg = max(n.neg, step_reach(step))
 				if step_reach(step) > 0 {
 					n.slices = true
@@ -229,6 +238,7 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 				n.lengths |= 1 << (uint(len(step)) & 63)
 				if len(step) > 0 {
 					n.heads |= 1 << (string(step)[0] & 63)
+					n.tails |= 1 << (string(step)[len(step) - 1] & 63)
 				}
 			}
 		}

@@ -1,6 +1,5 @@
 package tape
 
-import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/base/spell"
 
@@ -132,7 +131,7 @@ Reads :: struct {
 	scan: proc(f: ^Format, src: []u8, demand: ^Demand, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error),
 	// Makes the records of `src` framed as `framing`, in the container `path` reaches, in `allocator`, which
 	// `destroy_records` frees.
-	records: proc(f: ^Format, src: []u8, framing: Framing, opts: Options, allocator: runtime.Allocator, path: []Step = nil) -> (^Records, runtime.Allocator_Error),
+	records: proc(f: ^Format, src: []u8, framing: Framing, opts: Options, path: []Step, allocator: runtime.Allocator) -> (^Records, runtime.Allocator_Error),
 }
 
 // The `Reads` of a format whose entry procs take its `Spec`, the spec of a handle being its id less `first`. `R` is the
@@ -156,20 +155,11 @@ format_reads :: proc "contextless" ($Spec: typeid, $first: Format_Id, $validate:
 		scan = proc(f: ^Format, src: []u8, demand: ^Demand, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error) {
 			return scan(src, demand, spec_of(f), read, opts, allocator)
 		},
-		records = proc(f: ^Format, src: []u8, framing: Framing, opts: Options, allocator: runtime.Allocator, path: []Step = nil) -> (records: ^Records, err: runtime.Allocator_Error) {
+		records = proc(f: ^Format, src: []u8, framing: Framing, opts: Options, path: []Step, allocator: runtime.Allocator) -> (records: ^Records, err: runtime.Allocator_Error) {
 			r := new(R, allocator) or_return
 			context.allocator = allocator
 			r^ = records_open(src, framing, spec_of(f), opts, path)
 			r.reads, r.allocator = records_reads(R, records_validate, records_find, records_scan), allocator
-			r.release = proc(r: ^Records) {
-				// Records that hold memory past a batch have a field `close`, which frees it.
-				when intrinsics.type_has_field(R, "close") {
-					if close := (^R)(r).close; close != nil {
-						close((^R)(r))
-					}
-				}
-				free((^R)(r), r.allocator)
-			}
 			return r, nil
 		},
 	}

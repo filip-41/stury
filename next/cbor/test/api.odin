@@ -72,8 +72,8 @@ cbor_alone_reads_records_and_pieces :: proc(t: ^testing.T) {
 	seq := []u8{0x01, 0x82, 0x02, 0x03, 0x61}
 	records := cbor.records_open(seq)
 	out: [8]cbor.Record
-	testing.expect_value(t, cbor.records_validate(&records, out[:]), 2)
-	testing.expect_value(t, out[1].lo, 1)
+	testing.expect_value(t, cbor.records_validate(&records, out[:]), 0)
+	testing.expect_value(t, records.index, 2)
 	_, truncated := records.err.(cbor.Fault)
 	testing.expect(t, truncated)
 	pieces := cbor.Pieces {

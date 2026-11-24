@@ -10,6 +10,7 @@ import "core:slice"
 import "core:strings"
 import "core:testing"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 
 // An answer of a path read: the value found, or the outcome, with the node the readers stopped at.
 Ref_Answer :: struct {
@@ -558,38 +559,9 @@ Records_Read :: struct {
 @(private)
 Records_Got :: struct {
 	records: [dynamic]tape.Record,
-	errs:    [dynamic]tape.Error, // each record's error, nil for one that reads
 	answers: [dynamic]tape.Span_Answer,
 	docs:    [dynamic]tape.Document,
 	err:     tape.Error,
-}
-
-// The error of the record `rec` of the last batch of `r`, nil for one that reads.
-record_error :: proc(r: ^tape.Records, rec: tape.Record) -> tape.Error {
-	return r.faults[rec.err - 1] if rec.err != 0 else nil
-}
-
-// A record as a test compares it: the records before it, its bytes, its error and its key.
-Record_Read :: struct {
-	index:  u64,
-	lo, hi: u64,
-	err:    tape.Error,
-	key:    tape.Token,
-}
-
-// Record `k` of the `n` the last batch of `r` read into `out`, with its error.
-record_read :: proc(r: ^tape.Records, out: []tape.Record, k, n: int) -> Record_Read {
-	rec := out[k]
-	return {r.index - u64(n) + u64(k), rec.lo, rec.hi, record_error(r, rec), rec.key}
-}
-
-// The `n` records the last batch of `r` read into `out`, with their errors, in the temporary allocator.
-records_read_all :: proc(r: ^tape.Records, out: []tape.Record, n: int) -> []Record_Read {
-	got := make([]Record_Read, n, context.temp_allocator)
-	for k in 0 ..< n {
-		got[k] = record_read(r, out, k, n)
-	}
-	return got
 }
 
 @(private)
@@ -598,7 +570,6 @@ records_got_free :: proc(g: ^Records_Got) {
 		tape.destroy(&d)
 	}
 	delete(g.records)
-	delete(g.errs)
 	delete(g.answers)
 	delete(g.docs)
 }
@@ -630,9 +601,6 @@ records_batch :: proc(r: ^tape.Records, how: Records_Read, got: ^Records_Got) ->
 		}
 	}
 	append(&got.records, ..out[:n])
-	for rec in out[:n] {
-		append(&got.errs, record_error(r, rec))
-	}
 	return n
 }
 
@@ -657,7 +625,7 @@ records_read :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, p
 	defer if pieces {
 		delete(text)
 	}
-	r, e := run.reads.records(run.f, text[:end], framing, opts, context.allocator, at)
+	r, e := run.reads.records(run.f, text[:end], framing, opts, at, context.allocator)
 	if e != nil {
 		got.err = e
 		return
@@ -736,28 +704,55 @@ records_pieces_agree :: proc(t: ^testing.T, run: Piece_Run, framing: tape.Framin
 		ok := got.err == whole.err && len(got.records) == len(whole.records) && slice.equal(got.answers[:], whole.answers[:])
 		for k := 0; ok && k < len(got.records); k += 1 {
 			a, b := got.records[k], whole.records[k]
-			ok = a.lo == b.lo && a.hi == b.hi && got.errs[k] == whole.errs[k] && a.key == b.key
+			ok = a.lo == b.lo && a.hi == b.hi && a.err == b.err && a.key == b.key
 			ok = ok && (how.how != .Scan || same_documents(got.docs[k], whole.docs[k]))
 		}
 		if !testing.expectf(t, ok, "%s %v cut %v: records %v at %v %v %v: %v records, %v, whole %v records, %v", name, run.f.name, run.cuts, framing, at, how.how, how.path, len(got.records), got.err, len(whole.records), whole.err) {
 			return false
 		}
+		if how.how == .Validate && run.opts.dups != .All {
+			validate_keeps_faults(t, run, framing, &whole, at, name) or_return
+		}
 	}
 	return true
 }
 
-// The law of records at a path over `src`: for each container a path of names and places from the start reaches in the
-// build, the first member of each key taken, the records under `.Elements` or `.Members` are its children as written,
-// each from its first byte, a tag's where it has one, to its end with its key, and each record's scan document is the
-// build's subtree of the child. The records end with the verdict `validate` gives for the text, as do those at a path
-// to a scalar, to a container of the other kind, or to no value. Returns the containers whose records it read.
+// Whether the records a validate kept, those that do not read, are the records of a find with no path whose error is
+// set, in order and ending alike. A find refuses `.All`, which a validate takes.
+@(private)
+validate_keeps_faults :: proc(t: ^testing.T, run: Piece_Run, framing: tape.Framing, kept: ^Records_Got, at: []tape.Step, name: string) -> bool {
+	every := records_read(run, framing, {how = .Find}, false, at)
+	defer records_got_free(&every)
+	bad := make([dynamic]tape.Record, context.temp_allocator)
+	for rec in every.records {
+		if rec.err != nil {
+			append(&bad, rec)
+		}
+	}
+	ok := every.err == kept.err && len(bad) == len(kept.records)
+	for k := 0; ok && k < len(bad); k += 1 {
+		a, b := bad[k], kept.records[k]
+		ok = a.lo == b.lo && a.hi == b.hi && a.err == b.err && a.key == b.key
+	}
+	return testing.expectf(t, ok, "%s %v: validate under %v at %v keeps %v records ending %v, a find's faulting records are %v ending %v", name, run.f.name, framing, at, len(kept.records), kept.err, len(bad), every.err)
+}
+
+// The law of records at a path over `src`, under each policy for repeated keys: for each value a path of names and
+// places from the start reaches in the build that keeps every member, the records under `.Elements` or `.Members`
+// are the children of the containers of the framing's kind the path takes, as written, each from its first byte, a
+// tag's where it has one, to its end with its key, and each record's scan document is the build's subtree of the
+// child. A `Name` step takes the first member of its key under `.First`, every one in document order under `.Group`,
+// and under `.Last` each in turn, until one is met once a record was given, which ends the records with
+// `.Duplicate_Key` at its key. A value the path reaches last of another kind ends the records with
+// `build.records_kind_refusal`, under `.Last` once no later member may take its place, and a path the text has no
+// value for holds no records. The records end with the verdict `validate` gives for the text, or a refusal before it.
+// Returns the containers whose records it read.
 records_at_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, name: string) -> (read: int) {
 	defer free_all(context.temp_allocator)
 	every := opts
 	every.dups = .All
 	doc, err := reads.build(f, src, every, context.allocator)
 	defer tape.destroy(&doc)
-	verdict := reads.validate(f, src, opts, context.allocator)
 	whole := tape.Demand{}
 	derr: runtime.Allocator_Error
 	if whole, derr = tape.demand_of({{}}); derr != nil {
@@ -771,7 +766,7 @@ records_at_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src
 	}
 	records_of :: proc(reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, framing: tape.Framing, path: []tape.Step, demand: ^tape.Demand) -> (got: [dynamic]Got, end: tape.Error) {
 		got = make([dynamic]Got, context.temp_allocator)
-		r, e := reads.records(f, src, framing, opts, context.allocator, path)
+		r, e := reads.records(f, src, framing, opts, path, context.allocator)
 		if e != nil {
 			return got, e
 		}
@@ -796,25 +791,51 @@ records_at_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src
 			tape.destroy(&g.doc)
 		}
 	}
-	if err != nil {
-		for path in ([][]tape.Step{{tape.Name("a")}, {tape.Index(0)}, {tape.Index(0), tape.Index(0)}}) {
-			for framing in ([]tape.Framing{.Elements, .Members}) {
-				got, end := records_of(reads, f, src, opts, framing, path, &whole)
-				free_got(got)
-				testing.expectf(t, same_refusal(end, verdict), "%s %v: records at %v %v: %v, validate %v", name, f.name, path, framing, end, verdict)
-			}
-		}
-		return
+	refusal :: proc(e: tape.Error) -> bool {
+		x, fault := e.(tape.Fault)
+		return e == build.records_kind_refusal() || fault && x.kind == .Duplicate_Key
 	}
-	r := tape.Reader{&doc, nil}
-	Reached :: struct {
+	for dups in ([]tape.Duplicates{.Default, .First, .Last, .Group, .All}) {
+		o := opts
+		o.dups = dups
+		verdict := reads.validate(f, src, o, context.allocator)
+		if !build.path_dups(f, o) {
+			for path in ([][]tape.Step{{tape.Name("a")}, {tape.Index(0)}}) {
+				got, end := records_of(reads, f, src, o, .Elements, path, &whole)
+				free_got(got)
+				testing.expectf(t, len(got) == 0 && end == tape.Error(tape.Bad_Option{"dups"}), "%s %v: records at %v under %v: %d records, %v", name, f.name, path, dups, len(got), end)
+			}
+			continue
+		}
+		if err != nil {
+			for path in ([][]tape.Step{{tape.Name("a")}, {tape.Index(0)}, {tape.Index(0), tape.Index(0)}}) {
+				for framing in ([]tape.Framing{.Elements, .Members}) {
+					got, end := records_of(reads, f, src, o, framing, path, &whole)
+					free_got(got)
+					testing.expectf(t, same_refusal(end, verdict) || refusal(end), "%s %v: records at %v %v under %v: %v, validate %v", name, f.name, path, framing, dups, end, verdict)
+				}
+			}
+			continue
+		}
+		read += records_at_policy(t, reads, f, src, o, &doc, &whole, name, records_of, free_got)
+	}
+	return
+}
+
+// `records_at_agree` under the policy of `opts` over a valid `src`, whose build keeps every member in `doc`.
+@(private)
+records_at_policy :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, doc: ^tape.Document, whole: ^tape.Demand, name: string, records_of: proc(reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, framing: tape.Framing, path: []tape.Step, demand: ^tape.Demand) -> (got: [dynamic]$G, end: tape.Error), free_got: proc(got: [dynamic]G)) -> (read: int) {
+	dups := f.dups if opts.dups == .Default else opts.dups
+	r := tape.Reader{doc, nil}
+	reached := make([dynamic][]tape.Step, context.temp_allocator)
+	Reach :: struct {
 		path: []tape.Step,
 		at:   tape.Node_Index,
 	}
-	reached := make([dynamic]Reached, context.temp_allocator)
-	append(&reached, Reached{nil, tape.ROOT})
-	for i := 0; i < len(reached) && len(reached) < 40; i += 1 {
-		from := reached[i]
+	todo := make([dynamic]Reach, context.temp_allocator)
+	append(&todo, Reach{nil, tape.ROOT})
+	for i := 0; i < len(todo) && len(todo) < 40; i += 1 {
+		from := todo[i]
 		if len(from.path) == 3 {
 			continue
 		}
@@ -830,7 +851,7 @@ records_at_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src
 			}
 			step: tape.Step = tape.Index(place)
 			if key != tape.NO_NODE {
-				text := scalar_text(&doc, key)
+				text := scalar_text(doc, key)
 				if slice.contains(seen[:], text) {
 					continue
 				}
@@ -838,35 +859,111 @@ records_at_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src
 				step = tape.Name(text)
 			}
 			path := slice.concatenate([][]tape.Step{from.path, {step}}, context.temp_allocator)
-			append(&reached, Reached{path, value})
+			append(&todo, Reach{path, value})
 		}
 	}
-	append(&reached, Reached{{tape.Name("zz_missing")}, tape.NO_NODE}, Reached{{tape.Index(1 << 20)}, tape.NO_NODE})
-	for x in reached[1:] {
-		for framing in ([]tape.Framing{.Elements, .Members}) {
-			got, end := records_of(reads, f, src, opts, framing, x.path, &whole)
-			defer free_got(got)
-			kind := doc.nodes[x.at].kind if x.at != tape.NO_NODE else tape.Kind.Null
+	for x in todo[1:] {
+		append(&reached, x.path)
+	}
+	append(&reached, []tape.Step{tape.Name("zz_missing")}, []tape.Step{tape.Index(1 << 20)})
+	if doc.nodes[tape.ROOT].kind <= .Plain {
+		append(&reached, []tape.Step{})
+	}
+	// The records the policy gives at `path`, in order, and how they end.
+	Want :: struct {
+		children: [dynamic][2]tape.Node_Index, // each record's key, `NO_NODE` in an array, and value
+		end:      tape.Error,
+		given:    bool,
+		pending:  bool,
+		done:     bool,
+	}
+	visit :: proc(r: tape.Reader, f: ^tape.Format, src: []u8, at: tape.Node_Index, path: []tape.Step, framing: tape.Framing, dups: tape.Duplicates, w: ^Want) {
+		doc := r.doc
+		kind := doc.nodes[at].kind
+		if len(path) == 0 {
 			if kind != (.Array if framing == .Elements else .Object) {
-				testing.expectf(t, len(got) == 0 && same_refusal(end, verdict), "%s %v: records at %v %v of no such container: %d records, %v", name, f.name, x.path, framing, len(got), end)
-				continue
+				if dups == .Last {
+					w.pending = true
+				} else {
+					w.end, w.done = build.records_kind_refusal(), true
+				}
+				return
 			}
-			read += 1
-			c, _, _ := tape.children(r, x.at, context.temp_allocator)
-			k := 0
-			for ; ; k += 1 {
+			c, _, _ := tape.children(r, at, context.temp_allocator)
+			for {
 				key, value, vp := tape.next_child(r, &c, .Group)
 				if vp != .Found {
 					break
 				}
-				if !testing.expectf(t, k < len(got), "%s %v: records at %v %v: %d records, the container has more", name, f.name, x.path, framing, len(got)) {
-					break
+				append(&w.children, [2]tape.Node_Index{key, value})
+				w.given = true
+			}
+			return
+		}
+		#partial switch s in path[0] {
+		case tape.Index:
+			if kind != .Array {
+				return
+			}
+			c, _, _ := tape.children(r, at, context.temp_allocator)
+			for place := 0; ; place += 1 {
+				_, value, vp := tape.next_child(r, &c, .Group)
+				if vp != .Found {
+					return
 				}
+				if place == int(s) {
+					w.pending = false
+					visit(r, f, src, value, path[1:], framing, dups, w)
+					return
+				}
+			}
+		case tape.Name:
+			if kind != .Object {
+				return
+			}
+			c, _, _ := tape.children(r, at, context.temp_allocator)
+			for {
+				key, value, vp := tape.next_child(r, &c, .Group)
+				if vp != .Found || w.done {
+					return
+				}
+				if !tape.key_names(f, src, doc.nodes[key], string(s)) {
+					continue
+				}
+				if dups == .Last && w.given {
+					head, _ := f.bounds(src, doc.nodes[key])
+					w.end, w.done = tape.Fault{at = doc.nodes[key].lo - u64(head), kind = .Duplicate_Key}, true
+					return
+				}
+				w.pending = false
+				visit(r, f, src, value, path[1:], framing, dups, w)
+				if dups == .First {
+					return
+				}
+			}
+		}
+	}
+	for path in reached {
+		for framing in ([]tape.Framing{.Elements, .Members}) {
+			got, end := records_of(reads, f, src, opts, framing, path, whole)
+			defer free_got(got)
+			want := Want{children = make([dynamic][2]tape.Node_Index, context.temp_allocator)}
+			visit(r, f, src, tape.ROOT, path, framing, dups, &want)
+			if !want.done && want.pending {
+				want.end = build.records_kind_refusal()
+			}
+			ok := len(got) == len(want.children) && same_refusal(end, want.end)
+			if !testing.expectf(t, ok, "%s %v: records at %v %v under %v: %d records ending %v, want %d ending %v", name, f.name, path, framing, dups, len(got), end, len(want.children), want.end) {
+				continue
+			}
+			read += int(len(want.children) > 0)
+			for kv, k in want.children {
 				g := got[k]
+				key, value := kv[0], kv[1]
 				node := doc.nodes[value]
 				lo, hi := node.lo, node.lo + u64(node.n)
 				if node.kind > .Plain {
-					hi, _ = f.close_end(&doc, value)
+					hi, _ = f.close_end(doc, value)
 				} else {
 					head, tail := f.bounds(src, node)
 					lo, hi = lo - u64(head), hi + u64(tail)
@@ -876,13 +973,12 @@ records_at_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src
 						lo = min(lo, fact.lo)
 					}
 				}
-				want := strings.builder_make(context.temp_allocator)
-				render_node(&want, &doc, int(value))
-				ok := g.lo == lo && g.hi == hi && render_doc(&g.doc) == strings.to_string(want)
+				want_doc := strings.builder_make(context.temp_allocator)
+				render_node(&want_doc, doc, int(value))
+				ok = g.lo == lo && g.hi == hi && render_doc(&g.doc) == strings.to_string(want_doc)
 				ok &&= key == tape.NO_NODE || g.key.lo == doc.nodes[key].lo && g.key.n == doc.nodes[key].n
-				testing.expectf(t, ok, "%s %v: records at %v %v: record %d %v..%v %s, child %v..%v %s", name, f.name, x.path, framing, k, g.lo, g.hi, render_doc(&g.doc), lo, hi, strings.to_string(want))
+				testing.expectf(t, ok, "%s %v: records at %v %v under %v: record %d %v..%v %s, child %v..%v %s", name, f.name, path, framing, dups, k, g.lo, g.hi, render_doc(&g.doc), lo, hi, strings.to_string(want_doc))
 			}
-			testing.expectf(t, k == len(got) && end == nil, "%s %v: records at %v %v: %d records of %d, %v", name, f.name, x.path, framing, len(got), k, end)
 		}
 	}
 	return
@@ -929,13 +1025,23 @@ moved_error :: proc(err: tape.Error, by: i64) -> tape.Error {
 // own text's scan does. A text with no record has nothing to compare.
 @(private)
 records_alone_check :: proc(t: ^testing.T, run: Piece_Run, alone: Alone, how: Records_Read, own_demands: ^[2]tape.Demand, pieces: bool, name: string) -> bool {
-	got := records_read(run, alone.framing, how, pieces)
+	// A validate keeps only the records that do not read, so every record's verdict is a find's with no path, of which
+	// the validate's must be those that do not read.
+	read := how
+	if how.how == .Validate {
+		read = {how = .Find}
+		if run.opts.dups != .All {
+			kept := records_read(run, alone.framing, how, pieces)
+			defer records_got_free(&kept)
+			validate_keeps_faults(t, run, alone.framing, &kept, nil, name) or_return
+		}
+	}
+	got := records_read(run, alone.framing, read, pieces)
 	defer records_got_free(&got)
 	if len(got.records) == 0 {
 		return true
 	}
 	for rec, k in got.records {
-		rec_err := got.errs[k]
 		head: []u8
 		switch alone.head {
 		case .Nothing:
@@ -963,12 +1069,7 @@ records_alone_check :: proc(t: ^testing.T, run: Piece_Run, alone: Alone, how: Re
 		case .Find:
 			a, err := run.reads.find(run.f, text, own_path, how.read, run.opts, context.allocator)
 			want = err
-			if rec_err != nil {
-				// A record that does not read answers no value.
-				same = got.answers[k] == {outcome = .Missing}
-				detail = fmt.tprintf("answer %v of a record that does not read", got.answers[k])
-			}
-			if err == nil && rec_err == nil {
+			if err == nil && rec.err == nil {
 				got_answer := got.answers[k]
 				detail = fmt.tprintf("answer %v %q, own text's %v %q", got_answer, run.src[got_answer.lo:got_answer.hi], a, text[a.lo:a.hi])
 				same = a.outcome == got_answer.outcome && a.kind == got_answer.kind
@@ -978,17 +1079,17 @@ records_alone_check :: proc(t: ^testing.T, run: Piece_Run, alone: Alone, how: Re
 			d, err := run.reads.scan(run.f, text, &own_demands[row], how.read, run.opts, context.allocator)
 			defer tape.destroy(&d)
 			want = err
-			if err == nil && rec_err == nil {
+			if err == nil && rec.err == nil {
 				detail = fmt.tprintf("answers %s, own text's %s", render_answers(&got.docs[k]), render_answers(&d))
 				same = render_answers(&d) == render_answers(&got.docs[k])
 			}
 		}
 		// A read that stops at its answer judges the bytes it reads, so it may stop before a fault that the read of the
 		// own text finds in the rest of the record.
-		if how.read.stop_early && rec_err == nil && want != nil {
+		if how.read.stop_early && rec.err == nil && want != nil {
 			continue
 		}
-		if !testing.expectf(t, same_refusal(rec_err, moved_error(want, by)) && same, "%s %v cut %v pieces %v: %v %v %v record %d %q: reads as %v, its own text as %v, %s", name, run.f.name, run.cuts, pieces, how.how, how.path, how.read, k, string(text), rec_err, want, detail) {
+		if !testing.expectf(t, same_refusal(rec.err, moved_error(want, by)) && same, "%s %v cut %v pieces %v: %v %v %v record %d %q: reads as %v, its own text as %v, %s", name, run.f.name, run.cuts, pieces, how.how, how.path, how.read, k, string(text), rec.err, want, detail) {
 			return false
 		}
 	}
@@ -1231,8 +1332,14 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 					agree_facts(t, &doc, &r, name)
 				}
 				plain := run.grains == nil && run.limits == nil
+				if !stop {
+					build_query_agrees(t, reads, f, src, scan_opts, &doc, &d, set, run.limits, plain && len(set) == 1, name, a)
+				}
+				scan_query_agrees(t, f, &doc, &r, &d, set, run.limits, dups, stop, name)
 				// The query of every path over the scan is checked on the scans that keep each path whole.
-				queries_agree(t, reads, f, src, scan_opts, &doc, &r, &d, &all, run.paths, paths if plain else nil, run.limits, stop, plain && len(set) == 1, name, a)
+				if plain && len(paths) > 0 {
+					wide_query_agrees(t, f, &doc, &r, &all, paths, dups, stop, name, a)
+				}
 
 				if root, p := tape.root(w.r); p == .Found {
 					agree_past(&w, tape.ROOT, root, 0)
@@ -1293,81 +1400,76 @@ deep_back_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src:
 			tape.destroy(&r)
 			bad, refused := serr.(tape.Bad_Option)
 			testing.expectf(t, refused && bad.option == "path", "%s %v: scan of %v: %v", name, f.name, path, serr)
-			q, qerr := tape.query({doc, nil}, &d, dups)
+			q, qerr := build.query({doc, nil}, &d, {dups = dups})
 			defer tape.destroy(&q)
 			testing.expectf(t, qerr == nil && answers_agree(doc, &q, 0, path, dups, limit), "%s %v: query of the build, answers of %v under %v limit %d: %v %s", name, f.name, path, dups, limit, qerr, render_answers(&q))
 		}
 	}
 }
 
-// The query law over the scan `r` of `src` by `d`, a demand of `set`, and the build `doc`: a query of `d` over the
-// build answers as the reference does, and so does one over `r`, where a stopped scan, or one a limit on a path or a
-// step cut short, may leave a path `.Not_Loaded`. A query of `all`, the demand of `every` path, over `r` answers each
-// path as the reference does or with a `.Not_Loaded`, for a non-empty `every`. With `single`, a find of the one path
-// answers the first of the query's answers.
+// The query law over the build `doc` of `src`: a query of `d`, a demand of `set`, answers as the reference does. With
+// `single`, a find of the one path under `opts` answers the first of the query's answers.
 @(private)
-queries_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, doc, r: ^tape.Document, d, all: ^tape.Demand, set, every: [][]tape.Step, limits: []int, stop, single: bool, name: string, a: ^Agreement) {
+build_query_agrees :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, doc: ^tape.Document, d: ^tape.Demand, set: [][]tape.Step, limits: []int, single: bool, name: string, a: ^Agreement) {
 	dups := opts.dups
-	not_loaded :: proc(q: ^tape.Document, path: int) -> bool {
-		for k := 0; ; k += 1 {
-			_, p, ok := tape.answer({doc = q}, path, k)
-			if !ok {
-				return false
-			}
-			if p == .Not_Loaded {
-				return true
-			}
+	q, err := build.query({doc, nil}, d, {dups = dups})
+	defer tape.destroy(&q)
+	if !testing.expectf(t, err == nil, "%s %v: query of the build %v", name, f.name, err) {
+		return
+	}
+	a.queries += 1
+	for path, i in set {
+		limit := limits[i] if i < len(limits) else 0
+		if !answers_agree(doc, &q, i, path, dups, limit) {
+			testing.expectf(t, false, "%s %v: query of the build, answers of %v under %v limit %d: %s", name, f.name, path, dups, limit, render_answers(&q))
 		}
 	}
-	if !stop {
-		q, err := tape.query({doc, nil}, d, dups)
-		defer tape.destroy(&q)
-		if !testing.expectf(t, err == nil, "%s %v: query of the build %v", name, f.name, err) {
-			return
-		}
-		a.queries += 1
-		for path, i in set {
-			limit := limits[i] if i < len(limits) else 0
-			if !answers_agree(doc, &q, i, path, dups, limit) {
-				testing.expectf(t, false, "%s %v: query of the build, answers of %v under %v limit %d: %s", name, f.name, path, dups, limit, render_answers(&q))
-			}
-		}
-		if single {
-			fa, ferr := reads.find(f, src, set[0], {}, opts, context.allocator)
-			k, kp, any := tape.answer({doc = &q}, 0, 0)
-			ok := true
-			if bad, refused := ferr.(tape.Bad_Option); refused && bad.option == "path" {
-			} else if ferr != nil {
-				ok = false
-			} else if !any {
-				ok = fa.outcome == .Missing
-			} else if kp == .Found {
-				node := doc.nodes[k]
-				got := tape.answer_node(fa)
-				ok = fa.outcome == .Found && got.lo == node.lo && got.kind == node.kind && (node.kind > .Plain || got.n == node.n)
-			} else {
-				ok = fa.outcome == kp
-			}
-			testing.expectf(t, ok, "%s %v: find %v under %v: %v %v, query %v %v", name, f.name, set[0], dups, fa, ferr, kp, k)
-		}
+	if !single {
+		return
 	}
-	q, err := tape.query({r, nil}, d, dups)
+	fa, ferr := reads.find(f, src, set[0], {}, opts, context.allocator)
+	k, kp, any := tape.answer({doc = &q}, 0, 0)
+	ok := true
+	if bad, refused := ferr.(tape.Bad_Option); refused && bad.option == "path" {
+	} else if ferr != nil {
+		ok = false
+	} else if !any {
+		ok = fa.outcome == .Missing
+	} else if kp == .Found {
+		node := doc.nodes[k]
+		got := tape.answer_node(fa)
+		ok = fa.outcome == .Found && got.lo == node.lo && got.kind == node.kind && (node.kind > .Plain || got.n == node.n)
+	} else {
+		ok = fa.outcome == kp
+	}
+	testing.expectf(t, ok, "%s %v: find %v under %v: %v %v, query %v %v", name, f.name, set[0], dups, fa, ferr, kp, k)
+}
+
+// The query law over the scan `r` by `d`, a demand of `set`, against the build `doc`: a query of `d` over `r` answers as
+// the reference does, where a stopped scan, or one a limit on a path or a step cut short, may leave a path `.Not_Loaded`.
+@(private)
+scan_query_agrees :: proc(t: ^testing.T, f: ^tape.Format, doc, r: ^tape.Document, d: ^tape.Demand, set: [][]tape.Step, limits: []int, dups: tape.Duplicates, stop: bool, name: string) {
+	q, err := build.query({r, nil}, d, {dups = dups})
 	defer tape.destroy(&q)
 	if !testing.expectf(t, err == nil, "%s %v: query of the scan %v", name, f.name, err) {
 		return
 	}
+	cut := stop || limits != nil || step_limited(set)
 	for path, i in set {
 		limit := limits[i] if i < len(limits) else 0
-		if !answers_agree(doc, &q, i, path, dups, limit) && !((stop || limits != nil || step_limited(set)) && not_loaded(&q, i)) {
+		if !answers_agree(doc, &q, i, path, dups, limit) && !(cut && not_loaded(&q, i)) {
 			testing.expectf(t, false, "%s %v: query of the scan stop %v, answers of %v under %v limit %d: %s", name, f.name, stop, path, dups, limit, render_answers(&q))
 		}
 	}
-	if len(every) == 0 {
-		return
-	}
-	wide, werr := tape.query({r, nil}, all, dups)
+}
+
+// The query law of `all`, the demand of `every` path, over the scan `r` of fewer paths: each path answers as the
+// reference, the build `doc`, does, or with a `.Not_Loaded` where the scan did not keep what it reads.
+@(private)
+wide_query_agrees :: proc(t: ^testing.T, f: ^tape.Format, doc, r: ^tape.Document, all: ^tape.Demand, every: [][]tape.Step, dups: tape.Duplicates, stop: bool, name: string, a: ^Agreement) {
+	wide, err := build.query({r, nil}, all, {dups = dups})
 	defer tape.destroy(&wide)
-	if !testing.expectf(t, werr == nil, "%s %v: query of every path over the scan %v", name, f.name, werr) {
+	if !testing.expectf(t, err == nil, "%s %v: query of every path over the scan %v", name, f.name, err) {
 		return
 	}
 	for path, i in every {
@@ -1376,7 +1478,21 @@ queries_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 		} else if not_loaded(&wide, i) {
 			a.query_unread += 1
 		} else {
-			testing.expectf(t, false, "%s %v: query of every path over the scan of %v stop %v, answers of %v under %v: %s", name, f.name, set, stop, path, dups, render_answers(&wide))
+			testing.expectf(t, false, "%s %v: query of every path over the scan stop %v, answers of %v under %v: %s", name, f.name, stop, path, dups, render_answers(&wide))
+		}
+	}
+}
+
+// Whether some answer of path `path` of `q` is `.Not_Loaded`.
+@(private)
+not_loaded :: proc(q: ^tape.Document, path: int) -> bool {
+	for k := 0; ; k += 1 {
+		_, p, ok := tape.answer({doc = q}, path, k)
+		if !ok {
+			return false
+		}
+		if p == .Not_Loaded {
+			return true
 		}
 	}
 }

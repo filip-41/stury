@@ -66,13 +66,11 @@ faults_name_the_rule_on_every_read :: proc(t: ^testing.T) {
 	}
 	text := transmute([]u8)string("[1,]\n[01]\n[\"\x01\"]\n")
 	r := json.records_open(text)
-	defer tape.destroy_records(&r)
 	out: [4]tape.Record
 	n := json.records_validate(&r, out[:])
 	for want, i in ([]string{"trailing_comma", "leading_zero", "control_char"}) {
-		err := testkit.record_error(&r, out[i])
-		f, faulted := err.(tape.Fault)
-		testing.expectf(t, n == 3 && faulted && tape.fault_rule(f).code == want, "record %d of %d: %v, want %s", i, n, err, want)
+		f, faulted := out[i].err.(tape.Fault)
+		testing.expectf(t, n == 3 && faulted && tape.fault_rule(f).code == want, "record %d of %d: %v, want %s", i, n, out[i].err, want)
 	}
 }
 

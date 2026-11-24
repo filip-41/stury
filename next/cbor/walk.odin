@@ -51,16 +51,13 @@ FLAG_OBJECT :: u64(1) << 62
 FLAG_INDEF :: u64(1) << 61
 @(private)
 FLAG_TAG :: u64(1) << 60
-// Marks a frame of `Item_Frame` that holds the chunks of an indefinite string, whose major type is in the bits from 56.
-@(private)
-FLAG_CHUNKS :: u64(1) << 59
 // The count of items a frame waits for, and `INDEF_COUNT` for an indefinite item, which no count reaches.
 @(private)
 COUNT_MASK :: u64(1) << 56 - 1
 @(private)
 INDEF_COUNT :: u64(1) << 55
-#assert(FLAG_OBJECT & FLAG_INDEF == 0 && FLAG_INDEF & FLAG_TAG == 0 && FLAG_TAG & FLAG_CHUNKS == 0)
-#assert((FLAG_OBJECT | FLAG_INDEF | FLAG_TAG | FLAG_CHUNKS) & COUNT_MASK == 0)
+#assert(FLAG_OBJECT & FLAG_INDEF == 0 && FLAG_INDEF & FLAG_TAG == 0)
+#assert((FLAG_OBJECT | FLAG_INDEF | FLAG_TAG) & COUNT_MASK == 0)
 #assert(INDEF_COUNT & COUNT_MASK == INDEF_COUNT)
 
 // The frame of an array or map of `arg` items or pairs, `pair` for a map: it waits for `arg` items, or twice that, and
@@ -678,6 +675,8 @@ walk_item :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, $LA
 			r = hook.walk_result(u64(r) >> 16, hook.WALK_STEPS)
 		}
 		left = w.steps[0]
+	} else {
+		left = steps
 	}
 	if w.owned {
 		hook.levels_free(&w)

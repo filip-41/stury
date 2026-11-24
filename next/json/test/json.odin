@@ -591,3 +591,64 @@ memory_limit :: proc(t: ^testing.T) {
 	testing.expectf(t, ferr == nil && found.outcome == .Found && text[found.lo] == '2', "find: %v %v", ferr, found)
 	testing.expect(t, json.validate(text, opts = opts) == nil)
 }
+
+// A query over a document holds to its read options' budget: `depth` for the containers it enters, `steps` for those it
+// opens and `memory` for what it allocates, refused as `Exceeded` at the container that ran it out, or with no byte for
+// memory, with nothing left allocated. The one path `..` then a name, read as one pass over the nodes, holds to it as
+// two paths do.
+@(test)
+query_budget :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string(`{"a":[[1,[2]],[3]],"b":[[{"c":4}]]}`)
+	doc, berr := json.build(src)
+	defer tape.destroy(&doc)
+	testing.expect(t, berr == nil)
+	Case :: struct {
+		paths:  [][]tape.Step,
+		budget: tape.Budget,
+		kind:   tape.Budget_Kind,
+		at:     u64, // the byte of the container the query is refused at, `NO_BYTE` for one it answers
+	}
+	below := []tape.Step{tape.Descend{}, tape.Name("c")}
+	elements := []tape.Step{tape.Name("a"), tape.All{}, tape.All{}}
+	cases := []Case{
+		{{elements}, {depth = 3}, .Depth, tape.NO_BYTE},
+		{{elements}, {depth = 2}, .Depth, 6},
+		{{elements}, {steps = 4}, .Steps, tape.NO_BYTE},
+		{{elements}, {steps = 3}, .Steps, 14},
+		{{below}, {depth = 3}, .Depth, 9},
+		{{below, below}, {depth = 3}, .Depth, 9},
+		{{below}, {steps = 4}, .Steps, 14},
+		{{below, below}, {steps = 4}, .Steps, 14},
+		{{below}, {steps = 7}, .Steps, 25},
+		{{below, below}, {steps = 7}, .Steps, 25},
+		{{below}, {depth = 4, steps = 8}, .Depth, tape.NO_BYTE},
+		{{below, below}, {depth = 4, steps = 8}, .Depth, tape.NO_BYTE},
+	}
+	for c, i in cases {
+		d, _ := tape.demand_of(c.paths, allocator = context.temp_allocator)
+		q, err := json.query({doc = &doc}, &d, {budget = c.budget})
+		defer tape.destroy(&q)
+		e, exceeded := err.(tape.Exceeded)
+		if c.at == tape.NO_BYTE {
+			testing.expectf(t, err == nil && len(q.partial.answers) > 0, "case %d: %v", i, err)
+		} else {
+			testing.expectf(t, exceeded && e.kind == c.kind && e.at == c.at && q.partial == nil, "case %d: %v", i, err)
+		}
+	}
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `[`)
+	join_each(&b, 5000, ",", "%[0]d")
+	strings.write_string(&b, `]`)
+	wide, _ := json.build(transmute([]u8)strings.to_string(b))
+	defer tape.destroy(&wide)
+	d, _ := tape.demand_of([][]tape.Step{{tape.All{}}}, allocator = context.temp_allocator)
+	for memory in ([]u64{1, 1024, 4096}) {
+		q, err := json.query({doc = &wide}, &d, {budget = {memory = memory}})
+		e, exceeded := err.(tape.Exceeded)
+		testing.expectf(t, exceeded && e.kind == .Memory && e.at == tape.NO_BYTE && q.partial == nil, "memory %d: %v", memory, err)
+	}
+	q, err := json.query({doc = &wide}, &d, {budget = {memory = 1 << 20}})
+	testing.expectf(t, err == nil && q.allocator == context.allocator && len(q.partial.answers) == 5000, "memory: %v", err)
+	tape.destroy(&q)
+}

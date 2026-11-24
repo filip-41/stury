@@ -169,18 +169,22 @@ the_text_is_one_record :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("a = 1\n[t]\nb = [1, 2]\n")
 	r := toml.records_open(src)
-	defer toml.records_close(&r)
+	defer toml.destroy(&r)
 	out: [4]tape.Record
-	n := toml.records_validate(&r, out[:])
+	every: [4]tape.Span_Answer
+	n := toml.records_find(&r, nil, out[:], every[:])
 	testing.expect_value(t, n, 1)
-	testing.expect(t, out[0].lo == 0 && out[0].hi == u64(len(src)) && out[0].err == 0 && r.err == nil)
+	testing.expect(t, out[0].lo == 0 && out[0].hi == u64(len(src)) && out[0].err == nil && r.err == nil)
+	v := toml.records_open(src)
+	defer toml.destroy(&v)
+	testing.expect(t, toml.records_validate(&v, out[:]) == 0 && v.index == 1 && v.err == nil)
 	bad := transmute([]u8)string("a = 1\na = 2\n")
 	b := toml.records_open(bad)
 	testing.expect_value(t, toml.records_validate(&b, out[:]), 0)
 	testing.expect_value(t, testkit.code_of(b.err), "duplicate_key")
 	marked := toml.records_open(transmute([]u8)string("\xef\xbb\xbfa = 1\n"))
-	testing.expect_value(t, toml.records_validate(&marked, out[:]), 1)
-	testing.expect(t, out[0].lo == 3 && out[0].hi == 9 && out[0].err == 0)
+	testing.expect_value(t, toml.records_find(&marked, nil, out[:], every[:]), 1)
+	testing.expect(t, out[0].lo == 3 && out[0].hi == 9 && out[0].err == nil)
 	empty := toml.records_open(nil)
 	testing.expect_value(t, toml.records_validate(&empty, out[:]), 0)
 	for framing in ([]tape.Framing{.Lines, .Elements}) {
@@ -195,7 +199,7 @@ the_root_members_are_records :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("a = 'x'\n[t]\nb = [1, 2]\n[u.v]\nc = 3\n[t.w]\nd = 4\n")
 	r := toml.records_open(src, .Members)
-	defer toml.records_close(&r)
+	defer toml.destroy(&r)
 	out: [4]tape.Record
 	answers: [4]tape.Span_Answer
 	n := toml.records_find(&r, {tape.Name("b"), tape.Index(1)}, out[:], answers[:])
@@ -205,13 +209,13 @@ the_root_members_are_records :: proc(t: ^testing.T) {
 	}
 	keys := [3]string{"a", "t", "u"}
 	for rec, i in out[:n] {
-		testing.expectf(t, string(src[rec.key.lo:][:rec.key.n]) == keys[i] && rec.err == 0, "record %d: %v", i, rec)
+		testing.expectf(t, string(src[rec.key.lo:][:rec.key.n]) == keys[i] && rec.err == nil, "record %d: %v", i, rec)
 	}
 	testing.expect(t, out[0].lo == 4 && out[0].hi == 7)
 	testing.expect(t, answers[0].outcome == .Wrong_Kind && answers[1].outcome == .Found && answers[2].outcome == .Missing)
 	testing.expect_value(t, string(src[answers[1].lo:answers[1].hi]), "2")
 	bad := toml.records_open(transmute([]u8)string("a = 1\n[a]\n"), .Members)
-	defer toml.records_close(&bad)
+	defer toml.destroy(&bad)
 	testing.expect_value(t, toml.records_validate(&bad, out[:]), 0)
 	testing.expect_value(t, testkit.code_of(bad.err), "duplicate_key")
 }
@@ -236,6 +240,28 @@ records_at_a_path_are_the_children_of_the_container :: proc(t: ^testing.T) {
 	testing.expect(t, read > 0)
 }
 
+// Records at a path under `Budget.steps` end with the verdict `validate` gives, which counts the containers outside the
+// one the path reaches too.
+@(test)
+records_at_a_path_keep_the_steps_budget :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string("a = [{b = 1}, [2]]\n[t]\nc = [3, [4, {d = 5}]]\n[u.v]\nw = {x = [6]}\n")
+	path := []toml.Step{toml.Name("t"), toml.Name("c")}
+	over := 0
+	for steps in 1 ..= 12 {
+		opts := toml.Options{budget = {steps = u64(steps)}}
+		want := toml.validate(src, opts = opts)
+		r := toml.records_open(src, .Elements, opts = opts, path = path)
+		defer toml.destroy(&r)
+		out: [4]tape.Record
+		for toml.records_validate(&r, out[:]) == len(out) {}
+		_, past := want.(tape.Exceeded)
+		over += int(past)
+		testing.expectf(t, r.err == want, "%d steps: records end with %v, validate %v", steps, r.err, want)
+	}
+	testing.expect(t, over > 0 && over < 12)
+}
+
 // Records take `.Refuse` as every TOML read does, as a repeated key is a fault whatever the policy.
 @(test)
 records_take_the_refuse_policy :: proc(t: ^testing.T) {
@@ -248,14 +274,14 @@ records_take_the_refuse_policy :: proc(t: ^testing.T) {
 		d, _ := tape.demand_of({{tape.Name("b")}})
 		defer tape.destroy(&d)
 		v := toml.records_open(src, framing, opts = {dups = .Refuse})
-		defer toml.records_close(&v)
+		defer toml.destroy(&v)
 		f := toml.records_open(src, framing, opts = {dups = .Refuse})
-		defer toml.records_close(&f)
+		defer toml.destroy(&f)
 		s := toml.records_open(src, framing, opts = {dups = .Refuse})
-		defer toml.records_close(&s)
 		defer tape.destroy_records(&s)
 		want := 1 if framing == .Concatenated else 2
-		testing.expect_value(t, toml.records_validate(&v, out[:]), want)
+		testing.expect_value(t, toml.records_validate(&v, out[:]), 0)
+		testing.expect_value(t, v.index, u64(want))
 		testing.expect_value(t, toml.records_find(&f, {tape.Name("b")}, out[:], answers[:]), want)
 		n := toml.records_scan(&s, &d, out[:], docs[:])
 		testing.expect_value(t, n, want)

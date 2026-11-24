@@ -7,9 +7,17 @@ import "stury:cbor"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// Reads the nested text four ways: a verdict, a document, the first element at each level and a scan of two paths.
+// Reads the nested text four ways, a verdict, a document, the first element at each level and a scan of two paths,
+// and `testkit.deep_read`'s ways, which take the records of the innermost array.
 read_nested :: proc(read: int, text: []u8) -> bool {
 	opts := cbor.Options{budget = {depth = 200_000}}
+	if read >= 4 {
+		at := make([]tape.Step, len(text) - 2, context.temp_allocator)
+		for &step in at {
+			step = tape.Index(0)
+		}
+		return testkit.deep_read(read - 4, cbor.reads(.Cbor), cbor.as(.Cbor), text, opts, {{tape.Descend{}, tape.Index(0)}}, .Elements, at)
+	}
 	switch read {
 	case 0:
 		return cbor.validate(text, opts = opts) == nil
@@ -35,7 +43,7 @@ expect_nested_reads_on_thread :: proc(t: ^testing.T, stack: uint, depth: int) {
 	for i in 0 ..< depth {
 		text[i] = 0x81
 	}
-	testkit.expect_reads_on_thread(t, stack, 4, text, fmt.tprintf("depth %d", depth), read_nested)
+	testkit.expect_reads_on_thread(t, stack, 4 + testkit.DEEP_READS, text, fmt.tprintf("depth %d", depth), read_nested)
 }
 
 // Each read runs on a thread with the stack it states, over an item nesting past the frame's levels.

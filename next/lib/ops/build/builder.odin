@@ -112,11 +112,21 @@ builder_regs :: #force_inline proc "contextless" (h: ^Builder) -> hook.Regs {
 // `allocator`, is built in instead of a room of `nodes`, and it grows as such a room does.
 builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, allocator: runtime.Allocator, budget: ^hook.Memory_Budget = nil, lent: []tape.Node = nil) {
 	b^ = {}
-	b.doc = {src = src, format = format, allocator = allocator}
-	b.stack, b.borrowed, b.closed, b.ctx, b.most, b.budget = frames, true, tape.NO_NODE, context, most, budget
-	b.counts.allocator = allocator
-	if len(lent) > 0 {
-		b.lent, b.doc.nodes = true, lent[:min(len(lent), most)]
+	b.ctx, b.doc.allocator = context, allocator
+	builder_again(b, src, format, nodes, most, frames, budget, lent)
+}
+
+// Starts `b`, which `builder_start` started and `builder_end` ended, as `builder_start` does with the allocator and the
+// context it started with.
+@(private)
+builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, budget: ^hook.Memory_Budget = nil, lent: []tape.Node = nil) {
+	b.doc = {src = src, format = format, allocator = b.doc.allocator}
+	b.stack, b.facts, b.most, b.closed, b.err, b.full = frames, nil, most, tape.NO_NODE, nil, 0
+	b.borrowed, b.lent, b.budget, b.stubs, b.unstored, b.keep_facts = true, len(lent) > 0, budget, 0, 0, false
+	b.counts = nil
+	b.counts.allocator = b.doc.allocator
+	if b.lent {
+		b.doc.nodes = lent[:min(len(lent), most)]
 		b.end = u64(uintptr(raw_data(b.doc.nodes))) + u64(len(b.doc.nodes) * size_of(tape.Node))
 		b.err = builder_reserve_counts(b, len(b.doc.nodes))
 		return
@@ -130,27 +140,13 @@ builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 	if b.err = builder_reserve_counts(b, room); b.err != nil {
 		return
 	}
-	raw, err := runtime.mem_alloc_non_zeroed(room * size_of(tape.Node), align_of(tape.Node), allocator)
+	raw, err := runtime.mem_alloc_non_zeroed(room * size_of(tape.Node), align_of(tape.Node), b.doc.allocator)
 	if b.err = took(err, raw_data(raw), room); b.err != nil {
 		delete(b.counts)
 		return
 	}
 	b.doc.nodes = ([^]tape.Node)(raw_data(raw))[:room]
 	b.end = u64(uintptr(raw_data(raw))) + u64(room * size_of(tape.Node))
-	return
-}
-
-// Starts `b`, which `builder_start` started with the same allocator and `builder_end` ended, as `builder_start` would
-// with a `lent` room and no budget. The context `b` keeps is the one it started with.
-builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, most: int, frames: []u64, lent: []tape.Node) {
-	b.doc = {src = src, format = format, allocator = b.doc.allocator}
-	b.stack, b.facts, b.most, b.closed, b.err, b.full = frames, nil, most, tape.NO_NODE, nil, 0
-	b.borrowed, b.lent, b.budget, b.stubs, b.unstored, b.keep_facts = true, true, nil, 0, 0, false
-	b.counts = nil
-	b.counts.allocator = b.doc.allocator
-	b.doc.nodes = lent[:min(len(lent), most)]
-	b.end = u64(uintptr(raw_data(b.doc.nodes))) + u64(len(b.doc.nodes) * size_of(tape.Node))
-	b.err = builder_reserve_counts(b, len(b.doc.nodes))
 }
 
 // Reserves the entries of `counts` the containers closed in a room of `room` nodes may need.

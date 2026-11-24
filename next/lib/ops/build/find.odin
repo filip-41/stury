@@ -89,6 +89,7 @@ Find_Level :: struct {
 // The steps a find follows of `path`: a `Descend` at its end answers first the value the steps before it reach, so it
 // is left out. False for a `Descend` with steps after it, which a find refuses, as its answers lie at any depth, which
 // takes a scan's set of steps live in each container where a find holds a level per step.
+@(private)
 find_steps :: proc "contextless" (path: []tape.Step) -> ([]tape.Step, bool) {
 	n := len(path)
 	for n > 0 {

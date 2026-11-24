@@ -2,6 +2,7 @@ package json
 
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 
 // The names a JSON user calls beside the reads, so that a program reading JSON imports this package alone. The rest of
 // `lib/core/tape` serves walks and hooks.
@@ -63,7 +64,7 @@ Doc_Index :: tape.Doc_Index
 Children :: tape.Children
 root :: tape.root
 answer :: tape.answer
-query :: tape.query
+query :: build.query
 member :: tape.member
 element :: tape.element
 length :: tape.length
@@ -83,3 +84,5 @@ number_form :: tape.number_form
 number_exact :: tape.number_exact
 text_is_ascii :: tape.text_is_ascii
 destroy :: tape.destroy
+clone_document :: tape.clone_document
+records_window :: tape.records_window

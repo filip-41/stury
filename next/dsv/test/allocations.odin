@@ -145,7 +145,7 @@ read_under :: proc(data: rawptr, a: runtime.Allocator) {
 			opts.pieces = &p
 			window = text[:min(len(text), 90)]
 		}
-		records, err := reads.records(f, window, .Lines, opts, a)
+		records, err := reads.records(f, window, .Lines, opts, nil, a)
 		if err != nil {
 			return
 		}

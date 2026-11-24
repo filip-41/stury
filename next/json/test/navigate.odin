@@ -191,6 +191,16 @@ navigate_takes_duplicates_by_policy :: proc(t: ^testing.T) {
 		{{N("a")}, .Last, `2`, `Not_Loaded`},
 	}, dups = .First)
 	expect_reads(t, `{"a":1,"a":2}`, {{N("a")}}, {}, {{{}, .Default, `{"a":1,"a":2} #1 ["a":2]`, `{"a":1,"a":2} #1 ["a":2]`}})
+	// The members of a repeated key whose values are objects are kept alike, each with its own members.
+	nested := `{"a":{"x":1,"y":0},"b":2,"a":{"y":4,"x":3},"a":{"y":5}}`
+	for dups in ([]tape.Duplicates{.Last, .First}) {
+		expect_reads(t, nested, {{N("a"), N("x")}}, {}, {
+			{{N("a"), N("x")}, .Last, `Missing`, `Missing` if dups == .Last else `Not_Loaded`},
+			{{N("a"), N("x")}, .First, `1`, `1`},
+			{{N("a"), N("y")}, .First, `0`, `Not_Loaded`},
+			{{N("b")}, .Last, `2`, `Not_Loaded`},
+		}, dups = dups)
+	}
 	expect_reads(t, `{"a":1,"a":2}`, {{N("a")}}, {}, {
 		{{}, .Default, `{"a":1,"a":2} #1 ["a":2]`, `~{"a":1} #Not_Loaded [Not_Loaded]`},
 	}, dups = .First)

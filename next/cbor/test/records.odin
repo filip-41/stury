@@ -20,10 +20,11 @@ read_records :: proc(t: ^testing.T, src: []u8, framing: tape.Framing, spec := cb
 	keys := make([dynamic]string, context.temp_allocator)
 	r := cbor.records_open(src, framing, spec, opts)
 	out: [2]tape.Record
+	every: [2]tape.Span_Answer
 	for {
-		n := cbor.records_validate(&r, out[:])
+		n := cbor.records_find(&r, nil, out[:], every[:])
 		for rec in out[:n] {
-			testing.expectf(t, rec.err == 0, "record at %d: %v", rec.lo, testkit.record_error(&r, rec), loc = loc)
+			testing.expectf(t, rec.err == nil, "record at %d: %v", rec.lo, rec.err, loc = loc)
 			append(&spans, [2]u64{rec.lo, rec.hi})
 			if framing == .Members {
 				buf: [64]u8
@@ -36,6 +37,9 @@ read_records :: proc(t: ^testing.T, src: []u8, framing: tape.Framing, spec := cb
 		}
 	}
 	got = {spans[:], keys[:], r.err}
+	// A validate keeps no record, as every one reads, and counts them all.
+	v := cbor.records_open(src, framing, spec, opts)
+	testing.expectf(t, cbor.records_validate(&v, out[:]) == 0 && v.err == r.err && v.index == u64(len(spans)), "validate: %v records, %v", v.index, v.err, loc = loc)
 	// Find and scan read the same records, each answering as a read of its bytes alone.
 	f := cbor.records_open(src, framing, spec, opts)
 	answers: [1]tape.Span_Answer
@@ -99,7 +103,7 @@ elements_are_records :: proc(t: ^testing.T) {
 	trailing := read_records(t, hex("81 01 00"), .Elements)
 	testing.expect(t, len(trailing.spans) == 1 && testkit.code_of(trailing.err) == "trailing")
 	not_array := read_records(t, hex("a0"), .Elements)
-	testing.expect(t, len(not_array.spans) == 0 && not_array.err == nil)
+	testing.expect(t, len(not_array.spans) == 0 && not_array.err == tape.Error(tape.Bad_Option{"framing"}))
 	inner := read_records(t, hex("82 01 61 80"), .Elements)
 	testing.expect(t, len(inner.spans) == 1 && testkit.code_of(inner.err) == "invalid_utf8")
 	preferred := read_records(t, hex("9f 01 ff"), .Elements, .Preferred)
@@ -107,18 +111,27 @@ elements_are_records :: proc(t: ^testing.T) {
 }
 
 // A tag on the root does not hide its container: the elements of a tagged array and the members of a tagged map are
-// records, and a tag that folds a number leaves none.
+// records, a tag that folds a number leaves none, and a tag whose content may not be a container ends them with the
+// fault `validate` gives, at the root and under a path.
 @(test)
 tagged_roots_hold_records :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	got := read_records(t, hex("d9d9f7 83 01 02 03"), .Elements)
 	testing.expectf(t, len(got.spans) == 3 && got.spans[0] == {4, 5} && got.err == nil, "%v", got)
-	nested := read_records(t, hex("c1 d8 18 82 01 02"), .Elements)
+	nested := read_records(t, hex("d8 64 d9d9f7 82 01 02"), .Elements)
 	testing.expectf(t, len(nested.spans) == 2 && nested.err == nil, "%v", nested)
+	for text in ([]string{"c1 82 01 02", "c0 82 01 02", "d8 18 82 01 02", "d8 64 c1 82 01 02"}) {
+		want := cbor.validate(hex(text))
+		root := read_records(t, hex(text), .Elements)
+		testing.expectf(t, len(root.spans) == 0 && root.err == want && want != nil, "%s: %v, validate %v", text, root, want)
+		under := hex(fmt.tprintf("a1 61 61 %s", text))
+		at := read_records_at(t, under, .Elements, {tape.Name("a")})
+		testing.expectf(t, len(at.spans) == 0 && at.err == cbor.validate(under), "a: %s: %v", text, at)
+	}
 	members := read_records(t, hex("d9d9f7 a2 61 61 01 61 62 02"), .Members)
 	testing.expectf(t, len(members.spans) == 2 && members.err == nil, "%v", members)
 	number := read_records(t, hex("c4 82 20 01"), .Elements)
-	testing.expectf(t, len(number.spans) == 0 && number.err == nil, "%v", number)
+	testing.expectf(t, len(number.spans) == 0 && number.err == tape.Error(tape.Bad_Option{"framing"}), "%v", number)
 	strict := read_records(t, hex("d8 02 83 01 02 03"), .Elements, .Preferred)
 	testing.expect(t, len(strict.spans) == 0)
 	for text in ([]string{"dc", "dd", "de", "df", "df 83 01 02 03", "d8"}) {
@@ -202,11 +215,12 @@ records_answer_as_their_bytes_alone :: proc(t: ^testing.T) {
 records_open_through_the_reads :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := hex("01 02 03")
-	r, err := cbor.reads(.Cbor).records(cbor.as(.Cbor), src, .Concatenated, {}, context.allocator)
+	r, err := cbor.reads(.Cbor).records(cbor.as(.Cbor), src, .Concatenated, {}, nil, context.allocator)
 	testing.expect_value(t, err, nil)
 	defer tape.destroy_records(r)
 	out: [4]tape.Record
-	testing.expect_value(t, tape.records_validate(r, out[:]), 3)
+	testing.expect_value(t, tape.records_validate(r, out[:]), 0)
+	testing.expect_value(t, r.index, 3)
 }
 
 // A tolerance a member's key takes is the record's: its answer reports it, as the value's own bytes would.
@@ -220,4 +234,121 @@ members_report_the_tolerance_their_key_takes :: proc(t: ^testing.T) {
 	testing.expect_value(t, cbor.records_find(&r, {}, out[:], answers[:]), 2)
 	testing.expect_value(t, r.err, nil)
 	testing.expect(t, answers[0].tolerated && !answers[1].tolerated)
+}
+
+// A path takes as many steps as the text nests, each container of the framing held in memory past its first few, in
+// a whole text and in one cut at every byte.
+@(test)
+records_at_a_long_path_read_through_every_step :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	DEPTH :: 100
+	src := make([dynamic]u8, context.temp_allocator)
+	path := make([dynamic]tape.Step, context.temp_allocator)
+	for k in 0 ..< DEPTH {
+		if k % 2 == 0 {
+			append(&src, 0xa2, 0x61, 'z', 0x01, 0x61, 'k')
+			append(&path, tape.Name("k"))
+		} else {
+			append(&src, 0x82, 0x00)
+			append(&path, tape.Index(1))
+		}
+	}
+	append(&src, 0x83, 0x01, 0x02, 0x03)
+	for framing in ([]tape.Framing{.Elements}) {
+		got := read_records_at(t, src[:], framing, path[:])
+		testing.expectf(t, len(got.spans) == 3 && got.spans[0] == {u64(len(src)) - 3, u64(len(src)) - 2} && got.err == nil, "%v", got)
+	}
+	for cut in 1 ..< len(src) {
+		run := testkit.Piece_Run{src[:], cbor.reads(.Cbor), cbor.as(.Cbor), {}, {cut}}
+		if !testkit.records_pieces_agree(t, run, .Elements, nil, nil, "long path", path[:]) {
+			return
+		}
+	}
+}
+
+// A fault early in a window that more bytes follow ends the records there, and the window's caller keeps none of the
+// text past it.
+@(test)
+records_in_pieces_end_at_a_fault_the_window_holds :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := make([dynamic]u8, context.temp_allocator)
+	append(&src, 0x01, 0x1c)
+	for _ in 0 ..< 4096 {
+		append(&src, 0x02)
+	}
+	p := tape.Pieces{allocator = context.allocator}
+	defer tape.destroy(&p)
+	r := cbor.records_open(src[:], .Concatenated, .Cbor, {pieces = &p})
+	defer tape.destroy_records(&r)
+	out: [4]tape.Record
+	n := cbor.records_validate(&r, out[:])
+	f, faulted := r.err.(tape.Fault)
+	testing.expectf(t, faulted && f.at == 1 && !p.more && n == 0 && r.index == 1, "%d records of %d, %v, more %v keep %v", n, r.index, r.err, p.more, p.keep)
+}
+
+// A value off the path that the windows cut is passed a child at a time, nested values too, so each window's caller
+// keeps only the child its end cuts.
+@(test)
+records_in_pieces_keep_only_the_child_a_window_cuts :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	WINDOW :: 12
+	src := make([dynamic]u8, context.temp_allocator)
+	append(&src, 0xa2, 0x61, 's', 0x99, 0x01, 0x2c)
+	for _ in 0 ..< 300 {
+		append(&src, 0x82, 0x01, 0xa1, 0x61, 'b', 0x82, 0x02, 0x03)
+	}
+	append(&src, 0x61, 'a', 0x83, 0x01, 0x02, 0x03)
+	p := tape.Pieces{allocator = context.allocator}
+	defer tape.destroy(&p)
+	r := cbor.records_open(src[:WINDOW], .Elements, .Cbor, {pieces = &p}, {tape.Name("a")})
+	defer tape.destroy_records(&r)
+	out: [4]tape.Record
+	records, kept := 0, u64(0)
+	for {
+		records += cbor.records_validate(&r, out[:])
+		if !p.more {
+			break
+		}
+		kept = max(kept, p.at - p.keep)
+		end := min(p.at + WINDOW, u64(len(src)))
+		p.from, p.last = p.keep, end == u64(len(src))
+		testing.expect_value(t, tape.records_window(&r, src[p.keep:end]), nil)
+	}
+	testing.expectf(t, r.err == nil && r.index == 3 && records == 0 && kept < WINDOW, "%d records, %v, kept %d", r.index, r.err, kept)
+	// A count the text does not reach is refused at its head, before a fault in the container, at every cut.
+	for text in ([]string{"a2 61 73 99 01 2c 82 01 ff 61 61 83 01 02 03", "a2 61 73 99 01 2c 82 01 02 61 61 83 01 02 03", "a2 61 73 83 82 01 02 01 02 61 61 83 01 02 03"}) {
+		bad := hex(text)
+		every := make([dynamic]int, context.temp_allocator)
+		for cut in 1 ..< len(bad) {
+			run := testkit.Piece_Run{bad, cbor.reads(.Cbor), cbor.as(.Cbor), {}, {cut}}
+			if !testkit.records_pieces_agree(t, run, .Elements, nil, nil, text, {tape.Name("a")}) {
+				return
+			}
+			append(&every, cut)
+		}
+		run := testkit.Piece_Run{bad, cbor.reads(.Cbor), cbor.as(.Cbor), {}, every[:]}
+		if !testkit.records_pieces_agree(t, run, .Elements, nil, nil, text, {tape.Name("a")}) {
+			return
+		}
+	}
+}
+
+// The records of the container `path` reaches in `src`.
+@(private = "file")
+read_records_at :: proc(t: ^testing.T, src: []u8, framing: tape.Framing, path: []tape.Step) -> (got: Records_Read) {
+	spans := make([dynamic][2]u64, context.temp_allocator)
+	r := cbor.records_open(src, framing, .Cbor, {}, path)
+	defer tape.destroy_records(&r)
+	out: [2]tape.Record
+	every: [2]tape.Span_Answer
+	for {
+		n := cbor.records_find(&r, nil, out[:], every[:])
+		for rec in out[:n] {
+			append(&spans, [2]u64{rec.lo, rec.hi})
+		}
+		if n < len(out) {
+			break
+		}
+	}
+	return {spans[:], nil, r.err}
 }
