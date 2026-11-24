@@ -168,6 +168,10 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 	delim := w.delim
 	comment := opts.comment
 	_ = comment
+	// All ones for a comment byte, 0 for none, so a pass with comment code and no comment byte starts no comment line at
+	// a NUL, which a text's last block is padded with.
+	comment_on := u64(0) - u64(comment != 0)
+	_ = comment_on
 
 	pos, resumed := piece_resumes(w)
 	if !resumed {
@@ -246,7 +250,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 						d &= ~run
 						crm &= ~run
 					}
-					remaining := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment))
+					remaining := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment)) & comment_on
 					for remaining != 0 {
 						s := remaining & -remaining
 						remaining &~= s
@@ -352,7 +356,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 				lfs = nl
 				// A comment line's bytes are text, its LF ends the line, and a backslash in it opens no escape.
 				when COMMENTS {
-					starts := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment))
+					starts := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment)) & comment_on
 					cb, clfs = comment_span(nl, starts, w.in_comment != 0)
 					d &= ~cb
 					crm &= ~cb

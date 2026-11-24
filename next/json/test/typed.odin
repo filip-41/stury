@@ -5,8 +5,10 @@ import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
+import "core:slice"
 import "core:strings"
 import "core:testing"
+import "core:time"
 import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/ops/typed"
@@ -34,12 +36,12 @@ read :: proc(text: string, target: ^$T, spec := json.Spec.Json, r := json.Unmars
 
 // The refusal `e` holds, `.None` when `e` is no refused value.
 @(private = "file")
-refusal_of :: proc(e: tape.Error) -> json.Refusal {
+refusal_of :: proc(e: tape.Error) -> json.Typed_Refusal {
 	f, is_fault := e.(tape.Fault)
 	if !is_fault || f.kind != .Refused || f.rules == nil || f.rules.format != "typed" {
 		return .None
 	}
-	return json.Refusal(f.detail)
+	return json.Typed_Refusal(f.detail)
 }
 
 // The first byte of the value `e` refuses.
@@ -55,7 +57,7 @@ expect_nil :: proc(t: ^testing.T, e: tape.Error, loc := #caller_location) -> boo
 }
 
 @(private = "file")
-expect_refusal :: proc(t: ^testing.T, e: tape.Error, want: json.Refusal, loc := #caller_location) -> bool {
+expect_refusal :: proc(t: ^testing.T, e: tape.Error, want: json.Typed_Refusal, loc := #caller_location) -> bool {
 	return testing.expectf(t, refusal_of(e) == want, "got %v, want the refusal %v", e, want, loc = loc)
 }
 
@@ -108,6 +110,323 @@ members_in_any_order_and_repeated :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.c, "y")
 }
 
+@(private = "file")
+Keyed :: struct {
+	a:                        i64,
+	eight_ch:                 string,
+	nine_char:                i64,
+	sixteen_chars_ab:         string,
+	seventeen_chars_a:        i64,
+	twenty_four_characters_x: string,
+	inner:                    Point,
+	l:                        []i32,
+}
+
+// The members of a `Keyed` object in the order of each shape: the type's order, with a key the type lacks, reversed,
+// with a repeat, and with members absent.
+@(private = "file")
+KEYED_SHAPES := [?][]string {
+	{"a", "eight_ch", "nine_char", "sixteen_chars_ab", "seventeen_chars_a", "twenty_four_characters_x", "inner", "l"},
+	{"a", "eight_ch", "unknown_key", "nine_char", "sixteen_chars_ab", "seventeen_chars_a", "twenty_four_characters_x", "inner", "l"},
+	{"l", "inner", "twenty_four_characters_x", "seventeen_chars_a", "sixteen_chars_ab", "nine_char", "eight_ch", "a"},
+	{"a", "eight_ch", "nine_char", "sixteen_chars_ab", "a", "seventeen_chars_a", "twenty_four_characters_x", "inner", "l"},
+	{"a", "nine_char", "seventeen_chars_a", "inner"},
+}
+
+// A text of `n` `Keyed` objects in an array, most in the type's order, so that the walk matches their keys in its
+// member gaps, each value from `k`, the object's index. `pretty` puts each member on a line of its own.
+@(private = "file")
+keyed_text :: proc(n: int, pretty: bool) -> (text: string, objects: []string) {
+	b := strings.builder_make(context.temp_allocator)
+	spans := make([][2]int, n, context.temp_allocator)
+	strings.write_byte(&b, '[')
+	for k in 0 ..< n {
+		if k > 0 {
+			strings.write_byte(&b, ',')
+		}
+		shape := KEYED_SHAPES[0] if k % 7 < 3 else KEYED_SHAPES[k % len(KEYED_SHAPES)]
+		from := strings.builder_len(b)
+		strings.write_byte(&b, '{')
+		for key, i in shape {
+			if i > 0 {
+				strings.write_byte(&b, ',')
+			}
+			if pretty {
+				strings.write_string(&b, "\n    ")
+			}
+			fmt.sbprintf(&b, `"%s":`, key)
+			switch key {
+			case "inner":
+				fmt.sbprintf(&b, `{{"x":%d,"y":%d}}`, k, -k)
+			case "l":
+				fmt.sbprintf(&b, `[%d,%d]`, k, i)
+			case "eight_ch", "sixteen_chars_ab", "twenty_four_characters_x":
+				fmt.sbprintf(&b, `"%s%d"`, key[:3], k)
+			case:
+				fmt.sbprintf(&b, `%d`, k * 10 + i)
+			}
+		}
+		strings.write_byte(&b, '}')
+		spans[k] = {from, strings.builder_len(b)}
+	}
+	strings.write_byte(&b, ']')
+	text = strings.to_string(b)
+	objects = make([]string, n, context.temp_allocator)
+	for span, k in spans {
+		objects[k] = text[span[0]:span[1]]
+	}
+	return
+}
+
+@(private = "file")
+keyed_equal :: proc(x, y: Keyed) -> bool {
+	if len(x.l) != len(y.l) {
+		return false
+	}
+	for v, i in x.l {
+		if y.l[i] != v {
+			return false
+		}
+	}
+	return x.a == y.a && x.eight_ch == y.eight_ch && x.nine_char == y.nine_char && x.sixteen_chars_ab == y.sixteen_chars_ab && x.seventeen_chars_a == y.seventeen_chars_a && x.twenty_four_characters_x == y.twenty_four_characters_x && x.inner == y.inner
+}
+
+// The objects of a long array read as each reads alone, where the walk matches their keys in the gaps it learned from
+// the objects before: keys of each length class, a key the type lacks, members out of order, repeated and absent.
+@(test)
+keys_matched_in_gaps_read_as_an_object_alone :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	for pretty in ([]bool{false, true}) {
+		text, objects := keyed_text(96, pretty)
+		for dups in ([]tape.Duplicates{.Last, .First}) {
+			all: []Keyed
+			if !expect_nil(t, read(text, &all, opts = {dups = dups})) || !testing.expect_value(t, len(all), len(objects)) {
+				continue
+			}
+			for o, k in objects {
+				alone: Keyed
+				expect_nil(t, read(o, &alone, opts = {dups = dups}))
+				testing.expectf(t, keyed_equal(all[k], alone), "object %d (pretty %v, %v): %v, alone %v", k, pretty, dups, all[k], alone)
+			}
+		}
+	}
+}
+
+@(private = "file")
+Nest :: struct {
+	s: string,
+	l: []string,
+	d: [dynamic]string,
+	m: map[string][]string,
+	p: ^Nest,
+	u: union {
+		string,
+		[]string,
+	},
+	o: Maybe([]string),
+	a: [2]string,
+}
+
+@(private = "file")
+Nests :: struct {
+	n:    Nest,
+	list: []Nest,
+	m:    map[string]Nest,
+	x:    string,
+}
+
+// Frees what a read put in `n` with `allocator`: every string but a span of `text`, every list, map and pointer.
+@(private = "file")
+free_nest :: proc(n: ^Nest, text: []u8, allocator: runtime.Allocator) {
+	context.allocator = allocator
+	free_text :: proc(s: string, text: []u8) {
+		if uintptr(raw_data(s)) - uintptr(raw_data(text)) >= uintptr(len(text)) {
+			delete(s)
+		}
+	}
+	free_list :: proc(l: []string, text: []u8) {
+		for s in l {
+			free_text(s, text)
+		}
+		delete(l)
+	}
+	free_text(n.s, text)
+	free_list(n.l, text)
+	free_list(n.d[:], text)
+	for k, v in n.m {
+		free_text(k, text)
+		free_list(v, text)
+	}
+	delete(n.m)
+	if n.p != nil {
+		free_nest(n.p, text, allocator)
+		free(n.p)
+	}
+	switch u in n.u {
+	case string:
+		free_text(u, text)
+	case []string:
+		free_list(u, text)
+	}
+	if o, ok := n.o.?; ok {
+		free_list(o, text)
+	}
+	for s in n.a {
+		free_text(s, text)
+	}
+}
+
+// A repeat under `.Last` frees what the value it replaces holds, at every depth and in every container, and nothing
+// the target held: a read and a free of what it gave leave nothing allocated and free no block twice.
+@(test)
+a_repeat_frees_what_it_replaces :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	alloc := mem.tracking_allocator(&track)
+	nest := `{"s":"ab","l":["c","d\n"],"d":["e"],"m":{"k":["f"],"k":["g\t"]},"p":{"s":"h","p":{"l":["i"],"l":["j"]},"p":{"s":"k"}},"u":"l","u":["m"],"o":["n"],"a":["o","p"],"s":"q","l":["r"],"d":["s"],"o":["t"],"a":["u","v"],"m":{"v":["w"]}}`
+	text := transmute([]u8)strings.concatenate({`{"n":`, nest, `,"list":[`, nest, `,{"p":{"p":{"s":"x"}},"p":{"m":{"y":["z"],"y":["za"]}}}],"m":{"k":`, nest, `,"k":`, nest, `},"x":"zb","n":`, nest, `,"x":"zc","list":[`, nest, `],"m":{"j":{"s":"zd"},"j":{"s":"ze"}}}`}, context.temp_allocator)
+	plan, err := json.plan_make(Nests, allocator = context.temp_allocator)
+	expect_nil(t, err)
+	for borrow in ([]bool{false, true}) {
+		got: Nests
+		expect_nil(t, json.unmarshal(text, &got, read = {borrow_strings = borrow, plan = &plan}, allocator = alloc))
+		testing.expect_value(t, got.n.s, "q")
+		testing.expect_value(t, got.x, "zc")
+		testing.expect_value(t, len(got.list), 1)
+		testing.expect_value(t, got.m["j"].s, "ze")
+		spans := text if borrow else nil
+		free_nest(&got.n, spans, alloc)
+		for &n in got.list {
+			free_nest(&n, spans, alloc)
+		}
+		delete(got.list, alloc)
+		for k, &v in got.m {
+			if !borrow {
+				delete(k, alloc)
+			}
+			free_nest(&v, spans, alloc)
+		}
+		delete(got.m)
+		if !borrow {
+			delete(got.x, alloc)
+		}
+		testing.expectf(t, len(track.allocation_map) == 0, "borrow %v: %d blocks live", borrow, len(track.allocation_map))
+		testing.expectf(t, len(track.bad_free_array) == 0, "borrow %v: %d bad frees", borrow, len(track.bad_free_array))
+		mem.tracking_allocator_clear(&track)
+	}
+	// A value the target held stays allocated, and what the read put in it is freed.
+	kept, pointee := strings.clone("kept", alloc), new(Nest, alloc)
+	got := Nests {
+		x = "literal",
+		n = {s = kept, p = pointee},
+	}
+	got.m = make(map[string]Nest, alloc)
+	got.m["held"] = {s = "literal"}
+	expect_nil(t, json.unmarshal(transmute([]u8)string(`{"n":{"l":["a"],"p":{"s":"b"}},"n":{"l":["c"]},"m":{"held":{"s":"d"},"held":{"s":"e"},"new":{"s":"f"},"new":{"s":"g"}}}`), &got, read = {plan = &plan}, allocator = alloc))
+	testing.expect_value(t, got.n.l[0], "c")
+	testing.expect_value(t, got.m["held"].s, "e")
+	testing.expect_value(t, got.m["new"].s, "g")
+	testing.expect_value(t, got.x, "literal")
+	// The repeat set back the target's string and pointer, and its pointee as the target held it.
+	testing.expect(t, raw_data(got.n.s) == raw_data(kept) && got.n.p == pointee)
+	testing.expect_value(t, pointee.s, "")
+	free(pointee, alloc)
+	delete(kept, alloc)
+	delete(got.n.l[0], alloc)
+	delete(got.n.l, alloc)
+	for k, v in got.m {
+		if k != "held" {
+			delete(k, alloc)
+		}
+		delete(v.s, alloc)
+	}
+	delete(got.m)
+	testing.expectf(t, len(track.allocation_map) == 0, "%d blocks live", len(track.allocation_map))
+	testing.expectf(t, len(track.bad_free_array) == 0, "%d bad frees", len(track.bad_free_array))
+}
+
+// A repeat into a pointee or a map the target held frees what the read put there and sets back what the target held:
+// the pointee's bytes, and the map's entries, the target's own kept and the read's taken out.
+@(test)
+a_repeat_into_a_block_the_target_held_keeps_the_targets :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+	Held :: struct {
+		p: ^Nest,
+		m: map[string]string,
+	}
+	texts := [?]struct {
+		text:   string,
+		s:      string, // the pointee's string after the read, "own" for the target's
+		listed: bool, // the pointee holds the target's list
+		m:      string, // the map's entries after the read, sorted
+	} {
+		{`{"p":{"s":"x","s":"y"}}`, "y", true, "k0=v0"},
+		{`{"p":{"s":"x","l":["a"]},"p":{"s":"y"}}`, "y", true, "k0=v0"},
+		{`{"p":{"s":"x","l":["a"]},"p":{"d":["b"]}}`, "own", true, "k0=v0"},
+		{`{"m":{"a":"1","b":"2"},"m":{"a":"3"}}`, "own", true, "a=3 k0=v0"},
+		{`{"m":{"k0":"x","b":"2"},"m":{"c":"4"}}`, "own", true, "c=4 k0=v0"},
+		{`{"m":{"k0":"x"},"p":{"s":"z"},"m":{"k0":"y","e":"5"},"p":null,"p":{}}`, "own", true, "e=5 k0=y"},
+	}
+	for c in texts {
+		own, list := strings.clone("own"), make([]string, 1)
+		list[0] = strings.clone("listed")
+		pointee := new(Nest)
+		pointee.s, pointee.l = own, list
+		k0, v0 := strings.clone("k0"), strings.clone("v0")
+		got := Held {
+			p = pointee,
+		}
+		got.m = make(map[string]string)
+		got.m[k0] = v0
+		expect_nil(t, json.unmarshal(transmute([]u8)c.text, &got))
+		testing.expectf(t, got.p == pointee && pointee.s == c.s && raw_data(pointee.l) == raw_data(list) == c.listed, "%s: %v", c.text, pointee^)
+		keys := make([dynamic]string, context.temp_allocator)
+		for k, v in got.m {
+			append(&keys, strings.concatenate({k, "=", v}, context.temp_allocator))
+		}
+		slice.sort(keys[:])
+		testing.expectf(t, strings.join(keys[:], " ", context.temp_allocator) == c.m, "%s: %v", c.text, got.m)
+		// What is left is the target's blocks and the strings, lists and keys the read put in.
+		if raw_data(pointee.s) != raw_data(own) {
+			delete(pointee.s)
+		}
+		if raw_data(pointee.l) != raw_data(list) {
+			delete(pointee.l)
+		}
+		for e in pointee.d {
+			delete(e)
+		}
+		delete(pointee.d)
+		for k, v in got.m {
+			if raw_data(k) != raw_data(k0) {
+				delete(k)
+			}
+			if raw_data(v) != raw_data(v0) {
+				delete(v)
+			}
+		}
+		delete(got.m)
+		delete(k0)
+		delete(v0)
+		delete(list[0])
+		delete(list)
+		delete(own)
+		free(pointee)
+		free_all(context.temp_allocator)
+		testing.expectf(t, len(track.allocation_map) == 0, "%s: %d blocks live", c.text, len(track.allocation_map))
+		testing.expectf(t, len(track.bad_free_array) == 0, "%s: %d bad frees", c.text, len(track.bad_free_array))
+		mem.tracking_allocator_clear(&track)
+	}
+}
+
 @(test)
 first_occurrence_is_kept_and_later_ones_judged_by_syntax_only :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -134,29 +453,66 @@ first_occurrence_is_kept_and_later_ones_judged_by_syntax_only :: proc(t: ^testin
 	testing.expect_value(t, read(text, &s, opts = opts), json.validate(transmute([]u8)text))
 }
 
+// Under `.Refuse` the read judges each object's keys in its walk, with no document: a repeat refuses as a build refuses
+// it, in a value the read passes, past a refusal and before a later fault, and a fault before the repeat wins.
 @(test)
-refuse_duplicates_builds_the_whole_text_first :: proc(t: ^testing.T) {
+refuse_duplicates_judges_the_keys_in_the_walk :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
-	v: map[string]i32
-	text := `{"a":{"b":1,"b":2}}`
-	e := read(text, &v, opts = {dups = .Refuse})
-	f, is_fault := e.(tape.Fault)
-	testing.expect(t, is_fault && f.kind == .Duplicate_Key)
-	testing.expect_value(t, f.at, 12)
-	// The fault is the build's, whatever the type would have refused.
+	S :: struct {
+		a: i32,
+		l: []Point,
+		m: map[string]i32,
+	}
 	opts := json.Options {
 		dups = .Refuse,
 	}
-	_, built := json.build(transmute([]u8)string(`{"a":"x","a":2}`), opts = opts, allocator = context.temp_allocator)
-	testing.expect_value(t, read(`{"a":"x","a":2}`, &v, opts = opts), built)
-	ok: Point
-	expect_nil(t, read(`{"x":1,"y":2}`, &ok, opts = opts))
-	testing.expect_value(t, ok, Point{1, 2})
-	// A text the build refuses for syntax gives the build's error.
-	broken := `{"a":01}`
-	_, built = json.build(transmute([]u8)broken, opts = opts, allocator = context.temp_allocator)
-	testing.expect_value(t, read(broken, &v, opts = opts), built)
+	wide := strings.builder_make(context.temp_allocator)
+	strings.write_string(&wide, `{"m":{`)
+	for i in 0 ..< 40 {
+		fmt.sbprintf(&wide, `"k%d":%d,`, i, i)
+	}
+	strings.write_string(&wide, `"k17":1}}`)
+	texts := []string {
+		`{"a":{"b":1,"b":2}}`,
+		`{"a":"x","a":2}`,
+		`{"a":1,"skipped":{"k":1,"k":2},"l":[]}`,
+		`{"l":[{"x":1,"y":2},{"x":1,"x":3}]}`,
+		`{"a":"no","z":{"q":1,"q":2}}`,
+		`{"a":1,"z":{"q":1,"q":2},"a":01}`,
+		`{"a":01,"z":{"q":1,"q":2}}`,
+		`{"z":{"q":1,"\u0071":2}}`,
+		`{"z":[{"q":1},{"q":1}],"m":{"a":1,"b":2,"a":3}}`,
+		`{"x":1,"y":2}`,
+		`{"a":1,"l":[{"x":1,"y":2}]`,
+		strings.to_string(wide),
+	}
+	for text in texts {
+		_, built := json.build(transmute([]u8)text, opts = opts, allocator = context.temp_allocator)
+		s: S
+		e := read(text, &s, opts = opts)
+		if built == nil {
+			testing.expectf(t, refusal_of(e) != .None || e == nil, "%s: %v", text, e)
+		} else {
+			testing.expectf(t, e == built, "%s: %v, the build's %v", text, e, built)
+		}
+	}
+	// The read needs no document, so a budget a document passes still reads it.
+	text := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&text, '[')
+	for i in 0 ..< 100_000 {
+		strings.write_string(&text, `{"x":1,"y":2},` if i < 99_999 else `{"x":1,"y":2}]`)
+	}
+	src := transmute([]u8)strings.to_string(text)
+	budget := json.Options {
+		dups = .Refuse,
+		budget = {memory = 2 << 20},
+	}
+	_, built := json.build(src, opts = budget, allocator = context.temp_allocator)
+	testing.expect(t, built != nil)
+	points: []Point
+	expect_nil(t, read(string(src), &points, opts = budget))
+	testing.expect_value(t, len(points), 100_000)
 }
 
 @(test)
@@ -441,7 +797,7 @@ a_syntax_fault_is_the_validate_error_even_after_a_refusal :: proc(t: ^testing.T)
 	// The same through a path, which a syntax fault leaves as it was.
 	path := path_in()
 	e := read(`{"x":"no","y":01}`, &p, r = {path = &path})
-	testing.expect_value(t, refusal_of(e), json.Refusal.None)
+	testing.expect_value(t, refusal_of(e), json.Typed_Refusal.None)
 }
 
 @(test)
@@ -466,7 +822,7 @@ numbers_at_each_width :: proc(t: ^testing.T) {
 	testing.expect_value(t, transmute(u64)s.f, u64(1) << 63)
 	for text in ([]string{`{"a":128}`, `{"b":-1}`, `{"c":9223372036854775808}`, `{"d":18446744073709551616}`, `{"f":1e400}`, `{"e":1e39}`}) {
 		got := refusal_of(read(text, &s))
-		want := json.Refusal.Below_Minimum if text == `{"b":-1}` else .Above_Maximum
+		want := json.Typed_Refusal.Below_Minimum if text == `{"b":-1}` else .Above_Maximum
 		testing.expectf(t, got == want, "%s: %v", text, got)
 	}
 	expect_refusal(t, read(`{"a":1.0}`, &s), .Expected_Integer)
@@ -788,6 +1144,41 @@ borrowed_strings_point_into_the_text_in_every_place :: proc(t: ^testing.T) {
 	testing.expect_value(t, c.name, "alpha")
 }
 
+// A copied empty string is the zero string, so a caller deleting each string frees nothing of the text.
+@(test)
+copied_empty_strings_are_the_zero_string :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	S :: struct {
+		s:  string,
+		l:  []string,
+		m:  map[string]string,
+		q:  Maybe(string),
+		ps: ^string,
+	}
+	tracking: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&tracking, context.allocator)
+	defer mem.tracking_allocator_destroy(&tracking)
+	context.allocator = mem.tracking_allocator(&tracking)
+	s: S
+	expect_nil(t, json.unmarshal(transmute([]u8)string(`{"s":"","l":["","a"],"m":{"":""},"q":"","ps":""}`), &s))
+	testing.expect(t, raw_data(s.s) == nil && raw_data(s.l[0]) == nil && raw_data(s.q.?) == nil && raw_data(s.ps^) == nil)
+	delete(s.s)
+	for e in s.l {
+		delete(e)
+	}
+	delete(s.l)
+	for k, v in s.m {
+		delete(k)
+		delete(v)
+	}
+	delete(s.m)
+	delete(s.q.?)
+	delete(s.ps^)
+	free(s.ps)
+	testing.expect_value(t, len(tracking.bad_free_array), 0)
+	testing.expect_value(t, len(tracking.allocation_map), 0)
+}
+
 @(test)
 what_a_refused_read_allocated_stays_reachable :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -1019,12 +1410,7 @@ a_refused_wrapper_element_leaves_the_rest_as_it_was_and_nothing_allocated :: pro
 		testing.expectf(t, refusal_of(e) != .None, "%s: %v", text, e)
 		testing.expect_value(t, s.m, 5)
 		testing.expect(t, s.w == &kept)
-		// A union whose arm refused its value holds that arm, empty.
-		if text == `{"u":2.5}` {
-			testing.expect_value(t, s.u.(i32), 0)
-		} else {
-			testing.expect_value(t, s.u.(string), "keep")
-		}
+		testing.expect_value(t, s.u.(string), "keep")
 		// A pointer the read allocated stays reachable, so the caller frees it.
 		free(s.p, alloc)
 		// The list a refusal ends holds the elements read so far, at most the ones the text has.
@@ -1040,6 +1426,21 @@ a_refused_wrapper_element_leaves_the_rest_as_it_was_and_nothing_allocated :: pro
 		}
 		testing.expectf(t, len(track.allocation_map) == 0, "%s leaves %d allocations", text, len(track.allocation_map))
 		testing.expect_value(t, len(track.bad_free_array), 0)
+	}
+	// A wrapper that held nothing still holds nothing.
+	Nil :: struct {
+		m: Maybe(i32),
+		u: union {
+			i64,
+			string,
+		},
+		t: Maybe(time.Time),
+	}
+	for text in ([]string{`{"m":"x"}`, `{"u":1.5}`, `{"t":5}`}) {
+		s: Nil
+		e := json.unmarshal(transmute([]u8)text, &s, allocator = alloc)
+		testing.expectf(t, refusal_of(e) != .None, "%s: %v", text, e)
+		testing.expectf(t, s.m == nil && s.u == nil && s.t == nil, "%s: %v", text, s)
 	}
 }
 

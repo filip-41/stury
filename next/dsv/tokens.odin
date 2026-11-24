@@ -135,7 +135,12 @@ values_run :: #force_inline proc "contextless" ($ESC, $KEYS, $PAST, $QUOTES: boo
 		}
 		when KEYS {
 			// A key the hook skips has its cell passed with no token.
-			if column_passes(w, run.base, count, next_lo, at, esc, lax, QUOTES) {
+			if passes, value := column_passes(w, run.base, count, next_lo, at, esc, lax, QUOTES); passes {
+				if value {
+					if a, lo, n := put_value(w, opts, hs, run.base, next_lo, at, esc, lax, QUOTES, on); a == .Stop {
+						return next_lo, count, stopped(lo, n), true
+					}
+				}
 				count += 1
 				next_lo = at + 1
 				continue

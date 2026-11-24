@@ -2,6 +2,7 @@ package toml_tests
 
 import "base:runtime"
 import "core:math"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import "core:time"
@@ -13,12 +14,12 @@ import "stury:toml"
 // numbers in every spelling and the refusals with their places.
 
 // Expects `e` to be a refusal `want` at byte `at`.
-expect_refusal :: proc(t: ^testing.T, e: tape.Error, want: toml.Refusal, at: u64, loc := #caller_location) {
+expect_refusal :: proc(t: ^testing.T, e: tape.Error, want: toml.Typed_Refusal, at: u64, loc := #caller_location) {
 	f, is_fault := e.(tape.Fault)
 	if !testing.expectf(t, is_fault && f.kind == .Refused, "got %v, wanted a refusal %v", e, want, loc = loc) {
 		return
 	}
-	testing.expect_value(t, toml.Refusal(f.detail), want, loc)
+	testing.expect_value(t, toml.Typed_Refusal(f.detail), want, loc)
 	testing.expect_value(t, f.at, at, loc)
 }
 
@@ -94,6 +95,30 @@ port = 9090
 		testing.expect_value(t, got.servers[0], Server{"alpha", 8080, true})
 		testing.expect_value(t, got.servers[1], Server{"beta", 9090, false})
 	}
+}
+
+// A copied empty string is the zero string, so a caller deleting each string frees nothing of the text.
+@(test)
+copied_empty_strings_are_the_zero_string :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	S :: struct {
+		s: string,
+		l: []string,
+	}
+	tracker: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&tracker, context.allocator)
+	defer mem.tracking_allocator_destroy(&tracker)
+	alloc := mem.tracking_allocator(&tracker)
+	got: S
+	testing.expect_value(t, toml.unmarshal(transmute([]u8)string("s = \"\"\nl = [\"\", \"a\"]\n"), &got, allocator = alloc), nil)
+	testing.expect(t, raw_data(got.s) == nil && raw_data(got.l[0]) == nil)
+	delete(got.s, alloc)
+	for e in got.l {
+		delete(e, alloc)
+	}
+	delete(got.l, alloc)
+	testing.expect_value(t, len(tracker.bad_free_array), 0)
+	testing.expect_value(t, len(tracker.allocation_map), 0)
 }
 
 @(test)
@@ -218,9 +243,8 @@ clock = 07:32:00
 		testing.expectf(t, is_fault && f.kind == .Refused, "%q: %v", text, e)
 	}
 	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = true\n"), &only_time, allocator = context.temp_allocator), .Expected_Date_Time, 4)
-	// A number is a count of seconds since the epoch.
-	testing.expect_value(t, toml.unmarshal(transmute([]u8)string("v = 86400\n"), &only_time, allocator = context.temp_allocator), nil)
-	testing.expect_value(t, time.to_unix_nanoseconds(only_time.v), 86400e9)
+	// A number names no instant either.
+	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = 86400\n"), &only_time, allocator = context.temp_allocator), .Expected_Date_Time, 4)
 }
 
 @(test)

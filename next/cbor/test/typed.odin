@@ -2,6 +2,7 @@ package cbor_tests
 
 import "base:runtime"
 import "core:math/rand"
+import "core:mem"
 import "core:testing"
 import "core:time"
 import "stury:cbor"
@@ -19,12 +20,12 @@ holding :: proc(item: string) -> []u8 {
 }
 
 // Expects `e` to be a refusal `want`.
-expect_refusal_of :: proc(t: ^testing.T, e: tape.Error, want: cbor.Refusal, what: string, loc := #caller_location) {
+expect_refusal_of :: proc(t: ^testing.T, e: tape.Error, want: cbor.Typed_Refusal, what: string, loc := #caller_location) {
 	f, is_fault := e.(tape.Fault)
 	if !testing.expectf(t, is_fault && f.kind == .Refused, "%s: got %v, wanted %v", what, e, want, loc = loc) {
 		return
 	}
-	testing.expectf(t, cbor.Refusal(f.detail) == want, "%s: got %v, wanted %v", what, cbor.Refusal(f.detail), want, loc = loc)
+	testing.expectf(t, cbor.Typed_Refusal(f.detail) == want, "%s: got %v, wanted %v", what, cbor.Typed_Refusal(f.detail), want, loc = loc)
 }
 
 // A value read whole is the bytes of its item: a string with its head, and a string in chunks with its break. The tags
@@ -66,6 +67,52 @@ raw_values_hold_their_items :: proc(t: ^testing.T) {
 			}
 			testing.expectf(t, string(got.raw) == string(want), "%s: raw is %x", r.item, transmute([]u8)string(got.raw))
 		}
+	}
+}
+
+// A copied empty string is the zero string, so a caller deleting each string frees nothing of the text.
+@(test)
+copied_empty_strings_are_the_zero_string :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	S :: struct {
+		s: string,
+		l: []string,
+	}
+	tracker: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&tracker, context.allocator)
+	defer mem.tracking_allocator_destroy(&tracker)
+	alloc := mem.tracking_allocator(&tracker)
+	got: S
+	// {"s": "", "l": ["", "a"]}
+	src := []u8{0xa2, 0x61, 's', 0x60, 0x61, 'l', 0x82, 0x60, 0x61, 'a'}
+	testing.expect_value(t, cbor.unmarshal(src, &got, .Cbor, allocator = alloc), nil)
+	testing.expect(t, raw_data(got.s) == nil && raw_data(got.l[0]) == nil)
+	delete(got.s, alloc)
+	for e in got.l {
+		delete(e, alloc)
+	}
+	delete(got.l, alloc)
+	testing.expect_value(t, len(tracker.bad_free_array), 0)
+	testing.expect_value(t, len(tracker.allocation_map), 0)
+}
+
+// Under `.Refuse` a repeated key refuses the read as it refuses a build, in a map the read passes too.
+@(test)
+refuse_duplicates_refuses_as_a_build :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	S :: struct {
+		a: i64,
+	}
+	opts := cbor.Options {
+		dups = .Refuse,
+	}
+	for item in ([]string{"a2 6161 01 6161 02", "a2 6161 01 617a a2 01 01 01 02", "a1 6161 01"}) {
+		src := hex(item)
+		_, built := cbor.build(src, opts = opts, allocator = context.temp_allocator)
+		got: S
+		e := cbor.unmarshal(src, &got, .Cbor, opts = opts, allocator = context.temp_allocator)
+		testing.expectf(t, e == built, "%s: %v, the build's %v", item, e, built)
 	}
 }
 
@@ -131,7 +178,7 @@ numbers_read_by_value :: proc(t: ^testing.T) {
 	}
 	refused := [?]struct {
 		hex:  string,
-		want: cbor.Refusal,
+		want: cbor.Typed_Refusal,
 	} {
 		{"c2 49 010000000000000000", .Above_Maximum},
 		{"c3 49 010000000000000000", .Below_Minimum},
@@ -239,7 +286,7 @@ every_width_reads_its_range :: proc(t: ^testing.T) {
 }
 
 // Tag 0 reads a date-time text with an offset and tag 1 a number of seconds into a `time.Time`, and any other tag
-// passes to the item it holds.
+// passes to the item it holds. A number with no tag 1 names no instant.
 @(test)
 tags_read_as_the_item_they_hold :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -258,7 +305,6 @@ tags_read_as_the_item_they_hold :: proc(t: ^testing.T) {
 		{"c1 3a0000ffff", -65536e9},
 		{"d9d9f7 c1 1a514b67b0", 1363896240e9},
 		{"74 323031332d30332d32315432303a30343a30305a", 1363896240e9},
-		{"1a514b67b0", 1363896240e9},
 	}
 	for r in stamps {
 		got: Stamp
@@ -267,8 +313,23 @@ tags_read_as_the_item_they_hold :: proc(t: ^testing.T) {
 	}
 	refused := [?]struct {
 		hex:  string,
-		want: cbor.Refusal,
-	}{{"6a 323031332d30332d3231", .Bad_Date_Time}, {"f5", .Expected_Date_Time}, {"80", .Expected_Date_Time}}
+		want: cbor.Typed_Refusal,
+	} {
+		{"6a 323031332d30332d3231", .Bad_Date_Time},
+		{"f5", .Expected_Date_Time},
+		{"80", .Expected_Date_Time},
+		{"1a514b67b0", .Expected_Date_Time},
+		{"d864 1a514b67b0", .Expected_Date_Time},
+		// NaN as a half, a single and a double, minus infinity, a double whose nanoseconds pass `max(i64)`, and an
+		// integer whose nanoseconds do.
+		{"c1 f97e00", .Out_Of_Range},
+		{"c1 fa7fc00000", .Out_Of_Range},
+		{"c1 fb7ff8000000000000", .Out_Of_Range},
+		{"c1 f9fc00", .Out_Of_Range},
+		{"c1 fb42012e0be826d695", .Out_Of_Range},
+		{"c1 1b0000000226000000", .Out_Of_Range},
+		{"c1 1bffffffffffffffff", .Out_Of_Range},
+	}
 	for r in refused {
 		got: Stamp
 		expect_refusal_of(t, cbor.unmarshal(holding(r.hex), &got, .Cbor, allocator = context.temp_allocator), r.want, r.hex)
@@ -416,6 +477,63 @@ unions_in_lists_and_pointers :: proc(t: ^testing.T) {
 }
 
 // A refused value names its place in the item.
+// An array reads into a struct by position: each element into the next member, an element past the last member passed,
+// and a member past the last element kept. A refusal's path steps to the element by index.
+@(test)
+an_array_reads_into_a_struct_by_position :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	Point :: struct {
+		x, y: i64,
+	}
+	Row :: struct {
+		a: i64,
+		p: Point,
+		l: []string,
+		q: ^Point,
+	}
+	rows := [?]struct {
+		hex:  string,
+		want: Row,
+		q:    Point, // the pointee, zero for none
+	} {
+		{"84 01 82 02 03 81 61 61 82 04 05", {1, {2, 3}, {"a"}, nil}, {4, 5}},
+		{"82 07 a1 6178 08", {7, {8, 9}, nil, nil}, {}},
+		{"80", {5, {6, 9}, nil, nil}, {}},
+		{"86 01 82 02 03 80 f6 a1 6161 82 01 02 83 01 02 03", {1, {2, 3}, nil, nil}, {}},
+	}
+	for r in rows {
+		got := Row {
+			a = 5,
+			p = {6, 9},
+		}
+		e := cbor.unmarshal(hex(r.hex), &got, .Cbor, allocator = context.temp_allocator)
+		testing.expectf(t, e == nil, "%s: %v", r.hex, e)
+		testing.expectf(t, got.a == r.want.a && got.p == r.want.p && len(got.l) == len(r.want.l) && (got.q^ if got.q != nil else Point{}) == r.q, "%s: %v", r.hex, got)
+	}
+	got: Row
+	testing.expect_value(t, cbor.unmarshal(hex("84 01 82 02 03 80 a1 6178 04"), &got, .Cbor, allocator = context.temp_allocator), nil)
+	testing.expect(t, got.q != nil && got.q.x == 4)
+	list: []Point
+	testing.expect_value(t, cbor.unmarshal(hex("82 82 01 02 a2 6178 03 6179 04"), &list, .Cbor, allocator = context.temp_allocator), nil)
+	testing.expect(t, len(list) == 2 && list[0] == {1, 2} && list[1] == {3, 4})
+	path := make([dynamic]tape.Step, context.temp_allocator)
+	e := cbor.unmarshal(hex("82 01 82 02 6178"), &got, .Cbor, {path = &path}, allocator = context.temp_allocator)
+	expect_refusal_of(t, e, .Expected_Integer, "text for an integer")
+	if testing.expect_value(t, len(path), 2) {
+		testing.expect_value(t, path[0], tape.Step(tape.Index(1)))
+		testing.expect_value(t, path[1], tape.Step(tape.Index(1)))
+	}
+	Must :: struct {
+		a: i64,
+		b: i64 `cbor:",required"`,
+	}
+	must: Must
+	expect_refusal_of(t, cbor.unmarshal(hex("81 01"), &must, .Cbor, allocator = context.temp_allocator), .Missing_Field, "a missing member")
+	testing.expect_value(t, cbor.unmarshal(hex("82 01 02"), &must, .Cbor, allocator = context.temp_allocator), nil)
+	testing.expect_value(t, must, Must{1, 2})
+}
+
 @(test)
 a_refusal_names_its_path_and_byte :: proc(t: ^testing.T) {
 	testkit.deadline(t)

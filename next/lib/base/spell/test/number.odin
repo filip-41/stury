@@ -163,3 +163,47 @@ twenty_digit_integers :: proc(t: ^testing.T) {
 	}
 	expect_cases(t, cases)
 }
+
+// The short readers read every span they take as `number_strict` does, and `integer_short` takes every integer of at
+// most 16 digits that has 8 bytes past its first digit: each span of each text, with bytes past it or none.
+@(test)
+short_readers_agree_with_the_strict_one :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	texts := []string {
+		"0", "-0", "7", "-7", "10", "007", "-01", "1234567", "12345678", "-12345678", "123456789", "9999999999999999",
+		"-9999999999999999", "10000000000000000", "1790000002", "1.5", "-67.54717", "68789.78", "0.25", "00.5", "1.", ".5",
+		"1e5", "+1", "--1", "1-", "12a4", "1 2", "", "-", "1.2.3", "123456789012345.6", "1234567890123456.7",
+		"12345678.12345678", "1234567.12345678", "-0.5", "0.30000000000000004", "9007199.254740993", "147.19909",
+	}
+	for text in ([]string{"147.19909", "-67.54717", "0.25", "-0", "12345678", "1234567.12345678", "1.5"}) {
+		src := transmute([]u8)strings.concatenate({text, strings.repeat(",", 17, context.temp_allocator)}, context.temp_allocator)
+		_, ok := spell.float_short(src, 0, u64(len(text)))
+		testing.expectf(t, ok, "float %q refused", text)
+	}
+	for text in texts {
+		for pad in ([]int{0, 16}) {
+			src := transmute([]u8)strings.concatenate({text, strings.repeat(",", pad, context.temp_allocator)}, context.temp_allocator)
+			for lo in 0 ..< len(text) {
+				for hi in lo ..= len(text) {
+					want, valid := spell.number_strict(src, u64(lo), u64(hi))
+					digits := hi - lo - int(text[lo] == '-')
+					if v, ok := spell.integer_short(src, u64(lo), u64(hi)); ok {
+						testing.expectf(t, valid && want.kind == .Int && i64(want.bits) == v, "integer %q: %d, want %v %v", text[lo:hi], v, want, valid)
+					} else if pad > 0 && valid && want.kind == .Int && digits <= 16 && !strings.contains_any(text[lo:hi], ".eE") {
+						testing.expectf(t, false, "integer %q refused", text[lo:hi])
+					}
+					if n, ok := spell.number_short(src, u64(lo), u64(hi)); ok {
+						testing.expectf(t, valid && n == want, "short %q: %v, want %v %v", text[lo:hi], n, want, valid)
+					}
+					if f, ok := spell.float_short(src, u64(lo), u64(hi)); ok {
+						// `-0` is the integer 0 to the strict reader, and a float keeps its sign.
+						as_float := transmute(f64)want.bits if want.kind == .Float else f64(i64(want.bits))
+						minus := text[lo] == '-'
+						testing.expectf(t, valid && want.kind <= .Float && f == as_float && (f < 0 || f == 0 && minus) == minus, "float %q: %v, want %v %v", text[lo:hi], f, want, valid)
+					}
+				}
+			}
+		}
+	}
+}

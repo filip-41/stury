@@ -2,6 +2,7 @@ package typed
 
 import "base:intrinsics"
 import "base:runtime"
+import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
@@ -13,7 +14,8 @@ import "stury:lib/core/tape"
 // The options of a typed read beyond the read's `tape.Options`.
 Unmarshal_Options :: struct {
 	// A string with nothing to decode, and a `Raw`, is a slice of the text in place of a copy, so the text must outlive
-	// the target.
+	// the target. Without it each string the read copies is one allocation of its own, which the caller frees alone,
+	// and an arena as the read's allocator gives the speed of one block for all of them.
 	borrow_strings: bool,
 	// A member the type does not name refuses the read, where by default the read passes it.
 	refuse_unknown: bool,
@@ -32,8 +34,9 @@ NO_LIMIT :: max(u64)
 // An open container, with the registers its close gives back. `data` is a list's first element, a map, a fixed array
 // or bit set's base, or a raw value's first byte. `seen` holds which members of a struct were read, kept from the first
 // key that arrives out of order, as until then the cursor says, with `SEEN_ON` set then, and `run` is the cursor the
-// members marked last reached. `owner` reads the container and `target` is where it goes when the record before `b`
-// is a wrapper's. `key` is a map's last key.
+// members marked last reached. A struct's or a fixed array's `seen` has `SEEN_TARGET` when its bytes may hold the
+// target's own values, and a map's is 1 when the map held entries at its open. `owner` reads the container and
+// `target` is where it goes when the record before `b` is a wrapper's. `key` is a map's last key.
 @(private)
 Frame :: struct {
 	a, b, c: u64,
@@ -52,9 +55,9 @@ SEEN_ON :: u64(1) << 63
 @(private)
 FRAME_ROOM :: 64
 
-// The strings a copying read holds as spans before it copies them, in one call for all.
+// The target bytes a read keeps in its own frame. A larger target's are kept in the read's allocator.
 @(private)
-PENDING :: 32
+BEFORE_ROOM :: 128
 
 // The state of one read, which a format's walk reaches through its hook, a `Text_Reader` or a `Cells_Reader`.
 @(private)
@@ -80,33 +83,71 @@ Reader :: struct {
 	zero:      []u8, // zeroes as wide as the widest map value read, for a new entry
 	key:       [2]u64, // the last map key read, and whether its entry is new, which an empty cell takes back
 	fresh:     bool,
-	// The strings a copying read stored as spans of the text, which `copy_pending` copies. A list's growth and a map's
-	// insert copy them first, as either may move the values holding them.
-	pending:   [PENDING]uintptr,
-	pended:    int,
+	// The target, and its bytes as the read found them, so a repeat frees what the read put in the target and nothing
+	// the target held, and sets back what the target held.
+	target:    uintptr,
+	before:    []u8,
+	// The blocks the target held that the read went into, as `before` holds the target's: its pointees and maps.
+	held:      [dynamic]Held,
+	// One past the head of the last tag 1 the walk gave, so a number that starts there is a count of seconds since the
+	// epoch, as a `time.Time` takes it, which the format notes. 0 for none, as a value after a tag starts past the tag's first byte.
+	epoch:     u64,
 	allocator: runtime.Allocator, // the caller's, counted under `Budget.memory`
 	caller:    runtime.Allocator, // the one a dynamic array or map read keeps for its owner
 	ctx:       runtime.Context,
 }
 
+// A block the target held that the read went into: a pointee at `at` with its bytes as the read found them, or a map
+// whose header is at `at` with a copy of the entries it held.
+@(private)
+Held :: struct {
+	at:      uintptr,
+	bytes:   []u8,
+	entries: runtime.Raw_Map,
+	info:    ^runtime.Map_Info,
+}
+
 // The hook of a read of a format whose values carry their kinds, as JSON's, CBOR's and TOML's do.
 Text_Reader :: struct {
 	using reader: Reader,
-	protocol:     hook.Protocol({.Skips}, hook.Unused, hook.Unused, hook.Unused),
+	expected:     ^hook.Expected_Memo,
+	protocol:     hook.Protocol({.Skips, .Expects}, hook.Unused, hook.Unused, hook.Unused),
 }
 
 // The hook of a read of a delimited text, whose records hold cells by the header's places. Once a record's keys mapped
 // its columns to members, every later record of a text of fixed width is replayed: the walk gives its cells with no
-// key, which the record's close reads by that map.
+// key, each read by that map, with `b` at its column.
 Cells_Reader :: struct {
 	using reader: Reader,
 	dropped:      u64,
 	alike:        bool,
 	replay:       hook.Replay,
-	columns:      [hook.COLUMN_BITS]^Record, // the record of each column the first record took, in its order
+	columns:      [hook.COLUMN_BITS]Column, // each column the first record took, in its order
 	taken:        int,
 	learn:        Learn,
-	protocol:     hook.Protocol({.Skips, .Columns}, hook.Unused, hook.Unused, hook.Unused),
+	row:          [2]Record, // the records of a target that is one row, which `one_row` reads its records by
+	protocol:     hook.Protocol({.Skips, .Columns, .Cell_Values}, hook.Unused, hook.Unused, hook.Unused),
+}
+
+// A column of a replayed record: the record that reads its cell, the member's place, and how a cell with nothing to
+// decode is read with no call.
+@(private)
+Column :: struct {
+	rec:    ^Record,
+	offset: u32,
+	kind:   Read_Kind,
+	read:   Cell_Read,
+}
+
+// How a replayed record reads a cell with nothing to decode.
+@(private)
+Cell_Read :: enum u8 {
+	Hook, // through the hook, as a kind the replay has no read of its own for
+	String,
+	I64,
+	F64,
+	Number, // another number kind, through `store_number`
+	Bool,
 }
 
 // Where a `Cells_Reader` stands in learning its columns.
@@ -130,14 +171,17 @@ text_hook :: #force_inline proc "contextless" (h: ^Text_Reader, s: hook.Regs, t:
 // The delimited reader's hook: `reader_hook` for cells, which learns the columns in the first record and replays the
 // records after it.
 cells_hook :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, t: tape.Token, $number: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number) -> (hook.Regs, hook.Action) {
+	// A record is replayed only once its columns are learnt.
+	if h.replay.replays {
+		return replay_cell(h, s, t, number)
+	}
 	if h.learn == .Ready {
-		if h.replay.replays && t.kind == .End {
-			return replay_record(h, s, t, number)
-		}
 		if t.kind == .Object && t.role == .Value && h.sp == RECORD_SP - 1 && h.replay.fixed {
 			r, a := reader_hook(&h.reader, s, t, number, true)
 			if a == .Next && h.sp == RECORD_SP {
-				h.replay.replays, h.replay.given = true, 0
+				// The record's cells come with no keys, each read by its column.
+				h.replay.replays = true
+				r.b = u64(uintptr(&h.columns[0]))
 			}
 			return r, a
 		}
@@ -150,6 +194,11 @@ cells_hook :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, 
 @(private, rodata)
 DEAD_BLOCK := [2]Record{{word = NO_KEY, kind = .Dead}, {word = NO_KEY, kind = .End}}
 
+// The records of a struct read by position: a `Position` record, which takes every element to a cold path, and an
+// `End` record.
+@(private, rodata)
+POSITION_BLOCK := [2]Record{{word = NO_KEY, kind = .Position}, {word = NO_KEY, kind = .End}}
+
 // The registers of a refused read: no room, so every value takes the list's cold path.
 @(private)
 dead_regs :: #force_inline proc "contextless" () -> hook.Regs {
@@ -157,10 +206,16 @@ dead_regs :: #force_inline proc "contextless" () -> hook.Regs {
 }
 
 // Reads `src`, a text of `format`, into `target`, a value of type `T`, by `read.plan` or by a plan made for the call,
-// through `walk`, the format's walk for hook `H`, a `Text_Reader` or a `Cells_Reader`. `tag` is the format's struct tag key. A plan for another type or tag is `Bad_Option{"plan"}`, a nil
-// target `Bad_Option{"target"}`, and a text in pieces `Bad_Option{"pieces"}`. Repeated keys follow `opts.dups`, the
-// format's own for `.Default`. `.All` and `.Group` are `Bad_Option{"dups"}`, as a member holds one value, and a format
-// checks `.Refuse` before the read, which takes such a text as `.Last`.
+// through `walk`, the format's walk for hook `H`, a `Text_Reader`, a `Refusing_Reader` or a `Cells_Reader`. `tag` is the
+// format's struct tag key. A plan for another type or tag is `Bad_Option{"plan"}`, a nil target `Bad_Option{"target"}`,
+// and a text in pieces `Bad_Option{"pieces"}`. Repeated keys follow `opts.dups`, the format's own for `.Default`.
+// `.All` and `.Group` are `Bad_Option{"dups"}`, as a member holds one value. The read takes `.Refuse` as `.Last`, as the
+// repeats it refuses are judged by a `Refusing_Reader` or by the format, which faults on a repeat or judges the header
+// of a delimited text before the read. A member the text does not hold keeps the target's value, and a value the type
+// does not take is a `Fault` of kind `.Refused`, whose detail is a `Typed_Refusal`, at the value's first byte, unless the
+// text fails as the format's `validate` fails it, which is then the error. Each string and list is an allocation of its
+// own from `caller`, so an arena gives the speed of one block, and under `read.borrow_strings` a string with nothing to
+// decode is a span of `src`.
 @(require_results)
 read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: string, opts: tape.Options, read: Unmarshal_Options, caller: runtime.Allocator, $H: typeid, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
 	if e := tape.options_refused(format, opts); e != nil {
@@ -201,6 +256,12 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	hk: H
 	when H == Cells_Reader {
 		hk.alike = true
+	} else when H == Refusing_Reader {
+		hk.repeat = max(u64)
+	} else {
+		// Left unzeroed, as a walk reads only the entries it wrote. A `when` opens no scope, so it lives as `hk` does.
+		memo: hook.Expected_Memo = ---
+		hk.expected = &memo
 	}
 	h := &hk.reader
 	h^ = {
@@ -222,20 +283,31 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	}
 	h.ctx = context
 	h.ctx.allocator = allocator
-	frames[0] = {b = u64(uintptr(&DEAD_BLOCK[1]))}
+	frames[0] = {b = u64(uintptr(&DEAD_BLOCK[1])), seen = SEEN_TARGET}
+	before: [BEFORE_ROOM]u8 = ---
+	h.target = uintptr(target)
+	size := plan.size
+	h.before = before[:size] if size <= BEFORE_ROOM else (runtime.mem_alloc_non_zeroed(size, 1, allocator) or_else nil)
+	if len(h.before) != size {
+		return hook.memory_budget_error(&m, runtime.Allocator_Error.Out_Of_Memory)
+	}
+	intrinsics.mem_copy_non_overlapping(raw_data(h.before), target, size)
 	if read.path != nil {
 		clear(read.path)
 	}
 	regs := hook.Regs{NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}
 	_, err, _ := walk(src, opts, &hk, &regs, allocator, &h.ctx)
-	if !copy_pending(h) && err == nil && h.err == nil {
-		err = runtime.Allocator_Error.Out_Of_Memory
-	}
 	if h.frames != h.home {
-		runtime.mem_free_with_size(h.frames, h.room * size_of(Frame), allocator)
+		runtime.heap_free(h.frames)
 	}
 	if h.zero != nil {
 		runtime.mem_free_with_size(raw_data(h.zero), len(h.zero), allocator)
+	}
+	if len(h.before) > BEFORE_ROOM {
+		runtime.mem_free_with_size(raw_data(h.before), len(h.before), allocator)
+	}
+	if h.held != nil {
+		held_free(h)
 	}
 	if err == nil {
 		err = h.err
@@ -257,7 +329,7 @@ reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 			s.b += size_of(Record)
 			return s, .Next
 		}
-		return key_miss(h, s, t)
+		return key_miss(h, {s.a, s.b, s.c}, t)
 	}
 	if t.role != .Value {
 		return s, .Next
@@ -266,15 +338,15 @@ reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 		h.sp -= 1
 		f := &h.frames[h.sp]
 		owner := (^Record)(uintptr(f.b) - size_of(Record))
-		if f.seen == 0 && (owner.kind == .Struct || owner.kind == .Required && s.b >= u64(uintptr(owner.first)) + u64(h.plan.meta[owner.meta].required) * size_of(Record)) {
+		if f.seen & SEEN_ON == 0 && (owner.kind == .Struct || owner.kind == .Required && s.b >= u64(uintptr(owner.first)) + u64(h.plan.meta[owner.meta].required) * size_of(Record)) {
 			return {f.a, f.b, f.c + u64(owner.stride)}, .Next
 		}
-		return close_container(h, f, s, t)
+		return close_container(h, f, {s.a, s.b, s.c}, t)
 	}
 	if s.c >= s.a {
 		a: hook.Action
 		ok: bool
-		if s, a, ok = grow_list(h, s, t); !ok {
+		if s, a, ok = grow_list(h, {s.a, s.b, s.c}, t); !ok {
 			return s, a
 		}
 	}
@@ -288,7 +360,7 @@ reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 				// cold path.
 				if t.spelling & tape.SPELLING_DECODE == 0 {
 					if rec.kind >= .I8 && rec.kind <= .F64 {
-						if n, ok := cell_number(h, t); ok && store_number(rec.kind, n, dest) {
+						if n, ok := spell.number_strict(h.base[:h.len], t.lo, t.lo + u64(t.n)); ok && store_number(rec.kind, n, dest) {
 							break value
 						}
 					} else if rec.kind == .Bool && t.lo + 8 <= h.len {
@@ -301,73 +373,61 @@ reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 					}
 				}
 			}
-			return indirect(h, s, t, number, CELLS)
+			return indirect(h, {s.a, s.b, s.c}, t, number, CELLS)
 		}
 		if t.spelling & tape.SPELLING_DECODE == 0 {
-			(^runtime.Raw_String)(dest)^ = {h.base[t.lo:], int(t.n)}
-			if !h.borrow && t.n != 0 {
-				h.pending[h.pended] = dest
-				h.pended += 1
-				if h.pended == PENDING && !copy_pending(h) {
-					return refuse_memory(h, s, t)
-				}
+			if h.borrow {
+				(^runtime.Raw_String)(dest)^ = {h.base[t.lo:], int(t.n)}
+			} else if !copy_span(h, dest, t.lo, t.n) {
+				return refuse_memory(h, {s.a, s.b, s.c}, t)
 			}
 		} else if !store_string(h, t, dest) {
-			return refuse_memory(h, s, t)
+			return refuse_memory(h, {s.a, s.b, s.c}, t)
 		}
 	case .Number:
 		if rec.kind < .I8 || rec.kind > .F64 {
-			return indirect(h, s, t, number, CELLS)
+			return indirect(h, {s.a, s.b, s.c}, t, number, CELLS)
 		}
 		n := number(h.base[:h.len], t)
 		if !store_number(rec.kind, n, dest) {
-			return number_cold(h, s, t, n)
+			return number_cold(h, {s.a, s.b, s.c}, t, n)
 		}
 	case .True, .False:
 		if rec.kind != .Bool {
-			return indirect(h, s, t, number, CELLS)
+			return indirect(h, {s.a, s.b, s.c}, t, number, CELLS)
 		}
 		(^bool)(dest)^ = t.kind == .True
 	case .Object:
 		if rec.kind != .Struct && rec.kind != .Required {
-			return indirect(h, s, t, number, CELLS)
+			return indirect(h, {s.a, s.b, s.c}, t, number, CELLS)
 		}
 		if h.sp == h.room && !frames_grow(h) {
-			return refuse_memory(h, s, t)
+			return refuse_memory(h, {s.a, s.b, s.c}, t)
 		}
-		if h.frames[h.sp - 1].seen != 0 {
-			revisit(h, s, rec, dest)
-		}
+		// A struct in place in the bytes of the frame below takes its `SEEN_TARGET`, which a list's and a map's lack.
+		held := h.frames[h.sp - 1].seen & SEEN_TARGET
 		f := &h.frames[h.sp]
 		h.sp += 1
-		f.a, f.b, f.c, f.seen = s.a, s.b, s.c, 0
+		f.a, f.b, f.c, f.seen = s.a, s.b, s.c, held
 		return {NO_LIMIT, u64(uintptr(rec.first)), u64(dest)}, .Next
 	case .Array:
 		if rec.kind != .Slice && rec.kind != .Dynamic {
-			return indirect(h, s, t, number, CELLS)
+			return indirect(h, {s.a, s.b, s.c}, t, number, CELLS)
 		}
 		if h.sp == h.room && !frames_grow(h) {
-			return refuse_memory(h, s, t)
+			return refuse_memory(h, {s.a, s.b, s.c}, t)
 		}
 		f := &h.frames[h.sp]
 		h.sp += 1
 		f.a, f.b, f.c, f.data, f.seen = s.a, s.b, s.c, nil, 0
 		return {0, u64(uintptr(rec.first)), 0}, .Next
 	case:
-		return indirect(h, s, t, number, CELLS)
+		return indirect(h, {s.a, s.b, s.c}, t, number, CELLS)
 	}
 	s.c += u64(rec.stride)
 	return s, .Next
 }
 
-// The value of the cell `t` when its text is an RFC 8259 number.
-@(private)
-cell_number :: #force_inline proc "contextless" (h: ^Reader, t: tape.Token) -> (spell.Number, bool) #no_bounds_check {
-	if n, ok := spell.number_short(h.base[:h.len], t.lo, t.lo + u64(t.n)); ok {
-		return n, true
-	}
-	return spell.number_strict(h.base[:h.len], t.lo, t.lo + u64(t.n))
-}
 
 // Whether key token `t` is the key of record `k`: a plain string key of its length, with its bytes. A key of at most
 // eight bytes is one load masked by `tail`, which needs eight bytes of the text from the key on, and a longer one its
@@ -388,9 +448,11 @@ key_hit :: #force_inline proc "contextless" (h: ^Reader, k: ^Record, t: tape.Tok
 	return n <= 16 || key_rest(h, k, p, n)
 }
 
+// `kernel.load8` for the polymorphic procs of other files, whose bodies a check of the package with no instance does
+// not see using an import.
 @(private)
 load8 :: #force_inline proc "contextless" (p: [^]u8) -> u64 {
-	return u64(intrinsics.unaligned_load((^u64le)(p)))
+	return kernel.load8(p)
 }
 
 // Whether the bytes past the first eight of the `n`-byte key at `p` are those of record `k`'s name.
@@ -474,10 +536,11 @@ frame_owner :: #force_inline proc "contextless" (f: ^Frame) -> ^Record {
 	return f.owner if wrapper(r.kind) else r
 }
 
-// Whether a record of `kind` wraps the record that reads its value.
+// Whether a record of `kind` wraps the record that reads its value, as a `Position` record passes each element to a
+// member, so a frame it saved the registers of names its owner and destination itself.
 @(private)
 wrapper :: #force_inline proc "contextless" (kind: Read_Kind) -> bool {
-	return kind == .Maybe || kind == .Ptr || kind == .Union
+	return kind == .Maybe || kind == .Ptr || kind == .Union || kind == .Position
 }
 
 // The index of record `r` in its block, the block's first record being `first`.

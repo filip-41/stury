@@ -10,34 +10,28 @@ import "stury:lib/ops/typed"
 // instant into a `time.Time` when it has an offset.
 
 Plan :: typed.Plan
-Plan_Options :: typed.Plan_Options
 Unmarshal_Options :: typed.Unmarshal_Options
 Raw :: typed.Raw
-Refusal :: typed.Refusal
+Typed_Refusal :: typed.Typed_Refusal
 plan_destroy :: typed.plan_destroy
 
 @(private)
 TAG :: "toml"
 
-// The plan of `T` for TOML reads, which `unmarshal` takes in `Unmarshal_Options.plan`, in `allocator`, which
-// `plan_destroy` frees. A type a read cannot take is `Bad_Option` naming the member, or the type.
+// The plan of `T` for TOML reads, as `typed.plan_make` makes it, which `unmarshal` takes in `Unmarshal_Options.plan`.
 @(require_results)
-plan_make :: proc($T: typeid, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, tape.Error) {
+plan_make :: proc($T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (Plan, tape.Error) {
 	return typed.plan_make(T, TAG, opts, allocator)
 }
 
-// Reads `src`, a text of `spec`, into `target`. A member the text does not hold keeps the target's value, and a value
-// the type does not take is a `Fault` of kind `.Refused`, whose detail is a `Refusal`, at the value's first byte, unless
-// the text fails as `validate` fails it, which is then the error. Strings and lists are allocated with `allocator`, and
-// a string with nothing to decode is a span of `src` under `read.borrow_strings`. A key is never repeated, as a repeat
-// is a fault.
+// Reads `src`, a text of `spec`, into `target`, as `typed.read` reads. A key is never repeated, as a repeat is a fault.
 @(require_results)
-unmarshal :: proc(src: []u8, target: ^$T, spec := Spec.Toml_1_0, read := Unmarshal_Options{}, opts := Options{}, allocator := context.allocator) -> tape.Error {
+unmarshal :: #force_inline proc(src: []u8, target: ^$T, spec := Spec.Toml_1_0, read := Unmarshal_Options{}, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	return unmarshal_type(src, target, T, spec, read, opts, allocator)
 }
 
 @(private)
-unmarshal_type :: proc(src: []u8, target: rawptr, T: typeid, spec: Spec, read: Unmarshal_Options, opts: Options, allocator: runtime.Allocator) -> tape.Error {
+unmarshal_type :: #force_inline proc(src: []u8, target: rawptr, T: typeid, spec: Spec, read: Unmarshal_Options, opts: Options, allocator: runtime.Allocator) -> tape.Error {
 	// A text in pieces is refused by the read, so only a step budget needs the lax walk.
 	lax := opts.budget.steps != 0
 	switch spec {
@@ -63,10 +57,5 @@ unmarshal_as :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: 
 		}
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, on)
 	}
-	// A repeated key is a fault, so `.Refuse` has no case to judge.
-	o := opts
-	if o.dups == .Refuse {
-		o.dups = .Last
-	}
-	return typed.read(src, target, T, &FORMATS[S], TAG, o, read, allocator, typed.Text_Reader, walk)
+	return typed.read(src, target, T, &FORMATS[S], TAG, opts, read, allocator, typed.Text_Reader, walk)
 }

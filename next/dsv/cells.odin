@@ -77,7 +77,10 @@ put_header_key :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), 
 @(private)
 put_cell :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), opts: Pass_Options, hs: ^hook.Regs, base: [^]u8, cells: int, field_lo, hi: int, esc, lax: bool, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (a: hook.Action, lo: u64, n: u32) {
 	if !opts.no_header {
-		if column_passes(w, base, cells, field_lo, hi, esc, lax, w.quoted) {
+		if passes, value := column_passes(w, base, cells, field_lo, hi, esc, lax, w.quoted); passes {
+			if value {
+				return put_value(w, opts, hs, base, field_lo, hi, esc, lax, w.quoted, on)
+			}
 			return .Skip, 0, 0
 		}
 		if k, klo, kn := put_key(true, w, hs, cells, field_lo, hi, on); k == .Stop || k == .Skip {

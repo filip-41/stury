@@ -44,12 +44,12 @@ read_rows :: proc(src: string, target: ^$T, read := dsv.Unmarshal_Options{}, opt
 }
 
 // Expects `e` to be a refusal `want` at byte `at`.
-expect_refusal :: proc(t: ^testing.T, e: tape.Error, want: dsv.Refusal, at: u64, loc := #caller_location) -> (path_ok: bool) {
+expect_refusal :: proc(t: ^testing.T, e: tape.Error, want: dsv.Typed_Refusal, at: u64, loc := #caller_location) -> (path_ok: bool) {
 	f, is_fault := e.(tape.Fault)
 	if !testing.expectf(t, is_fault && f.kind == .Refused, "got %v, wanted a refusal %v", e, want, loc = loc) {
 		return false
 	}
-	testing.expect_value(t, dsv.Refusal(f.detail), want, loc)
+	testing.expect_value(t, dsv.Typed_Refusal(f.detail), want, loc)
 	testing.expect_value(t, f.at, at, loc)
 	return true
 }
@@ -188,7 +188,7 @@ repeated_and_unknown_columns :: proc(t: ^testing.T) {
 		opts: dsv.Options,
 		want: union {
 			i64,
-			dsv.Refusal,
+			dsv.Typed_Refusal,
 		}, // the row's `a`, or a refusal
 		at:   u64, // of a refusal
 	}
@@ -197,20 +197,20 @@ repeated_and_unknown_columns :: proc(t: ^testing.T) {
 	for c in ([]Case {
 			{"a,a\n1,2\n", {}, {}, i64(2), 0},
 			{"a,a\n1,2\n", {}, {dups = .First}, i64(1), 0},
-			{"a,a\nx,1\n", {}, {}, dsv.Refusal.Expected_Integer, 4},
-			{"a,a\n1,x\n", {}, {}, dsv.Refusal.Expected_Integer, 6},
+			{"a,a\nx,1\n", {}, {}, dsv.Typed_Refusal.Expected_Integer, 4},
+			{"a,a\n1,x\n", {}, {}, dsv.Typed_Refusal.Expected_Integer, 6},
 			{"a,a\n1,x\n", {}, {dups = .First}, i64(1), 0},
 			{"a,a\n1,\n", {}, {dups = .First}, i64(1), 0},
 			{"a,a,a\n1,2,3\n", {}, {}, i64(3), 0},
 			{"zz,a\nx,2\n", {}, {}, i64(2), 0},
-			{"a,zz\n1,x\n", {refuse_unknown = true}, {}, dsv.Refusal.Unknown_Field, 2},
+			{"a,zz\n1,x\n", {refuse_unknown = true}, {}, dsv.Typed_Refusal.Unknown_Field, 2},
 		}) {
 		rows: []Row
 		e := read_rows(c.src, &rows, c.read, c.opts)
 		switch w in c.want {
 		case i64:
 			testing.expectf(t, e == nil && len(rows) == 1 && rows[0].a == w, "%q: %v, %v", c.src, e, rows)
-		case dsv.Refusal:
+		case dsv.Typed_Refusal:
 			expect_refusal(t, e, w, c.at)
 		}
 	}
@@ -445,15 +445,53 @@ no_header_reads_each_record_as_a_list :: proc(t: ^testing.T) {
 		testing.expect_value(t, lists[1][0], 3)
 		testing.expect_value(t, lists[1][1], 4)
 	}
-	// A record is an array, which a struct or a map does not take.
+	// A record is an array, which a struct reads by position and a map does not take.
+	Row :: struct {
+		a: i64,
+		b: string,
+		c: i64 `csv:",required"`,
+	}
+	rows: []Row
+	testing.expect_value(t, read_rows("1,x,3,z\n2,y,4,w\n", &rows, opts = no_header), nil)
+	if testing.expect_value(t, len(rows), 2) {
+		testing.expect_value(t, rows[0], Row{1, "x", 3})
+		testing.expect_value(t, rows[1], Row{2, "y", 4})
+	}
+	expect_refusal(t, read_rows("1,x\n", &rows, opts = no_header), .Missing_Field, 3)
+	maps: []map[string]i64
+	expect_refusal(t, read_rows("1\n", &maps, opts = no_header), .Expected_Object, 0)
+}
+
+// A list of rows that are lists reads every record, the header's line as the first, and a target that is one row reads
+// the first record and refuses a second.
+@(test)
+the_header_is_a_list_rows_first_and_one_row_takes_one_record :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	lists: [][]string
+	testing.expect_value(t, read_rows("a,b\n1,\n", &lists), nil)
+	if testing.expect_value(t, len(lists), 2) {
+		testing.expect_value(t, lists[0][1], "b")
+		testing.expect_value(t, lists[1][0], "1")
+	}
+	fixed: [][2]string
+	testing.expect_value(t, read_rows("a,b\n1,2\n", &fixed), nil)
+	testing.expect(t, len(fixed) == 2 && fixed[0] == {"a", "b"} && fixed[1] == {"1", "2"})
 	Row :: struct {
 		a: i64,
 		b: string,
 	}
-	rows: []Row
-	expect_refusal(t, read_rows("1,x\n2,y\n", &rows, opts = no_header), .Expected_Object, 0)
-	maps: []map[string]i64
-	expect_refusal(t, read_rows("1\n", &maps, opts = no_header), .Expected_Object, 0)
+	row := Row{7, "kept"}
+	testing.expect_value(t, read_rows("a\n", &row), nil)
+	testing.expect_value(t, row, Row{7, "kept"})
+	testing.expect_value(t, read_rows("b,a\nx,1\n", &row), nil)
+	testing.expect_value(t, row, Row{1, "x"})
+	expect_refusal(t, read_rows("a,b\n1,x\n2,y\n", &row), .Too_Many, 8)
+	testing.expect_value(t, read_rows("1,x\n", &row, opts = {format = dsv.Dsv_Options{no_header = true}}), nil)
+	testing.expect_value(t, row, Row{1, "x"})
+	m: map[string]string
+	testing.expect_value(t, read_rows("a,b\n1,x\n", &m), nil)
+	testing.expect(t, len(m) == 2 && m["a"] == "1" && m["b"] == "x")
 }
 
 // A text with no record is an empty list, a header alone too.
@@ -544,6 +582,61 @@ a_refusal_leaves_what_it_allocated_with_the_target :: proc(t: ^testing.T) {
 	}
 	delete(rows, alloc)
 	testing.expect_value(t, len(tracker.allocation_map), 0)
+}
+
+// A copied empty cell is the zero string, so a caller deleting each string frees nothing of the text, the last cell
+// of an unterminated text too.
+@(test)
+copied_empty_cells_are_the_zero_string :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Row :: struct {
+		a, b: string,
+	}
+	tracker: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&tracker, context.allocator)
+	defer mem.tracking_allocator_destroy(&tracker)
+	alloc := mem.tracking_allocator(&tracker)
+	rows: []Row
+	testing.expect_value(t, dsv.unmarshal(transmute([]u8)string("a,b\n,x\ny,"), &rows, .Csv, allocator = alloc), nil)
+	if testing.expect_value(t, len(rows), 2) {
+		testing.expect(t, raw_data(rows[0].a) == nil && raw_data(rows[1].b) == nil)
+	}
+	for r in rows {
+		delete(r.a, alloc)
+		delete(r.b, alloc)
+	}
+	delete(rows, alloc)
+	testing.expect_value(t, len(tracker.bad_free_array), 0)
+	testing.expect_value(t, len(tracker.allocation_map), 0)
+}
+
+// A repeated column under `.Last` frees the cell it replaces, in every record, borrowed or copied.
+@(test)
+a_repeated_column_frees_what_it_replaces :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Row :: struct {
+		s: string,
+	}
+	tracker: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&tracker, context.allocator)
+	defer mem.tracking_allocator_destroy(&tracker)
+	alloc := mem.tracking_allocator(&tracker)
+	src := "s,n,s\n\"a\"\"b\",1,\"c\"\"d\"\nplain,2,\"e\"\"f\"\n\"g\"\"h\",3,last\n"
+	for borrow in ([]bool{false, true}) {
+		rows: []Row
+		testing.expect_value(t, dsv.unmarshal(transmute([]u8)src, &rows, .Csv, {borrow_strings = borrow}, allocator = alloc), nil)
+		if testing.expect_value(t, len(rows), 3) {
+			testing.expect_value(t, rows[0].s, `c"d`)
+			testing.expect_value(t, rows[2].s, "last")
+		}
+		for r in rows {
+			if !borrow || r.s != "last" {
+				delete(r.s, alloc)
+			}
+		}
+		delete(rows, alloc)
+		testing.expectf(t, len(tracker.allocation_map) == 0, "borrow %v: %d blocks live", borrow, len(tracker.allocation_map))
+	}
 }
 
 @(test)

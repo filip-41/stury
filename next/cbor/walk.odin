@@ -2,6 +2,7 @@ package cbor
 
 import "base:intrinsics"
 import "base:runtime"
+import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
@@ -348,6 +349,12 @@ run :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), lo, d0, top0: u64, regs: 
 				return fault(i, .Bad_Char, .Not_Preferred)
 			}
 			i = q + arg
+			when .Expects in C {
+				if key_due && expected_text(hs.b, src, q, arg) {
+					hs.b += hook.EXPECTED_STRIDE
+					break
+				}
+			}
 			if a = give(w, &hs, t, on); a == .Stop {
 				return hook.walk_result(i, hook.WALK_STOPPED)
 			}
@@ -680,4 +687,18 @@ walk_item :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, $LA
 		hook.levels_free(&w)
 	}
 	return r, w.tolerated, left
+}
+
+// Whether the text string key of `n` bytes at `q` of `src` is the one a hook with `.Expects` expects at `b`.
+@(private)
+expected_text :: #force_inline proc "contextless" (b: u64, src: []u8, q, n: u64) -> bool #no_bounds_check {
+	e := (^hook.Expected_Key)(uintptr(b))
+	if e.word != tape.key_word(n) || q + 8 > u64(len(src)) {
+		return false
+	}
+	p := raw_data(src)[q:]
+	if n <= 8 {
+		return (kernel.load8(p) ~ e.head) & e.tail == 0
+	}
+	return n <= 16 && kernel.load8(p) == e.head && kernel.load8(p[n - 8:]) == e.tail
 }

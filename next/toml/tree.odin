@@ -11,13 +11,10 @@ import "stury:lib/core/tape"
 @(private)
 NIL :: u32(max(u32))
 
-// A text of short keyed lines holds a node for about `NODE_BYTES` bytes, and a large table a member for about
-// `MEMBER_BYTES`. The tree reserves nodes for that many and the index, once a table outgrows its list, for that many
-// members. Past the cap or in a sparser text each grows as it fills.
+// A text of keyed lines holds a node for about `NODE_BYTES` bytes. The tree reserves nodes for that many, and grows
+// past the cap or in a denser text as it fills.
 @(private)
-NODE_BYTES :: 6
-@(private)
-MEMBER_BYTES :: 16
+NODE_BYTES :: 24
 @(private)
 MAX_RESERVED_NODES :: 1 << 20
 
@@ -26,7 +23,7 @@ MAX_RESERVED_NODES :: 1 << 20
 @(private)
 INDEXED_AFTER :: 16
 
-// The fewest slots the index holds, a power of two.
+// The slots the index holds once a table outgrows its list, a power of two. It doubles from there.
 @(private)
 INDEX_SLOTS :: 64
 
@@ -101,7 +98,6 @@ Table_Tree :: struct {
 	index:      []u64, // open addressing: a slot is 0 or a member's name hash's high half over its id plus 1
 	indexed:    int, // the slots in use
 	names:      runtime.Arena,
-	members:    int, // the members the index reserves for
 	keyed:      int, // the nodes with a key
 	inlines:    int, // the comments set on a value's line, which may replace one another
 	max_depth:  u32,
@@ -111,7 +107,7 @@ Table_Tree :: struct {
 
 // Why an insertion refused.
 @(private)
-Insert_Refusal :: enum u8 {
+Refusal :: enum u8 {
 	None,
 	Redefined, // a table written twice, or a header over a dotted table
 	Duplicate, // a key written twice
@@ -126,7 +122,6 @@ Insert_Refusal :: enum u8 {
 tree_init :: proc(t: ^Table_Tree, max_depth: u32, src_len: int) -> bool {
 	t.max_depth = max_depth
 	t.extended = NIL
-	t.members = min(src_len / MEMBER_BYTES, MAX_RESERVED_NODES) + 16
 	// A node is written whole when it is appended, so the reservation is not zeroed.
 	err: runtime.Allocator_Error
 	t.nodes, err = runtime.non_zero_make_dynamic_array_len_cap([dynamic]Table_Node, 0, min(src_len / NODE_BYTES, MAX_RESERVED_NODES) + 16)
@@ -232,17 +227,11 @@ index_insert :: proc(t: ^Table_Tree, parent, id: u32) -> bool #no_bounds_check {
 	return true
 }
 
-// Makes the index twice as large, or large enough for the members the text can hold when it is the first.
+// Makes the index twice as large, or `INDEX_SLOTS` when it is the first.
 @(private)
 index_grow :: #force_no_inline proc(t: ^Table_Tree) -> bool #no_bounds_check {
 	old := t.index
-	size := 2 * len(old)
-	if size == 0 {
-		size = INDEX_SLOTS
-		for size < t.members {
-			size *= 2
-		}
-	}
+	size := 2 * len(old) if len(old) > 0 else INDEX_SLOTS
 	grown, err := make([]u64, size)
 	if err != nil {
 		return false
@@ -267,7 +256,7 @@ index_grow :: #force_no_inline proc(t: ^Table_Tree) -> bool #no_bounds_check {
 // members, when its earlier members join it too. A container node is refused past the depth limit,
 // since its token opens a level.
 @(private)
-add_node :: proc(t: ^Table_Tree, parent: u32, part: ^Part, value: tape.Token, kind: Node_Kind, flags: bit_set[Flag; u8]) -> (id: u32, r: Insert_Refusal) #no_bounds_check {
+add_node :: proc(t: ^Table_Tree, parent: u32, part: ^Part, value: tape.Token, kind: Node_Kind, flags: bit_set[Flag; u8]) -> (id: u32, r: Refusal) #no_bounds_check {
 	depth := t.nodes[parent].depth + 1
 	if kind != .Scalar && depth + 1 > t.max_depth {
 		return NIL, .Too_Deep
@@ -319,7 +308,7 @@ grow_nodes :: proc(t: ^Table_Tree) -> bool {
 // The member a dotted key's part `part` names in table `cur`, which the key creates when it is new, with its token at
 // `lo`, the key part after it. An existing one is reached only when a dotted key made it.
 @(private)
-dotted_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32, first: bool, r: Insert_Refusal) #no_bounds_check {
+dotted_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32, first: bool, r: Refusal) #no_bounds_check {
 	id = find_child(t, cur, part.name)
 	if id == NIL {
 		id, r = add_node(t, cur, part, {lo = lo, kind = .Object, spelling = STYLE_DOTTED}, .Table, {.Dotted})
@@ -334,7 +323,7 @@ dotted_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32,
 
 // The scalar slot a key's last part names in table `cur`. The value is set once it has been read.
 @(private)
-leaf_key :: proc(t: ^Table_Tree, cur: u32, part: ^Part) -> (id: u32, r: Insert_Refusal) #no_bounds_check {
+leaf_key :: proc(t: ^Table_Tree, cur: u32, part: ^Part) -> (id: u32, r: Refusal) #no_bounds_check {
 	if find_child(t, cur, part.name) != NIL {
 		return NIL, .Duplicate
 	}
@@ -344,7 +333,7 @@ leaf_key :: proc(t: ^Table_Tree, cur: u32, part: ^Part) -> (id: u32, r: Insert_R
 // A table or array element a header's path passes through, a new table's token at `lo`, the key part after it. An
 // array of tables continues in its last element.
 @(private)
-header_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32, r: Insert_Refusal) #no_bounds_check {
+header_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32, r: Refusal) #no_bounds_check {
 	id = find_child(t, cur, part.name)
 	if id == NIL {
 		return add_node(t, cur, part, {lo = lo, kind = .Object}, .Table, {})
@@ -370,7 +359,7 @@ header_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32,
 // other headers' paths made, which keeps its token as a walk may have given it. `heads` says whether the comments
 // above the header are the table's: false once a walk gave its key, as they would come after it.
 @(private)
-header_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, body: u64) -> (id: u32, heads: bool, r: Insert_Refusal) #no_bounds_check {
+header_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, body: u64) -> (id: u32, heads: bool, r: Refusal) #no_bounds_check {
 	id = find_child(t, cur, part.name)
 	if id == NIL {
 		id, r = add_node(t, cur, part, {lo = body, kind = .Object}, .Table, {.Header})
@@ -391,7 +380,7 @@ header_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, body: u64) -> (id: u3
 // The new element table of the array of tables a `[[header]]` at `start` ends in, its token at `body`, the byte past
 // the header.
 @(private)
-array_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, start, body: u64) -> (id: u32, r: Insert_Refusal) #no_bounds_check {
+array_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, start, body: u64) -> (id: u32, r: Refusal) #no_bounds_check {
 	array := find_child(t, cur, part.name)
 	if array == NIL {
 		array, r = add_node(t, cur, part, {lo = start, kind = .Array}, .Array, {.Tables})

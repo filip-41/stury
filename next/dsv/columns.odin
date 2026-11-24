@@ -17,23 +17,28 @@ column_bit :: #force_inline proc "contextless" (c: int) -> u64 {
 // Whether the cell of column `c` of the open record, from `field_lo` to `hi` of the text at `base`, passes with no
 // token: the hook of `.Columns` skipped that column's key in the record the pass learnt its columns from, or the hook
 // replays the record, and the cell's value token is stored in the hook's `cells`, as `infer` leaves it for
-// `columns_close`. A record the hook keeps gives every cell. `esc`, `lax` and `quoted` are as `cell_token` reads them.
+// `columns_close`, or for a hook of `.Cell_Values` is `value`, given with no key, a cell of a replayed record whose
+// column it took. A record the hook keeps gives every cell. `esc`, `lax` and `quoted` are as `cell_token` reads them.
 @(private)
-column_passes :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), base: [^]u8, c, field_lo, hi: int, esc, lax, quoted: bool) -> bool #no_bounds_check {
+column_passes :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), base: [^]u8, c, field_lo, hi: int, esc, lax, quoted: bool) -> (passes, value: bool) #no_bounds_check {
 	when .Columns in C {
 		if w.columns & column_bit(c) == 0 && w.keep == .None {
-			return true
+			return true, false
 		}
 		if !w.h.replay.replays {
-			return false
+			return false, false
 		}
-		// A replayed record has the first record's width, at most `hook.COLUMN_BITS`, the length of `cells`, and a
-		// wider one gives no cell past that width (`read_wide`).
-		w.h.replay.cells[w.h.replay.given] = cell_token(S, base, field_lo, hi, esc, lax, .Value, false, quoted)
-		w.h.replay.given += 1
-		return true
+		when .Cell_Values in C {
+			return true, w.columns & column_bit(c) != 0
+		} else {
+			// A replayed record has the first record's width, at most `hook.COLUMN_BITS`, the length of `cells`, and a
+			// wider one gives no cell past that width (`read_wide`).
+			w.h.replay.cells[w.h.replay.given] = cell_token(S, base, field_lo, hi, esc, lax, .Value, false, quoted)
+			w.h.replay.given += 1
+			return true, false
+		}
 	} else {
-		return false
+		return false, false
 	}
 }
 

@@ -7,37 +7,35 @@ import "stury:lib/ops/typed"
 
 // Typed reads: a delimited text read into a list of Odin values during the walk, with no document between them. A
 // record reads into a struct whose members are named by the header's cells, through their tags under `csv`, or else
-// under `stury`, and under `Dsv_Options.no_header` into a list of cells. A cell is text for a string, and a number or
-// a boolean as its text spells it for a field of those, and an empty unquoted cell is absent.
+// under `stury`, and under `Dsv_Options.no_header` by their places. A record reads into a list of cells too, the
+// header's line being the first such record. A cell is text for a string, and a number or a boolean as its text spells
+// it for a field of those, and an empty unquoted cell is absent.
 
 Plan :: typed.Plan
-Plan_Options :: typed.Plan_Options
 Unmarshal_Options :: typed.Unmarshal_Options
 Raw :: typed.Raw
-Refusal :: typed.Refusal
+Typed_Refusal :: typed.Typed_Refusal
 plan_destroy :: typed.plan_destroy
 
 @(private)
 TAG :: "csv"
 
-// The plan of `T` for delimited reads, which `unmarshal` takes in `Unmarshal_Options.plan`, in `allocator`, which
-// `plan_destroy` frees. A type a read cannot take is `Bad_Option` naming the member, or the type.
+// The plan of `T` for delimited reads, as `typed.plan_make` makes it, which `unmarshal` takes in `Unmarshal_Options.plan`.
 @(require_results)
-plan_make :: proc($T: typeid, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, tape.Error) {
+plan_make :: proc($T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (Plan, tape.Error) {
 	return typed.plan_make(T, TAG, opts, allocator)
 }
 
-// Reads `src`, a text of `spec`, into `target`, a list of records. A member the record does not hold keeps its zero
-// value, and a cell the type does not take is a `Fault` of kind `.Refused`, whose detail is a `Refusal`, at the cell,
-// unless the text fails as `validate` fails it, which is then the error. Strings and lists are allocated with
-// `allocator`, and a cell with nothing to decode is a span of `src` under `read.borrow_strings`.
+// Reads `src`, a text of `spec`, into `target`, a list of records, or one record, which reads the first and refuses a
+// second as `.Too_Many`, as `typed.read` reads, a cell taking a value's place. A member a new record does not hold
+// keeps its zero value.
 @(require_results)
-unmarshal :: proc(src: []u8, target: ^$T, spec := Spec.Csv, read := Unmarshal_Options{}, opts := Options{}, allocator := context.allocator) -> tape.Error {
+unmarshal :: #force_inline proc(src: []u8, target: ^$T, spec := Spec.Csv, read := Unmarshal_Options{}, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	return unmarshal_type(src, target, T, spec, read, opts, allocator)
 }
 
 @(private)
-unmarshal_type :: proc(src: []u8, target: rawptr, T: typeid, spec: Spec, read: Unmarshal_Options, opts: Options, allocator: runtime.Allocator) -> tape.Error {
+unmarshal_type :: #force_inline proc(src: []u8, target: rawptr, T: typeid, spec: Spec, read: Unmarshal_Options, opts: Options, allocator: runtime.Allocator) -> tape.Error {
 	switch spec {
 	case .Csv:
 		return unmarshal_as(src, target, T, .Csv, read, opts, allocator)
@@ -54,13 +52,39 @@ unmarshal_as :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: 
 	if _, refused := pass_options(S, opts); refused != nil {
 		return refused
 	}
-	if e := refuse_repeat(src, S, opts, allocator); e != nil {
+	o := opts
+	if list_rows(T) {
+		d, _ := o.format.(tape.Dsv_Options)
+		d.no_header = true
+		o.format = d
+	}
+	if e := refuse_repeat(src, S, o, allocator); e != nil {
 		return e
 	}
-	if opts.budget.steps != 0 {
-		return unmarshal_walk(src, target, T, S, true, read, opts, allocator)
+	if o.budget.steps != 0 {
+		return unmarshal_walk(src, target, T, S, true, read, o, allocator)
 	}
-	return unmarshal_walk(src, target, T, S, false, read, opts, allocator)
+	return unmarshal_walk(src, target, T, S, false, read, o, allocator)
+}
+
+// Whether `T` is a list of rows that are lists of cells, which take the header's line as a record.
+@(private)
+list_rows :: proc(T: typeid) -> bool {
+	list :: proc(ti: ^runtime.Type_Info) -> ^runtime.Type_Info {
+		#partial switch v in runtime.type_info_base(ti).variant {
+		case ^runtime.Type_Info_Slice:
+			return v.elem
+		case ^runtime.Type_Info_Dynamic_Array:
+			return v.elem
+		case ^runtime.Type_Info_Array:
+			return v.elem
+		case ^runtime.Type_Info_Enumerated_Array:
+			return v.elem
+		}
+		return nil
+	}
+	row := list(type_info_of(T))
+	return row != nil && list(row) != nil
 }
 
 @(private)
@@ -71,10 +95,5 @@ unmarshal_walk :: #force_inline proc(src: []u8, target: rawptr, T: typeid, $S: S
 		}
 		return walk_text(src, S, LAX, options_resolved(S, opts), h, regs, a, ctx, on, nil, opts.budget.steps)
 	}
-	// `.Refuse` was judged on the header, so the read takes the repeats as `.Last`.
-	o := opts
-	if o.dups == .Refuse {
-		o.dups = .Last
-	}
-	return typed.read(src, target, T, &FORMATS[S], TAG, o, read, allocator, typed.Cells_Reader, walk)
+	return typed.read(src, target, T, &FORMATS[S], TAG, opts, read, allocator, typed.Cells_Reader, walk)
 }

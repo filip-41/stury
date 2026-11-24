@@ -182,24 +182,36 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 		}
 		return #must_tail st_bad_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	q, escaped, stop := string_probe(p, end)
-	if q == nil {
-		if escaped {
-			w.resume = stop
-			return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
-		}
-		// A byte past ASCII or a control byte, which `st_key_string` would only find again.
-		if stop != nil {
-			return #must_tail st_key_string_utf8(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
-		}
-		return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	// The key the hook expects is taken here as the hook would take it, with no token.
+	q: [^]u8
+	a := hook.Action.Next
+	when .Expects in C {
+		q = expected_at(hs.b, p, end)
 	}
-	a := emit_string(w, on, &hs, .Key, p, q, tape.SPELLING_ASCII)
-	if a == .Stop {
-		return stopped(w, hs, q)
-	}
-	if grows(C, a) {
-		return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	if q != nil {
+		hs.b += hook.EXPECTED_STRIDE
+	} else {
+		escaped: bool
+		stop: [^]u8
+		q, escaped, stop = string_probe(p, end)
+		if q == nil {
+			if escaped {
+				w.resume = stop
+				return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+			// A byte past ASCII or a control byte, which `st_key_string` would only find again.
+			if stop != nil {
+				return #must_tail st_key_string_utf8(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+			return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+		a = emit_string(w, on, &hs, .Key, p, q, tape.SPELLING_ASCII)
+		if a == .Stop {
+			return stopped(w, hs, q)
+		}
+		if grows(C, a) {
+			return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
 	}
 	if r := colon_fast(q, end); r != nil {
 		if gaps_on(m) {
@@ -520,7 +532,7 @@ st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 	if gaps_on(m) {
 		if d & 1 != 0 {
 			if r, key, nl := gap_match(w, p, end, m); r != nil {
-				a := emit_token(w, on, &hs, key)
+				a := gap_key(w, on, &hs, key, m)
 				if a == .Stop {
 					return stopped(w, hs, past_key(w, key))
 				}
@@ -862,7 +874,7 @@ st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 	if gaps_on(m) {
 		if d & 1 != 0 {
 			if r, key, _ := gap_match(w, p, end, m); r != nil {
-				a := emit_token(w, on, &hs, key)
+				a := gap_key(w, on, &hs, key, m)
 				if a == .Stop {
 					return stopped(w, hs, past_key(w, key))
 				}
@@ -966,7 +978,7 @@ st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		w.gap_lo = at(w, q)
 		return #must_tail st_after_unmatched(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	a = emit_token(w, on, &hs, key)
+	a = gap_key(w, on, &hs, key, m)
 	if a == .Stop {
 		return stopped(w, hs, past_key(w, key))
 	}
@@ -1019,7 +1031,7 @@ st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		w.gap_lo = at(w, q)
 		return #must_tail st_after_unmatched(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	a = emit_token(w, on, &hs, key)
+	a = gap_key(w, on, &hs, key, m)
 	if a == .Stop {
 		return stopped(w, hs, past_key(w, key))
 	}
@@ -1062,7 +1074,7 @@ st_hit_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 		w.gap_lo = at(w, q)
 		return #must_tail st_after_unmatched(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
-	a = emit_token(w, on, &hs, key)
+	a = gap_key(w, on, &hs, key, m)
 	if a == .Stop {
 		return stopped(w, hs, past_key(w, key))
 	}
@@ -1250,23 +1262,34 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		if p >= end || p[0] != '"' {
 			return #must_tail st_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
-		q, escaped, stop := string_probe(p, end)
-		if q == nil {
-			if escaped {
-				w.resume = stop
-				return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
-			}
-			if stop != nil {
-				return #must_tail st_key_string_utf8(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
-			}
-			return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		q: [^]u8
+		a := hook.Action.Next
+		when .Expects in C {
+			q = expected_at(hs.b, p, end)
 		}
-		a := emit_string(w, on, &hs, .Key, p, q, tape.SPELLING_ASCII)
-		if a == .Stop {
-			return stopped(w, hs, q)
-		}
-		if grows(C, a) {
-			return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		if q != nil {
+			hs.b += hook.EXPECTED_STRIDE
+		} else {
+			escaped: bool
+			stop: [^]u8
+			q, escaped, stop = string_probe(p, end)
+			if q == nil {
+				if escaped {
+					w.resume = stop
+					return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+				}
+				if stop != nil {
+					return #must_tail st_key_string_utf8(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+				}
+				return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+			a = emit_string(w, on, &hs, .Key, p, q, tape.SPELLING_ASCII)
+			if a == .Stop {
+				return stopped(w, hs, q)
+			}
+			if grows(C, a) {
+				return #must_tail st_grow_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
 		}
 		// The value's slot, the next, so a dormant row stays in step with the slots its later objects match.
 		value := min(run + 1, last)

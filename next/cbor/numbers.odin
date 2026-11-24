@@ -49,6 +49,27 @@ number_value :: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number {
 	return integer(span)
 }
 
+// `number_value` for a typed read's hook, which reads an unsigned integer and a binary64 in place and gives any other
+// number to `number_value`.
+@(private)
+number_in_place :: #force_inline proc "contextless" (src: []u8, t: tape.Node) -> spell.Number #no_bounds_check {
+	if t.role != .Tag {
+		b := src[t.lo]
+		switch t.spelling & tape.NUMBER_KIND {
+		case NUMBER_INT:
+			if b < 0x20 {
+				arg, _, _ := read_head(src, t.lo, b)
+				return {arg, .Int if arg <= u64(max(i64)) else .Uint}
+			}
+		case NUMBER_FLOAT:
+			if b == 0xfb {
+				return {u64(intrinsics.unaligned_load((^u64be)(raw_data(src)[t.lo + 1:]))), .Float}
+			}
+		}
+	}
+	return number_value(src, t)
+}
+
 // The number kind of the number token at `lo`: a float for an initial byte of `f9` or above, else an integer. `hi` is
 // unused, as the slot of `Format` takes it.
 @(private)

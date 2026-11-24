@@ -2,6 +2,7 @@ package typed
 
 import "base:runtime"
 import "core:time"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // A typed read fills an Odin value from a text during the walk, with no document between them. A plan is one type's
@@ -43,6 +44,7 @@ Read_Kind :: enum u8 {
 	Raw, // the value's text as written
 	Time, // `time.Time` from a date-time with an offset
 	Dead, // the record a refused read reads every token by, which takes every token to a cold path
+	Position, // the record the elements of an array a struct reads by position go through, to its members in turn
 }
 
 // A record. `word` is a member's key as a token's second word holds it, `head` its first eight bytes and `tail` its last
@@ -51,9 +53,7 @@ Read_Kind :: enum u8 {
 // index in `Plan.meta`.
 @(private)
 Record :: struct {
-	word:   u64,
-	head:   u64,
-	tail:   u64,
+	using expected: hook.Expected_Key,
 	first:  ^Record,
 	offset: u32,
 	stride: u32,
@@ -62,7 +62,7 @@ Record :: struct {
 	_:      [3]u8,
 }
 
-#assert(size_of(Record) == 48)
+#assert(size_of(Record) == hook.EXPECTED_STRIDE)
 
 // The `word` of a record that no key matches.
 @(private)
@@ -71,12 +71,6 @@ NO_KEY :: max(u64)
 // The bits of a token's second word a key match compares: its length, kind, role and `SPELLING_DECODE`.
 @(private)
 KEY_MASK :: u64(0xFFFF_FFFF) | u64(0xFFFF) << 32 | u64(tape.SPELLING_DECODE) << 48
-
-// The `word` of a member whose key is `n` bytes of text with nothing to decode.
-@(private)
-key_word :: #force_inline proc "contextless" (n: int) -> u64 {
-	return u64(n) | u64(tape.Kind.String) << 32 | u64(tape.Role.Key) << 40
-}
 
 // What only the cold paths read of a record, indexed by `Record.meta`.
 @(private)
@@ -99,6 +93,7 @@ Meta :: struct {
 	tag_size:  u8, // a `Union`'s tag bytes
 	key_kind:  Read_Kind, // a `Map`'s key: `String`, an integer kind or `Enum`
 	zeroed:    bool, // a list whose new elements start zeroed, as their readers may leave bytes unwritten
+	frees:     bool, // a value of the record may hold a block: a string, a list, a map or a pointer, or one in place
 	must:      bool, // a `required` member
 	signed:    bool, // a `Bit_Set` of integers
 }
@@ -162,6 +157,7 @@ Plan :: struct {
 	arms:      []Arm,
 	root:      ^Record, // the `b` the read starts with
 	type:      typeid,
+	size:      int, // the bytes of a value of `type`
 	tag:       string, // the struct tag key the members' names were read under
 	options:   Plan_Options,
 	strings:   []u8, // the names the plan spells itself, renamed or unescaped
@@ -206,7 +202,7 @@ plan_make :: proc(T: typeid, tag: string, opts := Plan_Options{}, allocator := c
 		delete(b.strings)
 		return {}, b.err
 	}
-	p.type, p.tag, p.options, p.allocator = T, tag, opts, allocator
+	p.type, p.size, p.tag, p.options, p.allocator = T, type_info_of(T).size, tag, opts, allocator
 	p.root = &p.records[root + 1]
 	return p, nil
 }
@@ -264,7 +260,7 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string) {
 		return
 	}
 	m := &b.meta[b.records[at].meta]
-	m.type, m.size, m.align = ti.id, u32(ti.size), u32(ti.align)
+	m.type, m.size, m.align, m.frees = ti.id, u32(ti.size), u32(ti.align), holds_block(ti)
 	kind := Read_Kind.End
 	if ti.id == time.Time || ti.id == Raw {
 		set_kind(b, at, .Time if ti.id == time.Time else .Raw)
@@ -335,6 +331,32 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string) {
 		return
 	}
 	set_kind(b, at, kind)
+}
+
+// Whether a value of `ti` may hold a block a read allocates, in it or in what it holds in place, which is no cycle.
+@(private)
+holds_block :: proc(ti: ^runtime.Type_Info) -> bool {
+	#partial switch v in runtime.type_info_base(ti).variant {
+	case ^runtime.Type_Info_String, ^runtime.Type_Info_Slice, ^runtime.Type_Info_Dynamic_Array, ^runtime.Type_Info_Map, ^runtime.Type_Info_Pointer:
+		return true
+	case ^runtime.Type_Info_Struct:
+		for i in 0 ..< int(v.field_count) {
+			if holds_block(v.types[i]) {
+				return true
+			}
+		}
+	case ^runtime.Type_Info_Array:
+		return holds_block(v.elem)
+	case ^runtime.Type_Info_Enumerated_Array:
+		return holds_block(v.elem)
+	case ^runtime.Type_Info_Union:
+		for variant in v.variants {
+			if holds_block(variant) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // The integer kind of `ti`, `End` for a type that is none the read takes.
@@ -852,11 +874,19 @@ plan_finish :: proc(b: ^Builder, p: ^Plan) -> tape.Error {
 	return nil
 }
 
-// Sets the key fields of member record `r` named `name`.
+// Sets the key fields of member record `r` named `name`. A name with a byte a JSON string escapes is no key a token
+// spells with nothing to decode, so it has `NO_KEY` and its member is found by its name alone, and a walk that matches
+// an expected key by its bytes never takes an escape for it.
 @(private)
 key_of :: proc "contextless" (r: ^Record, name: string) {
 	n := len(name)
-	r.word = key_word(n)
+	for c in transmute([]u8)name {
+		if c == '"' || c == '\\' || c < 0x20 {
+			r.word = NO_KEY
+			return
+		}
+	}
+	r.word = tape.key_word(u64(n))
 	r.head, r.tail = 0, 0
 	for i in 0 ..< min(n, 8) {
 		r.head |= u64(name[i]) << (8 * uint(i))

@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:math"
 import "core:strconv"
+import "stury:lib/base/kernel"
 
 // A number's value, read from its decimal text.
 Number :: struct {
@@ -103,7 +104,7 @@ number_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (nu
 		return
 	}
 	// The bytes past the span read as `0` digits.
-	w0, w1 := short_pad(load8(base[p:]), m), short_pad(load8(base[p + 8:]), m - min(m, 8))
+	w0, w1 := short_pad(kernel.load8(base[p:]), m), short_pad(kernel.load8(base[p + 8:]), m - min(m, 8))
 	k := short_nondigit(w0, w1)
 	if k >= m {
 		if m > 1 && base[p] == '0' {
@@ -125,10 +126,79 @@ number_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (nu
 	return {transmute(u64)(-v if neg else v), .Float}, true
 }
 
+// The value of `src[lo:hi]` when it is an RFC 8259 integer of at most 16 digits with 8 bytes of `src` from its first
+// digit, read in one or two words. False for any other span, which `number_short` or `number_strict` reads.
+@(require_results)
+integer_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (v: i64, ok: bool) #no_bounds_check {
+	base := raw_data(src)
+	if lo >= hi {
+		return
+	}
+	neg := base[lo] == '-'
+	p := lo + u64(neg)
+	m := hi - p
+	if m - 1 >= 16 || p + 8 > u64(len(src)) || m > 1 && base[p] == '0' {
+		return
+	}
+	// Each byte less `0` is a digit when it and it plus 6 keep their high nibble clear.
+	ZEROS :: 0x3030_3030_3030_3030
+	mag: u64
+	if m <= 8 {
+		x := (kernel.load8(base[p:]) ~ ZEROS) << (8 * (8 - m))
+		if ((x + 0x0606_0606_0606_0606) | x) & 0xF0F0_F0F0_F0F0_F0F0 != 0 {
+			return
+		}
+		mag = digits8_nibbles(x)
+	} else {
+		x := (kernel.load8(base[p:]) ~ ZEROS) << (8 * (16 - m))
+		y := kernel.load8(base[p + m - 8:]) ~ ZEROS
+		if ((x + 0x0606_0606_0606_0606) | x | (y + 0x0606_0606_0606_0606) | y) & 0xF0F0_F0F0_F0F0_F0F0 != 0 {
+			return
+		}
+		mag = digits8_nibbles(x) * 100_000_000 + digits8_nibbles(y)
+	}
+	return -i64(mag) if neg else i64(mag), true
+}
+
+// The binary64 of `src[lo:hi]` when it is an RFC 8259 number with no exponent, at most 8 digits before its point and 8
+// after it, 15 in all, and 17 bytes of `src` from its first digit. Its digits and the power of ten are exact, so the
+// one division rounds once. The words are read whatever the point's place, with no branch on it. False for any other
+// span, which `number_short` or `number_strict` reads.
+@(require_results)
+float_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (v: f64, ok: bool) #no_bounds_check {
+	base := raw_data(src)
+	if lo >= hi {
+		return
+	}
+	neg := base[lo] == '-'
+	p := lo + u64(neg)
+	m := hi - p
+	if m - 1 >= 16 || p + 17 > u64(len(src)) {
+		return
+	}
+	ZEROS :: 0x3030_3030_3030_3030
+	w := kernel.load8(base[p:])
+	dots := w ~ 0x2E2E_2E2E_2E2E_2E2E
+	// The place of the first point in the first word, 8 for none.
+	point := u64(intrinsics.count_trailing_zeros((dots - 0x0101_0101_0101_0101) &~ dots & 0x8080_8080_8080_8080)) >> 3
+	frac := m - point - 1 if point < m else 0
+	point = min(point, m)
+	if point == 0 || point == 8 && m > 8 || frac > 8 || point + frac > 15 || point < m && frac == 0 || point > 1 && base[p] == '0' {
+		return
+	}
+	x := (w ~ ZEROS) << (8 * (8 - point))
+	y := (kernel.load8(base[p + point + 1:]) ~ ZEROS) << (8 * (8 - frac)) if frac > 0 else 0
+	if ((x + 0x0606_0606_0606_0606) | x | (y + 0x0606_0606_0606_0606) | y) & 0xF0F0_F0F0_F0F0_F0F0 != 0 {
+		return
+	}
+	v = f64(digits8_nibbles(x) * POW10_U64[frac] + digits8_nibbles(y)) / POW10_F64[frac]
+	return -v if neg else v, true
+}
+
 // `number_short` of the `m` bytes at `p`, at most 8, after the sign, in one word.
 @(private)
 short_word :: #force_inline proc "contextless" (p: [^]u8, m: u64, neg: bool) -> (num: Number, ok: bool) #no_bounds_check {
-	w := short_pad(load8(p), m)
+	w := short_pad(kernel.load8(p), m)
 	nd := short_marks(w)
 	if nd == 0 {
 		if m > 1 && p[0] == '0' {
@@ -223,7 +293,7 @@ number_fraction :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, int
 			if total <= 7 {
 				start := point - u64(int_digits)
 				if start + 8 <= u64(len(src)) {
-					w := load8(base[start:])
+					w := kernel.load8(base[start:])
 					lo_mask := (u64(1) << (u64(int_digits) * 8)) - 1
 					merged := ((w & lo_mask) | ((w >> 8) & ~lo_mask)) << ((8 - u64(total)) * 8)
 					v := f64(digits8_value(merged)) / POW10_F64[frac_digits]

@@ -3,6 +3,7 @@ package json
 import "base:intrinsics"
 import "core:simd"
 import "stury:lib/base/kernel"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // A member gap is the text between an object's open bracket or a member's value and the next member's value, such as
@@ -181,6 +182,61 @@ gap_match :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, en
 	return r, tape.Token{at(w, p) + u64(learned.offset) + 1, u32(s.key_n), .String, .Key, tape.SPELLING_QUOTED | tape.SPELLING_ASCII}, learned.newline
 }
 
+// Gives the hook `key`, the key of slot `m`'s gap that matched, unless the hook has `.Expects` and expects that key,
+// which the walk then takes as the hook would. The slot's key is the gap's bytes, so once matched at a `b` it is taken
+// there again with no compare, until the slot learns another gap, which clears the slot's entry.
+@(private)
+gap_key :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, key: tape.Token, m: u64) -> hook.Action #no_bounds_check {
+	when .Expects in C {
+		e := &w.hooks.expected[m & (len(hook.Expected_Memo) - 1)]
+		if e[0] != m || e[1] != hs.b {
+			if !expects(w, hs.b, key) {
+				return emit_token(w, on, hs, key)
+			}
+			e^ = {m, hs.b}
+		}
+		hs.b += hook.EXPECTED_STRIDE
+		return .Next
+	} else {
+		return emit_token(w, on, hs, key)
+	}
+}
+
+// The slot of an entry of an `Expected_Memo` that holds none.
+@(private)
+NO_SLOT :: max(u64)
+
+// Whether `key`, a plain key of a gap, is the one a hook with `.Expects` expects at `b`. The gap leaves eight bytes to
+// read past the key.
+@(private)
+expects :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), b: u64, key: tape.Token) -> bool #no_bounds_check {
+	e := (^hook.Expected_Key)(uintptr(b))
+	if e.word != tape.key_word(u64(key.n)) {
+		return false
+	}
+	p := w.base[key.lo:]
+	if key.n <= 8 {
+		return (kernel.load8(p) ~ e.head) & e.tail == 0
+	}
+	return key.n <= 16 && kernel.load8(p) == e.head && kernel.load8(p[key.n - 8:]) == e.tail
+}
+
+// One past the closing quote of the key quoted at `p` when it is the one a hook with `.Expects` expects at `b`, its
+// bytes those of the expected key and a quote after them, else nil. An expected key holds no byte a JSON string
+// escapes, so its bytes quoted are a string the states accept. Reads 18 bytes from `p`.
+@(private)
+expected_at :: #force_inline proc "contextless" (b: u64, p, end: [^]u8) -> [^]u8 #no_bounds_check {
+	e := (^hook.Expected_Key)(uintptr(b))
+	n := e.word ~ tape.key_word(0)
+	if n > 16 || intrinsics.ptr_sub(end, p) < 18 || p[n + 1] != '"' {
+		return nil
+	}
+	if n <= 8 {
+		return p[n + 2:] if (kernel.load8(p[1:]) ~ e.head) & e.tail == 0 else nil
+	}
+	return p[n + 2:] if kernel.load8(p[1:]) == e.head && kernel.load8(p[n - 7:]) == e.tail else nil
+}
+
 // One past the `n`-byte gap at `p` matching `e` followed by a value-start byte, or nil on mismatch.
 @(private)
 gap_match_len :: #force_inline proc "contextless" (p, e: [^]u8, n: int) -> [^]u8 #no_bounds_check {
@@ -200,13 +256,13 @@ gap_match_len :: #force_inline proc "contextless" (p, e: [^]u8, n: int) -> [^]u8
 @(private)
 gap_equal :: #force_inline proc "contextless" (p, e: [^]u8, k: int) -> bool #no_bounds_check {
 	if k < 8 {
-		return ((word(p) ~ word(e)) & (u64(1) << (8 * u64(k)) - 1)) == 0
+		return ((kernel.load8(p) ~ kernel.load8(e)) & (u64(1) << (8 * u64(k)) - 1)) == 0
 	}
 	if k == 8 {
-		return word(p) == word(e)
+		return kernel.load8(p) == kernel.load8(e)
 	}
 	if k < 16 {
-		return ((word(p) ~ word(e)) | (word(p[k - 8:]) ~ word(e[k - 8:]))) == 0
+		return ((kernel.load8(p) ~ kernel.load8(e)) | (kernel.load8(p[k - 8:]) ~ kernel.load8(e[k - 8:]))) == 0
 	}
 	if k == 16 {
 		return kernel.all_zero(simd.bit_xor(kernel.load16(p), kernel.load16(e)))
@@ -227,11 +283,6 @@ gap_equal :: #force_inline proc "contextless" (p, e: [^]u8, k: int) -> bool #no_
 	c := simd.bit_xor(kernel.load16(p[32:]), kernel.load16(e[32:]))
 	d := simd.bit_xor(kernel.load16(p[k - 16:]), kernel.load16(e[k - 16:]))
 	return kernel.all_zero(simd.bit_or(simd.bit_or(a, b), simd.bit_or(c, d)))
-}
-
-@(private)
-word :: #force_inline proc "contextless" (p: [^]u8) -> u64 {
-	return u64(intrinsics.unaligned_load((^u64le)(p)))
 }
 
 // Learns slot `m`'s gap, which did not match, from `w.gap_lo` to the value at `r`, around the key quoted from `p` to
@@ -262,6 +313,11 @@ gap_learn :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), m: u6
 		key_off := at(w, p) - lo
 		nl := key_off > 0 && (w.base[lo] == '\n' || (key_off >= 2 && w.base[lo] == '\r' && w.base[lo + 1] == '\n'))
 		s^ = {u32(lo), u8(n), {offset = u8(key_off), newline = nl}, u8(intrinsics.ptr_sub(q, p) - 2), {relearns = s.miss.relearns + 1}}
+		when .Expects in C {
+			if e := &w.hooks.expected[m & (len(hook.Expected_Memo) - 1)]; e[0] == m {
+				e[0] = NO_SLOT
+			}
+		}
 	}
 	return
 }

@@ -54,6 +54,13 @@ Capability :: enum u8 {
 	// Stores no node for a key token, as a table's rows name their cells by place through a header stored apart, so the
 	// walk makes no room for one. It stores the room's other tokens, so a hook with `.Unkeyed` has `.Rooms`.
 	Unkeyed,
+	// Takes a replayed object's members as their value tokens, each in its turn and with no key, in place of the
+	// `cells` of its `Replay`, and answers each with `Next`. A hook with `.Cell_Values` has `.Columns`.
+	Cell_Values,
+	// In an object, `b` points at the `Expected_Key` of the key it takes next, which it takes by moving `b` past
+	// `EXPECTED_STRIDE` bytes and changing nothing else, so a walk may match that key itself and give no token for it.
+	// The walk may keep the keys it matched in the `Expected_Memo` the hook's field `expected` points at.
+	Expects,
 }
 
 Capabilities :: bit_set[Capability; u16]
@@ -75,6 +82,21 @@ Replay :: struct {
 	cells:   []tape.Token,
 	given:   int,
 }
+
+// The key a hook with `.Expects` takes next: `word` the second word of its token with no spelling, `head` its first eight
+// bytes and `tail` its last eight, or for a key of at most eight bytes the mask of its bytes. `word` is `max(u64)` where
+// the hook expects no key. A key of more than sixteen bytes is the hook's to match.
+Expected_Key :: struct {
+	word, head, tail: u64,
+}
+
+// The bytes from one `Expected_Key` of a hook to the next.
+EXPECTED_STRIDE :: 48
+
+// The keys a walk matched for a hook with `.Expects`, by places of the walk's own, each entry a place and the `b` the
+// walk matched that place's key at, so that a key the walk knows repeats the bytes of the last key at its place is
+// taken at the same `b` with no compare. A walk reads only entries it wrote, so a memo needs no zeroing.
+Expected_Memo :: distinct [256][2]u64
 
 // The type of the field `protocol` every hook has: its capabilities `C`, and for `.Levels`, `.Rooms` and `.Keeps` a
 // `Levels`, `Rooms` and `Keeps` type naming its procs, `Unused` for one it lacks. `check` says what is wrong.
@@ -105,6 +127,10 @@ check :: #force_inline proc "contextless" ($H: typeid) {
 	#assert(.Walk not_in C || intrinsics.type_has_field(H, "walk"), "a hook with `.Walk` has a field `walk: rawptr`")
 	#assert(.Unkeyed not_in C || .Rooms in C, "a hook with `.Unkeyed` has `.Rooms`, whose room it stores the other tokens in")
 	#assert(.Columns not_in C || .Skips in C, "a hook with `.Columns` has `.Skips`, as it passes members by `Skip`")
+	#assert(.Cell_Values not_in C || .Columns in C, "a hook with `.Cell_Values` has `.Columns`, whose replays it takes")
+	when .Expects in C {
+		#assert(intrinsics.type_field_type(H, "expected") == ^Expected_Memo, "a hook with `.Expects` has a field `expected: ^hook.Expected_Memo`")
+	}
 	when .Columns in C {
 		#assert(intrinsics.type_field_type(H, "dropped") == u64, "a hook with `.Columns` has a field `dropped: u64`")
 		#assert(intrinsics.type_field_type(H, "alike") == bool, "a hook with `.Columns` has a field `alike: bool`")

@@ -139,7 +139,7 @@ unmarshal_agrees :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, rea
 	if refusal != .None {
 		a.typed += 1
 		x, refused := err.(tape.Fault)
-		return testing.expectf(t, refused && x.rules == &typed.RULES && typed.Refusal(x.detail) == refusal, "%s: the typed read gives %v, the build %v", name, err, refusal, loc = loc)
+		return testing.expectf(t, refused && x.rules == &typed.RULES && typed.Typed_Refusal(x.detail) == refusal, "%s: the typed read gives %v, the build %v", name, err, refusal, loc = loc)
 	}
 	a.read += 1
 	if nulls_absent {
@@ -147,7 +147,7 @@ unmarshal_agrees :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, rea
 		drop_nulls(&want)
 	}
 	fault, _ := err.(tape.Fault)
-	if !testing.expectf(t, err == nil, "%s %x: the typed read refuses %v, the build gives %v", name, src, typed.Refusal(fault.detail), want, loc = loc) {
+	if !testing.expectf(t, err == nil, "%s %x: the typed read refuses %v, the build gives %v", name, src, typed.Typed_Refusal(fault.detail), want, loc = loc) {
 		return false
 	}
 	return testing.expectf(t, values_equal(got, want), "%s: the typed read gives %v, the build %v", name, got, want, loc = loc)
@@ -156,7 +156,7 @@ unmarshal_agrees :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, rea
 // The value of node `at` of `doc` as a typed read into a `Value` takes it, its repeated keys taken under `dups`, or the
 // refusal of the first value it reads and does not take: a byte string, or a number past binary64.
 @(private)
-value_of :: proc(doc: ^tape.Document, at: tape.Node_Index, dups: tape.Duplicates, allocator: runtime.Allocator) -> (Value, typed.Refusal) {
+value_of :: proc(doc: ^tape.Document, at: tape.Node_Index, dups: tape.Duplicates, allocator: runtime.Allocator) -> (Value, typed.Typed_Refusal) {
 	r := tape.Reader{doc, nil}
 	#partial switch doc.nodes[at].kind {
 	case .Null:

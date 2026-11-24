@@ -1,6 +1,7 @@
 package spell
 
 import "base:intrinsics"
+import "stury:lib/base/kernel"
 
 // The end of the run of decimal digits at `p`, with the run's first `room` digits added to `mant`. The digits of a
 // longer run past `room` are passed over, so `mant` is exact only while every digit folded in all fit `u64`.
@@ -67,14 +68,14 @@ fold_digits_end :: #force_inline proc "contextless" (src: []u8, end, k: u64) -> 
 @(private)
 fold_digits_end_words :: #force_inline proc "contextless" (base: [^]u8, end, k: u64) -> u64 #no_bounds_check {
 	if k <= 8 {
-		return digits8_nibbles(load8(base[end - 8:]) & KEEP_DIGITS[k])
+		return digits8_nibbles(kernel.load8(base[end - 8:]) & KEEP_DIGITS[k])
 	}
-	low := digits8_value(load8(base[end - 8:]))
+	low := digits8_value(kernel.load8(base[end - 8:]))
 	if k <= 16 {
-		return digits8_nibbles(load8(base[end - 16:]) & KEEP_DIGITS[k - 8]) * 1_0000_0000 + low
+		return digits8_nibbles(kernel.load8(base[end - 16:]) & KEEP_DIGITS[k - 8]) * 1_0000_0000 + low
 	}
-	mid := digits8_value(load8(base[end - 16:]))
-	return (digits8_nibbles(load8(base[end - 24:]) & KEEP_DIGITS[k - 16]) * 1_0000_0000 + mid) * 1_0000_0000 + low
+	mid := digits8_value(kernel.load8(base[end - 16:]))
+	return (digits8_nibbles(kernel.load8(base[end - 24:]) & KEEP_DIGITS[k - 16]) * 1_0000_0000 + mid) * 1_0000_0000 + low
 }
 
 // Masks keeping the digit nibbles of a word's last `c` bytes, by `c`.
@@ -89,11 +90,6 @@ KEEP_DIGITS: [9]u64 = {
 	0x0F0F_0F0F_0F0F << 16,
 	0x0F_0F0F_0F0F_0F0F << 8,
 	0x0F0F_0F0F_0F0F_0F0F,
-}
-
-@(private)
-load8 :: #force_inline proc "contextless" (p: [^]u8) -> u64 {
-	return u64(intrinsics.unaligned_load((^u64le)(p)))
 }
 
 // The value of the eight ASCII digits in `w`, its first byte the most significant.

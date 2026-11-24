@@ -4,12 +4,12 @@ import "base:runtime"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
-// A value the read's type does not take ends the read with `tape.Fault{kind = .Refused}`, whose detail is a `Refusal`.
+// A value the read's type does not take ends the read with `tape.Fault{kind = .Refused}`, whose detail is a `Typed_Refusal`.
 // The walk still judges the rest of the text, with no more tokens kept, so a text that is not one of its format fails as
 // its validate does, and its fault is the read's error.
 
 // Why a typed read refused a value, the detail of its fault.
-Refusal :: enum u8 {
+Typed_Refusal :: enum u8 {
 	None,
 	Expected_Integer,
 	Expected_Number,
@@ -31,30 +31,28 @@ Refusal :: enum u8 {
 	Out_Of_Range, // a date-time `time.Time` does not hold
 }
 
+// Each rule at its refusal's value, so that their order cannot drift apart.
 @(rodata)
 RULES := tape.Rules{"typed", {
-	{},
-	{"expected_integer", "Expected an integer"},
-	{"expected_number", "Expected a number"},
-	{"expected_string", "Expected a string"},
-	{"expected_bool", "Expected a boolean"},
-	{"expected_object", "Expected an object"},
-	{"expected_array", "Expected an array"},
-	{"expected_name", "Expected an enum member's name"},
-	{"expected_date_time", "Expected a date-time"},
-	{"above_maximum", "Number above the type's maximum"},
-	{"below_minimum", "Number below the type's minimum"},
-	{"not_a_member", "Not a member of the enum"},
-	{"too_few", "Fewer elements than the array holds"},
-	{"too_many", "More elements than the array holds"},
-	{"missing_field", "Required field missing"},
-	{"unknown_field", "Field not in the type"},
-	{"no_arm", "No union arm takes the value"},
-	{"bad_date_time", "Invalid RFC 3339 date-time"},
-	{"out_of_range", "Date-time out of range"},
+	int(Typed_Refusal.Expected_Integer) = {"expected_integer", "Expected an integer"},
+	int(Typed_Refusal.Expected_Number) = {"expected_number", "Expected a number"},
+	int(Typed_Refusal.Expected_String) = {"expected_string", "Expected a string"},
+	int(Typed_Refusal.Expected_Bool) = {"expected_bool", "Expected a boolean"},
+	int(Typed_Refusal.Expected_Object) = {"expected_object", "Expected an object"},
+	int(Typed_Refusal.Expected_Array) = {"expected_array", "Expected an array"},
+	int(Typed_Refusal.Expected_Name) = {"expected_name", "Expected an enum member's name"},
+	int(Typed_Refusal.Expected_Date_Time) = {"expected_date_time", "Expected a date-time"},
+	int(Typed_Refusal.Above_Maximum) = {"above_maximum", "Number above the type's maximum"},
+	int(Typed_Refusal.Below_Minimum) = {"below_minimum", "Number below the type's minimum"},
+	int(Typed_Refusal.Not_A_Member) = {"not_a_member", "Not a member of the enum"},
+	int(Typed_Refusal.Too_Few) = {"too_few", "Fewer elements than the array holds"},
+	int(Typed_Refusal.Too_Many) = {"too_many", "More elements than the array holds"},
+	int(Typed_Refusal.Missing_Field) = {"missing_field", "Required field missing"},
+	int(Typed_Refusal.Unknown_Field) = {"unknown_field", "Field not in the type"},
+	int(Typed_Refusal.No_Arm) = {"no_arm", "No union arm takes the value"},
+	int(Typed_Refusal.Bad_Date_Time) = {"bad_date_time", "Invalid RFC 3339 date-time"},
+	int(Typed_Refusal.Out_Of_Range) = {"out_of_range", "Date-time out of range"},
 }}
-
-#assert(len(Refusal) == 19)
 
 // The action a refused read answers token `t` with: a key's member and a container are passed, as the walk judges
 // them with no token.
@@ -68,7 +66,7 @@ dead_action :: #force_inline proc "contextless" (t: tape.Token) -> hook.Action {
 
 // Refuses value token `t` at the registers `s` that read it.
 @(private)
-refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, detail: Refusal) -> (hook.Regs, hook.Action) {
+refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, detail: Typed_Refusal) -> (hook.Regs, hook.Action) {
 	head: u8
 	if t.kind < .Array {
 		head, _ = h.format.bounds(h.base[:h.len], t)
@@ -93,7 +91,7 @@ refuse_memory :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, 
 // value refused steps into each one's child, the last one's by the registers `leaf` when not nil, and then to member
 // `name` when it is not empty.
 @(private)
-refuse_at :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, detail: Refusal, at: u64, n: int, leaf: ^hook.Regs, name := "") -> (hook.Regs, hook.Action) {
+refuse_at :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, detail: Typed_Refusal, at: u64, n: int, leaf: ^hook.Regs, name := "") -> (hook.Regs, hook.Action) {
 	if !h.dead {
 		h.err = tape.Fault{at = at, rules = &RULES, kind = .Refused, detail = u8(detail)}
 		s, leaf := s, leaf
@@ -134,8 +132,12 @@ fill_path :: proc "contextless" (h: ^Reader, n: int, leaf: ^hook.Regs, name: str
 		owner := frame_owner(f)
 		#partial switch owner.kind {
 		case .Struct, .Required:
-			r := (^Record)(uintptr(child.b) - size_of(Record))
-			append(h.path, tape.Name(member_name(h, &h.plan.meta[r.meta])))
+			// A struct read by position steps to its element by index, as the text holds an array.
+			if r := (^Record)(uintptr(child.b) - size_of(Record)); r.kind == .Position {
+				append(h.path, tape.Index(f.run - 1))
+			} else {
+				append(h.path, tape.Name(member_name(h, &h.plan.meta[r.meta])))
+			}
 		case .Slice, .Dynamic, .Array:
 			append(h.path, tape.Index((child.c - u64(uintptr(f.data))) / u64(h.plan.meta[owner.meta].size)))
 		case .Map:

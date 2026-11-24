@@ -57,6 +57,11 @@ Token :: struct {
 
 Node :: Token
 
+// The second word of the token of a key `n` bytes long whose spelling is 0.
+key_word :: #force_inline proc "contextless" (n: u64) -> u64 {
+	return n | u64(Kind.String) << 32 | u64(Role.Key) << 40
+}
+
 // An index into `Document.nodes`. A build refuses a text that makes `NO_NODE` nodes.
 Node_Index :: distinct u32
 

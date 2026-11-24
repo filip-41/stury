@@ -80,6 +80,11 @@ load16 :: #force_inline proc "contextless" (p: [^]u8) -> V {
 	return intrinsics.unaligned_load((^V)(p))
 }
 
+// The eight bytes at `p` as a little-endian word.
+load8 :: #force_inline proc "contextless" (p: [^]u8) -> u64 {
+	return u64(intrinsics.unaligned_load((^u64le)(p)))
+}
+
 store16 :: #force_inline proc "contextless" (p: [^]u8, v: V) {
 	intrinsics.unaligned_store((^V)(p), v)
 }

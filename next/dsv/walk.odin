@@ -122,7 +122,7 @@ walk_record_again :: proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, 
 }
 
 // Runs the pass instance for `p` over `src` from `lo`: the instance that folds in the defaults when `p` is the default
-// options, else the one with the comment code or the one without. A validate whose walk counts no steps and whose text
+// options, else the one with the comment code, which a pass with no comment byte runs too. A validate whose walk counts no steps and whose text
 // fits `Token.n` runs the instance with no tokens, then places its width fault.
 @(private)
 run :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
@@ -164,10 +164,7 @@ run_pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: [
 	if is_default(S, p) {
 		return pass_default(w, src, lo, regs, on, EMIT)
 	}
-	if p.comment != 0 {
-		return pass_with(w, src, lo, p, regs, on, EMIT, true)
-	}
-	return pass_with(w, src, lo, p, regs, on, EMIT, false)
+	return pass_with(w, src, lo, p, regs, on, EMIT)
 }
 
 // The floor tier of the pass. On x86-64 the pass is also built for the CPU's `.V3` where it has one, whose 32-byte
@@ -191,13 +188,13 @@ pass_default :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), sr
 }
 
 @(private)
-pass_with :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), $EMIT, $COMMENTS: bool) -> hook.Walk_Result {
+pass_with :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), $EMIT: bool) -> hook.Walk_Result {
 	when ODIN_ARCH == .amd64 {
 		if kernel.tier() == .V3 {
-			return pass_with_v3(w, src, lo, p, regs, on, EMIT, COMMENTS)
+			return pass_with_v3(w, src, lo, p, regs, on, EMIT)
 		}
 	}
-	return pass_with_floor(w, src, lo, p, regs, on, EMIT, COMMENTS)
+	return pass_with_floor(w, src, lo, p, regs, on, EMIT)
 }
 
 @(private, enable_target_feature = PASS_FLOOR_FEATURES)
@@ -208,10 +205,10 @@ pass_default_floor :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX
 }
 
 @(private, enable_target_feature = PASS_FLOOR_FEATURES)
-pass_with_floor :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), $EMIT, $COMMENTS: bool) -> hook.Walk_Result {
+pass_with_floor :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), $EMIT: bool) -> hook.Walk_Result {
 	hs := regs^
 	defer regs^ = hs
-	return pass(w, src, lo, p, &hs, on, EMIT, COMMENTS, PASS_FLOOR)
+	return pass(w, src, lo, p, &hs, on, EMIT, true, PASS_FLOOR)
 }
 
 // Returns the verdict on the text from `lo`, run without tokens, for a hooked walk whose hook passed over the text or
