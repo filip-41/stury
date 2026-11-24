@@ -170,10 +170,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 		}
 		return finish_table(doc, headed(doc), opts)
 	}
-	doc, err, built = build.parts_build(src, &FORMATS[S], parts, opts, 0, 1 + count, allocator, walk, finish, &data)
-	if built && err == nil {
-		doc.allocator = caller
-	}
+	doc, err, built = build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 0, 1 + count, allocator, caller, walk, finish, &data)
 	err = repeat_first(err, src, S, p, data.keys, opts, allocator)
 	return
 }

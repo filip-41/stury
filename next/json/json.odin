@@ -56,7 +56,7 @@ quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
 // build with a constant `spec` links only that spec's walk.
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> tape.Error {
-	probe_stack()
+	hook.probe_stack(READ_STACK)
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Json:
@@ -86,7 +86,7 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, 
 // thread is refused, and a block it is refused has the text built on one thread.
 @(require_results)
 build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
-	probe_stack()
+	hook.probe_stack(READ_STACK)
 	// A text with foreign options takes the whole-text build, which refuses them.
 	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.format == nil && len(src) >= build.PARALLEL_FROM {
 		return build_on_threads(src, spec, opts, allocator)
@@ -119,7 +119,7 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 // An optimized build with a constant `spec` links only that spec's walk.
 @(require_results)
 find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
-	probe_stack()
+	hook.probe_stack(READ_STACK)
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Json:
@@ -148,7 +148,7 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read
 // Needs `READ_STACK` bytes of stack and faults on a thread with less.
 @(require_results)
 scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Json, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
-	probe_stack()
+	hook.probe_stack(READ_STACK)
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Json:
@@ -179,7 +179,7 @@ walk :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, $on: 
 	if e := tape.options_refused(&FORMATS[S], opts); e != nil {
 		return 0, e, false
 	}
-	probe_stack()
+	hook.probe_stack(READ_STACK)
 	ctx := context
 	if opts.pieces != nil {
 		return piece_read(src, S, opts, h, regs, allocator, &ctx, on)

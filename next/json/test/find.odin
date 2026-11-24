@@ -415,6 +415,7 @@ reads_refuse_options_of_another_format :: proc(t: ^testing.T) {
 	out: [1]tape.Record
 	n := json.records_validate(&r, out[:])
 	testing.expectf(t, n == 0 && r.err == want, "records: %d %v", n, r.err)
+	testing.expect_value(t, json.validate(src, .Json, {format = tape.Cbor_Options{}}), want)
 }
 
 // The walk, a text in pieces and a build on a runner's threads refuse them too.

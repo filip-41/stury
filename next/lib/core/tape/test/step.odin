@@ -307,20 +307,49 @@ number_key_room :: proc "contextless" (src: []u8, t: tape.Token) -> int {
 	return 5
 }
 
+@(private = "file")
+number_key_text :: proc "contextless" (src: []u8, t: tape.Token, buf: []u8) -> (string, bool) {
+	return string(buf[:copy(buf, "seven")]), true
+}
+
 // A number key's number kind shares a bit with `SPELLING_DECODE`, and no kind changes how the key reads: each goes to
-// the format's `same_text` and `room`.
+// the format's `same_text`, `room` and `decode`.
 @(test)
 number_keys_read_the_same_for_every_number_kind :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	f := tape.Format{name = "numbers", same_text = number_key_same, room = number_key_room}
+	f := tape.Format{name = "numbers", same_text = number_key_same, room = number_key_room, decode = number_key_text}
 	src := []u8{0x01}
 	for kind in 0 ..< u16(16) {
 		key := tape.Token{lo = 0, n = 1, kind = .Number, role = .Key, spelling = tape.number_spelling(kind, 0, 0)}
 		testing.expectf(t, tape.key_names(&f, src, key, "1"), "key_names, number kind %d", kind)
 		testing.expectf(t, tape.same_keys(&f, src, key, src, key), "same_keys, number kind %d", kind)
 		testing.expectf(t, tape.text_room(&f, src, key) == 5, "text_room, number kind %d", kind)
+		buf: [5]u8
+		text, ok := tape.node_text(&f, src, key, buf[:])
+		testing.expectf(t, ok && text == "seven", "node_text, number kind %d: %q", kind, text)
+		// A number value reads as its bytes, or in a `.Binary` format as the format's decode of them.
 		value := key
 		value.role = .Value
 		testing.expectf(t, tape.text_room(&f, src, value) == 0, "text_room of a number value, kind %d", kind)
+		written, value_ok := tape.node_text(&f, src, value, buf[:])
+		testing.expectf(t, value_ok && written == "\x01", "node_text of a number value, kind %d: %q", kind, written)
+		binary := f
+		binary.caps = {.Binary}
+		testing.expectf(t, tape.text_room(&binary, src, value) == 5, "text_room of a binary number value, kind %d", kind)
+		decoded, decoded_ok := tape.node_text(&binary, src, value, buf[:])
+		testing.expectf(t, decoded_ok && decoded == "seven", "node_text of a binary number value, kind %d: %q", kind, decoded)
 	}
+}
+
+// A byte string value reads as its payload, its bytes in the text or the format's decode of them.
+@(test)
+byte_strings_read_as_their_payload :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	f := tape.Format{name = "bytes", decode = number_key_text}
+	src := []u8{0xde, 0xad}
+	buf: [5]u8
+	text, ok := tape.node_text(&f, src, tape.Token{lo = 0, n = 2, kind = .Bytes}, buf[:])
+	testing.expect(t, ok && text == "\xde\xad")
+	text, ok = tape.node_text(&f, src, tape.Token{lo = 0, n = 2, kind = .Bytes, spelling = tape.SPELLING_DECODE}, buf[:])
+	testing.expect(t, ok && text == "seven")
 }

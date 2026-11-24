@@ -166,7 +166,9 @@ builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: 
 // `builder_hook` for a walk that also gives fact tokens (role past `Key`), which it stores as facts.
 builder_hook_facts :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	if t.role > .Key {
-		return s, builder_fact(h, s, t)
+		// A copy, as the call takes its argument by reference and would keep `s` in memory for every token.
+		copy := s
+		return s, builder_fact(h, copy, t)
 	}
 	return builder_step(h, s, t, true, false)
 }
@@ -394,16 +396,17 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 	return s, true
 }
 
-// Stores fact token `t`, a comment, as a fact of the node it describes. A comment before a value is placed on the node
-// it marks when `builder_end` runs `builder_place_facts`. An inline comment belongs to the last value completed, and a
-// foot to the innermost open container, or to the root past the last one. `.Stop` when memory for the facts is refused.
+// Stores fact token `t`, a comment or a tag, as a fact of the node it describes. A comment before a value is placed on
+// the node it marks when `builder_end` runs `builder_place_facts`, and a tag is the next node's. An inline comment
+// belongs to the last value completed, and a foot to the innermost open container, or to the root past the last one.
+// `.Stop` when memory for the facts is refused.
 @(private, cold)
 builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> hook.Action {
 	a := builder_cursor(h, s)
 	node := a
 	kind := tape.fact_kind(t.role)
 	#partial switch kind {
-	case .Comment:
+	case .Comment, .Tag:
 	case .Comment_Inline:
 		// The container closed last is the last value completed when no node was stored after its subtree.
 		node = a - 1
@@ -526,10 +529,13 @@ builder_error :: proc "contextless" (h: ^Builder) -> tape.Error {
 // and takes precedence over the builder's. `regs` are the hook's registers at the walk's end and `root_close` is the
 // end of the root value.
 @(require_results)
-builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Error) -> (doc: tape.Document, e: tape.Error) {
+builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Error, refuse := false, rules: ^tape.Rules = nil) -> (doc: tape.Document, e: tape.Error) {
 	e = err
 	if e == nil {
 		e = builder_error(h)
+	}
+	if fault, is_fault := e.(tape.Fault); is_fault && refuse {
+		e = partial_repeat(h, regs, fault, rules)
 	}
 	if !h.borrowed {
 		delete(h.stack, h.doc.allocator)

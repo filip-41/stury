@@ -31,9 +31,15 @@ scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Alloca
 			// The head's bytes are where the keys are read from, which may lie before the window.
 			from := h.key_text if t.kind == .End && t.lo == h.head[0] && u64(t.n) == h.head[1] - h.head[0] else text
 			head, tail := hold_bounds(h, from, t)
+			// A span of no bytes past its offset, as an empty string's of a binary format, shares its offset with the
+			// token after it, and is held once.
+			empty := u64(t.n) + u64(tail) == 0
+			if empty && len(h.held) > 0 && h.held[len(h.held) - 1].lo == t.lo - u64(head) {
+				continue
+			}
 			append(&h.held, tape.Held_Span{t.lo - head, u64(len(h.bytes))}) or_return
 			append(&h.bytes, ..from[t.lo - head:t.lo + u64(t.n) + tail]) or_return
-			h.hold_from = t.lo + 1
+			h.hold_from = t.lo if empty else t.lo + 1
 		}
 	}
 	if len(h.bytes) > 2 * h.held_live + HOLD_SLACK {

@@ -45,12 +45,15 @@ utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 {
 	return p[n:]
 }
 
+// The UTF-8 of U+FFFD, the replacement character.
+REPLACEMENT :: [3]u8{0xEF, 0xBF, 0xBD}
+
 // Copies the UTF-8 character whose lead `p[0]` is past ASCII to `out`, or writes U+FFFD there for the maximal subpart
 // of an ill-formed sequence, and returns the bytes written, at most 4, and one past the bytes read. `p < end`.
 utf8_lax :: #force_inline proc "contextless" (p, end, out: [^]u8) -> (n: int, q: [^]u8) #no_bounds_check {
 	kind: Fault_Kind
 	if q, kind = utf8_char(p, end); kind != .None {
-		out[0], out[1], out[2] = 0xEF, 0xBF, 0xBD
+		out[0], out[1], out[2] = REPLACEMENT[0], REPLACEMENT[1], REPLACEMENT[2]
 		return 3, utf8_subpart(p, end)
 	}
 	n = intrinsics.ptr_sub(q, p)

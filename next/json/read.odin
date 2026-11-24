@@ -229,7 +229,7 @@ decode_surrogate_into :: #force_no_inline proc "contextless" (base: [^]u8, p, en
 		}
 	}
 	// A walk passes a lone surrogate half only under `.Lone_Surrogate`, which marks the string `SPELLING_LAX`.
-	out[w], out[w + 1], out[w + 2] = 0xEF, 0xBF, 0xBD
+	out[w], out[w + 1], out[w + 2] = spell.REPLACEMENT[0], spell.REPLACEMENT[1], spell.REPLACEMENT[2]
 	return w + 3, p + 6
 }
 

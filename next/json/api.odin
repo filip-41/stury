@@ -4,7 +4,7 @@ import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
 // The names a JSON user calls beside the reads, so that a program reading JSON imports this package alone. The rest of
-// `lib/core/tape` serves walks and hooks. The C header mirrors this list.
+// `lib/core/tape` serves walks and hooks.
 
 // A document and the place of a node in it.
 Document :: tape.Document

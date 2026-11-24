@@ -15,20 +15,15 @@ import "stury:lib/ops/build"
 @(private)
 piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	p := opts.pieces
-	s, serr := hook.piece_state(p, Piece)
-	if serr != nil {
-		return 0, serr, false
-	}
-	to, gap := tape.piece_window(p, src)
-	if gap != nil {
-		return 0, gap, false
+	s, text, to, berr := hook.piece_begin(p, Piece, nil, src)
+	if berr != nil {
+		return 0, berr, false
 	}
 	if !s.started {
 		a := hook.piece_lists(p)
 		s.opened.allocator, s.levels.allocator, s.names.allocator, s.steps_buf.allocator = a, a, a, a
 		s.comments.allocator = a
 	}
-	text := hook.piece_src(src, p.from)
 	pw := Piece_Walk{s = s, from = p.from, end = to, more = !p.last, ctx = ctx}
 	start := raw_data(text)
 	if s.place == PLACE_ROOT && s.last == 0 && s.cut.on == 0 && s.run.state == 0 {

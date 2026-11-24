@@ -331,8 +331,8 @@ same_documents :: proc(a, b: tape.Document) -> bool {
 }
 
 // The reads of `src` in pieces cut at `cuts` give what the whole reads give: the verdict and fault, the document, the
-// answer of each path and the scan of them.
-pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, cuts: []int, paths: [][]tape.Step, name: string, limits: []int = nil) -> bool {
+// answer of each path and the scan of them, and the records of `src` framed as `framing`.
+pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, cuts: []int, paths: [][]tape.Step, name: string, limits: []int = nil, framing := tape.Framing.Lines) -> bool {
 	r := Piece_Run{src, reads, f, opts, cuts}
 	whole_err := reads.validate(f, src, opts, context.allocator)
 	{
@@ -433,7 +433,7 @@ pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []
 	d, derr := tape.demand_of(paths, nil, limits, f.facts != {})
 	defer tape.destroy(&d)
 	if derr != nil {
-		return records_pieces_agree(t, r, paths, nil, name)
+		return records_pieces_agree(t, r, framing, paths, nil, name)
 	}
 	for stop in ([]bool{false, true}) {
 		read := tape.Read_Options{stop_early = stop}
@@ -463,7 +463,7 @@ pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []
 			return false
 		}
 	}
-	return records_pieces_agree(t, r, paths, &d, name)
+	return records_pieces_agree(t, r, framing, paths, &d, name)
 }
 
 // How a records law reads each record: judged, with the answer of `path`, or with the document of `demand`.
@@ -523,10 +523,11 @@ records_batch :: proc(r: ^tape.Records, how: Records_Read, got: ^Records_Got) ->
 	return n
 }
 
-// Reads the records of `run.src` as `how` says, the whole text at once, or with `pieces` a window at a time, each from
-// the last batch's `keep` to the next cut, of a copy whose bytes before `keep` are overwritten as `feed` overwrites them.
+// Reads the records of `run.src` framed as `framing` as `how` says, the whole text at once, or with `pieces` a window
+// at a time, each from the last batch's `keep` to the next cut, of a copy whose bytes before `keep` are overwritten as
+// `feed` overwrites them.
 @(private)
-records_read :: proc(run: Piece_Run, how: Records_Read, pieces: bool) -> (got: Records_Got) {
+records_read :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, pieces: bool) -> (got: Records_Got) {
 	opts := run.opts
 	p := tape.Pieces{allocator = context.allocator}
 	defer tape.destroy(&p)
@@ -543,7 +544,7 @@ records_read :: proc(run: Piece_Run, how: Records_Read, pieces: bool) -> (got: R
 	defer if pieces {
 		delete(text)
 	}
-	r, e := run.reads.records(run.f, text[:end], .Lines, opts, context.allocator)
+	r, e := run.reads.records(run.f, text[:end], framing, opts, context.allocator)
 	if e != nil {
 		got.err = e
 		return
@@ -569,10 +570,10 @@ records_read :: proc(run: Piece_Run, how: Records_Read, pieces: bool) -> (got: R
 	return
 }
 
-// Whether the records of a text read a window at a time are the whole text's, with the same answers and documents:
-// judged, with each path's answer and with the documents of `demand`, nil when the paths make none.
-@(private)
-records_pieces_agree :: proc(t: ^testing.T, run: Piece_Run, paths: [][]tape.Step, demand: ^tape.Demand, name: string) -> bool {
+// Whether the records of a text framed as `framing` read a window at a time are the whole text's, with the same answers
+// and documents: judged, with each path's answer and with the documents of `demand`, nil when the paths make none. The
+// framing of the windows reads no byte twice.
+records_pieces_agree :: proc(t: ^testing.T, run: Piece_Run, framing: tape.Framing, paths: [][]tape.Step, demand: ^tape.Demand, name: string) -> bool {
 	reads := make([dynamic]Records_Read, context.temp_allocator)
 	append(&reads, Records_Read{})
 	for path in paths {
@@ -582,9 +583,9 @@ records_pieces_agree :: proc(t: ^testing.T, run: Piece_Run, paths: [][]tape.Step
 		append(&reads, Records_Read{how = .Scan, demand = demand}, Records_Read{how = .Scan, demand = demand, read = {stop_early = true}})
 	}
 	for how in reads {
-		whole := records_read(run, how, false)
+		whole := records_read(run, framing, how, false)
 		defer records_got_free(&whole)
-		got := records_read(run, how, true)
+		got := records_read(run, framing, how, true)
 		defer records_got_free(&got)
 		ok := got.err == whole.err && len(got.records) == len(whole.records) && slice.equal(got.answers[:], whole.answers[:])
 		for k := 0; ok && k < len(got.records); k += 1 {
@@ -610,8 +611,9 @@ Alone_Head :: enum u8 {
 // text is a list of rows and a read of it reaches the record through its index, so that a read of a record at a path
 // answers as the own text at that index and the path does.
 Alone :: struct {
-	head: Alone_Head,
-	rows: bool,
+	head:    Alone_Head,
+	rows:    bool,
+	framing: tape.Framing, // the framing the records are read as, `.Lines` for a zero value
 }
 
 // `err` with the offset it names moved by `by`, as a record read in place in a text names what the read of its own text
@@ -639,7 +641,7 @@ moved_error :: proc(err: tape.Error, by: i64) -> tape.Error {
 // own text's scan does. A text with no record has nothing to compare.
 @(private)
 records_alone_check :: proc(t: ^testing.T, run: Piece_Run, alone: Alone, how: Records_Read, own_demands: ^[2]tape.Demand, pieces: bool, name: string) -> bool {
-	got := records_read(run, how, pieces)
+	got := records_read(run, alone.framing, how, pieces)
 	defer records_got_free(&got)
 	if len(got.records) == 0 {
 		return true
@@ -1284,4 +1286,39 @@ agree_past :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, depth: int) {
 			agree_past(w, fv, pv, depth + 1)
 		}
 	}
+}
+
+// Whether the value a find reaches by each of `names` from the root of `src`, an object, is the member the readers take
+// from the build of `src`, under every policy for repeated keys a path reads by: the same member, or none in both. A
+// format whose keys differ in kind reads a name that two kinds of key spell by the same policy in both.
+find_agrees_with_member :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, names: []string, name: string) -> bool {
+	for dups in ([]tape.Duplicates{.Default, .First, .Last}) {
+		opts := tape.Options {
+			dups = dups,
+		}
+		doc, err := reads.build(f, src, opts, context.allocator)
+		defer tape.destroy(&doc)
+		if err != nil {
+			continue
+		}
+		index := tape.Doc_Index {
+			allocator = context.allocator,
+		}
+		defer tape.destroy_index(&index)
+		reader := tape.Reader{&doc, &index}
+		// A length first, which has the index keep whether the object repeats a key.
+		_, _, _ = tape.length(reader, tape.ROOT, context.allocator)
+		for key in names {
+			a, ferr := reads.find(f, src, []tape.Step{tape.Name(key)}, {}, opts, context.allocator)
+			at, p := tape.member(reader, tape.ROOT, key, dups)
+			ok := ferr == nil && a.outcome == p
+			if ok && p == .Found {
+				ok = a.lo + u64(a.head) == doc.nodes[at].lo
+			}
+			if !testing.expectf(t, ok, "%s %v %v name %q: find %v %v, member %v at %v", name, f.name, dups, key, a, ferr, p, at) {
+				return false
+			}
+		}
+	}
+	return true
 }

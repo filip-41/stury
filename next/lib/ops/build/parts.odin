@@ -29,6 +29,10 @@ chunk_count :: proc "contextless" (runner: ^tape.Runner, n: int) -> int {
 Part :: struct {
 	from, to:  int,
 	opens:     []tape.Kind, // the containers open at `from`, outermost first
+	// Where `opens` is in the plan's kinds, which `parts_opens` places once the plan is whole, as appending to them may
+	// move them.
+	opens_at:  int,
+	opens_n:   int,
 	levels:    int, // the most containers open at once in it
 	comments:  int, // the facts its walk stores, or more
 	nodes:     int, // the nodes its walk stores, or more
@@ -40,18 +44,35 @@ Part :: struct {
 	tolerated: bool, // the walk used a rule of the read's tolerances
 }
 
+// Places the `opens` of each of `parts` in `kinds`, from the `opens_at` and `opens_n` each holds.
+parts_opens :: proc "contextless" (parts: []Part, kinds: []tape.Kind) {
+	for &p in parts {
+		p.opens = kinds[p.opens_at:][:p.opens_n]
+	}
+}
+
+// Settles the error of part `p`, one before the last, after its walk. A part ends inside the containers open at the
+// next seam, which its walk reads as a text cut short there, and one that ends otherwise had the plan misread the text.
+part_cut_short :: proc "contextless" (p: ^Part) {
+	if f, ok := p.err.(tape.Fault); ok && f.kind == .Truncated && f.at == u64(p.to) {
+		p.err = nil
+	} else if p.err == nil {
+		p.astray = true
+	}
+}
+
 // The walk of part `k` of `parts` over `src`, into the segment `s` its builder fills, which sets the part's `close`,
 // `err`, `astray` and `tolerated`. It runs on any thread and allocates nothing. `data` is the format's own.
 Part_Walk :: proc(src: []u8, parts: []Part, k: int, s: ^Segment, opts: tape.Options, data: rawptr)
 
 // Builds `src`, a text of `format`, in `parts`, each walked by `walk` on the threads of `opts.runner`, and returns its
 // document and error, or `built` false for a text built on one thread. `finish` settles the joined document from the
-// segments, as `segments_dups` does, destroying it on an error, and an `Allocator_Error` from it has the text built on
-// one thread. Under
-// `Budget.steps` the error is at the first container past the budget, `opened` bytes past its node's `lo`, unless a
-// part's error comes before it. The joined document's block of nodes holds `tail` nodes more past its nodes, for
-// `finish` to store. Every block comes from `allocator`, and the document is left with it.
-parts_build :: proc(src: []u8, format: ^tape.Format, parts: []Part, opts: tape.Options, opened: u64, tail: int, allocator: runtime.Allocator, walk: Part_Walk, finish: proc(doc: ^tape.Document, segs: []Segment, opts: tape.Options, data: rawptr) -> tape.Error, data: rawptr) -> (doc: tape.Document, err: tape.Error, built: bool) {
+// segments, destroying it on an error, and an `Allocator_Error` from it has the text built on one thread. A nil
+// `finish` settles the repeated keys by `segments_dups`, under `rules`. Under `Budget.steps` the error is at the first
+// container past the budget, `opened` bytes past its node's `lo`, unless a part's error comes before it. The joined
+// document's block of nodes holds `tail` nodes more past its nodes, for `finish` to store. Every block comes from
+// `allocator`, and the document is left with `caller`, the allocator the read was called with.
+parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: []Part, opts: tape.Options, opened: u64, tail: int, allocator, caller: runtime.Allocator, walk: Part_Walk, finish: proc(doc: ^tape.Document, segs: []Segment, opts: tape.Options, data: rawptr) -> tape.Error, data: rawptr) -> (doc: tape.Document, err: tape.Error, built: bool) {
 	segs, serr := make([]Segment, len(parts), allocator)
 	if serr != nil || raw_data(segs) == nil {
 		return {}, nil, false
@@ -150,6 +171,10 @@ parts_build :: proc(src: []u8, format: ^tape.Format, parts: []Part, opts: tape.O
 		if _, refused := p.err.(runtime.Allocator_Error); refused {
 			return {}, nil, false
 		}
+		// Under `.Refuse` a repeated key before the fault comes first, which the build on one thread judges.
+		if _, is_fault := p.err.(tape.Fault); is_fault && opts.dups == .Refuse {
+			return {}, nil, false
+		}
 		return {}, p.err, true
 	}
 	jerr: runtime.Allocator_Error
@@ -162,12 +187,14 @@ parts_build :: proc(src: []u8, format: ^tape.Format, parts: []Part, opts: tape.O
 			doc.flags += {.Tolerated}
 		}
 	}
-	if e := finish(&doc, segs, opts, data); e != nil {
+	e := finish(&doc, segs, opts, data) if finish != nil else segments_dups(&doc, segs, opts.dups, rules, opts.runner)
+	if e != nil {
 		if _, refused := e.(runtime.Allocator_Error); refused {
 			return {}, nil, false
 		}
 		return {}, e, true
 	}
+	doc.allocator = caller
 	return doc, nil, true
 }
 

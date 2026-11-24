@@ -262,7 +262,8 @@ records_keep_the_budget :: proc(t: ^testing.T) {
 	}
 }
 
-// Options no records read takes end the records before any is read: a text in pieces framed other than as lines.
+// Options no records read takes end the records before any is read: a text in pieces framed other than as lines, and
+// a concatenated framing, which JSON has no reading of.
 @(test)
 records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -271,6 +272,9 @@ records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	r := json.records_open(src, .Elements, .Json, {pieces = &pieces})
 	_, more := one_validate(&r)
 	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"pieces"}), "pieces: %v", r.err)
+	r = json.records_open(src, .Concatenated)
+	_, more = one_validate(&r)
+	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"framing"}), "concatenated: %v", r.err)
 	r = json.records_open(src, opts = {dups = .Refuse})
 	_, _, more = one_find(&r, {tape.Name("a")})
 	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"dups"}) && r.index == 0, "refuse: %v", r.err)

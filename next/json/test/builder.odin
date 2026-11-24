@@ -316,6 +316,31 @@ build_refuses_at_the_first_repeated_key :: proc(t: ^testing.T) {
 	}
 }
 
+// Under `.Refuse` a repeated key before a fault of the walk comes first, as the first fault in the text wins, whether
+// its object is closed or open at the fault. Under another policy the walk's fault is the error.
+@(test)
+build_refuses_a_repeat_before_a_fault :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	cases := [?]struct {
+		text:    string,
+		refusing: bool,
+	} {
+		{`{"a":1,"a":2,]`, true},
+		{`[{"a":1,"a":2},]`, true},
+		{`{"a":1,"b":2,"a":,}`, true},
+		{`{"a":1,"b":2 x`, false},
+	}
+	for c in cases {
+		for dups in ([]tape.Duplicates{.Refuse, .Last}) {
+			doc, err := json.build(transmute([]u8)c.text, opts = {dups = dups})
+			tape.destroy(&doc)
+			kind, _ := fault_of(err)
+			repeat_first := c.refusing && dups == .Refuse
+			testing.expectf(t, err != nil && (kind == .Duplicate_Key) == repeat_first, "%q %v: %v", c.text, dups, err)
+		}
+	}
+}
+
 // Two keys of one hash are two keys, in every order they come in among repeats of either.
 @(test)
 build_policies_tell_keys_of_one_hash_apart :: proc(t: ^testing.T) {

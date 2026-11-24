@@ -76,14 +76,16 @@ fault_rule :: proc "contextless" (f: Fault) -> Rule {
 	return KIND_RULES[f.kind]
 }
 
-// Writes the message of `err`, an error of a read of `src`, into `buf` and returns it, cut to `len(buf)` bytes. An
-// error that names a byte starts with its line and column, both from 1, where a line ends at LF and a column counts
-// bytes. Nil gives an empty message.
-error_message :: proc "contextless" (buf: []u8, err: Error, src: []u8) -> string {
+// Writes the message of `err`, an error of a read of `src`, a text of `format`, into `buf` and returns it, cut to
+// `len(buf)` bytes. An error that names a byte starts with its line and column, both from 1, where a line ends at LF
+// and a column counts bytes, or in a `.Binary` format with `byte` and its offset, from 0, as a binary text has no
+// lines. Nil gives an empty message.
+error_message :: proc "contextless" (buf: []u8, err: Error, src: []u8, format: ^Format = nil) -> string {
 	m := Message{buf = buf}
+	binary := format != nil && .Binary in format.caps
 	switch e in err {
 	case Fault:
-		message_place(&m, src, e.at)
+		message_place(&m, src, e.at, binary)
 		r := fault_rule(e)
 		message_text(&m, r.message)
 		if e.at < u64(len(src)) && (r.code == "control_char" || r.code == "invalid_utf8") {
@@ -95,7 +97,7 @@ error_message :: proc "contextless" (buf: []u8, err: Error, src: []u8) -> string
 		}
 	case Exceeded:
 		if e.at != NO_BYTE {
-			message_place(&m, src, e.at)
+			message_place(&m, src, e.at, binary)
 		}
 		message_text(&m, BUDGET_MESSAGES[e.kind])
 	case runtime.Allocator_Error:
@@ -142,9 +144,15 @@ message_number :: proc "contextless" (m: ^Message, v: u64) {
 	message_text(m, string(digits[i:]))
 }
 
-// Writes `line:col: ` of byte `at` of `src`, clamped to its length.
+// Writes `line:col: ` of byte `at` of `src`, clamped to its length, or of a `binary` text `byte at: `.
 @(private)
-message_place :: proc "contextless" (m: ^Message, src: []u8, at: u64) {
+message_place :: proc "contextless" (m: ^Message, src: []u8, at: u64, binary: bool) {
+	if binary {
+		message_text(m, "byte ")
+		message_number(m, min(at, u64(len(src))))
+		message_text(m, ": ")
+		return
+	}
 	at := int(min(at, u64(len(src))))
 	head := src[:at]
 	message_number(m, u64(kernel.count_byte(head, '\n') + 1))

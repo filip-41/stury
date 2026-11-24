@@ -14,7 +14,7 @@ first_value :: proc(t: ^testing.T, doc: ^tape.Document) -> tape.Node_Index {
 }
 
 // A number reads exact as an integer while it fits `i64` or `u64`, else as the correctly rounded binary64, and as
-// `Wide` past binary64's range.
+// `Wide` past binary64's range, and its text is as written.
 @(test)
 numbers_read_exact_or_rounded :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -52,8 +52,8 @@ numbers_read_exact_or_rounded :: proc(t: ^testing.T) {
 		testing.expect_value(t, err, nil)
 		num, ok := tape.node_number(&doc, first_value(t, &doc))
 		testing.expectf(t, ok && num.kind == c.kind && num.bits == c.bits, "%s: %v %x, want %v %x", c.text, num.kind, num.bits, c.kind, c.bits)
-		_, is_text := tape.node_text(&doc, first_value(t, &doc), nil)
-		testing.expectf(t, !is_text, "%s read as a string", c.text)
+		text, is_text := tape.node_text(&doc, first_value(t, &doc), nil)
+		testing.expectf(t, is_text && text == c.text, "%s reads as the text %q", c.text, text)
 		tape.destroy(&doc)
 	}
 }

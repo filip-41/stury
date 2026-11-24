@@ -29,12 +29,6 @@ MAX_LEVELS :: u64(max(int) / size_of(u32))
 // calls. A thread with less faults on its guard page, as a read first reads this much of it a page at a time.
 READ_STACK :: 48 * 1024
 
-// The distance between the stack probe's reads, a guard page at the least: a page of 16 KiB on arm64 macOS, else 4 KiB.
-@(private)
-STACK_PAGE :: 16 * 1024 when ODIN_OS == .Darwin && ODIN_ARCH == .arm64 else 4 * 1024
-
-#assert(READ_STACK % STACK_PAGE == 0)
-
 // A walk's state outside its registers, for hook type `H` of capabilities `C`, its protocol's. A walk with `LAX` counts
 // its containers within `Budget.steps` and reads a text in pieces, and one without counts nothing and reads a whole
 // text, with neither in its code. Every walk takes the rules of `tolerate`, which it tests only at a byte it would
@@ -90,7 +84,7 @@ walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, $
 	// Left unzeroed, as `gap_new_row` zeroes each row's `child` it makes and `gap_row_live` its slots.
 	w: Walk(S, H, LAX, C) = ---
 	walk_init(&w, src, raw_data(stack[:]), h, regs, allocator, ctx, limit, tolerate, steps)
-	w.depth = held_depth(h, regs, min(w.limit, WALK_LEVELS))
+	w.depth = hook.held_depth(h, regs, min(w.limit, WALK_LEVELS))
 	when .Walk in C {
 		h.walk = &w
 	}
@@ -128,7 +122,7 @@ walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, $
 		}
 	}
 	if w.owned {
-		levels_free(&w)
+		hook.levels_free(&w)
 	}
 	return r, w.tolerated
 }
@@ -234,38 +228,14 @@ root_tail :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p,
 walk_again :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, lo: u64, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	#assert(.Rooms not_in C)
 	levels: [REWALK_LEVELS]u32 = ---
-	stack, wregs, resume, depth, limit, room, gap_lo, grow, owned := w.stack, w.regs, w.resume, w.depth, w.limit, w.room, w.gap_lo, w.grow, w.owned
-	w.stack, w.regs, w.limit, w.room, w.owned = raw_data(levels[:]), regs, MAX_LEVELS, REWALK_LEVELS, false
-	w.depth = held_depth(w.hooks, regs, REWALK_LEVELS)
+	saved := hook.levels_scope(w, 0)
+	wregs, resume, gap_lo, grow := w.regs, w.resume, w.gap_lo, w.grow
+	w.stack, w.regs, w.limit, w.room = raw_data(levels[:]), regs, MAX_LEVELS, REWALK_LEVELS
+	w.depth = hook.held_depth(w.hooks, regs, REWALK_LEVELS)
 	r := enter(raw_data(src)[lo:], raw_data(src)[len(src):], INDENT_START, w, regs^, GAP_OFF, on)
-	if w.owned {
-		levels_free(w)
-	}
-	w.stack, w.regs, w.resume, w.depth, w.limit, w.room, w.gap_lo, w.grow, w.owned = stack, wregs, resume, depth, limit, room, gap_lo, grow, owned
+	hook.levels_leave(w, saved)
+	w.regs, w.resume, w.gap_lo, w.grow = wregs, resume, gap_lo, grow
 	return r
-}
-
-// Reads the `READ_STACK` bytes below the stack pointer a page at a time from the top, so that on a thread with less
-// stack the read faults on its guard page before its frames are written past it. WebAssembly's shadow stack has no
-// guard page and traps at its base, which the frame alone reaches, so the probe reads nothing there.
-@(private, no_sanitize_address)
-probe_stack :: #force_no_inline proc "contextless" () {
-	when ODIN_ARCH != .wasm32 && ODIN_ARCH != .wasm64p32 {
-		sp := uintptr(intrinsics.stack_pointer())
-		for k := uintptr(STACK_PAGE); k <= READ_STACK; k += STACK_PAGE {
-			_ = intrinsics.volatile_load((^u8)(sp - k))
-		}
-	}
-}
-
-// The open levels the hook has room for, at most `room`.
-@(private)
-held_depth :: #force_inline proc "contextless" (h: ^$H, regs: ^hook.Regs, room: u64) -> u64 {
-	when .Levels in intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0) {
-		return min(room, u64(hook.levels_held(h)) - regs.c)
-	} else {
-		return room
-	}
 }
 
 // Enters the walk at the value at `p`, at the indent and gap slot of the level it starts in. A call from a frame with a
@@ -308,14 +278,9 @@ pass_over :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p,
 	when LAX {
 		w.steps[0] += u64(given) // the container's step, taken again as its bracket is read again
 	}
-	slot := d >> 1
-	stack, depth, limit, room, owned := w.stack, w.depth, w.limit, w.room, w.owned
-	w.stack, w.depth, w.limit, w.room, w.owned = stack[slot:], depth - slot, limit - slot, room - slot, false
+	saved := hook.levels_scope(w, d >> 1)
 	r := enter(p, end, ind, (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(w), hs, m, hook.no_hook)
-	if w.owned {
-		levels_free(w)
-	}
-	w.stack, w.depth, w.limit, w.room, w.owned = stack, depth, limit, room, owned
+	hook.levels_leave(w, saved)
 	return r
 }
 
@@ -344,9 +309,7 @@ keep_through :: #force_no_inline proc "contextless" ($Inner: typeid, $of: proc "
 	}
 	inner := (^Walk(S, Inner, LAX, IC))(w)
 	hooks := w.hooks
-	slot := d >> 1
-	stack, depth, limit, room, owned := w.stack, w.depth, w.limit, w.room, w.owned
-	w.stack, w.depth, w.limit, w.room, w.owned = stack[slot:], depth - slot, limit - slot, room - slot, false
+	saved := hook.levels_scope(w, d >> 1)
 	inner.hooks = (^Inner)(of(hooks))
 	when LAX {
 		w.steps[0] += 1 // the container's step, taken again as its bracket is read again
@@ -356,14 +319,11 @@ keep_through :: #force_no_inline proc "contextless" ($Inner: typeid, $of: proc "
 	}
 	r := enter(p, end, ind, inner, hs^, m, on)
 	hs^ = w.regs^
-	if w.owned {
-		levels_free(w)
-	}
+	hook.levels_leave(w, saved)
 	w.hooks = hooks
 	when .Rooms in C {
 		w.rooms = hook.rooms_end(hooks)
 	}
-	w.stack, w.depth, w.limit, w.room, w.owned = stack, depth, limit, room, owned
 	return r
 }
 
@@ -443,62 +403,12 @@ at :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p: [^]u8) ->
 	return u64(intrinsics.ptr_sub(p, w.base))
 }
 
-// Doubles the levels the walk and its hook hold, up to `limit`, at the walk's deepest level with `open` levels open
-// in its hook, with registers `hs` and the text at `p`. The walk's own levels move to its allocator only past the `room`
-// of its frame. Returns 0, or the outcome when the limit is reached or memory is refused.
-@(private, cold)
-deepen :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: ^hook.Regs, p: [^]u8, open: u64) -> u8 {
-	if w.depth >= w.limit {
-		return hook.WALK_TOO_DEEP
-	}
-	want := min(w.limit, 2 * w.depth + 1)
-	// Each level the walk adds opens one more in the hook at most.
-	when .Levels in C {
-		if want_held := int(open + want - w.depth); hook.levels_held(w.hooks) < want_held && !hook.levels_grow(w.hooks, want_held, hs, at(w, p)) {
-			return hook.WALK_NO_MEMORY
-		}
-	}
-	if want > w.room && !levels_room(w, want) {
-		return hook.WALK_NO_MEMORY
-	}
-	when .Rooms in C {
-		// Growing the hook's levels may have grown its room.
-		w.rooms = hook.rooms_end(w.hooks)
-	}
-	w.depth = want
-	return 0
-}
-
-// Moves the walk's levels to a block of its allocator that holds `want` of them, or returns false.
-@(private, cold)
-levels_room :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), want: u64) -> bool {
-	{
-		context = w.ctx^
-		size := int(want) * size_of(u32)
-		stack: []u8
-		err: runtime.Allocator_Error
-		if w.owned {
-			stack, err = runtime.non_zero_mem_resize(w.stack, int(w.room) * size_of(u32), size, align_of(u32), w.allocator)
-		} else {
-			stack, err = runtime.mem_alloc_non_zeroed(size, align_of(u32), w.allocator)
-		}
-		// A nil allocator gives no memory and no error.
-		if err != nil || stack == nil {
-			return false
-		}
-		if !w.owned {
-			intrinsics.mem_copy_non_overlapping(raw_data(stack), w.stack, int(w.depth) * size_of(u32))
-		}
-		w.stack, w.owned, w.room = ([^]u32)(raw_data(stack)), true, want
-	}
-	return true
-}
-
-// Gives the walk's levels back to its allocator.
-@(private, cold)
-levels_free :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) {
-	context = w.ctx^
-	runtime.mem_free_with_size(w.stack, int(w.room) * size_of(u32), w.allocator)
+// Doubles the levels the walk and its hook hold, at the walk's deepest level with `open` levels open in its hook, with
+// registers `hs` and the text at `p`. Each level the walk adds opens one more in the hook at most. Returns 0, or the
+// outcome when the limit is reached or memory is refused.
+@(private)
+deepen :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: ^hook.Regs, p: [^]u8, open: u64) -> u8 {
+	return hook.deepen(w, hs, int(open) - int(w.depth), at(w, p))
 }
 
 @(private)

@@ -1340,13 +1340,13 @@ scan_settle :: proc "contextless" (h: ^Scanner, n: u32, d: u64) #no_bounds_check
 	}
 }
 
-// With `facts`, keeps comment `t` as a fact of a node the scan keeps. A comment before a token goes to the node that
-// token is stored at, an inline comment to the value before it unless the walk passed that value unstored, and a foot
-// to the open container. `.Stop` when memory for the facts is refused.
+// With `facts`, keeps comment or tag `t` as a fact of a node the scan keeps. A comment or a tag before a token goes to
+// the node that token is stored at, an inline comment to the value before it unless the walk passed that value
+// unstored, and a foot to the open container. `.Stop` when memory for the facts is refused.
 @(private, cold)
 scan_fact :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> hook.Action {
 	#partial switch tape.fact_kind(t.role) {
-	case .Comment:
+	case .Comment, .Tag:
 		// After a key, the token is its value, stored past the key's node.
 		at := builder_cursor(&h.b, s)
 		if h.wait_at != at {
@@ -1368,11 +1368,11 @@ scan_fact :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 	return builder_fact(&h.b, s, t)
 }
 
-// Drops the comments before a token the walk passed unstored.
+// Drops the comments and tags before a token the walk passed unstored.
 @(private, cold)
 scan_unwait :: #force_no_inline proc "contextless" (h: ^Scanner) {
 	for &f in h.b.doc.facts[h.wait_from:] {
-		if f.kind == .Comment {
+		if f.kind == .Comment || f.kind == .Tag {
 			f.node = tape.NO_NODE
 		}
 	}

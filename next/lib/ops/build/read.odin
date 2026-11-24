@@ -66,7 +66,7 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 	}
 	regs := builder_regs(&b)
 	root_close, err, tolerated := walk(src, opts, &b, &regs, allocator, &b.ctx)
-	doc, e := builder_end(&b, regs, root_close, err)
+	doc, e := builder_end(&b, regs, root_close, err, opts.dups == .Refuse, rules)
 	if e == nil {
 		e = finish(&doc, opts, rules)
 	}

@@ -140,6 +140,9 @@ probe_store :: proc(h: ^Probe, s: hook.Regs, t: tape.Token, end: uintptr) -> hoo
 	if t.kind == .End {
 		s.c -= 1
 	} else if t.kind > .Plain {
+		if int(s.c) >= h.levels {
+			panic("testkit: a container past the probe's levels")
+		}
 		s.c += 1
 	}
 	s.b += 1

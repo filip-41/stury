@@ -71,6 +71,22 @@ piece_state :: proc(p: ^tape.Pieces, $P: typeid) -> (s: ^P, err: runtime.Allocat
 	return (^P)(p.state), nil
 }
 
+// Starts a read of the window `src` of the text in pieces `p`: its state `s`, a block of the format's type `P`, which
+// the first read makes with `release` as its `Pieces.release` when that is not nil, the window as the slice its tokens'
+// offsets index (`tape.piece_src`) and the offset past it, or the error of a window that does not hold the bytes the
+// read needs.
+piece_begin :: proc(p: ^tape.Pieces, $P: typeid, release: proc(p: ^tape.Pieces), src: []u8) -> (s: ^P, text: []u8, to: u64, err: tape.Error) {
+	state, serr := piece_state(p, P)
+	if serr != nil {
+		return nil, nil, 0, serr
+	}
+	if release != nil {
+		p.release = release
+	}
+	to, err = tape.piece_window(p, src)
+	return state, tape.piece_src(src, p.from), to, err
+}
+
 // Frees the state of `p` that `piece_state` made. A format whose block holds lists of its own sets `Pieces.release` to
 // a procedure that frees them, then calls this.
 piece_release :: proc(p: ^tape.Pieces) {

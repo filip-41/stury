@@ -20,10 +20,16 @@ builder_dups :: proc(doc: ^tape.Document, dups: tape.Duplicates, rules: ^tape.Ru
 	// allocator and leak the bitmap.
 	allocator := doc.allocator
 	defer delete(r.drops, allocator)
+	refused := dups_scan(doc, dups, &r)
+	return dups_end(doc, &r, refused, rules)
+}
+
+// The repeated keys of every object of `doc` under policy `dups`, kept in `r`.
+@(private)
+dups_scan :: proc(doc: ^tape.Document, dups: tape.Duplicates, r: ^Repeats) -> (refused: runtime.Allocator_Error) {
 	keys: [dynamic]Hashed_Key
 	keys.allocator = doc.allocator
 	defer delete(keys)
-	refused: runtime.Allocator_Error
 	for node, i in doc.nodes {
 		if node.kind != .Object {
 			continue
@@ -32,17 +38,49 @@ builder_dups :: proc(doc: ^tape.Document, dups: tape.Duplicates, rules: ^tape.Ru
 		end := tape.Node_Index(i) + tape.Node_Index(node.n)
 		for k := tape.Node_Index(i) + 1; k < end; k = tape.node_after(doc, tape.node_after(doc, k)) {
 			if _, refused = append(&keys, Hashed_Key{doc.format.key_hash(doc.src, doc.nodes[k]), 0, k}); refused != nil {
-				break
+				return
 			}
 		}
-		if refused == nil {
-			refused = repeats_in(doc, keys[:], dups, &r)
-		}
-		if refused != nil {
-			break
+		if refused = repeats_in(doc, keys[:], dups, r); refused != nil {
+			return
 		}
 	}
-	return dups_end(doc, &r, refused, rules)
+	return
+}
+
+// The error of a walk that ended in the fault `fault` with the nodes it stored, which `.Refuse` makes `Duplicate_Key`
+// when a key repeats before the fault, as the first fault in the text wins. `regs` are the hook's registers at the end
+// of the walk, whose open containers the nodes' sizes are not yet set for.
+@(private)
+partial_repeat :: proc(h: ^Builder, regs: hook.Regs, fault: tape.Fault, rules: ^tape.Rules) -> tape.Error {
+	count := int(builder_cursor(h, regs))
+	if count < 3 {
+		return fault
+	}
+	// A copy with a node past the stored ones, which is read when a member's value is missing.
+	nodes, merr := make([]tape.Node, count + 1, h.doc.allocator)
+	if merr != nil || len(nodes) < count + 1 || raw_data(nodes) == nil {
+		return fault
+	}
+	defer delete(nodes, h.doc.allocator)
+	copy(nodes, h.doc.nodes[:count])
+	nodes[count] = {}
+	if open := int(regs.b >> 32); regs.c > 0 && open < count {
+		nodes[open].n = u32(count - open)
+	}
+	for j in 1 ..< int(regs.c) {
+		if open := int(h.stack[j] >> 32); open < count {
+			nodes[open].n = u32(count - open)
+		}
+	}
+	view := h.doc
+	view.nodes = nodes
+	view.facts = nil
+	r := Repeats{at = max(u64)}
+	if dups_scan(&view, .Refuse, &r) != nil || r.at >= fault.at {
+		return fault
+	}
+	return tape.Fault{at = r.at, rules = rules, kind = .Duplicate_Key}
 }
 
 // Whether policy `dups` may change or refuse `doc`.

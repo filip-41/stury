@@ -15,6 +15,9 @@ Cap :: enum u8 {
 	// The names a value is read by are known before the walk reaches the values, a table's header, so every read
 	// judges `.Refuse` on them, not a build alone.
 	Names_Ahead,
+	// A format whose texts are bytes, not lines of text: a number node's text is its value in decimal, as `decode` gives
+	// it, and `error_message` places a fault by its byte offset.
+	Binary,
 }
 
 Caps :: bit_set[Cap; u32]
@@ -49,12 +52,14 @@ Options :: struct {
 // The options of a read that one format family alone has, an arm per family.
 Format_Options :: union {
 	Dsv_Options,
+	Cbor_Options,
 }
 
 // The family of `Format_Options` a format's reads take, `.None` for a format with no options of its own.
 Options_Family :: enum u8 {
 	None,
 	Dsv,
+	Cbor,
 }
 
 // `Bad_Option{"format"}` when `opts.format` holds the options of a family other than `f`'s, else nil. Every read of a
@@ -64,6 +69,8 @@ options_refused :: #force_inline proc "contextless" (f: ^Format, opts: Options) 
 	switch _ in opts.format {
 	case Dsv_Options:
 		family = .Dsv
+	case Cbor_Options:
+		family = .Cbor
 	case nil:
 		return nil
 	}
@@ -78,6 +85,9 @@ Dsv_Options :: struct {
 	// An unquoted cell that is `true`, `false` or a JSON number reads as that value, not as a string.
 	infer:     bool,
 }
+
+// The options of a CBOR text. None changes what a read gives, so a document records none of them.
+Cbor_Options :: struct {}
 
 // A spec of a format (e.g. JSON, JSONC and JSON5 are three), in rodata, holding what a document of it needs to be
 // read. `Reads` holds the reads of its texts.

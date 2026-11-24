@@ -36,9 +36,10 @@ Records :: struct {
 RECORD_AHEAD :: 256
 
 // Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. The budget's limits hold
-// for each record, but `Budget.steps` under `.Elements`, which counts the containers of the whole text. A text in
-// pieces framed other than as `.Lines`, or options of another format family, ends the records with `tape.Bad_Option`
-// before any is read. A text in pieces opens with its first window, as `tape.Records` says.
+// for each record, but `Budget.steps` under `.Elements`, which counts the containers of the whole text. The framing
+// `.Concatenated`, which JSON has no reading of, options of another format family, and a text in pieces framed other
+// than as `.Lines` end the records with `tape.Bad_Option` before any is read. A text in pieces opens with its first
+// window, as `tape.Records` says.
 records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json, opts := Options{}) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("json: spec out of range")
@@ -50,6 +51,9 @@ records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json
 		if framing != .Lines {
 			r.err, r.at = tape.Bad_Option{"pieces"}, .Done
 		}
+	}
+	if framing == .Concatenated {
+		r.err, r.at = tape.Bad_Option{"framing"}, .Done
 	}
 	if e := tape.options_refused(&FORMATS[spec], opts); e != nil {
 		r.err, r.at = e, .Done
@@ -64,7 +68,7 @@ records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json
 // thread with less.
 @(require_results)
 records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.allocator) -> (n: int) {
-	probe_stack()
+	hook.probe_stack(READ_STACK)
 	lax := build.read_lax(r.opts)
 	switch r.spec {
 	case .Json:
@@ -93,7 +97,7 @@ records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.a
 // Needs `READ_STACK` bytes of stack and faults on a thread with less.
 @(require_results)
 records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
-	probe_stack()
+	hook.probe_stack(READ_STACK)
 	lax := build.read_lax(r.opts)
 	switch r.spec {
 	case .Json:
@@ -123,7 +127,7 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 // stack and faults on a thread with less.
 @(require_results)
 records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
-	probe_stack()
+	hook.probe_stack(READ_STACK)
 	lax := build.read_lax(r.opts)
 	switch r.spec {
 	case .Json:
@@ -541,7 +545,7 @@ record_walk :: #force_inline proc "contextless" (r: ^Records, w: ^Walk($S, $H, $
 			w.steps[0] = left
 		}
 	}
-	w.depth = held_depth(h, regs, min(w.limit, WALK_LEVELS))
+	w.depth = hook.held_depth(h, regs, min(w.limit, WALK_LEVELS))
 	when .Walk in C {
 		h.walk = w
 	}
@@ -558,7 +562,7 @@ record_walk :: #force_inline proc "contextless" (r: ^Records, w: ^Walk($S, $H, $
 		}
 	}
 	if w.owned {
-		levels_free(w)
+		hook.levels_free(w)
 	}
 	// The records keep the walk past the call, and none of the caller's frame.
 	w.hooks, w.regs, w.ctx, w.stack, w.allocator = nil, nil, nil, nil, {}

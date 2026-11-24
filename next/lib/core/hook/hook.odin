@@ -47,6 +47,9 @@ Capability :: enum u8 {
 	// `dropped: u64` before it gives the object's `End`, and learns the columns the hook takes from the first object
 	// only when its field `alike: bool` says the hook answers the same in every object.
 	Columns,
+	// Reads a text in windows, so the walk keeps the state of the window in its field `piece`. A walk with it also
+	// counts steps.
+	Windows,
 }
 
 Capabilities :: bit_set[Capability; u16]

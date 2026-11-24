@@ -38,6 +38,9 @@ Index_Entry :: struct {
 	members:  []Distinct_Member,
 	room:     []Distinct_Member, // the whole block `members` is a prefix of
 	slots:    []Key_Slot,
+	// Two of an object's distinct keys hash alike, as keys of two kinds of one text do, which its table cannot take a
+	// member by a name from, as the member of the name is the first or last of all the keys that read as it.
+	clash:    bool,
 }
 
 // The fewest elements a read passes in an array before the index lists its elements.
@@ -99,7 +102,8 @@ answer :: proc "contextless" (r: Reader, path, k: int) -> (node: Node_Index, p: 
 }
 
 // The value of the member `name` of the object at `at` under `dups`, `.Missing` when the object or null has none and
-// `.Wrong_Kind` for any other value. Every reader takes `NO_NODE`, which a miss gives, as a miss and answers `.Missing`.
+// `.Wrong_Kind` for any other value. Every reader takes `NO_NODE`, which a miss gives, as a miss and answers
+// `.Missing`.
 @(require_results)
 member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Default) -> (Node_Index, Presence) #no_bounds_check {
 	if at == NO_NODE {
@@ -120,7 +124,9 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 	}
 	if !partial && r.index != nil {
 		if count := child_count(doc, at, node); count > SMALL_OBJECT {
-			if e, ok := object_entry(r, at, count); ok {
+			// An object whose keys of two kinds may read as one name takes its member by comparing keys, as the finder
+			// does.
+			if e, ok := object_entry(r, at, count); ok && !e.clash {
 				return index_member(r, e, name, policy)
 			}
 		}
@@ -255,7 +261,8 @@ length :: proc(r: Reader, at: Node_Index, allocator: runtime.Allocator) -> (n: i
 	defer if len(slots) > len(room) {
 		delete(slots, allocator)
 	}
-	return distinct_keys(doc, at, nil, slots), .Found, nil
+	keys, _ := distinct_keys(doc, at, nil, slots)
+	return keys, .Found, nil
 }
 
 // A walk over the children of the container at `at`, which `next_child` moves. `.Wrong_Kind` for a scalar, null
@@ -325,7 +332,7 @@ wide_members :: proc(doc: ^Document, at: Node_Index, count: int, allocator: runt
 	defer if len(slots) > len(table_room) {
 		delete(slots, allocator)
 	}
-	if distinct_keys(doc, at, nil, slots) == count {
+	if n, _ := distinct_keys(doc, at, nil, slots); n == count {
 		return nil, nil, nil
 	}
 	made, merr2 := make([]Distinct_Member, count, allocator)
@@ -337,7 +344,8 @@ wide_members :: proc(doc: ^Document, at: Node_Index, count: int, allocator: runt
 	}
 	members = made
 	intrinsics.mem_zero(raw_data(slots), len(slots) * size_of(Key_Slot))
-	return members[:distinct_keys(doc, at, members, slots)], members, nil
+	n, _ := distinct_keys(doc, at, members, slots)
+	return members[:n], members, nil
 }
 
 // The slots of a key table `key_table` keeps in a caller's room, for a wide object of up to half as many members.
@@ -536,19 +544,20 @@ index_mark :: proc(r: Reader, at: Node_Index, repeats: bool) -> bool #no_bounds_
 	return true
 }
 
-// Whether two members of the whole object at `at`, of at most `SMALL_OBJECT` members, share a key.
+// Whether two members of the whole object at `at`, of at most `SMALL_OBJECT` members, share a key or have keys of two
+// kinds that read as one text.
 @(private)
 small_repeats :: proc "contextless" (doc: ^Document, at: Node_Index) -> bool #no_bounds_check {
 	keys: [SMALL_OBJECT]Node_Index = ---
-	// Each key's kind and length, which two keys of one text share unless one of them is spelled with escapes.
+	// Each key's length, which two keys of one text share unless one of them is spelled with escapes.
 	sizes: [SMALL_OBJECT]u64 = ---
 	n := 0
 	end := at + Node_Index(doc.nodes[at].n)
 	for k := at + 1; k < end; k = node_after(doc, k + 1) {
 		t := doc.nodes[k]
-		size := u64(t.n) | u64(t.kind) << 32 if t.spelling & SPELLING_DECODE == 0 else max(u64)
+		size := u64(t.n) if t.spelling & SPELLING_DECODE == 0 else max(u64)
 		for i in 0 ..< n {
-			if (sizes[i] == size || sizes[i] == max(u64) || size == max(u64)) && doc_same_keys(doc, doc.nodes[keys[i]], t) {
+			if (sizes[i] == size || sizes[i] == max(u64) || size == max(u64)) && doc_same_text(doc, doc.nodes[keys[i]], t) {
 				return true
 			}
 		}
@@ -618,9 +627,9 @@ object_entry :: proc(r: Reader, at: Node_Index, count: int) -> (e: Index_Entry, 
 		serr = .Out_Of_Memory
 	}
 	if merr == nil && serr == nil {
-		n := distinct_keys(r.doc, at, members, slots)
-		e = {node = at, members = members[:n], room = members, slots = slots}
-		if index_mark(r, at, n < count) && index_add(x, e) {
+		n, clash := distinct_keys(r.doc, at, members, slots)
+		e = {node = at, members = members[:n], room = members, slots = slots, clash = clash}
+		if index_mark(r, at, n < count || clash) && index_add(x, e) {
 			return e, true
 		}
 	}
@@ -810,7 +819,7 @@ table_size :: #force_inline proc "contextless" (count: int) -> int {
 // `members` each distinct key in text order with its first and last values, the slots' entries then one past a member.
 // Keys are hashed and compared by the format's one relation, `Format.key_hash` with `same_keys`.
 @(private)
-distinct_keys :: proc "contextless" (doc: ^Document, at: Node_Index, members: []Distinct_Member, slots: []Key_Slot) -> (n: int) #no_bounds_check {
+distinct_keys :: proc "contextless" (doc: ^Document, at: Node_Index, members: []Distinct_Member, slots: []Key_Slot) -> (n: int, clash: bool) #no_bounds_check {
 	mask := u32(len(slots) - 1)
 	end := at + Node_Index(doc.nodes[at].n)
 	for k := at + 1; k < end; k = node_after(doc, k + 1) {
@@ -839,6 +848,8 @@ distinct_keys :: proc "contextless" (doc: ^Document, at: Node_Index, members: []
 					}
 					break
 				}
+				// The same hash of another key: a key of another kind and the same text, or a collision.
+				clash = true
 			}
 			i = (i + 1) & mask
 		}
@@ -1068,6 +1079,14 @@ doc_same_keys :: #force_inline proc "contextless" (doc: ^Document, a, b: Token) 
 	src_a, at_a := node_src(doc, a)
 	src_b, at_b := node_src(doc, b)
 	return same_keys(doc.format, src_a, at_a, src_b, at_b)
+}
+
+// Whether keys `a` and `b` of `doc`, of any kinds, read as the same text.
+@(private)
+doc_same_text :: #force_inline proc "contextless" (doc: ^Document, a, b: Token) -> bool {
+	src_a, at_a := node_src(doc, a)
+	src_b, at_b := node_src(doc, b)
+	return doc.format.same_text(src_a, at_a, src_b, at_b)
 }
 
 @(private)

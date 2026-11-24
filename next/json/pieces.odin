@@ -391,7 +391,7 @@ piece_walk :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, p
 		gaps_drop(&w.gaps, pw.from)
 	}
 	open := u64(len(s.opened))
-	if open > w.room && !levels_room(w, open) {
+	if open > w.room && !hook.levels_room(w, open) {
 		return too_deep(w, w.regs^, w.base[s.last:], hook.WALK_NO_MEMORY)
 	}
 	intrinsics.mem_copy_non_overlapping(w.stack, raw_data(s.levels), int(open) * size_of(u32))

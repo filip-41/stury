@@ -170,24 +170,11 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 			p.close, p.err, _ = hook.walk_error(r, &RULES)
 			p.tolerated = took
 		}
-		// A part before the last ends inside the containers open at the next seam, which its walk reads as a text cut
-		// short there.
 		if k < len(parts) - 1 {
-			if f, ok := p.err.(tape.Fault); ok && f.kind == .Truncated && f.at == u64(p.to) {
-				p.err = nil
-			} else if p.err == nil {
-				p.astray = true
-			}
+			build.part_cut_short(p)
 		}
 	}
-	finish :: proc(doc: ^tape.Document, segs: []build.Segment, opts: Options, data: rawptr) -> tape.Error {
-		return build.segments_dups(doc, segs, opts.dups, &RULES, opts.runner)
-	}
-	doc, err, built = build.parts_build(src, &FORMATS[S], parts, opts, 1, 0, allocator, walk, finish, nil)
-	if built && err == nil {
-		doc.allocator = caller
-	}
-	return
+	return build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 1, 0, allocator, caller, walk, nil, nil)
 }
 
 // Cuts `src` from `start` into `len(chunks)` chunks of about equal size. A chunk never starts at a byte that follows a
@@ -619,7 +606,7 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 					return
 				}
 				list[len(list) - 1].to = r.seam
-				part := build.Part{from = r.seam, opens = transmute([]tape.Kind)runtime.Raw_Slice{data = rawptr(uintptr(len(held))), len = len(open)}, levels = len(open)}
+				part := build.Part{from = r.seam, opens_at = len(held), opens_n = len(open), levels = len(open)}
 				if _, err := append(&list, part); err != nil {
 					return
 				}
@@ -639,10 +626,7 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 	// Shrunk to their lengths so that the caller's `delete` of the returned slices frees the whole blocks.
 	shrink(&list)
 	shrink(&held)
-	// A part's `opens` holds an offset into `held` until the shrink has settled where `held` lives.
-	for &p in list {
-		p.opens = held[uintptr(raw_data(p.opens)):][:len(p.opens)]
-	}
+	build.parts_opens(list[:], held[:])
 	return list[:], held[:], true
 }
 

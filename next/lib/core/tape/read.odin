@@ -5,18 +5,27 @@ import "stury:lib/base/spell"
 
 // The readers a user calls on a scalar node, over the text the node's spans point into.
 
-// The text of the string or plain scalar token `t` of `src`, a text of format `f`, as a `find` answer's node or a
-// record's key: its bytes in the text when it holds no escape, else decoded into `buf`. False for a token of another
-// kind, or a `buf` shorter than `text_room` gives.
+// The text of scalar token `t` of `src`, a text of format `f`: its bytes in the text when it holds no escape, else
+// decoded into `buf`. A string, plain, number or byte string token has a text, a byte string's being its payload, and
+// so does a key of any kind, which a `Name` takes by its text, as a `find` answer's node or a record's key. A null or
+// boolean value has none. A number's text is its exact value: as written, or in a `.Binary` format its value in
+// decimal. False for a token with no text, a `buf` shorter than `text_room` gives, or a number of a `.Binary` format
+// whose value is past what its readers spell.
 @(require_results)
 node_text_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node, buf: []u8) -> (s: string, ok: bool) #no_bounds_check {
-	if t.kind != .String && t.kind != .Plain {
+	if t.kind > .Plain || t.kind < .Number && t.role != .Key {
 		return "", false
 	}
-	if t.spelling & SPELLING_DECODE == 0 {
+	if !text_decoded(f, t) {
 		return string(src[t.lo:][:t.n]), true
 	}
 	return f.decode(src, t, buf)
+}
+
+// Whether the text of scalar token `t` of a text of format `f` is a decode of its bytes rather than the bytes.
+@(private)
+text_decoded :: #force_inline proc "contextless" (f: ^Format, t: Token) -> bool {
+	return text_decodes(t) || t.kind == .Number && .Binary in f.caps
 }
 
 // `node_text_of` for node `at` of `doc`, false for `NO_NODE`.
@@ -111,7 +120,7 @@ node_number :: proc {
 // `f`, 0 for a scalar that reads as its bytes in the text.
 @(require_results)
 text_room_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node) -> int {
-	if t.kind > .Plain || !text_decodes(t) {
+	if t.kind > .Plain || !text_decoded(f, t) {
 		return 0
 	}
 	return f.room(src, t)
@@ -122,6 +131,16 @@ text_room_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node
 text_room_in :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> int {
 	src, t, ok := node_src_at(doc, at)
 	return text_room_of(doc.format, src, t) if ok else 0
+}
+
+// The number of tag `fact` of `doc`, a fact of kind `.Tag`, whose span is the tag's head. False for another fact.
+@(require_results)
+fact_number :: proc "contextless" (doc: ^Document, fact: Fact) -> (spell.Number, bool) {
+	if fact.kind != .Tag {
+		return {}, false
+	}
+	src, t := node_src(doc, {lo = fact.lo, n = fact.n, kind = .Number, role = .Tag})
+	return node_number_of(doc.format, src, t)
 }
 
 // The bytes a buffer needs for `node_text`, of a document or of a format and the text the node was read in.
