@@ -173,14 +173,14 @@ the_text_is_one_record :: proc(t: ^testing.T) {
 	out: [4]tape.Record
 	n := toml.records_validate(&r, out[:])
 	testing.expect_value(t, n, 1)
-	testing.expect(t, out[0].lo == 0 && out[0].hi == u64(len(src)) && out[0].err == nil && r.err == nil)
+	testing.expect(t, out[0].lo == 0 && out[0].hi == u64(len(src)) && out[0].err == 0 && r.err == nil)
 	bad := transmute([]u8)string("a = 1\na = 2\n")
 	b := toml.records_open(bad)
 	testing.expect_value(t, toml.records_validate(&b, out[:]), 0)
 	testing.expect_value(t, testkit.code_of(b.err), "duplicate_key")
 	marked := toml.records_open(transmute([]u8)string("\xef\xbb\xbfa = 1\n"))
 	testing.expect_value(t, toml.records_validate(&marked, out[:]), 1)
-	testing.expect(t, out[0].lo == 3 && out[0].hi == 9 && out[0].err == nil)
+	testing.expect(t, out[0].lo == 3 && out[0].hi == 9 && out[0].err == 0)
 	empty := toml.records_open(nil)
 	testing.expect_value(t, toml.records_validate(&empty, out[:]), 0)
 	for framing in ([]tape.Framing{.Lines, .Elements}) {
@@ -205,7 +205,7 @@ the_root_members_are_records :: proc(t: ^testing.T) {
 	}
 	keys := [3]string{"a", "t", "u"}
 	for rec, i in out[:n] {
-		testing.expectf(t, string(src[rec.key.lo:][:rec.key.n]) == keys[i] && rec.err == nil, "record %d: %v", i, rec)
+		testing.expectf(t, string(src[rec.key.lo:][:rec.key.n]) == keys[i] && rec.err == 0, "record %d: %v", i, rec)
 	}
 	testing.expect(t, out[0].lo == 4 && out[0].hi == 7)
 	testing.expect(t, answers[0].outcome == .Wrong_Kind && answers[1].outcome == .Found && answers[2].outcome == .Missing)
@@ -214,6 +214,26 @@ the_root_members_are_records :: proc(t: ^testing.T) {
 	defer toml.records_close(&bad)
 	testing.expect_value(t, toml.records_validate(&bad, out[:]), 0)
 	testing.expect_value(t, testkit.code_of(bad.err), "duplicate_key")
+}
+
+// The records at a path are the members of the table or the elements of the array it reaches, each as the build
+// reads it, and a path to no such container holds none.
+@(test)
+records_at_a_path_are_the_children_of_the_container :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	texts := []string {
+		"a = 'x'\n[t]\nb = [1, [2, 3], {c = 4}]\n[u.v]\nc = 3\n[t.w]\nd = 4\n",
+		"[[p]]\nq = 1\n[[p]]\nq = [5, 6]\nr.s = 'z'\n[[p.n]]\nm = true\n",
+		"x = { y = { z = [[], [1], { w = 2 }] } }\nk = 1979-05-27T07:32:00Z\n",
+		"a = 1\na = 2\n",
+	}
+	read: int
+	for text in texts {
+		for spec in toml.Spec {
+			read += testkit.records_at_agree(t, toml.reads(spec), toml.as(spec), transmute([]u8)text, {}, text)
+		}
+	}
+	testing.expect(t, read > 0)
 }
 
 // Records take `.Refuse` as every TOML read does, as a repeated key is a fault whatever the policy.
@@ -233,6 +253,7 @@ records_take_the_refuse_policy :: proc(t: ^testing.T) {
 		defer toml.records_close(&f)
 		s := toml.records_open(src, framing, opts = {dups = .Refuse})
 		defer toml.records_close(&s)
+		defer tape.destroy_records(&s)
 		want := 1 if framing == .Concatenated else 2
 		testing.expect_value(t, toml.records_validate(&v, out[:]), want)
 		testing.expect_value(t, toml.records_find(&f, {tape.Name("b")}, out[:], answers[:]), want)

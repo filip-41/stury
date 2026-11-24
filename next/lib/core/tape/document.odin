@@ -50,6 +50,94 @@ destroy_document :: proc(doc: ^Document) {
 	doc^ = {}
 }
 
+// A copy of `doc` in `allocator` that holds its own nodes, facts, counts, extension and answers, as a document a read
+// gives does, and the source too under `.Owns_Src`. A copy of a `query`'s document borrows the nodes it read still. A
+// refused allocation is the error, with nothing left allocated.
+clone_document :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, err: runtime.Allocator_Error) {
+	c = doc^
+	c.allocator, c.partial = allocator, nil
+	if .Borrowed not_in doc.flags {
+		c.nodes, c.facts, c.counts, c.ext = nil, nil, nil, nil
+		if .Owns_Src in doc.flags {
+			c.src = nil
+		}
+	}
+	defer if err != nil {
+		destroy_document(&c)
+	}
+	if .Borrowed not_in doc.flags {
+		c.nodes = clone_list(doc.nodes, allocator) or_return
+		c.facts = clone_list(doc.facts, allocator) or_return
+		c.counts = clone_list(doc.counts, allocator) or_return
+		if .Owns_Src in doc.flags {
+			c.src = clone_list(doc.src, allocator) or_return
+		}
+		if doc.ext != nil {
+			c.ext = clone_ext(doc.ext, allocator) or_return
+		}
+	}
+	if x := doc.partial; x != nil {
+		answers_at := size_of(Partial)
+		starts_at := answers_at + len(x.answers) * size_of(Answer)
+		kept_at := starts_at + len(x.starts) * size_of(u32)
+		missing_at := kept_at + len(x.kept) * size_of(Kept_Child)
+		names_at := missing_at + len(x.missing) * size_of(Missing_Name)
+		block := runtime.mem_alloc_non_zeroed(names_at + len(x.names), align_of(Partial), allocator) or_return
+		y := (^Partial)(raw_data(block))
+		y^ = x^
+		y.answers = ([^]Answer)(raw_data(block[answers_at:]))[:len(x.answers)]
+		y.starts = ([^]u32)(raw_data(block[starts_at:]))[:len(x.starts)]
+		copy(y.answers, x.answers)
+		copy(y.starts, x.starts)
+		if .Borrowed not_in doc.flags {
+			y.kept = ([^]Kept_Child)(raw_data(block[kept_at:]))[:len(x.kept)]
+			y.missing = ([^]Missing_Name)(raw_data(block[missing_at:]))[:len(x.missing)]
+			y.names = block[names_at:][:len(x.names)]
+			copy(y.kept, x.kept)
+			copy(y.missing, x.missing)
+			copy(y.names, x.names)
+		}
+		c.partial = y
+	}
+	return
+}
+
+@(private)
+clone_list :: proc(list: []$T, allocator: runtime.Allocator) -> (out: []T, err: runtime.Allocator_Error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	data := runtime.mem_alloc_non_zeroed(len(list) * size_of(T), align_of(T), allocator) or_return
+	out = ([^]T)(raw_data(data))[:len(list)]
+	copy(out, list)
+	return
+}
+
+// A copy of `ext` and the lists it names in one block.
+@(private)
+clone_ext :: proc(ext: ^Doc_Ext, allocator: runtime.Allocator) -> (e: ^Doc_Ext, err: runtime.Allocator_Error) {
+	held_at := size_of(Doc_Ext)
+	tables_at := held_at + len(ext.held) * size_of(Held_Span)
+	tables_at = (tables_at + align_of(Table) - 1) &~ (align_of(Table) - 1)
+	t, tabular := ext.format.(Tabular_Ext)
+	slots_at := tables_at + len(t.tables) * size_of(Table)
+	size := slots_at + len(t.slots) * size_of(u32)
+	block := runtime.mem_alloc_non_zeroed(size, align_of(Doc_Ext), allocator) or_return
+	e = (^Doc_Ext)(raw_data(block))
+	e^ = ext^
+	e.held = ([^]Held_Span)(raw_data(block[held_at:]))[:len(ext.held)]
+	copy(e.held, ext.held)
+	if tabular {
+		u := t
+		u.tables = ([^]Table)(raw_data(block[tables_at:]))[:len(t.tables)]
+		u.slots = ([^]u32)(raw_data(block[slots_at:]))[:len(t.slots)]
+		copy(u.tables, t.tables)
+		copy(u.slots, t.slots)
+		e.format = u
+	}
+	return
+}
+
 // How a document was built.
 Doc_Flag :: enum u8 {
 	Owns_Src,

@@ -23,7 +23,7 @@ read_records :: proc(t: ^testing.T, src: []u8, framing: tape.Framing, spec := cb
 	for {
 		n := cbor.records_validate(&r, out[:])
 		for rec in out[:n] {
-			testing.expectf(t, rec.err == nil, "record %d: %v", rec.index, rec.err, loc = loc)
+			testing.expectf(t, rec.err == 0, "record at %d: %v", rec.lo, testkit.record_error(&r, rec), loc = loc)
 			append(&spans, [2]u64{rec.lo, rec.hi})
 			if framing == .Members {
 				buf: [64]u8
@@ -152,9 +152,6 @@ records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	lines := cbor.records_open(hex("01"), .Lines)
 	out: [1]tape.Record
 	testing.expect(t, cbor.records_validate(&lines, out[:]) == 0 && lines.err == tape.Error(tape.Bad_Option{"framing"}))
-	pieces: tape.Pieces
-	piece := cbor.records_open(hex("81 01"), .Elements, opts = {pieces = &pieces})
-	testing.expect(t, cbor.records_validate(&piece, out[:]) == 0 && piece.err == tape.Error(tape.Bad_Option{"pieces"}))
 	dups := cbor.records_open(hex("01"), opts = {dups = .Refuse})
 	answers: [1]tape.Span_Answer
 	testing.expect(t, cbor.records_find(&dups, {}, out[:], answers[:]) == 0 && dups.err == tape.Error(tape.Bad_Option{"dups"}))

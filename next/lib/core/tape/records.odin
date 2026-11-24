@@ -19,16 +19,16 @@ Framing :: enum u8 {
 	Concatenated,
 }
 
-// One record: the records before it, its bytes in the text, and why it does not read, nil when it does. Its bytes run
-// from its first byte that is no white space to its line's end less a CR under `.Lines`, and to its value's end under
-// the other framings. Every offset, those of `err` included, counts from the text's first byte. Under
-// `.Members` `key` is the member's key, a token of role `.Key` that `key_raw` reads, and under the other framings it is
-// the zero token, whose role is `.Value`.
+// One record: its bytes in the text, and why it does not read. Its bytes run from its first byte that is no white
+// space to its line's end less a CR under `.Lines`, and to its value's end under the other framings. Every offset,
+// those of its error included, counts from the text's first byte. Under `.Members` `key` is the member's key, a token
+// of role `.Key` that `key_raw` reads, and under the other framings it is the zero token, whose role is `.Value`. `err`
+// is 0 for a record that reads, else one past the place of its error in the records' `faults`. A find of a record
+// that does not read answers `.Missing`, and a scan of it gives an empty document.
 Record :: struct {
-	index:  u64,
 	lo, hi: u64,
-	err:    Error,
 	key:    Token,
+	err:    u32,
 }
 
 // Where the records of a text are, in their framing.
@@ -44,23 +44,29 @@ Records_At :: enum u8 {
 // records into slices the caller gives, as many as they hold. Once a batch fills fewer than it was given room for the
 // records have ended, and `err` says why, nil at the text's end.
 //
-// Under `.Lines`, the records of a text in pieces are read a window at a time: `Options.pieces` is the read's, the
-// window the records open with is the text's first, and `records_window` gives each next window. A batch reads the
-// records whose lines the window holds whole and fills fewer than it was given room for once the window holds no more,
-// or once the records have ended. It then sets the pieces' `more`, `at` and `keep`, as a read of a window does: a
-// record the window's end cut is kept from its first byte, and its framing goes on in the next window where this one
-// stopped. Each record's offsets are the whole
-// text's, a scan's documents hold the bytes they read (`.Held`), and a find's answers are spans of the window it was
-// read in.
+// The records of a text in pieces are read a window at a time, under the framings a format's records read so:
+// `Options.pieces` is the read's, the window the records open with is the text's first, and `records_window` gives each
+// next window. A batch reads the records the window holds whole and fills fewer than it was given room for once the
+// window holds no more, or once the records have ended. It then sets the pieces' `more`, `at` and `keep`, as a read of
+// a window does: a record the window's end cut is kept from its first byte, and its framing goes on in the next window
+// where this one stopped. Each record's offsets are the whole text's, a scan's documents hold the bytes they read
+// (`.Held`), and a find's answers are spans of the window it was read in.
 Records :: struct {
 	src:     []u8,
 	opts:    Options,
 	framing: Framing,
+	// Under `.Elements` and `.Members`, the steps from the root to the container whose elements or members are the
+	// records, which it borrows, empty for the root. Each is a `Name` or an `Index` from the start, and takes the first
+	// member of its key, as the records are given before the object holding them closes.
+	path:    []Step,
 	at:      Records_At,
 	err:     Error,
+	// The errors of the records of the last batch that do not read, in their order, valid until the next batch.
+	faults:  [dynamic]Error,
 	pos:     u64, // where the next record is looked for
 	index:   u64, // the records read
 	key:     Token, // the key of the member being read under `.Members`
+	block:   Record_Block, // what the documents of the last batch of a scan are in
 	// Set by `Reads.records` for records it made: their reads, the proc that frees them and what they are in.
 	reads:     ^Records_Reads,
 	release:   proc(r: ^Records),
@@ -89,7 +95,8 @@ records_find :: proc(r: ^Records, path: []Step, out: []Record, answers: []Span_A
 
 // Reads the next records of `r`, which `Reads.records` made, into `out`, and for each the document of its nodes the
 // paths of `demand` reach into the same place of `docs`, an empty document for a record a fault refuses, whose every
-// path answers `.Missing` with no node. Returns how many it filled.
+// path answers `.Missing` with no node. Returns how many it filled. The documents are valid until the next call or
+// `destroy_records`, as `Record_Block` says.
 records_scan :: proc(r: ^Records, demand: ^Demand, out: []Record, docs: []Document, read := Read_Options{}, allocator := context.allocator) -> int {
 	return r.reads.scan(r, demand, out, docs, read, allocator)
 }
@@ -103,9 +110,44 @@ records_window :: proc "contextless" (r: ^Records, src: []u8) -> Error {
 	return nil
 }
 
-// Frees the records `Reads.records` made.
+// Frees what the records `r` hold, the documents of their last batch of a scan with them, and the records themselves
+// when `Reads.records` made them. A format's records opened directly are freed so too.
 destroy_records :: proc(r: ^Records) {
-	if r != nil && r.release != nil {
+	if r == nil {
+		return
+	}
+	record_block_free(&r.block)
+	delete(r.faults)
+	r.faults = nil
+	if r.release != nil {
 		r.release(r)
 	}
 }
+
+// The memory the documents of a batch of a scan of records are in, which the next batch reuses: a document a batch
+// gives is valid until the next batch or `destroy_records`, its free does nothing, and a caller that keeps it clones
+// it. Its chunks come from the allocator the first batch was given. A batch that outgrew the chunk leaves the next one
+// a single chunk of what it used.
+Record_Block :: struct {
+	chunk:   []u8,
+	used:    int,
+	last:    int, // where the last allocation starts, which grows in place
+	spent:   int, // the bytes of the chunks outgrown in this batch, which `outgrown` holds
+	outgrown: [dynamic][]u8,
+	backing: runtime.Allocator,
+}
+
+// Frees the chunks of `b` and leaves it zero.
+@(private)
+record_block_free :: proc(b: ^Record_Block) {
+	if b.backing.procedure == nil {
+		return
+	}
+	for c in b.outgrown {
+		runtime.mem_free_with_size(raw_data(c), len(c), b.backing)
+	}
+	delete(b.outgrown)
+	runtime.mem_free_with_size(raw_data(b.chunk), len(b.chunk), b.backing)
+	b^ = {}
+}
+

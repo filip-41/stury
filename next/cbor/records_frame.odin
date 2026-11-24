@@ -1,7 +1,8 @@
 package cbor
 
-// The framing of the items of a sequence read in pieces, a head at a time, so that no byte of an item is read twice
-// before its end is known.
+// The framing of the records of a text read in pieces, a head at a time, so that no byte of an item is read twice
+// before its end is known: the items of a sequence, and under `.Elements` and `.Members` each head, key and value the
+// framing reads before a window holds it.
 
 // The framing of an item of a text in pieces across windows: `open` once begun, read up to `seen`, in the `d` frames of
 // `frames` whose innermost is `top`, with the bytes of a head the last window cut in `head[:head_n]`, and `ended` once
@@ -58,31 +59,8 @@ item_frame :: proc "contextless" (r: ^Records, n: u64) -> bool #no_bounds_check 
 	src := r.src
 	// An item whose last string runs past the window ends where the string does.
 	for !f.ended && f.seen < n {
-		// The head, read from the window or from the bytes of it the last window held.
-		b := f.head[0] if f.head_n > 0 else src[f.seen]
+		b, at, hl, arg := head_next(f, src, n) or_return
 		ai := b & 31
-		hl := max(u64(HEAD_LEN[ai]), 1)
-		have := u64(f.head_n)
-		if f.seen + hl - have > n {
-			copy(f.head[have:], src[f.seen:n])
-			f.head_n = u8(have + n - f.seen)
-			f.seen = n
-			return false
-		}
-		at := f.seen - have
-		head: []u8
-		if have > 0 {
-			copy(f.head[have:hl], src[f.seen:f.seen + hl - have])
-			head = f.head[:hl]
-			f.head_n = 0
-		} else {
-			head = src[at:at + hl]
-		}
-		f.seen = at + hl
-		arg: u64
-		if ai <= 27 {
-			arg, _, _ = read_head(head, 0, ai)
-		}
 		if f.top & FLAG_CHUNKS != 0 && b != 0xff && (b >> 5 != u8(f.top >> 56) & 7 || ai > 27) {
 			f.stuck = true
 			return true
@@ -139,6 +117,93 @@ item_frame :: proc "contextless" (r: ^Records, n: u64) -> bool #no_bounds_check 
 		}
 	}
 	return f.ended && f.seen <= n
+}
+
+// The next head `f` frames, at `at`, of `hl` bytes, its initial byte `b` and its argument `arg`, read from the window
+// `src[:n]` or from the bytes of it the last window held, with `f.seen` moved past it. False with `seen` at `n` when the
+// window cuts the head, whose bytes `f.head` holds.
+@(private)
+head_next :: #force_inline proc "contextless" (f: ^Item_Frame, src: []u8, n: u64) -> (b: u8, at, hl, arg: u64, ok: bool) #no_bounds_check {
+	b = f.head[0] if f.head_n > 0 else src[f.seen]
+	ai := b & 31
+	hl = max(u64(HEAD_LEN[ai]), 1)
+	have := u64(f.head_n)
+	if f.seen + hl - have > n {
+		copy(f.head[have:], src[f.seen:n])
+		f.head_n = u8(have + n - f.seen)
+		f.seen = n
+		return
+	}
+	at = f.seen - have
+	head: []u8
+	if have > 0 {
+		copy(f.head[have:hl], src[f.seen:f.seen + hl - have])
+		head = f.head[:hl]
+		f.head_n = 0
+	} else {
+		head = src[at:at + hl]
+	}
+	f.seen = at + hl
+	if ai <= 27 {
+		arg, _, _ = read_head(head, 0, ai)
+	}
+	return b, at, hl, arg, true
+}
+
+// What the framing of the records of a text in pieces reads next at `pos`.
+@(private)
+Need :: enum u8 {
+	Byte, // one byte
+	Heads, // the tag heads and the head of a container, and the bytes its count claims, as `root_open` judges it
+	Item, // a whole item, or up to a byte that leaves its end unknown with every count before it
+}
+
+// Whether the window holds what the framing of `r` reads next at `r.pos`, as `need` says. A text not in pieces and its
+// last window hold it. False ends the batch, and the framing goes on in the next window where this one stopped, reading
+// on from where the heads were framed to.
+@(private)
+framed :: proc "contextless" (r: ^Records, need: Need) -> bool #no_bounds_check {
+	p := r.opts.pieces
+	f := &r.item
+	if p == nil || p.last {
+		f.open = false
+		return true
+	}
+	n := u64(len(r.src))
+	switch need {
+	case .Byte:
+		return r.pos < n
+	case .Item:
+		if !f.open {
+			f.open, f.stuck, f.ended, f.head_n, f.d, f.top, f.seen, f.need = true, false, false, 0, 0, 0, r.pos, 0
+		}
+		if !f.stuck && !item_frame(r, n) || f.stuck && f.need > n {
+			return false
+		}
+	case .Heads:
+		if !f.open {
+			f.open, f.ended, f.head_n, f.seen, f.need = true, false, 0, r.pos, 0
+		}
+		for !f.ended {
+			if f.seen >= n && f.head_n == 0 {
+				return false
+			}
+			b, at, hl, arg := head_next(f, r.src, n) or_return
+			if b >> 5 == 6 && b & 31 <= 27 {
+				continue
+			}
+			f.ended = true
+			if (b >> 5 == 4 || b >> 5 == 5) && b & 31 <= 27 {
+				pair := u64(b >> 5) & 1
+				f.need = max(u64) if arg > max(u64) >> 2 else at + hl + arg << pair
+			}
+		}
+		if f.need > n {
+			return false
+		}
+	}
+	f.open = false
+	return true
 }
 
 // Opens a frame of `frame` in `f`, or false with `stuck` set and the item's end past the last window when `f` holds no

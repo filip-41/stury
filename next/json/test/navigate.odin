@@ -670,3 +670,32 @@ navigate_walks_a_stopped_scan_partial_array :: proc(t: ^testing.T) {
 	_, _, cp = tape.next_child(r, &c)
 	testing.expect_value(t, cp, .Not_Loaded)
 }
+
+// A zero index, with no allocator, reads as no index: its tables are refused and the readers walk, answering the same.
+@(test)
+a_zero_index_reads_as_none :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"a":[`)
+	for i in 0 ..< 40 {
+		fmt.sbprintf(&b, "%s%d", "," if i > 0 else "", i)
+	}
+	strings.write_string(&b, `]`)
+	for i in 0 ..< 20 {
+		fmt.sbprintf(&b, `,"k%d":%d`, i % 15, i)
+	}
+	strings.write_string(&b, `}`)
+	doc, err := json.build(transmute([]u8)strings.to_string(b))
+	defer tape.destroy(&doc)
+	testing.expect(t, err == nil)
+	N :: proc(s: string) -> tape.Step {return tape.Name(s)}
+	I :: proc(i: int) -> tape.Step {return tape.Index(i)}
+	for steps in ([][]tape.Step{{}, {N("a")}, {N("a"), I(30)}, {N("k3")}, {N("k14")}, {N("z")}}) {
+		for dups in ([]tape.Duplicates{.Default, .First, .Last, .Group}) {
+			zero: tape.Doc_Index
+			testing.expect_value(t, describe(&doc, steps, dups, &zero), describe(&doc, steps, dups))
+			tape.destroy(&zero)
+		}
+	}
+}

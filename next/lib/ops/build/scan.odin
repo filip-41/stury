@@ -239,9 +239,9 @@ Scan_Room :: struct {
 // The node room grows as it fills. With no `rewalk` it reads each value once, keeping nodes where a replay would read a
 // value again.
 @(require_results)
-scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator) -> (err: runtime.Allocator_Error) {
+scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator, lent: []tape.Node = nil) -> (err: runtime.Allocator_Error) {
 	h^ = {}
-	builder_start(&h.b, src, format, nodes, most, frames, allocator)
+	builder_start(&h.b, src, format, nodes, most, frames, allocator, nil, lent)
 	h.key_text = src
 	if h.b.err != nil {
 		return h.b.err
@@ -301,11 +301,15 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 // same arguments. What the demand and the read fix is kept, and the lists go back to the room. A scanner never started,
 // or whose marks or picks outgrow the room, is started as `scanner_start` does.
 @(require_results)
-scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator, lent: []tape.Node = nil) -> runtime.Allocator_Error {
 	if h.demand != demand || !scan_in_room(h, raw_data(h.marks)) || len(demand.edges) >= len(room.picks) {
-		return scanner_start(h, src, format, demand, dups, read, rewalk, nodes, most, frames, room, allocator)
+		return scanner_start(h, src, format, demand, dups, read, rewalk, nodes, most, frames, room, allocator, lent)
 	}
-	builder_start(&h.b, src, format, nodes, most, frames, allocator)
+	if len(lent) > 0 && h.b.doc.allocator == allocator {
+		builder_again(&h.b, src, format, most, frames, lent)
+	} else {
+		builder_start(&h.b, src, format, nodes, most, frames, allocator, nil, lent)
+	}
 	if h.b.err != nil {
 		return h.b.err
 	}
@@ -1830,8 +1834,8 @@ scan_answer_before :: proc(a, b: Scan_Answer) -> bool {
 
 @(private)
 scanner_free :: proc(h: ^Scanner, allocator: runtime.Allocator) {
-	free_list :: proc(h: ^Scanner, list: ^[dynamic]$T) {
-		if !scan_in_room(h, raw_data(list^)) {
+	free_list :: #force_inline proc(h: ^Scanner, list: ^[dynamic]$T) {
+		if p := raw_data(list^); p != nil && !scan_in_room(h, p) {
 			delete(list^)
 		}
 	}
@@ -1845,8 +1849,12 @@ scanner_free :: proc(h: ^Scanner, allocator: runtime.Allocator) {
 	free_list(h, &h.ring)
 	free_list(h, &h.tokens)
 	free_list(h, &h.saved)
-	delete(h.held)
-	delete(h.bytes)
+	if h.held != nil {
+		delete(h.held)
+	}
+	if h.bytes != nil {
+		delete(h.bytes)
+	}
 	h.held, h.bytes = nil, nil
 
 	if !scan_in_room(h, raw_data(h.marks)) {

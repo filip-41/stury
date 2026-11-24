@@ -18,6 +18,7 @@ records_read_each_row :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := transmute([]u8)string("a,b\n1,2\n3\n\"x\ny\",4\r\n\n5,6")
 	r := dsv.records_open(src)
+	defer tape.destroy_records(&r)
 	out: [8]dsv.Record
 	n := dsv.records_validate(&r, out[:])
 	testing.expect_value(t, n, 4)
@@ -25,14 +26,16 @@ records_read_each_row :: proc(t: ^testing.T) {
 	spans := []string{"1,2", "3", "\"x\ny\",4", "5,6"}
 	for i in 0 ..< min(n, 4) {
 		testing.expectf(t, string(src[out[i].lo:out[i].hi]) == spans[i], "record %d: %q", i, src[out[i].lo:out[i].hi])
-		testing.expectf(t, (out[i].err == nil) == (i != 1), "record %d: %v", i, out[i].err)
+		testing.expectf(t, (out[i].err == 0) == (i != 1), "record %d: %v", i, out[i].err)
 	}
+	tape.destroy_records(&r)
 	r = dsv.records_open(src)
 	answers: [8]dsv.Span_Answer
 	n = dsv.records_find(&r, []tape.Step{tape.Name("b")}, out[:], answers[:])
 	testing.expect_value(t, n, 4)
 	testing.expect(t, answers[0].outcome == .Found && string(src[answers[0].lo:answers[0].hi]) == "2")
 	testing.expect(t, answers[2].outcome == .Found && string(src[answers[2].lo:answers[2].hi]) == "4")
+	tape.destroy_records(&r)
 	r = dsv.records_open(src)
 	demand, _ := tape.demand_of([][]tape.Step{{}}, allocator = context.temp_allocator)
 	docs: [8]dsv.Document
@@ -54,7 +57,9 @@ records_validate_agrees_with_a_counting_walk :: proc(t: ^testing.T) {
 		counted := opts
 		counted.budget.steps = 1 << 40
 		plain := dsv.records_open(src, .Lines, spec, opts)
+		defer tape.destroy_records(&plain)
 		steps := dsv.records_open(src, .Lines, spec, counted)
+		defer tape.destroy_records(&steps)
 		a, b: [16]dsv.Record
 		n := dsv.records_validate(&plain, a[:])
 		m := dsv.records_validate(&steps, b[:])
@@ -80,6 +85,7 @@ a_records_user_reads_a_cell_by_column_name :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string(ROWS)
 	r := dsv.records_open(src)
+	defer tape.destroy_records(&r)
 	out: [8]dsv.Record
 	answers: [8]dsv.Span_Answer
 	n := dsv.records_find(&r, []dsv.Step{dsv.Name("note")}, out[:], answers[:])
@@ -90,6 +96,7 @@ a_records_user_reads_a_cell_by_column_name :: proc(t: ^testing.T) {
 		text, _ := dsv.node_text(dsv.as(.Csv), src, dsv.answer_node(answers[i]), buf[:])
 		testing.expectf(t, answers[i].outcome == .Found && text == want[i], "record %d: %v %q", i, answers[i].outcome, text)
 	}
+	tape.destroy_records(&r)
 	r = dsv.records_open(src)
 	n = dsv.records_find(&r, []dsv.Step{dsv.Name("price")}, out[:], answers[:])
 	testing.expect_value(t, n, 3)
@@ -104,6 +111,7 @@ a_records_user_reads_a_cell_by_place :: proc(t: ^testing.T) {
 	defer dsv.destroy(&demand)
 	testing.expect_value(t, derr, nil)
 	r := dsv.records_open(src)
+	defer tape.destroy_records(&r)
 	out: [8]dsv.Record
 	docs: [8]dsv.Document
 	n := dsv.records_scan(&r, &demand, out[:], docs[:])
@@ -130,6 +138,7 @@ a_records_user_reads_a_cell_of_a_row_without_a_header_by_place :: proc(t: ^testi
 	testkit.deadline(t)
 	src := transmute([]u8)string("a,b\nc,d\n")
 	r := dsv.records_open(src, .Lines, .Csv, {format = dsv.Dsv_Options{no_header = true}})
+	defer tape.destroy_records(&r)
 	out: [4]dsv.Record
 	answers: [4]dsv.Span_Answer
 	n := dsv.records_find(&r, []dsv.Step{dsv.Index(1)}, out[:], answers[:])
@@ -282,6 +291,7 @@ records_frame_the_rows_a_model_frames :: proc(t: ^testing.T) {
 records_match_model :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Options) -> bool {
 	want, fault := model_rows(src, spec, opts)
 	r := dsv.records_open(transmute([]u8)src, .Lines, spec, opts)
+	defer tape.destroy_records(&r)
 	out := make([dynamic]dsv.Record, context.temp_allocator)
 	batch: [3]dsv.Record
 	for {
@@ -293,7 +303,7 @@ records_match_model :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: ds
 	}
 	n := len(out)
 	for i in 0 ..< min(n, len(want)) {
-		if !testing.expectf(t, out[i].lo == want[i].at && out[i].hi == want[i].hi && out[i].err == nil, "%v %v %q: row %d is %v, want %v", spec, opts, src, i, out[i], want[i]) {
+		if !testing.expectf(t, out[i].lo == want[i].at && out[i].hi == want[i].hi && out[i].err == 0, "%v %v %q: row %d is %v, want %v", spec, opts, src, i, out[i], want[i]) {
 			return false
 		}
 	}
@@ -310,6 +320,7 @@ record_cells_take_the_inferred_kinds :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("a,b,c,d,e\n1,\"2\",true,\"false\",\n")
 	r := dsv.records_open(src, .Lines, .Csv, {format = dsv.Dsv_Options{infer = true}})
+	defer tape.destroy_records(&r)
 	out: [2]dsv.Record
 	docs: [2]dsv.Document
 	demand, _ := dsv.demand_of({{tape.All{}}})
@@ -344,6 +355,7 @@ records_name_the_cells_past_the_header_by_place :: proc(t: ^testing.T) {
 			want: [2]string,
 		}{{"4", {"", "7"}}, {"3", {"1", "6"}}, {"b", {"2", "5"}}}) {
 		r := dsv.records_open(src, .Lines, .Csv, opts)
+		defer tape.destroy_records(&r)
 		n := dsv.records_find(&r, []tape.Step{tape.Name(c.name)}, out[:], answers[:])
 		testing.expect_value(t, n, 2)
 		for i in 0 ..< min(n, 2) {
@@ -389,12 +401,14 @@ records_read_a_quoted_header_name_and_a_blank_line :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("\xef\xbb\xbfid,\"pri\"\"ce\",note\r\n1,\"2,5\",\"a\"\"b\"\n\n2,7,\"x\ny\"\n")
 	r := dsv.records_open(src)
+	defer tape.destroy_records(&r)
 	out: [4]dsv.Record
 	testing.expect_value(t, dsv.records_validate(&r, out[:]), 2)
 	testing.expect_value(t, r.err, nil)
 	testing.expect_value(t, string(src[out[0].lo:out[0].hi]), "1,\"2,5\",\"a\"\"b\"")
 	testing.expect_value(t, string(src[out[1].lo:out[1].hi]), "2,7,\"x\ny\"")
 	answers: [4]dsv.Span_Answer
+	tape.destroy_records(&r)
 	r = dsv.records_open(src)
 	n := dsv.records_find(&r, []tape.Step{tape.Name("pri\"ce")}, out[:], answers[:])
 	testing.expect_value(t, n, 2)
@@ -403,6 +417,7 @@ records_read_a_quoted_header_name_and_a_blank_line :: proc(t: ^testing.T) {
 		text, _ := dsv.node_text(dsv.as(.Csv), src, dsv.answer_node(answers[i]), buf[:])
 		testing.expectf(t, answers[i].outcome == .Found && text == want, "record %d: %v %q", i, answers[i].outcome, text)
 	}
+	tape.destroy_records(&r)
 	r = dsv.records_open(src)
 	n = dsv.records_find(&r, []tape.Step{tape.Name("nope")}, out[:], answers[:])
 	testing.expect(t, n == 2 && answers[0].outcome == .Missing)
@@ -418,6 +433,7 @@ records_refuse_a_framing_a_delimited_text_does_not_have :: proc(t: ^testing.T) {
 			continue
 		}
 		r := dsv.records_open(src, framing)
+		defer tape.destroy_records(&r)
 		out: [2]dsv.Record
 		n := dsv.records_validate(&r, out[:])
 		_, refused := r.err.(tape.Bad_Option)
@@ -494,21 +510,23 @@ records_stopped_at_an_answer_judge_the_width_of_a_record :: proc(t: ^testing.T) 
 	fault, faulted := alone.(tape.Fault)
 	testing.expectf(t, faulted && fault.kind == .Bad_Width, "find of the header and the record: %v", alone)
 	r := dsv.records_open(src)
+	defer tape.destroy_records(&r)
 	out: [4]dsv.Record
 	answers: [4]dsv.Span_Answer
 	n := dsv.records_find(&r, []tape.Step{tape.Name("a")}, out[:], answers[:], {stop_early = true})
 	testing.expect_value(t, n, 3)
-	_, find_fault := out[1].err.(tape.Fault)
+	_, find_fault := testkit.record_error(&r, out[1]).(tape.Fault)
 	testing.expectf(t, find_fault, "find of the record: %v", out[1].err)
 	demand, _ := dsv.demand_of({{tape.Name("a")}})
 	defer dsv.destroy(&demand)
+	tape.destroy_records(&r)
 	r = dsv.records_open(src)
 	docs: [4]dsv.Document
 	n = dsv.records_scan(&r, &demand, out[:], docs[:], {stop_early = true})
 	defer for &d in docs[:n] {
 		dsv.destroy(&d)
 	}
-	_, scan_fault := out[1].err.(tape.Fault)
+	_, scan_fault := testkit.record_error(&r, out[1]).(tape.Fault)
 	testing.expectf(t, n == 3 && scan_fault, "scan of the record: %v", out[1].err)
 }
 
@@ -527,19 +545,21 @@ records_with_no_header_judge_the_width_of_a_first_record_read_to_its_answer :: p
 	out: [4]dsv.Record
 	answers: [4]dsv.Span_Answer
 	r := dsv.records_open(src, .Lines, .Csv, opts)
+	defer tape.destroy_records(&r)
 	n := dsv.records_find(&r, []tape.Step{tape.Index(1)}, out[:], answers[:], {stop_early = true})
 	testing.expect_value(t, n, 3)
-	_, find_fault := out[1].err.(tape.Fault)
-	testing.expectf(t, find_fault && out[0].err == nil && out[2].err == nil, "find of the records: %v %v %v", out[0].err, out[1].err, out[2].err)
+	_, find_fault := testkit.record_error(&r, out[1]).(tape.Fault)
+	testing.expectf(t, find_fault && out[0].err == 0 && out[2].err == 0, "find of the records: %v %v %v", out[0].err, out[1].err, out[2].err)
 	demand, _ := dsv.demand_of({{tape.Index(1)}})
 	defer dsv.destroy(&demand)
+	tape.destroy_records(&r)
 	r = dsv.records_open(src, .Lines, .Csv, opts)
 	docs: [4]dsv.Document
 	n = dsv.records_scan(&r, &demand, out[:], docs[:], {stop_early = true})
 	defer for &d in docs[:n] {
 		dsv.destroy(&d)
 	}
-	_, scan_fault := out[1].err.(tape.Fault)
+	_, scan_fault := testkit.record_error(&r, out[1]).(tape.Fault)
 	testing.expectf(t, n == 3 && scan_fault, "scan of the records: %v", out[1].err)
 }
 
@@ -650,6 +670,7 @@ records_judge_the_comment_lines_they_skip :: proc(t: ^testing.T) {
 		fault, faulted := want.(tape.Fault)
 		testing.expectf(t, faulted && fault.detail != 0, "%q: validate gave %v", c.src, want)
 		r := dsv.records_open(transmute([]u8)c.src, .Lines, .Csv, opts)
+		defer tape.destroy_records(&r)
 		out: [4]dsv.Record
 		n := dsv.records_validate(&r, out[:])
 		testing.expectf(t, n == c.records && r.err == want, "%q: %d records, %v, want %d and %v", c.src, n, r.err, c.records, want)
@@ -676,9 +697,10 @@ records_end_in_an_ill_formed_sequence_unless_the_text_ends :: proc(t: ^testing.T
 		want, _ := dsv.validate(src).(tape.Fault)
 		testing.expectf(t, want.kind == c.kind && want.at == c.at, "%q: validate gave %v", c.src, want)
 		r := dsv.records_open(src)
+		defer tape.destroy_records(&r)
 		out: [4]dsv.Record
 		n := dsv.records_validate(&r, out[:])
-		got, _ := out[0].err.(tape.Fault)
+		got, _ := testkit.record_error(&r, out[0]).(tape.Fault)
 		testing.expectf(t, n >= 1 && got.kind == want.kind && got.at == want.at && got.detail == want.detail, "%q: %v, validate %v", c.src, out[0].err, want)
 	}
 }
@@ -703,13 +725,14 @@ records_resume_at_the_line_after_an_unclosed_quote :: proc(t: ^testing.T) {
 		fault, _ := whole.(tape.Fault)
 		testing.expectf(t, fault.kind == .Truncated, "%q: validate gave %v", c.src, whole)
 		r := dsv.records_open(src)
+		defer tape.destroy_records(&r)
 		out: [6]dsv.Record
 		n := dsv.records_validate(&r, out[:])
 		testing.expectf(t, n == len(c.spans) && r.err == nil, "%q: %d records, %v", c.src, n, r.err)
 		for i in 0 ..< min(n, len(c.spans)) {
-			testing.expectf(t, string(src[out[i].lo:out[i].hi]) == c.spans[i] && (out[i].err != nil) == (i == c.bad), "%q: record %d is %q, %v", c.src, i, src[out[i].lo:out[i].hi], out[i].err)
+			testing.expectf(t, string(src[out[i].lo:out[i].hi]) == c.spans[i] && (out[i].err != 0) == (i == c.bad), "%q: record %d is %q, %v", c.src, i, src[out[i].lo:out[i].hi], out[i].err)
 		}
-		bad, _ := out[c.bad].err.(tape.Fault)
+		bad, _ := testkit.record_error(&r, out[c.bad]).(tape.Fault)
 		testing.expectf(t, bad.kind == .Truncated && bad.at == fault.at, "%q: record %d faults %v, validate %v", c.src, c.bad, out[c.bad].err, whole)
 	}
 }
@@ -721,15 +744,16 @@ records_with_an_unclosed_quote_do_not_fault_at_later_lines :: proc(t: ^testing.T
 	testkit.deadline(t)
 	src := transmute([]u8)string("a,b\n1,2\n3,\"x\n4,\xff\n5,6\n")
 	r := dsv.records_open(src)
+	defer tape.destroy_records(&r)
 	out: [6]dsv.Record
 	n := dsv.records_validate(&r, out[:])
 	testing.expect_value(t, n, 4)
 	if n == 4 {
-		first, _ := out[1].err.(tape.Fault)
+		first, _ := testkit.record_error(&r, out[1]).(tape.Fault)
 		testing.expectf(t, first.kind == .Truncated && first.at == 10 && out[1].hi == 12, "%v", out[1])
-		second, _ := out[2].err.(tape.Fault)
+		second, _ := testkit.record_error(&r, out[2]).(tape.Fault)
 		testing.expectf(t, second.kind == .Bad_Char && second.at == 15, "%v", out[2])
-		testing.expect_value(t, out[3].err, nil)
+		testing.expect_value(t, out[3].err, 0)
 	}
 }
 
@@ -739,11 +763,12 @@ records_with_an_unclosed_quote_judge_a_cut_sequence_by_their_own_bytes :: proc(t
 	testkit.deadline(t)
 	src := transmute([]u8)string("a\n\"#;\xc3\n")
 	r := dsv.records_open(src)
+	defer tape.destroy_records(&r)
 	out: [3]dsv.Record
 	n := dsv.records_validate(&r, out[:])
 	testing.expect(t, n >= 1)
 	if n >= 1 {
-		f, _ := out[0].err.(tape.Fault)
+		f, _ := testkit.record_error(&r, out[0]).(tape.Fault)
 		testing.expectf(t, f.kind == .Truncated, "%v", out[0])
 	}
 }
@@ -758,12 +783,13 @@ records_end_a_tsv_row_at_a_line_feed_after_a_backslash :: proc(t: ^testing.T) {
 	fault, faulted := err.(tape.Fault)
 	testing.expectf(t, faulted && fault.at == 5, "build: %v", err)
 	r := dsv.records_open(src, .Lines, .Tsv)
+	defer tape.destroy_records(&r)
 	out: [4]dsv.Record
 	n := dsv.records_validate(&r, out[:])
 	testing.expect_value(t, n, 3)
 	spans := []string{"1\\", "3\t4", "5\t6"}
 	for i in 0 ..< min(n, 3) {
-		testing.expectf(t, string(src[out[i].lo:out[i].hi]) == spans[i] && (out[i].err != nil) == (i == 0), "record %d is %q, %v", i, src[out[i].lo:out[i].hi], out[i].err)
+		testing.expectf(t, string(src[out[i].lo:out[i].hi]) == spans[i] && (out[i].err != 0) == (i == 0), "record %d is %q, %v", i, src[out[i].lo:out[i].hi], out[i].err)
 	}
 }
 
@@ -788,9 +814,10 @@ records_frame_across_block_edges :: proc(t: ^testing.T) {
 			whole, err := dsv.build(src, spec, {tolerate = {.Ragged}})
 			defer dsv.destroy(&whole)
 			r := dsv.records_open(src, .Lines, spec, {tolerate = {.Ragged}})
+			defer tape.destroy_records(&r)
 			out: [4]dsv.Record
 			n := dsv.records_validate(&r, out[:])
-			testing.expectf(t, err == nil && n == 2 && out[0].err == nil && out[1].err == nil, "%v pad %d: %v, %d records", spec, pad, err, n)
+			testing.expectf(t, err == nil && n == 2 && out[0].err == 0 && out[1].err == 0, "%v pad %d: %v, %d records", spec, pad, err, n)
 			if n == 2 {
 				testing.expectf(t, string(src[out[1].lo:out[1].hi]) == "last,1", "%v pad %d: last record %q", spec, pad, src[out[1].lo:out[1].hi])
 			}
@@ -838,6 +865,7 @@ records_in_pieces_read_a_window_at_a_time :: proc(t: ^testing.T) {
 	p := dsv.Pieces{allocator = context.allocator}
 	defer dsv.destroy(&p)
 	r := dsv.records_open(src[:5], .Lines, .Csv, {pieces = &p})
+	defer tape.destroy_records(&r)
 	got := make([dynamic]string, context.temp_allocator)
 	windows := 1
 	for {
@@ -868,6 +896,7 @@ records_in_pieces_give_a_header_fault_where_the_header_ends :: proc(t: ^testing.
 	src := transmute([]u8)string("# note\na\xFF,b\n1,2\n")
 	opts := tape.Options{format = dsv.Dsv_Options{comment = '#'}}
 	whole := dsv.records_open(src, .Lines, .Csv, opts)
+	defer tape.destroy_records(&whole)
 	testing.expect(t, whole.err != nil)
 	for cut in ([]int{11, 12, 15}) {
 		p := dsv.Pieces{allocator = context.allocator}
@@ -875,6 +904,7 @@ records_in_pieces_give_a_header_fault_where_the_header_ends :: proc(t: ^testing.
 		o := opts
 		o.pieces = &p
 		r := dsv.records_open(src[:cut], .Lines, .Csv, o)
+		defer tape.destroy_records(&r)
 		holds := cut >= 12
 		testing.expectf(t, r.err == (whole.err if holds else nil), "cut %v: open %v, whole %v", cut, r.err, whole.err)
 	}
@@ -883,6 +913,7 @@ records_in_pieces_give_a_header_fault_where_the_header_ends :: proc(t: ^testing.
 	o := opts
 	o.pieces = &p
 	r := dsv.records_open(src[:10], .Lines, .Csv, o)
+	defer tape.destroy_records(&r)
 	testing.expect_value(t, r.err, nil)
 	out: [2]tape.Record
 	n := dsv.records_validate(&r, out[:])

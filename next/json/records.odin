@@ -25,6 +25,70 @@ Records :: struct {
 	window:        u64,
 	seen:          u64,
 	open:          bool,
+	entered:       bool, // the framing opened the container whose children are the records, and has not passed its close
+	begun:         bool, // in a text in pieces, the byte order mark was judged
+	nav:           Path_Nav,
+	frame:         Piece_Frame,
+}
+
+// Where the framing around the records is: on the way down `path` to the container whose children are the records, or
+// once the path or the records ended, on the way through what follows to the text's end.
+@(private)
+Path_Nav :: struct {
+	open:    u32, // the containers of `path` open
+	passed:  u32, // the children of the deepest one passed
+	stage:   Nav_Stage,
+	leaving: bool, // no child is taken any more
+	// Where the step the framing is in started, and the steps of `Budget.steps` the walk had left there, which a text
+	// in pieces judges a fault from.
+	from:    u64,
+	left:    u64,
+}
+
+// The step the framing takes next in the deepest open container, `open` containers deep: the value of the child it
+// takes opened as a container, a child's key read under a `Name` step, a child's value passed, or the comma or close
+// after a value. At depth 0 the value is the root, and what follows it is the text's tail.
+@(private)
+Nav_Stage :: enum u8 {
+	Open,
+	Child,
+	Pass,
+	Sep,
+}
+
+// The framing of a text in pieces under `.Elements` and `.Members` from window to window, which reads each byte once:
+// the bytes before `seen` are framed, `depth` containers are open there, and `inside` says what the framing is
+// inside of. `ahead` is set once it found the stop the framing's next step reads to, a byte of kind `kind`.
+@(private)
+Piece_Frame :: struct {
+	seen:   u64,
+	depth:  u64,
+	gap:    u64, // the first byte of the comment the framing is in
+	inside: Frame_In,
+	quote:  u8,
+	ahead:  bool,
+	kind:   Frame_Stop,
+}
+
+@(private)
+Frame_In :: enum u8 {
+	Code,
+	String,
+	Escape,
+	Slash, // past a `/` that may open a comment
+	Line,
+	Line_E2, // in a line comment past the first byte, or the first two, of U+2028 or U+2029
+	Line_E280,
+	Block,
+	Block_Star,
+}
+
+@(private)
+Frame_Stop :: enum u8 {
+	Comma,
+	Colon,
+	Open,
+	Close,
 }
 
 #assert(size_of(Walk(.Json5, build.Scanner, false, build.SCANNER_CAPS)) <= size_of(Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS)))
@@ -35,25 +99,29 @@ Records :: struct {
 @(private)
 RECORD_AHEAD :: 256
 
-// Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. The budget's limits hold
-// for each record, but `Budget.steps` under `.Elements`, which counts the containers of the whole text. The framing
-// `.Concatenated`, which JSON has no reading of, options of another format family, and a text in pieces framed other
-// than as `.Lines` end the records with `tape.Bad_Option` before any is read. A text in pieces opens with its first
-// window, as `tape.Records` says.
-records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json, opts := Options{}) -> (r: Records) {
+// Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. Under `.Elements` and
+// `.Members` the records are those of the container `path` reaches, the root for none, as `tape.Records` says: the
+// framing passes the members and elements before it, judging each, and those after it, and a text with no such
+// container holds no records and ends them with the verdict `validate` gives for it. The budget's limits hold for each
+// record, but `Budget.steps` under `.Elements` and `.Members`, which counts the containers of the whole text. The
+// framing `.Concatenated`, which JSON has no reading of, options of another format family and a `path` the framing does
+// not take end the records with `tape.Bad_Option` before any is read. A text in pieces opens with its first window, as
+// `tape.Records` says. Under `.Elements` and `.Members` a window holds each value the framing passes whole, as it
+// holds a record.
+records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json, opts := Options{}, path: []tape.Step = nil) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("json: spec out of range")
 	}
-	r.src, r.framing, r.spec, r.opts, r.pos = src, framing, spec, opts, u64(spell.bom_length(src))
+	r.src, r.framing, r.spec, r.opts, r.pos, r.path = src, framing, spec, opts, u64(spell.bom_length(src)), path
 	if opts.pieces != nil {
 		// The byte order mark is judged once the first record is framed, when the window may hold it.
 		r.src, r.pos = tape.piece_src(src, opts.pieces.from), 0
-		if framing != .Lines {
-			r.err, r.at = tape.Bad_Option{"pieces"}, .Done
-		}
 	}
 	if framing == .Concatenated {
 		r.err, r.at = tape.Bad_Option{"framing"}, .Done
+	}
+	if e := build.records_path_refused(framing, path); e != nil {
+		r.err, r.at = e, .Done
 	}
 	if e := tape.options_refused(&FORMATS[spec], opts); e != nil {
 		r.err, r.at = e, .Done
@@ -121,8 +189,9 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 
 // Reads the next records of `r` into `out`, and for each the document of its nodes the paths of `demand` reach into the
 // same place of `docs`, as `scan` reads its bytes alone. Returns how many it filled, at most the shorter of the two
-// slices, and fewer once the records have ended. Each document's nodes point into the text, and each is the caller's to
-// free, so the memory a call holds is bounded by the slices it is given. Under `.Elements` and `.Members` the walk
+// slices, and fewer once the records have ended. Each document's nodes point into the text, and the documents are in the
+// records' block, valid until the next call or `tape.destroy_records`, as `tape.Record_Block` says, so the memory the
+// records hold is bounded by the slices a call is given. Under `.Elements` and `.Members` the walk
 // reads each value to its end whatever `read.stop_early` says, as the next starts there. Needs `READ_STACK` bytes of
 // stack and faults on a thread with less.
 @(require_results)
@@ -214,8 +283,8 @@ record_walked :: #force_inline proc(r: ^Records, $S: Spec, $LAX: bool, lo, cut: 
 
 // The next record's first byte, and under `.Lines` its line's end less a CR, under `.Elements` and `.Members` the text's
 // end. Under `.Members` the key is read into `r.key` and the first byte is the value's. False once the records have
-// ended. A fault in the text around the root container's elements or members ends them with the fault `validate` gives
-// for the text.
+// ended, or in a text in pieces once the window holds no more. A fault in the text around the records' container's
+// elements or members ends them with the fault `validate` gives for the text.
 @(private)
 record_frame :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut: u64, ok: bool) {
 	if r.at == .Done {
@@ -224,7 +293,12 @@ record_frame :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut: u64, 
 	n := u64(len(r.src))
 	when LAX {
 		if r.opts.pieces != nil {
-			return record_frame_window(r, w)
+			if r.framing == .Lines {
+				return record_frame_window(r, w)
+			}
+			if !piece_begin(r, (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(w)) {
+				return
+			}
 		}
 	}
 	if r.framing == .Lines {
@@ -244,22 +318,454 @@ record_frame :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (lo, cut: u64, 
 		}
 		return lo, cut, true
 	}
+	for !r.entered {
+		switch path_frame(r, (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(w)) {
+		case .Entered:
+		case .Wait:
+			return
+		case .Ended:
+			r.at = .Done
+			return
+		case .Fault:
+			frame_refuse(r, nil)
+			return
+		}
+	}
+	when LAX {
+		if r.opts.pieces != nil && !record_framed(r, S) {
+			return
+		}
+	}
+	r.nav.from = r.pos
+	when LAX {
+		r.nav.left = w.steps[0]
+	}
 	at, next := element_next(r, w)
 	switch next {
 	case .Element:
 		if r.framing == .Members {
 			if at = record_key(r, w, at); at == 0 {
-				records_refuse(r, nil)
+				frame_refuse(r, nil)
 				return
 			}
 		}
 		return at, n, true
 	case .End:
-		r.at = .Done
+		// What follows the records' container is framed as what follows a value passed in the container holding it.
+		r.entered, r.frame.ahead = false, false
+		r.nav = {open = u32(len(r.path)), passed = 1, stage = .Sep, leaving = true}
+		return record_frame(r, w)
 	case .Fault:
-		records_refuse(r, nil)
+		frame_refuse(r, nil)
 	}
 	return
+}
+
+// Takes the framing's next steps around the records, as `Path_Nav` says, until it opens the records' container or the
+// text ends: down `r.path`, taking at each container the first member of the key or the element of the place its step
+// names, and once the path takes no more, through each value to the text's end. Each value passed is judged alone, as
+// the walk of the whole text judges it. A container the path names that the text lacks leaves the records with none,
+// and the text judged to its end. In a text in pieces a step whose bytes the window lacks waits for the next window.
+@(private)
+path_frame :: proc(r: ^Records, w: ^Walk($S, hook.No_Hooks, $LAX, hook.NO_HOOKS_CAPS)) -> Nav_Result #no_bounds_check {
+	base := raw_data(r.src)
+	end := base[len(r.src):]
+	nv := &r.nav
+	for {
+		k := u64(nv.open)
+		nv.from = r.pos
+		when LAX {
+			nv.left = w.steps[0]
+		}
+		object := nav_object(r, k)
+		switch nv.stage {
+		case .Open:
+			if !framed(r, k, false, true, S) {
+				return .Wait
+			}
+			q := element_gap(base[r.pos:], end, S)
+			if q == nil || q == end {
+				return .Fault
+			}
+			if k > 0 && (q[0] == ']' || q[0] == '}') {
+				if !nav_close(r, q, base, object, S) {
+					return .Fault
+				}
+				continue
+			}
+			takes_object := nav_object(r, k + 1)
+			if q[0] != ('{' if takes_object else '[') {
+				nv.leaving, nv.stage = true, .Pass
+				continue
+			}
+			if k + 1 > build.read_depth(r.opts) {
+				return .Fault
+			}
+			when LAX {
+				w.steps[0] -= 1
+				if w.steps[0] == 0 {
+					return .Fault
+				}
+			}
+			r.frame.ahead = false
+			r.pos = u64(intrinsics.ptr_sub(q, base)) + 1
+			nv.open, nv.passed = nv.open + 1, 0
+			if k == u64(len(r.path)) {
+				r.entered, r.at = true, .Open
+				return .Entered
+			}
+			nv.stage = .Child
+		case .Child:
+			if !object {
+				nv.stage = .Pass
+				if !nv.leaving && i64(nv.passed) == i64(r.path[k - 1].(tape.Index)) {
+					nv.stage = .Open
+				}
+				continue
+			}
+			if !framed(r, k, true, false, S) {
+				return .Wait
+			}
+			q := element_gap(base[r.pos:], end, S)
+			if q == nil || q == end {
+				return .Fault
+			}
+			if q[0] == ']' || q[0] == '}' {
+				if !nav_close(r, q, base, object, S) {
+					return .Fault
+				}
+				continue
+			}
+			at := member_colon(r, w, u64(intrinsics.ptr_sub(q, base)))
+			if at == 0 {
+				return .Fault
+			}
+			r.frame.ahead, r.pos = false, at
+			nv.stage = .Pass
+			if !nv.leaving && tape.key_names(&FORMATS[S], r.src, r.key, string(r.path[k - 1].(tape.Name))) {
+				nv.stage = .Open
+			}
+			r.key = {}
+		case .Pass:
+			if r.frame.ahead && r.frame.kind == .Open {
+				// The value is a container, which the framing goes on into.
+				r.frame.ahead = false
+			}
+			if !framed(r, k, false, false, S) {
+				return .Wait
+			}
+			q := element_gap(base[r.pos:], end, S)
+			if q == nil || q == end {
+				return .Fault
+			}
+			if k > 0 && !object && (q[0] == ']' || q[0] == '}') {
+				if !nav_close(r, q, base, object, S) {
+					return .Fault
+				}
+				continue
+			}
+			hi, passed := path_pass(r, w, u64(intrinsics.ptr_sub(q, base)), k)
+			if !passed {
+				return .Fault
+			}
+			r.pos, nv.passed, nv.stage = hi, nv.passed + 1, .Sep
+		case .Sep:
+			if k == 0 {
+				return nav_tail(r, S)
+			}
+			if !framed(r, k, false, false, S) {
+				return .Wait
+			}
+			q := element_gap(base[r.pos:], end, S)
+			if q == nil || q == end {
+				return .Fault
+			}
+			if q[0] != ',' {
+				if !nav_close(r, q, base, object, S) {
+					return .Fault
+				}
+				continue
+			}
+			r.frame.ahead, r.pos, nv.stage = false, u64(intrinsics.ptr_sub(q, base)) + 1, .Child
+		}
+	}
+}
+
+@(private)
+Nav_Result :: enum u8 {
+	Entered, // the records' container is open
+	Wait,
+	Ended,
+	Fault,
+}
+
+// Whether the container `k` levels deep is an object: one a `Name` step takes a member of, or past the path the
+// records' container under `.Members`.
+@(private)
+nav_object :: #force_inline proc "contextless" (r: ^Records, k: u64) -> bool {
+	if k == 0 {
+		return false
+	}
+	if k <= u64(len(r.path)) {
+		_, object := r.path[k - 1].(tape.Name)
+		return object
+	}
+	return r.framing == .Members
+}
+
+// Closes the deepest open container at its close bracket at `q`, where a child or a comma may end it, after which the
+// framing passes what follows it in the container holding it. `.Fault` for a bracket of the other kind, and in JSON for
+// a close past a comma.
+@(private)
+nav_close :: proc "contextless" (r: ^Records, q, base: [^]u8, object: bool, $S: Spec) -> bool {
+	nv := &r.nav
+	if q[0] != ('}' if object else ']') || object && nv.stage == .Open || S == .Json && nv.stage != .Sep && nv.passed > 0 {
+		return false
+	}
+	r.frame.ahead, r.pos = false, u64(intrinsics.ptr_sub(q, base)) + 1
+	nv.open, nv.passed, nv.stage, nv.leaving = nv.open - 1, 1, .Sep, true
+	return true
+}
+
+// Frames the text's tail past its root: white space and comments to its end. In a text in pieces whose window is not
+// the last, the tail up to the window's end, or to the comment the window's end cuts, is judged and dropped.
+@(private)
+nav_tail :: proc "contextless" (r: ^Records, $S: Spec) -> Nav_Result {
+	base := raw_data(r.src)
+	n := u64(len(r.src))
+	if p := r.opts.pieces; p != nil && !p.last {
+		upto := n
+		if !frame_stop(r, 0, false, true, S) && r.frame.inside != .Code && r.frame.inside != .String && r.frame.inside != .Escape {
+			upto = r.frame.gap
+		}
+		if element_gap(base[r.pos:], base[upto:], S) != base[upto:] {
+			return .Fault
+		}
+		r.pos = upto
+		return .Wait
+	}
+	return .Ended if element_gap(base[r.pos:], base[n:], S) == base[n:] else .Fault
+}
+
+// Judges the value at `lo` alone, inside `depth` containers, as the walk of the whole text judges it, and returns where
+// it ends. False for a fault.
+@(private)
+path_pass :: proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, depth: u64) -> (hi: u64, ok: bool) {
+	plain := (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(w)
+	none: hook.No_Hooks
+	regs: hook.Regs
+	ctx := context
+	res := record_walk(r, plain, lo, raw_data(r.src)[len(r.src):], build.read_depth(r.opts) - depth, &none, &regs, context.allocator, &ctx, false, hook.no_hook)
+	if u8(res) != 0 {
+		return 0, false
+	}
+	return u64(res) >> 16, true
+}
+
+// In a text in pieces under `.Elements` and `.Members`, readies the framing for the window: the walk's gap table drops
+// what the last window held, and the byte order mark is judged once the window holds enough of it. False while it
+// does not.
+@(private)
+piece_begin :: proc "contextless" (r: ^Records, w: ^Walk($S, hook.No_Hooks, $LAX, hook.NO_HOOKS_CAPS)) -> bool {
+	p := r.opts.pieces
+	if p.from != r.window {
+		gaps_drop(&w.gaps, p.from)
+		r.window = p.from
+	}
+	if !r.begun {
+		if !p.last && piece_bom_open(r.src) {
+			return false
+		}
+		r.pos = u64(spell.bom_length(r.src))
+		r.frame.seen, r.begun, r.at = r.pos, true, .Open
+	}
+	return true
+}
+
+// Whether the window holds the next record of a text in pieces with what follows it up to the comma or close after it.
+// The stop the last record's framing found is past its comma, unless it is the close, which the records end at.
+@(private)
+record_framed :: proc "contextless" (r: ^Records, $S: Spec) -> bool {
+	if r.at == .After && r.frame.ahead {
+		if r.frame.kind == .Close {
+			return true
+		}
+		r.frame.ahead = false
+	}
+	return framed(r, u64(len(r.path)) + 1, false, false, S)
+}
+
+// Whether the window of a text in pieces holds the bytes the framing's next step reads, up to the next stop at most
+// `level` containers deep: a comma, with `colon` a colon, with `open` an open bracket, or a close. Always for a whole
+// text and for the last window.
+@(private)
+framed :: #force_inline proc "contextless" (r: ^Records, level: u64, colon, open: bool, $S: Spec) -> bool {
+	p := r.opts.pieces
+	return p == nil || r.frame.ahead || frame_stop(r, level, colon, open, S) || p.last
+}
+
+// Frames the bytes from `r.frame.seen` to the next stop at most `level` containers deep, as `framed` names them. True
+// with `r.frame.ahead` set and `seen` past it, false at the window's end, where the framing goes on in the next window.
+@(private)
+frame_stop :: proc "contextless" (r: ^Records, level: u64, colon, open: bool, $S: Spec) -> bool #no_bounds_check {
+	f := &r.frame
+	n := u64(len(r.src))
+	for i := f.seen; i < n; i += 1 {
+		c := r.src[i]
+		switch f.inside {
+		case .Code:
+			stop := Frame_Stop.Comma
+			switch c {
+			case '"':
+				f.inside, f.quote = .String, c
+				continue
+			case '\'':
+				when S == .Json5 {
+					f.inside, f.quote = .String, c
+				}
+				continue
+			case '/':
+				when S != .Json {
+					f.inside, f.gap = .Slash, i
+				}
+				continue
+			case '[', '{':
+				f.depth += 1
+				if !open || f.depth > level + 1 {
+					continue
+				}
+				stop = .Open
+			case ']', '}':
+				d := f.depth
+				f.depth = max(d, 1) - 1
+				if d > level {
+					continue
+				}
+				stop = .Close
+			case ',':
+				if f.depth > level {
+					continue
+				}
+			case ':':
+				if !colon || f.depth > level {
+					continue
+				}
+				stop = .Colon
+			case:
+				continue
+			}
+			f.seen, f.ahead, f.kind = i + 1, true, stop
+			return true
+		case .String:
+			if c == '\\' {
+				f.inside = .Escape
+			} else if c == f.quote {
+				f.inside = .Code
+			}
+		case .Escape:
+			f.inside = .String
+		case .Slash:
+			switch c {
+			case '/':
+				f.inside = .Line
+			case '*':
+				f.inside = .Block
+			case:
+				f.inside = .Code
+				i -= 1
+			}
+		case .Line:
+			if c == '\n' || c == '\r' {
+				f.inside = .Code
+			} else if S == .Json5 && c == 0xE2 {
+				f.inside = .Line_E2
+			}
+		case .Line_E2:
+			f.inside = .Line_E280 if c == 0x80 else .Line
+			if c != 0x80 {
+				i -= 1
+			}
+		case .Line_E280:
+			f.inside = .Code if c == 0xA8 || c == 0xA9 else .Line
+			if c != 0xA8 && c != 0xA9 {
+				i -= 1
+			}
+		case .Block:
+			if c == '*' {
+				f.inside = .Block_Star
+			}
+		case .Block_Star:
+			f.inside = .Code if c == '/' else .Block if c != '*' else .Block_Star
+		}
+	}
+	f.seen = n
+	return false
+}
+
+// Ends the records with the error `validate` gives for the text, or `err` when it gives none. In a text in pieces,
+// whose bytes before the window are gone, it is the error `validate` gives for a text of the bytes from where the
+// framing's step started, behind brackets and placeholder members that open the containers around them as they are
+// open there, with the steps of `Budget.steps` the walk had left.
+@(private, cold)
+frame_refuse :: proc(r: ^Records, err: tape.Error) {
+	if r.opts.pieces == nil {
+		records_refuse(r, err)
+		return
+	}
+	nv := &r.nav
+	k := u64(nv.open)
+	text := make([dynamic]u8)
+	defer delete(text)
+	for j in 1 ..= k {
+		object := nav_object(r, j)
+		append(&text, '{' if object else '[')
+		if j < k && object {
+			append(&text, `"":`)
+		}
+	}
+	object := nav_object(r, k)
+	// A placeholder value ends at a space, so that no byte after it reads as part of it.
+	member := `"":0 ` if object else "0 "
+	if r.entered {
+		if r.at == .After {
+			append(&text, member)
+		}
+	} else {
+		switch nv.stage {
+		case .Open, .Pass:
+			if k > 0 && object {
+				append(&text, `"":`)
+			} else if k > 0 && nv.passed > 0 {
+				append(&text, "0,")
+			}
+		case .Child:
+			if nv.passed > 0 {
+				append(&text, member)
+				append(&text, ",")
+			}
+		case .Sep:
+			append(&text, member)
+		}
+	}
+	by := i64(nv.from) - i64(len(text))
+	append(&text, ..r.src[nv.from:])
+	opts := r.opts
+	opts.pieces = nil
+	if opts.budget.steps != 0 && nv.left != max(u64) {
+		// The walk starts with one step past the budget, and each bracket before the bytes takes one.
+		opts.budget.steps = nv.left - 1 + k
+	}
+	r.err, r.at = validate(text[:], r.spec, opts), .Done
+	#partial switch &e in r.err {
+	case tape.Fault:
+		e.at = u64(i64(e.at) + by)
+	case tape.Exceeded:
+		if e.kind != .Memory {
+			e.at = u64(i64(e.at) + by)
+		}
+	case nil:
+		r.err = err
+	}
 }
 
 // `record_frame` under `.Lines` in a text in pieces: a record whose line end the window does not hold ends the batch,
@@ -314,65 +820,34 @@ Element_Next :: enum u8 {
 	Fault,
 }
 
-// Where the root container's next element starts, or under `.Members` its next member's key, past the open bracket or
-// the comma before it, or whether the container and the text end there or hold something else.
+// Where the next element of the records' container starts, or under `.Members` its next member's key, past the open
+// bracket or the comma before it, or whether the container ends there, leaving `r.pos` past its close, or holds
+// something else.
 @(private)
 element_next :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C)) -> (at: u64, next: Element_Next) #no_bounds_check {
 	base := raw_data(r.src)
 	end := base[len(r.src):]
-	open, close := u8('['), u8(']')
-	if r.framing == .Members {
-		open, close = '{', '}'
-	}
+	close := u8('}') if r.framing == .Members else ']'
 	q := element_gap(base[r.pos:], end, S)
 	if q == nil || q == end {
 		return 0, .Fault
 	}
-	switch r.at {
-	case .Start:
-		if q[0] != open {
-			return 0, .Fault
-		}
-		when LAX {
-			// The root container takes a step, as each container does.
-			w.steps[0] -= 1
-			if w.steps[0] == 0 {
-				return 0, .Fault
-			}
-		}
-		r.at, r.pos = .Open, u64(intrinsics.ptr_sub(q, base)) + 1
-		if q = element_gap(q[1:], end, S); q == nil || q == end {
-			return 0, .Fault
-		}
-		fallthrough
-	case .Open:
-		if q[0] == close {
-			return 0, element_close(q, end, S)
-		}
-	case .After:
-		if q[0] == close {
-			return 0, element_close(q, end, S)
-		}
+	if r.at == .After && q[0] != close {
 		if q[0] != ',' {
 			return 0, .Fault
 		}
 		if q = element_gap(q[1:], end, S); q == nil || q == end {
 			return 0, .Fault
 		}
-		when S != .Json {
-			if q[0] == close {
-				return 0, element_close(q, end, S)
-			}
+		if S == .Json && q[0] == close {
+			return 0, .Fault
 		}
-	case .Done:
+	}
+	if q[0] == close {
+		r.pos = u64(intrinsics.ptr_sub(q, base)) + 1
+		return 0, .End
 	}
 	return u64(intrinsics.ptr_sub(q, base)), .Element
-}
-
-// Whether the text ends past the root container's close bracket at `q`, with white space and comments alone after it.
-@(private)
-element_close :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec) -> Element_Next {
-	return .End if element_gap(q[1:], end, S) == end else .Fault
 }
 
 // The first byte past the white space and comments from `p`, nil at a comment that does not end.
@@ -411,7 +886,8 @@ record_first :: #force_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, 
 	when LAX {
 		left := w.steps[0]
 	}
-	res = record_walk(r, w, lo, base[n:], build.read_depth(r.opts) - 1, h, regs, allocator, ctx, false, on)
+	depth := build.read_depth(r.opts) - 1 - u64(len(r.path))
+	res = record_walk(r, w, lo, base[n:], depth, h, regs, allocator, ctx, false, on)
 	if u8(res) == hook.WALK_STOPPED {
 		// The hook refused the value, which leaves the walk short of its end, so a walk with no hook finds it.
 		// The refusal is the record's error, as it is for a line.
@@ -421,10 +897,10 @@ record_first :: #force_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, 
 		plain := (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(w)
 		none: hook.No_Hooks
 		none_regs: hook.Regs
-		end := record_walk(r, plain, lo, base[n:], build.read_depth(r.opts) - 1, &none, &none_regs, allocator, ctx, false, hook.no_hook)
+		end := record_walk(r, plain, lo, base[n:], depth, &none, &none_regs, allocator, ctx, false, hook.no_hook)
 		if u8(end) != 0 {
 			_, err, _ := hook.walk_error(end, &RULES)
-			records_refuse(r, err)
+			frame_refuse(r, err)
 			return
 		}
 		hi = u64(end) >> 16
@@ -433,7 +909,7 @@ record_first :: #force_inline proc(r: ^Records, w: ^Walk($S, $H, $LAX, $C), lo, 
 	}
 	if u8(res) != 0 {
 		_, err, _ := hook.walk_error(res, &RULES)
-		records_refuse(r, err)
+		frame_refuse(r, err)
 		return
 	}
 	hi = u64(res) >> 16
@@ -467,6 +943,23 @@ MEMBER_LEVEL :: u64(1 << 1 | 1)
 record_key :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C), at: u64) -> u64 {
 	base := raw_data(r.src)
 	end := base[len(r.src):]
+	colon := member_colon(r, w, at)
+	if colon == 0 {
+		return 0
+	}
+	q := element_gap(base[colon:], end, S)
+	if q == nil || q == end {
+		return 0
+	}
+	return u64(intrinsics.ptr_sub(q, base))
+}
+
+// Reads the key of the member at `at` into `r.key`, as `record_key` does, and returns the offset past its colon, or 0
+// when the key, the colon or the text fails.
+@(private)
+member_colon :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C), at: u64) -> u64 {
+	base := raw_data(r.src)
+	end := base[len(r.src):]
 	h: Member_Key
 	regs: hook.Regs
 	res := key_walk(r, (^Walk(S, Member_Key, LAX, hook.NO_HOOKS_CAPS))(w), at, &h, &regs)
@@ -477,11 +970,8 @@ record_key :: proc "contextless" (r: ^Records, w: ^Walk($S, $H, $LAX, $C), at: u
 	if q == nil || q == end || q[0] != ':' {
 		return 0
 	}
-	if q = element_gap(q[1:], end, S); q == nil || q == end {
-		return 0
-	}
 	r.key = h.key
-	return u64(intrinsics.ptr_sub(q, base))
+	return u64(intrinsics.ptr_sub(q, base)) + 1
 }
 
 // Walks the key of the member at `at` for hook `h`, which stops on it, and returns the walk's result.

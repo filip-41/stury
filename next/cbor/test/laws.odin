@@ -51,3 +51,26 @@ reads_agree_on_the_appendix :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, a.texts, len(rows))
 }
+
+// Records at a path over random items of every spec and their mutations are the children of the container the path
+// reaches in the build, each read as the build reads it, and end with the verdict `validate` gives for the text.
+@(test)
+records_at_a_path_agree_with_the_build :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0xcb1)
+	read := 0
+	for _ in 0 ..< testkit.rounds(40) {
+		src := random_item()
+		defer delete(src)
+		for spec in cbor.Spec {
+			read += testkit.records_at_agree(t, cbor.reads(spec), cbor.as(spec), src, {}, "generated")
+		}
+		for _ in 0 ..< 4 {
+			bad := mutated(src)
+			defer delete(bad)
+			read += testkit.records_at_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), bad, {}, "mutated")
+		}
+	}
+	testing.expectf(t, read > 100, "%d containers read", read)
+}

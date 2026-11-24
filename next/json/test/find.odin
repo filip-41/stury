@@ -391,7 +391,7 @@ validate_refuses_a_dups_policy_it_cannot_honour :: proc(t: ^testing.T) {
 			testing.expectf(t, n == 0 && r.err == tape.Error(tape.Bad_Option{"dups"}), "%v records: %d %v", dups, n, r.err)
 		} else {
 			testing.expectf(t, err == nil, "%v: %v", dups, err)
-			testing.expectf(t, n == 1 && out[0].err == nil, "%v records: %d %v", dups, n, out[0])
+			testing.expectf(t, n == 1 && out[0].err == 0, "%v records: %d %v", dups, n, out[0])
 		}
 	}
 }

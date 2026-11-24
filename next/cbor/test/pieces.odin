@@ -73,12 +73,12 @@ pieces_agree_on_generated_items :: proc(t: ^testing.T) {
 			step := max(1, len(text) / 24)
 			for k := 0; k <= len(text); k += step {
 				cuts := [1]int{k}
-				if !testkit.pieces_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), text, {}, cuts[:], paths, fmt.tprintf("generated %x", text), framing = .Concatenated) {
+				if !testkit.pieces_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), text, {}, cuts[:], paths, fmt.tprintf("generated %x", text), framing = .Concatenated, containers = true) {
 					return
 				}
 			}
 			for size in ([]int{1, 3, 16}) {
-				if !testkit.pieces_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), text, {}, testkit.cuts_by(len(text), size), paths, fmt.tprintf("generated %x", text), framing = .Concatenated) {
+				if !testkit.pieces_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), text, {}, testkit.cuts_by(len(text), size), paths, fmt.tprintf("generated %x", text), framing = .Concatenated, containers = true) {
 					return
 				}
 			}
@@ -165,19 +165,60 @@ records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
 	}
 }
 
-// The elements and members of a root read in pieces are refused, as a fault among them ends the records with the
-// fault of the whole text, which no window holds.
+// The elements and members of a container read a window at a time, at the root and at a path, are the whole text's
+// under every cut and window size, with the same fault where one ends them, and the framing reads no byte twice.
 @(test)
-records_in_pieces_take_a_sequence_only :: proc(t: ^testing.T) {
+container_records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("82 01 02")
-	for framing in ([]cbor.Framing{.Elements, .Members}) {
-		p := cbor.Pieces{allocator = context.allocator}
-		defer cbor.destroy(&p)
-		r := cbor.records_open(src, framing, opts = {pieces = &p})
-		out: [1]cbor.Record
-		testing.expect_value(t, cbor.records_validate(&r, out[:]), 0)
-		testing.expect_value(t, r.err, cbor.Error(tape.Bad_Option{"pieces"}))
+	defer free_all(context.temp_allocator)
+	paths := piece_paths()
+	d, _ := cbor.demand_of(paths, allocator = context.temp_allocator)
+	texts := []string {
+		"83 01 82 02 03 a1 61 61 04",
+		"a3 61 61 82 01 02 61 62 a1 61 62 05 61 63 06",
+		"a2 61 62 01 61 61 02",
+		"a2 61 61 01 61 61 02",
+		"a1 61 61 a2 61 62 01 61 62 02",
+		"d9 d9f7 9f 01 a1 61 61 9f 02 03 ff ff",
+		"bf 61 61 82 01 02 61 62 bf 61 63 01 ff ff",
+		"83 01 02",
+		"82 01 02 03",
+		"a1 61 61 83 01 02 03 00",
+		"82 01 1c",
+		"c2 41 01",
+		"a1 61 61 c2 41 01",
+		"82 81 81 81 01 a1 61 62 81 02",
+		"9b 0000000000000100 01 02 03",
+		"a2 61 61 9f 01 7f 61 78 ff ff 61 62 82 63 e282ac 63 ff6162",
+		"84 38 a7 c2 49 00 00 00 00 00 00 00 34 f1 d8 18 40",
+		"a3 61 61 01 61 62 02",
+	}
+	ats := [][]tape.Step{nil, {tape.Name("a")}, {tape.Index(0)}, {tape.Name("a"), tape.Index(1)}, {tape.Index(1), tape.Name("b")}}
+	options := []cbor.Options{{}, {tolerate = {.Invalid_Utf8}}, {budget = {steps = 3}}, {budget = {depth = 2}}}
+	for h in texts {
+		src := hex(h)
+		for spec in cbor.Spec {
+			for opts in options {
+				run := testkit.Piece_Run{src, cbor.reads(spec), cbor.as(spec), opts, nil}
+				for at in ats {
+					for framing in ([]cbor.Framing{.Elements, .Members}) {
+						for k in 0 ..= len(src) {
+							cuts := [1]int{k}
+							run.cuts = cuts[:]
+							if !testkit.records_pieces_agree(t, run, framing, paths, &d, h, at) {
+								return
+							}
+						}
+						for size in 1 ..= 12 {
+							run.cuts = testkit.cuts_by(len(src), size)
+							if !testkit.records_pieces_agree(t, run, framing, paths, &d, h, at) {
+								return
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 }
 

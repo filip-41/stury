@@ -31,6 +31,7 @@ Builder :: struct {
 	err:           runtime.Allocator_Error, // a refused allocation, or `Out_Of_Memory` with `full`
 	full:          u64, // one past the offset of the token a room of `most` nodes had no place for, else 0
 	borrowed:      bool, // `stack` is the caller's, which `builder_end` does not free
+	lent:          bool, // the room of `doc.nodes` is the caller's, which `builder_end` keeps whole and does not free
 	// The budget the builder's allocator counts against, or nil. Under it the room for nodes is never sized past what
 	// the budget leaves, so a refusal comes from the nodes the text needs and not from a room sized ahead of them.
 	budget:        ^hook.Memory_Budget,
@@ -107,12 +108,19 @@ builder_regs :: #force_inline proc "contextless" (h: ^Builder) -> hook.Regs {
 }
 
 // Makes `b` a builder over `src` with room for `nodes` nodes, growing up to `most`, and `frames` for its open stack. A
-// refused allocation leaves `err` set. `budget` is the one `allocator` counts against, if any.
-builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, allocator: runtime.Allocator, budget: ^hook.Memory_Budget = nil) {
+// refused allocation leaves `err` set. `budget` is the one `allocator` counts against, if any. A `lent` room, from
+// `allocator`, is built in instead of a room of `nodes`, and it grows as such a room does.
+builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, allocator: runtime.Allocator, budget: ^hook.Memory_Budget = nil, lent: []tape.Node = nil) {
 	b^ = {}
 	b.doc = {src = src, format = format, allocator = allocator}
 	b.stack, b.borrowed, b.closed, b.ctx, b.most, b.budget = frames, true, tape.NO_NODE, context, most, budget
 	b.counts.allocator = allocator
+	if len(lent) > 0 {
+		b.lent, b.doc.nodes = true, lent[:min(len(lent), most)]
+		b.end = u64(uintptr(raw_data(b.doc.nodes))) + u64(len(b.doc.nodes) * size_of(tape.Node))
+		b.err = builder_reserve_counts(b, len(b.doc.nodes))
+		return
+	}
 	room := clamp(nodes, 1, most)
 	if budget != nil {
 		// The first room takes at most half of what the budget leaves, so the read's other blocks fit beside it, and it
@@ -130,6 +138,19 @@ builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 	b.doc.nodes = ([^]tape.Node)(raw_data(raw))[:room]
 	b.end = u64(uintptr(raw_data(raw))) + u64(room * size_of(tape.Node))
 	return
+}
+
+// Starts `b`, which `builder_start` started with the same allocator and `builder_end` ended, as `builder_start` would
+// with a `lent` room and no budget. The context `b` keeps is the one it started with.
+builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, most: int, frames: []u64, lent: []tape.Node) {
+	b.doc = {src = src, format = format, allocator = b.doc.allocator}
+	b.stack, b.facts, b.most, b.closed, b.err, b.full = frames, nil, most, tape.NO_NODE, nil, 0
+	b.borrowed, b.lent, b.budget, b.stubs, b.unstored, b.keep_facts = true, true, nil, 0, 0, false
+	b.counts = nil
+	b.counts.allocator = b.doc.allocator
+	b.doc.nodes = lent[:min(len(lent), most)]
+	b.end = u64(uintptr(raw_data(b.doc.nodes))) + u64(len(b.doc.nodes) * size_of(tape.Node))
+	b.err = builder_reserve_counts(b, len(b.doc.nodes))
 }
 
 // Reserves the entries of `counts` the containers closed in a room of `room` nodes may need.
@@ -594,7 +615,14 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 	if e != nil {
 		h.doc.facts = h.facts
 		delete(h.counts)
-		tape.destroy(&h.doc)
+		if h.lent {
+			lent := h.doc.nodes
+			h.doc.nodes = nil
+			tape.destroy(&h.doc)
+			h.doc.nodes = lent
+		} else {
+			tape.destroy(&h.doc)
+		}
 		return {}, e
 	}
 	doc = h.doc
@@ -614,7 +642,7 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 	doc.nodes = doc.nodes[:count]
 	unused := len(h.doc.nodes) - count
 	keeps_pages := HEAP_KEEPS_PAGES && doc.allocator.procedure == runtime.default_allocator_proc
-	if h.budget != nil && unused > 0 || !keeps_pages && unused > count && unused * size_of(tape.Node) > ROOM_SLACK {
+	if !h.lent && (h.budget != nil && unused > 0 || !keeps_pages && unused > count && unused * size_of(tape.Node) > ROOM_SLACK) {
 		if raw, err := runtime.non_zero_mem_resize(raw_data(doc.nodes), len(h.doc.nodes) * size_of(tape.Node), count * size_of(tape.Node), align_of(tape.Node), doc.allocator); took(err, raw_data(raw), count) == nil {
 			doc.nodes = ([^]tape.Node)(raw_data(raw))[:count]
 		}

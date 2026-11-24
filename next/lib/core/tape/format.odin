@@ -130,14 +130,15 @@ Reads :: struct {
 	build: proc(f: ^Format, src: []u8, opts: Options, allocator: runtime.Allocator) -> (Document, Error),
 	find: proc(f: ^Format, src: []u8, path: []Step, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Span_Answer, Error),
 	scan: proc(f: ^Format, src: []u8, demand: ^Demand, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error),
-	// Makes the records of `src` framed as `framing`, in `allocator`, which `destroy_records` frees.
-	records: proc(f: ^Format, src: []u8, framing: Framing, opts: Options, allocator: runtime.Allocator) -> (^Records, runtime.Allocator_Error),
+	// Makes the records of `src` framed as `framing`, in the container `path` reaches, in `allocator`, which
+	// `destroy_records` frees.
+	records: proc(f: ^Format, src: []u8, framing: Framing, opts: Options, allocator: runtime.Allocator, path: []Step = nil) -> (^Records, runtime.Allocator_Error),
 }
 
 // The `Reads` of a format whose entry procs take its `Spec`, the spec of a handle being its id less `first`. `R` is the
 // format's records, which hold `Records` as their first field `records`, and every spec shares the one table. Records
 // that keep memory past a batch have a field `close: proc(r: ^R)` too, which frees it when the records are destroyed.
-format_reads :: proc "contextless" ($Spec: typeid, $first: Format_Id, $validate: proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> Error, $build: proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> (Document, Error), $find: proc(src: []u8, path: []Step, spec: Spec, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Span_Answer, Error), $scan: proc(src: []u8, demand: ^Demand, spec: Spec, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error), $R: typeid, $records_open: proc(src: []u8, framing: Framing, spec: Spec, opts: Options) -> R, $records_validate: proc(r: ^R, out: []Record, allocator: runtime.Allocator) -> int, $records_find: proc(r: ^R, path: []Step, out: []Record, answers: []Span_Answer, read: Read_Options, allocator: runtime.Allocator) -> int, $records_scan: proc(r: ^R, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int) -> ^Reads {
+format_reads :: proc "contextless" ($Spec: typeid, $first: Format_Id, $validate: proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> Error, $build: proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> (Document, Error), $find: proc(src: []u8, path: []Step, spec: Spec, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Span_Answer, Error), $scan: proc(src: []u8, demand: ^Demand, spec: Spec, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error), $R: typeid, $records_open: proc(src: []u8, framing: Framing, spec: Spec, opts: Options, path: []Step) -> R, $records_validate: proc(r: ^R, out: []Record, allocator: runtime.Allocator) -> int, $records_find: proc(r: ^R, path: []Step, out: []Record, answers: []Span_Answer, read: Read_Options, allocator: runtime.Allocator) -> int, $records_scan: proc(r: ^R, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int) -> ^Reads {
 	#assert(offset_of(R, records) == 0)
 	spec_of :: #force_inline proc "contextless" (f: ^Format) -> Spec {
 		return Spec(f.id - first)
@@ -155,10 +156,10 @@ format_reads :: proc "contextless" ($Spec: typeid, $first: Format_Id, $validate:
 		scan = proc(f: ^Format, src: []u8, demand: ^Demand, read: Read_Options, opts: Options, allocator: runtime.Allocator) -> (Document, Error) {
 			return scan(src, demand, spec_of(f), read, opts, allocator)
 		},
-		records = proc(f: ^Format, src: []u8, framing: Framing, opts: Options, allocator: runtime.Allocator) -> (records: ^Records, err: runtime.Allocator_Error) {
+		records = proc(f: ^Format, src: []u8, framing: Framing, opts: Options, allocator: runtime.Allocator, path: []Step = nil) -> (records: ^Records, err: runtime.Allocator_Error) {
 			r := new(R, allocator) or_return
 			context.allocator = allocator
-			r^ = records_open(src, framing, spec_of(f), opts)
+			r^ = records_open(src, framing, spec_of(f), opts, path)
 			r.reads, r.allocator = records_reads(R, records_validate, records_find, records_scan), allocator
 			r.release = proc(r: ^Records) {
 				// Records that hold memory past a batch have a field `close`, which frees it.

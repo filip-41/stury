@@ -1,6 +1,7 @@
 package json_tests
 
 import "core:fmt"
+import "core:math/rand"
 import "core:strings"
 import "core:testing"
 import "stury:json"
@@ -9,25 +10,26 @@ import "stury:testkit"
 
 // The batch of one record, the form the tests follow the records through.
 @(private = "file")
-one_validate :: proc(r: ^json.Records) -> (rec: tape.Record, more: bool) {
+one_validate :: proc(r: ^json.Records) -> (rec: testkit.Record_Read, more: bool) {
 	out: [1]tape.Record
-	return out[0], json.records_validate(r, out[:]) == 1
+	n := json.records_validate(r, out[:])
+	return testkit.record_read(r, out[:], 0, n) if n == 1 else {}, n == 1
 }
 
 @(private = "file")
-one_find :: proc(r: ^json.Records, path: []tape.Step, read := tape.Read_Options{}) -> (rec: tape.Record, answer: tape.Span_Answer, more: bool) {
+one_find :: proc(r: ^json.Records, path: []tape.Step, read := tape.Read_Options{}) -> (rec: testkit.Record_Read, answer: tape.Span_Answer, more: bool) {
 	out: [1]tape.Record
 	answers: [1]tape.Span_Answer
 	n := json.records_find(r, path, out[:], answers[:], read)
-	return out[0], answers[0], n == 1
+	return testkit.record_read(r, out[:], 0, n) if n == 1 else {}, answers[0], n == 1
 }
 
 @(private = "file")
-one_scan :: proc(r: ^json.Records, demand: ^tape.Demand, read := tape.Read_Options{}) -> (rec: tape.Record, doc: tape.Document, more: bool) {
+one_scan :: proc(r: ^json.Records, demand: ^tape.Demand, read := tape.Read_Options{}) -> (rec: testkit.Record_Read, doc: tape.Document, more: bool) {
 	out: [1]tape.Record
 	docs: [1]tape.Document
 	n := json.records_scan(r, demand, out[:], docs[:], read)
-	return out[0], docs[0], n == 1
+	return testkit.record_read(r, out[:], 0, n) if n == 1 else {}, docs[0], n == 1
 }
 
 // `err` with the offset it names moved by `by`, as a read in place in a text names what a read of a part of it alone
@@ -133,6 +135,7 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 	defer tape.destroy_demand(&demand)
 	for spec in json.Spec {
 		r := json.records_open(transmute([]u8)src, .Lines, spec)
+		defer tape.destroy_records(&r)
 		for span, i in spans {
 			rec, more := one_validate(&r)
 			line := transmute([]u8)src[span[0]:span[1]]
@@ -142,6 +145,7 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 		_, more := one_validate(&r)
 		testing.expectf(t, !more && r.err == nil && r.index == u64(len(spans)), "%v validate end: %v %v", spec, r.err, r.index)
 		for stop in ([]bool{false, true}) {
+			tape.destroy_records(&r)
 			r = json.records_open(transmute([]u8)src, .Lines, spec)
 			for span, i in spans {
 				rec, answer, ok := one_find(&r, path, {stop_early = stop})
@@ -158,6 +162,7 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 				testing.expectf(t, ok && rec == {u64(i), span[0], span[1], moved(err, span[0]), {}} && answer == alone, "%v find stop %v line %d %q: %v %v, want %v %v", spec, stop, i, line, rec, answer, err, alone)
 			}
 		}
+		tape.destroy_records(&r)
 		r = json.records_open(transmute([]u8)src, .Lines, spec)
 		for span, i in spans {
 			rec, doc, ok := one_scan(&r, &demand)
@@ -204,6 +209,7 @@ records_read_the_root_arrays_elements :: proc(t: ^testing.T) {
 		src := transmute([]u8)c.src
 		want_end := json.validate(src, c.spec)
 		r := json.records_open(src, .Elements, c.spec)
+		defer tape.destroy_records(&r)
 		for e, i in c.elements {
 			lo := u64(strings.index(c.src, e))
 			rec, more := one_validate(&r)
@@ -211,6 +217,7 @@ records_read_the_root_arrays_elements :: proc(t: ^testing.T) {
 		}
 		_, more := one_validate(&r)
 		testing.expectf(t, !more && r.err == want_end, "%q validate end: %v, want %v", c.src, r.err, want_end)
+		tape.destroy_records(&r)
 		r = json.records_open(src, .Elements, c.spec)
 		for e, i in c.elements {
 			lo := u64(strings.index(c.src, e))
@@ -223,6 +230,7 @@ records_read_the_root_arrays_elements :: proc(t: ^testing.T) {
 		}
 		_, _, more = one_find(&r, path)
 		testing.expectf(t, !more && r.err == want_end, "%q find end: %v, want %v", c.src, r.err, want_end)
+		tape.destroy_records(&r)
 		r = json.records_open(src, .Elements, c.spec)
 		for e, i in c.elements {
 			rec, doc, ok := one_scan(&r, &demand)
@@ -245,6 +253,7 @@ records_keep_the_budget :: proc(t: ^testing.T) {
 	lines := "[[1]]\n[[[1]]]\n{\"a\":[1],\"b\":[2]}\n"
 	opts := json.Options{budget = {depth = 2, steps = 2}}
 	r := json.records_open(transmute([]u8)lines, .Lines, .Json, opts)
+	defer tape.destroy_records(&r)
 	for span in line_spans(lines) {
 		rec, _ := one_validate(&r)
 		want := moved(json.validate(transmute([]u8)lines[span[0]:span[1]], .Json, opts), span[0])
@@ -252,6 +261,7 @@ records_keep_the_budget :: proc(t: ^testing.T) {
 	}
 	for src in ([]string{`[[1],[2],[3]]`, `[[1],[[2]]]`, `[1,2,3]`, `{"a":[1],"b":[2],"c":[3]}`, `{"a":[1],"b":[[2]]}`, `{"a":1,"b":2,"c":3}`}) {
 		opts = {budget = {depth = 2, steps = 3}}
+		tape.destroy_records(&r)
 		r = json.records_open(transmute([]u8)src, .Elements if src[0] == '[' else .Members, .Json, opts)
 		for {
 			_, more := one_validate(&r)
@@ -264,19 +274,17 @@ records_keep_the_budget :: proc(t: ^testing.T) {
 	}
 }
 
-// Options no records read takes end the records before any is read: a text in pieces framed other than as lines, and
-// a concatenated framing, which JSON has no reading of.
+// Options no records read takes end the records before any is read: a concatenated framing, which JSON has no reading
+// of, and a policy for repeated keys a path read refuses.
 @(test)
 records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("{\"a\":1}\n")
-	pieces: tape.Pieces
-	r := json.records_open(src, .Elements, .Json, {pieces = &pieces})
+	r := json.records_open(src, .Concatenated)
+	defer tape.destroy_records(&r)
 	_, more := one_validate(&r)
-	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"pieces"}), "pieces: %v", r.err)
-	r = json.records_open(src, .Concatenated)
-	_, more = one_validate(&r)
 	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"framing"}), "concatenated: %v", r.err)
+	tape.destroy_records(&r)
 	r = json.records_open(src, opts = {dups = .Refuse})
 	_, _, more = one_find(&r, {tape.Name("a")})
 	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"dups"}) && r.index == 0, "refuse: %v", r.err)
@@ -335,12 +343,13 @@ records_read_the_root_objects_members :: proc(t: ^testing.T) {
 			spans[i] = {u64(v), u64(v + len(m.value))}
 			at = v + len(m.value)
 		}
-		check :: proc(t: ^testing.T, what: string, c: Case, rec: tape.Record, i: int, spans: [][2]u64, m: Member) {
+		check :: proc(t: ^testing.T, what: string, c: Case, rec: testkit.Record_Read, i: int, spans: [][2]u64, m: Member) {
 			raw, escaped := tape.key_raw(transmute([]u8)c.src, rec.key)
 			testing.expectf(t, rec.index == u64(i) && rec.lo == spans[i][0] && rec.hi == spans[i][1] && rec.err == nil, "%q %s %d: %v, want %v", c.src, what, i, rec, spans[i])
 			testing.expectf(t, rec.key.role == .Key && string(raw) == m.key && escaped == m.escaped, "%q %s %d key: %q %v, want %q %v", c.src, what, i, raw, escaped, m.key, m.escaped)
 		}
 		r := json.records_open(src, .Members, c.spec)
+		defer tape.destroy_records(&r)
 		for m, i in c.members {
 			rec, more := one_validate(&r)
 			testing.expectf(t, more, "%q validate %d: ended with %v", c.src, i, r.err)
@@ -348,6 +357,7 @@ records_read_the_root_objects_members :: proc(t: ^testing.T) {
 		}
 		_, more := one_validate(&r)
 		testing.expectf(t, !more && r.err == want_end, "%q validate end: %v, want %v", c.src, r.err, want_end)
+		tape.destroy_records(&r)
 		r = json.records_open(src, .Members, c.spec)
 		for m, i in c.members {
 			rec, answer, ok := one_find(&r, path, {stop_early = true})
@@ -360,6 +370,7 @@ records_read_the_root_objects_members :: proc(t: ^testing.T) {
 		}
 		_, _, more = one_find(&r, path)
 		testing.expectf(t, !more && r.err == want_end, "%q find end: %v, want %v", c.src, r.err, want_end)
+		tape.destroy_records(&r)
 		r = json.records_open(src, .Members, c.spec)
 		for m, i in c.members {
 			rec, doc, ok := one_scan(&r, &demand)
@@ -394,25 +405,27 @@ records_read_alike_in_any_batch_size :: proc(t: ^testing.T) {
 	defer tape.destroy_demand(&demand)
 	for c in cases {
 		src := transmute([]u8)c.src
-		want_recs := make([dynamic]tape.Record, context.temp_allocator)
+		want_recs := make([dynamic]testkit.Record_Read, context.temp_allocator)
 		want_answers := make([dynamic]tape.Span_Answer, context.temp_allocator)
 		want_docs := make([dynamic]string, context.temp_allocator)
 		for size in ([]int{1, 2, 3, 7, 100}) {
-			recs := make([dynamic]tape.Record, context.temp_allocator)
+			recs := make([dynamic]testkit.Record_Read, context.temp_allocator)
 			answers := make([dynamic]tape.Span_Answer, context.temp_allocator)
 			docs := make([dynamic]string, context.temp_allocator)
 			out := make([]tape.Record, size, context.temp_allocator)
 			found := make([]tape.Span_Answer, size, context.temp_allocator)
 			scanned := make([]tape.Document, size, context.temp_allocator)
 			r := json.records_open(src, c.framing)
+			defer tape.destroy_records(&r)
 			for {
 				n := json.records_validate(&r, out)
-				append(&recs, ..out[:n])
+				append(&recs, ..testkit.records_read_all(&r, out, n))
 				if n < size {
 					break
 				}
 			}
 			end := r.err
+			tape.destroy_records(&r)
 			r = json.records_open(src, c.framing)
 			for {
 				n := json.records_find(&r, path, out, found, {stop_early = true})
@@ -422,6 +435,7 @@ records_read_alike_in_any_batch_size :: proc(t: ^testing.T) {
 				}
 			}
 			testing.expectf(t, r.err == end, "%q size %d find end: %v, want %v", c.src, size, r.err, end)
+			tape.destroy_records(&r)
 			r = json.records_open(src, c.framing)
 			for {
 				n := json.records_scan(&r, &demand, out, scanned)
@@ -494,6 +508,7 @@ records_reset_their_readers_between_records :: proc(t: ^testing.T) {
 		defer tape.destroy_demand(&demand)
 		for stop in ([]bool{false, true}) {
 			r := json.records_open(src)
+			defer tape.destroy_records(&r)
 			for span, i in spans {
 				rec, answer, ok := one_find(&r, path, {stop_early = stop})
 				line := src[span[0]:span[1]]
@@ -510,6 +525,7 @@ records_reset_their_readers_between_records :: proc(t: ^testing.T) {
 			}
 		}
 		r := json.records_open(src)
+		defer tape.destroy_records(&r)
 		for span, i in spans {
 			rec, doc, ok := one_scan(&r, &demand)
 			alone, err := json.scan(src[span[0]:span[1]], &demand, .Json)
@@ -560,6 +576,7 @@ records_go_on_after_a_record_the_budget_refuses :: proc(t: ^testing.T) {
 			}
 			refused := 0
 			r := json.records_open(src, c.framing, .Json, opts)
+			defer tape.destroy_records(&r)
 			for span, i in spans {
 				rec, doc, ok := one_scan(&r, &demand)
 				alone, err := json.scan(src[span[0]:span[1]], &demand, .Json, {}, opts)
@@ -575,6 +592,7 @@ records_go_on_after_a_record_the_budget_refuses :: proc(t: ^testing.T) {
 			_, _, more := one_scan(&r, &demand)
 			testing.expectf(t, !more && r.err == nil && refused > 0, "%v %v scan end: %v, %d refused", c.framing, opts.budget, r.err, refused)
 			refused = 0
+			tape.destroy_records(&r)
 			r = json.records_open(src, c.framing, .Json, opts)
 			for span, i in spans {
 				rec, answer, ok := one_find(&r, ring_path)
@@ -617,6 +635,7 @@ records_read_alike_through_the_format_handle :: proc(t: ^testing.T) {
 		docs, want_docs: [64]tape.Document
 		for op in 0 ..< 3 {
 			r := json.records_open(src, c.framing, c.spec)
+			defer tape.destroy_records(&r)
 			made, err := reads.records(json.as(c.spec), src, c.framing, {}, context.allocator)
 			testing.expectf(t, err == nil, "%q: %v", c.src, err)
 			n, m: int
@@ -630,7 +649,8 @@ records_read_alike_through_the_format_handle :: proc(t: ^testing.T) {
 			}
 			testing.expectf(t, n == m && n > 0 && r.err == made.err, "%q op %d: %d records ending %v, want %d ending %v", c.src, op, m, made.err, n, r.err)
 			for i in 0 ..< min(n, m) {
-				testing.expectf(t, out[i] == want[i] && found[i] == want_found[i], "%q op %d record %d: %v %v, want %v %v", c.src, op, i, out[i], found[i], want[i], want_found[i])
+				got, wanted := testkit.record_read(made, out[:], i, m), testkit.record_read(&r, want[:], i, n)
+				testing.expectf(t, got == wanted && found[i] == want_found[i], "%q op %d record %d: %v %v, want %v %v", c.src, op, i, got, found[i], wanted, want_found[i])
 				if op == 2 {
 					testing.expectf(t, testkit.render_doc(&docs[i]) == testkit.render_doc(&want_docs[i]), "%q record %d: %s, want %s", c.src, i, testkit.render_doc(&docs[i]), testkit.render_doc(&want_docs[i]))
 					tape.destroy(&docs[i])
@@ -658,4 +678,26 @@ records_answer_as_their_own_text :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+// Records at a path, over the suites' files and random texts of every grammar, are the children of the container the
+// path reaches in the build, each read as the build reads it, and end with the verdict `validate` gives for the text.
+@(test)
+records_at_a_path_agree_with_the_build :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0x7ec0)
+	read := 0
+	files := corpus_files()
+	defer delete(files)
+	for file in files {
+		read += testkit.records_at_agree(t, json.reads(file.spec), json.as(file.spec), file.data, {}, file.name)
+	}
+	for f in FLAVORS {
+		for _ in 0 ..< testkit.rounds(100) {
+			src := random_text(f)
+			read += testkit.records_at_agree(t, json.reads(f.spec), json.as(f.spec), src, flavor_options(f), "generated")
+		}
+	}
+	testing.expectf(t, read > 1000, "%d containers read", read)
 }

@@ -38,10 +38,11 @@ Records :: struct {
 }
 
 // Opens the records of `src`, a text of `spec`, each record read under `opts`. Only `.Lines` frames a delimited text,
-// a record per line outside a quoted cell. The budget's limits hold for each record. A refused option, or a header that
-// faults, ends the records before any is read. A text in pieces opens with its first window, as `tape.Records` says,
+// a record per line outside a quoted cell, so a `path` is refused, as a table's rows are its only container of
+// records. The budget's limits hold for each record. A refused option, or a header that faults, ends the records
+// before any is read. A text in pieces opens with its first window, as `tape.Records` says,
 // and its header is read once a window holds its line: at open, as for a whole text, when the first window does.
-records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Csv, opts := Options{}) -> (r: Records) {
+records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Csv, opts := Options{}, path: []tape.Step = nil) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("dsv: spec out of range")
 	}
@@ -60,6 +61,9 @@ records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Csv,
 	}
 	if err == nil && framing != .Lines {
 		err = tape.Bad_Option{"framing"}
+	}
+	if err == nil {
+		err = build.records_path_refused(framing, path)
 	}
 	if err != nil {
 		r.err, r.at = err, .Done
@@ -320,7 +324,8 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 }
 
 // Reads the next records of `r` into `out`, and for each the document of its nodes the paths of `demand` reach into the
-// same place of `docs`. Returns how many it filled, as `records_validate` does.
+// same place of `docs`. Returns how many it filled, as `records_validate` does. The documents are in the records'
+// block, valid until the next call or `tape.destroy_records`, as `tape.Record_Block` says.
 @(require_results)
 records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	switch r.spec {
@@ -352,6 +357,7 @@ records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S
 		return build.records_validate(r, out, &FORMATS[S], &RULES, caller, frame, walk)
 	}
 	n: int
+	clear(&r.faults)
 	for n < len(out) && r.at != .Done {
 		if !r.open {
 			k, window_end := records_run(r, S, out[n:])
@@ -361,7 +367,7 @@ records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S
 			}
 		}
 		// The record the run faulted in, judged alone, or the one whose framing the last window left open.
-		k := build.records_validate(r, out[n:n + 1], &FORMATS[S], &RULES, caller, frame, walk)
+		k := build.records_validate(r, out[n:n + 1], &FORMATS[S], &RULES, caller, frame, walk, true)
 		n += k
 		if k == 0 {
 			break
@@ -371,12 +377,11 @@ records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S
 	return n
 }
 
-// The records a validate's walk of a run of them has read into `out`, `n` of them, the first numbered `index`.
+// The records a validate's walk of a run of them has read into `out`, `n` of them.
 @(private)
 Record_Run :: struct {
 	out:      []tape.Record,
 	n:        int,
-	index:    u64,
 	key:      tape.Token,
 	protocol: hook.Protocol({}, hook.Unused, hook.Unused, hook.Unused),
 }
@@ -385,7 +390,7 @@ Record_Run :: struct {
 // holding only a CR is no record, so the byte before a record's line end is its own, which a CR of its CR LF is.
 @(private)
 record_run_add :: #force_inline proc "contextless" (h: ^Record_Run, base: [^]u8, lo, at: int) -> bool #no_bounds_check {
-	h.out[h.n] = {index = h.index + u64(h.n), lo = u64(lo), hi = u64(at - int(base[at - 1] == '\r')), key = h.key}
+	h.out[h.n] = {lo = u64(lo), hi = u64(at - int(base[at - 1] == '\r')), key = h.key}
 	h.n += 1
 	return h.n == len(h.out)
 }
@@ -404,7 +409,7 @@ record_run_hook :: proc "contextless" (h: ^Record_Run, s: hook.Regs, t: tape.Tok
 // the block it stopped before, so no byte is read twice.
 @(private)
 records_run :: proc(r: ^Records, $S: Spec, out: []tape.Record) -> (n: int, window_end: bool) {
-	h := Record_Run{out = out, index = r.index, key = r.key}
+	h := Record_Run{out = out, key = r.key}
 	p := r.p
 	p.limit += 1
 	p.no_header, p.infer = false, false
@@ -473,7 +478,7 @@ records_ran :: proc(r: ^Records, w: ^Pass($S, $H, $LAX, $C), out: []tape.Record,
 	if u8(res) == 0 {
 		// The text's last record, which no LF ends, unless its last line is a comment line.
 		if w.rec_lo < len(r.src) && w.in_comment == 0 {
-			out[n] = {index = r.index, lo = u64(w.rec_lo), hi = u64(len(r.src)), key = r.key}
+			out[n] = {lo = u64(w.rec_lo), hi = u64(len(r.src)), key = r.key}
 			r.index += 1
 			n += 1
 		}

@@ -133,12 +133,13 @@ prefixes_get_one_verdict_from_every_read :: proc(t: ^testing.T) {
 			scanned, scan_err := dsv.scan(prefix, &demand, spec, {}, opts)
 			dsv.destroy(&scanned)
 			r := dsv.records_open(prefix, .Lines, spec, opts)
+			defer tape.destroy_records(&r)
 			out: [4]dsv.Record
 			bad := false
 			for {
 				k := dsv.records_validate(&r, out[:])
 				for rec in out[:k] {
-					bad ||= rec.err != nil
+					bad ||= rec.err != 0
 				}
 				if k < len(out) {
 					break

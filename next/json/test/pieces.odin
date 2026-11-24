@@ -52,7 +52,7 @@ agree_over_sampled_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opt
 	for _ in 0 ..< testkit.rounds(2) {
 		cuts := [1]int{rand.int_max(len(src) + 1)}
 		c.reads += 1
-		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name) {
+		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name, containers = true) {
 			return
 		}
 	}
@@ -60,7 +60,7 @@ agree_over_sampled_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opt
 		i := rand.int_max(len(src))
 		cuts := [2]int{i, i + 1 + rand.int_max(len(src) - i)}
 		c.reads += 1
-		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name) {
+		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name, containers = true) {
 			return
 		}
 	}
@@ -87,7 +87,7 @@ agree_over_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.
 	for k := 0; k <= len(src); k += step {
 		cuts := [1]int{k}
 		c.reads += 1
-		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name) {
+		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name, containers = true) {
 			return
 		}
 	}
@@ -99,7 +99,7 @@ agree_over_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.
 		j := i + 1 + (k * 104729) % (len(src) - i)
 		cuts := [2]int{i, j}
 		c.reads += 1
-		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name) {
+		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name, containers = true) {
 			return
 		}
 	}

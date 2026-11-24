@@ -20,7 +20,8 @@ Reader :: struct {
 // array's elements by place, a wide object's distinct keys in text order with a hash table over them, and for each
 // object the readers examined whether it repeats a key, so they take the others as written. A refused allocation
 // leaves the readers walking, which answers the same. An index serves the readers of one document, from its first read
-// to `destroy`, and is empty until a read needs a table, so a zero one with its allocator set starts it.
+// to `destroy`, and is empty until a read needs a table, so a zero one with its allocator set starts it. With no
+// allocator each table is refused, so a zero index reads as none.
 Doc_Index :: struct {
 	examined:  []u64, // a bit per node, set for a whole object whose keys were compared
 	repeats:   []u64, // a bit per node, set for an examined object two of whose members share a key
@@ -530,7 +531,7 @@ index_mark :: proc(r: Reader, at: Node_Index, repeats: bool) -> bool #no_bounds_
 	if x.examined == nil {
 		words := (len(r.doc.nodes) + 63) / 64
 		bits, err := make([]u64, 2 * words, x.allocator)
-		if err != nil {
+		if err != nil || raw_data(bits) == nil {
 			return false
 		}
 		x.examined, x.repeats = bits[:words], bits[words:]
@@ -592,7 +593,7 @@ array_entry :: proc(r: Reader, at, first: Node_Index, count: int) -> (e: Index_E
 		return
 	}
 	elements, err := make([]Node_Index, count, x.allocator)
-	if err != nil {
+	if err != nil || raw_data(elements) == nil {
 		return {}, false
 	}
 	for k, j := first, 0; j < count; j += 1 {
@@ -641,7 +642,7 @@ object_entry :: proc(r: Reader, at: Node_Index, count: int) -> (e: Index_Entry, 
 index_add :: proc(x: ^Doc_Index, e: Index_Entry) -> bool #no_bounds_check {
 	if 2 * (len(x.entries) + 1) > len(x.table) {
 		table, err := make([]u32, max(16, 2 * len(x.table)), x.allocator)
-		if err != nil {
+		if err != nil || raw_data(table) == nil {
 			return false
 		}
 		mask := u32(len(table) - 1)

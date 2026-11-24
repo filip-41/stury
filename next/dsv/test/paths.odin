@@ -1,5 +1,6 @@
 package dsv_tests
 
+import "core:strings"
 import "core:testing"
 import "stury:dsv"
 import "stury:testkit"
@@ -39,7 +40,7 @@ find_cell :: proc(t: ^testing.T, opts: dsv.Options, size: int) -> Answer {
 		a, err := dsv.find(src[pieces.keep:to], path, .Csv, {}, read)
 		testing.expect_value(t, err, nil)
 		if !pieces.more {
-			return {a.outcome, string(pieces.text) if a.outcome == .Found else ""}
+			return {a.outcome, strings.clone(string(pieces.text), context.temp_allocator) if a.outcome == .Found else ""}
 		}
 	}
 }
@@ -68,7 +69,7 @@ scan_cell :: proc(t: ^testing.T, opts: dsv.Options, size: int) -> Answer {
 			at, presence, _ := dsv.answer({&s, nil}, 0, 0)
 			buf: [8]u8
 			text, _ := dsv.node_text(&s, at, buf[:])
-			return {presence, text if presence == .Found else ""}
+			return {presence, strings.clone(text, context.temp_allocator) if presence == .Found else ""}
 		}
 	}
 }
