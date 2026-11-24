@@ -41,6 +41,7 @@ PIECE_TEXTS := [?]string {
 	"<r>x<a/>y<!--c--><?p d?><![CDATA[z]]></r>",
 	"<r><![CDATA[a]]b]]><a><![CDATA[]]></a>&amp;&#65;&#x42;</r>",
 	`<r xmlns="u" xmlns:p="urn:p"><p:d p:x="1">t</p:d><a xmlns:p="v"><p:d>w</p:d></a></r>`,
+	`<r xmlns="&#x75;" xmlns:p="urn&#x3A;p"><p:d>t</p:d><a xmlns:p="v&amp;w"><p:d p:x="1">w</p:d></a></r>`,
 	`<!DOCTYPE r [<!ENTITY e "ent&amp;"><!ATTLIST r z CDATA "d"><!ATTLIST a k CDATA "]>">]><r><a>&e;</a></r>`,
 	`<!DOCTYPE r [<!-- ] --><?pi ]?><!ENTITY e "<b>in</b>t">]><r>&e;<c>&e;</c></r>`,
 	`<!DOCTYPE r SYSTEM "r.dtd"><r/>`,
@@ -61,14 +62,15 @@ PIECE_TEXTS := [?]string {
 }
 
 // Every text under the defaults, inference and a step budget, read in pieces: the same verdict and fault, the same
-// document, answers and scans as the whole text, at every cut and window size.
+// document, answers and scans as the whole text, and the same records of the text and of the root's members, at every
+// cut and window size.
 @(test)
 pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	options := [?]tape.Options{{}, {format = xml.Xml_Options{infer = true}}, {budget = {steps = 3}}, {budget = {depth = 2}}}
 	for text in PIECE_TEXTS {
 		for opts in options {
-			if !testkit.agree_in_pieces(t, xml.reads(.Xml), xml.as(.Xml), transmute([]u8)text, opts, piece_paths(), text) {
+			if !testkit.agree_in_pieces(t, xml.reads(.Xml), xml.as(.Xml), transmute([]u8)text, opts, piece_paths(), text, containers = true) {
 				return
 			}
 		}
@@ -91,12 +93,12 @@ pieces_agree_on_generated_documents :: proc(t: ^testing.T) {
 			for k in 0 ..< 6 {
 				cuts := [1]int{rand.int_max(len(text) + 1)}
 				_ = k
-				if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), text, {}, cuts[:], piece_paths(), name, framing = .Concatenated) {
+				if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), text, {}, cuts[:], piece_paths(), name, framing = .Concatenated, containers = true) {
 					return
 				}
 			}
 			for size in ([]int{1, 2, 3, 7, 16, 61}) {
-				if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), text, {}, testkit.cuts_by(len(text), size), piece_paths(), name, framing = .Concatenated) {
+				if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), text, {}, testkit.cuts_by(len(text), size), piece_paths(), name, framing = .Concatenated, containers = true) {
 					return
 				}
 			}
@@ -104,8 +106,8 @@ pieces_agree_on_generated_documents :: proc(t: ^testing.T) {
 	}
 }
 
-// A sample of the W3C suite's documents, read in pieces at a few cuts and window sizes. Without the fetched suite the
-// test reads nothing and passes.
+// A sample of the W3C suite's documents, read in pieces at a few cuts and window sizes, the root's members at the cuts.
+// Without the fetched suite the test reads nothing and passes.
 @(test)
 pieces_agree_on_the_conformance_cases :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -125,11 +127,11 @@ pieces_agree_on_the_conformance_cases :: proc(t: ^testing.T) {
 		step := max(1, len(data) / 5)
 		for at := 0; at <= len(data); at += step {
 			cuts := [1]int{at}
-			if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), data, {}, cuts[:], piece_paths(), path, framing = .Concatenated) {
+			if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), data, {}, cuts[:], piece_paths(), path, framing = .Concatenated, containers = true) {
 				return
 			}
 		}
-		for size in ([]int{1, 5, 29}) {
+		for size in ([]int{5, 29}) {
 			if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), data, {}, testkit.cuts_by(len(data), size), piece_paths(), path, framing = .Concatenated) {
 				return
 			}

@@ -82,12 +82,12 @@ a_refused_repeat_is_the_first_read :: proc(t: ^testing.T) {
 a_read_takes_its_options :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string(`<!DOCTYPE a [<!ENTITY e 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'>]><a><n>12</n><t>&e;&e;&e;&e;</t></a>`)
-	doc, err := xml.build(src, .Xml, {format = xml.Xml_Options{infer = true, max_expansion = 1 << 20}}, context.temp_allocator)
+	doc, err := xml.build(src, .Xml, {budget = {expansion = 1 << 20}, format = xml.Xml_Options{infer = true}}, context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	n, _ := member_at(&doc, {"a", "n"})
 	testing.expect_value(t, doc.nodes[n].kind, tape.Kind.Number)
-	e := xml.validate(src, .Xml, {format = xml.Xml_Options{max_expansion = 100}})
-	testing.expect_value(t, code_of(e), "expansion")
+	e := xml.validate(src, .Xml, {budget = {expansion = 100}})
+	testing.expect_value(t, code_of(e), "exceeded Expansion")
 	deep := transmute([]u8)string(`<a><b><c/></b></a>`)
 	e = xml.validate(deep, .Xml, {budget = {depth = 2}})
 	x, exceeded := e.(tape.Exceeded)
@@ -98,4 +98,14 @@ a_read_takes_its_options :: proc(t: ^testing.T) {
 	testing.expect_value(t, pieces.more, false)
 	tape.destroy_pieces(&pieces)
 	testing.expect_value(t, xml.validate(deep, .Xml, {format = tape.Cbor_Options{}}), tape.Error(tape.Bad_Option{"format"}))
+	// XML reads no ill-formed UTF-8, so every read refuses that rule, and takes the rules of tokens it has none of.
+	lax := xml.Options{tolerate = {.Invalid_Utf8}}
+	testing.expect_value(t, xml.validate(deep, .Xml, lax), tape.Error(tape.Bad_Option{"tolerate"}))
+	_, berr := xml.build(deep, .Xml, lax)
+	testing.expect_value(t, berr, tape.Error(tape.Bad_Option{"tolerate"}))
+	_, ferr := xml.find(deep, {xml.Name("a")}, .Xml, {}, lax)
+	testing.expect_value(t, ferr, tape.Error(tape.Bad_Option{"tolerate"}))
+	r := xml.records_open(deep, .Members, .Xml, lax)
+	testing.expect_value(t, r.err, tape.Error(tape.Bad_Option{"tolerate"}))
+	testing.expect_value(t, xml.validate(deep, .Xml, {tolerate = {.Ragged, .Bare_Quote, .Non_Finite, .Lone_Surrogate}}), nil)
 }

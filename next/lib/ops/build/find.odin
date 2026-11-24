@@ -199,9 +199,13 @@ finder_end :: proc(f: ^Finder) {
 	}
 }
 
-// Passes a key the open container cannot take, or a scalar no step looks at, with a compare or two and no call. Any
-// other token goes to `finder_token`.
+// Passes a fact, a key the open container cannot take, or a scalar no step looks at, with a compare or two and no
+// call. Any other token goes to `finder_token`.
 finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) #no_bounds_check {
+	// A fact moves no step.
+	if t.role > .Key {
+		return s, .Next
+	}
 	if t.role == .Key {
 		if !h.keys {
 			return s, .Next
@@ -272,11 +276,8 @@ finder_key_skip_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Re
 	if t.role != .Key {
 		return finder_hook(h, s, t)
 	}
-	passes := !h.keys
-	if h.entered > 0 {
-		_, named := h.steps[h.entered - 1].(tape.Name)
-		passes ||= named
-	}
+	// A level the finder takes no key at, or whose step is a `Name`, counts none of its members.
+	passes := !h.keys || h.named
 	r, a := finder_hook(h, s, t)
 	return r, .Skip if a == .Next && passes && !h.want else a
 }

@@ -147,7 +147,7 @@ attribute_scope :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), name
 // a type other than `CDATA`, else 0.
 @(private, cold)
 tokenized_bit :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), e: u64, name: [^]u8, n: int) -> u16 {
-	f := w.frames[e - 1]
+	f := w.stack[e - 1]
 	a := attr_decl(&w.dtd.view, f.tag[1:][:f.name_n], name[:n])
 	return ATTRIBUTE_TOKENIZED if a != nil && a.tokenized else 0
 }
@@ -159,7 +159,7 @@ declare :: proc "contextless" (w: ^Walk($H, $LAX), name: [^]u8, n: int, value: [
 	value := value
 	tokenized := false
 	if w.dtd != nil {
-		f := w.frames[e - 1]
+		f := w.stack[e - 1]
 		if a := attr_decl(&w.dtd.view, f.tag[1:][:f.name_n], name[:n]); a != nil {
 			tokenized = a.tokenized
 		}

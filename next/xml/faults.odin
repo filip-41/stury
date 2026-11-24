@@ -40,7 +40,6 @@ Detail :: enum u8 {
 	Reserved_Namespace, // `Bad_Char`: a declaration that binds the `xml` or `xmlns` namespace URI to another prefix or as the default
 	Empty_Binding, // `Bad_Char`: a prefix declaration with an empty URI
 	Duplicate_Expanded, // `Bad_Char`: an attribute whose namespace and local name the tag already has
-	Expansion, // `Too_Wide`: at the reference that takes the entity expansion past `Xml_Options.max_expansion`
 	Entity_Respelled, // `Bad_Char`: a replacement text whose markup its literal does not spell, so no byte holds it
 	Unread_Entity, // `Bad_Char`: a reference to an external entity, or to an undeclared one in a DTD not read whole
 	Recursion, // `Bad_Char`: a reference to an entity inside its own replacement text
@@ -56,7 +55,7 @@ Detail :: enum u8 {
 }
 
 // XML's fault rules, one per `Detail` value, which every fault a read returns points to.
-@(rodata)
+@(private, rodata)
 RULES := tape.Rules {
 	"xml",
 	{
@@ -92,7 +91,6 @@ RULES := tape.Rules {
 		{"reserved_namespace", "Reserved namespace URI"},
 		{"empty_binding", "Prefix bound to an empty URI"},
 		{"duplicate_expanded", "Attribute repeated by namespace and local name"},
-		{"expansion", "Entity references expand past the expansion budget"},
 		{"entity_respelled", "Replacement text spells markup its literal does not"},
 		{"unread_entity", "Entity text is not read"},
 		{"recursion", "Entity refers to itself"},

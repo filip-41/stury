@@ -230,16 +230,26 @@ no_hook :: #force_inline proc "contextless" (h: ^No_Hooks, s: Regs, t: tape.Toke
 Walk_Result :: distinct u64
 
 // Walk outcomes past the `Fault_Kind` values.
+WALK_EXPANSION :: u8(0xFA) // the text's references expanded past `Budget.expansion`
 WALK_MORE :: u8(0xFB) // the walk read the window of a text in pieces to its end, and the text continues
 WALK_STEPS :: u8(0xFC) // the walk opened a container past `Budget.steps`
 WALK_NO_MEMORY :: u8(0xFD) // a stack could not grow
 WALK_STOPPED :: u8(0xFE) // a hook returned `.Stop`
 WALK_TOO_DEEP :: u8(0xFF) // the nesting passed `Budget.depth`
 
-#assert(len(tape.Fault_Kind) < int(WALK_MORE))
+#assert(len(tape.Fault_Kind) < int(WALK_EXPANSION))
 
 walk_result :: #force_inline proc "contextless" (at: u64, outcome: u8, detail: u8 = 0) -> Walk_Result {
 	return Walk_Result(at << 16 | u64(detail) << 8 | u64(outcome))
+}
+
+// The result `r` of a walk with `steps` of `Budget.steps` left: past the budget the walk stops its hook, so a stop with
+// none left is `WALK_STEPS`.
+steps_result :: #force_inline proc "contextless" (r: Walk_Result, steps: u64) -> Walk_Result {
+	if u8(r) == WALK_STOPPED && steps == 0 {
+		return walk_result(u64(r) >> 16, WALK_STEPS)
+	}
+	return r
 }
 
 // Where the walk ended or failed, and its error, nil for a walk that read its text or its window, or was stopped.
@@ -253,6 +263,8 @@ walk_error :: #force_inline proc "contextless" (r: Walk_Result, rules: ^tape.Rul
 		err = tape.Exceeded{at = at, kind = .Depth}
 	case WALK_STEPS:
 		err = tape.Exceeded{at = at, kind = .Steps}
+	case WALK_EXPANSION:
+		err = tape.Exceeded{at = at, kind = .Expansion}
 	case WALK_NO_MEMORY:
 		err = runtime.Allocator_Error.Out_Of_Memory
 	case:

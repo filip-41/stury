@@ -374,4 +374,4 @@ builds_fit_the_smallest_arena :: proc(t: ^testing.T) {
 // The bytes past its nodes a table's build takes from an arena: the room its last growth left unused, its table and the
 // arena's alignment.
 @(private = "file")
-ARENA_SLACK :: 1024
+ARENA_SLACK :: 960 + size_of(tape.Doc_Ext)

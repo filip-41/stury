@@ -133,7 +133,7 @@ walk_tree :: proc(src: []u8, v11: bool, $LAX: bool, opts: Options, h: ^$H, regs:
 		frames = &frames,
 	}
 	when LAX {
-		w.steps[0] = steps_of(opts)
+		w.steps[0] = build.read_steps(opts)
 	}
 	when .Rooms in C {
 		w.rooms = hook.rooms_end(h)
@@ -159,24 +159,15 @@ reads_whole :: #force_inline proc "contextless" (h: ^$H, $C: hook.Capabilities) 
 	}
 }
 
-// One more than the containers a walk may open within the steps of `opts`, `max(u64)` for no limit.
-@(private)
-steps_of :: #force_inline proc "contextless" (opts: Options) -> u64 {
-	return opts.budget.steps + 1 if opts.budget.steps != 0 && opts.budget.steps < max(u64) else max(u64)
-}
-
 // The result of a walk that ended in `r`, which says a stop for the step budget or for a level the hook could not hold.
 @(private)
 walk_end :: proc "contextless" (w: ^Walk($H, $LAX, $C), r: hook.Walk_Result) -> hook.Walk_Result {
-	if u8(r) == hook.WALK_STOPPED {
-		when LAX {
-			if w.steps[0] == 0 {
-				return hook.walk_result(u64(r) >> 16, hook.WALK_STEPS)
-			}
-		}
-		if w.failed {
-			return hook.walk_result(u64(r) >> 16, hook.WALK_NO_MEMORY)
-		}
+	r := r
+	when LAX {
+		r = hook.steps_result(r, w.steps[0])
+	}
+	if u8(r) == hook.WALK_STOPPED && w.failed {
+		return hook.walk_result(u64(r) >> 16, hook.WALK_NO_MEMORY)
 	}
 	return r
 }
@@ -337,16 +328,10 @@ grow_room :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX, $C), hs: ^h
 // Doubles the levels the hook holds, up to the levels it can need, for the container at `at`.
 @(private, cold)
 deepen :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX, $C), hs: ^hook.Regs, at: u64) -> bool {
-	when .Levels in C {
-		want := min(max(2 * hook.levels_held(w.hooks), int(hs.c) + 1), max(w.levels, int(hs.c) + 1))
-		if !hook.levels_grow(w.hooks, want, hs, at) {
-			w.failed = true
-			return false
-		}
-		when .Rooms in C {
-			// Growing the hook's levels may have grown its room.
-			w.rooms = hook.rooms_end(w.hooks)
-		}
+	want := min(max(2 * hook.levels_held(w.hooks), int(hs.c) + 1), max(w.levels, int(hs.c) + 1))
+	if !hook.levels_need(w, want, hs, at) {
+		w.failed = true
+		return false
 	}
 	return true
 }

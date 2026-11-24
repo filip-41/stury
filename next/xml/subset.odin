@@ -398,12 +398,12 @@ attlist_declaration :: proc "contextless" (d: ^Dtd, rw: ^Walk(hook.No_Hooks, fal
 			a.fact_n = u32(intrinsics.ptr_sub(value_end, name_at))
 			a.lead = u8(min(intrinsics.ptr_sub(q[1:], name_at), markup.ATTRIBUTE_LEAD_MAX))
 			a.size = expansion_room(&d.view, d.src, name_at[:a.fact_n])
-			if stored && .Stopped not_in d.built.flags {
+			if stored && .Stopped not_in d.flags {
 				return name_at, {name_at, .Bad_Char, .Entity_Respelled}
 			}
 			q = value_end
 		}
-		if .Stopped not_in d.built.flags {
+		if .Stopped not_in d.flags {
 			if fault := declare_attribute(d, element_name, name, a); fault.kind != .None {
 				return name_at, {name_at, fault.kind, fault.detail}
 			}
@@ -438,7 +438,7 @@ declare_attribute :: proc "contextless" (d: ^Dtd, element, name: []u8, a: Attr_D
 		return {kind = NO_MEMORY}
 	}
 	a.name_lo, a.name_n = u32(lo), u16(len(name))
-	i := dtd_push(d, &d.atts, &d.built.attrs, &d.att_cap, a)
+	i := dtd_push(d, &d.attrs, &d.att_cap, a)
 	if i == NO_DECL {
 		return {kind = NO_MEMORY}
 	}
@@ -448,10 +448,10 @@ declare_attribute :: proc "contextless" (d: ^Dtd, element, name: []u8, a: Attr_D
 		return {kind = NO_MEMORY}
 	}
 	if a.defaulted {
-		d.built.flags += {.Defaults}
+		d.flags += {.Defaults}
 	}
 	if a.tokenized {
-		d.built.flags += {.Tokenized}
+		d.flags += {.Tokenized}
 	}
 	return {}
 }
@@ -625,7 +625,7 @@ entity_declaration :: proc "contextless" (d: ^Dtd, p, end: [^]u8, stored: bool) 
 		}
 	}
 	q, f = decl_close(q, end, .Entity_Declaration)
-	if f.kind != .None || .Stopped in d.built.flags || dtd_find(&d.view, kind, name) != NO_DECL {
+	if f.kind != .None || .Stopped in d.flags || dtd_find(&d.view, kind, name) != NO_DECL {
 		return q, f
 	}
 	lo, ok := dtd_bytes(d, name)
@@ -657,7 +657,7 @@ entity_declaration :: proc "contextless" (d: ^Dtd, p, end: [^]u8, stored: bool) 
 			e.flags += {.Stored}
 		}
 	}
-	i := dtd_push(d, &d.ents, &d.built.entities, &d.ent_cap, e)
+	i := dtd_push(d, &d.entities, &d.ent_cap, e)
 	if i == NO_DECL || !dtd_put(d, kind, i) {
 		return q, {kind = NO_MEMORY}
 	}
@@ -728,7 +728,7 @@ replacement_text :: proc "contextless" (d: ^Dtd, value: []u8) -> (lo: u64, n: u3
 	if !ok {
 		return
 	}
-	out := d.arena[lo:]
+	out := d.bytes[lo:]
 	w, i := 0, 0
 	for i < len(value) {
 		c := value[i]
@@ -747,8 +747,7 @@ replacement_text :: proc "contextless" (d: ^Dtd, value: []u8) -> (lo: u64, n: u3
 			i += 1
 		}
 	}
-	d.arena_n = lo + u64(w)
-	dtd_refresh(d)
+	d.bytes = d.bytes[:lo + u64(w)]
 	return lo, u32(w), true
 }
 
@@ -777,13 +776,13 @@ parameter_reference :: proc "contextless" (d: ^Dtd, rw: ^Walk(hook.No_Hooks, fal
 	}
 	after := n[1:]
 	// Entity Declared binds a subset with a parameter-entity reference only when the document is standalone.
-	d.built.flags -= {.Complete}
+	d.flags -= {.Complete}
 	i := dtd_find(&d.view, .Parameter, q[1:][:intrinsics.ptr_sub(n, q[1:])])
 	if i == NO_DECL || .External in d.entities[i].flags {
-		if i == NO_DECL && .Standalone in d.built.flags {
+		if i == NO_DECL && .Standalone in d.flags {
 			return q, {q, .Bad_Char, .Undeclared_Entity}
 		}
-		d.built.flags += {.Stopped}
+		d.flags += {.Stopped}
 		return after, {}
 	}
 	if .Measuring in d.entities[i].flags {
@@ -792,7 +791,7 @@ parameter_reference :: proc "contextless" (d: ^Dtd, rw: ^Walk(hook.No_Hooks, fal
 	if nest >= MAX_NEST {
 		return q, {q, TOO_DEEP, .None}
 	}
-	d.ents[i].flags += {.Measuring}
+	d.entities[i].flags += {.Measuring}
 	e := d.entities[i]
 	text := entity_text(&d.view, d.src, &e)
 	f: Dtd_Fault
@@ -811,7 +810,7 @@ parameter_reference :: proc "contextless" (d: ^Dtd, rw: ^Walk(hook.No_Hooks, fal
 	} else {
 		_, f = declarations(d, rw, raw_data(text), raw_data(text)[len(text):], false, stored, nest + 1)
 	}
-	d.ents[i].flags -= {.Measuring}
+	d.entities[i].flags -= {.Measuring}
 	if f.kind == .Truncated {
 		return q, {q, .Bad_Char, .Entity_Boundary}
 	}

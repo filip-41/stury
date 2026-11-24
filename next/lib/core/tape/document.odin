@@ -74,7 +74,7 @@ clone_document :: proc(doc: ^Document, allocator := context.allocator) -> (c: Do
 			c.src = clone_list(doc.src, allocator) or_return
 		}
 		if doc.ext != nil {
-			c.ext = clone_ext(doc.ext, allocator) or_return
+			c.ext = ext_make(doc.ext.held, doc.ext.format, allocator) or_return
 		}
 	}
 	if x := doc.partial; x != nil {
@@ -131,29 +131,63 @@ clone_list :: proc(list: []$T, allocator: runtime.Allocator) -> (out: []T, err: 
 	return
 }
 
-// A copy of `ext` and the lists it names in one block.
-@(private)
-clone_ext :: proc(ext: ^Doc_Ext, allocator: runtime.Allocator) -> (e: ^Doc_Ext, err: runtime.Allocator_Error) {
-	held_at := size_of(Doc_Ext)
-	tables_at := held_at + len(ext.held) * size_of(Held_Span)
-	tables_at = (tables_at + align_of(Table) - 1) &~ (align_of(Table) - 1)
-	t, tabular := ext.format.(Tabular_Ext)
-	slots_at := tables_at + len(t.tables) * size_of(Table)
-	size := slots_at + len(t.slots) * size_of(u32)
-	block := runtime.mem_alloc_non_zeroed(size, align_of(Doc_Ext), allocator) or_return
-	e = (^Doc_Ext)(raw_data(block))
-	e^ = ext^
-	e.held = ([^]Held_Span)(raw_data(block[held_at:]))[:len(ext.held)]
-	copy(e.held, ext.held)
-	if tabular {
-		u := t
-		u.tables = ([^]Table)(raw_data(block[tables_at:]))[:len(t.tables)]
-		u.slots = ([^]u32)(raw_data(block[slots_at:]))[:len(t.slots)]
-		copy(u.tables, t.tables)
-		copy(u.slots, t.slots)
-		e.format = u
+// A `Doc_Ext` of `held` and `format` in one block of `allocator`, with copies of the lists they name, which `destroy`
+// frees whole.
+ext_make :: proc(held: []Held_Span, format: Format_Ext, allocator: runtime.Allocator) -> (ext: ^Doc_Ext, err: runtime.Allocator_Error) {
+	sized := Ext_Block{size = size_of(Doc_Ext)}
+	scratch: Doc_Ext
+	ext_lists(&sized, &scratch, held, format)
+	raw := runtime.mem_alloc_non_zeroed(sized.size, align_of(Doc_Ext), allocator) or_return
+	// A nil allocator gives no memory and no error.
+	if raw == nil {
+		return nil, .Out_Of_Memory
 	}
+	ext = (^Doc_Ext)(raw_data(raw))
+	ext^ = {}
+	block := Ext_Block{base = raw_data(raw), size = size_of(Doc_Ext)}
+	ext_lists(&block, ext, held, format)
 	return
+}
+
+// The block `ext_make` fills, its lists placed one after another from `size` on. With no `base` it only sizes them.
+@(private)
+Ext_Block :: struct {
+	base: [^]u8,
+	size: int,
+}
+
+// Gives `ext` `held` and `format` with their lists placed in `b`.
+@(private)
+ext_lists :: proc "contextless" (b: ^Ext_Block, ext: ^Doc_Ext, held: []Held_Span, format: Format_Ext) {
+	ext.held = ext_list(b, held)
+	switch f in format {
+	case Tabular_Ext:
+		placed := f
+		placed.tables, placed.slots = ext_list(b, f.tables), ext_list(b, f.slots)
+		ext.format = placed
+	case Markup_Ext:
+		placed := f
+		placed.scopes, placed.uris, placed.uri_text = ext_list(b, f.scopes), ext_list(b, f.uris), ext_list(b, f.uri_text)
+		placed.dtd.entities, placed.dtd.attrs = ext_list(b, f.dtd.entities), ext_list(b, f.dtd.attrs)
+		placed.dtd.slots, placed.dtd.bytes = ext_list(b, f.dtd.slots), ext_list(b, f.dtd.bytes)
+		ext.format = placed
+	case Yaml_Ext:
+		ext.format = f
+	case nil:
+	}
+}
+
+// Places a copy of `list` in `b`, aligned for its entries.
+@(private)
+ext_list :: proc "contextless" (b: ^Ext_Block, list: []$T) -> []T {
+	at := (b.size + align_of(T) - 1) / align_of(T) * align_of(T)
+	b.size = at + len(list) * size_of(T)
+	if b.base == nil || len(list) == 0 {
+		return nil
+	}
+	placed := ([^]T)(b.base[at:])[:len(list)]
+	copy(placed, list)
+	return placed
 }
 
 // How a document was built.
@@ -192,10 +226,97 @@ Format_Ext :: union {
 	Markup_Ext,
 }
 
-// A markup document's elements that declare a namespace, by which its format resolves the prefix of a name.
+// A markup document's elements that declare a namespace, by which its format resolves the prefix of a name, and the
+// DTD its text declares, by which its texts' entity references decode.
 Markup_Ext :: struct {
-	scopes: []Markup_Scope, // sorted by node
+	scopes:   []Markup_Scope, // sorted by node
+	uris:     []Markup_Uri, // sorted by fact
+	uri_text: []u8, // the bytes `uris` name
+	dtd:      Markup_Dtd,
+	// The scopes of a partial document hold every declaration around the nodes it kept, as a scan that keeps facts
+	// holds them. A document of every value holds them all.
+	whole:  bool,
 }
+
+// The internal subset of a markup text: its entities and attribute-list declarations, a table of their names, and the
+// bytes they name beside the text's. A record names bytes by offset and length, into `bytes` or into the text. Zero
+// for a text with no DTD.
+Markup_Dtd :: struct {
+	entities: []Markup_Entity,
+	attrs:    []Markup_Attribute,
+	// A power of two of slots or none, each 0 or a record's index plus one, its kind in the top two bits, by its name's
+	// hash.
+	slots:    []u32,
+	bytes:    []u8,
+	flags:    Markup_Dtd_Flags,
+}
+
+Markup_Dtd_Flag :: enum u32 {
+	Complete, // no external subset and no parameter-entity reference: a reference to an undeclared entity is not well-formed
+	Standalone, // the XML declaration says `standalone="yes"`
+	Html, // the public identifier is one the HTML standard lists, so its named references read
+	Defaults, // an attribute-list declaration gives a default
+	Tokenized, // an attribute-list declaration gives a type other than `CDATA`
+	In_Place, // a reference was walked over its literal, so some nodes lie in the internal subset
+	Stopped, // a parameter entity that was not read was referenced: later entity and attribute-list declarations are not processed
+}
+
+Markup_Dtd_Flags :: bit_set[Markup_Dtd_Flag; u32]
+
+// An entity's replacement text is `text_n` bytes at `text_lo`, in the DTD's bytes when `.Stored` and in the text
+// otherwise, and its literal is `lit_n` bytes at `lit_lo`, past the opening quote. `size` bounds the bytes its
+// expansion decodes to, saturating. A document's entities are all `.Stored`.
+Markup_Entity :: struct {
+	text_lo: u64,
+	lit_lo:  u64,
+	size:    u64,
+	name_lo: u32,
+	text_n:  u32,
+	lit_n:   u32,
+	name_n:  u16,
+	flags:   Markup_Entity_Flags,
+}
+
+#assert(size_of(Markup_Entity) == 40)
+
+Markup_Entity_Flag :: enum u16 {
+	Parameter, // `%name;`
+	External, // a `SYSTEM` or `PUBLIC` entity, never read
+	Unparsed, // an external entity with an `NDATA` notation
+	Stored, // the replacement text is in the bytes, since it differs from the literal
+	Lit_Stored, // the literal is in the bytes, from a parameter entity's stored replacement text
+	Measured, // `size` and the flags from `Markup` on are set
+	Measuring, // being measured: a reference to it now is a recursion
+	Markup, // the replacement text, with the entities it refers to, holds a `<`
+	Element, // the replacement text, with the entities it refers to, holds a start tag
+	Respelled, // the replacement text holds markup the literal does not spell, so it cannot be walked over the literal
+	Cdata_End, // the replacement text holds `]]>`
+	External_Ref, // the replacement text refers to an external entity
+	Unparsed_Ref, // the replacement text refers to an unparsed entity
+	Undeclared_Ref, // the replacement text refers to an entity no declaration names
+}
+
+Markup_Entity_Flags :: bit_set[Markup_Entity_Flag; u16]
+
+// An attribute an attribute-list declaration names. A default's fact spans the text from the attribute's name through
+// the default's closing quote, as an attribute in a tag spans its name through its value, and `lead` is the fact's
+// lead, the bytes before the default's value, saturated at 255. `size` bounds the bytes the default's value decodes to.
+Markup_Attribute :: struct {
+	fact_lo:    u64,
+	size:       u64,
+	element_lo: u32,
+	name_lo:    u32,
+	fact_n:     u32,
+	next:       u32, // the element's next declaration, `max(u32)` for none
+	element_n:  u16,
+	name_n:     u16,
+	tokenized:  bool, // a type other than `CDATA`, whose value collapses its spaces
+	defaulted:  bool,
+	qualified:  bool, // the name has a prefix, so a tag it is a default of has its names judged again
+	lead:       u8,
+}
+
+#assert(size_of(Markup_Attribute) == 40)
 
 // An element that declares a namespace: the node of its value, the node past its subtree, and the index in
 // `Markup_Ext.scopes` of the nearest element around it that declares one, `NO_SCOPE` for none.
@@ -205,6 +326,13 @@ Markup_Scope :: struct {
 }
 
 NO_SCOPE :: max(u32)
+
+// The decode of a namespace declaration whose value is not as written: the index of its fact in `Document.facts`, and
+// where in `Markup_Ext.uri_text` the decode lies.
+Markup_Uri :: struct {
+	fact, n: u32,
+	lo:      u64,
+}
 
 // dsv's tables and their key lookup slots. A table's header is an `Array` of role `Key` stored past the root value's
 // subtree, which no reader reaches from the root: they take the header's keys by its node.

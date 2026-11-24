@@ -1,6 +1,6 @@
 package xml
 
-import "base:runtime"
+import "base:intrinsics"
 import "stury:lib/base/kernel"
 import "stury:lib/core/markup"
 import "stury:lib/core/tape"
@@ -23,41 +23,14 @@ ATTRIBUTE_TOKENIZED :: u16(1 << 11)
 @(private)
 ATTRIBUTE_NS :: u16(1 << 10)
 
-// The length of the attribute name at `lo` of `src`, which the white space or the `=` after it ends: in a tag an `=`
-// follows the name, and in an attribute-list declaration its type.
-@(private)
-name_length :: #force_inline proc "contextless" (src: []u8, lo: u64) -> int #no_bounds_check {
-	q := lo
-	for !kernel.is_ws(src[q]) && src[q] != '=' {
-		q += 1
-	}
-	return int(q - lo)
-}
-
-// The name and value of attribute fact `f`, as written between its quotes. The fact's lead runs through the opening
-// quote unless it saturated, and then the quote is the nearest byte before the closing one that equals it, since a
-// value holds no quote of its own kind.
-@(private)
-attribute_parts :: proc "contextless" (src: []u8, f: tape.Fact) -> (name, value: []u8) #no_bounds_check {
-	hi := f.lo + u64(f.n)
-	name = src[f.lo:f.lo + u64(name_length(src, f.lo))]
-	open := f.lo + markup.fact_lead(f.spelling)
-	if markup.fact_lead(f.spelling) == markup.ATTRIBUTE_LEAD_MAX {
-		open = hi - 1
-		for src[open - 1] != src[hi - 1] {
-			open -= 1
-		}
-	}
-	return name, src[open:hi - 1]
-}
-
 // The name of attribute fact `f` of `doc` as a key token and its value as a string token, which `tape.node_text`
-// reads with the document's format and allocator: decoded as an attribute value is, and for a type the DTD declares
+// reads with the document: decoded as an attribute value is, and for a type the DTD declares
 // that is not `CDATA`, with its spaces collapsed.
 attribute :: proc "contextless" (doc: ^tape.Document, f: tape.Fact) -> (name, value: tape.Token) {
-	n, v := attribute_parts(doc.src, f)
+	span := tape.span_bytes(doc, f.lo, f.n)
+	n, v := markup.attribute_parts(span, f.spelling)
 	name = {lo = f.lo, n = u32(len(n)), kind = .String, role = .Key}
-	value = {lo = f.lo + u64(f.n) - 1 - u64(len(v)), n = u32(len(v)), kind = .String}
+	value = {lo = f.lo + u64(intrinsics.ptr_sub(raw_data(v), raw_data(span))), n = u32(len(v)), kind = .String}
 	tokenized := f.spelling & ATTRIBUTE_TOKENIZED != 0
 	if !plain_value(v) || tokenized && !collapsed(v) {
 		value.spelling = tape.SPELLING_DECODE | SPELLING_ATTRIBUTE | (SPELLING_TOKENIZED if tokenized else 0)
@@ -79,25 +52,6 @@ collapsed :: proc "contextless" (value: []u8) -> bool {
 	return true
 }
 
-// The facts of node `at` of `doc`, in source order.
-@(private)
-facts_at :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> []tape.Fact #no_bounds_check {
-	lo, hi := 0, len(doc.facts)
-	for lo < hi {
-		mid := (lo + hi) / 2
-		if doc.facts[mid].node < at {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	hi = lo
-	for hi < len(doc.facts) && doc.facts[hi].node == at {
-		hi += 1
-	}
-	return doc.facts[lo:hi]
-}
-
 // The index of the first colon of `name`, -1 for none.
 @(private)
 colon_of :: proc "contextless" (name: []u8) -> int {
@@ -109,32 +63,59 @@ colon_of :: proc "contextless" (name: []u8) -> int {
 	return -1
 }
 
-// Lists the elements of `doc` that declare a namespace in its format data, which `namespace` reads. A document with
-// none has no list. False when memory is refused, which leaves `doc` as it was.
+// Lists the elements of `doc` that declare a namespace in its format data, which `namespace` reads, beside the DTD and
+// the held spans it holds, with `whole` when the facts of `doc` hold every declaration around its nodes. A document of
+// every value with none has no list. A refusal of memory destroys `doc`.
 @(private)
-keep_scopes :: proc(doc: ^tape.Document) -> bool {
-	n := 0
-	last := tape.NO_NODE
-	for f in doc.facts {
-		if f.kind == .Attribute && f.node != last && f.spelling & ATTRIBUTE_NS != 0 {
-			n, last = n + 1, f.node
+keep_scopes :: proc(doc: ^tape.Document, whole: bool) -> (err: tape.Error) {
+	if .Attribute not_in doc.present && (doc.partial == nil || !whole) {
+		return nil
+	}
+	// Most documents declare no namespace, so the first declaration is sought alone.
+	first := len(doc.facts)
+	for f, i in doc.facts {
+		if f.kind == .Attribute && f.spelling & ATTRIBUTE_NS != 0 {
+			first = i
+			break
 		}
 	}
-	if n == 0 {
-		return true
+	n, m := 0, 0
+	last := tape.NO_NODE
+	for f in doc.facts[first:] {
+		if f.kind == .Attribute && f.spelling & ATTRIBUTE_NS != 0 {
+			if f.node != last {
+				n, last = n + 1, f.node
+			}
+			m += 1
+		}
 	}
-	context.allocator = doc.allocator
-	size := size_of(tape.Doc_Ext) + n * size_of(tape.Markup_Scope)
-	raw, err := runtime.mem_alloc(size, align_of(tape.Doc_Ext))
-	if err != nil || raw == nil {
-		return false
+	if n == 0 && (doc.partial == nil || !whole) {
+		return nil
 	}
-	ext := (^tape.Doc_Ext)(raw_data(raw))
-	scopes := ([^]tape.Markup_Scope)(raw_data(raw[size_of(tape.Doc_Ext):]))[:n]
-	k := 0
+	defer if err != nil {
+		tape.destroy(doc)
+	}
+	scopes := make([]tape.Markup_Scope, n, doc.allocator) or_return
+	defer delete(scopes, doc.allocator)
+	uris := make([]tape.Markup_Uri, m, doc.allocator) or_return
+	defer delete(uris, doc.allocator)
+	text := make([dynamic]u8, doc.allocator)
+	defer delete(text)
+	k, d := 0, 0
 	last = tape.NO_NODE
-	for f in doc.facts {
-		if f.kind != .Attribute || f.node == last || f.spelling & ATTRIBUTE_NS == 0 {
+	for f, j in doc.facts[first:] {
+		if f.kind != .Attribute || f.spelling & ATTRIBUTE_NS == 0 {
+			continue
+		}
+		if _, value := attribute(doc, f); value.spelling & tape.SPELLING_DECODE != 0 {
+			w := len(text)
+			resize(&text, w + tape.text_room(doc, value)) or_return
+			uri, decodes := tape.node_text(doc, value, text[w:])
+			at := intrinsics.ptr_sub(raw_data(uri), raw_data(text)) if decodes && len(uri) > 0 else 0
+			uris[d] = {fact = u32(first + j), n = u32(len(uri)) if decodes else 0, lo = u64(at)}
+			d += 1
+		}
+		if f.node == last {
 			continue
 		}
 		last = f.node
@@ -147,31 +128,41 @@ keep_scopes :: proc(doc: ^tape.Document) -> bool {
 		scopes[k] = {node = f.node, end = end, parent = parent}
 		k += 1
 	}
-	ext.format = tape.Markup_Ext{scopes = scopes}
+	kept := tape.Markup_Ext{scopes = scopes, uris = uris[:d], uri_text = text[:], whole = whole}
+	held: []tape.Held_Span
+	if doc.ext != nil {
+		held = doc.ext.held
+		if m, ok := doc.ext.format.(tape.Markup_Ext); ok {
+			kept.dtd = m.dtd
+		}
+	}
+	ext := tape.ext_make(held, kept, doc.allocator) or_return
+	free(doc.ext, doc.allocator)
 	doc.ext = ext
-	return true
+	return nil
 }
 
-// The namespace URI of the element whose value is node `at` of `doc`, a document `build` made, bound to its prefix or
-// the default one, decoded into `buf` when it is not as written, and empty for none. False when `buf` is shorter than
-// the URI's decode needs, as `text_room` gives for an attribute's value, or the document's allocator refuses the DTD
-// the decode reads.
-namespace :: proc(doc: ^tape.Document, at: tape.Node_Index, buf: []u8) -> (uri: string, ok: bool) {
-	if at == tape.ROOT || at == tape.NO_NODE || doc.nodes[at - 1].role != .Key || markup.is_text_key(doc.nodes[at - 1]) {
-		return "", true
+// The namespace URI of the element whose value is node `at` of `doc`, bound to its prefix or the default one.
+// `.Missing` for an element in no namespace, and `.Not_Loaded` when `doc` is partial and its facts do not hold the
+// declarations around the element: a scan's document kept no facts, or a record's under `.Members` holds those of its
+// member and not the root's, and its root is the member, whose name is the record's key.
+namespace :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (uri: string, p: tape.Presence) {
+	ext: tape.Markup_Ext
+	if doc.ext != nil {
+		ext, _ = doc.ext.format.(tape.Markup_Ext)
+	}
+	unbound := tape.Presence.Missing if doc.partial == nil || ext.whole else .Not_Loaded
+	if at == tape.ROOT {
+		return "", unbound
+	}
+	if at == tape.NO_NODE || doc.nodes[at - 1].role != .Key || markup.is_text_key(doc.nodes[at - 1]) {
+		return "", .Missing
 	}
 	key := doc.nodes[at - 1]
-	written := doc.src[key.lo:][:key.n]
+	written := tape.span_bytes(doc, key.lo, key.n)
 	prefix := written[:max(colon_of(written), 0)]
 	if string(prefix) == "xml" {
-		return XML_URI, true
-	}
-	if doc.ext == nil {
-		return "", true
-	}
-	ext, scoped := doc.ext.format.(tape.Markup_Ext)
-	if !scoped {
-		return "", true
+		return XML_URI, .Found
 	}
 	// The last scope that starts at or before `at`, and then the scopes around it, nearest first.
 	lo, hi := 0, len(ext.scopes)
@@ -189,18 +180,87 @@ namespace :: proc(doc: ^tape.Document, at: tape.Node_Index, buf: []u8) -> (uri: 
 		if s.end <= at {
 			continue
 		}
-		for f in facts_at(doc, s.node) {
+		facts := tape.facts_of(doc, s.node)
+		for f, i in facts {
 			if f.kind != .Attribute {
 				continue
 			}
-			name, _ := attribute_parts(doc.src, f)
+			name, _ := markup.attribute_parts(tape.span_bytes(doc, f.lo, f.n), f.spelling)
 			if len(prefix) == 0 && string(name) == "xmlns" || len(prefix) > 0 && len(name) == len(prefix) + 6 && string(name[:6]) == "xmlns:" && string(name[6:]) == string(prefix) {
-				_, value := attribute(doc, f)
-				return tape.node_text(doc.format, doc.src, value, buf, doc.allocator)
+				uri = declared_uri(doc, &ext, f, u32(intrinsics.ptr_sub(raw_data(facts), raw_data(doc.facts)) + i))
+				// An empty default declaration undeclares the default namespace.
+				return uri, .Found if len(uri) > 0 else .Missing
 			}
 		}
 	}
-	return "", true
+	return "", unbound
+}
+
+// The URI namespace declaration `f`, fact `i` of `doc`, binds: its value as written, or the decode `ext` holds.
+@(private)
+declared_uri :: proc "contextless" (doc: ^tape.Document, ext: ^tape.Markup_Ext, f: tape.Fact, i: u32) -> string {
+	_, value := attribute(doc, f)
+	if value.spelling & tape.SPELLING_DECODE == 0 {
+		uri, _ := tape.node_text(doc, value, nil)
+		return uri
+	}
+	lo, hi := 0, len(ext.uris)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if ext.uris[mid].fact < i {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	u := ext.uris[lo]
+	return string(ext.uri_text[u.lo:][:u.n])
+}
+
+// Whether a step of `path` is a name in `{uri}local` form.
+@(private)
+expanded_step :: proc "contextless" (path: []tape.Step) -> bool {
+	for step in path {
+		if name, ok := step.(tape.Name); ok && len(name) > 0 && name[0] == '{' {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether a step of a path of `d` is a name in `{uri}local` form.
+@(private)
+expanded_demand :: proc "contextless" (d: ^tape.Demand) -> bool {
+	for e in d.edges {
+		if name, ok := e.step.(tape.Name); ok && len(name) > 0 && name[0] == '{' {
+			return true
+		}
+	}
+	return false
+}
+
+// XML's `Format.expanded`: whether key node `key` of `doc` is the expanded name `name`, `{uri}local`, an element whose
+// name has the local part `local` in the namespace `uri`, or in none for an empty one. A name with no closing brace is
+// no element's.
+@(private)
+expanded_names :: proc "contextless" (doc: ^tape.Document, key: tape.Node_Index, name: string) -> tape.Presence {
+	t := doc.nodes[key]
+	close := 1
+	for close < len(name) && name[close] != '}' {
+		close += 1
+	}
+	if close == len(name) || markup.is_text_key(t) {
+		return .Missing
+	}
+	written := tape.span_bytes(doc, t.lo, t.n)
+	if string(written[colon_of(written) + 1:]) != name[close + 1:] {
+		return .Missing
+	}
+	uri, p := namespace(doc, key + 1)
+	if p == .Not_Loaded {
+		return .Not_Loaded
+	}
+	return .Found if uri == name[1:close] else .Missing
 }
 
 // The byte just past the end of the element at container node `at`, or of the text for the document's node. The close
@@ -212,7 +272,8 @@ close_end :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u
 		return doc.root_close, true
 	}
 	src := doc.src
-	if in_subset(doc) {
+	// A reference walked over its literal puts nodes in the internal subset, past the bytes of the element they are in.
+	if dtd, ok := dtd_of(&doc.ext.format if doc.ext != nil else nil); ok && .In_Place in dtd.flags {
 		return balanced_end(src, doc.nodes[at].lo), true
 	}
 	last := at + tape.Node_Index(doc.nodes[at].n) - 1
@@ -253,13 +314,6 @@ close_end :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u
 	return p, true
 }
 
-// Whether a node of `doc` may lie in its internal subset, an entity's text walked at its reference, which a text with
-// a DTD that declares an entity holding markup has.
-@(private)
-in_subset :: proc "contextless" (doc: ^tape.Document) -> bool {
-	return declares_entities(doc.src)
-}
-
 // `close_end` for a document some of whose nodes may lie in the internal subset, so a last descendant may lie outside
 // the element's bytes: the element's tags are matched from its start tag at `lo` on. The text between them is balanced,
 // since a reference stands for content that closes what it opens.
@@ -280,7 +334,8 @@ balanced_end :: proc "contextless" (src: []u8, lo: u64) -> u64 {
 			}
 			continue
 		case '!', '?':
-			p = u64(uintptr(markup_end(raw_data(src)[p:], raw_data(src)[len(src):])) - uintptr(raw_data(src)))
+			past, _ := markup_end(raw_data(src)[p:], raw_data(src)[len(src):])
+			p = u64(intrinsics.ptr_sub(past, raw_data(src)))
 			continue
 		}
 		quote: u8
@@ -308,25 +363,15 @@ skip_misc :: proc "contextless" (src: []u8, p: u64) -> u64 {
 		for p < u64(len(src)) && kernel.is_ws(src[p]) {
 			p += 1
 		}
-		if p + 1 >= u64(len(src)) || src[p] != '<' {
+		// A CDATA section is content, which ends the run.
+		if p + 2 >= u64(len(src)) || src[p] != '<' || src[p + 1] != '?' && !(src[p + 1] == '!' && src[p + 2] == '-') {
 			return p
 		}
-		switch {
-		case src[p + 1] == '?':
-			p += 2
-			for !(src[p] == '?' && src[p + 1] == '>') {
-				p += 1
-			}
-			p += 2
-		case src[p + 1] == '!' && p + 3 < u64(len(src)) && src[p + 2] == '-':
-			p += 4
-			for !(src[p] == '-' && src[p + 1] == '-') {
-				p += 1
-			}
-			p += 3
-		case:
+		past, closed := markup_end(raw_data(src)[p:], raw_data(src)[len(src):])
+		if !closed {
 			return p
 		}
+		p = u64(intrinsics.ptr_sub(past, raw_data(src)))
 	}
 }
 

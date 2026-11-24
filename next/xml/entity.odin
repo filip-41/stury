@@ -1,10 +1,13 @@
 package xml
 
 import "base:intrinsics"
+import "base:runtime"
+import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import "stury:lib/core/hook"
+import "stury:lib/ops/build"
 
 // References to the entities of the DTD while a walk reads: what each may stand for where it stands, the sizes the
 // expansion budget adds, the descent into a replacement text that holds markup, which the walk reads over the
@@ -45,7 +48,7 @@ entity_reference :: #force_no_inline proc "contextless" (d: ^Dtd, p, end: [^]u8,
 	}
 	i := dtd_find(&d.view, .General, name)
 	if i == NO_DECL {
-		if .Html in d.head.flags {
+		if .Html in d.flags {
 			if _, ok := spell.entity_named(name); ok {
 				return n, .None, .None, 0
 			}
@@ -92,8 +95,8 @@ entity_reference :: #force_no_inline proc "contextless" (d: ^Dtd, p, end: [^]u8,
 	} else if .Cdata_End in refs && !attr {
 		return n, .Bad_Char, .Cdata_End, 0
 	}
-	if d.block != nil && d.depth == 0 && !budget(d, size) {
-		return n, .Too_Wide, .Expansion, 0
+	if d.sealed && d.depth == 0 && !budget(d, size) {
+		return n, EXPANSION, .None, 0
 	}
 	if .Markup in refs && !attr {
 		return n, .Bad_Char, .None, i + 1
@@ -112,7 +115,7 @@ budget :: #force_inline proc "contextless" (d: ^Dtd, size: u64) -> bool {
 // DTD was read whole, or that says it is standalone, declares every entity it refers to.
 @(private)
 unread :: proc "contextless" (d: ^Dtd, undeclared: bool) -> (tape.Fault_Kind, Detail) {
-	if undeclared && d.head.flags & {.Complete, .Standalone} != {} {
+	if undeclared && d.flags & {.Complete, .Standalone} != {} {
 		return .Bad_Char, .Undeclared_Entity
 	}
 	if d.tolerate {
@@ -146,7 +149,7 @@ measure :: proc "contextless" (d: ^Dtd, i: u32, nest: int) -> (size: u64, flags:
 		switch c {
 		case '<':
 			flags += {.Markup}
-			s := markup_end(q, end)
+			s, _ := markup_end(q, end)
 			if s == q {
 				if intrinsics.ptr_sub(end, q) >= 2 && NAME_BYTE[q[1]] != .No && NAME_BYTE[q[1]] != .Rest {
 					flags += {.Element}
@@ -179,7 +182,7 @@ measure :: proc "contextless" (d: ^Dtd, i: u32, nest: int) -> (size: u64, flags:
 			}
 			j := dtd_find(&d.view, .General, name)
 			if j == NO_DECL {
-				if .Html in d.head.flags {
+				if .Html in d.flags {
 					if value, ok := spell.entity_named(name); ok {
 						size += u64(max(len(value), n))
 						continue
@@ -216,7 +219,7 @@ measure :: proc "contextless" (d: ^Dtd, i: u32, nest: int) -> (size: u64, flags:
 	if .Markup in flags && (.Lit_Stored in e.flags || .Stored in e.flags && respelled(raw_data(d.src)[e.lit_lo:][:e.lit_n])) {
 		flags += {.Respelled}
 	}
-	if d.block != nil {
+	if d.sealed {
 		e.size = size
 		e.flags += flags + {.Measured}
 	}
@@ -237,20 +240,27 @@ markup_close :: proc "contextless" (s: string) -> string {
 	return ""
 }
 
-// One past the comment, processing instruction or CDATA section at `q`, a `<`, or `q` for any other markup. The text
-// was judged, or is judged where its markup is walked, so an unclosed one ends at `end`.
+// One past the comment, processing instruction or CDATA section at `q`, a `<`, and true, or `end` and false for one
+// that `end` comes before the close of, and `q` and false for any other markup. A close starts past the opening.
 @(private)
-markup_end :: proc "contextless" (q, end: [^]u8) -> [^]u8 #no_bounds_check {
-	close := markup_close(string(q[:intrinsics.ptr_sub(end, q)]))
+markup_end :: proc "contextless" (q, end: [^]u8) -> (past: [^]u8, closed: bool) #no_bounds_check {
+	n := intrinsics.ptr_sub(end, q)
+	close := markup_close(string(q[:n]))
 	if close == "" {
-		return q
+		return q, false
 	}
-	for s := q[2:]; s < end; s = s[1:] {
-		if intrinsics.ptr_sub(end, s) >= len(close) && string(s[:len(close)]) == close {
-			return s[len(close):]
+	open := 2 if close == "?>" else 4 if close == "-->" else 9
+	for j := open + len(close) - 1; j < n; j += 1 {
+		k := kernel.index_byte(q[j:n], '>')
+		if k < 0 {
+			break
+		}
+		j += k
+		if string(q[j + 1 - len(close):][:len(close)]) == close {
+			return q[j + 1:], true
 		}
 	}
-	return end
+	return end, false
 }
 
 // Whether a character reference in the literal `lit` stands where its character would read as something else than
@@ -342,7 +352,7 @@ expansion_room :: proc "contextless" (v: ^Dtd_View, src, span: []u8, nest := 0) 
 		}
 		j := dtd_find(v, .General, name)
 		if j == NO_DECL {
-			if .Html in v.head.flags {
+			if .Html in v.flags {
 				if value, ok := spell.entity_named(name); ok {
 					room += u64(len(value))
 				}
@@ -370,7 +380,7 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 	if t == nil {
 		return run_fault(w, hs, r)
 	}
-	f := &w.frames[d - 1]
+	f := &w.stack[d - 1]
 	if r.entity != 0 {
 		amp := r.q
 		if amp > p {
@@ -395,7 +405,7 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 		}
 		t.stack[t.depth] = {name_after[1:], end, amp, d, f.tag, i}
 		t.depth += 1
-		t.head.flags += {.In_Place}
+		t.flags += {.In_Place}
 		lit := w.base[e.lit_lo:]
 		if .Element in e.flags {
 			// The element's `Object` opens before its first child, whose start would deepen the walk, does.
@@ -440,7 +450,7 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 }
 
 // The result of a walk over a text with a DTD, `r`: a text that ends inside a replacement text is the fault of the
-// reference to it. Frees the DTD, or hands its sealed block to `kept`.
+// reference to it. Gives the document a build or a scan made the DTD's tables, and frees the DTD.
 @(private)
 dtd_end :: proc "contextless" (w: ^Walk($H, $LAX), r: u64) -> u64 {
 	t := w.dtd
@@ -448,9 +458,37 @@ dtd_end :: proc "contextless" (w: ^Walk($H, $LAX), r: u64) -> u64 {
 	if t.depth > 0 && tape.Fault_Kind(r & 0xff) == .Truncated {
 		r = fault_at(at(w, t.stack[t.depth - 1].at), .Bad_Char, u8(Detail.Entity_Boundary))
 	}
+	if (u8(r) == 0 || u8(r) == hook.WALK_STOPPED) && !dtd_give(t, w.base, w.hooks, w.ctx) {
+		r = fault_at(0, NO_MEMORY)
+	}
 	dtd_free(t)
 	w.dtd = nil
 	return r
+}
+
+// Whether a text may need the tables of `d` to decode: they declare an entity, name the HTML standard's references, or
+// the walk tolerated a reference whose text it did not read. A default's value refers to the DTD only then.
+@(private)
+dtd_decodes :: #force_inline proc "contextless" (d: ^Dtd) -> bool {
+	return len(d.entities) > 0 || .Html in d.flags || d.took
+}
+
+// Gives the document hook `h` makes, a build's or a scan's, a copy of the tables of `d`, the DTD of the text at `base`,
+// when its texts may decode by them. False when memory runs out.
+@(private)
+dtd_give :: proc "contextless" (d: ^Dtd, base: [^]u8, h: ^$H, ctx: ^runtime.Context) -> bool {
+	when H == build.Builder || H == build.Scanner {
+		when H == build.Builder {
+			doc := &h.doc
+		} else {
+			doc := &h.b.doc
+		}
+		if dtd_decodes(d) && doc.ext == nil {
+			doc.ext = dtd_keep(d, base, doc.allocator, ctx)
+			return doc.ext != nil
+		}
+	}
+	return true
 }
 
 // `p` is at the `>` or the `/` that ends the start tag of the element with `e` open elements, whose element type has
@@ -460,7 +498,7 @@ dtd_end :: proc "contextless" (w: ^Walk($H, $LAX), r: u64) -> u64 {
 st_defaults :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Walk($H, $LAX), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> u64 {
 	hs := hook.Regs{s0, s1, s2}
 	t := w.dtd
-	f := &w.frames[e - 1]
+	f := &w.stack[e - 1]
 	tag := f.tag
 	qualified := false
 	for i := dtd_find(&t.view, .Element, tag[1:][:f.name_n]); i != NO_DECL; i = t.attrs[i].next {
@@ -470,12 +508,12 @@ st_defaults :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^W
 			continue
 		}
 		if !budget(t, a.size) {
-			return fault(w, hs, tag, .Too_Wide, .Expansion)
+			return fault(w, hs, tag, EXPANSION)
 		}
-		spelling := markup.attribute_spelling(int(a.lead), true) | ATTRIBUTE_DTD | (ATTRIBUTE_TOKENIZED if a.tokenized else 0)
+		spelling := markup.attribute_spelling(int(a.lead), true) | (ATTRIBUTE_DTD if dtd_decodes(t) else 0) | (ATTRIBUTE_TOKENIZED if a.tokenized else 0)
 		if declares_ns(name, int(a.name_n)) {
 			spelling |= ATTRIBUTE_NS
-			_, value := attribute_parts(t.src, {lo = a.fact_lo, n = a.fact_n, spelling = markup.attribute_spelling(int(a.lead), true)})
+			_, value := markup.attribute_parts(t.src[a.fact_lo:][:a.fact_n], markup.attribute_spelling(int(a.lead), true))
 			rule, no_memory := declare(w, name, int(a.name_n), value, e)
 			if no_memory {
 				return fault(w, hs, tag, NO_MEMORY)

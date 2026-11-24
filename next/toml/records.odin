@@ -212,7 +212,7 @@ record_frame :: proc(r: ^Records, $S: Spec) -> (lo, cut: u64, ok: bool) {
 members_open :: proc(r: ^Records, $S: Spec) -> bool {
 	context.allocator = r.allocator
 	r.at = .Open
-	r.steps = steps_of(r.opts)
+	r.steps = build.read_steps(r.opts)
 	p, err := new(Parser)
 	if err != nil {
 		r.err, r.at = runtime.Allocator_Error.Out_Of_Memory, .Done

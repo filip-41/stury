@@ -1,6 +1,5 @@
 package tape_test
 
-import "base:runtime"
 import "core:testing"
 import "stury:lib/core/tape"
 import "stury:testkit"
@@ -304,12 +303,12 @@ number_key_same :: proc "contextless" (src: []u8, a: tape.Token, other: []u8, b:
 }
 
 @(private = "file")
-number_key_room :: proc "contextless" (src: []u8, t: tape.Token, _: runtime.Allocator) -> int {
+number_key_room :: proc "contextless" (src: []u8, t: tape.Token, _: ^tape.Format_Ext) -> int {
 	return 5
 }
 
 @(private = "file")
-number_key_text :: proc "contextless" (src: []u8, t: tape.Token, buf: []u8, _: runtime.Allocator) -> (string, bool) {
+number_key_text :: proc "contextless" (src: []u8, t: tape.Token, buf: []u8, _: ^tape.Format_Ext) -> (string, bool) {
 	return string(buf[:copy(buf, "seven")]), true
 }
 

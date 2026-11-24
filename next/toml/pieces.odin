@@ -245,7 +245,7 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 		s.parser.own = true
 		s.parser.pos = text_start(text, 0)
 		s.ending.at = s.parser.pos
-		s.steps, s.counts = steps_of(opts), opts.budget.steps != 0
+		s.steps, s.counts = build.read_steps(opts), opts.budget.steps != 0
 	}
 	pa := &s.parser
 	pa.src, pa.final = text, p.last

@@ -349,24 +349,27 @@ Piece_Run :: struct {
 }
 
 // Feeds `r.src` to `read` one window at a time, each from the last read's `keep` to the next cut, the last to the
-// text's end, and gives the result of the read that ended. The windows are of a copy of the text whose bytes before
-// `keep` are overwritten with a byte no text holds, so a read that reads before its window reads no byte of the text.
-// The copy, which a document may hold, is the caller's to free.
+// text's end, and gives the result of the read that ended. Each window is a copy of its bytes, overwritten with a byte
+// no text holds once its read returns and another follows, so a read that keeps a pointer into a window it was given
+// reads no byte of the text. The copy of the last, which a document may hold, is the caller's to free.
 feed :: proc(r: Piece_Run, p: ^tape.Pieces, read: proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool) -> (text: []u8) {
 	opts := r.opts
 	opts.pieces = p
 	p.allocator = context.allocator
-	text = slice.clone(r.src)
 	dropped: u64
 	for i := 0; ; i += 1 {
 		end := r.cuts[i] if i < len(r.cuts) else len(r.src)
 		p.from, p.last = p.keep, i >= len(r.cuts)
 		assert(p.keep >= dropped, "a read needs bytes its last read let go")
-		slice.fill(text[dropped:p.keep], 0xFF)
 		dropped = p.keep
-		if !read(text[p.keep:end], r, opts) || !p.more || p.last {
+		// The window before is freed once this one is made, so the two hold no byte in common.
+		window := slice.clone(r.src[p.keep:end])
+		delete(text)
+		text = window
+		if !read(text, r, opts) || !p.more || p.last {
 			return
 		}
+		slice.fill(text, 0xFF)
 	}
 }
 
@@ -406,22 +409,23 @@ same_documents :: proc(a, b: tape.Document) -> bool {
 }
 
 // `pieces_agree` over `src` cut in two at every byte, in three at a sample of pairs, and in windows of every size up
-// to a few dozen bytes, for a format whose records frame the text as one.
-agree_in_pieces :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, paths: [][]tape.Step, name: string) -> bool {
+// to a few dozen bytes, for a format whose records frame the text as one, and with `containers` as the children of a
+// container too.
+agree_in_pieces :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, paths: [][]tape.Step, name: string, containers := false) -> bool {
 	for k in 0 ..= len(src) {
 		cuts := [1]int{k}
-		pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated) or_return
+		pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated, containers = containers) or_return
 	}
 	if len(src) >= 8 {
 		for k in 0 ..< 12 {
 			i := (k * 7919) % len(src)
 			j := i + 1 + (k * 104729) % (len(src) - i)
 			cuts := [2]int{i, j}
-			pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated) or_return
+			pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated, containers = containers) or_return
 		}
 	}
 	for size in 1 ..= 40 {
-		pieces_agree(t, reads, f, src, opts, cuts_by(len(src), size), paths, name, framing = .Concatenated) or_return
+		pieces_agree(t, reads, f, src, opts, cuts_by(len(src), size), paths, name, framing = .Concatenated, containers = containers) or_return
 	}
 	return true
 }
@@ -661,9 +665,14 @@ records_read :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, p
 		}
 		end = run.cuts[i] if i < len(run.cuts) else len(run.src)
 		p.from, p.last = p.keep, i >= len(run.cuts)
-		slice.fill(text[dropped:p.keep], 0xFF)
+		assert(p.keep >= dropped, "a read needs bytes its last read let go")
 		dropped = p.keep
-		if err := tape.records_window(r, text[p.keep:end]); err != nil {
+		// Each window is a copy of its own, as `feed` gives them, the one before overwritten and freed once it is made.
+		window := slice.clone(run.src[p.keep:end])
+		slice.fill(text, 0xFF)
+		delete(text)
+		text = window
+		if err := tape.records_window(r, text); err != nil {
 			got.err = err
 			return
 		}

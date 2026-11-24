@@ -17,19 +17,22 @@ Spec :: enum u8 {
 	Xml,
 }
 
-// Options of an XML read. `budget` sets `depth` (an element is a level), `nodes`, `memory` and `steps` (a step is an
-// element with a child element, and the document). `format` takes `tape.Xml_Options`, and a read refuses another
-// format's. Of `tolerate` XML breaks `.Unread_Entity` alone. A runner is not used.
+// Options of an XML read. `budget` sets `depth` (an element is a level), `nodes`, `memory`, `steps` (a step is an
+// element with a child element, and the document) and `expansion`, which the entity references of a text count
+// against. `format` takes `tape.Xml_Options`, and a read refuses another format's. Of `tolerate` XML takes
+// `.Unread_Entity`, and refuses `.Invalid_Utf8` as `Bad_Option{"tolerate"}`, as it reads no ill-formed UTF-8. The
+// others name rules of tokens XML has none of, so they change nothing. A runner builds a long text with no document
+// type declaration on its threads.
 Options :: tape.Options
 
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Xml = {name = "xml", id = ID, facts = FACTS, options = .Xml, dups = .Group, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Xml = {name = "xml", id = ID, facts = FACTS, options = .Xml, dups = .Group, refuses = {.Invalid_Utf8}, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, text_ext = prolog_ext, close_end = close_end, expanded = expanded_names},
 }
 
 // The facts an XML document holds.
 @(private)
-FACTS :: tape.COMMENTS + {.Attribute, .Instruction, .Doctype, .Directive}
+FACTS :: tape.COMMENTS + {.Attribute, .Instruction, .Instruction_Foot, .Doctype, .Directive}
 
 // The format id of `.Xml`.
 @(private)
@@ -81,10 +84,14 @@ build :: #force_inline proc(src: []u8, spec := Spec.Xml, opts := Options{}, allo
 }
 
 // The first value `path` reaches in `src`, read with no document, or why none was reached. A name step matches an
-// element by its name as written, prefix included, and under `.Default` the first element of a repeated name. Allocates
-// only as `json.find` does.
+// element by its name as written, prefix included, and under `.Default` the first element of a repeated name. A name in
+// `{uri}local` form, which the readers of a document take, is `Bad_Option{"path"}`: an element's namespace may be
+// declared past its name. Allocates only as `json.find` does.
 @(require_results)
 find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Xml, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
+	if expanded_step(path) {
+		return {}, tape.Bad_Option{"path"}
+	}
 	switch spec {
 	case .Xml:
 		if opts.pieces != nil {
@@ -99,9 +106,12 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Xml, read 
 }
 
 // Builds a document of the nodes of `src` that the paths of `demand` reach, as `json.scan` does, with `Demand.facts`
-// the facts of its nodes.
+// the facts of its nodes. A name in `{uri}local` form is `Bad_Option{"path"}`, as for `find`.
 @(require_results)
 scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Xml, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
+	if expanded_demand(demand) {
+		return {}, tape.Bad_Option{"path"}
+	}
 	switch spec {
 	case .Xml:
 		if opts.pieces != nil {
@@ -117,16 +127,17 @@ scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Xml, re
 
 // Walks `src` as `S` for hook `h` from its registers `regs`, the walk the reads above run. Returns where the text ends
 // or the error, and whether the walk read a reference to an entity whose text is not read. A stop of the hook is no
-// error. The hook keeps the protocol `hook.check` checks, and has no `.Walk`.
+// error. A text in pieces is walked a window of `opts.pieces` at a time, as the reads in pieces walk it. The hook keeps
+// the protocol `hook.check` checks, and has no `.Walk`.
 walk :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), allocator := context.allocator) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	#assert(.Walk not_in intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0))
 	if err = tape.options_refused(&FORMATS[S], opts); err != nil {
 		return
 	}
-	if opts.pieces != nil {
-		return 0, tape.Bad_Option{"pieces"}, false
-	}
 	ctx := context
+	if opts.pieces != nil {
+		return piece_read(src, S, opts, h, regs, allocator, &ctx, on)
+	}
 	if build.read_lax(opts) {
 		return walk_text(src, S, true, opts, h, regs, allocator, &ctx, on)
 	}
@@ -154,11 +165,7 @@ build_as :: #force_no_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options
 @(private)
 build_finish :: proc(doc: ^tape.Document, opts: Options, rules: ^tape.Rules) -> tape.Error {
 	build.builder_dups(doc, opts.dups, rules) or_return
-	if .Attribute in doc.present && !keep_scopes(doc) {
-		tape.destroy(doc)
-		return runtime.Allocator_Error.Out_Of_Memory
-	}
-	return nil
+	return keep_scopes(doc, true)
 }
 
 @(private)
@@ -166,7 +173,11 @@ scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, build.scanner_key_skip_hook)
 	}
-	return build.read_scan(src, demand, &FORMATS[S], read, opts, caller, no_rewalk_scan, node_bound, walk)
+	doc, err := build.read_scan(src, demand, &FORMATS[S], read, opts, caller, nil, node_bound, walk)
+	if err == nil {
+		err = keep_scopes(&doc, demand.facts)
+	}
+	return doc, err
 }
 
 @(private)
@@ -174,19 +185,7 @@ find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: b
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, build.finder_key_skip_hook)
 	}
-	return build.read_find(src, path, &FORMATS[S], read, opts, caller, respell, no_rewalk_find, walk)
-}
-
-// A value of XML is never walked again, as XML has no `.Rewalk`: an element reads under the namespaces and the DTD
-// before it. A read that asked would be refused as a fault.
-@(private)
-no_rewalk_find :: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result {
-	return hook.walk_result(lo, u8(tape.Fault_Kind.Bad_Char))
-}
-
-@(private)
-no_rewalk_scan :: proc "contextless" (h: ^build.Scanner, regs: ^hook.Regs, lo: u64) -> hook.Walk_Result {
-	return hook.walk_result(lo, u8(tape.Fault_Kind.Bad_Char))
+	return build.read_find(src, path, &FORMATS[S], read, opts, caller, respell, nil, walk)
 }
 
 // The spelling of the number answer from `lo` to `hi` of `src`, an element's text an inferring read took as a number.
@@ -200,8 +199,8 @@ respell :: proc "contextless" (src: []u8, lo, hi: u64) -> u16 {
 @(private)
 node_bound :: #force_inline proc "contextless" (src: []u8, depth: u64) -> u64 {
 	n := u64(len(src)) + 16
-	if declares_entities(src) {
-		n += max(DEFAULT_EXPANSION, 100 * u64(len(src)))
+	if prolog_doctype(src) {
+		n += tape.default_expansion(u64(len(src)))
 	}
 	return n
 }
@@ -210,13 +209,8 @@ node_bound :: #force_inline proc "contextless" (src: []u8, depth: u64) -> u64 {
 // to an entity whose text is not read. An empty text holds no root element.
 @(private)
 walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
-	r, took := walk_document(src, 0, LAX, opts, build.read_depth(opts), steps_of(opts), h, regs, allocator, ctx, on)
+	r, took := walk_document(src, 0, LAX, opts, build.read_depth(opts), build.read_steps(opts), h, regs, allocator, ctx, on)
 	at, e, _ := hook.walk_error(r, &RULES)
 	return at, e, took
 }
 
-// The walk's count of `Budget.steps`, one more than the containers it may open.
-@(private)
-steps_of :: #force_inline proc "contextless" (opts: Options) -> u64 {
-	return opts.budget.steps + 1 if opts.budget.steps != 0 && opts.budget.steps < max(u64) else max(u64)
-}

@@ -111,20 +111,20 @@ ungrab :: proc "contextless" (g: Grab, p: rawptr, size: int) {
 }
 
 // The state a walk carries besides its registers. A walk with `LAX` counts `Budget.steps`, which one without never
-// does. `frames[i]` is the element with `i` open elements around it, and
-// `depth` frames are held, so no frame is read before it is written.
+// does. `stack[i]` is the frame of the element with `i` open elements around it, and `depth` frames are held, so no
+// frame is read before it is written. Its levels are those `hook.deepen` grows.
 @(private)
 Walk :: struct($H: typeid, $LAX: bool) {
 	base:       [^]u8,
 	hooks:      ^H,
-	frames:     [^]Frame,
+	stack:      [^]Frame,
 	regs:       ^hook.Regs, // the hook's registers where the walk ended
 	// With `LAX`, where a walk that goes on later pauses (pieces and member records), nil for a walk that never does.
 	pause:      ^Pause,
 	// The address one past the hook's room for nodes, for a hook with `.Rooms`.
 	rooms:      uintptr,
-	depth:      u64, // frames `frames` and the hook hold
-	room:       u64, // frames `frames` holds
+	depth:      u64, // frames `stack` and the hook hold
+	room:       u64, // frames `stack` holds
 	limit:      u64, // `Budget.depth`
 	opened:     u64, // the hook's open containers when the walk started
 	// With `.Skips`, the open count of the element whose `Object` a `Skip` hid, 0 for none. While it is set no token
@@ -151,8 +151,8 @@ Walk :: struct($H: typeid, $LAX: bool) {
 	// The DTD the text declares, nil for none, and the run `st_halt` acts on.
 	dtd:        ^Dtd,
 	halt:       Run,
-	expansion:  u64, // `Xml_Options.max_expansion`
-	allocator:  runtime.Allocator, // what `frames` grows in past the frame's levels
+	expansion:  u64, // `Budget.expansion`
+	allocator:  runtime.Allocator, // what `stack` grows in past the frame's levels
 	ctx:        ^runtime.Context, // the caller's, for the calls of `allocator`
 	tier:       kernel.Tier,
 	// Whether the tag being read has a name with a colon or a declaration, so its names are judged at its end.
@@ -161,12 +161,12 @@ Walk :: struct($H: typeid, $LAX: bool) {
 	tag_dtd:    bool,
 	// Whether the DTD declares an attribute of a type other than `CDATA`, so each attribute's reader reads the DTD.
 	attr_dtd:   bool,
-	owned:      bool, // `frames` is the allocator's
+	owned:      bool, // `stack` is the allocator's
 	unread:     bool, // `.Unread_Entity` is tolerated
 	infer:      bool, // `Xml_Options.infer`
 	keep_stubs: bool, // the keep is `Keep_Stubs`
 	tolerated:  bool, // the walk read a reference to an entity whose text is not read
-	// The walk reads the prolog only, to the DTD, as a decode that needs the DTD's entities does.
+	// The walk reads the prolog only, to the DTD, as the decode of a node of no document does.
 	dtd_only:   bool,
 }
 
@@ -180,31 +180,12 @@ walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, $LAX: boo
 	hook.check(H)
 	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
 	// `= ---` leaves the array unwritten. Every frame is written before it is read.
-	frames: [WALK_LEVELS]Frame = ---
-	x, _ := opts.format.(tape.Xml_Options)
-	w := Walk(H, LAX) {
-		base      = raw_data(src),
-		hooks     = h,
-		frames    = raw_data(frames[:]),
-		regs      = regs,
-		room      = WALK_LEVELS,
-		limit     = min(limit, MAX_LEVELS),
-		opened    = regs.c,
-		steps     = steps,
-		expansion = x.max_expansion,
-		allocator = allocator,
-		ctx       = ctx,
-		tier      = kernel.tier(),
-		unread    = .Unread_Entity in opts.tolerate,
-		infer     = x.infer,
-	}
-	w.depth = min(w.limit, WALK_LEVELS)
-	when .Levels in C {
-		w.depth = min(w.depth, u64(max(hook.levels_held(h) - int(regs.c), 0)))
-	}
-	when .Rooms in C {
-		w.rooms = hook.rooms_end(h)
-	}
+	stack: [WALK_LEVELS]Frame = ---
+	w: Walk(H, LAX)
+	walk_init(&w, opts, limit, steps, raw_data(stack[:]))
+	walk_bind(&w, raw_data(src), h, regs, ctx)
+	w.opened, w.allocator = regs.c, allocator
+	w.depth = hook.held_depth(h, regs, min(w.limit, WALK_LEVELS))
 	when .Walk in C {
 		h.walk = &w
 	}
@@ -212,13 +193,35 @@ walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, $LAX: boo
 	when .Walk in C {
 		h.walk = nil
 	}
-	r = walk_end(&w, r)
-	when LAX {
-		if u8(r) == hook.WALK_STOPPED && w.steps == 0 {
-			r = u64(hook.walk_result(r >> 16, hook.WALK_STEPS))
-		}
+	return hook.steps_result(hook.Walk_Result(walk_end(&w, r)), w.steps), w.tolerated
+}
+
+// Readies walk `w` for a text read under `opts`, to `limit` levels and with `steps` as `steps_of` counts them, its
+// levels in `stack` while its frame holds them. The calls that read the text bind it.
+@(private)
+walk_init :: proc "contextless" (w: ^Walk($H, $LAX), opts: tape.Options, limit, steps: u64, stack: [^]Frame = nil) {
+	x, _ := opts.format.(tape.Xml_Options)
+	w^ = {
+		stack     = stack,
+		room      = WALK_LEVELS,
+		limit     = min(limit, MAX_LEVELS),
+		steps     = steps,
+		expansion = opts.budget.expansion,
+		tier      = kernel.tier(),
+		unread    = .Unread_Entity in opts.tolerate,
+		infer     = x.infer,
 	}
-	return hook.Walk_Result(r), w.tolerated
+}
+
+// Gives walk `w`, kept past the call that reads it, what that call lends it: the text's base, the hook with its
+// registers, and the context its allocator is called in. The call takes them back before it returns.
+@(private)
+walk_bind :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), base: [^]u8, h: ^H, regs: ^hook.Regs, ctx: ^runtime.Context) {
+	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
+	w.base, w.hooks, w.regs, w.ctx = base, h, regs, ctx
+	when .Rooms in C {
+		w.rooms = hook.rooms_end(h)
+	}
 }
 
 // Frees what walk `w` holds and returns its result `r`, the fault of a reference whose replacement text the text ends
@@ -231,7 +234,7 @@ walk_end :: proc "contextless" (w: ^Walk($H, $LAX), r: u64) -> u64 {
 		r = dtd_end(w, r)
 	}
 	if w.owned {
-		frames_free(w)
+		hook.levels_free(w)
 	}
 	table_free(w)
 	if w.ns != nil {
@@ -438,6 +441,8 @@ fault_at :: #force_inline proc "contextless" (pos: u64, kind: tape.Fault_Kind, d
 TOO_DEEP :: tape.Fault_Kind(hook.WALK_TOO_DEEP)
 @(private)
 NO_MEMORY :: tape.Fault_Kind(hook.WALK_NO_MEMORY)
+@(private)
+EXPANSION :: tape.Fault_Kind(hook.WALK_EXPANSION)
 
 @(private)
 fault :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), hs: hook.Regs, p: [^]u8, kind: tape.Fault_Kind, detail := Detail.None) -> u64 {
@@ -471,58 +476,12 @@ name_fault :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), hs: hook.
 	return fault(w, hs, q, .Bad_Char, detail)
 }
 
-// The fault of an element opened past the depth the walk holds, `.None` once the frames and the hook's levels hold
-// twice the levels, up to the limit.
-@(private, cold)
-deepen :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), hs: ^hook.Regs, p: [^]u8) -> tape.Fault_Kind {
-	if w.depth >= w.limit {
-		return TOO_DEEP
-	}
-	want := min(w.limit, 2 * w.depth + 1)
-	// An element under `d` others is read with the document and `d` elements open in the hook.
-	when .Levels in intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0) {
-		if want_held := int(w.opened + want); hook.levels_held(w.hooks) < want_held && !hook.levels_grow(w.hooks, want_held, hs, at(w, p)) {
-			return NO_MEMORY
-		}
-	}
-	if want > w.room && !frames_room(w, want) {
-		return NO_MEMORY
-	}
-	when .Rooms in intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0) {
-		// Growing the hook's levels may have grown its room.
-		w.rooms = hook.rooms_end(w.hooks)
-	}
-	w.depth = want
-	return .None
-}
-
-// Moves the walk's frames to a block of its allocator that holds `want` of them, or returns false.
-@(private, cold)
-frames_room :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), want: u64) -> bool {
-	context = w.ctx^
-	size := int(want) * size_of(Frame)
-	block: []u8
-	err: runtime.Allocator_Error
-	if w.owned {
-		block, err = runtime.non_zero_mem_resize(w.frames, int(w.room) * size_of(Frame), size, align_of(Frame), w.allocator)
-	} else {
-		block, err = runtime.mem_alloc_non_zeroed(size, align_of(Frame), w.allocator)
-	}
-	// A nil allocator gives no memory and no error.
-	if err != nil || block == nil {
-		return false
-	}
-	if !w.owned {
-		intrinsics.mem_copy_non_overlapping(raw_data(block), w.frames, int(w.depth) * size_of(Frame))
-	}
-	w.frames, w.owned, w.room = ([^]Frame)(raw_data(block)), true, want
-	return true
-}
-
-@(private, cold)
-frames_free :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX)) {
-	context = w.ctx^
-	runtime.mem_free_with_size(w.frames, int(w.room) * size_of(Frame), w.allocator)
+// The fault of an element opened at `p` past the depth the walk holds, `.None` once the frames and the hook's levels
+// hold twice the levels, up to the limit. An element under `d` others is read with the hook's levels when the walk
+// started and `d` elements open in the hook.
+@(private)
+deepen :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), hs: ^hook.Regs, p: [^]u8) -> tape.Fault_Kind {
+	return tape.Fault_Kind(hook.deepen(w, hs, int(w.opened), at(w, p)))
 }
 
 // Whether `[p, q)` holds a CR.
@@ -642,11 +601,11 @@ st_start :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk
 		}
 	}
 	if d > 0 {
-		if r, done := open_content(w, on, &hs, &w.frames[d - 1], d, p); done {
+		if r, done := open_content(w, on, &hs, &w.stack[d - 1], d, p); done {
 			return r
 		}
 	}
-	w.frames[d] = Frame{tag = p, name_n = u16(name_n)}
+	w.stack[d] = Frame{tag = p, name_n = u16(name_n)}
 	w.nattr = 0
 	w.tag_ns = colon
 	if r := emit(w, on, &hs, .String, .Key, at(w, p) + 1, name_n); r != .Next {
@@ -738,6 +697,18 @@ st_attributes :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: 
 	}
 }
 
+// Whether walk `w` gives the hook no value of the element it reads: one the hook skipped at its key, or one inside an
+// element it mutes.
+@(private)
+passing :: #force_inline proc "contextless" (w: ^Walk($H, $LAX)) -> bool {
+	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
+	when .Skips in C {
+		return w.mute != 0 || w.skip_value
+	} else {
+		return false
+	}
+}
+
 // Adds the attribute name at `name` to the tag's names. Returns `.Bad_Char` when the tag already has it, `NO_MEMORY`
 // when the names cannot be held, else `.None`.
 @(private)
@@ -820,7 +791,7 @@ table_put :: proc "contextless" (table: [^]Name_Ref, cap: u64, name: [^]u8, n: u
 // `p` is at the `>` that ends the start tag of the element with `e` open elements. Its content follows.
 @(private, enable_target_feature = STATE_FEATURES)
 st_open_done :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Walk($H, $LAX), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> u64 {
-	f := &w.frames[e - 1]
+	f := &w.stack[e - 1]
 	n := intrinsics.ptr_sub(p[1:], f.tag)
 	if n > int(max(u32)) {
 		return fault(w, {s0, s1, s2}, p, .Too_Wide)
@@ -864,8 +835,8 @@ st_empty_done :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: 
 		table_free(w)
 	}
 	if w.tag_ns {
-		if kind, d := tag_names(w, w.frames[e - 1].tag, p); kind != .None {
-			return fault(w, hs, w.frames[e - 1].tag, kind, d)
+		if kind, d := tag_names(w, w.stack[e - 1].tag, p); kind != .None {
+			return fault(w, hs, w.stack[e - 1].tag, kind, d)
 		}
 	}
 	if x := emit(w, on, &hs, .Null, .Value, at(w, p), 0); x != .Next {
@@ -887,7 +858,7 @@ st_closed :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Wal
 	if e == 1 {
 		return #must_tail st_epilog(p, end, e, w, s0, s1, s2, on)
 	}
-	f := &w.frames[e - 2]
+	f := &w.stack[e - 2]
 	f.text_lo = at(w, p)
 	f.flags -= {.Seen, .Decode, .Chars, .Dtd}
 	f.flags += {.Prev}
@@ -908,7 +879,7 @@ st_content :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Wa
 	q := kernel.skip_ws(p, end)
 	// The flags of a text run say how its token is spelled, which a walk with no hook gives none of.
 	when H != hook.No_Hooks {
-		f := &w.frames[d - 1]
+		f := &w.stack[d - 1]
 		if q > p {
 			f.flags += {.Chars}
 		}
@@ -976,7 +947,7 @@ st_bang :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 	if r.kind != .None {
 		return run_fault(w, {s0, s1, s2}, r)
 	}
-	f := &w.frames[d - 1]
+	f := &w.stack[d - 1]
 	f.flags += {.Seen, .Decode}
 	if r.q > p[len(CDATA):] {
 		f.flags += {.Chars}
@@ -996,7 +967,7 @@ st_misc :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 	if r.kind != .None {
 		return run_fault(w, hs, r)
 	}
-	f := &w.frames[d - 1]
+	f := &w.stack[d - 1]
 	f.flags += {.Decode}
 	if has_ws(p, q) {
 		f.flags += {.Chars}
@@ -1029,7 +1000,7 @@ has_ws :: #force_no_inline proc "contextless" (p, q: [^]u8) -> bool #no_bounds_c
 		if kernel.is_ws(x[0]) {
 			return true
 		}
-		e := markup_end(x, q)
+		e, _ := markup_end(x, q)
 		x = e if e > x else x[1:]
 	}
 	return false
@@ -1041,7 +1012,7 @@ has_ws :: #force_no_inline proc "contextless" (p, q: [^]u8) -> bool #no_bounds_c
 @(private, enable_target_feature = STATE_FEATURES)
 st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($H, $LAX), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> u64 {
 	hs := hook.Regs{s0, s1, s2}
-	f := &w.frames[d - 1]
+	f := &w.stack[d - 1]
 	n := int(f.name_n)
 	name := f.tag[1:]
 	room := intrinsics.ptr_sub(end, p[2:])
@@ -1082,11 +1053,16 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 			}
 		}
 		when H != hook.No_Hooks {
-			lo := f.text_lo
-			// A run of white space alone is no text run, so no scan judged its line ends.
-			decode := .Decode in f.flags || .Seen not_in f.flags && has_cr(w.base[lo:], p)
-			if x := emit_text(w, on, &hs, f, lo, int(at(w, p) - lo), decode); x != .Next {
-				return refused(w, hs, x, p)
+			if passing(w) {
+				// The text of an element the hook skipped at its key gives no token.
+				w.skip_value = false
+			} else {
+				lo := f.text_lo
+				// A run of white space alone is no text run, so no scan judged its line ends.
+				decode := .Decode in f.flags || .Seen not_in f.flags && has_cr(w.base[lo:], p)
+				if x := emit_text(w, on, &hs, f, lo, int(at(w, p) - lo), decode); x != .Next {
+					return refused(w, hs, x, p)
+				}
 			}
 		}
 	}

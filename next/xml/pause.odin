@@ -1,7 +1,6 @@
 package xml
 
 import "base:intrinsics"
-import "base:runtime"
 import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
@@ -59,7 +58,7 @@ pause_due :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), p, end: [^]u8
 pause_content :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), p, end: [^]u8, d: u64, hs: hook.Regs) -> (result: u64, stop: bool) {
 	pc := w.pause
 	if d >= pc.floor {
-		units_frame(&pc.units, w.base, at(w, end))
+		units_frame(&pc.units, w.base, at(w, end), true)
 		if at(w, p) < pc.units.whole {
 			return 0, false
 		}
@@ -72,7 +71,7 @@ pause_content :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), p, end
 @(private, cold)
 pause_member :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), q: [^]u8, hs: hook.Regs) -> u64 {
 	hs := hs
-	if r, done := open_content(w, on, &hs, &w.frames[0], 1, q); done {
+	if r, done := open_content(w, on, &hs, &w.stack[0], 1, q); done {
 		return r
 	}
 	return paused(w, hs, .Member, q, 1)
@@ -96,17 +95,10 @@ st_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Wal
 			return fault(w, hs, p, kind)
 		}
 	}
-	w.frames[d] = Frame{tag = p, name_n = u16(name_n)}
+	w.stack[d] = Frame{tag = p, name_n = u16(name_n)}
 	w.nattr = 0
 	w.tag_ns = colon
 	return #must_tail st_attributes(q, end, d + 1, w, hs.a, hs.b, hs.c, on)
-}
-
-// Gives walk `w`, kept past the call that reads it, what that call lends it: the text's base, the frames and the hook
-// with its registers, and the context its allocator is called in. The call takes them back before it returns.
-@(private)
-walk_bind :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), base: [^]u8, frames: [^]Frame, h: ^H, regs: ^hook.Regs, ctx: ^runtime.Context) {
-	w.base, w.frames, w.hooks, w.regs, w.ctx = base, frames, h, regs, ctx
 }
 
 // Goes on with walk `w` over `src`, which ends at `end` past the place it paused at, for the hook from registers `hs`.
@@ -161,11 +153,34 @@ Unit_State :: enum u8 {
 	Subset_Pi,
 }
 
-// Frames the units of `base` from `u.at` up to `to`.
+// The bytes that end a run of a start tag outside a quote: `>` and the quotes.
+@(private, rodata)
+TAG_STOP := [256]bool{'>' = true, '"' = true, '\'' = true}
+
 @(private)
-units_frame :: proc "contextless" (u: ^Units, base: [^]u8, to: u64) #no_bounds_check {
+MAX_BACKOFF :: 16
+
+// The states `units_block` frames from.
+@(private)
+BLOCK_STATES :: bit_set[Unit_State]{.Text, .End_Tag, .Tag}
+
+// Frames the units of `base` from `u.at` up to `to`, with `BLOCKS` a block at a time where `units_block` takes one, and
+// otherwise byte by byte, as the test of the two compares them.
+@(private)
+units_frame :: proc "contextless" (u: ^Units, base: [^]u8, to: u64, $BLOCKS: bool) #no_bounds_check {
 	i := u.at
+	// The byte machine below reads on past a block `units_block` failed to take, for as many blocks as its failures in a
+	// row, up to `MAX_BACKOFF`, so a text of quotes in every block pays for few attempts.
+	retry, backoff := u64(0), u64(1)
 	for i < to {
+		if BLOCKS && i >= retry && i > 0 && to - i >= 64 && u.state in BLOCK_STATES {
+			if units_block(u, base, i) {
+				i += 64
+				backoff = 1
+				continue
+			}
+			retry, backoff = i + 64 * backoff, min(2 * backoff, MAX_BACKOFF)
+		}
 		b := base[i]
 		switch u.state {
 		case .Text:
@@ -213,20 +228,35 @@ units_frame :: proc "contextless" (u: ^Units, base: [^]u8, to: u64) #no_bounds_c
 				u.quote, u.n = 0, 0
 			}
 		case .Tag:
-			if u.quote != 0 {
-				if b == u.quote {
-					u.quote = 0
+			// A tag's bytes are read to the one that changes the state: a quote, or the `>` outside one.
+			if u.quote == 0 {
+				for i < to && !TAG_STOP[base[i]] {
+					i += 1
 				}
-			} else if b == '"' || b == '\'' {
-				u.quote = b
-			} else if b == '>' {
+			} else {
+				for i < to && base[i] != u.quote {
+					i += 1
+				}
+			}
+			if i >= to {
+				continue
+			}
+			if u.quote != 0 {
+				u.quote = 0
+			} else if c := base[i]; c == '>' {
 				u.rooted = true
 				unit_end(u, i + 1, false)
+			} else {
+				u.quote = c
 			}
 		case .End_Tag:
-			if b == '>' {
-				unit_end(u, i + 1, false)
+			for i < to && base[i] != '>' {
+				i += 1
 			}
+			if i >= to {
+				continue
+			}
+			unit_end(u, i + 1, false)
 		case .Comment, .Subset_Comment:
 			if b == '>' && u.n >= 2 {
 				if u.state == .Comment {
@@ -299,6 +329,65 @@ units_frame :: proc "contextless" (u: ^Units, base: [^]u8, to: u64) #no_bounds_c
 		i += 1
 	}
 	u.at = i
+}
+
+// Frames the 64 bytes at `i`, in the state `Text`, `End_Tag` or `Tag` outside a quote, in one step when they hold no
+// quote and no `<!` or `<?` that a tag's reading depends on, and no `<` as the last byte, whose next byte is the next
+// block's. Only the `<` and `>` bytes move the state then, in text order. Returns false for any other block, which the
+// byte machine reads.
+@(private)
+units_block :: #force_inline proc "contextless" (u: ^Units, base: [^]u8, i: u64) -> bool #no_bounds_check {
+	if u.state == .Tag && u.quote != 0 {
+		return false
+	}
+	b := kernel.load(base[i:])
+	quotes := kernel.either(kernel.eq(b, '"'), kernel.eq(b, '\''))
+	opens := kernel.either(kernel.eq(b, '!'), kernel.eq(b, '?'))
+	m := kernel.pack_n([4]kernel.Block{kernel.eq(b, '<'), kernel.eq(b, '>'), quotes, opens})
+	lt, gt := m[0], m[1]
+	in_tag := u.state != .Text
+	// A `<` the last block ended with has its next byte here.
+	opened := lt << 1 | u64(base[i - 1] == '<')
+	if opened & m[3] != 0 || lt >> 63 != 0 || m[2] != 0 && (in_tag || lt != 0) {
+		return false
+	}
+	end_tag := u.state == .End_Tag
+	// With the root's start tag read, a block whose `<` and `>` alternate from its first state is framed by its last
+	// `>` and its last `<`, with no loop over them: `inside` has a bit set in each byte of a tag.
+	inside := kernel.prefix_xor(kernel.Tier(0), lt | gt)
+	if in_tag {
+		inside = ~inside
+	}
+	if u.rooted && lt & ~inside == 0 && gt & inside == 0 {
+		if gt != 0 {
+			u.whole = i + 64 - u64(intrinsics.count_leading_zeros(gt))
+		}
+		if lt != 0 {
+			end_tag = base[i + 63 - u64(intrinsics.count_leading_zeros(lt)) + 1] == '/'
+			if !end_tag {
+				u.quote = 0
+			}
+		}
+		u.state = .Text if inside >> 63 == 0 else .End_Tag if end_tag else .Tag
+		return true
+	}
+	for ev := lt | gt; ev != 0; ev &= ev - 1 {
+		k := intrinsics.count_trailing_zeros(ev)
+		if !in_tag {
+			if lt >> k & 1 != 0 {
+				in_tag, end_tag = true, base[i + k + 1] == '/'
+				if !end_tag {
+					u.quote = 0
+				}
+			}
+		} else if gt >> k & 1 != 0 {
+			in_tag = false
+			u.rooted ||= !end_tag
+			u.whole = i + k + 1
+		}
+	}
+	u.state = .Text if !in_tag else .End_Tag if end_tag else .Tag
+	return true
 }
 
 // Ends the unit whose construct ends before `at`. A comment or instruction (`misc`) leaves `whole` to the unit after it.

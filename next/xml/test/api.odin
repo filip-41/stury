@@ -20,12 +20,12 @@ xml_alone_serves_a_program :: proc(t: ^testing.T) {
 	name, ok := xml.node_text(&doc, at, buf[:])
 	testing.expect(t, p == .Found && ok && name == "stury")
 	attributes := 0
-	for f in doc.facts {
-		if f.node == r && f.kind == .Attribute {
+	for f in xml.facts_of(&doc, r) {
+		if f.kind == .Attribute {
 			k, v := xml.attribute(&doc, f)
 			key, _ := xml.node_text(doc.format, doc.src, k, buf[:])
 			testing.expect_value(t, key, "id")
-			value, _ := xml.node_text(doc.format, doc.src, v, buf[:], doc.allocator)
+			value, _ := xml.node_text(&doc, v, buf[:])
 			testing.expect_value(t, value, "7")
 			attributes += 1
 		}

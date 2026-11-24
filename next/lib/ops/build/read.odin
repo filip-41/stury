@@ -195,3 +195,9 @@ node_most :: #force_inline proc "contextless" (bound: u64, opts: tape.Options) -
 read_depth :: #force_inline proc "contextless" (opts: tape.Options) -> u64 {
 	return u64(opts.budget.depth) if opts.budget.depth != 0 else tape.DEFAULT_DEPTH
 }
+
+// One more than the containers a read under `opts` may open within `Budget.steps`, which its walk counts down, and the
+// most a `u64` holds for no limit.
+read_steps :: #force_inline proc "contextless" (opts: tape.Options) -> u64 {
+	return opts.budget.steps + 1 if opts.budget.steps != 0 && opts.budget.steps < max(u64) else max(u64)
+}

@@ -4,6 +4,7 @@ package xml_tests
 
 import "core:fmt"
 import "core:math/rand"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "stury:lib/core/tape"
@@ -21,17 +22,17 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(RECORD_TEXT)
 	r := xml.records_open(src)
 	out: [2]tape.Record
-	n := xml.records_validate(&r, out[:])
-	testing.expect_value(t, n, 1)
+	testing.expect_value(t, xml.records_validate(&r, out[:]), 0)
+	testing.expect_value(t, r.index, 1)
 	testing.expect_value(t, r.err, nil)
-	testing.expect_value(t, out[0].err, nil)
-	testing.expect_value(t, out[0].lo, 0)
-	testing.expect_value(t, out[0].hi, u64(len(src)))
 
 	path := []tape.Step{tape.Name("a"), tape.Name("b")}
 	f := xml.records_open(src)
 	answers: [2]tape.Span_Answer
 	testing.expect_value(t, xml.records_find(&f, path, out[:], answers[:]), 1)
+	testing.expect_value(t, out[0].err, nil)
+	testing.expect_value(t, out[0].lo, 0)
+	testing.expect_value(t, out[0].hi, u64(len(src)))
 	testing.expect_value(t, string(src[answers[0].lo:answers[0].hi]), "1")
 	whole, _ := xml.find(src, path)
 	testing.expect_value(t, answers[0], whole)
@@ -45,12 +46,11 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, text_of(&docs[0], at), "1")
 	testing.expect_value(t, s.err, nil)
 
-	chosen, err := xml.reads(.Xml).records(xml.as(.Xml), src, .Concatenated, {}, context.allocator)
+	chosen, err := xml.reads(.Xml).records(xml.as(.Xml), src, .Concatenated, {}, nil, context.allocator)
 	testing.expect_value(t, err, nil)
 	defer tape.destroy_records(chosen)
-	testing.expect_value(t, tape.records_validate(chosen, out[:]), 1)
-	testing.expect_value(t, out[0].hi, u64(len(src)))
 	testing.expect_value(t, tape.records_validate(chosen, out[:]), 0)
+	testing.expect_value(t, chosen.index, 1)
 	testing.expect_value(t, chosen.err, nil)
 }
 
@@ -63,12 +63,14 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	out: [2]tape.Record
 	empty := xml.records_open(nil)
 	testing.expect_value(t, xml.records_validate(&empty, out[:]), 0)
+	testing.expect_value(t, empty.index, 0)
 	testing.expect_value(t, empty.err, nil)
 
 	src := transmute([]u8)string("<a/><b>1</b>")
 	r := xml.records_open(src)
 	r.pos = 4
-	testing.expect_value(t, xml.records_validate(&r, out[:]), 1)
+	answers: [2]tape.Span_Answer
+	testing.expect_value(t, xml.records_find(&r, {}, out[:], answers[:]), 1)
 	testing.expect_value(t, out[0].lo, 4)
 	testing.expect_value(t, out[0].hi, u64(len(src)))
 	testing.expect_value(t, out[0].err, nil)
@@ -89,10 +91,9 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	strings.write_string(&big, "</r>")
 	whole := transmute([]u8)strings.to_string(big)
 	w := xml.records_open(whole)
-	testing.expect_value(t, xml.records_validate(&w, out[:]), 1)
-	testing.expect_value(t, out[0].hi, u64(len(whole)))
-	testing.expect_value(t, out[0].err, nil)
 	testing.expect_value(t, xml.records_validate(&w, out[:]), 0)
+	testing.expect_value(t, w.index, 1)
+	testing.expect_value(t, w.err, nil)
 }
 
 // The records refuse the options they cannot take before any is read.
@@ -105,9 +106,8 @@ records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 		r := xml.records_open(src, framing)
 		testing.expect(t, xml.records_validate(&r, out[:]) == 0 && r.err == tape.Error(tape.Bad_Option{"framing"}))
 	}
-	pieces: tape.Pieces
-	p := xml.records_open(src, .Members, opts = {pieces = &pieces})
-	testing.expect(t, xml.records_validate(&p, out[:]) == 0 && p.err == tape.Error(tape.Bad_Option{"pieces"}))
+	at := xml.records_open(src, .Members, path = {tape.Name("a")})
+	testing.expect(t, xml.records_validate(&at, out[:]) == 0 && at.err == tape.Error(tape.Bad_Option{"path"}))
 }
 
 // The records of `src` under `.Members`, each as its offsets, key and document, and how they ended, one line each.
@@ -116,7 +116,7 @@ member_lines :: proc(src: string, opts := xml.Options{}) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	whole, _ := xml.demand_of([][]tape.Step{{}}, nil, nil, true, context.temp_allocator)
 	r := xml.records_open(transmute([]u8)src, .Members, opts = opts)
-	defer xml.records_close(&r)
+	defer tape.destroy_records(&r)
 	out: [2]tape.Record
 	docs: [2]tape.Document
 	for {
@@ -171,7 +171,7 @@ members_agree_with_the_whole_document :: proc(t: ^testing.T) {
 			out: [64]tape.Record
 			docs: [64]tape.Document
 			n := xml.records_scan(&r, &whole_demand, out[:], docs[:], {}, context.temp_allocator)
-			xml.records_close(&r)
+			tape.destroy_records(&r)
 			if berr != nil {
 				testing.expectf(t, r.err == berr, "%q: records end %v, build %v", text, r.err, berr)
 				continue
@@ -190,19 +190,68 @@ members_agree_with_the_whole_document :: proc(t: ^testing.T) {
 				testkit.render_node(&b, &doc, value)
 				got := testkit.render_doc(&docs[k])
 				testing.expectf(t, got == strings.to_string(b) && out[k].key.lo == key.lo && out[k].key.n == key.n, "%q member %d: %s %v, whole %s %v", text, k, got, out[k].key, strings.to_string(b), key)
-				// An instruction marks the node after it, which past an element's last child the whole document has
-				// outside the element and a record has not, so instructions are left out.
-				facts, got_facts := 0, 0
+				// Each fact of the member's nodes, at the same node of the record, which starts at the member's value.
+				facts := make([dynamic]tape.Fact, context.temp_allocator)
 				for f in doc.facts {
-					facts += int(int(f.node) >= value && int(f.node) < next && f.kind != .Instruction)
+					if int(f.node) >= value && int(f.node) < next {
+						placed := f
+						placed.node -= tape.Node_Index(value)
+						append(&facts, placed)
+					}
 				}
-				for f in docs[k].facts {
-					got_facts += int(f.kind != .Instruction)
-				}
-				testing.expectf(t, got_facts == facts, "%q member %d: %d facts, whole %d", text, k, got_facts, facts)
+				testing.expectf(t, slice.equal(docs[k].facts, facts[:]), "%q member %d: facts %v, whole %v", text, k, docs[k].facts, facts[:])
 				at = next
 			}
 			testing.expectf(t, k == n, "%q: %d records, %d members", text, n, k)
 		}
 	}
+}
+
+// The members of a long text read in pieces in small windows, each from the last one's `keep`, need no window much
+// longer than a member: the records keep no byte of the members they gave. A text with an internal subset keeps it,
+// as every read in pieces does.
+@(test)
+members_in_pieces_keep_only_the_member_being_read :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `<?xml version="1.0"?><!DOCTYPE r SYSTEM "r.dtd"><r xmlns:n="u">`)
+	for i in 0 ..< 2000 {
+		fmt.sbprintf(&b, `<n:m k="%d">&#65;%d</n:m> t`, i, i)
+	}
+	strings.write_string(&b, "</r>")
+	src := transmute([]u8)strings.to_string(b)
+	p := tape.Pieces{allocator = context.allocator}
+	defer tape.destroy(&p)
+	WINDOW :: 64
+	end := WINDOW
+	r := xml.records_open(src[:end], .Members, opts = {pieces = &p})
+	defer tape.destroy_records(&r)
+	out: [8]tape.Record
+	answers: [8]tape.Span_Answer
+	read, longest := 0, 0
+	for {
+		for {
+			n := xml.records_find(&r, {tape.Name("#text")}, out[:], answers[:])
+			read += n
+			if n < len(out) {
+				break
+			}
+		}
+		if !p.more || p.last {
+			break
+		}
+		end = min(int(p.keep) + WINDOW, len(src))
+		for end <= int(p.at) {
+			end += 1
+		}
+		longest = max(longest, end - int(p.keep))
+		p.from, p.last = p.keep, end == len(src)
+		if !testing.expect_value(t, xml.records_window(&r, src[p.keep:end]), nil) {
+			return
+		}
+	}
+	testing.expect_value(t, r.err, nil)
+	testing.expect_value(t, read, 4000)
+	testing.expectf(t, longest < 200, "a window of %d bytes", longest)
 }

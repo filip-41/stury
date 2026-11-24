@@ -1,6 +1,7 @@
 // The document an XML text builds and the reads over it: values, text, attributes, namespaces and paths.
 package xml_tests
 
+import "core:fmt"
 import "core:strings"
 import "core:testing"
 import "stury:lib/core/tape"
@@ -155,18 +156,17 @@ names_and_content_are_facts :: proc(t: ^testing.T) {
 	a, _ := member_at(&doc, {"a"})
 	b, _ := member_at(&doc, {"a", "b"})
 	testing.expect_value(t, text_of(&doc, b - 1), "b")
-	buf: [16]u8
-	ns, has := xml.namespace(&doc, b, buf[:])
-	testing.expect_value(t, has, true)
+	ns, p := xml.namespace(&doc, b)
+	testing.expect_value(t, p, tape.Presence.Found)
 	testing.expect_value(t, ns, "u")
 	content, cok := xml.content(&doc, b, context.temp_allocator)
 	testing.expect_value(t, cok, true)
 	testing.expect_value(t, content, "xyz")
 	c, found := xml.member(reader(&doc), b, "p:c")
 	testing.expect_value(t, found, tape.Presence.Found)
-	ns, _ = xml.namespace(&doc, c, buf[:])
+	ns, _ = xml.namespace(&doc, c)
 	testing.expect_value(t, ns, "v")
-	ns, _ = xml.namespace(&doc, a, buf[:])
+	ns, _ = xml.namespace(&doc, a)
 	testing.expect_value(t, ns, "u")
 }
 
@@ -183,8 +183,9 @@ a_name_reads_as_written_and_its_namespace_by_place :: proc(t: ^testing.T) {
 	got, found := xml.member(r, feed, "x:entry")
 	testing.expect_value(t, found, tape.Presence.Found)
 	testing.expect_value(t, text_of(&doc, got), "2")
-	_, found = xml.member(r, feed, "{http://x}entry")
-	testing.expect_value(t, found, tape.Presence.Missing)
+	got, found = xml.member(r, feed, "{http://x}entry")
+	testing.expect_value(t, found, tape.Presence.Found)
+	testing.expect_value(t, text_of(&doc, got), "2")
 	c, _ := xml.named(r, feed, "entry")
 	want := [?]struct {
 		text, uri: string,
@@ -192,17 +193,142 @@ a_name_reads_as_written_and_its_namespace_by_place :: proc(t: ^testing.T) {
 	for w in want {
 		_, v, p := xml.next_child(r, &c)
 		testing.expect_value(t, p, tape.Presence.Found)
-		buf: [16]u8
-		uri, _ := xml.namespace(&doc, v, buf[:])
+		uri, in_ns := xml.namespace(&doc, v)
 		testing.expect_value(t, text_of(&doc, v), w.text)
 		testing.expect_value(t, uri, w.uri)
+		testing.expect_value(t, in_ns, tape.Presence.Found if len(w.uri) > 0 else .Missing)
 	}
 	_, _, p := xml.next_child(r, &c)
 	testing.expect_value(t, p, tape.Presence.Missing)
 	x, _ := xml.member(r, feed, "x:entry")
-	buf: [16]u8
-	uri, _ := xml.namespace(&doc, x, buf[:])
+	uri, _ := xml.namespace(&doc, x)
 	testing.expect_value(t, uri, "http://x")
+}
+
+// A partial document reads the namespace of an element when its facts hold the declarations around it, and otherwise
+// says it did not keep them: a scan with no facts, and a member record for a prefix the root binds.
+@(test)
+a_partial_document_says_when_it_lacks_a_namespace :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string(`<r xmlns="d" xmlns:p="u"><a q="1"><p:b xmlns:s="w"><s:c/><e xmlns=""/></p:b></a></r>`)
+	Want :: struct {
+		a, b, c, e: tape.Presence,
+	}
+	found := Want{.Found, .Found, .Found, .Missing}
+	check :: proc(t: ^testing.T, doc: ^tape.Document, want: Want, member := false, loc := #caller_location) {
+		names := [?]string{"a", "p:b", "s:c", "e"}
+		uris := [?]string{"d", "u", "w", ""}
+		wants := [?]tape.Presence{want.a, want.b, want.c, want.e}
+		for name, i in names {
+			// A member's record holds its member as its root, with no key.
+			at := xml.ROOT if member && name == "a" else xml.NO_NODE
+			for n, k in doc.nodes {
+				if n.role == .Key && string(doc.src[n.lo:][:n.n]) == name {
+					at = xml.Node_Index(k + 1)
+				}
+			}
+			uri, p := xml.namespace(doc, at)
+			testing.expectf(t, p == wants[i], "%s: %v, want %v", name, p, wants[i], loc = loc)
+			testing.expect_value(t, uri, uris[i] if p == .Found else "", loc = loc)
+		}
+	}
+	doc, ok := built(t, string(src))
+	if !ok {
+		return
+	}
+	check(t, &doc, found)
+	for facts in ([]bool{false, true}) {
+		d, _ := xml.demand_of({{xml.Name("r"), xml.Name("a")}}, facts = facts, allocator = context.temp_allocator)
+		scanned, err := xml.scan(src, &d)
+		testing.expect_value(t, err, nil)
+		check(t, &scanned, found if facts else {.Not_Loaded, .Not_Loaded, .Not_Loaded, .Not_Loaded})
+		xml.destroy(&scanned)
+		pieces := tape.Pieces{last = true}
+		held, herr := xml.scan(src, &d, .Xml, {}, {pieces = &pieces})
+		testing.expect_value(t, herr, nil)
+		check(t, &held, found if facts else {.Not_Loaded, .Not_Loaded, .Not_Loaded, .Not_Loaded})
+		xml.destroy(&held)
+		tape.destroy(&pieces)
+	}
+	whole, _ := xml.demand_of({{}}, facts = true, allocator = context.temp_allocator)
+	for framing in ([]tape.Framing{.Concatenated, .Members}) {
+		r := xml.records_open(src, framing)
+		out: [1]xml.Record
+		docs: [1]xml.Document
+		testing.expect_value(t, xml.records_scan(&r, &whole, out[:], docs[:]), 1)
+		testing.expect_value(t, out[0].err, nil)
+		check(t, &docs[0], found if framing == .Concatenated else {.Not_Loaded, .Not_Loaded, .Found, .Missing}, framing == .Members)
+		xml.destroy(&docs[0])
+		tape.destroy_records(&r)
+	}
+}
+
+// A name in `{uri}local` form reads an element by its namespace and local name, through the readers of a document and
+// of a scan's document where its facts hold the declarations. A path read refuses it.
+@(test)
+an_expanded_name_reads_an_element_by_its_namespace :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	text := `<!DOCTYPE r [<!ENTITY u "urn:&#x75;">]><r xmlns:p="urn:p" xmlns:q="urn&#x3A;p"><p:a>1</p:a><q:a>2</q:a><a>3</a><b xmlns="&u;"><a>4</a></b><p:a xmlns:p="urn:other">5</p:a></r>`
+	doc, ok := built(t, text)
+	if !ok {
+		return
+	}
+	rd := reader(&doc)
+	r, _ := member_at(&doc, {"r"})
+	b, _ := member_at(&doc, {"r", "b"})
+	Want :: struct {
+		at:   tape.Node_Index,
+		name: string,
+		text: string,
+	}
+	for w in ([]Want{{r, "{urn:p}a", "1"}, {r, "{}a", "3"}, {r, "{urn:other}a", "5"}, {b, "{urn:u}a", "4"}, {r, "{urn:u}b", ""}}) {
+		got, p := xml.member(rd, w.at, w.name)
+		testing.expectf(t, p == .Found && text_of(&doc, got) == w.text, "%s: %v", w.name, p)
+	}
+	_, p := xml.member(rd, r, "{urn:q}a")
+	testing.expect_value(t, p, tape.Presence.Missing)
+	_, p = xml.member(rd, r, "{urn:p}a}")
+	testing.expect_value(t, p, tape.Presence.Missing)
+	uri, bound := xml.namespace(&doc, b)
+	testing.expect_value(t, bound, tape.Presence.Found)
+	testing.expect_value(t, uri, "urn:u")
+	c, named := xml.named(rd, r, "{urn:p}a")
+	testing.expect_value(t, named, tape.Presence.Found)
+	texts: [dynamic]string
+	texts.allocator = context.temp_allocator
+	for {
+		_, v, vp := xml.next_child(rd, &c)
+		if vp != .Found {
+			break
+		}
+		append(&texts, text_of(&doc, v))
+	}
+	testing.expect_value(t, strings.join(texts[:], " ", context.temp_allocator), "1 2")
+	src := transmute([]u8)text
+	for facts in ([]bool{false, true}) {
+		d, _ := xml.demand_of({{xml.Name("r")}}, facts = facts, allocator = context.temp_allocator)
+		scanned, err := xml.scan(src, &d)
+		testing.expect_value(t, err, nil)
+		sr, _ := member_at(&scanned, {"r"})
+		got, sp := xml.member(reader(&scanned), sr, "{urn:p}a")
+		testing.expect_value(t, sp, tape.Presence.Found if facts else .Not_Loaded)
+		if facts {
+			testing.expect_value(t, text_of(&scanned, got), "1")
+		}
+		xml.destroy(&scanned)
+	}
+	path := []tape.Step{xml.Name("r"), xml.Name("{urn:p}a")}
+	_, ferr := xml.find(src, path)
+	testing.expect_value(t, ferr, tape.Error(tape.Bad_Option{"path"}))
+	d, _ := xml.demand_of({path}, allocator = context.temp_allocator)
+	_, serr := xml.scan(src, &d)
+	testing.expect_value(t, serr, tape.Error(tape.Bad_Option{"path"}))
+	records := xml.records_open(src)
+	defer tape.destroy_records(&records)
+	out: [1]xml.Record
+	answers: [1]tape.Span_Answer
+	testing.expect_value(t, xml.records_find(&records, path, out[:], answers[:]), 0)
+	testing.expect_value(t, records.err, tape.Error(tape.Bad_Option{"path"}))
 }
 
 @(test)
@@ -258,11 +384,11 @@ an_attribute_fact_holds_its_value_between_its_markers :: proc(t: ^testing.T) {
 	a, _ := member_at(&doc, {"a"})
 	bodies := make([dynamic]string, context.temp_allocator)
 	values := make([dynamic]tape.Token, context.temp_allocator)
-	for f in doc.facts {
-		if f.node != a || f.kind != .Attribute {
+	for f in xml.facts_of(&doc, a) {
+		if f.kind != .Attribute {
 			continue
 		}
-		lead, tail := u64(f.spelling & 0xFF), u64(f.spelling >> 8 & 0xFF)
+		lead, tail := tape.fact_lead(f.spelling), tape.fact_tail(f.spelling)
 		append(&bodies, string(doc.src[f.lo + lead:f.lo + u64(f.n) - tail]))
 		name, value := xml.attribute(&doc, f)
 		testing.expect_value(t, name.role, tape.Role.Key)
@@ -362,4 +488,23 @@ a_repeated_name_reads_as_a_group_of_its_elements :: proc(t: ^testing.T) {
 	last, p := xml.member(reads, r, "b", .Last)
 	testing.expect_value(t, p, tape.Presence.Found)
 	testing.expect_value(t, text_of(&doc, last), "x")
+}
+
+// An instruction after an element's last child is the element's foot, as a comment there is, one before an element
+// marks it, and one past the root element is the document's foot.
+@(test)
+an_instruction_after_the_last_child_is_its_elements_foot :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, ok := built(t, "<r><a><b>1</b><?p d?>\n<!--c--></a><?q e?><c/></r><?z?>")
+	if !ok {
+		return
+	}
+	a, _ := member_at(&doc, {"r", "a"})
+	c, _ := member_at(&doc, {"r", "c"})
+	b := strings.builder_make(context.temp_allocator)
+	for f in doc.facts {
+		node := "a" if f.node == a else "c" if f.node == c else "root" if f.node == xml.ROOT else "other"
+		fmt.sbprintf(&b, "%v@%s:%s ", f.kind, node, doc.src[f.lo:][:f.n])
+	}
+	testing.expect_value(t, strings.to_string(b), "Instruction_Foot@root:<?z?> Instruction_Foot@a:<?p d?> Comment_Foot@a:<!--c--> Instruction@c:<?q e?> ")
 }

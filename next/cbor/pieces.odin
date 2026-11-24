@@ -375,9 +375,7 @@ piece_walk :: proc "contextless" (src: []u8, $S: Spec, opts: Options, h: ^$H, re
 	when .Walk in C {
 		h.walk = nil
 	}
-	if u8(r) == hook.WALK_STOPPED && w.steps[0] == 0 {
-		r = hook.walk_result(u64(r) >> 16, hook.WALK_STEPS)
-	}
+	r = hook.steps_result(r, w.steps[0])
 	s.steps = w.steps[0]
 	s.tolerated ||= w.tolerated
 	if w.owned {

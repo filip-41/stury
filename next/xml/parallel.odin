@@ -87,7 +87,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 		return {}, nil, false
 	}
 	want := build.chunk_count(opts.runner, len(src))
-	if want < 2 || !prolog_plain(src) {
+	if want < 2 || prolog_doctype(src) {
 		return {}, nil, false
 	}
 	m: hook.Memory_Budget
@@ -155,35 +155,9 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 	}
 	finish :: proc(doc: ^tape.Document, segs: []build.Segment, opts: Options, data: rawptr) -> tape.Error {
 		build.segments_dups(doc, segs, opts.dups, &RULES, opts.runner) or_return
-		if .Attribute in doc.present && !keep_scopes(doc) {
-			tape.destroy(doc)
-			return runtime.Allocator_Error.Out_Of_Memory
-		}
-		return nil
+		return keep_scopes(doc, true)
 	}
 	return build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 0, 0, allocator, caller, walk, finish, &plan)
-}
-
-// Whether the prolog of `src` holds no document type declaration, whose DTD the walk of each part would need.
-@(private)
-prolog_plain :: proc "contextless" (src: []u8) -> bool #no_bounds_check {
-	i := 0
-	for i >= 0 && i < len(src) {
-		k := kernel.index_byte(src[i:], '<')
-		if k < 0 || i + k + 3 >= len(src) {
-			return false
-		}
-		i += k
-		switch {
-		case src[i + 1] == '?':
-			i = misc_close(src, i + 2, '?', 1)
-		case src[i + 1] == '!' && src[i + 2] == '-' && src[i + 3] == '-':
-			i = misc_close(src, i + 4, '-', 2)
-		case:
-			return src[i + 1] != '!'
-		}
-	}
-	return false
 }
 
 // The seam after byte `from` of `src` when `from` lies in content: the byte past the first `</` and the `>` after it,
@@ -261,28 +235,18 @@ part_scan :: proc "contextless" (src: []u8, lo, hi: int, last: bool, locals: []P
 				switch text[at + 1] {
 				case '/':
 					mode, pos = .End, t + 2
-				case '?':
-					s.facts += 1
-					base, pos = misc_close(text, at + 2, '?', 1), 0
-					if base < 0 {
+				case '?', '!':
+					past, closed := markup_end(raw_data(text)[at:], raw_data(text)[hi:])
+					if !closed {
 						return
 					}
-					continue blocks
-				case '!':
-					switch {
-					case at + 3 < hi && text[at + 2] == '-' && text[at + 3] == '-':
-						s.facts += 1
-						base = misc_close(text, at + 4, '-', 2)
-					case at + 2 < hi && text[at + 2] == '[':
+					// A CDATA section is a character of the text, and a comment or an instruction a fact.
+					if text[at + 2] == '[' {
 						chars = true
-						base = misc_close(text, at + 3, ']', 2)
-					case:
-						return
+					} else {
+						s.facts += 1
 					}
-					pos = 0
-					if base < 0 {
-						return
-					}
+					base, pos = intrinsics.ptr_sub(past, raw_data(text)), 0
 					continue blocks
 				case:
 					mode, tag = .Tag, at
@@ -328,25 +292,6 @@ part_scan :: proc "contextless" (src: []u8, lo, hi: int, last: bool, locals: []P
 	}
 	s.ok = last || mode == .Text && past == hi
 	return
-}
-
-// The byte past the `>` that `n` bytes `b` stand just before, from `i`, as a comment, an instruction or a CDATA section
-// ends, or -1 when `text` holds none.
-@(private)
-misc_close :: proc "contextless" (text: []u8, i: int, b: u8, n: int) -> int #no_bounds_check {
-	j := i
-	for j < len(text) {
-		k := kernel.index_byte(text[j:], '>')
-		if k < 0 {
-			return -1
-		}
-		j += k
-		if j - n >= i && text[j - 1] == b && (n == 1 || text[j - 2] == b) {
-			return j + 1
-		}
-		j += 1
-	}
-	return -1
 }
 
 // Carries the open elements of the plan's scans from part to part and plans `parts` from them. False when a scan
@@ -412,25 +357,11 @@ walk_part :: proc(src: []u8, parts: []build.Part, k: int, s: ^build.Segment, opt
 		more  = true,
 		units = {at = u64(p.to), whole = u64(p.to)},
 	}
-	x, _ := opts.format.(tape.Xml_Options)
-	w := Walk(build.Builder, true) {
-		base      = raw_data(src),
-		hooks     = &s.b,
-		frames    = raw_data(frames[:]),
-		regs      = &s.regs,
-		pause     = nil if last else &pause,
-		room      = WALK_LEVELS,
-		limit     = min(plan.limit, MAX_LEVELS),
-		steps     = max(u64),
-		expansion = x.max_expansion,
-		allocator = ctx.allocator,
-		ctx       = &ctx,
-		tier      = kernel.tier(),
-		unread    = .Unread_Entity in opts.tolerate,
-		infer     = x.infer,
-	}
-	w.depth = min(w.limit, WALK_LEVELS, u64(hook.levels_held(&s.b)))
-	w.rooms = hook.rooms_end(&s.b)
+	w: Walk(build.Builder, true)
+	walk_init(&w, opts, plan.limit, max(u64), raw_data(frames[:]))
+	walk_bind(&w, raw_data(src), &s.b, &s.regs, &ctx)
+	w.pause, w.allocator = nil if last else &pause, ctx.allocator
+	w.depth = hook.held_depth(&s.b, &s.regs, min(w.limit, WALK_LEVELS))
 	text, end := src[:p.to], raw_data(src)[p.to:]
 	r: u64
 	if k == 0 {
@@ -468,7 +399,7 @@ seam_frames :: proc "contextless" (w: ^Walk($H, $LAX), opens: []Part_Open, at: u
 		if nf != .None {
 			return false
 		}
-		w.frames[i] = Frame {
+		w.stack[i] = Frame {
 			tag     = tag,
 			text_lo = o.lo + u64(o.tag_n),
 			tag_n   = o.tag_n,
@@ -507,7 +438,7 @@ seam_frames :: proc "contextless" (w: ^Walk($H, $LAX), opens: []Part_Open, at: u
 		}
 	}
 	if len(opens) > 0 {
-		w.frames[len(opens) - 1].text_lo = at
+		w.stack[len(opens) - 1].text_lo = at
 	}
 	return true
 }
@@ -520,10 +451,10 @@ seam_proved :: proc "contextless" (w: ^Walk($H, $LAX), pause: ^Pause, opens: []P
 		return false
 	}
 	for o, i in opens {
-		f := w.frames[i]
+		f := w.stack[i]
 		if f.tag != w.base[o.lo:] || f.tag_n != o.tag_n || f.flags != {.Object, .Prev} {
 			return false
 		}
 	}
-	return w.frames[len(opens) - 1].text_lo == at
+	return w.stack[len(opens) - 1].text_lo == at
 }

@@ -33,7 +33,8 @@ Role :: enum u8 {
 	Tag,
 	Anchor,
 	Alias,
-	Instruction,
+	Instruction, // before the value that follows it
+	Instruction_Foot, // after the last value or in an empty container, on that container
 	Doctype,
 	Directive,
 	Attribute,

@@ -283,7 +283,7 @@ quoted_key :: #force_no_inline proc(p: ^Parser, c: u8) -> (part: Part, ok: bool)
 	if err != nil {
 		return {}, no_memory(p)
 	}
-	text, _ := text_decoded(src, tok, buf, {})
+	text, _ := text_decoded(src, tok, buf, nil)
 	return Part{tok, text}, true
 }
 

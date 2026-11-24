@@ -85,8 +85,8 @@ Attribute :: struct {
 
 attributes_of :: proc(doc: ^tape.Document, at: tape.Node_Index) -> []Attribute {
 	out := make([dynamic]Attribute, context.temp_allocator)
-	for f in doc.facts {
-		if f.node == at && f.kind == .Attribute {
+	for f in xml.facts_of(doc, at) {
+		if f.kind == .Attribute {
 			name, value := xml.attribute(doc, f)
 			append(&out, Attribute{token_text(doc, name), token_text(doc, value)})
 		}
@@ -105,8 +105,8 @@ attribute_value :: proc(doc: ^tape.Document, at: tape.Node_Index, name: string) 
 
 // The text of token `t` of `doc`'s source.
 token_text :: proc(doc: ^tape.Document, t: tape.Token) -> string {
-	buf := make([]u8, max(tape.text_room(doc.format, doc.src, t, doc.allocator), int(t.n)), context.temp_allocator)
-	s, _ := tape.node_text(doc.format, doc.src, t, buf, doc.allocator)
+	buf := make([]u8, max(tape.text_room(doc, t), int(t.n)), context.temp_allocator)
+	s, _ := tape.node_text(doc, t, buf)
 	return s
 }
 
@@ -139,7 +139,7 @@ log_token :: proc "contextless" (r: ^Token_Log, s: hook.Regs, t: tape.Token) -> 
 		name = "Inline"
 	case .Comment_Foot:
 		name = "Foot"
-	case .Instruction, .Doctype, .Directive, .Attribute, .Tag, .Anchor, .Alias:
+	case .Instruction, .Instruction_Foot, .Doctype, .Directive, .Attribute, .Tag, .Anchor, .Alias:
 		name = fmt.tprint(t.role)
 	}
 	if t.spelling & tape.SPELLING_DECODE != 0 && t.role == .Value {

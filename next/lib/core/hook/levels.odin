@@ -5,8 +5,7 @@ import "base:runtime"
 
 // The open levels of a walk and its hook, for the walks that keep them in a frame and move them to memory of their own
 // allocator once an item nests past it. A walk `W` has the fields `stack` (a pointer to its levels), `depth`, `limit`,
-// `room`, `owned`, `allocator`, `ctx`, `hooks` and `rooms`, and takes its hook type, capabilities and the rest as the
-// parameters of its type, the hook's capabilities fourth.
+// `room`, `owned`, `allocator`, `ctx`, `hooks` and `rooms`, and reads the capabilities of its hook's protocol.
 
 // The open levels the hook has room for, at most `room`.
 held_depth :: #force_inline proc "contextless" (h: ^$H, regs: ^Regs, room: u64) -> u64 {
@@ -29,21 +28,27 @@ deepen :: #force_no_inline proc "contextless" (w: ^$W, hs: ^Regs, held: int, at:
 		return WALK_TOO_DEEP
 	}
 	want := min(w.limit, 2 * w.depth + 1)
-	C :: intrinsics.type_polymorphic_record_parameter_value(W, 3)
-	when .Levels in C {
-		if want_held := held + int(want); levels_held(w.hooks) < want_held && !levels_grow(w.hooks, want_held, hs, at) {
-			return WALK_NO_MEMORY
-		}
-	}
-	if want > w.room && !levels_room(w, want) {
+	if !levels_need(w, held + int(want), hs, at) || want > w.room && !levels_room(w, want) {
 		return WALK_NO_MEMORY
-	}
-	when .Rooms in C {
-		// Growing the hook's levels may have grown its room.
-		w.rooms = rooms_end(w.hooks)
 	}
 	w.depth = want
 	return 0
+}
+
+// Makes the hook of walk `w` hold `want` levels for the container at `at`, with its registers `hs`, and moves the
+// walk's `rooms` to the end of the hook's room, which growing the levels may move. False when memory is refused.
+levels_need :: #force_inline proc "contextless" (w: ^$W, want: int, hs: ^Regs, at: u64) -> bool {
+	H :: intrinsics.type_elem_type(intrinsics.type_field_type(W, "hooks"))
+	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, PROTOCOL_FIELD), 0)
+	when .Levels in C {
+		if levels_held(w.hooks) < want && !levels_grow(w.hooks, want, hs, at) {
+			return false
+		}
+		when .Rooms in C {
+			w.rooms = rooms_end(w.hooks)
+		}
+	}
+	return true
 }
 
 // The levels of a walk `W` as `levels_scope` found them.

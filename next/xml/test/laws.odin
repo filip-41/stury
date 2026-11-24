@@ -173,6 +173,37 @@ bare_walk :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe_Bare, regs: ^
 	return at, err
 }
 
+// The walk of a text in two pieces, cut in its middle, the second window from the first read's `keep`.
+@(private = "file")
+probe_walk_in_pieces :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe, regs: ^hook.Regs) -> (u64, tape.Error) {
+	p := tape.Pieces{allocator = context.allocator}
+	defer tape.destroy(&p)
+	o := opts
+	o.pieces = &p
+	at, err, _ := xml.walk(src[:len(src) / 2], .Xml, o, h, regs, testkit.probe_hook)
+	if err != nil || !p.more {
+		return at, err
+	}
+	p.from, p.last = p.keep, true
+	at, err, _ = xml.walk(src[p.keep:], .Xml, o, h, regs, testkit.probe_hook)
+	return at, err
+}
+
+@(private = "file")
+bare_walk_in_pieces :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe_Bare, regs: ^hook.Regs) -> (u64, tape.Error) {
+	p := tape.Pieces{allocator = context.allocator}
+	defer tape.destroy(&p)
+	o := opts
+	o.pieces = &p
+	at, err, _ := xml.walk(src[:len(src) / 2], .Xml, o, h, regs, testkit.bare_hook)
+	if err != nil || !p.more {
+		return at, err
+	}
+	p.from, p.last = p.keep, true
+	at, err, _ = xml.walk(src[p.keep:], .Xml, o, h, regs, testkit.bare_hook)
+	return at, err
+}
+
 // Texts of every kind of content: text, attributes, mixed content, CDATA, references, entities whose text holds
 // markup, comments and instructions in and around the root.
 @(rodata, private = "file")
@@ -186,7 +217,8 @@ PROTOCOL_TEXTS := [?]string {
 	`<!DOCTYPE r [<!ENTITY e "<b>q</b>t"><!ATTLIST r z CDATA "d">]><r>&e;<c>&e;</c></r>`,
 }
 
-// Every XML walk keeps the hook protocol: actions at every token, room and level growth, and `Budget.steps`.
+// Every XML walk, of a whole text and in pieces, keeps the hook protocol: actions at every token, room and level
+// growth, and `Budget.steps`.
 @(test)
 xml_walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -203,6 +235,8 @@ xml_walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 	}
 	testkit.hook_protocol(t, probe_walk, texts[:])
 	testkit.hook_inner_rooms(t, bare_walk, texts[:])
+	testkit.hook_protocol(t, probe_walk_in_pieces, texts[:])
+	testkit.hook_inner_rooms(t, bare_walk_in_pieces, texts[:])
 }
 
 // A hook stops a walk from another thread through a flag.

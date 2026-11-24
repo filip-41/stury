@@ -1,103 +1,28 @@
 package xml
 
 import "base:intrinsics"
+import "base:runtime"
 import "stury:lib/core/tape"
 
 // The DTD's tables: the entities and the attribute-list declarations of the internal subset, a name table over both,
-// and the bytes they name. The walk builds them from the read's allocator while it reads the subset, then seals them
-// into one block, `Dtd_Head` and then the entities, the declarations, the name slots and the bytes, which it reads to
-// the text's end. A decode that needs them reads the subset again, from the allocator the decode is given.
+// and the bytes they name. The walk grows them in the read's allocator while it reads the subset, and reads them to the
+// text's end. A document keeps a copy in its `Markup_Ext`, which its decodes read.
 
 @(private)
 NO_DECL :: max(u32)
 
 @(private)
-Dtd_Flag :: enum u32 {
-	Complete, // no external subset and no parameter-entity reference: a reference to an undeclared entity is not well-formed
-	Standalone, // the XML declaration says `standalone="yes"`
-	Html, // the public identifier is one the HTML standard lists, so its named references read
-	Defaults, // an attribute-list declaration gives a default
-	Tokenized, // an attribute-list declaration gives a type other than `CDATA`
-	In_Place, // a reference was walked over its literal, so some nodes lie in the internal subset
-	Stopped, // a parameter entity that was not read was referenced: later entity and attribute-list declarations are not processed
-}
-
+Dtd_Flag :: tape.Markup_Dtd_Flag
 @(private)
-Dtd_Flags :: bit_set[Dtd_Flag; u32]
-
+Dtd_Flags :: tape.Markup_Dtd_Flags
 @(private)
-Dtd_Head :: struct {
-	entities:  u32,
-	attrs:     u32,
-	slots:     u32,
-	flags:     Dtd_Flags,
-	bytes:     u64,
-	// The DOCTYPE's internal subset in `src`, where every node of an entity walked over its literal lies.
-	subset_lo: u64,
-	subset_hi: u64,
-}
-
-#assert(size_of(Dtd_Head) == 40)
-
+Entity_Flag :: tape.Markup_Entity_Flag
 @(private)
-Entity_Flag :: enum u16 {
-	Parameter, // `%name;`
-	External, // a `SYSTEM` or `PUBLIC` entity, never read
-	Unparsed, // an external entity with an `NDATA` notation
-	Stored, // the replacement text is in the bytes, since it differs from the literal
-	Lit_Stored, // the literal is in the bytes, from a parameter entity's stored replacement text
-	Measured, // `size` and the flags from `Markup` on are set
-	Measuring, // being measured: a reference to it now is a recursion
-	Markup, // the replacement text, with the entities it refers to, holds a `<`
-	Element, // the replacement text, with the entities it refers to, holds a start tag
-	Respelled, // the replacement text holds markup the literal does not spell, so it cannot be walked over the literal
-	Cdata_End, // the replacement text holds `]]>`
-	External_Ref, // the replacement text refers to an external entity
-	Unparsed_Ref, // the replacement text refers to an unparsed entity
-	Undeclared_Ref, // the replacement text refers to an entity no declaration names
-}
-
+Entity_Flags :: tape.Markup_Entity_Flags
 @(private)
-Entity_Flags :: bit_set[Entity_Flag; u16]
-
-// An entity's replacement text is `text_n` bytes at `text_lo`, in the bytes when `.Stored` and in `src` otherwise, and
-// its literal is `lit_n` bytes at `lit_lo`, past the opening quote. `size` bounds the bytes its expansion decodes to,
-// saturating.
+Entity :: tape.Markup_Entity
 @(private)
-Entity :: struct {
-	text_lo: u64,
-	lit_lo:  u64,
-	size:    u64,
-	name_lo: u32,
-	text_n:  u32,
-	lit_n:   u32,
-	name_n:  u16,
-	flags:   Entity_Flags,
-}
-
-#assert(size_of(Entity) == 40)
-
-// An attribute an attribute-list declaration names. A default's fact spans `src` from the attribute's name through the
-// default's closing quote, as an attribute in a tag spans its name through its value, and `lead` is the fact's lead,
-// the bytes before the default's value, saturated at `markup.ATTRIBUTE_LEAD_MAX`. `size` bounds the bytes the default's value decodes
-// to.
-@(private)
-Attr_Decl :: struct {
-	fact_lo:    u64,
-	size:       u64,
-	element_lo: u32,
-	name_lo:    u32,
-	fact_n:     u32,
-	next:       u32, // the element's next declaration, `NO_DECL` for none
-	element_n:  u16,
-	name_n:     u16,
-	tokenized:  bool, // a type other than `CDATA`, whose value collapses its spaces
-	defaulted:  bool,
-	qualified:  bool, // the name has a prefix, so a tag it is a default of has its names judged again
-	lead:       u8,
-}
-
-#assert(size_of(Attr_Decl) == 40)
+Attr_Decl :: tape.Markup_Attribute
 
 // The kinds of names the slots hold, in the slot's top two bits.
 @(private)
@@ -108,13 +33,7 @@ Slot_Kind :: enum u32 {
 }
 
 @(private)
-Dtd_View :: struct {
-	head:     ^Dtd_Head,
-	entities: []Entity,
-	attrs:    []Attr_Decl,
-	slots:    []u32,
-	bytes:    []u8,
-}
+Dtd_View :: tape.Markup_Dtd
 
 // A reference the walk entered: it reads the literal of `entity` and resumes at `resume`, before `end`, when the
 // literal ends. `at` is the reference's `&`. `depth` and `tag` are the open count and the start tag of the element
@@ -129,23 +48,19 @@ Entity_Frame :: struct {
 	entity: u32,
 }
 
-// The DTD a walk reads by. The tables grow in the builder's arrays while the internal subset is read and are sealed into
-// `block` at its end. `view` reads either.
+// The DTD a walk reads by. The tables of `view` grow in the arrays of `grab` while the internal subset is read, each
+// holding the records its slice names in an array of `*_cap` of them, and `sealed` once the subset is read.
 @(private)
 Dtd :: struct {
 	using view: Dtd_View,
 	src:        []u8,
-	block:      [^]u8,
-	block_n:    int,
-	built:      Dtd_Head,
-	ents:       [^]Entity,
+	// The internal subset's bytes in the text, where every node of an entity walked over its literal lies.
+	subset_lo:  u64,
+	subset_hi:  u64,
 	ent_cap:    u32,
-	atts:       [^]Attr_Decl,
 	att_cap:    u32,
-	slot_mem:   [^]u32,
-	arena:      [^]u8,
-	arena_n:    u64,
-	arena_cap:  u64,
+	bytes_cap:  u64,
+	sealed:     bool,
 	// The expansion the references at the document's level have added, and the most it may reach.
 	total:      u64,
 	limit:      u64,
@@ -157,9 +72,10 @@ Dtd :: struct {
 	grab:       Grab, // what the DTD's memory comes from
 }
 
-// Makes the DTD of a walk over `src` with memory from `g`, or nil when memory runs out.
+// Makes the DTD of a walk over `src` with memory from `g`, or nil when memory runs out. `limit` is
+// `Budget.expansion`.
 @(private)
-dtd_make :: proc "contextless" (src: []u8, tolerate: bool, max_expansion: u64, g: Grab) -> ^Dtd {
+dtd_make :: proc "contextless" (src: []u8, tolerate: bool, limit: u64, g: Grab) -> ^Dtd {
 	d := (^Dtd)(grab(g, size_of(Dtd), true))
 	if d == nil {
 		return nil
@@ -167,12 +83,7 @@ dtd_make :: proc "contextless" (src: []u8, tolerate: bool, max_expansion: u64, g
 	d.grab = g
 	d.src = src
 	d.tolerate = tolerate
-	d.limit = max_expansion
-	if d.limit == 0 {
-		amplified, over := intrinsics.overflow_mul(u64(len(src)), 100)
-		d.limit = max(8 << 20, max(u64) if over else amplified)
-	}
-	d.head = &d.built
+	d.limit = limit if limit != 0 else tape.default_expansion(u64(len(src)))
 	return d
 }
 
@@ -181,71 +92,45 @@ dtd_free :: proc "contextless" (d: ^Dtd) {
 	if d == nil {
 		return
 	}
-	dtd_free_tables(d)
-	ungrab(d.grab, d.block, d.block_n)
+	ungrab(d.grab, raw_data(d.entities), int(d.ent_cap) * size_of(Entity))
+	ungrab(d.grab, raw_data(d.attrs), int(d.att_cap) * size_of(Attr_Decl))
+	ungrab(d.grab, raw_data(d.slots), len(d.slots) * size_of(u32))
+	ungrab(d.grab, raw_data(d.bytes), int(d.bytes_cap))
 	ungrab(d.grab, d.stack, int(d.stack_cap) * size_of(Entity_Frame))
 	ungrab(d.grab, d, size_of(Dtd))
 }
 
-// Frees the builder's arrays.
+// A copy of the tables of `d` in a format data block of `allocator`, with the texts of its entities that lie in the
+// text, from `base`, moved to its bytes, so a document decodes by it with no byte of the internal subset. Nil when
+// memory runs out.
 @(private)
-dtd_free_tables :: proc "contextless" (d: ^Dtd) {
-	ungrab(d.grab, d.ents, int(d.ent_cap) * size_of(Entity))
-	ungrab(d.grab, d.atts, int(d.att_cap) * size_of(Attr_Decl))
-	ungrab(d.grab, d.slot_mem, int(d.built.slots) * size_of(u32))
-	ungrab(d.grab, d.arena, int(d.arena_cap))
-	d.ents, d.atts, d.slot_mem, d.arena = nil, nil, nil, nil
-}
-
-// Points the view at the builder's arrays.
-@(private)
-dtd_refresh :: proc "contextless" (d: ^Dtd) {
-	d.entities = d.ents[:d.built.entities]
-	d.attrs = d.atts[:d.built.attrs]
-	d.slots = d.slot_mem[:d.built.slots]
-	d.bytes = d.arena[:d.arena_n]
-}
-
-// Returns the view of a sealed block, empty for no block.
-@(private)
-dtd_view :: proc "contextless" (block: []u8) -> (v: Dtd_View) {
-	if len(block) < size_of(Dtd_Head) {
-		return
+dtd_keep :: proc "contextless" (d: ^Dtd, base: [^]u8, allocator: runtime.Allocator, ctx: ^runtime.Context) -> ^tape.Doc_Ext #no_bounds_check {
+	n := u64(len(d.bytes))
+	moved := n
+	for e in d.entities {
+		if e.flags & {.Stored, .External} == {} {
+			moved += u64(e.text_n)
+		}
 	}
-	p := raw_data(block)
-	v.head = (^Dtd_Head)(p)
-	at := size_of(Dtd_Head)
-	v.entities = ([^]Entity)(p[at:])[:v.head.entities]
-	at += int(v.head.entities) * size_of(Entity)
-	v.attrs = ([^]Attr_Decl)(p[at:])[:v.head.attrs]
-	at += int(v.head.attrs) * size_of(Attr_Decl)
-	v.slots = ([^]u32)(p[at:])[:v.head.slots]
-	at += int(v.head.slots) * size_of(u32)
-	v.bytes = p[at:][:v.head.bytes]
-	return
-}
-
-// Copies the tables into one block and frees the builder's arrays. Returns false when memory runs out.
-@(private)
-dtd_seal :: proc "contextless" (d: ^Dtd) -> bool {
-	h := d.built
-	h.bytes = d.arena_n
-	n := size_of(Dtd_Head) + int(h.entities) * size_of(Entity) + int(h.attrs) * size_of(Attr_Decl) + int(h.slots) * size_of(u32) + int(h.bytes)
-	// The slots end at a multiple of 4 and the bytes take any alignment, so the block's tail needs no padding.
-	block := ([^]u8)(grab(d.grab, n))
-	if block == nil {
-		return false
+	if !dtd_reserve(d, moved) {
+		return nil
 	}
-	(^Dtd_Head)(block)^ = h
-	v := dtd_view(block[:n])
-	intrinsics.mem_copy_non_overlapping(raw_data(v.entities), d.ents, int(h.entities) * size_of(Entity))
-	intrinsics.mem_copy_non_overlapping(raw_data(v.attrs), d.atts, int(h.attrs) * size_of(Attr_Decl))
-	intrinsics.mem_copy_non_overlapping(raw_data(v.slots), d.slot_mem, int(h.slots) * size_of(u32))
-	intrinsics.mem_copy_non_overlapping(raw_data(v.bytes), d.arena, int(h.bytes))
-	dtd_free_tables(d)
-	d.block, d.block_n = block, n
-	d.view = v
-	return true
+	kept := d.view
+	kept.bytes = raw_data(d.bytes)[:moved]
+	context = ctx^ if ctx != nil else runtime.default_context()
+	ext, err := tape.ext_make(nil, tape.Markup_Ext{dtd = kept}, allocator)
+	if err != nil {
+		return nil
+	}
+	dtd := &(&ext.format.(tape.Markup_Ext)).dtd
+	for &e in dtd.entities {
+		if e.flags & {.Stored, .External} == {} {
+			intrinsics.mem_copy_non_overlapping(raw_data(dtd.bytes[n:]), base[e.text_lo:], int(e.text_n))
+			e.text_lo, e.flags = n, e.flags + {.Stored}
+			n += u64(e.text_n)
+		}
+	}
+	return ext
 }
 
 @(private)
@@ -293,31 +178,28 @@ dtd_find :: proc "contextless" (v: ^Dtd_View, kind: Slot_Kind, name: []u8) -> u3
 // Adds the record `index` of `kind` to the slots, which double when half full. Returns false when memory runs out.
 @(private)
 dtd_put :: proc "contextless" (d: ^Dtd, kind: Slot_Kind, index: u32) -> bool #no_bounds_check {
-	used := d.built.entities + d.built.attrs
-	if 2 * used >= d.built.slots {
-		cap := max(64, 2 * d.built.slots)
-		fresh := ([^]u32)(grab(d.grab, int(cap) * size_of(u32), true))
-		if fresh == nil {
+	if used := len(d.entities) + len(d.attrs); 2 * used >= len(d.slots) {
+		cap := max(64, 2 * len(d.slots))
+		fresh := ([^]u32)(grab(d.grab, cap * size_of(u32), true))[:cap]
+		if raw_data(fresh) == nil {
 			return false
 		}
-		old := d.slot_mem[:d.built.slots]
-		for s in old {
+		for s in d.slots {
 			if s != 0 {
-				slot_insert(d, fresh, cap, Slot_Kind(s >> 30), s & (1 << 30 - 1) - 1)
+				slot_insert(&d.view, fresh, Slot_Kind(s >> 30), s & (1 << 30 - 1) - 1)
 			}
 		}
-		ungrab(d.grab, d.slot_mem, int(d.built.slots) * size_of(u32))
-		d.slot_mem, d.built.slots = fresh, cap
-		dtd_refresh(d)
+		ungrab(d.grab, raw_data(d.slots), len(d.slots) * size_of(u32))
+		d.slots = fresh
 	}
-	slot_insert(d, d.slot_mem, d.built.slots, kind, index)
+	slot_insert(&d.view, d.slots, kind, index)
 	return true
 }
 
 @(private)
-slot_insert :: proc "contextless" (d: ^Dtd, slots: [^]u32, cap: u32, kind: Slot_Kind, index: u32) #no_bounds_check {
-	mask := cap - 1
-	for i := name_hash(kind, slot_name(&d.view, kind, index)) & mask; ; i = (i + 1) & mask {
+slot_insert :: proc "contextless" (v: ^Dtd_View, slots: []u32, kind: Slot_Kind, index: u32) #no_bounds_check {
+	mask := u32(len(slots) - 1)
+	for i := name_hash(kind, slot_name(v, kind, index)) & mask; ; i = (i + 1) & mask {
 		if slots[i] == 0 {
 			slots[i] = u32(kind) << 30 | (index + 1)
 			return
@@ -328,37 +210,44 @@ slot_insert :: proc "contextless" (d: ^Dtd, slots: [^]u32, cap: u32, kind: Slot_
 // Copies `b` into the bytes. Returns its offset, and false when memory runs out.
 @(private)
 dtd_bytes :: proc "contextless" (d: ^Dtd, b: []u8) -> (lo: u64, ok: bool) {
-	if d.arena_n + u64(len(b)) > d.arena_cap {
-		cap := max(256, 2 * d.arena_cap, d.arena_n + u64(len(b)))
-		fresh := regrab(d.grab, d.arena, int(d.arena_cap), int(cap))
-		if fresh == nil {
-			return 0, false
-		}
-		d.arena, d.arena_cap = ([^]u8)(fresh), cap
-	}
-	lo = d.arena_n
-	intrinsics.mem_copy_non_overlapping(d.arena[lo:], raw_data(b), len(b))
-	d.arena_n += u64(len(b))
-	dtd_refresh(d)
+	lo = u64(len(d.bytes))
+	dtd_reserve(d, lo + u64(len(b))) or_return
+	d.bytes = raw_data(d.bytes)[:lo + u64(len(b))]
+	intrinsics.mem_copy_non_overlapping(raw_data(d.bytes[lo:]), raw_data(b), len(b))
 	return lo, true
 }
 
-// Appends `v` to the array `items` of `n` used and `cap` room. Returns its index, `NO_DECL` when memory runs out.
+// Gives the bytes room for `n` of them. Returns false when memory runs out.
 @(private)
-dtd_push :: proc "contextless" (d: ^Dtd, items: ^[^]$T, n, cap: ^u32, v: T) -> u32 {
-	if n^ == cap^ {
+dtd_reserve :: proc "contextless" (d: ^Dtd, n: u64) -> bool {
+	if n <= d.bytes_cap {
+		return true
+	}
+	cap := max(256, 2 * d.bytes_cap, n)
+	fresh := regrab(d.grab, raw_data(d.bytes), int(d.bytes_cap), int(cap))
+	if fresh == nil {
+		return false
+	}
+	d.bytes, d.bytes_cap = ([^]u8)(fresh)[:len(d.bytes)], cap
+	return true
+}
+
+// Appends `v` to the records `items` of an array with room for `cap`. Returns its index, `NO_DECL` when memory runs
+// out.
+@(private)
+dtd_push :: proc "contextless" (d: ^Dtd, items: ^[]$T, cap: ^u32, v: T) -> u32 {
+	n := u32(len(items))
+	if n == cap^ {
 		room := max(16, 2 * cap^)
-		fresh := regrab(d.grab, items^, int(cap^) * size_of(T), int(room) * size_of(T))
+		fresh := regrab(d.grab, raw_data(items^), int(cap^) * size_of(T), int(room) * size_of(T))
 		if fresh == nil {
 			return NO_DECL
 		}
-		items^, cap^ = ([^]T)(fresh), room
+		items^, cap^ = ([^]T)(fresh)[:n], room
 	}
-	i := n^
-	items^[i] = v
-	n^ += 1
-	dtd_refresh(d)
-	return i
+	items^ = raw_data(items^)[:n + 1]
+	items[n] = v
+	return n
 }
 
 // The replacement text of entity `e`.

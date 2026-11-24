@@ -51,14 +51,14 @@ scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Alloca
 	return nil
 }
 
-// Holds the text of a scan whose tokens are out of text order: its bytes up to the end of `text`, which one span from
-// offset 0 names, each window adding the bytes past those held.
+// Holds the text of a scan whose tokens are out of text order: its bytes from `h.hold_from`, where its first token is,
+// up to the end of `text`, which one span names, each window adding the bytes past those held.
 @(private)
 hold_whole :: proc(h: ^Scanner, text: []u8) -> runtime.Allocator_Error {
 	if len(h.held) == 0 {
-		append(&h.held, tape.Held_Span{0, 0}) or_return
+		append(&h.held, tape.Held_Span{h.hold_from, 0}) or_return
 	}
-	if held := len(h.bytes); len(text) > held {
+	if held := h.held[0].lo + u64(len(h.bytes)); u64(len(text)) > held {
 		append(&h.bytes, ..text[held:]) or_return
 	}
 	return nil
@@ -191,15 +191,13 @@ scanner_so_far :: proc(h: ^Scanner, regs: hook.Regs, cut: u64, allocator: runtim
 	return doc, nil
 }
 
-// Gives `doc` the spans the scan held, in a block of its own, and flags it `.Held`.
+// Gives `doc` the spans the scan held, in a block of its own with the format data the walk gave it, and flags it
+// `.Held`.
 @(private)
 hold_spans :: proc(h: ^Scanner, doc: ^tape.Document) -> runtime.Allocator_Error {
-	size := size_of(tape.Doc_Ext) + len(h.held) * size_of(tape.Held_Span)
-	block, err := runtime.mem_alloc_non_zeroed(size, align_of(tape.Doc_Ext), doc.allocator)
-	took(err, raw_data(block), size) or_return
-	ext := (^tape.Doc_Ext)(raw_data(block))
-	ext^ = {held = ([^]tape.Held_Span)(raw_data(block[size_of(tape.Doc_Ext):]))[:len(h.held)]}
-	copy(ext.held, h.held[:])
+	format := doc.ext.format if doc.ext != nil else nil
+	ext := tape.ext_make(h.held[:], format, doc.allocator) or_return
+	free(doc.ext, doc.allocator)
 	doc.ext = ext
 	doc.flags += {.Held}
 	return nil

@@ -1,7 +1,6 @@
 package tape
 
 import "base:intrinsics"
-import "base:runtime"
 import "stury:lib/base/spell"
 
 // The readers a user calls on a scalar node, over the text the node's spans point into.
@@ -10,18 +9,24 @@ import "stury:lib/base/spell"
 // decoded into `buf`. A string, plain, number or byte string token has a text, a byte string's being its payload, and
 // so does a key of any kind, which a `Name` takes by its text, as a `find` answer's node or a record's key. A null or
 // boolean value has none. A number's text is its exact value: as written, or in a `.Binary` format its value in
-// decimal. False for a token with no text, a `buf` shorter than `text_room` gives, or a number of a `.Binary` format
-// whose value is past what its readers spell, and for a decode that needs memory beyond `buf`, as an XML entity's DTD,
-// that `allocator` refuses. With no allocator a decode takes none.
+// decimal. False for a token with no text, a `buf` shorter than `text_room` gives, a number of a `.Binary` format
+// whose value is past what its readers spell, and a text whose decode needs the document it was read into, as an XML
+// text that refers to its DTD's entities does, which `node_text_read` reads. A read takes no memory.
 @(require_results)
-node_text_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node, buf: []u8, allocator := runtime.Allocator{}) -> (s: string, ok: bool) #no_bounds_check {
+node_text_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node, buf: []u8) -> (s: string, ok: bool) {
+	return text_of(f, src, t, buf, nil)
+}
+
+// `node_text_of` for token `t` of `src` read with the format data `ext` of the document holding it, nil for none.
+@(private, require_results)
+text_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node, buf: []u8, ext: ^Format_Ext) -> (s: string, ok: bool) #no_bounds_check {
 	if t.kind > .Plain || t.kind < .Number && t.role != .Key {
 		return "", false
 	}
 	if !text_decoded(f, t) {
 		return string(src[t.lo:][:t.n]), true
 	}
-	return f.decode(src, t, buf, allocator)
+	return f.decode(src, t, buf, ext)
 }
 
 // Whether the text of scalar token `t` of a text of format `f` is a decode of its bytes rather than the bytes.
@@ -30,17 +35,71 @@ text_decoded :: #force_inline proc "contextless" (f: ^Format, t: Token) -> bool 
 	return text_decodes(t) || t.kind == .Number && .Binary in f.caps
 }
 
-// `node_text_of` for node `at` of `doc`, with the document's allocator, false for `NO_NODE`.
+// `node_text_of` for node `at` of `doc`, false for `NO_NODE`.
 @(require_results)
-node_text_in :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index, buf: []u8) -> (s: string, ok: bool) {
-	src, t := node_src_at(doc, at) or_return
-	return node_text_of(doc.format, src, t, buf, doc.allocator)
+node_text_in :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index, buf: []u8) -> (s: string, ok: bool) #no_bounds_check {
+	if at == NO_NODE {
+		return "", false
+	}
+	return node_text_token(doc, doc.nodes[at], buf)
+}
+
+// `node_text_of` for token `t` of the text of `doc`, a node of it or a token read from it, as an attribute's value a
+// markup format reads from a fact. A string or plain text with no escape in a document that holds its text reads as
+// its bytes there, and any other through its format.
+@(require_results)
+node_text_token :: #force_inline proc "contextless" (doc: ^Document, t: Token, buf: []u8) -> (s: string, ok: bool) #no_bounds_check {
+	if u8(t.kind) - u8(Kind.String) <= 1 && t.spelling & SPELLING_DECODE == 0 && .Held not_in doc.flags {
+		return string(doc.src[t.lo:][:t.n]), true
+	}
+	return token_text_read(doc, t, buf)
+}
+
+// `node_text_token` for a token that needs its format to read it.
+@(private, cold)
+token_text_read :: #force_no_inline proc "contextless" (doc: ^Document, t: Token, buf: []u8) -> (s: string, ok: bool) {
+	src, at := node_src(doc, t)
+	return text_of(doc.format, src, at, buf, format_ext(doc))
+}
+
+// The format data of `doc`, nil for none.
+@(private)
+format_ext :: #force_inline proc "contextless" (doc: ^Document) -> ^Format_Ext {
+	return &doc.ext.format if doc.ext != nil else nil
 }
 
 // The text of a string or plain node, of a document or of a format and the text the node was read in.
 node_text :: proc {
 	node_text_of,
 	node_text_in,
+	node_text_token,
+}
+
+// The text of scalar token `t` of `src`, a text of format `f`, in a block of `allocator` that `delete` frees, as
+// `node_text_of` reads it, and also when its decode needs the document it was read into, as a `find` answer's XML text
+// that refers to its DTD's entities: what the decode needs is read from the text, once, in `allocator`. False for a
+// token with no text and when memory is refused.
+@(require_results)
+node_text_read :: proc(f: ^Format, src: []u8, t: Node, allocator := context.allocator) -> (s: string, ok: bool) {
+	if t.kind > .Plain || t.kind < .Number && t.role != .Key {
+		return "", false
+	}
+	ext: ^Doc_Ext
+	if f.text_ext != nil && text_decoded(f, t) {
+		ext = f.text_ext(src, allocator) or_return
+	}
+	defer free(ext, allocator)
+	format := &ext.format if ext != nil else nil
+	buf, err := make([]u8, max(room_of(f, src, t, format), int(t.n)), allocator)
+	if err != nil {
+		return "", false
+	}
+	text, read := text_of(f, src, t, buf, format)
+	if !read {
+		delete(buf, allocator)
+		return "", false
+	}
+	return string(buf[:copy(buf, text)]), true
 }
 
 // The bytes a format's readers read node `at` of `doc` in, and the node placed in them, false for `NO_NODE`.
@@ -119,21 +178,33 @@ node_number :: proc {
 }
 
 // The bytes of a buffer that always hold the text `node_text` gives for scalar token `t` of `src`, a text of format
-// `f`, 0 for a scalar that reads as its bytes in the text, with what the room needs beyond the text from `allocator`,
-// as `node_text_of` takes it.
+// `f`, 0 for a scalar that reads as its bytes in the text.
 @(require_results)
-text_room_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node, allocator := runtime.Allocator{}) -> int {
+text_room_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node) -> int {
+	return room_of(f, src, t, nil)
+}
+
+// `text_room_of` for token `t` of `src` read with the format data `ext` of the document holding it, nil for none.
+@(private, require_results)
+room_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node, ext: ^Format_Ext) -> int {
 	if t.kind > .Plain || !text_decoded(f, t) {
 		return 0
 	}
-	return f.room(src, t, allocator)
+	return f.room(src, t, ext)
 }
 
-// `text_room_of` for node `at` of `doc`, with the document's allocator, 0 for `NO_NODE`.
+// `text_room_of` for node `at` of `doc`, 0 for `NO_NODE`.
 @(require_results)
 text_room_in :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> int {
 	src, t, ok := node_src_at(doc, at)
-	return text_room_of(doc.format, src, t, doc.allocator) if ok else 0
+	return room_of(doc.format, src, t, format_ext(doc)) if ok else 0
+}
+
+// `text_room_of` for token `t` of the text of `doc` that is no node of it, as `node_text_token` reads it.
+@(require_results)
+text_room_token :: proc "contextless" (doc: ^Document, t: Token) -> int {
+	src, at := node_src(doc, t)
+	return room_of(doc.format, src, at, format_ext(doc))
 }
 
 // The name of the fact of kind `kind` that node `at` of `doc` holds in its spelling rather than as a span, as its
@@ -161,6 +232,7 @@ fact_number :: proc "contextless" (doc: ^Document, fact: Fact) -> (spell.Number,
 text_room :: proc {
 	text_room_of,
 	text_room_in,
+	text_room_token,
 }
 
 // The bytes of scalar token `t` as written in `src`, and whether they hold an escape, so that its text is a decode of

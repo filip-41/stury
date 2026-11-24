@@ -1,7 +1,6 @@
 package xml
 
 import "base:runtime"
-import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/markup"
@@ -11,7 +10,7 @@ import "stury:lib/core/tape"
 // picking the format at run time, the decode of a node's text, and where a container closes.
 
 // In a text's spelling, beside `SPELLING_DECODE`, the text refers to an entity the DTD declares or one the HTML standard
-// names, so its decode reads the DTD again from the text's prolog.
+// names, so its decode reads the DTD the document holds.
 @(private)
 SPELLING_DTD :: u16(1 << 12)
 
@@ -44,10 +43,11 @@ number_value :: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number {
 }
 
 // The decode of text `t` of `src` into `buf`: `#text` for a text member's key, an attribute's value as an attribute
-// value is decoded, and any other text as content. A text that refers to the DTD's entities reads the DTD again in
-// `allocator`. False when `buf` is shorter than `decode_room` gives or `allocator` refuses the DTD.
+// value is decoded, and any other text as content. A text that refers to the DTD's entities reads them from the
+// document's format data `ext`, which `prolog_ext` reads for a text of no document. False when `buf` is shorter than
+// `decode_room` gives, or for such a text read with no format data.
 @(private)
-text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, allocator: runtime.Allocator) -> (s: string, ok: bool) {
+text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, ext: ^tape.Format_Ext) -> (s: string, ok: bool) {
 	if markup.is_text_key(t) {
 		if len(buf) < len(markup.TEXT_KEY) {
 			return "", false
@@ -55,37 +55,61 @@ text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, allocato
 		return string(buf[:copy(buf, markup.TEXT_KEY)]), true
 	}
 	span := src[t.lo:][:t.n]
-	if t.spelling & SPELLING_DTD == 0 {
-		if t.spelling & SPELLING_ATTRIBUTE != 0 {
-			return attribute_text(span, buf, tokenized = t.spelling & SPELLING_TOKENIZED != 0)
-		}
-		return content_text(span, buf)
+	dtd: ^Dtd_View
+	if t.spelling & SPELLING_DTD != 0 {
+		dtd = dtd_of(ext) or_return
 	}
-	d := dtd_read(src, allocator) or_return
-	defer dtd_free(d)
-	view := &d.view if d != nil else nil
 	if t.spelling & SPELLING_ATTRIBUTE != 0 {
-		return attribute_text(span, buf, view, src, t.spelling & SPELLING_TOKENIZED != 0)
+		return attribute_text(span, buf, dtd, src, t.spelling & SPELLING_TOKENIZED != 0)
 	}
-	return content_text(span, buf, view, src)
+	return content_text(span, buf, dtd, src)
 }
 
 // The bytes that hold the decode of text `t` of `src`: its span, and past it what the references to the DTD's entities
-// it holds expand to, which the DTD read again in `allocator` tells.
+// it holds expand to, which the document's format data `ext` tells.
 @(private)
-decode_room :: proc "contextless" (src: []u8, t: tape.Node, allocator: runtime.Allocator) -> int {
+decode_room :: proc "contextless" (src: []u8, t: tape.Node, ext: ^tape.Format_Ext) -> int {
 	if markup.is_text_key(t) {
 		return len(markup.TEXT_KEY)
 	}
-	if t.spelling & SPELLING_DTD == 0 {
+	dtd, read := dtd_of(ext)
+	if t.spelling & SPELLING_DTD == 0 || !read {
 		return int(t.n)
 	}
-	d, _ := dtd_read(src, allocator)
-	defer dtd_free(d)
-	if d == nil {
-		return int(t.n)
+	return int(min(expansion_room(dtd, src, src[t.lo:][:t.n]), u64(max(int))))
+}
+
+// The tables of the DTD of the text `src` that the decode of a node of no document reads, read from its prolog in
+// `allocator`, nil for a text with no DTD. False when memory is refused. A text a read judged has a prolog
+// the walk reads to its DTD without a fault.
+@(private, cold)
+prolog_ext :: proc(src: []u8, allocator: runtime.Allocator) -> (ext: ^tape.Doc_Ext, ok: bool) {
+	regs: hook.Regs
+	ctx := context
+	w: Walk(hook.No_Hooks, false)
+	walk_init(&w, {}, 0, 0)
+	w.regs, w.base, w.allocator, w.ctx = &regs, raw_data(src), allocator, &ctx
+	w.unread, w.expansion, w.dtd_only = true, max(u64), true
+	r := prolog(&w, src, 0, 0, 0, 0, hook.no_hook)
+	defer dtd_free(w.dtd)
+	if u8(r) == hook.WALK_NO_MEMORY {
+		return nil, false
 	}
-	return int(min(expansion_room(&d.view, src, src[t.lo:][:t.n]), u64(max(int))))
+	if w.dtd == nil {
+		return nil, true
+	}
+	ext = dtd_keep(w.dtd, raw_data(src), allocator, &ctx)
+	return ext, ext != nil
+}
+
+// The DTD a document's format data `ext` holds, false for none.
+@(private)
+dtd_of :: #force_inline proc "contextless" (ext: ^tape.Format_Ext) -> (^Dtd_View, bool) {
+	if ext == nil {
+		return nil, false
+	}
+	m, ok := &ext.(tape.Markup_Ext)
+	return &m.dtd if ok else nil, ok
 }
 
 // Whether keys `t` of `src` and `o` of `other` read as the same text. A key is an element's name as written or a text
@@ -105,25 +129,4 @@ key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {
 @(private)
 key_text :: #force_inline proc "contextless" (src: []u8, t: tape.Token) -> string {
 	return markup.TEXT_KEY if markup.is_text_key(t) else string(src[t.lo:][:t.n])
-}
-
-// The DTD of the text `src`, read from its prolog in `allocator`, which `dtd_free` frees, nil for a text with no DTD.
-// False when memory is refused. A text the reads judged has a prolog the walk reads to its DTD without a fault.
-@(private, cold)
-dtd_read :: proc "contextless" (src: []u8, allocator: runtime.Allocator) -> (d: ^Dtd, read: bool) {
-	regs: hook.Regs
-	w := Walk(hook.No_Hooks, false) {
-		regs      = &regs,
-		base      = raw_data(src),
-		tier      = kernel.tier(),
-		unread    = true,
-		expansion = max(u64),
-		dtd_only  = true,
-		allocator = allocator,
-	}
-	if r := prolog(&w, src, 0, 0, 0, 0, hook.no_hook); u8(r) == hook.WALK_NO_MEMORY {
-		dtd_free(w.dtd)
-		return nil, false
-	}
-	return w.dtd, true
 }

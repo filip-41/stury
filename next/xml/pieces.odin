@@ -2,7 +2,6 @@ package xml
 
 import "base:intrinsics"
 import "base:runtime"
-import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
@@ -64,48 +63,44 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 		return 0, e, false
 	}
 	lists := hook.piece_lists(p)
-	w := (^Walk(H, true))(&s.walk)
+	// The walk reads in this call's frame, and the state keeps it without what the call lends it.
+	kept := (^Walk(H, true))(&s.walk)
+	walk := kept^
+	w := &walk
+	defer {
+		w.hooks, w.regs, w.ctx = nil, nil, nil
+		if w.dtd != nil {
+			w.dtd.grab.ctx = nil
+		}
+		kept^ = walk
+	}
 	base := raw_data(text)
 	if !s.started {
-		x, _ := opts.format.(tape.Xml_Options)
-		s.walk = {
-			frames    = raw_data(s.frames[:]),
-			room      = WALK_LEVELS,
-			limit     = min(build.read_depth(opts), MAX_LEVELS),
-			opened    = regs.c,
-			steps     = steps_of(opts),
-			expansion = x.max_expansion,
-			tier      = kernel.tier(),
-			unread    = .Unread_Entity in opts.tolerate,
-			infer     = x.infer,
+		walk_init(w, opts, build.read_depth(opts), build.read_steps(opts), raw_data(s.frames[:]))
+		walk_bind(w, base, h, regs, ctx)
+		w.opened = regs.c
+		// The hook holds the document's level before the walk opens an element.
+		if !hook.levels_need(w, int(regs.c) + 1, regs, 0) {
+			return 0, runtime.Allocator_Error.Out_Of_Memory, false
 		}
-		w.depth = min(w.limit, WALK_LEVELS)
-		when .Levels in C {
-			// The hook holds the document's level before the walk opens an element.
-			if hook.levels_held(h) <= int(regs.c) && !hook.levels_grow(h, int(regs.c) + 1, regs, 0) {
-				return 0, runtime.Allocator_Error.Out_Of_Memory, false
-			}
-			w.depth = min(w.depth, u64(hook.levels_held(h)) - regs.c)
-		}
+		w.depth = hook.held_depth(h, regs, min(w.limit, WALK_LEVELS))
 		s.tags.allocator, s.steps_buf.allocator = lists, lists
 		s.started, s.begun = true, true
-	} else if d := s.pause.depth; d > 0 && .Object not_in w.frames[d - 1].flags {
-		w.frames[d - 1].tag = base[s.inner:]
+	} else if d := s.pause.depth; d > 0 && .Object not_in w.stack[d - 1].flags {
+		w.stack[d - 1].tag = base[s.inner:]
 	}
-	w.base, w.hooks, w.regs, w.ctx, w.allocator, w.pause = base, h, regs, ctx, lists, &s.pause
+	walk_bind(w, base, h, regs, ctx)
+	w.allocator, w.pause = lists, &s.pause
 	if w.dtd != nil {
 		w.dtd.src, w.dtd.grab.ctx = text, ctx
 	}
 	s.pause.end, s.pause.more = base[to:], !p.last
 	if s.pause.place == .Prolog && !p.last {
-		units_frame(&s.pause.units, base, to)
+		units_frame(&s.pause.units, base, to, true)
 		if !s.pause.units.rooted {
 			p.more, p.at, p.keep, p.open = true, to, 0, nil
 			return 0, nil, false
 		}
-	}
-	when .Rooms in C {
-		w.rooms = hook.rooms_end(h)
 	}
 	when .Walk in C {
 		h.walk = w
@@ -121,67 +116,76 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 		}
 		return 0, nil, false
 	}
-	r = walk_end(w, r)
+	r = u64(hook.steps_result(hook.Walk_Result(walk_end(w, r)), w.steps))
 	s.begun = false
-	if u8(r) == hook.WALK_STOPPED && w.steps == 0 {
-		r = u64(hook.walk_result(r >> 16, hook.WALK_STEPS))
-	}
 	p.more, p.open = false, nil
 	root_close, err, _ = hook.walk_error(hook.Walk_Result(r), &RULES)
 	return root_close, err, w.tolerated
 }
 
-// Sets the pieces `p` for the window after one that ended at `to` with walk `w` paused, and copies out of the window
-// what the walk reads past the bytes the next window keeps: the names of the open elements and the namespaces in scope.
+// Sets the pieces `p` for the window after one that ended at `to` with walk `w` paused, with the path of the open
+// elements, as `window_hold` keeps what the walk reads past the window.
 @(private)
 piece_hold :: proc(p: ^tape.Pieces, s: ^Piece, w: ^Walk($H, $LAX), to: u64) -> tape.Error {
-	keep := s.pause.at
-	d := s.pause.depth
-	size := 0
-	for f in w.frames[:d] {
-		size += 1 + int(f.name_n)
-	}
-	// The copy has room for every name, so appending moves none.
-	tags := make([dynamic]u8, 0, size, s.tags.allocator) or_return
-	for f in w.frames[:d] {
-		append(&tags, ..f.tag[:1 + int(f.name_n)])
-	}
+	keep := window_hold(w, s.pause.at, s.pause.depth, &s.tags, &s.inner) or_return
 	clear(&s.steps_buf)
 	at_ := 0
-	for &f, i in w.frames[:d] {
-		if i == int(d) - 1 && .Object not_in f.flags {
-			s.inner = at(w, f.tag)
-			keep = min(keep, s.inner)
-		} else {
-			f.tag = raw_data(tags[at_:])
-		}
-		if _, serr := append(&s.steps_buf, tape.Step(tape.Name(string(tags[at_ + 1:][:f.name_n])))); serr != nil {
-			delete(tags)
-			return serr
-		}
+	for f in w.stack[:s.pause.depth] {
+		append(&s.steps_buf, tape.Step(tape.Name(string(s.tags[at_ + 1:][:f.name_n])))) or_return
 		at_ += 1 + int(f.name_n)
-	}
-	delete(s.tags)
-	s.tags = tags
-	if d > 0 {
-		keep = min(keep, w.frames[d - 1].text_lo)
-	}
-	if t := w.dtd; t != nil && t.built.subset_hi != 0 {
-		keep = min(keep, t.built.subset_lo)
-	}
-	if !ns_own(w) {
-		return runtime.Allocator_Error.Out_Of_Memory
 	}
 	p.more, p.at, p.keep, p.open = true, to, keep, s.steps_buf[:]
 	return nil
 }
 
+// Copies out of the window what walk `w`, paused at `paused_at` with `d` open elements, reads past the bytes the next
+// window keeps, and gives the first byte it keeps. The names of the open elements go to `tags`, each with its `<`, but
+// the innermost's while it has given no `Object`, whose start tag the window keeps, at `inner^`, `max(u64)` for none.
+// The namespaces in scope are copied out too. The window keeps the text run of the innermost open element, and the
+// internal subset while there is one, as the DTD's entities and attribute defaults are read in place there.
+@(private)
+window_hold :: proc(w: ^Walk($H, $LAX), paused_at, d: u64, tags: ^[dynamic]u8, inner: ^u64) -> (keep: u64, err: tape.Error) {
+	keep, inner^ = paused_at, max(u64)
+	size := 0
+	for f in w.stack[:d] {
+		size += 1 + int(f.name_n)
+	}
+	// The copy has room for every name, so appending moves none.
+	held := make([dynamic]u8, 0, size, tags.allocator) or_return
+	for f in w.stack[:d] {
+		append(&held, ..f.tag[:1 + int(f.name_n)])
+	}
+	at_ := 0
+	for &f, i in w.stack[:d] {
+		if i == int(d) - 1 && .Object not_in f.flags {
+			inner^ = at(w, f.tag)
+			keep = min(keep, inner^)
+		} else {
+			f.tag = raw_data(held[at_:])
+		}
+		at_ += 1 + int(f.name_n)
+	}
+	delete(tags^)
+	tags^ = held
+	if d > 0 {
+		keep = min(keep, w.stack[d - 1].text_lo)
+	}
+	if t := w.dtd; t != nil && t.subset_hi != 0 {
+		keep = min(keep, t.subset_lo)
+	}
+	if !ns_own(w) {
+		return keep, runtime.Allocator_Error.Out_Of_Memory
+	}
+	return keep, nil
+}
+
 // Copies the prefix and the URI of each namespace declaration in scope that points into the window into a block of
-// the walk's allocator. False when memory is refused.
+// the walk's allocator, the prefix right after the URI. A decoded URI is in a block already, without its prefix. False
+// when memory is refused.
 @(private)
 ns_own :: proc "contextless" (w: ^Walk($H, $LAX)) -> bool {
 	for &entry in w.ns[:w.ns_len] {
-		if entry.owned != 0 {
+		if entry.owned != 0 && (entry.prefix.n == 0 || entry.prefix.p == entry.uri.p[entry.uri.n:]) {
 			continue
 		}
 		size := max(int(entry.uri.n + entry.prefix.n), 1)
@@ -191,6 +195,7 @@ ns_own :: proc "contextless" (w: ^Walk($H, $LAX)) -> bool {
 		}
 		intrinsics.mem_copy_non_overlapping(b, entry.uri.p, int(entry.uri.n))
 		intrinsics.mem_copy_non_overlapping(b[entry.uri.n:], entry.prefix.p, int(entry.prefix.n))
+		ungrab(walk_grab(w), entry.uri.p, entry.owned)
 		entry.uri.p, entry.prefix.p, entry.owned = b, b[entry.uri.n:], size
 	}
 	return true
@@ -229,5 +234,9 @@ scan_pieces :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_O
 		h.scattered = true
 		return piece_read(src, S, opts, h, regs, a, ctx, build.scanner_hook)
 	}
-	return build.read_scan_pieces(src, demand, &FORMATS[S], read, opts, caller, Piece, walk)
+	doc, err := build.read_scan_pieces(src, demand, &FORMATS[S], read, opts, caller, Piece, walk)
+	if err == nil {
+		err = keep_scopes(&doc, demand.facts)
+	}
+	return doc, err
 }

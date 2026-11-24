@@ -465,7 +465,7 @@ builder_room :: proc "contextless" (h: ^Builder, s: hook.Regs, nodes: int) -> ho
 // is placed on the node it marks when `builder_end` runs `builder_place_facts`, a tag or an attribute is the next
 // node's, and a directive the root's. An inline comment belongs to the last value completed, and a foot to the
 // innermost open container, or to the root past the last one, except a foot right after a key, which a markup element
-// with no child element holds, and which is its value's. `.Stop` when memory for the facts is refused.
+// with no child element holds, and which is its value's. An instruction's foot is placed as a comment's. `.Stop` when memory for the facts is refused.
 @(private, cold)
 builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> hook.Action {
 	a := builder_cursor(h, s)
@@ -481,7 +481,7 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 		if h.closed != tape.NO_NODE && h.closed + tape.Node_Index(h.doc.nodes[h.closed].n) == a {
 			node = h.closed
 		}
-	case .Comment_Foot:
+	case .Comment_Foot, .Instruction_Foot:
 		node = tape.Node_Index(s.b >> 32)
 		// A key before the cursor with no value stored is a member of the innermost open container, when this walk
 		// stored it after the container's node. That node lies before its members, or in a segment that opened inside
@@ -523,8 +523,8 @@ builder_grow_facts :: proc "contextless" (h: ^Builder) -> bool {
 }
 
 // Gives each comment, instruction or document type that waits for the value it marks that value's node: the node after
-// it, or for one before a key, the key's value. One no node follows, past a stop, is the root's, and a comment is its
-// foot. Then sorts the facts by node.
+// it, or for one before a key, the key's value. One no node follows, past a stop, is the root's, and a comment or an
+// instruction is its foot. Then sorts the facts by node.
 @(private, cold)
 builder_place_facts :: proc(doc: ^tape.Document, count: int) {
 	doc.present += builder_place_comments(doc, doc.facts, count)
@@ -546,10 +546,13 @@ builder_place_comments :: proc "contextless" (doc: ^tape.Document, facts: []tape
 		}
 		if int(f.node) >= count {
 			f.node = tape.ROOT
-			if f.kind == .Comment {
+			#partial switch f.kind {
+			case .Comment:
 				f.kind = .Comment_Foot
-				present += {.Comment_Foot}
+			case .Instruction:
+				f.kind = .Instruction_Foot
 			}
+			present += {f.kind}
 		} else if f.kind == .Comment {
 			present += {.Comment}
 		}
@@ -645,21 +648,30 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 	} else {
 		delete(h.counts)
 	}
-	// The room is resized to `count` nodes under a memory budget, so the document is charged for the nodes it holds.
-	// Otherwise it is resized when more than half of it and more than `ROOM_SLACK` bytes are unused, unless it is on a
-	// default heap that keeps a freed block's pages (`HEAP_KEEPS_PAGES`), where a resize frees none. A room kept whole
-	// lets the allocator give its block to the next read of its size. A failed resize keeps the whole room. `destroy`
-	// frees the room as one block from its start.
-	doc.nodes = doc.nodes[:count]
-	unused := len(h.doc.nodes) - count
-	keeps_pages := HEAP_KEEPS_PAGES && doc.allocator.procedure == runtime.default_allocator_proc
-	if !h.lent && (h.budget != nil && unused > 0 || !keeps_pages && unused > count && unused * size_of(tape.Node) > ROOM_SLACK) {
-		if raw, err := runtime.non_zero_mem_resize(raw_data(doc.nodes), len(h.doc.nodes) * size_of(tape.Node), count * size_of(tape.Node), align_of(tape.Node), doc.allocator); took(err, raw_data(raw), count) == nil {
-			doc.nodes = ([^]tape.Node)(raw_data(raw))[:count]
-		}
+	// A lent room is the caller's, kept whole.
+	doc.nodes = h.doc.nodes[:count] if h.lent else builder_trim(h, h.doc.nodes, count)
+	if len(doc.facts) > 0 && raw_data(doc.facts) == raw_data(h.facts) {
+		doc.facts = builder_trim(h, h.facts, len(doc.facts))
 	}
 	doc.root_close = root_close
 	return doc, nil
+}
+
+// The first `count` entries of `room`, a room of the builder's nodes or facts, resized to them under a memory budget,
+// so the document is charged for what it holds. Otherwise it is resized when more than half of it and more than
+// `ROOM_SLACK` bytes are unused, unless it is on a default heap that keeps a freed block's pages (`HEAP_KEEPS_PAGES`),
+// where a resize frees none. A room kept whole lets the allocator give its block to the next read of its size. A
+// failed resize keeps the whole room. `destroy` frees the room as one block from its start.
+@(private)
+builder_trim :: proc(h: ^Builder, room: []$T, count: int) -> []T {
+	unused := len(room) - count
+	keeps_pages := HEAP_KEEPS_PAGES && h.doc.allocator.procedure == runtime.default_allocator_proc
+	if h.budget != nil && unused > 0 || !keeps_pages && unused > count && unused * size_of(T) > ROOM_SLACK {
+		if raw, err := runtime.non_zero_mem_resize(raw_data(room), len(room) * size_of(T), count * size_of(T), align_of(T), h.doc.allocator); took(err, raw_data(raw), count) == nil {
+			return ([^]T)(raw_data(raw))[:count]
+		}
+	}
+	return room[:count]
 }
 
 // The unused bytes up to which a document keeps its room whole rather than move its nodes to an exact block.

@@ -3,7 +3,6 @@ package xml
 import "base:intrinsics"
 import "stury:lib/base/spell"
 import "stury:lib/base/kernel"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import "stury:lib/core/hook"
 
@@ -48,8 +47,8 @@ prolog :: proc "contextless" (w: ^Walk($H, $LAX), src: []u8, lo: u64, s0, s1, s2
 		if w.dtd_only {
 			return 0
 		}
-		w.tag_dtd = w.dtd != nil && .Defaults in w.dtd.head.flags
-		w.attr_dtd = w.dtd != nil && .Tokenized in w.dtd.head.flags
+		w.tag_dtd = w.dtd != nil && .Defaults in w.dtd.flags
+		w.attr_dtd = w.dtd != nil && .Tokenized in w.dtd.flags
 		if x := emit(w, on, &hs, .Plain, .Doctype, at(w, q), intrinsics.ptr_sub(r, q)); x != .Next {
 			return refused(w, hs, x, r)
 		}
@@ -249,7 +248,8 @@ instruction :: proc "contextless" (w: ^Walk($H, $LAX), q, end: [^]u8) -> (next: 
 }
 
 // Gives the comments and instructions in the run from `p` to `q`, which `misc_run` has read whole. With `inline`, a
-// comment on the run's first line is a `Comment_Inline`, and the others get role `rest`. Returns the refusal of
+// comment on the run's first line is a `Comment_Inline`, and the others get role `rest`, an instruction its foot when
+// `rest` is a comment's foot. Returns the refusal of
 // `emit` and the byte it stopped at.
 @(private)
 give_misc :: proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, p, q, end: [^]u8, inline: bool, rest: tape.Role) -> (Emitted, [^]u8) {
@@ -270,11 +270,11 @@ give_misc :: proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h:
 			if x[1] == '!' {
 				e = run(w, x[4:], q, .Comment, 0).q[3:]
 				role = rest if next_line else .Comment_Inline
-				spelling = markup.fact_spelling(4, 3)
+				spelling = tape.fact_spelling(4, 3)
 			} else {
 				e, _ = instruction(w, x, q)
-				role = .Instruction
-				spelling = markup.fact_spelling(2, 2)
+				role = .Instruction_Foot if rest == .Comment_Foot else .Instruction
+				spelling = tape.fact_spelling(2, 2)
 			}
 			if r := emit(w, on, hs, .Plain, role, at(w, x), intrinsics.ptr_sub(e, x), spelling); r != .Next {
 				return r, e
@@ -454,18 +454,18 @@ doctype :: proc "contextless" (w: ^Walk($H, $LAX), src: []u8, q, end: [^]u8, sta
 	}
 	w.dtd = d
 	if !external {
-		d.built.flags += {.Complete}
+		d.flags += {.Complete}
 	}
 	if standalone {
-		d.built.flags += {.Standalone}
+		d.flags += {.Standalone}
 	}
 	for id in HTML_PUBLIC_IDS {
 		if string(public) == id {
-			d.built.flags += {.Html}
+			d.flags += {.Html}
 		}
 	}
 	if p[0] == '[' {
-		d.built.subset_lo = u64(intrinsics.ptr_sub(p[1:], raw_data(src)))
+		d.subset_lo = u64(intrinsics.ptr_sub(p[1:], raw_data(src)))
 		rw := Walk(hook.No_Hooks, false) {
 			base = w.base,
 			tier = w.tier,
@@ -475,7 +475,7 @@ doctype :: proc "contextless" (w: ^Walk($H, $LAX), src: []u8, q, end: [^]u8, sta
 		if f.kind != .None {
 			return q, f.at if f.at != nil else p, f.kind, f.detail
 		}
-		d.built.subset_hi = u64(intrinsics.ptr_sub(close, raw_data(src)))
+		d.subset_hi = u64(intrinsics.ptr_sub(close, raw_data(src)))
 		p = kernel.skip_ws(close[1:], end)
 		if p >= end {
 			return q, end, .Truncated, .None
@@ -484,9 +484,7 @@ doctype :: proc "contextless" (w: ^Walk($H, $LAX), src: []u8, q, end: [^]u8, sta
 			return q, p, .Bad_Char, .Doctype
 		}
 	}
-	if !dtd_seal(d) {
-		return q, p, NO_MEMORY, .None
-	}
+	d.sealed = true
 	return p[1:], nil, .None, .None
 }
 
@@ -547,38 +545,24 @@ text_start :: #force_inline proc "contextless" (src: []u8, lo: u64) -> u64 {
 	return min(lo, u64(len(src)))
 }
 
-// The bytes the entity references of a text may expand to when `Xml_Options.max_expansion` is 0, unless a hundred
-// times the text's length is more.
+// Whether the prolog of `src` may hold a document type declaration, which may declare entities: false only when a
+// start tag follows its comments, instructions and white space.
 @(private)
-DEFAULT_EXPANSION :: u64(8 << 20)
-
-// Whether the prolog of `src` holds a document type declaration, past its comments and instructions, which may declare
-// entities. A prolog it cannot read past answers false, as the walk refuses it before an entity is read.
-@(private)
-declares_entities :: proc "contextless" (src: []u8) -> bool #no_bounds_check {
+prolog_doctype :: proc "contextless" (src: []u8) -> bool #no_bounds_check {
 	p := raw_data(src)
 	end := p[len(src):]
 	q := p[text_start(src, 0):]
 	for {
 		q = kernel.skip_ws(q, end)
-		room := intrinsics.ptr_sub(end, q)
-		if room < 2 || q[0] != '<' {
+		if intrinsics.ptr_sub(end, q) < 2 || q[0] != '<' {
+			return true
+		}
+		if q[1] != '?' && q[1] != '!' {
 			return false
 		}
-		switch q[1] {
-		case '?':
-			q = markup_end(q, end)
-		case '!':
-			if room >= 9 && string(q[:9]) == "<!DOCTYPE" {
-				return true
-			}
-			e := markup_end(q, end)
-			if e == q {
-				return false
-			}
-			q = e
-		case:
-			return false
+		closed: bool
+		if q, closed = markup_end(q, end); !closed {
+			return true
 		}
 	}
 }

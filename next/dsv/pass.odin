@@ -629,9 +629,7 @@ steps_left :: #force_inline proc "contextless" (steps: u64) -> u64 {
 @(private)
 steps_ended :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), r: hook.Walk_Result) -> hook.Walk_Result {
 	when LAX {
-		if u8(r) == hook.WALK_STOPPED && w.steps[0] == 0 {
-			return hook.walk_result(u64(r) >> 16, hook.WALK_STEPS)
-		}
+		return hook.steps_result(r, w.steps[0])
 	}
 	return r
 }

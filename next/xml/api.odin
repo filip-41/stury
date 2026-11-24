@@ -29,6 +29,8 @@ Budget :: tape.Budget
 Budget_Kind :: tape.Budget_Kind
 Tolerance :: tape.Tolerance
 Tolerances :: tape.Tolerances
+Pieces :: tape.Pieces
+Runner :: tape.Runner
 Read_Options :: tape.Read_Options
 Duplicates :: tape.Duplicates
 Xml_Options :: tape.Xml_Options
@@ -49,6 +51,7 @@ Fault :: tape.Fault
 Fault_Kind :: tape.Fault_Kind
 Bad_Option :: tape.Bad_Option
 Exceeded :: tape.Exceeded
+Piece_Gap :: tape.Piece_Gap
 Span_Answer :: tape.Span_Answer
 Presence :: tape.Presence
 Framing :: tape.Framing
@@ -73,10 +76,12 @@ next_child :: tape.next_child
 named :: tape.named
 answer_node :: tape.answer_node
 node_text :: tape.node_text
+node_text_read :: tape.node_text_read
 node_number :: tape.node_number
 text_room :: tape.text_room
 key_raw :: tape.key_raw
 span_bytes :: tape.span_bytes
+facts_of :: tape.facts_of
 Number :: spell.Number
 Number_Kind :: spell.Number_Kind
 Number_Form :: tape.Number_Form
@@ -84,6 +89,7 @@ number_form :: tape.number_form
 number_exact :: tape.number_exact
 text_is_ascii :: tape.text_is_ascii
 destroy :: tape.destroy
+records_window :: tape.records_window
 
 // The markup shape's readers: the name of a text member, and an element's string value. `attribute` and
 // `namespace` read an element's attributes and the namespace of its name.

@@ -62,10 +62,11 @@ KIND_RULES := [Fault_Kind]Rule {
 
 @(private, rodata)
 BUDGET_MESSAGES := [Budget_Kind]string {
-	.Depth  = "Exceeds the depth limit",
-	.Nodes  = "Exceeds the node limit",
-	.Memory = "Exceeds the memory limit",
-	.Steps  = "Exceeds the step limit",
+	.Depth     = "Exceeds the depth limit",
+	.Nodes     = "Exceeds the node limit",
+	.Memory    = "Exceeds the memory limit",
+	.Steps     = "Exceeds the step limit",
+	.Expansion = "Exceeds the expansion limit",
 }
 
 // The rule of fault `f`: its format's detail, or else its kind's.

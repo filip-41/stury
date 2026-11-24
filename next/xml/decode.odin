@@ -1,5 +1,6 @@
 package xml
 
+import "base:intrinsics"
 import "core:unicode/utf8"
 import "stury:lib/base/spell"
 
@@ -12,7 +13,7 @@ import "stury:lib/base/spell"
 // false when `buf` is too short.
 @(private)
 content_text :: proc "contextless" (span: []u8, buf: []u8, dtd: ^Dtd_View = nil, src: []u8 = nil) -> (s: string, ok: bool) #no_bounds_check {
-	if dtd != nil && dtd.head != nil {
+	if dtd != nil {
 		x := Expander{dtd, src, buf, 0}
 		ok = expand(&x, span, true, false, 0)
 		return string(buf[:x.w]), ok
@@ -88,7 +89,7 @@ markup_text :: proc "contextless" (span: []u8, i: int, buf: []u8, w: ^int, lines
 // its leading and trailing spaces, and each run of spaces is one.
 @(private)
 attribute_text :: proc "contextless" (span: []u8, buf: []u8, dtd: ^Dtd_View = nil, src: []u8 = nil, tokenized := false) -> (s: string, ok: bool) #no_bounds_check {
-	if dtd != nil && dtd.head != nil {
+	if dtd != nil {
 		x := Expander{dtd, src, buf, 0}
 		ok = expand(&x, span, true, true, 0)
 		s = string(buf[:x.w])
@@ -166,7 +167,7 @@ expand :: proc "contextless" (x: ^Expander, span: []u8, top, attr: bool, nest: i
 					}
 					continue
 				}
-			} else if .Html in x.v.head.flags {
+			} else if .Html in x.v.flags {
 				if value, ok := spell.entity_named(name); ok {
 					if !put_bytes(x, value) {
 						return false
@@ -190,7 +191,8 @@ expand :: proc "contextless" (x: ^Expander, span: []u8, top, attr: bool, nest: i
 		case c == '<' && !attr:
 			// A comment or an instruction decodes to nothing and a CDATA section to fewer bytes than it spans.
 			p := raw_data(span)
-			if len(x.buf) - x.w < int(uintptr(markup_end(p[i:], p[len(span):])) - uintptr(p)) - i {
+			past, _ := markup_end(p[i:], p[len(span):])
+			if len(x.buf) - x.w < intrinsics.ptr_sub(past, p[i:]) {
 				return false
 			}
 			i = markup_text(span, i, x.buf, &x.w, top)

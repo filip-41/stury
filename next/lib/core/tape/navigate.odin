@@ -60,6 +60,7 @@ Children :: struct {
 	allocator: runtime.Allocator, // of `members` when `owned`, else the index's
 	owned:     bool,
 	once:      bool, // an object holding each key once, whose members are taken as written
+	expanded:  bool, // with `named`, the name is one the format reads as an expanded name
 	header:    Node_Index, // for a table's row, the header whose keys name its cells by place, else 0
 	name:      string, // with `named`, the key every member the walk gives has
 	named:     bool,
@@ -123,7 +124,8 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 	if policy == .Last && clashes(doc, at, name) {
 		return NO_NODE, .Ambiguous
 	}
-	if !partial && r.index != nil {
+	expanded := names_expanded(doc, name)
+	if !partial && r.index != nil && !expanded {
 		if count := child_count(doc, at, node); count > SMALL_OBJECT {
 			// An object whose keys of two kinds may read as one name takes its member by comparing keys, as the finder
 			// does.
@@ -135,14 +137,18 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 	// An object that holds each key once has its only match at the first, and a group's first member is its own.
 	first := policy != .Last || !partial && keys_known_once(r, at)
 	found := NO_NODE
+	unknown := false
 	end := at + Node_Index(node.n)
 	for k := at + 1; k < end; k = node_after(doc, k + 1) {
-		if doc_names(doc, doc.nodes[k], name) {
+		if key_at_names(doc, k, name, expanded, &unknown) {
 			found = k
 			if first {
 				break
 			}
 		}
+	}
+	if found == NO_NODE && unknown {
+		return NO_NODE, .Not_Loaded
 	}
 	if found != NO_NODE {
 		// A read keeps every member of a key it keeps one of, but under `.First` the first only, and none past a stop,
@@ -390,9 +396,13 @@ next_child :: proc "contextless" (r: Reader, c: ^Children, dups := Duplicates.De
 			for c.next < end {
 				key = c.next
 				c.next = node_after(doc, key + 1)
-				if !c.named || doc_names(doc, doc.nodes[key], c.name) {
+				unknown := false
+				if !c.named || key_at_names(doc, key, c.name, c.expanded, &unknown) {
 					c.place += 1
 					return key, key + 1, .Found
+				}
+				if unknown {
+					return NO_NODE, NO_NODE, .Not_Loaded
 				}
 			}
 			return NO_NODE, NO_NODE, .Missing
@@ -456,15 +466,16 @@ named :: proc "contextless" (r: Reader, at: Node_Index, name: string) -> (c: Chi
 	if node.kind != .Object {
 		return {}, step_refused(node.kind)
 	}
-	c = Children{container = at, next = at + 1, name = name, named = true}
+	c = Children{container = at, next = at + 1, name = name, named = true, expanded = names_expanded(doc, name)}
 	if t, row := row_of(doc, at); row {
 		c.header = t.header
 		_, p = row_member(doc, t, at, name, .First)
 		return c, p
 	}
+	unknown := false
 	end := at + Node_Index(node.n)
 	for k := at + 1; k < end; k = node_after(doc, k + 1) {
-		if doc_names(doc, doc.nodes[k], name) {
+		if key_at_names(doc, k, name, c.expanded, &unknown) {
 			// A read keeps every member of a key it keeps one of, but under `.First` the first only, and none past a
 			// stop, which leaves the count of an object it comes inside not known.
 			if node.spelling & CONTAINER_PARTIAL != 0 && (doc.partial.dups == .First || child_count(doc, at, node) < 0) {
@@ -474,7 +485,7 @@ named :: proc "contextless" (r: Reader, at: Node_Index, name: string) -> (c: Chi
 			return c, .Found
 		}
 	}
-	if node.spelling & CONTAINER_PARTIAL == 0 || named_missing(doc.partial, at, name) {
+	if !unknown && (node.spelling & CONTAINER_PARTIAL == 0 || named_missing(doc.partial, at, name)) {
 		return {}, .Missing
 	}
 	return {}, .Not_Loaded
@@ -1091,6 +1102,24 @@ kinds_named :: proc "contextless" (doc: ^Document, at: Node_Index, name: string)
 		}
 	}
 	return false
+}
+
+// Whether `name` is one the format of `doc` reads as an expanded name.
+@(private)
+names_expanded :: #force_inline proc "contextless" (doc: ^Document, name: string) -> bool {
+	return doc.format.expanded != nil && len(name) > 0 && name[0] == '{'
+}
+
+// Whether key node `k` of `doc` reads as `name`, by the format's reading for an `expanded` one, which sets `unknown`
+// for a key whose document did not keep what decides it.
+@(private)
+key_at_names :: #force_inline proc "contextless" (doc: ^Document, k: Node_Index, name: string, expanded: bool, unknown: ^bool) -> bool {
+	if !expanded {
+		return doc_names(doc, doc.nodes[k], name)
+	}
+	p := doc.format.expanded(doc, k, name)
+	unknown^ ||= p == .Not_Loaded
+	return p == .Found
 }
 
 // Whether key `t` of `doc` reads as `name`.

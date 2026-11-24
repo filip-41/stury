@@ -64,10 +64,14 @@ Options_Family :: enum u8 {
 	Xml,
 }
 
-// `Bad_Option{"format"}` when `opts.format` holds the options of a family other than `f`'s, else nil. Every read of a
-// format passes it, so a format cannot take another family's options.
+// `Bad_Option{"format"}` when `opts.format` holds the options of a family other than `f`'s, and
+// `Bad_Option{"tolerate"}` for a rule `f` refuses, else nil. Every read of a format passes it, so a format cannot take
+// another family's options.
 options_refused :: #force_inline proc "contextless" (f: ^Format, opts: Options) -> Error {
 	family := Options_Family.None
+	if opts.tolerate & f.refuses != {} {
+		return Bad_Option{"tolerate"}
+	}
 	switch _ in opts.format {
 	case Dsv_Options:
 		family = .Dsv
@@ -98,10 +102,7 @@ Cbor_Options :: struct {}
 Xml_Options :: struct {
 	// An element's text that is `true`, `false` or a JSON number, with no reference or markup in it, reads as that
 	// value, where any other text is a string.
-	infer:         bool,
-	// The most bytes the entity references of a text may expand to, 0 for the default: 8 MiB, or a hundred times the
-	// text's length when that is more. A reference counts its replacement text with the references it holds.
-	max_expansion: u64,
+	infer: bool,
 }
 
 // A spec of a format (e.g. JSON, JSONC and JSON5 are three), in rodata, holding what a document of it needs to be
@@ -113,16 +114,23 @@ Format :: struct {
 	caps:   Caps,
 	options: Options_Family, // the options of `Options.format` its reads take
 	dups:   Duplicates, // its own policy for repeated keys, which `.Default` takes, never `.Default`
+	// The rules of `Options.tolerate` its texts may break and its reads do not read past, which every read refuses as
+	// `Bad_Option{"tolerate"}`. A rule its grammar has no place for changes nothing, and is taken.
+	refuses: Tolerances,
 	// The bytes of a scalar token's authored span before and after the token's own, as a string's quotes.
 	bounds: proc "contextless" (src: []u8, t: Token) -> (head, tail: u8),
-	// The text of a scalar node whose spelling has `SPELLING_DECODE`, decoded into `buf`, false when `buf` is shorter
-	// than `room` gives or `allocator` refuses the memory the decode needs beyond `buf`, as an XML entity's DTD. A
+	// The text of a scalar node whose spelling has `SPELLING_DECODE`, decoded into `buf` with no memory of its own, read
+	// with the format data `ext` of the document holding it, nil for a node of no document. False when `buf` is
+	// shorter than `room` gives, or when the decode needs what only the document holds, as an XML entity's DTD. A
 	// scalar with no `SPELLING_DECODE` reads as its bytes in the text.
-	decode: proc "contextless" (src: []u8, t: Node, buf: []u8, allocator: runtime.Allocator) -> (s: string, ok: bool),
-	// The bytes that always hold the decode of scalar `t`, which may pass its span (a CBOR integer key's digits, an
-	// entity, a tolerated byte read as U+FFFD), with what it needs beyond its text from `allocator`. The span's length
-	// when `allocator` refuses that memory, which `decode` then refuses too.
-	room: proc "contextless" (src: []u8, t: Node, allocator: runtime.Allocator) -> int,
+	decode: proc "contextless" (src: []u8, t: Node, buf: []u8, ext: ^Format_Ext) -> (s: string, ok: bool),
+	// The bytes that always hold the decode of scalar `t`, read with `ext` as `decode` is, which may pass its span (a
+	// CBOR integer key's digits, an entity, a tolerated byte read as U+FFFD).
+	room: proc "contextless" (src: []u8, t: Node, ext: ^Format_Ext) -> int,
+	// The format data that `decode` and `room` read a node of no document of the text `src` with, read from the text in
+	// `allocator`, which `free` frees, nil for a text that needs none. False when memory is refused. Nil for a format
+	// whose decodes need no document.
+	text_ext: proc(src: []u8, allocator: runtime.Allocator) -> (ext: ^Doc_Ext, ok: bool),
 	// The value of a number node.
 	number: proc "contextless" (src: []u8, t: Node) -> spell.Number,
 	// Whether key `t` of `src` and key `o` of `other` read as the same text, whatever their kinds. It needs no memory.
@@ -136,6 +144,10 @@ Format :: struct {
 	// The name of the fact of kind `kind` that node `at` of `doc` holds in its spelling, nil for a format whose nodes
 	// spell none. False for a node that holds none.
 	fact_name: proc "contextless" (doc: ^Document, at: Node_Index, kind: Fact_Kind) -> (name: string, ok: bool),
+	// Whether key node `key` of `doc` is the expanded name `name`, written `{uri}local`: `.Found`, `.Missing`, or
+	// `.Not_Loaded` when `doc` did not keep the declarations that decide it. Nil for a format whose names have no
+	// namespace, which reads such a name as written.
+	expanded: proc "contextless" (doc: ^Document, key: Node_Index, name: string) -> Presence,
 }
 
 // The reads of one spec of a format, for a caller that picks the format at run time. They are not on `Format`: the

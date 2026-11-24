@@ -1714,7 +1714,7 @@ scan_settle :: proc "contextless" (h: ^Scanner, n: u32, d: u64) #no_bounds_check
 @(private, cold)
 scan_fact :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> hook.Action {
 	#partial switch tape.fact_kind(t.role) {
-	case .Comment_Foot:
+	case .Comment_Foot, .Instruction_Foot:
 		// A foot after a key is a markup element's with no child element, which marks the value as a comment does. After
 		// a key no step took, it waits as a comment does, and it lies inside the value's span, as no container's foot
 		// lies inside the value that follows it.
@@ -1755,7 +1755,7 @@ scan_unwait :: #force_no_inline proc "contextless" (h: ^Scanner, lo: u64) {
 		#partial switch f.kind {
 		case .Comment, .Tag, .Attribute, .Instruction, .Doctype:
 			f.node = tape.NO_NODE
-		case .Comment_Foot:
+		case .Comment_Foot, .Instruction_Foot:
 			if f.lo >= lo {
 				f.node = tape.NO_NODE
 			}

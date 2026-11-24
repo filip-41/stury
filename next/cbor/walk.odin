@@ -671,9 +671,7 @@ walk_item :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, $LA
 		h.walk = nil
 	}
 	when LAX {
-		if u8(r) == hook.WALK_STOPPED && w.steps[0] == 0 {
-			r = hook.walk_result(u64(r) >> 16, hook.WALK_STEPS)
-		}
+		r = hook.steps_result(r, w.steps[0])
 		left = w.steps[0]
 	} else {
 		left = steps

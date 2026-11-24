@@ -87,18 +87,19 @@ Token_Log :: struct {
 
 @(private)
 ROLE_NAMES := [tape.Role]string {
-	.Value          = "",
-	.Key            = "Key:",
-	.Comment        = "Comment:",
-	.Comment_Inline = "Inline:",
-	.Comment_Foot   = "Foot:",
-	.Tag            = "Tag:",
-	.Anchor         = "Anchor:",
-	.Alias          = "Alias:",
-	.Instruction    = "Instruction:",
-	.Doctype        = "Doctype:",
-	.Directive      = "Directive:",
-	.Attribute      = "Attribute:",
+	.Value            = "",
+	.Key              = "Key:",
+	.Comment          = "Comment:",
+	.Comment_Inline   = "Inline:",
+	.Comment_Foot     = "Foot:",
+	.Tag              = "Tag:",
+	.Anchor           = "Anchor:",
+	.Alias            = "Alias:",
+	.Instruction      = "Instruction:",
+	.Instruction_Foot = "Instruction_Foot:",
+	.Doctype          = "Doctype:",
+	.Directive        = "Directive:",
+	.Attribute        = "Attribute:",
 }
 
 @(private)
