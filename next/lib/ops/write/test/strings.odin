@@ -11,10 +11,10 @@ import "stury:json"
 import "stury:testkit"
 
 // JSON's string writer against a model that goes one byte at a time: a string of any bytes is read back from a source
-// that spells it, written, and compared with the text the fewest escapes give. The escapes are the quote, the
-// backslash and the control bytes, each with its shortest spelling, a control byte with no short one as `\u00xx` in
-// lowercase. Every other byte is written as itself. Ill-formed UTF-8 is read under `.Invalid_Utf8`, each maximal
-// subpart as U+FFFD.
+// that spells it, written, and compared with what the writer must give. A well-formed string is its source as it was,
+// escapes included. An ill-formed one, read under `.Invalid_Utf8` with each maximal subpart as U+FFFD, is its text with
+// the fewest escapes: the quote, the backslash and the control bytes, each with its shortest spelling, a control byte
+// with no short one as `\u00xx` in lowercase, and every other byte as itself.
 
 @(private = "file")
 REPLACEMENT :: "\xEF\xBF\xBD"
@@ -122,6 +122,18 @@ model_string :: proc(s: []u8) -> [dynamic]u8 {
 	return text
 }
 
+// The JSON string the writer gives for source string `spelled` of bytes `s`, whose text is `text`: the source as it was
+// when it is well formed, else the text with the fewest escapes, which a tolerated read leaves nothing else to write.
+@(private = "file")
+model_written :: proc(s, text, spelled: []u8) -> [dynamic]u8 {
+	if well_formed(s) {
+		written: [dynamic]u8
+		append(&written, ..spelled)
+		return written
+	}
+	return model_string(text)
+}
+
 Spelling :: enum {
 	// Multibyte text as it is, with only the escapes a string must have.
 	Raw,
@@ -187,7 +199,7 @@ expected_of :: proc(s: []u8, spelling: Spelling) -> (e: Expected) {
 	}
 	spelled := spell_string(s, spelling)
 	defer delete(spelled)
-	written := model_string(text[:])
+	written := model_written(s, text[:], spelled[:])
 	defer delete(written)
 	for x in ([]string{"[", string(spelled[:]), ",", string(spelled[:]), "]"}) {
 		append(&e.array_source, x)
@@ -426,10 +438,10 @@ strings_written_through_a_sink :: proc(t: ^testing.T) {
 	text, _ := model_text(s)
 	defer delete(text)
 	inject_at(&text, 0, 'A')
-	want := model_string(text[:])
-	defer delete(want)
 	source := spell_string(s, .Escaped)
 	defer delete(source)
+	want := model_written(s, text[:], source[:])
+	defer delete(want)
 	doc, err := json.build(source[:], .Json, {tolerate = {.Invalid_Utf8}})
 	defer json.destroy(&doc)
 	testing.expect_value(t, err, nil)
@@ -463,14 +475,8 @@ strings_after_strings_keep_every_byte :: proc(t: ^testing.T) {
 		}
 		spelled := spell_string(transmute([]u8)w, .Escaped)
 		append(&source, ..spelled[:])
+		append(&want, ..spelled[:])
 		delete(spelled)
-		text := make([dynamic]u8)
-		append(&text, 'A')
-		append(&text, w)
-		written := model_string(text[:])
-		append(&want, ..written[:])
-		delete(written)
-		delete(text)
 	}
 	append(&source, ']')
 	append(&want, ']')
@@ -518,13 +524,7 @@ strings_at_the_end_of_a_page :: proc(t: ^testing.T) {
 		for spelling in Spelling {
 			spelled := spell_string(body[:n], spelling)
 			defer delete(spelled)
-			text, _ := model_text(body[:n])
-			defer delete(text)
-			if spelling == .Escaped {
-				inject_at(&text, 0, 'A')
-			}
-			want := model_string(text[:])
-			defer delete(want)
+			want := spelled
 			doc, err := json.build(testkit.fence_copy(&fence, spelled[:]))
 			if !testing.expectf(t, err == nil, "length %d: %v", n, err) {
 				return

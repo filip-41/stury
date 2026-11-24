@@ -3,12 +3,16 @@ package json
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
+import "core:unicode/utf8"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 
 // JSON's writer: the layout of a document's values as a JSON, JSONC or JSON5 text, and the spelling of its scalars.
-// A string is written with the fewest escapes that keep it valid and the same text, a number as written when its text
-// is one of the target's, and a key of any scalar kind as a string of its text, as the readers name it.
+// A string of a JSON, JSONC or JSON5 text is written as it was, escapes included, and respelled only where the target
+// cannot hold it: a JSON5 string's own quote, escape or raw control byte in JSON, or a byte past ASCII under `ascii`. A
+// string of any other format is written by its text with the fewest escapes. A number is written as written when its
+// text is one of the target's, and a key of any scalar kind as a string of its text, as the readers name it.
 
 Write_Options :: write.Options
 Write_Error :: write.Error
@@ -16,8 +20,9 @@ Write_Error :: write.Error
 // Writes value `opts.node` of `doc`, a document of any format, as a text of `spec`, in a buffer from `allocator` that
 // the caller owns. Returns the kinds of the facts `doc` holds that the text does not: every fact for `.Json`, and the
 // facts other than comments, and comments with no place, for `.Jsonc` and `.Json5`. A value JSON cannot spell is
-// `Refused` with its node, and no text: a non-finite number or a byte string, a key that is a container, a number with
-// no decimal text, a container a path read kept part of.
+// `Refused` with its node, and no text: a non-finite number, a key that is a container, a number with no decimal text,
+// a container a path read kept part of. A byte string is a string of its payload's base64, and a number of a binary
+// format is written by its value in decimal, exactly.
 write :: proc(doc: ^tape.Document, spec := Spec.Json, opts := Write_Options{}, allocator := context.allocator) -> (text: []u8, dropped: tape.Facts, err: Write_Error) {
 	return write.to_buffer(doc, u8(spec), opts, allocator, write_out)
 }
@@ -51,10 +56,10 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 Layout :: struct {
 	width:      int, // bytes of indent a level
 	fill:       u64, // eight bytes of indent
-	// The document was read as JSON or JSONC and holds its text whole, so an unescaped string's span with its quotes
-	// is its JSON text.
+	// The document was read as JSON or JSONC and holds its text whole, so a string's span with its quotes is its JSON
+	// text, unless it is `SPELLING_LAX`.
 	copy_text:  bool,
-	// The document was read as JSON5, whose unescaped strings and keys keep their own quotes, or none.
+	// The document was read as JSON5 and holds its text whole, whose strings and keys keep their own quotes, or none.
 	json5:      bool,
 	// A number of kind 0 is an RFC 8259 number as written: a JSON or delimited document's.
 	numbers:    bool,
@@ -66,6 +71,19 @@ Layout :: struct {
 	line_comment: bool,
 	wrote:      bool, // a byte is written, so a value starts its own line
 	ascii:      bool, // `Options.ascii`
+}
+
+// `write_rows` for the text the document holds: its own quotes when it is JSON5, the ASCII bytes when `ascii`.
+@(private)
+write_rows_of_text :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $WIDTH: int, facts: bool, spec: Spec) {
+	switch {
+	case l.json5:
+		write_rows(out, w, l, PRETTY, WIDTH, .Json5, facts, spec)
+	case l.ascii:
+		write_rows(out, w, l, PRETTY, WIDTH, .Ascii, facts, spec)
+	case:
+		write_rows(out, w, l, PRETTY, WIDTH, .Json, facts, spec)
+	}
 }
 
 @(private)
@@ -80,7 +98,7 @@ write_as :: #force_no_inline proc(out: ^write.Out, doc: ^tape.Document, $T: Spec
 	}
 	whole := .Held not_in doc.flags
 	l.ascii = opts.ascii
-	l.copy_text = whole && !opts.ascii && (doc.format == &FORMATS[.Json] || doc.format == &FORMATS[.Jsonc])
+	l.copy_text = whole && (doc.format == &FORMATS[.Json] || doc.format == &FORMATS[.Jsonc])
 	l.json5 = whole && doc.format == &FORMATS[.Json5]
 	l.numbers = doc.format == &FORMATS[.Json] || doc.format == &FORMATS[.Jsonc] || doc.format == &FORMATS[.Json5] || doc.format.options == .Dsv
 	facts, tables := write.tree_facts(&w), write.tree_tables(&w)
@@ -90,14 +108,14 @@ write_as :: #force_no_inline proc(out: ^write.Out, doc: ^tape.Document, $T: Spec
 	}
 	if dense != nil {
 		write_dense(out, dense)
-	} else if !facts && !tables && l.copy_text && !opts.sort_keys && .Tolerated not_in doc.flags {
+	} else if !tables && (l.copy_text || l.json5 && T == .Json5 && !l.ascii) && !opts.sort_keys && .Tolerated not_in doc.flags {
 		switch {
 		case write.compact(opts):
-			write_rows(out, &w, &l, false, 0)
+			write_rows_of_text(out, &w, &l, false, 0, facts, T)
 		case l.width == 2:
-			write_rows(out, &w, &l, true, 2)
+			write_rows_of_text(out, &w, &l, true, 2, facts, T)
 		case:
-			write_rows(out, &w, &l, true, 0)
+			write_rows_of_text(out, &w, &l, true, 0, facts, T)
 		}
 	} else if write.compact(opts) {
 		write_tree_for(out, &w, &l, T, facts, tables, false)
@@ -134,66 +152,11 @@ write_tree :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, $FACTS
 		s := write.tree_next(w, FACTS, TABLES)
 		switch s.kind {
 		case .Scalar, .Open:
-			if !s.first {
-				write.put_byte(out, ',')
-			}
-			when FACTS {
-				lead_comments(out, w, l, s, T, PRETTY)
-			}
-			when PRETTY {
-				if s.depth > 0 || FACTS && l.wrote {
-					line_indent(out, l, s.depth)
-				}
-			}
-			if s.key != tape.NO_NODE {
-				if !put_key(out, w, l, s.key, T) {
-					return
-				}
-				put_colon(out, PRETTY)
-				when FACTS {
-					key_comments(out, w, l, s, T, PRETTY)
-				}
-			}
-			if s.kind == .Scalar {
-				if !put_scalar(out, w, l, s.node, T) {
-					return
-				}
-				when FACTS {
-					l.pending, l.line_value = s.facts, true
-					if s.depth == 0 {
-						l.root_facts = s.facts
-					}
-				}
-			} else {
-				write.put_byte(out, bracket_of(w.nodes[s.node].kind))
-				when FACTS {
-					l.line_value = false
-				}
-			}
-			when FACTS {
-				l.wrote = true
+			if !step_value(out, w, l, s, T, FACTS, PRETTY) {
+				return
 			}
 		case .Close:
-			when PRETTY {
-				feet := false
-				when FACTS {
-					feet = foot_comments(out, w, l, s, T, PRETTY)
-				}
-				if !s.first || feet {
-					line_indent(out, l, s.depth)
-				}
-			} else {
-				when FACTS {
-					foot_comments(out, w, l, s, T, PRETTY)
-				}
-			}
-			write.put_byte(out, ']' if w.nodes[s.node].kind == .Array else '}')
-			when FACTS {
-				l.pending, l.line_value = s.facts, true
-				if s.depth == 0 {
-					l.root_facts = s.facts
-				}
-			}
+			step_close(out, w, l, s, ']' if w.nodes[s.node].kind == .Array else '}', T, FACTS, PRETTY)
 		case .Done:
 			when FACTS {
 				if w.err == nil {
@@ -201,6 +164,77 @@ write_tree :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, $FACTS
 				}
 			}
 			return
+		}
+	}
+}
+
+// The scalar or container open of step `s`, with its comma, its key and, with `FACTS`, the comments around them. False
+// with `w.err` set for a scalar JSON cannot spell.
+@(private)
+step_value :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, s: write.Step, $T: Spec, $FACTS, $PRETTY: bool) -> bool {
+	if !s.first {
+		write.put_byte(out, ',')
+	}
+	when FACTS {
+		lead_comments(out, w, l, s, T, PRETTY)
+	}
+	when PRETTY {
+		if s.depth > 0 || FACTS && l.wrote {
+			line_indent(out, l, s.depth)
+		}
+	}
+	if s.key != tape.NO_NODE {
+		if !put_key(out, w, l, s.key, T) {
+			return false
+		}
+		put_colon(out, PRETTY)
+		when FACTS {
+			key_comments(out, w, l, s, T, PRETTY)
+		}
+	}
+	if s.kind == .Scalar {
+		if !put_scalar(out, w, l, s.node, T) {
+			return false
+		}
+		when FACTS {
+			l.pending, l.line_value = s.facts, true
+			if s.depth == 0 {
+				l.root_facts = s.facts
+			}
+		}
+	} else {
+		write.put_byte(out, bracket_of(w.nodes[s.node].kind))
+		when FACTS {
+			l.line_value = false
+		}
+	}
+	when FACTS {
+		l.wrote = true
+	}
+	return true
+}
+
+// The close `bracket` of the container of step `s`, with, under `FACTS`, the comments before it and its own after.
+@(private)
+step_close :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, s: write.Step, bracket: u8, $T: Spec, $FACTS, $PRETTY: bool) {
+	when PRETTY {
+		feet := false
+		when FACTS {
+			feet = foot_comments(out, w, l, s, T, PRETTY)
+		}
+		if !s.first || feet {
+			line_indent(out, l, s.depth)
+		}
+	} else {
+		when FACTS {
+			foot_comments(out, w, l, s, T, PRETTY)
+		}
+	}
+	write.put_byte(out, bracket)
+	when FACTS {
+		l.pending, l.line_value = s.facts, true
+		if s.depth == 0 {
+			l.root_facts = s.facts
 		}
 	}
 }
@@ -266,31 +300,78 @@ put_scalar :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at
 		return put_number(out, w, at, t, T)
 	case .String, .Plain:
 		return put_text(out, w, l, at, t, T)
-	case .Bytes, .Array, .Object, .End:
+	case .Bytes:
+		return put_bytes(out, w, at)
+	case .Array, .Object, .End:
 		w.err = write.Refused{at, .No_Spelling}
 		return false
 	}
 	return true
 }
 
-// Writes the string or plain scalar `t` at `at` as a JSON string, or under JSON5 a JSON5 one's span as written.
+// Writes byte string node `at` as a string of the base64 of its payload, as a byte string key is written.
+@(private, cold)
+put_bytes :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index) -> bool {
+	s := write.bytes_base64(w, at) or_return
+	defer delete(s, w.allocator)
+	write.put_byte(out, '"')
+	write.put(out, transmute([]u8)s)
+	write.put_byte(out, '"')
+	return true
+}
+
+// Writes the string or plain scalar `t` at `at` as a JSON string: the span of a JSON, JSONC or JSON5 text as written,
+// where the target holds it, else the text with the fewest escapes.
 @(private)
 put_text :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: tape.Node_Index, t: tape.Node, $T: Spec) -> bool #no_bounds_check {
-	if t.spelling & tape.SPELLING_DECODE == 0 {
-		// A string read whole from JSON or JSONC with no escape lies between its quotes, `lo - 1` and `lo + n`.
-		if l.copy_text && t.kind == .String {
-			write.put(out, w.doc.src[t.lo - 1:][:t.n + 2])
+	if t.spelling & tape.SPELLING_LAX == 0 && t.kind == .String {
+		src := w.doc.src
+		// A string of a JSON or JSONC text lies between its quotes, `lo - 1` and `lo + n`, whatever escapes it holds.
+		if l.copy_text {
+			put_span(out, l, src[t.lo - 1:][:t.n + 2], t.spelling)
 			return true
 		}
-		when T == .Json5 {
-			if l.json5 && !l.ascii {
-				head, tail := quotes(w.doc.src, t)
-				write.put(out, w.doc.src[t.lo - u64(head):][:t.n + u32(head) + u32(tail)])
+		if l.json5 {
+			// The quote bytes on each side of the string, none for a key written bare.
+			head, _ := quotes(src, t)
+			when T == .Json5 {
+				span := src[t.lo - u64(head):][:t.n + 2 * u32(head)]
+				// A bare key's `\u` escapes cannot spell a pair past the BMP, so under `ascii` it is quoted.
+				if head == 0 && l.ascii && t.spelling & tape.SPELLING_ASCII == 0 && has_astral(span) {
+					write.put_byte(out, '"')
+					put_ascii_text(out, span)
+					write.put_byte(out, '"')
+					return true
+				}
+				put_span(out, l, span, t.spelling)
 				return true
+			} else {
+				if t.spelling & tape.SPELLING_DECODE != 0 || head != 0 && src[t.lo - 1] == '\'' {
+					put_json5_as_json(out, l, src[t.lo:][:t.n])
+					return true
+				}
+				if head == 0 {
+					// A key written bare holds identifier characters, which a JSON string holds as they are.
+					write.put_byte(out, '"')
+					put_span(out, l, src[t.lo:][:t.n], t.spelling)
+					write.put_byte(out, '"')
+					return true
+				}
 			}
 		}
 	}
 	return put_text_of(out, w, l, at)
+}
+
+// Writes `span`, the text of a string with its quotes, as it is, or under `ascii` with each character past ASCII as a
+// `\u` escape, of which a text `spelling` marks ASCII has none.
+@(private)
+put_span :: #force_inline proc(out: ^write.Out, l: ^Layout, span: []u8, spelling: u16) {
+	if l.ascii && spelling & tape.SPELLING_ASCII == 0 {
+		put_ascii_text(out, span)
+	} else {
+		write.put(out, span)
+	}
 }
 
 // Writes key node `at` as a JSON string of its text, or under JSON5 a JSON5 key's span as written. A key that is a
@@ -353,11 +434,8 @@ put_ascii :: proc(out: ^write.Out, s: string, quoted: bool) {
 		p := write.room(out, 12)
 		n := 1
 		switch {
-		case r >= 0x10000:
-			c := u32(r) - 0x10000
-			n = u_escape(p, 0xD800 + c >> 10) + u_escape(p[6:], 0xDC00 + c & 0x3FF)
 		case r >= 0x80:
-			n = u_escape(p, u32(r))
+			n = rune_units(p, r)
 		case quoted && ESCAPE_OF[r] != 0:
 			n = escape_into(p, u8(r))
 		case:
@@ -368,6 +446,187 @@ put_ascii :: proc(out: ^write.Out, s: string, quoted: bool) {
 	if quoted {
 		write.put_byte(out, '"')
 	}
+}
+
+// Writes `s`, a string of a JSON or JSON5 text with its quotes, with each character past ASCII as a `\u` escape and
+// every other byte, escapes included, as it is. `s` is well formed UTF-8.
+@(private)
+put_ascii_text :: proc(out: ^write.Out, s: []u8) #no_bounds_check {
+	run, i := 0, 0
+	for i < len(s) {
+		for i + 8 <= len(s) && intrinsics.unaligned_load((^u64)(raw_data(s[i:]))) & 0x8080808080808080 == 0 {
+			i += 8
+		}
+		if i >= len(s) {
+			break
+		}
+		if s[i] < 0x80 {
+			i += 1
+			continue
+		}
+		// An odd run of backslashes before the character escapes it: JSON5 reads it as the character, and as nothing for a
+		// line separator, which JSON has no escape for.
+		end, back := i, 0
+		for end - back > run && s[end - back - 1] == '\\' {
+			back += 1
+		}
+		if back & 1 == 1 {
+			end -= 1
+			if is_line_separator(s[i:]) {
+				i += 3
+			}
+		}
+		write.put(out, s[run:end])
+		if i < len(s) && s[i] >= 0x80 {
+			i = put_ascii_burst(out, s, i)
+		}
+		run = i
+	}
+	write.put(out, s[run:])
+}
+
+// Whether `s` holds a character past the BMP, which UTF-8 leads with a byte from 0xF0.
+@(private)
+has_astral :: proc "contextless" (s: []u8) -> bool {
+	for c in s {
+		if c >= 0xF0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether `s` holds U+2028 or U+2029.
+@(private)
+holds_line_separator :: proc "contextless" (s: []u8) -> bool {
+	for c, i in s {
+		if c == 0xE2 && is_line_separator(s[i:]) {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether `s` starts with U+2028 or U+2029.
+@(private)
+is_line_separator :: #force_inline proc "contextless" (s: []u8) -> bool {
+	return len(s) >= 3 && s[0] == 0xE2 && s[1] == 0x80 && s[2] | 1 == 0xA9
+}
+
+// Writes the characters of `s` from `at`, which holds one past ASCII, as `\u` escapes, and each ASCII byte that stands
+// between two characters past ASCII as it is, in the room of the whole burst. Returns where it stopped: at the end, or
+// at an ASCII byte that another follows. `s` is well formed UTF-8.
+@(private)
+put_ascii_burst :: #force_no_inline proc(out: ^write.Out, s: []u8, at: int) -> int #no_bounds_check {
+	// A byte of `s` takes at most three of the output, and a character that starts before `end` ends at most three
+	// bytes past it.
+	end := min(len(s), at + write.ROOM_MAX / 3 - 4)
+	p := write.room(out, 3 * (end - at + 4))
+	o, i := 0, at
+	for i < end {
+		c := s[i]
+		switch {
+		case c < 0x80:
+			if i + 1 >= len(s) || s[i + 1] < 0x80 {
+				out.cursor += o
+				return i
+			}
+			// A backslash escapes the character after it, which is read as itself, or as nothing for a line separator.
+			if c != '\\' {
+				p[o] = c
+				o += 1
+			}
+			i += 1
+			if c == '\\' && is_line_separator(s[i:]) {
+				i += 3
+			}
+		case c < 0xE0:
+			o += u_escape(p[o:], u32(c & 0x1F) << 6 | u32(s[i + 1] & 0x3F))
+			i += 2
+		case c < 0xF0:
+			o += u_escape(p[o:], u32(c & 0x0F) << 12 | u32(s[i + 1] & 0x3F) << 6 | u32(s[i + 2] & 0x3F))
+			i += 3
+		case:
+			o += rune_units(p[o:], rune(u32(c & 0x07) << 18 | u32(s[i + 1] & 0x3F) << 12 | u32(s[i + 2] & 0x3F) << 6 | u32(s[i + 3] & 0x3F)))
+			i += 4
+		}
+	}
+	out.cursor += o
+	return i
+}
+
+// Writes `s`, the bytes between the quotes of a JSON5 string, as a JSON string. An escape JSON has is kept as written,
+// and one it lacks is spelled by what the reader decodes it to: `\x`, `\v`, `\0`, an escaped character that needs no
+// escape, and a line continuation, which stands for nothing. A raw quote of the other kind is escaped, as is a raw
+// control byte, and under `ascii` each character past ASCII is a `\u` escape. `s` is well formed.
+@(private)
+put_json5_as_json :: proc(out: ^write.Out, l: ^Layout, s: []u8) #no_bounds_check {
+	write.put_byte(out, '"')
+	run, i := 0, 0
+	for {
+		i = escape_from(s, i, ASCII_BYTES if l.ascii else 0)
+		if i >= len(s) {
+			break
+		}
+		write.put(out, s[run:i])
+		p := write.room(out, 12)
+		n := 0
+		switch c := s[i]; {
+		case c != '\\':
+			if c >= 0x80 {
+				r, size := utf8.decode_rune(s[i:])
+				n = rune_units(p, r)
+				i += size
+			} else {
+				n = escape_into(p, c)
+				i += 1
+			}
+		case spell.ESCAPED[s[i + 1]] != 0 || s[i + 1] == 'u':
+			n = 6 if s[i + 1] == 'u' else 2
+			copy(p[:n], s[i:])
+			i += n
+		case:
+			decoded: [2]u8
+			w, next := decode5_escape(raw_data(s), u64(i), u64(len(s)), &decoded[0], 0)
+			n = put_decoded(p, decoded[:w], l.ascii)
+			i = int(next)
+		}
+		out.cursor += n
+		run = i
+	}
+	write.put(out, s[run:])
+	write.put_byte(out, '"')
+}
+
+// Writes the character `d` of an escape, as the reader decodes it, at `p` as a JSON string holds it, and returns its
+// length: a byte below 0x80 with its escape if it needs one, else its UTF-8, under `ascii` as a `\u` escape.
+@(private)
+put_decoded :: #force_inline proc "contextless" (p: [^]u8, d: []u8, ascii: bool) -> int #no_bounds_check {
+	switch {
+	case len(d) == 0:
+		return 0
+	case len(d) == 1:
+		if ESCAPE_OF[d[0]] != 0 {
+			return escape_into(p, d[0])
+		}
+		p[0] = d[0]
+		return 1
+	case ascii:
+		r, _ := utf8.decode_rune(d)
+		return rune_units(p, r)
+	}
+	p[0], p[1] = d[0], d[1]
+	return 2
+}
+
+// Writes the `\u` escapes of code point `r`, past ASCII, at `p`: a surrogate pair past U+FFFF. Returns their length.
+@(private)
+rune_units :: #force_inline proc "contextless" (p: [^]u8, r: rune) -> int #no_bounds_check {
+	if r >= 0x10000 {
+		c := u32(r) - 0x10000
+		return u_escape(p, 0xD800 + c >> 10) + u_escape(p[6:], 0xDC00 + c & 0x3FF)
+	}
+	return u_escape(p, u32(r))
 }
 
 // Writes `\u` and the four lowercase hex digits of `unit` at `p` and returns 6.
@@ -407,33 +666,44 @@ ESCAPE_OF := [256]u8 {
 @(private, rodata)
 HEX_DIGITS := [16]u8{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'}
 
+// The high bit of each of eight bytes, which a byte past 0x7F has set.
+@(private)
+ASCII_BYTES :: u64(0x8080808080808080)
+
+// The first offset from `i` of a byte of `s` that a JSON string cannot hold as itself, a quote, a backslash or a control
+// byte, and with `past_ascii` set to `ASCII_BYTES` a byte past 0x7F too, else `len(s)`.
+@(private)
+escape_from :: #force_inline proc "contextless" (s: []u8, i: int, past_ascii: u64) -> int #no_bounds_check {
+	i := i
+	// Eight bytes at a time while none needs an escape. A byte past 0x7F never flags unless `past_ascii` says so, and the
+	// lowest flagged byte is a byte below 0x20, a quote or a backslash, as a borrow only flags bytes above a true one.
+	for i + 8 <= len(s) {
+		v := intrinsics.unaligned_load((^u64)(raw_data(s[i:])))
+		ONES :: u64(0x0101010101010101)
+		quote := v ~ (ONES * '"')
+		slash := v ~ (ONES * '\\')
+		hit := ((v - ONES * 0x20) | (quote - ONES) | (slash - ONES)) & ~v & ASCII_BYTES | v & past_ascii
+		if hit != 0 {
+			i += int(intrinsics.count_trailing_zeros(hit) >> 3)
+			break
+		}
+		i += 8
+	}
+	for i < len(s) && ESCAPE_OF[s[i]] == 0 && (s[i] < 0x80 || past_ascii == 0) {
+		i += 1
+	}
+	return i
+}
+
 // Writes `s` as a JSON string: a quote, a backslash and the control bytes escaped, each with its shortest escape, and
 // every other byte as itself.
 @(private)
 put_escaped :: proc(out: ^write.Out, s: string) #no_bounds_check {
 	write.put_byte(out, '"')
 	b := transmute([]u8)s
-	run := 0
-	i := 0
-	for i < len(b) {
-		// Eight bytes at a time while none needs an escape. Bytes past 0x7F never flag, and the lowest flagged byte is
-		// a byte below 0x20, a quote or a backslash, as a borrow only flags bytes above a true one.
-		for i + 8 <= len(b) {
-			v := intrinsics.unaligned_load((^u64)(raw_data(b[i:])))
-			ONES :: u64(0x0101010101010101)
-			HIGH :: u64(0x8080808080808080)
-			quote := v ~ (ONES * '"')
-			slash := v ~ (ONES * '\\')
-			hit := ((v - ONES * 0x20) | (quote - ONES) | (slash - ONES)) & ~v & HIGH
-			if hit != 0 {
-				i += int(intrinsics.count_trailing_zeros(hit) >> 3)
-				break
-			}
-			i += 8
-		}
-		for i < len(b) && ESCAPE_OF[b[i]] == 0 {
-			i += 1
-		}
+	run, i := 0, 0
+	for {
+		i = escape_from(b, i, 0)
 		if i >= len(b) {
 			break
 		}
@@ -591,6 +861,12 @@ inline_comments :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, $
 		for g in pending[k + 1:] {
 			more ||= g.kind == .Comment_Inline
 		}
+		// A block comment that holds U+2028 reads back as several lines in JSON5, so an inline comment after it would be read
+		// as the next value's lead comment: it is dropped.
+		if body, _ := write.comment_body(w.doc, f); T == .Json5 && more && holds_line_separator(body) {
+			w.dropped += {f.kind}
+			continue
+		}
 		when PRETTY {
 			write.put_byte(out, ' ')
 		}
@@ -608,6 +884,34 @@ put_body :: proc(out: ^write.Out, l: ^Layout, body: []u8) {
 	}
 }
 
+// Whether `body`, a comment's text, holds none of the bytes its form depends on: a line end, a `*`, and in JSON5 the
+// first byte of U+2028 and U+2029.
+@(private)
+comment_plain :: proc "contextless" (body: []u8, $T: Spec) -> bool #no_bounds_check {
+	ONES :: u64(0x0101010101010101)
+	HIGH :: u64(0x8080808080808080)
+	i := 0
+	for ; i + 8 <= len(body); i += 8 {
+		v := intrinsics.unaligned_load((^u64)(raw_data(body[i:])))
+		a, b, c := v ~ (ONES * '\n'), v ~ (ONES * '\r'), v ~ (ONES * '*')
+		hit := (a - ONES) & ~a | (b - ONES) & ~b | (c - ONES) & ~c
+		when T == .Json5 {
+			d := v ~ (ONES * 0xE2)
+			hit |= (d - ONES) & ~d
+		}
+		if hit & HIGH != 0 {
+			return false
+		}
+	}
+	for ; i < len(body); i += 1 {
+		c := body[i]
+		if c == '\n' || c == '\r' || c == '*' || T == .Json5 && c == 0xE2 {
+			return false
+		}
+	}
+	return true
+}
+
 // Writes comment `f` as a line comment when it was one and its body holds no line end, else as a block comment when
 // its body holds no `*/`, else drops it. With `block` it takes the block form where it can. In compact text a line
 // comment ends with a line end, which pretty text writes after it anyway. Returns whether it wrote a line comment.
@@ -615,7 +919,8 @@ put_body :: proc(out: ^write.Out, l: ^Layout, body: []u8) {
 put_comment :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, f: tape.Fact, block: bool, $T: Spec, $PRETTY: bool) -> (line_comment: bool) {
 	body, line := write.comment_body(w.doc, f)
 	can_line, can_block := true, true
-	for c, i in body {
+	scan := body if !comment_plain(body, T) else nil
+	for c, i in scan {
 		switch c {
 		case '\n', '\r':
 			can_line = false
@@ -623,7 +928,7 @@ put_comment :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, f: tape.Fact, b
 			can_block &&= i + 1 >= len(body) || body[i + 1] != '/'
 		case 0xE2:
 			// U+2028 and U+2029 end a JSON5 line comment.
-			if T == .Json5 && i + 2 < len(body) && body[i + 1] == 0x80 && body[i + 2] & 0xFE == 0xA8 {
+			if T == .Json5 && is_line_separator(body[i:]) {
 				can_line = false
 			}
 		}

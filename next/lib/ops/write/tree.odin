@@ -107,7 +107,13 @@ tree_start :: proc(w: ^Tree, doc: ^tape.Document, opts: Options, holds: tape.Fac
 	w.in_row, w.scratch, w.err = false, nil, nil
 	w.sort_keys, w.pairs = opts.sort_keys, make([dynamic]Pair, allocator)
 	if opts.node != tape.ROOT {
-		w.fact = facts_from(doc.facts, opts.node)
+		w.fact = facts_from(doc.facts, opts.node, 0)
+		// A subtree drops only the kinds its own facts hold.
+		w.dropped = {}
+		for k := w.fact; k < len(doc.facts) && doc.facts[k].node < w.end; k += 1 {
+			w.dropped += {doc.facts[k].kind}
+		}
+		w.dropped -= holds
 	}
 	w.first = w.fact
 	return nil
@@ -317,7 +323,7 @@ scalar_step :: #force_inline proc(w: ^Tree, s: Step, at: tape.Node_Index, $FACTS
 @(private)
 node_facts :: #force_inline proc "contextless" (w: ^Tree, at: tape.Node_Index) -> int #no_bounds_check {
 	if w.sort_keys {
-		w.fact = facts_from(w.facts, at)
+		w.fact = facts_from(w.facts, at, w.fact)
 	}
 	for w.fact < len(w.facts) && w.facts[w.fact].node < at {
 		w.dropped += {w.facts[w.fact].kind} & w.holds
@@ -330,10 +336,56 @@ node_facts :: #force_inline proc "contextless" (w: ^Tree, at: tape.Node_Index) -
 	return lo
 }
 
-// The first fact on node `at` or past it.
+// The step of value `at`, as `tree_next` gives it, for a writer that walks the nodes itself and calls it for each value
+// it writes with facts. `first` is whether the value is the first of its container, `key` its member's key or `NO_NODE`.
+value_step :: proc "contextless" (w: ^Tree, at, key: tape.Node_Index, depth: int, first: bool) -> Step #no_bounds_check {
+	lo := node_facts(w, at)
+	return {facts = w.facts[lo:w.fact], node = at, key = key, depth = depth, kind = .Scalar if w.nodes[at].kind < .Array else .Open, first = first}
+}
+
+// The first row from `i` of a walk by rows whose value holds facts, a member's row being its key's, else the largest
+// index. Facts on a key are no step's, and are dropped as the facts before a value are.
+fact_row :: proc "contextless" (w: ^Tree, i: tape.Node_Index) -> tape.Node_Index #no_bounds_check {
+	for w.fact < len(w.facts) {
+		at := w.facts[w.fact].node
+		if at >= w.end {
+			break
+		}
+		if w.nodes[at].role != .Key {
+			row := at - 1 if at > i && w.nodes[at - 1].role == .Key else at
+			if row >= i {
+				return row
+			}
+		}
+		w.dropped += {w.facts[w.fact].kind} & w.holds
+		w.fact += 1
+	}
+	return max(tape.Node_Index)
+}
+
+// The first fact on node `at` or past it, searched outward from the fact `near`, which a sorted object's members stay
+// close to.
 @(private)
-facts_from :: proc "contextless" (facts: []tape.Fact, at: tape.Node_Index) -> int {
-	lo, hi := 0, len(facts)
+facts_from :: proc "contextless" (facts: []tape.Fact, at: tape.Node_Index, near: int) -> int #no_bounds_check {
+	f := min(near, len(facts))
+	lo, hi := f, f
+	step := 1
+	if f < len(facts) && facts[f].node < at {
+		lo = f + 1
+		hi = lo
+		for hi < len(facts) && facts[hi].node < at {
+			lo = hi + 1
+			hi = lo + step
+			step *= 2
+		}
+		hi = min(hi, len(facts))
+	} else {
+		for lo > 0 && facts[lo - 1].node >= at {
+			hi = lo - 1
+			lo = max(lo - 1 - step, 0)
+			step *= 2
+		}
+	}
 	for lo < hi {
 		mid := (lo + hi) / 2
 		if facts[mid].node < at {

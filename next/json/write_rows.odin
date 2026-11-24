@@ -1,16 +1,17 @@
 package json
 
 import "base:intrinsics"
-import "core:simd"
 import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 
-// The write of a document read whole as JSON or JSONC, with no fact the target writes and no table: its rows in
-// document order, each container closed where its subtree ends, on a stack of its own. `rows_run` holds the common
-// case, calls nothing, and copies each token from the source in 16-byte blocks over chunks of rows the output's room
-// holds. `rows_rare` and `rows_close` write each row it stops at: a string with an escape spelled another way, a long
-// token, a deep line, a row whose block copy would read past the source.
+// The write of a document read whole as JSON, JSONC or JSON5, with no table: its rows in document order, each container
+// closed where its subtree ends, on a stack of its own. `rows_run` holds the common case, calls nothing, and copies each
+// token from the source in 16-byte blocks over chunks of rows the output's room holds. `rows_rare` and `rows_close`
+// write each row it stops at: a long token, a deep line, a row whose block copy would read past the source, a string
+// the target respells. A document with facts the target writes ends a chunk before each value that holds one, and
+// before the close of each container that holds a foot or inline comment. `rows_fact_value` and `rows_fact_close`
+// write those as the walk's layout loop does, with their comments.
 
 // The longest token `rows_run` copies.
 @(private)
@@ -50,6 +51,16 @@ Open_Container :: struct {
 	close: u32,
 }
 
+// What a string of the document is to the rows route: `Json` a span between its quotes as written, `Ascii` that too
+// where it is all ASCII, which sends any other to the rare path, and `Json5` a span between its own quotes, or a bare
+// key, which a plain scalar is not.
+@(private)
+Rows_Text :: enum {
+	Json,
+	Ascii,
+	Json5,
+}
+
 // Where a write of rows stands. `rows_run` holds it in a local, so it keeps all of it in registers.
 @(private)
 Rows :: struct {
@@ -68,8 +79,7 @@ Rows :: struct {
 }
 
 // The first node whose token a block copy may read past the source, so `rows_run` leaves it and every later row to
-// the rare path: a token is copied in blocks of 16 bytes, at least 32 bytes, from the byte before its span, and
-// `short_escapes` reads 32 bytes past a string.
+// the rare path: a token is copied in blocks of 16 bytes, at least 32 bytes, from the byte before its span.
 @(private)
 rows_copy_end :: proc "contextless" (doc: ^tape.Document) -> tape.Node_Index {
 	for i := len(doc.nodes); i > 0; i -= 1 {
@@ -84,9 +94,11 @@ rows_copy_end :: proc "contextless" (doc: ^tape.Document) -> tape.Node_Index {
 // Writes the value the walk `w` starts at: `rows_run` over chunks of rows the output's room holds, counting each row at
 // the room it takes at most past the closes of the containers open at the chunk's start, so no row tests the room, and
 // the rare path for each row it stops at. A chunk starts on a row inside the innermost container. A JSON or JSONC
-// document's scalars spell the same in every target, so the rare path writes them as JSON's.
+// document's scalars spell the same in every target, so the rare path writes them as JSON's. With `facts` a chunk ends
+// before each value that holds facts and the close of each container that writes some there, and the facts path of
+// `spec` writes them.
 @(private)
-write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $WIDTH: int) #no_bounds_check {
+write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $WIDTH: int, $TEXT: Rows_Text, facts: bool, spec: Spec) #no_bounds_check {
 	local: [ROW_LEVELS]Open_Container = ---
 	r: Rows
 	r.stack = &local[0]
@@ -110,19 +122,31 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 	r.limit = min(line_at, held - 1)
 	nodes, src := w.nodes, raw_data(w.doc.src)
 	stop := min(rows_copy_end(w.doc), w.end)
+	f := Rows_Facts{spec = spec}
+	if facts {
+		f.frames = make([dynamic]Fact_Container, w.allocator)
+	}
+	defer delete(f.frames)
 	i := w.i
-	if !rows_rare(out, w, l, &r, &held, i, PRETTY) {
+	f.row = write.fact_row(w, i) if facts else max(tape.Node_Index)
+	ok: bool
+	i, ok = rows_row(out, w, l, &r, &held, &f, i, PRETTY, TEXT)
+	if !ok {
 		return
 	}
-	i += 1
 	for r.top > 0 && out.err == nil {
-		if r.stack[r.top].end != i && i < stop && r.top <= line_at {
+		if facts {
+			f.row = write.fact_row(w, i)
+		}
+		if r.stack[r.top].end != i && i < stop && r.top <= line_at && l.pending == nil {
 			when PRETTY {
 				r.limit = min(r.top + ROW_HEADROOM, line_at, held - 1)
 				row_room := 3 * (r.limit * width + 18) + 2 * (ROW_TOKEN + 32) + 8
 				owed := r.top * (r.top * width + 18)
 			} else {
-				owed := r.top
+				// The rare path grows the stack, so the limit follows it.
+					r.limit = min(line_at, held - 1)
+					owed := r.top
 			}
 			write.room(out, row_room)
 			chunk := (out.size - out.cursor - owed) / row_room
@@ -134,6 +158,9 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 			}
 			if chunk > 0 {
 				r.stop = tape.Node_Index(min(int(i) + chunk, int(stop)))
+				if facts {
+					r.stop = min(r.stop, f.row, fact_container_end(&f))
+				}
 				// A chunk ends on a value, since a key is written with its value.
 				if nodes[r.stop - 1].role == .Key {
 					r.stop -= 1
@@ -154,7 +181,7 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 						r.p = r.p[int(r.after == 2):]
 					}
 					r.after = 0
-					next := rows_run(&r, nodes, src, i, PRETTY, WIDTH)
+					next := rows_run(&r, nodes, src, i, PRETTY, WIDTH, TEXT)
 					out.cursor = int(intrinsics.ptr_sub(r.p, out.buf))
 					// A run that stops inside its chunk with nothing owed stops before a row it does not write, and
 					// would stop there again.
@@ -167,13 +194,20 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 			}
 		}
 		if r.stack[r.top].end == i {
-			rows_close(out, l, &r, PRETTY)
+			if facts && (l.pending != nil || fact_container_closes(&f, r.top)) {
+				rows_fact_close(out, w, l, &r, &f, PRETTY)
+			} else {
+				rows_close(out, l, &r, PRETTY)
+			}
 		} else {
-			if !rows_rare(out, w, l, &r, &held, i, PRETTY) {
+			i, ok = rows_row(out, w, l, &r, &held, &f, i, PRETTY, TEXT)
+			if !ok {
 				return
 			}
-			i += 1
 		}
+	}
+	if facts && out.err == nil {
+		rows_fact_end(out, w, l, f.spec, PRETTY)
 	}
 }
 
@@ -181,10 +215,18 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 // with its key, with no test between. Returns the row it stopped at, and `after` says what is owed before it. It calls
 // nothing and holds the cursor in a local, so the loop keeps every value in a register.
 @(private)
-rows_run :: #force_no_inline proc "contextless" (r: ^Rows, nodes: [^]tape.Node, src: [^]u8, i: tape.Node_Index, $PRETTY: bool, $WIDTH: int) -> tape.Node_Index #no_bounds_check {
-	// `kind`, `role` and `spelling` are one word of a node, and a JSON key is a string.
-	KEY_MASK :: u32(0xFFFF) | u32(tape.SPELLING_DECODE) << 16
-	KEY_WORD :: u32(tape.Kind.String) | u32(tape.Role.Key) << 8
+rows_run :: #force_no_inline proc "contextless" (r: ^Rows, nodes: [^]tape.Node, src: [^]u8, i: tape.Node_Index, $PRETTY: bool, $WIDTH: int, $TEXT: Rows_Text) -> tape.Node_Index #no_bounds_check {
+	// `kind`, `role` and `spelling` are one word of a node, and a JSON key is a string. The route holds no string a
+	// tolerance read, and under `ascii` a string with no ASCII mark goes to the rare path, which respells it.
+	when TEXT == .Ascii {
+		KEY_MASK :: u32(0xFFFF) | u32(tape.SPELLING_ASCII) << 16
+		KEY_WORD :: u32(tape.Kind.String) | u32(tape.Role.Key) << 8 | u32(tape.SPELLING_ASCII) << 16
+	} else {
+		KEY_MASK :: u32(0xFFFF)
+		KEY_WORD :: u32(tape.Kind.String) | u32(tape.Role.Key) << 8
+	}
+	#assert(tape.SPELLING_QUOTED == 2 && tape.SPELLING_ASCII == 16)
+	#assert(tape.Kind.String == tape.Kind(5) && tape.Kind.Plain == tape.Kind(6))
 	#assert(offset_of(tape.Node, role) == offset_of(tape.Node, kind) + 1)
 	#assert(offset_of(tape.Node, spelling) == offset_of(tape.Node, kind) + 2)
 	#assert(u8('[') + 2 == u8(']') && u8('[') | 1 << 5 == u8('{'))
@@ -198,8 +240,10 @@ rows_run :: #force_no_inline proc "contextless" (r: ^Rows, nodes: [^]tape.Node, 
 			t := &nodes[i]
 			word := (^u32)(&t.kind)^
 			if word & KEY_MASK == KEY_WORD {
-				n := t.n + 2
-				if !copy_token(p, src[t.lo - 1:], n) {
+				// A JSON5 key may be bare, with no quote on either side.
+				head := (word >> 17) & 1 when TEXT == .Json5 else u32(1)
+				n := t.n + 2 * head
+				if !copy_token(p, src[t.lo - u64(head):], n) {
 					break
 				}
 				p = p[n:]
@@ -215,22 +259,21 @@ rows_run :: #force_no_inline proc "contextless" (r: ^Rows, nodes: [^]tape.Node, 
 				word = (^u32)(&t.kind)^
 			}
 			// A string's quotes are the bytes around its span, and of a JSON document's kinds only a string has bit 2.
-			// One test takes a container and a string with an escape: a kind past `Plain`, or a quoted kind's escape
-			// bit.
+			// One test takes a container and a string the target must respell: a kind past `Plain`, or under `ascii` a
+			// quoted kind with no ASCII mark, or in JSON5 a plain scalar, which is no quoted span.
 			quoted := (word >> 2) & 1
-			if ((word & 0xFF) + 1) >> 3 | (quoted & (word >> 16)) != 0 {
-				// An escaped string is rarer than a container, and its scan laid out between them delays every open.
-				if intrinsics.expect(word & 0xFF < u32(tape.Kind.Array), false) {
-					if t.role == .Key || t.n > ROW_TOKEN || !short_escapes(src[t.lo:], t.n) {
-						break
-					}
-					copy_token(p, src[t.lo - 1:], t.n + 2)
-					p = p[t.n + 2:]
+			odd := u32(0)
+			when TEXT == .Ascii {
+				odd = quoted & ~(word >> 20)
+			} else when TEXT == .Json5 {
+				odd = quoted & (word >> 1)
+			}
+			if ((word & 0xFF) + 1) >> 3 | odd != 0 {
+				// A lax string is rarer than a container, and its test laid out between them delays every open.
+				// A container a read kept part of is refused on the rare path.
+				if intrinsics.expect(word & 0xFF < u32(tape.Kind.Array) || word >> 16 & u32(tape.CONTAINER_PARTIAL) != 0, false) {
+					break
 				} else {
-					// A container a read kept part of is refused on the rare path.
-					if word >> 16 & u32(tape.CONTAINER_PARTIAL) != 0 {
-						break
-					}
 					open := '[' | u8(word & 0xFF == u32(tape.Kind.Object)) << 5
 					p[0] = open
 					if t.n == 1 {
@@ -248,10 +291,14 @@ rows_run :: #force_no_inline proc "contextless" (r: ^Rows, nodes: [^]tape.Node, 
 						p = p[1:]
 						when PRETTY {
 							c.bytes += WIDTH if WIDTH > 0 else c.width
-							p = line_start(p, c.head, c.fill, 1 + c.bytes)
 						}
 						if i >= c.stop {
+							// The line of the first child is owed.
+							c.after = 1
 							break
+						}
+						when PRETTY {
+							p = line_start(p, c.head, c.fill, 1 + c.bytes)
 						}
 						continue
 					}
@@ -308,7 +355,7 @@ before_row :: #force_inline proc "contextless" (c: ^Rows, i: tape.Node_Index, $P
 // Writes row `i` with what is owed before it, with no limit on the room, the depth or the spelling. False with
 // `w.err` set when it cannot.
 @(private, cold)
-rows_rare :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, held: ^int, i: tape.Node_Index, $PRETTY: bool) -> bool {
+rows_rare :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, held: ^int, i: tape.Node_Index, $PRETTY: bool, $SPEC: Spec) -> bool {
 	t := w.nodes[i]
 	if t.kind >= .Array && r.top + 1 == held^ && !write.grow_stack(&r.stack, held, ROW_LEVELS, w.allocator, &w.err) {
 		return false
@@ -333,11 +380,8 @@ rows_rare :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, 
 		r.after = 1
 		return true
 	}
-	src := w.doc.src
-	// A string with escapes is its source text respelled where `respell_escapes` may read past it.
-	copied := t.kind == .String && t.spelling & (tape.SPELLING_DECODE | tape.SPELLING_LAX) == tape.SPELLING_DECODE && t.lo + u64(t.n) + 64 <= u64(len(src)) && put_respelled(out, src[t.lo - 1:][:t.n + 2])
 	if t.role == .Key {
-		if !copied && !put_key(out, w, l, i, .Json) {
+		if !put_key(out, w, l, i, SPEC) {
 			return false
 		}
 		put_colon(out, PRETTY)
@@ -345,24 +389,165 @@ rows_rare :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, 
 		return true
 	}
 	r.after = 2
-	return copied || put_scalar(out, w, l, i, .Json)
+	return put_scalar(out, w, l, i, SPEC)
 }
 
-// Writes `text`, a string of a strict text with its quotes, respelled by `respell_escapes` in pieces that each end
-// past an escape. False when an escape at the start of a piece does not read, which a strict text's string never holds,
-// with the pieces before it written.
+// A container with facts the rows route has open, whose facts are written at its close.
 @(private)
-put_respelled :: proc(out: ^write.Out, text: []u8) -> bool #no_bounds_check {
-	for at := 0; at < len(text); {
-		n := min(len(text) - at, write.ROOM_MAX - 64)
-		wrote, read := respell_escapes(write.room(out, n + 64), raw_data(text)[at:], n)
-		if read == 0 {
-			return false
-		}
-		out.cursor += wrote
-		at += read
+Fact_Container :: struct {
+	end:   tape.Node_Index,
+	level: int, // its place on the stack of rows
+	facts: []tape.Fact,
+}
+
+// What the rows route of a document with facts keeps beside its rows.
+@(private)
+Rows_Facts :: struct {
+	spec:   Spec,
+	row:    tape.Node_Index, // the first row from the one being written whose value holds facts, else the largest
+	frames: [dynamic]Fact_Container, // the open containers with facts, the innermost last
+}
+
+// Where the innermost open container with facts ends, else the largest index.
+@(private)
+fact_container_end :: #force_inline proc "contextless" (f: ^Rows_Facts) -> tape.Node_Index {
+	if n := len(f.frames); n > 0 {
+		return f.frames[n - 1].end
 	}
-	return true
+	return max(tape.Node_Index)
+}
+
+// Whether the container at `level` of the stack of rows has facts.
+@(private)
+fact_container_closes :: #force_inline proc "contextless" (f: ^Rows_Facts, level: int) -> bool {
+	n := len(f.frames)
+	return n > 0 && f.frames[n - 1].level == level
+}
+
+// Whether any of `facts` is a comment that follows its value on its line.
+@(private)
+holds_inline :: proc "contextless" (facts: []tape.Fact) -> bool {
+	for f in facts {
+		if f.kind == .Comment_Inline {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether any of the facts of a container is written at its close: a foot comment, or an inline one after it. Its lead
+// comments are written at its open, and its close is like any other's.
+@(private)
+writes_at_close :: proc "contextless" (facts: []tape.Fact) -> bool {
+	for f in facts {
+		if f.kind == .Comment_Inline || f.kind == .Comment_Foot {
+			return true
+		}
+	}
+	return false
+}
+
+// Writes row `i`, and a member's value with its key, and returns the row after. A row that holds facts, or that follows
+// a value whose comments are owed, takes the facts path.
+@(private)
+rows_row :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, held: ^int, f: ^Rows_Facts, i: tape.Node_Index, $PRETTY: bool, $TEXT: Rows_Text) -> (next: tape.Node_Index, ok: bool) {
+	if i == f.row || l.pending != nil {
+		return rows_fact_value(out, w, l, r, held, f, i, PRETTY)
+	}
+	return i + 1, rows_rare(out, w, l, r, held, i, PRETTY, Spec.Json5 when TEXT == .Json5 else Spec.Json)
+}
+
+// `rows_fact_value_as` for the spec of the write.
+@(private, cold)
+rows_fact_value :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, held: ^int, f: ^Rows_Facts, i: tape.Node_Index, $PRETTY: bool) -> (tape.Node_Index, bool) {
+	if f.spec == .Jsonc {
+		return rows_fact_value_as(out, w, l, r, held, f, i, .Jsonc, PRETTY)
+	}
+	return rows_fact_value_as(out, w, l, r, held, f, i, .Json5, PRETTY)
+}
+
+// Writes the value of row `i`, or the member whose key it is, as the layout loop of `write_tree` does, with the comments
+// on it, and opens its container. Returns the row after, and false with `w.err` set when it cannot.
+@(private)
+rows_fact_value_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, held: ^int, f: ^Rows_Facts, i: tape.Node_Index, $T: Spec, $PRETTY: bool) -> (tape.Node_Index, bool) {
+	at, key := i, tape.NO_NODE
+	if w.nodes[i].role == .Key {
+		key, at = i, i + 1
+	}
+	t := w.nodes[at]
+	if t.kind >= .Array {
+		if t.spelling & tape.CONTAINER_PARTIAL != 0 {
+			w.err = write.Refused{at, .Partial}
+			return i, false
+		}
+		if r.top + 1 == held^ && !write.grow_stack(&r.stack, held, ROW_LEVELS, w.allocator, &w.err) {
+			return i, false
+		}
+	}
+	s := write.value_step(w, at, key, r.top, r.after != 2)
+	l.line_value, l.wrote = r.after == 2, r.top > 0 || r.after != 0
+	if !step_value(out, w, l, s, T, true, PRETTY) {
+		return i, false
+	}
+	if t.kind < .Array {
+		r.after = 2
+		if !holds_inline(l.pending) {
+			l.pending = nil
+		}
+		return at + 1, true
+	}
+	open := bracket_of(t.kind)
+	r.top += 1
+	r.stack[r.top] = {at + tape.Node_Index(t.n), u32(open) + 2}
+	r.after = 1
+	if writes_at_close(s.facts) {
+		if _, err := append(&f.frames, Fact_Container{end = at + tape.Node_Index(t.n), level = r.top, facts = s.facts}); err != nil {
+			w.err = err
+			return i, false
+		}
+	}
+	return at + 1, true
+}
+
+// `rows_fact_close_as` for the spec of the write.
+@(private, cold)
+rows_fact_close :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, f: ^Rows_Facts, $PRETTY: bool) {
+	if f.spec == .Jsonc {
+		rows_fact_close_as(out, w, l, r, f, .Jsonc, PRETTY)
+	} else {
+		rows_fact_close_as(out, w, l, r, f, .Json5, PRETTY)
+	}
+}
+
+// Writes the close of the innermost container as the layout loop of `write_tree` does, with the comments before it, and
+// its own after.
+@(private)
+rows_fact_close_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, f: ^Rows_Facts, $T: Spec, $PRETTY: bool) {
+	s := write.Step{depth = r.top - 1, kind = .Close, first = r.after == 1}
+	if fact_container_closes(f, r.top) {
+		s.facts = f.frames[len(f.frames) - 1].facts
+		pop(&f.frames)
+	}
+	l.line_value, l.wrote = r.after == 2, true
+	step_close(out, w, l, s, u8(r.stack[r.top].close), T, true, PRETTY)
+	if !holds_inline(l.pending) {
+		l.pending = nil
+	}
+	r.top -= 1
+	r.after = 2
+}
+
+// The comments after the last value of the text, for the spec of the write.
+@(private, cold)
+rows_fact_end :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, spec: Spec, $PRETTY: bool) {
+	if w.err != nil {
+		return
+	}
+	if spec == .Jsonc {
+		end_comments(out, w, l, .Jsonc, PRETTY)
+	} else {
+		end_comments(out, w, l, .Json5, PRETTY)
+	}
 }
 
 // Writes the close of the innermost container, with the line before it.
@@ -378,29 +563,6 @@ rows_close :: #force_no_inline proc(out: ^write.Out, l: ^Layout, r: ^Rows, $PRET
 	r.after = 2
 }
 
-// Whether the `n` bytes at `s`, a string's escaped text, hold only escapes `put_escaped` spells the same, so no unicode
-// escape and no escaped solidus: no backslash before a `u` or a slash. An escaped backslash before a `u` also says
-// false, which only sends the string to the rare path. A block of 32 bytes takes one test for a backslash, and one that
-// holds one a test of the bytes after them. It reads up to 32 bytes past the string.
-@(private)
-short_escapes :: #force_inline proc "contextless" (s: [^]u8, n: u32) -> bool #no_bounds_check {
-	V :: #simd[16]u8
-	for k := u32(0); k < n; k += 32 {
-		a := simd.lanes_eq(kernel.load16(s[k:]), V('\\'))
-		b := simd.lanes_eq(kernel.load16(s[k + 16:]), V('\\'))
-		if !kernel.any_lane16(a | b) {
-			continue
-		}
-		next_a, next_b := kernel.load16(s[k + 1:]), kernel.load16(s[k + 17:])
-		a &= simd.lanes_eq(next_a, V('u')) | simd.lanes_eq(next_a, V('/'))
-		b &= simd.lanes_eq(next_b, V('u')) | simd.lanes_eq(next_b, V('/'))
-		left := int(n - k)
-		if kernel.any_lane16(a & kernel.live16(min(left, 16)) | b & kernel.live16(clamp(left - 16, 0, 16))) {
-			return false
-		}
-	}
-	return true
-}
 
 // A line end and `n - 1` bytes of indent at `p`, from `v`, a block that opens with the line end, and `fill`. Stores up
 // to 15 bytes past them.

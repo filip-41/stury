@@ -1,6 +1,7 @@
 package write
 
 import "base:intrinsics"
+import "core:encoding/base64"
 import "core:math"
 import "core:strconv"
 import "stury:lib/core/tape"
@@ -27,6 +28,18 @@ text_of :: proc(w: ^Tree, at: tape.Node_Index) -> (s: string, ok: bool) #no_boun
 	return tape.node_text(doc, at, w.scratch)
 }
 
+// The base64 of the payload of byte string node `at`, as the readers spell a byte string key, in a buffer from the walk's
+// allocator that the caller frees. False with `w.err` set when the scratch or the buffer cannot grow.
+bytes_base64 :: proc(w: ^Tree, at: tape.Node_Index) -> (s: string, ok: bool) {
+	payload := text_of(w, at) or_return
+	encoded, err := base64.encode(transmute([]u8)payload, allocator = w.allocator)
+	if err != nil {
+		w.err = err
+		return "", false
+	}
+	return encoded, true
+}
+
 @(private, cold)
 scratch_grow :: #force_no_inline proc(w: ^Tree, room: int) -> bool {
 	size := max(room, 2 * len(w.scratch), 256)
@@ -42,18 +55,28 @@ scratch_grow :: #force_no_inline proc(w: ^Tree, room: int) -> bool {
 	return true
 }
 
-// The RFC 8259 text of number node `at`: its bytes when they are one, a JSON5 decimal (`+1`, `.5`, `5.`) or hex integer
-// spelled as one exactly, in `buf` or the walk's scratch, else its value's decimal, the shortest that reads back as the
+// The RFC 8259 text of number node `at`: in a binary format its value in decimal, exact, else its bytes when they are
+// one, a JSON5 decimal (`+1`, `.5`, `5.`) or hex integer spelled as one exactly, in `buf` or the walk's scratch, else its value's decimal, the shortest that reads back as the
 // same binary64 for a fraction, with `.0` added to a whole one so it stays a float. False for a value with none:
 // infinite, not a number, past 64 bits with no exact spelling, or with `w.err` set when the scratch cannot grow.
 number_text :: proc(w: ^Tree, at: tape.Node_Index, buf: ^[NUMBER_ROOM]u8) -> (string, bool) #no_bounds_check {
 	doc := w.doc
+	if .Binary in doc.format.caps {
+		// The bytes are an encoding, and no float spells an integer past `i64`. A value with no text gives an empty one.
+		s, ok := text_of(w, at)
+		return s, ok && len(s) > 0
+	}
 	t := doc.nodes[at]
 	b := tape.span_bytes(doc, t.lo, t.n)
-	if is_json_number(b) {
-		return string(b), true
+	// A `+` is the one sign JSON5 adds to a number that is otherwise RFC 8259's, and its text is the bytes after it.
+	plus := 1 if len(b) > 1 && b[0] == '+' else 0
+	if is_json_number(b[plus:]) {
+		return string(b[plus:]), true
 	}
 	if hex, decimal := number5_shape(b); hex || decimal {
+		if hex && len(b) - hex_digits_at(b) <= MAX_HEX_DIGITS_U64 {
+			return hex_text(b, buf), true
+		}
 		// A hex digit is under 1.21 decimal digits, and a decimal gains at most a `0` on each side of its point.
 		room := len(b) * 5 / 4 + 4
 		dst := buf[:]
@@ -96,6 +119,10 @@ number_text :: proc(w: ^Tree, at: tape.Node_Index, buf: ^[NUMBER_ROOM]u8) -> (st
 	}
 	return "", false
 }
+
+// The most hex digits that `i64` holds.
+@(private)
+MAX_HEX_DIGITS_U64 :: 15
 
 // The most hex digits of a number `number_text` writes in decimal, a bound on its quadratic work.
 @(private)
@@ -154,6 +181,17 @@ respell_decimal5 :: proc "contextless" (dst, b: []u8) -> int #no_bounds_check {
 		}
 	}
 	return n
+}
+
+// Hex integer `b` (`0x1F`, `-0xff`), of at most `MAX_HEX_DIGITS_U64` digits, in decimal, in `buf`.
+@(private)
+hex_text :: proc(b: []u8, buf: ^[NUMBER_ROOM]u8) -> string #no_bounds_check {
+	v: i64
+	for c in b[hex_digits_at(b):] {
+		d := c | 0x20
+		v = v << 4 | i64(d - '0' if d <= '9' else d - 'a' + 10)
+	}
+	return strconv.write_int(buf[:], -v if b[0] == '-' else v, 10)
 }
 
 // Writes hex integer `b` (`0x1F`, `-0xff`), of at most `MAX_HEX_DIGITS` digits, at `dst` in decimal, through limbs of

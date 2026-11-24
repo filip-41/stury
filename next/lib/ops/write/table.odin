@@ -204,9 +204,6 @@ table_header :: proc(t: ^Table_Write, root: tape.Node_Index, single: bool) -> (h
 		return {node = root + 1}, true, true
 	case .Array:
 		return {node = tape.NO_NODE, width = tape.child_count(doc, root + 1, doc.nodes[root + 1])}, false, true
-	case .Bytes:
-		w.err = Refused{root + 1, .No_Spelling}
-		return
 	}
 	return {node = tape.NO_NODE, width = 1, scalars = true}, false, true
 }
@@ -635,7 +632,9 @@ put_cell_of :: proc(t: ^Table_Write, at: tape.Node_Index, j: int) -> bool {
 		}
 		return put_cell(t, at, s, j, true)
 	case .Bytes:
-		w.err = Refused{at, .No_Spelling}
+		s := bytes_base64(w, at) or_return
+		defer delete(s, w.allocator)
+		return put_cell(t, at, s, j, false)
 	case .Array, .Object, .End:
 		w.err = Refused{at, .Not_A_Table}
 	}

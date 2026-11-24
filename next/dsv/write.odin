@@ -13,8 +13,9 @@ Write_Error :: write.Error
 // Writes value `opts.node` of `doc`, a document of any format, as a text of `spec`, a record a line, in a buffer from
 // `allocator` that the caller owns. The value is a table a delimited read built, or an array of objects, the first
 // one's keys the header and each other one holding the same keys, or of arrays of one width, with `no_header`, which
-// also writes an array of objects with no header line. A cell
-// is a scalar: null an empty cell, a string its text, quoted (CSV) or escaped (TSV) where it must be, a number or
+// also writes an array of objects with no header line. An array of arrays is refused without it: it has no keys, so
+// any header would read back as the first record, and the table as objects. A cell
+// is a scalar: null an empty cell, a string its text, a byte string its payload's base64, quoted (CSV) or escaped (TSV) where it must be, a number or
 // boolean its text, which reads back as text unless the options `infer`. `opts.format` holds the `Dsv_Options`, by
 // default those `doc` was read with when it is delimited. Comments on the table and on its records are written as
 // comment lines under a comment byte. Returns the kinds of the facts `doc` holds that the text does not.

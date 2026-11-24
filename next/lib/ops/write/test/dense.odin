@@ -123,8 +123,8 @@ dense_segment_edges :: proc(t: ^testing.T) {
 	}
 }
 
-// An escape that a segment's end cuts is carried whole into the next: a surrogate pair at every offset around the end of
-// each of the first segments.
+// A string, an escape or a surrogate pair that a segment's end cuts reads on in the next: each at every offset around
+// the end of each of the first segments.
 @(test)
 dense_escapes_cut_by_a_segment :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -217,8 +217,37 @@ dense_sampled_route :: proc(t: ^testing.T) {
 	}
 }
 
-// Texts of long strings, which the dense route writes when the first 2 KB hold no backslash and the rows write when they
-// do. Either way the text is the same.
+// Strings with escapes of every kind, a stretch with no blank outside them that the dense route stores unread, then one
+// with blanks that reads the string state the first left over: a backslash run that ends a block, and a quote after it.
+@(test)
+dense_escapes_before_blanks :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0xb11d)
+	pieces := [?]string{`a`, `\\`, `\"`, `\n`, `\u` + `0041`, `\\\"`, `é`, `\/`, `\\\\`, ` `}
+	for _ in 0 ..< testkit.rounds(300) {
+		src := strings.builder_make(context.temp_allocator)
+		strings.write_byte(&src, '[')
+		unspaced := 40 + rand.int_max(300)
+		for i in 0 ..< unspaced + 100 {
+			if i > 0 {
+				strings.write_string(&src, "," if i < unspaced else " , ")
+			}
+			strings.write_byte(&src, '"')
+			for _ in 0 ..< 1 + rand.int_max(40) {
+				strings.write_string(&src, rand.choice(pieces[:9] if i < unspaced else pieces[:]))
+			}
+			strings.write_byte(&src, '"')
+		}
+		strings.write_byte(&src, ']')
+		if !dense_agrees(t, src.buf[:], bound = 0) {
+			return
+		}
+	}
+}
+
+// Texts of long strings with escapes and without, which the dense route writes when the first 2 KB hold few blanks outside
+// strings and the rows write when they hold more. Either way the text is the same.
 @(test)
 dense_long_strings :: proc(t: ^testing.T) {
 	testkit.deadline(t)

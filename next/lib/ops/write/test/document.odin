@@ -222,28 +222,27 @@ document_tolerated_strings_through_the_rows :: proc(t: ^testing.T) {
 	}
 }
 
-// Strings read with escapes are written with the fewest, whatever the source spelled, and a comment's text is left as
-// it was.
+// Strings read with escapes are written with the escapes they were read with, and a comment's text is left as it was.
 @(test)
-document_respells_strings :: proc(t: ^testing.T) {
+document_keeps_string_escapes :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := `{"a":["é\/x","😀","é","\n\"\\",1E2]}`
+	src := `{"a":["é\/x","😀","é","\n\"\\","\u00e9\u0041",1E2]}`
 	doc, _ := json.build(transmute([]u8)string(src))
 	defer json.destroy(&doc)
 	compact, _, err := json.write(&doc)
 	defer delete(compact)
 	testing.expect_value(t, err, nil)
-	testing.expect_value(t, string(compact), `{"a":["é/x","😀","é","\n\"\\",1E2]}`)
+	testing.expect_value(t, string(compact), src)
 	pretty, _, perr := json.write(&doc, .Json, {indent = 1})
 	defer delete(pretty)
 	testing.expect_value(t, perr, nil)
-	testing.expect_value(t, string(pretty), "{\n \"a\": [\n  \"é/x\",\n  \"😀\",\n  \"é\",\n  \"\\n\\\"\\\\\",\n  1E2\n ]\n}")
+	testing.expect_value(t, string(pretty), "{\n \"a\": [\n  \"é\\/x\",\n  \"😀\",\n  \"é\",\n  \"\\n\\\"\\\\\",\n  \"\\u00e9\\u0041\",\n  1E2\n ]\n}")
 	jsonc, _ := json.build(transmute([]u8)string(`[/* \/ */ "\/"]`), .Jsonc)
 	defer json.destroy(&jsonc)
 	text, _, jerr := json.write(&jsonc, .Jsonc)
 	defer delete(text)
 	testing.expect_value(t, jerr, nil)
-	testing.expect_value(t, string(text), `[/* \/ */"/"]`)
+	testing.expect_value(t, string(text), `[/* \/ */"\/"]`)
 }
 
 // A JSONC line comment holding U+2028 or U+2029, which end a JSON5 line comment, is written as JSON5 as a block comment

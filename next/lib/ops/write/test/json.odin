@@ -40,19 +40,21 @@ append_fixtures :: proc(t: ^testing.T, texts: ^[dynamic]string) {
 	}
 }
 
-// Reads `src` by the route under test and as JSON5, whose walk is the model.
+// Reads `src` by the route under test and again as JSON5 flagged as read with a tolerance, whose write is the walk.
 @(private = "file")
 build_both_routes :: proc(t: ^testing.T, src: string, k: int, route: json.Spec) -> (fast, walked: json.Document) {
 	fast_err, walked_err: json.Error
 	fast, fast_err = json.build(transmute([]u8)src, route)
 	walked, walked_err = json.build(transmute([]u8)src, .Json5)
 	testing.expectf(t, fast_err == nil && walked_err == nil, "text %d: %v %v", k, fast_err, walked_err)
+	// A tolerated read takes the walk on every path, which is the model.
+	walked.flags += {.Tolerated}
 	return
 }
 
 // The layouts each text is written in: compact, two spaces, a tab, an odd width.
 @(private)
-LAYOUTS := [?]write.Options{{}, {indent = 2}, {tab = true}, {indent = 7}}
+LAYOUTS := [?]write.Options{{}, {indent = 2}, {tab = true}, {indent = 7}, {ascii = true}, {indent = 2, ascii = true}}
 
 @(private)
 Tally :: struct {
@@ -175,7 +177,7 @@ json_writes_tolerated_values :: proc(t: ^testing.T) {
 			for opts in LAYOUTS {
 				out, _, werr := json.write(&doc, .Json, opts)
 				defer delete(out)
-				testing.expectf(t, werr == nil && json.validate(out) == nil && strings.contains(string(out), "a�"), "%q %v: %q %v", text, opts, out, werr)
+				testing.expectf(t, werr == nil && json.validate(out) == nil && strings.contains(string(out), "a\\ufffd" if opts.ascii else "a�"), "%q %v: %q %v", text, opts, out, werr)
 			}
 		}
 		for src in ([]string{"[1, NaN, 2]", "[-Infinity]"}) {
@@ -205,7 +207,8 @@ json_writes_tolerated_values :: proc(t: ^testing.T) {
 	testing.expectf(t, werr == nil && len(out) > 4900 && out[0] == '-', "%v %d", werr, len(out))
 }
 
-// The fewest escapes, JSON5 numbers in JSON's spelling, and a key of each kind JSON5 writes.
+// Strings as written and respelled only where the target needs it, JSON5 numbers in JSON's spelling, and a key of each kind
+// JSON5 writes.
 @(test)
 json_spells_each_value :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -216,13 +219,17 @@ json_spells_each_value :: proc(t: ^testing.T) {
 		want: string,
 	}
 	cases := [?]Case{
-		{`"\u00e9\/\u0041\n\u001f\ud83d\ude00\"\\\b\f\r\t\u007f\u2028"`, .Json, .Json, "\"é/A\\n\\u001f😀\\\"\\\\\\b\\f\\r\\t\x7f\u2028\""},
-		{`{"\u0061\u0000":"x"}`, .Json, .Json, `{"a\u0000":"x"}`},
+		{`"\u00e9\/\u0041\n\u001f\ud83d\ude00\"\\\b\f\r\t\u007f\u2028"`, .Json, .Json, `"\u00e9\/\u0041\n\u001f\ud83d\ude00\"\\\b\f\r\t\u007f\u2028"`},
+		{`{"\u0061\u0000":"x"}`, .Json, .Json, `{"\u0061\u0000":"x"}`},
 		{`[+1, .5, 5., +.5e3, -.5, 5.e2, 0x1F, -0xff, +0x0, 0xFFFFFFFFFFFFFFFFFF, 1e400]`, .Json5, .Json, `[1,0.5,5.0,0.5e3,-0.5,5.0e2,31,-255,0,4722366482869645213695,1e400]`},
 		{`[+1, .5, 0x1F, Infinity, -NaN, 'a"b', "c'd"]`, .Json5, .Json5, `[+1,.5,0x1F,Infinity,-NaN,'a"b',"c'd"]`},
-		{`{a: 1, $b_c: 'x', 'q': "y", "\u0041": 2}`, .Json5, .Json, `{"a":1,"$b_c":"x","q":"y","A":2}`},
+		{`{a: 1, $b_c: 'x', 'q': "y", "\u0041": 2}`, .Json5, .Json, `{"a":1,"$b_c":"x","q":"y","\u0041":2}`},
 		{`{a: 1, $b_c: 'x', 'q': "y"}`, .Json5, .Json5, `{a:1,$b_c:'x','q':"y"}`},
 		{"'line\\\ncontinued \\x41 \\v \\0'", .Json5, .Json, "\"linecontinued A \\u000b \\u0000\""},
+		{"'it\\'s \"q\" \\x0a\\x22 \\a\\n\\u00e9\ttab \\\r\n!'", .Json5, .Json, `"it's \"q\" \n\" a\n\u00e9\ttab !"`},
+		{`['\x41é', "\x7e\n", 'é', "\q"]`, .Json5, .Jsonc, `["Aé","~\n","é","q"]`},
+		{`['\xe9\xE9']`, .Json5, .Json, `["éé"]`},
+		{`["a\né😀", 'b\n']`, .Json5, .Json5, `["a\né😀",'b\n']`},
 		{`[1, [2, [3]], {}]`, .Json, .Json, `[1,[2,[3]],{}]`},
 		{"  {\n \"a\" : [ true , false , null ] }  ", .Json, .Json, `{"a":[true,false,null]}`},
 	}
@@ -274,10 +281,12 @@ json_lays_out_each_layout :: proc(t: ^testing.T) {
 		{"{\"a\": // k\n 1}", .Jsonc, {indent = 2}, "{\n  \"a\": /* k*/ 1\n}"},
 		{"{\"a\": // k */\n 1}", .Jsonc, {indent = 2}, "{\n  \"a\": // k */\n  1\n}"},
 		{"// comment", .Jsonc, {}, ""},
-		{"[{\"b\":1,\"a\":{\"d\":2,\"c\":3},\"\\u0061a\":4},{\"y\":[{\"z\":1,\"x\":2}]}]", .Json, {sort_keys = true}, "[{\"a\":{\"c\":3,\"d\":2},\"aa\":4,\"b\":1},{\"y\":[{\"x\":2,\"z\":1}]}]"},
+		{"[{\"b\":1,\"a\":{\"d\":2,\"c\":3},\"\\u0061a\":4},{\"y\":[{\"z\":1,\"x\":2}]}]", .Json, {sort_keys = true}, "[{\"a\":{\"c\":3,\"d\":2},\"\\u0061a\":4,\"b\":1},{\"y\":[{\"x\":2,\"z\":1}]}]"},
 		{"{\"b\": /* x */ 1, \"a\": 2, // after a\n \"c\": [3]}", .Jsonc, {sort_keys = true, indent = 2}, "{\n  \"a\": 2, // after a\n  \"b\": /* x */ 1,\n  \"c\": [\n    3\n  ]\n}"},
 		{"[\"\u00e9\U0001F600\\u0001\\n\", {\"\u043a\": \"x\"}]", .Json, {ascii = true}, "[\"\\u00e9\\ud83d\\ude00\\u0001\\n\",{\"\\u043a\":\"x\"}]"},
-		{"// \u00e9\n['\u00e9']", .Json5, {ascii = true, indent = 2}, "// \\u00e9\n[\n  \"\\u00e9\"\n]"},
+		{"// \u00e9\n['\u00e9']", .Json5, {ascii = true, indent = 2}, "// \\u00e9\n[\n  '\\u00e9'\n]"},
+		{"[\"a\\n\u00e9\\u00e9\U0001F600\\/\"]", .Json, {ascii = true}, "[\"a\\n\\u00e9\\u00e9\\ud83d\\ude00\\/\"]"},
+		{"{\u00e9: '\u00e9\\x41\\'', 'b': \"\\n\"}", .Json5, {ascii = true}, "{\\u00e9:'\\u00e9\\x41\\'','b':\"\\n\"}"},
 	}
 	for c in cases {
 		doc, err := json.build(transmute([]u8)c.src, c.spec)
@@ -499,7 +508,7 @@ json_dense_writes_as_the_walk :: proc(t: ^testing.T) {
 	}
 }
 
-// The write of a JSON or JSONC document by its rows is the walk's, which a JSON5 read of the same text takes, in every
+// The write of a JSON, JSONC or JSON5 document by its rows is the walk's, which a read flagged as tolerant takes, in every
 // layout, into a buffer and a sink, whole and for a subtree: tokens past the rows' longest, escapes spelled again in
 // keys and values, nesting past the rows' stack and their deepest line, comments the target drops.
 @(test)
@@ -512,34 +521,91 @@ json_rows_write_as_the_walk :: proc(t: ^testing.T) {
 	defer delete(texts)
 	append(&texts, fmt.tprintf("%s{{\"%s\": \"%s\", \"k\\u0041\": [\"\\/\", {{}}, []]}}%s", strings.repeat("[", 1500, context.temp_allocator), long, long, strings.repeat("]", 1500, context.temp_allocator)))
 	append(&texts, fmt.tprintf("[\"%s\", \"\\u00e9%s\", %s, {{\"a\": [1, // c\n2]}}]", long, long, strings.repeat("1", 300, context.temp_allocator)))
+	append(&texts, fmt.tprintf("%s1%s", strings.repeat("[/* a */", 1500, context.temp_allocator), strings.repeat("] // b\n", 1500, context.temp_allocator)))
 	append_fixtures(t, &texts)
 	for _ in 0 ..< testkit.rounds(100) {
 		b := strings.builder_make(context.temp_allocator)
 		random_value(&b, 0)
 		append(&texts, strings.to_string(b))
 	}
+	for odds in ([?]int{1, 3, 20, 400}) {
+		for _ in 0 ..< testkit.rounds(4) {
+			append(&texts, records_text(300 if odds > 3 else 40, odds, false))
+		}
+	}
+	// The JSON5 texts follow the JSONC ones, and are read as JSON5, whose rows are its own.
+	json5_from := len(texts)
+	for odds in ([?]int{1, 3, 20, 400}) {
+		for _ in 0 ..< testkit.rounds(6) {
+			append(&texts, records_text(150 if odds > 3 else 30, odds, true))
+		}
+	}
 	for src, k in texts {
-		rows, walked := build_both_routes(t, src, k, .Jsonc)
+		rows, walked := build_both_routes(t, src, k, .Jsonc if k < json5_from else .Json5)
 		defer json.destroy(&rows)
 		defer json.destroy(&walked)
 		node := json.ROOT if len(rows.nodes) < 3 else json.Node_Index(len(rows.nodes) / 3)
 		for node > 0 && rows.nodes[node].role != .Value {
 			node -= 1
 		}
-		for opts in LAYOUTS {
-			for at in ([]json.Node_Index{json.ROOT, node}) {
-				o := opts
-				o.node = at
-				got, _, gerr := json.write(&rows, .Json, o)
-				defer delete(got)
-				want, _, err := json.write(&walked, .Json, o)
-				defer delete(want)
-				testing.expectf(t, gerr == nil && err == nil && string(got) == string(want), "text %d %v: %v %v %d %d", k, o, gerr, err, len(got), len(want))
-				sunk, serr := sink_text(&rows, .Json, o)
-				defer delete(sunk)
-				testing.expectf(t, serr == nil && string(sunk) == string(want), "text %d %v to a sink: %v", k, o, serr)
+		// JSON5 texts hold numbers JSON and JSONC cannot spell.
+		for spec in ([]json.Spec{.Json, .Jsonc, .Json5} if k < json5_from else {.Json5}) {
+			for opts in LAYOUTS {
+				for at in ([]json.Node_Index{json.ROOT, node}) {
+					o := opts
+					o.node = at
+					got, gdropped, gerr := json.write(&rows, spec, o)
+					defer delete(got)
+					want, dropped, err := json.write(&walked, spec, o)
+					defer delete(want)
+					testing.expectf(t, gerr == nil && err == nil && string(got) == string(want) && gdropped == dropped, "text %d as %v %v: %v %v rows %q, walk %q", k, spec, o, gerr, err, got[:min(len(got), 400)], want[:min(len(want), 400)])
+					sunk, serr := sink_text(&rows, spec, o)
+					defer delete(sunk)
+					testing.expectf(t, serr == nil && string(sunk) == string(want), "text %d as %v %v to a sink: %v", k, spec, o, serr)
+				}
 			}
 		}
+	}
+}
+
+// A subtree write drops the kinds of facts inside the subtree, not those of the whole document.
+@(test)
+json_subtree_drops_its_own_facts :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, err := json.build(transmute([]u8)string("[1 /* a */, [2], [3 // b\n]]"), .Jsonc)
+	defer json.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	plain, with_comment: json.Node_Index
+	for n, i in doc.nodes {
+		if n.kind == .Array && i > 0 {
+			if plain == 0 {
+				plain = json.Node_Index(i)
+			} else {
+				with_comment = json.Node_Index(i)
+			}
+		}
+	}
+	for at, want in ([]json.Node_Index{plain, with_comment, json.ROOT}) {
+		out, dropped, werr := json.write(&doc, .Json, {node = at})
+		defer delete(out)
+		testing.expectf(t, werr == nil && (dropped == {}) == (want == 0), "node %d: %q %v %v", at, out, dropped, werr)
+	}
+}
+
+// A block comment that holds U+2028 reads as several lines in JSON5, so it is dropped there, and the comment after it
+// on its line stays an inline one.
+@(test)
+json5_drops_a_block_comment_with_a_line_separator :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, err := json.build(transmute([]u8)string("[1 /* a b */ // c\n, 2]"), .Jsonc)
+	defer json.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	for opts in LAYOUTS {
+		out, dropped, werr := json.write(&doc, .Json5, opts)
+		defer delete(out)
+		back, berr := json.build(out, .Json5)
+		defer json.destroy(&back)
+		testing.expectf(t, werr == nil && berr == nil && dropped != {} && len(back.facts) == 1 && back.facts[0].kind == .Comment_Inline, "%v: %q %v %v", opts, out, werr, berr)
 	}
 }
 
@@ -556,6 +622,74 @@ json_random_documents_read_back :: proc(t: ^testing.T) {
 		round_trips(t, b.buf[:], .Json5, "random", &tally)
 		round_trips(t, b.buf[:], .Jsonc, "random", &tally)
 	}
+}
+
+// A comment or a line end, one gap in `odds`, else nothing.
+@(private = "file")
+gap :: proc(b: ^strings.Builder, odds: int) {
+	if rand.int_max(odds) == 0 {
+		strings.write_string(b, rand.choice([]string{" /* c */ ", " // c\n", "\n", "/* a\nb */", " /* é */"}))
+	}
+}
+
+// An array of `records` objects of scalars and containers with a gap in `odds` at every place a comment may stand, so a
+// run of rows meets facts in every place and in every depth. With `json5` its keys are bare, single or double quoted, its
+// numbers take every JSON5 form, its strings are single quoted or continue a line, and commas trail.
+@(private = "file")
+records_text :: proc(records, odds: int, json5: bool) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	for r in 0 ..< records {
+		gap(&b, odds)
+		if r > 0 {
+			strings.write_byte(&b, ',')
+			gap(&b, odds)
+		}
+		strings.write_byte(&b, '{')
+		for m in 0 ..< 1 + rand.int_max(6) {
+			if m > 0 {
+				strings.write_byte(&b, ',')
+			}
+			gap(&b, odds)
+			switch rand.int_max(3) if json5 else 2 {
+			case 0:
+				fmt.sbprintf(&b, "k%d", m)
+			case 1:
+				fmt.sbprintf(&b, `'k%d\x41é'`, m)
+			case:
+				fmt.sbprintf(&b, `"k%dA"`, m)
+			}
+			gap(&b, odds)
+			strings.write_byte(&b, ':')
+			gap(&b, odds)
+			switch rand.int_max(8) if json5 else 5 {
+			case 0:
+				strings.write_string(&b, rand.choice([]string{"0x1F", "+1", ".5", "5.", "Infinity", "-Infinity", "NaN", "1e3", "-0", "12"}) if json5 else `[1, "a\n", [], [[2]], {"x": null}, {}]`)
+			case 1:
+				strings.write_string(&b, `[1, 'a\'b', [], {k: null,},]` if json5 else `{"p": [true, false], "q": {"r": "s"}}`)
+			case 2:
+				strings.write_string(&b, `{p: [true, false,], 'q': {r: "s"}}` if json5 else `[]`)
+			case 3:
+				strings.write_string(&b, "'single \\\n continued é \\x7f'" if json5 else `"string with é and \/"`)
+			case 4:
+				strings.write_string(&b, rand.choice([]string{"null", "true", "false"}) if json5 else `"string with é and \/"`)
+			case:
+				strings.write_string(&b, `"string with é and \/ é"`)
+			}
+			gap(&b, odds)
+		}
+		if json5 && rand.int_max(3) == 0 {
+			strings.write_byte(&b, ',')
+		}
+		strings.write_byte(&b, '}')
+		gap(&b, odds)
+	}
+	if json5 && records > 0 {
+		strings.write_byte(&b, ',')
+	}
+	strings.write_byte(&b, ']')
+	gap(&b, odds)
+	return strings.to_string(b)
 }
 
 @(private = "file")
@@ -591,6 +725,49 @@ random_value :: proc(b: ^strings.Builder, depth: int) {
 		}
 		strings.write_byte(b, '}')
 	}
+}
+
+// Random JSON5 strings and bare keys, in either quote, with every escape JSON5 has and the bytes JSON cannot hold raw,
+// read back from every target and layout.
+@(test)
+json5_random_strings_read_back :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0x5712)
+	pieces := [?]string{
+		"a", " ", "é", "😀", " ", "\t", "\x01", "\x7f", `\x41`, `\x00`, `\x1F`, `\xe9`, `\x22`, `\x5c`, `\0`, `\v`, `\b`, `\f`, `\'`, `\"`,
+		"\\\u2028", "\\\u2029", `\😀`, "é\\é", `\\`, `\/`, `\a`, `\$`, `\é`, `\u` + `00e9`, `\u` + `0041`, `\u` + `d83d\u` + `de00`, `\u` + `2028`, "\\\n", "\\\r\n", "\\ ", `\n`, `\t`,
+	}
+	tally: Tally
+	for _ in 0 ..< testkit.rounds(150) {
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_byte(&b, '{')
+		for m in 0 ..< 1 + rand.int_max(6) {
+			if m > 0 {
+				strings.write_byte(&b, ',')
+			}
+			if rand.int_max(3) == 0 {
+				fmt.sbprintf(&b, "k%d%s", m, rand.choice([]string{"", "é", "𝒜"}))
+			} else {
+				fmt.sbprintf(&b, "'k%d%s'", m, rand.choice(pieces[:]) if rand.int_max(2) == 0 else "")
+			}
+			strings.write_byte(&b, ':')
+			quote := rand.choice([]string{"'", `"`})
+			strings.write_string(&b, quote)
+			for _ in 0 ..< rand.int_max(8) {
+				piece := rand.choice(pieces[:])
+				// A raw quote of the string's own kind is a break.
+				if strings.contains(piece, quote) && !strings.has_prefix(piece, `\`) {
+					piece = "a"
+				}
+				strings.write_string(&b, piece)
+			}
+			strings.write_string(&b, quote)
+		}
+		strings.write_byte(&b, '}')
+		round_trips(t, b.buf[:], .Json5, "json5 strings", &tally)
+	}
+	testing.expect(t, tally.texts > 50)
 }
 
 @(private = "file")
