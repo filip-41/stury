@@ -3,15 +3,14 @@ package dsv
 import "base:intrinsics"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
-import "stury:lib/ops/build"
 
 // The tokens a hooked pass gives besides a record's cells: the text's and each record's opening and `End`, and the
 // comment lines. Every token reaches the hook through `emit`.
 
 // Gives the hook the token of `n` bytes from `lo`, through its `Keeps` inside a record or text it keeps, and otherwise
 // after growing the hook's room when it has no place for the node. A walk with `LAX` counts a step of `Budget.steps`
-// per container and stops, with no token, at the first container past it. `builder_hook_rows` stores no key, so a key
-// needs no room for it, and every other hook gets room for its keys.
+// per container and stops, with no token, at the first container past it. A hook with `.Unkeyed` stores no key, so a
+// key needs no room for it, and every other hook gets room for its keys.
 @(private)
 emit :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), hs: ^hook.Regs, lo: u64, n: u32, kind: tape.Kind, role: tape.Role, spelling: u16, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Action {
 	t := tape.Token{lo, n, kind, role, spelling}
@@ -29,7 +28,7 @@ emit :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), hs: ^hook.
 		}
 	}
 	when .Rooms in C {
-		if kind != .End && role <= .Key && !(role == .Key && rawptr(on) == rawptr(build.builder_hook_rows)) && uintptr(hs.a) == w.rooms {
+		if kind != .End && role <= .Key && (role != .Key || .Unkeyed not_in C) && uintptr(hs.a) == w.rooms {
 			// The growth takes a copy of the registers, so their address reaches no call.
 			grown := hs^
 			ok := hook.rooms_grow(w.h, &grown, lo)
@@ -233,7 +232,8 @@ open_record :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src
 			w.leveled = true
 		}
 	}
-	if w.held != 0 {
+	// Comment lines are held only in a text with a comment byte.
+	if opts.comment != 0 && w.held != 0 {
 		given := hs^
 		rr, stop := give_comments(w, src, opts.comment, rec_lo, .Comment, &given, on)
 		hs^ = given

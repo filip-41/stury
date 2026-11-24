@@ -70,9 +70,29 @@ walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, $LAX: bool, 
 	when .Walk in C {
 		h.walk = &w
 	}
-	r := steps_ended(&w, run(&w, src, 0, p, regs, on))
+	when .Columns in C {
+		// A record of another width than the header's is a fault, unless `.Ragged` reads it. A record the hook replays
+		// has at most `hook.COLUMN_BITS` columns, as `column_bit` gives each its own bit only below that.
+		cells: [hook.COLUMN_BITS]tape.Token = ---
+		h.replay.fixed, h.replay.cells = .Ragged not_in p.tolerate, cells[:]
+	}
+	r: hook.Walk_Result
+	when .Columns in C && S == .Csv && !LAX {
+		if h.alike && len(w.keys) >= MASKED_WIDTH {
+			// The same walk state read by the instance that takes the learnt columns by mask.
+			m := (^Pass(S, H, LAX, C + MASK_COLUMNS))(&w)
+			r = steps_ended(m, run(m, src, 0, p, regs, on))
+		} else {
+			r = steps_ended(&w, run(&w, src, 0, p, regs, on))
+		}
+	} else {
+		r = steps_ended(&w, run(&w, src, 0, p, regs, on))
+	}
 	when .Walk in C {
 		h.walk = nil
+	}
+	when .Columns in C {
+		h.replay.cells = nil
 	}
 	if owned != nil {
 		context = ctx^
@@ -106,13 +126,32 @@ walk_record_again :: proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, 
 // fits `Token.n` runs the instance with no tokens, then places its width fault.
 @(private)
 run :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
-	when H == hook.No_Hooks && !LAX {
-		if u64(len(src)) - lo <= u64(max(u32)) && p.limit >= RECORD_DEPTH {
+	when H == hook.No_Hooks || H == Record_Run {
+		if u64(len(src)) - lo <= u64(max(u32)) && p.limit >= RECORD_DEPTH && counts_cells(w) {
+			when LAX {
+				if w.piece[0] != nil {
+					// A window holds the open record's first byte but not the text before it, so a width fault is
+					// placed from there, against the width the pass has by now.
+					r := run_pass(w, src, lo, p, regs, on, false)
+					return field_count_fault(src, u64(w.rec_lo), S, p, r, w.width)
+				}
+			}
 			width := w.width
 			return field_count_fault(src, lo, S, p, run_pass(w, src, lo, p, regs, on, false), width)
 		}
 	}
 	return run_pass(w, src, lo, p, regs, on, true)
+}
+
+// Whether a validate's walk counts the cells of its records instead of giving tokens: every walk of a whole text, and a
+// walk of a window of a text in pieces once the header, whose keys it gives, has ended or been read.
+@(private)
+counts_cells :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) -> bool {
+	when LAX {
+		return w.piece[0] == nil || !w.in_header || w.piece[0].keyed
+	} else {
+		return true
+	}
 }
 
 @(private)
@@ -172,14 +211,15 @@ pass_with_floor :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $
 
 // Returns the verdict on the text from `lo`, run without tokens, for a hooked walk whose hook passed over the text or
 // the rest of it. `lo` is the first byte of a record or of the text. `width` above 0 is the width the records are
-// checked against, and 0 has the first record set it. The tolerances this run took count as the walk's.
+// checked against, and 0 has the first record set it. The tolerances this run took count as the walk's. It reads under
+// the walk's own tolerances, which `p` of an instance that folds the defaults leaves out.
 @(private, cold)
 judge_from :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, width: int) -> hook.Walk_Result {
-	v: Pass(S, hook.No_Hooks, false, hook.NO_HOOKS_CAPS)
-	pass_start(&v, len(src), nil, p, 0)
-	v.width, v.in_header = width, !p.no_header && width == 0
+	v: Pass(S, hook.No_Hooks, false, hook.NO_HOOKS_CAPS + C & ONE_RECORD)
 	q := p
-	q.limit = max(u64)
+	q.tolerate, q.limit = w.tolerate, max(u64)
+	pass_start(&v, len(src), nil, q, 0)
+	v.width, v.in_header = width, !p.no_header && width == 0
 	regs: hook.Regs
 	r := run(&v, src, lo, q, &regs, hook.no_hook)
 	w.tolerated ||= v.tolerated

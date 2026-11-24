@@ -51,6 +51,65 @@ scans_pass_the_columns_no_path_takes :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+// The columns a scan takes read as a build reads them, at each place in a wide header where a run of cells starts or ends
+// and across the 63rd, from which every column shares one bit, in records that go on past the header.
+@(test)
+scans_take_the_columns_of_wide_records_as_builds_do :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	for width in ([]int{12, 13, 40, 63, 64, 65, 130}) {
+		b := strings.builder_make(context.temp_allocator)
+		for c in 0 ..< width {
+			fmt.sbprintf(&b, "%sc%d", "," if c > 0 else "", c)
+		}
+		for r in 0 ..< 5 {
+			strings.write_byte(&b, '\n')
+			for c in 0 ..< width + r % 2 {
+				switch (r + c) % 5 {
+				case 0:
+					fmt.sbprintf(&b, "%s\"q,%d\"\"\"", "," if c > 0 else "", c)
+				case 1:
+					strings.write_string(&b, "," if c > 0 else "")
+				case:
+					fmt.sbprintf(&b, "%s%d", "," if c > 0 else "", 100 * r + c)
+				}
+			}
+		}
+		src := transmute([]u8)strings.to_string(b)
+		opts := dsv.Options {
+			tolerate = {.Ragged},
+		}
+		full, berr := dsv.build(src, .Csv, opts)
+		defer dsv.destroy(&full)
+		testing.expect_value(t, berr, nil)
+		for picks in ([][]int{{0}, {width - 1}, {5, 6}, {width / 2}, {62, 64}, {63}, {1, width - 2}, {3, 11, 12}}) {
+			paths := make([dynamic][]tape.Step, context.temp_allocator)
+			for c in picks {
+				if c < width {
+					path := make([]tape.Step, 2, context.temp_allocator)
+					path[0], path[1] = tape.All{}, tape.Name(fmt.tprintf("c%d", c))
+					append(&paths, path)
+				}
+			}
+			demand, derr := dsv.demand_of(paths[:])
+			defer dsv.destroy(&demand)
+			testing.expect_value(t, derr, nil)
+			doc, err := dsv.scan(src, &demand, .Csv, {}, opts)
+			defer dsv.destroy(&doc)
+			testing.expect_value(t, err, nil)
+			for path, i in paths {
+				answers := make([dynamic]testkit.Ref_Answer, context.temp_allocator)
+				testkit.reference_answers(&full, path, .Default, &answers)
+				for want, k in answers {
+					node, p, ok := dsv.answer({&doc, nil}, i, k)
+					want_text, got_text := answer_text(&full, want.node, want.outcome), answer_text(&doc, node, p)
+					testing.expectf(t, ok && want_text == got_text, "width %d %v answer %d: %q, build %q", width, picks, k, got_text, want_text)
+				}
+			}
+		}
+	}
+}
+
 Read_Case :: struct {
 	src:       string,
 	no_header: bool,
@@ -452,4 +511,68 @@ reads_refuse_the_repeats_a_build_refuses :: proc(t: ^testing.T) {
 		r := dsv.records_open(src, .Lines, c.spec, refuse)
 		testing.expectf(t, r.err == want, "%q: records %v", c.src, r.err)
 	}
+}
+
+// A scan of records that all have the header's width reads as with `.Ragged`: without it each record after the first
+// replays the first, and with it each is read through its tokens. Over the texts the tests read and generated ones
+// with faults, under every option, both `stop_early` and the budgets of nodes and steps. A memory budget is left out,
+// as a replay holds less.
+@(test)
+scans_replay_records_as_they_read_them :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	compared := 0
+	for c in BUILT {
+		compared += replays_agree(t, c.spec, transmute([]u8)c.text, {format = c.opts, tolerate = c.tol})
+	}
+	for c in CSV_CASES {
+		compared += replays_agree(t, .Csv, transmute([]u8)c.text, {})
+	}
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0x5ca9)
+	for _ in 0 ..< testkit.rounds(200) {
+		text, spec, opts := random_text(even = true)
+		compared += replays_agree(t, spec, text, opts)
+	}
+	testing.expectf(t, compared >= 8000, "%d scans compared", compared)
+}
+
+// Compares the scans of `src` with and without `.Ragged` for demands whose steps from the root are `All`, and returns
+// how many gave a document.
+replays_agree :: proc(t: ^testing.T, spec: dsv.Spec, src: []u8, opts: dsv.Options) -> (compared: int) {
+	paths := [][][]tape.Step {
+		{{tape.All{}, tape.Name("k0")}},
+		{{tape.All{}, tape.Name("k1")}, {tape.All{}, tape.Name("k2")}},
+		{{tape.All{}, tape.Name("b")}, {tape.All{}, tape.Name("a")}, {tape.All{}, tape.Name("zz")}},
+		{{tape.All{}, tape.All{}}},
+		{{tape.All{}, tape.Name("k0"), tape.Name("x")}},
+		{{tape.All{}, tape.Name("k1")}, {tape.All{}, tape.Index(0)}},
+	}
+	budgets := []tape.Budget{{}, {nodes = 6}, {nodes = 30}, {steps = 4}}
+	for set in paths {
+		demand, _ := dsv.demand_of(set, allocator = context.temp_allocator)
+		for dups in ([]tape.Duplicates{.Last, .First, .Group}) {
+			for budget in budgets {
+				for stop in ([]bool{false, true}) {
+					even := opts
+					even.dups, even.budget, even.tolerate = dups, budget, opts.tolerate - {.Ragged}
+					doc, err := dsv.scan(src, &demand, spec, {stop_early = stop}, even)
+					defer dsv.destroy(&doc)
+					if fault, ok := err.(tape.Fault); ok && fault.kind == .Bad_Width {
+						continue
+					}
+					ragged := even
+					ragged.tolerate += {.Ragged}
+					read, rerr := dsv.scan(src, &demand, spec, {stop_early = stop}, ragged)
+					defer dsv.destroy(&read)
+					same := testkit.same_refusal(err, rerr) && (err != nil || testkit.same_documents(doc, read))
+					if !testing.expectf(t, same, "%q %v %v %v %v stop %v: %v %v", src, spec, set, dups, budget, stop, err, rerr) {
+						return
+					}
+					compared += int(err == nil)
+				}
+			}
+		}
+	}
+	return
 }

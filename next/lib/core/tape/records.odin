@@ -81,13 +81,15 @@ records_validate :: proc(r: ^Records, out: []Record, allocator := context.alloca
 }
 
 // Reads the next records of `r`, which `Reads.records` made, into `out`, and for each the first value `path` reaches
-// in it into the same place of `answers`. Returns how many it filled.
+// in it into the same place of `answers`, or `.Missing` with no span for a record a fault refuses. Returns how many it
+// filled.
 records_find :: proc(r: ^Records, path: []Step, out: []Record, answers: []Span_Answer, read := Read_Options{}, allocator := context.allocator) -> int {
 	return r.reads.find(r, path, out, answers, read, allocator)
 }
 
 // Reads the next records of `r`, which `Reads.records` made, into `out`, and for each the document of its nodes the
-// paths of `demand` reach into the same place of `docs`. Returns how many it filled.
+// paths of `demand` reach into the same place of `docs`, an empty document for a record a fault refuses, whose every
+// path answers `.Missing` with no node. Returns how many it filled.
 records_scan :: proc(r: ^Records, demand: ^Demand, out: []Record, docs: []Document, read := Read_Options{}, allocator := context.allocator) -> int {
 	return r.reads.scan(r, demand, out, docs, read, allocator)
 }

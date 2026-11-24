@@ -149,6 +149,8 @@ records_read_each_line_as_alone :: proc(t: ^testing.T) {
 				alone, err := json.find(line, path, spec, {stop_early = stop})
 				if err == nil {
 					alone.lo, alone.hi = alone.lo + span[0], alone.hi + span[0]
+				} else {
+					alone = {outcome = .Missing}
 				}
 				if alone.outcome == .Missing {
 					alone.lo, alone.hi = 0, 0
@@ -498,6 +500,8 @@ records_reset_their_readers_between_records :: proc(t: ^testing.T) {
 				alone, err := json.find(line, path, .Json, {stop_early = stop})
 				if err == nil {
 					alone.lo, alone.hi = alone.lo + span[0], alone.hi + span[0]
+				} else {
+					alone = {outcome = .Missing}
 				}
 				if alone.outcome == .Missing {
 					alone.lo, alone.hi = 0, 0
@@ -543,7 +547,7 @@ records_go_on_after_a_record_the_budget_refuses :: proc(t: ^testing.T) {
 	ring_path := []tape.Step{tape.Name("a"), tape.Index(-65)}
 	demand, _ := tape.demand_of({scan_path})
 	defer tape.destroy_demand(&demand)
-	limits := []json.Options{{budget = {nodes = 10}}, {budget = {memory = 1400}}}
+	limits := []json.Options{{budget = {nodes = 10}}, {budget = {memory = 1200}}}
 	for c in cases {
 		src := transmute([]u8)c.src
 		for opts in limits {
@@ -561,6 +565,8 @@ records_go_on_after_a_record_the_budget_refuses :: proc(t: ^testing.T) {
 				alone, err := json.scan(src[span[0]:span[1]], &demand, .Json, {}, opts)
 				if err != nil {
 					refused += 1
+					_, p, _ := tape.answer({doc = &doc}, 0, 0)
+					testing.expectf(t, p == .Missing, "%v %v scan %d: a refused record answers %v", c.framing, opts.budget, i, p)
 				}
 				testing.expectf(t, ok && rec.index == u64(i) && rec.lo == span[0] && rec.hi == span[1] && rec.err == moved(err, span[0]), "%v %v scan %d: %v %v, want %v", c.framing, opts.budget, i, rec, ok, err)
 				tape.destroy(&doc)

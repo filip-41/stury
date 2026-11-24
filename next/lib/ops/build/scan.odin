@@ -52,13 +52,15 @@ Scanner :: struct {
 	first:       bool, // under `.First` the first member of a repeated key answers
 	group:       bool, // under `.Group` every member of a repeated key answers
 	rewalks:     bool, // the format has `.Rewalk`, so an array whose elements only steps from the end take replays
-	// Whether `scanner_key_skip_hook` skips a member no step takes at its key. A scan that keeps facts, which `scan_pass`
-	// places, does not, nor does a read in pieces of a format whose window may end between a key and its value. A
-	// delimited window never does, so its scan sets it when it keeps no facts.
+	// Whether `scanner_key_skip_hook` skips a member no step takes at its key. A scan that keeps facts, which
+	// `scan_pass` places, does not, nor does a read in pieces of a format whose window may end between a key and its
+	// value. A delimited window never does, so its scan sets it when it keeps no facts.
 	key_skips:   bool,
 	// Every step from the root is an `All` with no limit, so the members a step takes are the same in every child of
 	// the root, as a walk of `.Columns` needs to pass the columns it learnt from one record in the rest.
 	alike:       bool,
+	replay:      hook.Replay,
+	record:      Scan_Record, // the first record, which a `fixed` walk's later records are made again from
 	stop:        bool, // `stop_early`
 	stopped:     bool,
 	// Under `stop_early`, or a limit on a path or a step, the scan tracks its settled paths. Once all are, `stop_early`
@@ -175,6 +177,25 @@ Scan_Answer :: struct {
 	dead:    bool, // a repeated key or a negative index took it back
 }
 
+// The first record of the root array of a `fixed` walk, closed, when each later record makes what it made: a node for
+// the record, the key and value of each column it took, and the answers and missing names it made, at nodes `size`
+// on from the record before. Those answers and names are all the scan's lists hold, and the later records' are made
+// from them in `scan_lists`. A replayed record pushes no frame, and the walk gives its cells with no token, which its
+// `End` makes.
+@(private)
+Scan_Record :: struct {
+	open:     tape.Node_Index, // the first record's node
+	size:     u32, // its nodes
+	spelling: u16, // its node's spelling once closed
+	answers:  u32, // the answers it made
+	missing:  u32, // the missing names it recorded
+	replayed: u32, // the records after it, each replaying it
+	ready:    bool, // the later records are replayed
+	tried:    bool, // the first record closed
+	on:       bool, // the open record replays it, with its cells in `Scanner.cells` while `replays`, else as tokens
+	lo:       u64, // while `replays`, the open record's first byte
+}
+
 // A child kept by its place in its container.
 @(private)
 Scan_Kept :: struct {
@@ -288,6 +309,7 @@ scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^t
 	h.walk, h.stopped, h.has_key, h.by_place, h.forced, h.replaying, h.dropped = nil, false, false, false, false, false, 0
 	h.end_of, h.opens, h.pending, h.passed, h.wait_at = .None, 0, len(demand.paths), tape.NO_NODE, tape.NO_NODE
 	h.wait_from, h.hold_from, h.held_live = 0, 0, 0
+	h.replay, h.record = {}, {}
 	scan_room_list(&h.frames, room.frames[:], allocator)
 	scan_room_list(&h.elements, room.elements[:], allocator)
 	scan_room_list(&h.live, room.live[:], allocator)
@@ -348,6 +370,12 @@ scanner_key_skip_hook :: #force_inline proc "contextless" (h: ^Scanner, s: hook.
 
 @(private)
 scanner_take :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $COLUMNS: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
+	when COLUMNS {
+		// Every record of the root array after the first replays it, which reopens its frame.
+		if h.record.ready && t.kind == .Object && s.c == 1 {
+			return scan_record_open(h, s, t)
+		}
+	}
 	if t.role > .Key {
 		if h.facts {
 			return s, scan_fact(h, s, t)
@@ -369,6 +397,11 @@ scanner_take :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 	// With `COLUMNS` and `key_skips`, in an object whose members no step takes, a member no step took is counted and
 	// its value skipped at the key. Whether a step takes a member depends on its key and its place only, as `.Columns`
 	// needs.
+	when COLUMNS {
+		if h.record.on && t.kind != .End {
+			return scan_record_token(h, s, t)
+		}
+	}
 	if t.role == .Key {
 		f := &h.frames[len(h.frames) - 1]
 		clear(&h.picks)
@@ -400,6 +433,11 @@ scanner_take :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 		return s, .Next
 	}
 	if t.kind == .End {
+		when COLUMNS {
+			if h.record.on {
+				return scan_record_close(h, s)
+			}
+		}
 		return scanner_close(h, s, t, COLUMNS)
 	}
 	if s.c > 0 && !h.forced {
@@ -669,6 +707,134 @@ scan_reopen :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: t
 	// element of the array and the next, since no other frame opens at its level.
 	(^runtime.Raw_Dynamic_Array)(&h.live).len = int(live + g.n_live)
 	return opened, .Next
+}
+
+// Opens a record that replays the first record, which the root counts, with no frame. When its nodes fit the room,
+// none of them grows it, so its cells come with no token and its nodes are stored at its `End`. Otherwise its node is
+// stored now and its cells come as tokens, so the room grows at the token whose node finds it full, as it does for a
+// record read whole.
+@(private)
+scan_record_open :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	h.frames[0].count += 1
+	h.record.on = true
+	if s.a + u64(h.record.size) * size_of(tape.Node) <= h.b.end {
+		h.replay.replays, h.replay.given, h.record.lo = true, 0, t.lo
+		return s, .Next
+	}
+	return scan_record_grows(h, s, t)
+}
+
+@(private, cold)
+scan_record_grows :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	opened, action := builder_step(&h.b, s, t, false, true)
+	return opened, .Stop if action == .Stop else .Next
+}
+
+// Takes key or value `t` of a replayed record whose cells come as tokens: a value stores its key's node and its own.
+@(private, cold)
+scan_record_token :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	if t.role == .Key {
+		h.key, h.has_key = t, true
+		h.key.spelling = tape.without_credit(h.key.spelling)
+		return s, .Next
+	}
+	s := s
+	s, _ = builder_step(&h.b, s, h.key, false, true)
+	h.has_key = false
+	s, _ = builder_step(&h.b, s, t, false, true)
+	return s, .Stop if h.b.err != nil else .Next
+}
+
+// Closes a replayed record as the first record's close made it: the record's node closed, after the key's and the
+// value's node of each column, which are stored here when the walk gave the cells in `cells`.
+@(private)
+scan_record_close :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs) -> (hook.Regs, hook.Action) #no_bounds_check {
+	s := s
+	r := &h.record
+	h.dropped, r.on = 0, false
+	r.replayed += 1
+	if h.replay.replays {
+		h.replay.replays = false
+		h.b.closed = builder_cursor(&h.b, s)
+		nodes := ([^]tape.Node)(uintptr(s.a))
+		nodes[0] = {r.lo, r.size, .Object, .Value, r.spelling}
+		first := h.b.doc.nodes[r.open:]
+		for c in 0 ..< r.size / 2 {
+			nodes[1 + 2 * c] = first[1 + 2 * c]
+			nodes[2 + 2 * c] = h.replay.cells[c]
+		}
+		s.a += u64(r.size) * size_of(tape.Node)
+		s.b += 1
+		return s, .Next
+	}
+	open := tape.Node_Index(s.b >> 32)
+	node := &h.b.doc.nodes[open]
+	node.n = r.size
+	node.spelling = r.spelling
+	h.b.closed = open
+	s.c -= 1
+	s.b = h.b.stack[s.c]
+	return s, .Next
+}
+
+// Keeps the first record of the root array, frame `f`, closed at node `open` with its nodes up to `end`, for the later
+// records to replay, when each makes what it made: the walk is `fixed`, the root opens their frames again, and no
+// answer depends on a cell's kind or on what the records before it settled.
+@(private, cold)
+scan_learn_record :: #force_no_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, open, end: tape.Node_Index) #no_bounds_check {
+	h.record.tried = true
+	// Without limits a path settles by its depth only, so a record that settled none leaves the later ones none to
+	// settle.
+	if !h.replay.fixed || h.facts || h.made != nil || h.pending != len(h.demand.paths) || h.stopped || h.end_of != .None || h.b.err != nil {
+		return
+	}
+	// The columns from `hook.COLUMN_BITS` on share a bit, so a record wider than that may be given the keys of columns
+	// it did not take, and a record the walk replays gives at most that many cells.
+	if !f.passes || f.count > hook.COLUMN_BITS || len(h.frames) != 2 || len(h.kept) != 0 {
+		return
+	}
+	// The root opens every later record's frame again, and its close makes no answer, so the later records' answers
+	// follow the first's in the scan's lists.
+	root := h.frames[0]
+	if root.object || root.element != .Object || root.takes_to != max(u64) || root.unmet != 0 {
+		return
+	}
+	dm := h.demand
+	for n in h.live[f.live:][:f.n_live] {
+		node := dm.nodes[n]
+		for edge in dm.edges[node.edges:][:node.n_edges] {
+			#partial switch _ in edge.step {
+			case tape.Name, tape.All:
+				// A step into a cell answers by the cell's kind.
+				if dm.nodes[edge.to].n_edges != 0 {
+					return
+				}
+			}
+		}
+	}
+	// Every answer and missing name so far is the record's, made in the order of its nodes.
+	pos := u64(0)
+	for a in h.answers {
+		if a.node < open || a.node >= end || a.pos < pos {
+			return
+		}
+		pos = a.pos
+	}
+	for m in h.missing {
+		if m.node != open {
+			return
+		}
+	}
+	// Its nodes are the key and value of each column it took.
+	if (end - open) % 2 != 1 || int(end - open) / 2 > len(h.replay.cells) {
+		return
+	}
+	for k := open + 1; k < end; k += 2 {
+		if h.b.doc.nodes[k].role != .Key || h.b.doc.nodes[k + 1].kind > .Plain {
+			return
+		}
+	}
+	h.record = {open = open, size = u32(end - open), spelling = h.b.doc.nodes[open].spelling, answers = u32(len(h.answers)), missing = u32(len(h.missing)), ready = true, tried = true}
 }
 
 // Records in the array at depth `d` the frame its element of `kind` just opened, for later elements of that kind to
@@ -1204,6 +1370,11 @@ scanner_close :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $
 			scan_settle(h, n, d - 1)
 		}
 	}
+	when COLUMNS {
+		if d == 2 && !h.record.tried {
+			scan_learn_record(h, f, open, builder_cursor(&h.b, s))
+		}
+	}
 	(^runtime.Raw_Dynamic_Array)(&h.live).len = int(f.live)
 	if f.replays {
 		(^runtime.Raw_Dynamic_Array)(&h.tokens).len = int(f.ring)
@@ -1460,13 +1631,30 @@ scan_grow_to :: #force_no_inline proc "contextless" (h: ^Scanner, list: ^runtime
 }
 
 // Gives `doc` its answers by path, kept children, missing names and held spans in one block, from `answers` and
-// `missing`, which it sorts, and `made`, which it overwrites.
+// `missing`, which it sorts, and `made`, which it overwrites. With records that replay the first record of a `fixed`
+// walk, the first of `answers` and `missing` are the first record's, which each replayed record makes again `size`
+// nodes after the record before, ahead of the rest.
 @(private)
 scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, missing: []Scan_Missing, made: []u32) -> runtime.Allocator_Error {
 	allocator := doc.allocator
 	paths := len(h.demand.paths)
-	if !slice.is_sorted_by(answers, scan_answer_before) {
-		slice.stable_sort_by(answers, scan_answer_before)
+	r := &h.record
+	// Each answer of `first` and name of `first_missing` stands for one in each of `rounds` records.
+	rounds := int(r.replayed) + 1 if r.replayed > 0 else 0
+	first := answers[:r.answers] if rounds > 0 else nil
+	first_missing := missing[:r.missing] if rounds > 0 else nil
+	rest, rest_missing := answers[len(first):], missing[len(first_missing):]
+	// The first record's part is made again in each of `rounds` records, each `size` nodes past the one before, and
+	// the rest's part once.
+	Part :: struct {
+		answers: []Scan_Answer,
+		missing: []Scan_Missing,
+		rounds:  int,
+		step:    tape.Node_Index,
+	}
+	parts := [2]Part{{first, first_missing, rounds, tape.Node_Index(r.size)}, {rest, rest_missing, 1, 0}}
+	if !slice.is_sorted_by(rest, scan_answer_before) {
+		slice.stable_sort_by(rest, scan_answer_before)
 	}
 	if h.demand.limited {
 		// A path keeps its first answers in document order, up to its limit.
@@ -1479,18 +1667,21 @@ scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, mis
 		}
 	}
 	live, names := 0, 0
-	for a in answers {
-		live += int(!a.dead)
+	for part in parts {
+		for a in part.answers {
+			live += part.rounds * int(!a.dead)
+		}
+		for m in part.missing {
+			names += part.rounds * len(m.name)
+		}
 	}
-	for m in missing {
-		names += len(m.name)
-	}
+	n_missing := rounds * len(first_missing) + len(rest_missing)
 	x: ^tape.Partial
 	answers_at := size_of(tape.Partial)
 	starts_at := answers_at + live * size_of(x.answers[0])
 	kept_at := starts_at + (paths + 1) * size_of(u32)
 	missing_at := kept_at + len(h.kept) * size_of(x.kept[0])
-	names_at := missing_at + len(missing) * size_of(x.missing[0])
+	names_at := missing_at + n_missing * size_of(x.missing[0])
 	block, perr := runtime.mem_alloc_non_zeroed(names_at + names, align_of(tape.Partial), allocator)
 	if e := took(perr, raw_data(block), names_at + names); e != nil {
 		return e
@@ -1501,24 +1692,31 @@ scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, mis
 	x.answers = ([^]type_of(x.answers[0]))(raw_data(block[answers_at:]))[:live]
 	x.starts = ([^]u32)(raw_data(block[starts_at:]))[:paths + 1]
 	x.kept = ([^]type_of(x.kept[0]))(raw_data(block[kept_at:]))[:len(h.kept)]
-	x.missing = ([^]type_of(x.missing[0]))(raw_data(block[missing_at:]))[:len(missing)]
+	x.missing = ([^]type_of(x.missing[0]))(raw_data(block[missing_at:]))[:n_missing]
 	x.names = block[names_at:]
 	// Each path's answers in document order, in three steps: count them, turn the counts into starts, place the
 	// answers.
 
 	runtime.mem_zero(raw_data(x.starts), len(x.starts) * size_of(u32))
 	if paths > 1 {
-		for a in answers {
-			x.starts[a.path + 1] += u32(!a.dead)
+		for part in parts {
+			for a in part.answers {
+				x.starts[a.path + 1] += u32(part.rounds) * u32(!a.dead)
+			}
 		}
 		for p in 0 ..< paths {
 			x.starts[p + 1] += x.starts[p]
 		}
 	}
-	for a in answers {
-		if !a.dead {
-			x.answers[x.starts[a.path]] = {a.node, a.outcome}
-			x.starts[a.path] += 1
+	for part in parts {
+		for k in 0 ..< part.rounds {
+			shift := tape.Node_Index(k) * part.step
+			for a in part.answers {
+				if !a.dead {
+					x.answers[x.starts[a.path]] = {a.node + shift, a.outcome}
+					x.starts[a.path] += 1
+				}
+			}
 		}
 	}
 	if paths > 0 {
@@ -1528,12 +1726,18 @@ scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, mis
 	for k, i in h.kept {
 		x.kept[i] = {k.node, k.index}
 	}
-	slice.stable_sort_by(missing, proc(a, b: Scan_Missing) -> bool { return a.node < b.node })
-	at := 0
-	for m, i in missing {
-		x.missing[i] = {m.node, u32(at), u32(len(m.name))}
-		copy(x.names[at:], m.name)
-		at += len(m.name)
+	slice.stable_sort_by(rest_missing, proc(a, b: Scan_Missing) -> bool { return a.node < b.node })
+	at, i := 0, 0
+	for part in parts {
+		for k in 0 ..< part.rounds {
+			shift := tape.Node_Index(k) * part.step
+			for m in part.missing {
+				x.missing[i] = {m.node + shift, u32(at), u32(len(m.name))}
+				copy(x.names[at:], m.name)
+				at += len(m.name)
+				i += 1
+			}
+		}
 	}
 	return nil
 }

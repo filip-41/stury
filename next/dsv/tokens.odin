@@ -78,19 +78,15 @@ Cell_Run :: struct {
 	lax_ends: u64,
 }
 
-// The masks of the block at `pos` that its token reader takes: the separators outside quoted cells and comment lines,
-// the LFs among them, the LFs that end a comment line, the bytes that make a cell need a decode (`bs`), and the leads
-// of the ill-formed sequences `.Invalid_Utf8` tolerated (`ill`), with `ill_back` the lead of one that starts before the
-// block, or -1.
+// The token reader's state that a pass carries from one block to the next: the open cell's first byte and number,
+// whether it holds an escape from an earlier block, and the hook's registers. A pass holds it in a local whose address
+// reaches no call, each cold call being given a copy, so that it can stay in registers from block to block.
 @(private)
-Block_Marks :: struct {
-	pos:      int,
-	seps:     u64,
-	lfs:      u64,
-	clfs:     u64,
-	bs:       u64,
-	ill:      u64,
-	ill_back: int,
+Token_State :: struct {
+	field_lo: int,
+	cells:    int,
+	carry:    bool,
+	regs:     hook.Regs,
 }
 
 // Gives the cells of a record wider than `width` up to the one that ends at `width`'s delimiter, then returns the fault
@@ -139,7 +135,7 @@ values_run :: #force_inline proc "contextless" ($ESC, $KEYS, $PAST, $QUOTES: boo
 		}
 		when KEYS {
 			// A key the hook skips has its cell passed with no token.
-			if column_passes(w, count) {
+			if column_passes(w, run.base, count, next_lo, at, esc, lax, QUOTES) {
 				count += 1
 				next_lo = at + 1
 				continue
@@ -164,10 +160,60 @@ values_run :: #force_inline proc "contextless" ($ESC, $KEYS, $PAST, $QUOTES: boo
 	return
 }
 
+// The fewest cells a header has for a walk to take the cells of its learnt columns by mask, as `MASK_COLUMNS` says. A
+// narrower record costs less cell by cell.
+@(private)
+MASKED_WIDTH :: 12
+
+// `values_run` of a headed record's cells for a hook of `.Columns` whose columns are learnt: the cells of columns it
+// takes are read one by one, and the cells between them pass with no token and no test. A bit of the learnt `columns`
+// is a column below the 63rd, and the last bit is every column from there on.
+@(private)
+values_masked :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), opts: Pass_Options, hs: ^hook.Regs, run: Cell_Run, field_lo, cells: int, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (next_lo, count: int, r: hook.Walk_Result, done: bool) {
+	// The cells the hook takes are read by the pass without `MASK_COLUMNS`, so this code is not read again from it.
+	v := (^Pass(S, H, LAX, C - MASK_COLUMNS))(w)
+	dm := run.d
+	next_lo, count = field_lo, cells
+	high := u64(0) - w.columns >> 63
+	taken := high
+	if count < hook.COLUMN_BITS {
+		below := u64(1) << u64(hook.COLUMN_BITS - count) - 1
+		taken = (w.columns >> u64(count)) & below | high & ~below
+	}
+	taken &= u64(1) << u64(intrinsics.count_ones(dm)) - 1
+	for taken != 0 {
+		for skip := intrinsics.count_trailing_zeros(taken); skip != 0; skip -= 1 {
+			next_lo = run.pos + int(intrinsics.count_trailing_zeros(dm)) + 1
+			dm &= dm - 1
+			count += 1
+			taken >>= 1
+		}
+		taken >>= 1
+		one := run
+		one.d = dm & -dm
+		dm &= dm - 1
+		next_lo, count, r, done = values_run(true, true, false, true, v, opts, hs, one, next_lo, count, on)
+		if done {
+			return
+		}
+	}
+	if dm != 0 {
+		count += int(intrinsics.count_ones(dm))
+		next_lo = run.pos + 64 - int(intrinsics.count_leading_zeros(run.d))
+	}
+	return
+}
+
 // `values_run` with the tests the block needs: no escape or ill-formed UTF-8 test in a `plain` block, where no cell
 // holding either ends, and no quoted-cell test while the text has held no quote.
 @(private)
 values_run_for :: #force_inline proc "contextless" ($KEYS: bool, plain, quoted: bool, w: ^Pass($S, $H, $LAX, $C), opts: Pass_Options, hs: ^hook.Regs, run: Cell_Run, field_lo, cells: int, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (next_lo, count: int, r: hook.Walk_Result, done: bool) {
+	when KEYS && MASK_COLUMNS <= C {
+		// A record the hook keeps gives every cell.
+		if w.learnt && w.keep == .None && w.columns != ~u64(0) {
+			return values_masked(w, opts, hs, run, field_lo, cells, on)
+		}
+	}
 	if plain && !quoted {
 		return values_run(false, KEYS, false, false, w, opts, hs, run, field_lo, cells, on)
 	}
@@ -202,42 +248,49 @@ header_run :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), run:
 	return
 }
 
-// Gives the tokens of the separators of `b`. The delimiters before the block's next LF are the open record's cells and
-// run through an inner loop that has no LF test, no CR test, no width check and no `End`, and that chooses the record's
-// state once per run. The outer loop gives each record's last cell and its `End`. With `LAX_UTF8` every block is read
-// with the escape and sequence tests, and the cells that hold an ill-formed sequence `.Invalid_Utf8` tolerated are
-// spelled for it.
+// Gives the tokens of the separators `seps` of the block at `pos`, with `lfs` the LFs among them, `bs` the bytes that
+// make a cell need a decode and `clfs` the LFs that end a comment line. The delimiters before the block's next LF are
+// the open record's cells and run through an inner loop that has no LF test, no CR test, no width check and no `End`,
+// and that chooses the record's state once per run. The outer loop gives each record's last cell and its `End`. With
+// `LAX_UTF8` the block is read with the escape and sequence tests, and the cells that hold an ill-formed sequence
+// `.Invalid_Utf8` tolerated, whose leads are `ill` with `ill_back` the lead of one that starts before the block, are
+// spelled for it. `quoted` is whether the text has held a quote. `t` is written back only when no token ends the walk.
 @(private)
-read_tokens :: #force_inline proc "contextless" ($LAX_UTF8: bool, comments: bool, w: ^Pass($S, $H, $LAX, $C), src: []u8, opts: Pass_Options, b: Block_Marks, outer: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) {
+block_tokens :: #force_inline proc "contextless" ($LAX_UTF8: bool, comments: bool, w: ^Pass($S, $H, $LAX, $C), src: []u8, opts: Pass_Options, t: ^Token_State, quoted: bool, pos: int, seps, lfs, bs, clfs, ill: u64, ill_back: int, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) #no_bounds_check {
 	base := raw_data(src)
-	pos := b.pos
-	// The block's registers are a local whose address reaches no call, each cold call being given a copy, so they stay
-	// in registers across the block's tokens.
-	regs := outer^
-	defer outer^ = regs
-	hs := &regs
-	// The open record's state is copied into locals for the block, since reading a field per cell is a load per cell.
-	// `carry` is whether the cell open at the block's start holds an escape from an earlier block.
-	rec_lo, field_lo, cells := w.rec_lo, w.field_lo, w.cells
-	width := w.width
-	header, no_header, muted, open := w.in_header, opts.no_header, w.muted, w.open
-	carry := w.field_esc
-	// `ill_carry` is whether the cell open at the block's start holds an ill-formed sequence, from the blocks before or
-	// from the lead `ill_back` this block's check found.
+	hs := &t.regs
+	field_lo, cells := t.field_lo, t.cells
+	no_header := opts.no_header
+	carry := t.carry
+	// Every cell that the block ends, except the one open at its start, is shorter than 64 bytes. That cell can
+	// exceed `max(u32)` only if it opened more than `max(u32) - 64` bytes before `pos`, so the test runs only then.
+	if u64(pos - field_lo) > u64(max(u32)) - 64 && cell_too_wide(base, field_lo, pos, seps) {
+		return fault_at(u64(field_lo), .Too_Wide), true
+	}
+	when !LAX_UTF8 && .Skips not_in C {
+		// No cell or record ends in the block, so no token is made, and the open cell holds an escape if it did or
+		// the block has one.
+		if seps == 0 {
+			t.carry ||= bs != 0
+			return 0, false
+		}
+	}
+	// `ill_carry` is whether the cell open at the block's start holds an ill-formed sequence, from the blocks before
+	// or from the lead `ill_back` this block's check found.
 	ill_carry := false
 	when LAX_UTF8 {
-		ill_carry = w.open_ill || b.ill_back >= field_lo
+		ill_carry = w.open_ill || ill_back >= field_lo
 	}
-	// The separators that end a cell holding an escape, and one holding an ill-formed sequence. A block where no cell
-	// ends with either takes the runs with `ESC` false, so the escape work is per block.
-	marked := b.bs | b.ill != 0 || carry || ill_carry
+	// The separators that end a cell holding an escape, and one holding an ill-formed sequence. A block where no
+	// cell ends with either takes the runs with `ESC` false, so the escape work is per block.
+	marked := bs | ill != 0 || carry || ill_carry
 	run := Cell_Run{base = base, pos = pos}
 	if marked {
-		run.esc_ends = ends_marked(b.seps, b.bs, carry)
-		run.lax_ends = ends_marked(b.seps, b.ill, ill_carry)
+		run.esc_ends = ends_marked(seps, bs, carry)
+		run.lax_ends = ends_marked(seps, ill, ill_carry)
 	}
 	plain_block := !LAX_UTF8 && run.esc_ends | run.lax_ends == 0
-	m, lf := b.seps, b.lfs
+	m, lf := seps, lfs
 	for m != 0 {
 		// `k` is the block's next LF, or 64 when the rest of the block holds none. The separators below `k` are
 		// delimiters of the open record.
@@ -250,10 +303,10 @@ read_tokens :: #force_inline proc "contextless" ($LAX_UTF8: bool, comments: bool
 			d = m & ((u64(1) << k) - 1)
 		}
 		run.d = d
-		if !open && d != 0 {
-			open = true
-			if !header {
-				if opened, stop := open_record(w, src, opts, hs, rec_lo, width, &muted, on); stop {
+		if !w.open && d != 0 {
+			w.open = true
+			if !w.in_header {
+				if opened, stop := open_record(w, src, opts, hs, w.rec_lo, w.width, &w.muted, on); stop {
 					return opened, true
 				}
 			}
@@ -261,41 +314,42 @@ read_tokens :: #force_inline proc "contextless" ($LAX_UTF8: bool, comments: bool
 		// `ended` says a run of cells ended the walk with `result`.
 		result: hook.Walk_Result
 		ended: bool
-		if header {
+		if d == 0 {
+			// The record's next separator is its LF. A run reaching past the width faulted at an earlier run, so
+			// none is reached here.
+		} else if w.in_header {
 			field_lo, cells, result, ended = header_run(w, run, plain_block, field_lo, cells)
-		} else if muted {
+		} else if w.muted {
 			// The hook passed this record over, so its cells are counted and its bytes judged, but make no tokens.
-			if d != 0 {
-				if width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= width {
-					return wide_fault(src, rec_lo, width, S, w.delim), true
-				}
-				cells += int(intrinsics.count_ones(d))
-				field_lo = pos + 64 - int(intrinsics.count_leading_zeros(d))
+			if w.width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= w.width {
+				return wide_fault(src, w.rec_lo, w.width, S, w.delim), true
 			}
+			cells += int(intrinsics.count_ones(d))
+			field_lo = pos + 64 - int(intrinsics.count_leading_zeros(d))
 		} else if no_header {
 			// No header, so every cell is a value and no key is given. A cold call takes a run built for it, so the
 			// local `run` stays in registers.
-			if width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= width {
-				given := regs
-				wide := read_wide(false, w, opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, width, on)
-				regs = given
+			if w.width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= w.width {
+				given := t.regs
+				wide := read_wide(false, w, opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, w.width, on)
+				t.regs = given
 				return wide, true
 			}
-			field_lo, cells, result, ended = values_run_for(false, plain_block, w.quoted, w, opts, hs, run, field_lo, cells, on)
-		} else if cells + int(intrinsics.count_ones(d)) >= width {
+			field_lo, cells, result, ended = values_run_for(false, plain_block, quoted, w, opts, hs, run, field_lo, cells, on)
+		} else if cells + int(intrinsics.count_ones(d)) >= w.width {
 			if .Ragged not_in w.tolerate {
-				given := regs
-				wide := read_wide(true, w, opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, width, on)
-				regs = given
+				given := t.regs
+				wide := read_wide(true, w, opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, w.width, on)
+				t.regs = given
 				return wide, true
 			}
-			given := regs
+			given := t.regs
 			field_lo, cells, result, ended = read_ragged(w, opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, on)
-			regs = given
+			t.regs = given
 		} else {
 			// A data record's run of cells, each after its column's key. The cell's own number is the key's index, and
 			// the run advances that number only.
-			field_lo, cells, result, ended = values_run_for(true, plain_block, w.quoted, w, opts, hs, run, field_lo, cells, on)
+			field_lo, cells, result, ended = values_run_for(true, plain_block, quoted, w, opts, hs, run, field_lo, cells, on)
 		}
 		if ended {
 			return result, true
@@ -303,47 +357,48 @@ read_tokens :: #force_inline proc "contextless" ($LAX_UTF8: bool, comments: bool
 		if k == 64 {
 			break
 		}
-		// The LF that ends the record also ends a cell. The CR of a CR LF belongs to the line end, so it is left out of
-		// the cell's span and is the first byte of the record's `End`.
+		// The LF that ends the record also ends a cell. The CR of a CR LF belongs to the line end, so it is left out
+		// of the cell's span and is the first byte of the record's `End`.
 		at := pos + int(k)
 		hi := at
 		if at > field_lo && base[at - 1] == '\r' {
 			hi = at - 1
 		}
-		if comments && b.clfs & (u64(1) << k) != 0 {
+		if comments && clfs & (u64(1) << k) != 0 {
 			// A comment line is no record: it sets no width, and the line after it starts fresh. It is held until a
 			// record or the text's end tells whether it is a `Comment` or the text's foot.
-			if w.held == 0 && rec_lo >= w.given {
-				w.held = rec_lo + 1
+			if w.held == 0 && w.rec_lo >= w.given {
+				w.held = w.rec_lo + 1
 			}
-			rec_lo, field_lo = at + 1, at + 1
+			w.rec_lo, field_lo = at + 1, at + 1
 			drop_line(&m, &lf, d)
 			continue
 		}
-		if !open {
+		if !w.open {
 			// An empty line, or a line holding only a CR, is no record: it makes no token and sets no width.
-			if hi == rec_lo {
-				rec_lo, field_lo = at + 1, at + 1
+			if hi == w.rec_lo {
+				w.rec_lo, field_lo = at + 1, at + 1
 				drop_line(&m, &lf, d)
 				continue
 			}
-			open = true
-			if !header {
-				if opened, stop := open_record(w, src, opts, hs, rec_lo, width, &muted, on); stop {
+			w.open = true
+			if !w.in_header {
+				if opened, stop := open_record(w, src, opts, hs, w.rec_lo, w.width, &w.muted, on); stop {
 					return opened, true
 				}
 			}
 		}
-		esc, lax := false, false
-		if !plain_block {
-			esc = run.esc_ends & (u64(1) << k) != 0
-			lax = run.lax_ends & (u64(1) << k) != 0
+		// `k` is below 64 here, and a plain block has no escape ends.
+		esc := run.esc_ends >> k & 1 != 0
+		lax := false
+		when LAX_UTF8 {
+			lax = run.lax_ends >> k & 1 != 0
 		}
-		if header {
+		if w.in_header {
 			if !put_header_key(w, cells, base, field_lo, hi, esc, lax) {
 				return hook.walk_result(u64(hi), hook.WALK_NO_MEMORY), true
 			}
-		} else if !muted {
+		} else if !w.muted {
 			a, lo, n := put_cell(w, opts, hs, base, cells, field_lo, hi, esc, lax, on)
 			if a == .Stop {
 				return stopped(lo, n), true
@@ -351,50 +406,58 @@ read_tokens :: #force_inline proc "contextless" ($LAX_UTF8: bool, comments: bool
 		}
 		cells += 1
 		field_lo = at + 1
-		if fault, wide := record_width(w, cells, &width); fault {
+		if fault, wide := record_width(w, cells, &w.width); fault {
 			if wide {
-				return wide_fault(src, rec_lo, width, S, w.delim), true
+				return wide_fault(src, w.rec_lo, w.width, S, w.delim), true
 			}
 			return fault_at(u64(hi), .Bad_Width, .Too_Few), true
 		}
-		if !header && !muted && !no_header {
-			columns_close(w, cells)
+		if !w.in_header && !w.muted && !no_header {
+			columns_close(w, opts, base, cells)
 		}
-		if !header && !close_record(w, hs, hi, u32(at + 1 - hi), on) {
-			return stopped(u64(hi), u32(at + 1 - hi)), true
+		// A one-record pass gives the `End` of a record at its line end with `n` 0, as a pass of the record's own
+		// bytes does.
+		line_n := u32(at + 1 - hi)
+		when ONE_RECORD <= C {
+			line_n = 0
+		}
+		if !w.in_header && !close_record(w, hs, hi, line_n, on) {
+			return stopped(u64(hi), line_n), true
 		}
 		when .Walk in C {
 			if w.again {
 				return hook.walk_result(u64(at + 1), 0), true
 			}
 		}
-		rec_lo, cells, open, muted = at + 1, 0, false, false
-		// A fault ends the walk with the block's state unsaved, but a read in pieces needs to know the header has ended.
-		header, w.in_header = false, false
+		when ONE_RECORD <= C {
+			return hook.walk_result(u64(at + 1), 0), true
+		}
+		// A read in pieces needs to know the header has ended.
+		w.rec_lo, cells, w.open, w.muted, w.in_header = at + 1, 0, false, false, false
 		drop_line(&m, &lf, d)
 	}
-	w.rec_lo, w.field_lo, w.cells, w.width = rec_lo, field_lo, cells, width
-	w.in_header, w.muted, w.open = header, muted, open
 	// The cell open at the block's end passes its escape state to the next block.
-	w.field_esc = false
+	next_carry := false
 	when LAX_UTF8 {
 		w.open_ill = false
 	}
 	if marked {
-		w.field_esc = span_esc(b.bs, pos, field_lo, pos + 64, carry)
+		next_carry = span_esc(bs, pos, field_lo, pos + 64, carry)
 		when LAX_UTF8 {
-			w.open_ill = span_esc(b.ill, pos, field_lo, pos + 64, ill_carry)
+			w.open_ill = span_esc(ill, pos, field_lo, pos + 64, ill_carry)
 		}
 	}
+	carry = next_carry
+	t.field_lo, t.cells, t.carry = field_lo, cells, carry
 	return 0, false
 }
 
-// `read_tokens` on a block that holds an ill-formed sequence `.Invalid_Utf8` tolerated, or that a cell holding one is
+// `block_tokens` on a block that holds an ill-formed sequence `.Invalid_Utf8` tolerated, or that a cell holding one is
 // open across. It is a cold copy of the whole reader per hook, so `comments` is a value here and not a compile-time
 // parameter, and the reader's escape-free runs, which this instance does not use, are left out.
 @(private, cold)
-read_lax_tokens :: #force_no_inline proc "contextless" (comments: bool, w: ^Pass($S, $H, $LAX, $C), src: []u8, opts: Pass_Options, b: Block_Marks, hs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) {
-	return read_tokens(true, comments, w, src, opts, b, hs, on)
+lax_block_tokens :: #force_no_inline proc "contextless" (comments: bool, w: ^Pass($S, $H, $LAX, $C), src: []u8, opts: Pass_Options, t: ^Token_State, quoted: bool, pos: int, seps, lfs, bs, clfs, ill: u64, ill_back: int, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) {
+	return block_tokens(true, comments, w, src, opts, t, quoted, pos, seps, lfs, bs, clfs, ill, ill_back, on)
 }
 
 // Gives the tokens of the record the text ends in, which no LF ends: its opening token, its open cell, and an `End` of
@@ -431,7 +494,7 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)
 		return fault_at(u64(hi), .Bad_Width, .Too_Few), true
 	}
 	if !w.muted && !opts.no_header {
-		columns_close(w, w.cells + 1)
+		columns_close(w, opts, base, w.cells + 1)
 	}
 	if !close_record(w, hs, hi, 0, on) {
 		return stopped(u64(hi), 0), true

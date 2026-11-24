@@ -714,6 +714,40 @@ records_resume_at_the_line_after_an_unclosed_quote :: proc(t: ^testing.T) {
 	}
 }
 
+// A record with an unclosed quote faults at the quote whatever the text holds past its line, as a read of its own bytes
+// does, and the records past it are judged on their own.
+@(test)
+records_with_an_unclosed_quote_do_not_fault_at_later_lines :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string("a,b\n1,2\n3,\"x\n4,\xff\n5,6\n")
+	r := dsv.records_open(src)
+	out: [6]dsv.Record
+	n := dsv.records_validate(&r, out[:])
+	testing.expect_value(t, n, 4)
+	if n == 4 {
+		first, _ := out[1].err.(tape.Fault)
+		testing.expectf(t, first.kind == .Truncated && first.at == 10 && out[1].hi == 12, "%v", out[1])
+		second, _ := out[2].err.(tape.Fault)
+		testing.expectf(t, second.kind == .Bad_Char && second.at == 15, "%v", out[2])
+		testing.expect_value(t, out[3].err, nil)
+	}
+}
+
+// A UTF-8 sequence cut by the end of an unclosed quote's record is judged on that record's bytes alone.
+@(test)
+records_with_an_unclosed_quote_judge_a_cut_sequence_by_their_own_bytes :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string("a\n\"#;\xc3\n")
+	r := dsv.records_open(src)
+	out: [3]dsv.Record
+	n := dsv.records_validate(&r, out[:])
+	testing.expect(t, n >= 1)
+	if n >= 1 {
+		f, _ := out[0].err.(tape.Fault)
+		testing.expectf(t, f.kind == .Truncated, "%v", out[0])
+	}
+}
+
 // A TSV backslash before a line feed escapes nothing, so the row ends there in the records as in every whole read.
 @(test)
 records_end_a_tsv_row_at_a_line_feed_after_a_backslash :: proc(t: ^testing.T) {
@@ -759,6 +793,36 @@ records_frame_across_block_edges :: proc(t: ^testing.T) {
 			testing.expectf(t, err == nil && n == 2 && out[0].err == nil && out[1].err == nil, "%v pad %d: %v, %d records", spec, pad, err, n)
 			if n == 2 {
 				testing.expectf(t, string(src[out[1].lo:out[1].hi]) == "last,1", "%v pad %d: last record %q", spec, pad, src[out[1].lo:out[1].hi])
+			}
+		}
+	}
+}
+
+// The records of a text read in two windows cut at every byte, and in windows of every size, are judged, answer and scan
+// as the whole text's records do.
+@(test)
+records_in_pieces_agree_at_every_window_and_cut :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0x7c)
+	defer free_all(context.temp_allocator)
+	paths := [][]tape.Step{{tape.Name("k0")}, {tape.Index(1)}, {tape.All{}}}
+	demand, _ := tape.demand_of(paths)
+	defer tape.destroy_demand(&demand)
+	for _ in 0 ..< testkit.rounds(40) {
+		src, spec, opts := random_text()
+		run := testkit.Piece_Run{src, dsv.reads(spec), dsv.as(spec), opts, nil}
+		for k in 0 ..= len(src) {
+			cuts := [1]int{k}
+			run.cuts = cuts[:]
+			if !testkit.records_pieces_agree(t, run, .Lines, paths, &demand, string(src)) {
+				return
+			}
+		}
+		for size in 1 ..< len(src) {
+			run.cuts = testkit.cuts_by(len(src), size)
+			if !testkit.records_pieces_agree(t, run, .Lines, paths, &demand, string(src)) {
+				return
 			}
 		}
 	}

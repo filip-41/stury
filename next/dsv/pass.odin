@@ -85,6 +85,24 @@ Pass :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	tolerated:  bool, // the walk took a rule of `tolerate`
 }
 
+// The bit a read of one record sets in its pass's capabilities. Such a pass starts at the record's first byte in the
+// whole text and ends after the first LF outside a quoted cell, which it finds as it reads, with the walk's result at
+// the byte past it. The bytes of a block past that LF are not judged.
+@(private)
+ONE_RECORD :: transmute(hook.Capabilities)u16(1 << 15)
+
+// The bit of the pass's capabilities of a walk of a header of `MASKED_WIDTH` cells or more for an `alike` hook of
+// `.Columns` in a CSV text, whose pass takes the cells of the columns it learnt by mask (`values_masked`). It is a pass
+// of its own so that a narrow text's pass has none of its code.
+@(private)
+MASK_COLUMNS :: transmute(hook.Capabilities)u16(1 << 14)
+
+// The pass's own bits lie past the hook's capabilities, and no field of `Pass` depends on its capabilities, so a walk
+// reads one pass as another of the same walk with other bits (`walk_text`, `values_masked`).
+#assert(int(max(hook.Capability)) < 14)
+#assert(size_of(Pass(.Csv, hook.No_Hooks, false, {})) == size_of(Pass(.Csv, hook.No_Hooks, false, ONE_RECORD + MASK_COLUMNS)))
+#assert(offset_of(Pass(.Csv, hook.No_Hooks, true, {}), tolerated) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS), tolerated))
+
 // How a hook keeps a record or the text, from its answer at the opening token.
 @(private)
 Kept :: enum u8 {
@@ -94,10 +112,10 @@ Kept :: enum u8 {
 }
 
 // Returns the CR bytes with no LF after them in `bad`, leaving out bit 63, whose CR the next block judges. `carried` is
-// true when a CR from the block before has no LF at byte 0 here, and the fault is then at `pos - 1`.
+// true when a CR from the block before, `last` bit 0, has no LF at byte 0 here, and the fault is then at `pos - 1`.
 @(private)
-cr_fault :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), cr, nl: u64) -> (bad: u64, carried: bool) {
-	return cr & ~(nl >> 1) & ~(u64(1) << 63), w.cr & ~nl != 0
+cr_fault :: #force_inline proc "contextless" (last, cr, nl: u64) -> (bad: u64, carried: bool) {
+	return cr & ~(nl >> 1) & ~(u64(1) << 63), last & ~nl != 0
 }
 
 // Returns the masks of a CSV block's quotes `q` and separators `seps`: the bytes inside quoted cells, the closing
@@ -160,261 +178,327 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 			if r, done := open_text(w, src, lo, opts, hs, on); done {
 				return r
 			}
+		} else when LAX {
+			// The text's `Array` is the first container the budget counts.
+			if !w.opened {
+				w.steps[0] -= 1
+			}
 		}
 	}
 
+	// With tokens, each block's tokens are read as soon as its masks are made. The masks a block leaves for the next
+	// are read from `w` and written back before its tokens, which read `w.quoted`, so they hold no register across the
+	// token code. The token reader's state, and without tokens the masks, are locals across the whole pass, written
+	// back to `w` when the block loop ends. The block loop sits in an outer one that each of its exits leaves, a shape
+	// whose code layout keeps the validate's block loop free of mispredicted branches.
 	for pos < n {
-		when LAX {
-			if piece_holds(w, pos, n) {
-				return piece_stop(w, pos)
-			}
-		}
-		rem := n - pos
-		b: kernel.Block
-		valid: u64
-		if rem >= 64 {
-			b = kernel.load(base[pos:])
-			valid = ~u64(0)
-		} else {
-			// The last block is partial and zero-padded. A zero byte is no delimiter, no quote and ASCII, and `valid`
-			// clears the mask bits past the text's end.
-			b = kernel.load_padded(src, pos)
-			valid = u64(1) << u64(rem) - 1
-		}
-
-		seps, lfs, clfs: u64
-		bs: u64
-		cb: u64
-		_ = cb
 		fault := -1
 		kind := tape.Fault_Kind.Bad_Char
 		detail := Detail.None
-		when S == .Csv {
-			m := kernel.pack_n([4]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, delim), kernel.eq(b, '\n'), kernel.eq(b, '\r')})
-			q, d, nl, crm := m[0], m[1], m[2], m[3]
-			// A comment line's bytes are text: they make no separator, open no quoted cell and hold no CR, and its LF
-			// still ends the line. Each run is cleared from `q`, `d` and `crm` before the next line start is judged,
-			// so a quote in a comment line does not flip the quoted-cell state.
-			when COMMENTS {
-				if w.in_comment != 0 {
-					run, lf := comment_span(nl, 0, true)
-					cb |= run
-					clfs |= lf
-					q &= ~run
-					d &= ~run
-					crm &= ~run
+		one_end := -1
+		window_end := false
+		_ = window_end
+		when EMIT {
+			t := Token_State{field_lo = w.field_lo, cells = w.cells, carry = w.field_esc, regs = hs^}
+		} else {
+			in_quote, start, close, last_cr, quoted, prev_high := w.in_quote, w.start, w.close, w.cr, w.quoted, w.prev_high
+			rs := cells_start(w)
+		}
+		for pos < n {
+			when EMIT {
+				in_quote, start, close, last_cr, quoted, prev_high := w.in_quote, w.start, w.close, w.cr, w.quoted, w.prev_high
+			}
+			when LAX {
+				if piece_holds(w, pos, n) {
+					window_end = true
+					break
 				}
-				remaining := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment))
-				for remaining != 0 {
-					s := remaining & -remaining
-					remaining &~= s
-					if w.quoted || q != 0 {
-						// Under `.Bare_Quote` the quotes before a line start pair up without its bare ones, which the
-						// quote loop below would drop only after the comment lines are cleared.
-						if .Bare_Quote in w.tolerate {
-							for {
-								_, _, _, bare := quote_masks(T, q, d | nl, w.in_quote, w.start, w.close)
-								if bare &= s - 1; bare == 0 {
-									break
+			}
+			rem := n - pos
+			b: kernel.Block
+			valid: u64
+			if rem >= 64 {
+				b = kernel.load(base[pos:])
+				valid = ~u64(0)
+			} else {
+				// The last block is partial and zero-padded. A zero byte is no delimiter, no quote and ASCII, and
+				// `valid` clears the mask bits past the text's end.
+				b = kernel.load_padded(src, pos)
+				valid = u64(1) << u64(rem) - 1
+			}
+
+			seps, lfs, clfs: u64
+			bs: u64
+			cb: u64
+			_ = cb
+			when S == .Csv {
+				m := kernel.pack_n([4]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, delim), kernel.eq(b, '\n'), kernel.eq(b, '\r')})
+				q, d, nl, crm := m[0], m[1], m[2], m[3]
+				// A comment line's bytes are text: they make no separator, open no quoted cell and hold no CR, and its
+				// LF still ends the line. Each run is cleared from `q`, `d` and `crm` before the next line start is
+				// judged, so a quote in a comment line does not flip the quoted-cell state.
+				when COMMENTS {
+					if w.in_comment != 0 {
+						run, lf := comment_span(nl, 0, true)
+						cb |= run
+						clfs |= lf
+						q &= ~run
+						d &= ~run
+						crm &= ~run
+					}
+					remaining := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment))
+					for remaining != 0 {
+						s := remaining & -remaining
+						remaining &~= s
+						if quoted || q != 0 {
+							// Under `.Bare_Quote` the quotes before a line start pair up without its bare ones, which
+							// the quote loop below would drop only after the comment lines are cleared.
+							if .Bare_Quote in opts.tolerate {
+								for {
+									_, _, _, bare := quote_masks(T, q, d | nl, in_quote, start, close)
+									if bare &= s - 1; bare == 0 {
+										break
+									}
+									q &~= bare & -bare
+									w.tolerated = true
 								}
-								q &~= bare & -bare
-								w.tolerated = true
+							}
+							if s & (kernel.prefix_xor(T, q) ~ in_quote) != 0 {
+								continue
 							}
 						}
-						if s & (kernel.prefix_xor(T, q) ~ w.in_quote) != 0 {
-							continue
-						}
+						run, lf := comment_span(nl, s, false)
+						cb |= run
+						clfs |= lf
+						q &= ~run
+						d &= ~run
+						crm &= ~run
 					}
-					run, lf := comment_span(nl, s, false)
-					cb |= run
-					clfs |= lf
-					q &= ~run
-					d &= ~run
-					crm &= ~run
+					w.in_comment = cb >> 63
 				}
-				w.in_comment = cb >> 63
-			}
-			// With no quote byte in this block and none in any earlier block, no quoted cell is open, so every
-			// separator is a delimiter or an LF, no quote placement needs judging, and `w.in_quote` stays clear.
-			if !w.quoted && q == 0 {
+				// With no quote byte in this block and none in any earlier block, no quoted cell is open, so every
+				// separator is a delimiter or an LF, no quote placement needs judging, and `in_quote` stays clear.
+				if !quoted && q == 0 {
+					seps = d | nl
+					lfs = nl
+					bad, carried := cr_fault(last_cr, crm, nl)
+					if carried {
+						fault = pos - 1
+					} else if bad != 0 {
+						fault = pos + int(intrinsics.count_trailing_zeros(bad))
+					}
+					start = seps >> 63
+					last_cr = crm >> 63
+				} else {
+					quoted = true
+					instr, closing, cr, bad, bare: u64
+					carried: bool
+					for {
+						// Once a text has held a quote every block takes this path, as a branch per block on its own
+						// quotes mispredicts on a text that quotes some cells and not others.
+						instr = kernel.prefix_xor(T, q) ~ in_quote
+						open := q & instr
+						closing = q & ~instr
+						seps = (d | nl) & ~instr
+						lfs = nl & ~instr
+						cr = crm & ~instr
+						// A quote opens a cell only at the cell's first byte. A closing quote may be followed only by a
+						// quote that doubles it, the delimiter, LF, CR or the end of the text.
+						after := closing << 1 | close
+						bare = open & ~(seps << 1 | start | after)
+						// `open` is a quote that starts a run of quoted bytes. `~valid` keeps the zero padding past the
+						// text's end from faulting after a closing quote at the last byte.
+						bad = bare | after & ~(q | d | nl | crm | ~valid)
+						cr_bad, c := cr_fault(last_cr, cr, nl)
+						bad |= cr_bad
+						carried = c
+						// Under `.Bare_Quote` a tolerated bare quote is no quote, and the block's quotes pair up again
+						// without it.
+						first := bad & -bad
+						if bare & first == 0 || .Bare_Quote not_in opts.tolerate {
+							break
+						}
+						q &~= first
+						w.tolerated = true
+					}
+					// A quote that opens right after a closing one is the second of a `""`, which a cell's decode
+					// reads.
+					when EMIT {
+						bs = (closing << 1 | close) & q
+					}
+					if carried {
+						fault = pos - 1
+					} else if bad != 0 {
+						fault = pos + int(intrinsics.count_trailing_zeros(bad))
+					}
+					// All ones when the block ended inside a quoted cell, the mask the next block's run starts from.
+					in_quote = u64(0) - (instr >> 63)
+					start = seps >> 63
+					close = closing >> 63
+					last_cr = cr >> 63
+				}
+			} else {
+				m := kernel.pack_n([3]kernel.Block{kernel.eq(b, delim), kernel.eq(b, '\n'), kernel.eq(b, '\r')})
+				d, nl, crm := m[0], m[1], m[2]
+				when S == .Tsv {
+					// A block with no backslash holds no escaped cell, so the mask is packed only for a block that
+					// holds one.
+					bsm := kernel.eq(b, '\\')
+					if kernel.any_lane(bsm) {
+						bs = kernel.pack(bsm)
+					}
+				}
 				seps = d | nl
 				lfs = nl
-				bad, carried := cr_fault(w, crm, nl)
-				if carried {
-					fault = pos - 1
-				} else if bad != 0 {
-					fault = pos + int(intrinsics.count_trailing_zeros(bad))
-				}
-				w.start = seps >> 63
-				w.cr = crm >> 63
-			} else {
-				w.quoted = true
-				instr, closing, cr, bad, bare: u64
-				carried: bool
-				for {
-					// Once a text has held a quote every block takes this path, as a branch per block on its own quotes
-					// mispredicts on a text that quotes some cells and not others.
-					instr = kernel.prefix_xor(T, q) ~ w.in_quote
-					open := q & instr
-					closing = q & ~instr
-					seps = (d | nl) & ~instr
-					lfs = nl & ~instr
-					cr = crm & ~instr
-					// A quote opens a cell only at the cell's first byte. A closing quote may be followed only by a
-					// quote that doubles it, the delimiter, LF, CR or the end of the text.
-					after := closing << 1 | w.close
-					bare = open & ~(seps << 1 | w.start | after)
-					// `open` is a quote that starts a run of quoted bytes. `~valid` keeps the zero padding past the
-					// text's end from faulting after a closing quote at the last byte.
-					bad = bare | after & ~(q | d | nl | crm | ~valid)
-					cr_bad, c := cr_fault(w, cr, nl)
-					bad |= cr_bad
-					carried = c
-					// Under `.Bare_Quote` a tolerated bare quote is no quote, and the block's quotes pair up again
-					// without it.
-					first := bad & -bad
-					if bare & first == 0 || .Bare_Quote not_in w.tolerate {
-						break
-					}
-					q &~= first
-					w.tolerated = true
-				}
-				// A quote that opens right after a closing one is the second of a `""`, which a cell's decode reads.
-				when EMIT {
-					bs = (closing << 1 | w.close) & q
-				}
-				if carried {
-					fault = pos - 1
-				} else if bad != 0 {
-					fault = pos + int(intrinsics.count_trailing_zeros(bad))
-				}
-				// All ones when the block ended inside a quoted cell, the mask the next block's run starts from.
-				w.in_quote = u64(0) - (instr >> 63)
-				w.start = seps >> 63
-				w.close = closing >> 63
-				w.cr = cr >> 63
-			}
-		} else {
-			m := kernel.pack_n([3]kernel.Block{kernel.eq(b, delim), kernel.eq(b, '\n'), kernel.eq(b, '\r')})
-			d, nl, crm := m[0], m[1], m[2]
-			when S == .Tsv {
-				// A block with no backslash holds no escaped cell, so the mask is packed only for a block that holds
-				// one.
-				bsm := kernel.eq(b, '\\')
-				if kernel.any_lane(bsm) {
-					bs = kernel.pack(bsm)
-				}
-			}
-			seps = d | nl
-			lfs = nl
-			// A comment line's bytes are text, its LF ends the line, and a backslash in it opens no escape.
-			when COMMENTS {
-				starts := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment))
-				cb, clfs = comment_span(nl, starts, w.in_comment != 0)
-				d &= ~cb
-				crm &= ~cb
-				bs &= ~cb
-				seps = d | nl
-				w.in_comment = cb >> 63
-			}
-			bad, carried := cr_fault(w, crm, nl)
-			if carried {
-				fault = pos - 1
-			} else if bad != 0 {
-				fault = pos + int(intrinsics.count_trailing_zeros(bad))
-			}
-			w.cr = crm >> 63
-			when S == .Tsv {
-				// A backslash must open one of the five escapes. Any other byte after it is a `.Bad_Escape` fault at
-				// the backslash.
-				if bs != 0 || w.esc != 0 {
-					if at := escape_fault(T, b, bs, pos, &w.esc); at >= 0 && (fault < 0 || at < fault) {
-						fault, kind = at, .Bad_Escape
-					}
-				}
-			}
-		}
-		when COMMENTS {
-			w.line = nl >> 63
-		}
-		_ = bs
-
-		// UTF-8 is checked on a block with a byte past 0x7F, and on an ASCII block only when the block before left a
-		// sequence open. Under `.Invalid_Utf8` a block whose check fails is read for the leads of its ill-formed
-		// sequences, as the mask `ill`, and `ill_back` is the lead of one that starts in the block before and that
-		// this block's check found. The tolerance is for cells: an ill-formed sequence in a comment line is still a
-		// fault, as it is in a JSONC comment.
-		ill: u64
-		ill_back := -1
-		check := kernel.utf8_next(T, b, kernel.is_ascii(b), &w.utf8, &w.prev_high)
-		if check && !kernel.utf8_clean(T, w.utf8) {
-			if .Invalid_Utf8 not_in w.tolerate {
-				// A sequence the text cuts short is reported at the text's end, after a quoted cell the text leaves
-				// open, so a block padded past the end does not report it first.
-				if at, k, dd := utf8_fault(src, int(lo), pos); at >= 0 && k != .Truncated && (fault < 0 || at < fault) {
-					fault, kind, detail = at, k, dd
-				}
-			} else {
-				// Clears the error state, so the next block's check reports that block's errors only.
-				w.utf8.err = {}
-				when EMIT || COMMENTS {
-					ill, ill_back = ill_leads(base, int(lo), pos, n)
-				}
+				// A comment line's bytes are text, its LF ends the line, and a backslash in it opens no escape.
 				when COMMENTS {
-					if at, k, dd := comment_utf8_fault(src, pos, ill, ill_back, cb | clfs); at >= 0 && (fault < 0 || at < fault) {
+					starts := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment))
+					cb, clfs = comment_span(nl, starts, w.in_comment != 0)
+					d &= ~cb
+					crm &= ~cb
+					bs &= ~cb
+					seps = d | nl
+					w.in_comment = cb >> 63
+				}
+				bad, carried := cr_fault(last_cr, crm, nl)
+				if carried {
+					fault = pos - 1
+				} else if bad != 0 {
+					fault = pos + int(intrinsics.count_trailing_zeros(bad))
+				}
+				last_cr = crm >> 63
+				when S == .Tsv {
+					// A backslash must open one of the five escapes. Any other byte after it is a `.Bad_Escape` fault
+					// at the backslash.
+					if bs != 0 || w.esc != 0 {
+						if at := escape_fault(T, b, bs, pos, &w.esc); at >= 0 && (fault < 0 || at < fault) {
+							fault, kind = at, .Bad_Escape
+						}
+					}
+				}
+			}
+			when COMMENTS {
+				w.line = nl >> 63
+			}
+			_ = bs
+
+			// The record a one-record pass reads ends at the block's first LF: the masks and faults past it are the
+			// next record's.
+			when ONE_RECORD <= C {
+				if lfs != 0 {
+					k := int(intrinsics.count_trailing_zeros(lfs))
+					one_end = pos + k
+					keep := ~u64(0) >> u64(63 - k)
+					seps &= keep
+					lfs &= keep
+					if fault > one_end {
+						fault = -1
+					}
+				}
+			}
+
+			// UTF-8 is checked on a block with a byte past 0x7F, and on an ASCII block only when the block before left
+			// a sequence open. Under `.Invalid_Utf8` a block whose check fails is read for the leads of its ill-formed
+			// sequences, as the mask `ill`, and `ill_back` is the lead of one that starts in the block before and that
+			// this block's check found. The tolerance is for cells: an ill-formed sequence in a comment line is still a
+			// fault, as it is in a JSONC comment.
+			ill: u64
+			ill_back := -1
+			check := kernel.utf8_next(T, b, kernel.is_ascii(b), &w.utf8, &prev_high)
+			if check && !kernel.utf8_clean(T, w.utf8) {
+				if .Invalid_Utf8 not_in opts.tolerate {
+					// A sequence the text cuts short is reported at the text's end, after a quoted cell the text leaves
+					// open, so a block padded past the end does not report it first.
+					if at, k, dd := utf8_fault(src, int(lo), pos); at >= 0 && k != .Truncated && (fault < 0 || at < fault) && (one_end < 0 || at <= one_end) {
 						fault, kind, detail = at, k, dd
 					}
+				} else {
+					// Clears the error state, so the next block's check reports that block's errors only.
+					w.utf8.err = {}
+					when EMIT || COMMENTS {
+						ill, ill_back = ill_leads(base, int(lo), pos, n)
+					}
+					when COMMENTS {
+						if at, k, dd := comment_utf8_fault(src, pos, ill, ill_back, cb | clfs); at >= 0 && (fault < 0 || at < fault) {
+							fault, kind, detail = at, k, dd
+						}
+					}
+					w.tolerated = true
 				}
-				w.tolerated = true
 			}
-		}
 
-		_, _ = ill, ill_back
+			_, _ = ill, ill_back
 
-		// A fault ends the read at its byte, and the separators past it are cleared, so no record that reaches it is
-		// counted and no cell of one is read.
-		if fault >= 0 {
-			cut := u64(1) << u64(max(fault - pos, 0)) - 1
-			seps &= cut
-			lfs &= cut
-			clfs &= cut
-		}
-
-		when EMIT {
-			// Every cell that the block ends, except the one open at its start, is shorter than 64 bytes. That cell can
-			// exceed `max(u32)` only if it opened more than `max(u32) - 64` bytes before `pos`, so the test runs only
-			// then.
-			if u64(pos - w.field_lo) > u64(max(u32)) - 64 && cell_too_wide(base, w.field_lo, pos, seps) {
-				return fault_at(u64(w.field_lo), .Too_Wide)
+			when EMIT {
+				w.in_quote, w.start, w.close, w.cr, w.quoted, w.prev_high = in_quote, start, close, last_cr, quoted, prev_high
 			}
-			// A block that holds an ill-formed sequence, or that a cell holding one is open across, reads its cells'
-			// spellings through a cold instance, so the clean instance holds no test of them.
-			if .Invalid_Utf8 in opts.tolerate && (ill != 0 || ill_back >= 0 || w.open_ill) {
-				if r, done := read_lax_tokens(COMMENTS, w, src, opts, {pos, seps, lfs, clfs, bs, ill, ill_back}, hs, on); done {
+
+			// A fault ends the read at its byte, and the separators past it are cleared, so no record that reaches it
+			// is counted and no cell of one is read.
+			if fault >= 0 {
+				cut := u64(1) << u64(max(fault - pos, 0)) - 1
+				seps &= cut
+				lfs &= cut
+				clfs &= cut
+			}
+
+			when EMIT {
+				// A block that holds an ill-formed sequence, or that a cell holding one is open across, reads its
+				// cells' spellings through a cold instance, so the clean instance holds no test of them.
+				if .Invalid_Utf8 in opts.tolerate && (ill != 0 || ill_back >= 0 || w.open_ill) {
+					given := t
+					r, done := lax_block_tokens(COMMENTS, w, src, opts, &given, quoted, pos, seps, lfs, bs, clfs, ill, ill_back, on)
+					t = given
+					if done {
+						hs^ = t.regs
+						return r
+					}
+				} else if r, done := block_tokens(false, COMMENTS, w, src, opts, &t, quoted, pos, seps, lfs, bs, clfs, 0, -1, on); done {
+					hs^ = t.regs
 					return r
 				}
-			} else if .Skips not_in C && seps == 0 {
-				// No cell or record ends in the block, so no token is made, and the open cell holds an escape if it did
-				// or the block has one.
-				w.field_esc ||= bs != 0
-			} else if r, done := read_tokens(false, COMMENTS, w, src, opts, {pos, seps, lfs, clfs, bs, 0, -1}, hs, on); done {
-				return r
+			} else {
+				if r, done := read_cells(COMMENTS, w, &rs, base, pos, seps, lfs, clfs); done {
+					w.in_quote, w.start, w.close, w.cr, w.quoted, w.prev_high = in_quote, start, close, last_cr, quoted, prev_high
+					cells_end(w, &rs)
+					return r
+				}
 			}
-		} else {
-			if r, done := read_cells(COMMENTS, w, base, pos, seps, lfs, clfs); done {
-				return r
+			if fault >= 0 {
+				break
 			}
+			when ONE_RECORD <= C {
+				if lfs != 0 {
+					break
+				}
+			}
+			pos += 64
 		}
-
+		when EMIT {
+			w.field_lo, w.cells, w.field_esc = t.field_lo, t.cells, t.carry
+			hs^ = t.regs
+		} else {
+			w.in_quote, w.start, w.close, w.cr, w.quoted, w.prev_high = in_quote, start, close, last_cr, quoted, prev_high
+			cells_end(w, &rs)
+		}
 		if fault >= 0 {
-			// A mask fault names its rule by its byte: a CR with no LF, a quote in an unquoted cell, else a byte after a
-			// closing quote.
+			// A mask fault names its rule by its byte: a CR with no LF, a quote in an unquoted cell, else a byte after
+			// a closing quote.
 			if kind == .Bad_Char && detail == .None {
 				detail = .Bare_Quote if base[fault] == '"' else .Lone_Cr if base[fault] == '\r' else .After_Quote
 			}
 			return fault_at(u64(fault), kind, detail)
 		}
-		pos += 64
+		when ONE_RECORD <= C {
+			if one_end >= 0 {
+				return hook.walk_result(u64(one_end + 1), 0)
+			}
+		}
+		when LAX {
+			if window_end {
+				return piece_stop(w, pos)
+			}
+		}
 	}
 	when LAX {
 		if piece_holds(w, pos, n) {
@@ -484,6 +568,14 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 				return r
 			}
 		} else {
+			when LAX {
+				// A record wider than the first faults before it opens its container.
+				if w.in_header || w.width == 0 || w.cells + 1 <= w.width || .Ragged in w.tolerate {
+					if r, done := step_record(w, w.rec_lo); done {
+						return r
+					}
+				}
+			}
 			if fault, wide := record_width(w, w.cells + 1, &w.width); fault {
 				return fault_at(u64(w.rec_lo), .Bad_Width, .Too_Many if wide else .Too_Few)
 			}

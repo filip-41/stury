@@ -36,14 +36,15 @@ spec_delimiter :: #force_inline proc "contextless" (spec: Spec, delimiter: u8) -
 // The pass options of `opts`, or the error for an option that spec `S` cannot read.
 // A delimiter is refused when it is CR, LF, non-ASCII or, under CSV, a quote, and under TSV also a backslash or one of
 // `t`, `n`, `r`, `0`. A comment byte is refused when it is CR, LF, the delimiter, non-ASCII or, under CSV, a quote, and
-// under TSV also a backslash.
+// under TSV also a backslash. A read judges its options once, here, and takes the options for its walks from
+// `options_resolved`.
 @(private)
 pass_options :: #force_inline proc "contextless" ($S: Spec, opts: tape.Options) -> (p: Pass_Options, refused: tape.Error) {
 	if refused = tape.options_refused(&FORMATS[S], opts); refused != nil {
 		return
 	}
-	d, _ := opts.format.(tape.Dsv_Options)
-	delim, c := spec_delimiter(S, d.delimiter), d.comment
+	p = options_resolved(S, opts)
+	delim, c := p.delim, p.comment
 	bad_delim := delim == '\r' || delim == '\n' || delim >= 0x80
 	bad_comment := c != 0 && (c == '\r' || c == '\n' || c == delim || c >= 0x80)
 	when S == .Csv {
@@ -59,11 +60,19 @@ pass_options :: #force_inline proc "contextless" ($S: Spec, opts: tape.Options) 
 	if bad_comment {
 		return {}, tape.Bad_Option{"comment"}
 	}
-	return {tolerate = opts.tolerate, delim = delim, comment = c, no_header = d.no_header, infer = d.infer, limit = u64(opts.budget.depth) if opts.budget.depth != 0 else tape.DEFAULT_DEPTH}, nil
+	return
 }
 
-// Whether `p` holds every default, so the pass runs the instance that folds them.
+// The pass options of `opts`, which a read has judged with `pass_options`.
+@(private)
+options_resolved :: #force_inline proc "contextless" ($S: Spec, opts: tape.Options) -> Pass_Options {
+	d, _ := opts.format.(tape.Dsv_Options)
+	return {tolerate = opts.tolerate, delim = spec_delimiter(S, d.delimiter), comment = d.comment, no_header = d.no_header, infer = d.infer, limit = u64(opts.budget.depth) if opts.budget.depth != 0 else tape.DEFAULT_DEPTH}
+}
+
+// Whether `p` holds every default, so the pass runs the instance that folds them. `.Ragged` is read from `Pass.tolerate`
+// only where a record's width is judged, past the cells of the header's width, so that instance reads it too.
 @(private)
 is_default :: #force_inline proc "contextless" ($S: Spec, p: Pass_Options) -> bool {
-	return p.tolerate == {} && p.delim == spec_delimiter(S, 0) && p.comment == 0 && !p.no_header && !p.infer && p.limit >= RECORD_DEPTH
+	return p.tolerate <= {.Ragged} && p.delim == spec_delimiter(S, 0) && p.comment == 0 && !p.no_header && !p.infer && p.limit >= RECORD_DEPTH
 }

@@ -45,14 +45,36 @@ Capability :: enum u8 {
 	// walk whose members are placed by position, as a delimited text's cells are, may pass such a member with no token
 	// once the hook skipped it in an earlier object. The walk adds the members it passed so to the hook's field
 	// `dropped: u64` before it gives the object's `End`, and learns the columns the hook takes from the first object
-	// only when its field `alike: bool` says the hook answers the same in every object.
+	// only when its field `alike: bool` says the hook answers the same in every object. The objects after the first may
+	// be replayed through the hook's field `replay: Replay`.
 	Columns,
 	// Reads a text in windows, so the walk keeps the state of the window in its field `piece`. A walk with it also
 	// counts steps.
 	Windows,
+	// Stores no node for a key token, as a table's rows name their cells by place through a header stored apart, so the
+	// walk makes no room for one. It stores the room's other tokens, so a hook with `.Unkeyed` has `.Rooms`.
+	Unkeyed,
 }
 
 Capabilities :: bit_set[Capability; u16]
+
+// The columns a walk of `.Columns` gives a bit each in its `u64` of the columns a hook takes, the last bit standing for
+// every column from there on, and so the most cells a record the hook replays holds.
+COLUMN_BITS :: 63
+
+#assert(COLUMN_BITS + 1 == 8 * size_of(u64))
+
+// How a walk of `.Columns` replays the objects after the first. Before its first token the walk sets `fixed` to say that
+// each object after the first gives the keys of the columns the hook took in the first, at the same places, or the walk
+// ends at a fault. A hook that makes in such an object what it made in the first sets `replays` at the object's opening
+// token and clears it at its `End`. In between the walk gives the cells of the columns it learnt with no token: each is
+// the value token it would give, stored in the next entry of `cells` and counted in `given`.
+Replay :: struct {
+	fixed:   bool,
+	replays: bool,
+	cells:   []tape.Token,
+	given:   int,
+}
 
 // The type of the field `protocol` every hook has: its capabilities `C`, and for `.Levels`, `.Rooms` and `.Keeps` a
 // `Levels`, `Rooms` and `Keeps` type naming its procs, `Unused` for one it lacks. `check` says what is wrong.
@@ -81,10 +103,12 @@ check :: #force_inline proc "contextless" ($H: typeid) {
 	#assert(.Keeps not_in C || .Skips in C, "a hook with `.Keeps` has `.Skips`, as the walk reads its keeps where it reads its skips")
 	#assert(.Number_Blocks not_in C || .Skips not_in C, "a hook with `.Number_Blocks` answers only `Next` and `Stop`, so it has no `.Skips`")
 	#assert(.Walk not_in C || intrinsics.type_has_field(H, "walk"), "a hook with `.Walk` has a field `walk: rawptr`")
+	#assert(.Unkeyed not_in C || .Rooms in C, "a hook with `.Unkeyed` has `.Rooms`, whose room it stores the other tokens in")
 	#assert(.Columns not_in C || .Skips in C, "a hook with `.Columns` has `.Skips`, as it passes members by `Skip`")
 	when .Columns in C {
 		#assert(intrinsics.type_field_type(H, "dropped") == u64, "a hook with `.Columns` has a field `dropped: u64`")
 		#assert(intrinsics.type_field_type(H, "alike") == bool, "a hook with `.Columns` has a field `alike: bool`")
+		#assert(intrinsics.type_field_type(H, "replay") == Replay, "a hook with `.Columns` has a field `replay: Replay`")
 	}
 	when .Walk in C {
 		#assert(intrinsics.type_field_type(H, "walk") == rawptr, "a hook's `walk` field is a `rawptr`")

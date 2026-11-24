@@ -278,8 +278,8 @@ cells_written_through_each_refill :: proc(t: ^testing.T) {
 @(test)
 cells_at_the_end_of_a_page :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	fence: Fence
-	defer fence_release(&fence)
+	fence: testkit.Fence
+	defer testkit.fence_release(&fence)
 	for stop in ([?]u8{'a', ',', '"', '\t', '\\', 0xC3, '\n'}) {
 		for n in 0 ..< 70 {
 			body := make([]u8, n, context.temp_allocator)
@@ -307,7 +307,7 @@ cells_at_the_end_of_a_page :: proc(t: ^testing.T) {
 			plain_source := strings.concatenate({"h\n", string(body)}, context.temp_allocator)
 			for source, k in ([2]string{string(quoted[:]), plain_source}) {
 				heap, herr := dsv.build(transmute([]u8)source)
-				fenced, ferr := dsv.build(fence_copy(&fence, transmute([]u8)source))
+				fenced, ferr := dsv.build(testkit.fence_copy(&fence, transmute([]u8)source))
 				if herr != nil || ferr != nil {
 					testing.expectf(t, (herr == nil) == (ferr == nil), "%q: %v %v", source, herr, ferr)
 					dsv.destroy(&heap)

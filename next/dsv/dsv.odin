@@ -131,7 +131,7 @@ validate_walk :: #force_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Optio
 		}
 	}
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-		p, _ := pass_options(S, opts)
+		p := options_resolved(S, opts)
 		return walk_text(src, S, LAX, p, h, regs, a, ctx, hook.no_hook, nil, opts.budget.steps)
 	}
 	return build.read_validate(src, &FORMATS[S], opts, allocator, 0, walk)
@@ -163,7 +163,7 @@ find_walk :: #force_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bo
 		return walk_record_again((^Pass(S, build.Finder, LAX, build.FINDER_CAPS))(h.walk), h.src, lo, &regs, build.finder_hook)
 	}
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-		p, _ := pass_options(S, opts)
+		p := options_resolved(S, opts)
 		return walk_text(src, S, LAX, p, h, regs, a, ctx, build.finder_hook, nil, opts.budget.steps)
 	}
 	return build.read_find(src, path, &FORMATS[S], read, opts, caller, tape.number_respell, rewalk, walk)
@@ -191,7 +191,7 @@ scan_walk :: #force_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX:
 		}
 	}
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-		p, _ := pass_options(S, opts)
+		p := options_resolved(S, opts)
 		return walk_text(src, S, LAX, p, h, regs, a, ctx, build.scanner_key_skip_hook, nil, opts.budget.steps)
 	}
 	return build.read_scan(src, demand, &FORMATS[S], read, opts, caller, nil, node_bound, walk)
@@ -227,7 +227,7 @@ build_walk :: #force_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options,
 	}
 	walk :: proc "contextless" (src: []u8, opts: Options, h: ^build.Builder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		context = ctx^
-		p, _ := pass_options(S, opts)
+		p := options_resolved(S, opts)
 		room: [FRAME_KEYS]tape.Token = ---
 		head: Head
 		if !p.no_header {
@@ -239,8 +239,8 @@ build_walk :: #force_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options,
 		defer if len(head.keys) > len(room) {
 			delete(head.keys, a)
 		}
-		root_close, err, tolerated := walk_text(src, S, LAX, p, h, regs, a, ctx, build.builder_hook_rows, &head, opts.budget.steps)
-		if err == nil && len(head.keys) > 0 && !append_header(h, regs, head, a) {
+		root_close, err, tolerated := walk_text(src, S, LAX, p, build.rows_of(h), regs, a, ctx, build.builder_hook_rows, &head, opts.budget.steps)
+		if err == nil && len(head.keys) > 0 && !append_header(h, regs, head) {
 			err = build.builder_error(h)
 		}
 		return root_close, repeat_first(err, src, S, p, head.keys, opts, a), tolerated

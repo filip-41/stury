@@ -90,7 +90,7 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 			werr = runtime.Allocator_Error.Out_Of_Memory
 		}
 		if werr != nil {
-			out[n], answers[n] = record_end(r, lo, w.hi, hook.memory_budget_error(&m, werr)), {}
+			out[n], answers[n] = record_end(r, lo, w.hi, hook.memory_budget_error(&m, werr)), {outcome = .Missing}
 			n += 1
 			continue
 		}

@@ -111,6 +111,9 @@ read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, rea
 	if e := tape.options_refused(format, opts); e != nil {
 		return {}, e
 	}
+	if !path_dups(format, opts) {
+		return {}, tape.Bad_Option{"dups"}
+	}
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return
 	blk := (^Find_Piece)(s.hook)
@@ -192,6 +195,9 @@ scan_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (doc: tape.Document, err: tape.Error) {
 	if e := tape.options_refused(format, opts); e != nil {
 		return {}, e
+	}
+	if !path_dups(format, opts) {
+		return {}, tape.Bad_Option{"dups"}
 	}
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return

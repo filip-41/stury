@@ -1,6 +1,7 @@
 package dsv_tests
 
 import "core:fmt"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import "stury:dsv"
@@ -348,3 +349,29 @@ builds_refuse_a_repeated_header_name_before_a_later_fault :: proc(t: ^testing.T)
 		testing.expectf(t, faulted && fault.kind == .Duplicate_Key && fault.at == c.at, "%q: %v, want a repeat at %d", c.src, err, c.at)
 	}
 }
+
+// A table builds into an arena that holds its nodes and little more, past a first room the arena refuses. Its child
+// counts are reserved before its nodes, as its first room is past `tape.MAX_CHILDREN` nodes, and hold all it needs. A
+// room whose counts grow later places them past its nodes, which the arena then cannot grow in place.
+@(test)
+builds_fit_the_smallest_arena :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	src := transmute([]u8)strings.concatenate({"a,b\n", strings.repeat("1,2\n", 5000, context.temp_allocator)}, context.temp_allocator)
+	first, err := dsv.build(src)
+	defer dsv.destroy(&first)
+	testing.expect_value(t, err, nil)
+	need := len(first.nodes) * size_of(tape.Node) + ARENA_SLACK
+	backing := make([]u8, need)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	doc, derr := dsv.build(src, .Csv, {}, mem.arena_allocator(&arena))
+	testing.expectf(t, derr == nil, "%d bytes: %v", need, derr)
+	testing.expect_value(t, len(doc.nodes), len(first.nodes))
+}
+
+// The bytes past its nodes a table's build takes from an arena: the room its last growth left unused, its table and the
+// arena's alignment.
+@(private = "file")
+ARENA_SLACK :: 1024

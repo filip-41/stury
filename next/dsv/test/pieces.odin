@@ -361,21 +361,69 @@ pieces_answer_a_long_text_in_bounded_windows :: proc(t: ^testing.T) {
 	}
 }
 
-// The path a window ends inside: the record being read and, under a header, the key of its cell being read.
+// The path the first or a later window ends inside: the record being read and, under a header, the key of its cell.
 @(test)
 pieces_name_the_open_path :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
-	text := fmt.tprintf("id,name\n1,x\n2,%s\n", strings.repeat("y", 100, context.temp_allocator))
-	src := transmute([]u8)text
-	p := dsv.Pieces{allocator = context.allocator}
-	defer dsv.destroy(&p)
-	testing.expect_value(t, dsv.validate(src[:90], .Csv, {pieces = &p}), nil)
-	testing.expect(t, p.more)
-	testing.expect_value(t, len(p.open), 2)
-	if len(p.open) == 2 {
-		testing.expect_value(t, p.open[0], tape.Step(tape.Index(1)))
-		testing.expect_value(t, p.open[1], tape.Step(tape.Name("name")))
+	y := strings.repeat("y", 100, context.temp_allocator)
+	for c in ([]struct {
+			text:   string,
+			second: bool, // the second window opens the open record
+			record: int,
+		}{{fmt.tprintf("id,name\n1,x\n2,%s\n", y), false, 1}, {fmt.tprintf("id,name\n1,x\n2,%s\n3,%s\n", y[:50], y[:70]), true, 2}}) {
+		src := transmute([]u8)c.text
+		p := dsv.Pieces{allocator = context.allocator}
+		defer dsv.destroy(&p)
+		testing.expect_value(t, dsv.validate(src[:90], .Csv, {pieces = &p}), nil)
+		if c.second {
+			p.from = p.keep
+			testing.expect_value(t, dsv.validate(src[p.keep:], .Csv, {pieces = &p}), nil)
+		}
+		testing.expect(t, p.more)
+		testing.expect_value(t, len(p.open), 2)
+		if len(p.open) == 2 {
+			testing.expect_value(t, p.open[0], tape.Step(tape.Index(c.record)))
+			testing.expect_value(t, p.open[1], tape.Step(tape.Name("name")))
+		}
+	}
+}
+
+// A validate of a text in two windows, cut anywhere, judges it and names the path the first window ends inside as a
+// validate of the whole text does, whether the cut falls in the header's window or past it, and under a step budget.
+@(test)
+validates_in_two_windows_as_the_whole_text :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	long := strings.repeat("y", 70, context.temp_allocator)
+	for text in ([]string {
+			"id,name\n1,x\n2,x\n3,x\n",
+			fmt.tprintf("id,name\n1,x\n2,%s\n3,\"q\"\"%s\"\n", long, long),
+			"a,b\n1,2\n3,4,5\n6,7\n",
+			"a,b\n1,2\n3\n4,5\r\n",
+			"a,b\n1,2\n3,\"4\n5\n",
+			"a,b\n1,2\n\n3,4\n\r\n5,6",
+			"a,b\n1,2\n3,x\"y\n",
+			"a,b\n1,2\n3,\xc3\n4,5\n",
+		}) {
+		src := transmute([]u8)text
+		for steps in ([]u64{0, 2, 3, 4}) {
+			opts := dsv.Options {
+				budget = {steps = steps},
+			}
+			whole := dsv.validate(src, .Csv, opts)
+			for cut in 1 ..< len(src) {
+				p := dsv.Pieces{allocator = context.allocator}
+				defer dsv.destroy(&p)
+				opts.pieces = &p
+				got := dsv.validate(src[:cut], .Csv, opts)
+				if got == nil && p.more {
+					p.from, p.last = p.keep, true
+					got = dsv.validate(src[p.keep:], .Csv, opts)
+				}
+				testing.expectf(t, got == whole, "%q steps %d cut at %d: %v, whole text %v", text, steps, cut, got, whole)
+			}
+		}
 	}
 }
 

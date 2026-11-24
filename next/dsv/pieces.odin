@@ -33,6 +33,7 @@ Piece :: struct {
 	skip_end:    bool,
 	keys:        [dynamic]tape.Token, // the header's keys read so far
 	headed:      bool, // the header has ended
+	keyed:       bool, // the header's keys are all in `keys`, so a validate counts the cells of the records past it
 	widest:      int, // the most cells a record had
 	head:        [dynamic]u8, // once the header has ended, the bytes of its keys from `head_lo`
 	head_lo:     u64,
@@ -91,11 +92,11 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 	if gap != nil {
 		return 0, gap, false
 	}
-	po, _ := pass_options(S, opts)
+	po := options_resolved(S, opts)
 	text := hook.piece_src(src, p.from)
 	more := !p.last
 	// A build judges the header's repeats when it has built it. Another read judges them when a window first holds it.
-	refuse := opts.dups == .Refuse && H != build.Builder
+	refuse := opts.dups == .Refuse && H != build.Rows_Builder
 	if !s.started {
 		if more && !piece_starts(s, text, to, S, po, refuse) {
 			p.more, p.at, p.keep, p.open = true, to, 0, nil
@@ -126,7 +127,26 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 	when .Walk in C {
 		h.walk = w
 	}
-	r := steps_ended(w, run_pass(w, text, 0, po, regs, on, true))
+	r: hook.Walk_Result
+	when H == hook.No_Hooks {
+		if w.in_header && !s.started && po.limit >= RECORD_DEPTH && u64(len(text)) <= u64(max(u32)) {
+			// The header gives its keys as tokens, from the text's first byte. The records are counted by a walk that
+			// starts there again, as it does for a whole text, so its blocks are those of the text's.
+			r = run_pass(w, text, 0, po, regs, header_ends, true)
+			if u8(r) == hook.WALK_STOPPED && w.steps[0] != 0 {
+				w^ = {}
+				pass_start(w, int(to), h, po, opts.budget.steps)
+				w.in_header, w.p, w.piece[0], w.keys = true, po, s, s.keys[:]
+				s.keyed, s.records = true, 0
+				r = run(w, text, 0, po, regs, on)
+			}
+			r = steps_ended(w, r)
+		} else {
+			r = steps_ended(w, run(w, text, 0, po, regs, on))
+		}
+	} else {
+		r = steps_ended(w, run(w, text, 0, po, regs, on))
+	}
 	when .Walk in C {
 		h.walk = nil
 	}
@@ -151,6 +171,12 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 		return 0, e, w.tolerated
 	}
 	return 0, nil, w.tolerated
+}
+
+// The hook of a validate's walk of a header: it stops at the first record, whose opening the walk has counted.
+@(private)
+header_ends :: proc "contextless" (h: ^hook.No_Hooks, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	return s, .Stop if t.kind == .Object else .Next
 }
 
 // Whether a first window ending at `to` of a text in pieces holds what the text's opening needs: past a possible byte
@@ -324,10 +350,9 @@ validate_pieces :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.A
 build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
 	walk :: proc(src: []u8, opts: Options, h: ^build.Builder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		head: Head
-		root_close, err, tolerated := piece_read(src, S, opts, h, regs, ctx, build.builder_hook_rows, &head)
+		root_close, err, tolerated := piece_read(src, S, opts, build.rows_of(h), regs, ctx, build.builder_hook_rows, &head)
 		if err == nil && !opts.pieces.more && len(head.keys) > 0 {
-			context = ctx^
-			if !append_header(h, regs, head, a) {
+			if !append_header(h, regs, head) {
 				err = build.builder_error(h)
 			}
 		}
@@ -336,7 +361,7 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 			if s.head[len(s.head) - 1] == '\n' {
 				head_end -= 1
 			}
-			po, _ := pass_options(S, opts)
+			po := options_resolved(S, opts)
 			err = repeat_first(err, tape.piece_src(s.head[:], s.head_lo), S, po, head.keys, opts, a, head_end)
 		}
 		return root_close, err, tolerated

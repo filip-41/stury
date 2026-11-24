@@ -1,11 +1,10 @@
-package write_tests
+package testkit
 
 import "core:mem"
 import "core:mem/virtual"
 
-// A mapping whose last page has no access, with texts copied to end at its last readable byte, so a write that reads
-// a byte past the text it was given faults.
-@(private)
+// A mapping whose last page has no access, with texts copied to end at its last readable byte, so a read or a write
+// that loads a byte past the text it was given faults.
 Fence :: struct {
 	base: rawptr,
 	span: uint,
@@ -13,7 +12,6 @@ Fence :: struct {
 }
 
 // Copies `src` to the end of the readable pages of `f`, mapping it first when it holds less than `len(src)` bytes.
-@(private)
 fence_copy :: proc(f: ^Fence, src: []u8) -> []u8 {
 	page := uint(mem.PAGE_SIZE)
 	span := max((uint(len(src)) + page - 1) & ~(page - 1), page)
@@ -31,7 +29,6 @@ fence_copy :: proc(f: ^Fence, src: []u8) -> []u8 {
 	return dst
 }
 
-@(private)
 fence_release :: proc(f: ^Fence) {
 	if f.base != nil {
 		virtual.release(f.base, f.size)

@@ -1,5 +1,6 @@
 package dsv_tests
 
+import "core:slice"
 import "core:testing"
 import "stury:dsv"
 import "stury:lib/core/tape"
@@ -104,6 +105,39 @@ faults_at_their_byte :: proc(t: ^testing.T) {
 	}
 	for c in TSV_CASES {
 		expect_reads(t, c, transmute([]u8)c.text, 0, true)
+	}
+}
+
+// Every detail a fault of the cases names has a rule of its own with a code and a message, and the cases name every
+// detail the rules have.
+@(test)
+every_detail_has_a_rule :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	rules: ^tape.Rules
+	named: [dynamic]u8
+	defer delete(named)
+	for cases, k in ([][]Case{CSV_CASES, TSV_CASES}) {
+		for c in cases {
+			f, faulted := dsv.validate(transmute([]u8)c.text, spec_of(k == 1)).(tape.Fault)
+			if !faulted || f.detail == 0 {
+				continue
+			}
+			rules = f.rules
+			if !slice.contains(named[:], f.detail) {
+				append(&named, f.detail)
+			}
+		}
+	}
+	if !testing.expect(t, rules != nil) {
+		return
+	}
+	testing.expect_value(t, len(named), len(rules.details) - 1)
+	for d in named {
+		rule := rules.details[d]
+		testing.expectf(t, rule.code != "" && rule.message != "", "detail %d: %v", d, rule)
+		for e in named {
+			testing.expectf(t, e == d || rules.details[e].code != rule.code, "details %d and %d share %q", d, e, rule.code)
+		}
 	}
 }
 

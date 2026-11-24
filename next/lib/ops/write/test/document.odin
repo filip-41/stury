@@ -121,8 +121,8 @@ document_refills :: proc(t: ^testing.T) {
 @(test)
 document_writes_stop_at_the_end_of_a_page :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	fence: Fence
-	defer fence_release(&fence)
+	fence: testkit.Fence
+	defer testkit.fence_release(&fence)
 	texts: [dynamic]string
 	defer delete(texts)
 	for text in ([]string{`null`, `-0.0`, `"a"`, `[]`, `{}`, `[[],{},[[]],{"a":{}}]`, `{"a":1,"b":[true,false,null],"c":{"d":"e","f":[1.5e300,-0,0.1]}}`, `  [ 1 , 2 ,
@@ -144,7 +144,7 @@ document_writes_stop_at_the_end_of_a_page :: proc(t: ^testing.T) {
 			return
 		}
 		for spec in ([?]json.Spec{.Json, .Jsonc, .Json5}) {
-			fenced, ferr := json.build(fence_copy(&fence, transmute([]u8)text), spec)
+			fenced, ferr := json.build(testkit.fence_copy(&fence, transmute([]u8)text), spec)
 			if !testing.expectf(t, ferr == nil, "%q as %v: %v", text, spec, ferr) {
 				return
 			}

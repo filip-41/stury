@@ -9,9 +9,11 @@ import "stury:lib/ops/build"
 // The header is stored once past the root value's nodes, widened by a key for each column a ragged record names by its
 // position. The table, its key slots and the build's policy for repeated keys are the document's `Tabular_Ext`.
 
-// The node capacity a build starts with, in bytes of text per node.
+// The node capacity a build starts with, in bytes of text per node. A cell of one byte and its delimiter take a node per
+// two bytes, so a table of short cells seldom grows the room it starts with, and `builder_end` gives back the room a
+// table of longer cells leaves unused.
 @(private)
-BUILD_BYTES_PER_NODE :: 4
+BUILD_BYTES_PER_NODE :: 2
 
 // The fewest header keys for which a table keeps key slots. With slots, a row's readers find a key by hash rather than
 // by comparing each. A slot holds its key's column plus one in a `u32`, 0 for none, and the slots number a power of two
@@ -22,22 +24,9 @@ SLOTTED_KEYS :: 8
 // Stores the header past the root value's nodes: an `Array` of role `Key` of its keys, and one key more for each
 // column a record past the header's width names by its position. False when the room cannot grow.
 @(private, cold)
-append_header :: proc(b: ^build.Builder, regs: ^hook.Regs, head: Head, allocator: runtime.Allocator) -> bool {
+append_header :: proc(b: ^build.Builder, regs: ^hook.Regs, head: Head) -> bool {
 	t := tape.Token{lo = head.keys[0].lo, kind = .Array, role = .Key}
-	if head.widest <= len(head.keys) {
-		return build.builder_append(b, regs, t, head.keys)
-	}
-	wide, err := make([]tape.Token, head.widest, allocator)
-	if build.took(err, raw_data(wide), head.widest) != nil {
-		b.err = .Out_Of_Memory
-		return false
-	}
-	defer delete(wide, allocator)
-	copy(wide, head.keys)
-	for c in len(head.keys) ..< head.widest {
-		wide[c] = column_key(head.keys, c)
-	}
-	return build.builder_append(b, regs, t, wide)
+	return build.builder_append(b, regs, t, head.keys, max(head.widest, len(head.keys)), column_key)
 }
 
 // Stores the header past the root value's nodes of the settled document `doc`, as `append_header` stores it in a build:
@@ -170,7 +159,7 @@ header_repeat :: proc(src: []u8, $S: Spec, keys: []tape.Token, allocator: runtim
 // before it walks, as a build does, or nil. A text in pieces judges its header when a window first holds it.
 @(private, cold)
 refuse_repeat :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocator) -> tape.Error {
-	p, _ := pass_options(S, opts)
+	p := options_resolved(S, opts)
 	if opts.dups != .Refuse || opts.pieces != nil || p.no_header {
 		return nil
 	}

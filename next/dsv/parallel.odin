@@ -98,7 +98,7 @@ build_parallel :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, call
 build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error, built: bool) {
 	m: hook.Memory_Budget
 	allocator := build.read_allocator(&m, opts, caller)
-	p, _ := pass_options(S, opts)
+	p := options_resolved(S, opts)
 	start := int(text_start(src, 0))
 	want := build.chunk_count(opts.runner, len(src) - start)
 	if want < 2 {
@@ -378,8 +378,8 @@ seam_plan :: proc(src: []u8, chunks: []Chunk, head_end, header: int, allocator: 
 // held, which a seam the plan misread gives.
 @(private)
 walk_part :: proc "contextless" (src: []u8, $S: Spec, p: Pass_Options, h: ^build.Builder, regs: ^hook.Regs, from: int, keys: []tape.Token, width: int, end: bool) -> (r: hook.Walk_Result, widest: int, tolerated, astray: bool) {
-	w: Pass(S, build.Builder, false, build.BUILDER_CAPS)
-	pass_start(&w, len(src), h, p, 0)
+	w: Pass(S, build.Rows_Builder, false, build.BUILDER_CAPS + {.Unkeyed})
+	pass_start(&w, len(src), build.rows_of(h), p, 0)
 	w.p, w.keys, w.width, w.in_header = p, keys, width, !p.no_header && from == 0
 	w.opened, w.unclosed = from > 0, !end
 	r = run(&w, src, u64(from), p, regs, build.builder_hook_rows)

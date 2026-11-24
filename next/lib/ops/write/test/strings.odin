@@ -507,8 +507,8 @@ strings_a_refusing_sink_fails_the_write :: proc(t: ^testing.T) {
 @(test)
 strings_at_the_end_of_a_page :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	fence: Fence
-	defer fence_release(&fence)
+	fence: testkit.Fence
+	defer testkit.fence_release(&fence)
 	body := make([]u8, 400)
 	defer delete(body)
 	for &b, i in body {
@@ -525,7 +525,7 @@ strings_at_the_end_of_a_page :: proc(t: ^testing.T) {
 			}
 			want := model_string(text[:])
 			defer delete(want)
-			doc, err := json.build(fence_copy(&fence, spelled[:]))
+			doc, err := json.build(testkit.fence_copy(&fence, spelled[:]))
 			if !testing.expectf(t, err == nil, "length %d: %v", n, err) {
 				return
 			}

@@ -39,7 +39,11 @@ comma := ,
 space := $(subst ,, )
 DSV_TIER_TESTS := $(addprefix dsv_tests.,walk_tokens walked_tokens_span_what_their_kind_says builds_read_as_tables \
 	finds_answer_cells_and_records scans_agree_with_builds scans_answer_paths_as_a_build_does pieces_agree_with_whole_reads \
-	pieces_carry_each_state_across_a_window parts_build_what_one_thread_builds records_answer_as_their_own_text)
+	pieces_carry_each_state_across_a_window parts_build_what_one_thread_builds records_answer_as_their_own_text \
+	validates_in_two_windows_as_the_whole_text validates_count_steps_as_builds_do \
+	scans_take_the_columns_of_wide_records_as_builds_do scans_replay_records_as_they_read_them \
+	records_with_an_unclosed_quote_do_not_fault_at_later_lines \
+	records_with_an_unclosed_quote_judge_a_cut_sequence_by_their_own_bytes)
 DSV_TIER_NAMES := -define:ODIN_TEST_NAMES=$(subst $(space),$(comma),$(DSV_TIER_TESTS))
 X86_TIERS := 0 1
 X86_OPTS ?= minimal speed

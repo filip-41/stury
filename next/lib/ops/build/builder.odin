@@ -45,10 +45,28 @@ Builder :: struct {
 	stubs:         u64,
 	unstored:      u64,
 	keep_facts:    bool, // a scan keeps the facts of the nodes it keeps, which its inner hooks store
-	protocol:      hook.Protocol(BUILDER_CAPS, hook.Levels(builder_levels_held, builder_levels_grow), hook.Rooms(builder_rooms_end, builder_rooms_grow), hook.Unused),
+	protocol:      hook.Protocol(BUILDER_CAPS, Builder_Levels, Builder_Rooms, hook.Unused),
 }
 
 BUILDER_CAPS :: hook.Capabilities{.Levels, .Rooms, .Number_Blocks}
+@(private)
+Builder_Levels :: hook.Levels(builder_levels_held, builder_levels_grow)
+@(private)
+Builder_Rooms :: hook.Rooms(builder_rooms_end, builder_rooms_grow)
+
+// The builder of a table's rows, read through `builder_hook_rows`. It is a `Builder` that a walk knows stores no key,
+// so the walk's code for a key has no room to make. It has a `Builder`'s size and address.
+Rows_Builder :: struct {
+	builder:  Builder,
+	protocol: hook.Protocol(BUILDER_CAPS + {.Unkeyed}, Builder_Levels, Builder_Rooms, hook.Unused),
+}
+
+#assert(size_of(Rows_Builder) == size_of(Builder))
+
+// The builder `b` as a builder of rows.
+rows_of :: #force_inline proc "contextless" (b: ^Builder) -> ^Rows_Builder {
+	return (^Rows_Builder)(b)
+}
 
 #assert(size_of(tape.Node) == 16)
 
@@ -96,8 +114,10 @@ builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 	b.stack, b.borrowed, b.closed, b.ctx, b.most, b.budget = frames, true, tape.NO_NODE, context, most, budget
 	b.counts.allocator = allocator
 	room := clamp(nodes, 1, most)
-	if !builder_affords(b, 0, room) {
-		room = builder_fit(b, 0)
+	if budget != nil {
+		// The first room takes at most half of what the budget leaves, so the read's other blocks fit beside it, and it
+		// grows within the budget as the nodes need.
+		room = min(room, max(builder_fit(b, 0) / 2, 1))
 	}
 	if b.err = builder_reserve_counts(b, room); b.err != nil {
 		return
@@ -187,31 +207,31 @@ builder_hook_kept :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs
 
 // `builder_hook_facts` for a table, whose walk gives each cell its column's key: it stores no key, as a table's rows
 // name their cells by place through a header the format stores with `builder_append`.
-builder_hook_rows :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+builder_hook_rows :: #force_inline proc "contextless" (h: ^Rows_Builder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	if t.role > .Key {
-		return s, builder_fact(h, s, t)
+		return s, builder_fact(&h.builder, s, t)
 	}
 	if t.role == .Key {
 		return s, .Next
 	}
-	return builder_step(h, s, t, true, false)
+	return builder_step(&h.builder, s, t, true, false)
 }
 
-// Stores the container `t` holding the scalars `children` past the nodes the walk stored, in no container, for a
-// format whose document keeps a list of nodes beside its root value, as a table's header. It grows the room for them
-// and returns false once the room cannot grow.
+// Stores the container `t` holding `count` scalars past the nodes the walk stored, in no container, for a format whose
+// document keeps a list of nodes beside its root value, as a table's header. Child `c` is `child(of, c)`. It grows the
+// room for them and returns false once the room cannot grow.
 @(cold)
-builder_append :: proc "contextless" (h: ^Builder, s: ^hook.Regs, t: tape.Token, children: []tape.Token) -> bool #no_bounds_check {
-	for k in 0 ..= len(children) {
+builder_append :: proc "contextless" (h: ^Builder, s: ^hook.Regs, t: tape.Token, of: []tape.Token, count: int, $child: proc "contextless" (of: []tape.Token, c: int) -> tape.Token) -> bool #no_bounds_check {
+	for k in 0 ..= count {
 		if s.a == h.end {
 			ok: bool
 			if s^, ok = builder_grow(h, s^, t.lo); !ok {
 				return false
 			}
 		}
-		node := t if k == 0 else children[k - 1]
+		node := t if k == 0 else child(of, k - 1)
 		if k == 0 {
-			count := u32(len(children))
+			count := u32(count)
 			node.n = count + 1
 			node.spelling = t.spelling & tape.CONTAINER_STYLE | u16(min(count, u32(tape.MAX_CHILDREN)))
 			if count >= u32(tape.MAX_CHILDREN) {
@@ -353,8 +373,9 @@ builder_unread :: proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) 
 // Grows the room for nodes, up to `most`, and moves `s.a` with it, for the token at offset `at` that finds the room
 // full. The new size is the larger of twice the room and `have * (1 + 1.25 * rest / at)`, where `rest` is the text past
 // `at`: the nodes the rest should make at the rate per byte so far, with a quarter more. A read that keeps nodes evenly
-// therefore grows once. If that size is refused it retries with twice the room. False, with `err` set, once a growth
-// is refused or the room holds `most`. No later growth clears `err`.
+// therefore grows once. A refused size is retried with twice the room, then with half the growth, down to one node, so
+// the room grows as far as its allocator gives. False, with `err` set, once a growth of one node is refused or the room holds `most`. No later
+// growth clears `err`.
 @(cold)
 builder_grow :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, at: u64) -> (hook.Regs, bool) {
 	s := s
@@ -375,12 +396,11 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 	}
 	if !builder_affords(h, have, want) {
 		want = double if builder_affords(h, have, double) else builder_fit(h, have)
-		double = min(double, want)
 	}
 	old := u64(uintptr(raw_data(h.doc.nodes)))
 	raw, err := runtime.non_zero_mem_resize(raw_data(h.doc.nodes), have * size_of(tape.Node), want * size_of(tape.Node), align_of(tape.Node), h.doc.allocator)
-	if err != nil && want > double {
-		want = double
+	for err == .Out_Of_Memory && want > have + 1 {
+		want = double if want > double else have + (want - have) / 2
 		raw, err = runtime.non_zero_mem_resize(raw_data(h.doc.nodes), have * size_of(tape.Node), want * size_of(tape.Node), align_of(tape.Node), h.doc.allocator)
 	}
 	if h.err = took(err, raw_data(raw), int(want)); h.err != nil {
@@ -586,12 +606,15 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 	} else {
 		delete(h.counts)
 	}
-	// A room that is at least half full, or has at most `ROOM_SLACK` unused bytes, is kept whole with its unwritten
-	// tail, so that the allocator can give its block to the next read of its size. A room less than half full is
-	// resized to `count` nodes, which moves them to an exact block when the allocator cannot shrink it in place. If the
-	// resize fails the document keeps the whole room. `destroy` frees the room as one block from its start.
+	// The room is resized to `count` nodes under a memory budget, so the document is charged for the nodes it holds.
+	// Otherwise it is resized when more than half of it and more than `ROOM_SLACK` bytes are unused, unless it is on a
+	// default heap that keeps a freed block's pages (`HEAP_KEEPS_PAGES`), where a resize frees none. A room kept whole
+	// lets the allocator give its block to the next read of its size. A failed resize keeps the whole room. `destroy`
+	// frees the room as one block from its start.
 	doc.nodes = doc.nodes[:count]
-	if 2 * count < len(h.doc.nodes) && (len(h.doc.nodes) - count) * size_of(tape.Node) > ROOM_SLACK {
+	unused := len(h.doc.nodes) - count
+	keeps_pages := HEAP_KEEPS_PAGES && doc.allocator.procedure == runtime.default_allocator_proc
+	if h.budget != nil && unused > 0 || !keeps_pages && unused > count && unused * size_of(tape.Node) > ROOM_SLACK {
 		if raw, err := runtime.non_zero_mem_resize(raw_data(doc.nodes), len(h.doc.nodes) * size_of(tape.Node), count * size_of(tape.Node), align_of(tape.Node), doc.allocator); took(err, raw_data(raw), count) == nil {
 			doc.nodes = ([^]tape.Node)(raw_data(raw))[:count]
 		}
@@ -603,6 +626,11 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 // The unused bytes up to which a document keeps its room whole rather than move its nodes to an exact block.
 @(private)
 ROOM_SLACK :: 1024
+
+// Whether the default heap keeps a freed or shrunk large block's pages resident and gives the block to the next
+// allocation of its size, as macOS's does.
+@(private)
+HEAP_KEEPS_PAGES :: ODIN_OS == .Darwin
 
 // Returns a copy of the document the walk has built so far, for a text that ended inside its root value. The
 // containers still open are closed at the cut, and a key whose value had not started is left out, so that the copy is
