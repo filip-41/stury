@@ -922,8 +922,8 @@ st_content :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Wa
 		return #must_tail st_misc(q, end, d, w, s0, s1, s2, on)
 	}
 	when LAX {
-		if w.pause != nil && w.pause.members && d == 1 {
-			return pause_member(w, on, q, {s0, s1, s2})
+		if w.pause != nil && w.pause.members == d && !passing(w) {
+			return pause_member(w, on, q, d, {s0, s1, s2})
 		}
 	}
 	return #must_tail st_start(q, end, d, w, s0, s1, s2, on)

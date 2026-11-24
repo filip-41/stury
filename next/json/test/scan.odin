@@ -876,3 +876,31 @@ room_doubles_when_its_growth_is_refused :: proc(t: ^testing.T) {
 	testing.expectf(t, rerr == nil && testkit.render_doc(&r) == testkit.render_doc(&kept) && len(r.partial.answers) == 3000, "scan: %v", rerr)
 	testing.expectf(t, doubling.refused >= 2, "%d growths refused", doubling.refused)
 }
+
+// A scan that a memory budget lets read is read under any larger one: the room of nodes grows by at most half of what the
+// budget leaves, so the lists the scan keeps beside it find space.
+@(test)
+scans_that_fit_a_memory_budget_fit_a_larger_one :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	join_each(&b, 70, ",", "%[0]d")
+	strings.write_byte(&b, ']')
+	src := transmute([]u8)strings.to_string(b)
+	for steps in ([][]tape.Step{{tape.Descend{}, tape.Name("a")}, {tape.Index(-3)}, {tape.Slice{-5, nil, 0}}}) {
+		d, derr := tape.demand_of({steps})
+		defer tape.destroy(&d)
+		testing.expect(t, derr == nil)
+		fits := false
+		for memory in 1 ..= u64(4000) {
+			r, err := json.scan(src, &d, opts = {budget = {memory = memory}})
+			tape.destroy(&r)
+			if !testing.expectf(t, err == nil || !fits, "%v: fits %d bytes and not %d", steps, memory - 1, memory) {
+				break
+			}
+			fits ||= err == nil
+		}
+		testing.expectf(t, fits, "%v fits no budget up to 4000 bytes", steps)
+	}
+}

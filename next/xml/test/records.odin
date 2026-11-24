@@ -106,16 +106,22 @@ records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 		r := xml.records_open(src, framing)
 		testing.expect(t, xml.records_validate(&r, out[:]) == 0 && r.err == tape.Error(tape.Bad_Option{"framing"}))
 	}
-	at := xml.records_open(src, .Members, path = {tape.Name("a")})
-	testing.expect(t, xml.records_validate(&at, out[:]) == 0 && at.err == tape.Error(tape.Bad_Option{"path"}))
+	for path in ([][]tape.Step{{tape.Index(0)}, {tape.Name("{u}a")}, {tape.Name("a"), tape.All{}}}) {
+		at := xml.records_open(src, .Members, path = path)
+		testing.expect(t, xml.records_validate(&at, out[:]) == 0 && at.err == tape.Error(tape.Bad_Option{"path"}))
+	}
+	whole := xml.records_open(src, .Concatenated, path = {tape.Name("a")})
+	testing.expect(t, xml.records_validate(&whole, out[:]) == 0 && whole.err == tape.Error(tape.Bad_Option{"path"}))
+	all := xml.records_open(src, .Members, opts = {dups = .All}, path = {tape.Name("a")})
+	testing.expect(t, xml.records_validate(&all, out[:]) == 0 && all.err == tape.Error(tape.Bad_Option{"dups"}))
 }
 
 // The records of `src` under `.Members`, each as its offsets, key and document, and how they ended, one line each.
 @(private = "file")
-member_lines :: proc(src: string, opts := xml.Options{}) -> string {
+member_lines :: proc(src: string, opts := xml.Options{}, path: []tape.Step = nil) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	whole, _ := xml.demand_of([][]tape.Step{{}}, nil, nil, true, context.temp_allocator)
-	r := xml.records_open(transmute([]u8)src, .Members, opts = opts)
+	r := xml.records_open(transmute([]u8)src, .Members, opts = opts, path = path)
 	defer tape.destroy_records(&r)
 	out: [2]tape.Record
 	docs: [2]tape.Document
@@ -254,4 +260,88 @@ members_in_pieces_keep_only_the_member_being_read :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.err, nil)
 	testing.expect_value(t, read, 4000)
 	testing.expectf(t, longest < 200, "a window of %d bytes", longest)
+}
+
+// The records at a path are the members of the element the path reaches below the root element, each keyed by its name
+// and read under the namespaces and the DTD of the text around it. Every element before it that the path does not take is
+// judged and passed, and the elements of its key that it takes follow one another in document order under `.Group`, the
+// first only under `.First`.
+@(test)
+members_at_a_path_are_the_members_of_the_element_it_reaches :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	a := []tape.Step{tape.Name("a")}
+	ab := []tape.Step{tape.Name("a"), tape.Name("b")}
+	text := `<r><x><b>1</b></x><a><c k="1">t</c>tail<d/></a><a><e/></a></r>`
+	testing.expect_value(t, member_lines(text, path = a), "21-35 c t\n35-39 #text tail\n39-43 d \n50-54 e \nend ")
+	testing.expect_value(t, member_lines(text, {dups = .First}, a), "21-35 c t\n35-39 #text tail\n39-43 d \nend ")
+	testing.expect_value(t, member_lines(text, {dups = .Last}, a), "21-35 c t\n35-39 #text tail\n39-43 d \nend duplicate_key")
+	testing.expect_value(t, member_lines("<r><a/><a><e/></a></r>", {dups = .Last}, a), "10-14 e \nend ")
+	testing.expect_value(t, member_lines(`<r><b/><a><b><n/></b><b>x<m/>y</b></a></r>`, path = ab), "13-17 n \n24-25 #text x\n25-29 m \n29-30 #text y\nend ")
+	// No element, or one with no child element, holds no member.
+	testing.expect_value(t, member_lines(text, path = {tape.Name("none")}), "end ")
+	testing.expect_value(t, member_lines("<r><a>text</a></r>", path = a), "end ")
+	testing.expect_value(t, member_lines("<r/>", path = a), "end ")
+	// A member reads under the namespaces declared around it, and a fault ends the records after every member before it.
+	testing.expect_value(t, member_lines(`<r xmlns:n="u"><a xmlns="d"><n:b>1</n:b><c/></a></r>`, path = a), "28-40 n:b 1\n40-44 c \nend ")
+	testing.expect_value(t, member_lines("<r><a><b>1</b><c></d></a></r>", path = a), "6-14 b 1\nend mismatched_tag")
+	testing.expect_value(t, member_lines("<r><x><y></x></r>", path = a), "end mismatched_tag")
+}
+
+// The records at a path read in pieces, in windows of any size, are those the whole text gives.
+@(test)
+members_at_a_path_agree_in_pieces :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	Case :: struct {
+		text: string,
+		path: []tape.Step,
+	}
+	cases := []Case {
+		{`<?xml version="1.0"?><r xmlns:n="u"><x k="1">skip<y>1</y></x><a><c k="1">t&#65;</c>tail<n:d/><!--c--></a>` +
+		`<x/><a><e>1</e>gap<f><g/></f></a></r>`, {tape.Name("a")}},
+		{`<r xmlns:n="u"><a><x><b>no</b></x><b k="1"><c>1</c>t<n:d/></b>between<b>q</b></a><a><b/><b>z</b></a></r>`, {tape.Name("a"), tape.Name("b")}},
+		{`<!DOCTYPE r [<!ENTITY e "v">]><r><a><b><c>&e;</c><c>x&e;</c></b></a><a><b><c/>&e;</b></a></r>`, {tape.Name("a"), tape.Name("b")}},
+	}
+	for c in cases {
+		src := transmute([]u8)c.text
+		want := member_lines(c.text, path = c.path)
+		testing.expectf(t, strings.count(want, "\n") >= 3, "%q holds no records: %q", c.text, want)
+		for window in ([]int{1, 2, 3, 5, 8, 13, 40}) {
+			b := strings.builder_make(context.temp_allocator)
+			whole, _ := xml.demand_of([][]tape.Step{{}}, nil, nil, true, context.temp_allocator)
+			p := tape.Pieces{allocator = context.temp_allocator}
+			end := min(window, len(src))
+			p.last = end == len(src)
+			r := xml.records_open(src[:end], .Members, opts = {pieces = &p}, path = c.path)
+			out: [2]tape.Record
+			docs: [2]tape.Document
+			for {
+				for {
+					n := xml.records_scan(&r, &whole, out[:], docs[:], {}, context.temp_allocator)
+					for rec, k in out[:n] {
+						fmt.sbprintf(&b, "%d-%d %s %s%s\n", rec.lo, rec.hi, c.text[rec.key.lo:][:rec.key.n] if rec.key.n > 0 else "#text", testkit.render_doc(&docs[k]), code_of(rec.err))
+					}
+					if n < len(out) {
+						break
+					}
+				}
+				if !p.more || p.last || r.err != nil {
+					break
+				}
+				end = min(int(p.keep) + window, len(src))
+				for end <= int(p.at) {
+					end += 1
+				}
+				p.from, p.last = p.keep, end == len(src)
+				if !testing.expect_value(t, xml.records_window(&r, src[p.keep:end]), nil) {
+					return
+				}
+			}
+			fmt.sbprintf(&b, "end %s", code_of(r.err))
+			tape.destroy_records(&r)
+			got := strings.to_string(b)
+			testing.expectf(t, got == want, "%q window %d: %q, whole %q", c.text, window, got, want)
+		}
+	}
 }

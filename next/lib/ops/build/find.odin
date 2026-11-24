@@ -32,6 +32,7 @@ Finder :: struct {
 	rewalks:   bool, // the format has `.Rewalk`
 	stop:      bool, // `stop_early`
 	want:      bool, // the next value token is the one the path takes
+	keyed:     bool, // with `want`, the next token is the value of a key `finder_hook` took itself, of a `Name` step
 	skip_end:  bool, // the next token is the `End` of a container this hook skipped
 	pending:   bool, // that `End` closes the answer, or with `ringing` an element whose span the ring keeps
 	ringing:   bool,
@@ -183,7 +184,7 @@ finder_reset :: proc(f: ^Finder, room: ^Find_Room) {
 		runtime.mem_free_with_size(raw_data(f.ring_block), len(f.ring_block), f.allocator)
 		f.ring_block, f.answers, f.answers_cap = nil, raw_data(room.answers[:]), FIND_ROOM
 	}
-	f.answer, f.want = FIND_NONE, true
+	f.answer, f.want, f.keyed = FIND_NONE, true, false
 	f.entered, f.replacers, f.ring_top = 0, 0, 0
 	f.pending, f.ringing, f.skip_end, f.replay, f.replaying, f.settled, f.refused = false, false, false, false, false, false, false
 	f.keys, f.named, f.quiet, f.count_at = false, false, false, nil
@@ -201,7 +202,14 @@ finder_end :: proc(f: ^Finder) {
 
 // Passes a fact, a key the open container cannot take, or a scalar no step looks at, with a compare or two and no
 // call. Any other token goes to `finder_token`.
-finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) #no_bounds_check {
+finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	return finder_hook_as(h, s, t, false)
+}
+
+// `finder_hook`, which with `NAMES` also takes a raw key of at most sixteen bytes that the open container's `Name` step
+// names, and the value after it, as `finder_keyed` and the close of a `Name` level do, with no call.
+@(private)
+finder_hook_as :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: tape.Token, $NAMES: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
 	// A fact moves no step.
 	if t.role > .Key {
 		return s, .Next
@@ -216,9 +224,10 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 					return s, .Next
 				}
 				// Reject a raw key whose bytes differ here, so a key shorter than a word needs no call into `finder_key`.
-				// These are the word loads `tape.key_names` would do. A key that matches still falls through, where
-				// `finder_key` checks its kind and takes it. Escaped keys keep that path.
+				// These are the word loads `tape.key_names` would do. A key that matches, and is longer than the two words,
+				// still falls through, where `finder_key` checks it whole. Escaped keys keep that path.
 				n := int(t.n)
+				exact := false
 				if n >= 8 {
 					at := raw_data(h.key_text)[t.lo:]
 					head := intrinsics.unaligned_load((^u64)(at))
@@ -226,6 +235,7 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 					if head != h.key_head || tail != h.key_tail {
 						return s, .Next
 					}
+					exact = n <= 2 * size_of(u64) // the two words cover every byte of such a key
 				} else {
 					a, b := raw_data(h.key_text[t.lo:]), raw_data(h.key)
 					same := false
@@ -238,6 +248,15 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 						same = n == 0 || a[0] == b[0]
 					}
 					if !same {
+						return s, .Next
+					}
+					exact = true
+				}
+				when NAMES {
+					if exact {
+						// The member is taken here, as `finder_key` would take it, and the value after it is `finder_keyed`'s.
+						h.levels[h.entered - 1].chosen, h.want, h.answer, h.keyed = true, true, FIND_NONE, true
+						h.keys, h.named, h.quiet, h.count_at = false, false, false, nil
 						return s, .Next
 					}
 				}
@@ -266,7 +285,7 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 		h.skip_end = true
 		return s, .Skip
 	}
-	return s, finder_token(h, t)
+	return s, finder_token(h, t, NAMES)
 }
 
 // `finder_hook` for a walk that passes the value of a member at its key when the hook answers `Skip` there, so a member
@@ -274,11 +293,11 @@ finder_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: ta
 // `All` or the members of an object under an `All`, still has them given, for the count.
 finder_key_skip_hook :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	if t.role != .Key {
-		return finder_hook(h, s, t)
+		return finder_hook_as(h, s, t, true)
 	}
 	// A level the finder takes no key at, or whose step is a `Name`, counts none of its members.
 	passes := !h.keys || h.named
-	r, a := finder_hook(h, s, t)
+	r, a := finder_hook_as(h, s, t, true)
 	return r, .Skip if a == .Next && passes && !h.want else a
 }
 
@@ -335,10 +354,35 @@ finder_names :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level, n
 }
 
 @(private)
-finder_token :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action {
-	a := finder_step(h, t)
+finder_token :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, $NAMES: bool) -> hook.Action {
+	a: hook.Action
+	when NAMES {
+		a = finder_keyed(h, t) if h.keyed else finder_step(h, t, true)
+	} else {
+		a = finder_step(h, t, false)
+	}
 	finder_focus(h)
 	return a
+}
+
+// The value of a key `finder_hook` took by a `Name` step. One that opens the object the next `Name` step goes through, or
+// reaches the end of the path, is passed here with no call, and any other goes to `finder_value`.
+@(private)
+finder_keyed :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #no_bounds_check {
+	h.keyed = false
+	at := h.entered
+	if at == len(h.steps) {
+		h.want = false
+		return finder_reach(h, t, .Found)
+	} else if _, name := h.steps[at].(tape.Name); name && t.kind == .Object {
+		h.want = false
+		h.opens[at] = t.lo
+		h.levels[at] = {ring = h.ring_top, object = true}
+		h.replacers += int(h.dups == .Last)
+		h.entered += 1
+		return .Next
+	}
+	return finder_step(h, t, true)
 }
 
 // The answer of a walk the finder read to its end or stop.
@@ -354,7 +398,7 @@ finder_answer :: #force_inline proc "contextless" (f: ^Finder) -> tape.Span_Answ
 }
 
 @(private)
-finder_step :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action {
+finder_step :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, $NAMES: bool) -> hook.Action #no_bounds_check {
 	if t.role > .Key {
 		return .Next
 	}
@@ -376,6 +420,20 @@ finder_step :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token) -> h
 		return .Rest if t.kind == .Array || t.kind == .Object else .Next
 	}
 	if t.kind == .End {
+		when NAMES {
+			// The close of an object a `Name` step went through, one of whose members was taken, as `finder_close` sets it.
+			if lv := &h.levels[h.entered - 1]; lv.chosen {
+				if _, name := h.steps[h.entered - 1].(tape.Name); name {
+					h.entered -= 1
+					h.ring_top = lv.ring
+					h.replacers -= int(h.dups == .Last)
+					if h.answer.outcome == .Not_Loaded && finder_spent(h) {
+						h.answer = {outcome = .Missing}
+					}
+					return finder_settle(h)
+				}
+			}
+		}
 		return finder_close(h, t)
 	}
 	if t.role == .Key {

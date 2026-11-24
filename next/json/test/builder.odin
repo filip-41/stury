@@ -3,6 +3,7 @@ package json_tests
 import "base:runtime"
 import "core:fmt"
 import "core:math/rand"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import "stury:json"
@@ -413,3 +414,27 @@ build_policies_recount_beside_a_saturated_array :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// A text that makes more nodes than `tape.MAX_CHILDREN` builds into an arena that holds its nodes and little more, though
+// its first room is smaller: the child counts come before the nodes, so the arena grows the nodes in place.
+@(test)
+builds_fit_the_smallest_arena_past_the_child_count_limit :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	src := transmute([]u8)strings.concatenate({"[", strings.repeat("1,", 50_000, context.temp_allocator), "1]"}, context.temp_allocator)
+	first, err := json.build(src)
+	defer tape.destroy(&first)
+	testing.expect_value(t, err, nil)
+	testing.expect(t, len(first.nodes) > int(tape.MAX_CHILDREN) * 2)
+	backing := make([]u8, len(first.nodes) * size_of(tape.Node) + ARENA_SLACK)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	doc, derr := json.build(src, .Json, {}, mem.arena_allocator(&arena))
+	testing.expectf(t, derr == nil, "%d bytes: %v", len(backing), derr)
+	testing.expect_value(t, len(doc.nodes), len(first.nodes))
+}
+
+// The bytes past its nodes that a build takes from an arena: the child counts and the arena's alignment.
+@(private = "file")
+ARENA_SLACK :: 256

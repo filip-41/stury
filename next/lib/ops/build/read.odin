@@ -60,7 +60,7 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 	most := node_most(bound(src, depth), opts)
 	frames: [FRAME_DEPTH]u64 = ---
 	b: Builder = ---
-	builder_start(&b, src, format, len(src) / bytes_per_node, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m if opts.budget.memory != 0 else nil)
+	builder_start(&b, src, format, len(src) / bytes_per_node, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m if opts.budget.memory != 0 else nil, counts = most)
 	if b.err != nil {
 		return {}, hook.memory_budget_error(&m, b.err)
 	}
@@ -98,7 +98,7 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 	frames: [FRAME_DEPTH]u64 = ---
 	room: Scan_Room = ---
 	h: Scanner = ---
-	if err := #force_inline scanner_start(&h, src, format, demand, opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator); err != nil {
+	if err := #force_inline scanner_start(&h, src, format, demand, opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, budget = &m if opts.budget.memory != 0 else nil); err != nil {
 		return {}, hook.memory_budget_error(&m, err)
 	}
 	regs := builder_regs(&h.b)

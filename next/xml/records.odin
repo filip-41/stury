@@ -8,12 +8,13 @@ import "stury:lib/ops/build"
 
 // The records of XML. A document's end is found only at the text's end, past its trailing comments and processing
 // instructions, so under `.Concatenated` the record is the whole text from the records' position to its end, and a
-// text of no bytes there holds none. Under `.Members` each member of the root element is a record keyed by its name:
-// each child element, from its start tag through its end tag, and each `#text` run between them. One walk of the text
-// reads them in place, pausing before each child and past it, so a member reads under the namespaces and the DTD of
-// the text around it, and the comments and instructions between members are passed. A root with no child element
-// holds none. In a text in pieces the walk pauses at a window's end too, and a member the window's end cuts is read
-// again whole in the next window, from its start tag, which the window keeps with what the walk reads in place there.
+// text of no bytes there holds none. Under `.Members` each member of the root element, or of the element the `path`
+// reaches below it, is a record keyed by its name: each child element, from its start tag through its end tag, and each
+// `#text` run between them. One walk of the text reads them in place, pausing before each child and past it, so a
+// member reads under the namespaces and the DTD of the text around it, and the comments and instructions between
+// members are passed. An element with no child element holds none. In a text in pieces the walk pauses at a window's end
+// too, and a member the window's end cuts is read again whole in the next window, from its start tag, which the window
+// keeps with what the walk reads in place there.
 
 // The records of a text of `spec`.
 Records :: struct {
@@ -32,7 +33,15 @@ Records :: struct {
 	child_waits:   bool,
 	giving:        Member, // the member framed last
 	// The level of the walk between members, as its hook counts them.
-	level:         u8,
+	level:         u32,
+	// The members the `path` takes by each step, as `Duplicates` says: with `.First` a bit per step, set once its
+	// element took one, and with `.Last` whether a record was given, which a later member of the key cannot take back.
+	taken:         [dynamic]u64,
+	given:         bool,
+	dups:          tape.Duplicates,
+	// A member of the path's key met after a record was given under `.Last`, at this offset.
+	repeat:        u64,
+	repeated:      bool,
 	// The walk read past the root, with this result.
 	over:          bool,
 	result:        u64,
@@ -50,8 +59,11 @@ Member :: enum u8 {
 }
 
 // Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. Another format's options,
-// `.Lines` and `.Elements`, which XML has no reading of, and a `path`, end the records with `tape.Bad_Option` before any
-// is read. Under `.Concatenated` a text in pieces holds one record, the whole text, so no batch gives it before the
+// `.Lines` and `.Elements`, which XML has no reading of, and a `path` under `.Concatenated`, one with a step but a
+// `Name` of a plain element name, or one the policy `opts.dups` refuses, end the records with `tape.Bad_Option` before
+// any is read. Under `.Members` the path's steps lead from the root element to the element whose children are the
+// records, and under it the records of an element repeated in the path follow one another in document order, as
+// `tape.Records.path` says of the other formats. Under `.Concatenated` a text in pieces holds one record, the whole text, so no batch gives it before the
 // last window, which must hold the text from its first byte. Under `.Members` a text in pieces opens with its first
 // window, as `tape.Records` says. The budget's limits hold for
 // each record, but `Budget.steps` under `.Members`, which counts the containers of the whole text.
@@ -68,10 +80,37 @@ records_open :: proc(src: []u8, framing := tape.Framing.Concatenated, spec := Sp
 		r.err, r.at = err, .Done
 	} else if framing == .Lines || framing == .Elements {
 		r.err, r.at = tape.Bad_Option{"framing"}, .Done
+	} else if refused := build.records_path_refused(&FORMATS[spec], framing, path, opts); refused != nil {
+		r.err, r.at = refused, .Done
 	} else if len(path) > 0 {
-		r.err, r.at = tape.Bad_Option{"path"}, .Done
+		if !members_path_named(path) {
+			r.err, r.at = tape.Bad_Option{"path"}, .Done
+			return
+		}
+		r.dups = tape.read_dups(&FORMATS[spec], opts.dups)
+		taken, e := make([dynamic]u64, (len(path) + 63) / 64, r.allocator)
+		r.taken = taken
+		if e != nil {
+			r.err, r.at = e, .Done
+		}
 	}
 	return
+}
+
+// Whether every step of `path` is a `Name` of an element the walk gives by its text: one the records can follow with no
+// namespace scope, and few enough for the walk's frames to hold them.
+@(private)
+members_path_named :: proc "contextless" (path: []tape.Step) -> bool {
+	if len(path) >= WALK_LEVELS - 1 {
+		return false
+	}
+	for step in path {
+		name, named := step.(tape.Name)
+		if !named || len(name) > 0 && name[0] == '{' {
+			return false
+		}
+	}
+	return true
 }
 
 // Frees what the walk of the records under `.Members` holds, which their last record frees too.
@@ -83,6 +122,7 @@ records_close :: proc(records: ^tape.Records) {
 		members_end(r, &ctx)
 	}
 	delete(r.tags)
+	delete(r.taken)
 }
 
 // Reads the next records of `r` into `out` and judges each, as `validate` judges its bytes alone, and under `.Members`
@@ -226,12 +266,15 @@ record_walk :: proc(r: ^tape.Records, lo: u64, $LAX: bool, h: ^$H, regs: ^hook.R
 	return
 }
 
-// The hook of the walk between members: it keeps the `#text` member the walk gives at the root's level and passes the
-// rest. The document is its first level and the root's `Object` its second.
+// The hook of the walk between members: it keeps the `#text` member the walk gives at the level of the element whose
+// children are the records, skips each member of the elements before it that the path does not take at its key, and
+// passes the rest. The document is its first level and the root's `Object` its second, and the `Object` of the element
+// the path reaches its level `len(path) + 2`.
 @(private)
 Member_Framer :: struct {
-	protocol: hook.Protocol(hook.NO_HOOKS_CAPS, hook.Unused, hook.Unused, hook.Unused),
-	level:    u8,
+	protocol: hook.Protocol(hook.NO_HOOKS_CAPS + {.Skips}, hook.Unused, hook.Unused, hook.Unused),
+	r:        ^Records,
+	level:    u32,
 	key:      tape.Token,
 	text:     [2]tape.Token,
 	has_text: bool,
@@ -239,18 +282,50 @@ Member_Framer :: struct {
 
 @(private)
 member_framer_hook :: proc "contextless" (h: ^Member_Framer, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	r := h.r
 	switch {
 	case t.role > .Key:
 	case t.kind == .End:
 		h.level -= 1
 	case t.role == .Key:
 		h.key = t
+		// A child of the element with `level - 1` open elements is a member of the path's step `level - 2`.
+		if step := int(h.level) - 2; step >= 0 && step < len(r.path) {
+			if taken, repeats := member_taken(r, step, t); !taken {
+				return s, .Skip
+			} else if repeats {
+				r.repeat, r.repeated = t.lo - 1, true
+				return s, .Stop
+			}
+		}
 	case t.kind == .Object:
 		h.level += 1
-	case h.level == 2:
+		if step := int(h.level) - 2; step >= 0 && step < len(r.path) {
+			r.taken[step / 64] &~= 1 << uint(step % 64)
+		}
+	case int(h.level) == len(r.path) + 2:
 		h.text, h.has_text = {h.key, t}, true
 	}
 	return s, .Next
+}
+
+// Whether the path's step `step` takes the child element with key `key`, a member of its container, as `r.dups` says,
+// and whether it takes a member of the key after a record was given under `.Last`, which the records cannot take back.
+@(private)
+member_taken :: proc "contextless" (r: ^Records, step: int, key: tape.Token) -> (taken, repeats: bool) {
+	if !tape.key_names(&FORMATS[r.spec], r.src, key, string(r.path[step].(tape.Name))) {
+		return false, false
+	}
+	bit := u64(1) << uint(step % 64)
+	#partial switch r.dups {
+	case .First:
+		taken = r.taken[step / 64] & bit == 0
+		r.taken[step / 64] |= bit
+		return
+	case .Group:
+		return true, false
+	}
+	return true, r.given
 }
 
 // Frames the next member of the root, walking on from the last one to the next child or past the root when no member
@@ -263,16 +338,19 @@ member_frame :: proc(r: ^Records) -> (lo, cut: u64, ok: bool) {
 	for {
 		switch {
 		case r.text_waits:
-			r.text_waits, r.giving, r.key = false, .Text, r.text[0]
+			r.text_waits, r.giving, r.given, r.key = false, .Text, true, r.text[0]
 			return r.text[1].lo, n, true
 		case r.child_waits:
-			r.child_waits, r.giving = false, .Element
+			r.child_waits, r.giving, r.given = false, .Element, true
 			at := r.pause.at
 			q, _ := name_end(base[at + 1:], base[n:])
 			r.key = {lo = at + 1, n = u32(intrinsics.ptr_sub(q, base[at + 1:])), kind = .String, role = .Key}
 			return at, n, true
 		case r.over:
 			r.err = members_result(r)
+			if r.repeated {
+				r.err = tape.Fault{at = r.repeat, rules = &RULES, kind = .Duplicate_Key}
+			}
 			members_end(r, nil)
 			return
 		}
@@ -295,7 +373,7 @@ members_result :: proc "contextless" (r: ^Records) -> tape.Error {
 @(private)
 members_walk :: proc(r: ^Records) -> bool {
 	r.ctx = context
-	h := Member_Framer{level = r.level}
+	h := Member_Framer{r = r, level = r.level}
 	regs: hook.Regs
 	if r.at == .Start {
 		if p := r.opts.pieces; p != nil && !p.last {
@@ -307,7 +385,7 @@ members_walk :: proc(r: ^Records) -> bool {
 		r.at = .Open
 		walk_init(&r.walk, r.opts, build.read_depth(r.opts), build.read_steps(r.opts))
 	}
-	r.pause.members, r.pause.floor = true, 0
+	r.pause.members, r.pause.floor = u64(len(r.path)) + 1, 0
 	res, _ := members_resume(r, (^Walk(Member_Framer, true))(&r.walk), &h, &regs, &r.ctx, member_framer_hook)
 	r.text, r.text_waits, r.level = h.text, h.has_text, h.level
 	if u8(res) != hook.WALK_MORE {
@@ -334,11 +412,12 @@ member_walk :: proc(r: ^Records, h: ^$H, regs: ^hook.Regs, ctx: ^runtime.Context
 		member_dtd(r, h, &walked, ctx)
 		return
 	}
-	saved := Member_Saved{root = r.frames[0], ns_len = r.walk.ns_len, steps = r.walk.steps, at = r.pause.at}
+	depth := u64(len(r.path)) + 1
+	saved := Member_Saved{root = r.frames[depth - 1], ns_len = r.walk.ns_len, steps = r.walk.steps, at = r.pause.at}
 	if t := r.walk.dtd; t != nil {
 		saved.total, saved.depth, t.took = t.total, t.depth, false
 	}
-	r.pause.members, r.pause.floor = false, 2
+	r.pause.members, r.pause.floor = 0, depth + 1
 	res, tolerated := members_resume(r, (^Walk(H, true))(&r.walk), h, regs, ctx, on)
 	if u8(res) == hook.WALK_STOPPED && r.walk.steps != 0 {
 		// The hook refused the member, which leaves the walk inside it, so a walk with no hook reads it again.
@@ -390,7 +469,7 @@ Member_Saved :: struct {
 // Whether the records' walk paused inside the member it reads, at the window's end.
 @(private)
 member_cut :: #force_inline proc "contextless" (r: ^Records) -> bool {
-	return r.pause.place == .Content && r.pause.depth >= 2
+	return r.pause.place == .Content && r.pause.depth > u64(len(r.path)) + 1
 }
 
 // Sets the keep of records of a text in pieces under `.Members` once a batch ends, past the pieces `build` set: the
@@ -426,11 +505,12 @@ member_restore :: proc(r: ^Records, saved: Member_Saved, ctx: ^runtime.Context) 
 	w.ctx, w.allocator = ctx, r.allocator
 	ns_release(w, w.ns[saved.ns_len:w.ns_len])
 	w.ctx = nil
-	w.ns_len, w.steps, r.frames[0] = saved.ns_len, saved.steps, saved.root
+	depth := u64(len(r.path)) + 1
+	w.ns_len, w.steps, r.frames[depth - 1] = saved.ns_len, saved.steps, saved.root
 	if t := w.dtd; t != nil {
 		t.depth, t.total = saved.depth, saved.total
 	}
-	r.pause.place, r.pause.at, r.pause.depth = .Member, saved.at, 1
+	r.pause.place, r.pause.at, r.pause.depth = .Member, saved.at, depth
 }
 
 // Gives the `#text` token `t` to hook `h` from registers `regs`, and the walk result past it.
@@ -452,7 +532,7 @@ member_token :: proc(r: ^Records, h: ^$H, regs: ^hook.Regs, t: tape.Token, $on: 
 members_resume :: proc(r: ^Records, w: ^Walk($H, true), h: ^H, regs: ^hook.Regs, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (u64, bool) {
 	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
 	// A member's levels are those of a text of its bytes alone, under the root's.
-	m := u64(1) if r.pause.place == .Member && !r.pause.members else 0
+	m := u64(len(r.path)) + 1 if r.pause.place == .Member && r.pause.members == 0 else 0
 	when .Levels in C {
 		if m == 0 && hook.levels_held(h) <= int(regs.c) && !hook.levels_grow(h, int(regs.c) + 1, regs, 0) {
 			return u64(hook.walk_result(0, hook.WALK_NO_MEMORY)), false
@@ -465,7 +545,11 @@ members_resume :: proc(r: ^Records, w: ^Walk($H, true), h: ^H, regs: ^hook.Regs,
 		// The innermost open element's start tag is in the window, which may be another than the one it was read in.
 		r.frames[d - 1].tag = raw_data(r.src)[r.inner:]
 	}
-	w.mute, w.skip_value, w.mute_end, w.keep = 0, false, false, 0
+	// The walk between members goes on skipping the element it skipped at its key, as it goes on from window to window.
+	if r.pause.members == 0 {
+		w.mute, w.skip_value, w.mute_end = 0, false, false
+	}
+	w.keep = 0
 	w.limit = min(build.read_depth(r.opts) + m, MAX_LEVELS)
 	w.depth = max(hook.held_depth(h, regs, min(w.limit, WALK_LEVELS) - m) + m, r.pause.depth)
 	end := raw_data(r.src)[len(r.src):]
@@ -479,7 +563,7 @@ members_resume :: proc(r: ^Records, w: ^Walk($H, true), h: ^H, regs: ^hook.Regs,
 	res := resume(w, r.src, end, regs^, on)
 	tolerated := w.dtd != nil && w.dtd.took
 	if w.owned {
-		r.frames[0] = w.stack[0]
+		copy(r.frames[:len(r.path) + 1], w.stack[:len(r.path) + 1])
 		hook.levels_free(w)
 	}
 	w.hooks, w.regs, w.ctx, w.stack, w.owned = nil, nil, nil, nil, false

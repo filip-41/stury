@@ -440,3 +440,25 @@ walks_refuse_options_of_another_format :: proc(t: ^testing.T) {
 	_, berr := json.build(src, .Json, {format = other, runner = &runner})
 	testing.expect_value(t, berr, want)
 }
+
+// A key that matches the path's name at its first and last words but not between them is not the member the path takes,
+// at every key length where the words do not cover the key, and a key that matches is taken under each policy of
+// repeated keys.
+@(test)
+find_takes_a_key_by_every_byte :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	for width in ([]int{1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 24, 40}) {
+		name := strings.repeat("k", width, context.temp_allocator)
+		near := make([]u8, width, context.temp_allocator)
+		copy(near, name)
+		near[width / 2] = 'j'
+		for dups in ([]tape.Duplicates{.First, .Last, .Group}) {
+			src := strings.concatenate({`{"`, string(near), `":1,"`, name, `":2,"`, string(near), `":3,"`, name, `":4}`}, context.temp_allocator)
+			text := "4" if dups == .Last else "2"
+			expect_find(t, {src, {tape.Name(name)}, dups, .Found, text})
+			nested := strings.concatenate({`{"`, name, `":{"`, string(near), `":5,"`, name, `":6}}`}, context.temp_allocator)
+			expect_find(t, {nested, {tape.Name(name), tape.Name(name)}, dups, .Found, "6"})
+		}
+	}
+}

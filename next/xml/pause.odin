@@ -6,16 +6,16 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // A walk that stops between two markup constructs and goes on later from the same state: in the next window of a text
-// in pieces, or at the next member of the root under `.Members`. The walk keeps its frames, namespaces and DTD, and
-// pauses only in content, before a child of the root, or past the root, where no token is half given. A walk with no
-// `pause` never pauses, and only a `LAX` walk reads it.
+// in pieces, or at the next member of the element the records' path reaches under `.Members`. The walk keeps its
+// frames, namespaces and DTD, and pauses only in content, before a child of that element, or past the root, where no
+// token is half given. A walk with no `pause` never pauses, and only a `LAX` walk reads it.
 
 // Where a paused walk goes on.
 @(private)
 Place :: enum u8 {
 	Prolog, // at the text's first byte
 	Content, // in the content of the element with `depth` open elements, at `at`
-	Member, // at the start tag at `at` of a child of the root, which the walk of its record reads
+	Member, // at the start tag at `at` of a child of the element the records' path reaches, which the walk of its record reads
 	Epilog, // past the root's end tag, at `at`
 }
 
@@ -25,9 +25,9 @@ Pause :: struct {
 	// while `more` says bytes follow it.
 	end:     [^]u8,
 	more:    bool,
-	// The walk pauses before each child of the root, past the text before it, and in the content of an element with
-	// fewer than `floor` open elements.
-	members: bool,
+	// The walk pauses before each child of the element with `members` open elements, past the text before it, 0 for no
+	// such pause, and in the content of an element with fewer than `floor` open elements.
+	members: u64,
 	floor:   u64,
 	units:   Units,
 	// Set by the walk where it paused.
@@ -66,18 +66,18 @@ pause_content :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), p, end
 	return paused(w, hs, .Content, p, d), true
 }
 
-// Gives the text before the root's child at `q` as the root's `#text` member, opening the root's `Object` first, and
-// pauses before the child's start tag, which the walk of its record reads.
+// Gives the text before the child at `q` of the element with `d` open elements as its `#text` member, opening its
+// `Object` first, and pauses before the child's start tag, which the walk of its record reads.
 @(private, cold)
-pause_member :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), q: [^]u8, hs: hook.Regs) -> u64 {
+pause_member :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), q: [^]u8, d: u64, hs: hook.Regs) -> u64 {
 	hs := hs
-	if r, done := open_content(w, on, &hs, &w.stack[0], 1, q); done {
+	if r, done := open_content(w, on, &hs, &w.stack[d - 1], d, q); done {
 		return r
 	}
-	return paused(w, hs, .Member, q, 1)
+	return paused(w, hs, .Member, q, d)
 }
 
-// `p` is at the start tag of a child of the root with `d` open elements, the root of a member's record. Reads it as
+// `p` is at the start tag of a child of the element with `d` open elements, the root of a member's record. Reads it as
 // `st_start` does, with no token for its name, which is the record's key, and nothing given of the root.
 @(private, enable_target_feature = STATE_FEATURES)
 st_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($H, $LAX), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> u64 {

@@ -251,9 +251,9 @@ Scan_Room :: struct {
 // The node room grows as it fills. With no `rewalk` it reads each value once, keeping nodes where a replay would read a
 // value again.
 @(require_results)
-scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator, lent: []tape.Node = nil) -> (err: runtime.Allocator_Error) {
+scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tape.Demand, dups: tape.Duplicates, read: tape.Read_Options, rewalk: Rewalk, nodes, most: int, frames: []u64, room: ^Scan_Room, allocator: runtime.Allocator, lent: []tape.Node = nil, budget: ^hook.Memory_Budget = nil) -> (err: runtime.Allocator_Error) {
 	h^ = {}
-	builder_start(&h.b, src, format, nodes, most, frames, allocator, nil, lent)
+	builder_start(&h.b, src, format, nodes, most, frames, allocator, budget, lent)
 	h.key_text = src
 	if h.b.err != nil {
 		return h.b.err
@@ -1251,10 +1251,15 @@ scan_cut :: #force_no_inline proc "contextless" (h: ^Scanner, to: u32, d: u64) -
 // read as `.Missing` past the path's last `All`, held by `owner` when there is one, and as `.Wrong_Kind` before it, the
 // step that met it `d` steps from the root. Past a `Descend` a value the steps cannot follow gives no answer.
 @(private)
-paths_fail :: proc "contextless" (sink: ^$S, dm: ^tape.Demand, to: u32, outcome: tape.Presence, d: u64, at, owner: tape.Node_Index, pos: u64, $answer: proc "contextless" (sink: ^S, node: tape.Node_Index, path: u32, outcome: tape.Presence, pos: u64, leaf: u32) -> runtime.Allocator_Error) -> runtime.Allocator_Error #no_bounds_check {
+paths_fail :: #force_inline proc "contextless" (sink: ^$S, dm: ^tape.Demand, to: u32, outcome: tape.Presence, d: u64, at, owner: tape.Node_Index, pos: u64, $answer: proc "contextless" (sink: ^S, node: tape.Node_Index, path: u32, outcome: tape.Presence, pos: u64, leaf: u32) -> runtime.Allocator_Error) -> runtime.Allocator_Error #no_bounds_check {
 	if outcome <= .Wrong_Kind && dm.nodes[to].deep {
 		return nil
 	}
+	return paths_answer_fail(sink, dm, to, outcome, d, at, owner, pos, answer)
+}
+
+@(private)
+paths_answer_fail :: proc "contextless" (sink: ^$S, dm: ^tape.Demand, to: u32, outcome: tape.Presence, d: u64, at, owner: tape.Node_Index, pos: u64, $answer: proc "contextless" (sink: ^S, node: tape.Node_Index, path: u32, outcome: tape.Presence, pos: u64, leaf: u32) -> runtime.Allocator_Error) -> runtime.Allocator_Error #no_bounds_check {
 	for m in to ..= dm.nodes[to].last {
 		node := dm.nodes[m]
 		for p in dm.ends[node.ends:][:node.n_ends] {
