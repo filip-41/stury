@@ -88,6 +88,9 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 	if !path_dups(format, opts) {
 		return {}, tape.Bad_Option{"dups"}
 	}
+	if scan_refuses(demand) {
+		return {}, tape.Bad_Option{"path"}
+	}
 	m: hook.Memory_Budget
 	allocator := read_allocator(&m, opts, caller)
 	depth := min(read_depth(opts), u64(len(src)))
@@ -114,11 +117,15 @@ read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Form
 	if !path_dups(format, opts) {
 		return {}, tape.Bad_Option{"dups"}
 	}
+	steps, followed := find_steps(path)
+	if !followed {
+		return {}, tape.Bad_Option{"path"}
+	}
 	m: hook.Memory_Budget
 	allocator := read_allocator(&m, opts, caller)
 	room: Find_Room = ---
 	f: Finder
-	if err := #force_inline finder_start(&f, src, format, path, opts.dups, read, respell, rewalk, &room, allocator); err != nil {
+	if err := #force_inline finder_start(&f, src, format, steps, opts.dups, read, respell, rewalk, &room, allocator); err != nil {
 		return {}, hook.memory_budget_error(&m, err)
 	}
 	defer finder_end(&f)

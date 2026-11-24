@@ -19,19 +19,49 @@ Ref_Answer :: struct {
 
 // The answers of `steps` over the whole document `doc` under `dups`, in document order, by its readers and the step
 // rules: null and a child a container lacks read as missing past the last `All` and as the wrong kind before it, an
-// `All` takes an object's members as written, and a `Name` under `.Group` each member of its key.
+// `All` takes an object's members as written, and a `Name` under `.Group` each member of its key. A `Descend` takes the
+// value and each value under it, its object members as written, past it a `Name` takes each member of its key, a value
+// the steps cannot follow gives no answer, and each value answers once.
 reference_answers :: proc(doc: ^tape.Document, steps: []tape.Step, dups: tape.Duplicates, out: ^[dynamic]Ref_Answer) {
 	alls_end := u64(0)
+	deep := false
 	for step, i in steps {
-		if _, all := step.(tape.All); all {
+		#partial switch _ in step {
+		case tape.All:
 			alls_end = u64(i + 1)
+		case tape.Descend:
+			deep = true
 		}
 	}
-	reference_from(doc, tape.ROOT, steps, 0, alls_end, dups, out)
+	from := len(out)
+	reference_from(doc, tape.ROOT, steps, 0, alls_end, dups, false, out)
+	if deep {
+		// Answers by place in the document, the misses past a container's nodes, once each.
+		place :: proc(doc: ^tape.Document, a: Ref_Answer) -> u64 {
+			if a.outcome != .Missing || doc.nodes[a.node].kind <= .Plain {
+				return 2 * u64(a.node)
+			}
+			return 2 * u64(a.node + tape.Node_Index(doc.nodes[a.node].n)) - 1
+		}
+		got := out[from:]
+		context.user_ptr = doc
+		slice.stable_sort_by(got, proc(a, b: Ref_Answer) -> bool {
+			doc := (^tape.Document)(context.user_ptr)
+			return place(doc, a) < place(doc, b)
+		})
+		n := 0
+		for a in got {
+			if n == 0 || got[n - 1] != a {
+				got[n] = a
+				n += 1
+			}
+		}
+		resize(out, from + n)
+	}
 }
 
 @(private)
-reference_from :: proc(doc: ^tape.Document, at: tape.Node_Index, steps: []tape.Step, taken, alls_end: u64, dups: tape.Duplicates, out: ^[dynamic]Ref_Answer) {
+reference_from :: proc(doc: ^tape.Document, at: tape.Node_Index, steps: []tape.Step, taken, alls_end: u64, dups: tape.Duplicates, deep: bool, out: ^[dynamic]Ref_Answer) {
 	if taken == u64(len(steps)) {
 		append(out, Ref_Answer{at, .Found})
 		return
@@ -39,17 +69,36 @@ reference_from :: proc(doc: ^tape.Document, at: tape.Node_Index, steps: []tape.S
 	r := tape.Reader{doc, nil}
 	node := doc.nodes[at]
 	step := steps[taken]
+	if _, descends := step.(tape.Descend); descends {
+		reference_from(doc, at, steps, taken + 1, alls_end, dups, true, out)
+		if node.kind == .Array || node.kind == .Object {
+			c, _, _ := tape.children(r, at, context.temp_allocator)
+			for {
+				_, value, p := tape.next_child(r, &c, .Group)
+				if p != .Found {
+					break
+				}
+				reference_from(doc, value, steps, taken, alls_end, dups, true, out)
+			}
+		}
+		return
+	}
 	if !tape.step_enters(step, node.kind) {
-		append(out, Ref_Answer{at, tape.path_refused(taken, alls_end) if node.kind == .Null else .Wrong_Kind})
+		if !deep {
+			append(out, Ref_Answer{at, tape.path_refused(taken, alls_end) if node.kind == .Null else .Wrong_Kind})
+		}
 		return
 	}
 	missing := Ref_Answer{at, tape.path_refused(taken + 1, alls_end)}
 	switch s in step {
+	case tape.Descend:
 	case tape.Name:
-		if dups == .Group {
+		if dups == .Group || deep {
 			c, p := tape.named(r, at, string(s))
 			if p != .Found {
-				append(out, missing)
+				if !deep {
+					append(out, missing)
+				}
 				return
 			}
 			for {
@@ -57,22 +106,26 @@ reference_from :: proc(doc: ^tape.Document, at: tape.Node_Index, steps: []tape.S
 				if vp != .Found {
 					return
 				}
-				reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
+				reference_from(doc, value, steps, taken + 1, alls_end, dups, deep, out)
 			}
 		}
 		value, p := tape.member(r, at, string(s), dups)
 		if p != .Found {
-			append(out, missing)
+			if !deep {
+				append(out, missing)
+			}
 			return
 		}
-		reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
+		reference_from(doc, value, steps, taken + 1, alls_end, dups, deep, out)
 	case tape.Index:
 		value, p := tape.element(r, at, int(s))
 		if p != .Found {
-			append(out, missing)
+			if !deep {
+				append(out, missing)
+			}
 			return
 		}
-		reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
+		reference_from(doc, value, steps, taken + 1, alls_end, dups, deep, out)
 	case tape.All:
 		c, _, _ := tape.children(r, at, context.temp_allocator)
 		for i := u64(0); ; i += 1 {
@@ -80,14 +133,14 @@ reference_from :: proc(doc: ^tape.Document, at: tape.Node_Index, steps: []tape.S
 			if p != .Found || !tape.all_takes(s.limit, i, node.kind == .Object, dups) {
 				return
 			}
-			reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
+			reference_from(doc, value, steps, taken + 1, alls_end, dups, deep, out)
 		}
 	case tape.Slice:
 		count, _, _ := tape.length(r, at, context.temp_allocator)
 		for e in 0 ..< u64(count) {
 			if tape.slice_takes(s, e, u64(count)) {
 				value, _ := tape.element(r, at, int(e))
-				reference_from(doc, value, steps, taken + 1, alls_end, dups, out)
+				reference_from(doc, value, steps, taken + 1, alls_end, dups, deep, out)
 			}
 		}
 	}
@@ -832,6 +885,8 @@ threads_fit :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u
 // The answers of the partial reads in the agreement test.
 Agreement :: struct {
 	texts, refused, scans, on_path, reads: int,
+	// The queries over builds, and the paths a query over a scan's partial document read as the build, or not loaded.
+	queries, query_reads, query_unread:   int,
 	outcomes:                              [tape.Presence]int,
 	shapes:                                map[u64]struct{}, // the kinds of steps of each path a scan read, `shape_of`
 }
@@ -845,6 +900,8 @@ expect_agreement :: proc(t: ^testing.T, a: ^Agreement, floor: Agreement_Floor) {
 	log.infof("agreement: %d texts, %d refused, %d scans, %d path steps, %d other reads, %d path shapes, partial outcomes %v", a.texts, a.refused, a.scans, a.on_path, a.reads, len(a.shapes), a.outcomes)
 	testing.expectf(t, a.texts >= floor.texts && a.refused >= floor.refused && a.scans >= floor.scans && a.on_path >= floor.on_path && len(a.shapes) >= floor.shapes, "%d texts, %d refused, %d scans, %d path steps, %d path shapes", a.texts, a.refused, a.scans, a.on_path, len(a.shapes))
 	testing.expect(t, a.outcomes[.Not_Loaded] > 0 && a.outcomes[.Missing] > 0 && a.outcomes[.Wrong_Kind] > 0 && a.outcomes[.Found] > 0)
+	log.infof("queries: %d of builds, over partial documents %d paths read as the build and %d not loaded", a.queries, a.query_reads, a.query_unread)
+	testing.expectf(t, a.queries >= floor.scans / 6 && a.query_reads > 0 && a.query_unread > 0, "%d queries, %d paths read, %d not loaded", a.queries, a.query_reads, a.query_unread)
 }
 
 // The readers law over `src`: each path of scans by paths of its own keys and indexes reads over the partial document
@@ -863,14 +920,22 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 	full_index := tape.Doc_Index{allocator = context.temp_allocator}
 	defer tape.destroy(&full_index)
 	paths := paths_of(&doc)
-	sets := make([dynamic][][]tape.Step, context.temp_allocator)
-	for i in 0 ..< len(paths) {
-		append(&sets, paths[i:][:1])
-		if i + 1 < len(paths) {
-			append(&sets, paths[i:][:2])
+	scanned := make([dynamic][]tape.Step, context.temp_allocator)
+	for path in paths {
+		if deep_back(path) {
+			deep_back_agree(t, reads, f, src, opts, &doc, path, name)
+		} else {
+			append(&scanned, path)
 		}
 	}
-	append(&sets, paths[:])
+	sets := make([dynamic][][]tape.Step, context.temp_allocator)
+	for i in 0 ..< len(scanned) {
+		append(&sets, scanned[i:][:1])
+		if i + 1 < len(scanned) {
+			append(&sets, scanned[i:][:2])
+		}
+	}
+	append(&sets, scanned[:])
 	Grained :: struct {
 		paths:  [][]tape.Step,
 		grains: []tape.Grain,
@@ -901,6 +966,9 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 	if f.facts != {} {
 		append(&runs, Grained{sets[len(sets) - 1], nil, nil, true})
 	}
+	all, aerr := tape.demand_of(paths)
+	testing.expect(t, aerr == nil)
+	defer tape.destroy(&all)
 	for run in runs {
 		set := run.paths
 		d, derr := tape.demand_of(set, run.grains, run.limits, run.facts)
@@ -942,11 +1010,153 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 				if run.facts {
 					agree_facts(t, &doc, &r, name)
 				}
+				plain := run.grains == nil && run.limits == nil
+				// The query of every path over the scan is checked on the scans that keep each path whole.
+				queries_agree(t, reads, f, src, scan_opts, &doc, &r, &d, &all, run.paths, paths if plain else nil, run.limits, stop, plain && len(set) == 1, name, a)
 
 				if root, p := tape.root(w.r); p == .Found {
 					agree_past(&w, tape.ROOT, root, 0)
 				}
 			}
+		}
+	}
+}
+
+// Whether a path of `set` has a step with a limit.
+@(private)
+step_limited :: proc(set: [][]tape.Step) -> bool {
+	for path in set {
+		for step in path {
+			#partial switch s in step {
+			case tape.All:
+				if s.limit > 0 {
+					return true
+				}
+			case tape.Slice:
+				if s.limit > 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// Whether `path` has a step from the end past a `Descend`, which a scan refuses.
+@(private)
+deep_back :: proc(path: []tape.Step) -> bool {
+	descends := false
+	for step in path {
+		if tape.step_reach(step) > 0 && descends {
+			return true
+		}
+		_, d := step.(tape.Descend)
+		descends ||= d
+	}
+	return false
+}
+
+// The law of a path a scan refuses: its scan ends with `tape.Bad_Option` for the path under every policy and limit, and
+// a query of the build `doc` answers it as the reference does.
+@(private)
+deep_back_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, doc: ^tape.Document, path: []tape.Step, name: string) {
+	for limit in 0 ..= 2 {
+		d, derr := tape.demand_of({path}, nil, {limit})
+		if !testing.expect(t, derr == nil) {
+			return
+		}
+		defer tape.destroy(&d)
+		for dups in ([]tape.Duplicates{.Last, .First, .Group}) {
+			o := opts
+			o.dups = dups
+			r, serr := reads.scan(f, src, &d, {}, o, context.allocator)
+			tape.destroy(&r)
+			bad, refused := serr.(tape.Bad_Option)
+			testing.expectf(t, refused && bad.option == "path", "%s %v: scan of %v: %v", name, f.name, path, serr)
+			q, qerr := tape.query({doc, nil}, &d, dups)
+			defer tape.destroy(&q)
+			testing.expectf(t, qerr == nil && answers_agree(doc, &q, 0, path, dups, limit), "%s %v: query of the build, answers of %v under %v limit %d: %v %s", name, f.name, path, dups, limit, qerr, render_answers(&q))
+		}
+	}
+}
+
+// The query law over the scan `r` of `src` by `d`, a demand of `set`, and the build `doc`: a query of `d` over the
+// build answers as the reference does, and so does one over `r`, where a stopped scan, or one a limit on a path or a
+// step cut short, may leave a path `.Not_Loaded`. A query of `all`, the demand of `every` path, over `r` answers each
+// path as the reference does or with a `.Not_Loaded`, for a non-empty `every`. With `single`, a find of the one path
+// answers the first of the query's answers.
+@(private)
+queries_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, doc, r: ^tape.Document, d, all: ^tape.Demand, set, every: [][]tape.Step, limits: []int, stop, single: bool, name: string, a: ^Agreement) {
+	dups := opts.dups
+	not_loaded :: proc(q: ^tape.Document, path: int) -> bool {
+		for k := 0; ; k += 1 {
+			_, p, ok := tape.answer({doc = q}, path, k)
+			if !ok {
+				return false
+			}
+			if p == .Not_Loaded {
+				return true
+			}
+		}
+	}
+	if !stop {
+		q, err := tape.query({doc, nil}, d, dups)
+		defer tape.destroy(&q)
+		if !testing.expectf(t, err == nil, "%s %v: query of the build %v", name, f.name, err) {
+			return
+		}
+		a.queries += 1
+		for path, i in set {
+			limit := limits[i] if i < len(limits) else 0
+			if !answers_agree(doc, &q, i, path, dups, limit) {
+				testing.expectf(t, false, "%s %v: query of the build, answers of %v under %v limit %d: %s", name, f.name, path, dups, limit, render_answers(&q))
+			}
+		}
+		if single {
+			fa, ferr := reads.find(f, src, set[0], {}, opts, context.allocator)
+			k, kp, any := tape.answer({doc = &q}, 0, 0)
+			ok := true
+			if bad, refused := ferr.(tape.Bad_Option); refused && bad.option == "path" {
+			} else if ferr != nil {
+				ok = false
+			} else if !any {
+				ok = fa.outcome == .Missing
+			} else if kp == .Found {
+				node := doc.nodes[k]
+				got := tape.answer_node(fa)
+				ok = fa.outcome == .Found && got.lo == node.lo && got.kind == node.kind && (node.kind > .Plain || got.n == node.n)
+			} else {
+				ok = fa.outcome == kp
+			}
+			testing.expectf(t, ok, "%s %v: find %v under %v: %v %v, query %v %v", name, f.name, set[0], dups, fa, ferr, kp, k)
+		}
+	}
+	q, err := tape.query({r, nil}, d, dups)
+	defer tape.destroy(&q)
+	if !testing.expectf(t, err == nil, "%s %v: query of the scan %v", name, f.name, err) {
+		return
+	}
+	for path, i in set {
+		limit := limits[i] if i < len(limits) else 0
+		if !answers_agree(doc, &q, i, path, dups, limit) && !((stop || limits != nil || step_limited(set)) && not_loaded(&q, i)) {
+			testing.expectf(t, false, "%s %v: query of the scan stop %v, answers of %v under %v limit %d: %s", name, f.name, stop, path, dups, limit, render_answers(&q))
+		}
+	}
+	if len(every) == 0 {
+		return
+	}
+	wide, werr := tape.query({r, nil}, all, dups)
+	defer tape.destroy(&wide)
+	if !testing.expectf(t, werr == nil, "%s %v: query of every path over the scan %v", name, f.name, werr) {
+		return
+	}
+	for path, i in every {
+		if answers_agree(doc, &wide, i, path, dups, 0) {
+			a.query_reads += 1
+		} else if not_loaded(&wide, i) {
+			a.query_unread += 1
+		} else {
+			testing.expectf(t, false, "%s %v: query of every path over the scan of %v stop %v, answers of %v under %v: %s", name, f.name, set, stop, path, dups, render_answers(&wide))
 		}
 	}
 }
@@ -966,6 +1176,8 @@ shape_of :: proc(path: []tape.Step) -> (shape: u64) {
 			code = 4 if s.limit <= 0 else 5
 		case tape.Slice:
 			code = 6 if s.lo >= 0 else 7
+		case tape.Descend:
+			code = 8
 		}
 		shape = shape << 3 | code
 	}
@@ -1017,6 +1229,14 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 	add(&out, tape.Slice{0, -1, 0})
 	add(&out, tape.Slice{1, 3, 1})
 	add(&out, tape.Slice{-3, -1, 0}, A)
+	D :: tape.Descend{}
+	add(&out, D)
+	add(&out, D, I(0))
+	add(&out, D, A)
+	add(&out, D, I(-1))
+	add(&out, I(0), D)
+	add(&out, D, D)
+	add(&out, D, tape.Slice{-2, nil, 0})
 	keys := make([dynamic]string, context.temp_allocator)
 	for node, i in doc.nodes {
 		if node.role != .Key || node.kind > .Plain || len(keys) == 12 {
@@ -1047,6 +1267,13 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 		add(&out, tape.All{1}, N(k))
 		add(&out, tape.Slice{-2, nil, 0}, N(k))
 		add(&out, N(k), tape.Slice{1, nil, 1})
+		if n < 4 {
+			add(&out, D, N(k))
+			add(&out, N(k), D)
+			add(&out, D, N(k), A)
+			add(&out, A, D, N(k2))
+			add(&out, D, N(k), D, N(k2))
+		}
 	}
 	for last in ([]bool{false, true}) {
 		down := make([dynamic]tape.Step, context.temp_allocator)
@@ -1120,6 +1347,23 @@ agree_on_path :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, steps: []tape.Step,
 		return
 	}
 	switch step in steps[0] {
+	case tape.Descend:
+		agree_on_path(w, f, p, steps[1:], grain)
+		if kind := w.doc.doc.nodes[f].kind; kind == .Array || kind == .Object {
+			fc, fp, _ := tape.children(w.doc, f, context.temp_allocator)
+			pc, pp, _ := tape.children(w.r, p, context.temp_allocator)
+			if !agree_step(w, "children", tape.NO_NODE, tape.NO_NODE, fp, pp) || fp != .Found {
+				return
+			}
+			for {
+				fk, fv, fnp := tape.next_child(w.doc, &fc, .Group)
+				pk, pv, pnp := tape.next_child(w.r, &pc, .Group)
+				if !agree_step(w, "descendant", fv, pv, fnp, pnp) || !same_node(w, fk, pk) || fnp != .Found {
+					break
+				}
+				agree_on_path(w, fv, pv, steps, grain)
+			}
+		}
 	case tape.Name:
 		if w.dups == .Group {
 			fc, fp := tape.named(w.doc, f, string(step))

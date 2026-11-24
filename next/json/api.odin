@@ -39,6 +39,7 @@ Name :: tape.Name
 Index :: tape.Index
 All :: tape.All
 Slice :: tape.Slice
+Descend :: tape.Descend
 Grain :: tape.Grain
 Demand :: tape.Demand
 demand_of :: tape.demand_of
@@ -62,6 +63,7 @@ Doc_Index :: tape.Doc_Index
 Children :: tape.Children
 root :: tape.root
 answer :: tape.answer
+query :: tape.query
 member :: tape.member
 element :: tape.element
 length :: tape.length

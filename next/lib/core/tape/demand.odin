@@ -11,6 +11,7 @@ Demand :: struct {
 	paths:     []Demand_Path, // one per path, in the order `demand_of` was given them
 	reach:     u64, // the greatest `Demand_Path.repeats`, past which no path settles
 	limited:   bool, // some path has a `limit`
+	deep:      bool, // some path has a `Descend` step
 	facts:     bool, // the read keeps the facts of the nodes it keeps, as a build does
 	allocator: runtime.Allocator,
 }
@@ -34,6 +35,11 @@ Demand_Node :: struct {
 	whole:          bool, // it ends a path whose grain is `.Whole`
 	keys:           bool, // it ends a path whose grain is `.Keys`, and none whose grain is `.Whole`
 	slices:         bool, // it has a `Slice` step with an end from the end
+	// It is reached through a `Descend` step, so it takes every child of a container it is live in through an `All`
+	// edge to itself, takes the members of a `Name` step as written, and a value its steps cannot follow gives no
+	// answer.
+	deep:           bool,
+	descend:        u32, // the node its `Descend` step leads to, which takes each value it takes, 0 for none
 }
 
 // A step from a node to the node of the longer prefix.
@@ -53,8 +59,9 @@ Demand_Path :: struct {
 	length:   u32, // its steps
 	limit:    u32, // the most answers it keeps, the first in document order, 0 for every one
 	// The index of its first step from the end, a negative `Index` or a `Slice` with an end from the end, which takes
-	// back the answers of elements it passes, else its length.
+	// back the answers of elements it passes, or of a `Descend`, else its length.
 	takes_back: u32,
+	grain:      Grain, // what it keeps of each value it ends at
 }
 
 // Whether every step of `d` from the root is an `All` with no limit, so the root's children are all reached by the same
@@ -112,6 +119,14 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 		append(&grown[at].ends, u32(p)) or_return
 		n_ends += 1
 	}
+	// Each node a `Descend` leads to has an `All` edge to itself beside its own.
+	for g in grown {
+		for e in g.edges {
+			if _, descends := e.step.(Descend); descends {
+				n_edges += 1
+			}
+		}
+	}
 	// Preorder numbers, so the nodes under a node follow it.
 	order := make([dynamic]u32, 0, len(grown), allocator) or_return
 	defer delete(order)
@@ -160,9 +175,21 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 	ne, nd := 0, 0
 	for old, i in order {
 		g := grown[old]
-		d.nodes[i] = {edges = u32(ne), n_edges = u32(len(g.edges)), ends = u32(nd), n_ends = u32(len(g.ends)), last = u32(i), takes_to = max(u64)}
+		// A node's parent, which comes first, marks it deep, and a `Descend` it leads to with a `descend` of `max(u32)`.
+		deep, target := d.nodes[i].deep, d.nodes[i].descend == max(u32)
+		d.nodes[i] = {edges = u32(ne), n_edges = u32(len(g.edges)) + u32(target), ends = u32(nd), n_ends = u32(len(g.ends)), last = u32(i), takes_to = max(u64), deep = deep}
 		for e in g.edges {
-			d.edges[ne] = {e.step, renumber[e.to]}
+			to := renumber[e.to]
+			d.edges[ne] = {e.step, to}
+			ne += 1
+			_, descends := e.step.(Descend)
+			d.nodes[to].deep = deep || descends
+			if descends {
+				d.nodes[i].descend, d.nodes[to].descend = to, max(u32)
+			}
+		}
+		if target {
+			d.edges[ne] = {All{}, u32(i)}
 			ne += 1
 		}
 		copy(d.ends[nd:], g.ends[:])
@@ -213,6 +240,7 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 	}
 	for path, p in paths {
 		x := Demand_Path{alls_end = 0, repeats = u32(len(path)), named = u32(len(path)), length = u32(len(path)), takes_back = u32(len(path))}
+		x.grain = grains[p] if p < len(grains) else .Whole
 
 		for step, i in path {
 			switch s in step {
@@ -231,6 +259,12 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 				}
 			case Name:
 				x.named = min(x.named, u32(i))
+			case Descend:
+				// An answer under a `Descend` is final once the walk leaves the value the `Descend` starts at, as a
+				// value inside it may come after the answers a limit holds.
+				x.repeats = min(x.repeats, u32(i))
+				x.takes_back = min(x.takes_back, u32(i))
+				d.deep = true
 			}
 		}
 		d.reach = max(d.reach, u64(x.repeats))

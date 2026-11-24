@@ -23,8 +23,8 @@ describe :: proc(doc: ^tape.Document, steps: []tape.Step, dups: tape.Duplicates,
 			at, p = tape.member(x, at, string(s), dups)
 		case tape.Index:
 			at, p = tape.element(x, at, int(s))
-		case tape.All, tape.Slice:
-			panic("describe takes no `All` or `Slice`")
+		case tape.All, tape.Slice, tape.Descend:
+			panic("describe takes no `All`, `Slice` or `Descend`")
 		}
 	}
 	if p != .Found {

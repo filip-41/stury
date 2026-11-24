@@ -192,11 +192,7 @@ element :: proc(r: Reader, at: Node_Index, index: int) -> (Node_Index, Presence)
 				return e.elements[i], .Found
 			}
 		}
-		k := first
-		for _ in 0 ..< i {
-			k = node_after(doc, k)
-		}
-		return k, .Found
+		return nth_child(doc, first, i), .Found
 	}
 	if doc.partial == nil {
 		return NO_NODE, .Not_Loaded
@@ -439,6 +435,8 @@ next_child :: proc "contextless" (r: Reader, c: ^Children, dups := Duplicates.De
 	}
 
 	value = c.next
+	// The nodes ahead are fetched, as each step waits on the load of the element it passes.
+	intrinsics.prefetch_read_data(&raw_data(doc.nodes)[value + NTH_AHEAD], 3)
 	c.next = node_after(doc, value)
 	c.place += 1
 	return NO_NODE, value, .Found
@@ -756,6 +754,28 @@ by_node :: #force_inline proc "contextless" (list: []$T, at: Node_Index, $PAST: 
 	}
 	return lo
 }
+
+// The child `i` of a whole container whose first child is `first`, which it has. Each step waits on the load of the
+// child before, so the nodes `NTH_AHEAD` past it are fetched ahead, as the walk only goes forward, and the step past a
+// container is the branch the walk predicts. A fetch past the nodes reads nothing.
+@(private)
+nth_child :: proc "contextless" (doc: ^Document, first: Node_Index, i: int) -> Node_Index #no_bounds_check {
+	nodes := raw_data(doc.nodes)
+	k := first
+	for _ in 0 ..< i {
+		t := nodes[k]
+		intrinsics.prefetch_read_data(&nodes[k + NTH_AHEAD], 3)
+		if intrinsics.expect(t.kind > .Plain, true) {
+			k += Node_Index(t.n)
+		} else {
+			k += 1
+		}
+	}
+	return k
+}
+
+@(private)
+NTH_AHEAD :: 64
 
 // The node after the value at `at` and its subtree.
 node_after :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> Node_Index #no_bounds_check {

@@ -24,6 +24,9 @@ Scanner :: struct {
 	missing:     [dynamic]Scan_Missing,
 	ring:        [dynamic]Scan_Ring, // what the scan held before each element a step from the end can still take
 	tokens:      [dynamic]tape.Token, // the token of each element a replaying array's negative `Index` can still take
+	// The marks of the `Name` steps of the deep demand nodes of each open frame that has them, as they were before it
+	// opened, since such a step is live in the frames inside it too.
+	saved:       [dynamic]u64,
 	rewalk:      Rewalk, // the proc that gives this hook the value at `lo` again
 	walk:        rawptr, // the walk giving this hook its tokens, which `rewalk` reads in
 	// For each demand edge whose key met a member of an object: in the high 32 bits the generation of the object's
@@ -157,6 +160,7 @@ Scan_Frame :: struct {
 	// value as one unread node.
 	keys:    bool,
 	slices:  bool, // it has `Slice` steps, which pick past the ring's check in `scan_element`, so it has a ring
+	deep:    bool, // a demand node live in it is deep, so the marks of its `Name` steps are saved while it is open
 	// For an array with no positional steps, where each element picks the same demand nodes: the kind of the element
 	// whose frame `Scanner.elements` holds at the level below, else `End`. An element of that kind reopens it.
 	element: tape.Kind,
@@ -261,7 +265,7 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 	scan_room_list(&h.picks, room.picks[:], allocator)
 	scan_room_list(&h.answers, room.answers[:], allocator)
 	scan_room_list(&h.kept, room.kept[:], allocator)
-	h.missing.allocator, h.ring.allocator, h.tokens.allocator = allocator, allocator, allocator
+	h.missing.allocator, h.ring.allocator, h.tokens.allocator, h.saved.allocator = allocator, allocator, allocator, allocator
 	h.held.allocator, h.bytes.allocator = allocator, allocator
 	made := len(demand.paths) if demand.limited else 0
 	if len(demand.edges) <= len(room.marks) && len(demand.paths) <= len(room.done) {
@@ -316,12 +320,28 @@ scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^t
 	scan_room_list(&h.picks, room.picks[:], allocator)
 	scan_room_list(&h.answers, room.answers[:], allocator)
 	scan_room_list(&h.kept, room.kept[:], allocator)
-	h.missing, h.ring, h.tokens = nil, nil, nil
-	h.missing.allocator, h.ring.allocator, h.tokens.allocator = allocator, allocator, allocator
+	h.missing, h.ring, h.tokens, h.saved = nil, nil, nil, nil
+	h.missing.allocator, h.ring.allocator, h.tokens.allocator, h.saved.allocator = allocator, allocator, allocator, allocator
 	runtime.mem_zero(raw_data(h.marks), len(h.marks) * size_of(u64))
 	runtime.mem_zero(raw_data(h.made), len(h.made) * size_of(u32))
 	runtime.mem_zero(raw_data(h.done), len(h.done))
 	return nil
+}
+
+// Whether a scan refuses `demand`, whose step from the end past a `Descend` would take back the answers under an element
+// it passes, which a `Descend` from a value inside that element may give again. `query` answers such a path.
+scan_refuses :: proc "contextless" (demand: ^tape.Demand) -> bool {
+	if !demand.deep {
+		return false
+	}
+	for node in demand.nodes {
+		for edge in demand.edges[node.edges:][:node.n_edges] {
+			if node.deep && tape.step_reach(edge.step) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Whether a step of `demand` has a limit, which settles its paths once the step takes no more.
@@ -538,6 +558,8 @@ scanner_key :: proc "contextless" (h: ^Scanner, t: tape.Token, $NAMED: bool) #no
 				mark := h.marks[e]
 				if u32(mark >> 32) != f.gen {
 					f.unmet -= 1
+				} else if node.deep {
+					// Past a `Descend` a `Name` takes each member of its key.
 				} else if h.first {
 					continue
 				} else if !h.group {
@@ -602,8 +624,13 @@ scanner_value :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $
 	live := u32(len(h.live))
 	answered := len(h.answers)
 	ends, stubs := false, false
-	for n in h.picks {
+	// A `Descend` takes the value itself: the node it leads to takes what its node takes, so the list grows as it is read.
+	for i := 0; i < len(h.picks); i += 1 {
+		n := h.picks[i]
 		node := dm.nodes[n]
+		if node.descend != 0 {
+			scan_descend(h, node.descend)
+		}
 		for p in dm.ends[node.ends:][:node.n_ends] {
 			scan_answer(h, at, p, .Found, 2 * u64(at), n)
 		}
@@ -849,8 +876,9 @@ scan_keep_element :: #force_inline proc "contextless" (h: ^Scanner, d: u64, kind
 	}
 	in_takes := f.count - 1 >= f.takes_from && f.count < f.takes_to
 	f.element = .End
-	// A reopened element skips `scanner_value`, which lists the kept elements of a partial array.
-	if !reopens || !in_takes || h.by_place {
+	// A reopened element skips `scanner_value`, which lists the kept elements of a partial array, and `scan_open`, which
+	// saves the marks of a deep frame.
+	if !reopens || !in_takes || h.by_place || h.frames[d].deep {
 		return
 	}
 	elements := (^runtime.Raw_Dynamic_Array)(&h.elements)
@@ -1155,6 +1183,10 @@ scan_cut :: #force_no_inline proc "contextless" (h: ^Scanner, to: u32, d: u64) -
 @(private)
 scan_fail :: proc "contextless" (h: ^Scanner, to: u32, null: bool, d: u64, at, owner: tape.Node_Index, pos: u64) #no_bounds_check {
 	dm := h.demand
+	// Past a `Descend` a value the steps cannot follow gives no answer.
+	if dm.nodes[to].deep {
+		return
+	}
 	for m in to ..= dm.nodes[to].last {
 		node := dm.nodes[m]
 		for p in dm.ends[node.ends:][:node.n_ends] {
@@ -1290,6 +1322,7 @@ scan_open :: proc "contextless" (h: ^Scanner, t: tape.Token, live: u32, whole: b
 		f.alls ||= node.alls
 		f.keys ||= node.keys
 		f.slices ||= node.slices
+		f.deep ||= node.deep
 		f.lengths |= node.lengths
 		f.heads |= node.heads
 	}
@@ -1314,7 +1347,52 @@ scan_open :: proc "contextless" (h: ^Scanner, t: tape.Token, live: u32, whole: b
 	if f.replays {
 		f.ring = u32(len(h.tokens))
 	}
+	if f.deep {
+		scan_save_marks(h, live)
+	}
 	scan_push(h, &h.frames, f)
+}
+
+// Takes demand node `to`, which a `Descend` of a node that took the coming value leads to, unless it took it already.
+@(private, cold)
+scan_descend :: #force_no_inline proc "contextless" (h: ^Scanner, to: u32) #no_bounds_check {
+	for n in h.picks {
+		if n == to {
+			return
+		}
+	}
+	scan_put(&h.picks, to)
+}
+
+// Saves the marks of the `Name` steps of the deep demand nodes from `live` in `Scanner.live`, a frame's, as it opens.
+@(private, cold)
+scan_save_marks :: #force_no_inline proc "contextless" (h: ^Scanner, live: u32) #no_bounds_check {
+	dm := h.demand
+	for n in h.live[live:] {
+		if node := dm.nodes[n]; node.deep {
+			for e in node.edges ..< node.edges + node.n_edges {
+				if _, named := dm.edges[e].step.(tape.Name); named {
+					scan_push(h, &h.saved, h.marks[e])
+				}
+			}
+		}
+	}
+}
+
+// Gives back the marks `scan_save_marks` saved for the frame `f` as it closes.
+@(private, cold)
+scan_restore_marks :: #force_no_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame) #no_bounds_check {
+	dm := h.demand
+	#reverse for n in h.live[f.live:][:f.n_live] {
+		if node := dm.nodes[n]; node.deep {
+			#reverse for edge, i in dm.edges[node.edges:][:node.n_edges] {
+				if _, named := edge.step.(tape.Name); named && len(h.saved) > 0 {
+					h.marks[node.edges + u32(i)] = h.saved[len(h.saved) - 1]
+					(^runtime.Raw_Dynamic_Array)(&h.saved).len -= 1
+				}
+			}
+		}
+	}
 }
 
 @(private)
@@ -1374,6 +1452,9 @@ scanner_close :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $
 		if d == 2 && !h.record.tried {
 			scan_learn_record(h, f, open, builder_cursor(&h.b, s))
 		}
+	}
+	if f.deep {
+		scan_restore_marks(h, f)
 	}
 	(^runtime.Raw_Dynamic_Array)(&h.live).len = int(f.live)
 	if f.replays {
@@ -1763,6 +1844,7 @@ scanner_free :: proc(h: ^Scanner, allocator: runtime.Allocator) {
 	free_list(h, &h.missing)
 	free_list(h, &h.ring)
 	free_list(h, &h.tokens)
+	free_list(h, &h.saved)
 	delete(h.held)
 	delete(h.bytes)
 	h.held, h.bytes = nil, nil

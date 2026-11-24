@@ -29,6 +29,8 @@ step_enters :: #force_inline proc "contextless" (step: Step, kind: Kind, members
 		return kind == .Array || kind == .Object
 	case Slice:
 		return kind == .Array || members && kind == .Object
+	case Descend:
+		return kind == .Array || kind == .Object
 	}
 	return false
 }

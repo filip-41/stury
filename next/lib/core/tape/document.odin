@@ -31,8 +31,14 @@ destroy :: proc {
 	destroy_pieces,
 }
 
-// Frees what `doc` holds and leaves it zero. The source is freed only under `.Owns_Src`.
+// Frees what `doc` holds and leaves it zero. The source is freed only under `.Owns_Src`, and under `.Borrowed` only the
+// answers are.
 destroy_document :: proc(doc: ^Document) {
+	if .Borrowed in doc.flags {
+		free(doc.partial, doc.allocator)
+		doc^ = {}
+		return
+	}
 	free(raw_data(doc.nodes), doc.allocator)
 	free(raw_data(doc.facts), doc.allocator)
 	free(raw_data(doc.counts), doc.allocator)
@@ -57,6 +63,9 @@ Doc_Flag :: enum u8 {
 	// held.
 	Held,
 	Dropped, // the duplicate key policy left members of the text out of the nodes
+	// The document of a `query`: its source, nodes, facts, counts and extension are those of the document the query
+	// read, which outlives it, and it holds only its answers.
+	Borrowed,
 }
 
 Doc_Flags :: bit_set[Doc_Flag; u8]

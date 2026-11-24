@@ -25,11 +25,18 @@ Slice :: struct {
 
 #assert(size_of(Slice) == 16)
 
+// The value and every value under it, in document order, as jq's and JSONPath's `..` read. An object's members are
+// visited as written, as `All` takes them, and a `Name` past it takes every member of its key, as `.Group` reads. A
+// value the steps past it cannot follow gives no answer. A scan refuses a step from the end past it, which `query`
+// answers, and `find` a step of any kind past it.
+Descend :: struct {}
+
 Step :: union #no_nil {
 	Name,
 	Index,
 	All,
 	Slice,
+	Descend,
 }
 
 // How much of the value at a path's end a read keeps. A scalar is kept whole under every grain.

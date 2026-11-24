@@ -114,6 +114,10 @@ read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, rea
 	if !path_dups(format, opts) {
 		return {}, tape.Bad_Option{"dups"}
 	}
+	steps, followed := find_steps(path)
+	if !followed {
+		return {}, tape.Bad_Option{"path"}
+	}
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return
 	blk := (^Find_Piece)(s.hook)
@@ -123,7 +127,7 @@ read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, rea
 		}
 		blk = new(Find_Piece, p.allocator) or_return
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
-		if e := finder_start(&blk.f, src, format, path, opts.dups, read, respell, nil, &blk.room, allocator); e != nil {
+		if e := finder_start(&blk.f, src, format, steps, opts.dups, read, respell, nil, &blk.room, allocator); e != nil {
 			free(blk, p.allocator)
 			return {}, hook.memory_budget_error(&s.blocks, e)
 		}
@@ -198,6 +202,9 @@ read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, 
 	}
 	if !path_dups(format, opts) {
 		return {}, tape.Bad_Option{"dups"}
+	}
+	if scan_refuses(demand) {
+		return {}, tape.Bad_Option{"path"}
 	}
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return

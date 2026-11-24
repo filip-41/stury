@@ -86,6 +86,25 @@ Find_Level :: struct {
 	object:  bool,
 }
 
+// The steps a find follows of `path`: a `Descend` at its end answers first the value the steps before it reach, so it
+// is left out. False for a `Descend` with steps after it, which a find refuses, as its answers lie at any depth, which
+// takes a scan's set of steps live in each container where a find holds a level per step.
+find_steps :: proc "contextless" (path: []tape.Step) -> ([]tape.Step, bool) {
+	n := len(path)
+	for n > 0 {
+		if _, descends := path[n - 1].(tape.Descend); !descends {
+			break
+		}
+		n -= 1
+	}
+	for s in path[:n] {
+		if _, descends := s.(tape.Descend); descends {
+			return nil, false
+		}
+	}
+	return path[:n], true
+}
+
 // The answer while the value taken last has given none, which `[]` of an empty array leaves. A path that ends with it
 // answers `.Missing`.
 @(private)
@@ -301,6 +320,7 @@ finder_focus :: #force_inline proc "contextless" (h: ^Finder) #no_bounds_check {
 		} else if h.quiet = !none || lv.count >= tape.slice_cut(step); !h.quiet && step.lo > 0 && lv.count < u64(step.lo) {
 			h.count_at, h.count_to = &lv.count, u64(step.lo)
 		}
+	case tape.Descend:
 	}
 }
 
@@ -580,7 +600,7 @@ finder_close :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #n
 		} else if lv.size > 0 && !lv.cut {
 			finder_slice_close(h, lv, step)
 		}
-	case tape.All:
+	case tape.All, tape.Descend:
 	case tape.Index:
 		if step >= 0 {
 			if !lv.chosen {

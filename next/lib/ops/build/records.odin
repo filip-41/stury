@@ -57,6 +57,11 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 	if !record_reads(r, &read, format) {
 		return
 	}
+	steps, followed := find_steps(path)
+	if !followed {
+		records_stop(r, tape.Bad_Option{"path"})
+		return
+	}
 	out := out
 	out = out[:min(len(out), len(answers))]
 	m: hook.Memory_Budget
@@ -67,7 +72,7 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 	for n < len(out) {
 		allocator := read_allocator(&m, r.opts, caller)
 		lo, cut := frame(r) or_break
-		if err := find_begin(&f, r.src, format, path, r.opts.dups, read, respell, rewalk, &room, allocator); err != nil {
+		if err := find_begin(&f, r.src, format, steps, r.opts.dups, read, respell, rewalk, &room, allocator); err != nil {
 			records_stop(r, hook.memory_budget_error(&m, err))
 			break
 		}
@@ -77,7 +82,7 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 			break
 		}
 		if w.again {
-			if err := find_begin(&f, r.src, format, path, r.opts.dups, read, respell, rewalk, &room, allocator, true); err != nil {
+			if err := find_begin(&f, r.src, format, steps, r.opts.dups, read, respell, rewalk, &room, allocator, true); err != nil {
 				records_stop(r, hook.memory_budget_error(&m, err))
 				break
 			}
@@ -106,6 +111,10 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, format: ^tape.Format, rules: ^tape.Rules, read: tape.Read_Options, caller: runtime.Allocator, rewalk: Rewalk, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $frame: Record_Frame, $walk: proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> Record_Walk) -> (n: int) {
 	read := read
 	if !record_reads(r, &read, format) {
+		return
+	}
+	if scan_refuses(demand) {
+		records_stop(r, tape.Bad_Option{"path"})
 		return
 	}
 	out := out
