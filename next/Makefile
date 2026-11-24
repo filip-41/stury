@@ -72,6 +72,7 @@ SAN_FLAGS := $(TEST_BASE_FLAGS) -define:TEST_TIMEOUT_SECONDS=900 -define:ODIN_TE
 # The test whose text nests 100,000 levels on a thread of one MiB, run at the optimization levels that change a frame.
 DEEP_TEST := json_tests.reads_nest_100000_levels_in_one_mib
 DEEP_CBOR_TEST := cbor_tests.reads_nest_100000_levels_in_one_mib
+DEEP_TOML_TEST := toml_tests.reads_nest_100000_levels_in_one_mib
 DEEP_OPTS := none speed
 
 .PHONY: check check-all lint test test-deep test-asan test-tsan
@@ -131,8 +132,8 @@ test:
 	@for p in $(GAP_PKGS); do \
 		echo "== $$p (no gaps, no rewalk)"; $(ODIN) test $$p -o:minimal $(TEST_FLAGS) -define:JSON_GAPS=false -define:JSON_REWALK=false -out:build/test-$$(echo $$p | tr / -)-nogaps || exit 1; \
 	done
-	@for pkg in json cbor; do \
-		case $$pkg in json) names="$(DEEP_TEST)";; *) names="$(DEEP_CBOR_TEST)";; esac; \
+	@for pkg in json cbor toml; do \
+		case $$pkg in json) names="$(DEEP_TEST)";; cbor) names="$(DEEP_CBOR_TEST)";; *) names="$(DEEP_TOML_TEST)";; esac; \
 		for o in $(DEEP_OPTS); do \
 			echo "== $$pkg/test (100,000 levels in one MiB, -o:$$o)"; \
 			$(ODIN) test $$pkg/test -o:$$o $(TEST_FLAGS) -define:ODIN_TEST_NAMES=$$names -out:build/test-deep-$$pkg-$$o || exit 1; \
@@ -155,7 +156,7 @@ endif
 
 # The sweeps that `test` samples, read in full: every cut, every window size, every budget around the least.
 DEEP_ROUNDS ?= 16
-DEEP_PKGS := cbor/test dsv/test json/test
+DEEP_PKGS := cbor/test dsv/test json/test toml/test
 test-deep:
 	@mkdir -p build; for p in $(DEEP_PKGS); do \
 		echo "== $$p (-define:ROUNDS=$(DEEP_ROUNDS))"; \
