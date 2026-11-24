@@ -1,5 +1,6 @@
 package tape_test
 
+import "base:runtime"
 import "core:testing"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
@@ -10,11 +11,11 @@ import "stury:testkit"
 @(rodata)
 TWICE := tape.Format{name = "twice", decode = twice_decode, room = twice_room, number = twice_number, same_text = twice_same, key_hash = twice_hash}
 
-twice_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
+twice_room :: proc "contextless" (src: []u8, t: tape.Node, _: runtime.Allocator) -> int {
 	return 2 * int(t.n)
 }
 
-twice_decode :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {
+twice_decode :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, _: runtime.Allocator) -> (string, bool) {
 	if len(buf) < 2 * int(t.n) {
 		return "", false
 	}

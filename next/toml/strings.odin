@@ -1,5 +1,6 @@
 package toml
 
+import "base:runtime"
 import "core:simd"
 import "core:unicode/utf8"
 import "stury:lib/base/kernel"
@@ -360,7 +361,7 @@ escape_at :: #force_inline proc "contextless" (s: []u8, i, hi: int) -> (r: rune,
 // The text of string or key node `t` of `src`, whose spelling has `SPELLING_DECODE`, in `buf`. An escape decodes to
 // fewer bytes than it spells, so a `buf` as long as the span holds it.
 @(private)
-text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: string, ok: bool) {
+text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, _: runtime.Allocator) -> (s: string, ok: bool) {
 	lo, hi := int(t.lo), int(t.lo) + int(t.n)
 	if len(buf) < hi - lo {
 		return "", false
@@ -386,7 +387,7 @@ text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: s
 
 // The bytes of a buffer that hold the text of scalar `t`: its span, as no escape decodes to more bytes than it spells.
 @(private)
-decode_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
+decode_room :: proc "contextless" (src: []u8, t: tape.Node, _: runtime.Allocator) -> int {
 	return int(t.n)
 }
 

@@ -1,6 +1,7 @@
 package cbor
 
 import "base:intrinsics"
+import "base:runtime"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
@@ -135,7 +136,7 @@ text_next :: proc "contextless" (r: ^Text_Run) -> ([]u8, bool) #no_bounds_check 
 // The text of scalar node `t` whose text is not its bytes, decoded into `buf`, false when `buf` is too short. A
 // number's is its value in decimal, as `number_text` gives it.
 @(private)
-text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: string, ok: bool) {
+text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, _: runtime.Allocator) -> (s: string, ok: bool) {
 	if t.kind == .Number {
 		return number_text(src, t, buf)
 	}
@@ -153,7 +154,7 @@ text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (s: s
 // The bytes that always hold the decode of scalar `t`: a number's decimal text, a byte string key's base64, a
 // tolerated text's three bytes per byte read as U+FFFD, and else its span, which its chunks' heads only add to.
 @(private)
-decode_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
+decode_room :: proc "contextless" (src: []u8, t: tape.Node, _: runtime.Allocator) -> int {
 	switch {
 	case t.kind == .Number:
 		return number_room(src, t)

@@ -32,7 +32,7 @@ WASM_NO_TAIL_FEATURE_SETS := none simd128
 # Test packages whose kernels pick an x86-64 tier, run at each tier and `X86_OPTS` level, and once at each level with
 # no tier named, so the CPU's own tier is detected and used. On an x86-64 machine these runs replace the plain one. An
 # arm64 Mac runs them through Rosetta, and skips them with a note where Rosetta is not installed.
-TIER_PKGS := lib/base/kernel/test lib/base/regex/test dsv/test cbor/test
+TIER_PKGS := lib/base/kernel/test lib/base/regex/test dsv/test cbor/test xml/test
 # The tests of `dsv/test` that read texts of every shape through the delimited pass. The others do not reach the pass
 # instances, and a run under Rosetta takes the whole package six times.
 comma := ,
@@ -77,6 +77,7 @@ SAN_FLAGS := $(TEST_BASE_FLAGS) -define:TEST_TIMEOUT_SECONDS=900 -define:ODIN_TE
 DEEP_TEST := json_tests.reads_nest_100000_levels_in_one_mib
 DEEP_CBOR_TEST := cbor_tests.reads_nest_100000_levels_in_one_mib
 DEEP_TOML_TEST := toml_tests.reads_nest_100000_levels_in_one_mib
+DEEP_XML_TEST := xml_tests.reads_nest_100000_levels_in_one_mib
 DEEP_OPTS := none speed
 
 .PHONY: check check-all lint test test-deep test-asan test-tsan
@@ -118,7 +119,7 @@ lint:
 	done
 	@mkdir -p build; for p in $(TIER_PKGS); do \
 		echo "== $$p (linux_amd64 tiers)"; \
-		case $$p in dsv/test) req="--require dsv::pass_default_v3:";; lib/base/regex/test) req="--require ::set_v3";; *) req=;; esac; \
+		case $$p in dsv/test) req="--require dsv::pass_default_v3:";; lib/base/regex/test) req="--require ::set_v3";; xml/test) req="--require xml::span_v3:";; *) req=;; esac; \
 		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:none $(LINT_FLAGS) -out:build/tiers-none.o || exit 1; \
 		python3 tools/tier_check.py $(OBJDUMP) build/tiers-none.o $$req || exit 1; \
 		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:build/tiers-speed.o || exit 1; \
@@ -136,8 +137,8 @@ test:
 	@for p in $(GAP_PKGS); do \
 		echo "== $$p (no gaps, no rewalk)"; $(ODIN) test $$p -o:minimal $(TEST_FLAGS) -define:JSON_GAPS=false -define:JSON_REWALK=false -out:build/test-$$(echo $$p | tr / -)-nogaps || exit 1; \
 	done
-	@for pkg in json cbor toml; do \
-		case $$pkg in json) names="$(DEEP_TEST)";; cbor) names="$(DEEP_CBOR_TEST)";; *) names="$(DEEP_TOML_TEST)";; esac; \
+	@for pkg in json cbor toml xml; do \
+		case $$pkg in json) names="$(DEEP_TEST)";; cbor) names="$(DEEP_CBOR_TEST)";; toml) names="$(DEEP_TOML_TEST)";; *) names="$(DEEP_XML_TEST)";; esac; \
 		for o in $(DEEP_OPTS); do \
 			echo "== $$pkg/test (100,000 levels in one MiB, -o:$$o)"; \
 			$(ODIN) test $$pkg/test -o:$$o $(TEST_FLAGS) -define:ODIN_TEST_NAMES=$$names -out:build/test-deep-$$pkg-$$o || exit 1; \
@@ -160,7 +161,7 @@ endif
 
 # The sweeps that `test` samples, read in full: every cut, every window size, every budget around the least.
 DEEP_ROUNDS ?= 16
-DEEP_PKGS := cbor/test dsv/test json/test toml/test
+DEEP_PKGS := cbor/test dsv/test json/test toml/test xml/test
 test-deep:
 	@mkdir -p build; for p in $(DEEP_PKGS); do \
 		echo "== $$p (-define:ROUNDS=$(DEEP_ROUNDS))"; \

@@ -1,6 +1,7 @@
 package tape
 
 import "base:intrinsics"
+import "base:runtime"
 import "stury:lib/base/spell"
 
 // The readers a user calls on a scalar node, over the text the node's spans point into.
@@ -10,16 +11,17 @@ import "stury:lib/base/spell"
 // so does a key of any kind, which a `Name` takes by its text, as a `find` answer's node or a record's key. A null or
 // boolean value has none. A number's text is its exact value: as written, or in a `.Binary` format its value in
 // decimal. False for a token with no text, a `buf` shorter than `text_room` gives, or a number of a `.Binary` format
-// whose value is past what its readers spell.
+// whose value is past what its readers spell, and for a decode that needs memory beyond `buf`, as an XML entity's DTD,
+// that `allocator` refuses. With no allocator a decode takes none.
 @(require_results)
-node_text_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node, buf: []u8) -> (s: string, ok: bool) #no_bounds_check {
+node_text_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node, buf: []u8, allocator := runtime.Allocator{}) -> (s: string, ok: bool) #no_bounds_check {
 	if t.kind > .Plain || t.kind < .Number && t.role != .Key {
 		return "", false
 	}
 	if !text_decoded(f, t) {
 		return string(src[t.lo:][:t.n]), true
 	}
-	return f.decode(src, t, buf)
+	return f.decode(src, t, buf, allocator)
 }
 
 // Whether the text of scalar token `t` of a text of format `f` is a decode of its bytes rather than the bytes.
@@ -28,11 +30,11 @@ text_decoded :: #force_inline proc "contextless" (f: ^Format, t: Token) -> bool 
 	return text_decodes(t) || t.kind == .Number && .Binary in f.caps
 }
 
-// `node_text_of` for node `at` of `doc`, false for `NO_NODE`.
+// `node_text_of` for node `at` of `doc`, with the document's allocator, false for `NO_NODE`.
 @(require_results)
 node_text_in :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index, buf: []u8) -> (s: string, ok: bool) {
 	src, t := node_src_at(doc, at) or_return
-	return node_text_of(doc.format, src, t, buf)
+	return node_text_of(doc.format, src, t, buf, doc.allocator)
 }
 
 // The text of a string or plain node, of a document or of a format and the text the node was read in.
@@ -117,20 +119,21 @@ node_number :: proc {
 }
 
 // The bytes of a buffer that always hold the text `node_text` gives for scalar token `t` of `src`, a text of format
-// `f`, 0 for a scalar that reads as its bytes in the text.
+// `f`, 0 for a scalar that reads as its bytes in the text, with what the room needs beyond the text from `allocator`,
+// as `node_text_of` takes it.
 @(require_results)
-text_room_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node) -> int {
+text_room_of :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Node, allocator := runtime.Allocator{}) -> int {
 	if t.kind > .Plain || !text_decoded(f, t) {
 		return 0
 	}
-	return f.room(src, t)
+	return f.room(src, t, allocator)
 }
 
-// `text_room_of` for node `at` of `doc`, 0 for `NO_NODE`.
+// `text_room_of` for node `at` of `doc`, with the document's allocator, 0 for `NO_NODE`.
 @(require_results)
 text_room_in :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> int {
 	src, t, ok := node_src_at(doc, at)
-	return text_room_of(doc.format, src, t) if ok else 0
+	return text_room_of(doc.format, src, t, doc.allocator) if ok else 0
 }
 
 // The name of the fact of kind `kind` that node `at` of `doc` holds in its spelling rather than as a span, as its

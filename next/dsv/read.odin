@@ -1,6 +1,7 @@
 package dsv
 
 import "base:intrinsics"
+import "base:runtime"
 import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
@@ -28,7 +29,7 @@ quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
 // bytes than it spells. Three times the span for a `SPELLING_LAX` cell, because a tolerated byte reads as U+FFFD.
 // `COLUMN_ROOM` for a key named by its column's position.
 @(private)
-decode_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
+decode_room :: proc "contextless" (src: []u8, t: tape.Node, _: runtime.Allocator) -> int {
 	if t.spelling & tape.SPELLING_PLACED != 0 {
 		return COLUMN_ROOM
 	}
@@ -39,7 +40,7 @@ decode_room :: proc "contextless" (src: []u8, t: tape.Node) -> int {
 // `decode_room` gives.
 @(private)
 decode_cell :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, $S: Spec) -> (s: string, ok: bool) #no_bounds_check {
-	if decode_room(src, t) > len(buf) {
+	if decode_room(src, t, {}) > len(buf) {
 		return "", false
 	}
 	n := 0
@@ -190,13 +191,13 @@ TSV_ESCAPED := [256]u8 {
 }
 
 @(private)
-decode_csv :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {return decode_cell(src, t, buf, .Csv)}
+decode_csv :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, _: runtime.Allocator) -> (string, bool) {return decode_cell(src, t, buf, .Csv)}
 
 @(private)
-decode_tsv :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {return decode_cell(src, t, buf, .Tsv)}
+decode_tsv :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, _: runtime.Allocator) -> (string, bool) {return decode_cell(src, t, buf, .Tsv)}
 
 @(private)
-decode_plain :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8) -> (string, bool) {return decode_cell(src, t, buf, .Plain)}
+decode_plain :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, _: runtime.Allocator) -> (string, bool) {return decode_cell(src, t, buf, .Plain)}
 
 @(private)
 same_csv :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {return same_cells(src, t, other, o, .Csv)}

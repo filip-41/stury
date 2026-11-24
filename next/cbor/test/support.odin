@@ -88,7 +88,7 @@ dump :: proc(b: ^strings.Builder, doc: ^tape.Document, i: tape.Node_Index) -> ta
 		strings.write_string(b, "h:")
 		payload := cbor.span_bytes(doc, node.lo, node.n)
 		if node.spelling & tape.SPELLING_DECODE != 0 {
-			s, _ := doc.format.decode(doc.src, node, make([]u8, node.n, context.temp_allocator))
+			s, _ := doc.format.decode(doc.src, node, make([]u8, node.n, context.temp_allocator), doc.allocator)
 			payload = transmute([]u8)s
 		}
 		for c in payload {

@@ -46,6 +46,8 @@ Builder :: struct {
 	stubs:         u64,
 	unstored:      u64,
 	keep_facts:    bool, // a scan keeps the facts of the nodes it keeps, which its inner hooks store
+	// The first node the walk stores: 0, or in a segment its first past the nodes of the segments before it.
+	first:         tape.Node_Index,
 	protocol:      hook.Protocol(BUILDER_CAPS, Builder_Levels, Builder_Rooms, hook.Unused),
 }
 
@@ -481,9 +483,10 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 		}
 	case .Comment_Foot:
 		node = tape.Node_Index(s.b >> 32)
-		// The node before the cursor is this walk's key only past the open container: a segment's open containers
-		// are scratch nodes past every segment's nodes, and the node before its first is another segment's.
-		if a > 0 && node < a - 1 && h.doc.nodes[a - 1].role == .Key && h.doc.nodes[a - 1].kind <= .Plain {
+		// A key before the cursor with no value stored is a member of the innermost open container, when this walk
+		// stored it after the container's node. That node lies before its members, or in a segment that opened inside
+		// it is a scratch node past every segment's nodes, and the node before the segment's first is another's.
+		if a > h.first && node != a - 1 && node != tape.NO_NODE && h.doc.nodes[a - 1].role == .Key && h.doc.nodes[a - 1].kind <= .Plain {
 			node = a
 			break
 		}

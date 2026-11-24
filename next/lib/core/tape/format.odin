@@ -115,18 +115,20 @@ Format :: struct {
 	dups:   Duplicates, // its own policy for repeated keys, which `.Default` takes, never `.Default`
 	// The bytes of a scalar token's authored span before and after the token's own, as a string's quotes.
 	bounds: proc "contextless" (src: []u8, t: Token) -> (head, tail: u8),
-	// The text of a scalar node whose spelling has `SPELLING_DECODE`, decoded into `buf`, false only when `buf` is
-	// shorter than `room` gives. A scalar with no `SPELLING_DECODE` reads as its bytes in the text.
-	decode: proc "contextless" (src: []u8, t: Node, buf: []u8) -> (s: string, ok: bool),
+	// The text of a scalar node whose spelling has `SPELLING_DECODE`, decoded into `buf`, false when `buf` is shorter
+	// than `room` gives or `allocator` refuses the memory the decode needs beyond `buf`, as an XML entity's DTD. A
+	// scalar with no `SPELLING_DECODE` reads as its bytes in the text.
+	decode: proc "contextless" (src: []u8, t: Node, buf: []u8, allocator: runtime.Allocator) -> (s: string, ok: bool),
 	// The bytes that always hold the decode of scalar `t`, which may pass its span (a CBOR integer key's digits, an
-	// entity, a tolerated byte read as U+FFFD).
-	room: proc "contextless" (src: []u8, t: Node) -> int,
+	// entity, a tolerated byte read as U+FFFD), with what it needs beyond its text from `allocator`. The span's length
+	// when `allocator` refuses that memory, which `decode` then refuses too.
+	room: proc "contextless" (src: []u8, t: Node, allocator: runtime.Allocator) -> int,
 	// The value of a number node.
 	number: proc "contextless" (src: []u8, t: Node) -> spell.Number,
-	// Whether scalar `t` of `src` and scalar `o` of `other` read as the same text, whatever their kinds.
+	// Whether key `t` of `src` and key `o` of `other` read as the same text, whatever their kinds. It needs no memory.
 	same_text: proc "contextless" (src: []u8, t: Token, other: []u8, o: Token) -> bool,
-	// A hash of the text scalar `t` of `src` reads as, `text_hash` of that text, so two scalars `same_text` holds for
-	// hash alike. A scalar with no `SPELLING_DECODE` hashes as its bytes in the text.
+	// A hash of the text key `t` of `src` reads as, `text_hash` of that text, so two keys `same_text` holds for hash
+	// alike. A key with no `SPELLING_DECODE` hashes as its bytes in the text. It needs no memory.
 	key_hash: proc "contextless" (src: []u8, t: Token) -> u32,
 	// The byte just past the close of the container node `at` of `doc`, which a document stores no node for. False for
 	// one other than the root of a `.Held` document, which holds no byte between its nodes.
