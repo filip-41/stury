@@ -1001,7 +1001,7 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 		if node.role != .Key || node.kind > .Plain || len(keys) == 12 {
 			continue
 		}
-		key := key_text(doc, tape.Node_Index(i))
+		key := scalar_text(doc, tape.Node_Index(i))
 		seen := false
 		for k in keys {
 			seen ||= k == key
@@ -1045,7 +1045,7 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 				key, member = k, v
 			}
 			if node.kind == .Object {
-				append(&down, tape.Step(tape.Name(key_text(doc, key))))
+				append(&down, tape.Step(tape.Name(scalar_text(doc, key))))
 			} else {
 				append(&down, tape.Step(tape.Index(-1 if last else 0)))
 			}
@@ -1057,12 +1057,6 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 		}
 	}
 	return out[:]
-}
-
-key_text :: proc(doc: ^tape.Document, at: tape.Node_Index) -> string {
-	buf := make([]u8, tape.text_room(doc, at), context.temp_allocator)
-	text, _ := tape.node_text(doc, at, buf)
-	return strings.clone(text, context.temp_allocator)
 }
 
 // Whether node `f` of the whole document and node `p` of the partial one are the same value of the text.
@@ -1143,7 +1137,7 @@ agree_on_path :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, steps: []tape.Step,
 				if kp != .Found {
 					break
 				}
-				key := key_text(w.doc.doc, k)
+				key := scalar_text(w.doc.doc, k)
 				fv, fp := tape.member(w.doc, f, key, .First)
 				pv, pp := tape.member(w.r, p, key, .First)
 				if agree_step(w, key, fv, pv, fp, pp) {
@@ -1258,7 +1252,7 @@ agree_past :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, depth: int) {
 	if w.doc.doc.nodes[f].kind == .Object {
 		end := f + tape.Node_Index(w.doc.doc.nodes[f].n)
 		for k := f + 1; k < end; {
-			append(&names, key_text(w.doc.doc, k))
+			append(&names, scalar_text(w.doc.doc, k))
 			k += 1
 			k += tape.Node_Index(w.doc.doc.nodes[k].n) if w.doc.doc.nodes[k].kind > .Plain else 1
 		}

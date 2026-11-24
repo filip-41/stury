@@ -84,6 +84,7 @@ Dsv_Options :: struct {
 	no_header: bool, // the first record is data, and each record an array of cells
 	// An unquoted cell that is `true`, `false` or a JSON number reads as that value, not as a string.
 	infer:     bool,
+	crlf:      bool, // a write ends each line with CR LF, where a read takes either line end
 }
 
 // The options of a CBOR text. None changes what a read gives, so a document records none of them.

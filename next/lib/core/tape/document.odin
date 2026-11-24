@@ -56,6 +56,7 @@ Doc_Flag :: enum u8 {
 	// offsets stay the text's, and `src` holds their bytes where `Doc_Ext.held` places them. No byte between them is
 	// held.
 	Held,
+	Dropped, // the duplicate key policy left members of the text out of the nodes
 }
 
 Doc_Flags :: bit_set[Doc_Flag; u8]

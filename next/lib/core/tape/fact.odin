@@ -30,6 +30,8 @@ Fact_Kind :: enum u8 {
 	Name, // no span: the element's shape
 	Namespace, // no span: the element's shape
 	Content, // no span: the element's shape
+	// On no document: a write's report that a key some records of a table lack was written as an empty cell in them.
+	Absent,
 }
 
 // The fact kind of a token whose role is a fact's.

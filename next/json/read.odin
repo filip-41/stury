@@ -323,7 +323,10 @@ decode5_escape :: proc "contextless" (base: [^]u8, p, end: u64, out: [^]u8, w: i
 	case e == 0xE2 && p + 3 < end && base[p + 2] == 0x80 && base[p + 3] | 1 == 0xA9:
 		return w, p + 4
 	}
-	// The escaped character itself. The other bytes of a UTF-8 character follow as plain bytes.
+	// The escaped character itself. A character past ASCII is read from its lead on, as a lax read judges it whole.
+	if e >= 0x80 {
+		return w, p + 1
+	}
 	out[w] = e
 	return w + 1, p + 2
 }

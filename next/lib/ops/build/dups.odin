@@ -105,6 +105,7 @@ dups_end :: proc(doc: ^tape.Document, r: ^Repeats, refused: runtime.Allocator_Er
 	refused := refused
 	if refused == nil && r.dropped {
 		refused = drop_members(doc, r.drops)
+		doc.flags += {.Dropped}
 	}
 	err: tape.Error
 	if refused != nil {

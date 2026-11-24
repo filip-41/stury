@@ -81,11 +81,12 @@ tolerate_invalid_utf8 :: proc(t: ^testing.T) {
 	}
 }
 
-// A JSON5 string in single quotes takes the tolerance as a double-quoted one does.
+// A JSON5 string in single quotes takes the tolerance as a double-quoted one does, and an escaped character past
+// ASCII is the character whole.
 @(test)
 tolerate_invalid_utf8_in_json5_quotes :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := "{'k\xFF': 'v\xC0\\x41'}"
+	src := "{'k\xFF': 'v\xC0\\x41\\\xC3\xA9\\" + FFFD + "\xA7'}"
 	testing.expect(t, json.validate(transmute([]u8)src, .Json5) != nil)
 	doc, err := json.build(transmute([]u8)src, .Json5, LAX)
 	defer tape.destroy(&doc)
@@ -96,7 +97,7 @@ tolerate_invalid_utf8_in_json5_quotes :: proc(t: ^testing.T) {
 		texts[i], _ = tape.node_text(&doc, n, make([]u8, tape.text_room(&doc, n), context.temp_allocator))
 	}
 	testing.expect_value(t, texts[0], "k" + FFFD)
-	testing.expect_value(t, texts[1], "v" + FFFD + "A")
+	testing.expect_value(t, texts[1], "v" + FFFD + "A\xC3\xA9" + FFFD + FFFD)
 }
 
 // A sequence the text's end cuts short leaves its string open, which no tolerance closes.

@@ -725,7 +725,6 @@ next_key :: proc "contextless" (doc: ^Document, c: ^Children, end: Node_Index, d
 }
 
 // The child count of the container `node` at `at`, -1 when a partial document does not know it.
-@(private)
 child_count :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index, node: Node) -> int {
 	count := node.spelling & MAX_CHILDREN
 	if count < MAX_CHILDREN {
@@ -893,6 +892,13 @@ row_policy :: #force_inline proc "contextless" (doc: ^Document, dups: Duplicates
 		return kept
 	}
 	return read_dups(doc.format, dups)
+}
+
+// Whether cell `j` of the `cells` of a row of the table whose header is `header` is one its build stored but drops, a
+// cell of a repeated header name the table's `Duplicates` policy does not keep.
+column_dropped :: proc "contextless" (doc: ^Document, header: Node_Index, j, cells: int) -> bool {
+	kept := table_kept(doc)
+	return kept != .All && cell_dropped(doc, header, j, cells, kept)
 }
 
 // Whether cell `j` of the `cells` of a row is one a table that kept the `kept` cell of a name stored but dropped: a
