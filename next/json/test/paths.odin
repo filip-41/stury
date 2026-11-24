@@ -120,7 +120,6 @@ find_agrees_with_the_build :: proc(t: ^testing.T) {
 }
 
 // Replaces one byte of `src` or cuts it short, so that the text is often not one any grammar reads.
-@(private = "file")
 corrupt :: proc(src: []u8) {
 	if len(src) == 0 {
 		return

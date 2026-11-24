@@ -13,7 +13,7 @@ import "stury:lib/ops/build"
 @(private)
 SEAM_LEVELS :: WALK_LEVELS - 1
 
-// Where a part starts: the walk's `d` levels there, from `Plan.levels[at:]`, and its innermost frame `top`.
+// Where a part starts: the walk's `d` levels there, from `Part_Plan.levels[at:]`, and its innermost frame `top`.
 @(private)
 Seam :: struct {
 	d, top: u64,
@@ -22,7 +22,7 @@ Seam :: struct {
 
 // The parts of a text, where each starts, and the kinds of the containers open at each seam.
 @(private)
-Plan :: struct {
+Part_Plan :: struct {
 	want:   int, // the parts the text is cut into, at most
 	parts:  [dynamic]build.Part,
 	seams:  [dynamic]Seam,
@@ -94,7 +94,7 @@ pass_start :: proc "contextless" (st: ^Pass($S, $RELATIVE), i: u64) {
 
 // The next cut of an absolute pass: where the next seam may be, past which the plan has its parts.
 @(private)
-seam_cut :: #force_inline proc "contextless" (plan: ^Plan, n: u64) -> u64 {
+seam_cut :: #force_inline proc "contextless" (plan: ^Part_Plan, n: u64) -> u64 {
 	return max(u64) if len(plan.parts) == plan.want else n / u64(plan.want) * u64(len(plan.parts))
 }
 
@@ -103,7 +103,7 @@ seam_cut :: #force_inline proc "contextless" (plan: ^Plan, n: u64) -> u64 {
 // into the last part of `plan`, which it cuts into parts at its seams. The pass has read a head the walk refuses,
 // or the end of the item, when it ends.
 @(private)
-plan_run :: proc(src: []u8, $S: Spec, $RELATIVE: bool, st: ^Pass(S, RELATIVE), stop: u64, plan: ^Plan) -> Pass_End #no_bounds_check {
+plan_run :: proc(src: []u8, $S: Spec, $RELATIVE: bool, st: ^Pass(S, RELATIVE), stop: u64, plan: ^Part_Plan) -> Pass_End #no_bounds_check {
 	STRICT :: S != .Cbor
 	n := u64(len(src))
 	i, d, top, c := st.i, st.d, st.top, st.c
@@ -319,7 +319,7 @@ complete :: proc "contextless" ($S: Spec, st: ^Pass(S, false), m: u64) -> (r: Re
 // containers it left open. The counts of `sm` go to the last part of `plan`. Returns false for a text that nests past
 // `SEAM_LEVELS`, and `ended` for one whose item closed or whose break no level may take.
 @(private)
-plan_carry :: proc(plan: ^Plan, $S: Spec, st: ^Pass(S, false), sm: ^Pass(S, true)) -> (ok, ended: bool) {
+plan_carry :: proc(plan: ^Part_Plan, $S: Spec, st: ^Pass(S, false), sm: ^Pass(S, true)) -> (ok, ended: bool) {
 	part := &plan.parts[len(plan.parts) - 1]
 	part.nodes += sm.counts[0].nodes
 	part.comments += sm.counts[0].comments
@@ -409,7 +409,7 @@ guess_start :: proc(src: []u8, $S: Spec, sm: ^Pass(S, true), cut, stop: u64) -> 
 // not reach, in a text where its heads do not meet the text's own, has the chunk read by the absolute pass. False when
 // memory is refused or the text nests past `SEAM_LEVELS`.
 @(private)
-plan_chunks :: proc(src: []u8, $S: Spec, want: int, plan: ^Plan, runner: ^tape.Runner) -> bool {
+plan_chunks :: proc(src: []u8, $S: Spec, want: int, plan: ^Part_Plan, runner: ^tape.Runner) -> bool {
 	Job :: struct {
 		src:    []u8,
 		want:   int,
@@ -496,7 +496,7 @@ plan_chunks :: proc(src: []u8, $S: Spec, want: int, plan: ^Plan, runner: ^tape.R
 // Plans up to `want` parts of `src` into `plan`, each counted for the nodes, facts and levels its walk stores. False
 // when memory is refused or the text nests past `SEAM_LEVELS`.
 @(private)
-plan_parts :: proc(src: []u8, $S: Spec, want: int, plan: ^Plan, runner: ^tape.Runner) -> bool {
+plan_parts :: proc(src: []u8, $S: Spec, want: int, plan: ^Part_Plan, runner: ^tape.Runner) -> bool {
 	plan.want = want
 	if _, e := append(&plan.parts, build.Part{}); e != nil {
 		return false
@@ -515,7 +515,7 @@ plan_parts :: proc(src: []u8, $S: Spec, want: int, plan: ^Plan, runner: ^tape.Ru
 // Ends the last part of `plan` at `i` and starts the next one there, in the walk's levels `stack` whose innermost frame
 // is `top` and in which `c` containers are open.
 @(private)
-plan_seam :: proc(plan: ^Plan, i, top: u64, c: int, stack: []Level($S)) -> bool {
+plan_seam :: proc(plan: ^Part_Plan, i, top: u64, c: int, stack: []Level($S)) -> bool {
 	at := len(plan.levels)
 	if resize(&plan.levels, at + len(stack)) != nil {
 		return false

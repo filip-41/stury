@@ -58,6 +58,7 @@ KIND_RULES := [Fault_Kind]Rule {
 	.Too_Wide      = {"too_wide", "Token is longer than 4 GiB"},
 	.Bad_Width     = {"bad_width", "Record width differs from the first record"},
 	.Duplicate_Key = {"duplicate_key", "Duplicate key"},
+	.Refused       = {"refused", "Value not taken by the type"},
 }
 
 @(private, rodata)

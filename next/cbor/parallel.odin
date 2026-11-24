@@ -53,7 +53,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 	}
 	m: hook.Memory_Budget
 	allocator := build.read_allocator(&m, opts, caller)
-	plan := Plan {
+	plan := Part_Plan {
 		parts  = make([dynamic]build.Part, allocator),
 		seams  = make([dynamic]Seam, allocator),
 		levels = make([dynamic]Level(.Length_First), allocator),
@@ -70,7 +70,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 	}
 	walk :: proc(src: []u8, parts: []build.Part, k: int, s: ^build.Segment, opts: Options, data: rawptr) {
 		p := &parts[k]
-		r, took := walk_part(src, p.from, p.to, S, opts, (^Plan)(data), k, &s.b, &s.regs)
+		r, took := walk_part(src, p.from, p.to, S, opts, (^Part_Plan)(data), k, &s.b, &s.regs)
 		if k == len(parts) - 1 && u8(r) == 0 && u64(r) >> 16 < u64(len(src)) {
 			r = fault(u64(r) >> 16, .Bad_Char, .Trailing)
 		}
@@ -86,7 +86,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 // Walks part `k` of `plan`, the bytes of `src` from `from` to `to`, for builder `h` with its registers `regs`, and
 // returns the walk's result and whether it took a rule of the tolerances.
 @(private)
-walk_part :: proc "contextless" (src: []u8, from, to: int, $S: Spec, opts: Options, plan: ^Plan, k: int, h: ^build.Builder, regs: ^hook.Regs) -> (hook.Walk_Result, bool) {
+walk_part :: proc "contextless" (src: []u8, from, to: int, $S: Spec, opts: Options, plan: ^Part_Plan, k: int, h: ^build.Builder, regs: ^hook.Regs) -> (hook.Walk_Result, bool) {
 	stack: [WALK_LEVELS]Level(S) = ---
 	w: Walk(S, build.Builder, false, build.BUILDER_CAPS)
 	walk_init(&w, src[:to], h, raw_data(stack[:]), min(build.read_depth(opts), MAX_LEVELS), WALK_LEVELS, opts)

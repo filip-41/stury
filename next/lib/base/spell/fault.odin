@@ -10,4 +10,5 @@ Fault_Kind :: enum u8 {
 	Too_Wide, // a token longer than `Token.n` holds, or a record past its size limit
 	Bad_Width, // a record wider or narrower than the first
 	Duplicate_Key, // a repeated key under a refusing duplicate policy
+	Refused, // a value a typed read's type does not take, which its detail names
 }

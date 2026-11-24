@@ -71,11 +71,121 @@ Number_Lex :: struct {
 // The value of `src[lo:hi]` read with RFC 8259's number grammar, false for a span that is no number.
 @(require_results)
 number_strict :: proc "contextless" (src: []u8, lo, hi: u64) -> (Number, bool) {
+	if num, ok := number_short(src, lo, hi); ok {
+		return num, true
+	}
 	n := lex_decimal(src, lo, hi, false)
 	if !n.ok {
 		return {}, false
 	}
 	return number_of_lex(src, lo, hi, n), true
+}
+
+// The value of `src[lo:hi]` when it is a short RFC 8259 number with no exponent: at most 16 bytes past its sign, digits
+// with at most one point between two of them, and with 16 bytes of `src` from its first digit. False for any other
+// span, which `number_strict` reads. The span is judged in two words, with no loop over its bytes.
+@(require_results)
+number_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (num: Number, ok: bool) #no_bounds_check {
+	base := raw_data(src)
+	if lo >= hi {
+		return
+	}
+	neg := base[lo] == '-'
+	p := lo + u64(neg)
+	m := hi - p
+	if m == 0 || m > 16 {
+		return
+	}
+	if m <= 8 && p + 8 <= u64(len(src)) {
+		return short_word(base[p:], m, neg)
+	}
+	if p + 16 > u64(len(src)) {
+		return
+	}
+	// The bytes past the span read as `0` digits.
+	w0, w1 := short_pad(load8(base[p:]), m), short_pad(load8(base[p + 8:]), m - min(m, 8))
+	k := short_nondigit(w0, w1)
+	if k >= m {
+		if m > 1 && base[p] == '0' {
+			return
+		}
+		return integer_number(short_digits(w0, w1, m), neg)
+	}
+	if base[p + k] != '.' || k == 0 || k == m - 1 || k > 1 && base[p] == '0' {
+		return
+	}
+	// The point read as a `0` digit, which no other non-digit may follow.
+	x := (u128(w0) | u128(w1) << 64) &~ (u128(0xFF) << (8 * k)) | u128(0x30) << (8 * k)
+	if short_nondigit(u64(x), u64(x >> 64)) < m {
+		return
+	}
+	low := u128(1) << (8 * k) - 1
+	merged := x & low | x >> 8 &~ low
+	v := f64(short_digits(u64(merged), u64(merged >> 64), m - 1)) / POW10_F64[m - k - 1]
+	return {transmute(u64)(-v if neg else v), .Float}, true
+}
+
+// `number_short` of the `m` bytes at `p`, at most 8, after the sign, in one word.
+@(private)
+short_word :: #force_inline proc "contextless" (p: [^]u8, m: u64, neg: bool) -> (num: Number, ok: bool) #no_bounds_check {
+	w := short_pad(load8(p), m)
+	nd := short_marks(w)
+	if nd == 0 {
+		if m > 1 && p[0] == '0' {
+			return
+		}
+		return integer_number(digits8_value(w << (8 * (8 - m))), neg)
+	}
+	k := u64(intrinsics.count_trailing_zeros(nd)) >> 3
+	if p[k] != '.' || k == 0 || k == m - 1 || k > 1 && p[0] == '0' {
+		return
+	}
+	// The point read as a `0` digit, which no other non-digit may follow.
+	w = w &~ (u64(0xFF) << (8 * k)) | u64(0x30) << (8 * k)
+	if short_marks(w) != 0 {
+		return
+	}
+	low := u64(1) << (8 * k) - 1
+	merged := w & low | w >> 8 &~ low
+	v := f64(digits8_value(merged << (8 * (9 - m)))) / POW10_F64[m - k - 1]
+	return {transmute(u64)(-v if neg else v), .Float}, true
+}
+
+// The high bits of the bytes of `w` that are no digit, exact for the first such byte only, as a later one may be
+// marked by its carry.
+@(private)
+short_marks :: #force_inline proc "contextless" (w: u64) -> u64 {
+	return ((w - 0x3030_3030_3030_3030) | (w + 0x4646_4646_4646_4646)) & 0x8080_8080_8080_8080
+}
+
+// Word `w` of a short number's span with its bytes from `k` on, `k` below 8, set to `0` digits.
+@(private)
+short_pad :: #force_inline proc "contextless" (w: u64, k: u64) -> u64 {
+	if k >= 8 {
+		return w
+	}
+	keep := u64(1) << (8 * k) - 1
+	return w & keep | 0x3030_3030_3030_3030 &~ keep
+}
+
+// The place of the first byte of the 16 in `w0` and `w1` that is no digit, 16 for none. A byte past the first such one
+// may be marked by its carry, and is not read.
+@(private)
+short_nondigit :: #force_inline proc "contextless" (w0, w1: u64) -> u64 {
+	if m0 := short_marks(w0); m0 != 0 {
+		return u64(intrinsics.count_trailing_zeros(m0)) >> 3
+	}
+	m1 := short_marks(w1)
+	return 8 + u64(intrinsics.count_trailing_zeros(m1)) >> 3 if m1 != 0 else 16
+}
+
+// The value of the first `t` digits, 1 to 16, of the 16 bytes in `w0` and `w1`.
+@(private)
+short_digits :: #force_inline proc "contextless" (w0, w1: u64, t: u64) -> u64 {
+	if t <= 8 {
+		return digits8_value(w0 << (8 * (8 - t)))
+	}
+	return digits8_value(w0) * POW10_U64[t - 8] + digits8_value(w1 << (8 * (16 - t)))
 }
 
 // The value of `src[lo:hi]` read with JSON5's decimal grammar, which also takes a `+` and a point with digits on one

@@ -37,6 +37,25 @@ scan_spec :: proc(src: []u8, $S: json.Spec, opts := json.Options{}) -> int {
 	return len(doc.nodes) if err == nil else -1
 }
 
+// A value of any shape, which a typed read takes from any text.
+Value :: union {
+	bool,
+	f64,
+	string,
+	[dynamic]Value,
+	map[string]Value,
+}
+
+unmarshal_spec :: proc(src: []u8, $S: json.Spec, opts := json.Options{}) -> bool {
+	// The arena is on the heap, as the compiler takes the read's error for a reference to what it allocated.
+	arena := new(mem.Dynamic_Arena)
+	defer free(arena)
+	mem.dynamic_arena_init(arena, context.allocator, context.allocator)
+	defer mem.dynamic_arena_destroy(arena)
+	v: Value
+	return json.unmarshal(src, &v, S, opts = opts, allocator = mem.dynamic_arena_allocator(arena)) == nil
+}
+
 @(export)
 validate_json :: proc "c" (p: [^]u8, n: int) -> bool {
 	context = runtime.default_context()
@@ -179,6 +198,42 @@ scan_tolerant_jsonc :: proc "c" (p: [^]u8, n: int) -> int {
 scan_tolerant_json5 :: proc "c" (p: [^]u8, n: int) -> int {
 	context = runtime.default_context()
 	return scan_spec(p[:n], .Json5, TOLERANT)
+}
+
+@(export)
+unmarshal_json :: proc "c" (p: [^]u8, n: int) -> bool {
+	context = runtime.default_context()
+	return unmarshal_spec(p[:n], .Json)
+}
+
+@(export)
+unmarshal_jsonc :: proc "c" (p: [^]u8, n: int) -> bool {
+	context = runtime.default_context()
+	return unmarshal_spec(p[:n], .Jsonc)
+}
+
+@(export)
+unmarshal_json5 :: proc "c" (p: [^]u8, n: int) -> bool {
+	context = runtime.default_context()
+	return unmarshal_spec(p[:n], .Json5)
+}
+
+@(export)
+unmarshal_tolerant_json :: proc "c" (p: [^]u8, n: int) -> bool {
+	context = runtime.default_context()
+	return unmarshal_spec(p[:n], .Json, TOLERANT)
+}
+
+@(export)
+unmarshal_tolerant_jsonc :: proc "c" (p: [^]u8, n: int) -> bool {
+	context = runtime.default_context()
+	return unmarshal_spec(p[:n], .Jsonc, TOLERANT)
+}
+
+@(export)
+unmarshal_tolerant_json5 :: proc "c" (p: [^]u8, n: int) -> bool {
+	context = runtime.default_context()
+	return unmarshal_spec(p[:n], .Json5, TOLERANT)
 }
 
 // Whether an ECMA pattern matches a text, -1 for a pattern or a search that fails, so the object holds the regex

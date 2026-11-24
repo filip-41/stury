@@ -3,7 +3,7 @@
 usage: wasm_check.py NM OBJDUMP OBJECT EXPORTS_SOURCE
 
 Every `@(export)` procedure of EXPORTS_SOURCE must be defined in OBJECT, and every walk state `st_value`, for each spec,
-each kind of read (no hooks, finder, scanner, builder), with `LAX` (steps and pieces) and without, must be there and
+each kind of read (no hooks, finder, scanner, builder, typed), with `LAX` (steps and pieces) and without, must be there and
 hold a `return_call`, which a walk's `#must_tail` calls become only with the `tail-call` feature.
 """
 
@@ -16,7 +16,7 @@ EXPORT = re.compile(r"@\(export\)\s+(\w+)\s*::", re.M)
 FUNCTION = re.compile(r"^[0-9a-f]+ <(.+)>:$")
 SPEC = re.compile(r"Walk\(S:\$\$(\d+),")
 LAX = re.compile(r"LAX:\$\$(true|false)")
-READS = ("No_Hooks", "Finder", "Scanner", "Builder")
+READS = ("No_Hooks", "Finder", "Scanner", "Builder", "Text_Reader")
 SPECS = ("0", "1", "2")
 LAXES = ("false", "true")
 

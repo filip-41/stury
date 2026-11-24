@@ -43,12 +43,12 @@ nested_text :: proc(depth: int, nesting: Nesting) -> []u8 {
 	return transmute([]u8)strings.to_string(b)
 }
 
-// Reads the nested text five ways, a verdict, a document, the value of `a`, a scan, and where a document's `a` closes,
-// and `testkit.deep_read`'s ways, which take the records of the innermost container that holds one.
+// Reads the nested text six ways, a verdict, a document, the value of `a`, a scan, where a document's `a` closes and a
+// typed read, and `testkit.deep_read`'s ways, which take the records of the innermost container that holds one.
 @(private = "file")
 read_nested :: proc(read: int, text: []u8) -> bool {
 	opts := toml.Options{budget = {depth = 200_000}}
-	if read >= 5 {
+	if read >= 6 {
 		// The steps to the innermost container of each `nested_text`, from its length.
 		arrays, inline := text[4] == '[', text[4] == '{'
 		steps := (len(text) - 6) / 2 if arrays else (len(text) - 6) / 4 if inline else (len(text) - 2) / 2 - 1 if text[0] == '[' else (len(text) - 4) / 2 - 1
@@ -57,7 +57,7 @@ read_nested :: proc(read: int, text: []u8) -> bool {
 			step = tape.Index(0) if arrays && k > 0 else tape.Name("a")
 		}
 		paths := [][]tape.Step{{tape.Descend{}, tape.Index(0)}, {tape.Descend{}, tape.Name("a")}}
-		return testkit.deep_read(read - 5, toml.reads(.Toml_1_0), toml.as(.Toml_1_0), text, opts, paths, .Elements if arrays else .Members, at)
+		return testkit.deep_read(read - 6, toml.reads(.Toml_1_0), toml.as(.Toml_1_0), text, opts, paths, .Elements if arrays else .Members, at)
 	}
 	switch read {
 	case 0:
@@ -75,6 +75,11 @@ read_nested :: proc(read: int, text: []u8) -> bool {
 		tape.destroy(&r)
 		tape.destroy(&d)
 		return err == nil
+	case 5:
+		v: testkit.Value_Table
+		err := toml.unmarshal(text, &v, opts = opts)
+		testkit.value_free(v)
+		return err == nil
 	case:
 		doc, err := toml.build(text, opts = opts)
 		defer tape.destroy(&doc)
@@ -91,7 +96,7 @@ reads_nest_100000_levels_in_one_mib :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	for nesting in Nesting {
 		text := nested_text(100_000, nesting)
-		testkit.expect_reads_on_thread(t, 1 << 20, 5 + testkit.DEEP_READS, text, fmt.tprint(nesting), read_nested)
+		testkit.expect_reads_on_thread(t, 1 << 20, 6 + testkit.DEEP_READS, text, fmt.tprint(nesting), read_nested)
 		free_all(context.temp_allocator)
 	}
 }
