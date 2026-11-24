@@ -32,33 +32,9 @@ cell_token :: #force_inline proc "contextless" ($S: Spec, base: [^]u8, field_lo,
 	if role == .Value && hi == field_lo {
 		kind = .Null
 	} else if role == .Value && infer && spelling == 0 {
-		return infer_token(base, u64(lo), u32(n))
+		return tape.infer_token(base, u64(lo), u32(n))
 	}
 	return {u64(lo), u32(n), kind, role, spelling}
-}
-
-// The token of an unquoted value cell that needs no decode, as `infer` reads it: `true` and `false` are those kinds,
-// and an RFC 8259 number is a `Number` with its digit counts as JSON's walk spells them. The first byte selects the
-// check, so a text cell needs one load.
-@(private)
-infer_token :: #force_inline proc "contextless" (base: [^]u8, lo: u64, n: u32) -> tape.Token {
-	t := tape.Token{lo, n, .String, .Value, 0}
-	switch base[lo] {
-	case 't':
-		if n == 4 && string(base[lo:][:4]) == "true" {
-			t.kind = .True
-		}
-	case 'f':
-		if n == 5 && string(base[lo:][:5]) == "false" {
-			t.kind = .False
-		}
-	case '-', '0' ..= '9':
-		end := base[lo + u64(n):]
-		if q, spelling, kind := tape.number_scan(base[lo:], end, true, false); kind == .None && q == end {
-			t.kind, t.spelling = .Number, u16(spelling)
-		}
-	}
-	return t
 }
 
 // Gives the hook the `Key` token of the column `cells`, and returns the hook's action with the span of the record's

@@ -967,7 +967,7 @@ scan_pass :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tap
 	h.has_key = false
 	if h.facts {
 		if h.passed = builder_cursor(&h.b, s); h.passed == h.wait_at {
-			scan_unwait(h)
+			scan_unwait(h, t.lo)
 		}
 	}
 
@@ -1714,34 +1714,51 @@ scan_settle :: proc "contextless" (h: ^Scanner, n: u32, d: u64) #no_bounds_check
 @(private, cold)
 scan_fact :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> hook.Action {
 	#partial switch tape.fact_kind(t.role) {
-	case .Comment, .Tag:
+	case .Comment_Foot:
+		// A foot after a key is a markup element's with no child element, which marks the value as a comment does. After
+		// a key no step took, it waits as a comment does, and it lies inside the value's span, as no container's foot
+		// lies inside the value that follows it.
+		if !h.has_key {
+			at := builder_cursor(&h.b, s)
+			if h.wait_at != at {
+				h.wait_at, h.wait_from = at, len(h.b.doc.facts)
+			}
+			break
+		}
+		fallthrough
+	case .Comment, .Tag, .Attribute, .Instruction, .Doctype:
 		// After a key, the token is its value, stored past the key's node.
 		at := builder_cursor(&h.b, s)
 		if h.wait_at != at {
 			h.wait_at, h.wait_from = at, len(h.b.doc.facts)
 		}
 		a := builder_fact(&h.b, s, t)
-		if a == .Next && h.has_key {
-			h.b.doc.facts[len(h.b.doc.facts) - 1].node += 1
+		if a == .Next {
+			h.b.doc.facts[len(h.b.doc.facts) - 1].node = at + tape.Node_Index(h.has_key)
 		}
 		return a
 	case .Comment_Inline:
 		if h.passed == builder_cursor(&h.b, s) {
 			return .Next
 		}
-	case .Comment_Foot:
+	case .Directive:
 	case:
 		return .Next
 	}
 	return builder_fact(&h.b, s, t)
 }
 
-// Drops the comments and tags before a token the walk passed unstored.
+// Drops the facts before the token at `lo` the walk passed unstored, and the feet inside its span.
 @(private, cold)
-scan_unwait :: #force_no_inline proc "contextless" (h: ^Scanner) {
+scan_unwait :: #force_no_inline proc "contextless" (h: ^Scanner, lo: u64) {
 	for &f in h.b.doc.facts[h.wait_from:] {
-		if f.kind == .Comment || f.kind == .Tag {
+		#partial switch f.kind {
+		case .Comment, .Tag, .Attribute, .Instruction, .Doctype:
 			f.node = tape.NO_NODE
+		case .Comment_Foot:
+			if f.lo >= lo {
+				f.node = tape.NO_NODE
+			}
 		}
 	}
 	h.wait_at = tape.NO_NODE
@@ -1755,8 +1772,10 @@ scan_check_facts :: proc "contextless" (h: ^Scanner, regs: hook.Regs) #no_bounds
 	facts := h.b.doc.facts
 	kept := 0
 	h.b.doc.present = {}
+	// A fact past every node of a scan that read the whole text lies past the root, which the build gives the root.
+	past := len(nodes) + 1 if !h.stopped && h.end_of != .Settled else len(nodes)
 	for f in facts {
-		if int(f.node) < len(nodes) {
+		if int(f.node) < past {
 			facts[kept] = f
 			kept += 1
 			if f.kind != .Comment {

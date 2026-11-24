@@ -43,7 +43,7 @@ column_passes :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), b
 infer_kept :: #force_no_inline proc "contextless" (base: [^]u8, cells: []tape.Token) #no_bounds_check {
 	for &t in cells {
 		if t.kind == .String && t.spelling == 0 {
-			t = infer_token(base, t.lo, t.n)
+			t = tape.infer_token(base, t.lo, t.n)
 		}
 	}
 }

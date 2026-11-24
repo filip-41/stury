@@ -189,7 +189,22 @@ Doc_Ext :: struct {
 Format_Ext :: union {
 	Tabular_Ext,
 	Yaml_Ext,
+	Markup_Ext,
 }
+
+// A markup document's elements that declare a namespace, by which its format resolves the prefix of a name.
+Markup_Ext :: struct {
+	scopes: []Markup_Scope, // sorted by node
+}
+
+// An element that declares a namespace: the node of its value, the node past its subtree, and the index in
+// `Markup_Ext.scopes` of the nearest element around it that declares one, `NO_SCOPE` for none.
+Markup_Scope :: struct {
+	node, end: Node_Index,
+	parent:    u32,
+}
+
+NO_SCOPE :: max(u32)
 
 // dsv's tables and their key lookup slots. A table's header is an `Array` of role `Key` stored past the root value's
 // subtree, which no reader reaches from the root: they take the header's keys by its node.

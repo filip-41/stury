@@ -53,6 +53,7 @@ Options :: struct {
 Format_Options :: union {
 	Dsv_Options,
 	Cbor_Options,
+	Xml_Options,
 }
 
 // The family of `Format_Options` a format's reads take, `.None` for a format with no options of its own.
@@ -60,6 +61,7 @@ Options_Family :: enum u8 {
 	None,
 	Dsv,
 	Cbor,
+	Xml,
 }
 
 // `Bad_Option{"format"}` when `opts.format` holds the options of a family other than `f`'s, else nil. Every read of a
@@ -71,6 +73,8 @@ options_refused :: #force_inline proc "contextless" (f: ^Format, opts: Options) 
 		family = .Dsv
 	case Cbor_Options:
 		family = .Cbor
+	case Xml_Options:
+		family = .Xml
 	case nil:
 		return nil
 	}
@@ -89,6 +93,16 @@ Dsv_Options :: struct {
 
 // The options of a CBOR text. None changes what a read gives, so a document records none of them.
 Cbor_Options :: struct {}
+
+// The options of an XML text. They change what the reads give, so a document records none of them.
+Xml_Options :: struct {
+	// An element's text that is `true`, `false` or a JSON number, with no reference or markup in it, reads as that
+	// value, where any other text is a string.
+	infer:         bool,
+	// The most bytes the entity references of a text may expand to, 0 for the default: 8 MiB, or a hundred times the
+	// text's length when that is more. A reference counts its replacement text with the references it holds.
+	max_expansion: u64,
+}
 
 // A spec of a format (e.g. JSON, JSONC and JSON5 are three), in rodata, holding what a document of it needs to be
 // read. `Reads` holds the reads of its texts.

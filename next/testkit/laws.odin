@@ -218,9 +218,29 @@ agree_facts :: proc(t: ^testing.T, doc, r: ^tape.Document, name: string, loc := 
 		role: tape.Role,
 		kind: tape.Kind,
 	}
+	// The root is known by its place, as a markup document's root starts where its root element's value does. A key of
+	// more than one node, as each reference to a markup entity reads its text anew, names `NO_NODE`.
 	whole := make(map[Key]tape.Node_Index, context.temp_allocator)
-	for node, i in doc.nodes {
-		whole[{node.lo, node.role, node.kind}] = tape.Node_Index(i)
+	for node, i in doc.nodes[1:] {
+		k := Key{node.lo, node.role, node.kind}
+		whole[k] = tape.NO_NODE if k in whole else tape.Node_Index(i + 1)
+	}
+	// Whether a node of the build known by `key` holds fact `f`.
+	some_has :: proc(doc: ^tape.Document, key: Key, f: tape.Fact) -> bool {
+		for g in doc.facts {
+			node := doc.nodes[g.node]
+			if g.node != tape.ROOT && g.lo == f.lo && g.kind == f.kind && (Key{node.lo, node.role, node.kind}) == key {
+				return true
+			}
+		}
+		return false
+	}
+	whole_of :: proc(whole: map[Key]tape.Node_Index, r: ^tape.Document, i: tape.Node_Index) -> (tape.Node_Index, bool) {
+		if i == tape.ROOT {
+			return tape.ROOT, true
+		}
+		node := r.nodes[i]
+		return whole[{node.lo, node.role, node.kind}]
 	}
 	has :: proc(facts: []tape.Fact, node: tape.Node_Index, f: tape.Fact) -> bool {
 		for g in facts {
@@ -232,15 +252,16 @@ agree_facts :: proc(t: ^testing.T, doc, r: ^tape.Document, name: string, loc := 
 	}
 	for f in r.facts {
 		node := r.nodes[f.node]
-		at, ok := whole[{node.lo, node.role, node.kind}]
-		testing.expectf(t, ok && has(doc.facts, at, f), "%s: scan fact %v on %v is not the build's", name, f, node, loc = loc)
+		at, ok := whole_of(whole, r, f.node)
+		held := has(doc.facts, at, f) if at != tape.NO_NODE else some_has(doc, {node.lo, node.role, node.kind}, f)
+		testing.expectf(t, ok && held, "%s: scan fact %v on %v is not the build's", name, f, node, loc = loc)
 	}
 	if .Stopped in r.flags {
 		return
 	}
 	kept := make(map[tape.Node_Index]tape.Node_Index, context.temp_allocator)
-	for node, i in r.nodes {
-		if at, ok := whole[{node.lo, node.role, node.kind}]; ok {
+	for i in 0 ..< len(r.nodes) {
+		if at, ok := whole_of(whole, r, tape.Node_Index(i)); ok && at != tape.NO_NODE {
 			kept[at] = tape.Node_Index(i)
 		}
 	}

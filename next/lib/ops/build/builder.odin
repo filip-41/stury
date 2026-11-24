@@ -459,17 +459,20 @@ builder_room :: proc "contextless" (h: ^Builder, s: hook.Regs, nodes: int) -> ho
 	return s
 }
 
-// Stores fact token `t`, a comment or a tag, as a fact of the node it describes. A comment before a value is placed on
-// the node it marks when `builder_end` runs `builder_place_facts`, and a tag is the next node's. An inline comment
-// belongs to the last value completed, and a foot to the innermost open container, or to the root past the last one.
-// `.Stop` when memory for the facts is refused.
+// Stores fact token `t` as a fact of the node it describes. A comment, an instruction or a document type before a value
+// is placed on the node it marks when `builder_end` runs `builder_place_facts`, a tag or an attribute is the next
+// node's, and a directive the root's. An inline comment belongs to the last value completed, and a foot to the
+// innermost open container, or to the root past the last one, except a foot right after a key, which a markup element
+// with no child element holds, and which is its value's. `.Stop` when memory for the facts is refused.
 @(private, cold)
 builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, t: tape.Token) -> hook.Action {
 	a := builder_cursor(h, s)
 	node := a
 	kind := tape.fact_kind(t.role)
 	#partial switch kind {
-	case .Comment, .Tag:
+	case .Comment, .Tag, .Attribute, .Instruction, .Doctype:
+	case .Directive:
+		node = tape.ROOT
 	case .Comment_Inline:
 		// The container closed last is the last value completed when no node was stored after its subtree.
 		node = a - 1
@@ -478,6 +481,12 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 		}
 	case .Comment_Foot:
 		node = tape.Node_Index(s.b >> 32)
+		// The node before the cursor is this walk's key only past the open container: a segment's open containers
+		// are scratch nodes past every segment's nodes, and the node before its first is another segment's.
+		if a > 0 && node < a - 1 && h.doc.nodes[a - 1].role == .Key && h.doc.nodes[a - 1].kind <= .Plain {
+			node = a
+			break
+		}
 		if node == tape.NO_NODE {
 			node = tape.ROOT
 		}
@@ -510,9 +519,9 @@ builder_grow_facts :: proc "contextless" (h: ^Builder) -> bool {
 	return true
 }
 
-// Gives each comment that waits for the value it marks that value's node: the node after the comment, or for a comment
-// before a key, the key's value. A comment no node follows, past a stop, becomes the root's foot. Then sorts the facts
-// by node.
+// Gives each comment, instruction or document type that waits for the value it marks that value's node: the node after
+// it, or for one before a key, the key's value. One no node follows, past a stop, is the root's, and a comment is its
+// foot. Then sorts the facts by node.
 @(private, cold)
 builder_place_facts :: proc(doc: ^tape.Document, count: int) {
 	doc.present += builder_place_comments(doc, doc.facts, count)
@@ -524,7 +533,7 @@ builder_place_facts :: proc(doc: ^tape.Document, count: int) {
 @(private)
 builder_place_comments :: proc "contextless" (doc: ^tape.Document, facts: []tape.Fact, count: int) -> (present: tape.Facts) {
 	for &f in facts {
-		if f.kind != .Comment {
+		if f.kind != .Comment && f.kind != .Instruction && f.kind != .Doctype {
 			continue
 		}
 		if int(f.node) < count && doc.nodes[f.node].role == .Key {
@@ -533,9 +542,12 @@ builder_place_comments :: proc "contextless" (doc: ^tape.Document, facts: []tape
 			f.node += 1 if key.kind <= .Plain else tape.Node_Index(key.n)
 		}
 		if int(f.node) >= count {
-			f.node, f.kind = tape.ROOT, .Comment_Foot
-			present += {.Comment_Foot}
-		} else {
+			f.node = tape.ROOT
+			if f.kind == .Comment {
+				f.kind = .Comment_Foot
+				present += {.Comment_Foot}
+			}
+		} else if f.kind == .Comment {
 			present += {.Comment}
 		}
 	}

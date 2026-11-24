@@ -7,15 +7,16 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // Applies a build's policy `dups` to the built `doc`, for the members of one object that share a key, kind and text.
-// `.Refuse` fails with `.Duplicate_Key` at the first byte of the first key of the text that repeats one of its
-// object's, which is a quoted key's opening quote. `.First` and `.Last` keep one member of each key and remove the
-// other members with their nodes and facts. Any other policy keeps every member. On an error `doc` is destroyed.
+// `.Refuse` fails with `.Duplicate_Key` at the first byte of the first key read that repeats one of its object's,
+// which is a quoted key's opening quote. A key read first lies first in the text, but in a markup entity read at each
+// reference to it. `.First` and `.Last` keep one member of each key and remove the other members with their nodes and
+// facts. Any other policy keeps every member. On an error `doc` is destroyed.
 @(require_results)
 builder_dups :: proc(doc: ^tape.Document, dups: tape.Duplicates, rules: ^tape.Rules) -> tape.Error {
 	if !dups_apply(doc, dups) {
 		return nil
 	}
-	r := Repeats{at = max(u64)}
+	r := Repeats{at = tape.NO_NODE}
 	// Copied here because an error destroys `doc`, and a deferred free through `doc.allocator` would then use a zeroed
 	// allocator and leak the bitmap.
 	allocator := doc.allocator
@@ -76,11 +77,15 @@ partial_repeat :: proc(h: ^Builder, regs: hook.Regs, fault: tape.Fault, rules: ^
 	view := h.doc
 	view.nodes = nodes
 	view.facts = nil
-	r := Repeats{at = max(u64)}
-	if dups_scan(&view, .Refuse, &r) != nil || r.at >= fault.at {
+	r := Repeats{at = tape.NO_NODE}
+	if dups_scan(&view, .Refuse, &r) != nil || r.at == tape.NO_NODE {
 		return fault
 	}
-	return tape.Fault{at = r.at, rules = rules, kind = .Duplicate_Key}
+	head, _ := view.format.bounds(view.src, view.nodes[r.at])
+	if at := view.nodes[r.at].lo - u64(head); at < fault.at {
+		return tape.Fault{at = at, rules = rules, kind = .Duplicate_Key}
+	}
+	return fault
 }
 
 // Whether policy `dups` may change or refuse `doc`.
@@ -89,11 +94,11 @@ dups_apply :: #force_inline proc "contextless" (doc: ^tape.Document, dups: tape.
 	return (dups == .Refuse || dups == .First || dups == .Last) && len(doc.nodes) > 0
 }
 
-// The repeated keys found. `at` is, under `.Refuse`, the offset of the first repeated key in the text, else
-// `max(u64)`. `drops` has a bit per key node of each dropped member, and `dropped` says whether any is set.
+// The repeated keys found. `at` is, under `.Refuse`, the node of the first repeated key read, else `tape.NO_NODE`.
+// `drops` has a bit per key node of each dropped member, and `dropped` says whether any is set.
 @(private)
 Repeats :: struct {
-	at:      u64,
+	at:      tape.Node_Index,
 	drops:   []u64,
 	dropped: bool,
 }
@@ -110,8 +115,9 @@ dups_end :: proc(doc: ^tape.Document, r: ^Repeats, refused: runtime.Allocator_Er
 	err: tape.Error
 	if refused != nil {
 		err = refused
-	} else if r.at != max(u64) {
-		err = tape.Fault{at = r.at, rules = rules, kind = .Duplicate_Key}
+	} else if r.at != tape.NO_NODE {
+		head, _ := doc.format.bounds(doc.src, doc.nodes[r.at])
+		err = tape.Fault{at = doc.nodes[r.at].lo - u64(head), rules = rules, kind = .Duplicate_Key}
 	}
 	if err != nil {
 		tape.destroy(doc)
@@ -152,8 +158,7 @@ repeats_in :: proc(doc: ^tape.Document, keys: []Hashed_Key, dups: tape.Duplicate
 				}
 				switch dups {
 				case .Refuse:
-					head, _ := doc.format.bounds(doc.src, doc.nodes[later.node])
-					r.at = min(r.at, doc.nodes[later.node].lo - u64(head))
+					r.at = min(r.at, later.node)
 				case .First:
 					drop_mark(doc, r, later.node) or_return
 				case .Last:
@@ -213,7 +218,7 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 		delete(j.keys, allocator)
 		delete(j.ranges, allocator)
 	}
-	r := Repeats{at = max(u64)}
+	r := Repeats{at = tape.NO_NODE}
 	defer delete(r.drops, allocator)
 	if j.parts, err = make([]Dups_Part, len(segs), allocator); err != nil {
 		return dups_end(doc, &r, err, rules)
@@ -226,7 +231,7 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 	// Each part's `keys` gets the crossing members it reads, and `scratch` the members of the one object it judges at a
 	// time.
 	for &p in j.parts {
-		p.r = {at = max(u64), drops = r.drops}
+		p.r = {at = tape.NO_NODE, drops = r.drops}
 		p.keys.allocator = allocator
 		p.scratch.allocator = allocator
 	}
@@ -257,7 +262,7 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 				from, to := dups_range(p.keys[:p.crossing], j.ranges[:], i)
 				at += to - from
 			}
-			g.r = {at = max(u64), drops = r.drops}
+			g.r = {at = tape.NO_NODE, drops = r.drops}
 		}
 		hook.fan_each(runner, len(j.ranges), dups_ranges, &j)
 		for g in j.ranges {

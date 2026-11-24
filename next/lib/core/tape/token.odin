@@ -138,6 +138,9 @@ Tolerance :: enum u8 {
 	Ragged,
 	// A quote inside a cell that no quote opens, in a format that quotes whole cells. It reads as the byte it is.
 	Bare_Quote,
+	// A markup reference to an entity whose text was not read: an external entity, or an undeclared one in a text whose
+	// declarations were not read whole. It reads as its own text, `&name;`.
+	Unread_Entity,
 }
 
 Tolerances :: bit_set[Tolerance; u8]
@@ -220,6 +223,30 @@ number_scan :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED, $HEX_R
 number_respell :: proc "contextless" (src: []u8, lo, hi: u64) -> u16 {
 	_, spelling, _ := number_scan(raw_data(src)[lo:], raw_data(src)[hi:], true, false)
 	return u16(spelling)
+}
+
+// The token of the text of `n` bytes at `lo` of `base`, which needs no decode, as a format's option to infer its kind
+// reads an untyped text, a delimited cell or a markup element's text: `true` and `false` are those kinds, an RFC 8259
+// number is a `Number` with its digit counts as JSON's walk spells them, and any other text is a `String`. The first
+// byte selects the check, so a text needs one load.
+infer_token :: #force_inline proc "contextless" (base: [^]u8, lo: u64, n: u32) -> Token {
+	t := Token{lo, n, .String, .Value, 0}
+	switch base[lo] {
+	case 't':
+		if n == 4 && string(base[lo:][:4]) == "true" {
+			t.kind = .True
+		}
+	case 'f':
+		if n == 5 && string(base[lo:][:5]) == "false" {
+			t.kind = .False
+		}
+	case '-', '0' ..= '9':
+		end := base[lo + u64(n):]
+		if q, spelling, kind := number_scan(base[lo:], end, true, false); kind == .None && q == end {
+			t.kind, t.spelling = .Number, u16(spelling)
+		}
+	}
+	return t
 }
 
 // The fault of a number whose fraction or exponent has no digit at `q`: `Truncated` at `end` when the text ends there.

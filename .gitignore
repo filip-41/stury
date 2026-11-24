@@ -25,6 +25,7 @@ __pycache__/
 !/core/rules/tables/*.bin
 !/core/spell/entities/*.bin
 !/next/lib/base/regex/tables/*.bin
+!/next/lib/base/spell/entities/*.bin
 *.dmp
 
 # Editor and OS droppings
