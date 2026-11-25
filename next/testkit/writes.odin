@@ -79,6 +79,8 @@ agree_value :: proc(t: ^testing.T, x: ^tape.Document, a: tape.Node_Index, y: ^ta
 	for k := 0; ; k += 1 {
 		ka, va, pa := tape.next_child(r, &c, .Group)
 		kb, vb, pb := tape.next_child(s, &d, .Group)
+		named, keyed := member_key(x, c, ka)
+		other, _ := member_key(y, d, kb)
 		if pa != pb {
 			return fail(t, path, name, fmt.tprintf("child %d is %v, read back %v", k, pa, pb), loc)
 		}
@@ -86,11 +88,11 @@ agree_value :: proc(t: ^testing.T, x: ^tape.Document, a: tape.Node_Index, y: ^ta
 			return true
 		}
 		resize(&path.buf, at)
-		if ka != tape.NO_NODE {
-			if scalar_text(x, ka) != scalar_text(y, kb) {
-				return fail(t, path, name, fmt.tprintf("key %q, read back %q", scalar_text(x, ka), scalar_text(y, kb)), loc)
+		if keyed {
+			if token_text(x, named) != token_text(y, other) {
+				return fail(t, path, name, fmt.tprintf("key %q, read back %q", token_text(x, named), token_text(y, other)), loc)
 			}
-			fmt.sbprintf(path, ".%s", scalar_text(x, ka))
+			fmt.sbprintf(path, ".%s", token_text(x, named))
 		} else {
 			fmt.sbprintf(path, "[%d]", k)
 		}
@@ -102,14 +104,30 @@ agree_value :: proc(t: ^testing.T, x: ^tape.Document, a: tape.Node_Index, y: ^ta
 
 // The text of scalar node `at`, its decode or its bytes.
 scalar_text :: proc(doc: ^tape.Document, at: tape.Node_Index) -> string {
-	room := tape.text_room(doc, at)
+	return token_text(doc, doc.nodes[at])
+}
+
+// The text of scalar token `t` of `doc`, its decode or its bytes.
+token_text :: proc(doc: ^tape.Document, t: tape.Token) -> string {
+	room := tape.text_room(doc, t)
 	if room == 0 {
-		t := doc.nodes[at]
 		return string(tape.span_bytes(doc, t.lo, t.n))
 	}
 	buf := make([]u8, room, context.temp_allocator)
-	s, _ := tape.node_text(doc, at, buf)
+	s, _ := tape.node_text(doc, t, buf)
 	return s
+}
+
+// The key of the member `next_child` last gave from `c` with `key`: a node's, or a table row's cell's, which has no
+// node. False for an element.
+member_key :: proc(doc: ^tape.Document, c: tape.Children, key: tape.Node_Index) -> (tape.Token, bool) {
+	if key != tape.NO_NODE {
+		return doc.nodes[key], true
+	}
+	if c.keys_n != 0 {
+		return tape.cell_key({doc, nil}, c), true
+	}
+	return {}, false
 }
 
 // The facts of kinds `kinds` on node `at`, as their kinds and bodies.

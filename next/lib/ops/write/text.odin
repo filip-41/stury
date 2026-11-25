@@ -28,6 +28,19 @@ text_of :: proc(w: ^Tree, at: tape.Node_Index) -> (s: string, ok: bool) #no_boun
 	return tape.node_text(doc, at, w.scratch)
 }
 
+// The text of scalar token `t`, a key of a table's header, which is no node: as `text_of` gives a node's.
+text_of_token :: proc(w: ^Tree, t: tape.Token) -> (s: string, ok: bool) #no_bounds_check {
+	doc := w.doc
+	room := tape.text_room(doc, t)
+	if room == 0 {
+		return string(tape.span_bytes(doc, t.lo, t.n)), true
+	}
+	if len(w.scratch) < room && !scratch_grow(w, room) {
+		return "", false
+	}
+	return tape.node_text(doc, t, w.scratch)
+}
+
 // The base64 of the payload of byte string node `at`, as the readers spell a byte string key, in a buffer from the walk's
 // allocator that the caller frees. False with `w.err` set when the scratch or the buffer cannot grow.
 bytes_base64 :: proc(w: ^Tree, at: tape.Node_Index) -> (s: string, ok: bool) {

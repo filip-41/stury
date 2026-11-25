@@ -80,7 +80,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 			build.part_cut_short(p)
 		}
 	}
-	return build.parts_build(src, &FORMATS[S], &RULES, plan.parts[:], opts, 0, 0, allocator, caller, walk, nil, &plan)
+	return build.parts_build(src, &FORMATS[S], &RULES, plan.parts[:], opts, 0, allocator, caller, walk, nil, &plan)
 }
 
 // Walks part `k` of `plan`, the bytes of `src` from `from` to `to`, for builder `h` with its registers `regs`, and

@@ -113,9 +113,10 @@ SPECIAL_MAX :: 6
 // The keys a table's records are written under.
 @(private)
 Header :: struct {
-	node:  tape.Node_Index, // a table's header array, the first object of an array of objects, `NO_NODE` for none
+	node:  tape.Node_Index, // a table with a header, the first object of an array of objects, `NO_NODE` for none
 	width: int, // its keys, or the first array's cells
-	delimited: bool, // a delimited table's header, whose keys are its elements and whose rows name cells by place
+	delimited: bool, // a delimited table's header, whose keys are `keys` and whose rows name cells by place
+	keys: []tape.Node, // of a table with a header, which `tape.table_keys` gives, no nodes of the document
 	scalars: bool, // the records are scalars, a cell each
 }
 
@@ -183,18 +184,12 @@ table_header :: proc(t: ^Table_Write, root: tape.Node_Index, single: bool) -> (h
 		}
 		return {node = tape.NO_NODE, width = 1, scalars = true}, false, true
 	}
-	if doc.ext != nil {
-		if ext, tabular := &doc.ext.format.(tape.Tabular_Ext); tabular {
-			for tb in ext.tables {
-				if tb.node == root {
-					h.delimited = true
-					if tb.header != 0 {
-						h.node, h.width = tb.header, int(doc.nodes[tb.header].n) - 1
-					}
-					return h, tb.header != 0, true
-				}
-			}
+	if keys, table := tape.table_keys(doc, root); table {
+		h.delimited = true
+		if len(keys) > 0 {
+			h.node, h.width, h.keys = root, len(keys), keys
 		}
+		return h, len(keys) > 0, true
 	}
 	if doc.nodes[root].n == 1 {
 		return h, !t.d.no_header, true
@@ -215,15 +210,7 @@ table_header :: proc(t: ^Table_Write, root: tape.Node_Index, single: bool) -> (h
 header_columns :: proc(t: ^Table_Write, h: ^Header, root: tape.Node_Index, single, sort_keys: bool) -> bool {
 	w := t.w
 	err: runtime.Allocator_Error
-	if h.delimited {
-		if t.keys_at, err = make([dynamic]tape.Node_Index, h.width, w.allocator); err != nil {
-			w.err = err
-			return false
-		}
-		for j in 0 ..< h.width {
-			t.keys_at[j] = h.node + 1 + tape.Node_Index(j)
-		}
-	} else if !key_union(t, h, root, single) {
+	if !h.delimited && !key_union(t, h, root, single) {
 		return false
 	}
 	if !sort_keys {
@@ -245,7 +232,7 @@ header_columns :: proc(t: ^Table_Write, h: ^Header, root: tape.Node_Index, singl
 		delete(named, w.allocator)
 	}
 	for &n, j in named {
-		s, ok := text_of(w, t.keys_at[j])
+		s, ok := column_text(t, h^, j)
 		if !ok {
 			return false
 		}
@@ -337,6 +324,15 @@ same_key :: #force_inline proc "contextless" (doc: ^tape.Document, a, b: tape.No
 	return x.n == y.n && (x.spelling | y.spelling) & tape.SPELLING_DECODE == 0 && x.kind <= .Plain && y.kind <= .Plain && .Held not_in doc.flags && string(doc.src[x.lo:][:x.n]) == string(doc.src[y.lo:][:y.n])
 }
 
+// The text of the key of column `j` of header `h`.
+@(private)
+column_text :: proc(t: ^Table_Write, h: Header, j: int) -> (string, bool) {
+	if h.delimited {
+		return text_of_token(t.w, h.keys[j])
+	}
+	return text_of(t.w, t.keys_at[j])
+}
+
 // The column written `k`th.
 @(private)
 column :: #force_inline proc(t: ^Table_Write, k: int) -> int {
@@ -357,19 +353,14 @@ table_header_line :: proc(t: ^Table_Write, h: Header) -> bool {
 	written := 0
 	for c in 0 ..< h.width {
 		j := column(t, c)
-		at := t.keys_at[j]
-		if h.delimited && tape.column_dropped(doc, h.node, j, h.width) {
+		if h.delimited && tape.column_dropped(doc, h.keys, j, h.width) {
 			continue
 		}
 		if written > 0 {
 			put_byte(t.out, t.d.delimiter)
 		}
-		if doc.nodes[at].kind > .Plain {
-			w.err = Refused{at, .No_Spelling}
-			return false
-		}
-		s, ok := text_of(w, at)
-		if !ok || !put_cell(t, at, s, written, false) {
+		s, ok := column_text(t, h, j)
+		if !ok || !put_cell(t, h.node if h.delimited else t.keys_at[j], s, written, false) {
 			return false
 		}
 		written += 1
@@ -387,7 +378,7 @@ kept_cells :: proc(t: ^Table_Write, h: Header, cells: int) -> (n: int) {
 		return cells
 	}
 	for j in 0 ..< cells {
-		n += int(!tape.column_dropped(t.w.doc, h.node, j, cells))
+		n += int(!tape.column_dropped(t.w.doc, h.keys, j, cells))
 	}
 	return
 }
@@ -432,7 +423,7 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 			if t.order != nil && count == h.width {
 				j = t.order[c]
 			}
-			if h.delimited && h.node != tape.NO_NODE && tape.column_dropped(doc, h.node, j, count) {
+			if h.delimited && h.node != tape.NO_NODE && tape.column_dropped(doc, h.keys, j, count) {
 				continue
 			}
 			if written > 0 {

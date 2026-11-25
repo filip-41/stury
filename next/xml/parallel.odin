@@ -157,7 +157,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 		build.segments_dups(doc, segs, opts.dups, &RULES, opts.runner) or_return
 		return keep_scopes(doc, true)
 	}
-	return build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 0, 0, allocator, caller, walk, finish, &plan)
+	return build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 0, allocator, caller, walk, finish, &plan)
 }
 
 // The seam after byte `from` of `src` when `from` lies in content: the byte past the first `</` and the `>` after it,

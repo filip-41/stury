@@ -174,7 +174,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 			build.part_cut_short(p)
 		}
 	}
-	return build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 1, 0, allocator, caller, walk, nil, nil)
+	return build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 1, allocator, caller, walk, nil, nil)
 }
 
 // Cuts `src` from `start` into `len(chunks)` chunks of about equal size. A chunk never starts at a byte that follows a

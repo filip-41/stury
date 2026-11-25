@@ -232,7 +232,7 @@ builder_hook_kept :: #force_inline proc "contextless" (h: ^Builder, s: hook.Regs
 }
 
 // `builder_hook_facts` for a table, whose walk gives each cell its column's key: it stores no key, as a table's rows
-// name their cells by place through a header the format stores with `builder_append`.
+// name their cells by place through a header the format keeps in its `Tabular_Ext`.
 builder_hook_rows :: #force_inline proc "contextless" (h: ^Rows_Builder, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	if t.role > .Key {
 		return s, builder_fact(&h.builder, s, t)
@@ -241,33 +241,6 @@ builder_hook_rows :: #force_inline proc "contextless" (h: ^Rows_Builder, s: hook
 		return s, .Next
 	}
 	return builder_step(&h.builder, s, t, true, false)
-}
-
-// Stores the container `t` holding `count` scalars past the nodes the walk stored, in no container, for a format whose
-// document keeps a list of nodes beside its root value, as a table's header. Child `c` is `child(of, c)`. It grows the
-// room for them and returns false once the room cannot grow.
-@(cold)
-builder_append :: proc "contextless" (h: ^Builder, s: ^hook.Regs, t: tape.Token, of: []tape.Token, count: int, $child: proc "contextless" (of: []tape.Token, c: int) -> tape.Token) -> bool #no_bounds_check {
-	for k in 0 ..= count {
-		if s.a == h.end {
-			ok: bool
-			if s^, ok = builder_grow(h, s^, t.lo); !ok {
-				return false
-			}
-		}
-		node := t if k == 0 else child(of, k - 1)
-		if k == 0 {
-			count := u32(count)
-			node.n = count + 1
-			node.spelling = t.spelling & tape.CONTAINER_STYLE | u16(min(count, u32(tape.MAX_CHILDREN)))
-			if count >= u32(tape.MAX_CHILDREN) {
-				builder_partial_count(h, builder_cursor(h, s^), count)
-			}
-		}
-		((^tape.Node)(uintptr(s.a)))^ = node
-		s.a += size_of(tape.Node)
-	}
-	return h.err == nil
 }
 
 // `builder_hook_kept` that stores each container opened at level `stubs` as a single unread node, without its tokens.
@@ -633,7 +606,7 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 	}
 	count := int(builder_cursor(h, regs))
 	if e == nil && len(h.doc.facts) > 0 {
-		// A comment past the root value's last node is the root's foot, whatever `builder_append` stored after it.
+		// A comment past the root value's last node is the root's foot.
 		builder_place_facts(&h.doc, int(tape.node_after(&h.doc, tape.ROOT)) if count > 0 else 0)
 	}
 	if e != nil {

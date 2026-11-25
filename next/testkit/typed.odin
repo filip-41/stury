@@ -205,7 +205,8 @@ value_of :: proc(doc: ^tape.Document, at: tape.Node_Index, dups: tape.Duplicates
 			if doc.nodes[at].kind == .Array {
 				append(&list, x)
 			} else {
-				table[text_at(doc, k, allocator)] = x
+				key, _ := member_key(doc, c, k)
+				table[strings.clone(token_text(doc, key), allocator)] = x
 			}
 		}
 		if doc.nodes[at].kind == .Array {

@@ -69,10 +69,9 @@ Part_Walk :: proc(src: []u8, parts: []Part, k: int, s: ^Segment, opts: tape.Opti
 // document and error, or `built` false for a text built on one thread. `finish` settles the joined document from the
 // segments, destroying it on an error, and an `Allocator_Error` from it has the text built on one thread. A nil
 // `finish` settles the repeated keys by `segments_dups`, under `rules`. Under `Budget.steps` the error is at the first
-// container past the budget, `opened` bytes past its node's `lo`, unless a part's error comes before it. The joined
-// document's block of nodes holds `tail` nodes more past its nodes, for `finish` to store. Every block comes from
+// container past the budget, `opened` bytes past its node's `lo`, unless a part's error comes before it. Every block comes from
 // `allocator`, and the document is left with `caller`, the allocator the read was called with.
-parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: []Part, opts: tape.Options, opened: u64, tail: int, allocator, caller: runtime.Allocator, walk: Part_Walk, finish: proc(doc: ^tape.Document, segs: []Segment, opts: tape.Options, data: rawptr) -> tape.Error, data: rawptr) -> (doc: tape.Document, err: tape.Error, built: bool) {
+parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: []Part, opts: tape.Options, opened: u64, allocator, caller: runtime.Allocator, walk: Part_Walk, finish: proc(doc: ^tape.Document, segs: []Segment, opts: tape.Options, data: rawptr) -> tape.Error, data: rawptr) -> (doc: tape.Document, err: tape.Error, built: bool) {
 	segs, serr := make([]Segment, len(parts), allocator)
 	if serr != nil || raw_data(segs) == nil {
 		return {}, nil, false
@@ -100,7 +99,7 @@ parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: 
 		return {}, nil, false
 	}
 	defer delete(frames, allocator)
-	room, rerr := non_zero_make([]tape.Node, total + 1 + scratch + tail, allocator)
+	room, rerr := non_zero_make([]tape.Node, total + 1 + scratch, allocator)
 	if rerr != nil || raw_data(room) == nil {
 		return {}, nil, false
 	}
@@ -178,7 +177,7 @@ parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: 
 		return {}, p.err, true
 	}
 	jerr: runtime.Allocator_Error
-	doc, joined, jerr = segments_join(segs, room, facts, parts[len(parts) - 1].close, tail, opts.runner, allocator)
+	doc, joined, jerr = segments_join(segs, room, facts, parts[len(parts) - 1].close, opts.runner, allocator)
 	if jerr != nil || !joined {
 		return {}, nil, false
 	}

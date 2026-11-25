@@ -8,9 +8,8 @@ import "base:runtime"
 // Nodes and facts over the source bytes of parsed text. Immutable, so threads share it without locks.
 Document :: struct {
 	src:        []u8, // borrowed unless `.Owns_Src`
-	// The root value's subtree starts at 0 and has `nodes[0].n` nodes. A format whose document holds more than the root
-	// value stores it after the subtree, in no container, as a table's header is (see `Tabular_Ext`), so a loop over all
-	// of `nodes` is no walk of the root's subtree.
+	// The root value's preorder: its subtree starts at 0 and has `nodes[0].n` nodes, and no node lies past it, so a loop
+	// over `nodes` walks the root. What a format keeps beside the root value, as a table's header keys, is in `ext`.
 	nodes:      []Node,
 	facts:      []Fact, // sorted by node, then source order
 	counts:     []Child_Count, // sorted by node, only containers whose `spelling` saturated
@@ -163,7 +162,7 @@ ext_lists :: proc "contextless" (b: ^Ext_Block, ext: ^Doc_Ext, held: []Held_Span
 	switch f in format {
 	case Tabular_Ext:
 		placed := f
-		placed.tables, placed.slots = ext_list(b, f.tables), ext_list(b, f.slots)
+		placed.tables, placed.keys, placed.slots = ext_list(b, f.tables), ext_list(b, f.keys), ext_list(b, f.slots)
 		ext.format = placed
 	case Markup_Ext:
 		placed := f
@@ -331,10 +330,13 @@ Markup_Uri :: struct {
 	lo:      u64,
 }
 
-// dsv's tables and their key lookup slots. A table's header is an `Array` of role `Key` stored past the root value's
-// subtree, which no reader reaches from the root: they take the header's keys by its node.
+// The tables of a document and their key lookup slots, which any format whose text is rows of cells under a header
+// fills: CSV and TSV now. A table is an array of rows whose cells carry no keys, and the table's keys, kept here and in
+// no node, name the cells by place. The readers in `navigate` give a row the members of an object with no call into
+// the format.
 Tabular_Ext :: struct {
-	tables:  []Table,
+	tables:  []Table, // sorted by node
+	keys:    []Node, // the keys of every table's header, a table's at `Table.keys_lo`
 	slots:   []u32,
 	// The policy the build took a header's repeated keys by, which says which cells of a repeated name a row keeps.
 	dups:    Duplicates,
@@ -342,13 +344,14 @@ Tabular_Ext :: struct {
 	options: Dsv_Options,
 }
 
-// An array whose elements are rows, each an object of scalar cells and no keys, which the header's keys name by
-// place: cell `j` of a row is the member whose key is the header's element `j`, and a row of fewer cells lacks the
-// members past them. The header, when there is one, is an array of keys in no container: a build stores it past the
-// root value's nodes. Tables are sorted by node, and an object inside a table's node is one of its rows.
+// An array whose elements are rows, each an object of scalar cells and no keys, which the table's keys name by
+// place: cell `j` of a row is the member whose key is key `j`, and a row of fewer cells lacks the members past them. A
+// table with no keys, `keys_n` 0, has rows no readers name: they read as arrays. Tables are sorted by node, and an
+// object inside a table's node is one of its rows.
 Table :: struct {
 	node:        Node_Index,
-	header:      Node_Index, // the keys' `Array` node, 0 for none
+	keys_lo:     u32, // the keys are `Tabular_Ext.keys[keys_lo:][:keys_n]`
+	keys_n:      u32,
 	first_row:   Node_Index, // row `k` is at `first_row + k * (width + 1)`
 	width:       u32, // 0 for ragged rows
 	// This table's key slots, `Tabular_Ext.slots[slots_lo:][:slots_len]`, a power of two of them or none: a key's

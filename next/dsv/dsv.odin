@@ -240,8 +240,8 @@ build_walk :: #force_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Options,
 			delete(head.keys, a)
 		}
 		root_close, err, tolerated := walk_text(src, S, LAX, p, build.rows_of(h), regs, a, ctx, build.builder_hook_rows, &head, opts.budget.steps)
-		if err == nil && len(head.keys) > 0 && !append_header(h, regs, head) {
-			err = build.builder_error(h)
+		if err == nil && len(head.keys) > 0 {
+			err = store_header(h, a, head)
 		}
 		return root_close, repeat_first(err, src, S, p, head.keys, opts, a), tolerated
 	}

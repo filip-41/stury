@@ -31,10 +31,14 @@ cell_at :: proc(doc: ^dsv.Document, rec, cell: int) -> dsv.Node_Index {
 
 // The text of `at` in `doc`: the decoded text of a string, and the bytes of any other scalar as written.
 text_of :: proc(doc: ^dsv.Document, at: dsv.Node_Index) -> (text: string, ok: bool) {
-	n := doc.nodes[at]
+	return token_text_of(doc, doc.nodes[at])
+}
+
+// The text of scalar token `n` of `doc`, a node's or a table's key, which has no node.
+token_text_of :: proc(doc: ^dsv.Document, n: tape.Token) -> (text: string, ok: bool) {
 	if n.kind == .String {
 		buf := make([]u8, 256, context.temp_allocator)
-		return dsv.node_text(doc, at, buf)
+		return dsv.node_text(doc, n, buf)
 	}
 	return string(dsv.span_bytes(doc, n.lo, n.n)), true
 }
@@ -182,14 +186,15 @@ header_cells_read_as_keys :: proc(t: ^testing.T) {
 		r := dsv.Reader{doc = &doc}
 		row, _ := dsv.element(r, dsv.ROOT, 0)
 		kids, _, _ := dsv.children(r, row, context.temp_allocator)
-		key, value: dsv.Node_Index
+		key: tape.Token
+		value: dsv.Node_Index
 		for k := 0; k <= c.key; k += 1 {
-			key, value, _ = dsv.next_child(r, &kids)
+			_, value, _ = dsv.next_child(r, &kids)
+			key = tape.cell_key(r, kids)
 		}
-		text, ok := text_of(&doc, key)
-		_, is_number := dsv.node_number(&doc, key)
+		text, ok := token_text_of(&doc, key)
 		testing.expectf(t, ok && text == c.text, "%q: key text %q, want %q", c.src, text, c.text)
-		testing.expectf(t, doc.nodes[key].role == .Key && doc.nodes[key].kind == .String && !is_number, "%q: key %v", c.src, doc.nodes[key])
+		testing.expectf(t, key.role == .Key && key.kind == .String, "%q: key %v", c.src, key)
 		found, p := dsv.member(r, row, c.text, .First)
 		testing.expectf(t, p == .Found && found == value, "%q: member %q is %v %v, want %v", c.src, c.text, found, p, value)
 	}
@@ -277,11 +282,11 @@ members_find_every_generated_key :: proc(t: ^testing.T) {
 			}
 			kids, _, _ := dsv.children(r, row, context.temp_allocator)
 			for {
-				key, value, q := dsv.next_child(r, &kids)
+				_, value, q := dsv.next_child(r, &kids)
 				if q == .Missing {
 					break
 				}
-				name, _ := text_of(&doc, key)
+				name, _ := token_text_of(&doc, tape.cell_key(r, kids))
 				found, fp := dsv.member(r, row, name)
 				testing.expectf(t, fp == .Found && found == value, "%q: member %q is %v %v, listed as %v", src, name, found, fp, value)
 			}

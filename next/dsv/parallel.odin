@@ -16,7 +16,7 @@ import "stury:lib/ops/build"
 // A walk from a seam starts inside the root's array between two records, with no comment line held, and is given the
 // width of the first record, as a single walk is at that point. The text between two seams is walked into a segment of
 // its own. The segments are joined (`build.parts_build`) into the document a single walk builds, and the header is
-// stored past the root as a single walk stores it.
+// stored in its table as a single walk stores it.
 //
 // A reading agrees with the pass over any text the pass accepts, so the first part in text order whose walk faults
 // gives the fault a single walk gives. A part whose walk ends other than between two records, or a text with no seam
@@ -74,7 +74,6 @@ Part_Data :: struct {
 	keys:   []tape.Token,
 	blank:  []tape.Token,
 	widest: []int,
-	most:   int, // the most nodes the build may store, header included
 }
 
 // The containers open at a seam: the root's array.
@@ -139,7 +138,6 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 	}
 	defer delete(widest, allocator)
 	data := Part_Data{p = p, width = head.cells, keys = keys[:count], blank = keys[count:], widest = widest}
-	data.most = build.node_most(node_bound(src, 0), opts)
 	walk :: proc(src: []u8, parts: []build.Part, k: int, s: ^build.Segment, opts: Options, data: rawptr) {
 		d := (^Part_Data)(data)
 		p := &parts[k]
@@ -158,19 +156,16 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 			for w in d.widest {
 				wide = max(wide, w)
 			}
-			wide = max(wide, len(d.keys))
-			// A single build stores the header in the room the rows leave within `Budget.nodes`.
-			if len(doc.nodes) + 1 + wide > d.most {
+			ext, err := table_ext(doc.allocator, d.keys, max(wide, len(d.keys)))
+			if err != nil {
 				tape.destroy(doc)
-				return runtime.Allocator_Error.Out_Of_Memory
+				return err
 			}
-			if e := append_keys(doc, d.keys, wide, 1 + len(d.keys)); e != nil {
-				return e
-			}
+			doc.ext = ext
 		}
-		return finish_table(doc, headed(doc), opts)
+		return finish_table(doc, opts)
 	}
-	doc, err, built = build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 0, 1 + count, allocator, caller, walk, finish, &data)
+	doc, err, built = build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 0, allocator, caller, walk, finish, &data)
 	err = repeat_first(err, src, S, p, data.keys, opts, allocator)
 	return
 }

@@ -352,9 +352,7 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 		head: Head
 		root_close, err, tolerated := piece_read(src, S, opts, build.rows_of(h), regs, ctx, build.builder_hook_rows, &head)
 		if err == nil && !opts.pieces.more && len(head.keys) > 0 {
-			if !append_header(h, regs, head) {
-				err = build.builder_error(h)
-			}
+			err = store_header(h, a, head)
 		}
 		if s := (^Piece)(opts.pieces.state); err != nil && s != nil && len(s.head) > 0 {
 			head_end := int(s.head_lo) + len(s.head)
@@ -378,11 +376,14 @@ table_so_far :: proc(doc: ^tape.Document, opts: Options, rules: ^tape.Rules) -> 
 		return nil
 	}
 	if s.headed && len(s.keys) > 0 {
-		if e := append_keys(doc, s.keys[:], max(s.widest, len(s.keys)), 0); e != nil {
-			return e
+		ext, err := table_ext(doc.allocator, s.keys[:], max(s.widest, len(s.keys)))
+		if err != nil {
+			tape.destroy(doc)
+			return err
 		}
+		doc.ext = ext
 	}
-	return finish_table(doc, headed(doc), opts, true)
+	return finish_table(doc, opts, true)
 }
 
 @(private)

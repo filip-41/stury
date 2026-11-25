@@ -486,7 +486,7 @@ rows_fact_value_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows
 	}
 	s := write.value_step(w, at, key, r.top, r.after != 2)
 	l.line_value, l.wrote = r.after == 2, r.top > 0 || r.after != 0
-	if !step_value(out, w, l, s, T, true, PRETTY) {
+	if !step_value(out, w, l, s, T, true, false, PRETTY) {
 		return i, false
 	}
 	if t.kind < .Array {

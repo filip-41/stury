@@ -1,13 +1,12 @@
 package dsv
 
 import "base:runtime"
-import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
 // Table build of a delimited text. The walk gives each cell its column's key, which the builder's table hook drops.
-// The header is stored once past the root value's nodes, widened by a key for each column a ragged record names by its
-// position. The table, its key slots and the build's policy for repeated keys are the document's `Tabular_Ext`.
+// The header is stored once in the document's `Tabular_Ext`, widened by a key for each column a ragged record names by
+// its position, with the table, its key slots and the build's policy for repeated keys.
 
 // The node capacity a build starts with, in bytes of text per node. A cell of one byte and its delimiter take a node per
 // two bytes, so a table of short cells seldom grows the room it starts with, and `builder_end` gives back the room a
@@ -21,89 +20,73 @@ BUILD_BYTES_PER_NODE :: 2
 @(private)
 SLOTTED_KEYS :: 8
 
-// Stores the header past the root value's nodes: an `Array` of role `Key` of its keys, and one key more for each
-// column a record past the header's width names by its position. False when the room cannot grow.
+// The `Doc_Ext` of a table in one block: its table, the `wide` keys of its header, which are `keys` widened by a key
+// named by its place for each column past them, and room for the key slots, which `finish_table` fills. A refused
+// allocation is the error.
 @(private, cold)
-append_header :: proc(b: ^build.Builder, regs: ^hook.Regs, head: Head) -> bool {
-	t := tape.Token{lo = head.keys[0].lo, kind = .Array, role = .Key}
-	return build.builder_append(b, regs, t, head.keys, max(head.widest, len(head.keys)), column_key)
+table_ext :: proc(allocator: runtime.Allocator, keys: []tape.Token, wide: int) -> (ext: ^tape.Doc_Ext, err: runtime.Allocator_Error) {
+	slots_len := slots_for(wide) if wide >= SLOTTED_KEYS else 0
+	table_at := size_of(tape.Doc_Ext) + wide * size_of(tape.Node)
+	slots_at := table_at + size_of(tape.Table)
+	size := slots_at + slots_len * size_of(u32)
+	raw, aerr := runtime.mem_alloc(size, align_of(tape.Doc_Ext), allocator)
+	if err = build.took(aerr, raw_data(raw), size); err != nil {
+		return
+	}
+	ext = (^tape.Doc_Ext)(raw_data(raw))
+	list := ([^]tape.Node)(raw_data(raw[size_of(tape.Doc_Ext):]))[:wide]
+	for c in 0 ..< wide {
+		list[c] = column_key(keys, c)
+	}
+	table := (^tape.Table)(raw_data(raw[table_at:]))
+	table^ = {keys_n = u32(wide), slots_len = u32(slots_len)}
+	ext.format = tape.Tabular_Ext{tables = ([^]tape.Table)(table)[:1], keys = list, slots = ([^]u32)(raw_data(raw[slots_at:]))[:slots_len]}
+	return
 }
 
-// Stores the header past the root value's nodes of the settled document `doc`, as `append_header` stores it in a build:
-// an `Array` of role `Key` of `keys`, widened to `wide` keys by one for each column past them, named by its place. The
-// header is written in place when the block of `doc.nodes` has `room` nodes more past them and the header fits in
-// them, else the nodes move to a new block. On a refused allocation `doc` is destroyed.
+// Gives the build `h` the table of the header of `head`, which `finish_built` completes.
 @(private, cold)
-append_keys :: proc(doc: ^tape.Document, keys: []tape.Token, wide, room: int) -> tape.Error {
-	at := len(doc.nodes)
-	nodes := ([^]tape.Node)(raw_data(doc.nodes))[:at + 1 + wide]
-	if 1 + wide > room {
-		err: runtime.Allocator_Error
-		nodes, err = make([]tape.Node, at + 1 + wide, doc.allocator)
-		if e := build.took(err, raw_data(nodes), len(nodes)); e != nil {
-			tape.destroy(doc)
-			return e
-		}
-		copy(nodes, doc.nodes)
-		delete(doc.nodes, doc.allocator)
+store_header :: proc(h: ^build.Builder, allocator: runtime.Allocator, head: Head) -> tape.Error {
+	ext, err := table_ext(allocator, head.keys, max(head.widest, len(head.keys)))
+	if err != nil {
+		return err
 	}
-	doc.nodes = nodes
-	nodes[at] = {lo = keys[0].lo, n = u32(wide + 1), kind = .Array, role = .Key, spelling = u16(min(wide, int(tape.MAX_CHILDREN)))}
-	for c in 0 ..< wide {
-		nodes[at + 1 + c] = column_key(keys, c)
-	}
-	if wide >= int(tape.MAX_CHILDREN) {
-		counts, cerr := make([]tape.Child_Count, len(doc.counts) + 1, doc.allocator)
-		if e := build.took(cerr, raw_data(counts), len(counts)); e != nil {
-			tape.destroy(doc)
-			return e
-		}
-		copy(counts, doc.counts)
-		counts[len(doc.counts)] = {tape.Node_Index(at), u32(wide)}
-		delete(doc.counts, doc.allocator)
-		doc.counts = counts
-	}
+	h.doc.ext = ext
 	return nil
 }
 
-// Writes the document's table: its header, first row, width and key slots, the options it was read with, and the
-// policy `dups` by which its rows read repeated keys. `.Refuse` refuses at the first key the header repeats, and a key named by its place repeats none. A text
-// read with `.Ragged` has no common width, and a text with no record has no row. With `cut` the last row may be one
-// read only in part, and a last row of another width than the header's, or the first row's with no header, leaves the
-// table no common width.
+// Completes the document's table, which a build gave its header with `store_header`: its first row, width and key
+// slots, the options it was read with, and the policy `dups` by which its rows read repeated keys. `.Refuse` refuses
+// at the first key the header repeats, and a key named by its place repeats none. A text read with `.Ragged` has no
+// common width, and a text with no record has no row. With `cut` the last row may be one read only in part, and a
+// last row of another width than the header's, or the first row's with no header, leaves the table no common width.
 @(private)
-finish_table :: proc(doc: ^tape.Document, headed: bool, opts: Options, cut := false) -> tape.Error {
+finish_table :: proc(doc: ^tape.Document, opts: Options, cut := false) -> tape.Error {
 	dups := opts.dups
-	header := tape.Node_Index(0)
-	keys: []tape.Node
-	if headed {
-		header = tape.node_after(doc, tape.ROOT)
-		keys = doc.nodes[header + 1:][:doc.nodes[header].n - 1]
+	if doc.ext == nil {
+		ext, err := table_ext(doc.allocator, nil, 0)
+		if err != nil {
+			tape.destroy(doc)
+			return err
+		}
+		doc.ext = ext
 	}
+	ext := &doc.ext.format.(tape.Tabular_Ext)
+	table := &ext.tables[0]
+	keys := ext.keys
 	rows := int(doc.nodes[0].n) - 1
-	slots_len := slots_for(len(keys)) if len(keys) >= SLOTTED_KEYS else 0
-	size := size_of(tape.Doc_Ext) + size_of(tape.Table) + slots_len * size_of(u32)
-	raw, err := runtime.mem_alloc(size, align_of(tape.Doc_Ext), doc.allocator)
-	if e := build.took(err, raw_data(raw), size); e != nil {
-		tape.destroy(doc)
-		return e
-	}
-	ext := (^tape.Doc_Ext)(raw_data(raw))
-	table := (^tape.Table)(raw_data(raw[size_of(tape.Doc_Ext):]))
-	slots := ([^]u32)(raw_data(raw[size_of(tape.Doc_Ext) + size_of(tape.Table):]))[:slots_len]
-	table^ = {header = header, first_row = 1 if rows > 0 else tape.Node_Index(len(doc.nodes)), slots_lo = 0, slots_len = u32(slots_len)}
+	table.first_row = 1
 	if .Ragged not_in opts.tolerate && rows > 0 {
-		table.width = u32(len(keys)) if headed else doc.nodes[1].n - 1
+		table.width = u32(len(keys)) if len(keys) > 0 else doc.nodes[1].n - 1
 		if cut && doc.nodes[last_row(doc)].n - 1 != table.width {
 			table.width = 0
 		}
 	}
-	repeat := fill_slots(doc, keys, slots)
-	table.unique_keys = b32(headed && repeat < 0)
+	repeat := fill_slots(doc, keys, ext.slots)
+	table.unique_keys = b32(len(keys) > 0 && repeat < 0)
 	d, _ := opts.format.(tape.Dsv_Options)
 	d.delimiter = spec_delimiter(spec_of(doc.format), d.delimiter)
-	ext.format = tape.Tabular_Ext{tables = ([^]tape.Table)(table)[:1], slots = slots, dups = dups, options = d}
-	doc.ext = ext
+	ext.dups, ext.options = dups, d
 	if dups == .Refuse && repeat >= 0 && keys[repeat].spelling & tape.SPELLING_PLACED == 0 {
 		at := key_start(doc.src, keys[repeat])
 		tape.destroy(doc)
@@ -206,16 +189,10 @@ key_start :: proc "contextless" (src: []u8, k: tape.Token) -> u64 {
 	return k.lo - u64(head)
 }
 
-// Whether a built document holds a header, which a build stores past the root value's nodes.
-@(private)
-headed :: #force_inline proc "contextless" (doc: ^tape.Document) -> bool {
-	return len(doc.nodes) > int(doc.nodes[0].n)
-}
-
-// The `finish` of a build of a table: its header, when it has one, and its slots.
+// The `finish` of a build of a table: its first row, width and slots.
 @(private)
 finish_built :: proc(doc: ^tape.Document, opts: Options, rules: ^tape.Rules) -> tape.Error {
-	return finish_table(doc, headed(doc), opts)
+	return finish_table(doc, opts)
 }
 
 // The node of the root's last row.

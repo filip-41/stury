@@ -47,7 +47,7 @@ layout_sizes :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	testing.expect_value(t, size_of(tape.Token), 16)
 	testing.expect_value(t, size_of(tape.Fact), 24)
-	testing.expect_value(t, size_of(tape.Table), 28)
+	testing.expect_value(t, size_of(tape.Table), 32)
 	when size_of(uintptr) == 8 {
 		testing.expect_value(t, size_of(tape.Document), 120)
 	}

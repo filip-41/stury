@@ -32,7 +32,8 @@ row_reads :: proc(doc: ^tape.Document, row: tape.Node_Index, names: []string, du
 		if p != .Found {
 			break
 		}
-		k, _ := tape.node_text(doc, key, buf[:])
+		named, _ := testkit.member_key(doc, c, key)
+		k, _ := tape.node_text(doc, named, buf[:])
 		fmt.sbprintf(&b, "%s=", k)
 		v, _ := tape.node_text(doc, value, buf[:])
 		fmt.sbprintf(&b, "%s;", v)

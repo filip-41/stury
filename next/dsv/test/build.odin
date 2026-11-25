@@ -2,13 +2,14 @@ package dsv_tests
 
 import "core:fmt"
 import "core:mem"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "stury:dsv"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// Writes the value at `at` of `doc` through the readers, as JSON: a table's rows as objects whose keys are the header's.
+// Writes the value at `at` of `doc` through the readers, as JSON: a table's rows as objects whose keys are the table's.
 render_value :: proc(b: ^strings.Builder, doc: ^dsv.Document, at: dsv.Node_Index) {
 	r := dsv.Reader{doc = doc}
 	n := doc.nodes[at]
@@ -36,8 +37,8 @@ render_value :: proc(b: ^strings.Builder, doc: ^dsv.Document, at: dsv.Node_Index
 			if !first {
 				strings.write_byte(b, ',')
 			}
-			if key != dsv.NO_NODE {
-				text, _ := dsv.node_text(doc, key, buf[:])
+			if k, keyed := testkit.member_key(doc, c, key); keyed {
+				text, _ := dsv.node_text(doc, k, buf[:])
 				fmt.sbprintf(b, "%q:", text)
 			}
 			render_value(b, doc, value)
@@ -131,10 +132,10 @@ builds_name_cells_of_a_very_wide_header :: proc(t: ^testing.T) {
 	testing.expect_value(t, p, tape.Presence.Missing)
 }
 
-// A build's nodes are the root value's subtree and then the header, in no container. A reader gives rows and cells from
-// the subtree and keys from the header, and never the header's own node.
+// A build's nodes are the root value's subtree alone. A reader gives rows and cells from the subtree and keys from the
+// table's, which are no nodes.
 @(test)
-builds_keep_the_header_past_the_root_subtree :: proc(t: ^testing.T) {
+builds_keep_the_header_in_the_table :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
 	for c in ([]struct {
@@ -153,9 +154,9 @@ builds_keep_the_header_past_the_root_subtree :: proc(t: ^testing.T) {
 			continue
 		}
 		root := dsv.Node_Index(doc.nodes[0].n)
-		testing.expectf(t, root < dsv.Node_Index(len(doc.nodes)), "%q: no header past the root", c.text)
-		header := doc.nodes[root]
-		testing.expectf(t, header.kind == .Array && header.role == .Key && int(root) + int(header.n) == len(doc.nodes), "%q: header %v past a root of %d nodes", c.text, header, root)
+		testing.expectf(t, int(root) == len(doc.nodes), "%q: %d nodes past a root of %d", c.text, len(doc.nodes), root)
+		keys, is_table := tape.table_keys(&doc, dsv.ROOT)
+		testing.expectf(t, is_table && len(keys) > 0 && keys[0].role == .Key, "%q: keys %v", c.text, keys)
 		r := dsv.Reader{doc = &doc}
 		rows, _, _ := dsv.children(r, dsv.ROOT, context.temp_allocator)
 		for {
@@ -170,7 +171,7 @@ builds_keep_the_header_past_the_root_subtree :: proc(t: ^testing.T) {
 				if q == .Missing {
 					break
 				}
-				testing.expectf(t, cell < root && key > root && key < root + dsv.Node_Index(header.n), "%q: cell %d key %d, header at %d", c.text, cell, key, root)
+				testing.expectf(t, cell < root && key == dsv.NO_NODE && slice.contains(keys, tape.cell_key(r, cells)), "%q: cell %d key %d", c.text, cell, key)
 			}
 		}
 	}
@@ -178,6 +179,8 @@ builds_keep_the_header_past_the_root_subtree :: proc(t: ^testing.T) {
 	defer dsv.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, int(doc.nodes[0].n), len(doc.nodes))
+	_, is_table := tape.table_keys(&doc, dsv.ROOT)
+	testing.expect(t, is_table)
 }
 
 // A header that repeats a key gives a row's first or last cell of it by the build's policy, the last at its last place,

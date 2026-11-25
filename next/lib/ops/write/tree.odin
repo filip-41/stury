@@ -29,6 +29,8 @@ Step :: struct {
 	kind:  Step_Kind,
 	// For a value, the first child of its container. For a close, the container had no child.
 	first: bool,
+	// The value is a cell of a table's row, which has no key node: its key is `Tree.cell`.
+	cell:  bool,
 }
 
 // The levels a walk keeps in itself. Past them its stack comes from the write's allocator.
@@ -54,7 +56,8 @@ Frame :: struct {
 @(private)
 Pair :: struct {
 	name:  string,
-	key:   tape.Node_Index,
+	key:   tape.Node_Index, // `NO_NODE` for a table row's cell, whose key is `cell`
+	cell:  tape.Token,
 	value: tape.Node_Index,
 	owned: bool,
 }
@@ -77,6 +80,7 @@ Tree :: struct {
 	reader:    tape.Reader,
 	row:       tape.Children, // the cells of the open row of a table, while `in_row`
 	in_row:    bool,
+	cell:      tape.Token, // the key of the cell of the last step that has `cell`
 	scratch:   []u8, // decoded texts, from `allocator`
 	// Under `sort_keys`, the members of the open objects, each object's above its parent's. The members leave text
 	// order, so a node's facts are found by its index.
@@ -170,7 +174,8 @@ tree_next :: #force_inline proc(w: ^Tree, $FACTS, $TABLES: bool) -> (s: Step) #n
 			if w.in_row {
 				key, value, p := tape.next_child(w.reader, &w.row, .Group)
 				if p == .Found {
-					s.first, s.key = f.children == 0, key
+					w.cell = tape.cell_key(w.reader, w.row)
+					s.first, s.key, s.cell = f.children == 0, key, true
 					f.children += 1
 					return scalar_step(w, s, value, FACTS)
 				}
@@ -196,6 +201,11 @@ tree_next :: #force_inline proc(w: ^Tree, $FACTS, $TABLES: bool) -> (s: Step) #n
 		if f.sorted {
 			p := w.pairs[int(f.pairs_lo) + int(f.children)]
 			s.key, w.i = p.key, p.value
+			when TABLES {
+				if p.key == tape.NO_NODE {
+					w.cell, s.cell = p.cell, true
+				}
+			}
 		} else if f.object {
 			s.key = w.i
 			k := w.nodes[w.i]
@@ -255,13 +265,13 @@ sort_members :: proc(w: ^Tree, f: ^Frame) {
 	if tree_tables(w) {
 		c, p, err = tape.children(w.reader, f.node, w.allocator)
 	}
-	if err == nil && p == .Found && c.header != 0 {
+	if err == nil && p == .Found && c.keys_n != 0 {
 		for err == nil {
 			key, value, q := tape.next_child(w.reader, &c, .Group)
 			if q != .Found {
 				break
 			}
-			_, err = append(&w.pairs, Pair{key = key, value = value})
+			_, err = append(&w.pairs, Pair{key = key, cell = tape.cell_key(w.reader, c), value = value})
 		}
 	} else {
 		for k := f.node + 1; err == nil && k < f.end; {
@@ -276,10 +286,15 @@ sort_members :: proc(w: ^Tree, f: ^Frame) {
 		if err != nil {
 			break
 		}
-		if w.nodes[m.key].kind > .Plain {
+		s: string
+		ok: bool
+		if m.key == tape.NO_NODE {
+			s, ok = text_of_token(w, m.cell)
+		} else if w.nodes[m.key].kind > .Plain {
 			continue
+		} else {
+			s, ok = text_of(w, m.key)
 		}
-		s, ok := text_of(w, m.key)
 		if !ok {
 			return
 		}
@@ -407,7 +422,7 @@ open_row :: proc(w: ^Tree, at: tape.Node_Index) {
 		w.depth = 0
 		return
 	}
-	if p == .Found && c.header != 0 {
+	if p == .Found && c.keys_n != 0 {
 		w.row, w.in_row = c, true
 		return
 	}

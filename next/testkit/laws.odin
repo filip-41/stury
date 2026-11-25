@@ -880,8 +880,8 @@ records_at_policy :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, sr
 				break
 			}
 			step: tape.Step = tape.Index(place)
-			if key != tape.NO_NODE {
-				text := scalar_text(doc, key)
+			if named, keyed := member_key(doc, c, key); keyed {
+				text := token_text(doc, named)
 				if slice.contains(seen[:], text) {
 					continue
 				}
@@ -957,12 +957,13 @@ records_at_policy :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, sr
 				if vp != .Found || w.done {
 					return
 				}
-				if !tape.key_names(f, src, doc.nodes[key], string(s)) {
+				named, _ := member_key(doc, c, key)
+				if !tape.key_names(f, src, named, string(s)) {
 					continue
 				}
 				if dups == .Last && w.given {
-					head, _ := f.bounds(src, doc.nodes[key])
-					w.end, w.done = tape.Fault{at = doc.nodes[key].lo - u64(head), kind = .Duplicate_Key}, true
+					head, _ := f.bounds(src, named)
+					w.end, w.done = tape.Fault{at = named.lo - u64(head), kind = .Duplicate_Key}, true
 					return
 				}
 				w.pending = false
@@ -1651,15 +1652,17 @@ paths_of :: proc(doc: ^tape.Document) -> [][]tape.Step {
 			r := tape.Reader{doc, nil}
 			c, _, _ := tape.children(r, at, context.temp_allocator)
 			key, member, _ := tape.next_child(r, &c, .Group)
+			named, _ := member_key(doc, c, key)
 			for last {
 				k, v, p := tape.next_child(r, &c, .Group)
 				if p != .Found {
 					break
 				}
 				key, member = k, v
+				named, _ = member_key(doc, c, k)
 			}
 			if node.kind == .Object {
-				append(&down, tape.Step(tape.Name(scalar_text(doc, key))))
+				append(&down, tape.Step(tape.Name(token_text(doc, named))))
 			} else {
 				append(&down, tape.Step(tape.Index(-1 if last else 0)))
 			}
@@ -1679,8 +1682,21 @@ same_node :: proc(w: ^Agree_Walk, f, p: tape.Node_Index) -> bool {
 	if f == tape.NO_NODE || p == tape.NO_NODE {
 		return f == p
 	}
-	x, y := w.doc.doc.nodes[f], w.r.doc.nodes[p]
+	return same_token(w.doc.doc.nodes[f], w.r.doc.nodes[p])
+}
+
+@(private)
+same_token :: proc(x, y: tape.Token) -> bool {
 	return x.lo == y.lo && x.kind == y.kind && x.role == y.role && (x.kind > .Plain || x.n == y.n && x.spelling == y.spelling)
+}
+
+// Whether the keys `fk` of the whole document's member that cursor `fc` gave and `pk` of the partial one's that `pc`
+// gave are the same key of the text, whether nodes or a table's keys.
+@(private)
+same_member :: proc(w: ^Agree_Walk, fc: tape.Children, fk: tape.Node_Index, pc: tape.Children, pk: tape.Node_Index) -> bool {
+	x, keyed := member_key(w.doc.doc, fc, fk)
+	y, other := member_key(w.r.doc, pc, pk)
+	return keyed == other && (!keyed || same_token(x, y))
 }
 
 // Checks a step of a path the scan read, which the partial document answers as the whole one does.
@@ -1724,7 +1740,7 @@ agree_on_path :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, steps: []tape.Step,
 			for {
 				fk, fv, fnp := tape.next_child(w.doc, &fc, .Group)
 				pk, pv, pnp := tape.next_child(w.r, &pc, .Group)
-				if !agree_step(w, "descendant", fv, pv, fnp, pnp) || !same_node(w, fk, pk) || fnp != .Found {
+				if !agree_step(w, "descendant", fv, pv, fnp, pnp) || !same_member(w, fc, fk, pc, pk) || fnp != .Found {
 					break
 				}
 				agree_on_path(w, fv, pv, steps, grain)
@@ -1740,7 +1756,7 @@ agree_on_path :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, steps: []tape.Step,
 			for {
 				fk, fv, fnp := tape.next_child(w.doc, &fc)
 				pk, pv, pnp := tape.next_child(w.r, &pc)
-				if !agree_step(w, "group member", fv, pv, fnp, pnp) || !same_node(w, fk, pk) || fnp != .Found {
+				if !agree_step(w, "group member", fv, pv, fnp, pnp) || !same_member(w, fc, fk, pc, pk) || fnp != .Found {
 					return
 				}
 				agree_on_path(w, fv, pv, steps[1:], grain)
@@ -1768,7 +1784,8 @@ agree_on_path :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, steps: []tape.Step,
 				if kp != .Found {
 					break
 				}
-				key := scalar_text(w.doc.doc, k)
+				named, _ := member_key(w.doc.doc, c, k)
+				key := token_text(w.doc.doc, named)
 				fv, fp := tape.member(w.doc, f, key, .First)
 				pv, pp := tape.member(w.r, p, key, .First)
 				if agree_step(w, key, fv, pv, fp, pp) {
@@ -1785,7 +1802,7 @@ agree_on_path :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, steps: []tape.Step,
 		for i := i32(0); step.limit <= 0 || node.kind == .Object || i < step.limit; i += 1 {
 			fk, fv, fnp := tape.next_child(w.doc, &fc, w.dups)
 			pk, pv, pnp := tape.next_child(w.r, &pc, w.dups)
-			if !agree_step(w, "next child", fv, pv, fnp, pnp) || !same_node(w, fk, pk) || fnp != .Found {
+			if !agree_step(w, "next child", fv, pv, fnp, pnp) || !same_member(w, fc, fk, pc, pk) || fnp != .Found {
 				break
 			}
 			agree_on_path(w, fv, pv, steps[1:], grain)
@@ -1841,7 +1858,7 @@ agree_grain :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, grain: tape.Grain) {
 			agree_step(w, "last key", tape.NO_NODE, tape.NO_NODE, fnp, pnp)
 			break
 		}
-		if !same_node(w, fk, pk) || pnp != .Not_Loaded && !(pnp == .Found && same_node(w, fv, pv)) {
+		if !same_member(w, fc, fk, pc, pk) || pnp != .Not_Loaded && !(pnp == .Found && same_node(w, fv, pv)) {
 			testing.expectf(w.t, false, "%s scan %v: key %v %v, whole %v; %s", w.name, w.paths, pk, pnp, fk, render_doc(w.r.doc))
 			break
 		}
@@ -1875,17 +1892,20 @@ agree_past :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, depth: int) {
 			if !agree_read(w, "next child", fv, pv, fnp, pnp) || fnp != .Found {
 				break
 			}
-			testing.expect(w.t, pnp != .Found || same_node(w, fk, pk))
+			testing.expect(w.t, pnp != .Found || same_member(w, fc, fk, pc, pk))
 		}
 	}
 	names := make([dynamic]string, context.temp_allocator)
 	append(&names, "zz_missing", "")
 	if w.doc.doc.nodes[f].kind == .Object {
-		end := f + tape.Node_Index(w.doc.doc.nodes[f].n)
-		for k := f + 1; k < end; {
-			append(&names, scalar_text(w.doc.doc, k))
-			k += 1
-			k += tape.Node_Index(w.doc.doc.nodes[k].n) if w.doc.doc.nodes[k].kind > .Plain else 1
+		c, _, _ := tape.children(w.doc, f, context.temp_allocator)
+		for {
+			k, _, q := tape.next_child(w.doc, &c, .Group)
+			if q != .Found {
+				break
+			}
+			key, _ := member_key(w.doc.doc, c, k)
+			append(&names, token_text(w.doc.doc, key))
 		}
 	}
 	for name, i in names {

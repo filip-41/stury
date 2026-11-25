@@ -152,7 +152,7 @@ write_tree :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, $FACTS
 		s := write.tree_next(w, FACTS, TABLES)
 		switch s.kind {
 		case .Scalar, .Open:
-			if !step_value(out, w, l, s, T, FACTS, PRETTY) {
+			if !step_value(out, w, l, s, T, FACTS, TABLES, PRETTY) {
 				return
 			}
 		case .Close:
@@ -171,7 +171,7 @@ write_tree :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, $FACTS
 // The scalar or container open of step `s`, with its comma, its key and, with `FACTS`, the comments around them. False
 // with `w.err` set for a scalar JSON cannot spell.
 @(private)
-step_value :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, s: write.Step, $T: Spec, $FACTS, $PRETTY: bool) -> bool {
+step_value :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, s: write.Step, $T: Spec, $FACTS, $TABLES, $PRETTY: bool) -> bool {
 	if !s.first {
 		write.put_byte(out, ',')
 	}
@@ -181,6 +181,14 @@ step_value :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, s:
 	when PRETTY {
 		if s.depth > 0 || FACTS && l.wrote {
 			line_indent(out, l, s.depth)
+		}
+	}
+	when TABLES {
+		if s.cell {
+			if !put_cell_key(out, w, l) {
+				return false
+			}
+			put_colon(out, PRETTY)
 		}
 	}
 	if s.key != tape.NO_NODE {
@@ -393,6 +401,16 @@ put_key :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: t
 @(private)
 put_text_of :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: tape.Node_Index) -> bool {
 	s, ok := write.text_of(w, at)
+	if ok {
+		put_string(out, l, s)
+	}
+	return ok
+}
+
+// Writes the key of a table's row's cell, which has no node, as a JSON string of its text.
+@(private)
+put_cell_key :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout) -> bool {
+	s, ok := write.text_of_token(w, w.cell)
 	if ok {
 		put_string(out, l, s)
 	}

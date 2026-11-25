@@ -91,17 +91,14 @@ readers_take_a_decode_past_its_span :: proc(t: ^testing.T) {
 	testing.expect(t, fits && text == "aabb")
 }
 
-// A table's rows read their cells by the header's keys, and the table its rows by place, the header no element.
+// A table's rows read their cells by the table's keys, and the table its rows by place, the keys no node.
 @(test)
 readers_read_tables :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	// name,age / ann,3 / bob,4,9
 	src := transmute([]u8)string("name,age\nann,3\nbob,4,9\n")
 	nodes := []tape.Node{
-		container(0, 11, 2, .Array),
-		container(0, 3, 2, .Array, .Key),
-		scalar(0, 4, .Plain, .Key),
-		scalar(5, 3, .Plain, .Key),
+		container(0, 8, 2, .Array),
 		container(9, 3, 2, .Object),
 		scalar(9, 3, .Plain),
 		scalar(13, 1, .Plain),
@@ -110,45 +107,51 @@ readers_read_tables :: proc(t: ^testing.T) {
 		scalar(19, 1, .Plain),
 		scalar(21, 1, .Plain),
 	}
+	keys := []tape.Node{scalar(0, 4, .Plain, .Key), scalar(5, 3, .Plain, .Key)}
 	for slotted in ([]bool{false, true}) {
 		slots := make([]u32, 4 if slotted else 0, context.temp_allocator)
 		for col in 0 ..< len(slots) / 2 {
-			k := nodes[2 + col]
 			mask := u32(len(slots) - 1)
-			i := TWICE.key_hash(src, k) & mask
+			i := TWICE.key_hash(src, keys[col]) & mask
 			for slots[i] != 0 {
 				i = (i + 1) & mask
 			}
 			slots[i] = u32(col + 1)
 		}
-		ext := tape.Doc_Ext{format = tape.Tabular_Ext{tables = {{node = 0, header = 1, first_row = 4, slots_len = u32(len(slots)), unique_keys = true}}, slots = slots}}
+		ext := tape.Doc_Ext{format = tape.Tabular_Ext{tables = {{node = 0, keys_n = 2, first_row = 1, slots_len = u32(len(slots)), unique_keys = true}}, keys = keys, slots = slots}}
 		doc := tape.Document{src = src, nodes = nodes, format = &TWICE, ext = &ext}
 		r := tape.Reader{&doc, nil}
 		row, p := tape.element(r, tape.ROOT, 1)
-		testing.expect(t, row == 7 && p == .Found)
-		row, p = tape.element(r, tape.ROOT, -2)
 		testing.expect(t, row == 4 && p == .Found)
+		row, p = tape.element(r, tape.ROOT, -2)
+		testing.expect(t, row == 1 && p == .Found)
 		_, p = tape.element(r, tape.ROOT, 2)
 		testing.expect_value(t, p, tape.Presence.Missing)
 		v: tape.Node_Index
-		v, p = tape.member(r, 7, "age")
-		testing.expect(t, v == 9 && p == .Found)
-		v, p = tape.member(r, 4, "name")
-		testing.expect(t, v == 5 && p == .Found)
-		_, p = tape.member(r, 4, "x")
+		v, p = tape.member(r, 4, "age")
+		testing.expect(t, v == 6 && p == .Found)
+		v, p = tape.member(r, 1, "name")
+		testing.expect(t, v == 2 && p == .Found)
+		_, p = tape.member(r, 1, "x")
 		testing.expect_value(t, p, tape.Presence.Missing)
-		n, _, _ := tape.length(r, 7, context.temp_allocator)
+		n, _, _ := tape.length(r, 4, context.temp_allocator)
 		testing.expect_value(t, n, 2)
 		rows, _, _ := tape.children(r, tape.ROOT, context.temp_allocator)
 		_, first, _ := tape.next_child(r, &rows)
 		_, second, _ := tape.next_child(r, &rows)
 		_, _, end := tape.next_child(r, &rows)
-		testing.expect(t, first == 4 && second == 7 && end == .Missing)
-		cells, _, _ := tape.children(r, 4, context.temp_allocator)
+		testing.expect(t, first == 1 && second == 4 && end == .Missing)
+		cells, _, _ := tape.children(r, 1, context.temp_allocator)
 		k1, v1, _ := tape.next_child(r, &cells)
+		key1 := tape.cell_key(r, cells)
 		k2, v2, _ := tape.next_child(r, &cells)
+		key2 := tape.cell_key(r, cells)
 		_, _, done := tape.next_child(r, &cells)
-		testing.expect(t, k1 == 2 && v1 == 5 && k2 == 3 && v2 == 6 && done == .Missing)
+		testing.expect(t, k1 == tape.NO_NODE && v1 == 2 && key1 == keys[0] && k2 == tape.NO_NODE && v2 == 3 && key2 == keys[1] && done == .Missing)
+		table_keys, is_table := tape.table_keys(&doc, tape.ROOT)
+		testing.expect(t, is_table && len(table_keys) == 2 && table_keys[1] == keys[1])
+		_, is_table = tape.table_keys(&doc, 1)
+		testing.expect(t, !is_table)
 	}
 }
 
@@ -157,31 +160,25 @@ readers_read_tables :: proc(t: ^testing.T) {
 readers_read_tables_that_repeat_a_key :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("a,a\n1,2\n")
-	nodes := []tape.Node{
-		container(0, 6, 1, .Array),
-		container(0, 3, 2, .Array, .Key),
-		scalar(0, 1, .Plain, .Key),
-		scalar(2, 1, .Plain, .Key),
-		container(4, 3, 2, .Object),
-		scalar(4, 1, .Plain),
-		scalar(6, 1, .Plain),
-	}
-	ext := tape.Doc_Ext{format = tape.Tabular_Ext{tables = {{node = 0, header = 1, first_row = 4, width = 2}}}}
+	nodes := []tape.Node{container(0, 4, 1, .Array), container(4, 3, 2, .Object), scalar(4, 1, .Plain), scalar(6, 1, .Plain)}
+	keys := []tape.Node{scalar(0, 1, .Plain, .Key), scalar(2, 1, .Plain, .Key)}
+	ext := tape.Doc_Ext{format = tape.Tabular_Ext{tables = {{node = 0, keys_n = 2, first_row = 1, width = 2}}, keys = keys}}
 	doc := tape.Document{src = src, nodes = nodes, format = &TWICE, ext = &ext}
 	r := tape.Reader{&doc, nil}
 	row, _ := tape.element(r, tape.ROOT, 0)
-	testing.expect_value(t, row, 4)
+	testing.expect_value(t, row, 1)
 	last, _ := tape.member(r, row, "a", .Last)
 	first, _ := tape.member(r, row, "a", .First)
-	testing.expect(t, last == 6 && first == 5)
+	testing.expect(t, last == 3 && first == 2)
 	n, _, _ := tape.length(r, row, context.temp_allocator)
 	testing.expect_value(t, n, 1)
 	c, _, _ := tape.children(r, row, context.temp_allocator)
-	k, v, _ := tape.next_child(r, &c, .Last)
+	_, v, _ := tape.next_child(r, &c, .Last)
+	key := tape.cell_key(r, c)
 	_, _, end := tape.next_child(r, &c, .Last)
-	testing.expect(t, k == 2 && v == 6 && end == .Missing)
+	testing.expect(t, key == keys[0] && v == 3 && end == .Missing)
 	g, gp := tape.named(r, row, "a")
 	_, g1, _ := tape.next_child(r, &g)
 	_, g2, _ := tape.next_child(r, &g)
-	testing.expect(t, gp == .Found && g1 == 5 && g2 == 6)
+	testing.expect(t, gp == .Found && g1 == 2 && g2 == 3)
 }
