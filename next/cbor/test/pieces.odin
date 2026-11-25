@@ -273,3 +273,32 @@ indefinite_chunks_are_read_once_across_windows :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// `builder_so_far` drops non-comment facts (such as CBOR `.Tag`) attached to a dropped trailing key or to a cut node
+// past `count`, never leaving an out-of-bounds `Fact.node`.
+@(test)
+so_far_drops_facts_past_cut :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	// Map {"a": tag(0)("x")} cut right after key "a" and tag(0); array [tag(0)(1)] cut right after tag(0).
+	cases := [?]struct {
+		full: string,
+		cut:  int,
+	}{
+		{"a1 61 61 c0 61 78", 4},
+		{"81 c0 01", 2},
+	}
+	for c in cases {
+		src := hex(c.full)
+		p := tape.Pieces{so_far = true, allocator = context.allocator}
+		defer cbor.destroy(&p)
+		doc, err := cbor.build(src[:c.cut], .Cbor, {pieces = &p})
+		defer tape.destroy(&doc)
+		testing.expectf(t, err == nil, "%s cut %d: %v", c.full, c.cut, err)
+		testing.expect_value(t, len(doc.facts), 0)
+		testing.expect(t, .Tag not_in doc.present)
+		for f in doc.facts {
+			testing.expectf(t, int(f.node) < len(doc.nodes), "%s: OOB fact node %d >= %d", c.full, f.node, len(doc.nodes))
+		}
+	}
+}

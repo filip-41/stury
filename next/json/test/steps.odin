@@ -512,3 +512,24 @@ children_read_past_a_hole :: proc(t: ^testing.T) {
 	_, _, p := tape.next_child({doc = &s}, &c)
 	testing.expect_value(t, p, tape.Presence.Missing)
 }
+
+// An inline comment arriving before any node (`a == 0`) attaches to `ROOT` instead of underflowing to `NO_NODE`.
+@(test)
+inline_comment_at_cursor_zero_attaches_to_root :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string("//c\n1")
+	tokens := []tape.Token{
+		{lo = 0, n = 3, kind = .Plain, role = .Comment_Inline, spelling = 2},
+		{lo = 4, n = 1, kind = .Number, role = .Value},
+	}
+	frames: [16]u64
+	b: build.Builder
+	build.builder_start(&b, src, json.as(.Jsonc), 4, 4, frames[:], context.allocator)
+	regs := build.builder_regs(&b)
+	token_walk(tokens, &b, &regs, build.builder_hook_facts)
+	doc, err := build.builder_end(&b, regs, u64(len(src)), nil)
+	defer tape.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(doc.facts), 1)
+	testing.expect_value(t, doc.facts[0].node, tape.ROOT)
+}

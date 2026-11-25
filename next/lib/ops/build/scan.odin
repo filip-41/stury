@@ -267,7 +267,10 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 	h.dups = tape.read_dups(format, dups)
 	h.stop, h.pending = read.stop_early, len(demand.paths)
 	h.settles = h.stop || !demand.facts && (demand.limited || scan_cuts(demand))
-	h.b.keep_facts, h.facts, h.passed, h.wait_at = demand.facts, demand.facts, tape.NO_NODE, tape.NO_NODE
+	if demand.facts {
+		h.b.flags += {.Keep_Facts}
+	}
+	h.facts, h.passed, h.wait_at = demand.facts, tape.NO_NODE, tape.NO_NODE
 	h.room = room
 	h.held.allocator, h.bytes.allocator = allocator, allocator
 	made := len(demand.paths) if demand.limited else 0
@@ -313,7 +316,9 @@ scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^t
 	if h.b.err != nil {
 		return h.b.err
 	}
-	h.b.keep_facts = h.facts
+	if h.facts {
+		h.b.flags += {.Keep_Facts}
+	}
 	h.walk, h.stopped, h.has_key, h.by_place, h.forced, h.replaying, h.dropped = nil, false, false, false, false, false, 0
 	h.end_of, h.opens, h.pending, h.passed, h.wait_at = .None, 0, len(demand.paths), tape.NO_NODE, tape.NO_NODE
 	h.wait_from, h.hold_from, h.held_live = 0, 0, 0
@@ -723,7 +728,7 @@ scanner_value :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $
 		return s, .Keep_Stubs
 	}
 	ok: bool
-	if s, ok = builder_unread(&h.b, s, t); !ok {
+	if s, ok = builder_unread(&h.b, s, t, true); !ok {
 		return s, .Stop
 	}
 	return s, .Skip
@@ -742,7 +747,7 @@ scan_stub :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (h
 		return builder_step(&h.b, kept, t, false, true)
 	}
 	ok: bool
-	if kept, ok = builder_unread(&h.b, kept, t); !ok {
+	if kept, ok = builder_unread(&h.b, kept, t, true); !ok {
 		return kept, .Stop
 	}
 	h.end_of = .Skipped
@@ -1716,7 +1721,7 @@ scan_fact :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 		if h.wait_at != at {
 			h.wait_at, h.wait_from = at, len(h.b.doc.facts)
 		}
-		a := builder_fact(&h.b, s, t)
+		a := builder_fact(&h.b, s.a, s.b, t)
 		if a == .Next {
 			h.b.doc.facts[len(h.b.doc.facts) - 1].node = at + tape.Node_Index(h.has_key)
 		}
@@ -1729,7 +1734,7 @@ scan_fact :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 	case:
 		return .Next
 	}
-	return builder_fact(&h.b, s, t)
+	return builder_fact(&h.b, s.a, s.b, t)
 }
 
 // Drops the facts before the token at `lo` the walk passed unstored, and the feet inside its span.

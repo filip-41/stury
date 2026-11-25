@@ -48,6 +48,9 @@ read_validate :: #force_inline proc(src: []u8, format: ^tape.Format, opts: tape.
 	return hook.memory_budget_error(&m.main, err)
 }
 
+// The saturated-container counts a build keeps on its stack before allocating `counts`, covering up to ~524k nodes.
+COUNTS_STACK :: 64
+
 // Builds the document of `src`, a text of `format`, which starts with room for a node per `bytes_per_node` bytes. `finish`
 // settles the built document and on an error destroys it, as `builder_finish_dups` does for repeated keys.
 read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Builder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool), $finish: proc(doc: ^tape.Document, opts: tape.Options, rules: ^tape.Rules) -> tape.Error, bytes_per_node := BUILD_BYTES_PER_NODE) -> (tape.Document, tape.Error) {
@@ -56,17 +59,23 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 	}
 	m: hook.Read_Budget
 	allocator := hook.read_budget(&m, opts, caller)
+	scratch := opts.scratch
+	if opts.budget.memory != 0 && scratch.procedure != nil {
+		scratch = hook.memory_budget(&m.scratch)
+	}
 	depth := min(read_depth(opts), u64(len(src)))
 	most := node_most(bound(src, depth), opts)
 	frames: [FRAME_DEPTH]u64 = ---
-	b: Builder = ---
-	builder_start(&b, src, format, len(src) / bytes_per_node, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m.main if opts.budget.memory != 0 else nil, counts = most)
+	counts_buf: [COUNTS_STACK]tape.Child_Count = ---
+	b_raw: [size_of(Builder) / size_of(u64)]u64 = ---
+	b := (^Builder)(&b_raw)
+	builder_start(b, src, format, len(src) / bytes_per_node, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m.main if opts.budget.memory != 0 else nil, counts = most, counts_buf = counts_buf[:], scratch = scratch)
 	if b.err != nil {
 		return {}, hook.memory_budget_error(&m.main, b.err)
 	}
-	regs := builder_regs(&b)
-	root_close, err, tolerated := walk(src, opts, &b, &regs, allocator, &b.ctx)
-	doc, e := builder_end(&b, regs, root_close, err, opts.dups == .Refuse, rules)
+	regs := builder_regs(b)
+	root_close, err, tolerated := walk(src, opts, b, &regs, allocator, &b.ctx)
+	doc, e := builder_end(b, regs, root_close, err, opts.dups == .Refuse, rules)
 	if e == nil {
 		e = finish(&doc, opts, rules)
 	}

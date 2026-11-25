@@ -438,3 +438,122 @@ builds_fit_the_smallest_arena_past_the_child_count_limit :: proc(t: ^testing.T) 
 // The bytes past its nodes that a build takes from an arena: the child counts and the arena's alignment.
 @(private = "file")
 ARENA_SLACK :: 256
+
+// An empty `runtime.Allocator{}` or `mem.nil_allocator()` refuses allocation without falling back to `context.allocator`,
+// both on whole builds past 16 KiB and on streaming `so_far` builds with saturated open containers.
+@(test)
+empty_and_nil_allocators_never_fall_back_to_context :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	// > 16 KiB text so `wide_room(most) > 0` and > MAX_CHILDREN elements so `counts` is needed.
+	src := transmute([]u8)container_of(.Array, int(tape.MAX_CHILDREN) + 64, context.temp_allocator)
+	for bad in ([]runtime.Allocator{{}, mem.nil_allocator()}) {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		{
+			context.allocator = mem.tracking_allocator(&track)
+			doc, err := json.build(src, .Json, {}, bad)
+			tape.destroy(&doc)
+			ae, is_ae := err.(runtime.Allocator_Error)
+			testing.expectf(t, is_ae && ae == .Out_Of_Memory, "whole build: got %v", err)
+		}
+		testing.expect_value(t, len(track.allocation_map), 0)
+		testing.expect_value(t, track.total_memory_allocated, 0)
+	}
+	// Streaming `so_far` with a saturated open container (> MAX_CHILDREN elements before the cut).
+	cut := len(src) - 1 // right before closing `]`
+	for bad in ([]runtime.Allocator{{}, mem.nil_allocator()}) {
+		pieces := tape.Pieces{so_far = true, allocator = context.allocator}
+		defer tape.destroy(&pieces)
+		// Feed the prefix with a real allocator for pieces state, but pass `bad` as the caller allocator for `so_far`.
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		pieces.more = true
+		{
+			context.allocator = mem.tracking_allocator(&track)
+			doc, err := json.build(src[:cut], .Json, {pieces = &pieces}, bad)
+			tape.destroy(&doc)
+			ae, is_ae := err.(runtime.Allocator_Error)
+			testing.expectf(t, is_ae && ae == .Out_Of_Memory, "so_far build: got %v", err)
+		}
+		testing.expect_value(t, len(track.allocation_map), 0)
+		testing.expect_value(t, track.total_memory_allocated, 0)
+	}
+}
+
+// A 1 MiB single string (1 node = 16 B) builds under a tight 256-byte memory budget without `counts = most`
+// pre-reservation exceeding the budget.
+@(test)
+budgeted_large_single_string_skips_counts_prereservation :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	src := transmute([]u8)strings.concatenate({`"`, strings.repeat("a", 1 << 20, context.temp_allocator), `"`}, context.temp_allocator)
+	doc, err := json.build(src, .Json, {budget = {memory = 256}})
+	defer tape.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(doc.nodes), 1)
+}
+
+// `builder_grow_facts` respects `Budget.memory` and backs off down to +1 fact instead of failing at the 16-fact minimum.
+@(test)
+budgeted_facts_back_off_under_tight_memory :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	// 1 node (16 B) + 1 comment fact (24 B) = 40 B total; 64 B budget is well below 16 * 24 = 384 B.
+	doc, err := json.build(transmute([]u8)string("// hi\n1"), .Jsonc, {budget = {memory = 64}})
+	defer tape.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(doc.nodes), 1)
+	testing.expect_value(t, len(doc.facts), 1)
+
+	// 20 comments (480 B) + initial node room (7 * 16 = 112 B) = 592 B; 640 B budget is well below doubling to 32 facts
+	// (112 + 32 * 24 = 880 B) and forces backoff down to what fits.
+	b := strings.builder_make(context.temp_allocator)
+	for i in 0 ..< 20 {
+		fmt.sbprintf(&b, "// c%d\n", i)
+	}
+	strings.write_string(&b, "1")
+	doc2, err2 := json.build(transmute([]u8)strings.to_string(b), .Jsonc, {budget = {memory = 640}})
+	defer tape.destroy(&doc2)
+	testing.expect_value(t, err2, nil)
+	testing.expect_value(t, len(doc2.nodes), 1)
+	testing.expect_value(t, len(doc2.facts), 20)
+}
+
+// Deep nesting past `FRAME_DEPTH` routes `Builder.stack` through `Options.scratch` when given, reducing peak memory
+// taken from the document's arena, and respects `Budget.memory` without speculative `doc.nodes` doubling.
+@(test)
+deep_build_uses_scratch_and_tight_budget :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	DEPTH :: 1200
+	src := transmute([]u8)strings.concatenate({strings.repeat("[", DEPTH, context.temp_allocator), strings.repeat("]", DEPTH, context.temp_allocator)}, context.temp_allocator)
+	buf_no_scratch := make([]u8, 128 * 1024)
+	defer delete(buf_no_scratch)
+	arena_no_scratch: mem.Arena
+	mem.arena_init(&arena_no_scratch, buf_no_scratch)
+	doc0, err0 := json.build(src, .Json, {budget = {depth = DEPTH}}, mem.arena_allocator(&arena_no_scratch))
+	testing.expect_value(t, err0, nil)
+	testing.expect_value(t, len(doc0.nodes), DEPTH)
+
+	main_buf := make([]u8, 128 * 1024)
+	defer delete(main_buf)
+	scratch_buf := make([]u8, 64 * 1024)
+	defer delete(scratch_buf)
+	main_arena, scratch_arena: mem.Arena
+	mem.arena_init(&main_arena, main_buf)
+	mem.arena_init(&scratch_arena, scratch_buf)
+	doc, err := json.build(src, .Json, {budget = {depth = DEPTH}, scratch = mem.arena_allocator(&scratch_arena)}, mem.arena_allocator(&main_arena))
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(doc.nodes), DEPTH)
+	testing.expect(t, scratch_arena.offset >= DEPTH * size_of(u64))
+	testing.expectf(t, main_arena.offset < arena_no_scratch.offset, "main=%d, without_scratch=%d", main_arena.offset, arena_no_scratch.offset)
+
+	// Also succeeds under a tight shared budget where speculative node doubling would fail.
+	doc2, err2 := json.build(src, .Json, {budget = {depth = DEPTH, memory = 64 * 1024}})
+	defer tape.destroy(&doc2)
+	testing.expect_value(t, err2, nil)
+	testing.expect_value(t, len(doc2.nodes), DEPTH)
+}

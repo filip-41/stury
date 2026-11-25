@@ -45,7 +45,7 @@ segment_start :: proc(src: []u8, format: ^tape.Format, room: []tape.Node, first,
 	s.depth, s.first, s.scratch, s.seam, s.allocator = len(kinds), first, scratch, seam, allocator
 	b := &s.b
 	b.doc = {src = src, format = format, nodes = room, facts = facts[:0], allocator = {refuse_blocks, nil}}
-	b.stack, b.facts, b.borrowed, b.closed, b.ctx, b.most = frames, facts, true, tape.NO_NODE, context, max(int)
+	b.stack, b.facts, b.flags, b.closed, b.ctx, b.most = frames, facts, {.Borrowed}, tape.NO_NODE, context, max(int)
 	b.first = tape.Node_Index(first)
 	b.end = u64(uintptr(raw_data(room))) + u64((first + nodes) * size_of(tape.Node))
 	// At most `nodes / MAX_CHILDREN` containers have `MAX_CHILDREN` children in the segment, and each gets one entry.
