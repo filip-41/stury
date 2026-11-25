@@ -12,7 +12,7 @@ import "stury:lib/core/tape"
 // Copies out of window `text` (indexed by the text's offsets) the authored span of each key and scalar node, each fact
 // and the coming key that the walk produced since the last hold. `regs` are the hook's registers at the window's end.
 scanner_hold :: proc(h: ^Scanner, regs: hook.Regs, text: []u8) -> runtime.Allocator_Error {
-	h.holds = true
+	h.flags += {.Holds}
 	if h.scattered {
 		return hold_whole(h, text)
 	}
@@ -171,16 +171,16 @@ scanner_so_far :: proc(h: ^Scanner, regs: hook.Regs, cut: u64, allocator: runtim
 	b := regs.b
 	for c := regs.c; c > 0; c -= 1 {
 		// A level past `h.frames` is inside a container the scan keeps whole, and its count is the builder's.
-		read[c - 1] = h.frames[c - 1].count if int(c) <= len(h.frames) else u64(u32(b))
+		read[c - 1] = h.frames.data[c - 1].count if int(c) <= int(h.frames.len) else u64(u32(b))
 		b = h.b.stack[c - 1]
 	}
 	doc = builder_so_far(&h.b, regs, cut, allocator, read) or_return
 	defer if err != nil {
 		tape.destroy(&doc)
 	}
-	answers := slice.clone(h.answers[:], allocator) or_return
+	answers := slice.clone(list_slice(h.answers), allocator) or_return
 	defer delete(answers, allocator)
-	missing := slice.clone(h.missing[:], allocator) or_return
+	missing := slice.clone(list_slice(h.missing), allocator) or_return
 	defer delete(missing, allocator)
 	made := slice.clone(h.made, allocator) or_return
 	defer delete(made, allocator)

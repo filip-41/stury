@@ -132,6 +132,7 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 	// The documents of the batch are in the records' block, which the last batch's documents leave.
 	block := tape.record_block_batch(&r.block, caller)
 	m: hook.Read_Budget
+	scratch_local: hook.Memory_Budget
 	frames: [FRAME_DEPTH]u64 = ---
 	room: Scan_Room = ---
 	h: Scanner
@@ -140,6 +141,8 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 	lent: []tape.Node
 	for n < len(out) {
 		allocator := hook.read_budget(&m, r.opts, block)
+		scratch := hook.scratch(r.opts, allocator, &scratch_local)
+		budget := &m.main if r.opts.budget.memory != 0 else nil
 		lo, cut, framed := frame(r, allocator)
 		if !framed {
 			r.err = hook.memory_budget_error(&m.main, r.err)
@@ -155,7 +158,7 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 			}
 			lent = ([^]tape.Node)(raw_data(raw))[:SCAN_NODES]
 		}
-		if err := scanner_restart(&h, r.src, format, demand, r.opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, lent); err != nil {
+		if err := scanner_restart(&h, r.src, format, demand, r.opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, lent, budget, scratch); err != nil {
 			records_stop(r, hook.memory_budget_error(&m.main, err))
 			break
 		}
@@ -171,7 +174,7 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 				r.err = hook.memory_budget_error(&m.main, r.err)
 				break
 			}
-			if err := scanner_restart(&h, r.src, format, demand, r.opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, lent); err != nil {
+			if err := scanner_restart(&h, r.src, format, demand, r.opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, lent, budget, scratch); err != nil {
 				records_stop(r, hook.memory_budget_error(&m.main, err))
 				break
 			}
@@ -182,7 +185,6 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 		root_close, werr, _ := hook.walk_error(w.res, rules)
 		if werr == nil && r.opts.pieces != nil {
 			// A window's bytes may go once the batch ends, so the document holds the bytes it reads.
-			h.held.allocator, h.bytes.allocator = allocator, allocator
 			if e := scanner_hold(&h, regs, r.src); e != nil {
 				werr = e
 			}

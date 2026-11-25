@@ -2,6 +2,7 @@ package json_tests
 
 import "base:runtime"
 import "core:fmt"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import "stury:json"
@@ -903,4 +904,316 @@ scans_that_fit_a_memory_budget_fit_a_larger_one :: proc(t: ^testing.T) {
 		}
 		testing.expectf(t, fits, "%v fits no budget up to 4000 bytes", steps)
 	}
+}
+
+// Negative indexes >= 2^32 (and `min(int)`) clamp `f.ring_k` to `max(u32)` rather than truncating to 0 or a small
+// number under piece scans (where `h.rewalk == nil`) and `-define:JSON_REWALK=false`.
+@(test)
+scan_clamps_huge_negative_indexes_in_pieces :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	scan_in_pieces :: proc(src: []u8, d: ^tape.Demand, step := 2) -> (doc: tape.Document, err: tape.Error) {
+		p := tape.Pieces{allocator = context.allocator}
+		defer tape.destroy(&p)
+		for pos := 0; pos < len(src); {
+			hi := min(pos + step, len(src))
+			p.last = hi == len(src)
+			p.from = u64(p.keep)
+			doc, err = json.scan(src[p.keep:hi], d, opts = {pieces = &p})
+			if err != nil || !p.more {
+				break
+			}
+			pos = hi
+		}
+		return
+	}
+	// `Index(min(int))` on `[1, 2, 3]` must yield `[Missing]`, not spurious `.Found` answers.
+	{
+		d, derr := tape.demand_of({{tape.Index(min(int))}})
+		defer tape.destroy(&d)
+		testing.expect_value(t, derr, nil)
+		src := transmute([]u8)string(`[1, 2, 3]`)
+		r, err := scan_in_pieces(src, &d)
+		defer tape.destroy(&r)
+		testing.expect_value(t, err, nil)
+		testing.expect_value(t, testkit.render_answers(&r), `0=Missing`)
+		w, werr := json.scan(src, &d)
+		defer tape.destroy(&w)
+		testing.expect_value(t, werr, nil)
+		testing.expect_value(t, testkit.render_answers(&w), `0=Missing`)
+	}
+	when size_of(int) >= 8 {
+		// `Index(-(1<<32))` would truncate `u32(k)` to 0.
+		{
+			d, derr := tape.demand_of({{tape.Index(-(1 << 32))}})
+			defer tape.destroy(&d)
+			testing.expect_value(t, derr, nil)
+			src := transmute([]u8)string(`[1, 2, 3]`)
+			r, err := scan_in_pieces(src, &d)
+			defer tape.destroy(&r)
+			testing.expect_value(t, err, nil)
+			testing.expect_value(t, testkit.render_answers(&r), `0=Missing`)
+			w, werr := json.scan(src, &d)
+			defer tape.destroy(&w)
+			testing.expect_value(t, werr, nil)
+			testing.expect_value(t, testkit.render_answers(&w), `0=Missing`)
+		}
+		// `{{Index(-2)}, {Index(-(1<<32)-1)}}` would truncate `u32(k)` to 1 and silently drop element 1 (`20`).
+		{
+			d, derr := tape.demand_of({{tape.Index(-2)}, {tape.Index(-(1 << 32) - 1)}})
+			defer tape.destroy(&d)
+			testing.expect_value(t, derr, nil)
+			src := transmute([]u8)string(`[10, 20, 30]`)
+			r, err := scan_in_pieces(src, &d)
+			defer tape.destroy(&r)
+			testing.expect_value(t, err, nil)
+			testing.expect_value(t, testkit.render_answers(&r), `0=20 1=Missing`)
+			w, werr := json.scan(src, &d)
+			defer tape.destroy(&w)
+			testing.expect_value(t, werr, nil)
+			testing.expect_value(t, testkit.render_answers(&w), `0=20 1=Missing`)
+		}
+	}
+}
+
+// `scan_drop` rewinds over leading facts before dropped element 0 so comments on dropped elements are cleared rather
+// than stolen by the shifted next element.
+@(test)
+scan_drop_clears_leading_facts_of_dropped_element_zero :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	d, derr := tape.demand_of({{tape.Index(-1)}}, facts = true)
+	defer tape.destroy(&d)
+	testing.expect_value(t, derr, nil)
+	Case :: struct {
+		src:          string,
+		want_whole:   int,
+		want_pieces:  int,
+		want_ans:     string,
+		forbid_text:  string,
+	}
+	cases := []Case{
+		{`[/*elem0*/1, 2]`, 0, 0, `0=2`, `/*elem0*/`},
+		{`[/*elem0*/1, /*inline0*/2]`, 0, 0, `0=2`, `/*elem0*/`},
+		{"[/*elem0*/1,\n/*elem1*/2]", 0, 1, `0=2`, `/*elem0*/`},
+		{`/*root*/ [/*elem0*/1, 2]`, 1, 1, `0=2`, `/*elem0*/`},
+		{"/*root*/ [/*e0*/1,\n/*e1*/2,\n/*e2*/3]", 1, 2, `0=3`, `/*e0*/`},
+	}
+	rewalks := .Rewalk in json.as(.Jsonc).caps
+	for c in cases {
+		src := transmute([]u8)c.src
+		whole, werr := json.scan(src, &d, .Jsonc)
+		defer tape.destroy(&whole)
+		want_whole := c.want_whole if rewalks else c.want_pieces
+		testing.expectf(t, werr == nil, "%q whole: %v", c.src, werr)
+		testing.expectf(t, len(whole.facts) == want_whole, "%q whole facts: %d, want %d", c.src, len(whole.facts), want_whole)
+		testing.expectf(t, testkit.render_answers(&whole) == c.want_ans, "%q whole ans: %q", c.src, testkit.render_answers(&whole))
+
+		// Verify piece scan at every single-byte cut clears dropped element 0's leading comment.
+		for cut in 0 ..= len(src) {
+			p := tape.Pieces{allocator = context.allocator}
+			defer tape.destroy(&p)
+			p.last = cut == len(src)
+			p.from = 0
+			doc, err := json.scan(src[:cut], &d, .Jsonc, opts = {pieces = &p})
+			if err == nil && p.more {
+				p.last = true
+				p.from = u64(p.keep)
+				doc, err = json.scan(src[p.keep:], &d, .Jsonc, opts = {pieces = &p})
+			}
+			defer tape.destroy(&doc)
+			testing.expectf(t, err == nil, "%q cut %d: %v", c.src, cut, err)
+			testing.expectf(t, len(doc.facts) == c.want_pieces, "%q cut %d: facts=%d, want %d", c.src, cut, len(doc.facts), c.want_pieces)
+			testing.expectf(t, testkit.render_answers(&doc) == c.want_ans, "%q cut %d: ans=%q", c.src, cut, testkit.render_answers(&doc))
+			for f in doc.facts {
+				span := string(src[f.lo:][:f.n])
+				testing.expectf(t, span != c.forbid_text, "%q cut %d: dropped comment %q was stolen by node %d", c.src, cut, span, f.node)
+			}
+		}
+	}
+}
+
+// Mixed limited and unlimited paths in one demand must not underflow `h.made[path]` when `scan_kill` (`.Last` dup) or
+// `scan_drop` (negative index in pieces) kills an answer on an unlimited path.
+@(test)
+scan_mixed_limited_and_unlimited_paths_no_underflow :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// `scan_kill` path: duplicate key under `.Last` on unlimited path 1 while path 0 is limited.
+	{
+		d, derr := tape.demand_of({{tape.Name("a")}, {tape.Name("b")}}, limits = {1, 0})
+		defer tape.destroy(&d)
+		testing.expect_value(t, derr, nil)
+		r, err := json.scan(transmute([]u8)string(`{"b":1,"b":2,"b":3,"a":4}`), &d)
+		defer tape.destroy(&r)
+		testing.expect_value(t, err, nil)
+		testing.expect_value(t, testkit.render_answers(&r), `0=4 1=3`)
+	}
+	// `scan_drop` path: negative index on unlimited path 1 in pieces while path 0 is limited.
+	{
+		d, derr := tape.demand_of({{tape.All{}}, {tape.Index(-1)}}, limits = {1, 0})
+		defer tape.destroy(&d)
+		testing.expect_value(t, derr, nil)
+		src := transmute([]u8)string(`[10, 20, 30, 40]`)
+		p := tape.Pieces{allocator = context.allocator}
+		defer tape.destroy(&p)
+		doc: tape.Document
+		err: tape.Error
+		for pos := 0; pos < len(src); pos += 3 {
+			hi := min(pos + 3, len(src))
+			p.last = hi == len(src)
+			p.from = u64(p.keep)
+			doc, err = json.scan(src[p.keep:hi], &d, opts = {pieces = &p})
+			testing.expect_value(t, err, nil)
+			if !p.more {
+				break
+			}
+		}
+		defer tape.destroy(&doc)
+		testing.expect_value(t, testkit.render_answers(&doc), `0=10 1=40`)
+	}
+}
+
+// `Scanner` routes transient scratch lists and its `marks`/`made`/`done` block through `Options.scratch` so document
+// arenas stay unpolluted while `Budget.memory` still counts scratch usage.
+@(test)
+scan_routes_transient_scratch_and_tracks_budget :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	// Build a demand with 40 paths (> Scan_Room's 32 marks/done) and 200 matching elements (> Scan_Room's 16 answers).
+	PATHS :: 40
+	paths := make([][]tape.Step, PATHS, context.temp_allocator)
+	for i in 0 ..< PATHS {
+		key := fmt.aprintf("k%d", i, allocator = context.temp_allocator)
+		paths[i] = make([]tape.Step, 2, context.temp_allocator)
+		paths[i][0], paths[i][1] = tape.All{}, tape.Name(key)
+	}
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	for r in 0 ..< 50 {
+		if r > 0 {
+			strings.write_byte(&b, ',')
+		}
+		fmt.sbprintf(&b, `{{"k0":%d,"k1":%d,"k39":%d}}`, r, r + 1, r + 2)
+	}
+	strings.write_byte(&b, ']')
+	src := transmute([]u8)strings.to_string(b)
+	d, derr := tape.demand_of(paths)
+	defer tape.destroy(&d)
+	testing.expect_value(t, derr, nil)
+
+	buf_no_scratch := make([]u8, 512 * 1024)
+	defer delete(buf_no_scratch)
+	arena_no_scratch: mem.Arena
+	mem.arena_init(&arena_no_scratch, buf_no_scratch)
+	doc0, err0 := json.scan(src, &d, allocator = mem.arena_allocator(&arena_no_scratch))
+	testing.expect_value(t, err0, nil)
+	testing.expect(t, doc0.partial != nil && len(doc0.partial.answers) == 50 * PATHS)
+
+	main_buf := make([]u8, 512 * 1024)
+	defer delete(main_buf)
+	scratch_buf := make([]u8, 512 * 1024)
+	defer delete(scratch_buf)
+	main_arena, scratch_arena: mem.Arena
+	mem.arena_init(&main_arena, main_buf)
+	mem.arena_init(&scratch_arena, scratch_buf)
+	doc, err := json.scan(src, &d, opts = {scratch = mem.arena_allocator(&scratch_arena)}, allocator = mem.arena_allocator(&main_arena))
+	testing.expect_value(t, err, nil)
+	testing.expect(t, doc.partial != nil && len(doc.partial.answers) == 50 * PATHS)
+	testing.expectf(t, scratch_arena.offset > 0, "expected scan scratch to allocate in Options.scratch")
+	testing.expectf(t, main_arena.offset < arena_no_scratch.offset, "main=%d, without_scratch=%d", main_arena.offset, arena_no_scratch.offset)
+
+	// Under `Budget.memory`, scratch allocations still count against the shared budget.
+	mem.arena_init(&main_arena, main_buf)
+	mem.arena_init(&scratch_arena, scratch_buf)
+	_, tight_err := json.scan(src, &d, opts = {budget = {memory = 512}, scratch = mem.arena_allocator(&scratch_arena)}, allocator = mem.arena_allocator(&main_arena))
+	ex, is_ex := tight_err.(tape.Exceeded)
+	testing.expectf(t, is_ex && ex.kind == .Memory, "expected memory budget Exceeded, got %v", tight_err)
+}
+
+// `records_scan` resets per-record scanner state (`holds`, `key_text`, `scattered`, `head`) and enforces `Budget.memory`
+// room throttling across restarted records, including with `Options.scratch`.
+@(test)
+records_scan_restarts_cleanly_with_budget_and_scratch :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	for i in 0 ..< 40 {
+		fmt.sbprintf(&b, `{{"id":%d,"pad":"xxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}` + "\n", i)
+	}
+	src := transmute([]u8)strings.to_string(b)
+	d, derr := tape.demand_of({{tape.Name("id")}})
+	defer tape.destroy(&d)
+	testing.expect_value(t, derr, nil)
+
+	// Tight per-record memory budget (2048 B) must succeed across all 40 records with scratch separated.
+	scratch_buf := make([]u8, 64 * 1024)
+	defer delete(scratch_buf)
+	scratch_arena: mem.Arena
+	mem.arena_init(&scratch_arena, scratch_buf)
+	r := json.records_open(src, .Lines, opts = {budget = {memory = 2048}, scratch = mem.arena_allocator(&scratch_arena)})
+	defer tape.destroy(&r)
+	out: [8]tape.Record
+	docs: [8]tape.Document
+	seen := 0
+	for {
+		n := json.records_scan(&r, &d, out[:], docs[:])
+		if n == 0 {
+			break
+		}
+		for k in 0 ..< n {
+			testing.expectf(t, out[k].err == nil, "record %d: %v", seen, out[k].err)
+			testing.expectf(t, testkit.render_answers(&docs[k]) == fmt.tprintf("0=%d", seen), "record %d: %q", seen, testkit.render_answers(&docs[k]))
+			seen += 1
+		}
+	}
+	testing.expect_value(t, r.err, nil)
+	testing.expect_value(t, seen, 40)
+}
+
+// Dropping large negative-index rings under pieces (`f.drops`) with mixed duplicate keys and multiple negative indexes
+// stays O(K) per drop and agrees identically with whole-text scan.
+@(test)
+scan_shed_large_negative_ring_with_dups :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	for i in 0 ..< 600 {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		// Include duplicate `"v"` on every 3rd element to exercise interspersed dead answers inside the ring.
+		if i % 3 == 0 {
+			fmt.sbprintf(&b, `{{"v":%d,"v":%d,"x":1}}`, i * 10, i)
+		} else {
+			fmt.sbprintf(&b, `{{"v":%d,"x":1}}`, i)
+		}
+	}
+	strings.write_byte(&b, ']')
+	src := transmute([]u8)strings.to_string(b)
+	d, derr := tape.demand_of({{tape.Index(-200), tape.Name("v")}, {tape.Index(-50), tape.Name("v")}, {tape.Index(-1), tape.Name("v")}})
+	defer tape.destroy(&d)
+	testing.expect_value(t, derr, nil)
+
+	whole, werr := json.scan(src, &d)
+	defer tape.destroy(&whole)
+	testing.expect_value(t, werr, nil)
+	want := testkit.render_answers(&whole)
+	testing.expect_value(t, want, `0=400 1=550 2=599`)
+
+	p := tape.Pieces{allocator = context.allocator}
+	defer tape.destroy(&p)
+	doc: tape.Document
+	err: tape.Error
+	for pos := 0; pos < len(src); {
+		hi := min(pos + 512, len(src))
+		p.last = hi == len(src)
+		p.from = u64(p.keep)
+		doc, err = json.scan(src[p.keep:hi], &d, opts = {pieces = &p})
+		testing.expect_value(t, err, nil)
+		pos = hi
+		if !p.more {
+			break
+		}
+	}
+	defer tape.destroy(&doc)
+	testing.expect_value(t, testkit.render_answers(&doc), want)
 }

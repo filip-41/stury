@@ -96,17 +96,20 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 	}
 	m: hook.Read_Budget
 	allocator := hook.read_budget(&m, opts, caller)
+	scratch_local: hook.Memory_Budget
+	scratch := hook.scratch(opts, allocator, &scratch_local)
 	depth := min(read_depth(opts), u64(len(src)))
 	most := node_most(bound(src, depth), opts)
 	frames: [FRAME_DEPTH]u64 = ---
 	room: Scan_Room = ---
-	h: Scanner = ---
-	if err := #force_inline scanner_start(&h, src, format, demand, opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, budget = &m.main if opts.budget.memory != 0 else nil); err != nil {
+	h_raw: [size_of(Scanner) / size_of(u64)]u64 = ---
+	h := (^Scanner)(&h_raw)
+	if err := #force_inline scanner_start(h, src, format, demand, opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, budget = &m.main if opts.budget.memory != 0 else nil, scratch = scratch); err != nil {
 		return {}, hook.memory_budget_error(&m.main, err)
 	}
 	regs := builder_regs(&h.b)
-	root_close, werr, tolerated := walk(src, opts, &h, &regs, allocator, &h.b.ctx)
-	doc, e := #force_inline scanner_end(&h, regs, root_close, werr)
+	root_close, werr, tolerated := walk(src, opts, h, &regs, allocator, &h.b.ctx)
+	doc, e := #force_inline scanner_end(h, regs, root_close, werr)
 	e = read_end(&doc, e, &m.main, tolerated, caller)
 	return doc, e
 }
