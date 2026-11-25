@@ -1,0 +1,509 @@
+package jq
+
+import "core:math"
+import "core:strings"
+import "stury:json"
+import "stury:lib/core/tape"
+import "stury:lib/query"
+
+// The value builtins: each takes its input and its arguments' values and gives one value, through the engine's
+// operations, with jq's checks and messages.
+
+@(private)
+v_not :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	return query.bool_value(!truthy(x)), .Ok
+}
+
+@(private)
+v_type :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	return query.text_borrowed(type_name(x)), .Ok
+}
+
+// jq's `reduce .[] as $x (null; . + $x)`, the sum held once so `+` extends it in place.
+@(private)
+v_add :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	if t := query.type_of(x); t != .Array && t != .Object {
+		return query.NULL, query.fail(h, .Types, .Iterate, x)
+	}
+	c := query.cursor_open(h, x) or_return
+	defer query.cursor_close(&c)
+	acc := query.NULL
+	for {
+		key, v, more, s := query.cursor_next(h, &c)
+		query.release(h, key)
+		if s != .Ok || !more {
+			if s != .Ok {
+				query.release(h, acc)
+			}
+			return acc, s
+		}
+		if acc.kind == .Int && v.kind == .Int {
+			if sum, ok := int_binary(.Add, acc.i, v.i); ok {
+				acc = sum
+				continue
+			}
+		}
+		acc, s = binary_owned(h, .Add, acc, v)
+		query.release(h, v)
+		if s != .Ok {
+			return query.NULL, s
+		}
+	}
+}
+
+@(private)
+v_length :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	switch query.type_of(x) {
+	case .Absent, .Null:
+		return query.int_value(0), .Ok
+	case .False, .True:
+		return query.NULL, raise_typed(m, x, " has no length")
+	case .Number:
+		if query.compare_numbers(x, query.int_value(0)) < 0 {
+			return query.num_neg(h, x)
+		}
+		return query.retain(x), .Ok
+	case .String:
+		return query.int_value(i64(query.codepoint_count(query.text_of(x)))), .Ok
+	case .Array, .Object:
+		return query.int_value(i64(query.length_of(h, x))), .Ok
+	}
+	return query.NULL, .Ok
+}
+
+@(private)
+v_utf8bytelength :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if !query.is_text(x) {
+		return query.NULL, raise_typed(m, x, " only strings have UTF-8 byte length")
+	}
+	return query.int_value(i64(len(query.text_of(x)))), .Ok
+}
+
+@(private)
+v_keys :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	t := query.type_of(x)
+	if t != .Array && t != .Object {
+		return query.NULL, raise_typed(m, x, " has no keys")
+	}
+	return query.keys_of(m.h, x, b.name == "keys")
+}
+
+@(private)
+v_has :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	t, k := query.type_of(x), query.type_of(args[0])
+	switch {
+	case t == .Object && k == .String:
+		return query.bool_value(query.has_member(m.h, x, query.text_of(args[0]))), .Ok
+	case t == .Array && k == .Number:
+		f := query.as_f64(args[0])
+		return query.bool_value(f >= 0 && f < f64(query.length_of(m.h, x))), .Ok
+	case t == .Null:
+		return query.FALSE, .Ok
+	}
+	out := make([dynamic]u8, m.h.allocator)
+	defer delete(out)
+	append(&out, "Cannot check whether ")
+	append(&out, type_name(x))
+	append(&out, " has a ")
+	append(&out, type_name(args[0]))
+	append(&out, " key")
+	return query.NULL, raise_owned_text(m, string(out[:]))
+}
+
+@(private)
+v_contains :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	ok := query.contains(m.h, x, args[0]) or_return
+	return query.bool_value(ok), .Ok
+}
+
+@(private)
+v_tostring :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	return to_text(m.h, x)
+}
+
+@(private)
+v_tojson :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	return to_json(m.h, x)
+}
+
+@(private)
+v_format :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if !query.is_text(args[0]) {
+		return query.NULL, raise_typed(m, args[0], " is not a valid format")
+	}
+	return format_value(m, query.text_of(args[0]), x)
+}
+
+@(private)
+v_tonumber :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	#partial switch query.type_of(x) {
+	case .Number:
+		return query.number_of(h, x)
+	case .String:
+		s := query.text_of(x)
+		if number_text(s) || named_number(s) {
+			v, ok := query.parse_number(h, s, true) or_return
+			if ok {
+				return v, .Ok
+			}
+		}
+	}
+	return query.NULL, raise_typed(m, x, " cannot be parsed as a number")
+}
+
+// Whether `s` is `nan`, `inf` or `infinity` in any case, with a sign or none: the numbers jq's `tonumber` reads by name.
+@(private)
+named_number :: proc(s: string) -> bool {
+	name := s[1:] if len(s) > 0 && (s[0] == '+' || s[0] == '-') else s
+	return strings.equal_fold(name, "nan") || strings.equal_fold(name, "inf") || strings.equal_fold(name, "infinity")
+}
+
+// Whether `s` is spelled as jq's `tonumber` reads a number: a sign, digits with a point, an exponent, no space.
+@(private)
+number_text :: proc(s: string) -> bool {
+	digits := false
+	for c, i in transmute([]u8)s {
+		switch c {
+		case '0' ..= '9':
+			digits = true
+		case '+', '-':
+			if i > 0 && s[i - 1] != 'e' && s[i - 1] != 'E' {
+				return false
+			}
+		case '.', 'e', 'E':
+		case:
+			return false
+		}
+	}
+	return digits
+}
+
+// `fromjson`: the text read as one JSON value, NaN and Infinity as jq reads them.
+@(private)
+v_fromjson :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if !query.is_text(x) {
+		return query.NULL, raise_typed(m, x, " only strings can be parsed")
+	}
+	s := query.text_of(x)
+	switch s {
+	case "nan", "NaN", "-nan", "-NaN":
+		return query.double_value(math.nan_f64()), .Ok
+	}
+	return read_json(m, s)
+}
+
+// The one JSON value of text `s`, copied into a document the value holds.
+@(private)
+read_json :: proc(m: ^Machine, s: string) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	src := make([]u8, len(s), h.allocator)
+	copy(src, s)
+	doc, err := json.build(src, .Json, {}, h.allocator)
+	if err != nil {
+		buf: [256]u8
+		text := tape.error_message(buf[:], err, src)
+		delete(src, h.allocator)
+		tape.destroy(&doc)
+		out := make([dynamic]u8, h.allocator)
+		defer delete(out)
+		append(&out, text)
+		append(&out, " (while parsing '")
+		append(&out, s)
+		append(&out, "')")
+		return query.NULL, raise_owned_text(m, string(out[:]))
+	}
+	doc.flags += {.Owns_Src}
+	return query.document_value(h, doc, true)
+}
+
+@(private)
+v_ascii_case :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if !query.is_text(x) {
+		return query.NULL, raise_text(m, "explode input must be a string")
+	}
+	return query.ascii_case(m.h, x, b.name == "ascii_upcase")
+}
+
+@(private)
+v_explode :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if !query.is_text(x) {
+		return query.NULL, raise_text(m, "explode input must be a string")
+	}
+	return query.explode(m.h, query.text_of(x))
+}
+
+@(private)
+v_implode :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	if query.type_of(x) != .Array {
+		return query.NULL, raise_text(m, "implode input must be an array")
+	}
+	a := query.built(h, x) or_return
+	defer query.release(h, a)
+	cps := make([]i64, len(query.items_of(a)), h.allocator)
+	defer delete(cps, h.allocator)
+	for c, i in query.items_of(a) {
+		if query.type_of(c) != .Number {
+			out := make([dynamic]u8, h.allocator)
+			defer delete(out)
+			typed(h, &out, c)
+			append(&out, " can't be imploded, unicode codepoint needs to be numeric")
+			return query.NULL, raise_owned_text(m, string(out[:]))
+		}
+		// A number that is no code point is U+FFFD, as jq has it.
+		cp := query.trunc_i64(c)
+		if cp < 0 || cp > 0x10FFFF || cp >= 0xD800 && cp < 0xE000 {
+			cp = 0xFFFD
+		}
+		cps[i] = cp
+	}
+	v, _ := query.implode(h, cps) or_return
+	return v, .Ok
+}
+
+@(private)
+v_trim :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if !query.is_text(x) {
+		return query.NULL, raise_text(m, "trim input must be a string")
+	}
+	return query.text_trim(m.h, x, b.name != "rtrim", b.name != "ltrim")
+}
+
+@(private)
+v_affix :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if !query.is_text(x) || !query.is_text(args[0]) {
+		return query.NULL, raise_text(m, "startswith() requires string inputs" if b.name == "startswith" else "endswith() requires string inputs")
+	}
+	s, t := query.text_of(x), query.text_of(args[0])
+	if len(t) > len(s) {
+		return query.FALSE, .Ok
+	}
+	if b.name == "startswith" {
+		return query.bool_value(s[:len(t)] == t), .Ok
+	}
+	return query.bool_value(s[len(s) - len(t):] == t), .Ok
+}
+
+@(private)
+v_split :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if !query.is_text(x) || !query.is_text(args[0]) {
+		return query.NULL, raise_text(m, "split input and separator must be strings")
+	}
+	return query.text_split(m.h, x, query.text_of(args[0]))
+}
+
+@(private)
+v_strindices :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	if !query.is_text(x) {
+		return query.NULL, raise_typed(m, x, " cannot be searched, as it is not a string")
+	}
+	if !query.is_text(args[0]) {
+		return query.NULL, raise_typed(m, args[0], " is not a string")
+	}
+	s, t := query.text_of(x), query.text_of(args[0])
+	out := query.make_array(h, 0) or_return
+	if len(t) == 0 {
+		return out, .Ok
+	}
+	// Code point offsets, counted as the search goes.
+	cp := 0
+	for i in 0 ..= len(s) - len(t) {
+		if s[i:i + len(t)] == t {
+			query.append_owned(h, &out, query.int_value(i64(cp))) or_return
+		}
+		if s[i] & 0xC0 != 0x80 {
+			cp += 1
+		}
+	}
+	return out, .Ok
+}
+
+@(private)
+v_sort :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if query.type_of(x) != .Array {
+		return query.NULL, raise_typed(m, x, " cannot be sorted, as it is not an array")
+	}
+	return query.sort_by(m.h, x)
+}
+
+// `_sort_by_impl`, `_group_by_impl`, `_unique_by_impl`, `_min_by_impl`, `_max_by_impl`, and `unique`, `min`, `max`.
+@(private)
+v_by :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	keys := args[0] if len(args) > 0 else query.ABSENT
+	if query.type_of(x) != .Array {
+		return query.NULL, raise_typed(m, x, " cannot be sorted, as it is not an array")
+	}
+	if len(args) > 0 && (query.type_of(keys) != .Array || query.length_of(h, keys) != query.length_of(h, x)) {
+		return query.NULL, raise_text(m, "Sort keys must be an array of the input's length")
+	}
+	switch b.name {
+	case "_sort_by_impl":
+		return query.sort_by(h, x, keys)
+	case "_group_by_impl":
+		return query.runs_by(h, x, keys, .Group)
+	case "_unique_by_impl", "unique":
+		return query.runs_by(h, x, keys, .First)
+	case "_min_by_impl", "min":
+		return query.extreme_by(h, x, keys, false)
+	}
+	return query.extreme_by(h, x, keys, true)
+}
+
+@(private)
+v_flatten :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	// jq counts the depth down by one until it is zero, which a fractional depth never reaches.
+	depth := query.as_f64(args[0])
+	return query.flatten(m.h, x, int(query.trunc_i64(args[0])) if depth == math.trunc(depth) else -1)
+}
+
+@(private)
+v_setpath :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	return query.set_path(m.h, query.retain(x), args[0], query.retain(args[1]))
+}
+
+@(private)
+v_delpaths :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	return query.del_paths(m.h, query.retain(x), args[0])
+}
+
+@(private)
+v_constant :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	switch b.name {
+	case "infinite":
+		return query.double_value(math.inf_f64(1)), .Ok
+	case "nan":
+		return query.double_value(math.nan_f64()), .Ok
+	case "have_literal_numbers":
+		return query.TRUE, .Ok
+	case "have_decnum":
+		// Integers are exact, as decNumber keeps them.
+		return query.TRUE, .Ok
+	case "input_line_number":
+		return query.int_value(0), .Ok
+	case "input_filename":
+		if m.hooks != nil && m.hooks.input_filename != nil {
+			return m.hooks.input_filename(m.hooks.data, m.h)
+		}
+	case "now":
+		if m.hooks != nil && m.hooks.now != nil {
+			return query.double_value(m.hooks.now(m.hooks.data)), .Ok
+		}
+		return query.double_value(0), .Ok
+	}
+	return query.NULL, .Ok
+}
+
+@(private)
+v_number_class :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if query.type_of(x) != .Number {
+		return query.FALSE, .Ok
+	}
+	f := query.as_f64(x)
+	switch b.name {
+	case "isinfinite":
+		return query.bool_value(math.is_inf(f)), .Ok
+	case "isnan":
+		return query.bool_value(math.is_nan(f)), .Ok
+	}
+	return query.bool_value(math.classify(f) == .Normal), .Ok
+}
+
+@(private)
+v_frexp :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	if query.type_of(x) != .Number {
+		return query.NULL, raise_typed(m, x, " number required")
+	}
+	a := query.as_f64(x)
+	out := query.make_array(h, 2) or_return
+	switch b.name {
+	case "frexp":
+		fr, e := math.frexp(a)
+		query.append_owned(h, &out, query.double_value(fr)) or_return
+		query.append_owned(h, &out, query.int_value(i64(e))) or_return
+	case "modf":
+		ip, fr := math.modf(a)
+		if math.is_inf(a) {
+			ip, fr = a, math.copy_sign(0, a)
+		}
+		query.append_owned(h, &out, query.double_value(fr)) or_return
+		query.append_owned(h, &out, query.double_value(ip)) or_return
+	case:
+		r, sign := math.lgamma(a)
+		query.append_owned(h, &out, query.double_value(r)) or_return
+		query.append_owned(h, &out, query.int_value(i64(sign))) or_return
+	}
+	return out, .Ok
+}
+
+@(private)
+v_builtins :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	out := query.make_array(h, len(BUILTINS)) or_return
+	for &e in BUILTINS {
+		if len(e.name) > 0 && e.name[0] == '_' {
+			continue
+		}
+		query.append_owned(h, &out, name_arity(h, e.name, int(e.arity)) or_return) or_return
+	}
+	for d := m.prog.prelude; d != nil; d = d.a {
+		if fn := d.fn; len(fn.name) > 0 && fn.name[0] != '_' {
+			query.append_owned(h, &out, name_arity(h, fn.name, len(fn.params)) or_return) or_return
+		}
+	}
+	return out, .Ok
+}
+
+// `name/arity` as a text value.
+@(private)
+name_arity :: proc(h: ^query.Heap, name: string, arity: int) -> (res: query.Value, status: query.Status) {
+	v, out := query.make_text(h, len(name) + (3 if arity >= 10 else 2)) or_return
+	copy(out[:len(name)], name)
+	out[len(name)] = '/'
+	if arity >= 10 {
+		out[len(name) + 1] = u8('0' + arity / 10)
+	}
+	out[len(name) + (2 if arity >= 10 else 1)] = u8('0' + arity % 10)
+	return v, .Ok
+}
+
+@(private)
+v_unavailable :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	out := make([dynamic]u8, m.h.allocator)
+	defer delete(out)
+	append(&out, b.name)
+	append(&out, " is not yet available")
+	return query.NULL, raise_owned_text(m, string(out[:]))
+}
+
+// Raises a message the caller made, copied into the heap.
+@(private)
+raise_owned_text :: proc(m: ^Machine, text: string) -> query.Status {
+	t, s := query.text_value(m.h, text)
+	if s != .Ok {
+		return s
+	}
+	defer query.release(m.h, t)
+	return raise(m.h, t)
+}
+
+// `a` rounded to the nearest integer, a tie to the even one.
+@(private)
+round_even :: proc(a: f64) -> f64 {
+	if math.is_inf(a) || math.is_nan(a) {
+		return a
+	}
+	f := math.floor(a)
+	switch d := a - f; {
+	case d > 0.5:
+		return f + 1
+	case d < 0.5:
+		return f
+	}
+	return f if math.floor(f / 2) * 2 == f else f + 1
+}

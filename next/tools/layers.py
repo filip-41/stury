@@ -12,7 +12,7 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-LAYERS = ["lib/base", "lib/core", "lib/ops", "lib/schema"]
+LAYERS = ["lib/base", "lib/core", "lib/ops", "lib/schema", "lib/query"]
 # The top-level packages above the formats. Any other top-level directory is a format, which imports only the
 # layers below it.
 TOP_EDGES = {

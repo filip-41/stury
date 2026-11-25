@@ -78,6 +78,7 @@ DEEP_TEST := json_tests.reads_nest_100000_levels_in_one_mib
 DEEP_CBOR_TEST := cbor_tests.reads_nest_100000_levels_in_one_mib
 DEEP_TOML_TEST := toml_tests.reads_nest_100000_levels_in_one_mib
 DEEP_XML_TEST := xml_tests.reads_nest_100000_levels_in_one_mib
+DEEP_JQ_TEST := jq_tests.programs_nest_100000_levels_in_one_mib,jq_tests.runs_go_100000_levels_deep_in_one_mib
 DEEP_OPTS := none speed
 
 .PHONY: check check-all lint test test-deep test-asan test-tsan
@@ -137,8 +138,8 @@ test:
 	@for p in $(GAP_PKGS); do \
 		echo "== $$p (no gaps, no rewalk)"; $(ODIN) test $$p -o:minimal $(TEST_FLAGS) -define:JSON_GAPS=false -define:JSON_REWALK=false -out:build/test-$$(echo $$p | tr / -)-nogaps || exit 1; \
 	done
-	@for pkg in json cbor toml xml; do \
-		case $$pkg in json) names="$(DEEP_TEST)";; cbor) names="$(DEEP_CBOR_TEST)";; toml) names="$(DEEP_TOML_TEST)";; *) names="$(DEEP_XML_TEST)";; esac; \
+	@for pkg in json cbor toml xml jq; do \
+		case $$pkg in json) names="$(DEEP_TEST)";; cbor) names="$(DEEP_CBOR_TEST)";; toml) names="$(DEEP_TOML_TEST)";; xml) names="$(DEEP_XML_TEST)";; *) names="$(DEEP_JQ_TEST)";; esac; \
 		for o in $(DEEP_OPTS); do \
 			echo "== $$pkg/test (100,000 levels in one MiB, -o:$$o)"; \
 			$(ODIN) test $$pkg/test -o:$$o $(TEST_FLAGS) -define:ODIN_TEST_NAMES=$$names -out:build/test-deep-$$pkg-$$o || exit 1; \

@@ -1,0 +1,86 @@
+# Where the jq frontend answers otherwise than jq 1.8.2, case by case of jq's own tests, and why.
+# case	kind	reason
+# kind: `better` is a divergence kept on purpose; `reader` is the JSON reader's own wording; `platform` is what jq takes from its libc or libm, which differs by platform; `bug` is a difference not yet fixed or ruled on. A `pending` case (none now) waits on what is not built yet.
+jq.test:2211	better	Integers are exact: arithmetic past 2^53 keeps every digit, where jq rounds to a double.
+jq.test:2215	better	Integers are exact: arithmetic past 2^53 keeps every digit, where jq rounds to a double.
+jq.test:2219	better	Integers are exact: arithmetic past 2^53 keeps every digit, where jq rounds to a double.
+jq.test:2241	better	Integers are exact: adding 0 to an integer past 2^53 keeps it, where jq rounds to a double.
+jq.test:2228	better	A decimal literal is a double: only integers are exact, and jq's decNumber keeps a decimal's digits.
+jq.test:2232	better	A decimal literal past a double's range is an infinity, written as the largest double, where decNumber keeps 1E+1000.
+jq.test:2271	better	A decimal literal past a double's range is an infinity, written as the largest double, where decNumber keeps 1E+1000.
+jq.test:2275	better	A decimal literal past a double's range is an infinity, written as the largest double, where decNumber keeps 1E+1000.
+jq.test:2324	reader	fromjson's parse errors are the JSON reader's messages, with the line and column first.
+jq.test:2498	reader	fromjson's parse errors are the JSON reader's messages, with the line and column first.
+jq.test:2563	reader	fromjson past the depth budget says so in the JSON reader's words, "Exceeds the depth limit", with the line and column first.
+ported.test:6	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:18	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:22	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:75	better	leaf_paths stays defined, where jq 1.8 removed it.
+ported.test:261	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:310	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:329	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:492	better	@base32 and @base32d encode and decode RFC 4648 base32, where jq 1.8.2's build refuses the format names.
+ported.test:646	better	@base64d of a text with a leading = is an error in v2, where jq reads it as empty.
+ported.test:655	better	@urid of bytes that are not UTF-8 gives U+FFFD as @base64d does, where jq refuses it.
+ported.test:679	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:683	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:687	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:691	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:695	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:715	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:745	better	A break is no error a program can raise: error({__jq: N}) is a plain error, where jq lets it end a label.
+ported.test:749	better	A break is no error a program can raise: error({__jq: N}) is a plain error, where jq lets it end a label.
+ported.test:753	better	Whether a computed value passes as a path follows how jq stores values (an array it was handed, a boolean or null equal to the value at the path passes, a fresh string does not), v2 follows how the value was made.
+ported.test:757	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:769	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:776	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:805	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:812	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:895	better	@csv and @tsv errors use the format's own name and say an array is needed, where jq words the tsv row error as csv.
+ported.test:908	better	Invalid path expression: jq names the step its own definition of the builtin took next (an access or an iteration of an internal value), v2 names the value that is no path or the plain error.
+ported.test:912	better	reverse of NaN is an empty array, as it has no elements, where jq's definition indexes with NaN and fails.
+ported.test:937	better	Invalid path expression: jq names the step its own definition of the builtin took next (an access or an iteration of an internal value), v2 names the value that is no path or the plain error.
+ported.test:957	better	Whether a computed value passes as a path follows how jq stores values (an array it was handed, a boolean or null equal to the value at the path passes, a fresh string does not), v2 follows how the value was made.
+ported.test:961	better	Invalid path expression: jq names the step its own definition of the builtin took next (an access or an iteration of an internal value), v2 names the value that is no path or the plain error.
+ported.test:985	better	Invalid path expression: jq names the step its own definition of the builtin took next (an access or an iteration of an internal value), v2 names the value that is no path or the plain error.
+ported.test:1000	better	contains takes true and false for one type, where jq refuses them as two kinds.
+ported.test:1012	better	Invalid path expression: jq names the step its own definition of the builtin took next (an access or an iteration of an internal value), v2 names the value that is no path or the plain error.
+ported.test:1016	better	Whether a computed value passes as a path follows how jq stores values (an array it was handed, a boolean or null equal to the value at the path passes, a fresh string does not), v2 follows how the value was made.
+ported.test:1065	better	A break or an error raised after a ?// destructuring makes jq retry the next alternative, which ends a reduce with null or lets a later alternative answer, v2 raises it.
+ported.test:1069	better	jq tracks paths inside the right side of an update operator, so a step there fails as an invalid path, v2 evaluates the right side as plain values and reports its own error.
+ported.test:1073	better	jq tracks paths inside the right side of an update operator, so a step there fails as an invalid path, v2 evaluates the right side as plain values and reports its own error.
+ported.test:1081	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:1100	better	A break or an error raised after a ?// destructuring makes jq retry the next alternative, which ends a reduce with null or lets a later alternative answer, v2 raises it.
+ported.test:1220	better	builtins also lists the functions stury adds to jq's, so a count of them differs.
+ported.test:1227	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:1231	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:1254	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:1290	better	limit and skip with a string, array or object as the count are refused as no number, where jq fails with a subtraction error only once the generator gives an output.
+ported.test:1318	better	jq fails an update whose body destructures with ?// (Paths must be specified as an array), v2 gives the update's result.
+ported.test:1322	better	A sort key of nan: jq orders nan before itself, so its order follows its sort routine, v2 keeps the input order.
+ported.test:1329	better	Whether a computed value passes as a path follows how jq stores values (an array it was handed, a boolean or null equal to the value at the path passes, a fresh string does not), v2 follows how the value was made.
+ported.test:1341	better	Invalid path expression: jq names the step its own definition of the builtin took next (an access or an iteration of an internal value), v2 names the value that is no path or the plain error.
+ported.test:1443	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:1491	platform	erf and erfc differ from the platform libm in the last digit.
+ported.test:1509	platform	strptime's weekday: jq leaves the libc's tm_wday as the platform computes it, v2 computes the date's.
+ported.test:1513	platform	strptime's weekday: jq leaves the libc's tm_wday as the platform computes it, v2 computes the date's.
+ported.test:1523	better	mktime of a year before 1900 gives its time, where jq's libc timegm refuses it (invalid gmtime representation).
+ported.test:1532	platform	Bessel jn and yn follow FreeBSD's algorithms, so their last digit can differ from the platform libm's, which jq takes.
+ported.test:1540	better	A sort key of nan: jq orders nan before itself, so its order follows its sort routine, v2 keeps the input order.
+ported.test:1695	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:1719	reader	The JSON reader refuses what jq's own parser repairs (a lone surrogate escape, a leading zero) and words its parse errors its own way.
+ported.test:1731	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:1819	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:1891	better	@csv and @tsv errors use the format's own name and say an array is needed, where jq words the tsv row error as csv.
+ported.test:1915	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:1927	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:1967	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:2112	bug	The regex retry limit is reached at other points than Oniguruma's.
+ported.test:2128	bug	The regex retry limit is reached at other points than Oniguruma's.
+ported.test:2408	bug	Unicode properties of newer code points differ from the Oniguruma version jq ships.
+ported.test:2542	platform	scalb with a fractional exponent: jq calls the platform's libm, which truncates the exponent on macOS and gives NaN on glibc, v2 gives glibc's answer everywhere.
+ported.test:2546	platform	scalb with a fractional exponent: jq calls the platform's libm, which truncates the exponent on macOS and gives NaN on glibc, v2 gives glibc's answer everywhere.
+ported.test:2557	platform	gamma is lgamma on glibc and tgamma on macOS libc: jq follows the platform.
+ported.test:2563	better	Numbers are exact integers or doubles: jq keeps a decimal literal's digits (decNumber), so its literal comparison, ordering and printing differ.
+ported.test:2567	better	gmtime of a year past 2^31 gives the year, where jq wraps it through a 32-bit tm_year.
+ported.test:29	better	The library writes -0 as 0 and an infinity as null, where jq writes -0 and the largest double.

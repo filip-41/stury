@@ -1,0 +1,2851 @@
+# Programs of the v1 CLI cases (tools/tests/cli/cases/cli.tsv) that a library run answers: the program, one input line and
+# the outputs, then `%%ERROR message` for the error that ends the run. A `%%FAIL` case is a program that does not compile.
+
+# compile
+
+"\udc00"
+null
+"�"
+
+%%FAIL
+"\ud800A"
+jq: error: Invalid \uXXXX\uXXXX surrogate pair escape at line 1, column 8 (while parsing '"\ud800"') at <top-level>, line 1, column 2:
+
+"😀"
+null
+"😀"
+
+"\(1)\udc00"
+null
+"1�"
+
+{"\udc00":1}
+null
+{"�":1}
+
+
+# conformance
+
+[0, 1.5, -1.75, -0.0, 1e300, nan, infinite, -infinite] | map(modf)
+null
+[[0,0],[0.5,1],[-0.75,-1],[0,0],[0,1e+300],[null,null],[0,1.7976931348623157e+308],[-0,-1.7976931348623157e+308]]
+
+null
+null
+null
+
+.a, .b
+{"a":1}
+1
+null
+
+.[1], .[-1], .[5]
+[1,2,3]
+2
+3
+null
+
+length, utf8bytelength
+"héllo"
+5
+6
+
+sort, sort_by(-.), min, max
+[3,1,2]
+[1,2,3]
+[3,2,1]
+1
+3
+
+sort_by(.a), group_by(.a), unique_by(.a), min_by(.a), max_by(.a)
+[{"a":2,"b":1},{"a":1,"b":2},{"a":1,"b":3}]
+[{"a":1,"b":2},{"a":1,"b":3},{"a":2,"b":1}]
+[[{"a":1,"b":2},{"a":1,"b":3}],[{"a":2,"b":1}]]
+[{"a":1,"b":2},{"a":2,"b":1}]
+{"a":1,"b":2}
+{"a":2,"b":1}
+
+flatten, flatten(1), flatten(0)
+[1,[2,[3,[4]]]]
+[1,2,3,4]
+[1,2,[3,[4]]]
+[1,[2,[3,[4]]]]
+
+%%FAIL
+[paths], [leaf_paths], [paths(type == "number")]
+jq: error: leaf_paths/0 is not defined at <top-level>, line 1, column 11:
+
+to_entries, with_entries(.value += 1), (to_entries | from_entries)
+{"a":1,"b":2}
+[{"key":"a","value":1},{"key":"b","value":2}]
+{"a":2,"b":3}
+{"a":1,"b":2}
+
+from_entries
+[{"name":"a","value":1},{"k":"b","v":2},{"key":null,"value":3},{"key":false},{"key":1,"value":4}]
+%%ERROR Cannot use null (null) as object key
+
+split(", "), split(","), [splits(", *")], indices(", "), index(","), rindex(",")
+"a,b, c"
+["a,b","c"]
+["a","b"," c"]
+["a","b","c"]
+[3]
+1
+3
+
+explode, (explode | implode), ascii_upcase, ltrimstr("a"), rtrimstr("c"), startswith("ab"), endswith("bc")
+"abc"
+[97,98,99]
+"abc"
+"ABC"
+"bc"
+"ab"
+true
+true
+
+trim, ltrim, rtrim
+"  x y  "
+"x y"
+"x y  "
+"  x y"
+
+map(try trim catch .), map(try ltrim catch .), map(try rtrim catch .)
+[null, "", 1, [], "\u200ba\u200b", "\u200ea\u200e", "\u200fa\u200f", "\ufeffa\ufeff", "\u00a0a\u00a0", "\u0085\u1680\u2003\u00e9\u3000 ", "\u2028x\u2029", "\ud83d\ude00 ", "\t\n\u000b\f\r x"]
+["trim input must be a string","","trim input must be a string","trim input must be a string","​a​","‎a‎","‏a‏","﻿a﻿","a","é","x","😀","x"]
+["trim input must be a string","","trim input must be a string","trim input must be a string","​a​","‎a‎","‏a‏","﻿a﻿","a ","é　 ","x ","😀 ","x"]
+["trim input must be a string","","trim input must be a string","trim input must be a string","​a​","‎a‎","‏a‏","﻿a﻿"," a","  é"," x","😀","\t\n\u000b\f\r x"]
+
+join("-")
+[1,null,"a",true]
+"1--a-true"
+
+has("a"), has("b"), (.a | has(0)), (.a | has(2))
+{"a":[1,2]}
+true
+false
+true
+false
+
+contains({a:"o"}), contains({b:[1]}), contains({b:[3]})
+{"a":"foo","b":[1,2]}
+true
+true
+false
+
+inside([1,2,3]), ([1] | inside([1,2]))
+[1,2]
+true
+true
+
+[range(5)], [range(2;5)], [range(0;10;3)], [range(5;0;-2)], [range(0;1;0)]
+null
+[0,1,2,3,4]
+[2,3,4]
+[0,3,6,9]
+[5,3,1]
+[]
+
+[limit(3; range(10))], [limit(0; 1,2)], first(range(10)), [first(empty)], isempty(empty), isempty(1,2)
+null
+[0,1,2]
+[]
+0
+[]
+true
+false
+
+[.[]?], (try error("x") catch .), (try error({a:1}) catch .a), [(1,2) | try (if . == 2 then error("e") else . end) catch "caught"]
+null
+[]
+"x"
+1
+[1,"caught"]
+
+1 as $x | 2 as $y | [$x, $y, $x + $y]
+null
+[1,2,3]
+
+. as {a: [$p, $q], b: {c: $r}} | [$p, $q, $r]
+{"a":[1,2],"b":{"c":3}}
+[1,2,3]
+
+reduce range(1;6) as $i (0; . + $i), [foreach range(5) as $i (0; . + $i)], [foreach range(5) as $i (0; . + $i; [$i, .])]
+null
+15
+[0,1,3,6,10]
+[[0,0],[1,1],[2,3],[3,6],[4,10]]
+
+def f(x): x * 2; def g: . + 1; [f(3), (5 | g)]
+null
+[6,6]
+
+def fac: if . <= 1 then 1 else . * (. - 1 | fac) end; [range(1;8) | fac]
+null
+[1,2,6,24,120,720,5040]
+
+[label $out | 1, 2, break $out, 3]
+null
+[1,2]
+
+"\(1 + 2) and \("x")", @json "v=\([1,"a"])", @text "\(null)", @html "<&>'\"", @uri "a b&c=d/é", @csv "\([1,"a\"b",null,true])", @tsv "\(["a\tb","c\\d"])", @sh "\("it's")", @base64 "hello", ("aGVsbG8=" | @base64d), ("aGVsbG8" | @base64d)
+null
+"3 and x"
+"v=[1,\"a\"]"
+"null"
+"<&>'\""
+"a b&c=d/é"
+"1,\"a\"\"b\",,true"
+"a\\tb\tc\\\\d"
+"'it'\\''s'"
+"hello"
+"hello"
+"hello"
+
+.a += 1, .a -= 1, .a *= 3, .a /= 2, .a %= 1, .b //= 5, .a |= . + 10, .a = 7
+{"a":1}
+{"a":2}
+{"a":0}
+{"a":3}
+{"a":0.5}
+{"a":0}
+{"a":1,"b":5}
+{"a":11}
+{"a":7}
+
+.[1:] = ["x"], .[0] |= empty, del(.[0,2]), to_entries
+[1,2,3]
+[1,"x"]
+[2,3]
+[2]
+[{"key":0,"value":1},{"key":1,"value":2},{"key":2,"value":3}]
+
+.a[].b |= . * 10, [.a[] | .b], (.a | map(.b) | add), del(.a[] | select(.b == 1))
+{"a":[{"b":1},{"b":2}]}
+{"a":[{"b":10},{"b":20}]}
+[1,2]
+3
+{"a":[{"b":2}]}
+
+transpose, combinations | tostring
+[[1,2],[3,4]]
+"[[1,3],[2,4]]"
+"[1,3]"
+"[1,4]"
+"[2,3]"
+"[2,4]"
+
+any, all, any(. > 2), all(. > 0), (map(. > 1) | any), ([] | any, all)
+[1,2,3]
+true
+true
+true
+true
+true
+false
+true
+
+1 == 1.0, [1,2] < [1,3], {} < [], null < false, "a" < "b", (1,null,"a",[],{}) | type
+null
+"boolean"
+"boolean"
+"boolean"
+"boolean"
+"boolean"
+"number"
+"null"
+"string"
+"array"
+"object"
+
+1e1000, -1e1000, ([1e1000] | tojson), (infinite | isinfinite), (nan | isnan), ([nan] | sort), (nan < 1), 0.1 + 0.2, 1/3, 3.0, 3.10, 1.5e-7, 100000000000000000000, 1e17, 12345678901234567890
+null
+1E+1000
+-1E+1000
+"[1E+1000]"
+true
+true
+[null]
+true
+0.30000000000000004
+0.3333333333333333
+3.0
+3.10
+1.5E-7
+100000000000000000000
+1E+17
+12345678901234567890
+
+[1.0, 1.50, -0, -0.0, 0.0, 1e2, 1E-2, 0.00001, 123e-10]
+null
+[1.0,1.50,0,0.0,0.0,1E+2,0.01,0.00001,1.23E-8]
+
+[true, false, null, 0, ""] | map(not)
+null
+[false,true,true,false,false]
+
+[.[]?] | length, ({} | keys), ([] | add), ({"a":1,"b":2} | add)
+null
+0
+[]
+null
+3
+
+keys, keys_unsorted, (to_entries | map(.key)), tojson, (tojson | fromjson)
+{"b":2,"a":1}
+["a","b"]
+["b","a"]
+["b","a"]
+"{\"b\":2,\"a\":1}"
+{"b":2,"a":1}
+
+"1.000" | tonumber, ("12" | tonumber + 1), (5 | tostring), ([1] | tostring), ("x" | tostring)
+null
+1.000
+13
+"5"
+"[1]"
+"x"
+
+"1.000", "-0", "12345678901234567890" | tonumber | ., tojson, -.
+null
+1.000
+"1.000"
+-1.000
+-0
+"-0"
+0
+12345678901234567890
+"12345678901234567890"
+-12345678901234567890
+
+["12" | tonumber] | (try path(.[0] | tostring | tonumber) catch .), path(.[0]), ("12" | tonumber | try path(tostring | tonumber) catch .), (map(tonumber) | .[0] == .[0])
+null
+"Invalid path expression with result 12"
+[0]
+"Invalid path expression with result 12"
+true
+
+"1e1000" | tonumber | ., tojson
+null
+1E+1000
+"1E+1000"
+
+"test 123 abc 456" | [match("[0-9]+"; "g") | .string], [scan("[0-9]+")], test("ABC"; "i"), [match("(?<x>[a-z]+) (?<y>[0-9]+)") | .captures[] | .name], capture("(?<word>[a-z]+) (?<num>[0-9]+)")
+null
+["123","456"]
+["123","456"]
+true
+["x","y"]
+{"word":"test","num":"123"}
+
+"aXbXc" | sub("X"; "-"), gsub("X"; "-"), gsub("(?<l>[a-z])"; "\(.l)\(.l)"), [sub("X"; "1", "2")]
+null
+"a-bXc"
+"a-b-c"
+"aaXbbXcc"
+["a1bXc","a2bXc"]
+
+"abc" | [match(""; "g") | .offset]
+null
+[0,1,2,3]
+
+"xyz" | [match("(a)?y") | .captures]
+null
+[[{"offset":-1,"string":null,"length":0,"name":null}]]
+
+[.[] | tostring]?, ([1,[2]] | getpath([1,0])), (null | getpath(["a","b"])), ({} | setpath(["a",1]; 5)), ([1,2,3] | delpaths([[0],[2]]))
+null
+2
+null
+{"a":[null,5]}
+[2]
+
+[paths], [..], getpath(["a","b"]), [path(..)], path(.a.b), [path(.a[]?)], pick(.a.b.c)
+{"a":{"b":{"c":1}}}
+[["a"],["a","b"],["a","b","c"]]
+[{"a":{"b":{"c":1}}},{"b":{"c":1}},{"c":1},1]
+{"c":1}
+[[],["a"],["a","b"],["a","b","c"]]
+["a","b"]
+[["a","b"]]
+{"a":{"b":{"c":1}}}
+
+reverse, (null | reverse), first, last, nth(1), nth(5), [nth(1; .[])]
+[3,1,2]
+[2,1,3]
+[]
+3
+2
+1
+null
+[1]
+
+%%FAIL
+[repeat(.+1; . < 4)]?, [limit(5; repeat(1))], [range(3) | until(. > 10; . * 2 + 1)], [1 | while(. < 50; . * 3)]
+jq: error: repeat/2 is not defined at <top-level>, line 1, column 2:
+
+[limit(5; recurse(. + 1))], ({"a":[{"a":[]}]} | [recurse(.a[])] | length), (2 | [recurse(if . < 20 then . * . else empty end)]), (2 | [recurse(. * .; . < 100)])
+null
+[null,1,2,3,4]
+2
+[2,4,16,256]
+[2,4,16]
+
+[.a[] | numbers], [.a[] | strings], [.a[] | nulls], [.a[] | objects], [.a[] | iterables], [.a[] | scalars], [.a[] | values]
+{"a":[1,"x",null,{}]}
+[1]
+["x"]
+[null]
+[{}]
+[{}]
+[1,"x",null]
+[1,"x",{}]
+
+[1,[2]] | walk(if type == "number" then . + 1 else . end)
+null
+[2,[3]]
+
+%%FAIL
+{"a":1,"b":[1,{"c":2}]} | [tostream], fromstream(tostream), [truncate_stream(1; tostream)]
+jq: error: truncate_stream/2 is not defined at <top-level>, line 1, column 62:
+
+@text "\(1)" | ., (1 | @json), ({} | @json), ("é" | @json), ("\u0001\u007f" | @json)
+null
+"1"
+"1"
+"{}"
+"\"é\""
+"\"\\u0001\\u007f\""
+
+{"a":1} | has("a"), (["a","b"] | index("b")), ("a" | in({"a":1})), (0 | in([5]))
+null
+true
+1
+true
+true
+
+%%FAIL
+[splits("")]?, ("abc" | split("")), ("" | split(",")), ("a" | ascii)?
+jq: error: ascii/0 is not defined at <top-level>, line 1, column 63:
+
+1 | floor, sqrt, pow(2;10), log, exp10?, (3.7 | floor, ceil, round, fabs, trunc), (-3.5 | round), (2.5 | rint), (10 | log10), ([1,2] | abs?), (-5 | abs), (-0 | abs)
+null
+1
+1
+1024
+0
+10
+3
+4
+4
+3.7
+3
+-4
+2
+1
+[1,2]
+5
+0
+
+"2015-03-05T23:51:47Z" | strptime("%Y-%m-%dT%H:%M:%SZ"), fromdateiso8601, (fromdate | todateiso8601)
+null
+[2015,2,5,23,51,47,4,63]
+1425599507
+"2015-03-05T23:51:47Z"
+
+{} | .a.b.c = 1, (.x[2] = 1), (.["k"] = 1)
+null
+{"a":{"b":{"c":1}}}
+{"x":[null,null,1]}
+{"k":1}
+
+.[1:2] |= map(. * 10), .[-1:], .[:-1], .[1:][0], ("abcdef" | .[2:4], .[-2:]), .[1.5:2.7]
+[1,2,3]
+[1,20,3]
+[3]
+[1,2]
+2
+"cd"
+"ef"
+[2,3]
+
+{"user":"x","titles":["a","b"]} | {user, title: .titles[]}
+null
+{"user":"x","title":"a"}
+{"user":"x","title":"b"}
+
+. as [$a, $b, {c: $c}] | [$a, $b, $c]
+null
+[null,null,null]
+
+{"a":"b","b":5} | . as {a: $k} | .[$k]
+null
+5
+
+if . then "t" elif . == null then "n" else "f" end, (if empty then 1 else 2 end), [if (true,false) then 1 else 2 end], (if false then 1 end)
+null
+"n"
+[1,2]
+null
+
+"abc" | ascii_downcase, @base32?, ltrimstr("x"), (tojson | fromjson)
+null
+"abc"
+"abc"
+"abc"
+
+[{"a":1},{"a":2}] | map(select(.a > 1)), (.[] | select(.a == 1) | .a), [.[] | .a] | add
+null
+{"a":2}
+%%ERROR Cannot iterate over number (1)
+
+[1,2,3] | to_entries, (with_entries(.value *= 2)), (keys), ([.[] | . * 2] | add)
+null
+[{"key":0,"value":1},{"key":1,"value":2},{"key":2,"value":3}]
+%%ERROR Cannot use number (0) as object key
+
+"x" | [limit(3; repeat(. + "y"))], ("a-b-c" | sub("-"; "+"; "g")), ("Abc" | test("a"; "i")), ("aaa" | [match("a"; "g")] | length)
+null
+["xy","xy","xy"]
+"a+b+c"
+true
+3
+
+[1,[2,3]] | getpath([1,1]), paths, [paths(type == "array")], (tostream | tojson)
+null
+3
+[0]
+[1]
+[1,0]
+[1,1]
+[[1]]
+"[[0],1]"
+"[[1,0],2]"
+"[[1,1],3]"
+"[[1,1]]"
+"[[1]]"
+
+%%FAIL
+[1,2,3] | IN(.[]; 2, 4), any(.[]; . == 2), all(.[]; . < 3), isvalid(.[5])?, (try ([1] | error) catch .)
+jq: error: isvalid/1 is not defined at <top-level>, line 1, column 61:
+
+{"a":[1,2]} | .a as [$x] | $x, (. as {$a} | $a), (. as {"a": [$y, $z]} | $y + $z)
+null
+1
+[1,2]
+3
+
+@sh "echo \([1, "a b"])", ([1, "x"] | @sh), (try ({} | @sh) catch .), ([1,"a,b"] | @csv), (["x\ty"] | @tsv), (try ([[1]] | @csv) catch .)
+null
+"echo 1 'a b'"
+"1 'x'"
+"object ({}) can not be escaped for shell"
+"1,\"a,b\""
+"x\\ty"
+"array ([1]) is not valid in a csv row"
+
+("a" | @uri), ("ü" | @uri), ("-_.~ !*'()" | @uri), ({"a":1} | @html), ([1] | @text)
+null
+"a"
+"%C3%BC"
+"-_.~%20%21%2A%27%28%29"
+"{&quot;a&quot;:1}"
+"[1]"
+
+[limit(3; .[]?)], [limit(1; 1, error("x"))], (first(1, error("y"))), (try [limit(-1; 1)] catch .), [skip(2; range(5))]?, nth(2; range(10))
+null
+[]
+[1]
+1
+"limit doesn't support negative count"
+[2,3,4]
+2
+
+"2015-03-05T23:51:47Z" | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime, todate, (. + 86400 | todate), (0 | strftime("%Y %m %d %H %M %S %a %b %c %D %F %T %p %I %u %w %s %y %C %e"))
+null
+1425599507
+"2015-03-05T23:51:47Z"
+%%ERROR array ([2015,2,5,23,51,47,4,63]) and number (86400) cannot be added
+
+.users[] | {name, n: (.tags | length)}, [.users[].tags[]], (.users | map(.name) | join(",")), ([.users[] | select(.tags | index("a"))] | length), (.users[0] | to_entries | length), [.users[] | .tags | first?], (.users | INDEX(.name) | keys)
+{"users":[{"name":"x","tags":["a","b"]},{"name":"y","tags":[]}]}
+{"name":"x","n":2}
+%%ERROR Cannot iterate over null (null)
+
+ascii_downcase, (. * 2)?, (. * 0), ([.] | implode?), (test("B"; "ix")), (capture("(?<first>.)(?<rest>.*)")), ([scan("(.)(.)")]), (sub("(?<x>.)"; "\(.x|ascii_upcase)")), (splits("b")), (@sh), (@text), (tojson|fromjson), (getpath(["a"])?)
+"abc"
+"abc"
+"abcabc"
+""
+true
+{"first":"a","rest":"bc"}
+[["a","b"]]
+"Abc"
+"a"
+"c"
+"'abc'"
+"abc"
+"abc"
+
+INDEX(.id), (INDEX(.[]; .n) | keys), (. as $r | [{"k":1},{"k":3}] | JOIN(INDEX($r[]; .id); .k)), (INDEX(.id) as $i | [{"k":2}] | [JOIN($i; .[]; .k; add?)])
+[{"id":1,"n":"a"},{"id":2,"n":"b"}]
+{"1":{"id":1,"n":"a"},"2":{"id":2,"n":"b"}}
+["a","b"]
+%%ERROR Cannot index object with number (1)
+
+-1
+[1]
+-1
+
+-.[0], -(1)
+[1]
+-1
+-1
+
+%%FAIL
+"\ud800"
+jq: error: Invalid \uXXXX\uXXXX surrogate pair escape at line 1, column 8 (while parsing '"\ud800"') at <top-level>, line 1, column 2:
+
+"nan", "inf", "-Infinity", "+1", ".5", "1.", "0x1", " 1", "nan1" | try tonumber catch .
+null
+null
+1.7976931348623157e+308
+-1.7976931348623157e+308
+1
+0.5
+1
+"string (\"0x1\") cannot be parsed as a number"
+"string (\" 1\") cannot be parsed as a number"
+"string (\"nan1\") cannot be parsed as a number"
+
+try (null | abs) catch ., (-1, 1, "a", [] | abs), (null, "a", nan, infinite | isinfinite, isnan, isnormal)
+null
+"null (null) cannot be negated"
+1
+1
+"a"
+[]
+false
+false
+false
+false
+false
+false
+false
+true
+false
+true
+false
+false
+
+map([finites])
+[1, 0, -1.5, 1e+308, "x", "", null, true, false, [], [1], {}]
+[[1],[0],[-1.5],[1E+308],[],[],[],[],[],[],[],[]]
+
+"a", "=a", "YQ", "YWJj", "Y*", "/w==" | try @base64d catch .
+null
+"string (\"a\") trailing base64 byte found"
+""
+"a"
+"abc"
+"string (\"Y*\") is not valid base64 data"
+"�"
+
+"%CE%BC", "%zz", "%", "%ff", "a+b" | try @urid catch .
+null
+"μ"
+"string (\"%zz\") is not a valid uri encoding"
+"string (\"%\") is not a valid uri encoding"
+"string (\"%ff\") is not a valid uri encoding"
+"a+b"
+
+"abcab" | _strindices("ab"), indices("b"), (try _strindices(1) catch .), (try (1 | _strindices("a")) catch .)
+null
+[0,3]
+[1,4]
+"number (1) is not a string"
+"number (1) cannot be searched, as it is not a string"
+
+strftime("%V %g %C %D %x %X %r %u %w %l %h %%")
+1425599621
+"10 15 20 03/05/15 03/05/15 23:53:41 11:53:41 PM 4 4 11 Mar %"
+
+try strftime("%c%c%c%c%c") catch ., strftime("")
+0
+"strftime/1: unknown system failure"
+""
+
+"\u00e9\uD83D\ude00\udc00\t\/\""
+null
+"é😀�\t/\""
+
+try fromjson catch .
+"\"\\ud800\""
+"Invalid \\uXXXX\\uXXXX surrogate pair escape at line 1, column 8 (while parsing '\"\\ud800\"')"
+
+try fromjson catch .
+"\"\\u12zz\""
+"Invalid characters in \\uXXXX escape at line 1, column 8 (while parsing '\"\\u12zz\"')"
+
+try fromjson catch .
+"\"\\q\""
+"Invalid escape at line 1, column 4 (while parsing '\"\\q\"')"
+
+fromjson
+"\"\\udfff\\ud83d\\ude00\""
+"�😀"
+
+%%FAIL
+"\ud800\u12"
+jq: error: Invalid \uXXXX\uXXXX surrogate pair escape at line 1, column 12 (while parsing '"\ud800\u12"') at <top-level>, line 1, column 2:
+
+[y0, y1, yn(3;-2)]
+-1
+[null,null,null]
+
+j0
+"a"
+%%ERROR string ("a") number required
+
+[builtins[] | select(test("^(j[01n]|y[01n]|get_)"))] | sort
+null
+["get_jq_origin/0","get_prog_origin/0","get_search_list/0","j0/0","j1/0","jn/2","y0/0","y1/0","yn/2"]
+
+[range(80) | . * 37 % 101 - 50] + . | (sort | .[0:6], .[-7:]), (unique | length), ([.[] | . * 1] | unique | .[-3:]), (map({k: (. % 9), v: .}) | (group_by(.k) | map(length)), (sort_by(.k) | map(.v) | .[0:8]), (unique_by(.k) | map(.v)))
+[1e1000,-1e1000,-0,0.0,1.10,1.1,13911860366432393,13911860366432392,100000000000000000001,100000000000000000000]
+[-1E+1000,-50,-49,-48,-47,-45]
+[49,50,13911860366432392,13911860366432393,100000000000000000000,100000000000000000001,1E+1000]
+87
+[13911860366432392,1e+20,1.7976931348623157e+308]
+[5,3,3,5,6,6,6,4,10,6,4,4,6,4,5,8,5]
+[-17,-44,-8,-35,-1E+1000,-7,-34,-25]
+[-17,-7,-24,-50,-13,-3,-20,-10,27,37,47,30,40,50,24,34,44]
+
+[label $f | (null, break $f) // 3, 4]
+null
+[]
+
+[. as {("a","b"): {("x","y"): $v}} | $v]
+{"a":{"x":1,"y":2},"b":{"x":3}}
+[1,2,3,null]
+
+. as [$v] ?// {k: $k1, ($k1): {k: $k2, ($k2): $v}} | [$k1, $k2, $v]
+{"k":"a","a":{"k":"b","b":7}}
+["a","b",7]
+
+[paths(def f: . as $x | if ($x|type) == "object" then .a | f else . end; f)]
+{"a":{"a":{"a":1}}}
+[["a"],["a","a"],["a","a","a"]]
+
+def f($n; $m): if $n < 3 then f($n + 1; $m + $n) else [$n, $m] end; f(0; 0)
+null
+[3,3]
+
+[label $f | label $g | try (break $g, break $f) catch .]
+null
+[{"__jq":1}]
+
+[label $f | 1, error({__jq: 0}), 2]
+null
+[1]
+
+[path(. as $d | 1 | $d)]
+[[1,2]]
+[[]]
+
+unique, (sort | .[0:6])
+[1.0,1,100000000000000000001,100000000000000000000,-0,0,1e2,100,true,-3.5,1.0,1,100000000000000000001,100000000000000000000,-0,0,1e2,100,true,-3.5,1.0,1,100000000000000000001,100000000000000000000,-0,0,1e2,100,true,-3.5,1.0,1,100000000000000000001,100000000000000000000,-0,0,1e2,100,true,-3.5,1.0,1,100000000000000000001,100000000000000000000,-0,0,1e2,100,true,-3.5,1.0,1,100000000000000000001,100000000000000000000,-0,0,1e2,100,true,-3.5,1.0,1,100000000000000000001,100000000000000000000,-0,0,1e2,100,true,-3.5]
+[true,-3.5,-0,1.0,1E+2,100000000000000000000,100000000000000000001]
+[true,true,true,true,true,true]
+
+("1e99999999999999999999", "12.5e9223372036854775807", "1e-99999999999999999999" | tonumber), ("1e2147483648" | tonumber | tojson | fromjson)
+null
+1.7976931348623157e+308
+1.7976931348623157e+308
+0E-1147483646
+1.7976931348623157E+308
+
+.a == 1e400, .a < 1e400, .a > 1e400, ([.a, 1e400, 1.8e309, -1e400, -1e500] | sort)
+{"a":1.7976931348623157e309}
+false
+true
+false
+[-1E+500,-1E+400,1.7976931348623157E+309,1.8E+309,1E+400]
+
+., .[0], .[1], map(. > 0)
+[1e1000000000, 1e-1999999999, 1e999999999, -1e2000000000, 5]
+[1.7976931348623157e+308,0E-1147483646,1E+999999999,-1.7976931348623157e+308,5]
+1.7976931348623157e+308
+0E-1147483646
+[true,false,true,false,true]
+
+[1e1000000000, 1e1000000001] | .[0] == .[1], .[0] < .[1], (unique | length), (group_by(.) | length), (sort | map(. == 1e1000000000))
+null
+true
+false
+1
+1
+[true,true]
+
+[2e-2000000000, 0, 1e-2000000000, -1e-2000000000] | sort, (unique | length), (map(. == 0))
+null
+[0E-1147483646,0,0E-1147483646,0E-1147483646]
+1
+[true,true,true,true]
+
+[infinite, 1e400, -infinite, -1e400] | .[0] == .[1], .[0] > .[1], .[2] < .[3], (1e400 + 0) == 1e400, ([.[] | . + 0] | unique | length)
+null
+true
+false
+false
+true
+2
+
+map(. == 1e400), (unique | length), (group_by(.) | length), (sort | .[0] < .[1])
+[1e400, 1e401, 1.0e400, 10e399]
+[true,false,true,true]
+2
+2
+false
+
+(.[0] == .[1]), (.[0] < .[1]), (unique | length), (group_by(.) | map(length)), (sort | map(. == 12345678901234567890123456789012345678901))
+[12345678901234567890123456789012345678901, 12345678901234567890123456789012345678902, 12345678901234567890123456789012345678901.0]
+false
+true
+2
+[2,1]
+[true,true,false]
+
+[limit(3; range(0; nan))]
+null
+[0,1,2]
+
+[limit(3; range(nan; nan; 1))]
+null
+[null,null,null]
+
+[range(0; -3; nan)]
+null
+[0]
+
+[range(null; 3; 1)]
+null
+[null,1,2]
+
+[range(0; 3; null)]
+null
+[]
+
+[range(0; 3; "a")]
+null
+%%ERROR number (0) and string ("a") cannot be added
+
+builtins | (length == (unique | length)), (map(select(. == "finites/0" or . == "map/1")) | sort)
+null
+true
+["finites/0","map/1"]
+
+
+# differential
+
+select(.x > 1)
+{"x":1.000000000000000111022302462515654042363166809082031250000001}
+{"x":1.000000000000000111022302462515654042363166809082031250000001}
+
+.[] | [. == "", ("" < .), ("" > .), ([., ""] | unique)]
+["", "a"]
+[true,false,false,[""]]
+[false,true,false,["","a"]]
+
+[pow(2,3; 1,2), atan2(1,2; 3,4), fmin(1,2; 3,4)]
+null
+[2,3,4,9,0.3217505543966422,0.5880026035475675,0.24497866312686414,0.4636476090008061,1,2,1,2]
+
+[setpath(["a"],["b"]; 1,2)]
+null
+[{"a":1},{"b":1},{"a":2},{"b":2}]
+
+try [pow(error("a"); error("b"))] catch ., try [setpath(error("a"); error("b"))] catch ., try [test(error("a"); error("b"))] catch .
+null
+"b"
+"b"
+"b"
+
+[range(0,1; 3,4)], [limit(1,2; 5,6,7)]
+null
+[0,1,2,0,1,2,3,1,2,1,2,3]
+[5,5,6]
+
+[fma(0.1; 10; -1), fma(2,3; 10,20; 1)], (try fma(1; "b"; "c") catch .)
+null
+[5.551115123125783e-17,21,31,41,61]
+"string (\"b\") number required"
+
+try [sub(error("a"); error("b"))] catch ., (null | try sub("a"; "b") catch .)
+null
+"a"
+"null (null) cannot be matched, as it is not a string"
+
+[null | has(null, "a", 0, [])], [null | in({}, [])]
+null
+[false,false,false,false]
+%%ERROR Cannot check whether object has a null key
+
+"x" | try @csv catch ., try @tsv catch .
+null
+"string (\"x\") cannot be csv-formatted, only array"
+"string (\"x\") cannot be tsv-formatted, only array"
+
+[1] | try .["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] catch .
+null
+"Cannot index array with string (\"aaaaaaaaaaaaaaaaaaaaaaaa...\")"
+
+{} | try .[{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":1}] catch .
+null
+"Cannot index object with object ({\"aaaaaaaaaaaaaaaaaaaaaaa...})"
+
+{} | try del(reduce .[1:] as $x (.c?; "")) catch .
+null
+"Invalid path expression near attempt to access element {\"start\":1,\"end\":null} of {}"
+
+[0, -0, 1.5, 0.5, -7, nan] | map(try reverse catch .)
+null
+[[],[],"Cannot index number with number (0.5)","Cannot index number with number (-0.5)","Cannot index number with number (6)","Cannot index number with number (null)"]
+
+[{}, {"a":1,"b":2,"c":3}, null, "", "abc", true] | map(try reverse catch .)
+null
+[[],"Cannot index object with number (2)",[],[],"Cannot index string with number (2)","boolean (true) has no length"]
+
+null | try flatten("[1]") catch .
+null
+"Cannot iterate over null (null)"
+
+true | try splits(.) catch ., try [scan(.)] catch ., try split(.; null) catch .
+null
+"boolean (true) cannot be matched, as it is not a string"
+"boolean (true) cannot be matched, as it is not a string"
+"boolean (true) cannot be matched, as it is not a string"
+
+{} | try [splits(1.5)] catch ., try [scan(1.5)] catch ., try [match(1.5)] catch ., try test([]) catch .
+null
+"object ({}) cannot be matched, as it is not a string"
+"object ({}) cannot be matched, as it is not a string"
+"number not a string or array"
+"array not a string or array"
+
+"a,b" | try path(match(",")) catch ., try [path(scan(","))] catch ., try [path(capture("(?<x>,)"))] catch ., try [path(sub(","; "x"))] catch .
+null
+"Invalid path expression near attempt to iterate through [{\"offset\":1,\"length\":1,\"...]"
+"Invalid path expression near attempt to iterate through [{\"offset\":1,\"length\":1,\"...]"
+"Invalid path expression near attempt to iterate through [{\"offset\":1,\"length\":1,\"...]"
+"Invalid path expression near attempt to iterate through [{\"offset\":1,\"length\":1,\"...]"
+
+[] | .[[]], indices([])
+null
+[]
+[]
+
+[foreach (1,2,3) as $y (0; if $y == 2 then empty else . + 1 end; [$y, .])]
+null
+[[1,1],[3,1]]
+
+[foreach (1,2,3) as $y ({}; if $y == 2 then empty else .a += 1 end)]
+null
+[{"a":1},{"a":1}]
+
+[false] | try path(.[0] | (. and true)) catch .
+null
+[0]
+
+{"a":1} | try path(.a |= 1) catch ., try path(.a += 1) catch ., try path(.a //= 1) catch ., try path(.a = 1) catch .
+null
+"Invalid path expression near attempt to access element 0 of [{\"a\":1},[]]"
+"Invalid path expression near attempt to access element 0 of [{\"a\":2},[]]"
+"Invalid path expression near attempt to access element 0 of [{\"a\":1},[]]"
+"Invalid path expression with result {\"a\":1}"
+
+{"a":[1,2]} | [paths], try path([.a[]]) catch .
+null
+[["a"],["a",0],["a",1]]
+"Invalid path expression with result [1,2]"
+
+try path(reduce .a as $x (sort; .)) catch ., try path(reduce .a as $x (tojson; .)) catch .
+[1]
+"Cannot index array with string (\"a\")"
+"Cannot index array with string (\"a\")"
+
+"ab" | path(ltrimstr("a")), path(rtrimstr("b")), path(ltrimstr("")), path(rtrimstr(""))
+null
+[{"start":1,"end":null}]
+[{"start":null,"end":1}]
+[{"start":0,"end":null}]
+[{"start":null,"end":2}]
+
+try path(ascii_downcase) catch ., try path([.a] | flatten) catch ., try path([.a] | add) catch ., try path([.a] | join(",")) catch ., try path([.a] | reverse) catch .
+{"a":"ab"}
+"explode input must be a string"
+"Invalid path expression near attempt to iterate through [\"ab\"]"
+"Invalid path expression near attempt to iterate through [\"ab\"]"
+"Invalid path expression near attempt to iterate through [\"ab\"]"
+"Invalid path expression near attempt to access element 0 of [\"ab\"]"
+
+path(.a | indices(1)), path(.a | index(1)), path(.a | rindex(1)), try path([.a] | indices(1)) catch .
+{"a":[[1],null,1]}
+["a",[1]]
+["a",[1],0]
+["a",[1],{"start":-1,"end":null},0]
+"Invalid path expression near attempt to access element [1] of [[[1],null,1]]"
+
+true | try inside(false) catch ., try contains(false) catch ., contains(true), ([[true]] | contains([[false]]))
+null
+"boolean (false) and boolean (true) cannot have their containment checked"
+"boolean (true) and boolean (false) cannot have their containment checked"
+true
+false
+
+getpath(.)?, getpath([.[1]])
+[[[2,1.0]],-7]
+null
+null
+
+[path(.[0] or .[0]), path(.[0] and true)]
+[false]
+%%ERROR Invalid path expression near attempt to access element 0 of [false]
+
+path(. as $y | .[]? = 2) and sqrt
+{}
+%%ERROR object ({}) number required
+
+frexp
+-0
+[-0,0]
+
+pick(([combinations(2)]?), try .[1:].a)
+{"c":1,"b":{"a":2}}
+%%ERROR Invalid path expression with result [[1,1],[1,{"a":2}],[{"a":...]
+
+del(splits("(?<x>a)"))
+"null"
+%%ERROR Cannot delete fields from string
+
+[path(splits("u"))], [splits("u")]
+"nul"
+[[{"start":null,"end":1,"next":2}],[{"start":2,"end":null,"next":null}]]
+["n","l"]
+
+try reduce range(200000) as $i ({}; if $i == 150000 then error({at: ., i: $i}) else .a = [$i] end) catch .
+null
+{"at":{"a":[149999]},"i":150000}
+
+reduce range(3000) as $i (0; . + (reduce range(400) as $j (0; . + $j)))
+null
+239400000
+
+reduce range(100000) as $i ({}; .[$i % 7 | tostring] += [$i]) | map_values(length)
+null
+{"0":14286,"1":14286,"2":14286,"3":14286,"4":14286,"5":14285,"6":14285}
+
+[label $out | reduce range(100000) as $i (0; if $i == 90000 then ., break $out else . + 1 end)]
+null
+[]
+
+reduce ([1] as [$a] ?// $a | $a) as $x (5; if $x == 1 then error("e") else . + 10 end)
+null
+10
+
+reduce ([1] as [$a] ?// $a | $a) as $x ("s"; .["a"])
+null
+null
+
+reduce ([[1], [2]] | .[] as [$a] ?// $a | $a) as $x ({n: 0}; if $x == 1 then .n += 1 | error("e") else .n += 10 end)
+null
+{"n":20}
+
+[label $f | reduce ([1] as [$a] ?// $a | $a) as $x (5; if $x == 1 then break $f else . end)]
+null
+[null]
+
+path(.a -= ([1]|first))
+null
+%%ERROR Invalid path expression near attempt to access element 0 of [1]
+
+pick(.a.b += sub("X"; "a")) as $y | try .[1:]
+"[[1]]"
+%%ERROR Invalid path expression near attempt to iterate through []
+
+[-1e-400, -(1e-400), (1e-400 | -.), (-1e-400 | abs), ([1e-400, -(1e-400), 0] | sort)]
+null
+[-1E-400,-1E-400,-1E-400,1E-400,[-1E-400,0,1E-400]]
+
+[-(1e-400) < 0, -(1e-400) == 0, -(1e-400) > 0, 1e-400 > 0, 1e-400 == 0, ([-(1e-400), 0, 1e-400, -0, -(0), 1e-400 * -1] | sort), (-(1e-400) | tostring), ([-(1e-400)] | tojson), -(1e-400) == -(1e-400), 1e-400 == -(1e-400), -(1e-400) < 1e-400, ([{a: -(1e-400)}, {a: 0}] | sort_by(.a) | map(.a)), ([-(1e-400), 0] | unique), ([0, -(1e-400)] | min), ([-(1e-400), 0] | group_by(.)), (-(1e-400) | . + 0), (-(1e-400) | -.), -(-(1e-400)), (-(1e-400) | abs), (-(1e-400) | fabs), (-(1e-400)|tojson|fromjson), (-1e-400 < 0), -(0.0), -(0e5), -(-0)]
+null
+[true,false,false,true,false,[-1E-400,0,0,0,1E-400,-0],"-1E-400","[-1E-400]",true,false,true,[-1E-400,0],[-1E-400,0],-1E-400,[[-1E-400],[0]],0,1E-400,1E-400,1E-400,0,-1E-400,true,0.0,0E+5,0]
+
+[0, -0, 0.0, 0e5, 0.00e-3] | map(-.)
+null
+[0,0,0.0,0E+5,0.00000]
+
+[range(30000)|{h:4,g:3,f:2,e:1,d:(.*7%10007),c:"x\(.%5)",b:(.%11),a:(.%7)}] | tojson | fromjson | (sort|.[0:2]), (unique|length), (group_by(.)|length)
+null
+[{"h":4,"g":3,"f":2,"e":1,"d":0,"c":"x0","b":0,"a":0},{"h":4,"g":3,"f":2,"e":1,"d":21,"c":"x0","b":0,"a":0}]
+30000
+30000
+
+("é" * 100000 + "😀x") | [.[0:1], .[-2:], .[100000:], .[50000:50002], (.[99990:] | length)], ("abcd" * 100000 | [.[0:1], .[-2:], .[399999:], .[200000:200002]])
+null
+["é","😀x","😀x","éé",12]
+["a","cd","d","ab"]
+
+. as $d | (reduce range(3000) as $i ([]; . + [$i], . + $d.a) | length, .[-3:]), [label $f | reduce range(5) as $i ([]; . + ([$i], (if $i == 3 then break $f else [-$i] end)))], (reduce ([7]) as [$a] ?// $a ([]; . + [1], . + ($a|numbers|error("x")), . + [2]))
+{"a":[1,"x",{"y":2}]}
+9000
+[1,"x",{"y":2}]
+[]
+[1,2]
+
+
+# extensions
+
+[1,2,3,4]|avg, median, variance, stddev, quantile(0.25)
+null
+2.5
+2.5
+1.25
+1.118033988749895
+1.75
+
+[{"a":1},{"a":5}]|avg(.a), median(.a), variance(.a), stddev(.a), quantile(1;.a)
+null
+3
+3
+4
+2
+5
+
+[]|avg, median, variance, stddev, quantile(0.5)
+null
+null
+null
+null
+null
+null
+
+[1,1,2,"a","a","a"]|frequency, frequency(type)
+null
+[{"value":"a","count":3},{"value":1,"count":2},{"value":2,"count":1}]
+[{"value":"number","count":3},{"value":"string","count":3}]
+
+[]|frequency
+null
+[]
+
+[{"t":"x"},{"t":"y"},{"t":"x"}]|frequency(.t)
+null
+[{"value":"x","count":2},{"value":"y","count":1}]
+
+[1,2,2,3]|union([3,4,0]), intersect([2,3,9,2]), except([2])
+null
+[0,1,2,3,4]
+[2,3]
+[1,3]
+
+[]|union([]), intersect([1]), except([1])
+null
+[]
+[]
+[]
+
+[1,null,2,null,null,3]|fill_forward
+null
+[1,1,2,2,2,3]
+
+[null,{"a":1,"b":null},{"a":null,"b":2},{"a":null,"b":null}]|fill_forward
+null
+[null,{"a":1,"b":null},{"a":1,"b":2},{"a":1,"b":2}]
+
+[]|fill_forward
+null
+[]
+
+[{"id":1,"x":10,"y":20},{"id":2,"x":30,"y":40}]|melt(["id"]), melt(["id"];"k";"v")
+null
+[{"id":1,"variable":"x","value":10},{"id":1,"variable":"y","value":20},{"id":2,"variable":"x","value":30},{"id":2,"variable":"y","value":40}]
+[{"id":1,"k":"x","v":10},{"id":1,"k":"y","v":20},{"id":2,"k":"x","v":30},{"id":2,"k":"y","v":40}]
+
+[]|melt(["id"])
+null
+[]
+
+[{"id":1,"k":"x","v":10},{"id":1,"k":"y","v":20},{"id":2,"k":"x","v":30}]|pivot(["id"];"k";"v")
+null
+[{"id":1,"x":10,"y":20},{"id":2,"x":30,"y":null}]
+
+[]|pivot(["id"];"k";"v")
+null
+[]
+
+[uuid_v4,uuid_v4]|(.[0]!=.[1]), all(.[]; test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+null
+true
+true
+
+uuid_v7|test("^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+null
+true
+
+"2015-03-05T23:51:47Z"|fromrfc3339
+null
+1425599507
+
+"2024-06-01T12:34:56.123+02:00"|fromrfc3339
+null
+1717238096.123
+
+"1969-12-31T23:59:58.5-00:00","2016-12-31T23:59:60Z"|fromrfc3339
+null
+-1.5
+1483228800
+
+1425599507|torfc3339
+null
+"2015-03-05T23:51:47Z"
+
+1717238096.123,-1.5,0|torfc3339
+null
+"2024-06-01T10:34:56.123Z"
+"1969-12-31T23:59:58.5Z"
+"1970-01-01T00:00:00Z"
+
+[builtins[]|select(test("^(sha1|sha256|sha512|md5|hmac_sha256|hmac_sha512|crc32|hex_encode|hex_decode|base64url_encode|base64url_decode|uuid_v4|uuid_v7|fromrfc3339|torfc3339|numfmt|parse_url|parse_query_string|parse_logfmt|json_pointer|ip_valid|ip_class|ip_canonical|ip_in_cidr)/"))]|length
+null
+0
+
+
+# grammar
+
+fromjson
+"01"
+1
+
+.[] | try fromjson catch .
+["01", "[1.]", "NaN", "1 2"]
+1
+[1]
+null
+"Unexpected extra JSON values (while parsing '1 2')"
+
+
+# jq
+
+(1, error("x")) // 2
+null
+1
+%%ERROR x
+
+.a // 2
+5
+%%ERROR Cannot index number with string ("a")
+
+. as [$a] | $a
+"s"
+%%ERROR Cannot index string with number (0)
+
+map(. * 1), map(-(.) / 3)
+[-299874053624667960, 466102861900888770, -374820591396187970, 12345678901234567890, 1e20, 1e15, 0.0001, 0.00001, 1e-7, 5e-324, 2.2250738585072014e-308, 1.7976931348623157e308]
+[-299874053624667970,466102861900888770,-374820591396187970,12345678901234567000,1e+20,1000000000000000,0.0001,1e-05,1e-07,5e-324,2.2250738585072014e-308,1.7976931348623157e+308]
+[99958017874889330,-155367620633629600,124940197132062660,-4115226300411522600,-33333333333333330000,-333333333333333.3,-3.3333333333333335e-05,-3.3333333333333337e-06,-3.3333333333333334e-08,-0,-7.41691286169067e-309,-5.992310449541053e+307]
+
+.[-1], .[-3], .[-4]
+[1,2,3]
+3
+1
+null
+
+.a[-4]
+{"a":[1,2,3]}
+null
+
+[.[-1], .[-3], .[-4], .[-1:]]
+[1,2,3]
+[3,1,null,[3]]
+
+.[-1]
+{"a":1}
+%%ERROR Cannot index object with number (-1)
+
+[. as {("a",1): $x} | $x]
+{"a":1,"b":2}
+%%ERROR Cannot index object with number (1)
+
+[. as {("a",error("k")): $x} | $x]
+{"a":1,"b":2}
+%%ERROR k
+
+limit(1, -1; 1, 2)
+null
+1
+%%ERROR limit doesn't support negative count
+
+limit("a"; 1, 2)
+null
+%%ERROR string ("a") and number (1) cannot be subtracted
+
+skip(null; 1, 2)
+null
+%%ERROR skip doesn't support negative count
+
+[flatten(label $out | (. as [$a] ?// {a: $a} ?// $a | $a) | ., break $out)]
+{"c":1}
+[[1]]
+
+[flatten(label $out | (. as [$a] ?// {a: $a} ?// $a | $a) | (if . == null then . else break $out end))]
+{"c":1}
+[]
+
+[flatten(try ((. as [$a] ?// {a: $a} ?// $a | $a) | ., error("x")) catch "c")?]
+{"c":1}
+[[1],[1]]
+
+(try (. as [$a] ?// $a | if ($a|type) == "number" then "first" else error(null) end) catch "c") | if . == "first" then error(null) else . end
+[1]
+"c"
+
+(try (. as [$a] ?// $a | if ($a|type) == "number" then "first" else error(true) end) catch "c") | if . == "first" then error(true) else . end
+[1]
+"c"
+
+{a: [3]} | .a |= (. as [$x] ?// $x | $x)
+null
+%%ERROR Paths must be specified as an array
+
+group_by(nan), sort_by(nan), unique_by(nan), (map([nan, .]) | sort | map(.[1]))
+[[2],{"a":1},"abc",3,null]
+[[[2]],[{"a":1}],["abc"],[3],[null]]
+[[2],{"a":1},"abc",3,null]
+[[2],{"a":1},"abc",3,null]
+[[2],{"a":1},"abc",3,null]
+
+"" | (try path(@html) catch .), (try path(@uri) catch .), (try path(@base64d) catch .), (try path("" | .) catch .), (try path(@json "") catch .), path(tostring), path(@text), ({"a":""} | (try path(.a | @html) catch .), path(.a | tostring))
+null
+"Invalid path expression with result \"\""
+"Invalid path expression with result \"\""
+"Invalid path expression with result \"\""
+"Invalid path expression with result \"\""
+"Invalid path expression with result \"\""
+[]
+[]
+"Invalid path expression with result \"\""
+["a"]
+
+[{"Key":"a","name":"b","value":1},{"key":false,"Name":"c","Value":2}] | from_entries, (try path(from_entries) catch .), ([] | try path(from_entries) catch .)
+null
+{"a":1,"c":2}
+"Invalid path expression near attempt to iterate through [{\"a\":1},{\"c\":2}]"
+"Invalid path expression near attempt to iterate through []"
+
+.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b
+{"a":1}
+null
+
+.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b
+{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":{"b":7}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+7
+
+map(length)
+[-0.0,-1.5,-0,-0.00,-0e0,-0E-2,1.50,-1.50]
+[0.0,1.5,0,0.00,0,0.00,1.50,1.50]
+
+map(length)
+[-0.0,-1.5,-0]
+[0.0,1.5,0]
+
+[-0.0, (0 * -1), -1.5] | map(length)
+null
+[0.0,0,1.5]
+
+.[1:]
+{"a":1}
+%%ERROR Cannot index object with object ({"start":1,"end":null})
+
+try setpath([{"start":1}]; [9]) catch ., try delpaths([[{"end":1}]]) catch ., setpath([{"start":1,"end":null}]; [9])
+[1,2,3]
+"Array/string slice indices must be integers"
+"Array/string slice indices must be integers"
+[1,9]
+
+[range(200) | {k: (. * 7 % 50 | tostring), i: .}] | (group_by(.k) | map([.[0].k, (map(.i) | .[0:3])]) | .[0:4]), (unique_by(.k) | map(.i) | .[0:6]), (sort_by(.k) | map(.i) | .[0:6])
+null
+[["0",[0,50,100]],["1",[43,93,143]],["10",[30,80,130]],["11",[23,73,123]]]
+[0,43,30,23,16,9]
+[0,50,100,150,43,93]
+
+[range(100) | if . == 50 then 7 elif . == 60 then null else (. % 30 | tostring) end] | (group_by(.) | map(length) | .[0:6]), (unique | .[0:4]), (sort_by(.) | .[0:3])
+null
+[1,1,3,4,3,3]
+[null,7,"0","1"]
+[null,7,"0"]
+
+[range(120) | ["", "é", "z", "Z", "é", "😀", "a b", "a"][. % 8] + (. % 15 | tostring)] | (group_by(.) | map(.[0]) | .[0:4], .[-4:]), (unique | length)
+null
+["0","1","10","11"]
+["😀6","😀7","😀8","😀9"]
+120
+
+[] | group_by(.a), sort_by(.a), unique_by(.a), min_by(.a), max_by(.a)
+null
+[]
+[]
+[]
+null
+null
+
+[([1,2],[3,4])[0,1]]
+null
+[1,3,2,4]
+
+[([1,2,3],[3,4,5])[(0,1):(2,3)]]
+null
+[[1,2],[3,4],[1,2,3],[3,4,5],[2],[4],[2,3],[4,5]]
+
+[([1,2],[3,4])[(0,1)]?]
+null
+[1,3,2,4]
+
+[({"a1":1,"a2":2},{"a1":3,"a2":4})."a\(1,2)"]
+null
+[1,3,2,4]
+
+try ((error("t"))[error("k")]) catch ., try ((error("t"))[:error("b")]) catch .
+null
+"k"
+"b"
+
+[[[1,2],[3,4]] | path(.[0,1][0,1]), path(.[0,1][(0,1):])]
+null
+[[0,0],[1,0],[0,1],[1,1],[0,{"start":0,"end":null}],[1,{"start":0,"end":null}],[0,{"start":1,"end":null}],[1,{"start":1,"end":null}]]
+
+[[1,2],[3,4]] | .[0,1][0,1] |= [.]
+null
+[[[1],[2]],[[3],[4]]]
+
+[null | floor[keys?]]
+null
+[]
+
+.[0,1][0,1]
+[[1,2],[3,4]]
+1
+3
+2
+4
+
+.[0], .[0] + 1, .[0] * 2 - .[0], .[0] == .[1], .[0] == .[2], .[0] == (.[0] + 0), tojson
+[1234567890123456789012345678901234567890,1234567890123456789012345678901234567890.0,1234567890123456789012345678901234567891]
+1234567890123456789012345678901234567890
+1.2345678901234568e+39
+1.2345678901234568e+39
+true
+false
+true
+"[1234567890123456789012345678901234567890,1234567890123456789012345678901234567890.0,1234567890123456789012345678901234567891]"
+
+
+# jsonc
+
+setpath(["a", {"fact": "comment"}, 0]; "x")
+{"a":1,"b":[2,1]}
+%%ERROR Cannot index number with object ({"fact":"comment"})
+
+getpath(["a", {"fact": "comment"}, 0])
+{"a":1,"b":[2,1]}
+%%ERROR Cannot index number with object ({"fact":"comment"})
+
+getpath(["a", {"fact": "bogus"}])
+{"a":1,"b":null}
+%%ERROR Cannot index number with object ({"fact":"bogus"})
+
+null | getpath([{"fact": "bogus"}])
+{"a":1,"b":null}
+null
+
+setpath([{"fact": "bogus"}]; 1)
+{"a":1,"b":null}
+%%ERROR Cannot index object with object ({"fact":"bogus"})
+
+delpaths([[{"fact": "bogus"}]])
+null
+null
+
+
+# libc
+
+1425599621 | gmtime, todate, (gmtime | mktime), strftime("%A, %B %d, %Y %j %e %H:%M:%S %Z"), ("2015-03-05 23:51" | strptime("%Y-%m-%d %H:%M"))
+null
+[2015,2,5,23,53,41,4,63]
+"2015-03-05T23:53:41Z"
+1425599621
+"Thursday, March 05, 2015 064  5 23:53:41 UTC"
+[2015,2,5,23,51,0,4,63]
+
+bsearch(2), bsearch(0), bsearch(4), bsearch(2.5), (try ("a" | bsearch(1)) catch .), ("true", "false", "x", 1 | try toboolean catch .), ("xaxx" | trimstr("x")), (2.5 | lgamma_r), [fma(2;3;4), fdim(5;3), remainder(5;3), (1 | erf), (1 | erfc)], (1, infinite, "a" | isfinite)
+[1,2,3]
+1
+-1
+-4
+-3
+"string (\"a\") cannot be searched from"
+true
+false
+"string (\"x\") cannot be parsed as a boolean"
+"number (1) cannot be parsed as a boolean"
+"ax"
+[0.2846828704729192,1]
+[10,2,-1,0.8427007929497148,0.15729920705028516]
+true
+false
+false
+
+strptime("%Y-%m-%d")
+"1900-01-01"
+[1900,0,1,0,0,0,0,0]
+
+strptime("%T")
+"12:30:00"
+[1900,0,0,12,30,0,6,-1]
+
+strptime("%Y"), ("03/15" | strptime("%m/%d")), ("12/5" | strptime("%m/%d"))
+"2000"
+[2000,0,0,0,0,0,5,-1]
+[1900,2,15,0,0,0,4,73]
+[1900,11,5,0,0,0,3,338]
+
+try mktime catch ., try strftime(1) catch .
+[1]
+"invalid gmtime representation"
+"strftime/1 requires a string format"
+
+[j0, j1, y0, y1]
+1
+[0.7651976865579666,0.4400505857449335,0.08825696421567697,-0.7812128213002887]
+
+[jn(2;1.5), yn(2;1.5), jn(1.7;2), jn(-1;2), yn(0;0), jn(0;0)]
+null
+[0.23208767214421472,-0.9321937597629739,0.5767248077568733,-0.5767248077568733,-1.7976931348623157e+308,1]
+
+[j0, y0, jn(5;.), yn(5;.)] | map(. * 1e160 | round)
+1e300
+[-7860673063,-1368136045,-1368136045,7860673063]
+
+[range(9)] | sort_by(nan), (group_by(nan) | map(.[0])), unique_by(nan), (map([nan, .]) | sort | map(.[1]))
+null
+[8,1,2,3,0,5,6,7,4]
+[8,1,2,3,0,5,6,7,4]
+[8,1,2,3,0,5,6,7,4]
+[8,1,2,3,0,5,6,7,4]
+
+
+# nofilter
+
+%%FAIL
+--
+jq: error: syntax error, unexpected end of file at <top-level>, line 1, column 2:
+
+%%FAIL
+--args
+jq: error: args/0 is not defined at <top-level>, line 1, column 3:
+
+
+# options
+
+.
+{"a":1}
+{"a":1}
+
+
+# parse
+
+.
+["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud800 and \uD83D\uDE00"]
+["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud800 and 😀"]
+
+.
+"\udc00"
+"�"
+
+[.]
+"\udc00"
+["�"]
+
+.
+"\ud83d\ude00"
+"😀"
+
+[.]
+"\ud83d\ude00"
+["😀"]
+
+.
+"\u0000"
+"\u0000"
+
+[.]
+"\u0000"
+["\u0000"]
+
+.
+[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+
+[..]|length
+[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+10000
+
+.[].id
+[{"id":1},{"x":2},{"id":3}]
+1
+null
+3
+
+.[].id
+[{"id":1},null,{"id":[2]}]
+1
+null
+[2]
+
+.[].id
+[{"id":1},5,{"id":2}]
+1
+%%ERROR Cannot index number with string ("id")
+
+.[].id
+[{"id":1},"s",{"id":2}]
+1
+%%ERROR Cannot index string with string ("id")
+
+.[].id
+[{"id":1},[2]]
+1
+%%ERROR Cannot index array with string ("id")
+
+.[]
+{"a":1,"b":[2],"c":{"d":3}}
+1
+[2]
+{"d":3}
+
+.[].k
+[{"k":1,"k":2},{"j":{"k":3},"k":4}]
+2
+4
+
+.k[]
+{"k":[1],"k":[2,3]}
+2
+3
+
+.a[].b.c
+{"a":[{"b":{"c":1}},{},{"b":{}},{"b":null},{"b":{"c":2},"b":{}}]}
+1
+null
+null
+null
+null
+
+.a[].b.c
+{"a":[{"b":{"c":1}},{"b":5},{"b":{"c":2}}]}
+1
+%%ERROR Cannot index number with string ("c")
+
+.[]
+5
+%%ERROR Cannot iterate over number (5)
+
+.[][0]
+[[1],[],null,{"a":2}]
+1
+null
+null
+%%ERROR Cannot index object with number (0)
+
+limit(2; .[].id)
+[{"id":1},{"x":2},5]
+1
+null
+
+fromjson|length
+"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+1
+
+.
+[1]
+[1]
+
+
+# peers
+
+del(.[1,2])
+[0,1,2,3]
+[0,3]
+
+9223372036854775807+1
+null
+9223372036854776000
+
+9223372036854775807 + 1 | tostring
+null
+"9223372036854776000"
+
+-9223372036854775808 % -1
+null
+0
+
+[5 % -1, -5 % 3, 5 % -3, -1 % 9223372036854775807]
+null
+[0,-2,2,-1]
+
+[paths] | length
+[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+9999
+
+tojson | length
+"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+20002
+
+try ("[" * 10000 + "]" * 10000 | fromjson | [paths] | length) catch .
+null
+9999
+
+try ("[" * 10001 + "]" * 10001 | fromjson | [paths] | length) catch .
+null
+"Exceeds depth limit for parsing at line 1, column 10001 (while parsing '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]')"
+
+walk(if type == "array" then . + [1] else . end) | [paths] | length
+[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+9999
+
+[0.1, 1e-310, 5e-324, 1.7976931348623157e308, 0.30000000000000004] | map(tojson|fromjson)
+null
+[0.1,1E-310,5E-324,1.7976931348623157E+308,0.30000000000000004]
+
+[0.1, 1e-310, 5e-324, 1.7976931348623157e308, 0.30000000000000004] | map(tojson)
+null
+["0.1","1E-310","5E-324","1.7976931348623157E+308","0.30000000000000004"]
+
+.a
+{"a":1,"b":"\udc00"}
+1
+
+.b
+{"a":1,"b":"\udc00"}
+"�"
+
+.
+{"a\u0001b":1}
+{"a\u0001b":1}
+
+keys
+{"a\u0001b":1,"\u001f":2}
+["\u001f","a\u0001b"]
+
+{"a\u0001b": 1} | tojson
+null
+"{\"a\\u0001b\":1}"
+
+"abcabc" | [scan("b")]
+null
+["b","b"]
+
+"abcabc" | [scan("(a)(b)")]
+null
+[["a","b"],["a","b"]]
+
+"aaa" | [scan("a*")]
+null
+["aaa",""]
+
+"test 123 test 456" | [scan("\\d+")]
+null
+["123","456"]
+
+null | .a = 1
+null
+{"a":1}
+
+null | .[2] = 1
+null
+[null,null,1]
+
+null | .a.b |= 3
+null
+{"a":{"b":3}}
+
+{"a":[1,{"b":2}]} | [getpath(["a",1,"b"]), getpath(["x","y"])]
+null
+[2,null]
+
+null | setpath(["a",0,"b"]; 1)
+null
+{"a":[{"b":1}]}
+
+{"a":[1,{"b":2}]} | [paths(type == "number")]
+null
+[["a",0],["a",1,"b"]]
+
+{"a":[1,{"b":2}]} | [tostream]
+null
+[[["a",0],1],[["a",1,"b"],2],[["a",1,"b"]],[["a",1]],[["a"]]]
+
+{"a":[1,{"b":2}]} | fromstream(tostream)
+null
+{"a":[1,{"b":2}]}
+
+fromstream(1|truncate_stream([[0],1],[[1,0],2],[[1,0]],[[1]]))
+null
+[2]
+
+try getpath(["a"]) catch .
+null
+null
+
+[1] | try getpath(["a"]) catch .
+null
+"Cannot index array with string (\"a\")"
+
+-0
+null
+0
+
+[-0, -0.0, 0 * -1, -0 | tojson, (-0 | tostring), ("-0" | fromjson)]
+null
+["0","0",-0,"0.0","0",-0,"-0","0",-0,"0","0",-0]
+
+-0 | tojson | fromjson
+null
+0
+
+[1, null, [1], {"a":1}, true] | map(ltrimstr("a"), rtrimstr("a"))
+null
+%%ERROR startswith() requires string inputs
+
+"abc" | ltrimstr(1), rtrimstr(null), ltrimstr("abc")
+null
+%%ERROR startswith() requires string inputs
+
+[limit(0; 1, 2)]
+null
+[]
+
+[limit(-1; 1, 2)]
+null
+%%ERROR limit doesn't support negative count
+
+[limit(1; 1, error)]
+null
+[1]
+
+"a1b22c333" | [splits("[0-9]+")]
+null
+["a","b","c",""]
+
+"a,b, c" | [splits(", *"; null)]
+null
+["a","b","c"]
+
+"abc" | [splits("")]
+null
+["","a","b","c",""]
+
+[1, "a b", null, true, "it's"] | @sh
+null
+"1 'a b' null true 'it'\\''s'"
+
+"a'b" | @sh
+null
+"'a'\\''b'"
+
+try ([[1]] | @sh) catch .
+null
+"array ([1]) can not be escaped for shell"
+
+"ü é/?&=+ ~-_.!*'()" | @uri
+null
+"%C3%BC%20%C3%A9%2F%3F%26%3D%2B%20~-_.%21%2A%27%28%29"
+
+[1, "a\"b", null, true, 1.5, "x,y"] | @csv
+null
+"1,\"a\"\"b\",,true,1.5,\"x,y\""
+
+[1, "a\tb\\c\nd\re", null, true] | @tsv
+null
+"1\ta\\tb\\\\c\\nd\\re\t\ttrue"
+
+["a\u0000b", "t\tx", "l\nx", "c\rx", "b\\x"] | @tsv
+null
+"a\\0b\tt\\tx\tl\\nx\tc\\rx\tb\\\\x"
+
+try ([[1]] | @csv) catch .
+null
+"array ([1]) is not valid in a csv row"
+
+try ([{}] | @tsv) catch .
+null
+"object ({}) is not valid in a csv row"
+
+[65, 1114111, 55296, 56320, 1114112, -1] | map(try ([.] | implode) catch "err")
+null
+["A","􏿿","�","�","�","�"]
+
+try ([55296] | implode) catch .
+null
+"�"
+
+try ("a" | implode) catch .
+null
+"implode input must be an array"
+
+try ([1.5] | implode) catch .
+null
+"\u0001"
+
+[65, 97] | map([.] | implode | ascii_downcase)
+null
+["a","a"]
+
+[1e1000, -1e1000, 100000000000000000000, 1.0, 1e17, 1.5e300, 123456789012345678] | map(tostring)
+null
+["1E+1000","-1E+1000","100000000000000000000","1.0","1E+17","1.5E+300","123456789012345678"]
+
+[1e1000, -1e1000, 100000000000000000000, 1.0, 1e-5, 1E2, 0.00001, 1e-7]
+null
+[1E+1000,-1E+1000,100000000000000000000,1.0,0.00001,1E+2,0.00001,1E-7]
+
+.
+[1e1000, 100000000000000000000, 1.0, 1.000, 1e-5, 12345678901234567890123]
+[1E+1000,100000000000000000000,1.0,1.000,0.00001,12345678901234567890123]
+
+map(. + 0)
+[1e1000, 100000000000000000000, 1.0, 12345678901234567890123]
+[1.7976931348623157e+308,1e+20,1,12345678901234568000000]
+
+[{}, [], "a", 1, null, true, false, {"a":1}, [0], "B", -1, 0.5] | sort
+null
+[null,false,true,-1,0.5,1,"B","a",[],[0],{},{"a":1}]
+
+[{"b":1}, {"a":2}, {"a":1,"b":0}, {"a":1}] | sort
+null
+[{"a":1},{"a":2},{"a":1,"b":0},{"b":1}]
+
+[[1,2],[1],[0,5],[]] | sort
+null
+[[],[0,5],[1],[1,2]]
+
+{"b":1, "a":2} + {"c":3, "a":4}
+null
+{"b":1,"a":4,"c":3}
+
+{"b":1, "a":2} * {"c":{"x":1}, "b":{"y":2}}
+null
+{"b":{"y":2},"a":2,"c":{"x":1}}
+
+{"z":1} + {"y":2} | keys_unsorted
+null
+["z","y"]
+
+[{"b":1}, {"a":2}] | add | keys_unsorted
+null
+["b","a"]
+
+[1, null, [1], {"a":1}, true, "ab"] | map(try ltrimstr("a") catch "e")
+null
+["e","e","e","e","e","b"]
+
+"abc" | [(try ltrimstr(1) catch "e"), (try rtrimstr(null) catch "e"), ltrimstr("abc"), ltrimstr("abcd")]
+null
+["e","e","","abc"]
+
+[1, "1", [1], {"a":1}, null, 1e1000, 100000000000000000001, -0, 3.0] | map(tostring)
+null
+["1","1","[1]","{\"a\":1}","null","1E+1000","100000000000000000001","0","3.0"]
+
+[first(empty)], [limit(3; range(10))]
+null
+[]
+[0,1,2]
+
+
+# regex
+
+.[] | . as [$f, $re, $fl, $s] | try ( if $f == "match" then [$s | match($re; $fl)] elif $f == "test" then ($s | test($re; $fl)) elif $f == "capture" then [$s | capture($re; $fl)] elif $f == "scan" then [$s | scan($re; $fl)] elif $f == "split" then ($s | split($re; $fl)) elif $f == "sub" then [$s | sub($re; "<\(.)>"; $fl)] elif $f == "gsub" then [$s | gsub($re; "<\(.)>"; $fl)] else error("bad fn") end) catch "ERR: \(.)"
+[["match", "foo(?=bar)", null, "foobar foobaz"], ["match", "foo(?!bar)", "g", "foobar foobaz"], ["gsub", "(?=u)", null, "qux"], ["match", "\\d+(?=%)", "g", "50% of 20"], ["match", "(?=(\\w+))\\w", "g", "abc"], ["match", "(?!a)", "g", "aab"]]
+[{"offset":0,"length":3,"string":"foo","captures":[]}]
+[{"offset":7,"length":3,"string":"foo","captures":[]}]
+["q<{}>ux"]
+[{"offset":0,"length":2,"string":"50","captures":[]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":0,"length":3,"string":"abc","name":null}]},{"offset":1,"length":1,"string":"b","captures":[{"offset":1,"length":2,"string":"bc","name":null}]},{"offset":2,"length":1,"string":"c","captures":[{"offset":2,"length":1,"string":"c","name":null}]}]
+[{"offset":2,"length":0,"string":"","captures":[]},{"offset":3,"length":0,"string":"","captures":[]}]
+
+.[] | . as [$f, $re, $fl, $s] | try ( if $f == "match" then [$s | match($re; $fl)] elif $f == "test" then ($s | test($re; $fl)) elif $f == "capture" then [$s | capture($re; $fl)] elif $f == "scan" then [$s | scan($re; $fl)] elif $f == "split" then ($s | split($re; $fl)) elif $f == "sub" then [$s | sub($re; "<\(.)>"; $fl)] elif $f == "gsub" then [$s | gsub($re; "<\(.)>"; $fl)] else error("bad fn") end) catch "ERR: \(.)"
+[["match", "\\h+", "g", "deadBEEF xyz"], ["match", "\\H+", "g", "deadBEEF xyz"]]
+[]
+[]
+
+.[] | . as $b | ("(?<=" + $b + ")", "(?<!" + $b + ")") as $re | [$re, try ("xab" | [match($re).offset]) catch .]
+["x+a", "a+", "a*", "xa*", "a*x", "a*a", ".*a", "a*\\b", "a+\\b", "a{0,}\\b", "a{1,}\\b", "a{0,5}\\b", "\\ba*", "^a*", "a*$", "(?:a|b)*\\b", "(?:ab)*\\b", "(?:a*)\\b", "a*?\\b", "(a*)\\b", "\\b\\b", "a*\\b\\B", "a*(?<=x)", "a*(?<=x)b", "x?(?<=x)", "a*+", "a*+\\b", "a?\\b", "a{2,}\\b", "a{3,}", "x{0,3}a{1,}", "a|bc", "\\b", "(?:a|\\b)", "(a)?", "(a)*", "a|(a)", "(?:a?)\\b", "\\1?", "(?i)a*"]
+["(?<=x+a)","Regex failure: invalid pattern in look-behind"]
+["(?<!x+a)","Regex failure: invalid pattern in look-behind"]
+["(?<=a+)",[2]]
+["(?<!a+)",[0]]
+["(?<=a*)",[0]]
+["(?<!a*)",[]]
+["(?<=xa*)","Regex failure: invalid pattern in look-behind"]
+["(?<!xa*)","Regex failure: invalid pattern in look-behind"]
+["(?<=a*x)","Regex failure: invalid pattern in look-behind"]
+["(?<!a*x)","Regex failure: invalid pattern in look-behind"]
+["(?<=a*a)",[2]]
+["(?<!a*a)",[0]]
+["(?<=.*a)",[2]]
+["(?<!.*a)",[0]]
+["(?<=a*\\b)",[0]]
+["(?<!a*\\b)",[1]]
+["(?<=a+\\b)",[]]
+["(?<!a+\\b)",[0]]
+["(?<=a{0,}\\b)",[0]]
+["(?<!a{0,}\\b)",[1]]
+["(?<=a{1,}\\b)",[]]
+["(?<!a{1,}\\b)",[0]]
+["(?<=a{0,5}\\b)",[0]]
+["(?<!a{0,5}\\b)",[1]]
+["(?<=\\ba*)","Regex failure: invalid pattern in look-behind"]
+["(?<!\\ba*)","Regex failure: invalid pattern in look-behind"]
+["(?<=^a*)","Regex failure: invalid pattern in look-behind"]
+["(?<!^a*)","Regex failure: invalid pattern in look-behind"]
+["(?<=a*$)","Regex failure: invalid pattern in look-behind"]
+["(?<!a*$)","Regex failure: invalid pattern in look-behind"]
+["(?<=(?:a|b)*\\b)","Regex failure: invalid pattern in look-behind"]
+["(?<!(?:a|b)*\\b)","Regex failure: invalid pattern in look-behind"]
+["(?<=(?:ab)*\\b)",[0]]
+["(?<!(?:ab)*\\b)",[1]]
+["(?<=(?:a*)\\b)",[0]]
+["(?<!(?:a*)\\b)",[1]]
+["(?<=a*?\\b)",[0]]
+["(?<!a*?\\b)",[1]]
+["(?<=(a*)\\b)","Regex failure: invalid pattern in look-behind"]
+["(?<!(a*)\\b)","Regex failure: invalid pattern in look-behind"]
+["(?<=\\b\\b)",[0]]
+["(?<!\\b\\b)",[1]]
+["(?<=a*\\b\\B)",[]]
+["(?<!a*\\b\\B)",[0]]
+["(?<=a*(?<=x))",[1]]
+["(?<!a*(?<=x))",[0]]
+["(?<=a*(?<=x)b)",[]]
+["(?<!a*(?<=x)b)",[0]]
+["(?<=x?(?<=x))",[1]]
+["(?<!x?(?<=x))",[0]]
+["(?<=a*+)",[0]]
+["(?<!a*+)",[]]
+["(?<=a*+\\b)","Regex failure: invalid pattern in look-behind"]
+["(?<!a*+\\b)","Regex failure: invalid pattern in look-behind"]
+["(?<=a?\\b)",[0]]
+["(?<!a?\\b)",[1]]
+["(?<=a{2,}\\b)",[]]
+["(?<!a{2,}\\b)",[0]]
+["(?<=a{3,})",[]]
+["(?<!a{3,})",[0]]
+["(?<=x{0,3}a{1,})",[2]]
+["(?<!x{0,3}a{1,})",[0]]
+["(?<=a|bc)","Regex failure: invalid pattern in look-behind"]
+["(?<!a|bc)","Regex failure: invalid pattern in look-behind"]
+["(?<=\\b)",[0]]
+["(?<!\\b)",[1]]
+["(?<=(?:a|\\b))","Regex failure: invalid pattern in look-behind"]
+["(?<!(?:a|\\b))","Regex failure: invalid pattern in look-behind"]
+["(?<=(a)?)","Regex failure: invalid pattern in look-behind"]
+["(?<!(a)?)","Regex failure: invalid pattern in look-behind"]
+["(?<=(a)*)","Regex failure: invalid pattern in look-behind"]
+["(?<!(a)*)","Regex failure: invalid pattern in look-behind"]
+["(?<=a|(a))",[2]]
+["(?<!a|(a))","Regex failure: invalid pattern in look-behind"]
+["(?<=(?:a?)\\b)",[0]]
+["(?<!(?:a?)\\b)",[1]]
+["(?<=\\1?)","Regex failure: invalid backref number/name"]
+["(?<!\\1?)","Regex failure: invalid backref number/name"]
+["(?<=(?i)a*)",[0]]
+["(?<!(?i)a*)",[]]
+
+try (1 | test("a")) catch ., try ("a" | test(1)) catch ., try ("a" | test("a"; 1)) catch ., try ("a" | test("a"; "q")) catch ., ("a" | test("a"; null)), try ("a" | test({})) catch ., ("A" | test(["a", "i"])), try ("a" | test(["a", 1])) catch ., try ({} | match(1)) catch ., try ("a" | match("(")) catch ., try ("a" | [match("a"; "gg")] | length) catch ., ("aXbxc" | [splits("x"; "i")]), ("abc" | sub("(?<x>b)"; "[\(.x)]"; "g")), try ("a" | capture([1])) catch .
+null
+"number (1) cannot be matched, as it is not a string"
+"number not a string or array"
+"number (1) is not a string"
+"q is not a valid modifier string"
+true
+"object not a string or array"
+true
+"number (1) is not a string"
+"number not a string or array"
+"Regex failure: end pattern with unmatched parenthesis"
+1
+["a","b","c"]
+"a[b]c"
+"number (1) is not a string"
+
+("x" * 3000000 | test("((x{10}){100}){3000}")), ("a" * 10 | test("((x{100}){100}){1000}")), ("ab" * 600 + "x" | [match("(?:(a)|(b)){1100,1300}x") | .length, .captures[].offset]), ("aaa" * 500 | [match("(a|aa){300,1000}") | .length, .captures[0].offset]), ("ab" * 1500 | [match("(ab){0,1200}?$").length]), ("abc" * 600 | [match("(?:(a?)(b?)(c?)){0,2000}") | .length, .captures[].offset]), ("aaaa" * 400 | try test("(a{2}|a){1000,1200}") catch .)
+null
+true
+false
+[1201,1198,1199]
+[1000,999]
+[2400]
+[1800,1800,1800,1800]
+"Regex failure: retry-limit-in-match over"
+
+((511, 512) as $n | try ("aa" | [match(("(" * $n) + "a" + (")+" * $n))] | .[0].captures | length) catch .), ((1022, 1023) as $n | try ("a" | test("a" + ("{1}" * $n))) catch .), ((510, 511) as $n | try ("a" | test(("(?:a*" * $n) + "a" + (")*" * $n))) catch .)
+null
+511
+"Regex failure: parse depth limit over"
+true
+"Regex failure: parse depth limit over"
+true
+"Regex failure: parse depth limit over"
+
+"a" * 200 | (try test("(a|aa){30,60}c") catch .), (try test("(a|b)(a|aa)+c") catch .), (try test("(zq|zr)(a|aa)+$") catch .)
+null
+"Regex failure: retry-limit-in-match over"
+"Regex failure: retry-limit-in-match over"
+false
+
+"a" * 40 + "!" | (try test("(?i)(A|a)*b") catch .), (try test("(a|a)*(?i:b)") catch .), (try test("(?i)(a|a)*b|c") catch .), (try test("(?i)(a|a)*[b]") catch .), (try test("(a|a)*.{50}\\z") catch .), (try test("(a|a)*!{3}") catch .), (try test("(a|aa)*[b]") catch .)
+null
+false
+false
+false
+false
+false
+false
+false
+
+("a" * 30 + "!" | try test("(a|aa)*\\R") catch .), ("a" * 30 + "\r" | try test("(a|aa)*\\R") catch .), ("xabc yabc" | [match("[xy]abc"; "g") | .offset]), ("12:34 1:23 123:456" | [scan("\\d\\d:\\d\\d")])
+null
+"Regex failure: retry-limit-in-match over"
+true
+[0,5]
+["12:34","23:45"]
+
+("(a)" * 32767) as $p | ("a" * 32767 | test($p)), (try ("a" | test($p + "(a)")) catch .)
+null
+true
+"Regex failure: too many captures"
+
+("a.b*c ab{x a]b}c" | [match("a\\.b\\*c"; "g"), match("ab{x"), match("a\\]b\\}c")] | map(.offset)), ("abcc abcabc" | [match("abc+"; "g").length]), ("xabcd" | test("(?<=abc)d"))
+null
+[0,6,11]
+[4,3,3]
+true
+
+"abcabc" | gsub("b"; "X", "Y")
+null
+"aXcaXc"
+"aYcaYc"
+
+"babc" | [match("(?:b(a|\\1c)){2}")]
+null
+[]
+
+"babcbabc" | [match("(?:b(a|\\1c))+"; "g") | .string]
+null
+["ba","ba"]
+
+"aab" | [match("(a|(?(1)b)){3}") | .string]
+null
+["aa"]
+
+.[] as $re | try ["a\nx\nbx" | match($re; "g") | .offset] catch .
+["(?m:(?<=x$))", "(?m)(?<=$)", "(?m)(?<=a$|b)", "(?m)(?<=a$|bx)", "(?m)(?<!x$)", "(?m)(?<=(x)$)\\1", "(?m)(?<=x$\\n)", "(?m)(?<=x\\Z)", "(?<=x$)", "(?m:a|(?<=x$))++"]
+[3,6]
+[1,3,6]
+[1,5]
+"Regex failure: invalid pattern in look-behind"
+[0,1,2,4,5]
+[]
+[4]
+"Regex failure: invalid pattern in look-behind"
+"Regex failure: invalid pattern in look-behind"
+[0,3,6]
+
+.[] as [$in, $re, $fl] | try ($in | split($re; $fl)) catch .
+[["banana", "a", 1], [1, "a", 1], [1, "a", null], ["banana", 1, {}], ["banana", 1, null], ["banana", "a", "q"], ["banana", "A", "i"], ["banana", "a", ["g"]]]
+"number (1) and string (\"g\") cannot be added"
+"number (1) and string (\"g\") cannot be added"
+"number (1) cannot be matched, as it is not a string"
+"object ({}) and string (\"g\") cannot be added"
+"number (1) is not a string"
+"qg is not a valid modifier string"
+["b","n","n",""]
+"array ([\"g\"]) and string (\"g\") cannot be added"
+
+.[] as $re | ["ay", "aX", "y", "b", "", "az", "z"] | map(test($re))
+["^(?(a)(?i:x|y))$", "^(a)?(?(1)(?i:x|y))$", "^(a)?(?(1)(?:x|y))$", "^(a)?(?(1)(?i:x|y)|z)$", "^(a)?(?(1)x|(?i:y|z))$", "^(?(a)(?i:x)|y)$"]
+[true,true,false,false,true,false,false]
+[true,true,false,false,true,false,false]
+[true,false,false,false,true,false,false]
+[true,true,false,false,false,false,true]
+[false,false,true,false,false,false,true]
+[false,true,true,false,false,false,false]
+
+"aé😀b" | [match("\\W*";"g") | .string]
+null
+["","","�😀","",""]
+
+"aαб日ア" | [match("\\p{Greek}|\\p{Cyrl}|\\p{Han}|\\p{Katakana}";"g").string]
+null
+["α","б","日","ア"]
+
+"αaб" | [match("\\P{Greek}";"g").string], [match("\\p{^Greek}";"g").string], [match("[^\\p{Greek}]";"g").string]
+null
+["a","б"]
+["a","б"]
+["a","б"]
+
+"²a_½" | [match("[\\w]";"g").string], [match("\\w";"g").string], [match("[\\W]";"g").string], [match("[\\p{Word}]";"g").string]
+null
+["a","_"]
+["²","a","_","½"]
+["²","½"]
+["a","_"]
+
+"a😀 " | [match("\\p{Emoji_Presentation}|\\p{white_space}|\\p{In_Basic_Latin}";"g").string]
+null
+["a","😀"," "]
+
+"x" | try test("\\p{Nope}") catch .
+null
+"Regex failure: invalid character property name {Nope}"
+
+"Ab9" | [match("\\p{Lu}|\\p{Nd}|\\p{ASCII_Hex_Digit}";"g").string]
+null
+["A","b","9"]
+
+["é́", "\r\n", "🇵🇱🇵", "👨‍👩‍👧x", "각가", "क्ष"] | map([match("\\X";"g").string])
+null
+[["é́"],["\r\n"],["🇵🇱","🇵"],["👨‍👩‍👧","x"],["각","가"],["क्","ष"]]
+
+"kB ‍😀‍😀" | [splits("\\X\\K"; "g")], [match("\\X\\K"; "g") | .offset], ("k👨‍👩‍👧α" | [splits("\\X\\K"; "g")])
+null
+["k","B ‍","😀","‍😀",""]
+[1,4,5,7]
+["k","👨","‍👩‍👧","α",""]
+
+"Straße STRASSE ﬃ ẞ" | [match("ss|ß|ffi";"gi").string]
+null
+["ß","SS","ﬃ","ẞ"]
+
+"ß ss SS" | [match("[ß]|[a-z]";"gi").string], [match("[^ß]";"gi").string]
+null
+["ß","ss","SS"]
+[" ","s","s"," ","S","S"]
+
+"ąĠ" | [match("\\s|";"g") | [.offset, .length]], [match("\\p{^L}|";"g") | [.offset, .length]], [match("[\\x{80}-\\x{bf}]|";"g") | .length], [match("\\W|";"g") | .length]
+null
+[[0,0],[1,0],[1,0],[2,0],[2,0]]
+[[0,0],[0,1],[1,0],[0,2],[2,0]]
+[0,0,0,0,0]
+[0,1,0,2,0]
+
+"Iẞı" | [match("(?<=.)";"g") | [.offset, .length, .string]]
+null
+[[1,0,""],[0,2,"��"],[2,0,""],[0,3,"�"],[3,0,""]]
+
+"1Σß" | [match("(?=.\\K)") | [.offset, .length]], [match("(?=..\\K).") | [.offset, .length]]
+null
+[[0,0]]
+[[1,0]]
+
+"ab" | [match("(?<=a(?:x|yy){0})").offset], (try test("(?<=()+)") catch .), [match("()(?<=(?(1)a))b").offset], [match("(?<=a(?:){1,2})b").string]
+null
+[1]
+"Regex failure: invalid pattern in look-behind"
+[1]
+["b"]
+
+"a" | (try test("[a-[:upper:]]") catch .), (try test("[a-[:nope:]]") catch .), (try test("[a-[x]]") catch .)
+null
+"Regex failure: char-class value at end of range"
+"Regex failure: invalid POSIX bracket type"
+"Regex failure: empty range in char class"
+
+[["SS","ß"],["ß","SS"],["ﬀ","ff"],["ff","ﬀ"],["ﬁ","FI"],["fl","ﬂ"],["ﬃ","ffi"],["ffi","ﬃ"],["Σ","ς"],["ſ","s"],["İ","i"],["ı","i"]] | map(. as [$s, $r] | $s | test($r; "i"))
+null
+[true,true,true,true,true,true,true,true,true,true,false,false]
+
+("a\nb" | test("a.b"; "m")), ("A\nb" | test("a.b"; "im")), ("a\nb" | test("^b"; "m")), [("a\nb" | match(".+"; "gm").string)]
+null
+true
+true
+false
+["a\nb"]
+
+("abc" | [scan("a(*SKIP)(*FAIL)|.")], test("(*FAIL)|b"), [match("a(*MISMATCH)|."; "g").offset]), ("ab" | test("a(*SKIP)b|.*"), test("(?<=(*FAIL)|a)b")), ("abab" | [match("ab(*SKIP)(*FAIL)|b"; "g").offset]), ("aay" | [match("aa(*SKIP)x|a(*SKIP)y"; "g")])
+null
+["a","b","c"]
+true
+[1,2]
+true
+true
+[]
+[]
+
+"a" | (try test("(*FAIL)?a") catch .), (try test("(*fail)") catch .), (try test("(*FAIL{1})") catch .), (try test("(*FAIL[t])(*SKIP[t])") catch .), (try test("(*FAIL") catch .), (try test("(*1)") catch .)
+null
+"Regex failure: target of repeat operator is invalid"
+"Regex failure: undefined callout name"
+"Regex failure: invalid callout arg"
+"Regex failure: multiplex defined name <t>"
+"Regex failure: end pattern in group"
+"Regex failure: invalid callout name"
+
+"ab" | [(try test("(?<=a(?:)*)b") catch .), (try test("(?<!\\d(?:|)*+)") catch .), (try test("(?<=(?:)*a)b") catch .), (try test("(?<=(?:)+(?:)+a)b") catch .), (try test("(?<=(?:|)+)b") catch .)]
+null
+["Regex failure: invalid pattern in look-behind","Regex failure: invalid pattern in look-behind",true,"Regex failure: invalid pattern in look-behind",true]
+
+[(try [match("(a$)(?<=\\1)|(a(?=b))(?<=\\1)b|(a\\Z)(?<!\\1)"; "g").offset] catch .), (try test("(?i)(?<=\\1)(1)") catch .), (try test("(?<=\\1)(?i:(a))") catch .), (try test("(?i)(?<=(\\2)(b))") catch .), (try test("(?i)(?<=\\1)([a])") catch .), (try test("(?<=b$)") catch .)]
+"ab$ab"
+[[],"Regex failure: invalid pattern in look-behind","Regex failure: invalid pattern in look-behind",false,false,"Regex failure: invalid pattern in look-behind"]
+
+[match("(?:a(*MAX{2}))*"; "g") | [.offset, .length]], [match("a(*COUNT[c]{X})(*CMP{c,>=,2})"; "g").offset], [match("(?:a(*COUNT[c]))+(*CMP{c,==,2})").length], [match(".(*TOTAL_COUNT[t])(*CMP{t,>,3})").offset], test("a(*ERROR{-1})|b"), [match("(?=a(*COUNT[n]))(?:a(*COUNT[m]))(*CMP{n,<,m})|a"; "g").offset]
+"aaab"
+[[0,2],[2,1],[3,0],[4,0]]
+[]
+[2]
+[3]
+true
+[0,1,2]
+
+[(try test("(*ERROR)") catch .), (try test("x|(*ERROR{-15})") catch .), (try test("b(*ERROR{0})") catch .), (try test("(*ERROR{-2147483649})") catch .), (try test("(*FAIL{}") catch .), (try test("(*FAIL{}x)") catch .), (try test("(*CMP{1,=,2})") catch .), (try test("(*CMP{1,<})") catch .), (try test("(*MAX[t]{1})(*CMP{u,==,1})") catch .), (try test("(*COUNT{Y})") catch .), (try test("(*MAX{2,Z})") catch .), (try test("(*COUNT[t]") catch .)]
+"aaab"
+["Regex failure: abort","Regex failure: match-stack limit over","Regex failure: invalid callout body","Regex failure: invalid callout body","Regex failure: undefined callout name","Regex failure: undefined callout name","Regex failure: invalid callout arg","Regex failure: invalid callout arg","Regex failure: invalid callout tag name","Regex failure: invalid callout arg","Regex failure: invalid callout arg","Regex failure: end pattern in group"]
+
+[range(1;7) as $k | [match("(*TOTAL_COUNT[t])(*CMP{t,>=,\($k)})a?b"; "g").offset]]
+"xxbxaabyb"
+[[2,5,8],[2,6,8],[5],[6],[8],[8]]
+
+[match(".*?(*MAX{1})"; "gn") | [.offset, .length]], [match(".??(*COUNT[c])(*CMP{c,<,2})"; "gn")]
+"kab"
+[[0,1],[1,1],[2,1]]
+[]
+
+[match("(?i)(?<=σ*[st])"; "g") | .offset], [match("(?i)(?<=k*[st])"; "g") | .offset], [match("(?i)(?<=[αβ]*σ)"; "g") | .offset], (try test("(?i)(?<=σ*[tu])") catch .)
+"xsσ"
+[2]
+[2]
+[3]
+"Regex failure: invalid pattern in look-behind"
+
+[match("[^\\x80-\\x{10ffff}]"; "g").offset], [match("[\\x80-\\x{ff}]"; "g").offset], [match("[a-\\x80]"; "g").offset], [match("[\\x{80}-\\x80]"; "g").offset], [match("[\\xff-\\x{10ffff}]"; "g").offset], (try test("[\\x81-\\x{80}]") catch .)
+"aé\u0080€ÿ"
+[0]
+[1,2,4]
+[0]
+[2]
+[3,4]
+"Regex failure: empty range in char class"
+
+[match("x\\K|xab"; "l") | [.offset, .length]], [match("\\K|ab"; "l") | [.offset, .length]], [match("a\\Kx|ab") | [.offset, .length]]
+"xab"
+[[1,2]]
+[[1,2]]
+[[1,2]]
+
+[match("/\\*(?~\\*/)\\*/"; "g") | .string], [match("(?~|cd|\\w+)"; "g") | .string], [match("(?~|b)\\w*|(?~|)x"; "g") | .string], [match("(?~|b|a*)$") | .offset], [match("(?~||\\b)"; "g") | .offset], (try test("(?<=(?~|3|\\d{2}))x") catch .), (try test("(?<=(?~|3|.{2}))") catch .), (try test("(?~") catch .)
+"/* a */ b */ abcde x"
+["/* a */"]
+["a","b","ab","de","x"]
+["","","","a","","","","","","","","","","a","","cde","","x",""]
+[20]
+[3,4,8,9,13,18,19,20]
+true
+"Regex failure: invalid pattern in look-behind"
+"Regex failure: end pattern in group"
+
+.[] | . as [$f, $re, $fl, $s] | try ( if $f == "match" then [$s | match($re; $fl)] elif $f == "test" then ($s | test($re; $fl)) elif $f == "capture" then [$s | capture($re; $fl)] elif $f == "scan" then [$s | scan($re; $fl)] elif $f == "split" then ($s | split($re; $fl)) elif $f == "sub" then [$s | sub($re; "<\(.)>"; $fl)] elif $f == "gsub" then [$s | gsub($re; "<\(.)>"; $fl)] else error("bad fn") end) catch "ERR: \(.)"
+[["match", "\\Q.a\\E?", "g", ".aa"], ["match", "\\Q.a\\E?", "g", "bca"], ["match", "\\Qab\\E+", null, "abbb"], ["match", "\\Qab\\E{2}", null, "abab abb"], ["match", "x\\Qab\\E*", "g", "xa xab"], ["match", "\\Qa\\E+", null, "aaa"], ["match", "\\Q.a", null, ".a"], ["match", "(\\Qab\\E)+", null, "abab"], ["test", "\\Q\\E+", null, "a"]]
+[{"offset":0,"length":2,"string":".a","captures":[]}]
+[]
+[{"offset":0,"length":4,"string":"abbb","captures":[]}]
+[{"offset":5,"length":3,"string":"abb","captures":[]}]
+[{"offset":0,"length":2,"string":"xa","captures":[]},{"offset":3,"length":3,"string":"xab","captures":[]}]
+[{"offset":0,"length":3,"string":"aaa","captures":[]}]
+[{"offset":0,"length":2,"string":".a","captures":[]}]
+[{"offset":0,"length":4,"string":"abab","captures":[{"offset":2,"length":2,"string":"ab","name":null}]}]
+true
+
+.[] | . as [$f, $re, $fl, $s] | try ( if $f == "match" then [$s | match($re; $fl)] elif $f == "test" then ($s | test($re; $fl)) elif $f == "capture" then [$s | capture($re; $fl)] elif $f == "scan" then [$s | scan($re; $fl)] elif $f == "split" then ($s | split($re; $fl)) elif $f == "sub" then [$s | sub($re; "<\(.)>"; $fl)] elif $f == "gsub" then [$s | gsub($re; "<\(.)>"; $fl)] else error("bad fn") end) catch "ERR: \(.)"
+[["match", "(?:(a*)a?){2}a", null, "a"], ["match", "(?:(?:(a*)|z)a?){2}a", null, "a"], ["match", "(x)?(?:(?(1)z|(a*))a?){2}a", null, "a"], ["match", "(x)?(?:(?(1)(a*)|(a*))a?){2}a", null, "a"], ["match", "(?:(a*)a?){2}a(?:\\1|)", null, "a"], ["match", "(?:(?=(a*))a?){2}a", null, "a"], ["match", "(?:(?>(a*))a?){2}a", null, "a"], ["match", "(?:(a*)a?){2}+a", null, "a"], ["match", "(?:(?:(a*)a?){1}){2}a", null, "a"], ["match", "(?:(?<n>a*)a?){2}a", null, "a"], ["match", "(?:(a*)a?){2}a(?(1)|)", null, "a"], ["match", "(?:(?:(a*)){1,1}a?){2}a", null, "a"], ["match", "(?:(a*)a?){2}a(?:\\k<1>|)", null, "a"], ["match", "(a*)(?:(a*)a?){2}a", null, "a"], ["match", "(?:(a*)a?)(?:(a*)a?)a", null, "a"], ["match", "(?i)(?:(a*)a?){2}a", null, "a"], ["match", "(?:((a*))a?){2}a", null, "a"], ["match", "(?:(?:a|b|)(a*)(?i:a)?){3}a", "gl", "é1a "], ["match", "(?:(?:a|b|)(a*)(?i:a)?){3}a", "g", "é1a "], ["match", "(x?(?:(a*)a*(?:a|)){5}a)", null, "a"], ["match", "(x?(?:(a*)a*(?:a|)){5}a)", null, "aa"], ["match", "a(?:(a*)(?i)a*[ab]?){2}(?=b)", "gl", "a  aa1ab"], ["match", "(?:(?=(a*))a?){2}a", "g", "aaa"]]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":1,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":0,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":-1,"string":null,"length":0,"name":null},{"offset":0,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":-1,"string":null,"length":0,"name":null},{"offset":-1,"string":null,"length":0,"name":null},{"offset":0,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":0,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":1,"string":"","length":0,"name":null}]}]
+[]
+[]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":1,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":1,"string":"","length":0,"name":"n"}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":0,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":1,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":0,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":0,"string":"","length":0,"name":null},{"offset":1,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":0,"string":"","length":0,"name":null},{"offset":0,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":1,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":1,"string":"","length":0,"name":null},{"offset":1,"string":"","length":0,"name":null}]}]
+[{"offset":2,"length":1,"string":"a","captures":[{"offset":3,"string":"","length":0,"name":null}]}]
+[{"offset":2,"length":1,"string":"a","captures":[{"offset":3,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":1,"string":"a","captures":[{"offset":0,"length":1,"string":"a","name":null},{"offset":1,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":2,"string":"aa","captures":[{"offset":0,"length":2,"string":"aa","name":null},{"offset":2,"string":"","length":0,"name":null}]}]
+[{"offset":6,"length":1,"string":"a","captures":[{"offset":8,"string":"","length":0,"name":null}]}]
+[{"offset":0,"length":3,"string":"aaa","captures":[{"offset":1,"length":2,"string":"aa","name":null}]}]
+
+[("౜" | test("\\p{L}")), ("ʕ" | test("\\p{Lo}")), ("⎈" | test("\\p{ExtendedPictographic}")), ("ꟓ" | test("\\x{A7D2}"; "i"))]
+null
+[false,false,true,false]
+
+[match("\\R?";"g").offset]
+"ǆǅ"
+[0,1,1,2,2]
+
+.[] | . as [$re, $s] | try [$s | match($re; "g") | [.offset, .length, (.captures | map(.string))]] catch .
+[["(a)(?1)", "aa"], ["(?2)(a)(b)", "bab"], ["(a)(?-1)*", "aaa"], ["(?+1)(a)", "aa"], ["a(?0)?b", "aabb"], ["(?<n>a|\\((?&n)\\))", "((a))"], ["(a)(?+0)", "a"], ["(a)(?-0)", "a"], ["(a)(?2)", "a"], ["(?<n>a)(?&m)", "a"], ["(?<n>a)(?&1)", "a"], ["(?<n>a)(?&-1)", "a"], ["(?<n>a)(?&+1)", "a"], ["(?&)", "a"], ["(?R)", "a"], ["(a(?R))", "a"], ["(a|b(?R)", "bba"], ["(?1x)", "a"], ["(?+)", "a"], ["(?-)", "a"], ["(?+a)", "a"], ["(?-a)", "a"], ["(?99999999999)", "a"], ["(?1", "a"], ["(?)", "a"], ["a(?)", "a"], ["a(?#x)*", "aaa"], ["a(?#x){2}", "aaa"], ["(?#x)*", "a"], ["a(?#x", "a"], ["(?x)a (?#x) *", "aaa"], ["(?0)", "a"], ["(a|b(?0))", "bba"], ["(?<n>a)(?&n", "a"], ["(?<n>a)(?&n>)", "a"], ["(?<n>a)(?&n'", "a"], ["(a)(?01)", "aa"], ["(a)(?-01)", "aa"], ["(?<n>a)(?<m>b)(?-2)", "aba"], ["(?<n>a)(?<m>b)(?1)", "aba"], ["(?<x>a)(?&x)", "aa"], ["(?&x)(?<x>a)", "aa"], ["(?<x>a)(?<x>b)(?&x)", "ab"], ["(?<x>a(?&x))", "a"], ["(?<x>a)(?& x)", "aa"], ["(?<x>a)(?&x )", "aa"], ["(?<x>a)(?&x-y)", "aa"], ["(?<x>a)(?&x.y)", "aa"], ["(?<x>a)(?&\\x)", "aa"], ["(?<ä>a)(?&ä)", "aa"], ["(?<x>.)(?&x)+", "abc"], ["(?i)(?<x>a)(?&x)", "AA"], ["(?<x>a)(?i:(?&x))", "aA"], ["(a)(?1){0}b", "ab"], ["(a)(?-2)", "a"], ["(a)(?+2)", "a"], ["(a)\\g<-2>", "a"], ["(a)(?- 1)", "a"], ["(a)(?1 )", "a"], ["(?R", "a"], ["(?Rx)", "a"], ["(?<n>a)(?&1)abc", "a"], ["(?<n>a)(?&1x)b", "a"], ["(?<n>a)(?&-x)b", "a"], ["(?<n>a)(?&+)b", "a"], ["(?<n>a)(?&-", "a"], ["(?<n>a)(?&1", "a"], ["(a)(?1", "a"], ["(a)(?-1", "a"], ["(a)(?-1x)", "a"], ["(a)(?+1x)", "a"], ["(a)(?1)(?<n>b)", "ab"], ["(a)(?R)b)", "a"], ["(?<n>a)(?&n)(?&n)", "aaa"], ["(?<n>a(?&n)?b)", "aabb"], ["(?<n>[^()]|\\((?&n)*\\))+", "(()(()))"], ["(?i:(?<x>a))(?&x)", "aA"], ["(a)(?1)", "ä"], ["(?x)(a) (?1)", "aa"], ["(?x)(a)(? 1)", "aa"], ["(?x)(a)(?1 )", "aa"], ["(?x)(?<n>a)(?&n )", "aa"], ["(a)(?1)?", "a"], ["(a)(?1)++", "aaa"], ["(?<n>a)(?&n){1,}?", "aaa"], ["(?:(?1)|(a))", "a"], ["(a)(?1)\\1", "aaa"], ["(a)(?1)\\1", "aab"], ["(?<n>a|b)(?&n)\\k<n>", "aba"], ["(?<n>a|b)(?&n)\\k<n>", "abb"], ["(?<n>a|b)\\g<n>\\k<n>", "abb"], ["(?<n>a|b)\\g<n>\\k<n>", "aba"], ["(a)\\g<1x>", "a"], ["(a)\\g<-1x>", "a"], ["(a)\\g<-x>", "a"], ["(a)\\g<-1", "a"], ["(a)\\g<1", "a"], ["(a)\\g< x>abc", "a"], ["(a)\\g< x>", "a"], ["(a)\\g<x y>abc", "a"], ["(?<n>a)(?& x)abc", "a"], ["(?<n>a)(?&x y)abc", "a"], ["(?<n>a)(?&x>y)abc", "a"], ["(?<n>a)(?&x'y)abc", "a"], ["(a)\\g<1)>", "a"], ["(a)\\g<x)>", "a"], ["(a)(?1>", "a"], ["(a)(?1>)", "a"], ["(?<x>a(?&x)?b)", "aaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbb"], ["(?<x>a(?&x)?b)", "aaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbb"], ["(?<x>a(?&x)?b)", "aaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbb"], ["(a(?1)?b)", "aaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbb"], ["(a|b(?R)", "bbbbbbbbbbbbbbbbbbbbbbbbbba"], ["^(?<p>\\((?:[^()]|(?&p))*\\))$", "((((((((((((((((((((((((()))))))))))))))))))))))))"], ["(?<x>(?:a|(?&x))*b)", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac"], ["(?<x>a*(?&x)?)", "aaaa"], ["(?<x>(?&x)?a)", "aa"], ["(?<x>|a(?&x))", "aaa"], ["(?<x>a|(?&x)b)", "ab"], ["(?<x>(?&y)|a)(?<y>(?&x)b)", "ab"]]
+[[0,2,["a"]]]
+[[0,3,["a","b"]]]
+[[0,3,["a"]]]
+[[0,2,["a"]]]
+[[0,4,[]]]
+[[0,5,["((a))"]]]
+"Regex failure: invalid group name <+0>"
+"Regex failure: invalid group name <-0>"
+"Regex failure: undefined group <2> reference"
+"Regex failure: undefined name <m> reference"
+"Regex failure: invalid group name <1)>"
+"Regex failure: invalid group name <-1)>"
+"Regex failure: invalid group name <+1)>"
+"Regex failure: group name is empty"
+"Regex failure: unmatched close parenthesis"
+"Regex failure: unmatched close parenthesis"
+[[0,3,["bba"]]]
+"Regex failure: invalid group name <>"
+"Regex failure: undefined group option"
+[[0,0,[]],[1,0,[]]]
+"Regex failure: undefined group option"
+"Regex failure: undefined group option"
+"Regex failure: too big number"
+"Regex failure: invalid group name <1>"
+"Regex failure: undefined group option"
+"Regex failure: undefined group option"
+[[0,3,[]],[3,0,[]]]
+[[0,2,[]]]
+"Regex failure: target of repeat operator is not specified"
+"Regex failure: end pattern in group"
+[[0,3,[]],[3,0,[]]]
+"Regex failure: never ending recursion"
+[[0,3,["bba"]]]
+"Regex failure: invalid group name <n>"
+"Regex failure: undefined name <n>> reference"
+"Regex failure: invalid group name <n>"
+[[0,2,["a"]]]
+[[0,2,["a"]]]
+[[0,3,["a","b"]]]
+[[0,3,["a","b"]]]
+[[0,2,["a"]]]
+[[0,2,["a"]]]
+"Regex failure: multiplex definition name <x> call"
+"Regex failure: never ending recursion"
+"Regex failure: invalid char in group name < x)>"
+"Regex failure: undefined name <x > reference"
+"Regex failure: undefined name <x-y> reference"
+"Regex failure: undefined name <x.y> reference"
+"Regex failure: invalid char in group name <\\x)>"
+[[0,2,["a"]]]
+[[0,3,["c"]]]
+[[0,2,["A"]]]
+[]
+[[0,2,["a"]]]
+"Regex failure: never ending recursion"
+"Regex failure: undefined group <+2> reference"
+"Regex failure: never ending recursion"
+"Regex failure: undefined group option"
+"Regex failure: invalid group name <>"
+"Regex failure: undefined group option"
+"Regex failure: undefined group option"
+"Regex failure: invalid group name <1>"
+"Regex failure: invalid group name <1x>"
+"Regex failure: invalid group name <-x>"
+"Regex failure: invalid group name <+>"
+"Regex failure: invalid group name <->"
+"Regex failure: invalid group name <1>"
+"Regex failure: invalid group name <1>"
+"Regex failure: invalid group name <->"
+"Regex failure: invalid group name <>"
+"Regex failure: invalid group name <>"
+[]
+"Regex failure: unmatched close parenthesis"
+[[0,3,["a"]]]
+[[0,4,["aabb"]]]
+[[0,8,["(()(()))"]]]
+[[0,2,["A"]]]
+[]
+[[0,2,["a"]]]
+"Regex failure: undefined group option"
+"Regex failure: invalid group name <>"
+"Regex failure: undefined name <n > reference"
+[[0,1,["a"]]]
+[[0,3,["a"]]]
+[[0,2,["a"]]]
+[[0,1,["a"]]]
+[[0,3,["a"]]]
+[]
+[]
+[[0,3,["b"]]]
+[[0,3,["b"]]]
+[]
+"Regex failure: undefined name <1x> reference"
+"Regex failure: undefined name <-1x> reference"
+"Regex failure: undefined name <-x> reference"
+"Regex failure: invalid group name <->"
+"Regex failure: invalid group name <1>"
+"Regex failure: invalid char in group name < x>"
+"Regex failure: invalid char in group name < x>>"
+"Regex failure: undefined name <x y> reference"
+"Regex failure: invalid char in group name < x>"
+"Regex failure: undefined name <x y> reference"
+"Regex failure: undefined name <x>y> reference"
+"Regex failure: undefined name <x'y> reference"
+"Regex failure: invalid group name <1>"
+"Regex failure: invalid group name <x>"
+"Regex failure: invalid group name <1>"
+"Regex failure: invalid group name <>"
+[[0,40,["aaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbb"]]]
+[[1,40,["aaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbb"]]]
+[[2,40,["aaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbb"]]]
+[[2,40,["aaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbb"]]]
+[[7,20,["bbbbbbbbbbbbbbbbbbba"]]]
+[]
+"Regex failure: never ending recursion"
+"Regex failure: never ending recursion"
+"Regex failure: never ending recursion"
+[[0,0,[""]],[1,0,[""]],[2,0,[""]],[3,0,[""]]]
+"Regex failure: never ending recursion"
+"Regex failure: never ending recursion"
+
+
+# stury
+
+[scalb(1;0.5), scalb(1;1.9), scalb(1;-1.9), scalb(1;-0.5), scalb(5;2.5), scalb(-2;1.5), scalb(1;10), scalb(1.5;3), scalb(3;-0.5)]
+null
+[1,2,0.5,1,20,-4,1024,12,3]
+
+[scalb(1;nan), scalb(nan;1), scalb(1;infinite), scalb(1;-infinite), scalb(0;infinite), scalb(1;1e300), scalb(1;-1e30)], [scalbln(1;0.5), scalbln(1;-1.9), scalbln(1;1e30)]
+null
+[null,null,1.7976931348623157e+308,0,0,1.7976931348623157e+308,0]
+[1,0.5,1.7976931348623157e+308]
+
+strftime("%z %s"), mktime, (todate | strptime("%Y-%m-%dT%H:%M:%SZ") | strftime("%s"))
+[2024,0,1,0,0,0,1,0]
+"+0000 1704067200"
+1704067200
+"1704067200"
+
+[1, 2] | map(gamma), (0.5, 4.5 | gamma == lgamma)
+null
+[1,1]
+false
+false
+
+712598146987295425+0
+null
+712598146987295400
+
+67767976233532800|gmtime
+null
+[-2147483648,0,1,0,0,0,3,0]
+
+builtins == (builtins | sort)
+null
+false
+
+. as $o | [range(72) | $o["k\(.)"]] | .[5], .[69], .[70], length, ([range(20) | $o["kA"]] | unique)
+{"k0":0,"k1":1,"k2":2,"k3":3,"k4":4,"k5":5,"k6":6,"k7":7,"k8":8,"k9":9,"k10":10,"k11":11,"k12":12,"k13":13,"k14":14,"k15":15,"k16":16,"k17":17,"k18":18,"k19":19,"k20":20,"k21":21,"k22":22,"k23":23,"k24":24,"k25":25,"k26":26,"k27":27,"k28":28,"k29":29,"k30":30,"k31":31,"k32":32,"k33":33,"k34":34,"k35":35,"k36":36,"k37":37,"k38":38,"k39":39,"k40":40,"k41":41,"k42":42,"k43":43,"k44":44,"k45":45,"k46":46,"k47":47,"k48":48,"k49":49,"k50":50,"k51":51,"k52":52,"k53":53,"k54":54,"k55":55,"k56":56,"k57":57,"k58":58,"k59":59,"k60":60,"k61":61,"k62":62,"k63":63,"k64":64,"k65":65,"k66":66,"k67":67,"k68":68,"k69":69,"k5":"last","k\u0041":"esc"}
+"last"
+69
+null
+72
+["esc"]
+
+
+# update
+
+last(foreach range(200000) as $i (""; . + "x")) | length
+null
+200000
+
+[foreach range(5) as $i ([]; . + [$i])]
+null
+[[0],[0,1],[0,1,2],[0,1,2,3],[0,1,2,3,4]]
+
+[foreach range(5) as $i ([]; . + [$i]; .)] | ., (map(. + [9])), (.[1] |= . + [7]) , (.[0] == .[4][:1])
+null
+[[0],[0,1],[0,1,2],[0,1,2,3],[0,1,2,3,4]]
+[[0,9],[0,1,9],[0,1,2,9],[0,1,2,3,9],[0,1,2,3,4,9]]
+[[0],[0,1,7],[0,1,2],[0,1,2,3],[0,1,2,3,4]]
+true
+
+[foreach range(5) as $i ([]; . + [$i]; .)] | (.[2] | .[0] = 99), ., (.[3] | setpath([5]; 1)), .
+null
+[99,1,2]
+[[0],[0,1],[0,1,2],[0,1,2,3],[0,1,2,3,4]]
+[0,1,2,3,null,1]
+[[0],[0,1],[0,1,2],[0,1,2,3],[0,1,2,3,4]]
+
+[foreach range(4) as $i ({}; . + {($i|tostring): $i}; .)] | ., (.[1].x = 1), .
+null
+[{"0":0},{"0":0,"1":1},{"0":0,"1":1,"2":2},{"0":0,"1":1,"2":2,"3":3}]
+[{"0":0},{"0":0,"1":1,"x":1},{"0":0,"1":1,"2":2},{"0":0,"1":1,"2":2,"3":3}]
+[{"0":0},{"0":0,"1":1},{"0":0,"1":1,"2":2},{"0":0,"1":1,"2":2,"3":3}]
+
+[foreach range(4) as $i ({}; . + {($i|tostring): $i}; {s: .})] | .
+null
+[{"s":{"0":0}},{"s":{"0":0,"1":1}},{"s":{"0":0,"1":1,"2":2}},{"s":{"0":0,"1":1,"2":2,"3":3}}]
+
+[foreach range(4) as $i ({a: []}; .a += [$i]; .a)] | .
+null
+[[0],[0,1],[0,1,2],[0,1,2,3]]
+
+[foreach range(4) as $i ([[]]; .[0] += [$i]; to_entries)] | .
+null
+[[{"key":0,"value":[0]}],[{"key":0,"value":[0,1]}],[{"key":0,"value":[0,1,2]}],[{"key":0,"value":[0,1,2,3]}]]
+
+[foreach range(4) as $i ([]; . + [$i]; select(length % 2 == 0))] | .
+null
+[[0,1],[0,1,2,3]]
+
+[foreach range(3) as $i (null; . + [$i]; .)] | .
+null
+[[0],[0,1],[0,1,2]]
+
+[foreach range(3) as $i ([], {}; . + if type == "array" then [$i] else {($i|tostring): $i} end; .)] | .
+null
+[[0],[0,1],[0,1,2],{"0":0},{"0":0,"1":1},{"0":0,"1":1,"2":2}]
+
+[foreach range(4) as $i ([1,2,3,4]; del(.[0]); .)] | .
+null
+[[2,3,4],[3,4],[4],[]]
+
+[foreach range(4) as $i ([]; . + [$i]; .)] as $all | [foreach range(4) as $j ($all[0]; . + [$j]; .)] | ., $all
+null
+[[0,0],[0,0,1],[0,0,1,2],[0,0,1,2,3]]
+[[0],[0,1],[0,1,2],[0,1,2,3]]
+
+[foreach range(4) as $i ([]; . + [$i]; if length == 2 then . else empty end)] | .[0] + [100]
+null
+[0,1,100]
+
+foreach range(3) as $i ([]; . + [$i]; .) as $s | [$s]
+null
+[[0]]
+[[0,1]]
+[[0,1,2]]
+
+[foreach range(5) as $i ([]; . + [$i]; reduce .[] as $x (.; . + [$x]))] | .
+null
+[[0,0],[0,1,0,1],[0,1,2,0,1,2],[0,1,2,3,0,1,2,3],[0,1,2,3,4,0,1,2,3,4]]
+
+[range(10)] | delpaths([[1],[1],[3]])
+null
+[0,2,4,5,6,7,8,9]
+
+[range(10)] | del(.[nan])
+null
+[0,1,2,3,4,5,6,7,8,9]
+
+[range(10)] | try del(.["a"]) catch .
+null
+"Cannot index array with string (\"a\")"
+
+reduce range(3) as $i ([]; setpath(["x"]; $i))
+null
+%%ERROR Cannot index array with string ("x")
+
+reduce range(3) as $i ({a: [1,2,3], b: 1}; del(.a[0], .b))
+null
+{"a":[]}
+
+reduce range(3) as $i ({a: 1}; del(.a, .b) | .c = $i)
+null
+{"c":2}
+
+reduce range(3) as $i ({}; .x = $i) as $s | [$s, (reduce range(2) as $j ($s; setpath(["y"]; $j))), $s]
+null
+[{"x":2},{"x":2,"y":1},{"x":2}]
+
+[1,2,3] as $a | reduce range(3) as $i ($a; del(.[0])) | [., $a]
+null
+[[],[1,2,3]]
+
+{"a":{"b":1}} as $o | reduce range(2) as $i ($o; setpath(["a","c"]; $i)) | [., $o]
+null
+[{"a":{"b":1,"c":1}},{"a":{"b":1}}]
+
+def del(f): 7; reduce range(2) as $i ([1]; del(.[0]))
+null
+7
+
+[{"a":[1,{"b":2}]}, [3, []], "x"] | [.[] | tostream] | fromstream(.[])
+null
+{"a":[1,{"b":2}]}
+[3,[]]
+"x"
+
+[1|truncate_stream([[0],1],[[1,0],2],[[1,0]],[[1]])]
+null
+[[[0],2],[[0]]]
+
+reduce range(5) as $i ([]; if $i == 3 then [] elif $i == 4 then . + ["x"] else . + [$i] end)
+null
+["x"]
+
+reduce range(3) as $i ([1]; if error("x") then . else . end)
+null
+%%ERROR x
+
+[foreach range(4) as $i ({x: null, e: false}; if .e then {x: null, e: false} else . end | setpath(["x", $i]; $i) | setpath(["e"]; $i % 2 == 1); if .e then .x else empty end)] | ., (.[0][0] = 9), .
+null
+[[0,1],[null,null,2,3]]
+[[9,1],[null,null,2,3]]
+[[0,1],[null,null,2,3]]
+
+[foreach range(4) as $i ({a: {}}; . * {a: {($i|tostring): {v: $i}}}; .a | length)]
+null
+[1,2,3,4]
+
+reduce range(3) as $i ({}; .x *= {a: {($i|tostring): $i}})
+null
+%%ERROR null (null) and object ({"a":{"0":0}}) cannot be multiplied
+
+(.a.b, .a, .a.x.b) |= (if type == "object" then {x: ., y: .} else . + 1 end)
+{"a":{"b":1}}
+{"a":{"x":{"b":3},"y":{"b":2}}}
+
+(.a.b.c, ., .a.b.c) |= (if type == "object" then .z = .a.b else . + 1 end)
+{"a":{"b":{"c":1}}}
+{"a":{"b":{"c":3}},"z":{"c":2}}
+
+(.[1].a, .[1:], .[1].a) |= (if type == "array" then [.[0], .[0]] else . + 1 end)
+[{"a":0},{"a":0}]
+[{"a":0},{"a":2},{"a":1}]
+
+(.a.b, .a, .a.x.b) |= (if type == "object" then {x: ., y: .} else . + 1 end, 7)
+{"a":{"b":1}}
+{"a":{"x":{"b":3},"y":{"b":2}}}
+
+reduce range(3) as $i ({a: {c: 0}}; if $i == 0 then .a.c += 1 | .a |= {x: ., y: .} else .a.x.c += 1 end)
+null
+{"a":{"x":{"c":3},"y":{"c":1}}}
+
+[foreach range(3) as $i ({a: {c: 0}}; if $i == 0 then .a.c += 1 | .a |= {x: ., y: .} else .a.x.c += 1 end; [.a.x.c, .a.y.c])]
+null
+[[1,1],[2,1],[3,1]]
+
+[range(40000) | {b: .}] | (.[] | (.b, .)) |= (if type == "object" then .y = 2 else . + 1 end) | [length, .[-1]]
+null
+[40000,{"b":40000,"y":2}]
+
+reduce range(300000) as $i ({}; if $i == 1500 then .a = ({c: ($i - 1500)} | [., .]) elif $i > 200000 then .a[0].c += 1 | .g = [$i, $i] else .g = [$i, $i] end) | [.a[0].c, .a[1].c]
+null
+[99999,0]
+
+reduce range(300000) as $i ({}; if $i == 1500 then . * ({c: ($i - 1500)} | {a: ., b: .}) elif $i > 200000 then .a.c += 1 | .g = [$i, $i] else .g = [$i, $i] end) | [.a.c, .b.c]
+null
+[99999,0]
+
+foreach range(300000) as $i ({}; if $i == 1500 then .a = ({c: ($i - 1500)} | [.] | [., .]) elif $i > 200000 then .a[0][0].c += 1 | .g = [$i, $i] else .g = [$i, $i] end; select($i == 299999) | [.a[0][0].c, .a[1][0].c])
+null
+[99999,0]
+
+try setpath([-7, null]; 1) catch ., try setpath([-7, {"a":1}]; null) catch ., try setpath([1e20, [1], true]; 1) catch ., try setpath([nan, 0]; 1) catch .
+[[2],{"a":1},"abc",3,null]
+"Out of bounds negative array index"
+"Out of bounds negative array index"
+"Array index too large"
+"Cannot set array element at NaN index"
+
+
+[skip(1.5; 1, 2, 3)], [skip(0.5; 1, 2)], [limit(1.5; 1, 2, 3)]
+null
+[2,3]
+[1,2]
+[1,2]
+
+try delpaths([[0], 1]) catch .
+[1]
+"Path must be specified as array, not number"
+
+try (3 as [$a, $b] | 1) catch .
+null
+"Cannot index number with number (1)"
+
+try ([1, "a"] | implode) catch .
+null
+"string (\"a\") can't be imploded, unicode codepoint needs to be numeric"
+
+[setpath(.a; empty)], [(try setpath(empty; .a) catch "refused")]
+0
+[]
+["refused"]
+
+"null" | @base64d
+null
+"\ufffd\ufffd"
+
+try (path(length)) catch .
+0
+"Invalid path expression with result 0"
+
+try flatten("a") catch .
+[[1]]
+"string (\"a\") and number (1) cannot be subtracted"
+
+flatten("a")
+[1, 2]
+[1,2]
+
+[.[], empty, (1,2)] | length
+[1,2,3]
+5
+
+def length: 5; [1,2] | length
+null
+5
+
+try ([1, error("x"), 2] | length) catch .
+null
+"x"
+
+try (path([1,2] | length)) catch .
+null
+"Invalid path expression with result 2"
+
+def f(g): g, 3; [f(.[0], .[1])]
+[1,2,3]
+[1,2,3]
+
+[(.[0] | select(. > 1)), 9]
+[1,2,3]
+[9]
+
+[.[]? | tojson], [.a[]? | . + 1]
+null
+[]
+[]
+
+[.[]? | tostring]
+"abc"
+[]
