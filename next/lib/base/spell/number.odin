@@ -21,30 +21,30 @@ Number_Kind :: enum u8 {
 	Wide, // past binary64's range, or a span of more than `MAX_NUMBER_DIGITS` digits whose size does not settle it
 }
 
-// The most digits, zeros included, that a decimal of more than `FOLDED_DIGITS` digits is read from, as a bound on the
-// work. It keeps every exponent such a decimal's value allows below the 10^4 `strconv.parse_f64` reads.
-@(private)
+// The most digits, zeros included, that a decimal of more than `FOLDED_DIGITS` digits is read from, bounding the work
+// of the slow fallback when the decimal's order does not already settle overflow or underflow.
+@(private = "file")
 MAX_NUMBER_DIGITS :: 4096
 // The most digits `Number_Lex.mant` holds exactly.
-@(private)
+@(private = "file")
 FOLDED_DIGITS :: 19
 // The decimal order, 10^`order`, at or above which a value is past binary64's largest and below which it rounds to zero.
-@(private)
+@(private = "file")
 OVERFLOW_ORDER :: 310
-@(private)
+@(private = "file")
 UNDERFLOW_ORDER :: -324
 // The scale past which `strconv.fast_float_compute_float` answers the same, bounding the `int` it takes.
-@(private)
+@(private = "file")
 SCALE_CLAMP :: 1000
 // The value an exponent stops growing at, past the `i32` range so it still reads as out of range.
-@(private)
+@(private = "file")
 EXP_SATURATED :: i64(max(i32)) + 1
 // Binary64 infinity, which `strconv.fast_float_compute_float` returns on overflow.
-@(private)
+@(private = "file")
 F64_INF_BITS :: u64(0x7FF) << 52
 
 // The powers of ten exact in binary64, for the Clinger fast path.
-@(private, rodata)
+@(private = "file", rodata)
 POW10_F64 := [23]f64{
 	1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
 	1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
@@ -59,7 +59,7 @@ POW10_U64: [20]u64 = {
 }
 
 // A lexed decimal.
-@(private)
+@(private = "file")
 Number_Lex :: struct {
 	int_at, int_digits:   u64,
 	frac_at, frac_digits: u64,
@@ -88,13 +88,13 @@ number_strict :: proc "contextless" (src: []u8, lo, hi: u64) -> (Number, bool) {
 @(require_results)
 number_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (num: Number, ok: bool) #no_bounds_check {
 	base := raw_data(src)
-	if lo >= hi {
+	if lo >= u64(len(src)) {
 		return
 	}
 	neg := base[lo] == '-'
 	p := lo + u64(neg)
 	m := hi - p
-	if m == 0 || m > 16 {
+	if m - 1 >= 16 {
 		return
 	}
 	if m <= 8 && p + 8 <= u64(len(src)) {
@@ -103,26 +103,46 @@ number_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (nu
 	if p + 16 > u64(len(src)) {
 		return
 	}
-	// The bytes past the span read as `0` digits.
-	w0, w1 := short_pad(kernel.load8(base[p:]), m), short_pad(kernel.load8(base[p + 8:]), m - min(m, 8))
+	// `m` is in `9..=16` here (`m <= 8` returned above or failed `p + 16 <= len(src)`).
+	// The bytes past the span in `w1` read as `0` digits.
+	w0 := kernel.load8(base[p:])
+	w1 := short_pad(kernel.load8(base[p + 8:]), m - 8)
 	k := short_nondigit(w0, w1)
 	if k >= m {
-		if m > 1 && base[p] == '0' {
+		if base[p] == '0' {
 			return
 		}
-		return integer_number(short_digits(w0, w1, m), neg)
+		return integer_number(digits8_value(w0) * POW10_U64[m - 8] + digits8_value(w1 << (8 * (16 - m))), neg)
 	}
 	if base[p + k] != '.' || k == 0 || k == m - 1 || k > 1 && base[p] == '0' {
 		return
 	}
-	// The point read as a `0` digit, which no other non-digit may follow.
-	x := (u128(w0) | u128(w1) << 64) &~ (u128(0xFF) << (8 * k)) | u128(0x30) << (8 * k)
-	if short_nondigit(u64(x), u64(x >> 64)) < m {
-		return
+	// The point read as a `0` digit, which no other non-digit may follow, then spliced out across the two words.
+	m0, m1: u64
+	if k < 8 {
+		s := 8 * k
+		w0 = w0 &~ (u64(0xFF) << s) | u64(0x30) << s
+		if non_digit_bytes(w0) | non_digit_bytes(w1) != 0 {
+			return
+		}
+		low := u64(1) << s - 1
+		m0 = w0 & low | w0 >> 8 &~ low | w1 << 56
+		m1 = w1 >> 8
+	} else {
+		s := 8 * (k - 8)
+		w1 = w1 &~ (u64(0xFF) << s) | u64(0x30) << s
+		if non_digit_bytes(w1) != 0 {
+			return
+		}
+		low := u64(1) << s - 1
+		m0 = w0
+		m1 = w1 & low | w1 >> 8 &~ low
 	}
-	low := u128(1) << (8 * k) - 1
-	merged := x & low | x >> 8 &~ low
-	v := f64(short_digits(u64(merged), u64(merged >> 64), m - 1)) / POW10_F64[m - k - 1]
+	sig := digits8_value(m0)
+	if m > 9 {
+		sig = sig * POW10_U64[m - 9] + digits8_value(m1 << (8 * (17 - m)))
+	}
+	v := f64(sig) / POW10_F64[m - k - 1]
 	return {transmute(u64)(-v if neg else v), .Float}, true
 }
 
@@ -131,13 +151,13 @@ number_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (nu
 @(require_results)
 integer_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (v: i64, ok: bool) #no_bounds_check {
 	base := raw_data(src)
-	if lo >= hi {
+	if lo >= u64(len(src)) {
 		return
 	}
 	neg := base[lo] == '-'
 	p := lo + u64(neg)
 	m := hi - p
-	if m - 1 >= 16 || p + 8 > u64(len(src)) || m > 1 && base[p] == '0' {
+	if m - 1 >= 16 || max(p + 8, hi) > u64(len(src)) || m > 1 && base[p] == '0' {
 		return
 	}
 	// Each byte less `0` is a digit when it and it plus 6 keep their high nibble clear.
@@ -160,20 +180,20 @@ integer_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (v
 	return -i64(mag) if neg else i64(mag), true
 }
 
-// The binary64 of `src[lo:hi]` when it is an RFC 8259 number with no exponent, at most 8 digits before its point and 8
-// after it, 15 in all, and 17 bytes of `src` from its first digit. Its digits and the power of ten are exact, so the
-// one division rounds once. The words are read whatever the point's place, with no branch on it. False for any other
-// span, which `number_short` or `number_strict` reads.
+// The binary64 of `src[lo:hi]` when it is an RFC 8259 number with no exponent, at most 7 digits before a point (8
+// without one), 8 after it, 15 in all, and 16 bytes of `src` from its first digit. Its digits and the power of ten are
+// exact, so the one division rounds once. The words are read whatever the point's place, with no branch on it. False for
+// any other span, which `number_short` or `number_strict` reads.
 @(require_results)
 float_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (v: f64, ok: bool) #no_bounds_check {
 	base := raw_data(src)
-	if lo >= hi {
+	if lo >= u64(len(src)) {
 		return
 	}
 	neg := base[lo] == '-'
 	p := lo + u64(neg)
 	m := hi - p
-	if m - 1 >= 16 || p + 17 > u64(len(src)) {
+	if m - 1 >= 16 || p + 16 > u64(len(src)) {
 		return
 	}
 	ZEROS :: 0x3030_3030_3030_3030
@@ -196,7 +216,7 @@ float_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (v: 
 }
 
 // `number_short` of the `m` bytes at `p`, at most 8, after the sign, in one word.
-@(private)
+@(private = "file", require_results)
 short_word :: #force_inline proc "contextless" (p: [^]u8, m: u64, neg: bool) -> (num: Number, ok: bool) #no_bounds_check {
 	w := short_pad(kernel.load8(p), m)
 	nd := non_digit_bytes(w)
@@ -222,7 +242,7 @@ short_word :: #force_inline proc "contextless" (p: [^]u8, m: u64, neg: bool) -> 
 }
 
 // Word `w` of a short number's span with its bytes from `k` on, `k` below 8, set to `0` digits.
-@(private)
+@(private = "file", require_results)
 short_pad :: #force_inline proc "contextless" (w: u64, k: u64) -> u64 {
 	if k >= 8 {
 		return w
@@ -233,26 +253,17 @@ short_pad :: #force_inline proc "contextless" (w: u64, k: u64) -> u64 {
 
 // The place of the first byte of the 16 in `w0` and `w1` that is no digit, 16 for none. A byte past the first such one
 // may be marked by its carry, and is not read.
-@(private)
+@(private = "file", require_results)
 short_nondigit :: #force_inline proc "contextless" (w0, w1: u64) -> u64 {
 	if m0 := non_digit_bytes(w0); m0 != 0 {
 		return u64(intrinsics.count_trailing_zeros(m0)) >> 3
 	}
 	m1 := non_digit_bytes(w1)
-	return 8 + u64(intrinsics.count_trailing_zeros(m1)) >> 3 if m1 != 0 else 16
-}
-
-// The value of the first `t` digits, 1 to 16, of the 16 bytes in `w0` and `w1`.
-@(private)
-short_digits :: #force_inline proc "contextless" (w0, w1: u64, t: u64) -> u64 {
-	if t <= 8 {
-		return digits8_value(w0 << (8 * (8 - t)))
-	}
-	return digits8_value(w0) * POW10_U64[t - 8] + digits8_value(w1 << (8 * (16 - t)))
+	return 8 + (u64(intrinsics.count_trailing_zeros(m1)) >> 3) if m1 != 0 else 16
 }
 
 // The value of `src[lo:hi]` read with JSON5's decimal grammar, which also takes a `+` and a point with digits on one
-// side only, false for a span that is no number.
+// side only (while still rejecting multi-digit leading zeros), false for a span that is no number.
 @(require_results)
 number_loose :: proc "contextless" (src: []u8, lo, hi: u64) -> (Number, bool) {
 	n := lex_decimal(src, lo, hi, true)
@@ -264,10 +275,14 @@ number_loose :: proc "contextless" (src: []u8, lo, hi: u64) -> (Number, bool) {
 
 // The value of the signed integer `src[lo:hi]` of `digits` digits, at most 19, which a walk counted. False for a span
 // of another length or a value below `i64`'s minimum.
+// Caller guarantees `src[lo:hi]` is a walk-validated decimal integer when `lo < hi <= u64(len(src))`.
 @(require_results)
 number_int :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, digits: int) -> (Number, bool) {
+	if lo >= u64(len(src)) {
+		return {}, false
+	}
 	p, neg := skip_sign(raw_data(src), lo)
-	if digits <= 0 || digits > 19 || p + u64(digits) != hi {
+	if uint(digits - 1) >= 19 || p + u64(digits) != hi || hi > u64(len(src)) {
 		return {}, false
 	}
 	return integer_number(fold_digits_end(src, hi, u64(digits)), neg)
@@ -275,14 +290,15 @@ number_int :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, digits: 
 
 // The value of the decimal `src[lo:hi]` with a point and no exponent, from the digit counts a walk found. Only the
 // point's place is checked against them.
+// Caller guarantees `src[lo:hi]` is a walk-validated decimal with a point when `lo < hi <= u64(len(src))`.
 @(require_results)
 number_fraction :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number #no_bounds_check {
 	base := raw_data(src)
 	total := int_digits + frac_digits
 	// A point at most 19 bytes before `hi` leaves both digit runs ending past `FOLD_WORDS_FROM`.
-	if int_digits > 0 && frac_digits >= 0 && total <= 19 && hi >= FOLD_WORDS_FROM + 19 {
+	if hi <= u64(len(src)) && uint(int_digits - 1) < 19 && uint(frac_digits - 1) < 19 && total <= 19 && hi >= FOLD_WORDS_FROM + 19 {
 		point := hi - u64(frac_digits) - 1
-		if base[point] == '.' {
+		if lo < point && base[point] == '.' {
 			if total <= 7 {
 				start := point - u64(int_digits)
 				if start + 8 <= u64(len(src)) {
@@ -312,15 +328,16 @@ number_fraction :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, int
 
 // The value of the decimal `src[lo:hi]` with an exponent, from the digit counts a walk found. A span the counts do
 // not match is read again whole.
+// Caller guarantees `src[lo:hi]` is a walk-validated decimal with an exponent when `lo < hi <= u64(len(src))`.
 @(require_results)
 number_exponent :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number #no_bounds_check {
-	if int_digits + frac_digits > 19 {
+	if lo >= u64(len(src)) || hi > u64(len(src)) || uint(int_digits) > 19 || uint(frac_digits) > 19 || int_digits + frac_digits > 19 {
 		return number_decimal(src, lo, hi)
 	}
 	base := raw_data(src)
 	p, neg := skip_sign(base, lo)
 	int_at := p
-	if int_digits < 0 || p + u64(int_digits) > hi {
+	if p + u64(int_digits) > hi {
 		return number_decimal(src, lo, hi)
 	}
 	p += u64(int_digits)
@@ -328,7 +345,7 @@ number_exponent :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, 
 	if p < hi && base[p] == '.' {
 		p += 1
 		frac_at = p
-		if frac_digits < 0 || p + u64(frac_digits) > hi {
+		if p + u64(frac_digits) > hi {
 			return number_decimal(src, lo, hi)
 		}
 		p += u64(frac_digits)
@@ -351,6 +368,7 @@ number_exponent :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, 
 // The correctly rounded binary64 of `mant` × 10^`e` with sign `neg`, or `Wide` on overflow. Up to 2^53 both `mant` and
 // `10^|e|` (for `|e| <= 22`) are exact in binary64, so Clinger's single operation holds. A positive `e` to 37 moves the
 // excess powers into `mant`, which stays an exact integer while it is at most 10^15.
+@(private = "file", require_results)
 number_significand :: #force_inline proc "contextless" (mant: u64, e: i64, neg: bool) -> Number {
 	if mant <= 1 << 53 {
 		if e >= -22 && e <= 22 {
@@ -378,42 +396,44 @@ number_significand :: #force_inline proc "contextless" (mant: u64, e: i64, neg: 
 }
 
 // The value of `src[lo:hi]`, which a walk accepted as a number, read with no digit counts.
-@(private, require_results)
+@(private = "file", require_results)
 number_decimal :: proc "contextless" (src: []u8, lo, hi: u64) -> Number {
-	return number_of_lex(src, lo, hi, lex_decimal(src, lo, hi, false))
+	n := lex_decimal(src, lo, hi, false)
+	if !n.ok {
+		return {}
+	}
+	return number_of_lex(src, lo, hi, n)
 }
 
-@(private)
-lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64, $LOOSE: bool) -> (n: Number_Lex) {
+@(private = "file", require_results)
+lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64, $LOOSE: bool) -> (n: Number_Lex) #no_bounds_check {
 	if lo >= hi || hi > u64(len(src)) {
 		return
 	}
 	base := raw_data(src)
 	p := lo
-	if src[p] == '-' || LOOSE && src[p] == '+' {
-		n.neg = src[p] == '-'
+	if base[p] == '-' || LOOSE && base[p] == '+' {
+		n.neg = base[p] == '-'
 		p += 1
 	}
 	if p >= hi {
 		return
 	}
 	n.int_at = p
-	when LOOSE {
+	if base[p] == '0' {
+		p += 1
+		if p < hi && base[p] - '0' < 10 {
+			return
+		}
+	} else if base[p] - '1' < 9 {
 		p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant, FOLDED_DIGITS), base))
 	} else {
-		if src[p] == '0' {
-			p += 1
-			if p < hi && src[p] - '0' < 10 {
-				return
-			}
-		} else if src[p] - '1' < 9 {
-			p = u64(intrinsics.ptr_sub(digit_fold(base[p:], base[hi:], &n.mant, FOLDED_DIGITS), base))
-		} else {
+		when !LOOSE {
 			return
 		}
 	}
 	n.int_digits = p - n.int_at
-	if p < hi && src[p] == '.' {
+	if p < hi && base[p] == '.' {
 		n.has_frac = true
 		p += 1
 		n.frac_at = p
@@ -427,7 +447,7 @@ lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64, $LOOSE: bool) -> (n: 
 	if LOOSE && n.int_digits + n.frac_digits == 0 {
 		return
 	}
-	if p < hi && src[p] | 0x20 == 'e' {
+	if p < hi && base[p] | 0x20 == 'e' {
 		n.has_exp = true
 		has_digits: bool
 		n.exp, p, has_digits = exponent_value(base, p + 1, hi)
@@ -440,7 +460,7 @@ lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64, $LOOSE: bool) -> (n: 
 }
 
 // The signed value of the exponent at `p`, saturated at `EXP_SATURATED`, the end of its digits, and whether it has any.
-@(private)
+@(private = "file", require_results)
 exponent_value :: #force_inline proc "contextless" (base: [^]u8, p, hi: u64) -> (exp: i64, end: u64, has_digits: bool) {
 	end = p
 	neg := false
@@ -457,8 +477,9 @@ exponent_value :: #force_inline proc "contextless" (base: [^]u8, p, hi: u64) -> 
 }
 
 // The value of a lexed number. An integer that fits `i64` or `u64` stays exact.
-@(private)
-number_of_lex :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, n: Number_Lex) -> Number {
+// Caller guarantees `n` came from `lex_decimal(src, lo, hi, ...)`, so `n.int_at + n.int_digits <= hi <= u64(len(src))`.
+@(private = "file", require_results)
+number_of_lex :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, n: Number_Lex) -> Number #no_bounds_check {
 	digits := n.int_digits + n.frac_digits
 	e := n.exp - i64(n.frac_digits)
 	if !n.has_frac && !n.has_exp {
@@ -468,7 +489,7 @@ number_of_lex :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, n: Nu
 		if !n.neg && n.int_digits == 20 {
 			tens, over := intrinsics.overflow_mul(n.mant, 10)
 			carry: bool
-			mag, carry = intrinsics.overflow_add(tens, u64(src[n.int_at + 19] - '0'))
+			mag, carry = intrinsics.overflow_add(tens, u64(raw_data(src)[n.int_at + 19] - '0'))
 			fits = !over && !carry
 		} else if n.int_digits > 19 {
 			fits = false
@@ -486,14 +507,14 @@ number_of_lex :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, n: Nu
 }
 
 // The place past an optional `-` at `lo`, and whether there is one.
-@(private)
+@(private = "file", require_results)
 skip_sign :: #force_inline proc "contextless" (base: [^]u8, lo: u64) -> (p: u64, neg: bool) {
 	neg = base[lo] == '-'
 	return lo + u64(neg), neg
 }
 
 // `mag` with sign `neg` as an `Int` or a `Uint`, false for a negative magnitude past `i64`'s minimum.
-@(private)
+@(private = "file", require_results)
 integer_number :: #force_inline proc "contextless" (mag: u64, neg: bool) -> (Number, bool) {
 	if neg {
 		if mag <= u64(1) << 63 {
@@ -509,7 +530,7 @@ integer_number :: #force_inline proc "contextless" (mag: u64, neg: bool) -> (Num
 
 // The value of a decimal of more than 19 digits. Its size settles an overflow or an underflow to zero whatever its
 // length, as an exponent of any size scales the digits it follows.
-@(private, cold)
+@(private = "file", cold, require_results)
 long_number :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, n: Number_Lex) -> Number {
 	order, any_nonzero := decimal_order(src, n)
 	switch {
@@ -528,7 +549,8 @@ long_number :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, n: N
 }
 
 // The order of a lexed decimal, the `k` with its value in [10^(k-1), 10^k), and whether any digit is nonzero.
-@(private)
+// Caller guarantees `n` came from `lex_decimal(src, lo, hi, ...)`.
+@(private = "file", require_results)
 decimal_order :: proc "contextless" (src: []u8, n: Number_Lex) -> (order: i64, any_nonzero: bool) #no_bounds_check {
 	for i in 0 ..< n.int_digits {
 		if src[n.int_at + i] != '0' {
@@ -545,6 +567,7 @@ decimal_order :: proc "contextless" (src: []u8, n: Number_Lex) -> (order: i64, a
 
 // The value of the hex digits `digits`, negated when `neg`: an integer while one holds it, else the correctly rounded
 // binary64, `Wide` past its range.
+// Caller guarantees every byte of `digits` is an ASCII hex digit (`0-9`, `a-f`, `A-F`), so `HEX_NIBBLE[b] < 16`.
 @(require_results)
 number_hex :: proc "contextless" (digits: []u8, neg: bool) -> Number #no_bounds_check {
 	i := 0

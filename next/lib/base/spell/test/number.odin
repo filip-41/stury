@@ -37,8 +37,9 @@ expect_cases :: proc(t: ^testing.T, cases: []Case) {
 	}
 }
 
-// Only a value past binary64's largest is `Wide`. Its spelling's length is no verdict: underflow reads as a signed zero,
-// and long spellings of values that fit read as those values.
+// A value past binary64's largest is `Wide`, as is a span past `MAX_NUMBER_DIGITS` (4096) whose order does not settle
+// overflow or underflow. Underflow reads as a signed zero whatever its length, and spellings within the cap read as
+// their rounded binary64 values.
 @(test)
 wide_is_only_overflow :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -407,4 +408,189 @@ i64_extremes_and_high_bit_terminators :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+// IEEE-754 halfway midpoints (exact `2^-1075`, subnormal/normal, `max(f64)` halfway, Eisel-Lemire 19-digit edges)
+// and the `MAX_NUMBER_DIGITS` (4096 vs 4097) slow-path cutoff.
+@(test)
+ieee754_midpoints_and_max_number_digits :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	// Exact 2^-1075 (752 significant digits): midpoint between 0 and min subnormal 2^-1074.
+	HALF_SUB_DIGITS :: "2.4703282292062327208828439643411068618252990130716238221279284125033775363510437593264991818081799618989828234772285886546332835517796989819938739800539093906315035659515570226392290858392449105184435931802849936536152500319370457678249219365623669863658480757001585769269903706311928279558551332927834338409351978015531246597263579574622766465272827220056374006485499977096599470454020828166226237857393450736339007967761930577506740176324673600968951340535537458516661134223766678604162159680461914467291840300530057530849048765391711386591646239524912623653881879636239373280423891018672348497668235089863388587925628302755995657524455507255189313690836254779186948667994968324049705821028513185451396213837722826145437693412532098591327667236328125"
+	// Exact (2^53 - 0.5) * 2^971: midpoint between max(f64) and +Inf.
+	MAX_HALF :: "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792"
+	MAX_BELOW :: "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497791"
+
+	cases := []Case {
+		{HALF_SUB_DIGITS + "e-324", .Float, 0},
+		{HALF_SUB_DIGITS + "1e-324", .Float, 1},
+		{"-" + HALF_SUB_DIGITS + "e-324", .Float, 1 << 63},
+		{"-" + HALF_SUB_DIGITS + "1e-324", .Float, (1 << 63) | 1},
+		{"2.2250738585072011e-308", .Float, 0x000F_FFFF_FFFF_FFFF},
+		{"2.2250738585072012e-308", .Float, 0x0010_0000_0000_0000},
+		{MAX_BELOW, .Float, 0x7FEF_FFFF_FFFF_FFFF},
+		{MAX_HALF, .Wide, 0},
+		{"-" + MAX_BELOW, .Float, 0xFFEF_FFFF_FFFF_FFFF},
+		{"-" + MAX_HALF, .Wide, 0},
+		// 19-digit Eisel-Lemire boundaries.
+		{"2470328229206232720e-342", .Float, 0},
+		{"2470328229206232721e-342", .Float, 1},
+		{"1797693134862315807e290", .Float, 0x7FEF_FFFF_FFFF_FFFF},
+		{"1797693134862315808e290", .Wide, 0},
+		// `MAX_NUMBER_DIGITS` (4096 vs 4097 total digits).
+		{strings.concatenate({"1.", strings.repeat("0", 4095, context.temp_allocator)}, context.temp_allocator), .Float, float_bits(1.0)},
+		{strings.concatenate({"1.", strings.repeat("0", 4096, context.temp_allocator)}, context.temp_allocator), .Wide, 0},
+		{strings.concatenate({"0.", strings.repeat("0", 4096, context.temp_allocator)}, context.temp_allocator), .Float, 0},
+		{strings.concatenate({"-0.", strings.repeat("0", 4096, context.temp_allocator)}, context.temp_allocator), .Float, 1 << 63},
+		{strings.concatenate({"1.", strings.repeat("0", 4096, context.temp_allocator), "e-500"}, context.temp_allocator), .Float, 0},
+	}
+	expect_cases(t, cases)
+}
+
+// `number_loose` follows JSON5's decimal grammar: allows leading `+` and one-sided decimal points, and rejects
+// multi-digit leading zeros (preventing int/float misclassification past 19-20 digits) and digitless spans.
+@(test)
+loose_leading_zeros_and_json5_edges :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	valid := []Case {
+		{"0", .Int, 0},
+		{"-0", .Int, 0},
+		{"+0", .Int, 0},
+		{"+123", .Int, 123},
+		{"0.", .Float, 0},
+		{"-0.", .Float, 1 << 63},
+		{"+0.", .Float, 0},
+		{".0", .Float, 0},
+		{"-.0", .Float, 1 << 63},
+		{"+.0", .Float, 0},
+		{"5.", .Float, float_bits(5.0)},
+		{"5.e2", .Float, float_bits(500.0)},
+		{"0e0", .Float, 0},
+		{"-0e0", .Float, 1 << 63},
+		{"0.000000000000000000001", .Float, float_bits(1e-21)},
+	}
+	for c in valid {
+		src := transmute([]u8)c.text
+		num, ok := spell.number_loose(src, 0, u64(len(src)))
+		testing.expectf(t, ok && num.kind == c.kind && num.bits == c.bits, "%q: %v %x (ok=%v), want %v %x", c.text, num.kind, num.bits, ok, c.kind, c.bits)
+	}
+	rejects := []string {
+		"00", "01", "-00", "+01", "00.5", "01e5",
+		"000000000000000000001", "-00000000000000000001", "-00000000000000000000", "+000000000000000000001",
+		"", "+", "-", ".", "+.", "-.", "e1", ".e1",
+	}
+	for text in rejects {
+		src := transmute([]u8)text
+		_, ok := spell.number_loose(src, 0, u64(len(src)))
+		testing.expectf(t, !ok, "number_loose(%q): expected reject", text)
+	}
+}
+
+// `number_hex` returns exact integers while they fit `i64`/`u64`, rounds larger values to nearest-even binary64 with
+// sticky tie-breaking across trailing digits, and returns `Wide` past binary64's range.
+@(test)
+number_hex_rounding_and_overflow :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	Hex_Case :: struct {
+		digits: string,
+		neg:    bool,
+		kind:   spell.Number_Kind,
+		bits:   u64,
+	}
+	cases := []Hex_Case {
+		{"0", false, .Int, 0},
+		{"0", true, .Int, 0},
+		{"00000000000000000000", false, .Int, 0},
+		{"000000000000000000ff", false, .Int, 0xFF},
+		{"deadBEEF", true, .Int, int_bits(-0xDEADBEEF)},
+		{"7fffffffffffffff", false, .Int, u64(max(i64))},
+		{"8000000000000000", false, .Uint, u64(1) << 63},
+		{"8000000000000000", true, .Int, u64(1) << 63},
+		{"ffffffffffffffff", false, .Uint, max(u64)},
+		{"ffffffffffffffff", true, .Float, 0xC3F0_0000_0000_0000},
+		// 16-digit negative round-to-even + sticky boundaries.
+		{"8000000000000001", true, .Float, 0xC3E0_0000_0000_0000},
+		{"8000000000000400", true, .Float, 0xC3E0_0000_0000_0000},
+		{"8000000000000401", true, .Float, 0xC3E0_0000_0000_0001},
+		{"8000000000000c00", true, .Float, 0xC3E0_0000_0000_0002},
+		// 17-digit and 18-digit round-to-even + sticky tie-breaking.
+		{"10000000000000800", false, .Float, 0x43F0_0000_0000_0000},
+		{"10000000000000801", false, .Float, 0x43F0_0000_0000_0001},
+		{"10000000000001800", false, .Float, 0x43F0_0000_0000_0002},
+		{"100000000000008000", false, .Float, 0x4430_0000_0000_0000},
+		{"100000000000008001", false, .Float, 0x4430_0000_0000_0001},
+		{"100000000000018000", false, .Float, 0x4430_0000_0000_0002},
+		// 256-digit max finite vs midpoint overflow, and 257-digit overflow (with and without leading zeros).
+		{strings.concatenate({"fffffffffffffb", strings.repeat("f", 242, context.temp_allocator)}, context.temp_allocator), false, .Float, 0x7FEF_FFFF_FFFF_FFFF},
+		{strings.concatenate({"FFFFFFFFFFFFFC", strings.repeat("0", 242, context.temp_allocator)}, context.temp_allocator), false, .Wide, 0},
+		{strings.concatenate({"1", strings.repeat("0", 255, context.temp_allocator)}, context.temp_allocator), false, .Float, 0x7FB0_0000_0000_0000},
+		{strings.concatenate({"00001", strings.repeat("0", 255, context.temp_allocator)}, context.temp_allocator), false, .Float, 0x7FB0_0000_0000_0000},
+		{strings.concatenate({"1", strings.repeat("0", 256, context.temp_allocator)}, context.temp_allocator), false, .Wide, 0},
+		{strings.concatenate({"1", strings.repeat("0", 256, context.temp_allocator)}, context.temp_allocator), true, .Wide, 0},
+	}
+	for c in cases {
+		got := spell.number_hex(transmute([]u8)c.digits, c.neg)
+		testing.expectf(t, got.kind == c.kind && got.bits == c.bits, "hex(neg=%v, len=%d): %v %x, want %v %x", c.neg, len(c.digits), got.kind, got.bits, c.kind, c.bits)
+	}
+}
+
+// All span readers reject empty/nil slices and out-of-bounds `(lo, hi)` safely without reading past `len(src)`,
+// `number_fraction` rejects `frac_digits == 0` on its fast path, and `float_short` accepts exact `p + 16 == len(src)`.
+@(test)
+oob_spans_and_slack_boundaries :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Empty/nil slice checks.
+	empty: []u8 = nil
+	for span in ([][2]u64{{0, 0}, {0, 1}, {1, 2}, {0, max(u64)}}) {
+		lo, hi := span[0], span[1]
+		_, ok_strict := spell.number_strict(empty, lo, hi)
+		_, ok_loose := spell.number_loose(empty, lo, hi)
+		_, ok_short := spell.number_short(empty, lo, hi)
+		_, ok_ishort := spell.integer_short(empty, lo, hi)
+		_, ok_fshort := spell.float_short(empty, lo, hi)
+		_, ok_nint := spell.number_int(empty, lo, hi, 1)
+		_ = spell.number_fraction(empty, lo, hi, 1, 1)
+		_ = spell.number_exponent(empty, lo, hi, 1, 1)
+		testing.expectf(t, !ok_strict && !ok_loose && !ok_short && !ok_ishort && !ok_fshort && !ok_nint, "empty (%d, %d): expected reject", lo, hi)
+	}
+
+	// Sub-slice with valid digits immediately past `len(src)` must never be read.
+	backing := transmute([]u8)string("1234567890123456")
+	sub := backing[:10]
+	for span in ([][2]u64{{0, 12}, {10, 11}, {12, 15}, {5, 5}, {6, 4}, {0, max(u64)}}) {
+		lo, hi := span[0], span[1]
+		_, ok_strict := spell.number_strict(sub, lo, hi)
+		_, ok_loose := spell.number_loose(sub, lo, hi)
+		_, ok_short := spell.number_short(sub, lo, hi)
+		_, ok_ishort := spell.integer_short(sub, lo, hi)
+		_, ok_fshort := spell.float_short(sub, lo, hi)
+		_, ok_nint := spell.number_int(sub, lo, hi, 12)
+		_ = spell.number_fraction(sub, lo, hi, 5, 5)
+		_ = spell.number_exponent(sub, lo, hi, 5, 5)
+		testing.expectf(t, !ok_strict && !ok_loose && !ok_short && !ok_ishort && !ok_fshort && !ok_nint, "sub (%d, %d): expected reject", lo, hi)
+	}
+
+	// `number_fraction` with `frac_digits == 0` must not take the fast path and fabricate a `.Float`.
+	trailing_dot := transmute([]u8)string("000000000000000000000000000000000000000000001234567890123456789.")
+	nf := spell.number_fraction(trailing_dot, 44, u64(len(trailing_dot)), 19, 0)
+	testing.expectf(t, nf.kind != .Float, "number_fraction trailing dot: got %v %x, expected non-Float fallback", nf.kind, nf.bits)
+
+	// `float_short` accepts exact `p + 16 == len(src)` and rejects `p + 15 == len(src)`.
+	exact_pos := transmute([]u8)string("1234567.12345678")
+	v_pos, ok_pos := spell.float_short(exact_pos, 0, 16)
+	testing.expectf(t, ok_pos && v_pos == 1234567.12345678, "float_short exact 16: %v %v", v_pos, ok_pos)
+
+	exact_neg := transmute([]u8)string("-1234567.12345678")
+	v_neg, ok_neg := spell.float_short(exact_neg, 0, 17)
+	testing.expectf(t, ok_neg && v_neg == -1234567.12345678, "float_short exact -16: %v %v", v_neg, ok_neg)
+
+	exact_pad := transmute([]u8)string("1.5,,,,,,,,,,,,,")
+	v_pad, ok_pad := spell.float_short(exact_pad, 0, 3)
+	testing.expectf(t, ok_pad && v_pad == 1.5, "float_short padded 16: %v %v", v_pad, ok_pad)
+
+	short_pad := transmute([]u8)string("1.5,,,,,,,,,,,,")
+	_, ok_short_pad := spell.float_short(short_pad, 0, 3)
+	testing.expectf(t, !ok_short_pad, "float_short padded 15: expected reject")
 }
