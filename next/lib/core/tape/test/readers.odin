@@ -182,3 +182,74 @@ readers_read_tables_that_repeat_a_key :: proc(t: ^testing.T) {
 	_, g2, _ := tape.next_child(r, &g)
 	testing.expect(t, gp == .Found && g1 == 2 && g2 == 3)
 }
+
+// Fast unescaped member lookup covers every short-key length class (0..16), >16-byte prefix/suffix collisions,
+// duplicate `.Last`/`.First` semantics, and fallback to slow decode while preserving earlier matches.
+@(test)
+member_fast_path_lengths_escapes_and_duplicates :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Keys exercise len 0, 1, 2, 3, 4, 7, 8, 15, 16, 17 (same 8B head & tail, different middle), plus escaped "aabb" ("ab" decoded twice) and duplicate "xy".
+	keys := []string{
+		"",
+		"a",
+		"xy",
+		"abc",
+		"abcd",
+		"abcdefg",
+		"abcdefgh",
+		"0123456789abcde",
+		"0123456789abcdef",
+		"prefix00_middleA_suffix00",
+		"prefix00_middleB_suffix00",
+		"ab", // decoded as "aabb" under TWICE when SPELLING_DECODE is set
+		"xy", // duplicate of index 2
+	}
+	src := make([dynamic]u8, context.allocator)
+	defer delete(src)
+	nodes := make([dynamic]tape.Node, context.allocator)
+	defer delete(nodes)
+	append(&nodes, container(0, 1 + 2 * len(keys), len(keys), .Object))
+	val_nodes := make([]tape.Node_Index, len(keys), context.allocator)
+	defer delete(val_nodes)
+	for k, i in keys {
+		lo := len(src)
+		append(&src, ..transmute([]u8)k)
+		sp := tape.SPELLING_DECODE if i == 11 else u16(0)
+		append(&nodes, scalar(lo, len(k), .String, .Key, sp))
+		vlo := len(src)
+		append(&src, u8('0' + (i % 10)))
+		val_nodes[i] = tape.Node_Index(len(nodes))
+		append(&nodes, scalar(vlo, 1, .Number))
+	}
+	doc := tape.Document{src = src[:], nodes = nodes[:], format = &TWICE}
+
+	idx: tape.Doc_Index
+	idx.allocator = context.allocator
+	defer tape.destroy_index(&idx)
+
+	for indexed in ([]bool{false, true}) {
+		r := tape.Reader{&doc, &idx if indexed else nil}
+		for k, i in keys {
+			if i == 2 || i == 11 || i == 12 {
+				continue
+			}
+			v, p := tape.member(r, tape.ROOT, k, .Last)
+			testing.expectf(t, p == .Found && v == val_nodes[i], "indexed=%v key=%q got=(%v,%v) want=%v", indexed, k, v, p, val_nodes[i])
+		}
+		// Duplicate key "xy" respects .First vs .Last even past an escaped key in between.
+		v_first, p_first := tape.member(r, tape.ROOT, "xy", .First)
+		testing.expect(t, p_first == .Found && v_first == val_nodes[2])
+		v_last, p_last := tape.member(r, tape.ROOT, "xy", .Last)
+		testing.expect(t, p_last == .Found && v_last == val_nodes[12])
+		// Escaped key decodes to "aabb", not raw "ab".
+		v_esc, p_esc := tape.member(r, tape.ROOT, "aabb", .Last)
+		testing.expect(t, p_esc == .Found && v_esc == val_nodes[11])
+		_, p_raw := tape.member(r, tape.ROOT, "ab", .Last)
+		testing.expect_value(t, p_raw, tape.Presence.Missing)
+		// Same-length misses in every length class.
+		for miss in ([]string{"b", "xz", "abd", "abce", "abcdefh", "abcdefgi", "0123456789abcdf", "0123456789abcdeg", "prefix00_middleC_suffix00"}) {
+			_, pm := tape.member(r, tape.ROOT, miss, .Last)
+			testing.expect_value(t, pm, tape.Presence.Missing)
+		}
+	}
+}

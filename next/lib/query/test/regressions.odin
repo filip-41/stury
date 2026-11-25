@@ -366,3 +366,144 @@ regex_compile_oom_fails_cleanly :: proc(t: ^testing.T) {
 	testing.expect_value(t, e.kind, query.Error_Kind.Memory)
 	query.destroy_error(&h, &e)
 }
+
+@(test)
+partial_array_slice_element_and_object_hash_paths :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	x: Test_Heap
+	heap_start(&x)
+	defer heap_done(t, &x)
+	h := &x.h
+
+	// Partial JSON array slice [0:32] exercises indexed `tape.element` on `CONTAINER_PARTIAL` arrays (> INDEX_ELEMENTS).
+	b := strings.builder_make(context.allocator)
+	defer strings.builder_destroy(&b)
+	strings.write_string(&b, `{"items":[`)
+	for i in 0 ..< 48 {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		fmt.sbprintf(&b, `{{"id":%d,"status":%d,"pad":"item_%d"}}`, i, 200 + (i % 5), i)
+	}
+	strings.write_string(&b, `]}`)
+	src := strings.to_string(b)
+
+	demand, derr := tape.demand_of({
+		{tape.Name("items"), tape.Slice{lo = 0, hi = 32}, tape.Name("id")},
+		{tape.Name("items"), tape.Slice{lo = 0, hi = 32}, tape.Name("status")},
+	})
+	testing.expect(t, derr == nil)
+	defer tape.destroy_demand(&demand)
+
+	doc, serr := json.scan(transmute([]u8)src, &demand, allocator = h.allocator)
+	testing.expectf(t, serr == nil, "scan failed: %v src=%q", serr, src[:min(len(src), 60)])
+	if serr != nil {
+		return
+	}
+	// Exercise both unindexed and indexed `tape.element` directly on the partial array (crossing INDEX_ELEMENTS = 16).
+	{
+		idx: tape.Doc_Index
+		idx.allocator = context.allocator
+		defer tape.destroy_index(&idx)
+		items_node, mp := tape.member({&doc, nil}, tape.ROOT, "items")
+		testing.expect_value(t, mp, tape.Presence.Found)
+		for indexed in ([]bool{false, true}) {
+			r := tape.Reader{&doc, &idx if indexed else nil}
+			for i in 0 ..< 48 {
+				_, ep := tape.element(r, items_node, i)
+				testing.expect_value(t, ep, tape.Presence.Found if i < 32 else tape.Presence.Not_Loaded)
+			}
+			_, p_neg_miss := tape.element(r, items_node, -1)
+			testing.expect_value(t, p_neg_miss, tape.Presence.Not_Loaded)
+			_, p_neg_hit := tape.element(r, items_node, -48)
+			testing.expect_value(t, p_neg_hit, tape.Presence.Found)
+			_, p_oob := tape.element(r, items_node, 48)
+			testing.expect_value(t, p_oob, tape.Presence.Missing)
+		}
+	}
+	root, rs := query.document_value(h, doc, true)
+	testing.expect_value(t, rs, query.Status.Ok)
+	defer query.release(h, root)
+
+	items, ms := query.member(h, root, "items")
+	testing.expect_value(t, ms, query.Status.Ok)
+	defer query.release(h, items)
+
+	for i in 0 ..< 32 {
+		el, es := query.element(h, items, i)
+		testing.expect_value(t, es, query.Status.Ok)
+		idv, is := query.member(h, el, "id")
+		testing.expect_value(t, is, query.Status.Ok)
+		id_i, ok := query.as_i64(idv)
+		testing.expect(t, ok && id_i == i64(i))
+		query.release(h, idv)
+		query.release(h, el)
+	}
+	testing.expect(t, !h.tainted)
+
+	// Sparse partial array (even indices 0,2,...,38 out of 48) exercises binary search in `kept_lookup`.
+	{
+		paths := make([][]tape.Step, 20, context.allocator)
+		defer {
+			for p in paths {
+				delete(p)
+			}
+			delete(paths)
+		}
+		for i in 0 ..< 20 {
+			p := make([]tape.Step, 3, context.allocator)
+			p[0], p[1], p[2] = tape.Name("items"), tape.Index(i * 2), tape.Name("id")
+			paths[i] = p
+		}
+		sdem, sderr := tape.demand_of(paths)
+		testing.expect(t, sderr == nil)
+		defer tape.destroy_demand(&sdem)
+		sdoc, sserr := json.scan(transmute([]u8)src, &sdem, allocator = context.allocator)
+		testing.expect(t, sserr == nil)
+		defer tape.destroy_document(&sdoc)
+		sidx: tape.Doc_Index
+		sidx.allocator = context.allocator
+		defer tape.destroy_index(&sidx)
+		sitems, smp := tape.member({&sdoc, nil}, tape.ROOT, "items")
+		testing.expect_value(t, smp, tape.Presence.Found)
+		for indexed in ([]bool{false, true}) {
+			r := tape.Reader{&sdoc, &sidx if indexed else nil}
+			for i in 0 ..< 48 {
+				_, ep := tape.element(r, sitems, i)
+				want := tape.Presence.Found if (i < 40 && i % 2 == 0) else tape.Presence.Not_Loaded
+				testing.expect_value(t, ep, want)
+			}
+		}
+	}
+
+	// Built object with short (0..8B) and long (>16B) keys across slot table growth and overwrites.
+	obj, os := query.make_object(h, 4)
+	testing.expect_value(t, os, query.Status.Ok)
+	defer query.release(h, obj)
+	for i in 0 ..< 40 {
+		buf: [48]u8
+		ks := ""
+		if i == 0 {
+			ks = ""
+		} else if i < 20 {
+			ks = fmt.bprintf(buf[:], "k%d", i)
+		} else {
+			ks = fmt.bprintf(buf[:], "long_object_key_prefix_%02d_suffix", i)
+		}
+		kv, kvs := query.text_value(h, ks)
+		testing.expect_value(t, kvs, query.Status.Ok)
+		testing.expect_value(t, query.object_put(h, &obj, kv, query.int_value(i64(i))), query.Status.Ok)
+	}
+	// Overwrite existing short and long keys.
+	for ks in ([]string{"", "k7", "long_object_key_prefix_25_suffix"}) {
+		kv, kvs := query.text_value(h, ks)
+		testing.expect_value(t, kvs, query.Status.Ok)
+		testing.expect_value(t, query.object_put(h, &obj, kv, query.int_value(999)), query.Status.Ok)
+		got, gs := query.member(h, obj, ks)
+		testing.expect_value(t, gs, query.Status.Ok)
+		v_i, ok := query.as_i64(got)
+		testing.expect(t, ok && v_i == 999)
+		query.release(h, got)
+	}
+	testing.expect_value(t, query.length_of(h, obj), 40)
+}

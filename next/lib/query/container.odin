@@ -1,5 +1,6 @@
 package query
 
+import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/core/tape"
 
@@ -156,7 +157,7 @@ append_owned :: proc(h: ^Heap, a: ^Value, x: Value) -> Status #no_bounds_check {
 	}
 	if x.kind >= .Array {
 		b.flags |= BLOCK_HAS_CONTAINER
-		if value_has_partial(x) {
+		if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
 			b.flags |= BLOCK_HAS_PARTIAL
 		}
 	}
@@ -186,7 +187,7 @@ array_put :: proc(h: ^Heap, a: ^Value, i: int, x: Value) -> Status #no_bounds_ch
 	}
 	if x.kind >= .Array {
 		b.flags |= BLOCK_HAS_CONTAINER
-		if value_has_partial(x) {
+		if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
 			b.flags |= BLOCK_HAS_PARTIAL
 		}
 	}
@@ -273,23 +274,29 @@ doc_keeps_origin :: #force_inline proc "contextless" (d: ^Doc_Block) -> bool {
 @(private, require_results)
 node_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, force_origin := false) -> (res: Value, status: Status) #no_bounds_check {
 	t := d.doc.nodes[at]
-	keep_origin := force_origin || h.keep_origins || doc_keeps_origin(d)
 	#partial switch t.kind {
+	case .Number, .Array, .Object:
+		d.rc += 1
+		return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
+	case .String, .Plain:
+		if intrinsics.expect(t.role != .Key && t.spelling & tape.SPELLING_DECODE == 0, true) {
+			d.rc += 1
+			return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
+		}
+		return decoded_text(h, d, at, t.role != .Key && (force_origin || h.keep_origins || doc_keeps_origin(d)))
+	case .Bytes:
+		return decoded_text(h, d, at, t.role != .Key && (force_origin || h.keep_origins || doc_keeps_origin(d)))
 	case .Null:
-		if !keep_origin {
+		if !(force_origin || h.keep_origins || doc_keeps_origin(d)) {
 			return NULL, .Ok
 		}
 	case .False:
-		if !keep_origin {
+		if !(force_origin || h.keep_origins || doc_keeps_origin(d)) {
 			return FALSE, .Ok
 		}
 	case .True:
-		if !keep_origin {
+		if !(force_origin || h.keep_origins || doc_keeps_origin(d)) {
 			return TRUE, .Ok
-		}
-	case .String, .Plain, .Bytes:
-		if t.role == .Key || tape.text_decodes(t) || t.kind == .Bytes {
-			return decoded_text(h, d, at, keep_origin && t.role != .Key)
 		}
 	}
 	d.rc += 1
@@ -342,8 +349,8 @@ token_text_value :: proc(h: ^Heap, d: ^Doc_Block, t: tape.Token, attach_doc := f
 }
 
 // The text of a key or a string node that holds an escape, decoded into a string of the heap.
-@(private)
-decoded_text :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, attach_doc := false) -> (res: Value, status: Status) {
+@(private, cold)
+decoded_text :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, attach_doc := false) -> (res: Value, status: Status) #no_bounds_check {
 	t := d.doc.nodes[at]
 	if t.role == .Key && (t.kind == .String || t.kind == .Plain) && !tape.text_decodes(t) {
 		d.rc += 1
@@ -390,13 +397,18 @@ member :: proc(h: ^Heap, v: Value, key: string) -> (res: Value, status: Status) 
 		return retain(object_entries(o)[k].value), .Ok
 	}
 	d := (^Doc_Block)(v.p)
-	if groups_names(d, v.n) {
+	if intrinsics.expect(groups_names(d, v.n), false) {
 		return group_member(h, d, tape.Node_Index(v.n), key)
 	}
 	at, p := tape.member(reader(d), tape.Node_Index(v.n), key)
 	if p != .Found {
 		note_presence(h, p)
 		return ABSENT, .Ok
+	}
+	t := d.doc.nodes[at]
+	if t.kind == .Number || t.kind >= .Array || (u8(t.kind) - u8(tape.Kind.String) <= 1 && t.role != .Key && t.spelling & tape.SPELLING_DECODE == 0) {
+		d.rc += 1
+		return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
 	}
 	return node_value(h, d, at)
 }
@@ -409,8 +421,8 @@ groups_names :: #force_inline proc "contextless" (d: ^Doc_Block, at: u32) -> boo
 
 // Member `key` of the markup element at `at` of `d`: its one child as itself, several as an array of them in document
 // order, `.Absent` for none.
-@(private)
-group_member :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, key: string) -> (res: Value, status: Status) {
+@(private, cold)
+group_member :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, key: string) -> (res: Value, status: Status) {
 	c, p := tape.named(reader(d), at, key)
 	if p != .Found {
 		note_presence(h, p)
@@ -465,6 +477,68 @@ has_member :: proc(h: ^Heap, v: Value, key: string) -> bool {
 	return p == .Found
 }
 
+// Fast word-at-a-time hash for built `Object_Block.slots` tables (private to this file).
+@(private = "file")
+object_key_hash :: #force_inline proc "contextless" (s: string) -> u32 #no_bounds_check {
+	n := len(s)
+	p := raw_data(s)
+	if intrinsics.expect(n <= 8, true) {
+		w: u64
+		switch {
+		case n >= 4:
+			w = u64(intrinsics.unaligned_load((^u32)(p))) | u64(intrinsics.unaligned_load((^u32)(p[n - 4:]))) << 32
+		case n >= 2:
+			w = u64(intrinsics.unaligned_load((^u16)(p))) | u64(p[n - 1]) << 16
+		case n == 1:
+			w = u64(p[0])
+		}
+		h := (u64(0x9E3779B97F4A7C15) ~ w ~ u64(n) << 56) * 0x9E3779B97F4A7C15
+		h ~= h >> 32
+		return u32((h * 0x9E3779B97F4A7C15) >> 32)
+	}
+	return tape.text_hash(transmute([]u8)s)
+}
+
+@(private = "file", cold)
+entry_node_text :: #force_no_inline proc "contextless" (v: Value) -> string {
+	return string(node_bytes(v))
+}
+
+@(private = "file")
+entry_key_text :: #force_inline proc "contextless" (v: Value) -> string #no_bounds_check {
+	if intrinsics.expect(v.kind == .String, true) {
+		return string(v.s[:v.n])
+	}
+	return entry_node_text(v)
+}
+
+// Fast equality of built object entry key `v` against `ks`.
+@(private = "file")
+entry_key_eq :: #force_inline proc "contextless" (v: Value, ks: string) -> bool #no_bounds_check {
+	s := entry_key_text(v)
+	n := len(ks)
+	if len(s) != n {
+		return false
+	}
+	a, b := raw_data(s), raw_data(ks)
+	if a == b {
+		return true
+	}
+	switch {
+	case n > 16:
+		return s == ks
+	case n >= 8:
+		return intrinsics.unaligned_load((^u64)(a)) == intrinsics.unaligned_load((^u64)(b)) &&
+			intrinsics.unaligned_load((^u64)(a[n - 8:])) == intrinsics.unaligned_load((^u64)(b[n - 8:]))
+	case n >= 4:
+		return intrinsics.unaligned_load((^u32)(a)) == intrinsics.unaligned_load((^u32)(b)) &&
+			intrinsics.unaligned_load((^u32)(a[n - 4:])) == intrinsics.unaligned_load((^u32)(b[n - 4:]))
+	case n >= 2:
+		return intrinsics.unaligned_load((^u16)(a)) == intrinsics.unaligned_load((^u16)(b)) && a[n - 1] == b[n - 1]
+	}
+	return n == 0 || a[0] == b[0]
+}
+
 // The index of the entry of `o` with key `key`, -1 for none.
 @(private)
 find_key :: proc "contextless" (o: ^Object_Block, key: string) -> int #no_bounds_check {
@@ -472,19 +546,19 @@ find_key :: proc "contextless" (o: ^Object_Block, key: string) -> int #no_bounds
 	slots := object_slots(o)
 	if slots == nil {
 		for e, i in entries {
-			if text_of(e.key) == key {
+			if entry_key_eq(e.key, key) {
 				return i
 			}
 		}
 		return -1
 	}
 	mask := object_slot_count(o) - 1
-	for at := u32(hash_text(key)) & mask; ; at = (at + 1) & mask {
+	for at := object_key_hash(key) & mask; ; at = (at + 1) & mask {
 		k := slots[at]
 		if k == 0 {
 			return -1
 		}
-		if text_of(entries[k - 1].key) == key {
+		if entry_key_eq(entries[k - 1].key, key) {
 			return int(k - 1)
 		}
 	}
@@ -512,8 +586,14 @@ index_keys :: proc(h: ^Heap, o: ^Object_Block) -> Status #no_bounds_check {
 	h.used += u64(count) * size_of(u32)
 	o.next_or_slots = raw_data(mem)
 	o.slot_log2 = log2
+	slots := ([^]u32)(o.next_or_slots)
+	mask := count - 1
 	for e, i in object_entries(o) {
-		slot_put(o, text_of(e.key), u32(i))
+		at := object_key_hash(entry_key_text(e.key)) & mask
+		for slots[at] != 0 {
+			at = (at + 1) & mask
+		}
+		slots[at] = u32(i) + 1
 	}
 	return .Ok
 }
@@ -522,7 +602,7 @@ index_keys :: proc(h: ^Heap, o: ^Object_Block) -> Status #no_bounds_check {
 slot_put :: #force_inline proc "contextless" (o: ^Object_Block, key: string, i: u32) #no_bounds_check {
 	slots := ([^]u32)(o.next_or_slots)
 	mask := (u32(1) << o.slot_log2) - 1
-	at := u32(hash_text(key)) & mask
+	at := object_key_hash(key) & mask
 	for slots[at] != 0 {
 		at = (at + 1) & mask
 	}
@@ -575,28 +655,30 @@ own_object :: proc(h: ^Heap, o: ^Value, more: int) -> Status {
 @(require_results)
 object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_bounds_check {
 	b := (^Object_Block)(o.p)
-	ks := text_of(key)
+	ks := entry_key_text(key)
 	k := -1
 	empty_slot := u32(0)
 	has_slot := false
+	key_hash := u32(0)
 	if slots := object_slots(b); slots != nil {
 		entries := object_entries(b)
 		mask := (u32(1) << b.slot_log2) - 1
-		for at := u32(hash_text(ks)) & mask; ; at = (at + 1) & mask {
+		key_hash = object_key_hash(ks)
+		for at := key_hash & mask; ; at = (at + 1) & mask {
 			slot := slots[at]
 			if slot == 0 {
 				empty_slot = at
 				has_slot = true
 				break
 			}
-			if text_of(entries[slot - 1].key) == ks {
+			if entry_key_eq(entries[slot - 1].key, ks) {
 				k = int(slot - 1)
 				break
 			}
 		}
 	} else {
 		for e, i in object_entries(b) {
-			if text_of(e.key) == ks {
+			if entry_key_eq(e.key, ks) {
 				k = i
 				break
 			}
@@ -618,14 +700,14 @@ object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_boun
 		}
 		if x.kind >= .Array {
 			b.flags |= BLOCK_HAS_CONTAINER
-			if value_has_partial(x) {
+			if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
 				b.flags |= BLOCK_HAS_PARTIAL
 			}
 		}
 		return .Ok
 	}
 	grew := false
-	if !(unique(o^) && b.len < b.cap) {
+	if intrinsics.expect(!(unique(o^) && b.len < b.cap), false) {
 		if s := own_object(h, o, 1); s != .Ok {
 			release(h, key)
 			release(h, x)
@@ -641,7 +723,7 @@ object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_boun
 	}
 	if x.kind >= .Array {
 		b.flags |= BLOCK_HAS_CONTAINER
-		if value_has_partial(x) {
+		if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
 			b.flags |= BLOCK_HAS_PARTIAL
 		}
 	}
@@ -649,7 +731,13 @@ object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_boun
 		if has_slot && !grew {
 			([^]u32)(b.next_or_slots)[empty_slot] = b.len
 		} else {
-			slot_put(b, ks, b.len - 1)
+			slots := ([^]u32)(b.next_or_slots)
+			mask := (u32(1) << b.slot_log2) - 1
+			at := (key_hash if has_slot else object_key_hash(ks)) & mask
+			for slots[at] != 0 {
+				at = (at + 1) & mask
+			}
+			slots[at] = b.len
 		}
 	} else if b.len > SMALL_ENTRIES {
 		return index_keys(h, b)
@@ -676,12 +764,12 @@ object_put_fresh :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #n
 	}
 	if x.kind >= .Array {
 		b.flags |= BLOCK_HAS_CONTAINER
-		if value_has_partial(x) {
+		if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
 			b.flags |= BLOCK_HAS_PARTIAL
 		}
 	}
 	if b.slot_log2 != 0 {
-		slot_put(b, text_of(key), b.len - 1)
+		slot_put(b, entry_key_text(key), b.len - 1)
 	} else if b.len > SMALL_ENTRIES {
 		return index_keys(h, b)
 	}
@@ -813,15 +901,47 @@ cursor_next :: proc(h: ^Heap, c: ^Cursor) -> (key, value: Value, more: bool, s: 
 		return retain(e.key), retain(e.value), true, .Ok
 	}
 	d := (^Doc_Block)(c.of.p)
-	k, at, p := tape.next_child(reader(d), &c.children)
+	nodes := raw_data(d.doc.nodes)
+	cont := nodes[c.children.container]
+	if cont.kind == .Array && cont.spelling & tape.CONTAINER_PARTIAL == 0 {
+		end := c.children.container + tape.Node_Index(cont.n)
+		at := c.children.next
+		if at >= end {
+			return ABSENT, ABSENT, false, .Ok
+		}
+		intrinsics.prefetch_read_data(&nodes[at + 64], 3)
+		elem := nodes[at]
+		c.children.next = at + (tape.Node_Index(elem.n) if elem.kind > .Plain else 1)
+		c.children.place += 1
+		if elem.kind == .Number || elem.kind >= .Array || (u8(elem.kind) - u8(tape.Kind.String) <= 1 && elem.role != .Key && elem.spelling & tape.SPELLING_DECODE == 0) {
+			d.rc += 1
+			return ABSENT, {p = d, n = u32(at), kind = .Node, held = true}, true, .Ok
+		}
+		return cursor_next_array_slow(h, d, at)
+	}
+	return cursor_next_node_slow(h, d, &c.children)
+}
+
+@(private = "file", cold, require_results)
+cursor_next_array_slow :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (key, value: Value, more: bool, s: Status) {
+	value, s = node_value(h, d, at)
+	if s != .Ok {
+		return ABSENT, ABSENT, false, s
+	}
+	return ABSENT, value, true, .Ok
+}
+
+@(private = "file", cold, require_results)
+cursor_next_node_slow :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, ch: ^tape.Children) -> (key, value: Value, more: bool, s: Status) #no_bounds_check {
+	k, at, p := tape.next_child(reader(d), ch)
 	if p != .Found {
 		note_presence(h, p)
 		return ABSENT, ABSENT, false, .Ok
 	}
 	if k != tape.NO_NODE {
 		key = key_value(h, d, k) or_return
-	} else if c.children.keys_n != 0 {
-		key = token_text_value(h, d, tape.cell_key(reader(d), c.children)) or_return
+	} else if ch.keys_n != 0 {
+		key = token_text_value(h, d, tape.cell_key(reader(d), ch^)) or_return
 	}
 	value, s = node_value(h, d, at)
 	if s != .Ok {
