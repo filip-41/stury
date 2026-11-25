@@ -185,34 +185,3 @@ readers_read_tables_that_repeat_a_key :: proc(t: ^testing.T) {
 	_, g2, _ := tape.next_child(r, &g)
 	testing.expect(t, gp == .Found && g1 == 5 && g2 == 6)
 }
-
-// Keys of two kinds that read as one name make a read of it by name under `.Last` ambiguous, and `.First` and a
-// group take them in document order.
-@(test)
-readers_refuse_a_clashing_name :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	src := transmute([]u8)string("1x1y")
-	nodes := []tape.Node{
-		container(0, 5, 2, .Object),
-		scalar(0, 1, .Number, .Key),
-		scalar(1, 1, .Plain),
-		scalar(2, 1, .String, .Key),
-		scalar(3, 1, .Plain),
-	}
-	ext := tape.Doc_Ext{format = tape.Yaml_Ext{clash = 2}}
-	doc := tape.Document{src = src, nodes = nodes, format = &TWICE, ext = &ext}
-	r := tape.Reader{&doc, nil}
-	_, p := tape.member(r, tape.ROOT, "1")
-	testing.expect_value(t, p, tape.Presence.Ambiguous)
-	v, fp := tape.member(r, tape.ROOT, "1", .First)
-	testing.expect(t, v == 2 && fp == .Found)
-	g, gp := tape.named(r, tape.ROOT, "1")
-	_, g1, _ := tape.next_child(r, &g)
-	_, g2, _ := tape.next_child(r, &g)
-	testing.expect(t, gp == .Found && g1 == 2 && g2 == 4)
-	n, _, _ := tape.length(r, tape.ROOT, context.temp_allocator)
-	testing.expect_value(t, n, 2)
-	doc.ext = nil
-	v, p = tape.member(r, tape.ROOT, "1")
-	testing.expect(t, v == 4 && p == .Found)
-}

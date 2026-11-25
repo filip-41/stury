@@ -49,10 +49,10 @@ Options :: struct {
 	format:   Format_Options,
 }
 
-// The options of a read that one format family alone has, an arm per family.
+// The options of a read that one format family alone has, an arm per family. The union is closed and frozen before the C
+// API, so a family with no options has no arm, and an arm is added with its first option.
 Format_Options :: union {
 	Dsv_Options,
-	Cbor_Options,
 	Xml_Options,
 }
 
@@ -60,7 +60,6 @@ Format_Options :: union {
 Options_Family :: enum u8 {
 	None,
 	Dsv,
-	Cbor,
 	Xml,
 }
 
@@ -75,8 +74,6 @@ options_refused :: #force_inline proc "contextless" (f: ^Format, opts: Options) 
 	switch _ in opts.format {
 	case Dsv_Options:
 		family = .Dsv
-	case Cbor_Options:
-		family = .Cbor
 	case Xml_Options:
 		family = .Xml
 	case nil:
@@ -94,9 +91,6 @@ Dsv_Options :: struct {
 	infer:     bool,
 	crlf:      bool, // a write ends each line with CR LF, where a read takes either line end
 }
-
-// The options of a CBOR text. None changes what a read gives, so a document records none of them.
-Cbor_Options :: struct {}
 
 // The options of an XML text. They change what the reads give, so a document records none of them.
 Xml_Options :: struct {

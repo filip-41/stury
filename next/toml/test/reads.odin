@@ -158,7 +158,7 @@ reads_refuse_options_they_do_not_take :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("a = 1\n")
 	testing.expect_value(t, testkit.code_of(toml.validate(src, opts = {format = tape.Dsv_Options{}})), "bad option format")
-	_, err := toml.build(src, opts = {format = tape.Cbor_Options{}})
+	_, err := toml.build(src, opts = {format = tape.Dsv_Options{}})
 	testing.expect_value(t, testkit.code_of(err), "bad option format")
 	_, err = toml.scan(src, nil, opts = {dups = .All})
 	testing.expect_value(t, testkit.code_of(err), "bad option dups")

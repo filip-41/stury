@@ -84,7 +84,7 @@ reads_refuse_bad_options :: proc(t: ^testing.T) {
 		r := dsv.records_open(src, .Lines, c.spec, opts)
 		testing.expectf(t, r.err == want, "%v records: %v", c, r.err)
 	}
-	other := dsv.Options{format = tape.Cbor_Options{}}
+	other := dsv.Options{format = tape.Xml_Options{}}
 	want := tape.Error(tape.Bad_Option{"format"})
 	testing.expect_value(t, dsv.validate(src, .Csv, other), want)
 	_, oerr := dsv.build(src, .Csv, other)

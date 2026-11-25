@@ -24,19 +24,18 @@ Spec :: enum u8 {
 }
 
 // Options of a CBOR read. `budget` sets `depth` (a tag counts as a level), `nodes`, `memory` and `steps` (a step is one
-// container). Only `.Invalid_Utf8` of `tolerate` has an effect. `format` takes a `Cbor_Options`, which has no field
-// yet, and refuses another format's. `runner` is for `build` alone, which builds a long text in parts on its threads:
+// container). Only `.Invalid_Utf8` of `tolerate` has an effect. `format` takes no options and refuses any family's.
+// `runner` is for `build` alone, which builds a long text in parts on its threads:
 // every other read ignores it, as does a build of a text in `pieces`. Under `Budget.memory` a build with no runner is
 // made on one thread, and one with a runner counts the blocks of its parts.
 Options :: tape.Options
-Cbor_Options :: tape.Cbor_Options
 
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Cbor          = {name = "cbor", id = ID, facts = {.Tag}, caps = {.Rewalk, .Binary}, options = .Cbor, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
-	.Preferred     = {name = "cbor-preferred", id = ID + 1, facts = {.Tag}, caps = {.Rewalk, .Binary}, options = .Cbor, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
-	.Deterministic = {name = "cbor-deterministic", id = ID + 2, facts = {.Tag}, caps = {.Rewalk, .Binary}, options = .Cbor, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
-	.Length_First  = {name = "cbor-length-first", id = ID + 3, facts = {.Tag}, caps = {.Rewalk, .Binary}, options = .Cbor, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Cbor          = {name = "cbor", id = ID, facts = {.Tag}, caps = {.Rewalk, .Binary}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Preferred     = {name = "cbor-preferred", id = ID + 1, facts = {.Tag}, caps = {.Rewalk, .Binary}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Deterministic = {name = "cbor-deterministic", id = ID + 2, facts = {.Tag}, caps = {.Rewalk, .Binary}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Length_First  = {name = "cbor-length-first", id = ID + 3, facts = {.Tag}, caps = {.Rewalk, .Binary}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
 }
 
 // The format id of `.Cbor`, the others following it in `Spec` order.

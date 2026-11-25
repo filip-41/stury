@@ -125,7 +125,7 @@ answer_text :: proc(doc: ^dsv.Document, node: dsv.Node_Index, p: dsv.Presence) -
 		return strings.clone(text, context.temp_allocator)
 	case .Missing:
 		return "M"
-	case .Wrong_Kind, .Not_Loaded, .Ambiguous:
+	case .Wrong_Kind, .Not_Loaded:
 		return "T"
 	}
 	return "T"

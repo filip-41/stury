@@ -171,8 +171,6 @@ ext_lists :: proc "contextless" (b: ^Ext_Block, ext: ^Doc_Ext, held: []Held_Span
 		placed.dtd.entities, placed.dtd.attrs = ext_list(b, f.dtd.entities), ext_list(b, f.dtd.attrs)
 		placed.dtd.slots, placed.dtd.bytes = ext_list(b, f.dtd.slots), ext_list(b, f.dtd.bytes)
 		ext.format = placed
-	case Yaml_Ext:
-		ext.format = f
 	case nil:
 	}
 }
@@ -222,7 +220,6 @@ Doc_Ext :: struct {
 // Per-format data beside the nodes, nil for formats that store none.
 Format_Ext :: union {
 	Tabular_Ext,
-	Yaml_Ext,
 	Markup_Ext,
 }
 
@@ -361,12 +358,6 @@ Table :: struct {
 	unique_keys: b32, // no two keys decode equal, so a lookup stops at the first match
 }
 
-Yaml_Ext :: struct {
-	// The first key whose text another key of its object of another kind has (`1` and `"1"`), 0 for none, so the
-	// readers look for such a pair only in a document that has one.
-	clash: u64,
-}
-
 // The data a path read kept beyond the document's nodes, in one block with its lists and the missing names' bytes. A
 // scan's document holds only the nodes its paths reached, with no facts.
 Partial :: struct {
@@ -389,7 +380,6 @@ Presence :: enum u8 {
 	Missing,
 	Wrong_Kind, // a step cannot enter this value
 	Not_Loaded, // a partial read did not keep it, so it may or may not exist
-	Ambiguous, // keys of two kinds read as the name, as YAML's `1` and `"1"`, so a read by name under `.Last` refuses it
 }
 
 // One value a path reached, or the node a path stopped at: the deepest container reached for `.Missing`, or the value

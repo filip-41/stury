@@ -121,9 +121,6 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 	}
 	policy := read_dups(doc.format, dups)
 	partial := node.spelling & CONTAINER_PARTIAL != 0
-	if policy == .Last && clashes(doc, at, name) {
-		return NO_NODE, .Ambiguous
-	}
 	expanded := names_expanded(doc, name)
 	if !partial && r.index != nil && !expanded {
 		if count := child_count(doc, at, node); count > SMALL_OBJECT {
@@ -1077,31 +1074,6 @@ next_cell :: proc "contextless" (doc: ^Document, c: ^Children, dups: Duplicates)
 		return key, value, .Found
 	}
 	return NO_NODE, NO_NODE, .Missing
-}
-
-// Whether keys of two kinds of the object at `at` read as `name`, in a document whose format records such a pair.
-@(private)
-clashes :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index, name: string) -> bool {
-	if doc.ext == nil {
-		return false
-	}
-	ext, yaml := doc.ext.format.(Yaml_Ext)
-	return yaml && ext.clash != 0 && kinds_named(doc, at, name)
-}
-
-@(private)
-kinds_named :: proc "contextless" (doc: ^Document, at: Node_Index, name: string) -> bool #no_bounds_check {
-	end := at + Node_Index(doc.nodes[at].n)
-	kind := Kind.End
-	for k := at + 1; k < end; k = node_after(doc, k + 1) {
-		if t := doc.nodes[k]; doc_names(doc, t, name) {
-			if kind != .End && t.kind != kind {
-				return true
-			}
-			kind = t.kind
-		}
-	}
-	return false
 }
 
 // Whether `name` is one the format of `doc` reads as an expanded name.

@@ -92,11 +92,10 @@ cbor_alone_reads_records_and_pieces :: proc(t: ^testing.T) {
 }
 
 @(test)
-cbor_alone_builds_on_a_runner_with_a_format_of_its_own :: proc(t: ^testing.T) {
+cbor_alone_builds_on_a_runner :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	runner := testkit.serial_runner(3)
 	opts := cbor.Options {
-		format = cbor.Cbor_Options{},
 		runner = &runner,
 	}
 	items := make([dynamic]u8, context.temp_allocator)

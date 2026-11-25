@@ -47,26 +47,6 @@ memory_budget_builds_on_the_runner :: proc(t: ^testing.T) {
 	}
 }
 
-// Options of CBOR's own family leave the build on the runner's threads, as no options do.
-@(test)
-cbor_options_keep_the_parallel_build :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	defer free_all(context.temp_allocator)
-	items := make([dynamic]u8, context.temp_allocator)
-	append(&items, 0x9f)
-	for k in 0 ..< 200 {
-		append(&items, 0x82, u8(k % 20), 0x61, 'a')
-	}
-	append(&items, 0xff)
-	for options in ([]tape.Format_Options{nil, cbor.Cbor_Options{}}) {
-		calls := 0
-		runner := counting_runner(&calls)
-		doc, err := cbor.build(items[:], .Cbor, {runner = &runner, format = options})
-		defer cbor.destroy(&doc)
-		testing.expectf(t, err == nil && calls > 0, "%v: %v, %d runner calls", options, err, calls)
-	}
-}
-
 // A text cut at every byte, with floats and simple values at the cuts, builds on many threads as on one: a chunk that
 // ends inside the head of an item reads no byte past the text.
 @(test)

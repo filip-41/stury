@@ -77,7 +77,7 @@ containers_keep_their_style :: proc(t: ^testing.T) {
 	}
 }
 
-// Every read refuses another family's options and takes its own.
+// Every read refuses any family's options.
 @(test)
 reads_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -87,7 +87,6 @@ reads_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	_, berr := cbor.build(src, .Cbor, {format = tape.Dsv_Options{}}, context.temp_allocator)
 	testing.expect_value(t, berr, other)
 	testing.expect_value(t, cbor.records_open(src, .Concatenated, .Cbor, {format = tape.Dsv_Options{}}).err, other)
-	testing.expect_value(t, cbor.validate(src, .Cbor, {format = cbor.Cbor_Options{}}), nil)
 	_, err := cbor.build(src, .Cbor, {dups = .Refuse}, context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, cbor.validate(src, .Cbor, {dups = .Refuse}), tape.Error(tape.Bad_Option{"dups"}))
