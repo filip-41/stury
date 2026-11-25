@@ -33,11 +33,11 @@ compare :: proc(h: ^Heap, a, b: Value, coll := JSON_ORDER) -> (res: int, status:
 // `compare` of values that lie `below` frames down in a larger comparison, which the depth budget counts.
 @(private)
 compare_below :: proc(h: ^Heap, a, b: Value, coll: Collation, below: int) -> (res: int, status: Status) {
-	r, open := compare_head(a, b, coll)
+	r, open := compare_head(h, a, b, coll)
 	if !open {
 		return r, .Ok
 	}
-	if r, open = compare_flat(a, b, coll); !open {
+	if r, open = compare_flat(h, a, b, coll); !open {
 		return r, .Ok
 	}
 	stack := make([dynamic]Compare_Frame, 0, 8, h.allocator)
@@ -79,7 +79,7 @@ compare_below :: proc(h: ^Heap, a, b: Value, coll: Collation, below: int) -> (re
 			y = member(h, f.b, k) or_return
 		}
 		f.i += 1
-		r, open = compare_head(x, y, coll)
+		r, open = compare_head(h, x, y, coll)
 		if open && len(stack) + below > depth_limit(h) {
 			release(h, x)
 			release(h, y)
@@ -101,13 +101,13 @@ compare_below :: proc(h: ^Heap, a, b: Value, coll: Collation, below: int) -> (re
 // The order of built arrays `a` and `b` when no pair of their elements is two containers, which takes no frame, and
 // else whether such a pair is reached before the order is known.
 @(private)
-compare_flat :: proc(a, b: Value, coll: Collation) -> (int, bool) #no_bounds_check {
+compare_flat :: proc(h: ^Heap, a, b: Value, coll: Collation) -> (int, bool) #no_bounds_check {
 	if a.kind != .Array || b.kind != .Array {
 		return 0, true
 	}
 	xs, ys := items_of(a), items_of(b)
 	for i in 0 ..< min(len(xs), len(ys)) {
-		r, open := compare_head(xs[i], ys[i], coll)
+		r, open := compare_head(h, xs[i], ys[i], coll)
 		if open {
 			return 0, true
 		}
@@ -121,7 +121,7 @@ compare_flat :: proc(a, b: Value, coll: Collation) -> (int, bool) #no_bounds_che
 // The order of `a` and `b` by type and, for scalars, value, and whether they are containers of one type, whose
 // children decide.
 @(private)
-compare_head :: proc(a, b: Value, coll: Collation) -> (int, bool) {
+compare_head :: proc(h: ^Heap, a, b: Value, coll: Collation) -> (int, bool) {
 	ta, tb := type_of(a), type_of(b)
 	ra, rb := coll.rank[ta], coll.rank[tb]
 	if ra != rb {
@@ -132,7 +132,7 @@ compare_head :: proc(a, b: Value, coll: Collation) -> (int, bool) {
 	}
 	#partial switch ta {
 	case .Number:
-		return compare_numbers(a, b), false
+		return compare_numbers(a, b, heap_allocator(h)), false
 	case .String:
 		x, y := text_of(a), text_of(b)
 		return int(x > y) - int(x < y), false
@@ -184,7 +184,7 @@ compare_keys :: proc(h: ^Heap, f: ^Compare_Frame) -> (res: int, status: Status) 
 }
 
 // The keys of object `v`, sorted by code point, each held, in a list of the heap's allocator.
-@(require_results)
+@(private, require_results)
 sorted_keys :: proc(h: ^Heap, v: Value) -> (res: [dynamic]Value, status: Status) {
 	keys := make([dynamic]Value, 0, length_of(h, v), h.allocator)
 	c := cursor_open(h, v) or_return
@@ -219,6 +219,7 @@ drop_values :: proc(h: ^Heap, xs: ^[dynamic]Value) {
 }
 
 // Sorts distinct strings, or entries by their keys, by code point in place, with no allocation.
+@(private)
 sort_texts :: proc(keys: []$T) where T == Value || T == Entry {
 	text :: #force_inline proc(x: T) -> string {
 		when T == Entry {
@@ -269,71 +270,167 @@ sort_texts :: proc(keys: []$T) where T == Value || T == Entry {
 // Whether `a` and `b` are equal: of one type, numbers by value (NaN equal to nothing), strings by bytes, arrays element
 // by element, objects with the same keys and equal values.
 @(require_results)
-equal :: proc(h: ^Heap, a, b: Value) -> (res: bool, status: Status) {
+equal :: proc(h: ^Heap, a, b: Value) -> (res: bool, status: Status) #no_bounds_check {
 	same, open := equal_head(h, a, b)
 	if !open {
 		return same, .Ok
 	}
-	stack := make([dynamic]Compare_Frame, 0, 8, h.allocator)
-	defer {
-		for &f in stack {
-			drop_frame(h, &f)
+	// Fast path for flat built arrays and objects (no nested containers): zero allocations, zero retain/release.
+	if a.kind == .Array && b.kind == .Array {
+		ba, bb := (^Array_Block)(a.p), (^Array_Block)(b.p)
+		if (ba.flags | bb.flags) & BLOCK_HAS_CONTAINER == 0 {
+			xs, ys := array_items(ba), array_items(bb)
+			for i in 0 ..< len(xs) {
+				eq, _ := equal_head(h, xs[i], ys[i])
+				if !eq {
+					return false, .Ok
+				}
+			}
+			return true, .Ok
 		}
-		delete(stack)
+	} else if a.kind == .Object && b.kind == .Object {
+		ba, bb := (^Object_Block)(a.p), (^Object_Block)(b.p)
+		if (ba.flags | bb.flags) & BLOCK_HAS_CONTAINER == 0 {
+			entries_a, entries_b := object_entries(ba), object_entries(bb)
+			for e in entries_a {
+				j := find_key(bb, text_of(e.key))
+				if j < 0 {
+					return false, .Ok
+				}
+				eq, _ := equal_head(h, e.value, entries_b[j].value)
+				if !eq {
+					return false, .Ok
+				}
+			}
+			return true, .Ok
+		}
 	}
-	push_frame(h, &stack, retain(a), retain(b)) or_return
-	for len(stack) > 0 {
-		f := &stack[len(stack) - 1]
+	Eq_Frame :: struct {
+		a, b:       Value,
+		c:          Cursor,
+		i, n:       int,
+		has_cursor: bool,
+	}
+	drop_eq :: proc(h: ^Heap, f: ^Eq_Frame) {
+		if f.has_cursor {
+			cursor_close(&f.c)
+		}
+		release(h, f.a)
+		release(h, f.b)
+		f^ = {}
+	}
+	open_eq :: proc(h: ^Heap, a, b: Value) -> (f: Eq_Frame, status: Status) {
+		f = {a = a, b = b, n = length_of(h, a)}
+		if a.kind == .Node && type_of(a) == .Object {
+			c, s := cursor_open(h, a)
+			if s != .Ok {
+				release(h, a)
+				release(h, b)
+				return {}, s
+			}
+			f.c, f.has_cursor = c, true
+		}
+		return f, .Ok
+	}
+	inline_buf: [8]Eq_Frame
+	sp := 0
+	dyn: [dynamic]Eq_Frame
+	defer {
+		for k in 0 ..< sp {
+			drop_eq(h, &inline_buf[k])
+		}
+		for &f in dyn {
+			drop_eq(h, &f)
+		}
+		delete(dyn)
+	}
+	push_eq :: proc(h: ^Heap, inline_buf: ^[8]Eq_Frame, sp: ^int, dyn: ^[dynamic]Eq_Frame, a, b: Value) -> Status {
+		f := open_eq(h, a, b) or_return
+		if len(dyn^) == 0 && sp^ < len(inline_buf) {
+			inline_buf[sp^] = f
+			sp^ += 1
+			return .Ok
+		}
+		if dyn.allocator.procedure == nil {
+			dyn^ = make([dynamic]Eq_Frame, 0, 16, h.allocator)
+		}
+		if _, err := append(dyn, f); err != nil {
+			drop_eq(h, &f)
+			return fail_memory(h)
+		}
+		return .Ok
+	}
+	push_eq(h, &inline_buf, &sp, &dyn, retain(a), retain(b)) or_return
+	for sp > 0 || len(dyn) > 0 {
+		f := &dyn[len(dyn) - 1] if len(dyn) > 0 else &inline_buf[sp - 1]
 		x, y: Value
 		if type_of(f.a) == .Array {
-			if f.i >= length_of(h, f.a) {
-				drop_frame(h, f)
-				pop(&stack)
+			if f.i >= f.n {
+				drop_eq(h, f)
+				if len(dyn) > 0 {
+					pop(&dyn)
+				} else {
+					sp -= 1
+				}
 				continue
 			}
-			x = element(h, f.a, f.i) or_return
-			y = element(h, f.b, f.i) or_return
+			if f.a.kind == .Array {
+				x = retain(items_of(f.a)[f.i])
+			} else {
+				x = element(h, f.a, f.i) or_return
+			}
+			if f.b.kind == .Array {
+				y = retain(items_of(f.b)[f.i])
+			} else {
+				y = element(h, f.b, f.i) or_return
+			}
+			f.i += 1
 		} else if f.a.kind == .Object {
-			// Keys are distinct and the counts agree, so `b` holds every key of `a` exactly when the two key sets are
-			// one: `a`'s entries go in their own order, with no sorted copy.
 			entries := entries_of(f.a)
-			if f.i >= len(entries) {
-				drop_frame(h, f)
-				pop(&stack)
+			if f.i >= f.n {
+				drop_eq(h, f)
+				if len(dyn) > 0 {
+					pop(&dyn)
+				} else {
+					sp -= 1
+				}
 				continue
 			}
 			e := entries[f.i]
+			f.i += 1
 			y = member(h, f.b, text_of(e.key)) or_return
 			if y.kind == .Absent {
 				return false, .Ok
 			}
 			x = retain(e.value)
 		} else {
-			if f.i == 0 {
-				f.keys = sorted_keys(h, f.a) or_return
-			}
-			if f.i >= len(f.keys) {
-				drop_frame(h, f)
-				pop(&stack)
+			k, vx, more := cursor_next(h, &f.c) or_return
+			if !more {
+				drop_eq(h, f)
+				if len(dyn) > 0 {
+					pop(&dyn)
+				} else {
+					sp -= 1
+				}
 				continue
 			}
-			k := text_of(f.keys[f.i])
-			x = member(h, f.a, k) or_return
-			y = member(h, f.b, k) or_return
+			y = member(h, f.b, text_of(k)) or_return
+			release(h, k)
 			if y.kind == .Absent {
-				release(h, x)
+				release(h, vx)
 				return false, .Ok
 			}
+			x = vx
 		}
-		f.i += 1
 		same, open = equal_head(h, x, y)
-		if open && len(stack) > depth_limit(h) {
+		depth := sp + len(dyn)
+		if open && depth > depth_limit(h) {
 			release(h, x)
 			release(h, y)
 			return false, fail(h, .Depth, .Equal)
 		}
 		if open {
-			push_frame(h, &stack, x, y) or_return
+			push_eq(h, &inline_buf, &sp, &dyn, x, y) or_return
 			continue
 		}
 		release(h, x)
@@ -353,11 +450,11 @@ equal_head :: proc(h: ^Heap, a, b: Value) -> (same, open: bool) {
 	}
 	#partial switch ta {
 	case .Number:
-		return numbers_equal(a, b), false
+		return numbers_equal(a, b, heap_allocator(h)), false
 	case .String:
 		return text_of(a) == text_of(b), false
 	case .Array, .Object:
-		if a.kind == b.kind && a.p == b.p && (a.kind != .Node || a.n == b.n) {
+		if a.kind == b.kind && a.p == b.p && (a.kind != .Node || (a.n == b.n && (^Doc_Block)(a.p).doc.partial == nil)) {
 			return true, false
 		}
 		if length_of(h, a) != length_of(h, b) {
@@ -379,42 +476,62 @@ hash :: proc(h: ^Heap, v: Value) -> (res: u64, status: Status) {
 	if t := type_of(v); t != .Array && t != .Object {
 		return hash_scalar(v), .Ok
 	}
-	stack := make([dynamic]Hash_Frame, 0, 8, h.allocator)
+	inline_buf: [8]Hash_Frame
+	sp := 0
+	dyn: [dynamic]Hash_Frame
 	defer {
-		for &f in stack {
+		for k in 0 ..< sp {
+			cursor_close(&inline_buf[k].c)
+			release(h, inline_buf[k].v)
+		}
+		for &f in dyn {
 			cursor_close(&f.c)
 			release(h, f.v)
 		}
-		delete(stack)
+		delete(dyn)
 	}
-	open :: proc(h: ^Heap, stack: ^[dynamic]Hash_Frame, v: Value) -> Status {
+	open :: proc(h: ^Heap, inline_buf: ^[8]Hash_Frame, sp: ^int, dyn: ^[dynamic]Hash_Frame, v: Value) -> Status {
 		c, s := cursor_open(h, v)
 		if s != .Ok {
 			release(h, v)
 			return s
 		}
 		seed := u64(0xA5A5) if type_of(v) == .Array else u64(0x5A5A)
-		if _, err := append(stack, Hash_Frame{v = v, c = c, acc = seed}); err != nil {
+		hf := Hash_Frame{v = v, c = c, acc = seed}
+		if len(dyn^) == 0 && sp^ < len(inline_buf) {
+			inline_buf[sp^] = hf
+			sp^ += 1
+			return .Ok
+		}
+		if dyn.allocator.procedure == nil {
+			dyn^ = make([dynamic]Hash_Frame, 0, 16, h.allocator)
+		}
+		if _, err := append(dyn, hf); err != nil {
 			cursor_close(&c)
 			release(h, v)
 			return fail_memory(h)
 		}
 		return .Ok
 	}
-	open(h, &stack, retain(v)) or_return
+	open(h, &inline_buf, &sp, &dyn, retain(v)) or_return
 	result: u64
-	for len(stack) > 0 {
-		f := &stack[len(stack) - 1]
+	for sp > 0 || len(dyn) > 0 {
+		f := &dyn[len(dyn) - 1] if len(dyn) > 0 else &inline_buf[sp - 1]
 		k, x, more := cursor_next(h, &f.c) or_return
 		if !more {
 			done := mix64(f.acc + u64(length_of(h, f.v)))
 			cursor_close(&f.c)
 			release(h, f.v)
-			pop(&stack)
-			if len(stack) == 0 {
+			if len(dyn) > 0 {
+				pop(&dyn)
+			} else {
+				sp -= 1
+			}
+			if sp == 0 && len(dyn) == 0 {
 				result = done
 			} else {
-				fold_hash(&stack[len(stack) - 1].acc, done, type_of(stack[len(stack) - 1].v) == .Object)
+				parent := &dyn[len(dyn) - 1] if len(dyn) > 0 else &inline_buf[sp - 1]
+				fold_hash(&parent.acc, done, type_of(parent.v) == .Object)
 			}
 			continue
 		}
@@ -423,7 +540,7 @@ hash :: proc(h: ^Heap, v: Value) -> (res: u64, status: Status) {
 				fold_hash(&f.acc, hash_text(text_of(k)), true)
 			}
 			release(h, k)
-			open(h, &stack, x) or_return
+			open(h, &inline_buf, &sp, &dyn, x) or_return
 			continue
 		}
 		hx := hash_scalar(x)
@@ -459,6 +576,87 @@ hash_scalar :: proc(v: Value) -> u64 {
 	return mix64(u64(t) + 1)
 }
 
+// Computes the stable sort permutation of `by` into `out` (length == len(by)), setting `ties[k]` when `by[out[k]]`
+// equals `by[out[k-1]]`.
+@(private, require_results)
+order_values :: proc(
+	h: ^Heap,
+	by: []Value,
+	out: []int,
+	coll := JSON_ORDER,
+	descending := false,
+	ties: []bool = nil,
+) -> Status {
+	n := len(by)
+	if n < 2 {
+		if n == 1 {
+			out[0] = 0
+		}
+		return .Ok
+	}
+	for i in 0 ..< n {
+		out[i] = i
+	}
+	ints := true
+	for v in by {
+		if v.kind != .Int {
+			ints = false
+			break
+		}
+	}
+	if ints {
+		_ = int_order(h, by, out, descending) or_return
+		for k in 1 ..< len(ties) {
+			ties[k] = by[out[k]].i == by[out[k - 1]].i
+		}
+		return .Ok
+	}
+	alloc := heap_allocator(h)
+	buf := make([]int, n, alloc)
+	if buf == nil {
+		return fail_memory(h)
+	}
+	defer delete(buf, alloc)
+	src, tmp := out, buf
+	o := ordering_init(h, by, coll) or_return
+	defer ordering_destroy(&o)
+	// A bottom-up merge sort of indexes: no recursion, and stable.
+	for width := 1; width < n; width *= 2 {
+		for lo := 0; lo < n; lo += 2 * width {
+			mid, hi := min(lo + width, n), min(lo + 2 * width, n)
+			i, j, k := lo, mid, lo
+			for i < mid && j < hi {
+				r := ordering_compare(&o, src[j], src[i]) or_return
+				if descending ? r > 0 : r < 0 {
+					tmp[k] = src[j]
+					j += 1
+				} else {
+					tmp[k] = src[i]
+					i += 1
+				}
+				k += 1
+			}
+			for ; i < mid; i += 1 {
+				tmp[k] = src[i]
+				k += 1
+			}
+			for ; j < hi; j += 1 {
+				tmp[k] = src[j]
+				k += 1
+			}
+		}
+		src, tmp = tmp, src
+	}
+	if raw_data(src) != raw_data(out) {
+		copy(out, src)
+	}
+	for k in 1 ..< len(ties) {
+		r := ordering_compare(&o, out[k], out[k - 1]) or_return
+		ties[k] = r == 0
+	}
+	return .Ok
+}
+
 // Sorts `xs` in place by `compare`, greatest first when `descending`, stably, the equal ones in their order. `keys`,
 // when given, is sorted alike and decides: `xs[i]` sorts by `keys[i]`. `ties`, when given, one entry per value, is set
 // for each value that is equal to the one before it in the sorted order.
@@ -476,110 +674,139 @@ sort_values :: proc(
 		return .Ok
 	}
 	by := keys if keys != nil else xs
-	order := make([]int, 2 * n, h.allocator)
+	alloc := heap_allocator(h)
+	order := make([]int, n, alloc)
 	if order == nil {
 		return fail_memory(h)
 	}
-	defer delete(order, h.allocator)
-	src, tmp := order[:n], order[n:]
-	for i in 0 ..< n {
-		src[i] = i
-	}
-	ints := true
-	for v in by {
-		if v.kind != .Int {
-			ints = false
-			break
-		}
-	}
-	if ints {
-		src = int_order(h, by, src, descending) or_return
-		for k in 1 ..< len(ties) {
-			ties[k] = by[src[k]].i == by[src[k - 1]].i
-		}
-	} else {
-		o := ordering_init(h, by, coll) or_return
-		defer ordering_destroy(&o)
-		// A bottom-up merge sort of indexes: no recursion, and stable.
-		for width := 1; width < n; width *= 2 {
-			for lo := 0; lo < n; lo += 2 * width {
-				mid, hi := min(lo + width, n), min(lo + 2 * width, n)
-				i, j, k := lo, mid, lo
-				for i < mid && j < hi {
-					r := ordering_compare(&o, src[j], src[i]) or_return
-					if descending ? r > 0 : r < 0 {
-						tmp[k] = src[j]
-						j += 1
-					} else {
-						tmp[k] = src[i]
-						i += 1
-					}
-					k += 1
-				}
-				for ; i < mid; i += 1 {
-					tmp[k] = src[i]
-					k += 1
-				}
-				for ; j < hi; j += 1 {
-					tmp[k] = src[j]
-					k += 1
-				}
-			}
-			src, tmp = tmp, src
-		}
-		for k in 1 ..< len(ties) {
-			r := ordering_compare(&o, src[k], src[k - 1]) or_return
-			ties[k] = r == 0
-		}
-	}
-	permute(h, xs, src) or_return
+	defer delete(order, alloc)
+	order_values(h, by, order, coll, descending, ties) or_return
+	permute(h, xs, order) or_return
 	if keys != nil {
-		permute(h, keys, src) or_return
+		permute(h, keys, order) or_return
 	}
 	return .Ok
 }
 
-// The stable order of integer keys `by`, written to `src`, by a merge sort of (key, index) pairs, which it reads in
-// order instead of through the indexes.
+// The stable order of integer keys `by`, written to `src`: insertion sort for tiny slices, else byte-skipping LSD radix
+// sort (single zero-alloc counting pass when keys vary in only one byte).
 @(private)
 int_order :: proc(h: ^Heap, by: []Value, src: []int, descending: bool) -> (res: []int, status: Status) #no_bounds_check {
+	n := len(by)
+	if n < 64 {
+		for i in 1 ..< n {
+			idx := src[i]
+			k := by[idx].i
+			j := i - 1
+			for j >= 0 && (by[src[j]].i < k if descending else by[src[j]].i > k) {
+				src[j + 1] = src[j]
+				j -= 1
+			}
+			src[j + 1] = idx
+		}
+		return src, .Ok
+	}
 	Pair :: struct {
-		k: i64,
+		k: u64,
 		i: int,
 	}
-	n := len(by)
-	buf := make([]Pair, 2 * n, h.allocator)
+	hist: [8][256]u32
+	flip := u64(0xFFFF_FFFF_FFFF_FFFF) if descending else u64(0)
+	first := (u64(by[0].i) ~ (u64(1) << 63)) ~ flip
+	diff := u64(0)
+	for v in by {
+		u := (u64(v.i) ~ (u64(1) << 63)) ~ flip
+		diff |= u ~ first
+		hist[0][u & 0xFF] += 1
+		hist[1][(u >> 8) & 0xFF] += 1
+		hist[2][(u >> 16) & 0xFF] += 1
+		hist[3][(u >> 24) & 0xFF] += 1
+		hist[4][(u >> 32) & 0xFF] += 1
+		hist[5][(u >> 40) & 0xFF] += 1
+		hist[6][(u >> 48) & 0xFF] += 1
+		hist[7][(u >> 56) & 0xFF] += 1
+	}
+	if diff == 0 {
+		return src, .Ok
+	}
+	passes: [8]uint
+	np := 0
+	for b in uint(0) ..< 8 {
+		if (diff >> (b * 8)) & 0xFF != 0 {
+			passes[np] = b
+			np += 1
+		}
+	}
+	if np == 1 {
+		shift := passes[0] * 8
+		counts := &hist[passes[0]]
+		off: [256]u32
+		sum := u32(0)
+		for b in 0 ..< 256 {
+			off[b] = sum
+			sum += counts[b]
+		}
+		for v, i in by {
+			u := (u64(v.i) ~ (u64(1) << 63)) ~ flip
+			bucket := (u >> shift) & 0xFF
+			src[off[bucket]] = i
+			off[bucket] += 1
+		}
+		return src, .Ok
+	}
+	alloc := heap_allocator(h)
+	buf := make([]Pair, 2 * n, alloc)
 	if buf == nil {
 		return nil, fail_memory(h)
 	}
-	defer delete(buf, h.allocator)
+	defer delete(buf, alloc)
 	from, to := buf[:n], buf[n:]
-	for v, i in by {
-		from[i] = {v.i, i}
+	{
+		shift := passes[0] * 8
+		counts := &hist[passes[0]]
+		off: [256]u32
+		sum := u32(0)
+		for b in 0 ..< 256 {
+			off[b] = sum
+			sum += counts[b]
+		}
+		for v, i in by {
+			u := (u64(v.i) ~ (u64(1) << 63)) ~ flip
+			bucket := (u >> shift) & 0xFF
+			from[off[bucket]] = {u, i}
+			off[bucket] += 1
+		}
 	}
-	for width := 1; width < n; width *= 2 {
-		for lo := 0; lo < n; lo += 2 * width {
-			mid, hi := min(lo + width, n), min(lo + 2 * width, n)
-			i, j, k := lo, mid, lo
-			for i < mid && j < hi {
-				right := from[j].k > from[i].k if descending else from[j].k < from[i].k
-				if right {
-					to[k] = from[j]
-					j += 1
-				} else {
-					to[k] = from[i]
-					i += 1
-				}
-				k += 1
-			}
-			copy(to[k:], from[i:mid])
-			k += mid - i
-			copy(to[k:], from[j:hi])
+	for p in 1 ..< np - 1 {
+		shift := passes[p] * 8
+		counts := &hist[passes[p]]
+		off: [256]u32
+		sum := u32(0)
+		for b in 0 ..< 256 {
+			off[b] = sum
+			sum += counts[b]
+		}
+		for item in from {
+			bucket := (item.k >> shift) & 0xFF
+			to[off[bucket]] = item
+			off[bucket] += 1
 		}
 		from, to = to, from
 	}
-	for p, i in from {
-		src[i] = p.i
+	{
+		shift := passes[np - 1] * 8
+		counts := &hist[passes[np - 1]]
+		off: [256]u32
+		sum := u32(0)
+		for b in 0 ..< 256 {
+			off[b] = sum
+			sum += counts[b]
+		}
+		for item in from {
+			bucket := (item.k >> shift) & 0xFF
+			src[off[bucket]] = item.i
+			off[bucket] += 1
+		}
 	}
 	return src, .Ok
 }
@@ -587,11 +814,12 @@ int_order :: proc(h: ^Heap, by: []Value, src: []int, descending: bool) -> (res: 
 // Puts `xs[order[i]]` at `xs[i]`.
 @(private)
 permute :: proc(h: ^Heap, xs: []Value, order: []int) -> Status {
-	moved := make([]Value, len(xs), h.allocator)
+	alloc := heap_allocator(h)
+	moved := make([]Value, len(xs), alloc)
 	if moved == nil {
 		return fail_memory(h)
 	}
-	defer delete(moved, h.allocator)
+	defer delete(moved, alloc)
 	for k, i in order {
 		moved[i] = xs[k]
 	}

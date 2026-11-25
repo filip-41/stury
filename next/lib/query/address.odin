@@ -129,10 +129,66 @@ ip_canonical :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 ip_in_cidr :: proc(h: ^Heap, v, cidr: Value) -> (res: bool, status: Status) {
 	a := address_of(h, v) or_return
 	text := text_of(cidr) if is_text(cidr) else ""
-	network := text[:max(strings.last_index_byte(text, '/'), 0)]
-	prefix, ok := net.parse_prefix(text)
-	if !ok || !bare_address(network) {
+	slash := strings.index_byte(text, '/')
+	if slash <= 0 || slash + 1 >= len(text) {
 		return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
 	}
-	return net.prefix_contains(prefix, a), .Ok
+	net_addr, addr_ok := parse_address(text[:slash])
+	if !addr_ok {
+		return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+	}
+	plen_str := text[slash + 1:]
+	if len(plen_str) > 3 || (len(plen_str) > 1 && plen_str[0] == '0') {
+		return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+	}
+	plen := 0
+	for c in transmute([]u8)plen_str {
+		if c < '0' || c > '9' {
+			return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+		}
+		plen = plen * 10 + int(c - '0')
+	}
+	switch n in net_addr {
+	case net.IP4_Address:
+		if plen > 32 {
+			return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+		}
+		b, same := a.(net.IP4_Address)
+		if !same {
+			return false, .Ok
+		}
+		nb := n
+		bb := b
+		return bytes_match_prefix(nb[:], bb[:], plen), .Ok
+	case net.IP6_Address:
+		if plen > 128 {
+			return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+		}
+		b, same := a.(net.IP6_Address)
+		if !same {
+			return false, .Ok
+		}
+		nb := transmute([16]u8)n
+		bb := transmute([16]u8)b
+		return bytes_match_prefix(nb[:], bb[:], plen), .Ok
+	}
+	return false, .Ok
+}
+
+@(private = "file")
+bytes_match_prefix :: proc "contextless" (a, b: []u8, bits: int) -> bool {
+	full := bits / 8
+	for i in 0 ..< full {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	rem := uint(bits % 8)
+	if rem > 0 {
+		mask := u8(0xFF) << (8 - rem)
+		if (a[full] & mask) != (b[full] & mask) {
+			return false
+		}
+	}
+	return true
 }

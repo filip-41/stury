@@ -90,6 +90,11 @@ xml_markup :: proc(data: rawptr, doc: ^tape.Document) -> (css.Options, bool) {
 	return {attribute = xml.attribute}, doc.format == xml.as(.Xml)
 }
 
+@(private)
+parse_json_hook :: proc(data: rawptr, src: []u8, budget: tape.Budget, allocator: runtime.Allocator) -> (tape.Document, tape.Error) {
+	return json.build(src, .Json, {budget = budget}, allocator)
+}
+
 // The hooks of every case: a clock at 2024-06-01T10:34:56.123Z, and random bytes that count up from 0 over the calls.
 @(private)
 fixed_now :: proc(data: rawptr) -> f64 {
@@ -127,7 +132,7 @@ run_case :: proc(c: Case, report: bool) -> Case_Result {
 	}
 	run: jq.Run
 	calls := 0
-	hooks := jq.Hooks{data = &calls, now = fixed_now, random = counted_bytes, markup = xml_markup}
+	hooks := jq.Hooks{data = &calls, now = fixed_now, random = counted_bytes, markup = xml_markup, parse_json = parse_json_hook}
 	jq.run_init(&run, prog, &h, nil, &hooks, 10_000_000)
 	outs := Outputs{h = &h}
 	end := jq.run_value(&run, input, collect, &outs)

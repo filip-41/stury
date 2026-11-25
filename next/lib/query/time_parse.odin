@@ -118,6 +118,9 @@ parse_time :: proc(h: ^Heap, text, format: Value, zones: Zones) -> (res: Value, 
 	}
 	finish(&r)
 	out := civil_value(h, r.civil, 0) or_return
+	defer if status != .Ok {
+		release(h, out)
+	}
 	if rest := r.text[r.at:]; rest != "" {
 		t := text_value(h, rest) or_return
 		append_owned(h, &out, t) or_return

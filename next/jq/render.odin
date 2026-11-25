@@ -25,10 +25,10 @@ type_name :: proc(v: query.Value) -> string {
 }
 
 // `v` as jq's messages show a value (jv_dump_string_trunc into `size` bytes): compact JSON, cut to fit with "..." and
-// the closing quote or bracket, a long string first cut to `size` characters. In the context allocator.
+// the closing quote or bracket, a long string first cut to `size` characters. In the heap's allocator.
 @(private)
 brief :: proc(h: ^query.Heap, v: query.Value, size := 30) -> string {
-	out := make([dynamic]u8)
+	out := make([dynamic]u8, h.allocator)
 	write_brief(h, &out, v, size)
 	return string(out[:])
 }

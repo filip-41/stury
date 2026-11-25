@@ -55,28 +55,30 @@ write_json :: proc(h: ^Heap, out: ^[dynamic]u8, v: Value, opts: Json_Options = {
 		object := type_of(f.v) == .Object
 		if !more {
 			if !f.first {
-				write_newline(out, opts, len(stack) - 1) or_return
+				write_newline(h, out, opts, len(stack) - 1) or_return
 			}
-			append(out, '}' if object else ']')
+			put_byte(h, out, '}' if object else ']') or_return
 			drop_write_frame(h, f)
 			pop(&stack)
 			continue
 		}
 		if !f.first {
-			append(out, ',')
+			put_byte(h, out, ',') or_return
 		}
 		f.first = false
-		write_newline(out, opts, len(stack)) or_return
+		write_newline(h, out, opts, len(stack)) or_return
 		if object {
 			s := write_text(h, out, text_of(k), opts.ascii)
 			release(h, k)
+			if s == .Ok {
+				s = put_byte(h, out, ':')
+			}
+			if s == .Ok && (opts.indent > 0 || opts.tab) {
+				s = put_byte(h, out, ' ')
+			}
 			if s != .Ok {
 				release(h, x)
 				return s
-			}
-			append(out, ':')
-			if opts.indent > 0 || opts.tab {
-				append(out, ' ')
 			}
 		}
 		if t := type_of(x); t == .Array || t == .Object {
@@ -85,7 +87,7 @@ write_json :: proc(h: ^Heap, out: ^[dynamic]u8, v: Value, opts: Json_Options = {
 				if opts.too_deep == "" {
 					return fail(h, .Depth, .To_Text)
 				}
-				append(out, opts.too_deep)
+				put_bytes(h, out, opts.too_deep) or_return
 				continue
 			}
 			open_write(h, out, &stack, x, opts) or_return
@@ -94,6 +96,22 @@ write_json :: proc(h: ^Heap, out: ^[dynamic]u8, v: Value, opts: Json_Options = {
 		s := write_scalar(h, out, x, opts)
 		release(h, x)
 		s or_return
+	}
+	return .Ok
+}
+
+@(private)
+put_byte :: #force_inline proc(h: ^Heap, out: ^[dynamic]u8, c: u8) -> Status {
+	if _, err := append(out, c); err != nil {
+		return fail_memory(h)
+	}
+	return .Ok
+}
+
+@(private)
+put_bytes :: #force_inline proc(h: ^Heap, out: ^[dynamic]u8, s: string) -> Status {
+	if _, err := append(out, s); err != nil {
+		return fail_memory(h)
 	}
 	return .Ok
 }
@@ -146,40 +164,39 @@ open_write :: proc(h: ^Heap, out: ^[dynamic]u8, stack: ^[dynamic]Write_Frame, v:
 }
 
 @(private)
-write_newline :: proc(out: ^[dynamic]u8, opts: Json_Options, depth: int) -> Status {
+write_newline :: proc(h: ^Heap, out: ^[dynamic]u8, opts: Json_Options, depth: int) -> Status {
 	if opts.indent == 0 && !opts.tab {
 		return .Ok
 	}
-	append(out, '\n')
+	put_byte(h, out, '\n') or_return
 	if opts.tab {
 		for _ in 0 ..< depth {
-			append(out, '\t')
+			put_byte(h, out, '\t') or_return
 		}
 		return .Ok
 	}
 	for _ in 0 ..< depth * opts.indent {
-		append(out, ' ')
+		put_byte(h, out, ' ') or_return
 	}
 	return .Ok
 }
 
 // Writes a scalar: a document's number as its literal when that is JSON's, any other as `write_number` does.
-@(require_results)
+@(private, require_results)
 write_scalar :: proc(h: ^Heap, out: ^[dynamic]u8, v: Value, opts: Json_Options = {}) -> Status {
 	#partial switch type_of(v) {
 	case .Absent, .Null:
-		append(out, "null")
+		return put_bytes(h, out, "null")
 	case .False:
-		append(out, "false")
+		return put_bytes(h, out, "false")
 	case .True:
-		append(out, "true")
+		return put_bytes(h, out, "true")
 	case .String:
 		return write_text(h, out, text_of(v), opts.ascii)
 	case .Number:
 		if v.kind == .Node {
 			if b := node_bytes(v); json_number_text(b) {
-				append(out, string(b))
-				return .Ok
+				return put_bytes(h, out, string(b))
 			}
 		}
 		return write_number(h, out, v, opts.double)
@@ -198,19 +215,17 @@ write_number :: proc(h: ^Heap, out: ^[dynamic]u8, v: Value, double: proc(buf: []
 	}
 	buf: [32]u8
 	if double != nil {
-		append(out, double(buf[:], x.f))
-		return .Ok
+		return put_bytes(h, out, double(buf[:], x.f))
 	}
 	if math.is_nan(x.f) || math.is_inf(x.f) {
-		append(out, "null")
-		return .Ok
+		return put_bytes(h, out, "null")
 	}
-	append(out, shortest_double(buf[:], x.f))
-	return .Ok
+	return put_bytes(h, out, shortest_double(buf[:], x.f))
 }
 
 // The shortest decimal of finite `f` that reads back as it, in `buf` (32 bytes): positional from 10^-5 to 10^17, else
 // `d.ddde±x`.
+@(private)
 shortest_double :: proc(buf: []u8, f: f64) -> string {
 	n := 0
 	if math.sign_bit(f) && f != 0 {
@@ -276,6 +291,7 @@ shortest_double :: proc(buf: []u8, f: f64) -> string {
 }
 
 // Whether `b` is a number as RFC 8259 spells one.
+@(private)
 json_number_text :: proc "contextless" (b: []u8) -> bool {
 	i, n := 0, len(b)
 	if i < n && b[i] == '-' {
@@ -325,9 +341,7 @@ json_number_text :: proc "contextless" (b: []u8) -> bool {
 @(require_results)
 write_text :: proc(h: ^Heap, out: ^[dynamic]u8, s: string, ascii := false) -> Status {
 	HEX := "0123456789abcdef"
-	if _, err := append(out, '"'); err != nil {
-		return fail_memory(h)
-	}
+	put_byte(h, out, '"') or_return
 	run := 0
 	i := 0
 	for i < len(s) {
@@ -342,58 +356,54 @@ write_text :: proc(h: ^Heap, out: ^[dynamic]u8, s: string, ascii := false) -> St
 				i += w
 				continue
 			}
-			append(out, s[run:i])
+			put_bytes(h, out, s[run:i]) or_return
 			if ascii {
-				write_unicode_escape(out, r)
+				write_unicode_escape(h, out, r) or_return
 			} else {
-				append(out, "�")
+				put_bytes(h, out, "\uFFFD") or_return
 			}
 			i += w
 			run = i
 			continue
 		}
-		append(out, s[run:i])
+		put_bytes(h, out, s[run:i]) or_return
 		switch c {
 		case '"':
-			append(out, `\"`)
+			put_bytes(h, out, `\"`) or_return
 		case '\\':
-			append(out, `\\`)
+			put_bytes(h, out, `\\`) or_return
 		case '\n':
-			append(out, `\n`)
+			put_bytes(h, out, `\n`) or_return
 		case '\t':
-			append(out, `\t`)
+			put_bytes(h, out, `\t`) or_return
 		case '\r':
-			append(out, `\r`)
+			put_bytes(h, out, `\r`) or_return
 		case '\b':
-			append(out, `\b`)
+			put_bytes(h, out, `\b`) or_return
 		case '\f':
-			append(out, `\f`)
+			put_bytes(h, out, `\f`) or_return
 		case:
-			append(out, `\u00`)
-			append(out, HEX[c >> 4], HEX[c & 15])
+			esc := [6]u8{'\\', 'u', '0', '0', HEX[c >> 4], HEX[c & 15]}
+			put_bytes(h, out, string(esc[:])) or_return
 		}
 		i += 1
 		run = i
 	}
-	append(out, s[run:])
-	if _, err := append(out, '"'); err != nil {
-		return fail_memory(h)
-	}
-	return .Ok
+	put_bytes(h, out, s[run:]) or_return
+	return put_byte(h, out, '"')
 }
 
 @(private)
-write_unicode_escape :: proc(out: ^[dynamic]u8, r: rune) {
+write_unicode_escape :: proc(h: ^Heap, out: ^[dynamic]u8, r: rune) -> Status {
 	HEX := "0123456789abcdef"
-	unit :: proc(out: ^[dynamic]u8, u: u32, hex: string) {
-		append(out, `\u`)
-		append(out, hex[u >> 12 & 15], hex[u >> 8 & 15], hex[u >> 4 & 15], hex[u & 15])
+	unit :: proc(h: ^Heap, out: ^[dynamic]u8, u: u32, hex: string) -> Status {
+		esc := [6]u8{'\\', 'u', hex[u >> 12 & 15], hex[u >> 8 & 15], hex[u >> 4 & 15], hex[u & 15]}
+		return put_bytes(h, out, string(esc[:]))
 	}
 	if r < 0x10000 {
-		unit(out, u32(r), HEX)
-		return
+		return unit(h, out, u32(r), HEX)
 	}
 	x := u32(r) - 0x10000
-	unit(out, 0xD800 + (x >> 10), HEX)
-	unit(out, 0xDC00 + (x & 0x3FF), HEX)
+	unit(h, out, 0xD800 + (x >> 10), HEX) or_return
+	return unit(h, out, 0xDC00 + (x & 0x3FF), HEX)
 }

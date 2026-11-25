@@ -61,6 +61,7 @@ Node_Flag :: enum u8 {
 	Opt, // `?` after a step
 	Single, // at most one output, and nothing after it
 	Native, // single, no generator, no call of a jq function or filter argument, at most `NATIVE_HEIGHT` tall
+	Distinct_Keys, // `.Object` whose keys are compile-time distinct string literals
 }
 
 @(private)

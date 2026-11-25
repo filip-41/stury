@@ -131,15 +131,17 @@ MAX_ARGS :: 4
 drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal {
 	r := Regs{n = root, input = input, env = env_retain(env), mode = .Eval}
 	base := m.stack.top
+	steps := m.steps
+	defer m.steps = steps
 	for {
 		switch r.mode {
 		case .Eval:
-			if m.steps == 0 {
+			if steps == 0 {
 				over_budget(m, &r)
 				continue
 			}
-			m.steps -= 1
-			step_eval(m, &r)
+			steps -= 1
+			step_eval(m, &r, &steps)
 		case .Emit:
 			if r.k == nil {
 				query.release(m.h, r.vpath)
@@ -153,14 +155,20 @@ drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal
 				r.v = query.ABSENT
 				continue
 			}
-			step_emit(m, &r)
+			step_emit(m, &r, &steps)
 		case .Ret:
 			if m.stack.top == base {
 				return r.sig
 			}
-			step_ret(m, &r)
+			step_ret(m, &r, &steps)
 		}
 	}
+}
+
+// Whether the heap holds an error that `try`, `?` and `?//` must not catch.
+@(private)
+is_fatal_error :: #force_inline proc "contextless" (h: ^query.Heap) -> bool {
+	return h.err.kind == .Memory || h.err.kind == .Budget
 }
 
 // Ends the run as the step budget ran out: no `try` catches it.
@@ -168,9 +176,24 @@ drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal
 over_budget :: proc(m: ^Machine, r: ^Regs) {
 	query.fail(m.h, .Budget, .None)
 	m.h.err.budget = .Steps
-	m.halt = {halted = false}
+	query.release(m.h, m.halt.value)
+	m.halt = {}
 	m.over = true
+	query.release(m.h, r.v)
+	query.release(m.h, r.vpath)
+	r.v, r.vpath = query.ABSENT, query.ABSENT
 	finish(m, r, .Halt)
+}
+
+// Sets the step budget error for a loop inside a native builtin.
+@(private, cold)
+fail_budget :: proc(m: ^Machine) -> query.Status {
+	query.fail(m.h, .Budget, .None)
+	m.h.err.budget = .Steps
+	query.release(m.h, m.halt.value)
+	m.halt = {}
+	m.over = true
+	return .Error
 }
 
 // Ends the evaluation in hand with output `v` and its path.
@@ -217,17 +240,23 @@ LEAVES :: bit_set[Node_Kind]{.Identity, .Literal, .Var}
 
 // Evaluates nodes while each hands on to the next, a tail turn, with no return to `drive` between them.
 @(private)
-step_eval :: #force_inline proc(m: ^Machine, r: ^Regs) {
+step_eval :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 	for {
+		if steps^ >= 0 {
+			m.steps = steps^
+		}
 		eval_once(m, r)
+		if steps^ >= 0 {
+			steps^ = m.steps
+		}
 		if r.mode != .Eval {
 			return
 		}
-		if m.steps == 0 {
+		if steps^ == 0 {
 			over_budget(m, r)
 			return
 		}
-		m.steps -= 1
+		steps^ -= 1
 	}
 }
 
@@ -248,7 +277,9 @@ eval_once :: #force_inline proc(m: ^Machine, r: ^Regs) {
 	}
 	switch n.kind {
 	case .Identity:
-		give(m, r, query.retain(r.input))
+		v := r.input
+		r.input = query.ABSENT
+		give(m, r, v)
 	case .Literal:
 		value_out(m, r, n.value)
 	case .Var:
@@ -479,7 +510,7 @@ identical :: proc(a, b: query.Value) -> bool {
 
 // A frame's handling of output `r.v`.
 @(private)
-step_emit :: #force_inline proc(m: ^Machine, r: ^Regs) {
+step_emit :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 	h := m.h
 	f := r.k
 	switch f.kind {
@@ -569,10 +600,12 @@ step_emit :: #force_inline proc(m: ^Machine, r: ^Regs) {
 		}
 		p.got = true
 		r.k = f.k
-	case .Try:
+	case .Try, .Alternative:
 		pass_through(m, r, f)
 	case .Bind:
 		emit_bind(m, r, (^Input_Frame)(f))
+	case .Destruct:
+		emit_destruct(m, r, (^Destruct_Frame)(f))
 	case .Reduce:
 		emit_fold_start(m, r, (^Input_Frame)(f))
 	case .Reduce_Update:
@@ -582,7 +615,18 @@ step_emit :: #force_inline proc(m: ^Machine, r: ^Regs) {
 		p.v, p.got, r.v, r.vpath = r.v, true, query.ABSENT, query.ABSENT
 		r.sig, r.mode = .Go, .Ret
 	case .Foreach:
+		if steps^ == 0 {
+			over_budget(m, r)
+			return
+		}
+		steps^ -= 1
+		if steps^ >= 0 {
+			m.steps = steps^
+		}
 		emit_foreach_item(m, r, (^Input_Frame)(f))
+		if steps^ >= 0 {
+			steps^ = m.steps
+		}
 	case .Foreach_Update:
 		p := (^Input_Frame)(f)
 		run := (^Input_Frame)(p.owner)
@@ -597,9 +641,9 @@ step_emit :: #force_inline proc(m: ^Machine, r: ^Regs) {
 			r.k = run.k
 			return
 		}
-		r.n, r.input, r.path, r.env, r.k, r.track, r.mode = run.n.d, r.v, query.ABSENT, env_retain(p.env), run.k, false, .Eval
+		r.n, r.input, r.path, r.env, r.k, r.track, r.mode = run.n.d, r.v, not_path_marker(m, r.v) if run.track else query.ABSENT, env_retain(p.env), run.k, run.track, .Eval
 		r.v = query.ABSENT
-	case .Label, .Out, .Comma, .Iter, .Range, .Cut, .Gen, .Alternative, .Args:
+	case .Label, .Out, .Comma, .Iter, .Range, .Cut, .Gen, .Css, .Args:
 		// These frames give their outputs straight to `k`: none is a `k` itself.
 		r.k = f.k
 	case .Limit:
@@ -668,7 +712,7 @@ pass_through :: proc(m: ^Machine, r: ^Regs, owner: ^Frame) {
 
 // What the top frame does with signal `r.sig` from what ran above it.
 @(private)
-step_ret :: #force_inline proc(m: ^Machine, r: ^Regs) {
+step_ret :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 	h := m.h
 	f := m.stack.top
 	sig := r.sig
@@ -704,8 +748,22 @@ step_ret :: #force_inline proc(m: ^Machine, r: ^Regs) {
 			r.v, r.k, r.mode = query.int_value(count), k, .Emit
 		}
 	case .Iter:
+		if sig == .Go {
+			if steps^ == 0 {
+				over_budget(m, r)
+				return
+			}
+			steps^ -= 1
+		}
 		resume_iter(m, r, (^Iter_Frame)(f))
 	case .Range:
+		if sig == .Go {
+			if steps^ == 0 {
+				over_budget(m, r)
+				return
+			}
+			steps^ -= 1
+		}
 		resume_range(m, r, (^Range_Frame)(f))
 	case .Step:
 		p := (^Step_Frame)(f)
@@ -736,8 +794,26 @@ step_ret :: #force_inline proc(m: ^Machine, r: ^Regs) {
 		if sig == .Break && m.brk == f {
 			r.sig = .Go
 		}
-	case .Skip, .Arg, .Gen:
+	case .Skip, .Arg:
 		pop_frame(m)
+	case .Gen:
+		if sig == .Go {
+			if steps^ == 0 {
+				over_budget(m, r)
+				return
+			}
+			steps^ -= 1
+		}
+		resume_gen(m, r, f)
+	case .Css:
+		if sig == .Go {
+			if steps^ == 0 {
+				over_budget(m, r)
+				return
+			}
+			steps^ -= 1
+		}
+		resume_css(m, r, (^Css_Frame)(f))
 	case .Cut:
 		c := (^Input_Frame)(f)
 		target := c.owner
@@ -757,6 +833,9 @@ step_ret :: #force_inline proc(m: ^Machine, r: ^Regs) {
 		resume_bind(m, r, (^Input_Frame)(f))
 	case .Alternative:
 		resume_alternative(m, r, (^Input_Frame)(f))
+	case .Destruct:
+		drop_destruct(m, (^Destruct_Frame)(f))
+		pop_frame(m)
 	case .Reduce_Update:
 		p := (^Input_Frame)(f)
 		run := (^Input_Frame)(p.owner)
@@ -806,6 +885,10 @@ drop_frame :: proc(m: ^Machine, f: ^Frame) {
 		query.release(h, p.vpath)
 	case .Collect:
 		query.release(h, (^Collect_Frame)(f).arr)
+	case .Destruct:
+		drop_destruct(m, (^Destruct_Frame)(f))
+	case .Css:
+		drop_css(m, (^Css_Frame)(f))
 	}
 }
 

@@ -18,7 +18,15 @@ emit_path :: proc(m: ^Machine, r: ^Regs, f: ^Frame) {
 		r.sig, r.mode = fail_status(s), .Ret
 		return
 	}
-	if p.kind != .Array {
+	if p.kind == .Node && query.type_of(p) == .Array {
+		b, s := query.built(h, p)
+		query.release(h, p)
+		if s != .Ok {
+			r.sig, r.mode = .Fail, .Ret
+			return
+		}
+		p = b
+	} else if p.kind != .Array {
 		p = m.empty
 	}
 	give_value(m, r, f, p)
@@ -184,6 +192,13 @@ emit_update_each :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 	if !is_path(p) {
 		s = raise_taken(h, path_error(m, "Invalid path expression with result ", p))
 		query.release(h, p)
+	} else if p.kind == .Node && query.type_of(p) == .Array {
+		b: query.Value
+		b, s = query.built(h, p)
+		query.release(h, p)
+		if s == .Ok {
+			s = query.append_owned(h, &f.paths, b)
+		}
 	} else {
 		s = query.append_owned(h, &f.paths, p if p.kind == .Array else m.empty)
 	}
@@ -242,8 +257,10 @@ update_next :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 			if s != .Ok {
 				break
 			}
-			if s = take_container(h, f, p, cur); s != .Ok {
-				break
+			if f.i + 1 == len(paths) {
+				if s = take_container(h, f, p, cur); s != .Ok {
+					break
+				}
 			}
 			if .Native not_in n.b.flags {
 				f.got = false
@@ -263,7 +280,7 @@ update_next :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 			if s != .Ok {
 				break
 			}
-			if n.op == .Add {
+			if n.op == .Add && f.i + 1 == len(paths) {
 				if s = take_container(h, f, p, cur); s != .Ok {
 					break
 				}
@@ -315,7 +332,7 @@ take_container :: proc(h: ^query.Heap, f: ^Update_Frame, p, cur: query.Value) ->
 		return .Ok
 	}
 	for step in query.items_of(p) {
-		if step.kind == .Object {
+		if query.type_of(step) == .Object {
 			return .Ok
 		}
 	}

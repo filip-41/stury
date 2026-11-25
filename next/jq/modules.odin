@@ -20,15 +20,16 @@ import "core:fmt"
 import "core:path/slashpath"
 import "core:slice"
 import "core:strings"
-import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/query"
 
 // Where the files of modules and data come from. The package reads no file itself.
 Loader :: struct {
-	data: rawptr,
+	data:       rawptr,
 	// The text of the file at `path`, allocated with `allocator`, or `ok` false when there is no such file.
-	read: proc(data: rawptr, path: string, allocator: runtime.Allocator) -> (text: string, ok: bool),
+	read:       proc(data: rawptr, path: string, allocator: runtime.Allocator) -> (text: string, ok: bool),
+	// Parses JSON data files (`import "..." as $name`). Without it non-raw JSON data imports fail.
+	parse_json: Json_Parser,
 }
 
 // What a program's modules and the builtins about them are given. Every path is the caller's spelling, joined and
@@ -193,7 +194,7 @@ stop_list :: proc(l: ^Linker, listed: int, msg: string) -> int {
 @(private = "file")
 load :: proc(l: ^Linker, path, text: string, is_data, raw: bool) -> (^Lib, int) {
 	if is_data {
-		v, msg := data_values(l.u, text, raw)
+		v, msg := data_values(l.u, l.m.loader, text, raw)
 		if msg != "" {
 			append(l.errors, Compile_Error{msg = fmt.aprintf("jq: error loading data file %s: %s", path, msg), kind = .Raw})
 			return nil, 1
@@ -230,32 +231,47 @@ parse_library :: proc(u: ^Unit, src, path: string, errors: ^[dynamic]Compile_Err
 	before := len(errors^)
 	prog := parse(u, src, errors, max_depth, path)
 	if len(errors^) == before && prog.body != nil {
-		// jq's message, which carries jq's name in its text.
-		append(errors, Compile_Error{msg = "jq: error: library should only have function definitions, not a main expression", kind = .Unlocated})
+		append(errors, Compile_Error{msg = "library should only have function definitions, not a main expression", kind = .Unlocated})
 	}
 	return prog
 }
 
 // The values of data file `text` as the array `$name` is bound to, or its text under `raw`, made in the unit's heap and
-// frozen. The file holds one JSON value or none.
+// frozen. The file holds a sequence of zero or more JSON values.
 @(private = "file")
-data_values :: proc(u: ^Unit, text: string, raw: bool) -> (v: query.Value, msg: string) {
+data_values :: proc(u: ^Unit, loader: Loader, text: string, raw: bool) -> (v: query.Value, msg: string) {
 	if raw {
 		return query.text_borrowed(text), ""
 	}
 	h := &u.heap
 	out, _ := query.make_array(h, 1)
-	if len(strings.trim_space(text)) > 0 {
-		src := transmute([]u8)text
-		doc, err := json.build(src, .Json, {}, u.allocator)
+	rem := transmute([]u8)strings.trim_space(text)
+	if len(rem) > 0 && loader.parse_json == nil {
+		query.release(h, out)
+		return query.NULL, "JSON parser is not configured"
+	}
+	for len(rem) > 0 {
+		doc, err := loader.parse_json(loader.data, rem, {}, u.allocator)
+		adv := len(rem)
 		if err != nil {
-			buf: [256]u8
-			return query.NULL, strings.clone(tape.error_message(buf[:], err, src))
+			f, is_fault := err.(tape.Fault)
+			if is_fault && f.kind == .Bad_Char && f.at > 0 && f.at < u64(len(rem)) {
+				tape.destroy(&doc)
+				doc, err = loader.parse_json(loader.data, rem[:f.at], {}, u.allocator)
+				adv = int(f.at)
+			}
+			if err != nil {
+				tape.destroy(&doc)
+				query.release(h, out)
+				buf: [256]u8
+				return query.NULL, strings.clone(tape.error_message(buf[:], err, rem))
+			}
 		}
 		x, _ := query.document_value(h, doc, true)
 		built, _ := query.built_deep(h, x)
 		query.release(h, x)
 		_ = query.append_owned(h, &out, built)
+		rem = transmute([]u8)strings.trim_space(string(rem[adv:]))
 	}
 	return query.freeze(out), ""
 }

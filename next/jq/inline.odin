@@ -97,7 +97,7 @@ inlinable :: proc(fn: ^Func) -> bool {
 @(private)
 inline_call :: proc(u: ^Unit, call: ^Node) {
 	fn := call.callee
-	shift := call.ref.hops
+	shift := i64(call.ref.hops)
 	if len(fn.params) > 0 {
 		shift -= 1
 	}
@@ -118,12 +118,14 @@ inline_call :: proc(u: ^Unit, call: ^Node) {
 		}
 		dst := new_clone(src^, u.allocator)
 		if dst.ref.kind == .Def {
-			dst.ref.hops += shift
+			dst.ref.hops = u32(i64(dst.ref.hops) + shift)
 		}
 		if len(src.args) > 0 {
 			dst.args = make([]^Node, len(src.args), u.allocator)
 			for a, i in src.args {
-				append(&stack, Copy{a, &dst.args[i]})
+				if a != nil {
+					append(&stack, Copy{a, &dst.args[i]})
+				}
 			}
 		}
 		for slot in ([4]^^Node{&dst.a, &dst.b, &dst.c, &dst.d}) {

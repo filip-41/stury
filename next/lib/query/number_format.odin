@@ -25,7 +25,7 @@ number_format :: proc(h: ^Heap, x, spec: Value) -> (res: Value, status: Status) 
 		return NULL, fail(h, .Range, .Number_Format, x)
 	}
 	text := text_of(spec)
-	out := make([dynamic]u8, 0, len(text) + 16, h.allocator)
+	out := make([dynamic]u8, 0, len(text) + 16, heap_allocator(h))
 	defer delete(out)
 	converted := false
 	for i := 0; i < len(text); i += 1 {
@@ -108,7 +108,7 @@ write_conversion :: proc(out: ^[dynamic]u8, spec: string, x: f64) -> (used: int,
 		negative = false
 	}
 	sign := "-" if negative else ""
-	grouped: [dynamic]u8
+	grouped := make([dynamic]u8, 0, 0, out.allocator)
 	defer delete(grouped)
 	if thousands && conversion != 'e' {
 		whole := text[:strings.index_byte(text, '.')] if strings.contains_rune(text, '.') else text

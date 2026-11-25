@@ -71,11 +71,10 @@ env_release :: proc(m: ^Machine, e: ^Env) {
 
 @(private)
 env_free :: #force_no_inline proc(m: ^Machine, first: ^Env) {
-	pending := make([dynamic]^Env, 0, 4, m.h.allocator)
+	pending: [dynamic]^Env
 	defer delete(pending)
-	append(&pending, first)
-	for len(pending) > 0 {
-		e := pop(&pending)
+	e := first
+	for {
 		for e != nil {
 			slots := env_slots(e)
 			for i in 0 ..< int(e.count) {
@@ -83,6 +82,9 @@ env_free :: #force_no_inline proc(m: ^Machine, first: ^Env) {
 					if c := slots[i].closure.env; c != nil {
 						c.rc -= 1
 						if c.rc == 0 {
+							if pending.allocator.procedure == nil {
+								pending = make([dynamic]^Env, 0, 4, m.h.allocator)
+							}
 							append(&pending, c)
 						}
 					}
@@ -100,6 +102,10 @@ env_free :: #force_no_inline proc(m: ^Machine, first: ^Env) {
 				}
 			}
 		}
+		if len(pending) == 0 {
+			break
+		}
+		e = pop(&pending)
 	}
 }
 
@@ -141,6 +147,7 @@ Frame_Kind :: enum u8 {
 	Key,
 	Bind,
 	Alternative,
+	Destruct,
 	Alt,
 	Try,
 	Out,
@@ -161,6 +168,7 @@ Frame_Kind :: enum u8 {
 	Update,
 	Update_Each,
 	Gen,
+	Css,
 }
 
 // The header of every frame: what kind it is, where its outputs go and the frame below it.

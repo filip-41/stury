@@ -21,7 +21,7 @@ read_file :: proc(data: rawptr, path: string, allocator: runtime.Allocator) -> (
 MODULES_SEARCH := [?]string{MODULES_DIR}
 
 corpus_modules :: proc() -> jq.Modules {
-	return {loader = {read = read_file}, search = MODULES_SEARCH[:]}
+	return {loader = {read = read_file, parse_json = parse_json_hook}, search = MODULES_SEARCH[:]}
 }
 
 // The files of a loader that reads none from disk, by path.
@@ -90,7 +90,7 @@ modules_bind_their_names :: proc(t: ^testing.T) {
 		"/m/in/sib.jq" = "def y: 7;",
 	}
 	mods := jq.Modules {
-		loader = {data = &files, read = read_memory},
+		loader = {data = &files, read = read_memory, parse_json = parse_json_hook},
 		search = {"/m"},
 	}
 	testing.expect_value(t, eval(t, `import "b" as b; b::h`, mods), "20")
@@ -103,7 +103,7 @@ modules_bind_their_names :: proc(t: ^testing.T) {
 	testing.expect_value(t, eval(t, `import "nope" as n; .`, mods), "jq: error: module not found: nope")
 	testing.expect_value(t, eval(t, `import "nope" as n {optional: true}; 1`, mods), "1")
 	testing.expect_value(t, eval(t, `import "bad" as b; 1`, mods), "jq: error: nosuch/0 is not defined at /m/bad.jq, line 1, column 13:")
-	testing.expect_value(t, eval(t, `import "main" as m; 1`, mods), "jq: error: jq: error: library should only have function definitions, not a main expression")
+	testing.expect_value(t, eval(t, `import "main" as m; 1`, mods), "jq: error: library should only have function definitions, not a main expression")
 	testing.expect_value(t, eval(t, `import "../a" as m; 1`, mods), "jq: error: Relative paths to modules may not traverse to parent directories (../a)")
 	testing.expect_value(t, eval(t, `import "a/a" as m; 1`, mods), "jq: error: module names must not have equal consecutive components: a/a")
 	testing.expect_value(t, eval(t, `import "a\\b" as m; 1`, mods), "jq: error: Modules must be named by relative paths using '/', not '\\' (a\\b)")
@@ -123,7 +123,7 @@ cyclic_imports_are_refused :: proc(t: ^testing.T) {
 		"/m/q.jq" = `import "p" as p; def b: 1;`,
 	}
 	mods := jq.Modules {
-		loader = {data = &files, read = read_memory},
+		loader = {data = &files, read = read_memory, parse_json = parse_json_hook},
 		search = {"/m"},
 	}
 	testing.expect_value(t, eval(t, `import "p" as p; 1`, mods), "jq: error: circular import of /m/p.jq")
@@ -173,7 +173,7 @@ callers_name_variables_programs_and_modules_see :: proc(t: ^testing.T) {
 		"/m/v.jq" = "def v: $x + $__prog_args[0] + $ENV.A;",
 	}
 	mods := jq.Modules {
-		loader = {data = &files, read = read_memory},
+		loader = {data = &files, read = read_memory, parse_json = parse_json_hook},
 		search = {"/m"},
 	}
 	globals := []string{`{"A":100}`, "[10]", "1"}

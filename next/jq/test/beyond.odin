@@ -238,7 +238,8 @@ false`},
 	{`{"a":{"b/c":1}} | json_pointer("/a/b~1c"), path(json_pointer("/a/b~1c")), json_pointer("")`, "null", `1
 ["a","b/c"]
 {"a":{"b/c":1}}`},
-	{`{"a":[1]} | path(json_pointer("/a/x"))`, "null", `["a",1]`},
+	{`{"a":[1]} | json_pointer("/a/x"), (try path(json_pointer("/a/x")) catch .)`, "null", `null
+"Invalid path expression with result null"`},
 	{`try (json_pointer(1)) catch ., try (json_pointer("/a/b")) catch .`, `{"a":1}`, `"json_pointer: 1 is not a JSON Pointer"
 "Cannot index number with string (\"b\")"`},
 	{`[(builtins | contains(["sha1/0", "sha256/0", "sha512/0", "md5/0", "hmac_sha256/1", "hmac_sha512/1", "crc32/0", "hex_encode/0", "hex_decode/0", "base64url_encode/0", "base64url_decode/0", "uuid_v4/0", "uuid_v7/0", "numfmt/1", "parse_url/0", "parse_query_string/0", "parse_logfmt/0", "json_pointer/1", "ip_valid/0", "ip_class/0", "ip_canonical/0", "ip_in_cidr/1"])), (builtins | map(startswith("_pointer")) | any)]`, "null", `[true,false]`},

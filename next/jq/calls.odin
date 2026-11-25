@@ -116,7 +116,7 @@ value_args :: proc(b: ^Builtin, arity: int) -> u8 {
 	#partial switch b.op {
 	case .None:
 		return u8(1 << uint(arity)) - 1
-	case .Error, .Getpath, .Halt_Error, .Limit, .Skip:
+	case .Error, .Getpath, .Halt_Error, .Limit, .Skip, .Css:
 		return 1 if arity > 0 else 0
 	case .Range:
 		return u8(1 << uint(arity)) - 1
@@ -169,6 +169,9 @@ advance_parts :: proc(m: ^Machine, r: ^Regs, f: ^Args_Frame, from: int) {
 			continue
 		}
 		part := n.args[i]
+		if part == nil {
+			continue
+		}
 		if part.kind == .Literal || .Native in part.flags {
 			v, found, s := eval_native(m, part, query.retain(f.input), f.env)
 			if s != .Ok || !found {
@@ -243,7 +246,15 @@ parts_done :: proc(m: ^Machine, r: ^Regs, f: ^Args_Frame) {
 	case .Object:
 		v, s = query.make_object(h, len(vals) / 2)
 		for i := 0; s == .Ok && i < len(vals); i += 2 {
-			s = put_entry(h, &v, query.retain(vals[i]), query.retain(vals[i + 1]))
+			val: query.Value
+			if n.args[i + 1] == nil {
+				val, s = query.get(h, f.input, vals[i])
+			} else {
+				val = query.retain(vals[i + 1])
+			}
+			if s == .Ok {
+				s = put_entry(h, &v, query.retain(vals[i]), val)
+			}
 		}
 	case .Call:
 		r.n, r.input, r.path, r.env, r.k, r.track, r.mode = n, query.retain(f.input), query.retain(f.path), env_retain(f.env), f.k, f.track, .Eval
@@ -274,7 +285,11 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 	b := n.builtin
 	switch b.op {
 	case .None:
-		v, s := b.fn(m, b, r.input, vals)
+		inp := r.input
+		if b.takes_input {
+			r.input = query.ABSENT
+		}
+		v, s := b.fn(m, b, inp, vals)
 		if s != .Ok {
 			finish(m, r, .Fail)
 			return
@@ -315,7 +330,11 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 				s = raise_taken(h, path_error(m, "Invalid path expression with result ", r.path))
 			} else {
 				p: query.Value
-				p, s = query.array_concat(h, r.path if r.path.kind == .Array else m.empty, vals[0])
+				if r.path.kind == .Array {
+					p, s = query.array_concat(h, r.path, vals[0])
+				} else {
+					p, s = query.built(h, vals[0])
+				}
 				query.release(h, r.path)
 				r.path = p
 			}
@@ -402,6 +421,7 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 		}
 		give(m, r, query.retain(r.input))
 	case .Halt:
+		query.release(h, m.halt.value)
 		m.halt = {halted = true}
 		finish(m, r, .Halt)
 	case .Halt_Error:
@@ -410,8 +430,11 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 			finish(m, r, .Fail)
 			return
 		}
+		query.release(h, m.halt.value)
 		m.halt = {halted = true, code = int(query.trunc_i64(vals[0])), value = query.retain(r.input)}
 		finish(m, r, .Halt)
+	case .Css:
+		start_css(m, r, vals[0])
 	}
 }
 

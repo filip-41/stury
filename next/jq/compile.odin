@@ -273,10 +273,13 @@ drain :: proc(r: ^Resolver) {
 			append(&r.stack, Work{n.a, e, w.depth})
 		case .Bind, .Reduce, .Foreach:
 			inner := bind_scope(n, w.scope, w.depth + 1)
-			// The source, and a reduce's or foreach's start, see the scope outside the binding.
+			// The source and a reduce's or foreach's start see the outer scope. Single-pattern keys see the outer
+			// scope; `?//` alternative keys see `inner` so earlier members' bindings are visible to later keys.
 			outer := 1 if n.kind == .Bind else 2
+			key_scope := inner if len(n.patterns) > 1 else w.scope
+			key_depth := w.depth + 1 if len(n.patterns) > 1 else w.depth
 			#reverse for k in n.keys {
-				append(&r.stack, Work{k, inner, w.depth + 1})
+				append(&r.stack, Work{k, key_scope, key_depth})
 			}
 			for i := 3; i >= outer; i -= 1 {
 				append(&r.stack, Work{child(n, i), inner, w.depth + 1})
@@ -501,6 +504,9 @@ mark :: proc(prog: ^Program) {
 		if n.kind == .Array && !native {
 			_, _, native = map_parts(n.a)
 		}
+		if n.kind == .Object && has_distinct_literal_keys(n) {
+			n.flags += {.Distinct_Keys}
+		}
 		n.height = u8(min(h + 1, 255))
 		if native && int(n.height) <= NATIVE_HEIGHT {
 			n.flags += {.Native}
@@ -606,6 +612,54 @@ map_parts :: proc(a: ^Node) -> (t: ^Node, f: ^Node, ok: bool) {
 }
 
 @(private)
+has_distinct_literal_keys :: proc(n: ^Node) -> bool {
+	if len(n.args) == 0 || len(n.args) > 32 {
+		return false
+	}
+	for i := 0; i < len(n.args); i += 2 {
+		k := n.args[i]
+		if k == nil || k.kind != .Literal || k.value.kind != .String || n.args[i + 1] == nil {
+			return false
+		}
+		ks := query.text_of(k.value)
+		for j := 0; j < i; j += 2 {
+			if query.text_of(n.args[j].value) == ks {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Whether `a` is a simple non-optional path chain `.`, `.k`, `.[expr]`, `.a.b[i]` (up to 8 steps) suitable for native update.
+@(private)
+simple_update_lhs :: proc(a: ^Node) -> bool {
+	cur := a
+	depth := 0
+	for cur != nil {
+		if cur.kind == .Identity {
+			return true
+		}
+		if depth >= 8 || .Opt in cur.flags {
+			return false
+		}
+		#partial switch cur.kind {
+		case .Field:
+			cur = cur.a
+		case .Index:
+			if cur.b == nil || .Native not_in cur.b.flags {
+				return false
+			}
+			cur = cur.a
+		case:
+			return false
+		}
+		depth += 1
+	}
+	return false
+}
+
+@(private)
 native_kind :: proc(n: ^Node) -> bool {
 	#partial switch n.kind {
 	case .Identity, .Field, .Index, .Slice, .Literal, .String, .Format, .Array, .Object, .Neg, .Pipe, .Binary, .And, .Or,
@@ -615,6 +669,8 @@ native_kind :: proc(n: ^Node) -> bool {
 		return true
 	case .Bind:
 		return len(n.patterns) == 1
+	case .Update:
+		return simple_update_lhs(n.a)
 	case .Call:
 		return n.builtin != nil && n.builtin.native
 	}

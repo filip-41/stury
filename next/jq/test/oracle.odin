@@ -82,7 +82,7 @@ oracle_case :: proc(out: ^strings.Builder, text, input_text: string) {
 	}
 	run: jq.Run
 	calls := 0
-	hooks := jq.Hooks{data = &calls, now = fixed_now, random = counted_bytes}
+	hooks := jq.Hooks{data = &calls, now = fixed_now, random = counted_bytes, parse_json = parse_json_hook}
 	jq.run_init(&run, prog, &h, nil, &hooks, ORACLE_STEPS)
 	outs := Outputs{h = &h}
 	end := jq.run_value(&run, input, collect, &outs)

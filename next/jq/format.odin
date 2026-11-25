@@ -1,5 +1,6 @@
 package jq
 
+import "core:strconv"
 import "stury:lib/query"
 
 // jq's `@name` formats and the texts of values.
@@ -7,6 +8,20 @@ import "stury:lib/query"
 // `v` as JSON text, as jq's `tojson` writes it.
 @(private)
 to_json :: proc(h: ^query.Heap, v: query.Value) -> (res: query.Value, status: query.Status) {
+	#partial switch v.kind {
+	case .Absent, .Null:
+		return query.text_borrowed("null"), .Ok
+	case .True:
+		return query.text_borrowed("true"), .Ok
+	case .False:
+		return query.text_borrowed("false"), .Ok
+	case .Int:
+		buf: [32]u8
+		return query.text_value(h, strconv.write_int(buf[:], v.i, 10))
+	case .Double:
+		buf: [32]u8
+		return query.text_value(h, jq_double(buf[:], v.f))
+	}
 	out := make([dynamic]u8, h.allocator)
 	defer delete(out)
 	query.write_json(h, &out, v, {double = jq_double, too_deep = TOO_DEEP}) or_return

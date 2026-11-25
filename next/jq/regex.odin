@@ -1,6 +1,5 @@
 package jq
 
-import "core:strings"
 import "stury:lib/query"
 
 // jq's `_match_impl`, which the prelude's `match`, `test`, `capture`, `scan`, `splits`, `split/2`, `sub` and `gsub` are
@@ -34,7 +33,7 @@ regex_flags :: proc(m: ^Machine, flags: query.Value) -> (opts: query.Regex_Flags
 			opts.longest = true
 		case 's':
 		case:
-			return {}, false, raise_owned_text(m, strings.concatenate({text, " is not a valid modifier string"}, context.temp_allocator))
+			return {}, false, raise_joined(m, text, " is not a valid modifier string")
 		}
 	}
 	return opts, global, .Ok
@@ -100,8 +99,8 @@ span_text :: proc(h: ^query.Heap, s: string, lo, hi: int) -> (res: query.Value, 
 	}
 	text := s[lo:hi]
 	if inside(s, lo) || inside(s, hi) {
-		fixed := valid_utf8(text)
-		defer delete(fixed)
+		fixed := valid_utf8(text, h.allocator)
+		defer delete(fixed, h.allocator)
 		return query.text_value(h, fixed)
 	}
 	return query.text_value(h, text)
@@ -126,14 +125,16 @@ match_object :: proc(h: ^query.Heap, re: ^query.Regex, s: string, found: []int, 
 	text := span_text(h, s, found[0], found[1]) or_return
 	put(h, &o, "string", text) or_return
 	caps := query.make_array(h, query.regex_groups(re)) or_return
+	defer if status != .Ok {
+		query.release(h, caps)
+	}
 	for g in 1 ..= query.regex_groups(re) {
 		c := capture_object(h, re, s, found, g, off, w) or_return
-		if query.append_owned(h, &caps, c) != .Ok {
-			query.release(h, caps)
-			return query.NULL, .Error
-		}
+		query.append_owned(h, &caps, c) or_return
 	}
-	put(h, &o, "captures", caps) or_return
+	c := caps
+	caps = query.ABSENT
+	put(h, &o, "captures", c) or_return
 	return o, .Ok
 }
 

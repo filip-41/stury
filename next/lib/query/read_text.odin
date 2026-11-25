@@ -147,7 +147,10 @@ add_member :: proc(h: ^Heap, o: ^Value, key, x: Value) -> Status {
 		return object_put(h, o, key, x)
 	}
 	release(h, key)
-	own_object(h, o, 0) or_return
+	if s := own_object(h, o, 0); s != .Ok {
+		release(h, x)
+		return s
+	}
 	e := &object_entries((^Object_Block)(o.p))[k]
 	if e.value.kind != .Array {
 		list, s := make_array(h, 2)
@@ -163,6 +166,7 @@ add_member :: proc(h: ^Heap, o: ^Value, key, x: Value) -> Status {
 			return s
 		}
 		e.value = list
+		(^Object_Block)(o.p).flags |= BLOCK_HAS_HELD | BLOCK_HAS_CONTAINER
 	}
 	return append_owned(h, &e.value, x)
 }

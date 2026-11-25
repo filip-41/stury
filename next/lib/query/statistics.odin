@@ -6,7 +6,7 @@ import "core:math"
 // variance and deviation, quantiles, and how often each value occurs. Integers stay exact wherever the answer is one.
 
 // The elements of array `v`, built, each a number: another value is a `.Types` error of `.Aggregate` naming it.
-@(require_results)
+@(private, require_results)
 numbers_in :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	if type_of(v) != .Array {
 		return NULL, fail(h, .Types, .Iterate, v)
@@ -49,6 +49,7 @@ variance :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	m := mean_of(h, items) or_return
 	defer release(h, m)
 	acc := int_value(0)
+	defer release(h, acc)
 	for x in items {
 		d := num_sub(h, x, m) or_return
 		sq, s := num_mul(h, d, d)
@@ -61,11 +62,9 @@ variance :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 			acc = next
 		}
 		if s != .Ok {
-			release(h, acc)
 			return NULL, s
 		}
 	}
-	defer release(h, acc)
 	return num_div(h, acc, int_value(i64(len(items))))
 }
 
@@ -125,8 +124,15 @@ frequency :: proc(h: ^Heap, v: Value, coll := JSON_ORDER) -> (res: Value, status
 	defer release(h, runs)
 	groups := items_of(runs)
 	out := make_array(h, len(groups)) or_return
-	counts := make([]Value, len(groups), h.allocator)
-	defer delete(counts, h.allocator)
+	defer if status != .Ok {
+		release(h, out)
+	}
+	alloc := heap_allocator(h)
+	counts := make([]Value, len(groups), alloc)
+	if counts == nil && len(groups) > 0 {
+		return NULL, fail_memory(h)
+	}
+	defer delete(counts, alloc)
 	for g, i in groups {
 		counts[i] = int_value(i64(length_of(h, g)))
 		row, s := make_object(h, 2)
@@ -136,18 +142,13 @@ frequency :: proc(h: ^Heap, v: Value, coll := JSON_ORDER) -> (res: Value, status
 		if s == .Ok {
 			s = object_put(h, &row, text_borrowed("count"), counts[i])
 		}
-		if s == .Ok {
-			s = append_owned(h, &out, row)
-		}
 		if s != .Ok {
-			release(h, out)
+			release(h, row)
 			return NULL, s
 		}
+		append_owned(h, &out, row) or_return
 	}
-	if s := sort_values(h, items_of(out), counts, coll, descending = true); s != .Ok {
-		release(h, out)
-		return NULL, s
-	}
+	sort_values(h, items_of(out), counts, coll, descending = true) or_return
 	return out, .Ok
 }
 

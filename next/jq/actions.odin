@@ -32,11 +32,7 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 11:
 		pats := v[3].pats[:]
 		keys := pattern_keys(pats)
-		if len(pats) == 1 && !all_plain(keys) {
-			r = {node = bind_by_steps(p, v[1].node, pats[0], v[5].node, at)}
-		} else {
-			r = {node = mk(p, Node{kind = .Bind, a = v[1].node, b = v[5].node, patterns = pats, keys = keys, loc = at})}
-		}
+		r = {node = mk(p, Node{kind = .Bind, a = v[1].node, b = v[5].node, patterns = pats, keys = keys, loc = at})}
 	case 12:
 		r = {node = mk(p, Node{kind = .Label, a = v[4].node, name = v[2].text, loc = at})}
 	case 13:
@@ -233,7 +229,11 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		r = {nodes = list(v[1].node, v[3].node)}
 	case 159:
 		// `{"text"}`: the member of the input that the text names.
-		r = {nodes = list(v[1].node, index(p, node(p, .Identity, at = at), v[1].node, false, at))}
+		if v[1].node.kind == .Literal {
+			r = {nodes = list(v[1].node, index(p, node(p, .Identity, at = at), v[1].node, false, at))}
+		} else {
+			r = {nodes = list(v[1].node, (^Node)(nil))}
+		}
 	case 160:
 		r = {nodes = list(var_node(p, v[1].text, at), v[3].node)}
 	case 161:
@@ -455,16 +455,6 @@ dep_values :: proc(nodes: []^Node) -> []query.Value {
 		deps[i] = n.value
 	}
 	return deps
-}
-
-@(private = "file")
-all_plain :: proc(keys: []^Node) -> bool {
-	for k in keys {
-		if !key_is_plain(k) {
-			return false
-		}
-	}
-	return true
 }
 
 // The key expressions of patterns `pats`, in the order the binding evaluates them, with no recursion.

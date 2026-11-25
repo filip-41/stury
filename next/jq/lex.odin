@@ -373,12 +373,14 @@ decode_string :: proc(out: ^strings.Builder, in_: string, lone_low_surrogate_at:
 
 // `s` as jq makes a string of it: each sequence that is not UTF-8, as far as jvp_utf8_next reads it,
 // one U+FFFD.
-valid_utf8 :: proc(s: string) -> string {
-	b := strings.builder_make()
+@(private)
+valid_utf8 :: proc(s: string, allocator := context.allocator) -> string {
+	b := strings.builder_make(allocator)
 	write_valid_utf8(&b, s)
 	return strings.to_string(b)
 }
 
+@(private)
 write_valid_utf8 :: proc(b: ^strings.Builder, s: string) {
 	run := 0 // s[run:i] is UTF-8 not yet written
 	for i := 0; i < len(s); {

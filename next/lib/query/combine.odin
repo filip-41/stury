@@ -13,24 +13,31 @@ array_concat :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) {
 		return retain(b), .Ok
 	}
 	out := built(h, a) or_return
-	if s := own_array(h, &out, nb); s != .Ok {
+	defer if status != .Ok {
 		release(h, out)
-		return NULL, s
+	}
+	own_array(h, &out, nb) or_return
+	if b.kind == .Array {
+		dst := (^Array_Block)(out.p)
+		src := (^Array_Block)(b.p)
+		items := array_items(src)
+		raw_dst := ([^]Value)(uintptr(dst) + size_of(Array_Block))
+		n := dst.len
+		for x, i in items {
+			raw_dst[n + u32(i)] = retain(x)
+		}
+		dst.len = n + u32(len(items))
+		dst.flags |= src.flags
+		return out, .Ok
 	}
 	c := cursor_open(h, b) or_return
 	defer cursor_close(&c)
 	for {
-		_, x, more, s := cursor_next(h, &c)
-		if s == .Ok && more {
-			s = append_owned(h, &out, x)
-		}
-		if s != .Ok {
-			release(h, out)
-			return NULL, s
-		}
+		_, x, more := cursor_next(h, &c) or_return
 		if !more {
 			return out, .Ok
 		}
+		append_owned(h, &out, x) or_return
 	}
 }
 
@@ -137,13 +144,95 @@ object_merge_into :: proc(h: ^Heap, acc: ^Value, b: Value) -> Status {
 // The elements of array `a` that equal no element of array `b`, in order.
 @(require_results)
 array_without :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) {
-	out := make_array(h, length_of(h, a)) or_return
+	na := length_of(h, a)
+	nb := length_of(h, b)
+	if nb == 0 || na == 0 {
+		return built(h, a)
+	}
+	out := make_array(h, na) or_return
+	defer if status != .Ok {
+		release(h, out)
+	}
+	if nb > 16 {
+		bv := built(h, b) or_return
+		defer release(h, bv)
+		bs := items_of(bv)
+		size := 32
+		for size < 2 * len(bs) {
+			size <<= 1
+		}
+		alloc := heap_allocator(h)
+		slots := make([]int, size, alloc)
+		defer delete(slots, alloc)
+		hashes := make([]u64, len(bs), alloc)
+		defer delete(hashes, alloc)
+		if slots == nil || hashes == nil {
+			return NULL, fail_memory(h)
+		}
+		mask := size - 1
+		for y, i in bs {
+			hy := hash(h, y) or_return
+			hashes[i] = hy
+			at := int(hy) & mask
+			for {
+				j := slots[at] - 1
+				if j < 0 {
+					slots[at] = i + 1
+					break
+				}
+				if hashes[j] == hy {
+					same := equal(h, bs[j], y) or_return
+					if same {
+						break
+					}
+				}
+				at = (at + 1) & mask
+			}
+		}
+		c := cursor_open(h, a) or_return
+		defer cursor_close(&c)
+		for {
+			_, x, more := cursor_next(h, &c) or_return
+			if !more {
+				return out, .Ok
+			}
+			hx, hs := hash(h, x)
+			if hs != .Ok {
+				release(h, x)
+				return NULL, hs
+			}
+			found := false
+			at := int(hx) & mask
+			for {
+				j := slots[at] - 1
+				if j < 0 {
+					break
+				}
+				if hashes[j] == hx {
+					same, es := equal(h, x, bs[j])
+					if es != .Ok {
+						release(h, x)
+						return NULL, es
+					}
+					if same {
+						found = true
+						break
+					}
+				}
+				at = (at + 1) & mask
+			}
+			if !found {
+				append_owned(h, &out, x) or_return
+			} else {
+				release(h, x)
+			}
+		}
+	}
 	c := cursor_open(h, a) or_return
 	defer cursor_close(&c)
 	for {
 		_, x, more, s := cursor_next(h, &c)
 		if s != .Ok {
-			release(h, out)
 			return NULL, s
 		}
 		if !more {
@@ -172,7 +261,6 @@ array_without :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) {
 			release(h, x)
 		}
 		if s != .Ok {
-			release(h, out)
 			return NULL, s
 		}
 	}
@@ -189,67 +277,66 @@ freeze :: proc(v: Value) -> Value {
 	if v.kind != .Array && v.kind != .Object {
 		return out
 	}
-	// The containers still to freeze are threaded through their own `next` field.
-	pending := block_of(v)
-	pending.rc = FROZEN_RC
-	set_next(v.kind, pending, nil)
-	for pending != nil {
-		b := pending
-		pending = next_of(b)
-		if (^Array_Block)(b).class == FROZEN_OBJECT {
-			for &e in object_entries((^Object_Block)(b)) {
-				thaw_child(&e.key, &pending)
-				thaw_child(&e.value, &pending)
+	stack_buf: [32]Value
+	sp := 1
+	stack_buf[0] = v
+	dyn: [dynamic]Value
+	defer delete(dyn)
+	block_of(v).rc = FROZEN_RC
+	push_c :: proc(buf: ^[32]Value, sp: ^int, dyn: ^[dynamic]Value, val: Value) {
+		if len(dyn^) == 0 && sp^ < len(buf) {
+			buf[sp^] = val
+			sp^ += 1
+		} else {
+			append(dyn, val)
+		}
+	}
+	for sp > 0 || len(dyn) > 0 {
+		cur: Value
+		if len(dyn) > 0 {
+			cur = pop(&dyn)
+		} else {
+			sp -= 1
+			cur = stack_buf[sp]
+		}
+		if cur.kind == .Object {
+			for &e in object_entries((^Object_Block)(cur.p)) {
+				if e.key.held {
+					kb := block_of(e.key)
+					e.key.held = false
+					kb.rc = FROZEN_RC
+				}
+				if e.value.held {
+					child := e.value
+					b := block_of(child)
+					e.value.held = false
+					if b.rc != FROZEN_RC {
+						b.rc = FROZEN_RC
+						if child.kind == .Array || child.kind == .Object {
+							push_c(&stack_buf, &sp, &dyn, child)
+						}
+					}
+				}
 			}
 		} else {
-			for &x in array_items((^Array_Block)(b)) {
-				thaw_child(&x, &pending)
+			for &x in array_items((^Array_Block)(cur.p)) {
+				if x.held {
+					child := x
+					b := block_of(child)
+					x.held = false
+					if b.rc != FROZEN_RC {
+						b.rc = FROZEN_RC
+						if child.kind == .Array || child.kind == .Object {
+							push_c(&stack_buf, &sp, &dyn, child)
+						}
+					}
+				}
 			}
 		}
 	}
 	return out
 }
 
-// Marks child `x` held by no count, putting a container on the list to freeze.
-@(private)
-thaw_child :: proc(x: ^Value, pending: ^^Block) {
-	if !x.held {
-		return
-	}
-	b := block_of(x^)
-	x.held = false
-	if b.rc == FROZEN_RC {
-		return
-	}
-	b.rc = FROZEN_RC
-	if x.kind == .Array || x.kind == .Object {
-		set_next(x.kind, b, pending^)
-		pending^ = b
-	}
-}
-
 // The count of a frozen block, which a block reached twice is known by.
 @(private)
 FROZEN_RC :: max(u32)
-
-// A frozen container's class marks an object, as its count is no longer read.
-@(private)
-FROZEN_OBJECT :: u8(0xFC)
-
-@(private)
-set_next :: proc(kind: Kind, b: ^Block, next: ^Block) {
-	if kind == .Object {
-		(^Object_Block)(b).next = next
-		b.class = FROZEN_OBJECT
-	} else {
-		(^Array_Block)(b).next = next
-	}
-}
-
-@(private)
-next_of :: proc(b: ^Block) -> ^Block {
-	if b.class == FROZEN_OBJECT {
-		return (^Object_Block)(b).next
-	}
-	return (^Array_Block)(b).next
-}

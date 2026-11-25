@@ -1,5 +1,6 @@
 package query
 
+import "base:runtime"
 import "core:mem"
 import "core:strings"
 import "stury:lib/base/regex"
@@ -58,9 +59,18 @@ regex_compile :: proc(h: ^Heap, c: ^Regex_Cache, pattern: Value, dialect: Regex_
 	if err.kind != .None {
 		return nil, regex_failed(h, c, err, pattern)
 	}
-	re = new_clone(compiled, arena)
-	own, _ := strings.clone(text, arena)
-	append(&c.entries, Cached_Regex{pattern = own,dialect = dialect, flags = flags, re = re})
+	clone_err: runtime.Allocator_Error
+	re, clone_err = new_clone(compiled, arena)
+	if clone_err != nil {
+		return nil, fail_memory(h)
+	}
+	own, str_err := strings.clone(text, arena)
+	if str_err != nil {
+		return nil, fail_memory(h)
+	}
+	if _, app_err := append(&c.entries, Cached_Regex{pattern = own, dialect = dialect, flags = flags, re = re}); app_err != nil {
+		return nil, fail_memory(h)
+	}
 	return re, .Ok
 }
 
@@ -71,7 +81,9 @@ regex_failed :: proc(h: ^Heap, c: ^Regex_Cache, err: regex.Error, pattern := ABS
 	}
 	clear(&c.message)
 	c.message.allocator = heap_allocator(h)
-	append(&c.message, err.message)
+	if _, app_err := append(&c.message, err.message); app_err != nil {
+		return fail_memory(h)
+	}
 	return fail(h, .Pattern, .Match, pattern, detail = string(c.message[:]))
 }
 

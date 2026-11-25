@@ -164,7 +164,7 @@ libm_pow :: proc "contextless" (x, y: f64) -> f64 {
 	return -r if negative else r
 }
 
-when ODIN_ARCH == .wasm32 && ODIN_OS != .JS {
+when ODIN_ARCH == .wasm32 && ODIN_OS == .Freestanding {
 	@(export, link_name = "sin")
 	c_sin :: proc "c" (x: f64) -> f64 {
 		return libm_sin(x)

@@ -151,9 +151,11 @@ pivot :: proc(h: ^Heap, v, ids, var, val: Value, coll := JSON_ORDER) -> (res: Va
 @(private)
 pivot_group :: proc(h: ^Heap, rows: []Value, ids, var, val: Value, cols: []Value) -> (res: Value, status: Status) {
 	wide := id_of(h, rows[0], ids) or_return
+	defer if status != .Ok {
+		release(h, wide)
+	}
 	for c in cols {
 		if type_of(c) != .String {
-			release(h, wide)
 			return NULL, fail(h, .Types, .Index, wide, c, detail = "object key")
 		}
 		x := NULL
@@ -165,7 +167,6 @@ pivot_group :: proc(h: ^Heap, rows: []Value, ids, var, val: Value, cols: []Value
 				x, s = member_or_null(h, r, val)
 			}
 			if s != .Ok {
-				release(h, wide)
 				return NULL, s
 			}
 			if same {

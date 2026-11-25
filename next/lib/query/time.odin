@@ -139,6 +139,9 @@ local_instant :: proc(zones: Zones, c: Civil) -> (t: i64, z: Zone, ok: bool) {
 @(private)
 civil_value :: proc(h: ^Heap, c: Civil, frac: f64) -> (res: Value, status: Status) {
 	out := make_array(h, 8) or_return
+	defer if status != .Ok {
+		release(h, out)
+	}
 	fields := [8]i64{c.year, c.mon, c.mday, c.hour, c.min, c.sec, c.wday, c.yday}
 	for n, i in fields {
 		x := int_value(n)

@@ -91,14 +91,17 @@ read_rfc3339 :: proc(s: string) -> (secs: i64, fraction: f64, ok: bool) {
 // Number `v`, seconds since the epoch, as an RFC 3339 date-time in UTC, years 0000 to 9999: the fraction is written
 // only when there is one, in the digits of the number's shortest spelling.
 rfc3339_text :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
+	if !is_number(v) {
+		return NULL, fail(h, .Types, .Time, v, detail = TIME_NUMBER)
+	}
 	f := as_f64(v)
-	if !is_number(v) || math.is_nan(f) {
+	if math.is_nan(f) {
 		return NULL, fail(h, .Types, .Time, v, detail = TIME_NUMBER)
 	}
 	if f < -62167219200 || f >= 253402300800 {
 		return NULL, fail(h, .Range, .Time, v, detail = TIME_YEARS)
 	}
-	spelled: [64]u8
+	spelled: [400]u8
 	text := strconv.write_float(spelled[:], abs(f), 'f', -1, 64, {})
 	whole, fraction := text, ""
 	for b, i in transmute([]u8)text {
@@ -107,8 +110,11 @@ rfc3339_text :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 			break
 		}
 	}
+	for len(fraction) > 0 && fraction[len(fraction) - 1] == '0' {
+		fraction = fraction[:len(fraction) - 1]
+	}
 	secs, _ := strconv.parse_i64(whole)
-	complement: [64]u8
+	complement: [400]u8
 	if f < 0 {
 		// Floor: the fraction is what the negative number lacks to the next whole second.
 		secs = -secs

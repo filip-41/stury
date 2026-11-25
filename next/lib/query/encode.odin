@@ -159,6 +159,7 @@ text_lossy :: proc(h: ^Heap, bytes: []u8) -> (res: Value, status: Status) {
 	return text_value(h, string(fixed[:]))
 }
 
+@(private)
 HEX_DIGITS :: "0123456789abcdef"
 
 // `s` as lowercase hex. `core:encoding/hex` writes into a fresh slice or a writer only, which would copy the text.
@@ -257,6 +258,6 @@ percent_decode :: proc(h: ^Heap, s: string, plus: bool) -> (res: Value, ok: bool
 			append(&out, c)
 		}
 	}
-	v := text_value(h, string(out[:])) or_return
+	v := text_lossy(h, out[:]) or_return
 	return v, true, .Ok
 }

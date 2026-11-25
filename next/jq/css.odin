@@ -97,56 +97,145 @@ raise_selector_fault :: proc(m: ^Machine, text: query.Value, f: tape.Fault) -> q
 	return raise_owned_text(m, string(out[:]))
 }
 
-// How a selector reads document `doc`, which the caller's `Hooks.markup` says, false for a document that is no markup, a
-// partial one, and any when the caller gave no hook.
+// How a selector reads document `doc`, which the caller's `Hooks.markup` says, false for a document that is no markup
+// or when the caller gave no hook.
 @(private = "file")
 markup_options :: proc(m: ^Machine, doc: ^tape.Document) -> (opts: css.Options, ok: bool) {
-	if m.hooks == nil || m.hooks.markup == nil || doc.partial != nil {
+	if m.hooks == nil || m.hooks.markup == nil {
 		return {}, false
 	}
 	return m.hooks.markup(m.hooks.data, doc)
 }
 
-// _css_paths(selector): an array of the paths of the elements below the input that the selector matches.
+// Generator frame for `css(selector)`: holds the `css.Found` match list and emits each matched node directly in O(1),
+// building its path only when `f.track` is set (`path(...)`, `|=`, `del(...)`).
 @(private)
-v_css_paths :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+Css_Frame :: struct {
+	using frame: Frame,
+	doc:         query.Value, // held (keeps Doc_Block alive)
+	path:        query.Value, // held (parent path when tracking)
+	found:       css.Found,
+	i:           int,
+}
+
+@(private)
+start_css :: proc(m: ^Machine, r: ^Regs, sel_val: query.Value) {
 	h := m.h
-	if !query.is_text(args[0]) {
-		return query.NULL, raise_typed(m, args[0], " cannot be a selector, as it is not a string")
+	if !query.is_text(sel_val) {
+		_ = raise_typed(m, sel_val, " cannot be a selector, as it is not a string")
+		finish(m, r, .Fail)
+		return
 	}
 	opts: css.Options
 	d: ^query.Doc_Block
 	markup := false
-	if x.kind == .Node {
-		d = (^query.Doc_Block)(x.p)
+	if r.input.kind == .Node {
+		d = (^query.Doc_Block)(r.input.p)
 		opts, markup = markup_options(m, &d.doc)
 	}
 	if !markup {
-		return query.NULL, raise_typed(m, x, " cannot be selected from, as it is not an element of an xml or html input")
+		_ = raise_typed(m, r.input, " cannot be selected from, as it is not an element of an xml or html input")
+		finish(m, r, .Fail)
+		return
 	}
-	sel := compiled_selector(m, args[0]) or_return
-	found, err := css.select(&d.doc, tape.Node_Index(x.n), sel, opts, query.heap_allocator(h))
+	sel, ss := compiled_selector(m, sel_val)
+	if ss != .Ok {
+		finish(m, r, .Fail)
+		return
+	}
+	found, err := css.select(&d.doc, tape.Node_Index(r.input.n), sel, opts, query.heap_allocator(h))
 	if err != nil {
-		return query.NULL, query.fail(h, .Memory, .None)
+		_ = query.fail(h, .Memory, .None)
+		finish(m, r, .Fail)
+		return
 	}
-	defer css.destroy_found(&found)
-	out := query.make_array(h, len(found.matches)) or_return
-	defer if status != .Ok {
-		query.release(h, out)
+	if found.partial {
+		h.tainted = true
+		css.destroy_found(&found)
+		finish(m, r, .Go)
+		return
 	}
-	for match in found.matches {
-		path := path_value(h, d, css.steps_of(&found, match)) or_return
-		query.append_owned(h, &out, path) or_return
+	if len(found.matches) == 0 {
+		css.destroy_found(&found)
+		finish(m, r, .Go)
+		return
 	}
-	return out, .Ok
+	if r.track && !is_path(r.path) {
+		css.destroy_found(&found)
+		_ = raise_taken(h, path_error(m, "Invalid path expression with result ", r.path))
+		finish(m, r, .Fail)
+		return
+	}
+	doc := r.input
+	parent_path := r.path
+	k, track := r.k, r.track
+	r.input, r.path = query.ABSENT, query.ABSENT
+	env_release(m, r.env)
+	r.env = nil
+	f, ps := push(m, Css_Frame, .Css, k)
+	if ps != .Ok {
+		css.destroy_found(&found)
+		query.release(h, doc)
+		query.release(h, parent_path)
+		r.sig, r.mode = .Fail, .Ret
+		return
+	}
+	f.track, f.doc, f.path, f.found, f.i = track, doc, parent_path, found, 0
+	r.sig = .Go
+	resume_css(m, r, f)
 }
 
-// The path `steps` of document block `d` as an array of names and places.
+@(private)
+resume_css :: proc(m: ^Machine, r: ^Regs, f: ^Css_Frame) {
+	h := m.h
+	if r.sig != .Go || f.i >= len(f.found.matches) {
+		drop_css(m, f)
+		pop_frame(m)
+		return
+	}
+	match := f.found.matches[f.i]
+	f.i += 1
+	d := (^query.Doc_Block)(f.doc.p)
+	v, s := query.node_at(h, d, match.value)
+	if s != .Ok {
+		drop_css(m, f)
+		pop_frame(m)
+		r.sig, r.mode = .Fail, .Ret
+		return
+	}
+	vp := query.ABSENT
+	if f.track {
+		vp, s = path_value(h, d, f.path, css.steps_of(&f.found, match))
+		if s != .Ok {
+			query.release(h, v)
+			drop_css(m, f)
+			pop_frame(m)
+			r.sig, r.mode = .Fail, .Ret
+			return
+		}
+	}
+	r.v, r.vpath, r.k, r.mode = v, vp, f.k, .Emit
+}
+
+@(private)
+drop_css :: proc(m: ^Machine, f: ^Css_Frame) {
+	css.destroy_found(&f.found)
+	query.release(m.h, f.doc)
+	query.release(m.h, f.path)
+}
+
+// The path `steps` of document block `d`, appended after `prefix` (when it is an array), as an array of names and places.
 @(private = "file")
-path_value :: proc(h: ^query.Heap, d: ^query.Doc_Block, steps: []css.Step) -> (res: query.Value, status: query.Status) {
-	path := query.make_array(h, len(steps)) or_return
+path_value :: proc(h: ^query.Heap, d: ^query.Doc_Block, prefix: query.Value, steps: []css.Step) -> (res: query.Value, status: query.Status) {
+	base_n := len(query.items_of(prefix)) if prefix.kind == .Array else 0
+	path := query.make_array(h, base_n + len(steps)) or_return
 	defer if status != .Ok {
 		query.release(h, path)
+	}
+	if prefix.kind == .Array {
+		for item in query.items_of(prefix) {
+			query.append_owned(h, &path, query.retain(item)) or_return
+		}
 	}
 	for step in steps {
 		name := query.key_value(h, d, step.key) or_return

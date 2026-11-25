@@ -37,6 +37,7 @@ Builtin_Op :: enum u8 {
 	Stderr,
 	Halt,
 	Halt_Error,
+	Css,
 }
 
 @(private)
@@ -44,13 +45,14 @@ Value_Fn :: #type proc(x: ^Machine, b: ^Builtin, input: query.Value, args: []que
 
 @(private)
 Builtin :: struct {
-	name:   string,
-	arity:  u8,
-	kind:   Builtin_Kind,
-	op:     Builtin_Op,
-	native: bool, // the native evaluator runs it: a value builtin, or a filter one it knows
-	fn:     Value_Fn,
-	types:  bit_set[query.Type], // a kind filter's
+	name:        string,
+	arity:       u8,
+	kind:        Builtin_Kind,
+	op:          Builtin_Op,
+	native:      bool, // the native evaluator runs it: a value builtin, or a filter one it knows
+	takes_input: bool, // consumes `input` by move (preserving `rc == 1` for in-place COW mutation)
+	fn:          Value_Fn,
+	types:       bit_set[query.Type], // a kind filter's
 }
 
 // The builtin `name/arity`, nil for none.
@@ -116,8 +118,8 @@ BUILTINS := [?]Builtin {
 	{name = "trim", arity = 0, kind = .Value, native = true, fn = v_trim},
 	{name = "ltrim", arity = 0, kind = .Value, native = true, fn = v_trim},
 	{name = "rtrim", arity = 0, kind = .Value, native = true, fn = v_trim},
-	{name = "sort", arity = 0, kind = .Value, native = true, fn = v_sort},
-	{name = "unique", arity = 0, kind = .Value, native = true, fn = v_by},
+	{name = "sort", arity = 0, kind = .Value, native = true, takes_input = true, fn = v_sort},
+	{name = "unique", arity = 0, kind = .Value, native = true, takes_input = true, fn = v_by},
 	{name = "min", arity = 0, kind = .Value, native = true, fn = v_by},
 	{name = "max", arity = 0, kind = .Value, native = true, fn = v_by},
 	{name = "isinfinite", arity = 0, kind = .Value, native = true, fn = v_number_class},
@@ -192,8 +194,8 @@ BUILTINS := [?]Builtin {
 	{name = "strftime", arity = 1, kind = .Value, native = true, fn = v_time},
 	{name = "strflocaltime", arity = 1, kind = .Value, native = true, fn = v_time},
 	{name = "strptime", arity = 1, kind = .Value, native = true, fn = v_time},
-	{name = "delpaths", arity = 1, kind = .Value, native = true, fn = v_delpaths},
-	{name = "setpath", arity = 2, kind = .Value, native = true, fn = v_setpath},
+	{name = "delpaths", arity = 1, kind = .Value, native = true, takes_input = true, fn = v_delpaths},
+	{name = "setpath", arity = 2, kind = .Value, native = true, takes_input = true, fn = v_setpath},
 	{name = "pow", arity = 2, kind = .Value, native = true, fn = v_math},
 	{name = "atan2", arity = 2, kind = .Value, native = true, fn = v_math},
 	{name = "fmod", arity = 2, kind = .Value, native = true, fn = v_math},
@@ -214,9 +216,9 @@ BUILTINS := [?]Builtin {
 	{name = "fma", arity = 3, kind = .Value, native = true, fn = v_math},
 	{name = "fromrfc3339", kind = .Value, native = true, fn = v_time},
 	{name = "torfc3339", kind = .Value, native = true, fn = v_time},
-	{name = "_sort_by_impl", arity = 1, kind = .Value, native = true, fn = v_by},
-	{name = "_group_by_impl", arity = 1, kind = .Value, native = true, fn = v_by},
-	{name = "_unique_by_impl", arity = 1, kind = .Value, native = true, fn = v_by},
+	{name = "_sort_by_impl", arity = 1, kind = .Value, native = true, takes_input = true, fn = v_by},
+	{name = "_group_by_impl", arity = 1, kind = .Value, native = true, takes_input = true, fn = v_by},
+	{name = "_unique_by_impl", arity = 1, kind = .Value, native = true, takes_input = true, fn = v_by},
 	{name = "_min_by_impl", arity = 1, kind = .Value, native = true, fn = v_by},
 	{name = "_max_by_impl", arity = 1, kind = .Value, native = true, fn = v_by},
 	{name = "_flatten", arity = 1, kind = .Value, native = true, fn = v_flatten},
@@ -257,7 +259,7 @@ BUILTINS := [?]Builtin {
 	{name = "ip_in_cidr", arity = 1, kind = .Value, native = true, fn = v_address},
 	{name = "_pointer_tokens", arity = 1, kind = .Value, native = true, fn = v_pointer},
 	{name = "_pointer_index", kind = .Value, native = true, fn = v_pointer},
-	{name = "_css_paths", arity = 1, kind = .Value, native = true, fn = v_css_paths},
+	{name = "css", arity = 1, kind = .Generator, op = .Css},
 }
 
 // What jq 1.8.2 writes in jq itself (src/builtin.jq), each definition reached only when a program calls it.
@@ -328,7 +330,6 @@ def tostream:
   path(def r: (.[]?|r), .; r) as $p |
   getpath($p) |
   reduce path(.[]?) as $q ([$p, .]; [$p+$q]);
-def toarray: if type == "array" then . else [.] end;
 def map_values(f): .[] |= f;
 def recurse(f; cond): def r: ., (f | select(cond) | r); r;
 def finites: select(type == "number" and (isinfinite | not));
@@ -399,7 +400,6 @@ def stddev(f): map(f) | stddev;
 def median(f): map(f) | median;
 def quantile($p; f): map(f) | quantile($p);
 def frequency(f): map(f) | frequency;
-def _pointer_walk($t; $i): if $i == ($t | length) then . else (if type == "array" then .[($t[$i] | _pointer_index) // length] else .[$t[$i]] end | _pointer_walk($t; $i + 1)) end;
+def _pointer_walk($t; $i): if $i == ($t | length) then . else (if type == "array" then ($t[$i] | _pointer_index) as $k | if $k == null then null else .[$k] end else .[$t[$i]] end | _pointer_walk($t; $i + 1)) end;
 def json_pointer($p): _pointer_walk(_pointer_tokens($p); 0);
-def css($s): _css_paths($s)[] as $p | getpath($p);
 `

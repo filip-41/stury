@@ -76,25 +76,35 @@ text_borrowed :: #force_inline proc "contextless" (s: string) -> Value {
 	return {s = raw_data(s), n = u32(len(s)), kind = .String}
 }
 
+@(private)
+BLOCK_HAS_HELD :: u8(1)
+@(private)
+BLOCK_HAS_CONTAINER :: u8(2)
+
 // The header of every block a value holds.
 Block :: struct {
-	rc:    u32,
-	class: u8, // its size class in the heap, `DIRECT` for one allocated on its own
-	_:     [3]u8,
+	rc:        u32,
+	class:     u8, // its size class in the heap, `DIRECT` for one allocated on its own
+	flags:     u8, // `BLOCK_HAS_HELD`, `BLOCK_HAS_CONTAINER` for containers
+	slot_log2: u8, // for `Object_Block`: log2(slot_count), 0 when no table
+	_:         u8,
 }
 
+@(private)
 Str_Block :: struct {
 	using block: Block,
 	cap:         u32, // the bytes after the header
 	_:           u32,
 }
 
+@(private)
 Big_Block :: struct {
 	using block: Block,
 	value:       big.Int,
 }
 
 // A built array's elements follow its header.
+@(private)
 Array_Block :: struct {
 	using block: Block,
 	next:        ^Block, // the next block of the heap's list of blocks being freed
@@ -103,13 +113,34 @@ Array_Block :: struct {
 
 // A built object's entries follow its header, in insertion order, with no key twice. Past `SMALL_ENTRIES` entries a
 // table of `slots` finds a key: each slot is an entry's index plus one, 0 for none, at most half full.
+// `next_or_slots` holds `[^]u32` while alive (`slot_log2 > 0`) and `^Block` while on `Heap.dying` (after slots are freed).
+@(private)
 Object_Block :: struct {
-	using block: Block,
-	next:        ^Block,
-	len, cap:    u32,
-	slots:       [^]u32,
-	slot_count:  u32,
-	_:           u32,
+	using block:   Block,
+	next_or_slots: rawptr,
+	len, cap:      u32,
+}
+#assert(size_of(Object_Block) == 24 when size_of(rawptr) == 8 else size_of(Object_Block) == 20)
+
+@(private)
+object_slots :: #force_inline proc "contextless" (o: ^Object_Block) -> [^]u32 {
+	return ([^]u32)(o.next_or_slots) if o.slot_log2 != 0 else nil
+}
+
+@(private)
+object_slot_count :: #force_inline proc "contextless" (o: ^Object_Block) -> u32 {
+	return u32(1) << o.slot_log2 if o.slot_log2 != 0 else 0
+}
+
+@(private)
+free_object_slots :: #force_inline proc(h: ^Heap, o: ^Object_Block) {
+	if o.slot_log2 != 0 {
+		bytes := (u64(1) << o.slot_log2) * size_of(u32)
+		runtime.mem_free_with_size(o.next_or_slots, int(bytes), h.allocator)
+		h.used -= bytes
+		o.next_or_slots = nil
+		o.slot_log2 = 0
+	}
 }
 
 Entry :: struct {
@@ -125,10 +156,11 @@ Doc_Block :: struct {
 }
 
 // The most entries an object finds a key in by comparing each.
+@(private)
 SMALL_ENTRIES :: 8
 
 // The block sizes the heap keeps free lists of: 16-byte steps to 256, then doubling to 64 KiB.
-@(private)
+@(private, rodata)
 CLASS_SIZES := [?]u32{
 	16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256,
 	512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
@@ -355,6 +387,7 @@ counted_proc :: proc(
 }
 
 // The bytes a block of `size` takes, past which it is moved to grow.
+@(private)
 block_room :: #force_inline proc "contextless" (size: int) -> int {
 	class := size_class(size)
 	return int(CLASS_SIZES[class]) if class != DIRECT else size
@@ -393,6 +426,7 @@ free_block :: proc(h: ^Heap, b: ^Block, size: int) #no_bounds_check {
 }
 
 // The block value `v` holds, nil for none.
+@(private)
 block_of :: #force_inline proc "contextless" (v: Value) -> ^Block {
 	if !v.held {
 		return nil
@@ -430,6 +464,9 @@ unique :: #force_inline proc "contextless" (v: Value) -> bool {
 // Frees block `b` of kind `kind` and every block only it held, with no recursion: containers wait on `Heap.dying`.
 @(private)
 free_tree :: #force_no_inline proc(h: ^Heap, kind: Kind, b: ^Block) #no_bounds_check {
+	if free_flat(h, kind, b) {
+		return
+	}
 	free_one(h, kind, b)
 	for h.dying != nil {
 		c := h.dying
@@ -443,16 +480,12 @@ free_tree :: #force_no_inline proc(h: ^Heap, kind: Kind, b: ^Block) #no_bounds_c
 			free_block(h, c, array_size(int(a.cap)))
 		} else {
 			o := (^Object_Block)(c)
-			h.dying = o.next
+			h.dying = (^Block)(o.next_or_slots)
 			for e in object_entries(o) {
 				drop_child(h, e.key)
 				drop_child(h, e.value)
 			}
 			c.class = o_class(o)
-			if o.slots != nil {
-				runtime.mem_free_with_size(o.slots, int(o.slot_count) * size_of(u32), h.allocator)
-				h.used -= u64(o.slot_count) * size_of(u32)
-			}
 			free_block(h, c, object_size(int(o.cap)))
 		}
 	}
@@ -484,40 +517,40 @@ drop_child :: #force_inline proc(h: ^Heap, v: Value) {
 	}
 }
 
-// Frees container block `b` at once when none of its children is a container, false for any other block. A container
-// of scalars, the common child, is then read once and in place instead of waiting on `Heap.dying`.
+// Frees container block `b` at once when none of its children is a container, false for any other block.
+// Containers holding only unheld scalars skip the child loop completely.
 @(private)
 free_flat :: proc(h: ^Heap, kind: Kind, b: ^Block) -> bool #no_bounds_check {
 	#partial switch kind {
 	case .Array:
 		a := (^Array_Block)(b)
-		items := array_items(a)
-		for x in items {
-			if x.held && x.kind >= .Array {
-				return false
-			}
+		if b.flags & BLOCK_HAS_HELD == 0 {
+			free_block(h, b, array_size(int(a.cap)))
+			return true
 		}
-		for x in items {
+		if b.flags & BLOCK_HAS_CONTAINER != 0 {
+			return false
+		}
+		for x in array_items(a) {
 			drop_scalar(h, x)
 		}
 		free_block(h, b, array_size(int(a.cap)))
 		return true
 	case .Object:
 		o := (^Object_Block)(b)
-		entries := object_entries(o)
-		for e in entries {
-			if e.value.held && e.value.kind >= .Array {
-				return false
-			}
+		if b.flags & BLOCK_HAS_HELD == 0 {
+			free_object_slots(h, o)
+			free_block(h, b, object_size(int(o.cap)))
+			return true
 		}
-		for e in entries {
+		if b.flags & BLOCK_HAS_CONTAINER != 0 {
+			return false
+		}
+		for e in object_entries(o) {
 			drop_scalar(h, e.key)
 			drop_scalar(h, e.value)
 		}
-		if o.slots != nil {
-			runtime.mem_free_with_size(o.slots, int(o.slot_count) * size_of(u32), h.allocator)
-			h.used -= u64(o.slot_count) * size_of(u32)
-		}
+		free_object_slots(h, o)
 		free_block(h, b, object_size(int(o.cap)))
 		return true
 	}
@@ -554,9 +587,10 @@ free_one :: proc(h: ^Heap, kind: Kind, b: ^Block) {
 		h.dying = b
 	case .Object:
 		o := (^Object_Block)(b)
+		free_object_slots(h, o)
 		o.rc = u32(b.class) << 24
 		b.class = DYING_OBJECT
-		o.next = h.dying
+		o.next_or_slots = h.dying
 		h.dying = b
 	case .Node:
 		d := (^Doc_Block)(b)
@@ -575,16 +609,19 @@ document_value :: proc(h: ^Heap, doc: tape.Document, owned: bool) -> (res: Value
 	b := alloc_block(h, size_of(Doc_Block)) or_return
 	d := (^Doc_Block)(b)
 	d.doc, d.owned = doc, owned
-	d.index = {allocator = h.allocator}
+	d.index = {allocator = heap_allocator(h)}
 	whole := Value{p = d, n = u32(tape.ROOT), kind = .Node, held = true}
-	if len(doc.nodes) == 0 {
+	root_idx, p := tape.root(reader(d))
+	note_presence(h, p)
+	if p != .Found {
 		release(h, whole)
 		return ABSENT, .Ok
 	}
-	if k := doc.nodes[tape.ROOT].kind; k != .Array && k != .Object {
+	whole.n = u32(root_idx)
+	if k := doc.nodes[root_idx].kind; k != .Array && k != .Object {
 		// A scalar root is the value it reads as, a text decoded, like every scalar a container gives.
 		defer release(h, whole)
-		return node_value(h, d, tape.ROOT)
+		return node_value(h, d, root_idx)
 	}
 	return whole, .Ok
 }

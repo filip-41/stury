@@ -31,6 +31,7 @@ Shape :: struct {
 	n:    int,
 }
 
+@(private)
 Ordering :: struct {
 	h:      ^Heap,
 	coll:   Collation,
@@ -45,7 +46,7 @@ Ordering :: struct {
 }
 
 // Prepares `by` for `ordering_compare`, `by[i]` being value `i`. `by` outlives the ordering and is not changed.
-@(require_results)
+@(private, require_results)
 ordering_init :: proc(h: ^Heap, by: []Value, coll: Collation) -> (o: Ordering, status: Status) {
 	o = {h = h, coll = coll, by = by}
 	has_object := false
@@ -58,14 +59,20 @@ ordering_init :: proc(h: ^Heap, by: []Value, coll: Collation) -> (o: Ordering, s
 	if !has_object {
 		return o, .Ok
 	}
-	o.forms = make([]Form, len(by), h.allocator)
+	alloc := heap_allocator(h)
+	o.pool.allocator = alloc
+	o.nest.allocator = alloc
+	o.subs.allocator = alloc
+	o.names.allocator = alloc
+	o.shapes.allocator = alloc
+	o.forms = make([]Form, len(by), alloc)
 	if o.forms == nil {
 		return o, fail_memory(h)
 	}
 	defer if status != .Ok {
 		ordering_destroy(&o)
 	}
-	entries := make([dynamic]Entry, 0, 16, h.allocator)
+	entries := make([dynamic]Entry, 0, 16, alloc)
 	defer delete(entries)
 	for v, i in by {
 		obj, ok := object_of(v)
@@ -81,25 +88,30 @@ ordering_init :: proc(h: ^Heap, by: []Value, coll: Collation) -> (o: Ordering, s
 	return o, .Ok
 }
 
+@(private)
 ordering_destroy :: proc(o: ^Ordering) {
+	if o.h == nil {
+		return
+	}
 	for v in o.pool {
 		release(o.h, v)
 	}
 	for v in o.names {
 		release(o.h, v)
 	}
-	delete(o.forms, o.h.allocator)
+	alloc := heap_allocator(o.h)
+	delete(o.forms, alloc)
 	delete(o.pool)
 	delete(o.nest)
 	delete(o.subs)
 	delete(o.names)
 	delete(o.shapes)
-	delete(o.table, o.h.allocator)
+	delete(o.table, alloc)
 	o^ = {}
 }
 
 // The order of values `i` and `j` of the ordering's `by`: -1, 0 or 1.
-@(require_results)
+@(private, require_results)
 ordering_compare :: proc(o: ^Ordering, i, j: int) -> (res: int, status: Status) #no_bounds_check {
 	if len(o.forms) > 0 {
 		x, y := o.forms[i], o.forms[j]
@@ -132,7 +144,7 @@ compare_forms :: proc(o: ^Ordering, x, y: Form, above: int) -> (res: int, status
 	}
 	xs, ys := o.pool[x.at:][:x.n], o.pool[y.at:][:y.n]
 	for k in 0 ..< len(xs) {
-		r, open := compare_head(xs[k], ys[k], o.coll)
+		r, open := compare_head(o.h, xs[k], ys[k], o.coll)
 		if open {
 			r = compare_members(o, int(x.at) + k, int(y.at) + k, above) or_return
 		}
@@ -248,6 +260,9 @@ scalar_form :: proc(h: ^Heap, v: Value) -> Value {
 	#partial switch t.kind {
 	case .Number:
 		r := settle(v)
+		if r.kind == .Node {
+			return v
+		}
 		release(h, v)
 		return r
 	case .String, .Plain:
@@ -299,7 +314,8 @@ same_keys :: proc(names: []Value, entries: []Entry) -> bool {
 // Doubles the table of shapes, from 16 slots, and files the shapes again.
 @(private)
 grow_shapes :: proc(o: ^Ordering) -> Status {
-	table := make([]u32, max(16, 2 * len(o.table)), o.h.allocator)
+	alloc := heap_allocator(o.h)
+	table := make([]u32, max(16, 2 * len(o.table)), alloc)
 	if table == nil {
 		return fail_memory(o.h)
 	}
@@ -311,7 +327,7 @@ grow_shapes :: proc(o: ^Ordering) -> Status {
 		}
 		table[at] = u32(i + 1)
 	}
-	delete(o.table, o.h.allocator)
+	delete(o.table, alloc)
 	o.table = table
 	return .Ok
 }
@@ -320,11 +336,12 @@ grow_shapes :: proc(o: ^Ordering) -> Status {
 @(private)
 rank_shapes :: proc(o: ^Ordering) -> Status {
 	n := len(o.shapes)
-	ids := make([]u32, 2 * n, o.h.allocator)
-	if ids == nil {
+	alloc := heap_allocator(o.h)
+	ids := make([]u32, 2 * n, alloc)
+	if ids == nil && n > 0 {
 		return fail_memory(o.h)
 	}
-	defer delete(ids, o.h.allocator)
+	defer delete(ids, alloc)
 	sorted, rank := ids[:n], ids[n:]
 	for i in 0 ..< n {
 		sorted[i] = u32(i)

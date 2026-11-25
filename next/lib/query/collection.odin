@@ -11,19 +11,24 @@ keys_of :: proc(h: ^Heap, v: Value, sorted := true) -> (res: Value, status: Stat
 	case .Array:
 		n := length_of(h, v)
 		out := make_array(h, n) or_return
+		defer if status != .Ok {
+			release(h, out)
+		}
 		for i in 0 ..< n {
 			append_owned(h, &out, int_value(i64(i))) or_return
 		}
 		return out, .Ok
 	case .Object:
 		out := make_array(h, length_of(h, v)) or_return
+		defer if status != .Ok {
+			release(h, out)
+		}
 		c := cursor_open(h, v) or_return
 		defer cursor_close(&c)
 		for {
 			k, x, more, s := cursor_next(h, &c)
 			release(h, x)
 			if s != .Ok {
-				release(h, out)
 				return NULL, s
 			}
 			if !more {
@@ -220,7 +225,10 @@ flatten :: proc(h: ^Heap, v: Value, depth: int) -> (res: Value, status: Status) 
 		depth: int,
 	}
 	out := make_array(h, length_of(h, v)) or_return
-	stack := make([dynamic]Level, 0, 8, h.allocator)
+	defer if status != .Ok {
+		release(h, out)
+	}
+	stack := make([dynamic]Level, 0, 8, heap_allocator(h))
 	defer {
 		for &l in stack {
 			cursor_close(&l.c)
@@ -229,13 +237,16 @@ flatten :: proc(h: ^Heap, v: Value, depth: int) -> (res: Value, status: Status) 
 		delete(stack)
 	}
 	c := cursor_open(h, v) or_return
-	append(&stack, Level{c, retain(v), depth})
+	if _, err := append(&stack, Level{c, retain(v), depth}); err != nil {
+		cursor_close(&c)
+		release(h, v)
+		return NULL, fail_memory(h)
+	}
 	for len(stack) > 0 {
 		top := &stack[len(stack) - 1]
 		key, x, more, s := cursor_next(h, &top.c)
 		release(h, key)
 		if s != .Ok {
-			release(h, out)
 			return NULL, s
 		}
 		if !more {
@@ -249,10 +260,13 @@ flatten :: proc(h: ^Heap, v: Value, depth: int) -> (res: Value, status: Status) 
 			xc, xs := cursor_open(h, x)
 			if xs != .Ok {
 				release(h, x)
-				release(h, out)
 				return NULL, xs
 			}
-			append(&stack, Level{xc, x, d})
+			if _, err := append(&stack, Level{xc, x, d}); err != nil {
+				cursor_close(&xc)
+				release(h, x)
+				return NULL, fail_memory(h)
+			}
 			continue
 		}
 		append_owned(h, &out, x) or_return
@@ -261,15 +275,29 @@ flatten :: proc(h: ^Heap, v: Value, depth: int) -> (res: Value, status: Status) 
 }
 
 // The elements of array `v`, each with its sort key: the key itself when `keys` is nil.
+// When `move` is true, takes ownership of `v` (releasing it on error), preserving `rc == 1` for in-place element moves.
 @(private)
-keyed :: proc(h: ^Heap, v, keys: Value) -> (xs, ks: Value, status: Status) {
+keyed :: proc(h: ^Heap, v, keys: Value, move := false) -> (xs, ks: Value, status: Status) {
 	if type_of(v) != .Array {
+		if move {
+			release(h, v)
+		}
 		return NULL, NULL, fail(h, .Types, .Sort, v)
 	}
-	xs = built(h, v) or_return
-	ks = retain(xs)
-	if keys.kind != .Absent {
-		release(h, ks)
+	if move && v.kind == .Array {
+		xs = v
+	} else {
+		xs, status = built(h, v)
+		if move {
+			release(h, v)
+		}
+		if status != .Ok {
+			return NULL, NULL, status
+		}
+	}
+	if keys.kind == .Absent {
+		ks = retain(xs)
+	} else {
 		ks, status = built(h, keys)
 		if status != .Ok {
 			release(h, xs)
@@ -283,51 +311,81 @@ keyed :: proc(h: ^Heap, v, keys: Value) -> (xs, ks: Value, status: Status) {
 // before.
 @(private)
 key_order :: proc(h: ^Heap, xs, ks: Value, coll: Collation, ties: []bool = nil) -> (order: []int, status: Status) {
+	alloc := heap_allocator(h)
 	n := len(items_of(xs))
-	order = make([]int, n, h.allocator)
-	idx := make([]Value, 2 * n, h.allocator)
-	defer delete(idx, h.allocator)
-	for i in 0 ..< n {
-		idx[i] = int_value(i64(i))
+	order = make([]int, n, alloc)
+	if order == nil && n > 0 {
+		return nil, fail_memory(h)
 	}
-	// The keys sort with the indexes, in a copy, as they may be the elements themselves.
-	keys := idx[n:]
-	copy(keys, items_of(ks))
+	if n < 2 {
+		if n == 1 {
+			order[0] = 0
+		}
+		return order, .Ok
+	}
+	raw_keys := items_of(ks)
 	// One-element arrays order as their elements, so a scalar wrapped in an array sorts by the scalar alone.
 	wrapped := true
-	for k in keys {
+	for k in raw_keys {
 		if k.kind != .Array || len(items_of(k)) != 1 || items_of(k)[0].kind >= .Array {
 			wrapped = false
 			break
 		}
 	}
+	by := raw_keys
+	unwrapped: []Value
 	if wrapped {
-		for &k in keys {
-			k = items_of(k)[0]
+		unwrapped = make([]Value, n, alloc)
+		if unwrapped == nil {
+			delete(order, alloc)
+			return nil, fail_memory(h)
 		}
+		for k, i in raw_keys {
+			unwrapped[i] = items_of(k)[0]
+		}
+		by = unwrapped
 	}
-	if s := sort_values(h, idx[:n], keys, coll, ties = ties); s != .Ok {
-		delete(order, h.allocator)
+	defer delete(unwrapped, alloc)
+	if s := order_values(h, by, order, coll, ties = ties); s != .Ok {
+		delete(order, alloc)
 		return nil, s
-	}
-	for x, i in idx[:n] {
-		order[i] = int(x.i)
 	}
 	return order, .Ok
 }
 
 // Array `v` sorted by its elements, or by `keys`, one per element; stable.
 @(require_results)
-sort_by :: proc(h: ^Heap, v: Value, keys := ABSENT, coll := JSON_ORDER) -> (res: Value, status: Status) {
-	xs, ks := keyed(h, v, keys) or_return
+sort_by :: proc(h: ^Heap, v: Value, keys := ABSENT, coll := JSON_ORDER, move := false) -> (res: Value, status: Status) {
+	xs, ks := keyed(h, v, keys, move) or_return
 	defer release(h, xs)
-	defer release(h, ks)
-	order := key_order(h, xs, ks, coll) or_return
-	defer delete(order, h.allocator)
+	order, os := key_order(h, xs, ks, coll)
+	release(h, ks)
+	if os != .Ok {
+		return NULL, os
+	}
+	defer delete(order, heap_allocator(h))
 	out := make_array(h, len(order)) or_return
+	defer if status != .Ok {
+		release(h, out)
+	}
 	items := items_of(xs)
-	for i in order {
-		append_owned(h, &out, retain(items[i])) or_return
+	dst := (^Array_Block)(out.p)
+	raw_dst := ([^]Value)(uintptr(dst) + size_of(Array_Block))
+	if unique(xs) {
+		for i, k in order {
+			raw_dst[k] = items[i]
+		}
+		dst.len = u32(len(order))
+		src_blk := (^Array_Block)(xs.p)
+		dst.flags = src_blk.flags
+		src_blk.len = 0
+		src_blk.flags = 0
+	} else {
+		for i, k in order {
+			raw_dst[k] = retain(items[i])
+		}
+		dst.len = u32(len(order))
+		dst.flags = (^Array_Block)(xs.p).flags
 	}
 	return out, .Ok
 }
@@ -341,60 +399,94 @@ Run_Pick :: enum u8 {
 
 // Array `v` in runs of equal keys, by `keys` or by its elements, in key order: each run, its first or its last element.
 @(require_results)
-runs_by :: proc(h: ^Heap, v: Value, keys: Value, pick: Run_Pick, coll := JSON_ORDER) -> (res: Value, status: Status) {
-	xs, ks := keyed(h, v, keys) or_return
+runs_by :: proc(h: ^Heap, v: Value, keys: Value, pick: Run_Pick, coll := JSON_ORDER, move := false) -> (res: Value, status: Status) {
+	xs, ks := keyed(h, v, keys, move) or_return
 	defer release(h, xs)
-	defer release(h, ks)
+	alloc := heap_allocator(h)
 	items := items_of(xs)
-	ties := make([]bool, len(items), h.allocator)
-	defer delete(ties, h.allocator)
+	ties := make([]bool, len(items), alloc)
+	defer delete(ties, alloc)
 	if len(ties) != len(items) {
+		release(h, ks)
 		return NULL, fail_memory(h)
 	}
-	order := key_order(h, xs, ks, coll, ties) or_return
-	defer delete(order, h.allocator)
-	out := make_array(h, 0) or_return
-	run := NULL
-	defer if status != .Ok {
-		release(h, out)
-		release(h, run)
+	order, os := key_order(h, xs, ks, coll, ties)
+	release(h, ks)
+	if os != .Ok {
+		return NULL, os
 	}
-	for i, at in order {
-		same := ties[at]
-		switch pick {
-		case .Group:
-			if !same {
-				if at > 0 {
-					move_run(h, &out, &run) or_return
-				}
-				run = make_array(h, 1) or_return
-			}
-			append_owned(h, &run, retain(items[i])) or_return
-		case .First:
-			if !same {
-				append_owned(h, &out, retain(items[i])) or_return
-			}
-		case .Last:
-			if same {
-				release(h, run)
-			} else if at > 0 {
-				move_run(h, &out, &run) or_return
-			}
-			run = retain(items[i])
+	defer delete(order, alloc)
+	if len(order) == 0 {
+		return make_array(h, 0)
+	}
+	groups := 1
+	for k in 1 ..< len(ties) {
+		if !ties[k] {
+			groups += 1
 		}
 	}
-	if pick != .First && len(order) > 0 {
-		move_run(h, &out, &run) or_return
+	out := make_array(h, groups) or_return
+	defer if status != .Ok {
+		release(h, out)
+	}
+	can_move := unique(xs)
+	src_blk := (^Array_Block)(xs.p)
+	switch pick {
+	case .Group:
+		at := 0
+		for at < len(order) {
+			end := at + 1
+			for end < len(order) && ties[end] {
+				end += 1
+			}
+			g_len := end - at
+			run := make_array(h, g_len) or_return
+			rblk := (^Array_Block)(run.p)
+			rdst := ([^]Value)(uintptr(rblk) + size_of(Array_Block))
+			if can_move {
+				for k in 0 ..< g_len {
+					rdst[k] = items[order[at + k]]
+				}
+			} else {
+				for k in 0 ..< g_len {
+					rdst[k] = retain(items[order[at + k]])
+				}
+			}
+			rblk.len = u32(g_len)
+			rblk.flags = src_blk.flags
+			append_owned(h, &out, run) or_return
+			at = end
+		}
+		if can_move {
+			src_blk.len = 0
+			src_blk.flags = 0
+		}
+	case .First:
+		for i, at in order {
+			if !ties[at] {
+				if can_move {
+					x := items[i]
+					items[i] = NULL
+					append_owned(h, &out, x) or_return
+				} else {
+					append_owned(h, &out, retain(items[i])) or_return
+				}
+			}
+		}
+	case .Last:
+		for i, at in order {
+			if at + 1 == len(order) || !ties[at + 1] {
+				if can_move {
+					x := items[i]
+					items[i] = NULL
+					append_owned(h, &out, x) or_return
+				} else {
+					append_owned(h, &out, retain(items[i])) or_return
+				}
+			}
+		}
 	}
 	return out, .Ok
-}
-
-// Appends `run^` to `out^`, leaving `run^` null whether it fails or not.
-@(private)
-move_run :: proc(h: ^Heap, out, run: ^Value) -> Status {
-	x := run^
-	run^ = NULL
-	return append_owned(h, out, x)
 }
 
 // The least element of array `v` by `keys` or by itself, the first of equals; the greatest, the last of equals. Null
@@ -429,12 +521,20 @@ group_ids :: proc(h: ^Heap, keys: []Value) -> (ids: []int, groups: int, status: 
 	for size < 2 * n {
 		size *= 2
 	}
+	alloc := heap_allocator(h)
 	ids = make([]int, n, h.allocator)
+	if ids == nil && n > 0 {
+		return nil, 0, fail_memory(h)
+	}
 	// A slot holds the index plus one of the first key of a group, 0 for none.
-	slots := make([]int, size, h.allocator)
-	defer delete(slots, h.allocator)
-	hashes := make([]u64, n, h.allocator)
-	defer delete(hashes, h.allocator)
+	slots := make([]int, size, alloc)
+	defer delete(slots, alloc)
+	hashes := make([]u64, n, alloc)
+	defer delete(hashes, alloc)
+	if slots == nil || (hashes == nil && n > 0) {
+		delete(ids, h.allocator)
+		return nil, 0, fail_memory(h)
+	}
 	for k, i in keys {
 		s: Status
 		hashes[i], s = hash(h, k)

@@ -54,39 +54,57 @@ v_modulemeta :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Val
 		}
 		return query.NULL, .Ok
 	}
-	meta := module_meta(&u, prog) or_return
-	out := make([dynamic]u8)
-	if s := query.write_json(&u.heap, &out, meta); s != .Ok {
-		query.clear_error(&u.heap)
-		return query.NULL, s
-	}
-	return read_json(m, string(out[:]))
+	return module_meta(m.h, prog)
 }
 
-// `prog`'s metadata object with `deps` and `defs` added, in the unit's heap.
+// `prog`'s metadata object with `deps` and `defs` added, copied directly into `h`.
 @(private = "file")
-module_meta :: proc(u: ^Unit, prog: Parsed) -> (meta: query.Value, status: query.Status) {
-	h := &u.heap
+module_meta :: proc(h: ^query.Heap, prog: Parsed) -> (meta: query.Value, status: query.Status) {
 	meta = query.make_object(h, 4) or_return
+	defer if status != .Ok {
+		query.release(h, meta)
+	}
 	if prog.meta.kind == .Object {
 		for e in query.entries_of(prog.meta) {
-			query.object_put(h, &meta, e.key, query.retain(e.value)) or_return
+			k := query.text_value(h, query.text_of(e.key)) or_return
+			v, vs := query.built_deep(h, e.value)
+			if vs != .Ok {
+				query.release(h, k)
+				return query.NULL, vs
+			}
+			query.object_put(h, &meta, k, v) or_return
 		}
 	}
 	deps := query.make_array(h, len(prog.deps)) or_return
 	for d in prog.deps {
-		query.append_owned(h, &deps, d) or_return
+		v, vs := query.built_deep(h, d)
+		if vs != .Ok {
+			query.release(h, deps)
+			return query.NULL, vs
+		}
+		if s := query.append_owned(h, &deps, v); s != .Ok {
+			query.release(h, deps)
+			return query.NULL, s
+		}
 	}
+	query.object_put(h, &meta, query.text_borrowed("deps"), deps) or_return
 	defs := query.make_array(h, 4) or_return
 	seen := make(map[string]bool)
 	for d := prog.defs; d != nil; d = d.a {
 		sig := fmt.aprintf("%s/%d", d.fn.name, len(d.fn.params))
 		if !seen[sig] {
 			seen[sig] = true
-			query.append_owned(h, &defs, query.text_value(h, sig) or_return) or_return
+			t, ts := query.text_value(h, sig)
+			if ts != .Ok {
+				query.release(h, defs)
+				return query.NULL, ts
+			}
+			if s := query.append_owned(h, &defs, t); s != .Ok {
+				query.release(h, defs)
+				return query.NULL, s
+			}
 		}
 	}
-	query.object_put(h, &meta, query.text_borrowed("deps"), deps) or_return
 	query.object_put(h, &meta, query.text_borrowed("defs"), defs) or_return
 	return meta, .Ok
 }

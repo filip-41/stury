@@ -17,10 +17,12 @@ object_size :: #force_inline proc "contextless" (cap: int) -> int {
 	return size_of(Object_Block) + cap * size_of(Entry)
 }
 
+@(private)
 array_items :: #force_inline proc "contextless" (a: ^Array_Block) -> []Value {
 	return ([^]Value)(uintptr(a) + size_of(Array_Block))[:a.len]
 }
 
+@(private)
 object_entries :: #force_inline proc "contextless" (o: ^Object_Block) -> []Entry {
 	return ([^]Entry)(uintptr(o) + size_of(Object_Block))[:o.len]
 }
@@ -93,7 +95,7 @@ make_object :: proc(h: ^Heap, cap: int) -> (res: Value, status: Status) {
 	size := block_room(object_size(max(cap, 1)))
 	b := alloc_block(h, size) or_return
 	o := (^Object_Block)(b)
-	o.next, o.len, o.cap, o.slots, o.slot_count = nil, 0, u32((size - size_of(Object_Block)) / size_of(Entry)), nil, 0
+	o.next_or_slots, o.len, o.cap = nil, 0, u32((size - size_of(Object_Block)) / size_of(Entry))
 	return {p = o, kind = .Object, held = true}, .Ok
 }
 
@@ -122,6 +124,7 @@ own_array :: proc(h: ^Heap, a: ^Value, more: int) -> Status {
 	items := array_items(old)
 	runtime.mem_copy_non_overlapping(rawptr(uintptr(x) + size_of(Array_Block)), raw_data(items), n * size_of(Value))
 	x.len = u32(n)
+	x.flags = old.flags
 	if unique(a^) {
 		// The elements move: the old block is freed without giving them up.
 		free_block(h, block_of(a^), array_size(int(old.cap)))
@@ -148,6 +151,12 @@ append_owned :: proc(h: ^Heap, a: ^Value, x: Value) -> Status #no_bounds_check {
 	}
 	([^]Value)(uintptr(b) + size_of(Array_Block))[b.len] = x
 	b.len += 1
+	if x.held {
+		b.flags |= BLOCK_HAS_HELD
+	}
+	if x.kind >= .Array {
+		b.flags |= BLOCK_HAS_CONTAINER
+	}
 	return .Ok
 }
 
@@ -169,6 +178,12 @@ array_put :: proc(h: ^Heap, a: ^Value, i: int, x: Value) -> Status #no_bounds_ch
 	}
 	items[i] = x
 	b.len = u32(max(n, i + 1))
+	if x.held {
+		b.flags |= BLOCK_HAS_HELD
+	}
+	if x.kind >= .Array {
+		b.flags |= BLOCK_HAS_CONTAINER
+	}
 	return .Ok
 }
 
@@ -203,7 +218,7 @@ note_presence :: #force_inline proc "contextless" (h: ^Heap, p: tape.Presence) {
 
 // The value of node `at` of document block `d`: null and booleans as themselves, a string with an escape decoded into
 // a string of the heap, anything else the node, holding the block.
-@(require_results)
+@(private, require_results)
 node_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) #no_bounds_check {
 	t := d.doc.nodes[at]
 	#partial switch t.kind {
@@ -222,17 +237,18 @@ node_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value,
 	return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
 }
 
-// The text of a key or a string node that holds an escape, decoded into a string of the heap.
+// The value of node `at` inside the document of `d`, retaining `d` when a node value is returned.
+@(require_results)
+node_at :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) {
+	return node_value(h, d, at)
+}
+
+// The text of a document token decoded into a string of the heap.
 @(private)
-decoded_text :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) {
-	t := d.doc.nodes[at]
-	if t.role == .Key && (t.kind == .String || t.kind == .Plain) && !tape.text_decodes(t) {
-		d.rc += 1
-		return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
-	}
-	room := tape.text_room(&d.doc, at)
+token_text_value :: proc(h: ^Heap, d: ^Doc_Block, t: tape.Token) -> (res: Value, status: Status) {
+	room := tape.text_room(&d.doc, t)
 	v, p := make_text(h, room) or_return
-	s, ok := tape.node_text(&d.doc, at, p[:room])
+	s, ok := tape.node_text(&d.doc, t, p[:room])
 	if !ok {
 		release(h, v)
 		return NULL, fail(h, .Parse, .To_Text)
@@ -244,6 +260,17 @@ decoded_text :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Valu
 	}
 	v.n = u32(len(s))
 	return v, .Ok
+}
+
+// The text of a key or a string node that holds an escape, decoded into a string of the heap.
+@(private)
+decoded_text :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) {
+	t := d.doc.nodes[at]
+	if t.role == .Key && (t.kind == .String || t.kind == .Plain) && !tape.text_decodes(t) {
+		d.rc += 1
+		return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
+	}
+	return token_text_value(h, d, t)
 }
 
 // The key of the built object entry or the document member whose key node is `at`, as a string value.
@@ -363,7 +390,8 @@ has_member :: proc(h: ^Heap, v: Value, key: string) -> bool {
 @(private)
 find_key :: proc "contextless" (o: ^Object_Block, key: string) -> int #no_bounds_check {
 	entries := object_entries(o)
-	if o.slots == nil {
+	slots := object_slots(o)
+	if slots == nil {
 		for e, i in entries {
 			if text_of(e.key) == key {
 				return i
@@ -371,9 +399,9 @@ find_key :: proc "contextless" (o: ^Object_Block, key: string) -> int #no_bounds
 		}
 		return -1
 	}
-	mask := o.slot_count - 1
+	mask := object_slot_count(o) - 1
 	for at := u32(hash_text(key)) & mask; ; at = (at + 1) & mask {
-		k := o.slots[at]
+		k := slots[at]
 		if k == 0 {
 			return -1
 		}
@@ -386,18 +414,15 @@ find_key :: proc "contextless" (o: ^Object_Block, key: string) -> int #no_bounds
 // Rebuilds the key table of `o`, which has more than `SMALL_ENTRIES` entries, or drops it.
 @(private)
 index_keys :: proc(h: ^Heap, o: ^Object_Block) -> Status #no_bounds_check {
-	if o.slots != nil {
-		runtime.mem_free_with_size(o.slots, int(o.slot_count) * size_of(u32), h.allocator)
-		h.used -= u64(o.slot_count) * size_of(u32)
-		o.slots, o.slot_count = nil, 0
-	}
+	free_object_slots(h, o)
 	if o.len <= SMALL_ENTRIES {
 		return .Ok
 	}
-	count := u32(16)
-	for count < 2 * o.cap {
-		count <<= 1
+	log2 := u8(4)
+	for (u32(1) << log2) < 2 * o.cap {
+		log2 += 1
 	}
+	count := u32(1) << log2
 	if h.limit != 0 && h.used + u64(count) * size_of(u32) > h.limit {
 		return fail_memory(h)
 	}
@@ -406,7 +431,8 @@ index_keys :: proc(h: ^Heap, o: ^Object_Block) -> Status #no_bounds_check {
 		return fail_memory(h)
 	}
 	h.used += u64(count) * size_of(u32)
-	o.slots, o.slot_count = ([^]u32)(raw_data(mem)), count
+	o.next_or_slots = raw_data(mem)
+	o.slot_log2 = log2
 	for e, i in object_entries(o) {
 		slot_put(o, text_of(e.key), u32(i))
 	}
@@ -415,16 +441,17 @@ index_keys :: proc(h: ^Heap, o: ^Object_Block) -> Status #no_bounds_check {
 
 @(private)
 slot_put :: #force_inline proc "contextless" (o: ^Object_Block, key: string, i: u32) #no_bounds_check {
-	mask := o.slot_count - 1
+	slots := ([^]u32)(o.next_or_slots)
+	mask := (u32(1) << o.slot_log2) - 1
 	at := u32(hash_text(key)) & mask
-	for o.slots[at] != 0 {
+	for slots[at] != 0 {
 		at = (at + 1) & mask
 	}
-	o.slots[at] = i + 1
+	slots[at] = i + 1
 }
 
 // Makes the built object `o^` one the caller alone holds, with room for `more` entries past its length.
-@(require_results)
+@(private, require_results)
 own_object :: proc(h: ^Heap, o: ^Value, more: int) -> Status {
 	old := (^Object_Block)(o.p)
 	n := int(old.len)
@@ -434,17 +461,22 @@ own_object :: proc(h: ^Heap, o: ^Value, more: int) -> Status {
 	cap := n + more
 	if unique(o^) {
 		cap = max(cap, 2 * n)
+		if old.class == DIRECT {
+			b := resize_direct(h, old, object_size(int(old.cap)), object_size(cap)) or_return
+			x := (^Object_Block)(b)
+			x.cap = u32(cap)
+			o.p = x
+			return index_keys(h, x)
+		}
 	}
 	w := make_object(h, cap) or_return
 	x := (^Object_Block)(w.p)
 	entries := object_entries(old)
 	runtime.mem_copy_non_overlapping(rawptr(uintptr(x) + size_of(Object_Block)), raw_data(entries), n * size_of(Entry))
 	x.len = u32(n)
+	x.flags = old.flags
 	if unique(o^) {
-		if old.slots != nil {
-			runtime.mem_free_with_size(old.slots, int(old.slot_count) * size_of(u32), h.allocator)
-			h.used -= u64(old.slot_count) * size_of(u32)
-		}
+		free_object_slots(h, old)
 		free_block(h, block_of(o^), object_size(int(old.cap)))
 	} else {
 		for e in entries {
@@ -464,19 +496,86 @@ own_object :: proc(h: ^Heap, o: ^Value, more: int) -> Status {
 @(require_results)
 object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_bounds_check {
 	b := (^Object_Block)(o.p)
-	k := find_key(b, text_of(key))
+	ks := text_of(key)
+	k := -1
+	empty_slot := u32(0)
+	has_slot := false
+	if slots := object_slots(b); slots != nil {
+		entries := object_entries(b)
+		mask := (u32(1) << b.slot_log2) - 1
+		for at := u32(hash_text(ks)) & mask; ; at = (at + 1) & mask {
+			slot := slots[at]
+			if slot == 0 {
+				empty_slot = at
+				has_slot = true
+				break
+			}
+			if text_of(entries[slot - 1].key) == ks {
+				k = int(slot - 1)
+				break
+			}
+		}
+	} else {
+		for e, i in object_entries(b) {
+			if text_of(e.key) == ks {
+				k = i
+				break
+			}
+		}
+	}
 	if k >= 0 {
 		if s := own_object(h, o, 0); s != .Ok {
 			release(h, key)
 			release(h, x)
 			return s
 		}
-		e := &object_entries((^Object_Block)(o.p))[k]
+		b = (^Object_Block)(o.p)
+		e := &object_entries(b)[k]
 		release(h, e.value)
 		release(h, key)
 		e.value = x
+		if x.held {
+			b.flags |= BLOCK_HAS_HELD
+		}
+		if x.kind >= .Array {
+			b.flags |= BLOCK_HAS_CONTAINER
+		}
 		return .Ok
 	}
+	grew := false
+	if !(unique(o^) && b.len < b.cap) {
+		if s := own_object(h, o, 1); s != .Ok {
+			release(h, key)
+			release(h, x)
+			return s
+		}
+		b = (^Object_Block)(o.p)
+		grew = true
+	}
+	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
+	b.len += 1
+	if key.held || x.held {
+		b.flags |= BLOCK_HAS_HELD
+	}
+	if x.kind >= .Array {
+		b.flags |= BLOCK_HAS_CONTAINER
+	}
+	if b.slot_log2 != 0 {
+		if has_slot && !grew {
+			([^]u32)(b.next_or_slots)[empty_slot] = b.len
+		} else {
+			slot_put(b, ks, b.len - 1)
+		}
+	} else if b.len > SMALL_ENTRIES {
+		return index_keys(h, b)
+	}
+	return .Ok
+}
+
+// Appends member `{key, x}` to the built object `o^` the caller owns when `key` is guaranteed not already present.
+@(require_results)
+object_put_fresh :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_bounds_check {
+	b := (^Object_Block)(o.p)
 	if !(unique(o^) && b.len < b.cap) {
 		if s := own_object(h, o, 1); s != .Ok {
 			release(h, key)
@@ -487,7 +586,13 @@ object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_boun
 	}
 	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
 	b.len += 1
-	if b.slots != nil {
+	if key.held || x.held {
+		b.flags |= BLOCK_HAS_HELD
+	}
+	if x.kind >= .Array {
+		b.flags |= BLOCK_HAS_CONTAINER
+	}
+	if b.slot_log2 != 0 {
 		slot_put(b, text_of(key), b.len - 1)
 	} else if b.len > SMALL_ENTRIES {
 		return index_keys(h, b)
@@ -509,6 +614,56 @@ object_delete :: proc(h: ^Heap, o: ^Value, key: string) -> Status {
 	release(h, entries[k].value)
 	copy(entries[k:b.len - 1], entries[k + 1:b.len])
 	b.len -= 1
+	return index_keys(h, b)
+}
+
+// Removes all members named by `keys` (string values) from the built object `o^` in one pass and rebuilds its index once.
+@(require_results)
+object_delete_many :: proc(h: ^Heap, o: ^Value, keys: []Value) -> Status {
+	if len(keys) == 0 {
+		return .Ok
+	}
+	if len(keys) == 1 {
+		return object_delete(h, o, text_of(keys[0]))
+	}
+	b := (^Object_Block)(o.p)
+	n := int(b.len)
+	if n == 0 {
+		return .Ok
+	}
+	alloc := heap_allocator(h)
+	gone := make([]bool, n, alloc)
+	if gone == nil {
+		return fail_memory(h)
+	}
+	defer delete(gone, alloc)
+	removed := 0
+	for k in keys {
+		idx := find_key(b, text_of(k))
+		if idx >= 0 && !gone[idx] {
+			gone[idx] = true
+			removed += 1
+		}
+	}
+	if removed == 0 {
+		return .Ok
+	}
+	own_object(h, o, 0) or_return
+	b = (^Object_Block)(o.p)
+	entries := ([^]Entry)(uintptr(b) + size_of(Object_Block))
+	w := 0
+	for i in 0 ..< n {
+		if gone[i] {
+			release(h, entries[i].key)
+			release(h, entries[i].value)
+		} else {
+			if w != i {
+				entries[w] = entries[i]
+			}
+			w += 1
+		}
+	}
+	b.len = u32(w)
 	return index_keys(h, b)
 }
 
@@ -576,6 +731,8 @@ cursor_next :: proc(h: ^Heap, c: ^Cursor) -> (key, value: Value, more: bool, s: 
 		}
 		if k != tape.NO_NODE {
 			key = key_value(h, d, k) or_return
+		} else if c.children.keys_n != 0 {
+			key = token_text_value(h, d, tape.cell_key(reader(d), c.children)) or_return
 		}
 		value, s = node_value(h, d, at)
 		if s != .Ok {
@@ -598,7 +755,7 @@ cursor_close :: proc(c: ^Cursor) {
 // A built object of the markup element `v`'s children, a repeated name one member that holds an array of its children
 // in document order, at the place its first came. Each child is still its node. Only this reads a built array among
 // the children, so an array among them is a group.
-@(require_results)
+@(private, require_results)
 grouped :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	d := (^Doc_Block)(v.p)
 	out := make_object(h, length_of(h, v)) or_return
@@ -628,13 +785,14 @@ grouped :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		}
 		i := find_key((^Object_Block)(out.p), text_of(key))
 		if i < 0 {
-			if s = object_put(h, &out, key, x); s != .Ok {
+			if s = object_put_fresh(h, &out, key, x); s != .Ok {
 				return NULL, s
 			}
 			continue
 		}
 		release(h, key)
-		entry := &object_entries((^Object_Block)(out.p))[i]
+		ob := (^Object_Block)(out.p)
+		entry := &object_entries(ob)[i]
 		if entry.value.kind != .Array {
 			first := entry.value
 			entry.value, s = make_array(h, 2)
@@ -643,6 +801,7 @@ grouped :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 				release(h, x)
 				return NULL, s
 			}
+			ob.flags |= BLOCK_HAS_HELD | BLOCK_HAS_CONTAINER
 			if s = append_owned(h, &entry.value, first); s != .Ok {
 				entry.value = NULL
 				release(h, x)
@@ -724,6 +883,9 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		if is_text(x) {
 			return text_value(h, text_of(x))
 		}
+		if x.kind == .Big {
+			return big_clone(h, x)
+		}
 		if is_number(x) {
 			return number_of(h, x)
 		}
@@ -732,7 +894,10 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	if t := type_of(v); t != .Array && t != .Object {
 		return scalar(h, v)
 	}
-	frames := make([dynamic]Frame, 0, 8, h.allocator)
+	frames, ferr := make([dynamic]Frame, 0, 8, h.allocator)
+	if ferr != nil {
+		return NULL, fail_memory(h)
+	}
 	defer delete(frames)
 	defer for &f in frames {
 		cursor_close(&f.c)
@@ -741,7 +906,13 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		release(h, f.from)
 	}
 	top, opened := open(h, retain(v), ABSENT)
-	append(&frames, top)
+	if _, aerr := append(&frames, top); aerr != nil {
+		cursor_close(&top.c)
+		release(h, top.out)
+		release(h, top.key)
+		release(h, top.from)
+		return NULL, fail_memory(h)
+	}
 	if opened != .Ok {
 		return NULL, opened
 	}
@@ -770,9 +941,24 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 			}
 			continue
 		}
+		if type_of(f.from) == .Object {
+			ck, ks := text_value(h, text_of(k))
+			release(h, k)
+			if ks != .Ok {
+				release(h, x)
+				return NULL, ks
+			}
+			k = ck
+		}
 		if t := type_of(x); t == .Array || t == .Object {
 			child, made := open(h, x, k)
-			append(&frames, child)
+			if _, aerr := append(&frames, child); aerr != nil {
+				cursor_close(&child.c)
+				release(h, child.out)
+				release(h, child.key)
+				release(h, child.from)
+				return NULL, fail_memory(h)
+			}
 			if made != .Ok {
 				return NULL, made
 			}

@@ -72,7 +72,7 @@ slice_key :: proc(h: ^Heap, key: Value) -> (from, to: Value, status: Status) {
 }
 
 // The places in array `t` where array `sub`, not empty, starts.
-@(require_results)
+@(private, require_results)
 places_of :: proc(h: ^Heap, t, sub: Value) -> (res: Value, status: Status) {
 	a := built(h, t) or_return
 	defer release(h, a)
@@ -80,17 +80,16 @@ places_of :: proc(h: ^Heap, t, sub: Value) -> (res: Value, status: Status) {
 	defer release(h, b)
 	xs, ys := items_of(a), items_of(b)
 	out := make_array(h, 0) or_return
+	defer if status != .Ok {
+		release(h, out)
+	}
 	if len(ys) == 0 {
 		return out, .Ok
 	}
 	for i in 0 ..= len(xs) - len(ys) {
 		same := true
 		for y, j in ys {
-			eq, s := equal(h, xs[i + j], y)
-			if s != .Ok {
-				release(h, out)
-				return NULL, s
-			}
+			eq := equal(h, xs[i + j], y) or_return
 			if !eq {
 				same = false
 				break
@@ -134,6 +133,9 @@ slice :: proc(h: ^Heap, t, from, to: Value) -> (res: Value, status: Status) {
 		return retain(t), .Ok
 	}
 	out := make_array(h, hi - lo) or_return
+	defer if status != .Ok {
+		release(h, out)
+	}
 	for i in lo ..< hi {
 		x := element(h, t, i) or_return
 		append_owned(h, &out, x) or_return
@@ -218,9 +220,14 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 		release(h, v)
 		return x, .Ok
 	}
+	if len(keys) == 1 {
+		return set(h, v, keys[0], x)
+	}
 	// Each container on the way down has its child taken out, so the child is held once and changes in place.
-	chain := make([dynamic]Value, 0, len(keys), h.allocator)
-	defer delete(chain)
+	chain_buf: [16]Value
+	chain_n := 0
+	chain_dyn: [dynamic]Value
+	defer delete(chain_dyn)
 	cur := v
 	s := Status.Ok
 	for k in keys[:len(keys) - 1] {
@@ -240,7 +247,27 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 			release(h, child)
 			break
 		}
-		append(&chain, cur)
+		if chain_n < len(chain_buf) && len(chain_dyn) == 0 {
+			chain_buf[chain_n] = cur
+			chain_n += 1
+		} else {
+			if chain_dyn.allocator.procedure == nil {
+				chain_dyn = make([dynamic]Value, 0, len(keys), h.allocator)
+				if _, err := append(&chain_dyn, ..chain_buf[:chain_n]); err != nil {
+					release(h, cur)
+					release(h, child)
+					s = fail_memory(h)
+					break
+				}
+				chain_n = 0
+			}
+			if _, err := append(&chain_dyn, cur); err != nil {
+				release(h, cur)
+				release(h, child)
+				s = fail_memory(h)
+				break
+			}
+		}
 		cur = child
 	}
 	if s == .Ok {
@@ -249,6 +276,7 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 		release(h, cur)
 		release(h, x)
 	}
+	chain := chain_dyn[:] if len(chain_dyn) > 0 else chain_buf[:chain_n]
 	#reverse for parent, i in chain {
 		if s != .Ok {
 			release(h, parent)
@@ -262,8 +290,21 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 	return cur, .Ok
 }
 
-// `t`, taken, with `t[key]` set to `x`, taken.
+// `t`, taken, with `t[key]` set to `x`, taken (single-step `set_path` without allocating a path array).
 @(require_results)
+set_one :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
+	return set(h, t, key, x)
+}
+
+// `t`, taken, without `t[key]` (single-step `del_paths` without allocating a path array).
+@(require_results)
+del_one :: proc(h: ^Heap, t, key: Value) -> (res: Value, status: Status) {
+	ks := [1]Value{key}
+	return del_keys(h, t, ks[:])
+}
+
+// `t`, taken, with `t[key]` set to `x`, taken.
+@(private, require_results)
 set :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 	tt, kt := type_of(t), type_of(key)
 	out := t
@@ -278,7 +319,11 @@ set :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 		}
 		if s == .Ok {
 			ps := object_put(h, &out, retain(key), x)
-			return out, ps
+			if ps != .Ok {
+				release(h, out)
+				return NULL, ps
+			}
+			return out, .Ok
 		}
 	case (tt == .Array || tt == .Null || tt == .Absent) && kt == .Number:
 		if tt != .Array {
@@ -302,7 +347,11 @@ set :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 		}
 		if s == .Ok {
 			ps := array_put(h, &out, i, x)
-			return out, ps
+			if ps != .Ok {
+				release(h, out)
+				return NULL, ps
+			}
+			return out, .Ok
 		}
 	case (tt == .Array || tt == .Null || tt == .Absent) && kt == .Object:
 		return set_slice(h, t, key, x)
@@ -380,7 +429,7 @@ del_paths :: proc(h: ^Heap, v, paths: Value) -> (res: Value, status: Status) {
 		release(h, v)
 		return NULL, s
 	}
-	lists := make([dynamic]Value, 0, len(items_of(ps)), h.allocator)
+	lists := make([dynamic]Value, 0, len(items_of(ps)), heap_allocator(h))
 	defer {
 		for l in lists {
 			release(h, l)
@@ -407,7 +456,11 @@ del_paths :: proc(h: ^Heap, v, paths: Value) -> (res: Value, status: Status) {
 			release(h, v)
 			return NULL, fail(h, .Depth, .Delete_Paths)
 		}
-		append(&lists, l)
+		if _, err := append(&lists, l); err != nil {
+			release(h, l)
+			release(h, v)
+			return NULL, fail_memory(h)
+		}
 	}
 	return del_sorted(h, v, lists[:])
 }
@@ -425,7 +478,8 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 		key:   Value, // that child's step
 		keys:  [dynamic]Value, // the children to delete, at the paths that end at them
 	}
-	stack := make([dynamic]Del_Frame, 0, 8, h.allocator)
+	alloc := heap_allocator(h)
+	stack := make([dynamic]Del_Frame, 0, 8, alloc)
 	defer {
 		for &f in stack {
 			release(h, f.out)
@@ -433,7 +487,10 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 		}
 		delete(stack)
 	}
-	append(&stack, Del_Frame{out = v, paths = paths, keys = make([dynamic]Value, h.allocator)})
+	if _, err := append(&stack, Del_Frame{out = v, paths = paths, keys = make([dynamic]Value, alloc)}); err != nil {
+		release(h, v)
+		return NULL, fail_memory(h)
+	}
 	for {
 		f := &stack[len(stack) - 1]
 		if f.i >= len(f.paths) {
@@ -466,7 +523,9 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 			j += 1
 		}
 		if whole {
-			append(&f.keys, key)
+			if _, err := append(&f.keys, key); err != nil {
+				return NULL, fail_memory(h)
+			}
 			f.i = j
 			continue
 		}
@@ -477,8 +536,11 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 			continue
 		}
 		f.key, f.j = key, j
-		below := Del_Frame{out = sub, paths = f.paths[f.i:j], depth = f.depth + 1, keys = make([dynamic]Value, h.allocator)}
-		append(&stack, below)
+		below := Del_Frame{out = sub, paths = f.paths[f.i:j], depth = f.depth + 1, keys = make([dynamic]Value, alloc)}
+		if _, err := append(&stack, below); err != nil {
+			release(h, sub)
+			return NULL, fail_memory(h)
+		}
 	}
 }
 
@@ -495,26 +557,32 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value) -> (res: Value, status: Stat
 	case .Object:
 		out := t
 		if t.kind == .Node {
-			out = built(h, t) or_return
+			bs: Status
+			out, bs = built(h, t)
 			release(h, t)
+			if bs != .Ok {
+				return NULL, bs
+			}
+		}
+		defer if status != .Ok {
+			release(h, out)
 		}
 		for k in keys {
-			s := Status.Ok
 			if type_of(k) != .String {
-				s = fail(h, .Types, .Delete_Paths, out, k, "field of object")
-			} else {
-				s = object_delete(h, &out, text_of(k))
-			}
-			if s != .Ok {
-				release(h, out)
-				return NULL, s
+				return NULL, fail(h, .Types, .Delete_Paths, out, k, "field of object")
 			}
 		}
+		object_delete_many(h, &out, keys) or_return
 		return out, .Ok
 	case .Array:
 		n := length_of(h, t)
-		gone := make([]bool, n, h.allocator)
-		defer delete(gone, h.allocator)
+		alloc := heap_allocator(h)
+		gone := make([]bool, n, alloc)
+		if gone == nil && n > 0 {
+			release(h, t)
+			return NULL, fail_memory(h)
+		}
+		defer delete(gone, alloc)
 		for k in keys {
 			#partial switch type_of(k) {
 			case .Number:
@@ -563,10 +631,11 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value) -> (res: Value, status: Stat
 		}
 		return out, .Ok
 	}
-	s := fail(h, .Types, .Delete_Paths, t, keys[0], "fields from" if type_of(keys[0]) == .Object else "")
+	s := fail(h, .Types, .Delete_Paths, t, keys[0], "fields from")
 	release(h, t)
 	return NULL, s
 }
 
 // The greatest index a change at a path may make an array reach.
+@(private)
 MAX_INDEX :: 1 << 29 - 1

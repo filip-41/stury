@@ -28,12 +28,14 @@ text_of :: #force_inline proc "contextless" (v: Value) -> string {
 }
 
 // The token of node value `v`. Read where the node is in hand: the reader that gave it reached it.
+@(private)
 node_token :: #force_inline proc "contextless" (v: Value) -> tape.Node #no_bounds_check {
 	d := (^Doc_Block)(v.p)
 	return d.doc.nodes[v.n]
 }
 
 // The bytes of scalar node `v` in its text: a number's literal, a string's text when it holds no escape.
+@(private)
 node_bytes :: #force_inline proc "contextless" (v: Value) -> []u8 {
 	d := (^Doc_Block)(v.p)
 	t := node_token(v)
@@ -154,6 +156,9 @@ codepoint_offset :: proc "contextless" (s: string, k: int) -> int {
 @(require_results)
 explode :: proc(h: ^Heap, s: string) -> (res: Value, status: Status) {
 	a := make_array(h, codepoint_count(s)) or_return
+	defer if status != .Ok {
+		release(h, a)
+	}
 	for r in s {
 		append_owned(h, &a, int_value(i64(r))) or_return
 	}
@@ -185,6 +190,7 @@ implode :: proc(h: ^Heap, cps: []i64) -> (v: Value, bad: int, s: Status) {
 }
 
 // Whether every byte of `s` is below 0x80.
+@(private)
 is_ascii :: proc "contextless" (s: string) -> bool {
 	for c in transmute([]u8)s {
 		if c >= 0x80 {
@@ -219,7 +225,7 @@ ascii_case :: proc(h: ^Heap, v: Value, upper: bool) -> (res: Value, status: Stat
 }
 
 // The part of string `v` from code point `from` to before `to`, both clamped to it.
-@(require_results)
+@(private, require_results)
 text_slice :: proc(h: ^Heap, v: Value, from, to: int) -> (res: Value, status: Status) {
 	s := text_of(v)
 	if to <= from {
@@ -255,6 +261,7 @@ text_repeat :: proc(h: ^Heap, v: Value, n: int) -> (res: Value, status: Status) 
 }
 
 // The byte offsets where `sep`, not empty, starts in `s`, overlapping ones included.
+@(private)
 text_find_all :: proc(s, sep: string, into: ^[dynamic]int) -> runtime.Allocator_Error {
 	if len(sep) == 0 || len(sep) > len(s) {
 		return nil
@@ -273,6 +280,9 @@ text_find_all :: proc(s, sep: string, into: ^[dynamic]int) -> runtime.Allocator_
 text_split :: proc(h: ^Heap, v: Value, sep: string) -> (res: Value, status: Status) {
 	s := text_of(v)
 	a := make_array(h, 0) or_return
+	defer if status != .Ok {
+		release(h, a)
+	}
 	if len(s) == 0 {
 		return a, .Ok
 	}
@@ -305,6 +315,7 @@ text_split :: proc(h: ^Heap, v: Value, sep: string) -> (res: Value, status: Stat
 }
 
 // Whether code point `r` is white space by Unicode's White_Space property.
+@(private)
 is_space :: proc "contextless" (r: rune) -> bool {
 	switch r {
 	case 0x09 ..= 0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000 ..= 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
@@ -343,6 +354,7 @@ text_trim :: proc(h: ^Heap, v: Value, left, right: bool) -> (res: Value, status:
 }
 
 // A hash of the bytes of `s`, FNV-1a widened by a final mix.
+@(private)
 hash_text :: proc "contextless" (s: string) -> u64 {
 	x := u64(0xCBF29CE484222325)
 	for c in transmute([]u8)s {

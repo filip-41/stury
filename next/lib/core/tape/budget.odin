@@ -16,6 +16,7 @@ Budget :: struct {
 
 // Which `Budget` limit an `Exceeded` ran out of.
 Budget_Kind :: enum u8 {
+	None,
 	Depth,
 	Nodes,
 	Memory,

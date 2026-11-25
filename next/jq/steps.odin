@@ -51,7 +51,7 @@ apply_step :: proc(m: ^Machine, n: ^Node, t, key, from, to: query.Value) -> (res
 		v, s = query.slice(m.h, t, from, to)
 	}
 	if s != .Ok {
-		if .Opt in n.flags {
+		if .Opt in n.flags && !is_fatal_error(m.h) {
 			query.clear_error(m.h)
 			return query.NULL, false, .Ok
 		}
