@@ -45,6 +45,894 @@ SCALAR_ROOM :: 64
 @(private)
 INLINE_FRAMES :: 64
 
+// Why `marshal_json` refused a value (matches `write.Refusal` without importing `lib/ops/write`).
+Marshal_Refusal :: enum u8 {
+	None,
+	No_Spelling,
+	Malformed,
+}
+
+// Bytes reserved ahead of the cursor for inline leaf values (integers, floats, short strings, booleans, null, RFC 3339).
+JSON_LEAF_ROOM :: 64
+
+// Maximum indent bytes written in-line before falling back to the cold long-line emitter.
+JSON_LINE_MAX :: 1024
+
+// Room reserved per struct member (fast key + optional pretty indent + leaf value).
+JSON_MEMBER_ROOM :: 1 + 256 + 16 + JSON_LEAF_ROOM
+JSON_PRETTY_MEMBER_ROOM :: 1 + 1 + JSON_LINE_MAX + 256 + 16 + 1 + JSON_LEAF_ROOM
+JSON_PRETTY_CLOSE_ROOM :: 2 * (1 + JSON_LINE_MAX) + 16
+
+@(private)
+Fast_Frame_Mode :: enum u32 {
+	Root,
+	Struct,
+	List,
+	Map,
+	Bits,
+}
+
+@(private)
+Fast_Frame :: struct {
+	r:     ^Record,
+	at:    uintptr,
+	left:  int,
+	step:  int,
+	total: int,
+	lead:  u32,
+	mode:  Fast_Frame_Mode,
+}
+when size_of(uintptr) == 8 {
+	#assert(size_of(Fast_Frame) == 48)
+}
+
+@(private)
+JSON_NULL_U32 :: u32le('n') | u32le('u') << 8 | u32le('l') << 16 | u32le('l') << 24
+@(private)
+JSON_TRUE_U32 :: u32le('t') | u32le('r') << 8 | u32le('u') << 16 | u32le('e') << 24
+@(private)
+JSON_FALSE_U64 :: u64le('f') | u64le('a') << 8 | u64le('l') << 16 | u64le('s') << 24 | u64le('e') << 32
+
+// Direct JSON marshaler: walks `value` by `plan` and writes JSON directly into `w`'s output buffer without per-token
+// callbacks, structural sequence validation, or re-encoding clean struct field names. `PRETTY` and `ASCII` are
+// compile-time specialized so the hot loop carries zero option branches.
+marshal_json :: proc(
+	value: rawptr,
+	T: typeid,
+	tag_key: string,
+	plan: ^Plan,
+	w: ^$W,
+	$PRETTY: bool,
+	$room: proc(w: ^W, n: int) -> [^]u8,
+	$cursor_of: proc "contextless" (w: ^W) -> ^int,
+	$has_err: proc "contextless" (w: ^W) -> bool,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
+	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
+	allocator := context.allocator,
+) -> (refusal: Marshal_Refusal, err: tape.Error) #no_bounds_check {
+	if value == nil {
+		return .None, tape.Bad_Option{"value"}
+	}
+	plan := plan
+	made: Plan
+	if plan == nil {
+		if made, err = plan_make(T, tag_key, {}, allocator); err != nil {
+			return .None, err
+		}
+		plan = &made
+	} else if plan.type != T || plan.tag != tag_key || plan.root == nil {
+		return .None, tape.Bad_Option{"plan"}
+	}
+	defer if plan == &made {
+		plan_destroy(&made)
+	}
+	inline_frames: [INLINE_FRAMES]Fast_Frame = ---
+	frames := raw_data(inline_frames[:])
+	top, cap_frames := 0, INLINE_FRAMES
+	defer if cap_frames > INLINE_FRAMES {
+		runtime.mem_free_with_size(frames, cap_frames * size_of(Fast_Frame), allocator)
+	}
+	keys := raw_data(plan.strings)
+	cursor := cursor_of(w)
+	cur := Fast_Frame{
+		r    = (^Record)(uintptr(plan.root) - size_of(Record)),
+		at   = uintptr(value),
+		left = 1,
+		mode = .Root,
+	}
+	next: for {
+		vf: ^Record
+		va: uintptr
+		p: [^]u8
+		if cur.mode == .Struct {
+			r := cur.r
+			if r.key_size == 0 {
+				for r.kind != .End && r.key_size == 0 {
+					mm := &plan.meta[r.meta]
+					member_at := cur.at + uintptr(r.offset)
+					if mm.omit_empty && is_empty(plan, r, member_at) || mm.omit_unset && is_unset(plan, r, member_at) {
+						r = intrinsics.ptr_offset(r, 1)
+						continue
+					}
+					break
+				}
+				if r.kind == .End {
+					when PRETTY {
+						p = room(w, JSON_PRETTY_CLOSE_ROOM)
+						if cur.lead == '{' {
+							p[0], p[1] = '{', '}'
+							cursor^ += 2
+							p = p[2:]
+						} else {
+							p = put_line(w, p, top - 1, 2)
+							p[0] = '}'
+							cursor^ += 1
+							p = p[1:]
+						}
+					} else {
+						p = room(w, 3)
+						if cur.lead == '{' {
+							p[0], p[1] = '{', '}'
+							cursor^ += 2
+							p = p[2:]
+						} else {
+							p[0] = '}'
+							cursor^ += 1
+							p = p[1:]
+						}
+					}
+					// Reuse this struct frame for the next element of a list of structs without pop/push.
+					up := &frames[top - 1]
+					if up.mode == .List && up.left > 0 && (up.r.kind == .Struct || up.r.kind == .Required) && !has_err(w) {
+						up.left -= 1
+						p[0] = ','
+						cursor^ += 1
+						when PRETTY {
+							_ = put_line(w, p[1:], top - 1, 1)
+						}
+						cur.r, cur.at, cur.lead = up.r.first, up.at, '{'
+						up.at += uintptr(up.step)
+						continue next
+					}
+					top -= 1
+					cur = frames[top]
+					if has_err(w) {
+						return .None, nil
+					}
+					continue next
+				}
+			}
+			ks := int(r.key_size)
+			if ks != 0 {
+				when PRETTY {
+					p = room(w, JSON_PRETTY_MEMBER_ROOM)
+					p[0] = u8(cur.lead)
+					cur.lead = ','
+					cursor^ += 1
+					p = put_line(w, p[1:], top, 256 + 16 + 1 + JSON_LEAF_ROOM)
+					key_src := keys[uint(r.key_off):]
+					if ks <= 16 {
+						intrinsics.unaligned_store((^u128)(p), intrinsics.unaligned_load((^u128)(key_src)))
+					} else {
+						intrinsics.mem_copy_non_overlapping(p, key_src, ks)
+					}
+					p = p[ks:]
+					p[0] = ' '
+					p = p[1:]
+					cursor^ += ks + 1
+				} else {
+					p = room(w, JSON_MEMBER_ROOM)
+					p[0] = u8(cur.lead)
+					cur.lead = ','
+					key_src := keys[uint(r.key_off):]
+					if ks <= 16 {
+						intrinsics.unaligned_store((^u128)(p[1:]), intrinsics.unaligned_load((^u128)(key_src)))
+					} else {
+						intrinsics.mem_copy_non_overlapping(p[1:], key_src, ks)
+					}
+					cursor^ += 1 + ks
+					p = p[1 + ks:]
+				}
+			} else {
+				when PRETTY {
+					p = room(w, 1 + 1 + JSON_LINE_MAX + 18)
+					p[0] = u8(cur.lead)
+					cur.lead = ','
+					cursor^ += 1
+					p = put_line(w, p[1:], top, 18)
+				} else {
+					p = room(w, 1 + 18)
+					p[0] = u8(cur.lead)
+					cur.lead = ','
+					p = p[1:]
+					cursor^ += 1
+				}
+				if !put_string(w, p, plan.meta[r.meta].name) {
+					return .No_Spelling, nil
+				}
+				p = room(w, 2 + JSON_LEAF_ROOM)
+				when PRETTY {
+					p[0], p[1] = ':', ' '
+					p = p[2:]
+					cursor^ += 2
+				} else {
+					p[0] = ':'
+					p = p[1:]
+					cursor^ += 1
+				}
+			}
+			cur.r = intrinsics.ptr_offset(r, 1)
+			vf, va = r, cur.at + uintptr(r.offset)
+		} else if cur.mode == .List {
+			if cur.left == 0 {
+				when PRETTY {
+					p = room(w, 1 + JSON_LINE_MAX + 8)
+					p = put_line(w, p, top - 1, 1)
+					p[0] = ']'
+					cursor^ += 1
+				} else {
+					p = room(w, 1)
+					p[0] = ']'
+					cursor^ += 1
+				}
+				top -= 1
+				cur = frames[top]
+				if has_err(w) {
+					return .None, nil
+				}
+				continue next
+			}
+			cur.left -= 1
+			when PRETTY {
+				p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
+				p[0] = ','
+				p = p[cur.lead:]
+				cursor^ += int(cur.lead)
+				cur.lead = 1
+				p = put_line(w, p, top, JSON_LEAF_ROOM)
+			} else {
+				p = room(w, 1 + JSON_LEAF_ROOM)
+				p[0] = ','
+				p = p[cur.lead:]
+				cursor^ += int(cur.lead)
+				cur.lead = 1
+			}
+			vf, va = cur.r, cur.at
+			cur.at += uintptr(cur.step)
+		} else if cur.mode == .Map {
+			m := &plan.meta[cur.r.meta]
+			info := m.map_info
+			raw := (^runtime.Raw_Map)(cur.at)^
+			ks, vs, hs, _, _ := runtime.map_kvh_data_dynamic(raw, info)
+			i := cur.step
+			for i < cur.left && !runtime.map_hash_is_valid(hs[i]) {
+				i += 1
+			}
+			if i >= cur.left {
+				when PRETTY {
+					p = room(w, 1 + JSON_LINE_MAX + 8)
+					if cur.lead == '{' {
+						p[0], p[1] = '{', '}'
+						cursor^ += 2
+					} else {
+						p = put_line(w, p, top - 1, 1)
+						p[0] = '}'
+						cursor^ += 1
+					}
+				} else {
+					p = room(w, 2)
+					if cur.lead == '{' {
+						p[0], p[1] = '{', '}'
+						cursor^ += 2
+					} else {
+						p[0] = '}'
+						cursor^ += 1
+					}
+				}
+				top -= 1
+				cur = frames[top]
+				if has_err(w) {
+					return .None, nil
+				}
+				continue next
+			}
+			cur.step = i + 1
+			key := runtime.map_cell_index_dynamic(ks, info.ks, uintptr(i))
+			when PRETTY {
+				p = room(w, 1 + 1 + JSON_LINE_MAX + 32)
+				p[0] = u8(cur.lead)
+				cur.lead = ','
+				cursor^ += 1
+				p = put_line(w, p[1:], top, 32)
+			} else {
+				p = room(w, 1 + 32)
+				p[0] = u8(cur.lead)
+				cur.lead = ','
+				p = p[1:]
+				cursor^ += 1
+			}
+			if m.key_kind == .String {
+				if !put_string(w, p, (^string)(key)^) {
+					return .No_Spelling, nil
+				}
+			} else if !put_non_string_key(plan, m, key, w, p, cursor, put_string) {
+				return .No_Spelling, nil
+			}
+			p = room(w, 2 + JSON_LEAF_ROOM)
+			when PRETTY {
+				p[0], p[1] = ':', ' '
+				p = p[2:]
+				cursor^ += 2
+			} else {
+				p[0] = ':'
+				p = p[1:]
+				cursor^ += 1
+			}
+			vf, va = element_of(cur.r), runtime.map_cell_index_dynamic(vs, info.vs, uintptr(i))
+		} else if cur.mode == .Bits {
+			i := cur.step
+			for i < cur.left && ((^u8)(cur.at + uintptr(i >> 3))^ >> uint(i & 7)) & 1 == 0 {
+				i += 1
+			}
+			if i >= cur.left {
+				when PRETTY {
+					p = room(w, 1 + JSON_LINE_MAX + 8)
+					if cur.lead != 0 {
+						p = put_line(w, p, top - 1, 1)
+					}
+					p[0] = ']'
+					cursor^ += 1
+				} else {
+					p = room(w, 1)
+					p[0] = ']'
+					cursor^ += 1
+				}
+				top -= 1
+				cur = frames[top]
+				if has_err(w) {
+					return .None, nil
+				}
+				continue next
+			}
+			cur.step = i + 1
+			when PRETTY {
+				p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
+				p[0] = ','
+				p = p[cur.lead:]
+				cursor^ += int(cur.lead)
+				cur.lead = 1
+				p = put_line(w, p, top, JSON_LEAF_ROOM)
+			} else {
+				p = room(w, 1 + JSON_LEAF_ROOM)
+				p[0] = ','
+				p = p[cur.lead:]
+				cursor^ += int(cur.lead)
+				cur.lead = 1
+			}
+			mm := &plan.meta[cur.r.meta]
+			elem := element_of(cur.r)
+			if !put_enum_scalar(plan, &plan.meta[elem.meta], mm.lower + i64(i), w, p, cursor, put_string) {
+				return .No_Spelling, nil
+			}
+			continue next
+		} else {
+			if cur.left == 0 {
+				return .None, nil
+			}
+			cur.left = 0
+			p = room(w, JSON_LEAF_ROOM)
+			vf, va = cur.r, cur.at
+		}
+
+		value: for {
+			if vf.kind == .String {
+				if !put_string(w, p, (^string)(va)^) {
+					return .No_Spelling, nil
+				}
+				continue next
+			}
+			#partial switch vf.kind {
+			case .I64:
+				cursor^ += put_i64(p, (^i64)(va)^)
+			case .F64:
+				n, ok := put_f64(p, (^f64)(va)^)
+				if !ok {
+					return .No_Spelling, nil
+				}
+				cursor^ += n
+			case .Bool:
+				if (^bool)(va)^ {
+					intrinsics.unaligned_store((^u32le)(p), JSON_TRUE_U32)
+					cursor^ += 4
+				} else {
+					intrinsics.unaligned_store((^u64le)(p), JSON_FALSE_U64)
+					cursor^ += 5
+				}
+			case .Struct, .Required:
+				if top >= tape.DEFAULT_DEPTH {
+					return .Malformed, nil
+				}
+				if !push_fast_frame(&frames, &top, &cap_frames, cur, allocator, &err) {
+					return .None, err
+				}
+				cur = Fast_Frame{r = vf.first, at = va, lead = '{', mode = .Struct}
+			case .Slice, .Dynamic, .Array:
+				if top >= tape.DEFAULT_DEPTH {
+					return .Malformed, nil
+				}
+				data, n := va, 0
+				if vf.kind == .Array {
+					n = int(plan.meta[vf.meta].count)
+				} else {
+					raw := (^runtime.Raw_Slice)(va)
+					data, n = uintptr(raw.data), raw.len
+				}
+				if n == 0 {
+					p[0], p[1] = '[', ']'
+					cursor^ += 2
+				} else {
+					if !push_fast_frame(&frames, &top, &cap_frames, cur, allocator, &err) {
+						return .None, err
+					}
+					elem := element_of(vf)
+					p[0] = '['
+					cursor^ += 1
+					cur = Fast_Frame{r = elem, at = data, left = n, step = int(elem.stride), total = n, lead = 0, mode = .List}
+				}
+			case .Map:
+				if top >= tape.DEFAULT_DEPTH {
+					return .Malformed, nil
+				}
+				raw := (^runtime.Raw_Map)(va)^
+				if runtime.map_len(raw) == 0 {
+					p[0], p[1] = '{', '}'
+					cursor^ += 2
+				} else {
+					mm := &plan.meta[vf.meta]
+					elem := element_of(vf)
+					if mm.key_kind == .String && (elem.kind == .I64 || elem.kind == .String) {
+						if !put_flat_string_map(mm.map_info, raw, elem.kind == .I64, top + 1, w, cursor, PRETTY, room, has_err, put_string, put_line) {
+							return .No_Spelling, nil
+						}
+						if has_err(w) {
+							return .None, nil
+						}
+					} else {
+						if !push_fast_frame(&frames, &top, &cap_frames, cur, allocator, &err) {
+							return .None, err
+						}
+						cur = Fast_Frame{r = vf, at = va, left = runtime.map_cap(raw), step = 0, lead = '{', mode = .Map}
+					}
+				}
+			case .Maybe:
+				m := &plan.meta[vf.meta]
+				if m.tag_size == 0 && (^uintptr)(va)^ == 0 || m.tag_size != 0 && load_size(va + uintptr(m.tag), int(m.tag_size)) == 0 {
+					intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32)
+					cursor^ += 4
+				} else {
+					vf = element_of(vf)
+					continue value
+				}
+			case .Ptr:
+				to := (^uintptr)(va)^
+				if to == 0 {
+					intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32)
+					cursor^ += 4
+				} else {
+					vf, va = element_of(vf), to
+					continue value
+				}
+			case .Union:
+				m := &plan.meta[vf.meta]
+				tag_v := u32(load_size(va + uintptr(m.tag), int(m.tag_size)))
+				arm: ^Arm
+				for &a in plan.arms[m.arms:][:m.count] {
+					if a.tag == tag_v {
+						arm = &a
+						break
+					}
+				}
+				if arm == nil {
+					intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32)
+					cursor^ += 4
+				} else {
+					vf = &plan.records[arm.first - 1]
+					continue value
+				}
+			case .Bit_Set:
+				if top >= tape.DEFAULT_DEPTH {
+					return .Malformed, nil
+				}
+				if !push_fast_frame(&frames, &top, &cap_frames, cur, allocator, &err) {
+					return .None, err
+				}
+				mm := &plan.meta[vf.meta]
+				p[0] = '['
+				cursor^ += 1
+				cur = Fast_Frame{r = vf, at = va, left = min(int(mm.count), int(mm.size) * 8), step = 0, lead = 0, mode = .Bits}
+			case:
+				rref, rerr := put_rare_scalar(plan, vf, va, w, p, cursor, put_string)
+				if rerr != nil || rref != .None {
+					return rref, rerr
+				}
+			}
+			continue next
+		}
+	}
+}
+
+@(private)
+push_fast_frame :: #force_inline proc(frames: ^[^]Fast_Frame, top, cap_frames: ^int, frame: Fast_Frame, allocator: runtime.Allocator, err: ^tape.Error) -> bool #no_bounds_check {
+	if top^ == cap_frames^ && !grow_fast_frames(frames, cap_frames, allocator, err) {
+		return false
+	}
+	frames^[top^] = frame
+	top^ += 1
+	return true
+}
+
+@(private, cold)
+grow_fast_frames :: #force_no_inline proc(frames: ^[^]Fast_Frame, cap_frames: ^int, allocator: runtime.Allocator, err: ^tape.Error) -> bool {
+	next_cap := cap_frames^ * 2
+	raw, aerr := runtime.mem_alloc_non_zeroed(next_cap * size_of(Fast_Frame), align_of(Fast_Frame), allocator)
+	if aerr != nil || raw_data(raw) == nil {
+		err^ = aerr if aerr != nil else runtime.Allocator_Error.Out_Of_Memory
+		return false
+	}
+	grown := ([^]Fast_Frame)(raw_data(raw))
+	intrinsics.mem_copy_non_overlapping(grown, frames^, cap_frames^ * size_of(Fast_Frame))
+	if cap_frames^ > INLINE_FRAMES {
+		runtime.mem_free_with_size(frames^, cap_frames^ * size_of(Fast_Frame), allocator)
+	}
+	frames^, cap_frames^ = grown, next_cap
+	return true
+}
+
+@(private, cold)
+put_non_string_key :: proc(
+	plan: ^Plan,
+	m: ^Meta,
+	key: uintptr,
+	w: ^$W,
+	p: [^]u8,
+	cursor: ^int,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
+) -> bool #no_bounds_check {
+	size := int(m.map_info.ks.size_of_type)
+	#partial switch m.key_kind {
+	case .Enum:
+		v := load_size(key, size)
+		signed := is_signed(m.enum_info.base)
+		sv := sign_extend(v, size) if signed else i64(v)
+		if plan.options.enums == .Name && m.enum_info != nil {
+			for ev, idx in m.enum_info.values {
+				if i64(ev) == sv {
+					return put_string(w, p, m.enum_info.names[idx])
+				}
+			}
+		}
+		p[0] = '"'
+		n := put_i64(p[1:], sv) if signed else put_u64(p[1:], v)
+		p[1 + n] = '"'
+		cursor^ += n + 2
+		return true
+	case .I8, .I16, .I32, .I64:
+		p[0] = '"'
+		n := put_i64(p[1:], sign_extend(load_size(key, size), size))
+		p[1 + n] = '"'
+		cursor^ += n + 2
+		return true
+	}
+	p[0] = '"'
+	n := put_u64(p[1:], load_size(key, size))
+	p[1 + n] = '"'
+	cursor^ += n + 2
+	return true
+}
+
+@(private, cold)
+put_enum_scalar :: proc(
+	plan: ^Plan,
+	m: ^Meta,
+	value: i64,
+	w: ^$W,
+	p: [^]u8,
+	cursor: ^int,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
+) -> bool #no_bounds_check {
+	if plan.options.enums == .Name && m.enum_info != nil {
+		for ev, idx in m.enum_info.values {
+			if i64(ev) == value {
+				return put_string(w, p, m.enum_info.names[idx])
+			}
+		}
+	}
+	cursor^ += put_i64(p, value) if m.signed else put_u64(p, u64(value))
+	return true
+}
+
+@(private)
+ZEROS8 :: u64(0x3030_3030_3030_3030)
+
+// `x` < 10^8 as eight digit values 0..9, the most significant in the low byte.
+@(private)
+bcd8 :: #force_inline proc "contextless" (x: u64) -> u64 {
+	abcd_efgh := x + (1 << 32 - 10000) * ((x * ((1 << 40) / 10000 + 1)) >> 40)
+	ab_cd_ef_gh := abcd_efgh + (1 << 16 - 100) * ((abcd_efgh * ((1 << 19) / 100 + 1)) >> 19 & 0x7f_0000_007f)
+	a_b_c_d_e_f_g_h := ab_cd_ef_gh + (1 << 8 - 10) * ((ab_cd_ef_gh * ((1 << 10) / 10 + 1)) >> 10 & 0xf_000f_000f_000f)
+	return intrinsics.byte_swap(a_b_c_d_e_f_g_h)
+}
+
+@(private)
+lead8_text :: #force_inline proc "contextless" (dst: [^]u8, x: u64) -> int #no_bounds_check {
+	digits := bcd8(x)
+	skip := int(intrinsics.count_trailing_zeros(digits | 1 << 56)) >> 3
+	intrinsics.unaligned_store((^u64le)(dst), u64le((digits + ZEROS8) >> (8 * uint(skip))))
+	return 8 - skip
+}
+
+// Writes `u` in decimal at `dst` (caller guarantees >= 24 bytes of room). Returns the digit count.
+@(private)
+put_u64 :: #force_inline proc "contextless" (dst: [^]u8, u: u64) -> int #no_bounds_check {
+	if u < 100_000_000 {
+		return lead8_text(dst, u)
+	}
+	if u < 10_000_000_000_000_000 {
+		high := u / 100_000_000
+		n := lead8_text(dst, high)
+		intrinsics.unaligned_store((^u64le)(dst[n:]), u64le(bcd8(u - high * 100_000_000) | ZEROS8))
+		return n + 8
+	}
+	top := u / 10_000_000_000_000_000
+	low16 := u - top * 10_000_000_000_000_000
+	mid := low16 / 100_000_000
+	n := lead8_text(dst, top)
+	intrinsics.unaligned_store((^u64le)(dst[n:]), u64le(bcd8(mid) | ZEROS8))
+	intrinsics.unaligned_store((^u64le)(dst[n + 8:]), u64le(bcd8(low16 - mid * 100_000_000) | ZEROS8))
+	return n + 16
+}
+
+// Writes `v` in decimal at `dst` (caller guarantees >= 24 bytes of room). Returns the byte count.
+@(private)
+put_i64 :: #force_inline proc "contextless" (dst: [^]u8, v: i64) -> int #no_bounds_check {
+	neg := int(v < 0)
+	dst[0] = '-'
+	u := u64(v)
+	return neg + put_u64(dst[neg:], 0 - u if neg != 0 else u)
+}
+
+// Tight loop for `map[string]i64` and `map[string]string` (computes `ks, vs, hs` once for the entire map).
+@(private)
+put_flat_string_map :: #force_no_inline proc(
+	info: ^runtime.Map_Info,
+	raw: runtime.Raw_Map,
+	is_i64: bool,
+	depth: int,
+	w: ^$W,
+	cursor: ^int,
+	$PRETTY: bool,
+	$room: proc(w: ^W, n: int) -> [^]u8,
+	$has_err: proc "contextless" (w: ^W) -> bool,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
+	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
+) -> bool #no_bounds_check {
+	cap_map := runtime.map_cap(raw)
+	ks, vs, hs, _, _ := runtime.map_kvh_data_dynamic(raw, info)
+	keys_arr := ([^]string)(ks)
+	vals_i64 := ([^]i64)(vs)
+	vals_str := ([^]string)(vs)
+	lead := u8('{')
+	for i in 0 ..< cap_map {
+		if !runtime.map_hash_is_valid(hs[i]) {
+			continue
+		}
+		key := keys_arr[i]
+		when PRETTY {
+			p := room(w, 1 + 1 + JSON_LINE_MAX + 18 + 2 + JSON_LEAF_ROOM)
+			p[0] = lead
+			lead = ','
+			cursor^ += 1
+			p = put_line(w, p[1:], depth, 18 + 2 + JSON_LEAF_ROOM)
+		} else {
+			p := room(w, 1 + 18 + 1 + JSON_LEAF_ROOM)
+			p[0] = lead
+			lead = ','
+			p = p[1:]
+			cursor^ += 1
+		}
+		before := cursor^
+		if !put_string(w, p, key) {
+			return false
+		}
+		wrote := cursor^ - before
+		if len(key) < 16 && wrote == len(key) + 2 {
+			p = p[wrote:]
+		} else {
+			p = room(w, 2 + JSON_LEAF_ROOM)
+		}
+		when PRETTY {
+			p[0], p[1] = ':', ' '
+			p = p[2:]
+			cursor^ += 2
+		} else {
+			p[0] = ':'
+			p = p[1:]
+			cursor^ += 1
+		}
+		if is_i64 {
+			cursor^ += put_i64(p, vals_i64[i])
+		} else {
+			if !put_string(w, p, vals_str[i]) {
+				return false
+			}
+		}
+		if i & 63 == 63 && has_err(w) {
+			return true
+		}
+	}
+	when PRETTY {
+		p := room(w, 1 + JSON_LINE_MAX + 8)
+		if lead == '{' {
+			p[0], p[1] = '{', '}'
+			cursor^ += 2
+		} else {
+			p = put_line(w, p, depth - 1, 1)
+			p[0] = '}'
+			cursor^ += 1
+		}
+	} else {
+		p := room(w, 2)
+		if lead == '{' {
+			p[0], p[1] = '{', '}'
+			cursor^ += 2
+		} else {
+			p[0] = '}'
+			cursor^ += 1
+		}
+	}
+	return true
+}
+
+@(private, cold)
+put_rare_scalar :: #force_no_inline proc(
+	plan: ^Plan,
+	vf: ^Record,
+	va: uintptr,
+	w: ^$W,
+	p: [^]u8,
+	cursor: ^int,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
+) -> (Marshal_Refusal, tape.Error) #no_bounds_check {
+	#partial switch vf.kind {
+	case .I32:
+		cursor^ += put_i64(p, i64((^i32)(va)^))
+	case .I16:
+		cursor^ += put_i64(p, i64((^i16)(va)^))
+	case .I8:
+		cursor^ += put_i64(p, i64((^i8)(va)^))
+	case .U64:
+		cursor^ += put_u64(p, (^u64)(va)^)
+	case .U32:
+		cursor^ += put_u64(p, u64((^u32)(va)^))
+	case .U16:
+		cursor^ += put_u64(p, u64((^u16)(va)^))
+	case .U8:
+		cursor^ += put_u64(p, u64((^u8)(va)^))
+	case .F32:
+		n, ok := put_f32(p, (^f32)(va)^)
+		if !ok {
+			return .No_Spelling, nil
+		}
+		cursor^ += n
+	case .Bool_Wide:
+		if load_size(va, int(plan.meta[vf.meta].size)) != 0 {
+			intrinsics.unaligned_store((^u32le)(p), JSON_TRUE_U32)
+			cursor^ += 4
+		} else {
+			intrinsics.unaligned_store((^u64le)(p), JSON_FALSE_U64)
+			cursor^ += 5
+		}
+	case .Enum:
+		m := &plan.meta[vf.meta]
+		signed := is_signed(m.enum_info.base)
+		raw := load_size(va, int(m.size))
+		v := sign_extend(raw, int(m.size)) if signed else i64(raw)
+		em := Meta{enum_info = m.enum_info, signed = signed}
+		if !put_enum_scalar(plan, &em, v, w, p, cursor, put_string) {
+			return .No_Spelling, nil
+		}
+	case .Time:
+		tbuf: [SCALAR_ROOM]u8 = ---
+		text, ok := rfc3339_text((^time.Time)(va)^, &tbuf)
+		if !ok {
+			return .None, tape.Bad_Option{"time"}
+		}
+		p[0] = '"'
+		intrinsics.mem_copy_non_overlapping(p[1:], raw_data(text), len(text))
+		p[1 + len(text)] = '"'
+		cursor^ += len(text) + 2
+	case:
+		return .None, tape.Bad_Option{"raw"}
+	}
+	return .None, nil
+}
+
+// Writes finite `f` directly at `dst` (caller guarantees `JSON_LEAF_ROOM` = 64 bytes), appending `.0` to whole floats
+// so `-0.0` keeps its sign bit and floats remain distinct from integers. False for NaN or Inf.
+// Fast path handles exact decimals with up to 3 fractional digits in `[0, 1e6)` (matching shortest `'g'` output bit-for-bit).
+@(private)
+put_f64 :: #force_inline proc(dst: [^]u8, f: f64) -> (int, bool) #no_bounds_check {
+	if f - f != 0 {
+		return 0, false
+	}
+	bits := transmute(u64)f
+	neg := int(bits >> 63)
+	abs_f := transmute(f64)(bits & 0x7FFF_FFFF_FFFF_FFFF)
+	if abs_f < 1_000_000.0 && (abs_f >= 0.001 || abs_f == 0) {
+		scaled := abs_f * 1000.0
+		k := u64(scaled + 0.5)
+		diff := scaled - f64(k)
+		if diff > -1e-7 && diff < 1e-7 && k < 1_000_000_000 && f64(k) / 1000.0 == abs_f {
+			dst[0] = '-'
+			whole := k / 1000
+			frac := k - whole * 1000
+			n := neg + lead8_text(dst[neg:], whole)
+			dst[n] = '.'
+			if frac == 0 {
+				dst[n + 1] = '0'
+				return n + 2, true
+			}
+			d1 := frac / 100
+			rem := frac - d1 * 100
+			d2 := rem / 10
+			d3 := rem - d2 * 10
+			dst[n + 1] = '0' + u8(d1)
+			if d3 != 0 {
+				dst[n + 2] = '0' + u8(d2)
+				dst[n + 3] = '0' + u8(d3)
+				return n + 4, true
+			}
+			if d2 != 0 {
+				dst[n + 2] = '0' + u8(d2)
+				return n + 3, true
+			}
+			return n + 2, true
+		}
+	}
+	return put_f64_slow(dst, f), true
+}
+
+@(private)
+put_f64_slow :: #force_no_inline proc(dst: [^]u8, f: f64) -> int #no_bounds_check {
+	res := strconv.write_float(dst[:JSON_LEAF_ROOM - 2], f, 'g', -1, 64, {})
+	n := len(res)
+	for i in 0 ..< n {
+		c := dst[i]
+		if c == '.' || c == 'e' || c == 'E' {
+			return n
+		}
+	}
+	dst[n], dst[n + 1] = '.', '0'
+	return n + 2
+}
+
+@(private)
+put_f32 :: #force_no_inline proc(dst: [^]u8, f: f32) -> (int, bool) #no_bounds_check {
+	if f - f != 0 {
+		return 0, false
+	}
+	res := strconv.write_float(dst[:JSON_LEAF_ROOM - 2], f64(f), 'g', -1, 32, {})
+	n := len(res)
+	for i in 0 ..< n {
+		c := dst[i]
+		if c == '.' || c == 'e' || c == 'E' {
+			return n, true
+		}
+	}
+	dst[n], dst[n + 1] = '.', '0'
+	return n + 2, true
+}
+
 // Writes the value `value` points at, of type `T`, by `plan` (or a plan made for `T` under `tag_key` and freed on
 // return when `plan` is nil), to `w` by `token`, one call each. Returns `werr` for the first error `token` or `tag`
 // returns (leaving the writer at a prefix), or `err` for a bad plan/value, a `Raw` member, an out-of-range `time.Time`,

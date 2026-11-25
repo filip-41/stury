@@ -54,12 +54,13 @@ Read_Kind :: enum u8 {
 @(private)
 Record :: struct {
 	using expected: hook.Expected_Key,
-	first:  ^Record,
-	offset: u32,
-	stride: u32,
-	meta:   u32,
-	kind:   Read_Kind,
-	_:      [3]u8,
+	first:    ^Record,
+	offset:   u32,
+	stride:   u32,
+	meta:     u32,
+	kind:     Read_Kind,
+	key_size: u8,  // length of pre-encoded JSON `"name":` in `Plan.strings[key_off:]` when clean ASCII & non-omittable; 0 = slow path
+	key_off:  u16, // byte offset in `Plan.strings` where `"name":` starts
 }
 
 #assert(size_of(Record) == hook.EXPECTED_STRIDE)
@@ -851,6 +852,51 @@ plan_finish :: proc(b: ^Builder, p: ^Plan) -> tape.Error {
 			}
 		}
 	}
+	// Pre-encode clean ASCII, non-omittable struct member keys as `"name":` into `b.strings` for fast JSON marshaling.
+	// Reserve upfront so `b.strings` does not move while `b.spelled` spans are read from it.
+	extra := 0
+	for block, end in b.ends {
+		count := int(b.meta[b.records[end].meta].count)
+		for k in 0 ..< count {
+			m := &b.meta[b.records[block + k].meta]
+			if !m.omit_empty && !m.omit_unset {
+				extra += len(m.name) + 3
+			}
+		}
+	}
+	for s in b.spelled {
+		extra += s.n
+	}
+	if extra > 0 {
+		if err := reserve(&b.strings, len(b.strings) + extra + 16); err != nil {
+			return err
+		}
+		for s in b.spelled {
+			b.meta[s.at].name = string(b.strings[s.lo:][:s.n])
+		}
+		any_key := false
+		for block, end in b.ends {
+			count := int(b.meta[b.records[end].meta].count)
+			for k in 0 ..< count {
+				member := &b.records[block + k]
+				m := &b.meta[member.meta]
+				name := m.name
+				if !m.omit_empty && !m.omit_unset && len(name) + 3 <= int(max(u8)) && len(b.strings) <= int(max(u16)) && is_clean_ascii_key(name) {
+					off := len(b.strings)
+					append(&b.strings, '"')
+					append(&b.strings, ..transmute([]u8)name)
+					append(&b.strings, '"', ':')
+					member.key_size = u8(len(name) + 3)
+					member.key_off = u16(off)
+					any_key = true
+				}
+			}
+		}
+		if any_key {
+			pad: [16]u8
+			append(&b.strings, ..pad[:])
+		}
+	}
 	shrink(&b.records)
 	shrink(&b.meta)
 	shrink(&b.strings)
@@ -887,6 +933,17 @@ plan_finish :: proc(b: ^Builder, p: ^Plan) -> tape.Error {
 		}
 	}
 	return nil
+}
+
+// Whether every byte of `name` is printable ASCII that needs no JSON escape (identical in UTF-8 and `\u`-escaped ASCII modes).
+@(private)
+is_clean_ascii_key :: proc "contextless" (name: string) -> bool {
+	for c in transmute([]u8)name {
+		if c < 0x20 || c >= 0x80 || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 // Sets the key fields of member record `r` named `name`. A name with a byte a JSON string escapes is no key a token

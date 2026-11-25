@@ -1,7 +1,8 @@
 package json
 
+import "base:intrinsics"
 import "core:io"
-import "core:unicode/utf8"
+import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 
@@ -48,7 +49,7 @@ token :: proc(w: ^Writer, kind: write.Token_Kind, text := "") -> Write_Error {
 	}
 	switch kind {
 	case .Key, .String:
-		if !utf8.valid_string(text) {
+		if !kernel.utf8_valid(transmute([]u8)text) {
 			return write.Refused{tape.Node_Index(w.seq.taken), .No_Spelling}
 		}
 	case .Number:
@@ -131,14 +132,33 @@ writer_end :: proc(w: ^Writer) -> (text: []u8, err: Write_Error) {
 
 // A line end and the indent of `depth` levels.
 @(private)
-put_line :: proc(out: ^write.Out, opts: Write_Options, depth: int) {
-	write.put_byte(out, '\n')
-	unit, width := u8(' '), int(opts.indent)
-	if opts.tab {
-		unit, width = '\t', 1
+put_line :: proc(out: ^write.Out, opts: Write_Options, depth: int) #no_bounds_check {
+	fill := u64(0x0909_0909_0909_0909) if opts.tab else u64(0x2020_2020_2020_2020)
+	width := 1 if opts.tab else int(opts.indent)
+	n := depth * width
+	if n + 9 > write.ROOM_MAX {
+		put_line_long(out, fill, n)
+		return
 	}
-	for _ in 0 ..< depth * width {
-		write.put_byte(out, unit)
+	p := write.room(out, n + 9)
+	p[0] = '\n'
+	for k := 0; k < n; k += 8 {
+		intrinsics.unaligned_store((^u64)(p[1 + k:]), fill)
+	}
+	out.cursor += n + 1
+}
+
+@(private, cold)
+put_line_long :: #force_no_inline proc(out: ^write.Out, fill: u64, n: int) #no_bounds_check {
+	write.put_byte(out, '\n')
+	for left := n; left > 0; {
+		k := min(left, write.ROOM_MAX - 8)
+		p := write.room(out, k + 8)
+		for i := 0; i < k; i += 8 {
+			intrinsics.unaligned_store((^u64)(p[i:]), fill)
+		}
+		out.cursor += k
+		left -= k
 	}
 }
 

@@ -1,6 +1,10 @@
 package json_tests
 
+import "base:runtime"
+import "core:bytes"
 import "core:math"
+import "core:strconv"
+import "core:strings"
 import "core:testing"
 import "core:time"
 import "stury:json"
@@ -231,4 +235,181 @@ marshal_edge_cases_plan_array_bits_enum_negzero :: proc(t: ^testing.T) {
 	testing.expectf(t, nzok && nztext == "-0.0", "neg zero: %s", nztext)
 	nz_back: f64
 	testing.expect(t, json.unmarshal(transmute([]u8)nztext, &nz_back) == nil && math.sign_bit(nz_back))
+}
+
+@(test)
+marshal_utf8_escapes_floats_and_framing :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	heap_alloc := context.allocator
+	context.allocator = context.temp_allocator
+
+	// Invalid UTF-8 refused across short (<16B), mid (16..4000B with clean prefix), long (>4096B), map keys, and struct keys.
+	bad_strings := [?]string{
+		"\xff",
+		"abc\x80def",
+		"0123456789abcdef\xff",
+		"0123456789abcdef0123456789abcdef\xc3\x28",
+		strings.concatenate({strings.repeat("a", 5000), "\xff"}),
+	}
+	for s in bad_strings {
+		val := s
+		for opts in ([?]json.Write_Options{{}, {ascii = true}}) {
+			_, err := json.marshal(&val, opts)
+			r, ok := err.(write.Refused)
+			testing.expectf(t, ok && r.why == .No_Spelling, "bad utf8 len=%d opts=%v: %v", len(s), opts, err)
+		}
+	}
+	bad_flat_map: map[string]i64
+	bad_flat_map["ok_key_12345"] = 1
+	bad_flat_map["bad\xffkey"] = 2
+	_, fmerr := json.marshal(&bad_flat_map)
+	fmr, fmok := fmerr.(write.Refused)
+	testing.expectf(t, fmok && fmr.why == .No_Spelling, "flat map bad utf8 key: %v", fmerr)
+
+	bad_str_map: map[string]string
+	bad_str_map["ok"] = "0123456789abcdef\xfe"
+	_, smerr := json.marshal(&bad_str_map)
+	smr, smok := smerr.(write.Refused)
+	testing.expectf(t, smok && smr.why == .No_Spelling, "str map bad utf8 val: %v", smerr)
+
+	// Valid strings with escapes, control chars, DEL (0x7f), 2/3/4-byte UTF-8 across short, mid, and long lengths.
+	Tricky_Strings :: struct {
+		empty:                      string,
+		short_esc:                  string,
+		short_utf8:                 string,
+		mid_clean_then_esc:         string,
+		mid_utf8_astral:            string,
+		long_with_utf8_and_escapes: string,
+		del_char:                   string,
+		very_long_field_name_over_16_bytes: i64,
+		escaped_key:                i64 `json:"a\"b\nc"`,
+		utf8_key:                   i64 `json:"café"`,
+	}
+	ts := Tricky_Strings{
+		empty                      = "",
+		short_esc                  = "a\"b\\c\n\t\x01",
+		short_utf8                 = "é日😀",
+		mid_clean_then_esc         = "0123456789abcdef0123456789\"\\\r\n\x00\x1f",
+		mid_utf8_astral            = "prefix_0123456789_café_東京_🚀🎉_end",
+		long_with_utf8_and_escapes = strings.concatenate({strings.repeat("x", 4200), "\"\n", "é😀", strings.repeat("y", 100)}),
+		del_char                   = "before\x7fafter",
+		very_long_field_name_over_16_bytes = 9_223_372_036_854_775_807,
+		escaped_key                = -9_223_372_036_854_775_808,
+		utf8_key                   = 42,
+	}
+	for opts in ([?]json.Write_Options{{}, {indent = 2}, {tab = true}, {ascii = true}, {indent = 2, ascii = true}}) {
+		text, ok := marshal_text(t, &ts, opts)
+		if !ok {
+			return
+		}
+		// Must round-trip identically through json.unmarshal AND match json.write of the parsed document.
+		back: Tricky_Strings
+		uerr := json.unmarshal(transmute([]u8)text, &back)
+		testing.expectf(t, uerr == nil && back == ts, "roundtrip opts=%v err=%v", opts, uerr)
+		doc, berr := json.build(transmute([]u8)text)
+		testing.expectf(t, berr == nil, "build opts=%v: %v", opts, berr)
+		doc_text, _, werr := json.write(&doc, .Json, opts)
+		testing.expectf(t, werr == nil && string(doc_text) == text, "write match opts=%v: werr=%v", opts, werr)
+		json.destroy(&doc)
+	}
+
+	// Float formatting matches `strconv.write_float(..., 'g', -1, 64, {})` + `.0` across fast-path boundaries.
+	floats := [?]f64{
+		0.0, -0.0, 0.001, -0.001, 0.0001, 0.00009, 0.1, 0.2, 0.29, 0.3, 1.0, -1.0,
+		190.476, 414.941, 456.867, 999999.999, 999999.9999, 1000000.0, -65.61361699999998,
+		1e-5, 1e20, math.F64_MAX, math.F64_MIN,
+	}
+	for fv in floats {
+		v := fv
+		got, ok := marshal_text(t, &v)
+		if !ok {
+			continue
+		}
+		buf: [64]u8
+		raw := strconv.write_float(buf[:62], fv, 'g', -1, 64, {})
+		has_dot := false
+		for c in transmute([]u8)raw {
+			if c == '.' || c == 'e' || c == 'E' {
+				has_dot = true
+				break
+			}
+		}
+		want := raw
+		if !has_dot {
+			buf[len(raw)], buf[len(raw) + 1] = '.', '0'
+			want = string(buf[:len(raw) + 2])
+		}
+		testing.expectf(t, got == want, "float %v: got %q, want %q", fv, got, want)
+	}
+	for bad_f in ([?]f64{math.nan_f64(), math.inf_f64(1), math.inf_f64(-1)}) {
+		v := bad_f
+		_, err := json.marshal(&v)
+		r, ok := err.(write.Refused)
+		testing.expectf(t, ok && r.why == .No_Spelling, "non-finite f64 %v: %v", bad_f, err)
+	}
+	bad_f32 := f32(math.inf_f32(-1))
+	_, f32err := json.marshal(&bad_f32)
+	f32r, f32ok := f32err.(write.Refused)
+	testing.expectf(t, f32ok && f32r.why == .No_Spelling, "non-finite f32: %v", f32err)
+
+	// Framing (.Lines, .Seq) and marshal_to sink.
+	item := Inner{7, "hi"}
+	for framing in ([?]write.Record_Framing{.None, .Lines, .Seq}) {
+		got, ok := marshal_text(t, &item, {framing = framing})
+		if !ok {
+			continue
+		}
+		want := `{"a":7,"b":"hi"}` if framing == .None else "{\"a\":7,\"b\":\"hi\"}\n" if framing == .Lines else "\x1e{\"a\":7,\"b\":\"hi\"}\n"
+		testing.expectf(t, got == want, "framing %v: got %q, want %q", framing, got, want)
+		sink: bytes.Buffer
+		bytes.buffer_init_allocator(&sink, 0, 0, context.allocator)
+		serr := json.marshal_to(bytes.buffer_to_stream(&sink), &item, {framing = framing})
+		testing.expectf(t, serr == nil && bytes.buffer_to_string(&sink) == want, "marshal_to %v: %v %q", framing, serr, bytes.buffer_to_string(&sink))
+	}
+
+	// Deep pretty indent (> 1024 spaces) exercises `fast_put_line_long`.
+	deep_head: Chain
+	at := &deep_head
+	for _ in 0 ..< 600 {
+		at.next = new(Chain)
+		at = at.next
+	}
+	deep_pretty, dpok := marshal_text(t, &deep_head, {indent = 2})
+	if dpok {
+		doc, berr := json.build(transmute([]u8)deep_pretty)
+		testing.expectf(t, berr == nil, "deep pretty build: %v", berr)
+		json.destroy(&doc)
+	}
+
+	// Failing allocator sweep: zero leaks and zero context.temp_allocator usage.
+	context.allocator = heap_alloc
+	Sweep_Data :: struct {
+		k:    ^Tricky_Strings,
+		opts: json.Write_Options,
+	}
+	sweep_marshal :: proc(data: rawptr, a: runtime.Allocator) {
+		d := (^Sweep_Data)(data)
+		out, err := json.marshal(d.k, d.opts, nil, a)
+		if err == nil {
+			delete(out, a)
+		} else {
+			_ = err.(runtime.Allocator_Error)
+		}
+	}
+	for opts in ([?]json.Write_Options{{}, {indent = 2}, {ascii = true}}) {
+		sd := Sweep_Data{&ts, opts}
+		s := testkit.sweep_failures(sweep_marshal, &sd)
+		testing.expectf(t, s.bad == 0 && s.refused >= 1, "marshal sweep %v: %v", opts, s)
+	}
+	// Verify zero context.temp_allocator usage on marshal.
+	tf := testkit.Failing{backing = context.temp_allocator, fail_at = -1}
+	saved_temp := context.temp_allocator
+	context.temp_allocator = testkit.failing_allocator(&tf)
+	defer context.temp_allocator = saved_temp
+	for opts in ([?]json.Write_Options{{}, {indent = 2}, {tab = true}, {ascii = true}}) {
+		out, merr := json.marshal(&ts, opts, nil, heap_alloc)
+		testing.expectf(t, merr == nil, "no-temp marshal %v: %v", opts, merr)
+		delete(out, heap_alloc)
+	}
+	testing.expect_value(t, tf.count, 0)
 }
