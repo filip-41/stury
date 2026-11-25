@@ -19,8 +19,8 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 	// Branches on the first byte's class, so `true`, `false` and `null` share a branch.
 	#partial switch VALUE_CLASS[p[0]] {
 	case .String:
-		q, escaped, stop := string_short(p, end, '"')
-		if q == nil {
+		q, stop, ok, escaped := string_short(p, end, '"')
+		if !ok {
 			if escaped {
 				w.resume = stop
 				return #must_tail st_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
@@ -191,10 +191,10 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 	if q != nil {
 		hs.b += hook.EXPECTED_STRIDE
 	} else {
-		escaped: bool
 		stop: [^]u8
-		q, escaped, stop = string_probe(p, end)
-		if q == nil {
+		ok, escaped: bool
+		q, stop, ok, escaped = string_probe(p, end)
+		if !ok {
 			if escaped {
 				w.resume = stop
 				return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
@@ -282,9 +282,9 @@ colon_fast :: #force_inline proc "contextless" (q, end: [^]u8) -> [^]u8 {
 @(private, enable_target_feature = STATE_FEATURES)
 st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q, escape := string_lean(p[32:] if intrinsics.ptr_sub(end, p) > 32 else p, end, '"')
-	if q == nil {
-		if escape != nil {
+	q, escape, ok, escaped := string_lean(p[32:] if intrinsics.ptr_sub(end, p) > 32 else p, end, '"')
+	if !ok {
+		if escaped {
 			w.resume = escape
 			return #must_tail st_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
@@ -308,14 +308,15 @@ st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, 
 st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q: [^]u8
+	ok: bool
 	when S == .Json5 {
 		if w.refused < BLOCK_RETIRE {
-			q = string_escaped(w.resume, end, '"')
+			q, ok = string_escaped(w.resume, end, '"')
 		}
 	} else {
-		q = string_escaped(w.resume, end, '"')
+		q, ok = string_escaped(w.resume, end, '"')
 	}
-	if q == nil {
+	if !ok {
 		return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	if too_wide(p, q) {
@@ -335,8 +336,8 @@ st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, in
 @(private, enable_target_feature = STATE_FEATURES)
 st_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q := string_utf8(p)
-	if q == nil {
+	q, ok := string_utf8(p)
+	if !ok {
 		return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	a := emit_string(w, on, &hs, .Value, p, q, 0)
@@ -375,9 +376,9 @@ st_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 @(private, enable_target_feature = STATE_FEATURES)
 st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q, escape := string_lean(p[PROBE_MAX:] if intrinsics.ptr_sub(end, p) > PROBE_MAX else p, end, '"')
-	if q == nil {
-		if escape != nil {
+	q, escape, ok, escaped := string_lean(p[PROBE_MAX:] if intrinsics.ptr_sub(end, p) > PROBE_MAX else p, end, '"')
+	if !ok {
+		if escaped {
 			w.resume = escape
 			return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
@@ -405,14 +406,14 @@ st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 @(private, enable_target_feature = STATE_FEATURES)
 st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q, at, credit := key_escaped_head(w.resume, end)
+	q, at, credit, ok := key_escaped_head(w.resume, end)
 	spelling := tape.SPELLING_DECODE
-	if q == nil {
-		q = string_escaped(at, end, '"')
+	if !ok {
+		q, ok = string_escaped(at, end, '"')
 	} else {
 		spelling = tape.credit_spelling(credit) if .Credits in C else tape.SPELLING_DECODE
 	}
-	if q == nil {
+	if !ok {
 		return #must_tail st_key_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	if too_wide(p, q) {
@@ -437,8 +438,8 @@ st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d
 @(private, enable_target_feature = STATE_FEATURES)
 st_key_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q := string_utf8(p)
-	if q == nil {
+	q, ok := string_utf8(p)
+	if !ok {
 		return #must_tail st_key_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	a := emit_string(w, on, &hs, .Key, p, q, 0)
@@ -651,7 +652,7 @@ st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	}
 	#partial switch VALUE_CLASS[p[0]] {
 	case .String:
-		if q, _, _ := string_short(p, end, '"'); q != nil {
+		if q, _, ok, _ := string_short(p, end, '"'); ok {
 			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 	case .Number:
@@ -955,8 +956,8 @@ st_after_unmatched :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 @(private, enable_target_feature = STATE_FEATURES)
 st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q, escaped, stop := string_short(p, end, '"')
-	if q == nil {
+	q, stop, ok, escaped := string_short(p, end, '"')
+	if !ok {
 		if escaped {
 			w.resume = stop
 			return #must_tail st_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
@@ -1270,10 +1271,10 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		if q != nil {
 			hs.b += hook.EXPECTED_STRIDE
 		} else {
-			escaped: bool
 			stop: [^]u8
-			q, escaped, stop = string_probe(p, end)
-			if q == nil {
+			ok, escaped: bool
+			q, stop, ok, escaped = string_probe(p, end)
+			if !ok {
 				if escaped {
 					w.resume = stop
 					return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)

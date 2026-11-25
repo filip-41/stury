@@ -268,8 +268,8 @@ escape5 :: #force_inline proc "contextless" (e, end: [^]u8, tol: tape.Tolerances
 @(private, enable_target_feature = STATE_FEATURES)
 st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	q, _, stop := string_short(p, end, '\'')
-	if q == nil {
+	q, stop, ok, _ := string_short(p, end, '\'')
+	if !ok {
 		w.resume = stop
 		return #must_tail st_string5_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
@@ -289,22 +289,23 @@ st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 st_string5_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q: [^]u8
+	ok: bool
 	stop := w.resume
 	if stop == nil {
-		q, stop = string_lean(p, end, '\'')
+		q, stop, ok, _ = string_lean(p, end, '\'')
 	}
 	spelling := tape.SPELLING_ASCII
 	// The block readers take only JSON's escapes, so a first escape of JSON5's alone goes to `string_exact`.
 	escaped := stop != nil && stop[0] == '\\'
 	json_escape := !escaped || intrinsics.ptr_sub(end, stop) > 1 && (spell.ESCAPED[stop[1]] != 0 || stop[1] == 'u')
-	if q == nil && escaped && json_escape {
-		q = string_escaped(stop, end, '\'')
+	if !ok && escaped && json_escape {
+		q, ok = string_escaped(stop, end, '\'')
 		spelling = tape.SPELLING_DECODE
 	}
-	if q == nil && json_escape {
-		q, spelling = string_block(w, p, end, '\'')
+	if !ok && json_escape {
+		q, spelling, ok = string_block(w, p, end, '\'')
 	}
-	if q == nil {
+	if !ok {
 		kind: tape.Fault_Kind
 		if q, spelling, kind = string_exact_in(w, p, end); kind != .None {
 			return fault(w, hs, q, kind)

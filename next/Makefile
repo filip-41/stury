@@ -34,6 +34,9 @@ WASM_NO_TAIL_FEATURE_SETS := none simd128
 # no tier named, so the CPU's own tier is detected and used. On an x86-64 machine these runs replace the plain one. An
 # arm64 Mac runs them through Rosetta, and skips them with a note where Rosetta is not installed.
 TIER_PKGS := lib/base/kernel/test lib/base/regex/test dsv/test cbor/test xml/test
+# `json/test` checks `json::string_span_v3` tier isolation in `lint-tiers`; it stays out of `TIER_PKGS` because its
+# single-module `-o:speed` x86-64 test binary inlines all five `read_nested` arms past `THREAD_START` before `probe_stack`.
+LINT_TIER_PKGS := $(TIER_PKGS) json/test
 # The tests of `dsv/test` that read texts of every shape through the delimited pass. The others do not reach the pass
 # instances, and a run under Rosetta takes the whole package six times.
 comma := ,
@@ -86,7 +89,7 @@ DEEP_XML_TEST := xml_tests.reads_nest_100000_levels_in_one_mib
 DEEP_JQ_TEST := jq_tests.programs_nest_100000_levels_in_one_mib,jq_tests.runs_go_100000_levels_deep_in_one_mib
 DEEP_OPTS := none speed
 
-.PHONY: check check-all lint lint-check lint-wasm lint-tiers $(TIER_PKGS:%=lint-tiers/%) test test-deep test-asan test-tsan
+.PHONY: check check-all lint lint-check lint-wasm lint-tiers $(LINT_TIER_PKGS:%=lint-tiers/%) test test-deep test-asan test-tsan
 
 check: lint test
 
@@ -134,12 +137,12 @@ lint-wasm:
 	@$(ODIN) build $(DEADSTRIP_PKG) -build-mode:obj -no-entry-point $(LINT_FLAGS) -o:speed -out:build/deadstrip.o || exit 1
 	@python3 tools/deadstrip_check.py $(NM) build/deadstrip.o || exit 1
 
-lint-tiers: $(TIER_PKGS:%=lint-tiers/%)
+lint-tiers: $(LINT_TIER_PKGS:%=lint-tiers/%)
 
-$(TIER_PKGS:%=lint-tiers/%): lint-tiers/%:
+$(LINT_TIER_PKGS:%=lint-tiers/%): lint-tiers/%:
 	@mkdir -p build; p=$*; o=build/tiers-$$(echo $$p | tr / -); \
 		echo "== $$p (linux_amd64 tiers)"; \
-		case $$p in dsv/test) req="--require dsv::pass_default_v3:";; lib/base/regex/test) req="--require ::set_v3";; xml/test) req="--require xml::span_v3:";; *) req=;; esac; \
+		case $$p in dsv/test) req="--require dsv::pass_default_v3:";; lib/base/regex/test) req="--require ::set_v3";; json/test) req="--require json::string_span_v3:";; xml/test) req="--require xml::span_v3:";; *) req=;; esac; \
 		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:none $(LINT_FLAGS) -out:$$o-none.o || exit 1; \
 		python3 tools/tier_check.py $(OBJDUMP) $$o-none.o $$req || exit 1; \
 		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:$$o-speed.o || exit 1; \

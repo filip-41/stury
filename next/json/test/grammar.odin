@@ -518,3 +518,64 @@ a_gap_differing_in_any_byte_is_refused_there :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// Short UTF-8 strings closing at every byte boundary across lanes 0..31 (especially 13..16 where the 16-byte fast
+// window ends), plus escaped strings immediately followed by non-ASCII tokens in the same 64-byte block.
+@(test)
+short_utf8_and_escaped_block_boundaries :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	tail_pad := strings.repeat(" ", 80, context.temp_allocator)
+	// Truncated 2-, 3-, and 4-byte UTF-8 sequences cut by the closing quote at every length 1..31.
+	bad_tails := []string{"\xc3", "\xe2", "\xe2\x82", "\xf0", "\xf0\x9f", "\xf0\x9f\x98"}
+	for total in 1 ..= 31 {
+		for bad in bad_tails {
+			if len(bad) > total {
+				continue
+			}
+			lead := strings.repeat("a", total - len(bad), context.temp_allocator)
+			for spec in JSON_SPECS {
+				expect_fault(t, spec, strings.concatenate({`["`, lead, bad, `"]`, tail_pad}, context.temp_allocator), .Bad_Char, 2 + len(lead))
+				expect_fault(t, spec, strings.concatenate({`{"`, lead, bad, `":1}`, tail_pad}, context.temp_allocator), .Bad_Char, 2 + len(lead))
+			}
+		}
+		// Valid 2-, 3-, and 4-byte UTF-8 endings at every length 2..31.
+		for good in ([]string{"é", "名", "😀"}) {
+			if len(good) > total {
+				continue
+			}
+			lead := strings.repeat("a", total - len(good), context.temp_allocator)
+			want := strings.concatenate({lead, good}, context.temp_allocator)
+			buf: [64]u8
+			for spec in JSON_SPECS {
+				for src in ([]string{
+					strings.concatenate({`["`, want, `"]`, tail_pad}, context.temp_allocator),
+					strings.concatenate({`{"`, want, `":1}`, tail_pad}, context.temp_allocator),
+				}) {
+					doc := expect_builds(t, spec, src)
+					got, ok := tape.node_text(&doc, 1, buf[:])
+					testing.expectf(t, ok && got == want, "%v %q: got %q", spec, src, got)
+					tape.destroy(&doc)
+				}
+			}
+		}
+	}
+	// Sparse and dense escaped strings followed immediately by non-ASCII tokens inside the same 64-byte block.
+	esc_cases := [][2]string {
+		{`a\"b`, `a"b`},
+		{`a\nb\tc`, "a\nb\tc"},
+		{`x\u00e9y\ud83d\ude00z`, "xéy😀z"},
+	}
+	buf: [64]u8
+	for ec in esc_cases {
+		src := strings.concatenate({`["`, ec[0], `","日本語","🎉"]`, tail_pad}, context.temp_allocator)
+		for spec in JSON_SPECS {
+			doc := expect_builds(t, spec, src)
+			got0, ok0 := tape.node_text(&doc, 1, buf[:])
+			got1, ok1 := tape.node_text(&doc, 2, buf[:])
+			got2, ok2 := tape.node_text(&doc, 3, buf[:])
+			testing.expectf(t, ok0 && got0 == ec[1] && ok1 && got1 == "日本語" && ok2 && got2 == "🎉", "%v %q: %q %q %q", spec, src, got0, got1, got2)
+			tape.destroy(&doc)
+		}
+	}
+}
