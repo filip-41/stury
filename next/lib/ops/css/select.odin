@@ -37,9 +37,11 @@ Match :: struct {
 }
 
 // What a select found, in document order. `destroy_found` frees it.
+// `partial` is true when the document holds only part of its values and could not be selected from.
 Found :: struct {
 	matches: [dynamic]Match,
 	steps:   [dynamic]Step,
+	partial: bool,
 }
 
 // The steps from the element the select started at to the one `m` found.
@@ -119,7 +121,11 @@ select :: proc(doc: ^tape.Document, from: tape.Node_Index, sel: ^Selector, opts:
 		matches = make([dynamic]Match, allocator),
 		steps   = make([dynamic]Step, allocator),
 	}
-	if len(doc.nodes) > 0 && doc.partial == nil {
+	if doc.partial != nil {
+		found.partial = true
+		return found, nil
+	}
+	if len(doc.nodes) > 0 {
 		base := start(&m, from)
 		for f in walk_next(&m, 0) {
 			if !match_list(&m, sel.list, f, -1) {
@@ -240,6 +246,29 @@ group_index :: proc(m: ^Matcher, g: i32) -> i32 {
 @(private)
 same_name :: #force_inline proc(m: ^Matcher, a, b: tape.Node_Index) -> bool {
 	return m.doc.format.same_text(m.doc.src, m.doc.nodes[a], m.doc.src, m.doc.nodes[b])
+}
+
+// Whether keys `a` and `b` have the same element type name, folding ASCII case when `m.opts.fold` is set.
+@(private)
+same_type :: proc(m: ^Matcher, a, b: tape.Node_Index) -> bool {
+	if !m.opts.fold {
+		return same_name(m, a, b)
+	}
+	abuf, bbuf: [64]u8
+	sa, aok := tape.node_text(m.doc, m.doc.nodes[a], abuf[:])
+	sb, bok := tape.node_text(m.doc, m.doc.nodes[b], bbuf[:])
+	if aok && bok {
+		return fold_equal(sa, sb)
+	}
+	ra := tape.text_room(m.doc, m.doc.nodes[a])
+	rb := tape.text_room(m.doc, m.doc.nodes[b])
+	if err := resize(&m.scratch, ra + rb); err != nil {
+		m.err = err
+		return false
+	}
+	sa, _ = tape.node_text(m.doc, m.doc.nodes[a], m.scratch[:ra])
+	sb, _ = tape.node_text(m.doc, m.doc.nodes[b], m.scratch[ra:ra + rb])
+	return fold_equal(sa, sb)
 }
 
 // Whether key `k` names an element, not a run of text.
@@ -461,6 +490,9 @@ names_equal :: #force_inline proc(fold_case: bool, a, b: string) -> bool {
 // Whether the element at frame `at` has the attribute `t` names with a value its operator takes.
 @(private)
 attribute :: proc(m: ^Matcher, t: Test, at: Frame) -> bool {
+	if m.opts.attribute == nil {
+		return false
+	}
 	want := text(m, t.name)
 	for fact in tape.facts_of(m.doc, at.value) {
 		if fact.kind != .Attribute {
@@ -561,7 +593,7 @@ position :: proc(m: ^Matcher, t: Test, f: i32) -> i64 {
 		if t.last && !after {
 			continue
 		}
-		if t.of_type && !same_name(m, at.key, g.key) {
+		if t.of_type && !same_type(m, at.key, g.key) {
 			continue
 		}
 		if t.list.n > 0 && !sibling_matches(m, t.list, {key = g.key, value = g.value, parent = at.parent, index = index, depth = at.depth}) {
