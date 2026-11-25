@@ -92,13 +92,16 @@ list_rows :: proc(T: typeid) -> bool {
 	return row != nil && list(row) != nil
 }
 
+// Shared `Cells_Reader` hook so serial and parallel typed unmarshal share one set of pass instances.
+@(private)
+cells_reader_hook :: #force_inline proc "contextless" (h: ^typed.Cells_Reader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+	return typed.cells_hook(h, s, t, number_value)
+}
+
 @(private)
 unmarshal_walk :: #force_inline proc(src: []u8, target: rawptr, T: typeid, $S: Spec, $LAX: bool, read: Unmarshal_Options, opts: Options, allocator: runtime.Allocator) -> tape.Error {
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^typed.Cells_Reader, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-		on :: #force_inline proc "contextless" (h: ^typed.Cells_Reader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-			return typed.cells_hook(h, s, t, number_value)
-		}
-		return walk_text(src, S, LAX, options_resolved(S, opts), h, regs, a, ctx, on, nil, opts.budget.steps)
+		return walk_text(src, S, LAX, options_resolved(S, opts), h, regs, a, ctx, cells_reader_hook, nil, opts.budget.steps)
 	}
 	return typed.read(src, target, T, &FORMATS[S], TAG, opts, read, allocator, typed.Cells_Reader, walk)
 }

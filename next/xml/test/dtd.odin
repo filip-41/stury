@@ -425,3 +425,15 @@ texts_of :: proc(doc: ^xml.Document) -> string {
 	}
 	return strings.to_string(b)
 }
+
+@(test)
+entity_close_tag_near_src_end_does_not_overread :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Opening `<a>` sits within 6 bytes of the end of a freshly allocated buffer while the entity literal has >8 bytes;
+	// `st_end`'s load8 fast path must not read past `src` on `f.tag[1:]`.
+	lit := `<!DOCTYPE a [<!ENTITY e "</a>        ">]><a>&e;`
+	buf := make([]u8, len(lit))
+	defer delete(buf)
+	copy(buf, lit)
+	testing.expect(t, xml.validate(buf) != nil)
+}

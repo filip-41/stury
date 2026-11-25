@@ -113,9 +113,7 @@ walk_record_again :: proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, 
 	v: Pass(S, H, LAX, C)
 	v.n, v.h, v.delim, v.tolerate, v.start, v.line, v.width, v.keys, v.p = len(src), w.h, w.delim, w.tolerate, 1, 1, w.width, w.keys, w.p
 	v.opened, v.unclosed, v.again = true, true, true
-	when LAX {
-		v.steps[0] = max(u64)
-	}
+	v.steps[0] = max(u64)
 	p := w.p
 	p.limit = max(u64)
 	return run_pass(&v, src, lo, p, regs, on, true)
@@ -126,7 +124,17 @@ walk_record_again :: proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, 
 // fits `Token.n` runs the instance with no tokens, then places its width fault.
 @(private)
 run :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
-	when H == hook.No_Hooks || H == Record_Run {
+	when H == Record_Run {
+		when LAX {
+			if w.piece[0] != nil {
+				r := run_pass(w, src, lo, p, regs, on, false)
+				return field_count_fault(src, u64(w.rec_lo), S, p, r, w.width)
+			}
+		}
+		width := w.width
+		r := run_pass(w, src, lo, p, regs, on, false)
+		return field_count_fault(src, record_run_from(w.h, src, lo, r), S, p, r, width)
+	} else when H == hook.No_Hooks {
 		if u64(len(src)) - lo <= u64(max(u32)) && p.limit >= RECORD_DEPTH && counts_cells(w) {
 			when LAX {
 				if w.piece[0] != nil {
@@ -138,11 +146,7 @@ run :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, 
 			}
 			width := w.width
 			r := run_pass(w, src, lo, p, regs, on, false)
-			when H == Record_Run {
-				return field_count_fault(src, record_run_from(w.h, src, lo, r), S, p, r, width)
-			} else {
-				return field_count_fault(src, lo, S, p, r, width)
-			}
+			return field_count_fault(src, lo, S, p, r, width)
 		}
 	}
 	return run_pass(w, src, lo, p, regs, on, true)
@@ -161,10 +165,13 @@ counts_cells :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) ->
 
 @(private)
 run_pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), $EMIT: bool) -> hook.Walk_Result {
-	if is_default(S, p) {
-		return pass_default(w, src, lo, regs, on, EMIT)
+	when !LAX {
+		if is_default(S, p) {
+			return pass_default(w, src, lo, regs, on, EMIT)
+		}
 	}
-	return pass_with(w, src, lo, p, regs, on, EMIT)
+	// Non-default options, pieces and step-budgeted walks share one `pass_with` instance per `(S, H, C - MASK_COLUMNS)`.
+	return pass_with(as_lax(w), src, lo, p, regs, on, EMIT)
 }
 
 // The floor tier of the pass. On x86-64 the pass is also built for the CPU's `.V3` where it has one, whose 32-byte

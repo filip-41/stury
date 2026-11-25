@@ -62,11 +62,11 @@ SEEN_TARGET :: u64(1) << 61
 @(private)
 SEEN_BITS :: 61
 
-// The open levels a read keeps in its own frame. A deeper text moves them to the read's allocator.
+// The open levels a read keeps in its own frame. A deeper text moves them to the read's scratch allocator.
 @(private = "file")
 FRAME_ROOM :: 64
 
-// The target bytes a read keeps in its own frame. A larger target's are kept in the read's allocator.
+// The target bytes a read keeps in its own frame. A larger target's are kept in the read's scratch allocator.
 @(private = "file")
 BEFORE_ROOM :: 128
 
@@ -291,6 +291,10 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	#assert(align_of(hook.Read_Budget) <= align_of(u64))
 	m := (^hook.Read_Budget)(&m_buf[0])
 	allocator := hook.read_budget(m, opts, caller)
+	scratch_buf: [size_of(hook.Memory_Budget) / size_of(u64)]u64 = ---
+	#assert(size_of(scratch_buf) == size_of(hook.Memory_Budget))
+	#assert(align_of(hook.Memory_Budget) <= align_of(u64))
+	scratch := hook.scratch(opts, allocator, (^hook.Memory_Budget)(&scratch_buf[0]))
 	frames: [FRAME_ROOM]Frame = ---
 	flags: Reader_Flags
 	if dups == .First {
@@ -326,7 +330,7 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 		target    = uintptr(target),
 		allocator = allocator,
 		caller    = caller,
-		scratch   = allocator,
+		scratch   = scratch,
 		ctx       = ctx,
 	}
 	when H == Cells_Reader {
@@ -339,9 +343,9 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 		hk.keys = {}
 		hk.opens = {}
 		hk.hashed = {}
-		hk.keys.allocator = allocator
-		hk.opens.allocator = allocator
-		hk.hashed.allocator = allocator
+		hk.keys.allocator = scratch
+		hk.opens.allocator = scratch
+		hk.hashed.allocator = scratch
 		hk.repeat = max(u64)
 		hk.passing = 0
 		hk.ends = false
@@ -375,7 +379,9 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 		}
 	}
 	regs := hook.Regs{NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}
-	_, err, _ := walk(src, opts, hk, &regs, allocator, &h.ctx)
+	// TOML derives its own `hook.scratch` from `allocator` so its tree stays inside `m`'s shared budget.
+	walk_alloc := allocator if format.id >= tape.FORMAT_ID_TOML && format.id < tape.FORMAT_ID_XML else scratch
+	_, err, _ := walk(src, opts, hk, &regs, walk_alloc, &h.ctx)
 	if err == nil {
 		err = h.err
 	} else if .Dead not_in h.flags {

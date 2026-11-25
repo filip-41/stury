@@ -569,18 +569,29 @@ give_held :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc 
 // Gives the text run of frame `f` that ends at `end_of_run` as a `#text` member when it is text, and starts the next run.
 @(private)
 text_member :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, f: ^Frame, end_of_run: [^]u8) -> (result: u64, done: bool) {
-	if .Seen in f.flags {
-		lo := f.text_lo
-		n := int(at(w, end_of_run) - lo)
-		if r := emit(w, on, hs, .String, .Key, lo, 0, tape.SPELLING_DECODE | markup.SPELLING_TEXT_KEY); r != .Next {
-			return refused(w, hs^, r, end_of_run), true
+	when H != hook.No_Hooks {
+		if .Seen in f.flags {
+			if r, over := text_member_emit(w, on, hs, f, end_of_run); over {
+				return r, true
+			}
 		}
-		if r := emit_text(w, on, hs, f, lo, n, .Decode in f.flags); r != .Next {
-			return refused(w, hs^, r, end_of_run), true
-		}
+		f.flags -= {.Seen, .Decode, .Chars, .Dtd}
+		f.flags += {.Prev}
 	}
-	f.flags -= {.Seen, .Decode, .Chars, .Dtd}
-	f.flags += {.Prev}
+	return 0, false
+}
+
+// Emits a mixed-content `#text` member out of line so `st_start` and `st_end` do not inline multiple hook copies.
+@(private, cold)
+text_member_emit :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, f: ^Frame, end_of_run: [^]u8) -> (result: u64, done: bool) {
+	lo := f.text_lo
+	n := int(at(w, end_of_run) - lo)
+	if r := emit(w, on, hs, .String, .Key, lo, 0, tape.SPELLING_DECODE | markup.SPELLING_TEXT_KEY); r != .Next {
+		return refused(w, hs^, r, end_of_run), true
+	}
+	if r := emit_text(w, on, hs, f, lo, n, .Decode in f.flags); r != .Next {
+		return refused(w, hs^, r, end_of_run), true
+	}
 	return 0, false
 }
 
@@ -603,16 +614,39 @@ st_start :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk
 			return fault(w, hs, p, kind)
 		}
 	}
-	if d > 0 {
-		if r, done := open_content(w, on, &hs, &w.stack[d - 1], d, p); done {
-			return r
+	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
+	muted := false
+	_ = muted
+	when .Skips in C && !LAX {
+		muted = w.mute != 0
+	}
+	when H != hook.No_Hooks || LAX {
+		if !muted && d > 0 {
+			if r, done := open_content(w, on, &hs, &w.stack[d - 1], d, p); done {
+				return r
+			}
 		}
+	}
+	if q < end && q[0] == '>' && !w.tag_dtd && !colon {
+		w.stack[d] = Frame{tag = p, text_lo = at(w, q) + 1, tag_n = u32(name_n + 2), name_n = u16(name_n)}
+		when H != hook.No_Hooks {
+			if !muted {
+				if r := emit(w, on, &hs, .String, .Key, at(w, p) + 1, name_n); r != .Next {
+					return refused(w, hs, r, q)
+				}
+			}
+		}
+		return #must_tail st_content(q[1:], end, d + 1, w, hs.a, hs.b, hs.c, on)
 	}
 	w.stack[d] = Frame{tag = p, name_n = u16(name_n)}
 	w.nattr = 0
 	w.tag_ns = colon
-	if r := emit(w, on, &hs, .String, .Key, at(w, p) + 1, name_n); r != .Next {
-		return refused(w, hs, r, q)
+	when H != hook.No_Hooks {
+		if !muted {
+			if r := emit(w, on, &hs, .String, .Key, at(w, p) + 1, name_n); r != .Next {
+				return refused(w, hs, r, q)
+			}
+		}
 	}
 	return #must_tail st_attributes(q, end, d + 1, w, hs.a, hs.b, hs.c, on)
 }
@@ -861,10 +895,14 @@ st_closed :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Wal
 	if e == 1 {
 		return #must_tail st_epilog(p, end, e, w, s0, s1, s2, on)
 	}
-	f := &w.stack[e - 2]
-	f.text_lo = at(w, p)
-	f.flags -= {.Seen, .Decode, .Chars, .Dtd}
-	f.flags += {.Prev}
+	when H != hook.No_Hooks || LAX {
+		f := &w.stack[e - 2]
+		f.text_lo = at(w, p)
+		when H != hook.No_Hooks {
+			f.flags -= {.Seen, .Decode, .Chars, .Dtd}
+			f.flags += {.Prev}
+		}
+	}
 	return #must_tail st_content(p, end, e - 1, w, s0, s1, s2, on)
 }
 
@@ -880,38 +918,50 @@ st_content :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Wa
 		}
 	}
 	q := kernel.skip_ws(p, end)
-	// The flags of a text run say how its token is spelled, which a walk with no hook gives none of.
-	when H != hook.No_Hooks {
-		f := &w.stack[d - 1]
-		if q > p {
-			f.flags += {.Chars}
-		}
-	}
 	if q >= end {
+		when H != hook.No_Hooks {
+			if q > p {
+				w.stack[d - 1].flags += {.Chars}
+			}
+		}
 		w.halt = Run{q = end, decode = q > p && has_cr(p, q), kind = .Truncated}
 		return #must_tail st_halt(q, end, d, w, s0, s1, s2, on)
 	}
 	if q[0] != '<' {
-		when H != hook.No_Hooks {
-			if q > p && has_cr(p, q) {
-				f.flags += {.Decode}
-			}
-		}
 		r := run(w, q, end, .Text, 0)
 		if r.kind != .None {
+			when H != hook.No_Hooks {
+				f := &w.stack[d - 1]
+				if q > p {
+					f.flags += {.Chars}
+					if has_cr(p, q) {
+						f.flags += {.Decode}
+					}
+				}
+			}
 			w.halt = r
 			return #must_tail st_halt(q, end, d, w, s0, s1, s2, on)
 		}
 		when H != hook.No_Hooks {
-			f.flags += {.Seen, .Chars}
-			if r.decode {
-				f.flags += {.Decode}
-			}
-			if r.dtd {
-				f.flags += {.Dtd}
+			if !passing(w) {
+				f := &w.stack[d - 1]
+				flags := f.flags + {.Seen, .Chars}
+				if r.decode || q > p && has_cr(p, q) {
+					flags += {.Decode}
+				}
+				if r.dtd {
+					flags += {.Dtd}
+				}
+				f.flags = flags
 			}
 		}
 		q = r.q
+	} else {
+		when H != hook.No_Hooks {
+			if q > p && !passing(w) {
+				w.stack[d - 1].flags += {.Chars}
+			}
+		}
 	}
 	if intrinsics.ptr_sub(end, q) < 2 {
 		return fault(w, {s0, s1, s2}, end, .Truncated)
@@ -1019,43 +1069,83 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 	n := int(f.name_n)
 	name := f.tag[1:]
 	room := intrinsics.ptr_sub(end, p[2:])
-	if room < n {
-		if string(p[2:][:room]) != string(name[:room]) {
+	when !LAX && ODIN_ENDIAN == .Little {
+		if n <= 8 && room >= 8 && (w.dtd == nil || w.dtd.depth == 0) {
+			mask := ~u64(0) >> u64(64 - 8 * n)
+			if (kernel.load8(p[2:]) ~ kernel.load8(name)) & mask != 0 {
+				return fault(w, hs, p[2:], .Bad_Char, .Mismatched_Tag)
+			}
+		} else if room < n {
+			if string(p[2:][:room]) != string(name[:room]) {
+				return fault(w, hs, p[2:], .Bad_Char, .Mismatched_Tag)
+			}
+			return fault(w, hs, end, .Truncated)
+		} else if string(p[2:][:n]) != string(name[:n]) {
 			return fault(w, hs, p[2:], .Bad_Char, .Mismatched_Tag)
 		}
-		return fault(w, hs, end, .Truncated)
-	}
-	if string(p[2:][:n]) != string(name[:n]) {
-		return fault(w, hs, p[2:], .Bad_Char, .Mismatched_Tag)
+	} else {
+		if room < n {
+			if string(p[2:][:room]) != string(name[:room]) {
+				return fault(w, hs, p[2:], .Bad_Char, .Mismatched_Tag)
+			}
+			return fault(w, hs, end, .Truncated)
+		}
+		if string(p[2:][:n]) != string(name[:n]) {
+			return fault(w, hs, p[2:], .Bad_Char, .Mismatched_Tag)
+		}
 	}
 	q := p[2 + n:]
-	if q < end && NAME_BYTE[q[0]] != .No {
-		return fault(w, hs, q, .Bad_Char, .Mismatched_Tag)
-	}
-	q = kernel.skip_ws(q, end)
-	if q >= end {
-		return fault(w, hs, end, .Truncated)
-	}
-	if q[0] != '>' {
-		return fault(w, hs, q, .Bad_Char, .Close_Tag)
-	}
-	after := q[1:]
-	if .Object in f.flags {
-		if r, done := text_member(w, on, &hs, f, p); done {
-			return r
-		}
-		if x := emit_close(w, on, &hs, d, at(w, p), intrinsics.ptr_sub(after, p)); x != .Next {
-			return refused(w, hs, x, after)
-		}
+	after: [^]u8
+	if q < end && q[0] == '>' {
+		after = q[1:]
 	} else {
-		when H != hook.No_Hooks {
+		if q < end && NAME_BYTE[q[0]] != .No {
+			return fault(w, hs, q, .Bad_Char, .Mismatched_Tag)
+		}
+		q = kernel.skip_ws(q, end)
+		if q >= end {
+			return fault(w, hs, end, .Truncated)
+		}
+		if q[0] != '>' {
+			return fault(w, hs, q, .Bad_Char, .Close_Tag)
+		}
+		after = q[1:]
+	}
+	when H != hook.No_Hooks {
+		C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
+		when .Skips in C && !LAX {
+			if w.mute != 0 {
+				if w.mute == d {
+					w.mute = 0
+					if w.mute_end {
+						w.mute_end = false
+					} else if x := emit(w, on, &hs, .End, .Value, at(w, p), intrinsics.ptr_sub(after, p)); x != .Next {
+						return refused(w, hs, x, after)
+					}
+				}
+				if w.ns_len == 0 && d > 1 {
+					pf := &w.stack[d - 2]
+					pf.text_lo = at(w, after)
+					pf.flags -= {.Seen, .Decode, .Chars, .Dtd}
+					pf.flags += {.Prev}
+					return #must_tail st_content(after, end, d - 1, w, hs.a, hs.b, hs.c, on)
+				}
+				return #must_tail st_closed(after, end, d, w, hs.a, hs.b, hs.c, on)
+			}
+		}
+		if .Object in f.flags {
+			if r, done := text_member(w, on, &hs, f, p); done {
+				return r
+			}
+			if x := emit_close(w, on, &hs, d, at(w, p), intrinsics.ptr_sub(after, p)); x != .Next {
+				return refused(w, hs, x, after)
+			}
+		} else {
 			if .Held in f.flags {
 				if r, done := give_held(w, on, &hs, f, p, .Comment_Foot); done {
 					return r
 				}
 			}
-		}
-		when H != hook.No_Hooks {
 			if passing(w) {
 				// The text of an element the hook skipped at its key gives no token.
 				w.skip_value = false
@@ -1068,6 +1158,17 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 				}
 			}
 		}
+	}
+	if w.ns_len == 0 && d > 1 {
+		when H != hook.No_Hooks || LAX {
+			pf := &w.stack[d - 2]
+			pf.text_lo = at(w, after)
+			when H != hook.No_Hooks {
+				pf.flags -= {.Seen, .Decode, .Chars, .Dtd}
+				pf.flags += {.Prev}
+			}
+		}
+		return #must_tail st_content(after, end, d - 1, w, hs.a, hs.b, hs.c, on)
 	}
 	return #must_tail st_closed(after, end, d, w, hs.a, hs.b, hs.c, on)
 }

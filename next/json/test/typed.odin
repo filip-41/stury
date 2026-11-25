@@ -1972,6 +1972,61 @@ float_zero_f32_edges_long_keys_and_map_paths :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.bad_free_array), 0)
 }
 
+// Deep typed unmarshal routes frames and walk levels through `hook.scratch` so the caller's arena holds only target
+// allocations, explicit `Options.scratch` receives scratch with no leaks, and `Budget.memory` caps both together.
+@(test)
+deep_unmarshal_scratch_and_peak_memory :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	Chain :: struct {
+		v:   i64,
+		kid: ^Chain,
+	}
+	DEPTH :: 2048
+	b := strings.builder_make(context.temp_allocator)
+	for _ in 0 ..< DEPTH - 1 {
+		strings.write_string(&b, `{"v":1,"kid":`)
+	}
+	strings.write_string(&b, `{"v":1}`)
+	for _ in 0 ..< DEPTH - 1 {
+		strings.write_byte(&b, '}')
+	}
+	src := transmute([]u8)strings.to_string(b)
+	plan, perr := json.plan_make(Chain, allocator = context.temp_allocator)
+	expect_nil(t, perr)
+	want_target_bytes := (DEPTH - 1) * size_of(Chain)
+
+	// 1. Default scratch (heap): caller's arena holds only target `^Chain` allocations.
+	words := make([]u64, (want_target_bytes + 4096) / size_of(u64), context.temp_allocator)
+	buf := ([^]u8)(raw_data(words))[:len(words) * size_of(u64)]
+	ar: mem.Arena
+	mem.arena_init(&ar, buf)
+	root: Chain
+	err := json.unmarshal(src, &root, read = {plan = &plan}, opts = {budget = {depth = DEPTH + 16}}, allocator = mem.arena_allocator(&ar))
+	expect_nil(t, err)
+	testing.expect_value(t, ar.peak_used, want_target_bytes)
+
+	// 2. Explicit `Options.scratch`: receives frames and walk levels, freed cleanly with zero leaks.
+	mem.arena_free_all(&ar)
+	scratch_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&scratch_track, context.allocator)
+	defer mem.tracking_allocator_destroy(&scratch_track)
+	root = {}
+	err = json.unmarshal(src, &root, read = {plan = &plan}, opts = {budget = {depth = DEPTH + 16}, scratch = mem.tracking_allocator(&scratch_track)}, allocator = mem.arena_allocator(&ar))
+	expect_nil(t, err)
+	testing.expect_value(t, ar.peak_used, want_target_bytes)
+	testing.expect(t, scratch_track.peak_memory_allocated > 0)
+	testing.expect_value(t, len(scratch_track.allocation_map), 0)
+	testing.expect_value(t, len(scratch_track.bad_free_array), 0)
+
+	// 3. `Budget.memory` counts both target and scratch together and refuses when tight.
+	mem.arena_free_all(&ar)
+	root = {}
+	err = json.unmarshal(src, &root, read = {plan = &plan}, opts = {budget = {depth = DEPTH + 16, memory = u64(want_target_bytes + 1024)}}, allocator = mem.arena_allocator(&ar))
+	ex, is_ex := err.(tape.Exceeded)
+	testing.expectf(t, is_ex && ex.kind == .Memory, "got %v, want Exceeded(.Memory)", err)
+}
+
 // The typed read law over the suites' files and random texts of every grammar, strict and tolerant: a read into a
 // `testkit.Value` is what the build converts to, and a text the build refuses is refused alike.
 @(test)

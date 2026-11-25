@@ -87,7 +87,7 @@ open_text :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: 
 		return 0, false
 	}
 	if opts.comment != 0 && !opts.no_header {
-		if r, done = give_head_comments(w, src, opts.comment, hs, on); done {
+		if r, done = give_head_comments(as_lax(w), src, opts.comment, hs, on); done {
 			return
 		}
 	}
@@ -138,6 +138,12 @@ level_room :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), hs: 
 	return true
 }
 
+// Out-of-line `open_text` for `pass_with`, keeping comment/options setup out of every `pass_with` body.
+@(private)
+open_text_with :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, opts: Pass_Options, hs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) {
+	return open_text(w, src, lo, opts, hs, on)
+}
+
 // Gives the text's `End` at `n`, after the comment lines past its last record, which are the text's foot. For a text
 // the hook keeps, the `End` goes through its `Keeps` first.
 @(private)
@@ -151,8 +157,8 @@ close_text :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src:
 		}
 		return 0, false
 	}
-	if w.held != 0 {
-		if r, done = give_comments(w, src, comment, n, .Comment_Foot, hs, on); done {
+	if comment != 0 && w.held != 0 {
+		if r, done = give_comments(as_lax(w), src, comment, n, .Comment_Foot, hs, on); done {
 			return
 		}
 	}
@@ -166,6 +172,12 @@ close_text :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src:
 		return stopped(u64(n), 0), true
 	}
 	return 0, false
+}
+
+// Out-of-line `close_text` for `pass_with`, keeping foot-comment teardown out of every `pass_with` body.
+@(private)
+close_text_with :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, comment: u8, n: int, hs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) {
+	return close_text(w, src, comment, n, hs, on)
 }
 
 // Gives each comment line from the first one held up to `upto` as a token of `role`, and holds none after. A record
@@ -235,7 +247,7 @@ open_record :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src
 	// Comment lines are held only in a text with a comment byte.
 	if opts.comment != 0 && w.held != 0 {
 		given := hs^
-		rr, stop := give_comments(w, src, opts.comment, rec_lo, .Comment, &given, on)
+		rr, stop := give_comments(as_lax(w), src, opts.comment, rec_lo, .Comment, &given, on)
 		hs^ = given
 		if stop {
 			return rr, true

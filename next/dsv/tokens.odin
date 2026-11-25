@@ -90,20 +90,48 @@ Token_State :: struct {
 }
 
 // Gives the cells of a record wider than `width` up to the one that ends at `width`'s delimiter, then returns the fault
-// at that delimiter. With `KEYS` the record is headed, so each cell has a `Key` before it.
+// at that delimiter. With `keys` the record is headed, so each cell has a `Key` before it.
 @(private, cold)
-read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, w: ^Pass($S, $H, $LAX, $C), opts: Pass_Options, hs: ^hook.Regs, run: Cell_Run, field_lo, cells, width: int, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+read_wide :: #force_no_inline proc "contextless" (keys: bool, w: ^Pass($S, $H, $LAX, $C), opts: Pass_Options, hs: ^hook.Regs, run: Cell_Run, field_lo, cells, width: int, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	// `last` is the delimiter that ends the cell numbered `width - 1`, the first cell past the width's delimiters.
 	last := run.d
 	for _ in 1 ..< width - cells {
 		last &= last - 1
 	}
 	last &= -last
-	upto := run
-	upto.d &= last | (last - 1)
-	_, _, r, done := values_run(true, KEYS, false, true, w, opts, hs, upto, field_lo, cells, on)
-	if done {
-		return r
+	dm := run.d & (last | (last - 1))
+	next_lo, count := field_lo, cells
+	for dm != 0 {
+		k := intrinsics.count_trailing_zeros(dm)
+		at := run.pos + int(k)
+		dm &= dm - 1
+		esc := run.esc_ends & (u64(1) << k) != 0
+		lax := run.lax_ends & (u64(1) << k) != 0
+		if keys {
+			if passes, value := column_passes(w, run.base, count, next_lo, at, esc, lax, true); passes {
+				if !value {
+					count += 1
+					next_lo = at + 1
+					continue
+				}
+			} else {
+				ka, klo, kn := put_key(false, w, hs, count, next_lo, at, on)
+				if ka == .Stop {
+					return stopped(klo, kn)
+				}
+				if ka == .Skip {
+					count += 1
+					next_lo = at + 1
+					continue
+				}
+				column_taken(w, count)
+			}
+		}
+		if a, lo, n := put_value(w, opts, hs, run.base, next_lo, at, esc, lax, true, on); a == .Stop {
+			return stopped(lo, n)
+		}
+		count += 1
+		next_lo = at + 1
 	}
 	return fault_at(u64(run.pos + int(intrinsics.count_trailing_zeros(last))), .Bad_Width, .Too_Many)
 }
@@ -113,6 +141,13 @@ read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, w: ^Pass($S, $H, 
 @(private, cold)
 read_ragged :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), opts: Pass_Options, hs: ^hook.Regs, run: Cell_Run, field_lo, cells: int, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (next_lo, count: int, r: hook.Walk_Result, done: bool) {
 	return values_run(true, true, true, true, w, opts, hs, run, field_lo, cells, on)
+}
+
+// Gives a run of an unheaded record's cells out of line so `pass_with` does not inline three extra `values_run` copies
+// for `Dsv_Options.no_header`.
+@(private, cold)
+read_no_header :: #force_no_inline proc "contextless" (plain, quoted: bool, w: ^Pass($S, $H, $LAX, $C), opts: Pass_Options, hs: ^hook.Regs, run: Cell_Run, field_lo, cells: int, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (next_lo, count: int, r: hook.Walk_Result, done: bool) {
+	return values_run_for(false, plain, quoted, w, opts, hs, run, field_lo, cells, on)
 }
 
 // Gives a run of a record's cells as values, from the cell at `field_lo` numbered `cells`, and returns the first byte
@@ -176,7 +211,7 @@ MASKED_WIDTH :: 12
 @(private)
 values_masked :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), opts: Pass_Options, hs: ^hook.Regs, run: Cell_Run, field_lo, cells: int, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (next_lo, count: int, r: hook.Walk_Result, done: bool) {
 	// The cells the hook takes are read by the pass without `MASK_COLUMNS`, so this code is not read again from it.
-	v := (^Pass(S, H, LAX, C - MASK_COLUMNS))(w)
+	v := unmasked(w)
 	dm := run.d
 	next_lo, count = field_lo, cells
 	high := u64(0) - w.columns >> 63
@@ -219,13 +254,20 @@ values_run_for :: #force_inline proc "contextless" ($KEYS: bool, plain, quoted: 
 			return values_masked(w, opts, hs, run, field_lo, cells, on)
 		}
 	}
-	if plain && !quoted {
-		return values_run(false, KEYS, false, false, w, opts, hs, run, field_lo, cells, on)
+	when S == .Csv {
+		if plain && !quoted {
+			return values_run(false, KEYS, false, false, w, opts, hs, run, field_lo, cells, on)
+		}
+		if plain {
+			return values_run(false, KEYS, false, true, w, opts, hs, run, field_lo, cells, on)
+		}
+		return values_run(true, KEYS, false, true, w, opts, hs, run, field_lo, cells, on)
+	} else {
+		if plain {
+			return values_run(false, KEYS, false, false, w, opts, hs, run, field_lo, cells, on)
+		}
+		return values_run(true, KEYS, false, false, w, opts, hs, run, field_lo, cells, on)
 	}
-	if plain {
-		return values_run(false, KEYS, false, true, w, opts, hs, run, field_lo, cells, on)
-	}
-	return values_run(true, KEYS, false, true, w, opts, hs, run, field_lo, cells, on)
 }
 
 // Stores the header's cells that the delimiters `run.d` end as the `Key` tokens that name its columns' cells, from the
@@ -336,20 +378,22 @@ block_tokens :: #force_inline proc "contextless" ($LAX_UTF8: bool, comments: boo
 			// local `run` stays in registers.
 			if w.width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= w.width {
 				given := t.regs
-				wide := read_wide(false, w, opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, w.width, on)
-				t.regs = given
-				return wide, true
-			}
-			field_lo, cells, result, ended = values_run_for(false, plain_block, quoted, w, opts, hs, run, field_lo, cells, on)
-		} else if cells + int(intrinsics.count_ones(d)) >= w.width {
-			if .Ragged not_in w.tolerate {
-				given := t.regs
-				wide := read_wide(true, w, opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, w.width, on)
+				wide := read_wide(false, as_lax(w), opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, w.width, on)
 				t.regs = given
 				return wide, true
 			}
 			given := t.regs
-			field_lo, cells, result, ended = read_ragged(w, opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, on)
+			field_lo, cells, result, ended = read_no_header(plain_block, quoted, as_lax(w), opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, on)
+			t.regs = given
+		} else if cells + int(intrinsics.count_ones(d)) >= w.width {
+			if .Ragged not_in w.tolerate {
+				given := t.regs
+				wide := read_wide(true, as_lax(w), opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, w.width, on)
+				t.regs = given
+				return wide, true
+			}
+			given := t.regs
+			field_lo, cells, result, ended = read_ragged(as_lax(w), opts, &given, Cell_Run{base, pos, d, run.esc_ends, run.lax_ends}, field_lo, cells, on)
 			t.regs = given
 		} else {
 			// A data record's run of cells, each after its column's key. The cell's own number is the key's index, and
@@ -505,4 +549,10 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)
 		return stopped(u64(hi), 0), true
 	}
 	return 0, false
+}
+
+// Out-of-line `read_last_tokens` for `pass_with`, keeping trailing-record handling out of every `pass_with` body.
+@(private, cold)
+read_last_tokens_with :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, opts: Pass_Options, hs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (r: hook.Walk_Result, done: bool) {
+	return read_last_tokens(w, src, opts, hs, on)
 }

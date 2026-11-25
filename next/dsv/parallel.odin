@@ -127,7 +127,7 @@ validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 	task :: proc(arg: rawptr, k: int) {
 		j := (^Validate_Job)(arg)
 		part := &j.parts[k]
-		w: Pass(S, hook.No_Hooks, false, {})
+		w: Pass(S, hook.No_Hooks, false, hook.NO_HOOKS_CAPS)
 		none: hook.No_Hooks
 		regs: hook.Regs
 		pass_start(&w, len(j.src[:part.to]), &none, j.p, 0)
@@ -609,19 +609,16 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 		w.in_header, w.opened, w.unclosed = false, true, true
 		cells: [hook.COLUMN_BITS]tape.Token = ---
 		hk.replay.fixed, hk.replay.cells = .Ragged not_in d.p.tolerate, cells[:]
-		on :: #force_inline proc "contextless" (h: ^typed.Cells_Reader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-			return typed.cells_hook(h, s, t, number_value)
-		}
 		r: hook.Walk_Result
 		when S == .Csv {
 			if hk.alike && len(w.keys) >= MASKED_WIDTH {
 				m := (^Pass(S, typed.Cells_Reader, false, C + MASK_COLUMNS))(&w)
-				r = run(m, d.src[:part.to], u64(part.from), d.p, regs, on)
+				r = run(m, d.src[:part.to], u64(part.from), d.p, regs, cells_reader_hook)
 			} else {
-				r = run(&w, d.src[:part.to], u64(part.from), d.p, regs, on)
+				r = run(&w, d.src[:part.to], u64(part.from), d.p, regs, cells_reader_hook)
 			}
 		} else {
-			r = run(&w, d.src[:part.to], u64(part.from), d.p, regs, on)
+			r = run(&w, d.src[:part.to], u64(part.from), d.p, regs, cells_reader_hook)
 		}
 		hk.replay.cells = nil
 		end := k == d.n_parts - 1

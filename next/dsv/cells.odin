@@ -32,9 +32,15 @@ cell_token :: #force_inline proc "contextless" ($S: Spec, base: [^]u8, field_lo,
 	if role == .Value && hi == field_lo {
 		kind = .Null
 	} else if role == .Value && infer && spelling == 0 {
-		return tape.infer_token(base, u64(lo), u32(n))
+		return infer_cell(base, u64(lo), u32(n))
 	}
 	return {u64(lo), u32(n), kind, role, spelling}
+}
+
+// Out-of-line wrapper around `tape.infer_token` so `pass_with` does not inline it into every `put_value` copy.
+@(private)
+infer_cell :: #force_no_inline proc "contextless" (base: [^]u8, lo: u64, n: u32) -> tape.Token {
+	return tape.infer_token(base, lo, n)
 }
 
 // Gives the hook the `Key` token of the column `cells`, and returns the hook's action with the span of the record's

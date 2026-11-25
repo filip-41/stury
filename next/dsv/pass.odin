@@ -47,10 +47,11 @@ Pass :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	columns:    u64,
 	taken:      u64,
 	learnt:     bool,
-	// With `LAX`, one more than the containers the walk may still open, 0 once it opened one past `Budget.steps`.
-	steps:      [int(LAX)]u64,
-	// With `LAX`, the read of a text in pieces whose window the pass reads, nil for a whole text.
-	piece:      [int(LAX)]^Piece,
+	// One more than the containers the walk may still open, 0 once it opened one past `Budget.steps` (`max(u64)` when
+	// no step budget is active). Kept unconditionally so `Pass(..., false, C)` and `Pass(..., true, C)` share layout.
+	steps:      [1]u64,
+	// The read of a text in pieces whose window the pass reads, nil for a whole text.
+	piece:      [1]^Piece,
 	tolerate:   tape.Tolerances,
 	delim:      u8,
 	keep:       Kept, // how the hook keeps the open record, or the text with `keep_root`
@@ -100,8 +101,23 @@ MASK_COLUMNS :: transmute(hook.Capabilities)u32(1 << 30)
 // The pass's own bits lie past the hook's capabilities, and no field of `Pass` depends on its capabilities, so a walk
 // reads one pass as another of the same walk with other bits (`walk_text`, `values_masked`).
 #assert(int(max(hook.Capability)) < 30)
-#assert(size_of(Pass(.Csv, hook.No_Hooks, false, {})) == size_of(Pass(.Csv, hook.No_Hooks, false, ONE_RECORD + MASK_COLUMNS)))
-#assert(offset_of(Pass(.Csv, hook.No_Hooks, true, {}), tolerated) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS), tolerated))
+#assert(size_of(Pass(.Csv, hook.No_Hooks, false, {})) == size_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS)))
+#assert(offset_of(Pass(.Csv, hook.No_Hooks, false, {}), steps) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS), steps))
+#assert(offset_of(Pass(.Csv, hook.No_Hooks, false, {}), piece) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS), piece))
+#assert(offset_of(Pass(.Csv, hook.No_Hooks, false, {}), tolerated) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS), tolerated))
+
+// Strips `MASK_COLUMNS` for `values_masked` while keeping `LAX`.
+@(private)
+unmasked :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) -> ^Pass(S, H, LAX, C - MASK_COLUMNS) {
+	return (^Pass(S, H, LAX, C - MASK_COLUMNS))(w)
+}
+
+// Views `w` as `LAX=true` without `MASK_COLUMNS` so `pass_with` and cold out-of-line helpers share one instance across
+// `LAX` and `MASK_COLUMNS` without changing `pass_default`'s specialized hot path.
+@(private)
+as_lax :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) -> ^Pass(S, H, true, C - MASK_COLUMNS) {
+	return (^Pass(S, H, true, C - MASK_COLUMNS))(w)
+}
 
 // How a hook keeps a record or the text, from its answer at the opening token.
 @(private)
@@ -178,9 +194,16 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 		pos = int(text_start(src, lo))
 		w.rec_lo, w.field_lo = pos, pos
 		when EMIT {
-			// The text's opening `Array` token, at `lo` with `n` 0.
-			if r, done := open_text(w, src, lo, opts, hs, on); done {
-				return r
+			// The text's opening `Array` token, at `lo` with `n` 0. Kept inline in `pass_default` (`!COMMENTS`) so no
+			// prologue call steals callee-saved registers from its block loop.
+			when COMMENTS {
+				if r, done := open_text_with(as_lax(w), src, lo, opts, hs, on); done {
+					return r
+				}
+			} else {
+				if r, done := open_text(w, src, lo, opts, hs, on); done {
+					return r
+				}
 			}
 		} else when LAX {
 			// The text's `Array` is the first container the budget counts.
@@ -451,7 +474,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 				// cells' spellings through a cold instance, so the clean instance holds no test of them.
 				if .Invalid_Utf8 in opts.tolerate && (ill != 0 || ill_back >= 0 || w.open_ill) {
 					given := t
-					r, done := lax_block_tokens(COMMENTS, w, src, opts, &given, quoted, pos, seps, lfs, bs, clfs, ill, ill_back, on)
+					r, done := lax_block_tokens(COMMENTS, as_lax(w), src, opts, &given, quoted, pos, seps, lfs, bs, clfs, ill, ill_back, on)
 					t = given
 					if done {
 						hs^ = t.regs
@@ -568,8 +591,14 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 	}
 	if last {
 		when EMIT {
-			if r, done := read_last_tokens(w, src, opts, hs, on); done {
-				return r
+			when COMMENTS {
+				if r, done := read_last_tokens_with(as_lax(w), src, opts, hs, on); done {
+					return r
+				}
+			} else {
+				if r, done := read_last_tokens(w, src, opts, hs, on); done {
+					return r
+				}
 			}
 		} else {
 			when LAX {
@@ -587,8 +616,14 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 	}
 
 	when EMIT {
-		if r, done := close_text(w, src, opts.comment, n, hs, on); done {
-			return r
+		when COMMENTS {
+			if r, done := close_text_with(as_lax(w), src, opts.comment, n, hs, on); done {
+				return r
+			}
+		} else {
+			if r, done := close_text(w, src, opts.comment, n, hs, on); done {
+				return r
+			}
 		}
 	}
 	return hook.walk_result(u64(n), 0)
@@ -611,9 +646,7 @@ fault_at :: #force_inline proc "contextless" (at: u64, kind: tape.Fault_Kind, de
 @(private)
 pass_start :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), n: int, h: ^H, p: Pass_Options, steps: u64) {
 	w.n, w.h, w.delim, w.tolerate, w.start, w.line = n, h, p.delim, p.tolerate, 1, 1
-	when LAX {
-		w.steps[0] = steps_left(steps)
-	}
+	w.steps[0] = steps_left(steps)
 	when .Rooms in C {
 		w.rooms = hook.rooms_end(h)
 	}

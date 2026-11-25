@@ -682,7 +682,7 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 		return record_frame(container_of(r, Records, "records"), S)
 	}
 	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
-		return record_walked_by(container_of(r, Records, "records"), S, lo, cut, alone, h, regs, a, ctx, build.scanner_hook)
+		return record_walked_by(container_of(r, Records, "records"), S, lo, cut, alone, h, regs, a, ctx, build.scanner_key_skip_hook)
 	}
 	if !records_hold(r, S, caller, true) {
 		return 0
