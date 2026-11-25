@@ -321,7 +321,7 @@ equal :: proc(h: ^Heap, a, b: Value) -> (res: bool, status: Status) #no_bounds_c
 	}
 	open_eq :: proc(h: ^Heap, a, b: Value) -> (f: Eq_Frame, status: Status) {
 		f = {a = a, b = b, n = length_of(h, a)}
-		if a.kind == .Node && type_of(a) == .Object {
+		if (a.kind == .Node || a.kind == .Overlay) && type_of(a) == .Object {
 			c, s := cursor_open(h, a)
 			if s != .Ok {
 				release(h, a)
@@ -454,7 +454,7 @@ equal_head :: proc(h: ^Heap, a, b: Value) -> (same, open: bool) {
 	case .String:
 		return text_of(a) == text_of(b), false
 	case .Array, .Object:
-		if a.kind == b.kind && a.p == b.p && (a.kind != .Node || (a.n == b.n && (^Doc_Block)(a.p).doc.partial == nil)) {
+		if a.kind == b.kind && a.p == b.p && (a.kind != .Node || (a.n == b.n && (^Doc_Block)(a.p).doc.partial == nil)) && (a.kind != .Overlay || a.n == b.n) {
 			return true, false
 		}
 		if length_of(h, a) != length_of(h, b) {

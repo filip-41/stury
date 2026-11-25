@@ -250,6 +250,7 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 	defer delete(chain_dyn)
 	cur := v
 	s := Status.Ok
+	_, _, last_is_fact := fact_step(h, keys[len(keys) - 1])
 	for k in keys[:len(keys) - 1] {
 		child: Value
 		if type_of(k) == .Number && (type_of(cur) == .Array || type_of(cur) == .Null || type_of(cur) == .Absent) {
@@ -260,7 +261,7 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 			}
 		}
 		child, s = get(h, cur, k)
-		if s == .Ok && type_of(k) != .Object && type_of(cur) != .Null && type_of(cur) != .Absent {
+		if s == .Ok && !last_is_fact && cur.kind != .Overlay && type_of(k) != .Object && type_of(cur) != .Null && type_of(cur) != .Absent {
 			cur, s = set(h, cur, k, NULL)
 		}
 		if s != .Ok {
@@ -290,19 +291,19 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 		}
 		cur = child
 	}
+	chain := chain_dyn[:] if len(chain_dyn) > 0 else chain_buf[:chain_n]
 	if s == .Ok {
-		cur, s = set(h, cur, keys[len(keys) - 1], x)
+		cur, s = set(h, cur, keys[len(keys) - 1], x, len(chain))
 	} else {
 		release(h, cur)
 		release(h, x)
 	}
-	chain := chain_dyn[:] if len(chain_dyn) > 0 else chain_buf[:chain_n]
 	#reverse for parent, i in chain {
 		if s != .Ok {
 			release(h, parent)
 			continue
 		}
-		cur, s = set(h, parent, keys[i], cur)
+		cur, s = set(h, parent, keys[i], cur, i)
 	}
 	if s != .Ok {
 		return NULL, s
@@ -313,25 +314,33 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 // `t`, taken, with `t[key]` set to `x`, taken (single-step `set_path` without allocating a path array).
 @(require_results)
 set_one :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
-	return set(h, t, key, x)
+	return set(h, t, key, x, 0)
 }
 
 // `t`, taken, without `t[key]` (single-step `del_paths` without allocating a path array).
 @(require_results)
 del_one :: proc(h: ^Heap, t, key: Value) -> (res: Value, status: Status) {
 	ks := [1]Value{key}
-	return del_keys(h, t, ks[:])
+	return del_keys(h, t, ks[:], 0)
 }
 
 // `t`, taken, with `t[key]` set to `x`, taken.
 @(private, require_results)
-set :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
+set :: proc(h: ^Heap, t, key, x: Value, overlay_depth := 0) -> (res: Value, status: Status) {
 	tt, kt := type_of(t), type_of(key)
 	out := t
 	s := Status.Ok
 	switch {
 	case (tt == .Object || tt == .Null || tt == .Absent) && kt == .String:
-		if tt != .Object {
+		if t.kind == .Overlay && tt == .Object {
+			same_ov := 1 if (x.kind == .Overlay && x.p == t.p) else 0
+			if overlay_is_unique(t, overlay_depth + same_ov) {
+				return overlay_set_member(h, t, text_of(key), x)
+			}
+			// Shared/aliased `.Overlay`: COW-materialize before mutating so aliases stay untouched!
+			out, s = overlay_built(h, t)
+			release(h, t)
+		} else if tt != .Object {
 			release(h, t)
 			out, s = make_object(h, 1)
 		} else if t.kind == .Node {
@@ -347,15 +356,8 @@ set :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 			return out, .Ok
 		}
 	case (tt == .Array || tt == .Null || tt == .Absent) && kt == .Number:
-		if tt != .Array {
-			release(h, t)
-			out, s = make_array(h, 1)
-		} else if t.kind == .Node {
-			out, s = built(h, t)
-			release(h, t)
-		}
 		i, _ := element_index(key)
-		if s == .Ok && math.is_nan(as_f64(key)) {
+		if math.is_nan(as_f64(key)) {
 			s = fail(h, .Range, .Set_Path, out, key, "Cannot set array element at NaN index")
 		}
 		if s == .Ok && i < 0 {
@@ -366,6 +368,22 @@ set :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 		}
 		if s == .Ok && index_past_limit(key) {
 			s = fail(h, .Range, .Set_Path, out, key, "Array index too large")
+		}
+		if s == .Ok && t.kind == .Overlay && tt == .Array {
+			same_ov := 1 if (x.kind == .Overlay && x.p == t.p) else 0
+			if overlay_is_unique(t, overlay_depth + same_ov) {
+				return overlay_set_element(h, t, i, x)
+			}
+			out, s = overlay_built(h, t)
+			release(h, t)
+		} else if s == .Ok {
+			if tt != .Array {
+				release(h, t)
+				out, s = make_array(h, 1)
+			} else if t.kind == .Node {
+				out, s = built(h, t)
+				release(h, t)
+			}
 		}
 		if s == .Ok {
 			ps := array_put(h, &out, i, x)
@@ -545,7 +563,7 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 	for {
 		f := &stack[len(stack) - 1]
 		if f.i >= len(f.paths) {
-			done, s := del_keys(h, f.out, f.keys[:])
+			done, s := del_keys(h, f.out, f.keys[:], len(stack) - 1)
 			delete(f.keys)
 			pop(&stack)
 			if s != .Ok {
@@ -555,7 +573,7 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 				return done, .Ok
 			}
 			up := &stack[len(stack) - 1]
-			up.out, s = set(h, up.out, up.key, done)
+			up.out, s = set(h, up.out, up.key, done, len(stack) - 1)
 			if s != .Ok {
 				up.out = NULL
 				return NULL, s
@@ -598,7 +616,7 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 // `t`, taken, without its children at `keys`: indexes and slices of an array, all counted from `t` as it is, or keys
 // of an object.
 @(private)
-del_keys :: proc(h: ^Heap, t: Value, keys: []Value) -> (res: Value, status: Status) {
+del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res: Value, status: Status) {
 	if len(keys) == 0 {
 		return t, .Ok
 	}
@@ -630,7 +648,7 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value) -> (res: Value, status: Stat
 		}
 		cur := t
 		if len(rest) > 0 {
-			cur = del_keys(h, cur, rest[:]) or_return
+			cur = del_keys(h, cur, rest[:], overlay_depth) or_return
 		}
 		for fk in facts {
 			kind, is_attr, _ := fact_step(h, fk)
@@ -652,8 +670,11 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value) -> (res: Value, status: Stat
 	case .Null, .Absent:
 		return t, .Ok
 	case .Object:
+		if t.kind == .Overlay && overlay_is_unique(t, overlay_depth) {
+			return overlay_del_members(h, t, keys)
+		}
 		out := t
-		if t.kind == .Node {
+		if t.kind == .Node || t.kind == .Overlay {
 			bs: Status
 			out, bs = built(h, t)
 			release(h, t)
@@ -707,6 +728,9 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value) -> (res: Value, status: Stat
 				release(h, t)
 				return NULL, s
 			}
+		}
+		if t.kind == .Overlay && overlay_is_unique(t, overlay_depth) {
+			return overlay_del_elements(h, t, gone)
 		}
 		out, s := make_array(h, n)
 		for i in 0 ..< n {

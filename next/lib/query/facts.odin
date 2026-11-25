@@ -264,9 +264,22 @@ validate_path_facts :: proc(h: ^Heap, keys: []Value) -> Status {
 // Sets `h.tainted = true` if `v` belongs to a partial document scanned without facts (`!Partial.facts`).
 @(require_results)
 fact_read :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr := "", is_attr := false) -> (res: Value, status: Status) {
+	if v.kind == .Overlay {
+		return overlay_fact_read(h, v, kind, attr, is_attr)
+	}
 	d, at, from_doc := value_doc_origin(v, true)
 	if !from_doc {
 		return NULL, .Ok
+	}
+	// If `h` has an active overlay writer matching `d`, check overlay fact overrides (e.g. on decoded base strings)!
+	if h.write_fact_data != nil {
+		ob := (^Overlay_Block)(h.write_fact_data)
+		if ob != nil && ob.ov != nil && &d.doc == ob.ov.base {
+			if ch, has := ob.ov.by_base[at]; has {
+				ov_ref := Value{p = ob, n = ch.idx, kind = .Overlay}
+				return overlay_fact_read(h, ov_ref, kind, attr, is_attr)
+			}
+		}
 	}
 	doc := &d.doc
 	if doc.partial != nil && !doc.partial.facts {
@@ -352,6 +365,9 @@ fact_write :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr: string, is_at
 	}
 	if h.write_fact != nil {
 		return h.write_fact(h.write_fact_data, h, v, kind, attr, is_attr, nv)
+	}
+	if v.kind == .Overlay {
+		return overlay_write_fact(v.p, h, v, kind, attr, is_attr, nv)
 	}
 	release(h, v)
 	release(h, nv)
@@ -514,7 +530,7 @@ read_many_facts :: proc(h: ^Heap, doc: ^tape.Document, at: tape.Node_Index, kind
 	return out if out.kind != .Absent else NULL, .Ok
 }
 
-@(private = "file")
+@(private)
 read_attributes :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, name: string, one: bool) -> (res: Value, status: Status) {
 	doc := &d.doc
 	if doc.format == nil || doc.format.attribute == nil || .Attribute not_in doc.present {

@@ -3,6 +3,7 @@ package query
 import "base:runtime"
 import "core:math/big"
 import "stury:lib/core/tape"
+import "stury:lib/ops/edit"
 
 // The values every query language evaluates over: absent, null, booleans, exact integers, doubles, strings, arrays and
 // objects. A value is 16 bytes. A string, a big integer and a built container live in a block of the `Heap` with a
@@ -22,6 +23,7 @@ Kind :: enum u8 {
 	Array, // `p` a `^Array_Block`
 	Object, // `p` a `^Object_Block`
 	Node, // node `n` of the document of the `^Doc_Block` at `p`: a number, a string with no escape, or a container
+	Overlay, // handle slot `n` of the `^Overlay_Block` at `p`
 }
 
 // What a value is, whatever holds it, in no language's order.
@@ -622,6 +624,23 @@ free_one :: proc(h: ^Heap, kind: Kind, b: ^Block) {
 			tape.destroy_document(&d.doc)
 		}
 		free_block(h, b, size_of(Doc_Block))
+	case .Overlay:
+		ob := (^Overlay_Block)(b)
+		if h.write_fact_data == b {
+			h.write_fact = nil
+			h.write_fact_data = nil
+		}
+		if ob.owned && ob.ov != nil {
+			edit.destroy(ob.ov)
+			free(ob.ov, heap_allocator(h))
+		}
+		if ob.doc_block != nil {
+			ob.doc_block.rc -= 1
+			if ob.doc_block.rc == 0 {
+				free_one(h, .Node, ob.doc_block)
+			}
+		}
+		free_block(h, b, size_of(Overlay_Block))
 	}
 }
 

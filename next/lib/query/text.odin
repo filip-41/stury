@@ -11,7 +11,10 @@ is_text :: #force_inline proc "contextless" (v: Value) -> bool {
 	if v.kind == .String {
 		return true
 	}
-	return v.kind == .Node && node_is_text(node_token(v))
+	if v.kind == .Node {
+		return node_is_text(node_token(v))
+	}
+	return v.kind == .Overlay && overlay_type(v) == .String
 }
 
 @(private)
@@ -23,6 +26,16 @@ node_is_text :: #force_inline proc "contextless" (t: tape.Node) -> bool {
 text_of :: #force_inline proc "contextless" (v: Value) -> string {
 	if v.kind == .String {
 		return string(v.s[:v.n])
+	}
+	if v.kind == .Overlay {
+		u := overlay_unwrap_scalar(v)
+		if u.kind == .String {
+			return string(u.s[:u.n])
+		}
+		if u.kind == .Node {
+			return string(node_bytes(u))
+		}
+		return ""
 	}
 	return string(node_bytes(v))
 }

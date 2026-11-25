@@ -59,6 +59,8 @@ type_of :: proc "contextless" (v: Value) -> Type {
 		return .Object
 	case .Node:
 		return node_type(node_token(v))
+	case .Overlay:
+		return overlay_type(v)
 	}
 	return .Null
 }
@@ -206,6 +208,8 @@ length_of :: proc(h: ^Heap, v: Value) -> int {
 		n, p, _ := tape.length(reader(d), tape.Node_Index(v.n), h.allocator)
 		note_presence(h, p)
 		return n
+	case .Overlay:
+		return overlay_length(h, v)
 	}
 	return 0
 }
@@ -376,6 +380,9 @@ element :: proc(h: ^Heap, v: Value, i: int) -> (res: Value, status: Status) #no_
 		}
 		return retain(items[k]), .Ok
 	}
+	if intrinsics.expect(v.kind == .Overlay, false) {
+		return overlay_element(h, v, i)
+	}
 	d := (^Doc_Block)(v.p)
 	at, p := tape.element(reader(d), tape.Node_Index(v.n), i)
 	if p != .Found {
@@ -395,6 +402,9 @@ member :: proc(h: ^Heap, v: Value, key: string) -> (res: Value, status: Status) 
 			return ABSENT, .Ok
 		}
 		return retain(object_entries(o)[k].value), .Ok
+	}
+	if intrinsics.expect(v.kind == .Overlay, false) {
+		return overlay_member(h, v, key)
 	}
 	d := (^Doc_Block)(v.p)
 	if intrinsics.expect(groups_names(d, v.n), false) {
@@ -470,6 +480,9 @@ group_member :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Ind
 has_member :: proc(h: ^Heap, v: Value, key: string) -> bool {
 	if v.kind == .Object {
 		return find_key((^Object_Block)(v.p), key) >= 0
+	}
+	if intrinsics.expect(v.kind == .Overlay, false) {
+		return overlay_has_member(h, v, key)
 	}
 	d := (^Doc_Block)(v.p)
 	_, p := tape.member(reader(d), tape.Node_Index(v.n), key)
@@ -855,6 +868,11 @@ Cursor :: struct {
 @(require_results)
 cursor_open :: proc(h: ^Heap, v: Value) -> (c: Cursor, s: Status) {
 	c.of = v
+	if v.kind == .Overlay {
+		c.of = overlay_built(h, v) or_return
+		c.h = h
+		return c, .Ok
+	}
 	if v.kind != .Node {
 		return c, .Ok
 	}
@@ -1029,6 +1047,9 @@ grouped :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 // each child still its node.
 @(require_results)
 built :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
+	if v.kind == .Overlay {
+		return overlay_built(h, v)
+	}
 	if v.kind != .Node {
 		return retain(v), .Ok
 	}
@@ -1091,7 +1112,7 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		return
 	}
 	scalar :: proc(h: ^Heap, x: Value) -> (Value, Status) {
-		if x.kind == .Node {
+		if x.kind == .Node || x.kind == .Overlay {
 			#partial switch type_of(x) {
 			case .Null:
 				return NULL, .Ok

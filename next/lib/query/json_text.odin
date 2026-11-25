@@ -194,7 +194,11 @@ write_scalar :: proc(h: ^Heap, out: ^[dynamic]u8, v: Value, opts: Json_Options =
 	case .String:
 		return write_text(h, out, text_of(v), opts.ascii)
 	case .Number:
-		if v.kind == .Node {
+		if v.kind == .Overlay {
+			if txt, ok := overlay_number_literal(v); ok && json_number_text(txt) {
+				return put_bytes(h, out, string(txt))
+			}
+		} else if v.kind == .Node {
 			d := (^Doc_Block)(v.p)
 			if d.doc.format == nil || .Binary not_in d.doc.format.caps {
 				if b := node_bytes(v); json_number_text(b) {

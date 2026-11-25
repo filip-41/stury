@@ -497,7 +497,7 @@ v_number_class :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.V
 	if x.kind == .Big {
 		return query.bool_value(b.name == "isnormal"), .Ok
 	}
-	if x.kind == .Node && query.is_integer(x) {
+	if (x.kind == .Node || x.kind == .Overlay) && query.is_integer(x) {
 		if _, ok := query.as_i64(x); !ok {
 			return query.bool_value(b.name == "isnormal"), .Ok
 		}

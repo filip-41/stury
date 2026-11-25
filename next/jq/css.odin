@@ -128,10 +128,18 @@ start_css :: proc(m: ^Machine, r: ^Regs, sel_val: query.Value) {
 	}
 	opts: css.Options
 	d: ^query.Doc_Block
+	start_node: tape.Node_Index
 	markup := false
 	if r.input.kind == .Node {
 		d = (^query.Doc_Block)(r.input.p)
+		start_node = tape.Node_Index(r.input.n)
 		opts, markup = markup_options(m, &d.doc)
+	} else if r.input.kind == .Overlay {
+		if bd, bn, ok := query.overlay_doc_origin(r.input); ok {
+			d = bd
+			start_node = bn
+			opts, markup = markup_options(m, &d.doc)
+		}
 	}
 	if !markup {
 		_ = raise_typed(m, r.input, " cannot be selected from, as it is not an element of an xml or html input")
@@ -143,7 +151,7 @@ start_css :: proc(m: ^Machine, r: ^Regs, sel_val: query.Value) {
 		finish(m, r, .Fail)
 		return
 	}
-	found, err := css.select(&d.doc, tape.Node_Index(r.input.n), sel, opts, query.heap_allocator(h))
+	found, err := css.select(&d.doc, start_node, sel, opts, query.heap_allocator(h))
 	if err != nil {
 		_ = query.fail(h, .Memory, .None)
 		finish(m, r, .Fail)
@@ -195,7 +203,12 @@ resume_css :: proc(m: ^Machine, r: ^Regs, f: ^Css_Frame) {
 	}
 	match := f.found.matches[f.i]
 	f.i += 1
-	d := (^query.Doc_Block)(f.doc.p)
+	d: ^query.Doc_Block
+	if f.doc.kind == .Overlay {
+		d, _, _ = query.overlay_doc_origin(f.doc)
+	} else {
+		d = (^query.Doc_Block)(f.doc.p)
+	}
 	v, s := query.node_at(h, d, match.value)
 	if s != .Ok {
 		drop_css(m, f)

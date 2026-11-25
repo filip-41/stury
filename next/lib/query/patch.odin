@@ -364,7 +364,7 @@ ptr_mutate :: proc(h: ^Heap, root: Value, ptr: string, mut: Mut_Kind, val: Value
 	#reverse for &st in chain {
 		parent := st.parent
 		st.parent = ABSENT
-		if parent.kind == .Node {
+		if parent.kind == .Node || parent.kind == .Overlay {
 			b, bs := built(h, parent)
 			release(h, parent)
 			if bs != .Ok {
@@ -408,7 +408,7 @@ mutate_leaf :: proc(h: ^Heap, parent: Value, tok: string, mut: Mut_Kind, val: Va
 			}
 		}
 		out := parent
-		if out.kind == .Node {
+		if out.kind == .Node || out.kind == .Overlay {
 			b, bs := built(h, out)
 			release(h, out)
 			if bs != .Ok {
@@ -461,7 +461,7 @@ mutate_leaf :: proc(h: ^Heap, parent: Value, tok: string, mut: Mut_Kind, val: Va
 			}
 		}
 		out := parent
-		if out.kind == .Node {
+		if out.kind == .Node || out.kind == .Overlay {
 			b, bs := built(h, out)
 			release(h, out)
 			if bs != .Ok {

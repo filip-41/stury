@@ -17,6 +17,8 @@ is_number :: #force_inline proc "contextless" (v: Value) -> bool {
 		return true
 	case .Node:
 		return node_token(v).kind == .Number
+	case .Overlay:
+		return overlay_type(v) == .Number
 	}
 	return false
 }
@@ -25,6 +27,9 @@ is_number :: #force_inline proc "contextless" (v: Value) -> bool {
 // caller releases. `v` is a number.
 @(require_results)
 number_of :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
+	if v.kind == .Overlay {
+		return overlay_number_of(h, v)
+	}
 	if v.kind != .Node {
 		return retain(v), .Ok
 	}
@@ -197,6 +202,8 @@ as_f64 :: proc(v: Value) -> f64 {
 			}
 			return wide_double(node_bytes(v))
 		}
+	case .Overlay:
+		return overlay_as_f64(v)
 	}
 	return 0
 }
@@ -219,6 +226,8 @@ as_i64 :: proc(v: Value) -> (i64, bool) {
 		if n.kind == .Float {
 			return as_i64(double_value(transmute(f64)n.bits))
 		}
+	case .Overlay:
+		return overlay_as_i64(v)
 	}
 	return 0, false
 }
@@ -230,6 +239,13 @@ trunc_i64 :: proc(v: Value) -> i64 {
 	}
 	if v.kind == .Big {
 		return max(i64) if !big_negative(v) else min(i64)
+	}
+	if _, is_uint, dec, is_big := node_big_int(v); is_big {
+		if is_uint {
+			return max(i64)
+		}
+		neg, _ := decimal_parts(dec)
+		return min(i64) if neg else max(i64)
 	}
 	f := as_f64(v)
 	switch {
@@ -285,6 +301,8 @@ is_integer :: proc(v: Value) -> bool {
 		}
 		form, _ := tape.number_form(&d.doc, tape.Node_Index(v.n))
 		return form.frac_digits == 0 && !form.exponent
+	case .Overlay:
+		return overlay_is_integer(v)
 	}
 	return false
 }
@@ -684,7 +702,7 @@ compare_numbers :: proc(a, b: Value, allocator := context.allocator) -> int {
 	if a.kind == .Int && b.kind == .Int {
 		return int(a.i > b.i) - int(a.i < b.i)
 	}
-	if a.kind == .Big || b.kind == .Big || a.kind == .Node || b.kind == .Node {
+	if a.kind == .Big || b.kind == .Big || a.kind == .Node || b.kind == .Node || a.kind == .Overlay || b.kind == .Overlay {
 		return compare_wide(a, b, allocator)
 	}
 	return compare_mixed(as_scalar_number(a), as_scalar_number(b))
@@ -783,10 +801,13 @@ compare_double_big :: proc(f: f64, y: ^big.Int) -> int {
 	return -cmp if f_neg else cmp
 }
 
-// Whether a `.Node` number is an exact integer outside `i64`'s range: its unsigned value when `.Uint`, or its
-// decimal bytes (optional leading `-`, digits only) when `.Float` or `.Wide`.
+// Whether a `.Node` or `.Overlay` number is an exact integer outside `i64`'s range: its unsigned value when `.Uint`,
+// or its decimal bytes (optional leading `-`, digits only) when `.Float`, `.Wide`, or `.Number_Text`.
 @(private)
 node_big_int :: proc(v: Value) -> (u: u64, is_uint: bool, dec: string, ok: bool) {
+	if v.kind == .Overlay {
+		return overlay_big_int(v)
+	}
 	if v.kind != .Node {
 		return
 	}
@@ -916,27 +937,29 @@ compare_node_big_against_big :: proc(a: Value, y: ^big.Int, allocator: runtime.A
 @(private)
 compare_wide :: proc(a, b: Value, allocator: runtime.Allocator) -> int {
 	x, y := settle(a), settle(b)
-	if x.kind != .Big && y.kind != .Big && x.kind != .Node && y.kind != .Node {
+	x_wide := x.kind == .Node || x.kind == .Overlay
+	y_wide := y.kind == .Node || y.kind == .Overlay
+	if x.kind != .Big && y.kind != .Big && !x_wide && !y_wide {
 		return compare_numbers(x, y, allocator)
 	}
 	if x.kind == .Big && y.kind == .Big {
 		c, _ := big.int_compare(&(^Big_Block)(x.p).value, &(^Big_Block)(y.p).value)
 		return c
 	}
-	if x.kind == .Node && y.kind == .Node {
+	if x_wide && y_wide {
 		abuf, bbuf: [24]u8
 		return compare_decimal(node_big_decimal(x, &abuf), node_big_decimal(y, &bbuf))
 	}
-	if x.kind == .Node && y.kind == .Big {
+	if x_wide && y.kind == .Big {
 		return compare_node_big_against_big(x, &(^Big_Block)(y.p).value, allocator)
 	}
-	if x.kind == .Big && y.kind == .Node {
+	if x.kind == .Big && y_wide {
 		return -compare_node_big_against_big(y, &(^Big_Block)(x.p).value, allocator)
 	}
-	if x.kind == .Big || x.kind == .Node {
+	if x.kind == .Big || x_wide {
 		return -compare_wide(y, x, allocator)
 	}
-	// `y` is `.Big` or a `.Node` big integer, past `i64` either way.
+	// `y` is `.Big` or a `.Node`/`.Overlay` big integer, past `i64` either way.
 	if y.kind == .Big {
 		if x.kind == .Int {
 			return 1 if big_negative(y) else -1
@@ -951,11 +974,11 @@ compare_wide :: proc(a, b: Value, allocator: runtime.Allocator) -> int {
 	return -compare_node_big_double(y, x.f)
 }
 
-// A document's number as a value with no block of its own where it fits one, for an order: an integer past `i64` stays
-// its node so comparison stays exact.
+// A document's or overlay's number as a value with no block of its own where it fits one, for an order:
+// an integer past `i64` stays its `.Node`/`.Overlay` so comparison stays exact.
 @(private)
 settle :: proc(v: Value) -> Value {
-	if v.kind != .Node {
+	if v.kind != .Node && v.kind != .Overlay {
 		return v
 	}
 	if i, ok := as_i64(v); ok {
@@ -975,7 +998,8 @@ numbers_equal :: proc(a, b: Value, allocator := context.allocator) -> bool {
 	if a.kind == .Double && math.is_nan(a.f) || b.kind == .Double && math.is_nan(b.f) {
 		return false
 	}
-	if (a.kind == .Node && math.is_nan(as_f64(a))) || (b.kind == .Node && math.is_nan(as_f64(b))) {
+	if (a.kind == .Node && math.is_nan(as_f64(a))) || (b.kind == .Node && math.is_nan(as_f64(b))) ||
+		(a.kind == .Overlay && math.is_nan(as_f64(a))) || (b.kind == .Overlay && math.is_nan(as_f64(b))) {
 		return false
 	}
 	return compare_numbers(a, b, allocator) == 0

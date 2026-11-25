@@ -19,7 +19,7 @@ emit_path :: proc(m: ^Machine, r: ^Regs, f: ^Frame) {
 		r.sig, r.mode = fail_status(s), .Ret
 		return
 	}
-	if p.kind == .Node && query.type_of(p) == .Array {
+	if (p.kind == .Node || p.kind == .Overlay) && query.type_of(p) == .Array {
 		b, s := query.built(h, p)
 		query.release(h, p)
 		if s != .Ok {
@@ -193,7 +193,7 @@ emit_update_each :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 	if !is_path(p) {
 		s = raise_taken(h, path_error(m, "Invalid path expression with result ", p))
 		query.release(h, p)
-	} else if p.kind == .Node && query.type_of(p) == .Array {
+	} else if (p.kind == .Node || p.kind == .Overlay) && query.type_of(p) == .Array {
 		b: query.Value
 		b, s = query.built(h, p)
 		query.release(h, p)

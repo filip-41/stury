@@ -549,7 +549,7 @@ identical :: proc(a, b: query.Value) -> bool {
 		return false
 	case .String:
 		return a.s == b.s && a.n == b.n
-	case .Node:
+	case .Node, .Overlay:
 		return a.p == b.p && a.n == b.n && query.type_of(a) != .Number
 	}
 	return a.p == b.p
@@ -1035,7 +1035,7 @@ truthy :: #force_inline proc "contextless" (v: query.Value) -> bool {
 	#partial switch v.kind {
 	case .Absent, .Null, .False:
 		return false
-	case .Node:
+	case .Node, .Overlay:
 		t := query.type_of(v)
 		return t != .Null && t != .False
 	}
