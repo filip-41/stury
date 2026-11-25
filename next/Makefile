@@ -47,6 +47,10 @@ DSV_TIER_TESTS := $(addprefix dsv_tests.,walk_tokens walked_tokens_span_what_the
 DSV_TIER_NAMES := -define:ODIN_TEST_NAMES=$(subst $(space),$(comma),$(DSV_TIER_TESTS))
 X86_TIERS := 0 1
 X86_OPTS ?= minimal speed
+# The runs that force a tier build one LLVM module per file: at `-o:speed` one module of `dsv/test` takes minutes and
+# gigabytes, and the forced tiers check that each tier's code reads right, not what inlines across files. The run that
+# detects the tier keeps the one module an optimized build makes by default.
+X86_TIER_MODULES := -use-separate-modules
 OBJDUMP ?= $(shell command -v llvm-objdump || echo /opt/homebrew/opt/llvm@22/bin/llvm-objdump)
 PLAIN_PKGS := $(TEST_PKGS)
 ifeq ($(shell uname -sm),Darwin arm64)
@@ -81,14 +85,19 @@ DEEP_XML_TEST := xml_tests.reads_nest_100000_levels_in_one_mib
 DEEP_JQ_TEST := jq_tests.programs_nest_100000_levels_in_one_mib,jq_tests.runs_go_100000_levels_deep_in_one_mib
 DEEP_OPTS := none speed
 
-.PHONY: check check-all lint test test-deep test-asan test-tsan
+.PHONY: check check-all lint lint-check lint-wasm lint-tiers $(TIER_PKGS:%=lint-tiers/%) test test-deep test-asan test-tsan
 
 check: lint test
 
 # `check` and the sanitizer runs, which take longer and are not part of it.
 check-all: check test-asan test-tsan
 
+# The three parts share nothing, and the longest builds in them (a wasm object, the optimized `dsv/test` module) use one
+# thread each, so they run side by side.
 lint:
+	@$(MAKE) -j4 --no-print-directory lint-check lint-wasm lint-tiers
+
+lint-check:
 	@echo "== layers"; python3 tools/layers.py || exit 1
 	@for p in $(LIB_PKGS); do \
 		echo "== $$p"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) || exit 1; \
@@ -96,6 +105,14 @@ lint:
 			echo "== $$p ($$t)"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) -target:$$t || exit 1; \
 		done; \
 	done
+	@for p in $(TEST_PKGS); do \
+		echo "== $$p"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) || exit 1; \
+		for t in $(TEST_LINT_TARGETS); do \
+			echo "== $$p ($$t)"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) -target:$$t || exit 1; \
+		done; \
+	done
+
+lint-wasm:
 	@mkdir -p build; for t in $(WASM_TARGETS); do for f in $(WASM_FEATURE_SETS); do \
 		echo "== $(WASM_PKG) ($$t, $$f)"; \
 		$(ODIN) build $(WASM_PKG) -build-mode:obj -no-entry-point $(LINT_FLAGS) -o:speed -target:$$t -target-features:$$f -out:build/wasm.o || exit 1; \
@@ -112,20 +129,17 @@ lint:
 	@echo "== $(DEADSTRIP_PKG)"
 	@$(ODIN) build $(DEADSTRIP_PKG) -build-mode:obj -no-entry-point $(LINT_FLAGS) -o:speed -out:build/deadstrip.o || exit 1
 	@python3 tools/deadstrip_check.py $(NM) build/deadstrip.o || exit 1
-	@for p in $(TEST_PKGS); do \
-		echo "== $$p"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) || exit 1; \
-		for t in $(TEST_LINT_TARGETS); do \
-			echo "== $$p ($$t)"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) -target:$$t || exit 1; \
-		done; \
-	done
-	@mkdir -p build; for p in $(TIER_PKGS); do \
+
+lint-tiers: $(TIER_PKGS:%=lint-tiers/%)
+
+$(TIER_PKGS:%=lint-tiers/%): lint-tiers/%:
+	@mkdir -p build; p=$*; o=build/tiers-$$(echo $$p | tr / -); \
 		echo "== $$p (linux_amd64 tiers)"; \
 		case $$p in dsv/test) req="--require dsv::pass_default_v3:";; lib/base/regex/test) req="--require ::set_v3";; xml/test) req="--require xml::span_v3:";; *) req=;; esac; \
-		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:none $(LINT_FLAGS) -out:build/tiers-none.o || exit 1; \
-		python3 tools/tier_check.py $(OBJDUMP) build/tiers-none.o $$req || exit 1; \
-		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:build/tiers-speed.o || exit 1; \
-		python3 tools/tier_check.py $(OBJDUMP) build/tiers-speed.o --inlined $$req || exit 1; \
-	done
+		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:none $(LINT_FLAGS) -out:$$o-none.o || exit 1; \
+		python3 tools/tier_check.py $(OBJDUMP) $$o-none.o $$req || exit 1; \
+		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:$$o-speed.o || exit 1; \
+		python3 tools/tier_check.py $(OBJDUMP) $$o-speed.o --inlined $$req || exit 1
 
 test:
 	@for p in $(TEST_PKGS); do \
@@ -150,7 +164,7 @@ ifdef X86_RUNS
 		case $$p in dsv/test) names="$(DSV_TIER_NAMES)";; *) names=;; esac; \
 		for t in $(X86_TIERS); do \
 			echo "== $$p (x86-64 tier $$t, -o:$$o)"; \
-			$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) $$names -define:TIER=$$t -out:build/test-tier$$t-$$o || exit 1; \
+			$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) $(X86_TIER_MODULES) $$names -define:TIER=$$t -out:build/test-tier$$t-$$o || exit 1; \
 		done; \
 		echo "== $$p (x86-64 detected tier, -o:$$o)"; \
 		$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) $$names -out:build/test-detected-$$o || exit 1; \

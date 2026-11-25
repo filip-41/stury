@@ -62,9 +62,10 @@ Tally :: struct {
 }
 
 // Writes the document `src` builds as `from` in every spec and layout and checks each against the laws. A text whose
-// write is refused must hold a value the target cannot spell, which only JSON5's non-finite numbers are.
+// write is refused must hold a value the target cannot spell, which only JSON5's non-finite numbers are. A long text
+// passes `of` to write one spec and layout in `of` of them, `testkit.sampled`.
 @(private)
-round_trips :: proc(t: ^testing.T, src: []u8, from: json.Spec, name: string, tally: ^Tally) {
+round_trips :: proc(t: ^testing.T, src: []u8, from: json.Spec, name: string, tally: ^Tally, of := 1) {
 	doc, err := json.build(src, from)
 	if err != nil {
 		return
@@ -73,6 +74,9 @@ round_trips :: proc(t: ^testing.T, src: []u8, from: json.Spec, name: string, tal
 	tally.texts += 1
 	for to in json.Spec {
 		for opts in LAYOUTS {
+			if of > 1 && !testkit.sampled(of) {
+				continue
+			}
 			tally.writes += 1
 			text, dropped, werr := json.write(&doc, to, opts)
 			if werr != nil {
@@ -135,9 +139,13 @@ json_writes_read_back :: proc(t: ^testing.T) {
 		round_trips(t, transmute([]u8)src, .Json5, src, &tally)
 	}
 	testing.expectf(t, tally.texts > 380, "%d texts", tally.texts)
+	// A fixture is far longer than a suite text and each of its writes is read back and written again, so a run writes
+	// a third of its specs and layouts, and every one at `ROUNDS` of 3.
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 0x77a1e5)
 	for name in FIXTURES {
 		if src, err := fixture(name); err == nil {
-			round_trips(t, src, .Json, name, &tally)
+			round_trips(t, src, .Json, name, &tally, 3)
 			delete(src)
 		}
 	}

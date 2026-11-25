@@ -446,10 +446,12 @@ pieces_refuse_a_window_with_a_gap :: proc(t: ^testing.T) {
 
 // A token far longer than a window is read on in each window from where the last stopped. A validate whose windows
 // start at its `keep` reads each byte about once, with the bytes before the window overwritten by `poison`, which the
-// grammar refuses where they were, and the reads in 1 KiB pieces give what the whole reads give.
+// grammar refuses where they were, and the reads in pieces of 1 KiB, or a 4096th of a longer text, give what the whole
+// reads give. A document keeps its text, so each window is a copy of everything read so far, and a longer text in pieces
+// of 1 KiB takes the square of its length in copies.
 @(private = "file")
 long_token_agrees :: proc(t: ^testing.T, src: []u8, spec: json.Spec, paths: [][]tape.Step, poison: u8, name: string) {
-	PIECE :: 1024
+	PIECE := max(1024, len(src) / 4096)
 	err, read := validate_in_windows(src, spec, PIECE, poison)
 	testing.expectf(t, err == nil && read <= 4 * len(src), "%s %v: validate %v, %d bytes read of %d", name, spec, err, read, len(src))
 	p := tape.Pieces{allocator = context.allocator}

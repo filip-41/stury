@@ -1256,6 +1256,10 @@ expect_agreement :: proc(t: ^testing.T, a: ^Agreement, floor: Agreement_Floor) {
 	testing.expectf(t, a.queries >= floor.scans / 6 && a.query_reads > 0 && a.query_unread > 0, "%d queries, %d paths read, %d not loaded", a.queries, a.query_reads, a.query_unread)
 }
 
+// The query of every path over a partial document costs a read of every path for each set of paths, so a run reads it
+// over the scans of a path and its pair in each `WIDE_EVERY` of them and of the whole set of paths, and over every set at `ROUNDS` of `WIDE_EVERY`.
+WIDE_EVERY :: 4
+
 // The readers law over `src`: each path of scans by paths of its own keys and indexes reads over the partial document
 // as over the build, and every other read the partial document answers is the build's, or `.Not_Loaded` where the build
 // has a value or lacks it. A text the build refuses is refused alike by every read. `a` counts what was read.
@@ -1293,17 +1297,18 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 		grains: []tape.Grain,
 		limits: []int,
 		facts:  bool,
+		wide:   bool, // the query of every path is read over each of its scans, `wide_query_agrees`
 	}
 	runs := make([dynamic]Grained, context.temp_allocator)
 	for set, i in sets {
-		append(&runs, Grained{set, nil, nil, false})
+		append(&runs, Grained{set, nil, nil, false, ROUNDS >= WIDE_EVERY || i % (2 * WIDE_EVERY) < 2 || i + 1 == len(sets)})
 		if len(set) == 1 || i + 1 == len(sets) {
 			for grain in ([]tape.Grain{.Keys, .Exists}) {
 				grains := make([]tape.Grain, len(set), context.temp_allocator)
 				for &g, j in grains {
 					g = grain if j % 3 != 2 else .Whole
 				}
-				append(&runs, Grained{set, grains, nil, false})
+				append(&runs, Grained{set, grains, nil, false, false})
 			}
 			// Each path's first answer, or its first two, and every third path's every answer.
 			for limit in 1 ..= 2 {
@@ -1311,12 +1316,12 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 				for &l, j in limits {
 					l = limit if j % 3 != 2 else 0
 				}
-				append(&runs, Grained{set, nil, limits, false})
+				append(&runs, Grained{set, nil, limits, false, false})
 			}
 		}
 	}
 	if f.facts != {} {
-		append(&runs, Grained{sets[len(sets) - 1], nil, nil, true})
+		append(&runs, Grained{sets[len(sets) - 1], nil, nil, true, true})
 	}
 	all, aerr := tape.demand_of(paths)
 	testing.expect(t, aerr == nil)
@@ -1368,7 +1373,7 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 				}
 				scan_query_agrees(t, f, &doc, &r, &d, set, run.limits, dups, stop, name)
 				// The query of every path over the scan is checked on the scans that keep each path whole.
-				if plain && len(paths) > 0 {
+				if run.wide && plain && len(paths) > 0 {
 					wide_query_agrees(t, f, &doc, &r, &all, paths, dups, stop, name, a)
 				}
 
