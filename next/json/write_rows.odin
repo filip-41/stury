@@ -389,7 +389,25 @@ rows_rare :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, 
 		return true
 	}
 	r.after = 2
+	return rows_scalar(out, w, l, i, SPEC)
+}
+
+// `put_scalar` of row `i`, out of line. Its number branch writes the token's span as written, through `tape.span_bytes`,
+// whose two slice checks a build that checks bounds carries, and one copy serves every row the rare path writes rather
+// than one per `rows_rare` instance. The span is in bounds by the document's own invariant: a node's `lo` and `n` name
+// bytes of `w.doc.src` from its first byte, so `src[lo:][:n]` ends at `lo + n <= len(src)`, and its `lo` is at most the
+// text's length, which `span_bytes` reads past only to compare.
+@(private, cold)
+rows_scalar :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, i: tape.Node_Index, $SPEC: Spec) -> bool {
 	return put_scalar(out, w, l, i, SPEC)
+}
+
+// `step_value` of the facts path, out of line for the reason `rows_scalar` gives: `put_scalar` writes a number's span
+// through `tape.span_bytes`, and the checks of its two slices belong in one copy of the step, not in each
+// `rows_fact_value`. The scalar's span is in bounds as `rows_scalar` says.
+@(private, cold)
+rows_fact_step :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, s: write.Step, $T: Spec, $PRETTY: bool) -> bool {
+	return step_value(out, w, l, s, T, true, false, PRETTY)
 }
 
 // A container with facts the rows route has open, whose facts are written at its close.
@@ -486,7 +504,7 @@ rows_fact_value_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows
 	}
 	s := write.value_step(w, at, key, r.top, r.after != 2)
 	l.line_value, l.wrote = r.after == 2, r.top > 0 || r.after != 0
-	if !step_value(out, w, l, s, T, true, false, PRETTY) {
+	if !rows_fact_step(out, w, l, s, T, PRETTY) {
 		return i, false
 	}
 	if t.kind < .Array {

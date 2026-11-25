@@ -32,6 +32,29 @@ Records :: struct {
 	seq_rs:        bool,
 	seq_unframed:  bool,
 	skip_line:     bool,
+	// The reads of the spec and `LAX` the records were opened with, which `records_open` picks, so that a caller of one
+	// spec links the walks of that spec alone: a read that switched on `spec` here would reach every spec's walks and
+	// no build could drop the ones it never reads.
+	validate_as:   Records_Validate,
+	find_as:       Records_Find,
+	scan_as:       Records_Scan,
+}
+
+// The batch reads one spec and `LAX` give, each an instance of `records_validate_as` and its kin, which `records_open`
+// picks.
+@(private)
+Records_Validate :: #type proc(r: ^Records, out: []tape.Record, allocator: runtime.Allocator) -> int
+@(private)
+Records_Find :: #type proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read: tape.Read_Options, allocator: runtime.Allocator) -> int
+@(private)
+Records_Scan :: #type proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read: tape.Read_Options, allocator: runtime.Allocator) -> int
+
+// The three batch reads of one spec and `LAX`, which `records_open` picks.
+@(private)
+Records_Reads :: struct {
+	validate: Records_Validate,
+	find:     Records_Find,
+	scan:     Records_Scan,
 }
 
 #assert(size_of(Walk(.Json5, build.Scanner, false, build.SCANNER_CAPS)) <= size_of(Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS)))
@@ -51,7 +74,7 @@ RECORD_AHEAD :: 256
 // framing `.Concatenated`, which JSON has no reading of, options of another format family, and a `path` the framing or
 // the policy for repeated keys does not take end the records with `tape.Bad_Option` before any is read, as
 // `build.records_path_refused` says. A text in pieces opens with its first window, as `tape.Records` says.
-records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json, opts := Options{}, path: []tape.Step = nil) -> (r: Records) {
+records_open :: #force_inline proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json, opts := Options{}, path: []tape.Step = nil) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("json: spec out of range")
 	}
@@ -73,6 +96,30 @@ records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json
 		r.err, r.at = e, .Done
 	}
 	walk_init(&r.walk, src, nil, (^hook.No_Hooks)(nil), nil, {}, nil, build.read_depth(opts), opts.tolerate, opts.budget.steps)
+	// The reads of this spec and `LAX`. The switch folds at the call site of an inlined `records_open` with a constant
+	// spec and options, so the walks of the specs and `LAX` a caller never opens are dropped.
+	lax := build.read_lax(opts)
+	chosen: Records_Reads
+	if spec == .Json {
+		if lax {
+			chosen = records_reads_of(.Json, true)
+		} else {
+			chosen = records_reads_of(.Json, false)
+		}
+	} else if spec == .Jsonc {
+		if lax {
+			chosen = records_reads_of(.Jsonc, true)
+		} else {
+			chosen = records_reads_of(.Jsonc, false)
+		}
+	} else {
+		if lax {
+			chosen = records_reads_of(.Json5, true)
+		} else {
+			chosen = records_reads_of(.Json5, false)
+		}
+	}
+	r.validate_as, r.find_as, r.scan_as = chosen.validate, chosen.find, chosen.scan
 	return
 }
 
@@ -82,27 +129,9 @@ records_open :: proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json
 // record nesting past `WALK_LEVELS` allocates, for its open levels. Needs `READ_STACK` bytes of stack and faults on a
 // thread with less.
 @(require_results)
-records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.allocator) -> (n: int) {
+records_validate :: #force_inline proc(r: ^Records, out: []tape.Record, allocator := context.allocator) -> (n: int) {
 	hook.probe_stack(READ_STACK)
-	lax := build.read_lax(r.opts)
-	switch r.spec {
-	case .Json:
-		if lax {
-			return records_validate_as(r, out, .Json, true, allocator)
-		}
-		return records_validate_as(r, out, .Json, false, allocator)
-	case .Jsonc:
-		if lax {
-			return records_validate_as(r, out, .Jsonc, true, allocator)
-		}
-		return records_validate_as(r, out, .Jsonc, false, allocator)
-	case .Json5:
-		if lax {
-			return records_validate_as(r, out, .Json5, true, allocator)
-		}
-		return records_validate_as(r, out, .Json5, false, allocator)
-	}
-	return
+	return r.validate_as(r, out, allocator)
 }
 
 // Reads the next records of `r` into `out`, and for each the first value `path` reaches in it into the same place of
@@ -111,27 +140,9 @@ records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.a
 // walk reads each value to its end whatever `read.stop_early` says, as the next starts there. Allocates as `find` does.
 // Needs `READ_STACK` bytes of stack and faults on a thread with less.
 @(require_results)
-records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
+records_find :: #force_inline proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	hook.probe_stack(READ_STACK)
-	lax := build.read_lax(r.opts)
-	switch r.spec {
-	case .Json:
-		if lax {
-			return records_find_as(r, path, out, answers, .Json, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Json, false, read, allocator)
-	case .Jsonc:
-		if lax {
-			return records_find_as(r, path, out, answers, .Jsonc, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Jsonc, false, read, allocator)
-	case .Json5:
-		if lax {
-			return records_find_as(r, path, out, answers, .Json5, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Json5, false, read, allocator)
-	}
-	return
+	return r.find_as(r, path, out, answers, read, allocator)
 }
 
 // Reads the next records of `r` into `out`, and for each the document of its nodes the paths of `demand` reach into the
@@ -142,27 +153,9 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 // reads each value to its end whatever `read.stop_early` says, as the next starts there. Needs `READ_STACK` bytes of
 // stack and faults on a thread with less.
 @(require_results)
-records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
+records_scan :: #force_inline proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	hook.probe_stack(READ_STACK)
-	lax := build.read_lax(r.opts)
-	switch r.spec {
-	case .Json:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Json, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Json, false, read, allocator)
-	case .Jsonc:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Jsonc, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Jsonc, false, read, allocator)
-	case .Json5:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Json5, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Json5, false, read, allocator)
-	}
-	return
+	return r.scan_as(r, demand, out, docs, read, allocator)
 }
 
 // Builds a worker-local `Records` cursor for parallel chunk `chunk`, with locked `scratch` and serial runner.
@@ -404,6 +397,24 @@ count_delim_records :: proc "contextless" (src: []u8, lo, hi: u64, framing: tape
 		}
 	}
 	return
+}
+
+// The reads of each spec and `LAX` that `records_open` gives the records, so that the record entry procs need no switch
+// on the spec: each entry is an instance of `records_validate_as` and its kin, and a build links only those an opened
+// record names.
+@(private)
+records_reads_of :: #force_inline proc($S: Spec, $LAX: bool) -> Records_Reads {
+	return {
+		validate = proc(r: ^Records, out: []tape.Record, allocator: runtime.Allocator) -> int {
+			return records_validate_as(r, out, S, LAX, allocator)
+		},
+		find = proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read: tape.Read_Options, allocator: runtime.Allocator) -> int {
+			return records_find_as(r, path, out, answers, S, LAX, read, allocator)
+		},
+		scan = proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read: tape.Read_Options, allocator: runtime.Allocator) -> int {
+			return records_scan_as(r, demand, out, docs, S, LAX, read, allocator)
+		},
+	}
 }
 
 // `record_frame` of the records `r` of a JSON spec, in the walk for hook `H`.
