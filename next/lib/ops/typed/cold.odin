@@ -21,7 +21,9 @@ key_span :: #force_inline proc "contextless" (h: ^Reader, t: tape.Token) -> stri
 map_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Frame, owner: ^Record) -> (hook.Regs, hook.Action) {
 	context = h.ctx
 	s := s
-	f.key = t
+	if h.path != nil {
+		note_map_key(h, h.sp - 1, t)
+	}
 	m := &h.plan.meta[owner.meta]
 	raw := (^runtime.Raw_Map)(f.data)
 	k: [2]u64
@@ -57,7 +59,7 @@ map_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Fram
 			free_held(h, owned)
 			return refuse_memory(h, s, t)
 		}
-		if met && h.first {
+		if met && .First in h.flags {
 			free_held(h, owned)
 			return s, .Skip
 		}
@@ -88,7 +90,7 @@ map_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Fram
 	}
 	if !inserted {
 		free_held(h, owned)
-		if h.first && f.seen == 0 {
+		if .First in h.flags && f.seen == 0 {
 			return s, .Skip
 		}
 		// An entry of a map empty at its open, or one this object met before, is this read's, so a repeat frees what
@@ -99,17 +101,39 @@ map_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Fram
 			return refuse_memory(h, s, t)
 		}
 	}
-	h.key, h.fresh = k, inserted
+	h.key = k
+	if inserted {
+		h.flags += {.Fresh}
+	} else {
+		h.flags -= {.Fresh}
+	}
 	s.c = u64(uintptr(slot))
 	return s, .Next
 }
 
+// Records the last key `t` of the open map at frame `idx` when `h.path != nil`. A refusal to grow leaves the slot
+// unrecorded, matching `fill_path`.
+@(private = "file", cold)
+note_map_key :: #force_no_inline proc "contextless" (h: ^Reader, idx: int, t: tape.Token) {
+	if idx >= len(h.map_keys) {
+		context = h.ctx
+		alloc := h.path.allocator if h.path.allocator.procedure != nil else h.caller
+		wide := max(16, max(len(h.map_keys) * 2, idx + 1))
+		block, err := runtime.non_zero_mem_resize(raw_data(h.map_keys), len(h.map_keys) * size_of(tape.Token), wide * size_of(tape.Token), align_of(tape.Token), alloc)
+		if err != nil || len(block) < wide * size_of(tape.Token) {
+			return
+		}
+		h.map_keys = ([^]tape.Token)(raw_data(block))[:wide]
+	}
+	h.map_keys[idx] = t
+}
+
 // Gives the open list room for one more element, or refuses the element of a fixed array that has none. A refused read
 // answers every value here, as its registers have no room.
-@(private)
+@(private, cold)
 grow_list :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action, bool) {
 	context = h.ctx
-	if h.dead {
+	if .Dead in h.flags {
 		return dead_regs(), dead_action(t), false
 	}
 	f := &h.frames[h.sp - 1]
@@ -139,20 +163,29 @@ grow_list :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: t
 	return {data + wide * stride, s.b, data + n * stride}, .Next, true
 }
 
-// Doubles the frames the read holds, false when memory is refused. Past its own the read's frames are on the default
-// heap, which grows them in place rather than leave a dead copy in the caller's allocator at each step.
-@(private)
+// Doubles the frames the read holds through the read's allocator, false when memory is refused.
+@(private, cold)
 frames_grow :: #force_no_inline proc "contextless" (h: ^Reader) -> bool {
+	if h.room > max(int) / (2 * size_of(Frame)) {
+		return false
+	}
+	context = h.ctx
 	wide := h.room * 2
 	grown := h.frames != h.home
-	bytes := runtime.heap_resize(h.frames, wide * size_of(Frame)) if grown else runtime.heap_alloc(wide * size_of(Frame), false)
-	if bytes == nil {
+	block: []u8
+	err: runtime.Allocator_Error
+	if grown {
+		block, err = runtime.non_zero_mem_resize(h.frames, h.room * size_of(Frame), wide * size_of(Frame), align_of(Frame), h.allocator)
+	} else {
+		block, err = runtime.mem_alloc_non_zeroed(wide * size_of(Frame), align_of(Frame), h.allocator)
+	}
+	if err != nil || len(block) < wide * size_of(Frame) {
 		return false
 	}
 	if !grown {
-		intrinsics.mem_copy_non_overlapping(bytes, h.frames, h.room * size_of(Frame))
+		intrinsics.mem_copy_non_overlapping(raw_data(block), h.frames, h.room * size_of(Frame))
 	}
-	h.frames, h.room = ([^]Frame)(bytes), wide
+	h.frames, h.room = ([^]Frame)(raw_data(block)), wide
 	return true
 }
 
@@ -172,7 +205,7 @@ push :: proc "contextless" (h: ^Reader, s: hook.Regs, data: rawptr) -> (^Frame, 
 // `required` member the cursor did not pass, a list, a fixed array, a raw value or a wrapper's element.
 @(private)
 close_container :: #force_no_inline proc "contextless" (h: ^Reader, f: ^Frame, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-	if h.dead {
+	if .Dead in h.flags {
 		h.sp = 1
 		return dead_regs(), .Next
 	}
@@ -284,7 +317,7 @@ settle_open :: proc "contextless" (h: ^Reader, s: hook.Regs, n: int) {
 
 // A value the hook's hot cases do not take: a kind read through its own path, a wrapper's element, a delimited text's
 // cell for a field other than a string, or a token the record refuses.
-@(private)
+@(private, cold)
 indirect :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, $number: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number, $CELLS: bool) -> (hook.Regs, hook.Action) {
 	s := s
 	rec := (^Record)(uintptr(s.b) - size_of(Record))
@@ -313,7 +346,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 				return refuse_at(h, s, t, .Missing_Field, t.lo, h.sp, nil, member_name(h, m))
 			} else if rec.stride != 0 {
 				intrinsics.mem_zero(rawptr(dest), int(rec.stride))
-			} else if frame_owner(f).kind == .Map && h.fresh {
+			} else if frame_owner(f).kind == .Map && .Fresh in h.flags {
 				map_absent(h, f)
 			}
 			s.c += u64(rec.stride)
@@ -393,7 +426,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 		// A map that holds entries at its open tracks the keys `.First` met in a set of its own. One with a block is the
 		// target's, as the read makes a map empty.
 		f.seen = u64((^runtime.Raw_Map)(dest).len != 0)
-		if runtime.map_data((^runtime.Raw_Map)(dest)^) != 0 && !hold_map(h, dest, m.map_info) {
+		if .First not_in h.flags && runtime.map_data((^runtime.Raw_Map)(dest)^) != 0 && !hold_map(h, dest, m.map_info) {
 			return refuse_memory(h, s, t)
 		}
 		return {NO_LIMIT, u64(uintptr(rec.first)), 0}, .Next
@@ -449,7 +482,7 @@ positional :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, $numb
 	}
 	inner, action := reader_hook(h, {NO_LIMIT, u64(uintptr(member)) + size_of(Record), s.c}, t, number, CELLS)
 	h.outer = outer
-	if h.dead {
+	if .Dead in h.flags {
 		return inner, action
 	}
 	if h.sp != sp {
@@ -528,7 +561,7 @@ wrapped :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, rec: ^Re
 			}
 			(^rawptr)(dest)^ = raw_data(block)
 			made = true
-		} else if !hold_pointee(h, uintptr((^rawptr)(dest)^), int(m.size)) {
+		} else if .First not_in h.flags && !hold_pointee(h, uintptr((^rawptr)(dest)^), int(m.size)) {
 			return refuse_memory(h, s, t)
 		}
 		target = uintptr((^rawptr)(dest)^)
@@ -564,7 +597,7 @@ wrapped :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, rec: ^Re
 	}
 	inner, action := reader_hook(h, {NO_LIMIT, u64(uintptr(first)), u64(target)}, t, number, CELLS)
 	h.outer = outer
-	if h.dead {
+	if .Dead in h.flags {
 		// The element was refused whole, so a pointer made for it is taken back, as a list does not count its place.
 		if made {
 			runtime.mem_free_with_size(rawptr(target), max(int(m.size), 1), h.allocator)

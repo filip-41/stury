@@ -11,7 +11,7 @@ import "stury:lib/core/tape"
 // `cells_hook` before the columns are mapped: the first record into a struct maps them, and a record into anything
 // else, a repeated column or a refusal leaves every record read by its keys.
 @(private)
-learn_columns :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, t: tape.Token, $number: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number) -> (hook.Regs, hook.Action) {
+learn_columns :: #force_no_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, t: tape.Token, $number: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number) -> (hook.Regs, hook.Action) {
 	#partial switch h.learn {
 	case .Before:
 		if t.kind == .Array && h.sp == 1 {
@@ -26,12 +26,12 @@ learn_columns :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Reg
 		}
 	case .Learning:
 		r, a := reader_hook(&h.reader, s, t, number, true)
-		if h.dead {
+		if .Dead in h.flags {
 			h.learn = .Off
 		} else if t.role == .Key && a == .Next {
 			column := (^Record)(uintptr(r.b) - size_of(Record))
 			// A record with a column repeated under `.Last` is read by its keys, so the repeat frees what it replaces.
-			repeated := h.taken == len(h.columns)
+			repeated := h.taken == hook.COLUMN_BITS
 			for taken in h.columns[:h.taken] {
 				repeated ||= taken.rec == column
 			}
@@ -62,7 +62,8 @@ learn_columns :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Reg
 // the row.
 @(private)
 one_row :: #force_no_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-	h.row = {(^Record)(uintptr(s.b) - size_of(Record))^, {word = NO_KEY, kind = .End}}
+	h.row[0] = (^Record)(uintptr(s.b) - size_of(Record))^
+	h.row[1] = {word = NO_KEY, kind = .End}
 	h.row[0].stride = 1
 	f, ok := push(&h.reader, s, nil)
 	if !ok {
@@ -74,6 +75,8 @@ one_row :: #force_no_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, 
 
 // A token of a replayed record: a cell, read by the column at `b`, and the record's `End`, which closes it. A cell with
 // nothing to decode of a string, number or boolean member is read here, and any other through the hook.
+// Invariant: `h.replay.replays` is true only while a fixed-width record is open (`h.sp == RECORD_SP >= 1`), `s.b` points
+// within `h.columns[:h.taken]`, and for plain string cells `t.lo + u64(t.n) <= h.len`.
 @(private)
 replay_cell :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, t: tape.Token, $number: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number) -> (hook.Regs, hook.Action) #no_bounds_check {
 	if t.kind == .End {
@@ -107,7 +110,7 @@ replay_cell :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs,
 				return next, .Next
 			}
 		case .Number:
-			if v, ok := spell.number_short(src, t.lo, t.lo + u64(t.n)); ok && store_number(column.kind, v, dest) {
+			if v, ok := spell.number_short(src, t.lo, t.lo + u64(t.n)); ok && store_number(column.kind, v, dest, t.n) {
 				return next, .Next
 			}
 		case .Bool:
@@ -130,7 +133,7 @@ replay_cell :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs,
 replay_cold :: #force_no_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, t: tape.Token, $number: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number) -> (hook.Regs, hook.Action) {
 	column := (^Column)(uintptr(s.b))
 	r, a := reader_hook(&h.reader, {NO_LIMIT, u64(uintptr(column.rec)) + size_of(Record), s.c}, t, number, true)
-	if h.dead {
+	if .Dead in h.flags {
 		h.replay.replays = false
 		return r, a
 	}

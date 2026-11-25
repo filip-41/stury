@@ -31,71 +31,96 @@ Unmarshal_Options :: struct {
 @(private)
 NO_LIMIT :: max(u64)
 
-// An open container, with the registers its close gives back. `data` is a list's first element, a map, a fixed array
-// or bit set's base, or a raw value's first byte. `seen` holds which members of a struct were read, kept from the first
-// key that arrives out of order, as until then the cursor says, with `SEEN_ON` set then, and `run` is the cursor the
-// members marked last reached. A struct's or a fixed array's `seen` has `SEEN_TARGET` when its bytes may hold the
-// target's own values, and a map's is 1 when the map held entries at its open. `owner` reads the container and
-// `target` is where it goes when the record before `b` is a wrapper's. `key` is a map's last key.
+// An open container, with the registers its close gives back. `seen` holds which members of a struct were read, kept
+// from the first key that arrives out of order, as until then the cursor says, with `SEEN_ON` set then, and `run` is
+// the cursor the members marked last reached. A struct's or a fixed array's `seen` has `SEEN_TARGET` when its bytes may
+// hold the target's own values, and a map's is 1 when the map held entries at its open. `data` is a list's first
+// element, a map, a fixed array or bit set's base, or a raw value's first byte. `owner` reads the container and
+// `target` is where it goes when the record before `b` is a wrapper's.
 @(private)
 Frame :: struct {
 	a, b, c: u64,
-	data:    rawptr,
 	seen:    u64,
+	data:    rawptr,
 	run:     u64,
 	owner:   ^Record,
 	target:  uintptr,
-	key:     tape.Token,
 }
 
+// The bits of `Frame.seen` past the members' own: `SEEN_ON` once the struct's members are tracked, `SEEN_WIDE` when
+// members from `SEEN_BITS` on are tracked in the words at `Frame.data`, and `SEEN_TARGET` when the bytes of the struct
+// or fixed array may hold the target's own values, as the read did not make them.
 @(private)
 SEEN_ON :: u64(1) << 63
 
-// The open levels a read keeps in its own frame. A deeper text moves them to the read's allocator.
 @(private)
+SEEN_WIDE :: u64(1) << 62
+
+@(private)
+SEEN_TARGET :: u64(1) << 61
+
+@(private)
+SEEN_BITS :: 61
+
+// The open levels a read keeps in its own frame. A deeper text moves them to the read's allocator.
+@(private = "file")
 FRAME_ROOM :: 64
 
 // The target bytes a read keeps in its own frame. A larger target's are kept in the read's allocator.
-@(private)
+@(private = "file")
 BEFORE_ROOM :: 128
 
-// The state of one read, which a format's walk reaches through its hook, a `Text_Reader` or a `Cells_Reader`.
+// Cold state flags of `Reader`, packed into one byte inside Cache Line 0.
+@(private)
+Reader_Flag :: enum u8 {
+	First,   // repeated keys under `.First`
+	Unknown, // `refuse_unknown`
+	Made,    // the read made its plan, and frees it on return
+	Dead,    // a refusal ended the read, and the walk judges the rest of the text
+	Fresh,   // the last map key read made a new entry, which an empty cell takes back
+}
+
+@(private)
+Reader_Flags :: bit_set[Reader_Flag; u8]
+
+// The state of one read, which a format's walk reaches through its hook, a `Text_Reader`, a `Refusing_Reader` or a
+// `Cells_Reader`. Hot fields sit first so all per-token fields and `expected` fit in Cache Line 0, while keeping
+// `Text_Reader.reader` at offset 0 so `&h.reader` requires no pointer adjustment.
 @(private)
 Reader :: struct {
-	base:      [^]u8,
-	len:       u64,
-	frames:    [^]Frame,
-	sp:        int,
-	room:      int, // the frames `frames` holds
-	plan:      ^Plan,
-	format:    ^tape.Format,
-	home:      [^]Frame, // the frames in the read's caller's frame
-	borrow:    bool,
-	first:     bool, // repeated keys under `.First`
-	unknown:   bool, // `refuse_unknown`
-	made:             bool, // the read made its plan, and frees it on return
-	dead:             bool, // a refusal ended the read, and the walk judges the rest of the text
+	base:             [^]u8,
+	len:              u64,
+	frames:           [^]Frame,
+	sp:               int,
+	room:             int, // the frames `frames` holds
+	borrow:           bool,
+	flags:            Reader_Flags,
 	optional_seconds: bool, // a date-time may omit `:SS`, as TOML 1.1 allows
-	err:       tape.Error, // the first refusal
+	plan:             ^Plan,
+	expected:         ^hook.Expected_Memo, // used by `Text_Reader` walks with `.Expects`
+	// Cold fields past Cache Line 0.
+	home:             [^]Frame, // the frames in the read's caller's frame
+	format:           ^tape.Format,
+	err:              tape.Error, // the first refusal
 	// The registers of the outermost wrapper whose element is being read, nil outside one. A refusal of the element is
 	// the wrapper's, as its registers name the element's place.
-	outer:     ^hook.Regs,
-	path:      ^[dynamic]tape.Step,
-	zero:      []u8, // zeroes as wide as the widest map value read, for a new entry
-	key:       [2]u64, // the last map key read, and whether its entry is new, which an empty cell takes back
-	fresh:     bool,
+	outer:            ^hook.Regs,
+	path:             ^[dynamic]tape.Step,
+	map_keys:         []tape.Token, // each open map frame's last key when `path != nil`, indexed by frame
+	zero:             []u8, // zeroes as wide as the widest map value read, for a new entry
+	key:              [2]u64, // the last map key read
 	// The target, and its bytes as the read found them, so a repeat frees what the read put in the target and nothing
 	// the target held, and sets back what the target held.
-	target:    uintptr,
-	before:    []u8,
+	target:           uintptr,
+	before:           []u8,
 	// The blocks the target held that the read went into, as `before` holds the target's: its pointees and maps.
-	held:      [dynamic]Held,
+	held:             [dynamic]Held,
 	// One past the head of the last tag 1 the walk gave, so a number that starts there is a count of seconds since the
 	// epoch, as a `time.Time` takes it, which the format notes. 0 for none, as a value after a tag starts past the tag's first byte.
-	epoch:     u64,
-	allocator: runtime.Allocator, // the caller's, counted under `Budget.memory`
-	caller:    runtime.Allocator, // the one a dynamic array or map read keeps for its owner
-	ctx:       runtime.Context,
+	epoch:            u64,
+	allocator:        runtime.Allocator, // the caller's, counted under `Budget.memory`
+	caller:           runtime.Allocator, // the one a dynamic array or map read keeps for its owner
+	ctx:              runtime.Context,
 }
 
 // A block the target held that the read went into: a pointee at `at` with its bytes as the read found them, or a map
@@ -111,7 +136,6 @@ Held :: struct {
 // The hook of a read of a format whose values carry their kinds, as JSON's, CBOR's and TOML's do.
 Text_Reader :: struct {
 	using reader: Reader,
-	expected:     ^hook.Expected_Memo,
 	protocol:     hook.Protocol({.Skips, .Expects}, hook.Unused, hook.Unused, hook.Unused),
 }
 
@@ -120,12 +144,12 @@ Text_Reader :: struct {
 // key, each read by that map, with `b` at its column.
 Cells_Reader :: struct {
 	using reader: Reader,
-	dropped:      u64,
-	alike:        bool,
 	replay:       hook.Replay,
-	columns:      [hook.COLUMN_BITS]Column, // each column the first record took, in its order
+	dropped:      u64,
 	taken:        int,
+	alike:        bool,
 	learn:        Learn,
+	columns:      [hook.COLUMN_BITS]Column, // each column the first record took, in its order
 	row:          [2]Record, // the records of a target that is one row, which `one_row` reads its records by
 	protocol:     hook.Protocol({.Skips, .Columns, .Cell_Values}, hook.Unused, hook.Unused, hook.Unused),
 }
@@ -138,6 +162,13 @@ Column :: struct {
 	offset: u32,
 	kind:   Read_Kind,
 	read:   Cell_Read,
+}
+
+#assert(offset_of(Text_Reader, reader) == 0)
+#assert(offset_of(Text_Reader, expected) + size_of(^hook.Expected_Memo) <= 64)
+when size_of(uintptr) == 8 {
+	#assert(size_of(Frame) == 64)
+	#assert(size_of(Column) == 16)
 }
 
 // How a replayed record reads a cell with nothing to decode.
@@ -176,23 +207,22 @@ cells_hook :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, 
 	if h.replay.replays {
 		return replay_cell(h, s, t, number)
 	}
-	if h.learn == .Ready {
-		if t.kind == .Object && t.role == .Value && h.sp == RECORD_SP - 1 && h.replay.fixed {
-			r, a := reader_hook(&h.reader, s, t, number, true)
-			if a == .Next && h.sp == RECORD_SP {
-				// The record's cells come with no keys, each read by its column.
-				h.replay.replays = true
-				r.b = u64(uintptr(&h.columns[0]))
-			}
-			return r, a
+	if h.learn == .Ready && t.kind == .Object && t.role == .Value && h.sp == RECORD_SP - 1 && h.replay.fixed {
+		// `t.kind == .Object` is constant here so LLVM folds `reader_hook` to only the struct open path.
+		r, a := reader_hook(&h.reader, s, t, number, true)
+		if a == .Next && h.sp == RECORD_SP {
+			// The record's cells come with no keys, each read by its column.
+			h.replay.replays = true
+			r.b = u64(uintptr(&h.columns[0]))
 		}
-		return reader_hook(&h.reader, s, t, number, true)
+		return r, a
 	}
 	return learn_columns(h, s, t, number)
 }
+
 // The records a refused read reads every token by: a `Dead` record, which takes every value to a cold path, and an
 // `End` record, which every key misses.
-@(private, rodata)
+@(private = "file", rodata)
 DEAD_BLOCK := [2]Record{{word = NO_KEY, kind = .Dead}, {word = NO_KEY, kind = .End}}
 
 // The records of a struct read by position: a `Position` record, which takes every element to a cold path, and an
@@ -206,7 +236,7 @@ dead_regs :: #force_inline proc "contextless" () -> hook.Regs {
 	return {0, u64(uintptr(&DEAD_BLOCK[1])), 0}
 }
 
-// Reads `src`, a text of `format`, into `target`, a value of type `T`, by `read.plan` or by a plan made for the call,
+// Reads `src`, a text of `format`, into `target`, a value of type `T`, by `uopts.plan` or by a plan made for the call,
 // through `walk`, the format's walk for hook `H`, a `Text_Reader`, a `Refusing_Reader` or a `Cells_Reader`. `tag` is the
 // format's struct tag key. A plan for another type or tag is `Bad_Option{"plan"}`, a nil target `Bad_Option{"target"}`,
 // and a text in pieces `Bad_Option{"pieces"}`. Repeated keys follow `opts.dups`, the format's own for `.Default`.
@@ -215,10 +245,13 @@ dead_regs :: #force_inline proc "contextless" () -> hook.Regs {
 // of a delimited text before the read. A member the text does not hold keeps the target's value, and a value the type
 // does not take is a `Fault` of kind `.Refused`, whose detail is a `Typed_Refusal`, at the value's first byte, unless the
 // text fails as the format's `validate` fails it, which is then the error. Each string and list is an allocation of its
-// own from `caller`, so an arena gives the speed of one block, and under `read.borrow_strings` a string with nothing to
+// own from `caller`, so an arena gives the speed of one block, and under `uopts.borrow_strings` a string with nothing to
 // decode is a span of `src`.
 @(require_results)
-read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: string, opts: tape.Options, read: Unmarshal_Options, caller: runtime.Allocator, $H: typeid, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: string, opts: tape.Options, uopts: Unmarshal_Options, caller: runtime.Allocator, $H: typeid, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> tape.Error {
+	if uopts.path != nil {
+		clear(uopts.path)
+	}
 	if e := tape.options_refused(format, opts); e != nil {
 		return e
 	}
@@ -232,75 +265,122 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	if dups == .All || dups == .Group {
 		return tape.Bad_Option{"dups"}
 	}
-	plan := read.plan
-	made: Plan
+	// Unzeroed backing for a one-shot plan so cached-plan calls skip zeroing `size_of(Plan)` bytes.
+	made_buf: [size_of(Plan) / size_of(u64)]u64 = ---
+	#assert(size_of(made_buf) == size_of(Plan))
+	#assert(align_of(Plan) <= align_of(u64))
+	plan := uopts.plan
+	made := false
 	if plan == nil {
-		err: tape.Error
-		if made, err = plan_make(T, tag, {}, caller); err != nil {
+		p := (^Plan)(&made_buf[0])
+		if err := make_temp_plan(T, tag, caller, p); err != nil {
 			return err
 		}
-		plan = &made
-	}
-	defer if plan == &made {
-		plan_destroy(&made)
-	}
-	if plan.type != T || plan.tag != tag {
+		plan = p
+		made = true
+	} else if plan.type != T || !(len(plan.tag) == len(tag) && (raw_data(plan.tag) == raw_data(tag) || plan.tag == tag)) {
 		return tape.Bad_Option{"plan"}
 	}
-	m: hook.Read_Budget
-	allocator := hook.read_budget(&m, opts, caller)
-	frames: [FRAME_ROOM]Frame = ---
-	hk: H
-	when H == Cells_Reader {
-		hk.alike = true
-	} else when H == Refusing_Reader {
-		hk.repeat = max(u64)
-	} else {
-		// Left unzeroed, as a walk reads only the entries it wrote. A `when` opens no scope, so it lives as `hk` does.
-		memo: hook.Expected_Memo = ---
-		hk.expected = &memo
+	defer if made {
+		destroy_temp_plan(plan)
 	}
+	m_buf: [size_of(hook.Read_Budget) / size_of(u64)]u64 = ---
+	#assert(size_of(m_buf) == size_of(hook.Read_Budget))
+	#assert(align_of(hook.Read_Budget) <= align_of(u64))
+	m := (^hook.Read_Budget)(&m_buf[0])
+	allocator := hook.read_budget(m, opts, caller)
+	frames: [FRAME_ROOM]Frame = ---
+	flags: Reader_Flags
+	if dups == .First {
+		flags += {.First}
+	}
+	if uopts.refuse_unknown {
+		flags += {.Unknown}
+	}
+	if made {
+		flags += {.Made}
+	}
+	ctx := context
+	ctx.allocator = allocator
+	// Unzeroed backing for `H` so `Cells_Reader.columns`/`row` (1,104 B) are not zeroed on every call, while every live
+	// field of `Reader` and `H` is initialized once below.
+	hk_buf: [size_of(H) / size_of(u64)]u64 = ---
+	#assert(size_of(hk_buf) == size_of(H))
+	#assert(align_of(H) <= align_of(u64))
+	hk := (^H)(&hk_buf[0])
 	h := &hk.reader
 	h^ = {
 		base      = raw_data(src),
 		len       = u64(len(src)),
 		frames    = raw_data(frames[:]),
-		home      = raw_data(frames[:]),
 		sp        = 1,
 		room      = FRAME_ROOM,
+		borrow    = uopts.borrow_strings,
+		flags     = flags,
 		plan      = plan,
+		home      = raw_data(frames[:]),
 		format    = format,
-		borrow    = read.borrow_strings,
-		first     = dups == .First,
-		unknown   = read.refuse_unknown,
-		made      = plan == &made,
-		path      = read.path,
+		path      = uopts.path,
+		target    = uintptr(target),
 		allocator = allocator,
 		caller    = caller,
+		ctx       = ctx,
 	}
-	h.ctx = context
-	h.ctx.allocator = allocator
+	when H == Cells_Reader {
+		hk.replay = {}
+		hk.dropped = 0
+		hk.taken = 0
+		hk.alike = true
+		hk.learn = .Before
+	} else when H == Refusing_Reader {
+		hk.keys = nil
+		hk.opens = nil
+		hk.hashed = nil
+		hk.repeat = max(u64)
+		hk.passing = 0
+		hk.ends = false
+		hk.value = false
+		hk.done = false
+		hk.refused = nil
+	} else {
+		// Left unzeroed, as a walk reads only the entries it wrote. A `when` opens no scope, so it lives as `hk` does.
+		memo: hook.Expected_Memo = ---
+		hk.expected = &memo
+	}
 	frames[0] = {b = u64(uintptr(&DEAD_BLOCK[1])), seen = SEEN_TARGET}
 	before: [BEFORE_ROOM]u8 = ---
-	h.target = uintptr(target)
-	size := plan.size
-	h.before = before[:size] if size <= BEFORE_ROOM else (runtime.mem_alloc_non_zeroed(size, 1, allocator) or_else nil)
-	if len(h.before) != size {
-		return hook.memory_budget_error(&m.main, runtime.Allocator_Error.Out_Of_Memory)
-	}
-	intrinsics.mem_copy_non_overlapping(raw_data(h.before), target, size)
-	if read.path != nil {
-		clear(read.path)
+	// Only `.Last` (and refusing walks that still overwrite during the walk) can call `reset` on a repeated key.
+	// `.First` skips repeats, and DSV `.Refuse` rejects duplicate headers before entering `read`.
+	if dups != .First && !(H == Cells_Reader && dups == .Refuse) {
+		size := uint(plan.size)
+		if size <= BEFORE_ROOM {
+			// Dominated by `size <= BEFORE_ROOM` (`uint` rules out negative lengths).
+			#no_bounds_check h.before = before[:size]
+		} else {
+			block, berr := runtime.mem_alloc_non_zeroed(int(size), 1, allocator)
+			if berr != nil || len(block) < int(size) {
+				err := tape.Error(runtime.Allocator_Error.Out_Of_Memory)
+				return hook.memory_budget_error(&m.main, err) if opts.budget.memory != 0 else err
+			}
+			#no_bounds_check h.before = block[:size]
+		}
+		if size > 0 {
+			intrinsics.mem_copy_non_overlapping(raw_data(h.before), target, int(size))
+		}
 	}
 	regs := hook.Regs{NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}
-	_, err, _ := walk(src, opts, &hk, &regs, allocator, &h.ctx)
+	_, err, _ := walk(src, opts, hk, &regs, allocator, &h.ctx)
 	if err == nil {
 		err = h.err
-	} else if !h.dead {
+	} else if .Dead not_in h.flags {
 		settle_open(h, regs, h.sp)
 	}
 	if h.frames != h.home {
-		runtime.heap_free(h.frames)
+		runtime.mem_free_with_size(h.frames, h.room * size_of(Frame), allocator)
+	}
+	if h.map_keys != nil {
+		path_alloc := h.path.allocator if h.path.allocator.procedure != nil else caller
+		runtime.mem_free_with_size(raw_data(h.map_keys), len(h.map_keys) * size_of(tape.Token), path_alloc)
 	}
 	if h.zero != nil {
 		runtime.mem_free_with_size(raw_data(h.zero), len(h.zero), allocator)
@@ -311,13 +391,31 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	if h.held != nil {
 		held_free(h)
 	}
-	return hook.memory_budget_error(&m.main, err)
+	return hook.memory_budget_error(&m.main, err) if opts.budget.memory != 0 else err
+}
+
+// Cold wrapper for one-shot `plan_make` so cached-plan reads keep it out of their hot blocks.
+@(private = "file", cold)
+make_temp_plan :: #force_no_inline proc(T: typeid, tag: string, caller: runtime.Allocator, out: ^Plan) -> tape.Error {
+	p, err := plan_make(T, tag, {}, caller)
+	if err == nil {
+		out^ = p
+	}
+	return err
+}
+
+@(private = "file", cold)
+destroy_temp_plan :: #force_no_inline proc(plan: ^Plan) {
+	plan_destroy(plan)
 }
 
 // The hook. A value's open takes no call on the hot kinds, and a key takes none when it is the one the struct expects
 // next. `number` is the format's reader of a number token, and `CELLS` says the format's values have no kind of their
 // own, as a delimited text's cells: a cell is text for a string and read by its field otherwise, and an empty one is
 // absent.
+// Invariants for `#no_bounds_check`: `h.sp >= 1` at every `.End` (`close_container` restores `h.sp = 1` when `.Dead`),
+// `h.sp < h.room` holds after `frames_grow`, `s.b` points into a valid plan record block (so `owner.meta` indexes
+// `h.plan.meta`), and the walk guarantees `t.lo + u64(t.n) <= h.len` for plain string/number tokens.
 @(private)
 reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, $number: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number, $CELLS: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
 	s := s
@@ -357,7 +455,7 @@ reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 				// cold path.
 				if t.spelling & tape.SPELLING_DECODE == 0 {
 					if rec.kind >= .I8 && rec.kind <= .F64 {
-						if n, ok := spell.number_strict(h.base[:h.len], t.lo, t.lo + u64(t.n)); ok && store_number(rec.kind, n, dest) {
+						if n, ok := spell.number_strict(h.base[:h.len], t.lo, t.lo + u64(t.n)); ok && store_number(rec.kind, n, dest, t.n) {
 							break value
 						}
 					} else if rec.kind == .Bool && t.lo + 8 <= h.len {
@@ -386,7 +484,7 @@ reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 			return indirect(h, {s.a, s.b, s.c}, t, number, CELLS)
 		}
 		n := number(h.base[:h.len], t)
-		if !store_number(rec.kind, n, dest) {
+		if !store_number(rec.kind, n, dest, t.n) {
 			return number_cold(h, {s.a, s.b, s.c}, t, n)
 		}
 	case .True, .False:
@@ -416,7 +514,7 @@ reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 		}
 		f := &h.frames[h.sp]
 		h.sp += 1
-		f.a, f.b, f.c, f.data, f.seen = s.a, s.b, s.c, nil, 0
+		f.a, f.b, f.c, f.seen, f.data = s.a, s.b, s.c, 0, nil
 		return {0, u64(uintptr(rec.first)), 0}, .Next
 	case:
 		return indirect(h, {s.a, s.b, s.c}, t, number, CELLS)
@@ -425,12 +523,17 @@ reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 	return s, .Next
 }
 
-
 // Whether key token `t` is the key of record `k`: a plain string key of its length, with its bytes. A key of at most
 // eight bytes is one load masked by `tail`, which needs eight bytes of the text from the key on, and a longer one its
 // first and last eight bytes, and past sixteen the rest compared out of line.
+// Invariant for `#no_bounds_check`: when `KEY_MASK` matches `k.word`, `t` has `SPELLING_DECODE == 0` so the walk
+// guarantees `t.lo + u64(t.n) <= h.len`; for `n <= 8` the `t.lo + 8 <= h.len` guard precedes `load8`, and for `n > 8`
+// both `p[:8]` and `p[n - 8:n]` lie inside `h.base[:h.len]`.
 @(private)
 key_hit :: #force_inline proc "contextless" (h: ^Reader, k: ^Record, t: tape.Token) -> bool #no_bounds_check {
+	when ODIN_ENDIAN != .Little {
+		#panic("key_hit assumes little-endian Token layout")
+	}
 	if (transmute([2]u64)t)[1] & KEY_MASK != k.word {
 		return false
 	}
@@ -452,16 +555,22 @@ load8 :: #force_inline proc "contextless" (p: [^]u8) -> u64 {
 	return kernel.load8(p)
 }
 
-// Whether the bytes past the first eight of the `n`-byte key at `p` are those of record `k`'s name.
-@(private)
-key_rest :: #force_no_inline proc "contextless" (h: ^Reader, k: ^Record, p: [^]u8, n: u64) -> bool {
-	return string(p[8:n]) == h.plan.meta[k.meta].name[8:]
+// Whether the middle bytes past the first eight and before the last eight of the `n`-byte key at `p` are those of
+// record `k`'s name.
+// Invariant for `#no_bounds_check`: called from `key_hit` only after proving `n > 16`, `k.word` matched (so
+// `len(h.plan.meta[k.meta].name) == n` and `k.meta < len(h.plan.meta)`), `t.lo + n <= h.len`, and both `p[:8]` and
+// `p[n - 8:n]` already match `name`.
+@(private = "file", cold)
+key_rest :: #force_no_inline proc "contextless" (h: ^Reader, k: ^Record, p: [^]u8, n: u64) -> bool #no_bounds_check {
+	return string(p[8:n - 8]) == h.plan.meta[k.meta].name[8:n - 8]
 }
 
-// Stores number `n` at `dest` as a record of `kind` reads it, false when it does not fit there exactly, as an integer
-// out of range, a fraction for an integer, or a float `f32` may round twice.
+// Stores number `n` (whose token has `tok_len` bytes) at `dest` as a record of `kind` reads it, false when it does not
+// fit there exactly, as an integer out of range, a fraction for an integer, `-0` into a float, or a float `f32` may
+// round twice.
+// Invariant for `#no_bounds_check`: `kind` is a valid `Read_Kind` enum value indexing `INT_LO` and `INT_HI`.
 @(private)
-store_number :: #force_inline proc "contextless" (kind: Read_Kind, n: spell.Number, dest: uintptr) -> bool #no_bounds_check {
+store_number :: #force_inline proc "contextless" (kind: Read_Kind, n: spell.Number, dest: uintptr, tok_len: u32) -> bool #no_bounds_check {
 	#partial switch kind {
 	case .I64:
 		if n.kind == .Int {
@@ -473,20 +582,19 @@ store_number :: #force_inline proc "contextless" (kind: Read_Kind, n: spell.Numb
 			(^u64)(dest)^ = n.bits
 			return true
 		}
-		// `-0` reads as the integer 0, which the cold path gives its sign.
-		if n.kind == .Int && n.bits != 0 {
+		// `-0` reads as the integer 0 with `tok_len >= 2`, which the cold path gives its sign; plain `0` has `tok_len == 1`.
+		if n.kind == .Int && (n.bits != 0 || tok_len == 1) {
 			(^f64)(dest)^ = f64(i64(n.bits))
 			return true
 		}
 	case .F32:
-		if n.kind == .Float && !f32_double_rounds(transmute(f64)n.bits) {
-			v := transmute(f64)n.bits
-			if abs(v) <= f64(max(f32)) || v != v {
-				(^f32)(dest)^ = f32(v)
+		if n.kind == .Float {
+			u := n.bits & 0x7FFF_FFFF_FFFF_FFFF
+			if (u - F32_NORMAL_BITS <= F32_MAX_BITS - F32_NORMAL_BITS || u == 0) && u & (1 << 29 - 1) != 1 << 28 {
+				(^f32)(dest)^ = f32(transmute(f64)n.bits)
 				return true
 			}
-		}
-		if n.kind == .Int && n.bits != 0 {
+		} else if n.kind == .Int && (n.bits != 0 || tok_len == 1) {
 			(^f32)(dest)^ = f32(i64(n.bits))
 			return true
 		}
@@ -515,15 +623,19 @@ write_int :: #force_inline proc "contextless" (dest: uintptr, v: u64, kind: Read
 	}
 }
 
-@(private)
-F32_NORMAL :: 1.1754943508222875e-38
+@(private = "file")
+F32_NORMAL_BITS :: u64(0x3810_0000_0000_0000) // binary64 bit pattern of 2^-126 (smallest normal f32)
+
+@(private = "file")
+F32_MAX_BITS :: u64(0x47EF_FFFF_E000_0000) // binary64 bit pattern of max(f32)
 
 // Whether the binary64 `v` of a decimal may narrow to a different `f32` than the decimal rounds to: its low 29 bits are
 // a normal `f32`'s midpoint, or it is below the normal range, where an `f32` keeps fewer bits. Otherwise a cast rounds
 // once.
 @(private)
 f32_double_rounds :: #force_inline proc "contextless" (v: f64) -> bool {
-	return transmute(u64)v & (1 << 29 - 1) == 1 << 28 || abs(v) < F32_NORMAL && v != 0
+	u := transmute(u64)v & 0x7FFF_FFFF_FFFF_FFFF
+	return u & (1 << 29 - 1) == 1 << 28 || u - 1 < F32_NORMAL_BITS - 1
 }
 
 // The record that reads the container a frame holds.

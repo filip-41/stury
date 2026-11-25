@@ -1798,6 +1798,180 @@ a_repeated_key_is_refused_inside_a_skipped_value_and_a_list :: proc(t: ^testing.
 	testing.expect_value(t, len(ok.l), 1)
 }
 
+// A syntax fault past `FRAME_ROOM` (64 levels) settles open frames before freeing the frame buffer (no UAF under ASan),
+// and frame growth accounts to the caller's allocator and `Budget.memory`.
+@(test)
+deep_syntax_fault_past_frame_room_settles_before_freeing_frames :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	Node :: struct {
+		kids: []Node,
+	}
+	free_node :: proc(n: Node, a: runtime.Allocator) {
+		for child in n.kids {
+			free_node(child, a)
+		}
+		delete(n.kids, a)
+	}
+	depth := 80
+	b := strings.builder_make(context.temp_allocator)
+	for _ in 0 ..< depth {
+		strings.write_string(&b, `{"kids":[`)
+	}
+	strings.write_string(&b, `{"kids":[!`) // mid-stream syntax fault at depth > 64 (160 frames open)
+	src := transmute([]u8)strings.to_string(b)
+
+	plan, perr := json.plan_make(Node, allocator = context.temp_allocator)
+	expect_nil(t, perr)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	alloc := mem.tracking_allocator(&track)
+
+	root: Node
+	e := json.unmarshal(src, &root, read = {plan = &plan}, allocator = alloc)
+	_, is_fault := e.(tape.Fault)
+	testing.expectf(t, is_fault && refusal_of(e) == .None, "expected syntax fault, got %v", e)
+	free_node(root, alloc)
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+
+	// Deep nesting past `FRAME_ROOM` charges frame growth to `Budget.memory`.
+	Deep :: struct {
+		d: ^Deep,
+	}
+	deep_plan, dperr := json.plan_make(Deep, allocator = context.temp_allocator)
+	expect_nil(t, dperr)
+	deep_src := nested_text(80)
+	deep: Deep
+	be := json.unmarshal(deep_src, &deep, read = {plan = &deep_plan}, opts = {budget = {memory = 512}}, allocator = alloc)
+	ex, is_ex := be.(tape.Exceeded)
+	testing.expectf(t, is_ex && ex.kind == .Memory, "expected memory budget exceeded, got %v", be)
+	for cur := deep.d; cur != nil; {
+		next := cur.d
+		free(cur, alloc)
+		cur = next
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
+// Under `.First`, a target larger than `BEFORE_ROOM` (128 B) allocates no snapshot, so scalar/borrowed reads succeed
+// under `mem.nil_allocator()` and tight memory budgets. Also verifies `path` is cleared before early option errors.
+@(test)
+first_policy_skips_before_snapshot_and_path_clears_early :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	Big :: struct {
+		a:   i64,
+		s:   string,
+		pad: [32]u64,
+	}
+	#assert(size_of(Big) > 128)
+	plan, perr := json.plan_make(Big, allocator = context.temp_allocator)
+	expect_nil(t, perr)
+	dst := Big{a = 9, s = "keep"}
+	dst.pad[31] = 77
+	src := transmute([]u8)string(`{"a":1,"s":"ok","a":2,"s":"ignored"}`)
+	expect_nil(t, json.unmarshal(src, &dst, read = {plan = &plan, borrow_strings = true}, opts = {dups = .First}, allocator = mem.nil_allocator()))
+	testing.expect_value(t, dst.a, 1)
+	testing.expect_value(t, dst.s, "ok")
+	testing.expect_value(t, dst.pad[31], 77)
+
+	// Reused `path` is cleared even when `read` returns early on `Bad_Option`.
+	path := path_in()
+	append(&path, tape.Name("stale"))
+	e := json.unmarshal(src, &dst, read = {plan = &plan, path = &path}, opts = {dups = .All}, allocator = context.temp_allocator)
+	testing.expect_value(t, expect_bad_option(t, e), "dups")
+	testing.expect_value(t, len(path), 0)
+}
+
+// Plain `0`, `-0`, `0.0`, `-0.0`, and `f32` boundary/special values keep bit-exact IEEE-754 results, and deep map paths
+// record and free cleanly.
+@(test)
+float_zero_f32_edges_long_keys_and_map_paths :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	// Signed zeros into f64 and f32.
+	f64s: []f64
+	expect_nil(t, read(`[0,-0,0.0,-0.0]`, &f64s))
+	if testing.expect_value(t, len(f64s), 4) {
+		testing.expect_value(t, transmute(u64)f64s[0], u64(0x0000_0000_0000_0000))
+		testing.expect_value(t, transmute(u64)f64s[1], u64(0x8000_0000_0000_0000))
+		testing.expect_value(t, transmute(u64)f64s[2], u64(0x0000_0000_0000_0000))
+		testing.expect_value(t, transmute(u64)f64s[3], u64(0x8000_0000_0000_0000))
+	}
+	f32s: []f32
+	expect_nil(t, read(`[0,-0,0.0,-0.0,1.17549435e-38,1.1754942e-38,3.4028234663852886e+38,-3.4028234663852886e+38]`, &f32s))
+	if testing.expect_value(t, len(f32s), 8) {
+		testing.expect_value(t, transmute(u32)f32s[0], u32(0x0000_0000))
+		testing.expect_value(t, transmute(u32)f32s[1], u32(0x8000_0000))
+		testing.expect_value(t, transmute(u32)f32s[2], u32(0x0000_0000))
+		testing.expect_value(t, transmute(u32)f32s[3], u32(0x8000_0000))
+		testing.expect_value(t, transmute(u32)f32s[4], u32(0x0080_0000)) // smallest normal f32 (2^-126)
+		testing.expect_value(t, transmute(u32)f32s[5], u32(0x007f_ffff)) // largest subnormal f32
+		testing.expect_value(t, transmute(u32)f32s[6], u32(0x7f7f_ffff)) // +max(f32)
+		testing.expect_value(t, transmute(u32)f32s[7], u32(0xff7f_ffff)) // -max(f32)
+	}
+	special: []f32
+	expect_nil(t, read(`[Infinity,-Infinity,NaN]`, &special, .Json5))
+	if testing.expect_value(t, len(special), 3) {
+		testing.expect(t, math.is_inf(special[0], 1))
+		testing.expect(t, math.is_inf(special[1], -1))
+		testing.expect(t, math.is_nan(special[2]))
+	}
+	// Long keys (> 16 B): same first 8 + last 8 bytes, differing only in middle [8:n-8].
+	Long :: struct {
+		abcdefgh_MID1_12345678: i64,
+		abcdefgh_MID2_12345678: i64,
+	}
+	lg: Long
+	expect_nil(t, read(`{"abcdefgh_MID1_12345678":11,"abcdefgh_XXXX_12345678":99,"abcdefgh_MID2_12345678":22}`, &lg))
+	testing.expect_value(t, lg, Long{11, 22})
+
+	// Deep nested maps (> 16 levels) record map keys in cold side array and free cleanly.
+	Map_Node :: struct {
+		m: map[string]Map_Node,
+		v: i64,
+	}
+	free_mnode :: proc(n: Map_Node, a: runtime.Allocator) {
+		for k, val in n.m {
+			delete(k, a)
+			free_mnode(val, a)
+		}
+		delete(n.m)
+	}
+	mb := strings.builder_make(context.temp_allocator)
+	for i in 0 ..< 20 {
+		fmt.sbprintf(&mb, `{{"m":{{"k%d":`, i)
+	}
+	strings.write_string(&mb, `{"v":"bad"}`)
+	for _ in 0 ..< 20 {
+		strings.write_string(&mb, `}}`)
+	}
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	alloc := mem.tracking_allocator(&track)
+	mpath := make([dynamic]tape.Step, alloc)
+	defer delete(mpath)
+	mplan, mperr := json.plan_make(Map_Node, allocator = context.temp_allocator)
+	expect_nil(t, mperr)
+	mroot: Map_Node
+	me := json.unmarshal(transmute([]u8)strings.to_string(mb), &mroot, read = {plan = &mplan, path = &mpath}, allocator = alloc)
+	expect_refusal(t, me, .Expected_Integer)
+	testing.expect_value(t, len(mpath), 41)
+	testing.expect_value(t, mpath[0], tape.Step(tape.Name("m")))
+	testing.expect_value(t, mpath[1], tape.Step(tape.Name("k0")))
+	testing.expect_value(t, mpath[39], tape.Step(tape.Name("k19")))
+	testing.expect_value(t, mpath[40], tape.Step(tape.Name("v")))
+	free_mnode(mroot, alloc)
+	delete(mpath)
+	mpath = {}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
 // The typed read law over the suites' files and random texts of every grammar, strict and tolerant: a read into a
 // `testkit.Value` is what the build converts to, and a text the build refuses is refused alike.
 @(test)

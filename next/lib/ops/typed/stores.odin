@@ -184,7 +184,7 @@ store_raw :: proc "contextless" (h: ^Reader, lo, hi: u64, dest: uintptr) -> bool
 
 // A number the hot store did not take: an integer past `i64` or out of the field's range, a decimal for an integer, a
 // float `f32` may round twice, or one past binary64.
-@(private)
+@(private, cold)
 number_cold :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, n: spell.Number) -> (hook.Regs, hook.Action) {
 	s := s
 	rec := (^Record)(uintptr(s.b) - size_of(Record))

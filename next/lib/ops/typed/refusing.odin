@@ -33,7 +33,7 @@ refusing_hook :: #force_inline proc "contextless" (h: ^Refusing_Reader, s: hook.
 	if t.role <= .Key && (t.role == .Key || t.kind >= .Array) {
 		note_token(h, t)
 	}
-	if h.done || h.dead {
+	if h.done || .Dead in h.flags {
 		return s, .Next
 	}
 	if h.passing > 0 {

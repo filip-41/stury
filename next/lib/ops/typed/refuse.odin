@@ -65,7 +65,7 @@ dead_action :: #force_inline proc "contextless" (t: tape.Token) -> hook.Action {
 }
 
 // Refuses value token `t` at the registers `s` that read it.
-@(private)
+@(private, cold)
 refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, detail: Typed_Refusal) -> (hook.Regs, hook.Action) {
 	head: u8
 	if t.kind < .Array {
@@ -76,12 +76,12 @@ refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t
 }
 
 // Ends the read for memory refused at token `t`.
-@(private)
+@(private, cold)
 refuse_memory :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-	if !h.dead {
+	if .Dead not_in h.flags {
 		h.err = runtime.Allocator_Error.Out_Of_Memory
 		settle_open(h, h.outer^ if h.outer != nil else s, h.sp)
-		h.dead = true
+		h.flags += {.Dead}
 	}
 	h.sp = 1
 	return dead_regs(), dead_action(t)
@@ -92,7 +92,7 @@ refuse_memory :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, 
 // `name` when it is not empty.
 @(private)
 refuse_at :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, detail: Typed_Refusal, at: u64, n: int, leaf: ^hook.Regs, name := "") -> (hook.Regs, hook.Action) {
-	if !h.dead {
+	if .Dead not_in h.flags {
 		h.err = tape.Fault{at = at, rules = &RULES, kind = .Refused, detail = u8(detail)}
 		s, leaf := s, leaf
 		if h.outer != nil && n == h.sp {
@@ -105,7 +105,7 @@ refuse_at :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, detail
 			fill_path(h, n, leaf, name)
 		}
 		settle_open(h, s, n)
-		h.dead = true
+		h.flags += {.Dead}
 	}
 	h.sp = 1
 	return dead_regs(), dead_action(t)
@@ -141,7 +141,9 @@ fill_path :: proc "contextless" (h: ^Reader, n: int, leaf: ^hook.Regs, name: str
 		case .Slice, .Dynamic, .Array:
 			append(h.path, tape.Index((child.c - u64(uintptr(f.data))) / u64(h.plan.meta[owner.meta].size)))
 		case .Map:
-			append(h.path, tape.Name(key_span(h, f.key)))
+			if k < len(h.map_keys) {
+				append(h.path, tape.Name(key_span(h, h.map_keys[k])))
+			}
 		}
 	}
 	if name != "" {
@@ -154,7 +156,7 @@ fill_path :: proc "contextless" (h: ^Reader, n: int, leaf: ^hook.Regs, name: str
 @(private)
 member_name :: proc "contextless" (h: ^Reader, m: ^Meta) -> string {
 	lo, n := uintptr(raw_data(h.plan.strings)), uintptr(len(h.plan.strings))
-	if h.made && uintptr(raw_data(m.name)) - lo < n {
+	if .Made in h.flags && uintptr(raw_data(m.name)) - lo < n {
 		return m.field
 	}
 	return m.name

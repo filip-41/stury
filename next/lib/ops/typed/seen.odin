@@ -9,7 +9,7 @@ import "stury:lib/core/tape"
 // A key the struct did not expect next, or a map's.
 @(private)
 key_miss :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-	if h.dead {
+	if .Dead in h.flags {
 		return s, .Skip
 	}
 	f := &h.frames[h.sp - 1]
@@ -33,7 +33,7 @@ struct_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^F
 	m := &h.plan.meta[owner.meta]
 	i := member_index(h, owner, m, t)
 	if i < 0 {
-		if h.unknown {
+		if .Unknown in h.flags {
 			return refuse_at(h, s, t, .Unknown_Field, t.lo, h.sp, nil, key_span(h, t))
 		}
 		return s, .Skip
@@ -44,14 +44,14 @@ struct_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^F
 	mark_run(h, f, owner, s.b)
 	member := &([^]Record)(owner.first)[i]
 	if seen_set(f, i) {
-		if h.first {
+		if .First in h.flags {
 			return s, .Skip
 		}
 		if !reset(h, member, uintptr(s.c) + uintptr(member.offset), f.seen & SEEN_TARGET != 0) {
 			return refuse_memory(h, s, t)
 		}
 	}
-	if h.first || read_after(f, i, int(m.count)) {
+	if .First in h.flags || read_after(f, i, int(m.count)) {
 		s.b = u64(uintptr(&h.plan.records[h.plan.meta[member.meta].solo]))
 	} else {
 		s.b = u64(uintptr(member)) + size_of(Record)
@@ -89,18 +89,6 @@ member_index :: proc "contextless" (h: ^Reader, owner: ^Record, m: ^Meta, t: tap
 		at = (at + 1) & mask
 	}
 }
-
-// The bits of `Frame.seen` past the members' own: `SEEN_ON` once the struct's members are tracked, `SEEN_WIDE` when
-// members from `SEEN_BITS` on are tracked in the words at `Frame.data`, and `SEEN_TARGET` when the bytes of the struct
-// or fixed array may hold the target's own values, as the read did not make them.
-@(private)
-SEEN_WIDE :: u64(1) << 62
-
-@(private)
-SEEN_TARGET :: u64(1) << 61
-
-@(private)
-SEEN_BITS :: 61
 
 // Starts tracking which members of the struct in frame `f` were read, false when memory is refused.
 @(private)
