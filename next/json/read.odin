@@ -349,11 +349,18 @@ same_text :: proc
 }
 
 // `tape.text_hash` of the text that string `t` of `src` reads as, decoding an escape at a time.
+// Invariant for `#no_bounds_check`: the walk gives a key token's span inside the text, `t.lo + u64(t.n) <= len(src)`.
 @(private)
-key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {
+key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 #no_bounds_check {
 	if t.spelling & tape.SPELLING_DECODE == 0 {
 		return tape.text_hash(src[t.lo:][:t.n])
 	}
+	return key_hash_decoded(src, t)
+}
+
+// `key_hash` of a key that decodes an escape, out of line so a plain key's hash takes no frame.
+@(private = "file", cold)
+key_hash_decoded :: #force_no_inline proc "contextless" (src: []u8, t: tape.Token) -> u32 {
 	x := tape.text_hasher()
 	k := key_reader(src, t)
 	for {

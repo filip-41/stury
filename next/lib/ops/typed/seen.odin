@@ -65,19 +65,42 @@ struct_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^F
 SCAN_MEMBERS :: 8
 
 // The member of struct `owner` whose name key `t` reads as, -1 for none.
+// Invariant for `#no_bounds_check`: the walk gives a plain key's span inside the text, `t.lo + u64(t.n) <= h.len`.
 @(private)
 member_index :: proc "contextless" (h: ^Reader, owner: ^Record, m: ^Meta, t: tape.Token) -> int #no_bounds_check {
 	members := ([^]Record)(owner.first)
+	// `key_hit` matches a plain string key alone, by the bytes in the text, as `Format.key_hash` hashes one: every
+	// other key reads through the format's reader, which may decode an escape or a number's digits.
+	plain := t.kind == .String && t.spelling & tape.SPELLING_DECODE == 0
 	if m.count <= SCAN_MEMBERS {
+		unspelled := false
 		for i in 0 ..< int(m.count) {
-			if key_hit(h, &members[i], t) {
+			r := &members[i]
+			if key_hit(h, r, t) {
 				return i
 			}
+			unspelled = unspelled || r.word == NO_KEY
+		}
+		// Every member was compared, so a plain key the scan missed is no member's: the table would compare the same
+		// names again, by `same_text`, and find none. Two cases the scan cannot judge are left to the table: a member
+		// whose name holds a byte a key spells with an escape has no `word`, and a key of at most eight bytes with
+		// fewer than eight bytes of text after it is no `key_hit`'s.
+		wide_enough := t.n > 8 || t.lo + 8 <= h.len
+		if plain && wide_enough && !unspelled {
+			return -1
 		}
 	}
 	src := h.base[:h.len]
 	mask := m.slots_n - 1
-	at := h.format.key_hash(src, t) & mask
+	// A plain key hashes as its bytes in the text, which is the plan's `tape.text_hash` of a member's name, so the
+	// table takes it with no indirect call; a decoded key reads through the format, out of line.
+	hash: u32
+	if plain {
+		hash = tape.text_hash(src[t.lo:][:t.n])
+	} else {
+		hash = member_hash(h, src, t)
+	}
+	at := hash & mask
 	for {
 		k := h.plan.slots[m.slots + at]
 		if k == 0 {
@@ -88,6 +111,12 @@ member_index :: proc "contextless" (h: ^Reader, owner: ^Record, m: ^Meta, t: tap
 		}
 		at = (at + 1) & mask
 	}
+}
+
+// The hash of key `t` that is no plain string key's bytes, as an escaped, a number or a byte string key.
+@(private = "file", cold)
+member_hash :: #force_no_inline proc "contextless" (h: ^Reader, src: []u8, t: tape.Token) -> u32 {
+	return h.format.key_hash(src, t)
 }
 
 // Starts tracking which members of the struct in frame `f` were read, false when memory is refused.
@@ -165,8 +194,15 @@ mark_run :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Record, b: u64) {
 		return
 	}
 	upto := (b - first) / size_of(Record)
-	for i in f.run ..< upto {
-		seen_set(f, int(i))
+	if upto > f.run {
+		// A single shift masks the run of members the cursor passed: SEEN_BITS is 61, so every shift is below 64.
+		if upto <= SEEN_BITS {
+			f.seen |= ((u64(1) << uint(upto)) - 1) &~ ((u64(1) << uint(f.run)) - 1)
+		} else {
+			for i in f.run ..< upto {
+				seen_set(f, int(i))
+			}
+		}
+		f.run = upto
 	}
-	f.run = max(f.run, upto)
 }
