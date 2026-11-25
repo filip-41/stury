@@ -36,3 +36,40 @@ test_utf8_walks :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, spell.skip_continuations(s, len(s)), len(s))
 }
+
+// Out-of-range and all-continuation inputs to `char_start` and `skip_continuations` clamp safely without trapping.
+@(test)
+test_utf8_walks_bounds :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	s := "a€😀b"
+	testing.expect_value(t, spell.char_start(s, -10), 0)
+	testing.expect_value(t, spell.char_start(s, -1), 0)
+	testing.expect_value(t, spell.char_start(s, 0), 0)
+	testing.expect_value(t, spell.char_start(s, len(s)), len(s))
+	testing.expect_value(t, spell.char_start(s, len(s) + 5), len(s))
+
+	testing.expect_value(t, spell.skip_continuations(s, -10), 0)
+	testing.expect_value(t, spell.skip_continuations(s, -1), 0)
+	testing.expect_value(t, spell.skip_continuations(s, len(s)), len(s))
+	testing.expect_value(t, spell.skip_continuations(s, len(s) + 5), len(s))
+
+	testing.expect_value(t, spell.char_start("", -1), 0)
+	testing.expect_value(t, spell.char_start("", 0), 0)
+	testing.expect_value(t, spell.char_start("", 1), 0)
+	testing.expect_value(t, spell.skip_continuations("", -1), 0)
+	testing.expect_value(t, spell.skip_continuations("", 0), 0)
+	testing.expect_value(t, spell.skip_continuations("", 1), 0)
+
+	conts := "\x80\x81\xBFa"
+	testing.expect_value(t, spell.char_start(conts, 2), 0)
+	testing.expect_value(t, spell.char_start(conts, 3), 3)
+	testing.expect_value(t, spell.skip_continuations(conts, -3), 3)
+	testing.expect_value(t, spell.skip_continuations(conts, 0), 3)
+	testing.expect_value(t, spell.skip_continuations(conts, 2), 3)
+	testing.expect_value(t, spell.skip_continuations(conts, 3), 3)
+
+	only_conts := "\x80\x90\xBF"
+	testing.expect_value(t, spell.char_start(only_conts, 2), 0)
+	testing.expect_value(t, spell.skip_continuations(only_conts, -1), 3)
+	testing.expect_value(t, spell.skip_continuations(only_conts, 0), 3)
+}

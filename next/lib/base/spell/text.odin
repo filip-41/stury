@@ -1,14 +1,16 @@
 package spell
 
 import "base:intrinsics"
+import "stury:lib/base/kernel"
 
-// One past the UTF-8 character whose lead is at `p`, where `p < end` and `p[0] >= 0x80`, or `p` with `.Bad_Char` for a
-// malformed sequence. A sequence the text cuts short gives `end` with `.Truncated` when every byte present could still
-// continue it.
-utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: Fault_Kind) #no_bounds_check {
+// Scans one UTF-8 character or maximal ill-formed subpart starting at `p`, where `p < end` and `p[0] >= 0x80`.
+// Returns one past the character with `.None`, `end` with `.Truncated` when the text ends inside a valid prefix, or
+// one past the maximal subpart with `.Bad_Char`.
+@(private = "file", require_results)
+utf8_scan_one :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: Fault_Kind) {
 	c := p[0]
 	if c < 0xc2 || c > 0xf4 {
-		return p, .Bad_Char
+		return p[1:], .Bad_Char
 	}
 	need := 2 if c < 0xe0 else 3 if c < 0xf0 else 4
 	for i in 1 ..< need {
@@ -21,54 +23,72 @@ utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind
 			bad ||= c == 0xe0 && b < 0xa0 || c == 0xed && b > 0x9f || c == 0xf0 && b < 0x90 || c == 0xf4 && b > 0x8f
 		}
 		if bad {
-			return p, .Bad_Char
+			return p[i:], .Bad_Char
 		}
 	}
 	return p[need:], .None
 }
 
-// One past the maximal subpart of the ill-formed UTF-8 sequence at `p`, where `p < end`: its longest start that some
-// well-formed sequence starts with, or its first byte when none does. A decoder that replaces each such subpart with
-// U+FFFD reads ill-formed text as Unicode's "substitution of maximal subparts" does.
-utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 {
-	n := 1
-	for n < 3 && p[n:] < end {
-		if _, k := utf8_char(p, p[n + 1:]); k != .Truncated {
-			break
-		}
-		n += 1
+// One past the UTF-8 character whose lead is at `p`, where `p < end` and `p[0] >= 0x80`, or `p` with `.Bad_Char` for a
+// malformed sequence. A sequence the text cuts short gives `end` with `.Truncated` when every byte present could still
+// continue it.
+@(require_results)
+utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: Fault_Kind) {
+	q, kind = utf8_scan_one(p, end)
+	if kind == .Bad_Char {
+		return p, .Bad_Char
 	}
-	return p[n:]
+	return
+}
+
+// One past the maximal subpart of the ill-formed UTF-8 sequence at `p`, where `p < end`: its longest start that some
+// well-formed sequence starts with, or its first byte when none does. A well-formed sequence at `p` returns one past
+// the character. A decoder that replaces each ill-formed subpart with U+FFFD reads ill-formed text as Unicode's
+// "substitution of maximal subparts" does.
+@(require_results)
+utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 {
+	q, _ := utf8_scan_one(p, end)
+	return q
 }
 
 // The UTF-8 of U+FFFD, the replacement character.
 REPLACEMENT :: [3]u8{0xEF, 0xBF, 0xBD}
 
 // Copies the UTF-8 character whose lead `p[0]` is past ASCII to `out`, or writes U+FFFD there for the maximal subpart
-// of an ill-formed sequence, and returns the bytes written, at most 4, and one past the bytes read. `p < end`.
-utf8_lax :: #force_inline proc "contextless" (p, end, out: [^]u8) -> (n: int, q: [^]u8) #no_bounds_check {
+// of an ill-formed sequence, and returns the bytes written, at most 4, and one past the bytes read. Caller guarantees
+// `p < end` and `out` has room for at least `max(3, char_len)` writable bytes (4 bytes, or 3 bytes per remaining input
+// byte).
+@(require_results)
+utf8_lax :: #force_inline proc "contextless" (p, end, out: [^]u8) -> (n: int, q: [^]u8) {
 	kind: Fault_Kind
-	if q, kind = utf8_char(p, end); kind != .None {
+	if q, kind = utf8_scan_one(p, end); kind != .None {
 		out[0], out[1], out[2] = REPLACEMENT[0], REPLACEMENT[1], REPLACEMENT[2]
-		return 3, utf8_subpart(p, end)
+		return 3, q
 	}
 	n = intrinsics.ptr_sub(q, p)
-	for i in 0 ..< n {
-		out[i] = p[i]
+	out[0] = p[0]
+	out[1] = p[1]
+	if n >= 3 {
+		out[2] = p[2]
+		if n == 4 {
+			out[3] = p[3]
+		}
 	}
 	return
 }
 
 // The length of the UTF-8 byte order mark that starts `src`, 0 for none.
+@(require_results)
 bom_length :: #force_inline proc "contextless" (src: []u8) -> int {
 	return 3 if len(src) >= 3 && src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF else 0
 }
 
-// The end of the run of decimal digits at `p`.
-digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
+// The end of the run of decimal digits at `p`. Caller guarantees `p <= end` with `[p, end)` readable.
+@(require_results)
+digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 {
 	q := p
 	for intrinsics.ptr_sub(end, q) >= 8 {
-		w := u64(intrinsics.unaligned_load((^u64le)(q)))
+		w := kernel.load8(q)
 		m := non_digit_bytes(w)
 		if m != 0 {
 			return q[intrinsics.count_trailing_zeros(m) >> 3:]
@@ -81,8 +101,9 @@ digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bound
 	return q
 }
 
-// The end of the run of hex digits at `p`.
-hex_digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
+// The end of the run of hex digits at `p`. Caller guarantees `p <= end` with `[p, end)` readable.
+@(require_results)
+hex_digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 {
 	q := p
 	for q < end && HEX_NIBBLE[q[0]] != 0xff {
 		q = q[1:]
@@ -91,12 +112,14 @@ hex_digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_b
 }
 
 // Whether byte `b` continues a UTF-8 character, which a character's lead byte does not.
+@(require_results)
 is_continuation :: #force_inline proc "contextless" (b: byte) -> bool {
 	return b & 0xC0 == 0x80
 }
 
-// The bytes a walk by character steps over from the byte `b` to the next place it tries: the width a lead byte gives.
-// A continuation byte, where a search can start inside a character, and a byte no UTF-8 sequence starts with, give 1.
+// The bytes a walk by character steps over from `b` by its UTF-8 bit-prefix: `0xC0..0xDF` give 2, `0xE0..0xEF` give 3,
+// `0xF0..0xF7` give 4, and every other byte (`0x00..0xBF`, `0xF8..0xFF`) gives 1.
+@(require_results)
 lead_width :: #force_inline proc "contextless" (b: byte) -> int {
 	switch {
 	case b < 0xC0:
@@ -111,8 +134,16 @@ lead_width :: #force_inline proc "contextless" (b: byte) -> int {
 	return 1
 }
 
-// The index of the first byte of the character that holds byte `i` of `s`, or 0 when none starts at or before it.
+// The index of the first byte of the character that holds byte `i` of `s`, 0 when `i <= 0` or none starts at or before
+// it, and `len(s)` when `i >= len(s)`.
+@(require_results)
 char_start :: #force_inline proc "contextless" (s: string, i: int) -> int {
+	if i <= 0 {
+		return 0
+	}
+	if i >= len(s) {
+		return len(s)
+	}
 	i := i
 	for i > 0 && is_continuation(s[i]) {
 		i -= 1
@@ -120,11 +151,15 @@ char_start :: #force_inline proc "contextless" (s: string, i: int) -> int {
 	return i
 }
 
-// The index of the first byte at or after `i` that is not a continuation byte, or `len(s)`.
+// The index of the first byte at or after `max(i, 0)` that is not a continuation byte, or `len(s)`.
+@(require_results)
 skip_continuations :: #force_inline proc "contextless" (s: string, i: int) -> int {
-	i := i
-	for i < len(s) && is_continuation(s[i]) {
-		i += 1
+	j := max(i, 0)
+	if j >= len(s) {
+		return len(s)
 	}
-	return i
+	for j < len(s) && is_continuation(s[j]) {
+		j += 1
+	}
+	return j
 }
