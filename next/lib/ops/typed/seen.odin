@@ -98,7 +98,7 @@ seen_start :: proc "contextless" (h: ^Reader, f: ^Frame, m: ^Meta) -> bool {
 	if m.count <= SEEN_BITS {
 		return true
 	}
-	words, err := runtime.mem_alloc(int(wide_words(m)) * size_of(u64), align_of(u64), h.allocator)
+	words, err := runtime.mem_alloc(int(wide_words(m)) * size_of(u64), align_of(u64), h.scratch)
 	if err != nil {
 		return false
 	}
@@ -117,7 +117,7 @@ wide_words :: #force_inline proc "contextless" (m: ^Meta) -> u32 {
 seen_end :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Record) {
 	context = h.ctx
 	if f.seen & SEEN_WIDE != 0 {
-		runtime.mem_free_with_size(f.data, int(wide_words(&h.plan.meta[owner.meta])) * size_of(u64), h.allocator)
+		runtime.mem_free_with_size(f.data, int(wide_words(&h.plan.meta[owner.meta])) * size_of(u64), h.scratch)
 		f.seen &~= SEEN_WIDE
 	}
 }

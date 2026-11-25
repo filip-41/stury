@@ -55,6 +55,18 @@ as :: proc "contextless" (spec: Spec) -> ^tape.Format {
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Cbor, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	hook.probe_stack(READ_STACK)
+	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.budget.steps == 0 && len(src) >= build.PARALLEL_FROM && tape.options_refused(&FORMATS[spec], opts) == nil && build.validate_dups(&FORMATS[spec], opts) {
+		switch spec {
+		case .Cbor:
+			return validate_parallel(src, .Cbor, opts, allocator)
+		case .Preferred:
+			return validate_parallel(src, .Preferred, opts, allocator)
+		case .Deterministic:
+			return validate_parallel(src, .Deterministic, opts, allocator)
+		case .Length_First:
+			return validate_parallel(src, .Length_First, opts, allocator)
+		}
+	}
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Cbor:

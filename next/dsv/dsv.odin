@@ -117,6 +117,9 @@ validate_as :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, allocat
 	if e := refuse_repeat(src, S, opts, allocator); e != nil {
 		return e
 	}
+	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.budget.steps == 0 && len(src) >= build.PARALLEL_FROM {
+		return validate_parallel(src, S, opts, allocator)
+	}
 	if build.read_lax(opts) {
 		return validate_walk(src, S, true, opts, allocator)
 	}

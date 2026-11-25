@@ -30,6 +30,8 @@ Detail :: enum u8 {
 	Leading_Plus, // `Bad_Char`: a `+` where a value must start
 	Key_Not_String, // `Bad_Char`: a byte that opens no string where an object's key must start
 	Expected_Value, // `Bad_Char`: any other byte where a value must start
+	Unframed, // `Bad_Char`: RFC 7464 `.Seq` bytes before the first 0x1E record separator
+	Cut_Number, // `Bad_Number`: RFC 7464 `.Seq` top-level number with no white space after it
 }
 
 // JSON's `tape.Rules`, one rule per `Detail` in its order.
@@ -55,6 +57,8 @@ RULES := tape.Rules{"json", {
 	{"leading_plus", "A number cannot start with '+'"},
 	{"key_not_string", "Object keys must be strings"},
 	{"expected_value", "Expected a value"},
+	{"unframed", "Text before the first record separator"},
+	{"cut_number", "Number in a text sequence has no whitespace after it"},
 }}
 
 // The detail for the byte at `p` where a value must start and none does, in the container `d` names. A close of its

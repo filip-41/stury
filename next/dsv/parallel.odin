@@ -6,6 +6,7 @@ import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
+import "stury:lib/ops/typed"
 
 // Builds a long delimited text on the threads of a `tape.Runner`. The text is cut into chunks, each starting one past
 // an LF. That LF ends a line or, in CSV, lies inside a quoted cell that goes on. A chunk is read in one pass from both
@@ -80,6 +81,182 @@ Part_Data :: struct {
 @(private, rodata)
 SEAM_OPENS := [1]tape.Kind{.Array}
 
+// `validate` on the threads of `opts.runner`, else on the calling thread.
+@(private)
+validate_parallel :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> tape.Error {
+	err, done := validate_parts(src, S, opts, caller)
+	if done {
+		return err
+	}
+	one := opts
+	one.runner = nil
+	return validate_walk(src, S, false, one, caller)
+}
+
+@(private)
+Validate_Job :: struct {
+	src:   []u8,
+	parts: []build.Part,
+	p:     Pass_Options,
+	width: int,
+}
+
+// Validates `src` in parts on the threads of `opts.runner`, returning `done` false to fall back to one thread.
+@(private)
+validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (err: tape.Error, done: bool) {
+	if e := tape.options_refused(&FORMATS[S], opts); e != nil {
+		return e, true
+	}
+	if !build.validate_dups(&FORMATS[S], opts) {
+		return tape.Bad_Option{"dups"}, true
+	}
+	m: hook.Memory_Budget
+	allocator := build.read_allocator(&m, opts, caller)
+	p := options_resolved(S, opts)
+	start := int(text_start(src, 0))
+	first := record_start(src, start, p.comment)
+	if first >= len(src) {
+		return nil, false
+	}
+	head := scan_record(src, first, 0, S, p.delim)
+	parts, planned := plan_dsv_parts(src, start, head.line_end + 1, head.cells + 1 if !p.no_header else 0, S, p, opts.runner, allocator)
+	defer delete(parts, allocator)
+	if !planned || len(parts) < 2 {
+		return nil, false
+	}
+	task :: proc(arg: rawptr, k: int) {
+		j := (^Validate_Job)(arg)
+		part := &j.parts[k]
+		w: Pass(S, hook.No_Hooks, false, {})
+		none: hook.No_Hooks
+		regs: hook.Regs
+		pass_start(&w, len(j.src[:part.to]), &none, j.p, 0)
+		w.p = j.p
+		if k == 0 {
+			w.in_header = !j.p.no_header
+			w.opened = false
+		} else {
+			w.in_header = false
+			w.opened = true
+			w.width = j.width
+		}
+		end := k == len(j.parts) - 1
+		w.unclosed = !end
+		r := run(&w, j.src[:part.to], u64(part.from), j.p, &regs, hook.no_hook)
+		part.astray = !end && (u8(r) == u8(tape.Fault_Kind.Truncated) || u8(r) == 0 && (w.held != 0 || w.rec_lo != len(j.src[:part.to])))
+		part.close, part.err, _ = hook.walk_error(r, &RULES)
+	}
+	vj := Validate_Job{src = src, parts = parts, p = p, width = head.cells}
+	hook.fan_each(opts.runner, len(parts), task, &vj)
+	for part in parts {
+		if part.astray {
+			return nil, false
+		}
+		if part.err != nil {
+			if _, is_oom := part.err.(runtime.Allocator_Error); is_oom {
+				return nil, false
+			}
+			return part.err, true
+		}
+	}
+	return nil, true
+}
+
+// Allocates, cuts, and scans `want` parallel chunks of `src` from `start` under `S`.
+@(private)
+scan_csv_chunks :: proc(src: []u8, start: int, $S: Spec, p: Pass_Options, runner: ^tape.Runner, want: int, allocator: runtime.Allocator) -> ([]Chunk, bool) {
+	if want < 2 {
+		return nil, false
+	}
+	chunks, cerr := make([]Chunk, want, allocator)
+	if cerr != nil || raw_data(chunks) == nil {
+		return nil, false
+	}
+	cut_chunks(src, start, chunks)
+	read :: proc(arg: rawptr, k: int) {
+		j := (^Chunk_Job)(arg)
+		read_chunk(j.src, &j.chunks[k], S, j.p, S == .Csv && k > 0)
+	}
+	cj := Chunk_Job{src = src, chunks = chunks, p = p}
+	hook.fan_each(runner, len(chunks), read, &cj)
+	return chunks, true
+}
+
+// Plans record-boundary parts of `src` from `start`, with all seams past `head_end`. For non-CSV specs every LF ends
+// a record so no quote-tracking chunk scan is needed; CSV scans chunks in parallel from both quote states.
+@(private)
+plan_dsv_parts :: proc(src: []u8, start, head_end, header: int, $S: Spec, p: Pass_Options, runner: ^tape.Runner, allocator: runtime.Allocator) -> (parts: []build.Part, ok: bool) {
+	want := build.chunk_count(runner, len(src) - start)
+	when S == .Csv {
+		chunks, cok := scan_csv_chunks(src, start, S, p, runner, want, allocator)
+		if !cok {
+			return nil, false
+		}
+		defer delete(chunks, allocator)
+		parts = seam_plan(src, chunks, head_end, header, allocator)
+		return parts, len(parts) >= 2
+	} else {
+		if want < 2 {
+			return nil, false
+		}
+		chunks, cerr := make([]Chunk, want, allocator)
+		if cerr != nil || raw_data(chunks) == nil {
+			return nil, false
+		}
+		defer delete(chunks, allocator)
+		cut_chunks(src, start, chunks)
+		list := make([dynamic]build.Part, allocator)
+		if _, err := append(&list, build.Part{from = 0, levels = 2}); err != nil {
+			delete(list)
+			return nil, false
+		}
+		for c, k in chunks {
+			if k > 0 && c.lo > head_end && c.lo > list[len(list) - 1].from && c.lo < len(src) {
+				list[len(list) - 1].to = c.lo
+				if _, err := append(&list, build.Part{from = c.lo, opens = SEAM_OPENS[:], levels = 2}); err != nil {
+					delete(list)
+					return nil, false
+				}
+			}
+		}
+		list[len(list) - 1].to = len(src)
+		shrink(&list)
+		return list[:], len(list) >= 2
+	}
+}
+
+// Plans record-boundary chunks for parallel `records_*` starting from `pos` (past the header).
+@(private)
+plan_dsv_records_chunks :: proc(src: []u8, pos: u64, $S: Spec, p: Pass_Options, runner: ^tape.Runner, chunks: []build.Record_Chunk, allocator: runtime.Allocator) -> int {
+	when S != .Csv {
+		return build.cut_delim_chunks(src, pos, '\n', runner, chunks)
+	} else {
+		want := min(build.chunk_count(runner, len(src) - int(pos)), len(chunks))
+		raw, rok := scan_csv_chunks(src, int(pos), S, p, runner, want, allocator)
+		if !rok {
+			return 0
+		}
+		defer delete(raw, allocator)
+		nc := 0
+		lo := pos
+		place := Place.Line
+		for &c, k in raw {
+			r := &c.runs[place]
+			if k > 0 && r.seam > int(lo) && r.seam < len(src) && nc + 1 < len(chunks) {
+				chunks[nc] = {lo = lo, hi = u64(r.seam), end_pos = u64(r.seam)}
+				nc += 1
+				lo = u64(r.seam)
+			}
+			place = .Quoted if r.in_quote != 0 else .Line
+		}
+		if lo < u64(len(src)) && nc < len(chunks) {
+			chunks[nc] = {lo = lo, hi = u64(len(src)), end_pos = u64(len(src))}
+			nc += 1
+		}
+		return nc
+	}
+}
+
 // `build` on the threads of `opts.runner`, else on the calling thread.
 @(private)
 build_parallel :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
@@ -99,22 +276,11 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 	allocator := build.read_allocator(&m, opts, caller)
 	p := options_resolved(S, opts)
 	start := int(text_start(src, 0))
-	want := build.chunk_count(opts.runner, len(src) - start)
-	if want < 2 {
-		return {}, nil, false
-	}
-	chunks, cerr := make([]Chunk, want, allocator)
-	if cerr != nil || raw_data(chunks) == nil {
+	chunks, cok := scan_csv_chunks(src, start, S, p, opts.runner, build.chunk_count(opts.runner, len(src) - start), allocator)
+	if !cok {
 		return {}, nil, false
 	}
 	defer delete(chunks, allocator)
-	cut_chunks(src, start, chunks)
-	read :: proc(arg: rawptr, k: int) {
-		j := (^Chunk_Job)(arg)
-		read_chunk(j.src, &j.chunks[k], S, j.p, S == .Csv && k > 0)
-	}
-	cj := Chunk_Job{src = src, chunks = chunks, p = p}
-	hook.fan_each(opts.runner, len(chunks), read, &cj)
 	// The first record. Parts past the first take their width from it, and read as a header it holds the keys.
 	first := record_start(src, start, p.comment)
 	if first >= len(src) {
@@ -179,8 +345,8 @@ cut_chunks :: proc "contextless" (src: []u8, start: int, chunks: []Chunk) #no_bo
 	for &c, k in chunks {
 		hi := len(src)
 		if k < len(chunks) - 1 {
-			at := start + n * (k + 1) / len(chunks)
-			next := start + n * (k + 2) / len(chunks)
+			at := start + int(u64(n) * u64(k + 1) / u64(len(chunks)))
+			next := start + int(u64(n) * u64(k + 2) / u64(len(chunks)))
 			hi = lo
 			for i in max(at - 1, lo) ..< next {
 				if src[i] == '\n' {
@@ -381,4 +547,88 @@ walk_part :: proc "contextless" (src: []u8, $S: Spec, p: Pass_Options, h: ^build
 	// A walk faults as `Truncated` only at the text's end, which a part before the last does not hold.
 	astray = !end && (u8(r) == u8(tape.Fault_Kind.Truncated) || u8(r) == 0 && (w.held != 0 || w.rec_lo != len(src)))
 	return r, w.widest, w.tolerated, astray
+}
+
+// Parallel typed unmarshal of a delimited text into a slice or dynamic array of rows.
+@(private)
+unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: Spec, read: Unmarshal_Options, opts: Options, caller: runtime.Allocator) -> (tape.Error, bool) {
+	if typed.parallel_alloc_class(caller, opts) == .Serial {
+		return nil, false
+	}
+	p := options_resolved(S, opts)
+	start := int(text_start(src, 0))
+	first := record_start(src, start, p.comment)
+	if first >= len(src) {
+		return nil, false
+	}
+	head := scan_record(src, first, 0, S, p.delim)
+	scratch := opts.scratch if opts.scratch.procedure != nil else runtime.heap_allocator()
+	frame: [FRAME_KEYS]tape.Token = ---
+	keys: []tape.Token
+	data_start := u64(start)
+	if !p.no_header {
+		ctx := context
+		kerr: tape.Error
+		if keys, kerr = header_keys(head.cells, frame[:], scratch, &ctx); kerr != nil {
+			return nil, false
+		}
+		hi := min(head.line_end + 1, len(src))
+		if walk_header(src[:hi], S, p, keys) != nil {
+			if len(keys) > len(frame) {
+				delete(keys, scratch)
+			}
+			return nil, false
+		}
+		data_start = u64(hi)
+	}
+	defer if len(keys) > len(frame) {
+		delete(keys, scratch)
+	}
+	raw_chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk
+	nc := plan_dsv_records_chunks(src, data_start, S, p, opts.runner, raw_chunks[:], scratch)
+	if nc < 2 {
+		return nil, false
+	}
+	parts: [typed.MAX_PARALLEL_PARTS]typed.Parallel_Part
+	for k in 0 ..< nc {
+		parts[k] = {from = int(raw_chunks[k].lo), to = int(raw_chunks[k].hi)}
+	}
+	Typed_Data :: struct {
+		src:     []u8,
+		p:       Pass_Options,
+		keys:    []tape.Token,
+		width:   int,
+		n_parts: int,
+	}
+	walk_part_typed :: proc(k: int, part: typed.Parallel_Part, hk: ^typed.Cells_Reader, regs: ^hook.Regs, data: rawptr) -> typed.Part_Result {
+		d := (^Typed_Data)(data)
+		C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(typed.Cells_Reader, hook.PROTOCOL_FIELD), 0)
+		w: Pass(S, typed.Cells_Reader, false, C)
+		pass_start(&w, part.to, hk, d.p, 0)
+		w.p, w.keys, w.width = d.p, d.keys, d.width
+		w.in_header, w.opened, w.unclosed = false, true, true
+		cells: [hook.COLUMN_BITS]tape.Token = ---
+		hk.replay.fixed, hk.replay.cells = .Ragged not_in d.p.tolerate, cells[:]
+		on :: #force_inline proc "contextless" (h: ^typed.Cells_Reader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+			return typed.cells_hook(h, s, t, number_value)
+		}
+		r: hook.Walk_Result
+		when S == .Csv {
+			if hk.alike && len(w.keys) >= MASKED_WIDTH {
+				m := (^Pass(S, typed.Cells_Reader, false, C + MASK_COLUMNS))(&w)
+				r = run(m, d.src[:part.to], u64(part.from), d.p, regs, on)
+			} else {
+				r = run(&w, d.src[:part.to], u64(part.from), d.p, regs, on)
+			}
+		} else {
+			r = run(&w, d.src[:part.to], u64(part.from), d.p, regs, on)
+		}
+		hk.replay.cells = nil
+		end := k == d.n_parts - 1
+		astray := !end && (u8(r) == u8(tape.Fault_Kind.Truncated) || u8(r) == 0 && (w.held != 0 || w.rec_lo != part.to))
+		_, err, _ := hook.walk_error(r, &RULES)
+		return {err = err, astray = astray}
+	}
+	td := Typed_Data{src = src, p = p, keys = keys, width = head.cells, n_parts = nc}
+	return typed.read_parallel_list(src, target, T, &FORMATS[S], &RULES, TAG, opts, read, caller, parts[:nc], typed.Cells_Reader, walk_part_typed, &td)
 }

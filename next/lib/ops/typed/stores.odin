@@ -10,17 +10,26 @@ import "stury:lib/core/tape"
 
 // Stores of a scalar token into the bytes its type spells: text, bytes, numbers, enums, bits and times.
 
-// Frees a block `token_text` or `store_text` allocated.
+// Frees a scratch block `token_text` allocated.
 @(private)
 free_held :: #force_inline proc "contextless" (h: ^Reader, held: []u8) {
 	context = h.ctx
 	if held != nil {
-		runtime.mem_free_with_size(raw_data(held), len(held), h.allocator)
+		runtime.mem_free_with_size(raw_data(held), len(held), h.scratch)
 	}
 }
 
-// The text of scalar token `t`: its bytes in the text, or its decode in `buf`, or in a block of the read's allocator,
-// `held`, when `buf` is too short. False when memory is refused.
+// Frees a persistent block `store_text` allocated (from `h.allocator`).
+@(private)
+free_owned :: #force_inline proc "contextless" (h: ^Reader, owned: []u8) {
+	context = h.ctx
+	if owned != nil {
+		runtime.mem_free_with_size(raw_data(owned), len(owned), h.allocator)
+	}
+}
+
+// The text of scalar token `t`: its bytes in the text, or its decode in `buf`, or in a block of the read's scratch
+// allocator, `held`, when `buf` is too short. False when memory is refused.
 @(private)
 token_text :: proc "contextless" (h: ^Reader, t: tape.Token, buf: []u8) -> (s: string, held: []u8, ok: bool) {
 	context = h.ctx
@@ -30,7 +39,7 @@ token_text :: proc "contextless" (h: ^Reader, t: tape.Token, buf: []u8) -> (s: s
 	}
 	room := h.format.room(src, t, nil)
 	err: runtime.Allocator_Error
-	if held, err = runtime.mem_alloc_non_zeroed(room, 1, h.allocator); err != nil {
+	if held, err = runtime.mem_alloc_non_zeroed(room, 1, h.scratch); err != nil {
 		return "", nil, false
 	}
 	s, ok = tape.node_text_of(h.format, src, t, held)

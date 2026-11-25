@@ -57,6 +57,9 @@ quotes :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	hook.probe_stack(READ_STACK)
+	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.format == nil && opts.budget.steps == 0 && len(src) >= build.PARALLEL_FROM {
+		return validate_on_threads(src, spec, opts, allocator)
+	}
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Json:

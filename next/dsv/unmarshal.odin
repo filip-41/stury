@@ -61,6 +61,11 @@ unmarshal_as :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: 
 	if e := refuse_repeat(src, S, o, allocator); e != nil {
 		return e
 	}
+	if o.runner != nil && o.runner.threads > 0 && o.pieces == nil && o.budget.steps == 0 && len(src) >= typed.PARALLEL_FROM {
+		if err, done := unmarshal_parallel(src, target, T, S, read, o, allocator); done {
+			return err
+		}
+	}
 	if o.budget.steps != 0 {
 		return unmarshal_walk(src, target, T, S, true, read, o, allocator)
 	}

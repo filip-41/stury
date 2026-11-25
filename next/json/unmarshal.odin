@@ -48,6 +48,17 @@ unmarshal_type :: #force_inline proc(src: []u8, target: rawptr, T: typeid, spec:
 @(private)
 unmarshal_spec :: #force_inline proc(src: []u8, target: rawptr, T: typeid, $S: Spec, read: Unmarshal_Options, opts: Options, allocator: runtime.Allocator) -> Error {
 	lax := opts.budget.steps != 0
+	if !lax && opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= typed.PARALLEL_FROM {
+		if opts.dups == .Refuse {
+			if err, done := unmarshal_parallel(src, target, T, S, true, read, opts, allocator); done {
+				return err
+			}
+		} else {
+			if err, done := unmarshal_parallel(src, target, T, S, false, read, opts, allocator); done {
+				return err
+			}
+		}
+	}
 	if opts.dups == .Refuse {
 		return unmarshal_as(src, target, T, S, true, true, read, opts, allocator) if lax else unmarshal_as(src, target, T, S, false, true, read, opts, allocator)
 	}

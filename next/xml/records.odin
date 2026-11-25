@@ -78,7 +78,7 @@ records_open :: proc(src: []u8, framing := tape.Framing.Concatenated, spec := Sp
 	}
 	if err := tape.options_refused(&FORMATS[spec], opts); err != nil {
 		r.err, r.at = err, .Done
-	} else if framing == .Lines || framing == .Elements {
+	} else if framing == .Lines || framing == .Seq || framing == .Elements {
 		r.err, r.at = tape.Bad_Option{"framing"}, .Done
 	} else if refused := build.records_path_refused(&FORMATS[spec], framing, path, opts); refused != nil {
 		r.err, r.at = refused, .Done

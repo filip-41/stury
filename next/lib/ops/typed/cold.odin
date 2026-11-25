@@ -56,22 +56,22 @@ map_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Fram
 	if f.seen != 0 {
 		err: runtime.Allocator_Error
 		if met, err = first_met(h, f, key_span(h, t)); err != nil {
-			free_held(h, owned)
+			free_owned(h, owned)
 			return refuse_memory(h, s, t)
 		}
 		if met && .First in h.flags {
-			free_held(h, owned)
+			free_owned(h, owned)
 			return s, .Skip
 		}
 	}
 	if h.zero == nil || len(h.zero) < int(m.map_info.vs.size_of_type) {
 		if h.zero != nil {
-			runtime.mem_free_with_size(raw_data(h.zero), len(h.zero), h.allocator)
+			runtime.mem_free_with_size(raw_data(h.zero), len(h.zero), h.scratch)
 			h.zero = nil
 		}
-		zero, err := runtime.mem_alloc(max(int(m.map_info.vs.size_of_type), 16), 16, h.allocator)
+		zero, err := runtime.mem_alloc(max(int(m.map_info.vs.size_of_type), 16), 16, h.scratch)
 		if err != nil {
-			free_held(h, owned)
+			free_owned(h, owned)
 			return refuse_memory(h, s, t)
 		}
 		h.zero = zero
@@ -85,11 +85,11 @@ map_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Fram
 	_, slot, inserted, err := runtime.__dynamic_map_entry(raw, m.map_info, &k, raw_data(h.zero))
 	raw.allocator = held
 	if err != nil || slot == nil {
-		free_held(h, owned)
+		free_owned(h, owned)
 		return refuse_memory(h, s, t)
 	}
 	if !inserted {
-		free_held(h, owned)
+		free_owned(h, owned)
 		if .First in h.flags && f.seen == 0 {
 			return s, .Skip
 		}
@@ -150,7 +150,8 @@ grow_list :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: t
 		n, room = (s.c - data) / stride, (s.a - data) / stride
 	}
 	wide := max(8, room * 2)
-	bytes, err := runtime.non_zero_mem_resize(f.data, int(room * stride), int(wide * stride), int(m.align), h.allocator)
+	list_alloc := h.scratch if .Worker_List in h.flags && h.sp == 2 else h.allocator
+	bytes, err := runtime.non_zero_mem_resize(f.data, int(room * stride), int(wide * stride), int(m.align), list_alloc)
 	if err != nil {
 		r, a := refuse_memory(h, s, t)
 		return r, a, false
@@ -163,7 +164,7 @@ grow_list :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: t
 	return {data + wide * stride, s.b, data + n * stride}, .Next, true
 }
 
-// Doubles the frames the read holds through the read's allocator, false when memory is refused.
+// Doubles the frames the read holds through the read's scratch allocator, false when memory is refused.
 @(private, cold)
 frames_grow :: #force_no_inline proc "contextless" (h: ^Reader) -> bool {
 	if h.room > max(int) / (2 * size_of(Frame)) {
@@ -175,9 +176,9 @@ frames_grow :: #force_no_inline proc "contextless" (h: ^Reader) -> bool {
 	block: []u8
 	err: runtime.Allocator_Error
 	if grown {
-		block, err = runtime.non_zero_mem_resize(h.frames, h.room * size_of(Frame), wide * size_of(Frame), align_of(Frame), h.allocator)
+		block, err = runtime.non_zero_mem_resize(h.frames, h.room * size_of(Frame), wide * size_of(Frame), align_of(Frame), h.scratch)
 	} else {
-		block, err = runtime.mem_alloc_non_zeroed(wide * size_of(Frame), align_of(Frame), h.allocator)
+		block, err = runtime.mem_alloc_non_zeroed(wide * size_of(Frame), align_of(Frame), h.scratch)
 	}
 	if err != nil || len(block) < wide * size_of(Frame) {
 		return false

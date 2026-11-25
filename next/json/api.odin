@@ -56,6 +56,7 @@ Span_Answer :: tape.Span_Answer
 Presence :: tape.Presence
 Framing :: tape.Framing
 Record :: tape.Record
+Bad_Record :: tape.Bad_Record
 error_message :: tape.error_message
 
 // The readers over a document, or over the text a `find` answer or a record's key was read in.
@@ -86,3 +87,4 @@ text_is_ascii :: tape.text_is_ascii
 destroy :: tape.destroy
 clone_document :: tape.clone_document
 records_window :: tape.records_window
+records_skip :: tape.records_skip

@@ -275,19 +275,21 @@ records_keep_the_budget :: proc(t: ^testing.T) {
 	}
 }
 
-// Options no records read takes end the records before any is read: a concatenated framing, which JSON has no reading
-// of, and a policy for repeated keys a path read refuses.
+// Options no records read takes end the records before any is read: a path under `.Lines`, `.Seq` or `.Concatenated`,
+// and a policy for repeated keys a path read refuses.
 @(test)
 records_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("{\"a\":1}\n")
-	r := json.records_open(src, .Concatenated)
+	for framing in ([]tape.Framing{.Lines, .Seq, .Concatenated}) {
+		r := json.records_open(src, framing, path = {tape.Name("a")})
+		defer tape.destroy_records(&r)
+		_, more := one_record(&r)
+		testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"path"}), "%v with path: %v", framing, r.err)
+	}
+	r := json.records_open(src, opts = {dups = .Refuse})
 	defer tape.destroy_records(&r)
-	_, more := one_record(&r)
-	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"framing"}), "concatenated: %v", r.err)
-	tape.destroy_records(&r)
-	r = json.records_open(src, opts = {dups = .Refuse})
-	_, _, more = one_find(&r, {tape.Name("a")})
+	_, _, more := one_find(&r, {tape.Name("a")})
 	testing.expectf(t, !more && r.err == tape.Error(tape.Bad_Option{"dups"}) && r.index == 0, "refuse: %v", r.err)
 }
 

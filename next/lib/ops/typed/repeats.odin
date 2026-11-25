@@ -59,16 +59,16 @@ hold_pointee :: proc "contextless" (h: ^Reader, p: uintptr, size: int) -> bool {
 	if held_of(h, p, false) != nil {
 		return true
 	}
-	bytes, err := runtime.mem_alloc_non_zeroed(size, 1, h.allocator)
+	bytes, err := runtime.mem_alloc_non_zeroed(size, 1, h.scratch)
 	if err != nil {
 		return false
 	}
 	intrinsics.mem_copy_non_overlapping(raw_data(bytes), rawptr(p), size)
 	if h.held == nil {
-		h.held.allocator = h.allocator
+		h.held.allocator = h.scratch
 	}
 	if _, err = append(&h.held, Held{at = p, bytes = bytes}); err != nil {
-		runtime.mem_free_with_size(raw_data(bytes), size, h.allocator)
+		runtime.mem_free_with_size(raw_data(bytes), size, h.scratch)
 		return false
 	}
 	return true
@@ -83,14 +83,14 @@ hold_map :: proc "contextless" (h: ^Reader, at: uintptr, info: ^runtime.Map_Info
 		return true
 	}
 	raw := (^runtime.Raw_Map)(at)^
-	entries, err := runtime.map_alloc_dynamic(info, runtime.map_log2_cap(raw), h.allocator)
+	entries, err := runtime.map_alloc_dynamic(info, runtime.map_log2_cap(raw), h.scratch)
 	if err != nil {
 		return false
 	}
 	runtime.map_rehash_dynamic(raw, &entries, info)
 	entries.len = raw.len
 	if h.held == nil {
-		h.held.allocator = h.allocator
+		h.held.allocator = h.scratch
 	}
 	if _, err = append(&h.held, Held{at = at, entries = entries, info = info}); err != nil {
 		_ = runtime.map_free_dynamic(entries, info)
@@ -105,7 +105,7 @@ held_free :: proc "contextless" (h: ^Reader) {
 	context = h.ctx
 	for b in h.held {
 		if b.info == nil {
-			runtime.mem_free_with_size(raw_data(b.bytes), len(b.bytes), h.allocator)
+			runtime.mem_free_with_size(raw_data(b.bytes), len(b.bytes), h.scratch)
 		} else {
 			_ = runtime.map_free_dynamic(b.entries, b.info)
 		}
@@ -122,7 +122,7 @@ held_map_reset :: proc(h: ^Reader, rec: ^Record, at: uintptr, entries: ^runtime.
 	raw := (^runtime.Raw_Map)(at)
 	value := &([^]Record)(rec.first)[-1]
 	frees := h.plan.meta[value.meta].frees
-	added := make([dynamic][2]u64, h.allocator)
+	added := make([dynamic][2]u64, h.scratch)
 	defer delete(added)
 	ks, vs, hs, _, _ := runtime.map_kvh_data_dynamic(raw^, info)
 	seed := runtime.map_seed(entries^)
@@ -178,7 +178,7 @@ Release_Step :: enum u8 {
 @(private)
 release :: proc "contextless" (h: ^Reader, rec: ^Record, at, was: uintptr) -> runtime.Allocator_Error {
 	context = h.ctx
-	steps := make([dynamic]Release, 0, 16, h.allocator)
+	steps := make([dynamic]Release, 0, 16, h.scratch)
 	defer delete(steps)
 	append(&steps, Release{rec = rec, at = at, was = was}) or_return
 	for len(steps) > 0 {
@@ -329,8 +329,8 @@ release_text :: proc "contextless" (h: ^Reader, dest: uintptr) {
 @(private)
 first_met :: proc(h: ^Reader, f: ^Frame, key: string) -> (met: bool, err: runtime.Allocator_Error) {
 	if f.run == 0 {
-		set := new(map[string]struct {}, h.allocator) or_return
-		set.allocator = h.allocator
+		set := new(map[string]struct {}, h.scratch) or_return
+		set.allocator = h.scratch
 		f.run = u64(uintptr(set))
 	}
 	set := (^map[string]struct {})(uintptr(f.run))
@@ -348,7 +348,7 @@ first_end :: proc "contextless" (h: ^Reader, f: ^Frame) {
 		context = h.ctx
 		set := (^map[string]struct {})(uintptr(f.run))
 		delete(set^)
-		free(set, h.allocator)
+		free(set, h.scratch)
 		f.run = 0
 	}
 }

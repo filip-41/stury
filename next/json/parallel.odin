@@ -7,6 +7,7 @@ import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
+import "stury:lib/ops/typed"
 
 // Builds a text on the threads of a `tape.Runner`, whichever value holds most of the text. The text is cut into
 // chunks, and each chunk is read for its strings, comments and brackets from the two places its first byte is most
@@ -92,6 +93,118 @@ Lex_Job :: struct {
 	chunks: []Lex_Chunk,
 }
 
+// `validate` on the threads of `opts.runner`.
+@(private)
+validate_on_threads :: #force_no_inline proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> tape.Error {
+	switch spec {
+	case .Json:
+		return validate_parallel(src, .Json, opts, allocator)
+	case .Jsonc:
+		return validate_parallel(src, .Jsonc, opts, allocator)
+	case .Json5:
+		return validate_parallel(src, .Json5, opts, allocator)
+	}
+	panic("json: spec out of range")
+}
+
+@(private)
+Validate_Job :: struct {
+	src:   []u8,
+	parts: []build.Part,
+	opts:  Options,
+}
+
+@(private)
+validate_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> tape.Error {
+	if e := tape.options_refused(&FORMATS[S], opts); e != nil {
+		return e
+	}
+	if !build.validate_dups(&FORMATS[S], opts) {
+		return tape.Bad_Option{"dups"}
+	}
+	err, done := validate_parts(src, S, opts, caller)
+	if done {
+		return err
+	}
+	one := opts
+	one.runner = nil
+	return validate_as(src, S, false, one, caller)
+}
+
+// Validates `src` in parts on the threads of `opts.runner`, returning `done` false to fall back to one thread.
+@(private)
+validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (err: tape.Error, done: bool) {
+	m: hook.Memory_Budget
+	allocator := build.read_allocator(&m, opts, caller)
+	parts, opens, planned := plan_parts(src, S, opts, allocator)
+	defer delete(parts, allocator)
+	defer delete(opens, allocator)
+	if !planned || len(parts) < 2 {
+		return nil, false
+	}
+	task :: proc(arg: rawptr, k: int) {
+		j := (^Validate_Job)(arg)
+		ctx := context
+		p := &j.parts[k]
+		h: hook.No_Hooks
+		regs: hook.Regs
+		if k == 0 {
+			p.close, p.err, p.tolerated = walk_text(j.src[:p.to], S, false, j.opts, &h, &regs, {}, &ctx, hook.no_hook)
+		} else {
+			r, took := walk_seam(j.src[:p.to], p.from, p.opens, S, j.opts.tolerate, build.read_depth(j.opts), &h, &regs, &ctx, hook.no_hook)
+			p.close, p.err, _ = hook.walk_error(r, &RULES)
+			p.tolerated = took
+		}
+		if k < len(j.parts) - 1 {
+			build.part_cut_short(p)
+		}
+	}
+	vj := Validate_Job{src = src, parts = parts, opts = opts}
+	hook.fan_each(opts.runner, len(parts), task, &vj)
+	for p in parts {
+		if p.astray {
+			return nil, false
+		}
+		if p.err != nil {
+			if _, is_oom := p.err.(runtime.Allocator_Error); is_oom {
+				return nil, false
+			}
+			return p.err, true
+		}
+	}
+	return nil, true
+}
+
+// Plans the seam-delimited parts of `src` for parallel `build` or `validate`.
+@(private)
+plan_parts :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocator) -> (parts: []build.Part, opens: []tape.Kind, ok: bool) {
+	start := spell.bom_length(src)
+	want := build.chunk_count(opts.runner, len(src) - start)
+	if want < 2 {
+		return nil, nil, false
+	}
+	chunks, cerr := make([]Lex_Chunk, want, allocator)
+	if cerr != nil || raw_data(chunks) == nil {
+		return nil, nil, false
+	}
+	defer delete(chunks, allocator)
+	lex_cut(src, start, chunks, S)
+	lex :: proc(arg: rawptr, k: int) {
+		j := (^Lex_Job)(arg)
+		// A chunk that starts past a line end is read from outside strings and comments only. It is read from
+		// another place only for a text the walk refuses or a block comment across the line end.
+		c := &j.chunks[k]
+		if k > 0 && !j.chunks[k - 1].line {
+			c.runs = lex_pair(j.src, c.lo, c.hi, S)
+		} else {
+			c.runs[int(Lex.Out)] = lex_run(j.src, c.lo, c.hi, .Out, S)
+		}
+	}
+	lj := Lex_Job{src = src, chunks = chunks}
+	hook.fan_each(opts.runner, len(chunks), lex, &lj)
+	return seam_plan(src, chunks, S, build.read_depth(opts), allocator)
+}
+
 // `build` on the threads of `opts.runner`.
 @(private)
 build_on_threads :: #force_no_inline proc(src: []u8, spec: Spec, opts: Options, allocator: runtime.Allocator) -> (tape.Document, tape.Error) {
@@ -128,32 +241,7 @@ build_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error, built: bool) {
 	m: hook.Memory_Budget
 	allocator := build.read_allocator(&m, opts, caller)
-	start := spell.bom_length(src)
-	want := build.chunk_count(opts.runner, len(src) - start)
-	if want < 2 {
-		return {}, nil, false
-	}
-	chunks, cerr := make([]Lex_Chunk, want, allocator)
-	if cerr != nil || raw_data(chunks) == nil {
-		return {}, nil, false
-	}
-	defer delete(chunks, allocator)
-	lex_cut(src, start, chunks, S)
-	lex :: proc(arg: rawptr, k: int) {
-		j := (^Lex_Job)(arg)
-		// A chunk that starts past a line end is read from outside strings and comments only. It is read from
-		// another place only for a text the walk refuses or a block comment across the line end.
-		c := &j.chunks[k]
-		if k > 0 && !j.chunks[k - 1].line {
-			c.runs = lex_pair(j.src, c.lo, c.hi, S)
-		} else {
-			c.runs[int(Lex.Out)] = lex_run(j.src, c.lo, c.hi, .Out, S)
-		}
-	}
-	lj := Lex_Job{src = src, chunks = chunks}
-	hook.fan_each(opts.runner, len(chunks), lex, &lj)
-	limit := build.read_depth(opts)
-	parts, opens, planned := seam_plan(src, chunks, S, limit, allocator)
+	parts, opens, planned := plan_parts(src, S, opts, allocator)
 	defer delete(parts, allocator)
 	defer delete(opens, allocator)
 	if !planned || len(parts) < 2 {
@@ -643,7 +731,11 @@ walk_seam :: proc "contextless" (src: []u8, from: int, opens: []tape.Kind, $S: S
 	stack: [WALK_LEVELS]u32 = ---
 	w: Walk(S, H, false, C) = ---
 	walk_init(&w, src, raw_data(stack[:]), h, regs, {}, ctx, limit, tolerate, 0)
-	w.depth = min(w.limit, u64(hook.levels_held(h)))
+	when .Levels in C {
+		w.depth = min(w.limit, u64(hook.levels_held(h)))
+	} else {
+		w.depth = min(w.limit, WALK_LEVELS)
+	}
 	stack[0] = u32(']') | u32(GAP_OFF) << 8
 	for i in 1 ..< len(opens) {
 		stack[i] = u32(']') | u32(opens[i - 1] == .Object) << 5 | u32(GAP_OFF) << 8
@@ -661,4 +753,250 @@ walk_seam :: proc "contextless" (src: []u8, from: int, opens: []tape.Kind, $S: S
 	r := enter_member(raw_data(src)[from:], end, d, indent_start(&w), &w, regs^, m, on)
 	r = walk_tail(&w, r, end, on)
 	return r, w.tolerated
+}
+
+// Parallel typed unmarshal for root or nested spine arrays in JSON, JSONC, and JSON5.
+@(private)
+unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: Spec, $REFUSE: bool, read: Unmarshal_Options, opts: Options, allocator: runtime.Allocator) -> (Error, bool) {
+	H :: typed.Refusing_Reader when REFUSE else typed.Text_Reader
+	on_prefix :: #force_inline proc "contextless" (h: ^typed.Probe_Reader(H), s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+		when REFUSE {
+			return typed.probe_refusing_hook(h, s, t, number_value)
+		} else {
+			return typed.probe_text_hook(h, s, t, number_value)
+		}
+	}
+	on_inner :: #force_inline proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
+		when REFUSE {
+			return typed.refusing_hook(h, s, t, number_value)
+		} else {
+			return typed.text_hook(h, s, t, number_value)
+		}
+	}
+	walk_prefix :: proc(src: []u8, opts: Options, h: ^typed.Probe_Reader(H), regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
+		return walk_text(src, S, false, opts, h, regs, a, ctx, on_prefix)
+	}
+	Split_Info :: struct {
+		n_parts: int,
+		opts:    Options,
+	}
+	split_list :: proc(src: []u8, found: typed.Parallel_List, opts: Options, parts: []typed.Parallel_Part, scratch: runtime.Allocator, data: rawptr) -> (n_parts, list_close: int, ok: bool) {
+		n_parts, list_close, ok = split_json_list(src, int(found.open), S, opts, parts, scratch)
+		if ok {
+			(^Split_Info)(data).n_parts = n_parts
+		}
+		return
+	}
+	walk_part :: proc(k: int, p: typed.Parallel_Part, found: typed.Parallel_List, h: ^H, regs: ^hook.Regs, data: rawptr) -> typed.Part_Result {
+		info := (^Split_Info)(data)
+		limit := build.read_depth(info.opts)
+		if u64(found.depth) > limit {
+			return {astray = true}
+		}
+		sub_limit := limit - u64(found.depth - 1)
+		opens := [1]tape.Kind{.Array}
+		r, _ := walk_seam(h.base[:p.to], p.from, opens[:], S, info.opts.tolerate, sub_limit, h, regs, &h.ctx, on_inner)
+		_, err, _ := hook.walk_error(r, &RULES)
+		if k < info.n_parts - 1 {
+			if f, is_fault := err.(tape.Fault); is_fault && f.kind == .Truncated && f.at == u64(p.to) {
+				err = nil
+			} else if err == nil {
+				return {astray = true}
+			}
+		} else if err == nil && (u64(r) >> 16 != u64(p.to) || h.sp != 1) {
+			return {astray = true}
+		}
+		return {err = err}
+	}
+	walk_suffix :: proc(src: []u8, list_close: int, opens: []tape.Kind, opts: Options, h: ^H, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context, data: rawptr) -> (u64, tape.Error, bool) {
+		return walk_json_suffix(src, list_close + 1, opens, S, opts, h, regs, a, ctx, on_inner)
+	}
+	info := Split_Info{opts = opts}
+	return typed.read_parallel_spine(src, target, T, &FORMATS[S], &RULES, TAG, opts, read, allocator, SEAM_LEVELS, H, walk_prefix, split_list, walk_part, walk_suffix, &info)
+}
+
+// Walks the suffix of `src` starting at `from` (1 byte past the closing `]` of the parallel list), inside the still-open
+// parent containers `opens`, through `walk_tail`.
+@(private)
+walk_json_suffix :: proc "contextless" (src: []u8, from: int, opens: []tape.Kind, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (u64, tape.Error, bool) {
+	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
+	stack: [WALK_LEVELS]u32 = ---
+	w: Walk(S, H, false, C) = ---
+	walk_init(&w, src, raw_data(stack[:]), h, regs, allocator, ctx, build.read_depth(opts), opts.tolerate, 0)
+	when .Levels in C {
+		w.depth = min(w.limit, u64(hook.levels_held(h)))
+	} else {
+		w.depth = min(w.limit, WALK_LEVELS)
+	}
+	end := raw_data(src)[len(src):]
+	r: hook.Walk_Result
+	if len(opens) == 0 {
+		r = walk_tail(&w, hook.walk_result(u64(from), 0), end, on)
+	} else {
+		stack[0] = u32(']') | u32(GAP_OFF) << 8
+		for i in 1 ..< len(opens) {
+			stack[i] = u32(']') | u32(opens[i - 1] == .Object) << 5 | u32(GAP_OFF) << 8
+		}
+		w.gap_lo = GAP_UNLEARNABLE
+		d := u64(len(opens)) << 1 | u64(opens[len(opens) - 1] == .Object)
+		r = enter_place(PLACE_AFTER, raw_data(src)[from:], end, d, &w, regs^, on)
+		r = walk_tail(&w, r, end, on)
+	}
+	if w.owned {
+		hook.levels_free(&w)
+	}
+	at, err, _ := hook.walk_error(r, &RULES)
+	return at, err, w.tolerated
+}
+
+// Splits the JSON array whose `[` was at `open - 1` into `n_parts` element-aligned chunks and locates its matching `]`
+// (`list_close`). Uses the parallel lex pass to chain string/comment states and bracket depth across chunks, then finds
+// each chunk's first depth-0 comma in parallel.
+@(private)
+split_json_list :: proc(src: []u8, open: int, $S: Spec, opts: Options, parts: []typed.Parallel_Part, scratch: runtime.Allocator) -> (n_parts, list_close: int, ok: bool) {
+	want := min(build.chunk_count(opts.runner, len(src) - open), len(parts))
+	if want < 2 {
+		return 0, 0, false
+	}
+	chunks, cerr := make([]Lex_Chunk, want, scratch)
+	if cerr != nil || raw_data(chunks) == nil {
+		return 0, 0, false
+	}
+	defer delete(chunks, scratch)
+	lex_cut(src, open, chunks, S)
+	lex :: proc(arg: rawptr, k: int) {
+		j := (^Lex_Job)(arg)
+		c := &j.chunks[k]
+		if k > 0 && !j.chunks[k - 1].line {
+			c.runs = lex_pair(j.src, c.lo, c.hi, S)
+		} else {
+			c.runs[int(Lex.Out)] = lex_run(j.src, c.lo, c.hi, .Out, S)
+		}
+	}
+	lj := Lex_Job{src = src, chunks = chunks}
+	hook.fan_each(opts.runner, len(chunks), lex, &lj)
+	// Chain lex state and relative bracket depth (0 = inside target array) in text order until the array closes.
+	Chunk_Seam :: struct {
+		start_state: Lex,
+		start_depth: int,
+		find_close:  bool,
+		seam:        int,
+		close:       int,
+	}
+	seams: [typed.MAX_PARALLEL_PARTS]Chunk_Seam
+	state := Lex.Out
+	rel_depth := 0
+	last_chunk := -1
+	for &c, k in chunks {
+		seams[k] = {start_state = state, start_depth = rel_depth, seam = -1, close = -1}
+		rare: Lex_Run
+		r := &c.runs[int(state)] if state <= .Double else &rare
+		if !r.read {
+			r^ = lex_run(src, c.lo, c.hi, state, S)
+		}
+		if r.pre.pops > rel_depth {
+			seams[k].find_close = true
+			last_chunk = k
+			break
+		}
+		rel_depth = rel_depth - r.pre.pops + r.pre.n
+		if r.seam >= 0 {
+			if r.post.pops > rel_depth {
+				seams[k].find_close = true
+				last_chunk = k
+				break
+			}
+			rel_depth = rel_depth - r.post.pops + r.post.n
+		}
+		state = r.end
+	}
+	if last_chunk < 0 {
+		return 0, 0, false
+	}
+	Seam_Job :: struct {
+		src:    []u8,
+		chunks: []Lex_Chunk,
+		seams:  []Chunk_Seam,
+	}
+	find_task :: proc(arg: rawptr, k: int) {
+		j := (^Seam_Job)(arg)
+		c := &j.chunks[k]
+		s := &j.seams[k]
+		if k == 0 && !s.find_close {
+			return
+		}
+		s.seam, s.close = scan_depth0_seam(j.src, c.lo, c.hi, s.start_state, s.start_depth, k > 0, s.find_close, S)
+	}
+	sj := Seam_Job{src = src, chunks = chunks[:last_chunk + 1], seams = seams[:last_chunk + 1]}
+	hook.fan_each(opts.runner, last_chunk + 1, find_task, &sj)
+	list_close = seams[last_chunk].close
+	if list_close < open || src[list_close] != ']' {
+		return 0, 0, false
+	}
+	cur := open
+	for k in 1 ..= last_chunk {
+		at := seams[k].seam
+		if at > cur && at <= list_close {
+			parts[n_parts] = {from = cur, to = at}
+			n_parts += 1
+			cur = at
+		}
+	}
+	parts[n_parts] = {from = cur, to = list_close + 1}
+	n_parts += 1
+	return n_parts, list_close, n_parts >= 2
+}
+
+// Scans `src[lo:hi]` from `(from_state, from_depth)` for the first depth-0 comma (when `want_seam`) and/or the
+// matching closing bracket where depth drops from 0 to -1 (when `want_close`).
+@(private, enable_target_feature = STATE_FEATURES)
+scan_depth0_seam :: proc "contextless" (src: []u8, lo, hi: int, from_state: Lex, from_depth: int, want_seam, want_close: bool, $S: Spec) -> (seam, close: int) #no_bounds_check {
+	seam, close = -1, -1
+	run := Lex_Run{seam = -1, end = from_state, read = true, at = lo, comment_end = -1, comment_from = lo}
+	text := src[:hi]
+	odd: u64
+	depth := from_depth
+	for base := lo; base < hi; base += 64 {
+		b := kernel.load_block(text, base)
+		escaped := kernel.escaped(kernel.pack(kernel.eq(b, '\\')), &odd)
+		q := kernel.pack(kernel.eq(b, '"')) &~ escaped
+		m := lex_brackets(b)
+		outside, comments: u64
+		if run.end <= .Double && run.at <= base {
+			inside := kernel.prefix_xor(STATE_TIER, q) ~ (max(u64) if run.end == .Double else 0)
+			if lex_marks(b, S) &~ inside == 0 {
+				outside = ~inside
+				run.end = .Double if inside >> 63 != 0 else .Out
+				run.comment_bytes = 0
+			} else {
+				str_m, com_m, _ := lex_comments(&run, src, hi, base, b, q, escaped, S)
+				outside, comments = ~(str_m | com_m), com_m
+			}
+		} else {
+			str_m, com_m, _ := lex_comments(&run, src, hi, base, b, q, escaped, S)
+			outside, comments = ~(str_m | com_m), com_m
+		}
+		opens, closes := m[0] & outside, m[1] & outside
+		commas := m[2] & outside if want_seam && seam < 0 else 0
+		for bits := opens | closes | commas; bits != 0; bits &= bits - 1 {
+			k := base + int(intrinsics.count_trailing_zeros(bits))
+			bit := bits & -bits
+			if opens & bit != 0 {
+				depth += 1
+			} else if closes & bit != 0 {
+				depth -= 1
+				if depth < 0 {
+					close = k
+					return
+				}
+			} else if depth == 0 && seam < 0 && seam_at(src, lo, base, k, &run, comments, S) {
+				seam = k + 1
+				if !want_close {
+					return
+				}
+			}
+		}
+		run.comment_bytes = comments
+	}
+	return
 }

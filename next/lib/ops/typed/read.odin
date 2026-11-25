@@ -73,11 +73,12 @@ BEFORE_ROOM :: 128
 // Cold state flags of `Reader`, packed into one byte inside Cache Line 0.
 @(private)
 Reader_Flag :: enum u8 {
-	First,   // repeated keys under `.First`
-	Unknown, // `refuse_unknown`
-	Made,    // the read made its plan, and frees it on return
-	Dead,    // a refusal ended the read, and the walk judges the rest of the text
-	Fresh,   // the last map key read made a new entry, which an empty cell takes back
+	First,       // repeated keys under `.First`
+	Unknown,     // `refuse_unknown`
+	Made,        // the read made its plan, and frees it on return
+	Dead,        // a refusal ended the read, and the walk judges the rest of the text
+	Fresh,       // the last map key read made a new entry, which an empty cell takes back
+	Worker_List, // parallel worker's top-level list (`h.sp == 2`) allocates its temporary element buffer from `scratch`
 }
 
 @(private)
@@ -118,8 +119,9 @@ Reader :: struct {
 	// One past the head of the last tag 1 the walk gave, so a number that starts there is a count of seconds since the
 	// epoch, as a `time.Time` takes it, which the format notes. 0 for none, as a value after a tag starts past the tag's first byte.
 	epoch:            u64,
-	allocator:        runtime.Allocator, // the caller's, counted under `Budget.memory`
+	allocator:        runtime.Allocator, // the caller's, counted under `Budget.memory` (persistent result data)
 	caller:           runtime.Allocator, // the one a dynamic array or map read keeps for its owner
+	scratch:          runtime.Allocator, // short-lived read scratch (frames, before, held, seen, first_met, refusing tables)
 	ctx:              runtime.Context,
 }
 
@@ -222,7 +224,7 @@ cells_hook :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs, 
 
 // The records a refused read reads every token by: a `Dead` record, which takes every value to a cold path, and an
 // `End` record, which every key misses.
-@(private = "file", rodata)
+@(private, rodata)
 DEAD_BLOCK := [2]Record{{word = NO_KEY, kind = .Dead}, {word = NO_KEY, kind = .End}}
 
 // The records of a struct read by position: a `Position` record, which takes every element to a cold path, and an
@@ -324,6 +326,7 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 		target    = uintptr(target),
 		allocator = allocator,
 		caller    = caller,
+		scratch   = allocator,
 		ctx       = ctx,
 	}
 	when H == Cells_Reader {
@@ -333,9 +336,12 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 		hk.alike = true
 		hk.learn = .Before
 	} else when H == Refusing_Reader {
-		hk.keys = nil
-		hk.opens = nil
-		hk.hashed = nil
+		hk.keys = {}
+		hk.opens = {}
+		hk.hashed = {}
+		hk.keys.allocator = allocator
+		hk.opens.allocator = allocator
+		hk.hashed.allocator = allocator
 		hk.repeat = max(u64)
 		hk.passing = 0
 		hk.ends = false
@@ -357,7 +363,7 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 			// Dominated by `size <= BEFORE_ROOM` (`uint` rules out negative lengths).
 			#no_bounds_check h.before = before[:size]
 		} else {
-			block, berr := runtime.mem_alloc_non_zeroed(int(size), 1, allocator)
+			block, berr := runtime.mem_alloc_non_zeroed(int(size), 1, h.scratch)
 			if berr != nil || len(block) < int(size) {
 				err := tape.Error(runtime.Allocator_Error.Out_Of_Memory)
 				return hook.memory_budget_error(&m.main, err) if opts.budget.memory != 0 else err
@@ -375,27 +381,12 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	} else if .Dead not_in h.flags {
 		settle_open(h, regs, h.sp)
 	}
-	if h.frames != h.home {
-		runtime.mem_free_with_size(h.frames, h.room * size_of(Frame), allocator)
-	}
-	if h.map_keys != nil {
-		path_alloc := h.path.allocator if h.path.allocator.procedure != nil else caller
-		runtime.mem_free_with_size(raw_data(h.map_keys), len(h.map_keys) * size_of(tape.Token), path_alloc)
-	}
-	if h.zero != nil {
-		runtime.mem_free_with_size(raw_data(h.zero), len(h.zero), allocator)
-	}
-	if len(h.before) > BEFORE_ROOM {
-		runtime.mem_free_with_size(raw_data(h.before), len(h.before), allocator)
-	}
-	if h.held != nil {
-		held_free(h)
-	}
+	cleanup_reader(h, BEFORE_ROOM)
 	return hook.memory_budget_error(&m.main, err) if opts.budget.memory != 0 else err
 }
 
 // Cold wrapper for one-shot `plan_make` so cached-plan reads keep it out of their hot blocks.
-@(private = "file", cold)
+@(private, cold)
 make_temp_plan :: #force_no_inline proc(T: typeid, tag: string, caller: runtime.Allocator, out: ^Plan) -> tape.Error {
 	p, err := plan_make(T, tag, {}, caller)
 	if err == nil {
@@ -404,7 +395,7 @@ make_temp_plan :: #force_no_inline proc(T: typeid, tag: string, caller: runtime.
 	return err
 }
 
-@(private = "file", cold)
+@(private, cold)
 destroy_temp_plan :: #force_no_inline proc(plan: ^Plan) {
 	plan_destroy(plan)
 }

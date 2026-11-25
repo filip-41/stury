@@ -9,6 +9,10 @@ Framing :: enum u8 {
 	// One value per line (NDJSON). A line of white space alone holds no record. A record whose line holds more than one
 	// value, or a value that runs on past its line, is refused, and the records go on at the next line.
 	Lines,
+	// RFC 7464 JSON text sequences: each record is led by ASCII RS (0x1E). Empty or white-space-only RS spans hold no
+	// record. Bytes before the first RS are refused as unframed, and a top-level number with no white space after it is
+	// refused as potentially truncated. A fault in one record leaves the records going on at the next RS.
+	Seq,
 	// The elements of the root array, or of the array `Records.path` reaches. A fault ends the records, as the text
 	// holds no list past it, and a value of another kind ends them with `Bad_Option{"framing"}`.
 	Elements,
@@ -16,20 +20,47 @@ Framing :: enum u8 {
 	// key in `Record.key`. Every member is a record, repeated keys too. A fault ends the records, and a value of another
 	// kind ends them with `Bad_Option{"framing"}`, as under `.Elements`.
 	Members,
-	// Values one after another with nothing between them, as a CBOR sequence (RFC 8742). A fault ends the records, as
-	// the text holds no place where the next value starts.
+	// Values one after another with nothing between them, as a CBOR sequence (RFC 8742) or concatenated JSON texts. A
+	// fault ends the records, as the text holds no place where the next value starts, unless `records_skip` skips past
+	// it where the framing allows.
 	Concatenated,
 }
 
 // One record: its bytes in the text, and why it does not read, nil when it does. Its bytes run from its first byte
-// that is no white space to its line's end less a CR under `.Lines`, and to its value's end under the other framings.
-// Every offset, those of `err` included, counts from the text's first byte. Under `.Members` `key` is the member's key,
-// a token of role `.Key` that `key_raw` reads, and under the other framings it is the zero token, whose role is
-// `.Value`.
+// that is no white space to its line's end less a CR under `.Lines`, to the next 0x1E or text end under `.Seq`, and to
+// its value's end under the other framings. Every offset, those of `err` included, counts from the text's first byte.
+// Under `.Members` `key` is the member's key, a token of role `.Key` that `key_raw` reads, and under the other framings
+// it is the zero token, whose role is `.Value`.
 Record :: struct {
 	lo, hi: u64,
 	err:    Error,
 	key:    Token,
+}
+
+// A record that did not read, returned by `records_skip` or collected into `Records.quarantine`. `text` is its bytes
+// in the current window (`r.src[lo:hi]`), and `lo`, `hi` are its whole-text offsets.
+Bad_Record :: struct {
+	lo, hi: u64,
+	err:    Error,
+	text:   []u8,
+}
+
+// The `Fault.detail` values the records layer uses.
+Record_Detail :: enum u8 {
+	None,
+	Too_Long, // `Too_Wide`, a record past `Records.max_bytes`
+}
+
+// The records layer's `Rules`, indexed by `Record_Detail`.
+@(rodata)
+RECORDS_RULES := Rules{"records", {
+	{},
+	{"too_long", "Record is longer than the limit"},
+}}
+
+// The `Too_Wide` fault for a record or unread streaming window exceeding `Records.max_bytes`, placed at `at`.
+record_too_long :: #force_inline proc "contextless" (at: u64) -> Fault {
+	return {at = at, rules = &RECORDS_RULES, kind = .Too_Wide, detail = u8(Record_Detail.Too_Long)}
 }
 
 // Where the records of a text are, in their framing.
@@ -70,12 +101,24 @@ Records :: struct {
 	pos:     u64, // where the next record is looked for
 	index:   u64, // the records read
 	key:     Token, // the key of the member being read under `.Members`
-	block:   Record_Block, // what the documents of the last batch of a scan are in
+	block:      Record_Block, // what the documents of the last batch of a scan are in
+	// Maximum bytes a single record (or unread streaming window past the last whole record) may span; 0 for no limit.
+	// Exceeding it ends the records with `record_too_long` (`Fault_Kind.Too_Wide`, code `records.too_long`).
+	max_bytes:  u64,
+	// When true, batch reads automatically skip past faulting records where the framing supports `records_skip` (such
+	// as JSON `.Concatenated`), reporting them in `out` (and in `quarantine` when set) and continuing.
+	skip_bad:   bool,
+	// Optional bad-record sink: when non-nil, `records_find` and `records_scan` route faulting records here instead of
+	// emitting them into `out`/`answers`/`docs` (so every returned entry is valid), and `records_validate` mirrors its
+	// faulting records here too.
+	quarantine: ^[dynamic]Bad_Record,
+	// Set by a format whose framing supports skipping past a faulting record (`records_skip`).
+	skip:       proc(r: ^Records) -> (Bad_Record, bool),
 	// Set by a format whose records hold memory past a batch, which frees it.
-	release: proc(r: ^Records),
+	release:    proc(r: ^Records),
 	// Set by `Reads.records` for records it made, which `destroy_records` frees from `allocator`: their reads.
-	reads:     ^Records_Reads,
-	allocator: runtime.Allocator,
+	reads:      ^Records_Reads,
+	allocator:  runtime.Allocator,
 }
 
 // The batch reads of the records of one spec of a format, as its own records reads read them.
@@ -104,6 +147,16 @@ records_find :: proc(r: ^Records, path: []Step, out: []Record, answers: []Span_A
 // `destroy_records`, as `Record_Block` says.
 records_scan :: proc(r: ^Records, demand: ^Demand, out: []Record, docs: []Document, read := Read_Options{}, allocator := context.allocator) -> int {
 	return r.reads.scan(r, demand, out, docs, read, allocator)
+}
+
+// Skips past the faulting record that ended `r` so the next batch call resumes at the following record, returning the
+// skipped record and true. Returns false (leaving `r.err` untouched) when `r` did not end on a skippable fault or its
+// format/framing has no recovery boundary (such as `.Elements`/`.Members`, CBOR, TOML, XML, or `Too_Wide`).
+records_skip :: proc(r: ^Records) -> (bad: Bad_Record, ok: bool) {
+	if r == nil || r.skip == nil {
+		return
+	}
+	return r.skip(r)
 }
 
 // Gives the records `r` of a text in pieces the window `src`, which starts at the pieces' `from`, at or before their
