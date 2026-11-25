@@ -274,5 +274,5 @@ segment_facts :: proc(arg: rawptr, k: int) {
 		}
 	}
 	present += builder_place_comments(c.doc, facts, len(c.doc.nodes))
-	intrinsics.atomic_or((^u16)(&c.present[k % len(c.present)]), transmute(u16)present)
+	intrinsics.atomic_or((^u32)(&c.present[k % len(c.present)]), transmute(u32)present)
 }

@@ -149,7 +149,7 @@ Tolerance :: enum u8 {
 	Unread_Entity,
 }
 
-Tolerances :: bit_set[Tolerance; u8]
+Tolerances :: bit_set[Tolerance; u16]
 
 NUMBER_KIND :: u16(0xF) // in a number's spelling, the format's number kind, 0 for its plain decimal
 NUMBER_EXP :: u16(1 << 14) // in a number's spelling, the number has an exponent

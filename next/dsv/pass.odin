@@ -89,17 +89,17 @@ Pass :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 // whole text and ends after the first LF outside a quoted cell, which it finds as it reads, with the walk's result at
 // the byte past it. The bytes of a block past that LF are not judged.
 @(private)
-ONE_RECORD :: transmute(hook.Capabilities)u16(1 << 15)
+ONE_RECORD :: transmute(hook.Capabilities)u32(1 << 31)
 
 // The bit of the pass's capabilities of a walk of a header of `MASKED_WIDTH` cells or more for an `alike` hook of
 // `.Columns` in a CSV text, whose pass takes the cells of the columns it learnt by mask (`values_masked`). It is a pass
 // of its own so that a narrow text's pass has none of its code.
 @(private)
-MASK_COLUMNS :: transmute(hook.Capabilities)u16(1 << 14)
+MASK_COLUMNS :: transmute(hook.Capabilities)u32(1 << 30)
 
 // The pass's own bits lie past the hook's capabilities, and no field of `Pass` depends on its capabilities, so a walk
 // reads one pass as another of the same walk with other bits (`walk_text`, `values_masked`).
-#assert(int(max(hook.Capability)) < 14)
+#assert(int(max(hook.Capability)) < 30)
 #assert(size_of(Pass(.Csv, hook.No_Hooks, false, {})) == size_of(Pass(.Csv, hook.No_Hooks, false, ONE_RECORD + MASK_COLUMNS)))
 #assert(offset_of(Pass(.Csv, hook.No_Hooks, true, {}), tolerated) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS), tolerated))
 

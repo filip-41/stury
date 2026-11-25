@@ -121,7 +121,7 @@ select :: proc(doc: ^tape.Document, from: tape.Node_Index, sel: ^Selector, opts:
 		matches = make([dynamic]Match, allocator),
 		steps   = make([dynamic]Step, allocator),
 	}
-	if doc.partial != nil {
+	if .Cut in doc.flags || (doc.partial != nil && (.Borrowed not_in doc.flags || subtree_has_partial(doc, from))) {
 		found.partial = true
 		return found, nil
 	}
@@ -206,7 +206,7 @@ group_index :: proc(m: ^Matcher, g: i32) -> i32 {
 		}
 	}
 	run := &m.runs[at.depth]
-	if run.parent == parent && at.value > run.value && same_name(m, run.key, at.key) {
+	if run.parent == parent && at.value > run.value && same_type(m, run.key, at.key) {
 		index := run.index
 		it := tape.Children{container = parent, next = tape.node_after(m.doc, run.value)}
 		for {
@@ -214,38 +214,87 @@ group_index :: proc(m: ^Matcher, g: i32) -> i32 {
 			if p != .Found || value == at.value {
 				break
 			}
-			if same_name(m, key, at.key) {
+			if same_type(m, key, at.key) {
 				index += 1
 			}
 		}
 		run.index, run.key, run.value = index + 1, at.key, at.value
 		return run.index if run.count > 1 else -1
 	}
-	buf: [64]u8
-	name := node_string(m, m.doc.nodes[at.key], buf[:])
-	it, p := tape.named(m.reader, parent, name)
-	if p != .Found {
-		return -1
-	}
 	index, count := i32(0), i32(0)
-	for {
-		_, value, q := tape.next_child(m.reader, &it, .Group)
-		if q != .Found {
-			break
+	if m.opts.fold {
+		it := children_at(parent)
+		for {
+			key, value, q := tape.next_child(m.reader, &it, .Group)
+			if q != .Found {
+				break
+			}
+			if !same_type(m, key, at.key) {
+				continue
+			}
+			if value == at.value {
+				index = count
+			}
+			count += 1
 		}
-		if value == at.value {
-			index = count
+	} else {
+		buf: [64]u8
+		name := node_string(m, m.doc.nodes[at.key], buf[:])
+		it, p := tape.named(m.reader, parent, name)
+		if p != .Found {
+			return -1
 		}
-		count += 1
+		for {
+			_, value, q := tape.next_child(m.reader, &it, .Group)
+			if q != .Found {
+				break
+			}
+			if value == at.value {
+				index = count
+			}
+			count += 1
+		}
 	}
 	run^ = {parent = parent, key = at.key, value = at.value, index = index, count = count}
 	return index if count > 1 else -1
 }
 
+// Whether `from` or any container inside its subtree was kept only in part by a path read.
+@(private)
+subtree_has_partial :: proc "contextless" (doc: ^tape.Document, from: tape.Node_Index) -> bool #no_bounds_check {
+	if doc.partial == nil || len(doc.nodes) == 0 || int(from) >= len(doc.nodes) {
+		return false
+	}
+	end := tape.node_after(doc, from)
+	for i := from; i < end; i += 1 {
+		if t := doc.nodes[i]; t.kind > .Plain && t.spelling & tape.CONTAINER_PARTIAL != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Whether keys `a` and `b` of the document read as one name.
 @(private)
 same_name :: #force_inline proc(m: ^Matcher, a, b: tape.Node_Index) -> bool {
-	return m.doc.format.same_text(m.doc.src, m.doc.nodes[a], m.doc.src, m.doc.nodes[b])
+	if .Held not_in m.doc.flags && m.doc.format != nil && m.doc.format.same_text != nil {
+		return m.doc.format.same_text(m.doc.src, m.doc.nodes[a], m.doc.src, m.doc.nodes[b])
+	}
+	abuf, bbuf: [64]u8
+	sa, aok := tape.node_text(m.doc, m.doc.nodes[a], abuf[:])
+	sb, bok := tape.node_text(m.doc, m.doc.nodes[b], bbuf[:])
+	if aok && bok {
+		return sa == sb
+	}
+	ra := tape.text_room(m.doc, m.doc.nodes[a])
+	rb := tape.text_room(m.doc, m.doc.nodes[b])
+	if err := resize(&m.scratch, ra + rb); err != nil {
+		m.err = err
+		return false
+	}
+	sa, _ = tape.node_text(m.doc, m.doc.nodes[a], m.scratch[:ra])
+	sb, _ = tape.node_text(m.doc, m.doc.nodes[b], m.scratch[ra:ra + rb])
+	return sa == sb
 }
 
 // Whether keys `a` and `b` have the same element type name, folding ASCII case when `m.opts.fold` is set.

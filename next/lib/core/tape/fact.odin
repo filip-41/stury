@@ -79,7 +79,7 @@ fact_kind :: #force_inline proc "contextless" (role: Role) -> Fact_Kind {
 #assert(u8(Role.Instruction_Foot) - u8(Role.Comment) == u8(Fact_Kind.Instruction_Foot))
 #assert(u8(Role.Attribute) - u8(Role.Comment) == u8(Fact_Kind.Attribute))
 
-Facts :: bit_set[Fact_Kind; u16]
+Facts :: bit_set[Fact_Kind; u32]
 
 // The comment facts, for a format that holds comments.
 COMMENTS :: Facts{.Comment, .Comment_Inline, .Comment_Foot}

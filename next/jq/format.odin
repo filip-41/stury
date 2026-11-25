@@ -1,5 +1,6 @@
 package jq
 
+import "base:runtime"
 import "core:strconv"
 import "stury:lib/query"
 
@@ -22,7 +23,8 @@ to_json :: proc(h: ^query.Heap, v: query.Value) -> (res: query.Value, status: qu
 		buf: [32]u8
 		return query.text_value(h, jq_double(buf[:], v.f))
 	}
-	out := make([dynamic]u8, h.allocator)
+	alloc := query.heap_allocator(h)
+	out := make([dynamic]u8, alloc)
 	defer delete(out)
 	query.write_json(h, &out, v, {double = jq_double, too_deep = TOO_DEEP}) or_return
 	return query.text_value(h, string(out[:]))
@@ -111,22 +113,30 @@ cannot_decode :: proc(m: ^Machine, t: query.Value, why: string) -> query.Status 
 
 @(private)
 escape_html :: proc(h: ^query.Heap, s: string) -> (res: query.Value, status: query.Status) {
-	out := make([dynamic]u8, 0, len(s), h.allocator)
+	alloc := query.heap_allocator(h)
+	out, aerr := make([dynamic]u8, 0, len(s), alloc)
+	if aerr != nil {
+		return query.NULL, query.fail(h, .Memory, .None)
+	}
 	defer delete(out)
 	for i in 0 ..< len(s) {
+		err: runtime.Allocator_Error
 		switch s[i] {
 		case '<':
-			append(&out, "&lt;")
+			_, err = append(&out, "&lt;")
 		case '>':
-			append(&out, "&gt;")
+			_, err = append(&out, "&gt;")
 		case '&':
-			append(&out, "&amp;")
+			_, err = append(&out, "&amp;")
 		case '\'':
-			append(&out, "&apos;")
+			_, err = append(&out, "&apos;")
 		case '"':
-			append(&out, "&quot;")
+			_, err = append(&out, "&quot;")
 		case:
-			append(&out, s[i])
+			_, err = append(&out, s[i])
+		}
+		if err != nil {
+			return query.NULL, query.fail(h, .Memory, .None)
 		}
 	}
 	return query.text_value(h, string(out[:]))
@@ -141,7 +151,8 @@ format_row :: proc(m: ^Machine, v: query.Value, csv: bool) -> (res: query.Value,
 	}
 	a := query.built(h, v) or_return
 	defer query.release(h, a)
-	out := make([dynamic]u8, h.allocator)
+	alloc := query.heap_allocator(h)
+	out := make([dynamic]u8, alloc)
 	defer delete(out)
 	for x, i in query.items_of(a) {
 		if i > 0 {
@@ -203,7 +214,8 @@ format_shell :: proc(m: ^Machine, v: query.Value) -> (res: query.Value, status: 
 		a = query.built(h, v) or_return
 	}
 	defer query.release(h, a)
-	out := make([dynamic]u8, h.allocator)
+	alloc := query.heap_allocator(h)
+	out := make([dynamic]u8, alloc)
 	defer delete(out)
 	for x, i in query.items_of(a) {
 		if i > 0 {

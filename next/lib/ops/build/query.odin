@@ -178,7 +178,7 @@ query_walk :: proc(q: ^Query) -> runtime.Allocator_Error {
 @(private)
 query_named_below :: proc "contextless" (q: ^Query) -> (string, bool) #no_bounds_check {
 	dm, doc := q.demand, q.r.doc
-	if len(dm.paths) != 1 || dm.paths[0].length != 2 || dm.paths[0].grain != .Whole || doc.partial != nil || doc.ext != nil || .Held in doc.flags {
+	if len(dm.paths) != 1 || dm.paths[0].length != 2 || dm.paths[0].grain != .Whole || doc.partial != nil || doc.ext != nil || .Held in doc.flags || .Cut in doc.flags {
 		return "", false
 	}
 	if dm.nodes[0].n_edges != 1 || dm.nodes[0].n_ends != 0 {

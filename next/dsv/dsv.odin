@@ -17,10 +17,9 @@ Spec :: enum u8 {
 }
 
 // Options of a delimited read. The format's own options are in `format` as a `tape.Dsv_Options`. `budget` sets `depth`,
-// `nodes`, `memory` and `steps` (a step is the text or one record). `runner` applies to `build` alone, which builds a
-// long text in parts on its threads. Every other read ignores it, as does a build of a text in `pieces`. Under
-// `Budget.memory` a build with no runner is made on one thread, and a build with a runner counts the blocks of its
-// parts.
+// `nodes`, `memory` and `steps` (a step is the text or one record). With `runner`, long whole texts run in parallel for
+// `validate`, `build`, `unmarshal`, and records; reads in `pieces` run on the calling thread. Under `Budget.memory` a
+// build with no runner is made on one thread, and a build with a runner counts the blocks of its parts.
 Options :: tape.Options
 Dsv_Options :: tape.Dsv_Options
 

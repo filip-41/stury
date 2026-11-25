@@ -174,6 +174,13 @@ writer_end :: proc(w: ^Writer) -> (item: []u8, err: Write_Error) {
 	return write.out_finish(&w.out)
 }
 
+// Aborts `w` and frees its buffers without flushing or returning an item. `w` is not used again.
+writer_drop :: proc(w: ^Writer) {
+	write.sequence_drop(&w.seq)
+	write.out_drop(&w.out)
+	w^ = {}
+}
+
 // Typed writes: `value` written by the plan a typed read of its type is made by, as `json.marshal` writes a text. Its
 // plan is the one `plan_make` of this package makes, or nil to make one for the call. Under `.Preferred`,
 // `.Deterministic` and `.Length_First` (or `opts.sort_keys`), containers are emitted with definite lengths and keys
@@ -258,7 +265,7 @@ marshal_out :: proc(value: rawptr, T: typeid, spec: Spec, opts: Write_Options, p
 		}
 		werr, terr := typed.marshal(value, T, TAG, plan, &w, token, allocator, tag_text)
 		if err = marshal_error(werr, terr); err != nil {
-			_, _ = writer_end(&w)
+			writer_drop(&w)
 			return nil, err
 		}
 		return writer_end(&w)

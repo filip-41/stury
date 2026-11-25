@@ -24,7 +24,7 @@ scan_fact :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 			break
 		}
 		fallthrough
-	case .Comment, .Tag, .Attribute, .Instruction, .Doctype:
+	case .Comment, .Tag, .Anchor, .Alias, .Attribute, .Instruction, .Doctype:
 		// After a key, the token is its value, stored past the key's node.
 		at := builder_cursor(&h.b, s)
 		if h.wait_at != at {
@@ -52,7 +52,7 @@ scan_fact :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 scan_unwait :: #force_no_inline proc "contextless" (h: ^Scanner, lo: u64) #no_bounds_check {
 	for &f in h.b.doc.facts[h.wait_from:] {
 		#partial switch f.kind {
-		case .Comment, .Tag, .Attribute, .Instruction, .Doctype:
+		case .Comment, .Tag, .Anchor, .Alias, .Attribute, .Instruction, .Doctype:
 			f.node = tape.NO_NODE
 		case .Comment_Foot, .Instruction_Foot:
 			if f.lo >= lo {

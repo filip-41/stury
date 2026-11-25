@@ -70,10 +70,10 @@ RECORD_AHEAD :: 256
 // framing passes the members and elements before it, judging each, and those after it. A path of more than seven steps,
 // and in a text in pieces a value off the path that a window cuts more than seven levels deep, take memory from the
 // context's allocator, which `tape.destroy_records` frees. The budget's limits hold for each
-// record, but `Budget.steps` under `.Elements` and `.Members`, which counts the containers of the whole text. The
-// framing `.Concatenated`, which JSON has no reading of, options of another format family, and a `path` the framing or
-// the policy for repeated keys does not take end the records with `tape.Bad_Option` before any is read, as
-// `build.records_path_refused` says. A text in pieces opens with its first window, as `tape.Records` says.
+// record, but `Budget.steps` under `.Elements` and `.Members`, which counts the containers of the whole text. Options
+// of another format family, and a `path` the framing or the policy for repeated keys does not take, end the records
+// with `tape.Bad_Option` before any is read, as `build.records_path_refused` says. A text in pieces opens with its
+// first window, as `tape.Records` says.
 records_open :: #force_inline proc(src: []u8, framing := tape.Framing.Lines, spec := Spec.Json, opts := Options{}, path: []tape.Step = nil) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("json: spec out of range")

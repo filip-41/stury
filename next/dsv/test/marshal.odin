@@ -1,5 +1,7 @@
 package dsv_tests
 
+import "core:math"
+import "core:strings"
 import "core:testing"
 import "stury:dsv"
 import "stury:testkit"
@@ -22,4 +24,23 @@ rows_marshal_under_one_header :: proc(t: ^testing.T) {
 	tsv, terr := dsv.marshal(&rows, .Tsv)
 	defer delete(tsv)
 	testing.expectf(t, terr == nil && string(tsv) == "id\twho\n1\ta,b\n2\tc\n", "%v\n%s", terr, tsv)
+}
+
+@(test)
+marshal_lines_error_aborts_without_leak_or_flush :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Bad :: struct {
+		x: f64,
+	}
+	bad := Bad{x = math.nan_f64()}
+	text, err := dsv.marshal(&bad, .Csv, {framing = .Lines})
+	testing.expect(t, err != nil)
+	testing.expect(t, text == nil)
+
+	sb: strings.Builder
+	strings.builder_init(&sb)
+	defer strings.builder_destroy(&sb)
+	serr := dsv.marshal_to(strings.to_writer(&sb), &bad, .Csv, {framing = .Lines})
+	testing.expect(t, serr != nil)
+	testing.expect_value(t, strings.builder_len(sb), 0)
 }

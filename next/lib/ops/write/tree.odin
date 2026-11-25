@@ -317,8 +317,15 @@ sort_members :: proc(w: ^Tree, f: ^Frame) {
 	}
 	if w.no_dups {
 		for i in 1 ..< len(members) {
-			if members[i].name == members[i - 1].name {
-				w.err = Refused{members[i].key if members[i].key != tape.NO_NODE else f.node, .No_Spelling}
+			a, b := members[i - 1], members[i]
+			if a.key != tape.NO_NODE && w.nodes[a.key].kind > .Plain {
+				continue
+			}
+			if b.key != tape.NO_NODE && w.nodes[b.key].kind > .Plain {
+				continue
+			}
+			if b.name == a.name {
+				w.err = Refused{b.key if b.key != tape.NO_NODE else f.node, .No_Spelling}
 				w.i, w.depth = w.end, 0
 				return
 			}

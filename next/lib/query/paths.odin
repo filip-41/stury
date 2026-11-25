@@ -131,8 +131,8 @@ slice :: proc(h: ^Heap, t, from, to: Value) -> (res: Value, status: Status) {
 			return NULL, ms
 		}
 		defer release(h, step)
-		_ = object_put(h, &step, text_borrowed("start"), retain(from) if from.kind != .Absent else NULL)
-		_ = object_put(h, &step, text_borrowed("end"), retain(to) if to.kind != .Absent else NULL)
+		object_put(h, &step, text_borrowed("start"), retain(from) if from.kind != .Absent else NULL) or_return
+		object_put(h, &step, text_borrowed("end"), retain(to) if to.kind != .Absent else NULL) or_return
 		return NULL, fail(h, .Types, .Index, t, step)
 	}
 	if ft != .Number && ft != .Null && ft != .Absent || tot != .Number && tot != .Null && tot != .Absent {

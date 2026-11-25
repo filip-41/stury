@@ -56,7 +56,8 @@ read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, o
 		}
 		blk = new(Build_Piece, p.allocator) or_return
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
-		builder_start(&blk.b, src, format, max(len(src) / BUILD_BYTES_PER_NODE, SCAN_NODES), node_most(max(u64), opts), nil, allocator)
+		budget := &s.blocks if opts.budget.memory != 0 else nil
+		builder_start(&blk.b, src, format, max(len(src) / BUILD_BYTES_PER_NODE, SCAN_NODES), node_most(max(u64), opts), nil, allocator, budget = budget)
 		if blk.b.err != nil {
 			e := hook.memory_budget_error(&s.blocks, blk.b.err)
 			free(blk, p.allocator)
@@ -196,7 +197,8 @@ read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, 
 		}
 		blk = new(Scan_Piece, p.allocator) or_return
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
-		if e := scanner_start(&blk.h, src, format, demand, opts.dups, read, nil, SCAN_NODES, node_most(max(u64), opts), nil, &blk.room, allocator); e != nil {
+		budget := &s.blocks if opts.budget.memory != 0 else nil
+		if e := scanner_start(&blk.h, src, format, demand, opts.dups, read, nil, SCAN_NODES, node_most(max(u64), opts), nil, &blk.room, allocator, budget = budget); e != nil {
 			free(blk, p.allocator)
 			return {}, hook.memory_budget_error(&s.blocks, e)
 		}

@@ -37,7 +37,7 @@ FACTS :: tape.COMMENTS + {.Tag, .Style}
 
 // The format id of `.Toml_1_0`, the other following it.
 @(private)
-ID :: tape.Format_Id(11)
+ID :: tape.FORMAT_ID_TOML
 
 // The format handle of `spec`, to read nodes of a text of `spec` with `tape.node_text` and `tape.node_number`, and to
 // pass a document's format to a call that takes one. Nil for a `spec` out of range.

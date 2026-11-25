@@ -244,7 +244,7 @@ simple_key :: proc(p: ^Parser) -> (part: Part, ok: bool) #no_bounds_check {
 		for end < len(src) && bare_byte(src[end]) {
 			end += 1
 		}
-		if end - lo > int(max(u32)) {
+		if u64(end - lo) > u64(max(u32)) {
 			return {}, fault(p, lo, .Too_Wide, .None)
 		}
 		p.pos = end
@@ -272,7 +272,7 @@ quoted_key :: #force_no_inline proc(p: ^Parser, c: u8) -> (part: Part, ok: bool)
 		return {}, false
 	}
 	p.pos = end
-	if end - lo - 2 > int(max(u32)) {
+	if u64(end - lo - 2) > u64(max(u32)) {
 		return {}, fault(p, lo, .Too_Wide, .None)
 	}
 	tok := tape.Token{u64(lo + 1), u32(end - lo - 2), .String, .Key, string_spelling(.Basic if c == '"' else .Literal, escaped)}

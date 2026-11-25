@@ -399,3 +399,34 @@ parts_of_a_seam_heavy_text_build_as_one_thread :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 	}
 }
+
+// Parallel duplicate-key checking under a real thread pool and `Budget.memory` must not race on the allocator.
+@(test)
+segments_dups_parallel_with_budget_has_no_race :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	pool: host.Pool
+	if host.pool_init(&pool, 4) != nil {
+		return
+	}
+	defer host.pool_destroy(&pool)
+	b := strings.builder_make(context.temp_allocator)
+	defer free_all(context.temp_allocator)
+	strings.write_byte(&b, '{')
+	for i in 0 ..< 4000 {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		fmt.sbprintf(&b, `"k%d":{{"a":1,"b":2,"a":%d}}`, i, i)
+	}
+	strings.write_byte(&b, '}')
+	src := transmute([]u8)strings.to_string(b)
+
+	doc, err := json.build(src, .Json, {dups = .Last, budget = {memory = 64 << 20}, runner = &pool.runner})
+	testing.expectf(t, err == nil, "parallel .Last build failed: %v", err)
+	tape.destroy(&doc)
+
+	doc2, err2 := json.build(src, .Json, {dups = .Refuse, budget = {memory = 64 << 20}, runner = &pool.runner})
+	tape.destroy(&doc2)
+	f, is_fault := err2.(tape.Fault)
+	testing.expectf(t, is_fault && f.kind == .Duplicate_Key, "parallel .Refuse build: got %v", err2)
+}

@@ -64,3 +64,9 @@ writer_end :: proc(w: ^Writer) -> (text: []u8, err: Write_Error) {
 	text, _, err = write.to_buffer(&doc, u8(w.spec), w.opts, w.allocator, write_out)
 	return
 }
+
+// Aborts `w` and frees its buffers without writing text. `w` is not used again.
+writer_drop :: proc(w: ^Writer) {
+	write.token_tape_drop(&w.tape)
+	w^ = {}
+}

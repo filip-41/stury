@@ -35,6 +35,8 @@ Pool :: struct {
 	// after a call that began within `SPIN` of the end of the one before.
 	ended:       time.Tick,
 	spin:        bool,
+	// True between `start` and `finish`, guarding the single-flight contract.
+	active:      bool,
 }
 
 // A helper that has taken a task can lose its core to another process, and the caller then waits for it. On a loaded
@@ -155,6 +157,7 @@ pool_destroy :: proc(pool: ^Pool) {
 @(private)
 start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 	pool := (^Pool)(data)
+	assert(!sync.atomic_exchange(&pool.active, true), "host.Pool runs one call at a time")
 	pool.began = time.tick_now()
 	sync.atomic_store(&pool.spin, pool.ended != {} && time.tick_diff(pool.ended, pool.began) < SPIN)
 	pool.task, pool.arg = task, arg
@@ -188,6 +191,7 @@ finish :: proc(data: rawptr) {
 	wait_done(pool)
 	adapt_width(pool, time.tick_since(pool.began), time.tick_since(waited))
 	pool.ended = time.tick_now()
+	sync.atomic_store(&pool.active, false)
 }
 
 // Waits until no handed task is pending: spins first, then yields.

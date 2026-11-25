@@ -37,6 +37,50 @@ number_of :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	case .Uint:
 		return big_from_u64(h, n.bits)
 	case .Float, .Wide:
+		is_binary := d.doc.format != nil && .Binary in d.doc.format.caps
+		if is_binary {
+			if n.kind == .Float {
+				f := transmute(f64)n.bits
+				// Binary formats (e.g. CBOR) report bignums/neg-ints past i64 that fit exactly in f64 (like ±2^64) as
+				// `.Float`, while their decoded text is plain decimal digits without `.` or `e`.
+				if !math.is_inf(f) && !math.is_nan(f) && abs(f) >= f64(u64(1) << 53) && f == math.trunc(f) {
+					buf: [256]u8
+					alloc := heap_allocator(h)
+					s, owned, ok := binary_number_text(&d.doc, at, buf[:], alloc)
+					defer if owned != nil {
+						delete(owned, alloc)
+					}
+					if ok && is_plain_int_dec(s) {
+						return big_from_text(h, s)
+					}
+				}
+				return double_value(f), .Ok
+			}
+			buf: [256]u8
+			alloc := heap_allocator(h)
+			s, owned, ok := binary_number_text(&d.doc, at, buf[:], alloc)
+			defer if owned != nil {
+				delete(owned, alloc)
+			}
+			if ok {
+				if is_plain_int_dec(s) {
+					return big_from_text(h, s)
+				}
+				if sn, valid := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); valid {
+					switch sn.kind {
+					case .Int:
+						return int_value(i64(sn.bits)), .Ok
+					case .Uint:
+						return big_from_u64(h, sn.bits)
+					case .Float:
+						return double_value(transmute(f64)sn.bits), .Ok
+					case .Wide:
+						return double_value(wide_double(transmute([]u8)s)), .Ok
+					}
+				}
+			}
+			return double_value(math.nan_f64()), .Ok
+		}
 		form, _ := tape.number_form(&d.doc, at)
 		if form.frac_digits == 0 && !form.exponent && !form.point && form.kind == 0 {
 			return big_from_text(h, string(node_bytes(v)))
@@ -47,6 +91,50 @@ number_of :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		return double_value(transmute(f64)n.bits), .Ok
 	}
 	return NULL, .Ok
+}
+
+// Decodes the decimal text of a `.Binary` format number node into `buf` or a temporary `alloc` buffer.
+@(private)
+binary_number_text :: proc(doc: ^tape.Document, at: tape.Node_Index, buf: []u8, alloc: runtime.Allocator) -> (s: string, owned: []u8, ok: bool) {
+	room := tape.text_room(doc, at)
+	if room <= 0 {
+		return "", nil, false
+	}
+	if room <= len(buf) {
+		s, ok = tape.node_text(doc, at, buf[:room])
+		return s, nil, ok
+	}
+	if alloc.procedure == nil {
+		return "", nil, false
+	}
+	tmp, aerr := make([]u8, room, alloc)
+	if aerr != nil {
+		return "", nil, false
+	}
+	s, ok = tape.node_text(doc, at, tmp)
+	if !ok {
+		delete(tmp, alloc)
+		return "", nil, false
+	}
+	return s, tmp, true
+}
+
+// Whether `s` is a plain decimal integer (optional leading `-`, digits only).
+@(private)
+is_plain_int_dec :: proc "contextless" (s: string) -> bool {
+	if len(s) == 0 {
+		return false
+	}
+	i := 1 if s[0] == '-' else 0
+	if i >= len(s) {
+		return false
+	}
+	for ; i < len(s); i += 1 {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // A number past binary64's range as the double it rounds to: an infinity or a zero, with its sign.
@@ -85,6 +173,28 @@ as_f64 :: proc(v: Value) -> f64 {
 		case .Float:
 			return transmute(f64)n.bits
 		case .Wide:
+			if d.doc.format != nil && .Binary in d.doc.format.caps {
+				buf: [256]u8
+				s, owned, ok := binary_number_text(&d.doc, tape.Node_Index(v.n), buf[:], context.temp_allocator)
+				defer if owned != nil {
+					delete(owned, context.temp_allocator)
+				}
+				if ok {
+					if sn, valid := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); valid {
+						switch sn.kind {
+						case .Int:
+							return f64(i64(sn.bits))
+						case .Uint:
+							return f64(sn.bits)
+						case .Float:
+							return transmute(f64)sn.bits
+						case .Wide:
+							return wide_double(transmute([]u8)s)
+						}
+					}
+				}
+				return math.nan_f64()
+			}
 			return wide_double(node_bytes(v))
 		}
 	}
@@ -149,6 +259,29 @@ is_integer :: proc(v: Value) -> bool {
 		case .Float:
 			f := transmute(f64)n.bits
 			return f == math.trunc(f) && !math.is_inf(f)
+		}
+		if d.doc.format != nil && .Binary in d.doc.format.caps {
+			buf: [256]u8
+			s, owned, ok := binary_number_text(&d.doc, tape.Node_Index(v.n), buf[:], context.temp_allocator)
+			defer if owned != nil {
+				delete(owned, context.temp_allocator)
+			}
+			if !ok {
+				return false
+			}
+			if is_plain_int_dec(s) {
+				return true
+			}
+			if sn, valid := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); valid {
+				#partial switch sn.kind {
+				case .Int, .Uint:
+					return true
+				case .Float:
+					f := transmute(f64)sn.bits
+					return f == math.trunc(f) && !math.is_inf(f)
+				}
+			}
+			return false
 		}
 		form, _ := tape.number_form(&d.doc, tape.Node_Index(v.n))
 		return form.frac_digits == 0 && !form.exponent
@@ -663,7 +796,7 @@ node_big_int :: proc(v: Value) -> (u: u64, is_uint: bool, dec: string, ok: bool)
 	if n.kind == .Uint {
 		return n.bits, true, "", true
 	}
-	if n.kind == .Float || n.kind == .Wide {
+	if (n.kind == .Float || n.kind == .Wide) && (d.doc.format == nil || .Binary not_in d.doc.format.caps) {
 		form, _ := tape.number_form(&d.doc, at)
 		if form.frac_digits == 0 && !form.exponent && !form.point && form.kind == 0 {
 			return 0, false, string(node_bytes(v)), true

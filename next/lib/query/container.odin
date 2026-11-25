@@ -1019,6 +1019,9 @@ grouped :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		if s = append_owned(h, &entry.value, x); s != .Ok {
 			return NULL, s
 		}
+		if value_has_partial(entry.value) {
+			ob.flags |= BLOCK_HAS_PARTIAL
+		}
 	}
 }
 

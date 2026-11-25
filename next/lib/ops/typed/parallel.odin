@@ -253,6 +253,18 @@ worker_block_grow :: proc(b: ^Worker_Block, size, align: int) -> ([]u8, runtime.
 
 // Mutex-guarded scratch allocator (also counting against `pool.limit` when `pool != nil && pool.limit != 0`).
 @(private)
+parallel_scratch_backing :: #force_inline proc "contextless" (opts: tape.Options, caller: runtime.Allocator) -> runtime.Allocator {
+	if opts.scratch.procedure != nil {
+		return opts.scratch
+	}
+	when ODIN_DEFAULT_TO_NIL_ALLOCATOR || ODIN_DEFAULT_TO_PANIC_ALLOCATOR {
+		return caller
+	} else {
+		return {runtime.default_allocator_proc, nil}
+	}
+}
+
+@(private)
 Locked_Scratch :: struct {
 	lock:    sync.Mutex,
 	backing: runtime.Allocator,
@@ -431,7 +443,7 @@ read_parallel_spine :: proc(
 		destroy_temp_plan(plan)
 	}
 	pool := Block_Pool{backing = caller, limit = opts.budget.memory}
-	scratch_backing := opts.scratch if opts.scratch.procedure != nil else runtime.heap_allocator()
+	scratch_backing := parallel_scratch_backing(opts, caller)
 	lscratch := Locked_Scratch{backing = scratch_backing, pool = &pool if opts.budget.memory != 0 else nil}
 	scratch := locked_scratch_allocator(&lscratch)
 	prefix_block := Worker_Block{pool = &pool, last = -1, next = BLOCK_MIN}
@@ -580,10 +592,10 @@ parallel_list_workers :: proc(
 	elem_meta := &plan.meta[list.owner.meta]
 	elem_size := int(elem_meta.size)
 	elem_align := max(int(elem_meta.align), 1)
-	scratch_backing := opts.scratch if opts.scratch.procedure != nil else runtime.heap_allocator()
+	scratch_backing := parallel_scratch_backing(opts, caller)
 	lscratch := Locked_Scratch{backing = scratch_backing, pool = pool if opts.budget.memory != 0 else nil}
-	// If `opts.scratch` is unset and no budget is active, `runtime.heap_allocator()` is already thread-safe with no lock.
-	scratch := runtime.heap_allocator() if opts.scratch.procedure == nil && opts.budget.memory == 0 else locked_scratch_allocator(&lscratch)
+	// If `opts.scratch` is unset and no budget is active on a hosted build, `runtime.heap_allocator()` is already thread-safe with no lock.
+	scratch := scratch_backing if opts.scratch.procedure == nil && opts.budget.memory == 0 && !(ODIN_DEFAULT_TO_NIL_ALLOCATOR || ODIN_DEFAULT_TO_PANIC_ALLOCATOR) else locked_scratch_allocator(&lscratch)
 	outs: [MAX_PARALLEL_PARTS]Worker_Out
 	flags := reader_flags(dups, uopts, made) + {.Worker_List}
 	Job :: struct {

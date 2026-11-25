@@ -619,7 +619,7 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, a_addr, b: u64
 	node := a
 	kind := tape.fact_kind(t.role)
 	#partial switch kind {
-	case .Comment, .Tag, .Attribute, .Instruction, .Doctype:
+	case .Comment, .Tag, .Anchor, .Alias, .Attribute, .Instruction, .Doctype:
 	case .Directive:
 		node = tape.ROOT
 	case .Comment_Inline:

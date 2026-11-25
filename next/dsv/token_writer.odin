@@ -52,3 +52,8 @@ put :: proc(w: ^Writer, doc: ^tape.Document, node := tape.ROOT) -> Write_Error {
 writer_end :: proc(w: ^Writer) -> (text: []u8, err: Write_Error) {
 	return write.table_writer_end(&w.tw)
 }
+
+// Aborts `w` and frees its buffers without flushing pending rows or returning text. `w` is not used again.
+writer_drop :: proc(w: ^Writer) {
+	write.table_writer_drop(&w.tw)
+}

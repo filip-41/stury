@@ -7,7 +7,7 @@ import "stury:lib/core/tape"
 
 // The id of the first spec, which the others follow.
 @(private)
-FIRST_ID :: tape.Format_Id(4)
+FIRST_ID :: tape.FORMAT_ID_DSV
 
 // The reads of `spec`, for a caller that picks the format at run time, to use with the handle `as` returns. Nil for a
 // `spec` out of range.

@@ -63,7 +63,7 @@ Capability :: enum u8 {
 	Expects,
 }
 
-Capabilities :: bit_set[Capability; u16]
+Capabilities :: bit_set[Capability; u32]
 
 // The columns a walk of `.Columns` gives a bit each in its `u64` of the columns a hook takes, the last bit standing for
 // every column from there on, and so the most cells a record the hook replays holds.
@@ -299,18 +299,18 @@ walk_error :: #force_inline proc "contextless" (r: Walk_Result, rules: ^tape.Rul
 	return
 }
 
-// What `fan_each` shares: the next index to claim, the count of them and the task each is given to.
+// What `fan_each` shares: the next index to claim, the count of them and the argument given to each task.
 @(private)
 Fan_Each :: struct {
 	next, count: int,
-	task:        proc(arg: rawptr, k: int),
 	arg:         rawptr,
 }
 
 // Runs `task(arg, k)` once for each `k` below `count`, on the calling thread and on the threads of `runner`, each thread
-// claiming the next index while any is left. The calls share the work through `arg`.
-fan_each :: proc(runner: ^tape.Runner, count: int, task: proc(arg: rawptr, k: int), arg: rawptr) {
-	each := Fan_Each{count = count, task = task, arg = arg}
+// claiming the next index while any is left. The calls share the work through `arg`. Specializing on `$task` gives each
+// workload a distinct trampoline address so `host.Pool` tracks per-task adaptive widths independently.
+fan_each :: proc(runner: ^tape.Runner, count: int, $task: proc(arg: rawptr, k: int), arg: rawptr) {
+	each := Fan_Each{count = count, arg = arg}
 	fan(runner, proc(arg: rawptr) {
 			e := (^Fan_Each)(arg)
 			for {
@@ -318,7 +318,7 @@ fan_each :: proc(runner: ^tape.Runner, count: int, task: proc(arg: rawptr, k: in
 				if k >= e.count {
 					return
 				}
-				e.task(e.arg, k)
+				task(e.arg, k)
 			}
 		}, &each)
 }

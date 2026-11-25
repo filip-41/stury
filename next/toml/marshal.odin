@@ -19,7 +19,7 @@ marshal :: proc(value: ^$T, spec := Spec.Toml_1_0, opts := Write_Options{}, plan
 		return nil, err
 	}
 	if err = marshal_into(&w, value, T, plan, allocator); err != nil {
-		_, _ = writer_end(&w)
+		writer_drop(&w)
 		return nil, err
 	}
 	return writer_end(&w)
@@ -36,7 +36,7 @@ marshal_to :: proc(sink: io.Writer, value: ^$T, spec := Spec.Toml_1_0, opts := W
 		return err
 	}
 	if err := marshal_into(&w, value, T, plan, allocator); err != nil {
-		_, _ = writer_end(&w)
+		writer_drop(&w)
 		return err
 	}
 	_, err := writer_end(&w)

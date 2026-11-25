@@ -208,7 +208,7 @@ Doc_Flag :: enum u8 {
 	Borrowed,
 }
 
-Doc_Flags :: bit_set[Doc_Flag; u8]
+Doc_Flags :: bit_set[Doc_Flag; u16]
 
 // What a document holds beside its nodes, facts and counts, in one block with the lists it names, which `destroy` frees
 // whole.

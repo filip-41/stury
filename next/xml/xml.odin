@@ -36,7 +36,7 @@ FACTS :: tape.COMMENTS + {.Attribute, .Instruction, .Instruction_Foot, .Doctype,
 
 // The format id of `.Xml`.
 @(private)
-ID :: tape.Format_Id(13)
+ID :: tape.FORMAT_ID_XML
 
 // The format handle of `spec`, to read nodes of a text of `spec` with `tape.node_text` and `tape.node_number`, and to
 // pass a document's format to a call that takes one. Nil for a `spec` out of range.
@@ -48,6 +48,7 @@ as :: proc "contextless" (spec: Spec) -> ^tape.Format {
 // `WALK_LEVELS`, a DTD and a namespace declaration whose URI needs decoding allocate.
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Xml, opts := Options{}, allocator := context.allocator) -> tape.Error {
+	hook.probe_stack(READ_STACK)
 	switch spec {
 	case .Xml:
 		if opts.pieces != nil {
@@ -67,6 +68,7 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Xml, opts := Options{}, a
 // declaration is built on the threads of `opts.runner`, into the document one thread builds.
 @(require_results)
 build :: #force_inline proc(src: []u8, spec := Spec.Xml, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
+	hook.probe_stack(READ_STACK)
 	switch spec {
 	case .Xml:
 		if opts.pieces != nil {
@@ -89,6 +91,7 @@ build :: #force_inline proc(src: []u8, spec := Spec.Xml, opts := Options{}, allo
 // declared past its name. Allocates only as `json.find` does.
 @(require_results)
 find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Xml, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
+	hook.probe_stack(READ_STACK)
 	if expanded_step(path) {
 		return {}, tape.Bad_Option{"path"}
 	}
@@ -109,6 +112,7 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Xml, read 
 // the facts of its nodes. A name in `{uri}local` form is `Bad_Option{"path"}`, as for `find`.
 @(require_results)
 scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Xml, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
+	hook.probe_stack(READ_STACK)
 	if expanded_demand(demand) {
 		return {}, tape.Bad_Option{"path"}
 	}
@@ -131,6 +135,7 @@ scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Xml, re
 // the protocol `hook.check` checks, and has no `.Walk`.
 walk :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), allocator := context.allocator) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	#assert(.Walk not_in intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0))
+	hook.probe_stack(READ_STACK)
 	if err = tape.options_refused(&FORMATS[S], opts); err != nil {
 		return
 	}

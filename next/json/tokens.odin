@@ -130,6 +130,13 @@ writer_end :: proc(w: ^Writer) -> (text: []u8, err: Write_Error) {
 	return write.out_finish(&w.out)
 }
 
+// Aborts `w` and frees its buffers without flushing or returning text. `w` is not used again.
+writer_drop :: proc(w: ^Writer) {
+	write.sequence_drop(&w.seq)
+	write.out_drop(&w.out)
+	w^ = {}
+}
+
 // A line end and the indent of `depth` levels.
 @(private)
 put_line :: proc(out: ^write.Out, opts: Write_Options, depth: int) #no_bounds_check {

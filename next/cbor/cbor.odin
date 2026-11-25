@@ -25,9 +25,9 @@ Spec :: enum u8 {
 
 // Options of a CBOR read. `budget` sets `depth` (a tag counts as a level), `nodes`, `memory` and `steps` (a step is one
 // container). Only `.Invalid_Utf8` of `tolerate` has an effect. `format` takes no options and refuses any family's.
-// `runner` is for `build` alone, which builds a long text in parts on its threads:
-// every other read ignores it, as does a build of a text in `pieces`. Under `Budget.memory` a build with no runner is
-// made on one thread, and one with a runner counts the blocks of its parts.
+// With `runner`, long whole texts run in parallel for `validate`, `build`, and root-array `unmarshal`; reads in
+// `pieces` run on the calling thread. Under `Budget.memory` a build with no runner is made on one thread, and one with
+// a runner counts the blocks of its parts.
 Options :: tape.Options
 
 @(private, rodata)
@@ -40,7 +40,7 @@ FORMATS := [Spec]tape.Format {
 
 // The format id of `.Cbor`, the others following it in `Spec` order.
 @(private)
-ID :: tape.Format_Id(7)
+ID :: tape.FORMAT_ID_CBOR
 
 // The format handle of `spec`, to read nodes of a text of `spec` with `tape.node_text` and `tape.node_number`, and to
 // pass a document's format to a call that takes one. Nil for a `spec` out of range.
@@ -55,7 +55,7 @@ as :: proc "contextless" (spec: Spec) -> ^tape.Format {
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Cbor, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	hook.probe_stack(READ_STACK)
-	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.budget.steps == 0 && len(src) >= build.PARALLEL_FROM && tape.options_refused(&FORMATS[spec], opts) == nil && build.validate_dups(&FORMATS[spec], opts) {
+	if spec <= max(Spec) && opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.budget.steps == 0 && len(src) >= build.PARALLEL_FROM && tape.options_refused(&FORMATS[spec], opts) == nil && build.validate_dups(&FORMATS[spec], opts) {
 		switch spec {
 		case .Cbor:
 			return validate_parallel(src, .Cbor, opts, allocator)
@@ -106,7 +106,7 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Cbor, opts := Options{}, 
 build :: #force_inline proc(src: []u8, spec := Spec.Cbor, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	hook.probe_stack(READ_STACK)
 	// A text with foreign options takes the whole-text build, which refuses them.
-	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= build.PARALLEL_FROM && tape.options_refused(&FORMATS[spec], opts) == nil {
+	if spec <= max(Spec) && opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && len(src) >= build.PARALLEL_FROM && tape.options_refused(&FORMATS[spec], opts) == nil {
 		switch spec {
 		case .Cbor:
 			return build_parallel(src, .Cbor, opts, allocator)

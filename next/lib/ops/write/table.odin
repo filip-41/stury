@@ -188,7 +188,7 @@ table_writer_end :: proc(w: ^Table_Writer) -> (text: []u8, err: Error) {
 	return out_finish(&out)
 }
 
-@(private)
+// Frees every buffer `w` holds without flushing pending rows to its sink or returning text.
 table_writer_drop :: proc(w: ^Table_Writer) {
 	token_tape_drop(&w.tokens)
 	if w.streaming {
@@ -198,6 +198,7 @@ table_writer_drop :: proc(w: ^Table_Writer) {
 			out_drop(&w.out)
 		}
 	}
+	w^ = {}
 }
 
 // Writes the current batch of `w` into its output and resets the tape for the next batch.

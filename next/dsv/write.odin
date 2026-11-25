@@ -74,10 +74,18 @@ resolve_options :: proc(spec: Spec, opts: Write_Options, doc: ^tape.Document, al
 		}
 	}
 	// A read refuses the options a write cannot use either: a delimiter or comment byte the spec cannot frame.
-	if e := validate(nil, spec, {format = d}, allocator); e != nil {
-		if bad, refused := e.(tape.Bad_Option); refused {
-			return {}, {}, false, bad
-		}
+	// Validate directly through `pass_options` so write-only binaries do not link the DSV parser walks.
+	refused: tape.Error
+	switch spec {
+	case .Csv:
+		_, refused = pass_options(.Csv, {format = d})
+	case .Tsv:
+		_, refused = pass_options(.Tsv, {format = d})
+	case .Plain:
+		_, refused = pass_options(.Plain, {format = d})
+	}
+	if bad, ok := refused.(tape.Bad_Option); ok {
+		return {}, {}, false, bad
 	}
 	d.delimiter = spec_delimiter(spec, d.delimiter)
 	// A text of `spec` written under the options it was read with keeps the cells it read plainly.

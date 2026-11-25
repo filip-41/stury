@@ -2,7 +2,6 @@ package xml
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:encoding/base64"
 import "core:io"
 import "stury:lib/base/spell"
 import "stury:lib/core/markup"
@@ -502,13 +501,8 @@ put_text :: proc(s: ^Writing, at: tape.Node_Index) -> bool {
 	buf: [write.NUMBER_ROOM]u8 = ---
 	node := w.nodes[at]
 	if node.kind == .Bytes {
-		payload, ok := write.text_of(w, at)
+		encoded, ok := write.bytes_base64(w, at)
 		if !ok {
-			return false
-		}
-		encoded, err := base64.encode(transmute([]u8)payload, allocator = w.allocator)
-		if err != nil {
-			w.err = err
 			return false
 		}
 		defer delete(encoded, w.allocator)

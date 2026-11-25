@@ -1,7 +1,6 @@
 package toml
 
 import "base:runtime"
-import "core:encoding/base64"
 import "core:io"
 import "core:math"
 import "core:slice"
@@ -939,13 +938,8 @@ put_scalar :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
 	case .Number:
 		return put_number(t, at)
 	case .Bytes:
-		s, ok := write.text_of(&t.w, at)
+		encoded, ok := write.bytes_base64(&t.w, at)
 		if !ok {
-			return false
-		}
-		encoded, err := base64.encode(transmute([]u8)s, allocator = t.w.allocator)
-		if err != nil {
-			t.w.err = err
 			return false
 		}
 		defer delete(encoded, t.w.allocator)

@@ -113,6 +113,9 @@ records_validate_chunks :: proc(r: ^tape.Records, out: []tape.Record, chunks: []
 	alloc := locked_allocator(&locked)
 	scratch := alloc if r.opts.scratch.procedure != nil else runtime.Allocator{}
 	bads: [MAX_RECORD_CHUNKS][dynamic]Bad_Entry
+	for k in 0 ..< nc {
+		bads[k].allocator = alloc
+	}
 	defer {
 		for k in 0 ..< nc {
 			delete(bads[k])

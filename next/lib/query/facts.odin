@@ -97,6 +97,64 @@ attribute_key :: proc(h: ^Heap, attr: string) -> (res: Value, status: Status) {
 	return o, .Ok
 }
 
+// Read-only `fact_step` for compile-time literal `.Object` values without touching a `Heap` (safe across threads on a
+// shared immutable `Program`).
+fact_step_literal :: proc "contextless" (key: Value) -> (kind: tape.Fact_Kind, is_attr: bool, ok: bool) {
+	if key.kind != .Object {
+		return
+	}
+	ob := (^Object_Block)(key.p)
+	n := int(ob.len)
+	if n < 1 || n > 2 {
+		return
+	}
+	entries := object_entries(ob)
+	fi := find_key(ob, "fact")
+	if fi < 0 || entries[fi].value.kind != .String {
+		return
+	}
+	fname := text_of(entries[fi].value)
+	if n == 2 {
+		if fname != "attribute" {
+			return
+		}
+		ni := find_key(ob, "name")
+		if ni < 0 || entries[ni].value.kind != .String {
+			return
+		}
+		return .Attribute, true, true
+	}
+	for info in FACT_CATALOG {
+		if info.name == fname {
+			return info.kind, false, true
+		}
+	}
+	return
+}
+
+// Read-only `unknown_fact_step` for compile-time literal `.Object` values without touching a `Heap`.
+is_unknown_fact_step_literal :: proc "contextless" (key: Value) -> bool {
+	if key.kind != .Object {
+		return false
+	}
+	ob := (^Object_Block)(key.p)
+	if ob.len != 1 {
+		return false
+	}
+	entries := object_entries(ob)
+	fi := find_key(ob, "fact")
+	if fi < 0 || entries[fi].value.kind != .String {
+		return false
+	}
+	fname := text_of(entries[fi].value)
+	for info in FACT_CATALOG {
+		if info.name == fname {
+			return false
+		}
+	}
+	return true
+}
+
 // Whether `key` is a known fact path step (`{"fact": "<name>"}` or `{"fact": "attribute", "name": "<attr>"}`).
 fact_step :: proc(h: ^Heap, key: Value) -> (kind: tape.Fact_Kind, is_attr: bool, ok: bool) {
 	if type_of(key) != .Object {

@@ -207,6 +207,10 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 		return nil
 	}
 	allocator := doc.allocator
+	// Workers append to `p.keys` and `p.scratch` concurrently, so guard `allocator` (which may be a non-thread-safe
+	// caller allocator or `hook.Memory_Budget`).
+	locked := Locked_Allocator{backing = allocator}
+	worker_alloc := locked_allocator(&locked)
 	j := Dups_Job{doc = doc, segs = segs, dups = dups}
 	err: runtime.Allocator_Error
 	defer {
@@ -232,8 +236,8 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 	// time.
 	for &p in j.parts {
 		p.r = {at = tape.NO_NODE, drops = r.drops}
-		p.keys.allocator = allocator
-		p.scratch.allocator = allocator
+		p.keys.allocator = worker_alloc
+		p.scratch.allocator = worker_alloc
 	}
 	hook.fan_each(runner, len(j.segs), dups_parts, &j)
 	crossing := 0

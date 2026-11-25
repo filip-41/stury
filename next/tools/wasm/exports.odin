@@ -3,12 +3,17 @@ package wasm_exports
 
 import "base:runtime"
 import "core:mem"
+import "stury:cbor"
+import "stury:dsv"
 import "stury:jq"
 import "stury:json"
 import "stury:lib/base/regex"
 import "stury:lib/core/tape"
 import "stury:lib/ops/css"
 import "stury:lib/query"
+import "stury:stury"
+import "stury:toml"
+import "stury:xml"
 
 // Every tolerance and a step budget, which a walk with `LAX` counts, so the object holds those walks too.
 TOLERANT :: json.Options{tolerate = {.Invalid_Utf8, .Non_Finite, .Lone_Surrogate}, budget = {steps = 1 << 40}}
@@ -21,6 +26,7 @@ validate_spec :: proc(src: []u8, $S: json.Spec, opts := json.Options{}) -> bool 
 
 build_spec :: proc(src: []u8, $S: json.Spec, opts := json.Options{}) -> int {
 	doc, err := json.build(src, S, opts)
+	defer tape.destroy(&doc)
 	return len(doc.nodes) if err == nil else -1
 }
 
@@ -37,6 +43,7 @@ scan_spec :: proc(src: []u8, $S: json.Spec, opts := json.Options{}) -> int {
 	}
 	defer tape.destroy_demand(&demand)
 	doc, err := json.scan(src, &demand, S, opts = opts)
+	defer tape.destroy(&doc)
 	return len(doc.nodes) if err == nil else -1
 }
 
@@ -325,4 +332,44 @@ jq_eval_count :: proc "c" (prog_p: [^]u8, prog_n: int, in_p: [^]u8, in_n: int) -
 	defer jq.run_destroy(&run)
 	end := jq.run_value(&run, input, sink, &count)
 	return count if end == .Done else -1
+}
+
+@(export)
+build_dsv :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	doc, err := dsv.build(p[:n], .Csv)
+	defer tape.destroy(&doc)
+	return len(doc.nodes) if err == nil else -1
+}
+
+@(export)
+build_cbor :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	doc, err := cbor.build(p[:n], .Cbor)
+	defer tape.destroy(&doc)
+	return len(doc.nodes) if err == nil else -1
+}
+
+@(export)
+build_toml :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	doc, err := toml.build(p[:n], .Toml_1_0)
+	defer tape.destroy(&doc)
+	return len(doc.nodes) if err == nil else -1
+}
+
+@(export)
+build_xml :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	doc, err := xml.build(p[:n], .Xml)
+	defer tape.destroy(&doc)
+	return len(doc.nodes) if err == nil else -1
+}
+
+@(export)
+format_json_to_cbor :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	out, _, err := stury.format(p[:n], json.Spec.Json, cbor.Spec.Cbor)
+	defer delete(out)
+	return len(out) if err == nil else -1
 }

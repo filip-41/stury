@@ -25,6 +25,14 @@ Caps :: bit_set[Cap; u32]
 // The stable id of one spec of a format, stored in saved documents. Unique across the linked formats.
 Format_Id :: distinct u16
 
+// Central base `Format_Id` assignments for built-in format families. Each format claims `len(Spec)` consecutive IDs
+// from its base so specs cannot silently collide across packages.
+FORMAT_ID_JSON :: Format_Id(1)  // 1..3: Json, Jsonc, Json5
+FORMAT_ID_DSV  :: Format_Id(4)  // 4..6: Csv, Tsv, Plain
+FORMAT_ID_CBOR :: Format_Id(7)  // 7..10: Cbor, Preferred, Deterministic, Length_First
+FORMAT_ID_TOML :: Format_Id(11) // 11..12: Toml_1_0, Toml_1_1
+FORMAT_ID_XML  :: Format_Id(13) // 13: Xml
+
 // Options of a read of any format.
 Options :: struct {
 	budget:   Budget,

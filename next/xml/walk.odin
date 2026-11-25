@@ -18,6 +18,9 @@ STATE_TIER :: kernel.Tier(0)
 @(private)
 STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 
+// Stack headroom probed on each XML read entry (frames: 512 * 24 B = 12 KiB, plus builder/scanner stack frames).
+READ_STACK :: 48 * 1024
+
 // Open elements a read keeps in its frame. A deeper text moves them to memory from the read's allocator, so a
 // `validate` within this depth allocates nothing past what a DTD or a namespace declaration needs.
 @(private)
@@ -512,7 +515,7 @@ emit_text :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "co
 	if n == 0 || decode && .Chars not_in f.flags {
 		return emit(w, on, hs, .Null, .Value, lo, n)
 	}
-	if !decode && w.infer && n <= int(max(u32)) {
+	if !decode && w.infer && u64(n) <= u64(max(u32)) {
 		t := tape.infer_token(w.base, lo, u32(n))
 		return emit(w, on, hs, t.kind, .Value, lo, n, t.spelling)
 	}
@@ -793,7 +796,7 @@ table_put :: proc "contextless" (table: [^]Name_Ref, cap: u64, name: [^]u8, n: u
 st_open_done :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Walk($H, $LAX), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> u64 {
 	f := &w.stack[e - 1]
 	n := intrinsics.ptr_sub(p[1:], f.tag)
-	if n > int(max(u32)) {
+	if u64(n) > u64(max(u32)) {
 		return fault(w, {s0, s1, s2}, p, .Too_Wide)
 	}
 	f.tag_n = u32(n)

@@ -592,14 +592,13 @@ demand_index :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need
 	b := n.b
 	if b.kind == .Literal {
 		// Static fact step: `.@comment`, `.@tag`, `.&attr`, etc.
-		if kind, _, is_fact := query.fact_step(&a.prog.unit.heap, b.value); is_fact {
+		if kind, _, is_fact := query.fact_step_literal(b.value); is_fact {
 			if kind == .Content {
 				return demand_node(a, n.a, whole_need(.Whole_Op, true), env)
 			}
 			return demand_node(a, n.a, grain_need(a, .Exists, true), env)
 		}
-		if unk, is_unk := query.unknown_fact_step(&a.prog.unit.heap, b.value); is_unk {
-			query.release(&a.prog.unit.heap, unk)
+		if query.is_unknown_fact_step_literal(b.value) {
 			return demand_node(a, n.a, grain_need(a, .Exists, true), env)
 		}
 		if b.value.kind == .String {
@@ -956,7 +955,7 @@ demand_getpath :: proc(a: ^Analyzer, arg: ^Node, out: Need, env: ^Var_Frame) -> 
 		static := true
 		facts := out.facts
 		for item, i in items {
-			if kind, _, is_fact := query.fact_step(&a.prog.unit.heap, item); is_fact {
+			if kind, _, is_fact := query.fact_step_literal(item); is_fact {
 				facts = true
 				if i + 1 == len(items) && kind != .Content {
 					// Static path ending in non-content fact.
@@ -1103,7 +1102,7 @@ needs_facts :: proc(prog: ^Program, alloc: runtime.Allocator) -> bool {
 			return false
 		}
 		if n.kind == .Index && n.b.kind == .Literal {
-			if _, _, is_fact := query.fact_step(&prog.unit.heap, n.b.value); is_fact {
+			if _, _, is_fact := query.fact_step_literal(n.b.value); is_fact {
 				return true
 			}
 		}

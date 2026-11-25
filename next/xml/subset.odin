@@ -634,7 +634,7 @@ entity_declaration :: proc "contextless" (d: ^Dtd, p, end: [^]u8, stored: bool) 
 	}
 	e.name_lo, e.name_n = u32(lo), u16(len(name))
 	if .External not_in e.flags {
-		if len(value) > int(max(u32)) {
+		if u64(len(value)) > u64(max(u32)) {
 			return q, {name_at, .Too_Wide, .None}
 		}
 		e.lit_n = u32(len(value))

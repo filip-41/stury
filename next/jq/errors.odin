@@ -201,6 +201,10 @@ write_text_fault :: proc(h: ^query.Heap, out: ^[dynamic]u8, e: ^query.Error) -> 
 			append(out, " is not closed")
 		}
 	case .Pointer:
+		if e.detail != "" {
+			append(out, e.detail)
+			return true
+		}
 		append(out, "json_pointer: ")
 		write_brief(h, out, e.a)
 		append(out, " is not a JSON Pointer")

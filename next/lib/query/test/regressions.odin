@@ -5,11 +5,13 @@ import "core:math"
 import "core:mem"
 import "core:strings"
 import "core:testing"
+import "stury:cbor"
 import "stury:dsv"
 import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/query"
 import "stury:testkit"
+import "stury:xml"
 
 @(test)
 dsv_row_iteration_keeps_column_keys :: proc(t: ^testing.T) {
@@ -506,4 +508,85 @@ partial_array_slice_element_and_object_hash_paths :: proc(t: ^testing.T) {
 		query.release(h, got)
 	}
 	testing.expect_value(t, query.length_of(h, obj), 40)
+}
+
+@(test)
+cbor_negative_ints_and_bignum_query_and_json :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	x: Test_Heap
+	heap_start(&x)
+	defer heap_done(t, &x)
+	h := &x.h
+
+	// CBOR array: [-17, -24, -49, 2^64, 2^64 + 1].
+	// -17 is 0x30 ('0'), -24 is 0x37 ('7'), -49 is 0x38 0x30 ("80"): raw bytes look like JSON numerals!
+	src := [?]u8{
+		0x85,
+		0x30,
+		0x37,
+		0x38, 0x30,
+		0xc2, 0x49, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0xc2, 0x49, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+	}
+	doc, err := cbor.build(src[:], .Cbor, allocator = h.allocator)
+	testing.expectf(t, err == nil, "cbor build failed: %v", err)
+	root, rs := query.document_value(h, doc, true)
+	testing.expect_value(t, rs, query.Status.Ok)
+	defer query.release(h, root)
+
+	out := make([dynamic]u8, h.allocator)
+	defer delete(out)
+	testing.expect_value(t, query.write_json(h, &out, root), query.Status.Ok)
+	testing.expect_value(t, string(out[:]), "[-17,-24,-49,18446744073709551616,18446744073709551617]")
+
+	for idx in 3 ..= 4 {
+		big_elem, es := query.element(h, root, idx)
+		testing.expect_value(t, es, query.Status.Ok)
+		defer query.release(h, big_elem)
+		testing.expect(t, query.is_integer(big_elem))
+		testing.expect(t, abs(query.as_f64(big_elem) - 18446744073709551616.0) == 0)
+		num, ns := query.number_of(h, big_elem)
+		testing.expect_value(t, ns, query.Status.Ok)
+		defer query.release(h, num)
+		testing.expect_value(t, num.kind, query.Kind.Big)
+	}
+}
+
+@(test)
+xml_grouped_propagates_partial_flag :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	x: Test_Heap
+	heap_start(&x)
+	defer heap_done(t, &x)
+	h := &x.h
+
+	src := `<root><x><a/></x><x><b/></x></root>`
+	doc, err := xml.build(transmute([]u8)src, .Xml, allocator = h.allocator)
+	testing.expectf(t, err == nil, "xml build failed: %v", err)
+	part, perr := tape.partial_block(0, 0, 0, 0, 0, .Group, h.allocator)
+	testing.expect(t, perr == nil)
+	doc.partial = part
+	// Mark the second `<x>` element's object value as partial while keeping the first complete.
+	seen := 0
+	for &n, i in doc.nodes {
+		if n.kind == .Object && i > 1 {
+			seen += 1
+			if seen == 2 {
+				n.spelling |= tape.CONTAINER_PARTIAL
+				break
+			}
+		}
+	}
+	testing.expect_value(t, seen, 2)
+	root, rs := query.document_value(h, doc, true)
+	testing.expect_value(t, rs, query.Status.Ok)
+	defer query.release(h, root)
+
+	el, es := query.member(h, root, "root")
+	testing.expect_value(t, es, query.Status.Ok)
+	defer query.release(h, el)
+	built_el, bs := query.built(h, el)
+	testing.expect_value(t, bs, query.Status.Ok)
+	defer query.release(h, built_el)
+	testing.expect(t, query.value_has_partial(built_el))
 }

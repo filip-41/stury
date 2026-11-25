@@ -159,7 +159,8 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 }
 
 // Reads the next records of `r` into `out`, and for each the document of its nodes the paths of `demand` reach into the
-// same place of `docs`, as `scan` reads its bytes alone. Each document is the caller's to free.
+// same place of `docs`, as `scan` reads its bytes alone. Documents live in `r.block` until the next batch or
+// `tape.destroy_records`, as `tape.Record_Block` says.
 @(require_results)
 records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	if expanded_demand(demand) {

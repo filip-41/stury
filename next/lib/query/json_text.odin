@@ -195,8 +195,11 @@ write_scalar :: proc(h: ^Heap, out: ^[dynamic]u8, v: Value, opts: Json_Options =
 		return write_text(h, out, text_of(v), opts.ascii)
 	case .Number:
 		if v.kind == .Node {
-			if b := node_bytes(v); json_number_text(b) {
-				return put_bytes(h, out, string(b))
+			d := (^Doc_Block)(v.p)
+			if d.doc.format == nil || .Binary not_in d.doc.format.caps {
+				if b := node_bytes(v); json_number_text(b) {
+					return put_bytes(h, out, string(b))
+				}
 			}
 		}
 		return write_number(h, out, v, opts.double)

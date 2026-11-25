@@ -18,9 +18,9 @@ Spec :: enum u8 {
 }
 
 // Options of a JSON read. `budget` sets `depth`, `nodes`, `memory` and `steps` (a step is one container). JSON has no
-// options of its own, so its reads refuse any `format`. `runner` is for `build` alone, which builds a long whole text in
-// parts on its threads: every other read ignores it, as does a build of a text in `pieces`. Under `Budget.memory` a build
-// with no runner is made on one thread, and one with a runner counts the blocks of its parts.
+// options of its own, so its reads refuse any `format`. With `runner`, long whole texts run in parallel for `validate`,
+// `build`, `unmarshal`, and independent-record framings; reads in `pieces` run on the calling thread. Under
+// `Budget.memory` a build with no runner is made on one thread, and one with a runner counts the blocks of its parts.
 Options :: tape.Options
 
 // Whether a read may walk a value again from its first byte. A test build turns it off to read as a format without
@@ -33,9 +33,9 @@ CAPS :: tape.Caps{.Rewalk} when REWALK else tape.Caps{}
 
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Json  = {name = "json", id = 1, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
-	.Jsonc = {name = "jsonc", id = 2, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
-	.Json5 = {name = "json5", id = 3, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Json  = {name = "json", id = tape.FORMAT_ID_JSON, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Jsonc = {name = "jsonc", id = tape.FORMAT_ID_JSON + 1, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Json5 = {name = "json5", id = tape.FORMAT_ID_JSON + 2, facts = tape.COMMENTS, caps = CAPS, dups = .Last, bounds = quotes, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
 }
 
 // The format handle of `spec`, to read nodes of a text of `spec` with `tape.node_text` and `tape.node_number`, and to

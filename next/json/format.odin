@@ -8,7 +8,7 @@ import "stury:lib/core/tape"
 // The reads of `spec`, for a caller that picks the format at run time, to use with the handle `as` returns. Nil for a
 // `spec` out of range.
 reads :: proc "contextless" (spec: Spec) -> ^tape.Reads {
-	return tape.format_reads(Spec, 1, validate, build, find, scan, Records, records_open, records_validate, records_find, records_scan) if spec <= max(Spec) else nil
+	return tape.format_reads(Spec, tape.FORMAT_ID_JSON, validate, build, find, scan, Records, records_open, records_validate, records_find, records_scan) if spec <= max(Spec) else nil
 }
 
 // The offset just past the close of container node `at` of `doc`, counting the closes of the containers its last

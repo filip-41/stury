@@ -267,8 +267,12 @@ v_implode :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value)
 	}
 	a := query.built(h, x) or_return
 	defer query.release(h, a)
-	cps := make([]i64, len(query.items_of(a)), h.allocator)
-	defer delete(cps, h.allocator)
+	alloc := query.heap_allocator(h)
+	cps, aerr := make([]i64, len(query.items_of(a)), alloc)
+	if aerr != nil {
+		return query.NULL, query.fail(h, .Memory, .None)
+	}
+	defer delete(cps, alloc)
 	for c, i in query.items_of(a) {
 		if query.type_of(c) != .Number {
 			out := make([dynamic]u8, h.allocator)

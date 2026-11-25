@@ -390,7 +390,7 @@ tolerances_take_one_rule_each :: proc(t: ^testing.T) {
 		{`["a\udc00b"]`, .Lone_Surrogate, .Json},
 	}
 	for subset in 0 ..< 8 {
-		tolerate := transmute(tape.Tolerances)u8(subset)
+		tolerate := transmute(tape.Tolerances)u16(subset)
 		for spec in json.Spec {
 			for c in cases {
 				doc, err := json.build(transmute([]u8)c.src, spec, {tolerate = tolerate})
