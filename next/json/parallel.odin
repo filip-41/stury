@@ -213,7 +213,7 @@ lex_run :: proc "contextless" (src: []u8, lo, hi: int, from: Lex, $S: Spec) -> (
 // The readings of `src[lo:hi]` from outside strings and comments and from inside a `"` string, made in a single pass
 // while their blocks hold no comment marker or JSON5 `'`. Both readings find the same quotes, and each reads the
 // brackets and commas outside its own strings, which are the other reading's strings.
-@(private)
+@(private, enable_target_feature = STATE_FEATURES)
 lex_pair :: proc "contextless" (src: []u8, lo, hi: int, $S: Spec) -> (runs: [2]Lex_Run) #no_bounds_check {
 	runs[0] = {seam = -1, end = .Out, read = true, comment_end = -1}
 	runs[1] = {seam = -1, end = .Double, read = true, comment_end = -1}
@@ -302,7 +302,7 @@ lex_block :: #force_inline proc "contextless" (run: ^Lex_Run, src: []u8, lo, bas
 // before `base` escapes the one at it. A block that starts outside comments and holds no comment marker or JSON5 `'`
 // outside its `"` strings is read whole from its masks. Any other block's strings and comments are read from its
 // quotes, comment markers and line ends only, and its brackets then from masks too.
-@(private)
+@(private, enable_target_feature = STATE_FEATURES)
 lex_on :: proc "contextless" (run: ^Lex_Run, src: []u8, lo, hi, base: int, odd: u64, $S: Spec) #no_bounds_check {
 	text := src[:hi]
 	odd := odd

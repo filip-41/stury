@@ -166,7 +166,7 @@ BLOCK_STATES :: bit_set[Unit_State]{.Text, .End_Tag, .Tag}
 
 // Frames the units of `base` from `u.at` up to `to`, with `BLOCKS` a block at a time where `units_block` takes one, and
 // otherwise byte by byte, as the test of the two compares them.
-@(private)
+@(private, enable_target_feature = STATE_FEATURES)
 units_frame :: proc "contextless" (u: ^Units, base: [^]u8, to: u64, $BLOCKS: bool) #no_bounds_check {
 	i := u.at
 	// The byte machine below reads on past a block `units_block` failed to take, for as many blocks as its failures in a

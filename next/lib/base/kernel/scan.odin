@@ -172,12 +172,14 @@ Quotes :: struct {
 
 // Reads `src` as a stretch of text into `s`, which holds only `quote`, `escape`, `nest` and `odd`, with `quoted`
 // false.
+@(enable_target_feature = FEATURES[Tier(0)])
 quote_run :: proc "contextless" (src: []u8, s: ^Quotes) {
 	scan(src, 0, s, .Run)
 }
 
 // The index of the first `sep` outside quoted runs at level `want`, from state `s` at `src[0]`, or -1 when there is
 // none or the level falls below `want` first. With `quote` 0 it is the first `sep`.
+@(enable_target_feature = FEATURES[Tier(0)])
 quote_cut :: proc "contextless" (src: []u8, s: Quotes) -> int {
 	s := s
 	if s.quote == 0 {

@@ -259,6 +259,57 @@ first_lane16_every_lane :: proc(t: ^testing.T) {
 	}
 }
 
+// Checks `last_lane16` on each lane alone and under random lanes below it.
+@(test, enable_target_feature = FEATURES)
+last_lane16_every_lane :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 14)
+	for lane in 0 ..< 16 {
+		for round in 0 ..< testkit.rounds(64) {
+			m: [16]u8
+			m[lane] = 0xff
+			for below in 0 ..< lane {
+				if round > 0 && rand.int_max(2) == 0 {
+					m[below] = 0xff
+				}
+			}
+			got := k.last_lane16(transmute(#simd[16]u8)m)
+			testing.expectf(t, got == u64(lane), "% x: %d, want %d", m, got, lane)
+		}
+	}
+}
+
+// Checks `is_ascii` across all 64 lanes (0x7f vs 0x80) and `all_zero` across 16-lane and 64-lane vectors.
+@(test, enable_target_feature = FEATURES)
+is_ascii_and_all_zero_every_lane :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	buf: [64]u8
+	testing.expect(t, k.is_ascii(k.load(raw_data(buf[:]))))
+	testing.expect(t, k.all_zero(#simd[16]u8{}))
+	testing.expect(t, k.all_zero(#simd[64]u8{}))
+	for lane in 0 ..< 64 {
+		buf[lane] = 0x7f
+		testing.expectf(t, k.is_ascii(k.load(raw_data(buf[:]))), "0x7f at lane %d", lane)
+		for v in ([3]u8{0x01, 0x80, 0xff}) {
+			buf[lane] = v
+			testing.expectf(t, !k.all_zero(transmute(#simd[64]u8)buf), "all_zero64 0x%02x at lane %d", v, lane)
+			if v >= 0x80 {
+				testing.expectf(t, !k.is_ascii(k.load(raw_data(buf[:]))), "0x%02x at lane %d", v, lane)
+			}
+		}
+		buf[lane] = 0
+	}
+	v16: [16]u8
+	for lane in 0 ..< 16 {
+		for v in ([3]u8{0x01, 0x80, 0xff}) {
+			v16[lane] = v
+			testing.expectf(t, !k.all_zero(transmute(#simd[16]u8)v16), "all_zero16 0x%02x at lane %d", v, lane)
+		}
+		v16[lane] = 0
+	}
+}
+
 // Checks `compress` against a loop on random and structured keep masks: it stores the kept lanes in order, returns
 // their count, and stores nothing past 64 bytes from its start.
 @(test, enable_target_feature = FEATURES)
