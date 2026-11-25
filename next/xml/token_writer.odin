@@ -51,9 +51,9 @@ writer_end :: proc(w: ^Writer) -> (text: []u8, err: Write_Error) {
 	}
 	doc := write.token_tape_document(&w.tape, as(w.spec))
 	if w.sink.procedure != nil {
-		_, err = write.to_sink(w.sink, &doc, u8(w.spec), w.opts, w.allocator, write_out)
+		_, err = write.to_sink(w.sink, &doc, u8(w.spec) | FROM_TOKENS, w.opts, w.allocator, write_out)
 		return nil, err
 	}
-	text, _, err = write.to_buffer(&doc, u8(w.spec), w.opts, w.allocator, write_out)
+	text, _, err = write.to_buffer(&doc, u8(w.spec) | FROM_TOKENS, w.opts, w.allocator, write_out)
 	return
 }

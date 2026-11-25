@@ -3,7 +3,9 @@ package write
 import "base:intrinsics"
 import "core:encoding/base64"
 import "core:math"
+import "core:simd"
 import "core:strconv"
+import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
 
 // The texts a writer spells from a document's nodes, whatever format the document was read in: a scalar's or key's
@@ -15,9 +17,13 @@ NUMBER_ROOM :: 40
 // The text of scalar node `at`, a value or a key: a string's or plain scalar's text, decoded into the walk's scratch
 // when it holds an escape, and any other scalar's bytes as written. False when the scratch cannot grow, with `w.err`
 // set.
-text_of :: proc(w: ^Tree, at: tape.Node_Index) -> (s: string, ok: bool) #no_bounds_check {
+text_of :: #force_inline proc(w: ^Tree, at: tape.Node_Index) -> (s: string, ok: bool) #no_bounds_check {
 	doc := w.doc
 	t := doc.nodes[at]
+	// A string or plain text with no escape in a document that holds its text is its bytes there.
+	if u8(t.kind) - u8(tape.Kind.String) <= 1 && t.spelling & tape.SPELLING_DECODE == 0 && .Held not_in doc.flags {
+		return string(doc.src[t.lo:][:t.n]), true
+	}
 	room := tape.text_room(doc, at)
 	if room == 0 {
 		return string(tape.span_bytes(doc, t.lo, t.n)), true
@@ -26,6 +32,92 @@ text_of :: proc(w: ^Tree, at: tape.Node_Index) -> (s: string, ok: bool) #no_boun
 		return "", false
 	}
 	return tape.node_text(doc, at, w.scratch)
+}
+
+@(private)
+Lanes16 :: #simd[16]u8
+
+// The bytes of a text that a writer spells as more than themselves.
+Escape_Set :: enum u8 {
+	Xml_Text, // `&`, `<`, `>` and a control byte but tab and line feed
+	Toml_Basic, // `"`, `\\`, a control byte, DEL and a byte past ASCII
+}
+
+@(private, rodata)
+ESCAPED := [Escape_Set][256]bool {
+	.Xml_Text   = {0 ..< 9 = true, 11 ..< 32 = true, '&' = true, '<' = true, '>' = true},
+	.Toml_Basic = {0 ..< 32 = true, '"' = true, '\\' = true, 0x7F ..= 0xFF = true},
+}
+
+// The length of the longest prefix of `b` that holds no byte of `set`, which a writer copies as it is.
+clean_prefix :: proc "contextless" (b: []u8, $SET: Escape_Set) -> int #no_bounds_check {
+	p := raw_data(b)
+	i := 0
+	for ; i + 16 <= len(b); i += 16 {
+		if hits(load_lanes(p[i:]), SET) {
+			break
+		}
+	}
+	// The last block of a text of 16 bytes or more ends with it, overlapping the one before, and a text of 8 to 15
+	// bytes is two overlapping words.
+	if i < len(b) {
+		// Past a block that held a byte the whole text is not clean, so only a loop that ended on the text's end tests it.
+		if len(b) >= 16 {
+			if i + 16 > len(b) && !hits(load_lanes(p[len(b) - 16:]), SET) {
+				return len(b)
+			}
+		} else if len(b) >= 8 && i == 0 {
+			if !word_hits(kernel.load8(p), SET) && !word_hits(kernel.load8(p[len(b) - 8:]), SET) {
+				return len(b)
+			}
+		}
+	}
+	for ; i < len(b); i += 1 {
+		if ESCAPED[SET][p[i]] {
+			break
+		}
+	}
+	return i
+}
+
+// Whether the eight bytes of `x` may hold a byte of `set`: it holds none when this says no, and it also says yes for a tab
+// or a line feed of an XML text.
+@(private)
+word_hits :: #force_inline proc "contextless" (x: u64, $SET: Escape_Set) -> bool {
+	ONES :: u64(0x0101010101010101)
+	HIGH :: u64(0x8080808080808080)
+	has_zero :: #force_inline proc "contextless" (x: u64) -> u64 {
+		return (x - ONES) & ~x & HIGH
+	}
+	small := (x - 0x20 * ONES) & ~x & HIGH
+	when SET == .Xml_Text {
+		return small | has_zero(x ~ '&' * ONES) | has_zero(x ~ '<' * ONES) | has_zero(x ~ '>' * ONES) != 0
+	} else {
+		return small | has_zero(x ~ '"' * ONES) | has_zero(x ~ '\\' * ONES) | has_zero(x ~ 0x7F * ONES) | x & HIGH != 0
+	}
+}
+
+// The lanes of `v` below a space, and a load of 16 bytes, outside the procs of a set so an import of them is used
+// where no set is.
+@(private)
+control_lanes :: #force_inline proc "contextless" (v: Lanes16) -> Lanes16 {
+	return simd.lanes_lt(v, Lanes16(0x20))
+}
+
+@(private)
+load_lanes :: #force_inline proc "contextless" (p: [^]u8) -> Lanes16 {
+	return kernel.load16(p)
+}
+
+@(private)
+hits :: #force_inline proc "contextless" (v: Lanes16, $SET: Escape_Set) -> bool {
+	control := control_lanes(v)
+	when SET == .Xml_Text {
+		plain := simd.lanes_eq(v, Lanes16('\t')) | simd.lanes_eq(v, Lanes16('\n'))
+		return kernel.any_lane16(simd.bit_and_not(control, plain) | simd.lanes_eq(v, Lanes16('&')) | simd.lanes_eq(v, Lanes16('<')) | simd.lanes_eq(v, Lanes16('>')))
+	} else {
+		return kernel.any_lane16(control | simd.lanes_eq(v, Lanes16('"')) | simd.lanes_eq(v, Lanes16('\\')) | simd.lanes_ge(v, Lanes16(0x7F)))
+	}
 }
 
 // The text of scalar token `t`, a key of a table's header, which is no node: as `text_of` gives a node's.
@@ -265,4 +357,41 @@ comment_body :: proc "contextless" (doc: ^tape.Document, f: tape.Fact) -> (body:
 	span := tape.span_bytes(doc, f.lo, f.n)
 	open, close := min(int(f.spelling & 0xFF), len(span)), int(f.spelling >> 8)
 	return span[open:max(open, len(span) - close)], close == 0
+}
+
+// Copies `b` to `dst` and says whether it holds no byte of `set`, which a writer that finds one takes back by not
+// moving its cursor. It stores up to 15 bytes past `len(b)`, so `dst` has that room.
+copy_clean :: proc "contextless" (dst: [^]u8, b: []u8, $SET: Escape_Set) -> bool #no_bounds_check {
+	p := raw_data(b)
+	n := len(b)
+	if n >= 16 {
+		seen := false
+		i := 0
+		for ; i + 16 <= n; i += 16 {
+			v := load_lanes(p[i:])
+			intrinsics.unaligned_store((^Lanes16)(dst[i:]), v)
+			seen ||= hits(v, SET)
+		}
+		if i < n {
+			v := load_lanes(p[n - 16:])
+			intrinsics.unaligned_store((^Lanes16)(dst[n - 16:]), v)
+			seen ||= hits(v, SET)
+		}
+		return !seen
+	}
+	if n >= 8 {
+		a, z := kernel.load8(p), kernel.load8(p[n - 8:])
+		intrinsics.unaligned_store((^u64le)(dst), u64le(a))
+		intrinsics.unaligned_store((^u64le)(dst[n - 8:]), u64le(z))
+		if !word_hits(a, SET) && !word_hits(z, SET) {
+			return true
+		}
+	}
+	for i in 0 ..< n {
+		if ESCAPED[SET][p[i]] {
+			return false
+		}
+		dst[i] = p[i]
+	}
+	return true
 }

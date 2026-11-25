@@ -79,3 +79,40 @@ values_with_no_element_are_refused :: proc(t: ^testing.T) {
 	_, _, err := xml.write(&doc, .Xml, {ascii = true})
 	testing.expect(t, err != nil)
 }
+
+// The writer copies a text of an XML read that its reader read with no decode as it stands, so such a text must hold
+// no byte that would need a reference: no `<`, `&` or CR, and no control byte but tab and line feed.
+@(test)
+xml_texts_with_no_decode_hold_no_byte_to_escape :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	sources := [?]string{
+		"<a>1 > 0</a>",
+		"<a>x &gt; y &amp; z</a>",
+		"<a><![CDATA[<&>]]></a>",
+		"<a>l1\r\nl2</a>",
+		"<a>tab\there\nline</a>",
+		"<a>a &#60; b<b/>c &#13; d</a>",
+		"<a><b>1</b><b>x > y</b><!--c--><b>]]&gt;</b></a>",
+	}
+	for src in sources {
+		doc, err := xml.build(transmute([]u8)src)
+		defer xml.destroy(&doc)
+		testing.expectf(t, err == nil, "%q: %v", src, err)
+		for n, i in doc.nodes {
+			if n.kind != .String || n.role != .Value || n.spelling & tape.SPELLING_DECODE != 0 {
+				continue
+			}
+			for c in tape.span_bytes(&doc, n.lo, n.n) {
+				bad := c == '<' || c == '&' || c == '\r' || c < 0x20 && c != '\t' && c != '\n'
+				testing.expectf(t, !bad, "%q: node %d holds byte %d with no decode", src, i, c)
+			}
+		}
+		text, _, werr := xml.write(&doc)
+		defer delete(text)
+		testing.expectf(t, werr == nil && xml.validate(text) == nil, "%q: %v\n%s", src, werr, text)
+		back, berr := xml.build(text)
+		defer xml.destroy(&back)
+		testing.expectf(t, berr == nil, "%q: %v", text, berr)
+		testkit.values_agree(t, &doc, tape.ROOT, &back, tape.ROOT, {facts = {.Attribute, .Comment}}, "xml")
+	}
+}

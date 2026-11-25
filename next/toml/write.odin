@@ -8,6 +8,7 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 
@@ -63,6 +64,7 @@ Writing :: struct {
 	dots:     [dynamic]u8, // the keys of the dotted tables around the member being written, each with its point
 	via:      [dynamic]u8, // the `dots` of each pending table written under the tables around it, as `Pending.via_lo` says
 	tmp:      [dynamic]u8,
+	key:      []u8, // the spelling `spell_key` made, the key's own bytes or `tmp`
 	pending:  [dynamic]Pending,
 	members:  [dynamic]Member,
 	reader:   tape.Reader,
@@ -190,7 +192,7 @@ write_tables :: proc(t: ^Writing, root: tape.Node_Index, allocator: runtime.Allo
 		if !spell_key(t, item.key) {
 			return
 		}
-		append(&t.path, ..t.tmp[:])
+		append(&t.path, ..t.key)
 		level := len(stack) - 1
 		if !(style_is(t, item.value, "implicit") && only_tables(t, item.value)) {
 			if t.wrote {
@@ -218,18 +220,28 @@ write_tables :: proc(t: ^Writing, root: tape.Node_Index, allocator: runtime.Allo
 // tables after the pending ones, as a frame on `stack`.
 @(private)
 put_table :: proc(t: ^Writing, at: tape.Node_Index, stack: ^[dynamic]Table_Frame, level: int) -> bool {
-	lo, hi, ok := collect(t, at, true)
-	if !ok {
-		return false
-	}
-	defer release(t, lo)
 	frame := Table_Frame{path_to = len(t.path)}
 	// A frame's tables come after those of the frames below it, so the list is cut back to where its own start.
 	first := len(t.pending)
-	for m in t.members[lo:hi] {
-		deferred, listed := defer_table(t, m)
-		if !listed ||!deferred && !put_member(t, m, level) {
+	if !t.sort && write.plain_members(&t.w, at) && t.w.nodes[at].kind == .Object {
+		// With no order to make the members are the nodes in turn, which needs no list of them.
+		for k, end := at + 1, at + tape.Node_Index(t.w.nodes[at].n); k < end; {
+			m := Member{key = k, value = k + 1}
+			k = tape.node_after(t.w.doc, m.value)
+			if !put_table_member(t, m, level) {
+				return false
+			}
+		}
+	} else {
+		lo, hi, ok := collect(t, at, true)
+		if !ok {
 			return false
+		}
+		defer release(t, lo)
+		for m in t.members[lo:hi] {
+			if !put_table_member(t, m, level) {
+				return false
+			}
 		}
 	}
 	if at != t.root {
@@ -244,6 +256,13 @@ put_table :: proc(t: ^Writing, at: tape.Node_Index, stack: ^[dynamic]Table_Frame
 	return true
 }
 
+// Writes member `m` of a table in line, or lists it as a table still to be written under a header.
+@(private)
+put_table_member :: #force_inline proc(t: ^Writing, m: Member, level: int) -> bool {
+	deferred, listed := defer_table(t, m)
+	return listed && (deferred || put_member(t, m, level))
+}
+
 // Lists the member `m` of a table as a table still to be written when it is written under a header: an object that is
 // not in braces or dotted, or an array of objects, each a table of the array. False with the error set when memory is
 // refused.
@@ -256,7 +275,7 @@ defer_table :: proc(t: ^Writing, m: Member) -> (deferred, ok: bool) {
 		append(&t.via, ..t.dots[:])
 		append(&t.pending, Pending{key = m.key, value = m.value, array = tape.NO_NODE, via_lo = via_lo, via_hi = len(t.via)})
 	case kind == .Array && !style_is(t, m.value, "inline") && all_tables(t, m.value):
-		elements, _, e := tape.children(t.reader, m.value, t.w.allocator)
+		elements, e := write.children_as_written(&t.w, m.value)
 		if e != nil {
 			t.w.err = e
 			return false, false
@@ -288,7 +307,7 @@ put_member :: proc(t: ^Writing, m: Member, level: int) -> bool {
 		}
 		put_lead(t, m.value, level)
 		before := len(t.dots)
-		append(&t.dots, ..t.tmp[:])
+		append(&t.dots, ..t.key)
 		append(&t.dots, '.')
 		lo, hi, ok := collect(t, m.value, true)
 		if !ok {
@@ -310,9 +329,14 @@ put_member :: proc(t: ^Writing, m: Member, level: int) -> bool {
 	if !spell_key(t, m.key) {
 		return false
 	}
-	write.put(t.out, t.tmp[:])
+	write.put(t.out, t.key)
 	write.put(t.out, transmute([]u8)string(" = "))
-	if !put_inline(t, m.value, level) {
+	// A scalar opens no container, so it takes no walk of its own.
+	if t.w.nodes[m.value].kind < .Array {
+		if !put_scalar(t, m.value) {
+			return false
+		}
+	} else if !put_inline(t, m.value, level) {
 		return false
 	}
 	put_tail(t, m.value)
@@ -324,7 +348,7 @@ put_member :: proc(t: ^Writing, m: Member, level: int) -> bool {
 // Whether the array at `at` holds objects and nothing else, at least one.
 @(private)
 all_tables :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
-	c, _, err := tape.children(t.reader, at, t.w.allocator)
+	c, err := write.children_as_written(&t.w, at)
 	if err != nil {
 		t.w.err = err
 		return false
@@ -366,7 +390,7 @@ only_tables :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
 @(private)
 collect :: proc(t: ^Writing, at: tape.Node_Index, object: bool) -> (lo, hi: int, ok: bool) {
 	lo = len(t.members)
-	c, _, err := tape.children(t.reader, at, t.w.allocator)
+	c, err := write.children_as_written(&t.w, at)
 	if err != nil {
 		t.w.err = err
 		return lo, lo, false
@@ -508,7 +532,7 @@ put_inline :: proc(t: ^Writing, at: tape.Node_Index, level: int) -> bool {
 				if is_dotted(t, m.value) {
 					// The members of a table of dotted keys stand in this one's, each under the key and a point.
 					dots_len := len(t.dots)
-					append(&t.dots, ..t.tmp[:])
+					append(&t.dots, ..t.key)
 					append(&t.dots, '.')
 					lo, hi, ok := collect(t, m.value, true)
 					if !ok {
@@ -522,7 +546,7 @@ put_inline :: proc(t: ^Writing, at: tape.Node_Index, level: int) -> bool {
 					continue
 				}
 				write.put(t.out, t.dots[:])
-				write.put(t.out, t.tmp[:])
+				write.put(t.out, t.key)
 				write.put(t.out, transmute([]u8)string(" = "))
 			}
 			next = m.value
@@ -603,9 +627,29 @@ put_scalar :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
 // or not-a-number float as `inf` and `nan`.
 @(private)
 put_number :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
-	buf: [write.NUMBER_ROOM]u8
-	style := style_name(t, at)
-	value, _ := tape.node_number(t.w.doc, at)
+	buf: [write.NUMBER_ROOM]u8 = ---
+	// A number of a TOML text is spelled in its own base by its bits. Its text is a TOML number already, and a float
+	// has a point or an exponent in it, so only a base or an infinite or not-a-number float needs its value.
+	base := 0
+	value: spell.Number
+	if t.toml {
+		#partial switch Number_Spelling(t.w.nodes[at].spelling & tape.NUMBER_KIND) {
+		case .Plain, .Decimal:
+		case .Hex: base = 16
+		case .Octal: base = 8
+		case .Binary: base = 2
+		case:
+			value, _ = tape.node_number(t.w.doc, at)
+		}
+	} else {
+		value, _ = tape.node_number(t.w.doc, at)
+		if style := style_name(t, at); style == "hex" || style == "octal" || style == "binary" {
+			base = 16 if style == "hex" else 8 if style == "octal" else 2
+		}
+	}
+	if base != 0 && t.toml {
+		value, _ = tape.node_number(t.w.doc, at)
+	}
 	if value.kind == .Float {
 		f := transmute(f64)value.bits
 		if math.is_nan(f) || math.is_inf(f) {
@@ -613,20 +657,17 @@ put_number :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
 			return true
 		}
 	}
-	if style == "hex" || style == "octal" || style == "binary" {
-		base := 16 if style == "hex" else 8 if style == "octal" else 2
-		if value.kind == .Uint || value.kind == .Int && i64(value.bits) >= 0 {
-			write.put(t.out, transmute([]u8)string("0x" if base == 16 else "0o" if base == 8 else "0b"))
-			write.put(t.out, transmute([]u8)strconv.write_bits(buf[:], value.bits, base, false, 64, "0123456789abcdef", {}))
-			return true
-		}
+	if base != 0 && (value.kind == .Uint || value.kind == .Int && i64(value.bits) >= 0) {
+		write.put(t.out, transmute([]u8)string("0x" if base == 16 else "0o" if base == 8 else "0b"))
+		write.put(t.out, transmute([]u8)strconv.write_bits(buf[:], value.bits, base, false, 64, "0123456789abcdef", {}))
+		return true
 	}
 	s, ok := write.number_text(&t.w, at, &buf)
-	if !ok || !toml_number(t, at, s) {
+	if !ok || !t.toml && !toml_number(t, at, s) {
 		return refuse(t, at)
 	}
 	write.put(t.out, transmute([]u8)s)
-	if style == "float" && !strings.contains_any(s, ".eE") {
+	if !t.toml && style_name(t, at) == "float" && !strings.contains_any(s, ".eE") {
 		write.put(t.out, transmute([]u8)string(".0"))
 	}
 	return true
@@ -662,6 +703,10 @@ style_name :: proc(t: ^Writing, at: tape.Node_Index) -> string {
 	if !t.styled {
 		return ""
 	}
+	if t.toml {
+		name, _ := spelled_fact(t.w.doc, at, .Style)
+		return name
+	}
 	name, _ := tape.fact_name(t.w.doc, at, .Style)
 	return name
 }
@@ -682,19 +727,26 @@ spell_key :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
 	if !ok {
 		return false
 	}
+	// A key of a TOML text that was not quoted is made of the bytes a bare key has.
+	if t.toml && t.w.nodes[at].spelling & tape.SPELLING_QUOTED == 0 {
+		t.key = transmute([]u8)s
+		return true
+	}
 	bare := len(s) > 0
 	for c in transmute([]u8)s {
 		bare &&= c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
 	}
 	style := style_name(t, at)
 	if bare && (style == "" || style == "bare") {
-		clear(&t.tmp)
-		append(&t.tmp, s)
-	} else if style == "literal" && is_literal(s, false) {
+		t.key = transmute([]u8)s
+		return true
+	}
+	if style == "literal" && is_literal(s, false) {
 		literal_string(t, s, false)
 	} else {
 		basic_string(t, s)
 	}
+	t.key = t.tmp[:]
 	return true
 }
 
@@ -731,7 +783,8 @@ put_string :: proc(t: ^Writing, s: string, style: string) {
 	case style == "multiline":
 		basic_string(t, s, true)
 	case:
-		basic_string(t, s)
+		spell_basic(t, s, false, true)
+		return
 	}
 	write.put(t.out, t.tmp[:])
 }
@@ -742,38 +795,70 @@ put_string :: proc(t: ^Writing, s: string, style: string) {
 @(private)
 basic_string :: proc(t: ^Writing, s: string, multi := false) {
 	clear(&t.tmp)
-	append(&t.tmp, "\"\"\"\n" if multi else "\"")
-	hex := "0123456789abcdef"
-	for r in s {
-		switch {
-		case r == '"':
-			append(&t.tmp, '\\', '"')
-		case r == '\\':
-			append(&t.tmp, '\\', '\\')
-		case r == '\n':
-			if multi {
-				append(&t.tmp, '\n')
-			} else {
-				append(&t.tmp, '\\', 'n')
-			}
-		case r == '\t':
-			append(&t.tmp, '\\', 't')
-		case r == '\r':
-			append(&t.tmp, '\\', 'r')
-		case r == '\b':
-			append(&t.tmp, '\\', 'b')
-		case r == '\f':
-			append(&t.tmp, '\\', 'f')
-		case r < 0x20 || r == 0x7F:
-			append(&t.tmp, '\\', 'u', '0', '0', hex[r >> 4], hex[r & 15])
-		case r == utf8.RUNE_ERROR:
-			append(&t.tmp, "\xEF\xBF\xBD")
-		case:
-			buf, n := utf8.encode_rune(r)
-			append(&t.tmp, ..buf[:n])
+	spell_basic(t, s, multi, false)
+}
+
+// `basic_string` of `s`, appended to `t.tmp` or with `DIRECT` written to the output.
+@(private)
+spell_basic :: proc(t: ^Writing, s: string, multi: bool, $DIRECT: bool) {
+	emit :: #force_inline proc(t: ^Writing, b: []u8, $DIRECT: bool) {
+		when DIRECT {
+			write.put(t.out, b)
+		} else {
+			append(&t.tmp, ..b)
 		}
 	}
-	append(&t.tmp, "\"\"\"" if multi else "\"")
+	quote := transmute([]u8)string("\"\"\"\n" if multi else "\"")
+	emit(t, quote, DIRECT)
+	hex := "0123456789abcdef"
+	run := 0
+	for i := 0; i < len(s); {
+		i += write.clean_prefix(transmute([]u8)s[i:], .Toml_Basic)
+		if i == len(s) {
+			break
+		}
+		c := s[i]
+		if c >= 0x80 {
+			r, width := utf8.decode_rune_in_string(s[i:])
+			if !(r == utf8.RUNE_ERROR && width == 1) {
+				i += width
+				continue
+			}
+		}
+		emit(t, transmute([]u8)s[run:i], DIRECT)
+		i += 1
+		run = i
+		escape: [6]u8
+		n := 2
+		escape[0] = '\\'
+		switch {
+		case c == '"':
+			escape[1] = '"'
+		case c == '\\':
+			escape[1] = '\\'
+		case c == '\n' && multi:
+			escape[0], n = '\n', 1
+		case c == '\n':
+			escape[1] = 'n'
+		case c == '\t':
+			escape[1] = 't'
+		case c == '\r':
+			escape[1] = 'r'
+		case c == '\b':
+			escape[1] = 'b'
+		case c == '\f':
+			escape[1] = 'f'
+		case c < 0x20 || c == 0x7F:
+			escape = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 15]}
+			n = 6
+		case:
+			escape = {0xEF, 0xBF, 0xBD, 0, 0, 0}
+			n = 3
+		}
+		emit(t, escape[:n], DIRECT)
+	}
+	emit(t, transmute([]u8)s[run:], DIRECT)
+	emit(t, transmute([]u8)string("\"\"\"" if multi else "\""), DIRECT)
 }
 
 // Writes the indent of `level` levels.

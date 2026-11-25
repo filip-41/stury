@@ -38,6 +38,12 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 	if opts.format != nil || opts.indent != 0 || opts.tab || opts.ascii || opts.framing != .None {
 		return {}, tape.Bad_Option{"format" if opts.format != nil else "indent"}
 	}
+	if Spec(spec) == .Cbor {
+		if text, whole := verbatim_item(doc, opts); whole {
+			write.put(out, text)
+			return doc.present - {.Tag}, out.err
+		}
+	}
 	w: write.Tree
 	if e := write.tree_start(&w, doc, opts, {.Tag}, allocator); e != nil {
 		return {}, e
@@ -61,6 +67,19 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 		w.err = out.err
 	}
 	return dropped, w.err
+}
+
+// The source of a document read whole from CBOR, which `.Cbor` writes as it is: every item its source holds is valid
+// there, a tag included. False for a document that holds less than its source, a subtree and a sorted write.
+@(private)
+verbatim_item :: proc "contextless" (doc: ^tape.Document, opts: Write_Options) -> (text: []u8, whole: bool) {
+	if !read_as_cbor(doc) || opts.node != tape.ROOT || opts.sort_keys || doc.partial != nil || doc.ext != nil || len(doc.nodes) == 0 {
+		return nil, false
+	}
+	if doc.flags & {.Stopped, .Tolerated, .Cut, .Held, .Dropped, .Borrowed} != {} || doc.root_close != u64(len(doc.src)) || doc.nodes[0].role != .Value {
+		return nil, false
+	}
+	return doc.src, true
 }
 
 @(private)

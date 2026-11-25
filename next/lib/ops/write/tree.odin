@@ -433,3 +433,21 @@ open_row :: proc(w: ^Tree, at: tape.Node_Index) {
 	}
 	tape.destroy_children(&c)
 }
+
+// Whether the members of the container at `at` are its nodes in order, key and value for an object, with no table's rows
+// and no member a partial document left out.
+plain_members :: #force_inline proc "contextless" (w: ^Tree, at: tape.Node_Index) -> bool #no_bounds_check {
+	t := w.nodes[at]
+	return w.doc.ext == nil && t.kind >= .Array && t.spelling & tape.CONTAINER_PARTIAL == 0
+}
+
+// `tape.children` of the container at `at` for a walk that takes every member as written (`.Group`), which skips the
+// check of an object's keys for a repeat that `.Group` does not use. A table's rows and a partial container go through
+// `tape.children`.
+children_as_written :: proc(w: ^Tree, at: tape.Node_Index) -> (c: tape.Children, err: runtime.Allocator_Error) #no_bounds_check {
+	if plain_members(w, at) {
+		return tape.Children{container = at, next = at + 1}, nil
+	}
+	c, _, err = tape.children(w.reader, at, w.allocator)
+	return
+}

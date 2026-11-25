@@ -87,3 +87,26 @@ values_with_no_toml_spelling_are_refused :: proc(t: ^testing.T) {
 	_ = tape.ROOT
 	_ = testkit.deadline
 }
+
+// The writer takes the text of a number read from TOML as a TOML number, with no second check of it: signs, underscores,
+// exponents, a leading `+`, the bases and the infinite and not-a-number floats are written as the reader's values say.
+@(test)
+toml_numbers_write_as_the_reader_read_them :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := "a = 1\nb = +1\nc = -17\nd = 1_000\ne = 1e3\nf = 1E+3\ng = 6.626e-34\nh = 1_0.5_5\ni = +inf\nj = -inf\nk = nan\nl = +nan\n" +
+		"m = 0xDEAD_BEEF\nn = 0o755\no = 0b1010\np = -0.0\nq = +0\nr = 1e400\ns = -9223372036854775808\nu = 5e+22\n"
+	want := "a = 1\nb = 1\nc = -17\nd = 1000\ne = 1e3\nf = 1E+3\ng = 6.626e-34\nh = 10.55\ni = inf\nj = -inf\nk = nan\nl = nan\n" +
+		"m = 0xdeadbeef\nn = 0o755\no = 0b1010\np = -0.0\nq = 0\nr = 1e400\ns = -9223372036854775808\nu = 5e+22\n"
+	doc, err := toml.build(transmute([]u8)src, .Toml_1_0)
+	defer toml.destroy(&doc)
+	testing.expectf(t, err == nil, "%v", err)
+	text, _, werr := toml.write(&doc)
+	defer delete(text)
+	testing.expectf(t, werr == nil && string(text) == want, "%v\n%s", werr, text)
+	back, berr := toml.build(text, .Toml_1_0)
+	defer toml.destroy(&back)
+	testing.expectf(t, berr == nil, "%v", berr)
+	again, _, rerr := toml.write(&back)
+	defer delete(again)
+	testing.expectf(t, rerr == nil && string(again) == want, "%v\n%s", rerr, again)
+}

@@ -1,5 +1,6 @@
 package xml
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:encoding/base64"
 import "core:io"
@@ -57,13 +58,20 @@ Writing :: struct {
 	stack:  [dynamic]Open_Frame,
 	unit:   []u8, // what one level of indent is
 	xml:    bool, // the document is an XML text, whose attributes, instructions and declarations are written
+	read:   bool, // the document is the read of an XML text, whose texts with no decode hold no byte to escape but `>`
 	open:   bool, // a start tag is written but for its `>`
 	wrote:  bool,
 	pretty: bool, // the text is indented
 }
 
+// Added to the spec of a write of a document the token writer made, whose texts are values and not the text of a read.
 @(private)
-write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
+FROM_TOKENS :: u8(0x80)
+
+@(private)
+write_out :: proc(out: ^write.Out, doc: ^tape.Document, tagged: u8, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
+	read := tagged & FROM_TOKENS == 0
+	spec := tagged & ~FROM_TOKENS
 	if spec > u8(max(Spec)) {
 		return {}, tape.Bad_Option{"spec"}
 	}
@@ -78,7 +86,7 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 	if doc.nodes[opts.node].kind != .Object || tape.child_count(doc, opts.node, doc.nodes[opts.node]) != 1 {
 		w.err = write.Refused{opts.node, .No_Spelling}
 	} else {
-		s := Writing{out = out, w = &w, doc = doc, xml = x, pretty = !write.compact(opts)}
+		s := Writing{out = out, w = &w, doc = doc, xml = x, read = x && read, pretty = !write.compact(opts)}
 		s.unit = transmute([]u8)string("\t") if opts.tab else TABS[:int(opts.indent)]
 		s.stack.allocator = allocator
 		facts, tables := write.tree_facts(&w), write.tree_tables(&w)
@@ -109,7 +117,7 @@ fail :: proc(w: ^write.Tree, at: tape.Node_Index) {
 
 // Closes a start tag still open and, in indented text, starts a line at `level`.
 @(private)
-begin :: proc(s: ^Writing, level: int, pretty: bool) {
+begin :: #force_inline proc(s: ^Writing, level: int, pretty: bool) {
 	if s.open {
 		write.put_byte(s.out, '>')
 		s.open = false
@@ -173,9 +181,20 @@ comment_holds :: proc "contextless" (body: []u8) -> bool {
 
 // Whether the object at `at` holds a `#text` member, so that no whitespace may be added between its children.
 @(private)
-holds_text :: proc(w: ^write.Tree, at: tape.Node_Index) -> bool {
+holds_text :: proc(w: ^write.Tree, at: tape.Node_Index, xml: bool) -> bool {
 	end := tape.node_after(w.doc, at)
 	for k := at + 1; k < end; k = tape.node_after(w.doc, k + 1) {
+		// The reader marks the `#text` member of an XML document, whose text is no bytes of the source.
+		if xml {
+			if markup.is_text_key(w.nodes[k]) {
+				return true
+			}
+			continue
+		}
+		// A key with no escape has the length of its text.
+		if t := w.nodes[k]; t.spelling & tape.SPELLING_DECODE == 0 && int(t.n) != len(TEXT_KEY) {
+			continue
+		}
 		if name, ok := write.text_of(w, k); ok && name == TEXT_KEY {
 			return true
 		}
@@ -210,7 +229,9 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 			if top.root {
 				// What follows the root element, each on a line of its own.
 				when FACTS {
-					put_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, 0, s.pretty, true)
+					if len(step.facts) != 0 {
+						put_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, 0, s.pretty, true)
+					}
 				}
 				continue
 			}
@@ -226,7 +247,9 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 				s.open = false
 			} else {
 				when FACTS {
-					put_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, top.level + 1, top.pretty, false)
+					if len(step.facts) != 0 {
+						put_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, top.level + 1, top.pretty, false)
+					}
 				}
 				begin(s, top.level, top.pretty)
 				write.put(out, transmute([]u8)string("</"))
@@ -235,7 +258,9 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 				write.put_byte(out, '>')
 			}
 			when FACTS {
-				put_misc(s, step.facts, {.Comment_Inline}, 0, false, false)
+				if len(step.facts) != 0 {
+					put_misc(s, step.facts, {.Comment_Inline}, 0, false, false)
+				}
 			}
 			continue
 		}
@@ -251,7 +276,9 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 		if len(s.stack) == 0 {
 			// The document's object, whose declaration and document type stand before its element.
 			when FACTS {
-				put_misc(s, step.facts, {.Comment, .Instruction, .Directive, .Doctype}, 0, s.pretty, false)
+				if len(step.facts) != 0 {
+					put_misc(s, step.facts, {.Comment, .Instruction, .Directive, .Doctype}, 0, s.pretty, false)
+				}
 			}
 			if _, e := append(&s.stack, Open_Frame{root = true, pretty = s.pretty, level = -1}); e != nil {
 				w.err = e
@@ -274,7 +301,9 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 		}
 		level := parent.level + 1
 		when FACTS {
-			put_misc(s, step.facts, {.Comment, .Instruction}, level, parent.pretty, !step.first && !parent.text)
+			if len(step.facts) != 0 {
+				put_misc(s, step.facts, {.Comment, .Instruction}, level, parent.pretty, !step.first && !parent.text)
+			}
 		}
 		if name == TEXT_KEY {
 			begin(s, 0, false)
@@ -284,11 +313,14 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 			}
 			continue
 		}
-		if !is_name(name) {
+		if !s.xml && !is_name(name) {
 			fail(w, name_node)
 			return
 		}
 		begin(s, level, parent.pretty)
+		if step.kind == .Scalar && len(step.facts) == 0 && put_leaf(s, name, step.node) {
+			continue
+		}
 		write.put_byte(out, '<')
 		write.put(out, transmute([]u8)name)
 		when FACTS {
@@ -297,7 +329,7 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 			}
 		}
 		if step.kind == .Open {
-			text := holds_text(w, step.node)
+			text := holds_text(w, step.node, s.xml)
 			frame := Open_Frame{name = name_node, level = level, pretty = parent.pretty && !text, text = text}
 			if _, e := append(&s.stack, frame); e != nil {
 				w.err = e
@@ -320,7 +352,9 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 				return
 			}
 			when FACTS {
-				put_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, 0, false, false)
+				if len(step.facts) != 0 {
+					put_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, 0, false, false)
+				}
 			}
 			write.put(out, transmute([]u8)string("</"))
 			again, _ := write.text_of(w, name_node)
@@ -328,7 +362,9 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 			write.put_byte(out, '>')
 		}
 		when FACTS {
-			put_misc(s, step.facts, {.Comment_Inline}, 0, false, false)
+			if len(step.facts) != 0 {
+				put_misc(s, step.facts, {.Comment_Inline}, 0, false, false)
+			}
 		}
 	}
 }
@@ -357,26 +393,64 @@ put_attributes :: proc(s: ^Writing, facts: []tape.Fact) {
 	}
 }
 
+// The text of the scalar at `at` as the walk reads it, in `buf` or the walk's scratch. False for a scalar that is not
+// written as text of its own, and with `w.err` set when memory is refused.
+@(private)
+scalar_text :: #force_inline proc(w: ^write.Tree, at: tape.Node_Index, buf: ^[write.NUMBER_ROOM]u8) -> (s: string, ok: bool) {
+	#partial switch w.nodes[at].kind {
+	case .True:
+		return "true", true
+	case .False:
+		return "false", true
+	case .Number:
+		return write.number_text(w, at, buf)
+	case .String, .Plain:
+		return write.text_of(w, at)
+	}
+	return "", false
+}
+
+// Writes the element `<name>text</name>` whole when the scalar at `at` has a text with nothing to escape that fits one
+// room of the output, with one copy per part. Returns false, having written nothing, for any other.
+@(private)
+put_leaf :: proc(s: ^Writing, name: string, at: tape.Node_Index) -> bool {
+	buf: [write.NUMBER_ROOM]u8 = ---
+	text, ok := scalar_text(s.w, at, &buf)
+	n := len(name)
+	total := 2 * n + len(text) + 5
+	// The reader reads a text with a `<`, `&`, CR or control byte as decoded or refuses it, so a text of a read with no
+	// decode is written as it stands, a `>` too.
+	node := s.w.nodes[at]
+	raw := s.read && node.kind == .String && node.spelling & tape.SPELLING_DECODE == 0 && .Held not_in s.doc.flags
+	if !ok || total + 16 > write.ROOM_MAX {
+		return false
+	}
+	p := write.room(s.out, total + 16)
+	p[0] = '<'
+	intrinsics.mem_copy_non_overlapping(p[1:], raw_data(name), n)
+	p[1 + n] = '>'
+	if raw {
+		intrinsics.mem_copy_non_overlapping(p[2 + n:], raw_data(text), len(text))
+	} else if !write.copy_clean(p[2 + n:], transmute([]u8)text, .Xml_Text) {
+		return false
+	}
+	q := p[2 + n + len(text):]
+	q[0], q[1] = '<', '/'
+	intrinsics.mem_copy_non_overlapping(q[2:], raw_data(name), n)
+	q[2 + n] = '>'
+	s.out.cursor += total
+	s.wrote = true
+	return true
+}
+
 // Writes the text of the scalar at `at`, `&`, `<`, `>` and a carriage return as references. False for a number with no
 // text, a control character that XML forbids, or with `w.err` set when memory is refused.
 @(private)
 put_text :: proc(s: ^Writing, at: tape.Node_Index) -> bool {
 	out, w := s.out, s.w
 	s.wrote = true
-	n := w.nodes[at]
-	buf: [write.NUMBER_ROOM]u8
-	s: string
-	#partial switch n.kind {
-	case .True:
-		s = "true"
-	case .False:
-		s = "false"
-	case .Number:
-		ok: bool
-		if s, ok = write.number_text(w, at, &buf); !ok {
-			return false
-		}
-	case .Bytes:
+	buf: [write.NUMBER_ROOM]u8 = ---
+	if w.nodes[at].kind == .Bytes {
 		payload, ok := write.text_of(w, at)
 		if !ok {
 			return false
@@ -389,36 +463,30 @@ put_text :: proc(s: ^Writing, at: tape.Node_Index) -> bool {
 		defer delete(encoded, w.allocator)
 		write.put(out, transmute([]u8)encoded)
 		return true
-	case .String, .Plain:
-		ok: bool
-		if s, ok = write.text_of(w, at); !ok {
-			return false
-		}
-	case:
+	}
+	text, ok := scalar_text(w, at, &buf)
+	if !ok {
 		return false
 	}
-	run := 0
-	b := transmute([]u8)s
-	for c, i in b {
+	b := transmute([]u8)text
+	for len(b) > 0 {
+		clean := write.clean_prefix(b, .Xml_Text)
+		write.put(out, b[:clean])
+		if clean == len(b) {
+			break
+		}
 		ref: string
-		switch c {
+		switch b[clean] {
 		case '&': ref = "&amp;"
 		case '<': ref = "&lt;"
 		case '>': ref = "&gt;"
 		case '\r': ref = "&#13;"
-		case 0 ..< 0x20:
-			if c != '\t' && c != '\n' {
-				return false
-			}
-			continue
 		case:
-			continue
+			return false
 		}
-		write.put(out, b[run:i])
 		write.put(out, transmute([]u8)ref)
-		run = i + 1
+		b = b[clean + 1:]
 	}
-	write.put(out, b[run:])
 	return true
 }
 
