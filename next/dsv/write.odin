@@ -31,6 +31,12 @@ write_to :: proc(sink: io.Writer, doc: ^tape.Document, spec := Spec.Csv, opts :=
 
 @(private)
 write_out :: proc(out: ^write.Out, doc: ^tape.Document, wanted: u8, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
+	return write_rows(out, doc, wanted, opts, allocator, nil)
+}
+
+// `write_out`, of one batch of a table written in batches when `stream` is given.
+@(private)
+write_rows :: proc(out: ^write.Out, doc: ^tape.Document, wanted: u8, opts: Write_Options, allocator: runtime.Allocator, stream: ^write.Table_Stream) -> (tape.Facts, write.Error) {
 	if wanted > u8(max(Spec)) {
 		return {}, tape.Bad_Option{"spec"}
 	}
@@ -67,5 +73,5 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, wanted: u8, opts: Write_
 		verbatim = r == d
 	}
 	cells := [Spec]write.Cells{.Csv = .Quoted, .Tsv = .Escaped, .Plain = .Bare}
-	return write.table(out, doc, &FORMATS[spec], cells[spec], d, verbatim, opts, allocator)
+	return write.table(out, doc, &FORMATS[spec], cells[spec], d, verbatim, opts, allocator, stream)
 }

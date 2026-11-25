@@ -41,7 +41,22 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 	if opts.format != nil {
 		return {}, tape.Bad_Option{"format"}
 	}
-	switch Spec(spec) {
+	if opts.framing == .Lines && !write.compact(opts) {
+		return {}, tape.Bad_Option{"framing"}
+	}
+	if opts.framing == .Seq {
+		write.put_byte(out, RECORD_SEPARATOR)
+	}
+	dropped, err := write_spec(out, doc, Spec(spec), opts, allocator)
+	if opts.framing != .None && err == nil {
+		write.put_byte(out, '\n')
+	}
+	return dropped, err
+}
+
+@(private)
+write_spec :: proc(out: ^write.Out, doc: ^tape.Document, spec: Spec, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
+	switch spec {
 	case .Json:
 		return write_as(out, doc, .Json, opts, allocator)
 	case .Jsonc:
@@ -50,6 +65,10 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 	}
 	return write_as(out, doc, .Json5, opts, allocator)
 }
+
+// The byte that starts each text of an RFC 7464 sequence.
+@(private)
+RECORD_SEPARATOR :: 0x1E
 
 // What a JSON write knows of its document and layout, and where its comments stand.
 @(private)

@@ -21,9 +21,23 @@ Options :: struct {
 	// A JSON target spells each character past ASCII in a string, key or comment as a `\u` escape, a surrogate pair
 	// past U+FFFF.
 	ascii:  bool,
+	// Each value written is a record of its own: a line (NDJSON, a compact text only) or an RFC 7464 sequence's, which
+	// starts with a record separator and ends with a line feed. A token writer takes any number of root values then.
+	framing: Record_Framing,
+	// A delimited token writer holds every row and writes the header of every key in first-seen order at its end. Without
+	// it the header is the caller's, else the first row's keys, rows are written as they come, and a later row's key the
+	// header lacks is `Refused{.Row_Keys}`. A write of a document writes the union of its keys either way.
+	grow_header: bool,
 	// The target's own options, as a read takes them: a delimited target's `Dsv_Options`. Nil takes those a delimited
 	// document was read with, else the target's defaults. Another family's options are `Bad_Option{"format"}`.
 	format: tape.Format_Options,
+}
+
+// How a text of values frames each one, as `Options.framing` says.
+Record_Framing :: enum u8 {
+	None,
+	Lines,
+	Seq,
 }
 
 // Why a write refused a value, which `Refused` names with its node.
@@ -38,6 +52,9 @@ Refusal :: enum u8 {
 	// A container a path read kept only part of, or that a text cut inside its root left open, which would be written
 	// as less than the text holds. A text cut inside a scalar root is this refusal at the root.
 	Partial,
+	// A token the sequence cannot take at that place, or one that opens past the depth a caller holds, with the index
+	// of the token as `node`.
+	Malformed,
 }
 
 // A value the target cannot write as the document holds it, and the node it is.

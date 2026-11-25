@@ -15,7 +15,6 @@ is_date_time :: proc "contextless" (s: string) -> bool {
 }
 
 // Whether `s` is an RFC 3339 `full-date`.
-@(private)
 is_full_date :: proc "contextless" (s: string) -> bool {
 	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
 		return false

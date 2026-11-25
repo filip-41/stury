@@ -85,6 +85,7 @@ Tree :: struct {
 	// Under `sort_keys`, the members of the open objects, each object's above its parent's. The members leave text
 	// order, so a node's facts are found by its index.
 	sort_keys: bool,
+	length_first: bool, // with `sort_keys`, a shorter key first, as CBOR orders text keys
 	pairs:     [dynamic]Pair,
 	allocator: runtime.Allocator,
 	err:       Error,
@@ -308,7 +309,11 @@ sort_members :: proc(w: ^Tree, f: ^Frame) {
 		w.i, w.depth = w.end, 0
 		return
 	}
-	slice.stable_sort_by(members, proc(a, b: Pair) -> bool {return a.name < b.name})
+	if w.length_first {
+		slice.stable_sort_by(members, proc(a, b: Pair) -> bool {return len(a.name) < len(b.name) || len(a.name) == len(b.name) && a.name < b.name})
+	} else {
+		slice.stable_sort_by(members, proc(a, b: Pair) -> bool {return a.name < b.name})
+	}
 }
 
 // Frees the names of `pairs[lo:]` the walk cloned and drops those members.

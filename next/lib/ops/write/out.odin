@@ -69,7 +69,6 @@ to_sink :: proc(sink: io.Writer, doc: ^tape.Document, spec: u8, opts: Options, a
 
 // Starts an output into a buffer of at least `hint` bytes, or into `sink` when it has a procedure. It allocates its
 // buffer here, so a refusal is the error and no writer runs.
-@(private)
 out_start :: proc(out: ^Out, allocator: runtime.Allocator, sink: io.Writer, hint: int) -> runtime.Allocator_Error {
 	out^ = {sink = sink, allocator = allocator}
 	size := SINK_BYTES if sink.procedure != nil else max(hint, ROOM_MAX)
@@ -148,7 +147,6 @@ drain :: proc(out: ^Out) {
 // Ends the output. A buffer output returns its bytes, which the caller owns and frees with the allocator it gave, or
 // nil and the error. A sink output writes what it holds to the sink and returns no bytes. Either frees what it holds
 // and is not used again.
-@(private)
 out_finish :: proc(out: ^Out) -> (text: []u8, err: Error) {
 	if out.sink.procedure != nil {
 		if out.err == nil && out.cursor > 0 {
@@ -165,7 +163,6 @@ out_finish :: proc(out: ^Out) -> (text: []u8, err: Error) {
 }
 
 // Frees an output that `out_finish` did not end, for a writer that stops on a refusal.
-@(private)
 out_drop :: proc(out: ^Out) {
 	runtime.mem_free_with_size(out.buf, out.size, out.allocator)
 	out^ = {}

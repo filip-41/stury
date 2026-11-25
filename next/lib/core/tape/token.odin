@@ -272,3 +272,18 @@ digit_spelling :: #force_inline proc "contextless" (int_digits, frac_digits: u64
 		return 0
 	}
 }
+
+// The tokens a caller writes a value as, one at a time, and a typed write gives a writer: a container opens, holds
+// its members' keys with a value after each or its elements, and closes.
+Token_Kind :: enum u8 {
+	Object, // opens an object
+	Array, // opens an array
+	Key, // a member's key, whose value is the next token
+	String, // text, as UTF-8
+	Number, // the decimal text of a number
+	True,
+	False,
+	Null,
+	Close, // closes the innermost container
+}
+

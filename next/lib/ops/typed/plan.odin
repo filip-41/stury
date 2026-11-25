@@ -95,6 +95,8 @@ Meta :: struct {
 	zeroed:    bool, // a list whose new elements start zeroed, as their readers may leave bytes unwritten
 	frees:     bool, // a value of the record may hold a block: a string, a list, a map or a pointer, or one in place
 	must:      bool, // a `required` member
+	omit_empty: bool, // a member a write leaves out when its value is empty (`omitempty`)
+	omit_unset: bool, // a member a write leaves out when it is a nil pointer, `Maybe` or union (`omitunset`)
 	signed:    bool, // a `Bit_Set` of integers
 }
 
@@ -572,6 +574,7 @@ Member :: struct {
 	type:     ^runtime.Type_Info,
 	offset:   uintptr,
 	required: bool,
+	omit_empty, omit_unset: bool,
 	spelled:  bool, // `name` is a span of `Builder.strings`, which `plan_finish` places
 	lo:       int,
 }
@@ -612,6 +615,7 @@ fill_struct :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, v: ^runtime.Ty
 		r := block + i
 		m := &b.meta[b.records[r].meta]
 		m.must, m.field = member.required, member.field
+		m.omit_empty, m.omit_unset = member.omit_empty, member.omit_unset
 		if member.required {
 			b.meta[b.records[block + len(members)].meta].required = u32(i + 1)
 		}
@@ -656,7 +660,7 @@ gather_members :: proc(b: ^Builder, v: ^runtime.Type_Info_Struct, base: uintptr,
 		if t.skip {
 			continue
 		}
-		member := Member{name = t.name, field = name, type = type, offset = offset, required = t.required, spelled = t.spelled, lo = t.lo}
+		member := Member{name = t.name, field = name, type = type, offset = offset, required = t.required, omit_empty = t.omit_empty, omit_unset = t.omit_unset, spelled = t.spelled, lo = t.lo}
 		if _, err := append(out, member); err != nil {
 			b.err = err
 			return
@@ -672,6 +676,7 @@ Member_Tag :: struct {
 	lo:       int,
 	skip:     bool,
 	required: bool,
+	omit_empty, omit_unset: bool,
 }
 
 // Reads the tag of member `name`: the value under the plan's tag key, or else under `stury`, is `name,flag,flag`, or `-`
@@ -722,7 +727,11 @@ member_tag :: proc(b: ^Builder, name, tag: string) -> (t: Member_Tag, ok: bool) 
 			k += 1
 		}
 		switch flags[:k] {
-		case "", "omitempty", "omitunset":
+		case "":
+		case "omitempty":
+			t.omit_empty = true
+		case "omitunset":
+			t.omit_unset = true
 		case "required":
 			t.required = true
 		case:

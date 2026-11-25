@@ -24,14 +24,93 @@ Cells :: enum u8 {
 	Bare,
 }
 
+// What a table written in batches keeps from one batch to the next, so its rows are written as they come and no union of
+// keys is held. A batch is a document whose root array holds rows, led by a carrier object of the header's keys once
+// the header is known. Objects whose keys the header lacks are `Refused{.Row_Keys}`, and rows of another shape than the
+// first's `Refused{.Not_A_Table}`.
+Table_Stream :: struct {
+	names:     [dynamic]string, // the header's keys in the order they are written
+	known:     bool, // `names` is the header, which the first element of each batch carries
+	headed:    bool, // the header line is written
+	started:   bool, // a line is written
+	shape:     Rows_Shape,
+	width:     int, // the cells of each row of `.Cells`
+	allocator: runtime.Allocator,
+}
+
+// What a table's rows are.
+Rows_Shape :: enum u8 {
+	Unset,
+	Objects,
+	Cells,
+	Scalars,
+}
+
+// Starts `s` under `header`, whose keys are copied, in the order of their texts under `sort_keys`, nil for the keys of
+// the first row. A key repeated is `Bad_Option{"header"}`.
+table_stream_start :: proc(s: ^Table_Stream, header: []string, sort_keys: bool, allocator: runtime.Allocator) -> Error {
+	s^ = {allocator = allocator, known = len(header) > 0}
+	s.names.allocator = allocator
+	for k in header {
+		name, err := strings.clone(k, allocator)
+		if err == nil {
+			_, err = append(&s.names, name)
+		}
+		if err != nil {
+			table_stream_drop(s)
+			return err
+		}
+	}
+	if sort_keys {
+		slice.stable_sort(s.names[:])
+	}
+	repeated := false
+	if len(header) > 1 {
+		copied := slice.clone(s.names[:], allocator)
+		slice.sort(copied)
+		for i in 1 ..< len(copied) {
+			repeated ||= copied[i] == copied[i - 1]
+		}
+		delete(copied, allocator)
+	}
+	if repeated {
+		table_stream_drop(s)
+		return tape.Bad_Option{"header"}
+	}
+	return nil
+}
+
+// Frees what `s` holds.
+table_stream_drop :: proc(s: ^Table_Stream) {
+	for name in s.names {
+		delete(name, s.allocator)
+	}
+	delete(s.names)
+	s^ = {}
+}
+
+// Gives the tape `t`, which a batch starts, the carrier of the header, once it is known. Returns the nodes it holds.
+table_stream_carry :: proc(s: ^Table_Stream, t: ^Token_Tape) -> (nodes: int, err: Error) {
+	if !s.known {
+		return 0, nil
+	}
+	token_tape_take(t, .Object, "") or_return
+	for name in s.names {
+		token_tape_take(t, .Key, name) or_return
+		token_tape_take(t, .Null, "") or_return
+	}
+	token_tape_take(t, .Close, "") or_return
+	return 1 + 2 * len(s.names), nil
+}
+
 // Writes value `opts.node` of `doc` as a delimited text whose cells `cells` spells and whose options are `d`, its
 // delimiter resolved, for target `target`. Comments on the table and its records are written as comment lines under a
 // comment byte. Returns the fact kinds dropped.
-table :: proc(out: ^Out, doc: ^tape.Document, target: ^tape.Format, cells: Cells, d: tape.Dsv_Options, verbatim: bool, opts: Options, allocator: runtime.Allocator) -> (dropped: tape.Facts, err: Error) {
+table :: proc(out: ^Out, doc: ^tape.Document, target: ^tape.Format, cells: Cells, d: tape.Dsv_Options, verbatim: bool, opts: Options, allocator: runtime.Allocator, stream: ^Table_Stream = nil) -> (dropped: tape.Facts, err: Error) {
 	holds := target.facts if d.comment != 0 else {}
 	w: Tree
 	tree_start(&w, doc, opts, holds, allocator) or_return
-	t := Table_Write{w = &w, out = out, cells = cells, d = d, native = doc.format.options == .Dsv, whole = .Held not_in doc.flags}
+	t := Table_Write{w = &w, out = out, cells = cells, d = d, stream = stream, native = doc.format.options == .Dsv, whole = .Held not_in doc.flags}
 	t.verbatim = verbatim && t.native && t.whole
 	t.translate = !t.verbatim && t.native && t.whole && !d.infer
 	// The bytes a cell's spec must quote, escape or refuse, and the first bytes that may make a cell read as another
@@ -65,7 +144,13 @@ table :: proc(out: ^Out, doc: ^tape.Document, target: ^tape.Format, cells: Cells
 	}
 	index := tape.Doc_Index{allocator = allocator}
 	w.reader.index = &index
-	table_rows(&t, opts.sort_keys)
+	if stream != nil {
+		t.started, t.carrier = stream.started, stream.known
+	}
+	table_rows(&t, opts.sort_keys && !(stream != nil && stream.known))
+	if stream != nil {
+		stream.started = t.started
+	}
 	tape.destroy(&index)
 	delete(t.keys_at)
 	delete(t.order, allocator)
@@ -85,6 +170,8 @@ Table_Write :: struct {
 	native:  bool, // the document is delimited, so a number's bytes are its text
 	whole:   bool, // the document holds its text whole, so an unescaped cell's text is its span
 	started: bool, // a line is written, so no cell starts the text
+	stream:  ^Table_Stream, // the table is written in batches
+	carrier: bool, // the batch's first element carries the header
 	// While the header is written, its width. Its keys read as keys, never null and never typed.
 	keys:    int,
 	// The document is a text of the target spec read under the target's options, so a cell it read unquoted and
@@ -144,18 +231,31 @@ table_rows :: proc(t: ^Table_Write, sort_keys: bool) {
 		w.err = tape.Bad_Option{"no_header"}
 		return
 	}
+	if t.stream != nil && !stream_shape(t, root, header, objects) {
+		return
+	}
 	if header.node != tape.NO_NODE && !header_columns(t, &header, root, single, sort_keys) {
+		return
+	}
+	if t.stream != nil && !stream_names(t, header) {
 		return
 	}
 	lo := node_facts(w, root)
 	root_facts := w.facts[lo:w.fact]
 	put_comments(t, root_facts, .Comment, ~tape.Facts{.Comment, .Comment_Foot})
-	if header.node != tape.NO_NODE && !t.d.no_header && !table_header_line(t, header) {
+	headed := t.stream != nil && t.stream.headed
+	if header.node != tape.NO_NODE && !t.d.no_header && !headed && !table_header_line(t, header) {
 		return
+	}
+	if t.stream != nil {
+		t.stream.headed = true
 	}
 	first, end := root + 1, tape.node_after(doc, root)
 	if single {
 		first = root
+	}
+	if t.carrier {
+		first = tape.node_after(doc, root + 1)
 	}
 	for at := first; at < end; at = tape.node_after(doc, at) {
 		if doc.nodes[at].kind > .Plain && doc.nodes[at].spelling & tape.CONTAINER_PARTIAL != 0 {
@@ -201,6 +301,51 @@ table_header :: proc(t: ^Table_Write, root: tape.Node_Index, single: bool) -> (h
 		return {node = tape.NO_NODE, width = tape.child_count(doc, root + 1, doc.nodes[root + 1])}, false, true
 	}
 	return {node = tape.NO_NODE, width = 1, scalars = true}, false, true
+}
+
+// Judges the shape of the rows of a batch as the stream's: the first batch sets it, and a batch of the header's keys
+// carries them first.
+@(private)
+stream_shape :: proc(t: ^Table_Write, root: tape.Node_Index, h: Header, objects: bool) -> bool {
+	s := t.stream
+	shape := Rows_Shape.Objects if h.node != tape.NO_NODE && objects else Rows_Shape.Scalars if h.scalars else Rows_Shape.Cells
+	if s.shape == .Unset {
+		s.shape, s.width = shape, h.width
+	}
+	switch {
+	case shape != s.shape:
+		t.w.err = Refused{root + 1, .Not_A_Table}
+	case shape == .Cells && h.width != s.width:
+		t.w.err = Refused{root + 1, .Row_Keys}
+	case:
+		return true
+	}
+	return false
+}
+
+// Keeps the keys of the first row of a stream whose header is not known, in the order they are written, as its header.
+@(private)
+stream_names :: proc(t: ^Table_Write, h: Header) -> bool {
+	s := t.stream
+	if s.known || h.node == tape.NO_NODE {
+		return true
+	}
+	for c in 0 ..< h.width {
+		text, ok := text_of(t.w, t.keys_at[column(t, c)])
+		if !ok {
+			return false
+		}
+		name, err := strings.clone(text, s.allocator)
+		if err == nil {
+			_, err = append(&s.names, name)
+		}
+		if err != nil {
+			t.w.err = err
+			return false
+		}
+	}
+	s.known = true
+	return true
 }
 
 // Lists the key of each column of header `h`, for records that are objects the union of their keys in the order they
@@ -272,6 +417,10 @@ key_union :: proc(t: ^Table_Write, h: ^Header, root: tape.Node_Index, single: bo
 	first, end := root + 1, tape.node_after(doc, root)
 	if single {
 		first = root
+	}
+	if t.stream != nil {
+		// A stream's header is its first row's keys.
+		end = tape.node_after(doc, first)
 	}
 	err: runtime.Allocator_Error
 	for at := first; err == nil && at < end; at = tape.node_after(doc, at) {
@@ -465,6 +614,7 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 				break
 			}
 		}
+		found := 0
 		for j in 0 ..< h.width {
 			if j > 0 {
 				put_byte(t.out, t.d.delimiter)
@@ -482,9 +632,15 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 				w.err = Refused{at, .No_Spelling}
 				return false
 			}
+			found += 1
 			if !put_record_cell(t, value, j) {
 				return false
 			}
+		}
+		// A stream's header is its first row's, so a key it lacks has no column, and a key repeated has none for its second.
+		if t.stream != nil && found < tape.child_count(doc, at, node) {
+			w.err = Refused{at, .Row_Keys}
+			return false
 		}
 	case:
 		w.err = Refused{at, .Not_A_Table}

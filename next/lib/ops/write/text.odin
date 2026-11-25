@@ -251,7 +251,6 @@ decimal_of_hex :: proc "contextless" (dst, b: []u8) -> int #no_bounds_check {
 }
 
 // Whether `b` is one RFC 8259 number, with nothing before or after it.
-@(private)
 is_json_number :: #force_inline proc "contextless" (b: []u8) -> bool #no_bounds_check {
 	if len(b) == 0 || (b[0] != '-' && b[0] - '0' >= 10) {
 		return false
