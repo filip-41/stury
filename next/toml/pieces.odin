@@ -22,6 +22,9 @@ import "stury:lib/ops/build"
 // keeps from the first byte of what it has read and not given, so a text of tables written one after another is held
 // from its second table on.
 
+@(private = "file")
+Tree_Budget :: hook.Memory_Budget
+
 // What a read of a text in pieces keeps from one window to the next, besides the state `hook.Piece_State` holds.
 @(private)
 Piece :: struct {
@@ -35,6 +38,7 @@ Piece :: struct {
 	first:       bool, // the first statement is read, which a hook that can stop is given the root after
 	rooted:      bool, // the root's tokens were given
 	counts:      bool, // the walk counts `Budget.steps`
+	tree_budget: Tree_Budget, // counts `opts.scratch` against `Budget.memory`
 }
 
 // Where the search for a statement's end is. A statement ends at a line end outside a comment, a string and a bracket.
@@ -237,8 +241,9 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 			p.more, p.at, p.keep, p.open = true, to, 0, nil
 			return 0, nil, false
 		}
-		if !parser_init(&s.parser, text, S == .Toml_1_1, build.read_depth(opts)) {
-			return 0, runtime.Allocator_Error.Out_Of_Memory, false
+		tree_allocator := hook.scratch(opts, lists, &s.tree_budget)
+		if !parser_init(&s.parser, text, S == .Toml_1_1, build.read_depth(opts), tree_allocator) {
+			return 0, hook.memory_budget_error(&s.tree_budget, runtime.Allocator_Error.Out_Of_Memory), false
 		}
 		s.begun = true
 		s.frames.allocator, s.steps_buf.allocator = lists, lists
@@ -286,7 +291,7 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 		return to, nil, false
 	}
 	root_close, err, _ = hook.walk_error(r, &RULES)
-	return root_close, err, false
+	return root_close, hook.memory_budget_error(&s.tree_budget, err), false
 }
 
 // Reads on from where the last window stopped, to where this one ends or the walk does.

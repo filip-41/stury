@@ -137,3 +137,55 @@ memory_budget_peers_share_a_limit :: proc(t: ^testing.T) {
 	testing.expect_value(t, runtime.mem_free_with_size(raw_data(first), 60, hook.memory_budget(&a)), nil)
 	testing.expect_value(t, runtime.mem_free_with_size(raw_data(second), 40, hook.memory_budget(&b)), nil)
 }
+
+// `hook.scratch` defaults to the caller's allocator, uses `Options.scratch` directly with no budget, shares one limit
+// through `Read_Budget` when set, and never writes `peer` or `refused` into a caller's `Memory_Budget`.
+@(test)
+scratch_counts_without_mutating_caller_budget :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	arena: mem.Arena
+	backing: [256]u8
+	mem.arena_init(&arena, backing[:])
+	arena_a := mem.arena_allocator(&arena)
+
+	// Unset scratch keeps the caller's allocator (no default-heap fallback).
+	local: hook.Memory_Budget
+	testing.expect(t, hook.scratch({}, arena_a, &local).procedure == arena_a.procedure)
+
+	// Explicit scratch with no budget returns `opts.scratch` untouched.
+	caller_m := hook.Memory_Budget{backing = context.allocator, limit = 100}
+	caller_a := hook.memory_budget(&caller_m)
+	testing.expect(t, hook.scratch({scratch = arena_a}, caller_a, &local).procedure == arena_a.procedure)
+	testing.expect(t, caller_m.peer == nil && !caller_m.refused)
+
+	// Explicit scratch with a budget over a caller's `Memory_Budget` counts against its `held` without writing into it.
+	held, err := runtime.mem_alloc(60, 8, caller_a)
+	testing.expect_value(t, err, nil)
+	defer runtime.mem_free_with_size(raw_data(held), 60, caller_a)
+	local = {}
+	sc := hook.scratch({budget = {memory = 100}, scratch = context.allocator}, caller_a, &local)
+	_, err = runtime.mem_alloc(41, 8, sc)
+	testing.expect_value(t, err, runtime.Allocator_Error.Out_Of_Memory)
+	testing.expect(t, caller_m.peer == nil && !caller_m.refused)
+	testing.expect(t, local.refused)
+	testing.expect_value(t, hook.memory_budget_error(&local, err), tape.Error(tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}))
+
+	// `Read_Budget` pairs `main` and `scratch` symmetrically in both directions.
+	rb: hook.Read_Budget
+	opts := tape.Options{budget = {memory = 100}, scratch = context.allocator}
+	main_a := hook.read_budget(&rb, opts, context.allocator)
+	local = {}
+	scratch_a := hook.scratch(opts, main_a, &local)
+	sblock, serr := runtime.mem_alloc(60, 8, scratch_a)
+	testing.expect_value(t, serr, nil)
+	_, merr := runtime.mem_alloc(41, 8, main_a)
+	testing.expect_value(t, merr, runtime.Allocator_Error.Out_Of_Memory)
+	testing.expect_value(t, hook.memory_budget_error(&rb.main, merr), tape.Error(tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}))
+	mblock, merr2 := runtime.mem_alloc(40, 8, main_a)
+	testing.expect_value(t, merr2, nil)
+	_, serr2 := runtime.mem_alloc(1, 8, scratch_a)
+	testing.expect_value(t, serr2, runtime.Allocator_Error.Out_Of_Memory)
+	testing.expect_value(t, hook.memory_budget_error(&rb.main, serr2), tape.Error(tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}))
+	testing.expect_value(t, runtime.mem_free_with_size(raw_data(mblock), 40, main_a), nil)
+	testing.expect_value(t, runtime.mem_free_with_size(raw_data(sblock), 60, scratch_a), nil)
+}

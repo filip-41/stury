@@ -47,6 +47,10 @@ Options :: struct {
 	// The options only one format family has, which every other family's reads refuse as `Bad_Option{"format"}`. Nil
 	// takes the family's defaults.
 	format:   Format_Options,
+	// Where short-lived scratch memory freed before a read returns comes from (as a TOML read's table tree). Zero
+	// takes the caller's allocator; pass the heap or a second arena so a read into an arena keeps only its result.
+	// Counted against `Budget.memory` with the read's own blocks.
+	scratch:  runtime.Allocator,
 }
 
 // The options of a read that one format family alone has, an arm per family. The union is closed and frozen before the C

@@ -36,8 +36,8 @@ read_validate :: #force_inline proc(src: []u8, format: ^tape.Format, opts: tape.
 	}
 	h: hook.No_Hooks
 	regs: hook.Regs
-	m: hook.Memory_Budget
-	a := read_allocator(&m, opts, caller)
+	m: hook.Read_Budget
+	a := hook.read_budget(&m, opts, caller)
 	err: tape.Error
 	if len(src) > frame_levels {
 		ctx := context
@@ -45,7 +45,7 @@ read_validate :: #force_inline proc(src: []u8, format: ^tape.Format, opts: tape.
 	} else {
 		_, err, _ = walk(src, opts, &h, &regs, a, nil)
 	}
-	return hook.memory_budget_error(&m, err)
+	return hook.memory_budget_error(&m.main, err)
 }
 
 // Builds the document of `src`, a text of `format`, which starts with room for a node per `bytes_per_node` bytes. `finish`
@@ -54,15 +54,15 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 	if e := tape.options_refused(format, opts); e != nil {
 		return {}, e
 	}
-	m: hook.Memory_Budget
-	allocator := read_allocator(&m, opts, caller)
+	m: hook.Read_Budget
+	allocator := hook.read_budget(&m, opts, caller)
 	depth := min(read_depth(opts), u64(len(src)))
 	most := node_most(bound(src, depth), opts)
 	frames: [FRAME_DEPTH]u64 = ---
 	b: Builder = ---
-	builder_start(&b, src, format, len(src) / bytes_per_node, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m if opts.budget.memory != 0 else nil, counts = most)
+	builder_start(&b, src, format, len(src) / bytes_per_node, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m.main if opts.budget.memory != 0 else nil, counts = most)
 	if b.err != nil {
-		return {}, hook.memory_budget_error(&m, b.err)
+		return {}, hook.memory_budget_error(&m.main, b.err)
 	}
 	regs := builder_regs(&b)
 	root_close, err, tolerated := walk(src, opts, &b, &regs, allocator, &b.ctx)
@@ -70,7 +70,7 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 	if e == nil {
 		e = finish(&doc, opts, rules)
 	}
-	e = read_end(&doc, e, &m, tolerated, caller)
+	e = read_end(&doc, e, &m.main, tolerated, caller)
 	return doc, e
 }
 
@@ -85,20 +85,20 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 	if e := scan_refused(format, opts, demand); e != nil {
 		return {}, e
 	}
-	m: hook.Memory_Budget
-	allocator := read_allocator(&m, opts, caller)
+	m: hook.Read_Budget
+	allocator := hook.read_budget(&m, opts, caller)
 	depth := min(read_depth(opts), u64(len(src)))
 	most := node_most(bound(src, depth), opts)
 	frames: [FRAME_DEPTH]u64 = ---
 	room: Scan_Room = ---
 	h: Scanner = ---
-	if err := #force_inline scanner_start(&h, src, format, demand, opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, budget = &m if opts.budget.memory != 0 else nil); err != nil {
-		return {}, hook.memory_budget_error(&m, err)
+	if err := #force_inline scanner_start(&h, src, format, demand, opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, budget = &m.main if opts.budget.memory != 0 else nil); err != nil {
+		return {}, hook.memory_budget_error(&m.main, err)
 	}
 	regs := builder_regs(&h.b)
 	root_close, werr, tolerated := walk(src, opts, &h, &regs, allocator, &h.b.ctx)
 	doc, e := #force_inline scanner_end(&h, regs, root_close, werr)
-	e = read_end(&doc, e, &m, tolerated, caller)
+	e = read_end(&doc, e, &m.main, tolerated, caller)
 	return doc, e
 }
 
@@ -109,18 +109,18 @@ read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Form
 	if refused != nil {
 		return {}, refused
 	}
-	m: hook.Memory_Budget
-	allocator := read_allocator(&m, opts, caller)
+	m: hook.Read_Budget
+	allocator := hook.read_budget(&m, opts, caller)
 	room: Find_Room = ---
 	f: Finder
 	if err := #force_inline finder_start(&f, src, format, steps, opts.dups, read, respell, rewalk, &room, allocator); err != nil {
-		return {}, hook.memory_budget_error(&m, err)
+		return {}, hook.memory_budget_error(&m.main, err)
 	}
 	defer finder_end(&f)
 	regs: hook.Regs
 	_, werr, tolerated := walk(src, opts, &f, &regs, allocator, &f.ctx)
 	answer, err := finder_result(&f, werr, tolerated)
-	return answer, hook.memory_budget_error(&m, err)
+	return answer, hook.memory_budget_error(&m.main, err)
 }
 
 // Why a path read of `format` under `opts` is refused: an option the format refuses, or a repeated keys policy that

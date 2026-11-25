@@ -247,12 +247,8 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	if plan.type != T || plan.tag != tag {
 		return tape.Bad_Option{"plan"}
 	}
-	m: hook.Memory_Budget
-	allocator := caller
-	if opts.budget.memory != 0 {
-		m = {backing = caller, limit = opts.budget.memory}
-		allocator = hook.memory_budget(&m)
-	}
+	m: hook.Read_Budget
+	allocator := hook.read_budget(&m, opts, caller)
 	frames: [FRAME_ROOM]Frame = ---
 	hk: H
 	when H == Cells_Reader {
@@ -290,7 +286,7 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	size := plan.size
 	h.before = before[:size] if size <= BEFORE_ROOM else (runtime.mem_alloc_non_zeroed(size, 1, allocator) or_else nil)
 	if len(h.before) != size {
-		return hook.memory_budget_error(&m, runtime.Allocator_Error.Out_Of_Memory)
+		return hook.memory_budget_error(&m.main, runtime.Allocator_Error.Out_Of_Memory)
 	}
 	intrinsics.mem_copy_non_overlapping(raw_data(h.before), target, size)
 	if read.path != nil {
@@ -315,7 +311,7 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	if h.held != nil {
 		held_free(h)
 	}
-	return hook.memory_budget_error(&m, err)
+	return hook.memory_budget_error(&m.main, err)
 }
 
 // The hook. A value's open takes no call on the hot kinds, and a key takes none when it is the one the struct expects

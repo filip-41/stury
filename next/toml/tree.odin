@@ -92,6 +92,7 @@ Notes :: struct {
 
 @(private)
 Table_Tree :: struct {
+	allocator:  runtime.Allocator,
 	nodes:      [dynamic]Table_Node,
 	comments:   [dynamic]Comment,
 	notes:      [dynamic]Notes,
@@ -119,18 +120,19 @@ Tree_Refusal :: enum u8 {
 }
 
 @(private)
-tree_init :: proc(t: ^Table_Tree, max_depth: u32, src_len: int) -> bool {
+tree_init :: proc(t: ^Table_Tree, max_depth: u32, src_len: int, allocator: runtime.Allocator) -> bool {
+	t.allocator = allocator
 	t.max_depth = max_depth
 	t.extended = NIL
 	// A node is written whole when it is appended, so the reservation is not zeroed.
 	err: runtime.Allocator_Error
-	t.nodes, err = runtime.non_zero_make_dynamic_array_len_cap([dynamic]Table_Node, 0, min(src_len / NODE_BYTES, MAX_RESERVED_NODES) + 16)
+	t.nodes, err = runtime.non_zero_make_dynamic_array_len_cap([dynamic]Table_Node, 0, min(src_len / NODE_BYTES, MAX_RESERVED_NODES) + 16, allocator)
 	if err != nil {
 		return false
 	}
-	t.comments.allocator = context.allocator
-	t.notes.allocator = context.allocator
-	t.names = {backing_allocator = context.allocator, minimum_block_size = 4096}
+	t.comments.allocator = allocator
+	t.notes.allocator = allocator
+	t.names = {backing_allocator = allocator, minimum_block_size = 4096}
 	append(&t.nodes, Table_Node{kind = .Table, flags = {.Header}, parent = NIL, first = NIL, last = NIL, next = NIL, value = {kind = .Object}})
 	return true
 }
@@ -140,7 +142,7 @@ tree_destroy :: proc(t: ^Table_Tree) {
 	delete(t.nodes)
 	delete(t.comments)
 	delete(t.notes)
-	delete(t.index)
+	delete(t.index, t.allocator)
 	runtime.arena_destroy(&t.names)
 }
 
@@ -232,7 +234,7 @@ index_insert :: proc(t: ^Table_Tree, parent, id: u32) -> bool #no_bounds_check {
 index_grow :: #force_no_inline proc(t: ^Table_Tree) -> bool #no_bounds_check {
 	old := t.index
 	size := 2 * len(old) if len(old) > 0 else INDEX_SLOTS
-	grown, err := make([]u64, size)
+	grown, err := make([]u64, size, t.allocator)
 	if err != nil {
 		return false
 	}
@@ -246,7 +248,7 @@ index_grow :: #force_no_inline proc(t: ^Table_Tree) -> bool #no_bounds_check {
 			grown[i] = slot
 		}
 	}
-	delete(old)
+	delete(old, t.allocator)
 	t.index = grown
 	return true
 }

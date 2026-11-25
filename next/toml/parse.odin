@@ -28,17 +28,17 @@ Parser :: struct {
 }
 
 @(private)
-parser_init :: proc(p: ^Parser, src: []u8, v11: bool, max_depth: u64) -> bool {
+parser_init :: proc(p: ^Parser, src: []u8, v11: bool, max_depth: u64, tree_allocator: runtime.Allocator) -> bool {
 	p^ = Parser{src = src, v11 = v11, last = NIL, final = true}
-	if !tree_init(&p.tree, u32(min(max_depth, u64(max(u32)))), len(src)) {
+	if !tree_init(&p.tree, u32(min(max_depth, u64(max(u32)))), len(src), tree_allocator) {
 		return false
 	}
 	err: runtime.Allocator_Error
-	p.parts, err = make([dynamic]Part, 0, 4)
+	p.parts, err = make([dynamic]Part, 0, 4, tree_allocator)
 	if err != nil {
 		return false
 	}
-	p.stack, err = make([dynamic]u32, 0, 8)
+	p.stack, err = make([dynamic]u32, 0, 8, tree_allocator)
 	return err == nil
 }
 

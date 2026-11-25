@@ -92,27 +92,29 @@ Walk :: struct($H: typeid, $LAX: bool, $C: hook.Capabilities) {
 
 // Reads `src` as `S` and gives its tokens to `on` from registers `regs`, which hold the hook's last registers when it
 // returns. Returns the end of the text, or the error, and whether the walk took a rule of `opts.tolerate`, which TOML
-// has none of. The tree and the walk's levels are in `allocator`, called in `ctx`.
+// has none of. The tree and the walk's levels come from `hook.scratch(opts, allocator)`, called in `ctx`.
 @(private)
 walk_text :: proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	hook.check(H)
 	context = ctx^
 	context.allocator = allocator
-	r := walk_tree(src, S == .Toml_1_1, LAX, opts, h, regs, on)
+	local: hook.Memory_Budget
+	tree_allocator := hook.scratch(opts, allocator, &local)
+	r := walk_tree(src, S == .Toml_1_1, LAX, opts, h, regs, tree_allocator, on)
 	if u8(r) == 0 {
 		return u64(len(src)), nil, false
 	}
 	at: u64
 	at, err, _ = hook.walk_error(r, &RULES)
-	return at, err, false
+	return at, hook.memory_budget_error(&local, err), false
 }
 
 @(private)
-walk_tree :: proc(src: []u8, v11: bool, $LAX: bool, opts: Options, h: ^$H, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+walk_tree :: proc(src: []u8, v11: bool, $LAX: bool, opts: Options, h: ^$H, regs: ^hook.Regs, tree_allocator: runtime.Allocator, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
 	p: Parser
 	defer parser_destroy(&p)
-	if !parser_init(&p, src, v11, build.read_depth(opts)) {
+	if !parser_init(&p, src, v11, build.read_depth(opts), tree_allocator) {
 		return hook.walk_result(0, hook.WALK_NO_MEMORY)
 	}
 	p.pos = text_start(src, 0)
@@ -126,6 +128,7 @@ walk_tree :: proc(src: []u8, v11: bool, $LAX: bool, opts: Options, h: ^$H, regs:
 		return p.fail
 	}
 	frames: [dynamic]Frame
+	frames.allocator = tree_allocator
 	defer delete(frames)
 	w := Walk(H, LAX, C) {
 		p      = &p,

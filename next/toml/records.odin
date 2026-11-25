@@ -16,12 +16,14 @@ import "stury:lib/ops/build"
 // or `records_scan` reads in batches, as `tape.Records` says. Under `.Members` and `.Elements` the text is read whole
 // at the first record into a tree in the records' allocator, which `tape.destroy_records` frees.
 Records :: struct {
-	using records: tape.Records,
-	spec:          Spec,
-	held:          ^Parser, // under `.Members` and `.Elements`, the text read whole, nil before the first record
-	member:        u32, // under `.Members` and `.Elements`, the child read next
+	using records:  tape.Records,
+	spec:           Spec,
+	held:           ^Parser, // under `.Members` and `.Elements`, the text read whole, nil before the first record
+	member:         u32, // under `.Members` and `.Elements`, the child read next
 	// Under `.Members` and `.Elements`, the walk's count of `Budget.steps`, which counts the containers of the text.
-	steps:         u64,
+	steps:          u64,
+	tree_allocator: runtime.Allocator, // where `held` lives: `opts.scratch` when set, else `r.allocator`
+	tree_budget:    hook.Memory_Budget, // counts `held` against `Budget.memory`
 }
 
 // Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. Under `.Members` and
@@ -57,9 +59,8 @@ records_open :: proc(src: []u8, framing := tape.Framing.Concatenated, spec := Sp
 records_close :: proc(records: ^tape.Records) {
 	r := (^Records)(records)
 	if r.held != nil {
-		context.allocator = r.allocator
 		parser_destroy(r.held)
-		free(r.held)
+		free(r.held, r.tree_allocator)
 		r.held = nil
 	}
 }
@@ -210,23 +211,30 @@ record_frame :: proc(r: ^Records, $S: Spec) -> (lo, cut: u64, ok: bool) {
 // counted in the walk's order give, as the containers outside the one reached are not walked.
 @(private)
 members_open :: proc(r: ^Records, $S: Spec) -> bool {
-	context.allocator = r.allocator
+	base := r.opts.scratch if r.opts.scratch.procedure != nil else r.allocator
+	tree_allocator := base
+	if r.opts.budget.memory != 0 {
+		r.tree_budget = {backing = base, limit = r.opts.budget.memory}
+		tree_allocator = hook.memory_budget(&r.tree_budget)
+	}
+	r.tree_allocator = tree_allocator
+	context.allocator = tree_allocator
 	r.at = .Open
 	r.steps = build.read_steps(r.opts)
-	p, err := new(Parser)
+	p, err := new(Parser, tree_allocator)
 	if err != nil {
-		r.err, r.at = runtime.Allocator_Error.Out_Of_Memory, .Done
+		r.err, r.at = hook.memory_budget_error(&r.tree_budget, err), .Done
 		return false
 	}
 	r.held = p
-	if !parser_init(p, r.src, S == .Toml_1_1, build.read_depth(r.opts)) {
-		r.err, r.at = runtime.Allocator_Error.Out_Of_Memory, .Done
+	if !parser_init(p, r.src, S == .Toml_1_1, build.read_depth(r.opts), tree_allocator) {
+		r.err, r.at = hook.memory_budget_error(&r.tree_budget, runtime.Allocator_Error.Out_Of_Memory), .Done
 		return false
 	}
 	p.pos = text_start(r.src, 0)
 	if !parse_rest(p) {
-		_, r.err, _ = hook.walk_error(p.fail, &RULES)
-		r.at = .Done
+		_, walk_err, _ := hook.walk_error(p.fail, &RULES)
+		r.err, r.at = hook.memory_budget_error(&r.tree_budget, walk_err), .Done
 		return false
 	}
 	r.steps -= 1
@@ -360,7 +368,9 @@ member_walk :: proc(r: ^Records, $LAX: bool, h: ^$H, regs: ^hook.Regs, allocator
 	p := r.held
 	id := r.member
 	m := p.tree.nodes[id]
+	local: hook.Memory_Budget
 	frames: [dynamic]Frame
+	frames.allocator = hook.scratch(r.opts, allocator, &local)
 	defer delete(frames)
 	w := Walk(H, LAX, C) {
 		p      = p,

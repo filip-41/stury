@@ -34,26 +34,27 @@ records_validate :: proc(r: ^tape.Records, out: []tape.Record, format: ^tape.For
 		records_stop(r, tape.Bad_Option{"dups"})
 		return
 	}
-	m: hook.Memory_Budget
+	m: hook.Read_Budget
 	ctx := context
 	h: hook.No_Hooks
 	regs: hook.Regs
 	for n < len(out) {
-		allocator := read_allocator(&m, r.opts, caller)
+		allocator := hook.read_budget(&m, r.opts, caller)
 		lo, cut, framed := frame(r, allocator)
 		if !framed {
-			r.err = hook.memory_budget_error(&m, r.err)
+			r.err = hook.memory_budget_error(&m.main, r.err)
 			break
 		}
 		w := walk(r, lo, cut, false, &h, &regs, allocator, &ctx)
 		if !w.ok {
+			r.err = hook.memory_budget_error(&m.main, r.err)
 			break
 		}
 		if w.again {
 			w.res = walk(r, lo, cut, true, &h, &regs, allocator, &ctx).res
 		}
 		_, err, _ := hook.walk_error(w.res, rules)
-		if rec := record_end(r, lo, w.hi, hook.memory_budget_error(&m, err)); rec.err != nil {
+		if rec := record_end(r, lo, w.hi, hook.memory_budget_error(&m.main, err)); rec.err != nil {
 			out[n] = rec
 			n += 1
 		}
@@ -76,30 +77,31 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 	read.stop_early &&= r.framing == .Lines
 	out := out
 	out = out[:min(len(out), len(answers))]
-	m: hook.Memory_Budget
+	m: hook.Read_Budget
 	ctx := context
 	room: Find_Room = ---
 	f: Finder
 	defer finder_end(&f)
 	for n < len(out) {
-		allocator := read_allocator(&m, r.opts, caller)
+		allocator := hook.read_budget(&m, r.opts, caller)
 		lo, cut, framed := frame(r, allocator)
 		if !framed {
-			r.err = hook.memory_budget_error(&m, r.err)
+			r.err = hook.memory_budget_error(&m.main, r.err)
 			break
 		}
 		if err := find_begin(&f, r.src, format, steps, r.opts.dups, read, respell, rewalk, &room, allocator); err != nil {
-			records_stop(r, hook.memory_budget_error(&m, err))
+			records_stop(r, hook.memory_budget_error(&m.main, err))
 			break
 		}
 		regs: hook.Regs
 		w := walk(r, lo, cut, false, &f, &regs, allocator, &ctx)
 		if !w.ok {
+			r.err = hook.memory_budget_error(&m.main, r.err)
 			break
 		}
 		if w.again {
 			if err := find_begin(&f, r.src, format, steps, r.opts.dups, read, respell, rewalk, &room, allocator, true); err != nil {
-				records_stop(r, hook.memory_budget_error(&m, err))
+				records_stop(r, hook.memory_budget_error(&m.main, err))
 				break
 			}
 			regs = {}
@@ -111,7 +113,7 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 		if err != nil {
 			answer = {outcome = .Missing}
 		}
-		out[n], answers[n] = record_end(r, lo, w.hi, hook.memory_budget_error(&m, err)), answer
+		out[n], answers[n] = record_end(r, lo, w.hi, hook.memory_budget_error(&m.main, err)), answer
 		n += 1
 	}
 	records_window_end(r)
@@ -129,7 +131,7 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 	out = out[:min(len(out), len(docs))]
 	// The documents of the batch are in the records' block, which the last batch's documents leave.
 	block := tape.record_block_batch(&r.block, caller)
-	m: hook.Memory_Budget
+	m: hook.Read_Budget
 	frames: [FRAME_DEPTH]u64 = ---
 	room: Scan_Room = ---
 	h: Scanner
@@ -137,10 +139,10 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 	// budget counts each record's own room instead.
 	lent: []tape.Node
 	for n < len(out) {
-		allocator := read_allocator(&m, r.opts, block)
+		allocator := hook.read_budget(&m, r.opts, block)
 		lo, cut, framed := frame(r, allocator)
 		if !framed {
-			r.err = hook.memory_budget_error(&m, r.err)
+			r.err = hook.memory_budget_error(&m.main, r.err)
 			break
 		}
 		depth := min(read_depth(r.opts), cut - lo)
@@ -154,7 +156,7 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 			lent = ([^]tape.Node)(raw_data(raw))[:SCAN_NODES]
 		}
 		if err := scanner_restart(&h, r.src, format, demand, r.opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, lent); err != nil {
-			records_stop(r, hook.memory_budget_error(&m, err))
+			records_stop(r, hook.memory_budget_error(&m.main, err))
 			break
 		}
 		regs := builder_regs(&h.b)
@@ -166,10 +168,11 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 				lent = h.b.doc.nodes
 			}
 			if !w.ok {
+				r.err = hook.memory_budget_error(&m.main, r.err)
 				break
 			}
 			if err := scanner_restart(&h, r.src, format, demand, r.opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, lent); err != nil {
-				records_stop(r, hook.memory_budget_error(&m, err))
+				records_stop(r, hook.memory_budget_error(&m.main, err))
 				break
 			}
 			regs = builder_regs(&h.b)
@@ -191,7 +194,7 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 				e = record_nodes_own(&r.block, &doc)
 			}
 		}
-		e = read_end(&doc, e, &m, w.tolerated, block)
+		e = read_end(&doc, e, &m.main, w.tolerated, block)
 		out[n], docs[n] = record_end(r, lo, w.hi, e), doc
 		n += 1
 	}
