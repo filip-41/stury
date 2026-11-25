@@ -49,21 +49,21 @@ SAMPLED_FROM :: 64 << 10
 // Splits `src` in two at some random bytes and in three at some random pairs, and checks each split's reads.
 @(private = "file")
 agree_over_sampled_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.Options, name: string, c: ^Corpus, paths: [][]tape.Step) {
-	for _ in 0 ..< testkit.rounds(2) {
-		cuts := [1]int{rand.int_max(len(src) + 1)}
-		c.reads += 1
-		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name, containers = true) {
-			return
-		}
+	n1, n2 := testkit.rounds(2), testkit.rounds(1)
+	cuts_list := make([dynamic][]int, 0, n1 + n2, context.temp_allocator)
+	singles := make([]int, n1, context.temp_allocator)
+	for k in 0 ..< n1 {
+		singles[k] = rand.int_max(len(src) + 1)
+		append(&cuts_list, singles[k:k + 1])
 	}
-	for _ in 0 ..< testkit.rounds(1) {
+	pairs := make([][2]int, n2, context.temp_allocator)
+	for k in 0 ..< n2 {
 		i := rand.int_max(len(src))
-		cuts := [2]int{i, i + 1 + rand.int_max(len(src) - i)}
-		c.reads += 1
-		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name, containers = true) {
-			return
-		}
+		pairs[k] = {i, i + 1 + rand.int_max(len(src) - i)}
+		append(&cuts_list, pairs[k][:])
 	}
+	c.reads += len(cuts_list)
+	testkit.pieces_agree_cuts(t, json.reads(spec), json.as(spec), src, opts, cuts_list[:], paths, name, containers = true)
 }
 
 // Splits `src` in two at every byte, or at a sample of them past 96 bytes, and in three at a sample of byte pairs, and
@@ -84,25 +84,27 @@ agree_over_splits :: proc(t: ^testing.T, src: []u8, spec: json.Spec, opts: tape.
 	}
 	// A long text is split at a sample of its bytes, as each split reads it whole a few dozen times.
 	step := max(1, len(src) / testkit.rounds(96))
+	n1 := len(src) / step + 1
+	n2 := testkit.rounds(6) if len(src) >= 8 else 0
+	cuts_list := make([dynamic][]int, 0, n1 + n2, context.temp_allocator)
+	singles := make([]int, n1, context.temp_allocator)
+	si := 0
 	for k := 0; k <= len(src); k += step {
-		cuts := [1]int{k}
-		c.reads += 1
-		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name, containers = true) {
-			return
+		singles[si] = k
+		append(&cuts_list, singles[si:si + 1])
+		si += 1
+	}
+	if n2 > 0 {
+		pairs := make([][2]int, n2, context.temp_allocator)
+		for k in 0 ..< n2 {
+			i := (k * 7919) % len(src)
+			j := i + 1 + (k * 104729) % (len(src) - i)
+			pairs[k] = {i, j}
+			append(&cuts_list, pairs[k][:])
 		}
 	}
-	if len(src) < 8 {
-		return
-	}
-	for k in 0 ..< testkit.rounds(6) {
-		i := (k * 7919) % len(src)
-		j := i + 1 + (k * 104729) % (len(src) - i)
-		cuts := [2]int{i, j}
-		c.reads += 1
-		if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), src, opts, cuts[:], paths, name, containers = true) {
-			return
-		}
-	}
+	c.reads += len(cuts_list)
+	testkit.pieces_agree_cuts(t, json.reads(spec), json.as(spec), src, opts, cuts_list[:], paths, name, containers = true)
 }
 
 @(private = "file")
@@ -163,15 +165,19 @@ pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 @(test)
 pieces_judge_the_text_past_a_limit :: proc(t: ^testing.T) {
 	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
 	whole := []string{`[1,2,3]`, `[1,[2,3],{"a":4}]`, `{"a":[1,[2]],"b":[3]}`, "[1, /* c */ 2, x", "[1,2] // c", `{"a":[1 /* c */]} /* d */`}
 	for texts in ([][]string{LIMITED_TEXTS, whole}) {
 		for src in texts {
+			singles := make([]int, len(src) + 1, context.temp_allocator)
+			cuts_list := make([][]int, len(src) + 1, context.temp_allocator)
+			for cut in 0 ..= len(src) {
+				singles[cut] = cut
+				cuts_list[cut] = singles[cut:cut + 1]
+			}
 			for spec in ([]json.Spec{.Json, .Jsonc}) {
-				for cut in 0 ..= len(src) {
-					cuts := [1]int{cut}
-					if !testkit.pieces_agree(t, json.reads(spec), json.as(spec), transmute([]u8)src, {}, cuts[:], limited_paths, "limited", limited_limits) {
-						return
-					}
+				if !testkit.pieces_agree_cuts(t, json.reads(spec), json.as(spec), transmute([]u8)src, {}, cuts_list, limited_paths, "limited", limited_limits) {
+					return
 				}
 			}
 		}
@@ -198,12 +204,13 @@ pieces_read_short_escaped_keys_as_whole_reads :: proc(t: ^testing.T) {
 	defer tape.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	paths := paths_into(&doc)
+	singles := make([]int, len(src) + 1, context.temp_allocator)
+	cuts_list := make([][]int, len(src) + 1, context.temp_allocator)
 	for k in 0 ..= len(src) {
-		cuts := [1]int{k}
-		if !testkit.pieces_agree(t, json.reads(.Json), json.as(.Json), src, {}, cuts[:], paths, "escaped keys") {
-			return
-		}
+		singles[k] = k
+		cuts_list[k] = singles[k:k + 1]
 	}
+	testkit.pieces_agree_cuts(t, json.reads(.Json), json.as(.Json), src, {}, cuts_list, paths, "escaped keys")
 }
 
 // A text of ASCII and other strings and keys split anywhere gives the spellings of the whole read.
@@ -828,21 +835,16 @@ records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
 	for c in cases {
 		src := transmute([]u8)c.text
 		reads, f := json.reads(c.spec), json.as(c.spec)
+		cuts_list := make([dynamic][]int, 0, len(src) + 8, context.temp_allocator)
+		singles := make([]int, len(src) + 1, context.temp_allocator)
 		for k in 0 ..= len(src) {
-			cuts := [1]int{k}
-			if !testkit.pieces_agree(t, reads, f, src, {}, cuts[:], paths, c.name) {
-				break
-			}
+			singles[k] = k
+			append(&cuts_list, singles[k:k + 1])
 		}
 		for size in ([]int{1, 2, 3, 7, 64, 100, 300}) {
-			cuts := make([dynamic]int, context.temp_allocator)
-			for k := size; k < len(src); k += size {
-				append(&cuts, k)
-			}
-			if !testkit.pieces_agree(t, reads, f, src, {}, cuts[:], paths, c.name) {
-				break
-			}
+			append(&cuts_list, testkit.cuts_by(len(src), size))
 		}
+		testkit.pieces_agree_cuts(t, reads, f, src, {}, cuts_list[:], paths, c.name)
 	}
 }
 

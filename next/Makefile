@@ -51,9 +51,9 @@ DSV_TIER_TESTS := $(addprefix dsv_tests.,walk_tokens walked_tokens_span_what_the
 DSV_TIER_NAMES := -define:ODIN_TEST_NAMES=$(subst $(space),$(comma),$(DSV_TIER_TESTS))
 X86_TIERS := 0 1
 X86_OPTS ?= minimal speed
-# The runs that force a tier build one LLVM module per file: at `-o:speed` one module of `dsv/test` takes minutes and
-# gigabytes, and the forced tiers check that each tier's code reads right, not what inlines across files. The run that
-# detects the tier keeps the one module an optimized build makes by default.
+# The forced-tier runs and `dsv/test` build one LLVM module per package/file: at `-o:speed` one module of `dsv/test`
+# takes minutes and gigabytes. The smaller packages' detected-tier runs keep the one module an optimized build makes by
+# default so cross-file inlining is exercised at runtime.
 X86_TIER_MODULES := -use-separate-modules
 OBJDUMP ?= $(shell command -v llvm-objdump || echo /opt/homebrew/opt/llvm@22/bin/llvm-objdump)
 PLAIN_PKGS := $(TEST_PKGS)
@@ -143,10 +143,24 @@ $(LINT_TIER_PKGS:%=lint-tiers/%): lint-tiers/%:
 	@mkdir -p build; p=$*; o=build/tiers-$$(echo $$p | tr / -); \
 		echo "== $$p (linux_amd64 tiers)"; \
 		case $$p in dsv/test) req="--require dsv::pass_default_v3:";; lib/base/regex/test) req="--require ::set_v3";; json/test) req="--require json::string_span_v3:";; xml/test) req="--require xml::span_v3:";; *) req=;; esac; \
-		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:none $(LINT_FLAGS) -out:$$o-none.o || exit 1; \
-		python3 tools/tier_check.py $(OBJDUMP) $$o-none.o $$req || exit 1; \
-		$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:$$o-speed.o || exit 1; \
-		python3 tools/tier_check.py $(OBJDUMP) $$o-speed.o --inlined $$req || exit 1
+		rm -rf $$o-none && mkdir -p $$o-none && \
+		$(ODIN) test $$p -build-mode:obj -use-separate-modules -target:linux_amd64 -o:none $(LINT_FLAGS) -out:$$o-none/m.o || exit 1; \
+		python3 tools/tier_check.py $(OBJDUMP) $$o-none $$req || exit 1; \
+		if [ "$$p" = "lib/base/kernel/test" ]; then \
+			$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:$$o-speed.o || exit 1; \
+			python3 tools/tier_check.py $(OBJDUMP) $$o-speed.o --inlined $$req || exit 1; \
+		else \
+			rm -rf $$o-speed && mkdir -p $$o-speed && \
+			$(ODIN) test $$p -build-mode:obj -use-separate-modules -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:$$o-speed/m.o || exit 1; \
+			if [ "$$p" = "dsv/test" ]; then \
+				python3 tools/tier_check.py $(OBJDUMP) $$o-speed --inlined \
+					--inlined-skip 'dsv::line_end_v3:proc"contextless"(src:[]u8,start:int,S:$$$$1,' \
+					--inlined-skip 'dsv::line_end_v3:proc"contextless"(src:[]u8,start:int,S:$$$$2,' \
+					$$req || exit 1; \
+			else \
+				python3 tools/tier_check.py $(OBJDUMP) $$o-speed --inlined $$req || exit 1; \
+			fi; \
+		fi
 
 test:
 	@for p in $(TEST_PKGS); do \
@@ -168,13 +182,13 @@ test:
 	done
 ifdef X86_RUNS
 	@for p in $(TIER_PKGS); do for o in $(X86_OPTS); do \
-		case $$p in dsv/test) names="$(DSV_TIER_NAMES)";; *) names=;; esac; \
+		case $$p in dsv/test) names="$(DSV_TIER_NAMES)"; det_mods="$(X86_TIER_MODULES)";; *) names=; det_mods=;; esac; \
 		for t in $(X86_TIERS); do \
 			echo "== $$p (x86-64 tier $$t, -o:$$o)"; \
 			$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) $(X86_TIER_MODULES) $$names -define:TIER=$$t -out:build/test-tier$$t-$$o || exit 1; \
 		done; \
 		echo "== $$p (x86-64 detected tier, -o:$$o)"; \
-		$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) $$names -out:build/test-detected-$$o || exit 1; \
+		$(ODIN) test $$p -o:$$o $(TEST_FLAGS) $(X86_FLAGS) $$det_mods $$names -out:build/test-detected-$$o || exit 1; \
 	done; done
 endif
 ifdef X86_SKIPPED

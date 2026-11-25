@@ -156,22 +156,30 @@ same_value :: proc(whole: ^tape.Document, f: tape.Node_Index, part: ^tape.Docume
 	return x.lo == y.lo && x.kind == y.kind && x.role == y.role && (x.kind > .Plain || x.n == y.n)
 }
 
-// Whether the answers of path `path` of the scan `r` are the reference's over the build `doc`, its first `limit` for a
-// limit past 0, their outcomes and found values in document order.
-answers_agree :: proc(doc, r: ^tape.Document, path: int, steps: []tape.Step, dups: tape.Duplicates, limit: int) -> bool {
-	want := make([dynamic]Ref_Answer, context.temp_allocator)
-	reference_answers(doc, steps, dups, &want)
-	if limit > 0 && len(want) > limit {
-		resize(&want, limit)
+// Whether the answers of path `path` of the scan `r` match the precomputed reference answers `want`, its first `limit`
+// for a limit past 0, their outcomes and found values in document order.
+@(private)
+answers_match :: proc(doc, r: ^tape.Document, path: int, want: []Ref_Answer, limit: int) -> bool {
+	n := len(want)
+	if limit > 0 && n > limit {
+		n = limit
 	}
-	for w, k in want {
+	for w, k in want[:n] {
 		node, p, ok := tape.answer({doc = r}, path, k)
 		if !ok || p != w.outcome || p == .Found && !same_value(doc, w.node, r, node) {
 			return false
 		}
 	}
-	_, _, more := tape.answer({doc = r}, path, len(want))
+	_, _, more := tape.answer({doc = r}, path, n)
 	return !more
+}
+
+// Whether the answers of path `path` of the scan `r` are the reference's over the build `doc`, its first `limit` for a
+// limit past 0, their outcomes and found values in document order.
+answers_agree :: proc(doc, r: ^tape.Document, path: int, steps: []tape.Step, dups: tape.Duplicates, limit: int) -> bool {
+	want := make([dynamic]Ref_Answer, context.temp_allocator)
+	reference_answers(doc, steps, dups, &want)
+	return answers_match(doc, r, path, want[:], limit)
 }
 
 // Whether two errors of reads of one text are the same: the same fault at the same byte, or the same other error.
@@ -348,28 +356,74 @@ Piece_Run :: struct {
 	cuts:  []int, // where each window but the last ends
 }
 
+// Allocator for ephemeral test-harness piece windows: uses `context.allocator` under sanitizers so every window gets
+// its own heap redzone and UAF/OOB detection, and `context.temp_allocator` otherwise to avoid tracking-allocator lock
+// contention across tens of thousands of cuts.
+@(private)
+window_allocator :: #force_inline proc() -> runtime.Allocator {
+	when ODIN_SANITIZER_FLAGS != {} {
+		return context.allocator
+	}
+	return context.temp_allocator
+}
+
 // Feeds `r.src` to `read` one window at a time, each from the last read's `keep` to the next cut, the last to the
 // text's end, and gives the result of the read that ended. Each window is a copy of its bytes, overwritten with a byte
 // no text holds once its read returns and another follows, so a read that keeps a pointer into a window it was given
-// reads no byte of the text. The copy of the last, which a document may hold, is the caller's to free.
-feed :: proc(r: Piece_Run, p: ^tape.Pieces, read: proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool) -> (text: []u8) {
+// reads no byte of the text. For long multi-window runs outside sanitizers where `keep` stays fixed (as a build's does,
+// borrowing from byte 0), the window buffer grows geometrically so only newly arrived bytes are copied between
+// reallocations, while every growth moves to a fresh allocation and poisons the old one, and guard bytes past the
+// window stay `0xFF`. The backing buffer of the last window, which a document may hold, is the caller's to free.
+feed :: proc(r: Piece_Run, p: ^tape.Pieces, read: proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool, buf_allocator := context.allocator) -> (text: []u8) {
 	opts := r.opts
 	opts.pieces = p
 	p.allocator = context.allocator
+	grow := len(r.cuts) > 16 && ODIN_SANITIZER_FLAGS == {}
+	buf: []u8
+	buf_from, buf_valid: u64
 	dropped: u64
 	for i := 0; ; i += 1 {
 		end := r.cuts[i] if i < len(r.cuts) else len(r.src)
 		p.from, p.last = p.keep, i >= len(r.cuts)
 		assert(p.keep >= dropped, "a read needs bytes its last read let go")
 		dropped = p.keep
-		// The window before is freed once this one is made, so the two hold no byte in common.
-		window := slice.clone(r.src[p.keep:end])
-		delete(text)
-		text = window
-		if !read(text, r, opts) || !p.more || p.last {
-			return
+		need := end - int(p.keep)
+		if !grow || buf == nil || p.keep != buf_from || need > len(buf) {
+			cap := need
+			if grow && !p.last && p.keep == buf_from && buf != nil {
+				cap = min(max(need, 2 * len(buf)), len(r.src) - int(p.keep))
+			}
+			// The window before is freed once this one is made, so the two hold no byte in common.
+			window := make([]u8, cap, buf_allocator)
+			copy(window[:need], r.src[p.keep:end])
+			if cap > need {
+				slice.fill(window[need:min(cap, need + 64)], 0xFF)
+			}
+			if buf != nil {
+				if grow {
+					slice.fill(buf, 0xFF)
+				}
+				delete(buf, buf_allocator)
+			}
+			buf = window
+			buf_from = p.keep
+			buf_valid = u64(end)
+		} else {
+			if u64(end) > buf_valid {
+				copy(buf[int(buf_valid - buf_from):need], r.src[buf_valid:end])
+				buf_valid = u64(end)
+			}
+			if len(buf) > need {
+				slice.fill(buf[need:min(len(buf), need + 64)], 0xFF)
+			}
 		}
-		slice.fill(text, 0xFF)
+		if !read(buf[:need], r, opts) || !p.more || p.last {
+			// Return `buf` as-is (never clone+free it): `read` may have borrowed `buf[:need]` into a returned document.
+			return buf
+		}
+		if !grow {
+			slice.fill(buf, 0xFF)
+		}
 	}
 }
 
@@ -408,163 +462,202 @@ same_documents :: proc(a, b: tape.Document) -> bool {
 	return same(x.answers, y.answers) && same(x.starts, y.starts) && same(x.kept, y.kept) && same(x.missing, y.missing) && same(x.names, y.names) && x.dups == y.dups
 }
 
-// `pieces_agree` over `src` cut in two at every byte, in three at a sample of pairs, and in windows of every size up
-// to a few dozen bytes, for a format whose records frame the text as one, and with `containers` as the children of a
+// `pieces_agree_cuts` over `src` cut in two at every byte, in three at a sample of pairs, and in windows of every size
+// up to a few dozen bytes, for a format whose records frame the text as one, and with `containers` as the children of a
 // container too.
 agree_in_pieces :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, paths: [][]tape.Step, name: string, containers := false) -> bool {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	cuts_list := make([dynamic][]int, 0, len(src) + 1 + 12 + 40, context.temp_allocator)
+	singles := make([]int, len(src) + 1, context.temp_allocator)
 	for k in 0 ..= len(src) {
-		cuts := [1]int{k}
-		pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated, containers = containers) or_return
+		singles[k] = k
+		append(&cuts_list, singles[k:k + 1])
 	}
 	if len(src) >= 8 {
+		pairs := make([][2]int, 12, context.temp_allocator)
 		for k in 0 ..< 12 {
 			i := (k * 7919) % len(src)
 			j := i + 1 + (k * 104729) % (len(src) - i)
-			cuts := [2]int{i, j}
-			pieces_agree(t, reads, f, src, opts, cuts[:], paths, name, framing = .Concatenated, containers = containers) or_return
+			pairs[k] = {i, j}
+			append(&cuts_list, pairs[k][:])
 		}
 	}
 	for size in 1 ..= 40 {
-		pieces_agree(t, reads, f, src, opts, cuts_by(len(src), size), paths, name, framing = .Concatenated, containers = containers) or_return
+		append(&cuts_list, cuts_by(len(src), size))
 	}
-	return true
+	return pieces_agree_cuts(t, reads, f, src, opts, cuts_list[:], paths, name, framing = .Concatenated, containers = containers)
 }
 
 // The reads of `src` in pieces cut at `cuts` give what the whole reads give: the verdict and fault, the document, the
 // answer of each path and the scan of them, and the records of `src` framed as `framing`, with `containers` under
 // `.Elements` and `.Members` too, as `records_pieces_agree_at` reads them.
 pieces_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, cuts: []int, paths: [][]tape.Step, name: string, limits: []int = nil, framing := tape.Framing.Lines, containers := false) -> bool {
-	r := Piece_Run{src, reads, f, opts, cuts}
-	whole_err := reads.validate(f, src, opts, context.allocator)
-	{
-		p: tape.Pieces
-		defer tape.destroy(&p)
-		got: tape.Error
-		context.user_ptr = &got
-		window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
-			err := r.reads.validate(r.f, window, opts, context.allocator)
-			(^tape.Error)(context.user_ptr)^ = err
-			return err == nil
-		})
-		defer delete(window)
-		if !testing.expectf(t, got == whole_err && !p.more, "%s %v cut %v: validate %v, whole %v", name, f.name, cuts, got, whole_err) {
-			return false
-		}
+	one := [1][]int{cuts}
+	return pieces_agree_cuts(t, reads, f, src, opts, one[:], paths, name, limits, framing, containers)
+}
+
+// Checks `pieces_agree` across every cut schedule in `cuts_list`, computing the whole-text baseline reads and demand
+// once for `src` instead of repeating them per cut.
+pieces_agree_cuts :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, cuts_list: [][]int, paths: [][]tape.Step, name: string, limits: []int = nil, framing := tape.Framing.Lines, containers := false) -> bool {
+	if len(cuts_list) == 0 {
+		return true
 	}
+	base := Piece_Run{src, reads, f, opts, nil}
+	whole_err := reads.validate(f, src, opts, context.allocator)
 	whole, berr := reads.build(f, src, opts, context.allocator)
 	defer tape.destroy(&whole)
-	{
-		p: tape.Pieces
-		defer tape.destroy(&p)
-		Got :: struct {
-			doc: tape.Document,
-			err: tape.Error,
-		}
-		got: Got
-		defer tape.destroy(&got.doc)
-		context.user_ptr = &got
-		window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
-			g := (^Got)(context.user_ptr)
-			doc, err := r.reads.build(r.f, window, opts, context.allocator)
-			tape.destroy(&g.doc)
-			g.doc, g.err = doc, err
-			return err == nil
-		})
-		defer delete(window)
-		if !testing.expectf(t, got.err == berr && same_documents(got.doc, whole), "%s %v cut %v: build %v, whole %v", name, f.name, cuts, got.err, berr) {
-			return false
-		}
+	Find_Want :: struct {
+		a:   tape.Span_Answer,
+		err: tape.Error,
 	}
-	{
-		// Each document so far of a text that builds holds in its root's subtree the scalars of the whole document's,
-		// up to the cut.
-		p := tape.Pieces{so_far = true}
-		defer tape.destroy(&p)
-		Got :: struct {
-			doc:   tape.Document,
-			err:   tape.Error,
-			whole: ^tape.Document,
-			apart: bool,
-		}
-		got := Got{whole = &whole}
-		defer tape.destroy(&got.doc)
-		context.user_ptr = &got
-		window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
-			g := (^Got)(context.user_ptr)
-			doc, err := r.reads.build(r.f, window, opts, context.allocator)
-			tape.destroy(&g.doc)
-			g.doc, g.err = doc, err
-			if err == nil && opts.pieces.more && len(g.whole.nodes) > 0 && !scalars_lead(&doc, g.whole) {
-				g.apart = true
-			}
-			return err == nil
-		})
-		defer delete(window)
-		if !testing.expectf(t, got.err == berr && !got.apart && same_documents(got.doc, whole), "%s %v cut %v: build so far %v, whole %v, apart %v", name, f.name, cuts, got.err, berr, got.apart) {
-			return false
-		}
-	}
-	for path in paths {
-		for stop in ([]bool{false, true}) {
-			read := tape.Read_Options{stop_early = stop}
-			want, ferr := reads.find(f, src, path, read, opts, context.allocator)
-			p: tape.Pieces
-			Got :: struct {
-				a:    tape.Span_Answer,
-				err:  tape.Error,
-				path: []tape.Step,
-				read: tape.Read_Options,
-			}
-			got := Got{path = path, read = read}
-			context.user_ptr = &got
-			window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
-				g := (^Got)(context.user_ptr)
-				g.a, g.err = r.reads.find(r.f, window, g.path, g.read, opts, context.allocator)
-				return g.err == nil
-			})
-			defer delete(window)
-			text := string(p.text)
-			ok := got.err == ferr && (ferr != nil || got.a == want && (want.outcome != .Found || text == string(src[want.lo:want.hi])))
-			tape.destroy(&p)
-			if !testing.expectf(t, ok, "%s %v cut %v: find %v stop %v: %v %v, whole %v %v", name, f.name, cuts, path, stop, got.a, got.err, want, ferr) {
-				return false
-			}
+	find_wants := make([]Find_Want, len(paths) * 2)
+	defer delete(find_wants)
+	for path, pi in paths {
+		for stop, si in ([2]bool{false, true}) {
+			a, ferr := reads.find(f, src, path, {stop_early = stop}, opts, context.allocator)
+			find_wants[pi * 2 + si] = {a, ferr}
 		}
 	}
 	d, derr := tape.demand_of(paths, nil, limits, f.facts != {})
 	defer tape.destroy(&d)
-	if derr != nil {
-		return records_pieces_agree_at(t, r, framing, paths, nil, name, containers)
+	scan_wants: [2]tape.Document
+	scan_errs: [2]tape.Error
+	defer for &w in scan_wants {
+		tape.destroy(&w)
 	}
-	for stop in ([]bool{false, true}) {
-		read := tape.Read_Options{stop_early = stop}
-		want, serr := reads.scan(f, src, &d, read, opts, context.allocator)
-		defer tape.destroy(&want)
-		p: tape.Pieces
-		Got :: struct {
-			doc:  tape.Document,
-			err:  tape.Error,
-			d:    ^tape.Demand,
-			read: tape.Read_Options,
-		}
-		got := Got{d = &d, read = read}
-		context.user_ptr = &got
-		window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
-			g := (^Got)(context.user_ptr)
-			doc, err := r.reads.scan(r.f, window, g.d, g.read, opts, context.allocator)
-			tape.destroy(&g.doc)
-			g.doc, g.err = doc, err
-			return err == nil
-		})
-		defer delete(window)
-		ok := got.err == serr && same_documents(got.doc, want)
-		tape.destroy(&got.doc)
-		tape.destroy(&p)
-		if !testing.expectf(t, ok, "%s %v cut %v: scan stop %v: %v, whole %v", name, f.name, cuts, stop, got.err, serr) {
-			return false
+	if derr == nil {
+		for stop, si in ([2]bool{false, true}) {
+			scan_wants[si], scan_errs[si] = reads.scan(f, src, &d, {stop_early = stop}, opts, context.allocator)
 		}
 	}
-	return records_pieces_agree_at(t, r, framing, paths, &d, name, containers)
+	win_alloc := window_allocator()
+	for cuts in cuts_list {
+		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+		r := base
+		r.cuts = cuts
+		{
+			p: tape.Pieces
+			defer tape.destroy(&p)
+			got: tape.Error
+			context.user_ptr = &got
+			window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+				err := r.reads.validate(r.f, window, opts, context.allocator)
+				(^tape.Error)(context.user_ptr)^ = err
+				return err == nil
+			}, win_alloc)
+			defer delete(window, win_alloc)
+			if !testing.expectf(t, got == whole_err && !p.more, "%s %v cut %v: validate %v, whole %v", name, f.name, cuts, got, whole_err) {
+				return false
+			}
+		}
+		{
+			p: tape.Pieces
+			defer tape.destroy(&p)
+			Got :: struct {
+				doc: tape.Document,
+				err: tape.Error,
+			}
+			got: Got
+			defer tape.destroy(&got.doc)
+			context.user_ptr = &got
+			window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+				g := (^Got)(context.user_ptr)
+				doc, err := r.reads.build(r.f, window, opts, context.allocator)
+				tape.destroy(&g.doc)
+				g.doc, g.err = doc, err
+				return err == nil
+			}, win_alloc)
+			defer delete(window, win_alloc)
+			if !testing.expectf(t, got.err == berr && same_documents(got.doc, whole), "%s %v cut %v: build %v, whole %v", name, f.name, cuts, got.err, berr) {
+				return false
+			}
+		}
+		{
+			// Each document so far of a text that builds holds in its root's subtree the scalars of the whole document's,
+			// up to the cut.
+			p := tape.Pieces{so_far = true}
+			defer tape.destroy(&p)
+			Got :: struct {
+				doc:   tape.Document,
+				err:   tape.Error,
+				whole: ^tape.Document,
+				apart: bool,
+			}
+			got := Got{whole = &whole}
+			defer tape.destroy(&got.doc)
+			context.user_ptr = &got
+			window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+				g := (^Got)(context.user_ptr)
+				doc, err := r.reads.build(r.f, window, opts, context.allocator)
+				tape.destroy(&g.doc)
+				g.doc, g.err = doc, err
+				if err == nil && opts.pieces.more && len(g.whole.nodes) > 0 && !scalars_lead(&doc, g.whole) {
+					g.apart = true
+				}
+				return err == nil
+			}, win_alloc)
+			defer delete(window, win_alloc)
+			if !testing.expectf(t, got.err == berr && !got.apart && same_documents(got.doc, whole), "%s %v cut %v: build so far %v, whole %v, apart %v", name, f.name, cuts, got.err, berr, got.apart) {
+				return false
+			}
+		}
+		for path, pi in paths {
+			for stop, si in ([2]bool{false, true}) {
+				read := tape.Read_Options{stop_early = stop}
+				want := find_wants[pi * 2 + si]
+				p: tape.Pieces
+				Got :: struct {
+					a:    tape.Span_Answer,
+					err:  tape.Error,
+					path: []tape.Step,
+					read: tape.Read_Options,
+				}
+				got := Got{path = path, read = read}
+				context.user_ptr = &got
+				window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+					g := (^Got)(context.user_ptr)
+					g.a, g.err = r.reads.find(r.f, window, g.path, g.read, opts, context.allocator)
+					return g.err == nil
+				}, win_alloc)
+				defer delete(window, win_alloc)
+				text := string(p.text)
+				ok := got.err == want.err && (want.err != nil || got.a == want.a && (want.a.outcome != .Found || text == string(src[want.a.lo:want.a.hi])))
+				tape.destroy(&p)
+				if !testing.expectf(t, ok, "%s %v cut %v: find %v stop %v: %v %v, whole %v %v", name, f.name, cuts, path, stop, got.a, got.err, want.a, want.err) {
+					return false
+				}
+			}
+		}
+		if derr == nil {
+			for stop, si in ([2]bool{false, true}) {
+				read := tape.Read_Options{stop_early = stop}
+				p: tape.Pieces
+				Got :: struct {
+					doc:  tape.Document,
+					err:  tape.Error,
+					d:    ^tape.Demand,
+					read: tape.Read_Options,
+				}
+				got := Got{d = &d, read = read}
+				context.user_ptr = &got
+				window := feed(r, &p, proc(window: []u8, r: Piece_Run, opts: tape.Options) -> bool {
+					g := (^Got)(context.user_ptr)
+					doc, err := r.reads.scan(r.f, window, g.d, g.read, opts, context.allocator)
+					tape.destroy(&g.doc)
+					g.doc, g.err = doc, err
+					return err == nil
+				}, win_alloc)
+				defer delete(window, win_alloc)
+				ok := got.err == scan_errs[si] && same_documents(got.doc, scan_wants[si])
+				tape.destroy(&got.doc)
+				tape.destroy(&p)
+				if !testing.expectf(t, ok, "%s %v cut %v: scan stop %v: %v, whole %v", name, f.name, cuts, stop, got.err, scan_errs[si]) {
+					return false
+				}
+			}
+		}
+	}
+	return records_pieces_agree_cuts_at(t, base, cuts_list, framing, paths, &d if derr == nil else nil, name, containers)
 }
 
 // How a records law reads each record: judged, with the answer of `path`, or with the document of `demand`.
@@ -587,6 +680,17 @@ Records_Got :: struct {
 	answers: [dynamic]tape.Span_Answer,
 	docs:    [dynamic]tape.Document,
 	err:     tape.Error,
+}
+
+@(private)
+records_got_reset :: proc(g: ^Records_Got) {
+	for &d in g.docs {
+		tape.destroy(&d)
+	}
+	clear(&g.records)
+	clear(&g.answers)
+	clear(&g.docs)
+	g.err = nil
 }
 
 @(private)
@@ -633,7 +737,9 @@ records_batch :: proc(r: ^tape.Records, how: Records_Read, got: ^Records_Got) ->
 // at a time, each from the last batch's `keep` to the next cut, of a copy whose bytes before `keep` are overwritten as
 // `feed` overwrites them.
 @(private)
-records_read :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, pieces: bool, at: []tape.Step = nil) -> (got: Records_Got) {
+records_read_into :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, pieces: bool, got: ^Records_Got, at: []tape.Step = nil) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	win_alloc := window_allocator()
 	opts := run.opts
 	p := tape.Pieces{allocator = context.allocator}
 	defer tape.destroy(&p)
@@ -641,14 +747,14 @@ records_read :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, p
 	end := len(text)
 	if pieces {
 		opts.pieces = &p
-		text = slice.clone(run.src)
 		if len(run.cuts) > 0 {
 			end = run.cuts[0]
 		}
+		text = slice.clone(run.src[:end], win_alloc)
 		p.last = len(run.cuts) == 0
 	}
 	defer if pieces {
-		delete(text)
+		delete(text, win_alloc)
 	}
 	r, e := run.reads.records(run.f, text[:end], framing, opts, at, context.allocator)
 	if e != nil {
@@ -658,7 +764,7 @@ records_read :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, p
 	defer tape.destroy_records(r)
 	dropped: u64
 	for i := 1; ; i += 1 {
-		for records_batch(r, how, &got) == RECORDS_BATCH {
+		for records_batch(r, how, got) == RECORDS_BATCH {
 		}
 		if !pieces || !p.more || p.last {
 			break
@@ -668,9 +774,9 @@ records_read :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, p
 		assert(p.keep >= dropped, "a read needs bytes its last read let go")
 		dropped = p.keep
 		// Each window is a copy of its own, as `feed` gives them, the one before overwritten and freed once it is made.
-		window := slice.clone(run.src[p.keep:end])
+		window := slice.clone(run.src[p.keep:end], win_alloc)
 		slice.fill(text, 0xFF)
-		delete(text)
+		delete(text, win_alloc)
 		text = window
 		if err := tape.records_window(r, text); err != nil {
 			got.err = err
@@ -678,19 +784,24 @@ records_read :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, p
 		}
 	}
 	got.err = r.err
+}
+
+@(private)
+records_read :: proc(run: Piece_Run, framing: tape.Framing, how: Records_Read, pieces: bool, at: []tape.Step = nil) -> (got: Records_Got) {
+	records_read_into(run, framing, how, pieces, &got, at)
 	return
 }
 
-// `records_pieces_agree` under `framing`, and with `containers` under `.Elements` and `.Members` of the root and of each
-// of `paths` of at most two steps, each a member's name or a place from the start.
+// `records_pieces_agree_cuts` under `framing`, and with `containers` under `.Elements` and `.Members` of the root and
+// of each of `paths` of at most two steps, each a member's name or a place from the start.
 @(private)
-records_pieces_agree_at :: proc(t: ^testing.T, run: Piece_Run, framing: tape.Framing, paths: [][]tape.Step, demand: ^tape.Demand, name: string, containers: bool) -> bool {
-	records_pieces_agree(t, run, framing, paths, demand, name) or_return
+records_pieces_agree_cuts_at :: proc(t: ^testing.T, run: Piece_Run, cuts_list: [][]int, framing: tape.Framing, paths: [][]tape.Step, demand: ^tape.Demand, name: string, containers: bool) -> bool {
+	records_pieces_agree_cuts(t, run, cuts_list, framing, paths, demand, name) or_return
 	if !containers {
 		return true
 	}
 	for nested in ([]tape.Framing{.Elements, .Members}) {
-		records_pieces_agree(t, run, nested, paths, demand, name) or_return
+		records_pieces_agree_cuts(t, run, cuts_list, nested, paths, demand, name) or_return
 	}
 	outer: for at in paths {
 		if len(at) == 0 || len(at) > 2 {
@@ -708,7 +819,7 @@ records_pieces_agree_at :: proc(t: ^testing.T, run: Piece_Run, framing: tape.Fra
 			}
 		}
 		for nested in ([]tape.Framing{.Elements, .Members}) {
-			records_pieces_agree(t, run, nested, paths, demand, name, at) or_return
+			records_pieces_agree_cuts(t, run, cuts_list, nested, paths, demand, name, at) or_return
 		}
 	}
 	return true
@@ -718,6 +829,17 @@ records_pieces_agree_at :: proc(t: ^testing.T, run: Piece_Run, framing: tape.Fra
 // the whole text's, with the same answers and documents: judged, with each path's answer and with the documents of
 // `demand`, nil when the paths make none. The framing of the windows reads no byte twice.
 records_pieces_agree :: proc(t: ^testing.T, run: Piece_Run, framing: tape.Framing, paths: [][]tape.Step, demand: ^tape.Demand, name: string, at: []tape.Step = nil) -> bool {
+	one := [1][]int{run.cuts}
+	return records_pieces_agree_cuts(t, run, one[:], framing, paths, demand, name, at)
+}
+
+// `records_pieces_agree` across every cut schedule in `cuts_list`, reading the whole-text baseline and checking
+// `validate_keeps_faults` once per `(framing, at, how)` instead of once per cut.
+records_pieces_agree_cuts :: proc(t: ^testing.T, base: Piece_Run, cuts_list: [][]int, framing: tape.Framing, paths: [][]tape.Step, demand: ^tape.Demand, name: string, at: []tape.Step = nil) -> bool {
+	if len(cuts_list) == 0 {
+		return true
+	}
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	reads := make([dynamic]Records_Read, context.temp_allocator)
 	append(&reads, Records_Read{})
 	for path in paths {
@@ -726,22 +848,28 @@ records_pieces_agree :: proc(t: ^testing.T, run: Piece_Run, framing: tape.Framin
 	if demand != nil {
 		append(&reads, Records_Read{how = .Scan, demand = demand}, Records_Read{how = .Scan, demand = demand, read = {stop_early = true}})
 	}
+	got: Records_Got
+	defer records_got_free(&got)
 	for how in reads {
-		whole := records_read(run, framing, how, false, at)
+		whole := records_read(base, framing, how, false, at)
 		defer records_got_free(&whole)
-		got := records_read(run, framing, how, true, at)
-		defer records_got_free(&got)
-		ok := got.err == whole.err && len(got.records) == len(whole.records) && slice.equal(got.answers[:], whole.answers[:])
-		for k := 0; ok && k < len(got.records); k += 1 {
-			a, b := got.records[k], whole.records[k]
-			ok = a.lo == b.lo && a.hi == b.hi && a.err == b.err && a.key == b.key
-			ok = ok && (how.how != .Scan || same_documents(got.docs[k], whole.docs[k]))
+		if how.how == .Validate && base.opts.dups != .All {
+			validate_keeps_faults(t, base, framing, &whole, at, name) or_return
 		}
-		if !testing.expectf(t, ok, "%s %v cut %v: records %v at %v %v %v: %v records, %v, whole %v records, %v", name, run.f.name, run.cuts, framing, at, how.how, how.path, len(got.records), got.err, len(whole.records), whole.err) {
-			return false
-		}
-		if how.how == .Validate && run.opts.dups != .All {
-			validate_keeps_faults(t, run, framing, &whole, at, name) or_return
+		for cuts in cuts_list {
+			records_got_reset(&got)
+			run := base
+			run.cuts = cuts
+			records_read_into(run, framing, how, true, &got, at)
+			ok := got.err == whole.err && len(got.records) == len(whole.records) && slice.equal(got.answers[:], whole.answers[:])
+			for k := 0; ok && k < len(got.records); k += 1 {
+				a, b := got.records[k], whole.records[k]
+				ok = a.lo == b.lo && a.hi == b.hi && a.err == b.err && a.key == b.key
+				ok = ok && (how.how != .Scan || same_documents(got.docs[k], whole.docs[k]))
+			}
+			if !testing.expectf(t, ok, "%s %v cut %v: records %v at %v %v %v: %v records, %v, whole %v records, %v", name, run.f.name, run.cuts, framing, at, how.how, how.path, len(got.records), got.err, len(whole.records), whole.err) {
+				return false
+			}
 		}
 	}
 	return true
@@ -1260,6 +1388,41 @@ expect_agreement :: proc(t: ^testing.T, a: ^Agreement, floor: Agreement_Floor) {
 // over the scans of a path and its pair in each `WIDE_EVERY` of them and of the whole set of paths, and over every set at `ROUNDS` of `WIDE_EVERY`.
 WIDE_EVERY :: 4
 
+// Reference answers for every path of a document under each duplicates policy `{.Last, .First, .Group}`, computed once
+// per document so every scan, build query, scan query and wide query reuses them instead of re-walking the document.
+@(private)
+Ref_Cache :: struct {
+	answers: [3][dynamic]Ref_Answer,
+	starts:  [3][]int,
+}
+
+@(private)
+ref_cache_init :: proc(doc: ^tape.Document, paths: [][]tape.Step) -> (c: Ref_Cache) {
+	policies := [3]tape.Duplicates{.Last, .First, .Group}
+	for dups, di in policies {
+		c.starts[di] = make([]int, len(paths) + 1)
+		for path, pi in paths {
+			c.starts[di][pi] = len(c.answers[di])
+			reference_answers(doc, path, dups, &c.answers[di])
+		}
+		c.starts[di][len(paths)] = len(c.answers[di])
+	}
+	return
+}
+
+@(private)
+ref_cache_destroy :: proc(c: ^Ref_Cache) {
+	for di in 0 ..< 3 {
+		delete(c.answers[di])
+		delete(c.starts[di])
+	}
+}
+
+@(private)
+ref_for :: proc(c: ^Ref_Cache, di, pi: int) -> []Ref_Answer {
+	return c.answers[di][c.starts[di][pi]:c.starts[di][pi + 1]]
+}
+
 // The readers law over `src`: each path of scans by paths of its own keys and indexes reads over the partial document
 // as over the build, and every other read the partial document answers is the build's, or `.Not_Loaded` where the build
 // has a value or lacks it. A text the build refuses is refused alike by every read. `a` counts what was read.
@@ -1273,27 +1436,37 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 		return
 	}
 	a.texts += 1
-	full_index := tape.Doc_Index{allocator = context.temp_allocator}
+	full_index := tape.Doc_Index{allocator = context.allocator}
 	defer tape.destroy(&full_index)
+	obj_keys := object_keys_of(&doc, &full_index)
 	paths := paths_of(&doc)
+	cache := ref_cache_init(&doc, paths)
+	defer ref_cache_destroy(&cache)
 	scanned := make([dynamic][]tape.Step, context.temp_allocator)
-	for path in paths {
+	scanned_idx := make([dynamic]int, context.temp_allocator)
+	for path, pi in paths {
 		if deep_back(path) {
-			deep_back_agree(t, reads, f, src, opts, &doc, path, name)
+			deep_back_agree(t, reads, f, src, opts, &doc, path, pi, &cache, name)
 		} else {
 			append(&scanned, path)
+			append(&scanned_idx, pi)
 		}
 	}
-	sets := make([dynamic][][]tape.Step, context.temp_allocator)
+	Set :: struct {
+		paths: [][]tape.Step,
+		idxs:  []int,
+	}
+	sets := make([dynamic]Set, context.temp_allocator)
 	for i in 0 ..< len(scanned) {
-		append(&sets, scanned[i:][:1])
+		append(&sets, Set{scanned[i:][:1], scanned_idx[i:][:1]})
 		if i + 1 < len(scanned) {
-			append(&sets, scanned[i:][:2])
+			append(&sets, Set{scanned[i:][:2], scanned_idx[i:][:2]})
 		}
 	}
-	append(&sets, scanned[:])
+	append(&sets, Set{scanned[:], scanned_idx[:]})
 	Grained :: struct {
 		paths:  [][]tape.Step,
+		idxs:   []int,
 		grains: []tape.Grain,
 		limits: []int,
 		facts:  bool,
@@ -1301,38 +1474,41 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 	}
 	runs := make([dynamic]Grained, context.temp_allocator)
 	for set, i in sets {
-		append(&runs, Grained{set, nil, nil, false, ROUNDS >= WIDE_EVERY || i % (2 * WIDE_EVERY) < 2 || i + 1 == len(sets)})
-		if len(set) == 1 || i + 1 == len(sets) {
+		append(&runs, Grained{set.paths, set.idxs, nil, nil, false, ROUNDS >= WIDE_EVERY || i % (2 * WIDE_EVERY) < 2 || i + 1 == len(sets)})
+		if len(set.paths) == 1 || i + 1 == len(sets) {
 			for grain in ([]tape.Grain{.Keys, .Exists}) {
-				grains := make([]tape.Grain, len(set), context.temp_allocator)
+				grains := make([]tape.Grain, len(set.paths), context.temp_allocator)
 				for &g, j in grains {
 					g = grain if j % 3 != 2 else .Whole
 				}
-				append(&runs, Grained{set, grains, nil, false, false})
+				append(&runs, Grained{set.paths, set.idxs, grains, nil, false, false})
 			}
 			// Each path's first answer, or its first two, and every third path's every answer.
 			for limit in 1 ..= 2 {
-				limits := make([]int, len(set), context.temp_allocator)
+				limits := make([]int, len(set.paths), context.temp_allocator)
 				for &l, j in limits {
 					l = limit if j % 3 != 2 else 0
 				}
-				append(&runs, Grained{set, nil, limits, false, false})
+				append(&runs, Grained{set.paths, set.idxs, nil, limits, false, false})
 			}
 		}
 	}
 	if f.facts != {} {
-		append(&runs, Grained{sets[len(sets) - 1], nil, nil, true, true})
+		last := sets[len(sets) - 1]
+		append(&runs, Grained{last.paths, last.idxs, nil, nil, true, true})
 	}
 	all, aerr := tape.demand_of(paths)
 	testing.expect(t, aerr == nil)
 	defer tape.destroy(&all)
+	policies := [3]tape.Duplicates{.Last, .First, .Group}
 	for run in runs {
 		set := run.paths
 		d, derr := tape.demand_of(set, run.grains, run.limits, run.facts)
 		testing.expect(t, derr == nil)
 		defer tape.destroy(&d)
-		for dups in ([]tape.Duplicates{.Last, .First, .Group}) {
+		for dups, di in policies {
 			for stop in ([]bool{false, true}) {
+				runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 				scan_opts := opts
 				scan_opts.dups = dups
 				r, serr := reads.scan(f, src, &d, {stop_early = stop}, scan_opts, context.allocator)
@@ -1343,7 +1519,7 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 				a.scans += 1
 				// The whole document's readers go through its index on a scan that ran to the end, and the partial one's
 				// on a stopped scan, so each path is checked against the other.
-				w := Agree_Walk{t, {&doc, nil}, {&r, nil}, dups, name, set, stop, a}
+				w := Agree_Walk{t, {&doc, nil}, {&r, nil}, dups, name, set, stop, a, &obj_keys}
 				partial_index := tape.Doc_Index{allocator = context.temp_allocator}
 				defer tape.destroy(&partial_index)
 				if stop {
@@ -1360,7 +1536,7 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 					}
 
 					// A stopped scan's answers are the reference's once its paths are settled, which a stop leaves them.
-					if !answers_agree(&doc, &r, i, path, dups, limit) {
+					if !answers_match(&doc, &r, i, ref_for(&cache, di, run.idxs[i]), limit) {
 						testing.expectf(t, false, "%s %v: answers of %v under %v limit %d stop %v: %s", name, f.name, path, dups, limit, stop, render_answers(&r))
 					}
 				}
@@ -1369,12 +1545,12 @@ readers_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: [
 				}
 				plain := run.grains == nil && run.limits == nil
 				if !stop {
-					build_query_agrees(t, reads, f, src, scan_opts, &doc, &d, set, run.limits, plain && len(set) == 1, name, a)
+					build_query_agrees(t, reads, f, src, scan_opts, &doc, &d, set, run.idxs, &cache, di, run.limits, plain && len(set) == 1, name, a)
 				}
-				scan_query_agrees(t, f, &doc, &r, &d, set, run.limits, dups, stop, name)
+				scan_query_agrees(t, f, &doc, &r, &d, set, run.idxs, &cache, di, run.limits, dups, stop, name)
 				// The query of every path over the scan is checked on the scans that keep each path whole.
 				if run.wide && plain && len(paths) > 0 {
-					wide_query_agrees(t, f, &doc, &r, &all, paths, dups, stop, name, a)
+					wide_query_agrees(t, f, &doc, &r, &all, paths, &cache, di, dups, stop, name, a)
 				}
 
 				if root, p := tape.root(w.r); p == .Found {
@@ -1422,14 +1598,15 @@ deep_back :: proc(path: []tape.Step) -> bool {
 // The law of a path a scan refuses: its scan ends with `tape.Bad_Option` for the path under every policy and limit, and
 // a query of the build `doc` answers it as the reference does.
 @(private)
-deep_back_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, doc: ^tape.Document, path: []tape.Step, name: string) {
+deep_back_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, doc: ^tape.Document, path: []tape.Step, path_idx: int, cache: ^Ref_Cache, name: string) {
+	policies := [3]tape.Duplicates{.Last, .First, .Group}
 	for limit in 0 ..= 2 {
 		d, derr := tape.demand_of({path}, nil, {limit})
 		if !testing.expect(t, derr == nil) {
 			return
 		}
 		defer tape.destroy(&d)
-		for dups in ([]tape.Duplicates{.Last, .First, .Group}) {
+		for dups, di in policies {
 			o := opts
 			o.dups = dups
 			r, serr := reads.scan(f, src, &d, {}, o, context.allocator)
@@ -1438,7 +1615,7 @@ deep_back_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src:
 			testing.expectf(t, refused && bad.option == "path", "%s %v: scan of %v: %v", name, f.name, path, serr)
 			q, qerr := build.query({doc, nil}, &d, {dups = dups})
 			defer tape.destroy(&q)
-			testing.expectf(t, qerr == nil && answers_agree(doc, &q, 0, path, dups, limit), "%s %v: query of the build, answers of %v under %v limit %d: %v %s", name, f.name, path, dups, limit, qerr, render_answers(&q))
+			testing.expectf(t, qerr == nil && answers_match(doc, &q, 0, ref_for(cache, di, path_idx), limit), "%s %v: query of the build, answers of %v under %v limit %d: %v %s", name, f.name, path, dups, limit, qerr, render_answers(&q))
 		}
 	}
 }
@@ -1446,7 +1623,7 @@ deep_back_agree :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src:
 // The query law over the build `doc` of `src`: a query of `d`, a demand of `set`, answers as the reference does. With
 // `single`, a find of the one path under `opts` answers the first of the query's answers.
 @(private)
-build_query_agrees :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, doc: ^tape.Document, d: ^tape.Demand, set: [][]tape.Step, limits: []int, single: bool, name: string, a: ^Agreement) {
+build_query_agrees :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, opts: tape.Options, doc: ^tape.Document, d: ^tape.Demand, set: [][]tape.Step, idxs: []int, cache: ^Ref_Cache, di: int, limits: []int, single: bool, name: string, a: ^Agreement) {
 	dups := opts.dups
 	q, err := build.query({doc, nil}, d, {dups = dups})
 	defer tape.destroy(&q)
@@ -1456,7 +1633,7 @@ build_query_agrees :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, s
 	a.queries += 1
 	for path, i in set {
 		limit := limits[i] if i < len(limits) else 0
-		if !answers_agree(doc, &q, i, path, dups, limit) {
+		if !answers_match(doc, &q, i, ref_for(cache, di, idxs[i]), limit) {
 			testing.expectf(t, false, "%s %v: query of the build, answers of %v under %v limit %d: %s", name, f.name, path, dups, limit, render_answers(&q))
 		}
 	}
@@ -1484,7 +1661,7 @@ build_query_agrees :: proc(t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, s
 // The query law over the scan `r` by `d`, a demand of `set`, against the build `doc`: a query of `d` over `r` answers as
 // the reference does, where a stopped scan, or one a limit on a path or a step cut short, may leave a path `.Not_Loaded`.
 @(private)
-scan_query_agrees :: proc(t: ^testing.T, f: ^tape.Format, doc, r: ^tape.Document, d: ^tape.Demand, set: [][]tape.Step, limits: []int, dups: tape.Duplicates, stop: bool, name: string) {
+scan_query_agrees :: proc(t: ^testing.T, f: ^tape.Format, doc, r: ^tape.Document, d: ^tape.Demand, set: [][]tape.Step, idxs: []int, cache: ^Ref_Cache, di: int, limits: []int, dups: tape.Duplicates, stop: bool, name: string) {
 	q, err := build.query({r, nil}, d, {dups = dups})
 	defer tape.destroy(&q)
 	if !testing.expectf(t, err == nil, "%s %v: query of the scan %v", name, f.name, err) {
@@ -1493,7 +1670,7 @@ scan_query_agrees :: proc(t: ^testing.T, f: ^tape.Format, doc, r: ^tape.Document
 	cut := stop || limits != nil || step_limited(set)
 	for path, i in set {
 		limit := limits[i] if i < len(limits) else 0
-		if !answers_agree(doc, &q, i, path, dups, limit) && !(cut && not_loaded(&q, i)) {
+		if !answers_match(doc, &q, i, ref_for(cache, di, idxs[i]), limit) && !(cut && not_loaded(&q, i)) {
 			testing.expectf(t, false, "%s %v: query of the scan stop %v, answers of %v under %v limit %d: %s", name, f.name, stop, path, dups, limit, render_answers(&q))
 		}
 	}
@@ -1502,14 +1679,14 @@ scan_query_agrees :: proc(t: ^testing.T, f: ^tape.Format, doc, r: ^tape.Document
 // The query law of `all`, the demand of `every` path, over the scan `r` of fewer paths: each path answers as the
 // reference, the build `doc`, does, or with a `.Not_Loaded` where the scan did not keep what it reads.
 @(private)
-wide_query_agrees :: proc(t: ^testing.T, f: ^tape.Format, doc, r: ^tape.Document, all: ^tape.Demand, every: [][]tape.Step, dups: tape.Duplicates, stop: bool, name: string, a: ^Agreement) {
+wide_query_agrees :: proc(t: ^testing.T, f: ^tape.Format, doc, r: ^tape.Document, all: ^tape.Demand, every: [][]tape.Step, cache: ^Ref_Cache, di: int, dups: tape.Duplicates, stop: bool, name: string, a: ^Agreement) {
 	wide, err := build.query({r, nil}, all, {dups = dups})
 	defer tape.destroy(&wide)
 	if !testing.expectf(t, err == nil, "%s %v: query of every path over the scan %v", name, f.name, err) {
 		return
 	}
 	for path, i in every {
-		if answers_agree(doc, &wide, i, path, dups, 0) {
+		if answers_match(doc, &wide, i, ref_for(cache, di, i), 0) {
 			a.query_reads += 1
 		} else if not_loaded(&wide, i) {
 			a.query_unread += 1
@@ -1556,16 +1733,57 @@ shape_of :: proc(path: []tape.Step) -> (shape: u64) {
 	return shape << 3 | u64(len(path))
 }
 
+// Distinct decoded key names of every `.Object` node in `doc`, indexed by `Node_Index`: `starts[f]..starts[f+1]`
+// slices `names`. Computed once per document in `temp_allocator` so `agree_past` neither re-decodes keys nor recurses
+// redundantly on repeated keys.
+@(private)
+Object_Keys :: struct {
+	names:  []string,
+	starts: []int,
+}
+
+@(private)
+object_keys_of :: proc(doc: ^tape.Document, index: ^tape.Doc_Index) -> Object_Keys {
+	starts := make([]int, len(doc.nodes) + 1, context.temp_allocator)
+	names := make([dynamic]string, context.temp_allocator)
+	r := tape.Reader{doc, index}
+	for node, i in doc.nodes {
+		starts[i] = len(names)
+		if node.kind != .Object {
+			continue
+		}
+		from := len(names)
+		c, p, _ := tape.children(r, tape.Node_Index(i), context.temp_allocator)
+		if p != .Found {
+			continue
+		}
+		for {
+			k, _, q := tape.next_child(r, &c, .Group)
+			if q != .Found {
+				break
+			}
+			key, _ := member_key(doc, c, k)
+			text := token_text(doc, key)
+			if !slice.contains(names[from:], text) {
+				append(&names, text)
+			}
+		}
+	}
+	starts[len(doc.nodes)] = len(names)
+	return {names[:], starts}
+}
+
 @(private)
 Agree_Walk :: struct {
-	t:     ^testing.T,
-	doc:   tape.Reader,
-	r:     tape.Reader,
-	dups:  tape.Duplicates,
-	name:  string,
-	paths: [][]tape.Step,
-	stop:  bool,
-	a:     ^Agreement,
+	t:        ^testing.T,
+	doc:      tape.Reader,
+	r:        tape.Reader,
+	dups:     tape.Duplicates,
+	name:     string,
+	paths:    [][]tape.Step,
+	stop:     bool,
+	a:        ^Agreement,
+	obj_keys: ^Object_Keys,
 }
 
 // The paths of a scan: the whole text, indexes from either end, every element, the first ones, slices, up to twelve
@@ -1900,30 +2118,28 @@ agree_past :: proc(w: ^Agree_Walk, f, p: tape.Node_Index, depth: int) {
 			testing.expect(w.t, pnp != .Found || same_member(w, fc, fk, pc, pk))
 		}
 	}
-	names := make([dynamic]string, context.temp_allocator)
-	append(&names, "zz_missing", "")
-	if w.doc.doc.nodes[f].kind == .Object {
-		c, _, _ := tape.children(w.doc, f, context.temp_allocator)
-		for {
-			k, _, q := tape.next_child(w.doc, &c, .Group)
-			if q != .Found {
-				break
-			}
-			key, _ := member_key(w.doc.doc, c, k)
-			append(&names, token_text(w.doc.doc, key))
-		}
-	}
-	for name, i in names {
+	other := tape.Duplicates.First if w.dups == .Last else .Last
+	for name in ([2]string{"zz_missing", ""}) {
 		fv, fp := tape.member(w.doc, f, name, w.dups)
 		pv, pp := tape.member(w.r, p, name, w.dups)
-		if agree_read(w, name, fv, pv, fp, pp) && pp == .Found && i >= 2 {
-			agree_past(w, fv, pv, depth + 1)
-		}
-		// A read under the policy the scan did not take.
-		other := tape.Duplicates.First if w.dups == .Last else .Last
+		agree_read(w, name, fv, pv, fp, pp)
 		fv, fp = tape.member(w.doc, f, name, other)
 		pv, pp = tape.member(w.r, p, name, other)
 		agree_read(w, name, fv, pv, fp, pp)
+	}
+	if w.doc.doc.nodes[f].kind == .Object {
+		keys := w.obj_keys.names[w.obj_keys.starts[f]:w.obj_keys.starts[f + 1]]
+		for name in keys {
+			fv, fp := tape.member(w.doc, f, name, w.dups)
+			pv, pp := tape.member(w.r, p, name, w.dups)
+			if agree_read(w, name, fv, pv, fp, pp) && pp == .Found {
+				agree_past(w, fv, pv, depth + 1)
+			}
+			// A read under the policy the scan did not take.
+			fv, fp = tape.member(w.doc, f, name, other)
+			pv, pp = tape.member(w.r, p, name, other)
+			agree_read(w, name, fv, pv, fp, pp)
+		}
 	}
 	count := fn if fl == .Found else 0
 	for i in -count - 2 ..= count + 1 {
