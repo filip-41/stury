@@ -215,3 +215,42 @@ libm_pow_is_exact_where_the_result_is :: proc(t: ^testing.T) {
 	testing.expect_value(t, query.libm_pow(2, -1075), 0)
 	testing.expect(t, math.is_nan(query.libm_pow(-8, 1.0 / 3)))
 }
+
+// `log10` and `log2` are exact on exact powers of 10 and 2 (catching older `core:math` builds where `log10(1000)`
+// gave 2.9999999999999996).
+@(test)
+log10_and_log2_are_exact_on_exact_powers :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	pow10 := f64(1)
+	for k in 0 ..= 22 {
+		testing.expect_value(t, math.log10(pow10), f64(k))
+		pow10 *= 10
+	}
+	for k in -1074 ..= 1023 {
+		testing.expect_value(t, math.log2(math.ldexp(f64(1), k)), f64(k))
+	}
+}
+
+// The five libm-backed math builtins (`sin`, `cos`, `tan`, `exp`, `pow`) may differ by platform in the last digit,
+// staying within 1 ulp of reference values and exact at exact inputs.
+@(test)
+libm_backed_builtins_are_within_an_ulp :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	testing.expect_value(t, math.sin(f64(0)), 0)
+	testing.expect_value(t, math.cos(f64(0)), 1)
+	testing.expect_value(t, math.tan(f64(0)), 0)
+	testing.expect_value(t, math.exp(f64(0)), 1)
+	testing.expect_value(t, math.pow(f64(2), 10), 1024)
+	testing.expect_value(t, math.pow(f64(10), 3), 1000)
+
+	within_ulps(t, math.sin(f64(1)), 0.8414709848078965, 1, "sin", {1, 0})
+	within_ulps(t, math.sin(f64(-2.5)), -0.5984721441039565, 1, "sin", {-2.5, 0})
+	within_ulps(t, math.cos(f64(1)), 0.5403023058681398, 1, "cos", {1, 0})
+	within_ulps(t, math.cos(f64(2.5)), -0.8011436155469337, 1, "cos", {2.5, 0})
+	within_ulps(t, math.tan(f64(1)), 1.5574077246549023, 1, "tan", {1, 0})
+	within_ulps(t, math.tan(f64(-0.75)), -0.9315964599440725, 1, "tan", {-0.75, 0})
+	within_ulps(t, math.exp(f64(1)), 2.718281828459045, 1, "exp", {1, 0})
+	within_ulps(t, math.exp(f64(-2.5)), 0.0820849986238988, 1, "exp", {-2.5, 0})
+	within_ulps(t, math.pow(f64(2), 0.5), 1.4142135623730951, 1, "pow", {2, 0.5})
+	within_ulps(t, math.pow(f64(3.5), 2.5), 22.91765149399039, 1, "pow", {3.5, 2.5})
+}

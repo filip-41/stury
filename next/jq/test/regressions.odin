@@ -240,3 +240,33 @@ hooks_modules_data_seq_toarray_removed_and_partial_css :: proc(t: ^testing.T) {
 	jq.run_destroy(&run)
 	testing.expect_value(t, query.heap_live(&h), u64(0))
 }
+
+@(test)
+math_exact_powers_and_libm_ulp_bounds :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	arena: virtual.Arena
+	testing.expect(t, suite_arena(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+
+	// `log10` and `log2` are exact on exact powers.
+	out10, end10, _ := eval_expr(t, `[1, 10, 100, 1000, 1e6, 1e15, 1e22] | map(log10)`, "null")
+	testing.expect_value(t, end10, jq.Run_End.Done)
+	testing.expect_value(t, out10, `[0,1,2,3,6,15,22]`)
+
+	out2, end2, _ := eval_expr(t, `[range(-20; 53)] | all(. as $k | pow(2; $k) | log2 == $k)`, "null")
+	testing.expect_value(t, end2, jq.Run_End.Done)
+	testing.expect_value(t, out2, `true`)
+
+	// The five libm-backed builtins stay within 1 ulp of reference values.
+	prog := `[
+		((1 | sin) - 0.8414709848078965 | fabs <= 2.220446049250313e-16),
+		((1 | cos) - 0.5403023058681398 | fabs <= 2.220446049250313e-16),
+		((1 | tan) - 1.5574077246549023 | fabs <= 4.440892098500626e-16),
+		((1 | exp) - 2.718281828459045  | fabs <= 4.440892098500626e-16),
+		(pow(2; 0.5) - 1.4142135623730951 | fabs <= 2.220446049250313e-16)
+	] | all`
+	out_ulp, end_ulp, _ := eval_expr(t, prog, "null")
+	testing.expect_value(t, end_ulp, jq.Run_End.Done)
+	testing.expect_value(t, out_ulp, `true`)
+}
