@@ -199,7 +199,7 @@ float_short :: #force_inline proc "contextless" (src: []u8, lo, hi: u64) -> (v: 
 @(private)
 short_word :: #force_inline proc "contextless" (p: [^]u8, m: u64, neg: bool) -> (num: Number, ok: bool) #no_bounds_check {
 	w := short_pad(kernel.load8(p), m)
-	nd := short_marks(w)
+	nd := non_digit_bytes(w)
 	if nd == 0 {
 		if m > 1 && p[0] == '0' {
 			return
@@ -212,20 +212,13 @@ short_word :: #force_inline proc "contextless" (p: [^]u8, m: u64, neg: bool) -> 
 	}
 	// The point read as a `0` digit, which no other non-digit may follow.
 	w = w &~ (u64(0xFF) << (8 * k)) | u64(0x30) << (8 * k)
-	if short_marks(w) != 0 {
+	if non_digit_bytes(w) != 0 {
 		return
 	}
 	low := u64(1) << (8 * k) - 1
 	merged := w & low | w >> 8 &~ low
 	v := f64(digits8_value(merged << (8 * (9 - m)))) / POW10_F64[m - k - 1]
 	return {transmute(u64)(-v if neg else v), .Float}, true
-}
-
-// The high bits of the bytes of `w` that are no digit, exact for the first such byte only, as a later one may be
-// marked by its carry.
-@(private)
-short_marks :: #force_inline proc "contextless" (w: u64) -> u64 {
-	return ((w - 0x3030_3030_3030_3030) | (w + 0x4646_4646_4646_4646)) & 0x8080_8080_8080_8080
 }
 
 // Word `w` of a short number's span with its bytes from `k` on, `k` below 8, set to `0` digits.
@@ -242,10 +235,10 @@ short_pad :: #force_inline proc "contextless" (w: u64, k: u64) -> u64 {
 // may be marked by its carry, and is not read.
 @(private)
 short_nondigit :: #force_inline proc "contextless" (w0, w1: u64) -> u64 {
-	if m0 := short_marks(w0); m0 != 0 {
+	if m0 := non_digit_bytes(w0); m0 != 0 {
 		return u64(intrinsics.count_trailing_zeros(m0)) >> 3
 	}
-	m1 := short_marks(w1)
+	m1 := non_digit_bytes(w1)
 	return 8 + u64(intrinsics.count_trailing_zeros(m1)) >> 3 if m1 != 0 else 16
 }
 

@@ -16,6 +16,10 @@ float_bits :: proc(f: f64) -> u64 {
 	return transmute(u64)f
 }
 
+int_bits :: proc(v: i64) -> u64 {
+	return u64(v)
+}
+
 // `1` followed by `zeros` zeros, or `0.` followed by `zeros` zeros and a `1`.
 big_one :: proc(zeros: int) -> string {
 	return strings.concatenate({"1", strings.repeat("0", zeros, context.temp_allocator)}, context.temp_allocator)
@@ -203,6 +207,203 @@ short_readers_agree_with_the_strict_one :: proc(t: ^testing.T) {
 						testing.expectf(t, valid && want.kind <= .Float && f == as_float && (f < 0 || f == 0 && minus) == minus, "float %q: %v, want %v %v", text[lo:hi], f, want, valid)
 					}
 				}
+			}
+		}
+	}
+}
+
+// `number_int` agrees with `number_strict` below, at, and above `FOLD_WORDS_FROM` (24), including `i64` extremes and
+// 19-digit unsigned values, and rejects out-of-range digit counts or values below `min(i64)`.
+@(test)
+number_int_across_fold_words_boundary :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	cases := []Case {
+		{"0", .Int, 0},
+		{"-0", .Int, 0},
+		{"7", .Int, 7},
+		{"-7", .Int, int_bits(-7)},
+		{"12345678", .Int, 12_345_678},
+		{"-12345678", .Int, int_bits(-12_345_678)},
+		{"123456789", .Int, 123_456_789},
+		{"1234567890123456", .Int, 1_234_567_890_123_456},
+		{"-1234567890123456", .Int, int_bits(-1_234_567_890_123_456)},
+		{"12345678901234567", .Int, 12_345_678_901_234_567},
+		{"9223372036854775807", .Int, u64(max(i64))},
+		{"-9223372036854775808", .Int, u64(1) << 63},
+		{"9223372036854775808", .Uint, u64(1) << 63},
+		{"9999999999999999999", .Uint, 9_999_999_999_999_999_999},
+	}
+	// Sweep prefix lengths so `hi` crosses `FOLD_WORDS_FROM` (24) with arbitrary non-ASCII prefix bytes before `lo`.
+	for prefix_len in ([]int{0, 1, 5, 8, 15, 16, 22, 23, 24, 25, 32}) {
+		for c in cases {
+			buf := make([]u8, prefix_len + len(c.text) + 4, context.temp_allocator)
+			for i in 0 ..< prefix_len {
+				buf[i] = 0xFF if i & 1 == 0 else 'x'
+			}
+			copy(buf[prefix_len:], c.text)
+			for i in prefix_len + len(c.text) ..< len(buf) {
+				buf[i] = ','
+			}
+			lo := u64(prefix_len)
+			hi := u64(prefix_len + len(c.text))
+			digits := len(c.text) - int(c.text[0] == '-')
+			num, ok := spell.number_int(buf, lo, hi, digits)
+			testing.expectf(t, ok && num.kind == c.kind && num.bits == c.bits, "prefix=%d %s: %v %x (ok=%v), want %v %x", prefix_len, c.text, num.kind, num.bits, ok, c.kind, c.bits)
+		}
+	}
+	// Values below `min(i64)` and invalid digit counts are rejected by `number_int`.
+	rejects := []struct {
+		text:   string,
+		digits: int,
+	} {
+		{"-9223372036854775809", 19},
+		{"-9999999999999999999", 19},
+		{"12345678901234567890", 20},
+		{"123", 0},
+		{"123", 2},
+		{"123", 4},
+	}
+	for prefix_len in ([]int{0, 24}) {
+		for r in rejects {
+			buf := make([]u8, prefix_len + len(r.text), context.temp_allocator)
+			for i in 0 ..< prefix_len {
+				buf[i] = ' '
+			}
+			copy(buf[prefix_len:], r.text)
+			_, ok := spell.number_int(buf, u64(prefix_len), u64(len(buf)), r.digits)
+			testing.expectf(t, !ok, "prefix=%d %s (digits=%d): expected reject", prefix_len, r.text, r.digits)
+		}
+	}
+}
+
+// `number_fraction` agrees with `number_strict` across the `FOLD_WORDS_FROM + 19` (43) threshold, covering the
+// merged-word (`<= 7`), Clinger (`8..15`), fast-float (`16..19`), and long-decimal (`> 19`) paths.
+@(test)
+number_fraction_across_fold_words_boundary :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	cases := []struct {
+		text:                string,
+		int_digits, frac_dig: int,
+	} {
+		{"0.0", 1, 1},
+		{"-0.0", 1, 1},
+		{"1.5", 1, 1},
+		{"-67.54717", 2, 5},
+		{"123456.7", 6, 1},
+		{"1.234567", 1, 6},
+		{"12345678.1", 8, 1},
+		{"-12345.67890123", 5, 8},
+		{"12345678.1234567", 8, 7},
+		{"123456789.1234567", 9, 7},
+		{"-123456789.123456789", 9, 9},
+		{"1234567890.123456789", 10, 9},
+		{"9999999999.999999999", 10, 9},
+		{"-0.123456789012345678", 1, 18},
+		{"123456789012345678.9", 18, 1},
+		{"1234567890.12345678901234567890", 10, 20},
+		{"12345678901234567890.12345678901234567890", 20, 20},
+	}
+	// Sweep `prefix_len` and `tail_len` so `hi` sits below, at, and above `43` and `start + 8` crosses `len(src)`.
+	for prefix_len in ([]int{0, 10, 24, 35, 40, 42, 43, 44, 50}) {
+		for tail_len in ([]int{0, 8}) {
+			for c in cases {
+				buf := make([]u8, prefix_len + len(c.text) + tail_len, context.temp_allocator)
+				for i in 0 ..< prefix_len {
+					buf[i] = 0xFF if i & 1 == 0 else ','
+				}
+				copy(buf[prefix_len:], c.text)
+				for i in prefix_len + len(c.text) ..< len(buf) {
+					buf[i] = ','
+				}
+				lo := u64(prefix_len)
+				hi := u64(prefix_len + len(c.text))
+				want, valid := spell.number_strict(buf, lo, hi)
+				got := spell.number_fraction(buf, lo, hi, c.int_digits, c.frac_dig)
+				testing.expectf(t, valid && got == want, "prefix=%d tail=%d %s: %v %x, want %v %x", prefix_len, tail_len, c.text, got.kind, got.bits, want.kind, want.bits)
+			}
+		}
+	}
+}
+
+// `number_exponent` agrees with `number_strict` across `FOLD_WORDS_FROM` (24), both <= 19 and > 19 digits, and falls
+// back cleanly when the supplied digit counts do not match.
+@(test)
+number_exponent_across_fold_words_boundary :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	cases := []struct {
+		text:                 string,
+		int_digits, frac_dig: int,
+	} {
+		{"0e0", 1, 0},
+		{"-0e0", 1, 0},
+		{"1e5", 1, 0},
+		{"1.5e23", 1, 1},
+		{"-67.54717e-2", 2, 5},
+		{"12345678e10", 8, 0},
+		{"123456789e-10", 9, 0},
+		{"-12345678.901234567E+12", 8, 9},
+		{"1234567890123456789e-18", 19, 0},
+		{"1.7976931348623157e308", 1, 16},
+		{"1.7976931348623159e308", 1, 16},
+		{"1e-5000", 1, 0},
+		{"12345678901234567890.12345e-5", 20, 5},
+		// Mismatched counts still fall back to `number_decimal`.
+		{"12.34e5", 1, 2},
+		{"1234e5", 4, 1},
+	}
+	for prefix_len in ([]int{0, 8, 16, 22, 23, 24, 25, 32}) {
+		for c in cases {
+			buf := make([]u8, prefix_len + len(c.text) + 4, context.temp_allocator)
+			for i in 0 ..< prefix_len {
+				buf[i] = 0xFF if i & 1 == 0 else ' '
+			}
+			copy(buf[prefix_len:], c.text)
+			for i in prefix_len + len(c.text) ..< len(buf) {
+				buf[i] = ','
+			}
+			lo := u64(prefix_len)
+			hi := u64(prefix_len + len(c.text))
+			want, valid := spell.number_strict(buf, lo, hi)
+			got := spell.number_exponent(buf, lo, hi, c.int_digits, c.frac_dig)
+			testing.expectf(t, valid && got == want, "prefix=%d %s: %v %x, want %v %x", prefix_len, c.text, got.kind, got.bits, want.kind, want.bits)
+		}
+	}
+}
+
+// `number_strict` handles `i64` extremes (`min(i64)`, `max(i64)`, `min(i64) - 1`) and never mistakes high-bit
+// non-ASCII bytes (`0x80`, `0xB0`, `0xBA`, `0xFF`) for ASCII digits in either `number_short` or `digit_fold`.
+@(test)
+i64_extremes_and_high_bit_terminators :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	expect_cases(t, []Case {
+		{"9223372036854775807", .Int, u64(max(i64))},
+		{"9223372036854775808", .Uint, u64(1) << 63},
+		{"-9223372036854775808", .Int, u64(1) << 63},
+		{"-9223372036854775809", .Float, float_bits(-9223372036854775809.0)},
+	})
+	high_bytes := []u8{0x80, 0xAF, 0xB0, 0xB9, 0xBA, 0xFF}
+	prefixes := []string{"1", "1234567", "12345678", "123456789", "1234567890123456", "12345678901234567", "9223372036854775807"}
+	for b in high_bytes {
+		for pad in ([]int{0, 16}) {
+			for p in prefixes {
+				// High-bit byte inside the span must be rejected.
+				bad := make([]u8, len(p) + 1 + pad, context.temp_allocator)
+				copy(bad, p)
+				bad[len(p)] = b
+				for i in len(p) + 1 ..< len(bad) {
+					bad[i] = '0'
+				}
+				_, bad_ok := spell.number_strict(bad, 0, u64(len(p) + 1))
+				testing.expectf(t, !bad_ok, "prefix=%q byte=0x%02x pad=%d: high-bit byte inside span accepted", p, b, pad)
+
+				// High-bit byte immediately past `hi` must not corrupt the valid span before it.
+				good_want, want_ok := spell.number_strict(transmute([]u8)p, 0, u64(len(p)))
+				good_got, got_ok := spell.number_strict(bad, 0, u64(len(p)))
+				testing.expectf(t, want_ok && got_ok && good_got == good_want, "prefix=%q trailing=0x%02x pad=%d: %v %x, want %v %x", p, b, pad, good_got.kind, good_got.bits, good_want.kind, good_want.bits)
 			}
 		}
 	}
