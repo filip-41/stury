@@ -629,12 +629,12 @@ quote_scan_every_stretch :: proc(t: ^testing.T) {
 		for lo := 0; lo < len(buf); lo += 1 + rand.int_max(9) {
 			for hi := lo; hi <= len(buf); hi += 1 + rand.int_max(9) {
 				text := buf[lo:hi]
-				for odd in u64(0) ..= 1 {
+				for odd in ([2]bool{false, true}) {
 					s := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, odd = odd}
 					k.quote_run(text, &s)
 					for g in 0 ..< 2 {
 						quoted, want := g == 1, rand.int_max(3)
-						esc, depth, low, cut := odd == 1, 0, 0, -1
+						esc, depth, low, cut := odd, 0, 0, -1
 						// An escape hides only a quote.
 						for c, i in text {
 							was := esc
@@ -650,11 +650,11 @@ quote_scan_every_stretch :: proc(t: ^testing.T) {
 							case c == ',' && cut == -1 && depth == 0: cut = i
 							}
 						}
-						testing.expectf(t, s.depth[g] == depth && s.low[g] == low && s.quoted == (quoted != (g == 1)) && s.odd == u64(esc), "%q from %d: %v", text, g, s)
+						testing.expectf(t, s.depth[g] == depth && s.low[g] == low && s.quoted == (quoted != (g == 1)) && s.odd == esc, "%q from %d: %v", text, g, s)
 						from := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, odd = odd, quoted = g == 1, want = want}
 						from.depth[0] = want
 						testing.expectf(t, k.quote_cut(text, from) == max(cut, -1), "%q from %d: cut %d, want %d", text, g, k.quote_cut(text, from), cut)
-						from.depth[0] = min(int) / 2
+						from.depth[0] = min(int)
 						testing.expectf(t, k.quote_cut(text, from) == -1, "%q from %d below `want`: cut %d", text, g, k.quote_cut(text, from))
 					}
 				}
@@ -761,9 +761,9 @@ quote_cut_flat_matches_bytewise :: proc(t: ^testing.T) {
 		for lo := 0; lo < len(buf); lo += 1 + rand.int_max(7) {
 			for hi := lo; hi <= len(buf); hi += 1 + rand.int_max(11) {
 				text := buf[lo:hi]
-				for odd in u64(0) ..= 1 {
+				for odd in ([2]bool{false, true}) {
 					for g in 0 ..< 2 {
-						quoted, esc, cut := g == 1, odd == 1, -1
+						quoted, esc, cut := g == 1, odd, -1
 						for c, i in text {
 							was := esc
 							esc = !esc && c == '\\'
@@ -1088,6 +1088,194 @@ load8_and_store16_unaligned :: proc(t: ^testing.T) {
 		for i in 0 ..< len(dst) {
 			want: u8 = payload[i - off] if (i >= off && i < off + 16) else 0x55
 			testing.expectf(t, dst[i] == want, "store16 off=%d byte %d: 0x%02x, want 0x%02x", off, i, dst[i], want)
+		}
+	}
+}
+
+// Checks `prefix_xor` directly across 0, all ones, every single bit, alternating patterns, and random masks.
+@(test, enable_target_feature = FEATURES)
+prefix_xor_masks :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 21)
+	ref :: proc(x: u64) -> (out: u64) {
+		parity: u64
+		for i in 0 ..< 64 {
+			parity ~= (x >> uint(i)) & 1
+			out |= parity << uint(i)
+		}
+		return
+	}
+	fixed := [?]u64{
+		0,
+		~u64(0),
+		0x5555_5555_5555_5555,
+		0xAAAA_AAAA_AAAA_AAAA,
+		0x0000_0000_FFFF_FFFF,
+		0xFFFF_FFFF_0000_0000,
+		0x8000_0000_0000_0001,
+	}
+	for x in fixed {
+		testing.expectf(t, k.prefix_xor(T, x) == ref(x), "prefix_xor(0x%016x): 0x%016x, want 0x%016x", x, k.prefix_xor(T, x), ref(x))
+	}
+	for bit in 0 ..< 64 {
+		x := u64(1) << uint(bit)
+		testing.expectf(t, k.prefix_xor(T, x) == ref(x), "prefix_xor(bit %d)", bit)
+	}
+	for _ in 0 ..< testkit.rounds(2048) {
+		x := rand.uint64()
+		testing.expectf(t, k.prefix_xor(T, x) == ref(x), "prefix_xor(0x%016x)", x)
+	}
+}
+
+// Checks `depth_low` directly against a bit-by-bit oracle, including `min(int)` and `max(int)` boundary inputs.
+@(test)
+depth_low_boundaries :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 22)
+	ref :: proc(low, depth: int, open, close: u64) -> int {
+		l, d := low, depth
+		for i in 0 ..< 64 {
+			bit := u64(1) << uint(i)
+			if open & bit != 0 {
+				d += 1
+			} else if close & bit != 0 {
+				d -= 1
+				l = min(l, d)
+			}
+		}
+		return l
+	}
+	// Extreme boundaries where `depth - count_ones(close)` or `depth - low` would wrap signed `int`.
+	testing.expect_value(t, k.depth_low(min(int), min(int), 0, 0), min(int))
+	testing.expect_value(t, k.depth_low(min(int), min(int), 0b01, 0b10), min(int))
+	testing.expect_value(t, k.depth_low(min(int) + 1, min(int) + 1, 0b01, 0b110), min(int))
+	testing.expect_value(t, k.depth_low(min(int), min(int) + 1, 0, 0b1), min(int))
+	testing.expect_value(t, k.depth_low(min(int), max(int), 0, ~u64(0)), min(int))
+	testing.expect_value(t, k.depth_low(max(int) - 10, max(int) - 5, 0, 0b11111111), max(int) - 13)
+	testing.expect_value(t, k.depth_low(0, 5, ~u64(0), 0), 0)
+	testing.expect_value(t, k.depth_low(10, 0, 0, 0), 10)
+	testing.expect_value(t, k.depth_low(10, 0, 0, 1), -1)
+
+	for _ in 0 ..< testkit.rounds(2048) {
+		open := rand.uint64()
+		close := rand.uint64() &~ open
+		depth := rand.int_max(128) - 64
+		low := depth - rand.int_max(70)
+		testing.expect_value(t, k.depth_low(low, depth, open, close), ref(low, depth, open, close))
+	}
+}
+
+// Checks `is_ws` and `is_markup_ws` exhaustively across all 256 byte values.
+@(test)
+ws_predicates_every_byte :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for v in 0 ..< 256 {
+		c := u8(v)
+		want_ws := c == ' ' || c == '\t' || c == '\n' || c == '\r'
+		want_markup := want_ws || c == '\f'
+		testing.expectf(t, k.is_ws(c) == want_ws, "is_ws(0x%02x)", c)
+		testing.expectf(t, k.is_markup_ws(c) == want_markup, "is_markup_ws(0x%02x)", c)
+	}
+}
+
+// Checks `quote_cut` and `quote_run` edge cases: starting below `want`, `min(int)`/`max(int)` levels, stale
+// `s.quoted == true`, `quote == 0`, and `escape == 0`.
+@(test)
+quote_edge_cases :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Starting below `want` returns -1 even when opening brackets would climb back to `want`.
+	below := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, want = 1, depth = {0, 0}}
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[,"), below), -1)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[[,"), below), -1)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string(""), below), -1)
+
+	// `min(int)` and `max(int)` levels without signed subtraction wraparound.
+	at_min := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, want = min(int), depth = {min(int), 0}}
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string(","), at_min), 0)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[,"), at_min), -1)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[],"), at_min), 2)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("],"), at_min), -1)
+
+	near_min := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, want = min(int), depth = {min(int) + 1, 0}}
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("],"), near_min), 1)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("]],"), near_min), -1)
+
+	at_max := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, want = max(int), depth = {max(int), 0}}
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[,"), at_max), -1)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[],"), at_max), 2)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string("],"), at_max), -1)
+
+	// `quote == 0` takes the direct `.Forward` scan path for the first `sep`.
+	no_quote := k.Quotes{quote = 0, escape = '\\', sep = ',', nest = true, want = 5}
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`","`), no_quote), 1)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`[[,`), no_quote), 2)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`abc`), no_quote), -1)
+
+	// `escape == 0` treats backslashes as ordinary bytes and leaves `odd` untouched.
+	no_esc_cut := k.Quotes{quote = '"', escape = 0, sep = ',', odd = true}
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`\"a",`), no_esc_cut), 4)
+	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`",\"`), no_esc_cut), -1)
+
+	no_esc_run := k.Quotes{quote = '"', escape = 0, nest = true, odd = true}
+	k.quote_run(transmute([]u8)string(`\"["\`), &no_esc_run)
+	testing.expect_value(t, no_esc_run.odd, true)
+	testing.expect_value(t, no_esc_run.quoted, false)
+	testing.expect_value(t, no_esc_run.depth, [2]int{0, 1})
+
+	// `quote_run` ignores any stale `s.quoted == true` on entry.
+	sample := transmute([]u8)string(`[,"["]`)
+	stale := k.Quotes{quote = '"', escape = '\\', nest = true, quoted = true}
+	fresh := k.Quotes{quote = '"', escape = '\\', nest = true, quoted = false}
+	k.quote_run(sample, &stale)
+	k.quote_run(sample, &fresh)
+	testing.expect_value(t, stale, fresh)
+
+	empty_stale := k.Quotes{quote = '"', escape = '\\', nest = true, quoted = true}
+	k.quote_run(nil, &empty_stale)
+	testing.expect_value(t, empty_stale.quoted, false)
+}
+
+// Checks `count_byte`, `count_chars`, and `skip_ws` across short (< 16 B) and block-boundary lengths.
+@(test)
+scan_short_and_boundary_lengths :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	buf: [140]u8
+	for &b, i in buf {
+		switch i % 6 {
+		case 0: b = ' '
+		case 1: b = '\t'
+		case 2: b = '\n'
+		case 3: b = 0xC3
+		case 4: b = 0xA9
+		case: b = 'x'
+		}
+	}
+	lengths := [?]int{0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 63, 64, 65, 127, 128, 129}
+	for n in lengths {
+		s := buf[:n]
+		want_nl, want_chars := 0, 0
+		for b in s {
+			want_nl += int(b == '\n')
+			want_chars += int(b & 0xC0 != 0x80)
+		}
+		testing.expectf(t, k.count_byte(s, '\n') == want_nl, "count_byte len %d", n)
+		testing.expectf(t, k.count_chars(s) == want_chars, "count_chars len %d", n)
+	}
+	ws_buf: [140]u8
+	ws := [4]u8{' ', '\t', '\n', '\r'}
+	for &b, i in ws_buf {
+		b = ws[i & 3]
+	}
+	for n in lengths {
+		p := raw_data(ws_buf[:])
+		testing.expectf(t, intrinsics.ptr_sub(k.skip_ws(p, p[n:]), p) == n, "skip_ws all-ws len %d", n)
+		if n > 0 {
+			saved := ws_buf[n - 1]
+			ws_buf[n - 1] = 'z'
+			testing.expectf(t, intrinsics.ptr_sub(k.skip_ws(p, p[n:]), p) == n - 1, "skip_ws stop-last len %d", n)
+			ws_buf[n - 1] = saved
 		}
 	}
 }
