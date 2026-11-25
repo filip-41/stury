@@ -153,7 +153,8 @@ token_find :: proc(src: []u8, format: ^tape.Format, tokens: []tape.Token, steps:
 	defer build.finder_end(&f)
 	regs: hook.Regs
 	token_walk(tokens, &f, &regs, build.finder_hook)
-	return build.finder_answer(&f)
+	answer, _ := build.finder_result(&f, nil, false)
+	return answer
 }
 
 // The text of answer `k` of path `path`, or its outcome.

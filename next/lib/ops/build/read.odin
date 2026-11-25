@@ -82,14 +82,8 @@ builder_finish_dups :: proc(doc: ^tape.Document, opts: tape.Options, rules: ^tap
 // Builds the document of the nodes of `src`, a text of `format`, that the paths of `demand` reach. `rewalk` walks a
 // value again for the scanner.
 read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, rewalk: Rewalk, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Document, tape.Error) {
-	if e := tape.options_refused(format, opts); e != nil {
+	if e := scan_refused(format, opts, demand); e != nil {
 		return {}, e
-	}
-	if !path_dups(format, opts) {
-		return {}, tape.Bad_Option{"dups"}
-	}
-	if scan_refuses(demand) {
-		return {}, tape.Bad_Option{"path"}
 	}
 	m: hook.Memory_Budget
 	allocator := read_allocator(&m, opts, caller)
@@ -111,15 +105,9 @@ read_scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, format: ^tape.F
 // The first value `path` reaches in `src`, a text of `format`, read with no document. `respell` gives the spelling of
 // a number the walk gave unspelled, and `rewalk` walks a value again for the finder.
 read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, $walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (tape.Span_Answer, tape.Error) {
-	if e := tape.options_refused(format, opts); e != nil {
-		return {}, e
-	}
-	if !path_dups(format, opts) {
-		return {}, tape.Bad_Option{"dups"}
-	}
-	steps, followed := find_steps(path)
-	if !followed {
-		return {}, tape.Bad_Option{"path"}
+	steps, refused := find_path(format, opts, path)
+	if refused != nil {
+		return {}, refused
 	}
 	m: hook.Memory_Budget
 	allocator := read_allocator(&m, opts, caller)
@@ -131,15 +119,18 @@ read_find :: #force_inline proc(src: []u8, path: []tape.Step, format: ^tape.Form
 	defer finder_end(&f)
 	regs: hook.Regs
 	_, werr, tolerated := walk(src, opts, &f, &regs, allocator, &f.ctx)
-	if werr != nil {
-		return {}, hook.memory_budget_error(&m, werr)
+	answer, err := finder_result(&f, werr, tolerated)
+	return answer, hook.memory_budget_error(&m, err)
+}
+
+// Why a path read of `format` under `opts` is refused: an option the format refuses, or a repeated keys policy that
+// `path_dups` refuses. Nil when it may go on. A document built by hand has no format, which refuses no option.
+@(private)
+path_read_refused :: #force_inline proc "contextless" (format: ^tape.Format, opts: tape.Options) -> tape.Error {
+	if format != nil {
+		tape.options_refused(format, opts) or_return
 	}
-	if f.refused {
-		return {}, hook.memory_budget_error(&m, runtime.Allocator_Error.Out_Of_Memory)
-	}
-	answer := finder_answer(&f)
-	answer.tolerated = tolerated
-	return answer, nil
+	return nil if path_dups(format, opts) else tape.Bad_Option{"dups"}
 }
 
 // Whether a path read of `format` may take the repeated keys policy of `opts`. A path read takes one member of a key, so
@@ -200,4 +191,19 @@ read_depth :: #force_inline proc "contextless" (opts: tape.Options) -> u64 {
 // most a `u64` holds for no limit.
 read_steps :: #force_inline proc "contextless" (opts: tape.Options) -> u64 {
 	return opts.budget.steps + 1 if opts.budget.steps != 0 && opts.budget.steps < max(u64) else max(u64)
+}
+
+// What a path read whose answers are all settled, and which reads on to judge the rest of the text, answers token `t`:
+// a container is judged with the rest of the text and no more tokens, and any other token passes.
+@(private)
+read_rest :: #force_inline proc "contextless" (t: tape.Token) -> hook.Action {
+	return .Rest if t.role == .Value && (t.kind == .Array || t.kind == .Object) else .Next
+}
+
+// The entries a path read's ring keeps for a step reaching `reach` elements back from the end of an array in `src`. An
+// element takes at least one byte, so a ring of more entries than the text has bytes holds nothing more. A read with no
+// `rewalk` may read a text in pieces, whose length `src` does not bound.
+@(private)
+ring_entries :: #force_inline proc "contextless" (reach: u64, src: []u8, rewalk: bool) -> u64 {
+	return min(reach, u64(len(src))) if rewalk else reach
 }

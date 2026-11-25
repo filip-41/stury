@@ -50,6 +50,42 @@ all_takes :: #force_inline proc "contextless" (limit: i32, index: u64, object: b
 	return limit <= 0 || index < u64(limit) || object && dups != .First
 }
 
+// Whether `step` takes child `e` of a container of `count` children, an object when `object` is set, by its place. A
+// `Name` takes a member by its key, and a `Descend` every child, which this leaves to the reader.
+child_takes :: proc "contextless" (step: Step, e, count: u64, object: bool, dups: Duplicates) -> bool {
+	#partial switch s in step {
+	case Index:
+		at, in_array := index_in(i64(s), count)
+		return !object && in_array && at == e
+	case All:
+		return all_takes(s.limit, e, object, dups)
+	case Slice:
+		return !object && slice_takes(s, e, count)
+	}
+	return false
+}
+
+// What a `Name` step does with a member of its key under `dups` when `met` says an earlier member of the object had the
+// key: the first member is taken under every policy, and a later one is passed under `.First`, taken in place of the
+// one before under `.Last`, and taken beside it under any other.
+Name_Take :: enum u8 {
+	Take,
+	Pass,
+	Replace,
+}
+
+name_take :: #force_inline proc "contextless" (dups: Duplicates, met: bool) -> Name_Take {
+	if met {
+		#partial switch dups {
+		case .First:
+			return .Pass
+		case .Last:
+			return .Replace
+		}
+	}
+	return .Take
+}
+
 // Whether `s` takes element `e` of an array of `count` elements. With `count` 0 the count is not known yet, and an
 // element an end from the end may yet take is taken.
 slice_takes :: proc "contextless" (s: Slice, e, count: u64) -> bool {
@@ -106,7 +142,7 @@ step_reach :: #force_inline proc "contextless" (step: Step) -> u64 {
 step_replaces :: #force_inline proc "contextless" (step: Step, dups: Duplicates) -> bool {
 	#partial switch _ in step {
 	case Name:
-		return dups == .Last
+		return name_take(dups, true) == .Replace
 	}
 	return step_reach(step) > 0
 }
@@ -116,7 +152,7 @@ step_replaces :: #force_inline proc "contextless" (step: Step, dups: Duplicates)
 step_takes_one :: #force_inline proc "contextless" (step: Step, dups: Duplicates) -> bool {
 	#partial switch s in step {
 	case Name:
-		return dups == .First
+		return name_take(dups, true) == .Pass
 	case Index:
 		return s >= 0
 	}

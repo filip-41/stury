@@ -52,8 +52,6 @@ Scanner :: struct {
 	replaying:   bool, // inside a `rewalk`, where every array keeps the elements its negative indexes may take
 	end_of:      Scan_End, // what the next token is, when it is the `End` of a container
 	dups:        tape.Duplicates, // the read's policy, resolved
-	first:       bool, // under `.First` the first member of a repeated key answers
-	group:       bool, // under `.Group` every member of a repeated key answers
 	rewalks:     bool, // the format has `.Rewalk`, so an array whose elements only steps from the end take replays
 	// Whether `scanner_key_skip_hook` skips a member no step takes at its key. A scan that keeps facts, which
 	// `scan_pass` places, does not, nor does a read in pieces of a format whose window may end between a key and its
@@ -267,7 +265,7 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 	h.demand, h.rewalk, h.rewalks = demand, rewalk, .Rewalk in format.caps && rewalk != nil
 	h.key_skips, h.alike = !demand.facts, tape.demand_children_alike(demand)
 	h.dups = tape.read_dups(format, dups)
-	h.first, h.group, h.stop, h.pending = h.dups == .First, h.dups == .Group, read.stop_early, len(demand.paths)
+	h.stop, h.pending = read.stop_early, len(demand.paths)
 	h.settles = h.stop || !demand.facts && (demand.limited || scan_cuts(demand))
 	h.b.keep_facts, h.facts, h.passed, h.wait_at = demand.facts, demand.facts, tape.NO_NODE, tape.NO_NODE
 	h.room = room
@@ -341,21 +339,23 @@ scan_lists_reset :: proc "contextless" (h: ^Scanner, room: ^Scan_Room, allocator
 	runtime.mem_zero(raw_data(h.done), len(h.done))
 }
 
-// Whether a scan refuses `demand`, whose step from the end past a `Descend` would take back the answers under an element
-// it passes, which a `Descend` from a value inside that element may give again. `query` answers such a path.
+// Why a scan of `demand` over a text of `format` under `opts` is refused, as `path_read_refused` judges it, or for a
+// step from the end past a `Descend`, which would take back the answers under an element it passes that a `Descend`
+// from a value inside that element may give again. `query` answers such a path.
 @(private)
-scan_refuses :: proc "contextless" (demand: ^tape.Demand) -> bool {
+scan_refused :: proc "contextless" (format: ^tape.Format, opts: tape.Options, demand: ^tape.Demand) -> tape.Error {
+	path_read_refused(format, opts) or_return
 	if !demand.deep {
-		return false
+		return nil
 	}
 	for node in demand.nodes {
 		for edge in demand.edges[node.edges:][:node.n_edges] {
 			if node.deep && tape.step_reach(edge.step) > 0 {
-				return true
+				return tape.Bad_Option{"path"}
 			}
 		}
 	}
-	return false
+	return nil
 }
 
 // Whether a step of `demand` has a limit, which settles its paths once the step takes no more.
@@ -419,7 +419,7 @@ scanner_take :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 	if h.end_of != .None {
 		end := h.end_of
 		if end == .Settled {
-			return s, scan_rest(t)
+			return s, read_rest(t)
 		}
 		h.end_of = .None
 		if end == .Picked {
@@ -602,12 +602,15 @@ scan_name_meets :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame
 	mark := h.marks[e]
 	if u32(mark >> 32) != f.gen {
 		f.unmet -= 1
-	} else if deep {
+	} else if !deep {
 		// Past a `Descend` a `Name` takes each member of its key.
-	} else if h.first {
-		return
-	} else if !h.group {
-		scan_kill(h, int(u32(mark)), len(h.answers), to)
+		switch tape.name_take(h.dups, true) {
+		case .Take:
+		case .Pass:
+			return
+		case .Replace:
+			scan_kill(h, int(u32(mark)), len(h.answers), to)
+		}
 	}
 	h.marks[e] = u64(f.gen) << 32 | u64(len(h.answers))
 	scan_put(&h.picks, to)
@@ -1000,7 +1003,7 @@ scan_element :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: 
 					h.by_place = true
 				}
 			case tape.All:
-				if step.limit <= 0 || index < u64(step.limit) {
+				if tape.all_takes(step.limit, index, false, h.dups) {
 					scan_put(&h.picks, edge.to)
 					// A limit leaves the array partial, so each element it keeps holds its place.
 					h.by_place ||= step.limit > 0
@@ -1189,15 +1192,8 @@ scan_ring_takes :: proc "contextless" (h: ^Scanner, f: ^Scan_Frame, e: u64) -> b
 	for n in h.live[f.live:][:f.n_live] {
 		node := dm.nodes[n]
 		for edge in dm.edges[node.edges:][:node.n_edges] {
-			#partial switch step in edge.step {
-			case tape.Index:
-				if at, in_array := tape.index_in(i64(step), f.count); in_array && at == e {
-					return true
-				}
-			case tape.Slice:
-				if tape.slice_takes(step, e, f.count) {
-					return true
-				}
+			if tape.child_takes(edge.step, e, f.count, false, h.dups) {
+				return true
 			}
 		}
 	}
@@ -1415,11 +1411,7 @@ scan_open :: proc "contextless" (h: ^Scanner, t: tape.Token, live: u32, whole: b
 	if t.kind != .Array {
 		k = 0
 	}
-	// An element takes at least one byte, so a ring of more entries than the text has bytes holds nothing more. A scan
-	// with no `rewalk` may read a text whose length its source does not bound.
-	if h.rewalk != nil {
-		k = min(k, u64(len(h.b.doc.src)))
-	}
+	k = ring_entries(k, h.b.doc.src, h.rewalk != nil)
 	// Only one array is read again at a time, so a replay holds at most one more walk and reads each element once
 	// more. A format that cannot walk an element alone keeps every element a step from the end may take, and takes back
 	// what the elements it does not take answered.
@@ -1588,18 +1580,12 @@ scan_replay :: proc "contextless" (h: ^Scanner, s: hook.Regs, f: ^Scan_Frame, e:
 	s := s
 	dm := h.demand
 	clear(&h.picks)
+	// Its positional steps are all from the end, as it replays.
 	for n in h.live[f.live:][:f.n_live] {
 		node := dm.nodes[n]
 		for edge in dm.edges[node.edges:][:node.n_edges] {
-			#partial switch step in edge.step {
-			case tape.Index:
-				if at, in_array := tape.index_in(i64(step), f.count); step < 0 && in_array && e == at {
-					scan_put(&h.picks, edge.to)
-				}
-			case tape.Slice:
-				if tape.slice_takes(step, e, f.count) {
-					scan_put(&h.picks, edge.to)
-				}
+			if tape.child_takes(edge.step, e, f.count, false, h.dups) {
+				scan_put(&h.picks, edge.to)
 			}
 		}
 	}
@@ -1683,14 +1669,7 @@ scan_halt :: #force_inline proc "contextless" (h: ^Scanner, t: tape.Token) -> ho
 	if h.end_of != .Settled || h.b.err != nil {
 		return .Stop
 	}
-	return scan_rest(t)
-}
-
-// The answer to token `t` once every path is settled: a container is judged with the rest of the text and no more
-// tokens, and any other token passes.
-@(private)
-scan_rest :: #force_inline proc "contextless" (t: tape.Token) -> hook.Action {
-	return .Rest if t.role == .Value && (t.kind == .Array || t.kind == .Object) else .Next
+	return read_rest(t)
 }
 
 // Marks done each path under demand node `n` whose answers are all made once the walk is back at depth `d`.

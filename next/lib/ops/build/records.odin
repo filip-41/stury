@@ -66,15 +66,14 @@ records_validate :: proc(r: ^tape.Records, out: []tape.Record, format: ^tape.For
 }
 
 records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, format: ^tape.Format, rules: ^tape.Rules, read: tape.Read_Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, rewalk: proc "contextless" (h: ^Finder, lo: u64) -> hook.Walk_Result, $frame: Record_Frame, $walk: proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> Record_Walk) -> (n: int) {
+	steps, refused := find_path(format, r.opts, path)
+	if refused != nil {
+		records_stop(r, refused)
+		return
+	}
+	// Under a framing other than `.Lines` each record is read to its end, as the next starts there.
 	read := read
-	if !record_reads(r, &read, format) {
-		return
-	}
-	steps, followed := find_steps(path)
-	if !followed {
-		records_stop(r, tape.Bad_Option{"path"})
-		return
-	}
+	read.stop_early &&= r.framing == .Lines
 	out := out
 	out = out[:min(len(out), len(answers))]
 	m: hook.Memory_Budget
@@ -108,17 +107,11 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 			w.res, w.tolerated = a.res, a.tolerated
 		}
 		_, werr, _ := hook.walk_error(w.res, rules)
-		if werr == nil && f.refused {
-			werr = runtime.Allocator_Error.Out_Of_Memory
+		answer, err := finder_result(&f, werr, w.tolerated)
+		if err != nil {
+			answer = {outcome = .Missing}
 		}
-		if werr != nil {
-			out[n], answers[n] = record_end(r, lo, w.hi, hook.memory_budget_error(&m, werr)), {outcome = .Missing}
-			n += 1
-			continue
-		}
-		answers[n] = finder_answer(&f)
-		answers[n].tolerated = w.tolerated
-		out[n] = record_end(r, lo, w.hi, nil)
+		out[n], answers[n] = record_end(r, lo, w.hi, hook.memory_budget_error(&m, err)), answer
 		n += 1
 	}
 	records_window_end(r)
@@ -126,14 +119,12 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 }
 
 records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, format: ^tape.Format, rules: ^tape.Rules, read: tape.Read_Options, caller: runtime.Allocator, rewalk: Rewalk, $bound: proc "contextless" (src: []u8, depth: u64) -> u64, $frame: Record_Frame, $walk: proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> Record_Walk) -> (n: int) {
+	if refused := scan_refused(format, r.opts, demand); refused != nil {
+		records_stop(r, refused)
+		return
+	}
 	read := read
-	if !record_reads(r, &read, format) {
-		return
-	}
-	if scan_refuses(demand) {
-		records_stop(r, tape.Bad_Option{"path"})
-		return
-	}
+	read.stop_early &&= r.framing == .Lines
 	out := out
 	out = out[:min(len(out), len(docs))]
 	// The documents of the batch are in the records' block, which the last batch's documents leave.
@@ -225,20 +216,6 @@ find_begin :: #force_inline proc(f: ^Finder, src: []u8, format: ^tape.Format, pa
 @(private, cold)
 records_stop :: proc "contextless" (r: ^tape.Records, err: tape.Error) {
 	r.err, r.at = err, .Done
-}
-
-// Whether a path read under `read` and the records' options may go on, which ends the records with `tape.Bad_Option`
-// for the build-only policies a path read refuses. Under a framing other than `.Lines` it reads each record to its end, as the next starts there.
-@(private)
-record_reads :: proc "contextless" (r: ^tape.Records, read: ^tape.Read_Options, format: ^tape.Format) -> bool {
-	if !path_dups(format, r.opts) {
-		records_stop(r, tape.Bad_Option{"dups"})
-		return false
-	}
-	if r.framing != .Lines {
-		read.stop_early = false
-	}
-	return true
 }
 
 // Sets the pieces of records of a text in pieces for the next window once a batch ends: the records go on while they

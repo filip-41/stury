@@ -10,6 +10,7 @@ import "core:testing"
 import "stury:dsv"
 import "stury:host"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 import "stury:testkit"
 
 // Builds of delimited texts on a runner's threads against the build on one thread.
@@ -200,7 +201,13 @@ parts_join_with_no_build_on_one_thread :: proc(t: ^testing.T) {
 	context.random_generator = testkit.seeded(t, &state, 0x10b5)
 	for spec in dsv.Spec {
 		for comments in ([]bool{false, true}) {
-			src := seam_text(spec, 400, 4, comments, false)
+			// A text shorter than `PARALLEL_FROM` is built on one thread, so this text is made long enough to join.
+			rows := 400
+			src := seam_text(spec, rows, 4, comments, false)
+			for len(src) < build.PARALLEL_FROM {
+				rows *= 2
+				src = seam_text(spec, rows, 4, comments, false)
+			}
 			opts := dsv.Options{format = dsv.Dsv_Options{comment = '#' if comments else 0}}
 			for threads in ([]int{3, 17, 70}) {
 				starts := 0

@@ -253,28 +253,23 @@ demand_of :: proc(paths: [][]Step, grains: []Grain = nil, limits: []int = nil, f
 		x.grain = grains[p] if p < len(grains) else .Whole
 
 		for step, i in path {
-			switch s in step {
+			// `repeats` and `takes_back` read a `Name` as `.First` does, which takes one member and none back.
+			// `path_settles` and `path_final` add the policy's own reading.
+			if !step_takes_one(step, .First) {
+				x.repeats = min(x.repeats, u32(i))
+			}
+			_, descends := step.(Descend)
+			// An answer under a `Descend` is final once the walk leaves the value the `Descend` starts at, as a value
+			// inside it may come after the answers a limit holds.
+			if step_replaces(step, .First) || descends {
+				x.takes_back = min(x.takes_back, u32(i))
+			}
+			d.deep ||= descends
+			#partial switch _ in step {
 			case All:
 				x.alls_end = u32(i + 1)
-				x.repeats = min(x.repeats, u32(i))
-			case Index:
-				if s < 0 {
-					x.repeats = min(x.repeats, u32(i))
-					x.takes_back = min(x.takes_back, u32(i))
-				}
-			case Slice:
-				x.repeats = min(x.repeats, u32(i))
-				if step_reach(s) > 0 {
-					x.takes_back = min(x.takes_back, u32(i))
-				}
 			case Name:
 				x.named = min(x.named, u32(i))
-			case Descend:
-				// An answer under a `Descend` is final once the walk leaves the value the `Descend` starts at, as a
-				// value inside it may come after the answers a limit holds.
-				x.repeats = min(x.repeats, u32(i))
-				x.takes_back = min(x.takes_back, u32(i))
-				d.deep = true
 			}
 		}
 		d.reach = max(d.reach, u64(x.repeats))

@@ -108,15 +108,9 @@ find_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 // Returns the answer of a find over a text in pieces. Its bytes are copied out of the window it closes in into
 // `Pieces.text`. Until then the read keeps from its first byte, and from the first byte of each span its rings hold.
 read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (answer: tape.Span_Answer, err: tape.Error) {
-	if e := tape.options_refused(format, opts); e != nil {
-		return {}, e
-	}
-	if !path_dups(format, opts) {
-		return {}, tape.Bad_Option{"dups"}
-	}
-	steps, followed := find_steps(path)
-	if !followed {
-		return {}, tape.Bad_Option{"path"}
+	steps, refused := find_path(format, opts, path)
+	if refused != nil {
+		return {}, refused
 	}
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return
@@ -150,18 +144,11 @@ read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, rea
 		find_piece_free(blk, p.allocator)
 		s.hook = nil
 	}
-	if werr != nil {
-		return {}, hook.memory_budget_error(&s.blocks, werr)
-	}
-	if blk.f.refused {
-		return {}, hook.memory_budget_error(&s.blocks, runtime.Allocator_Error.Out_Of_Memory)
-	}
 	if a := blk.f.answer; a.outcome != .Not_Loaded && a.hi > a.lo {
 		blk.f.src = hook.piece_src(p.text, a.lo)
 	}
-	answer = finder_answer(&blk.f)
-	answer.tolerated = tolerated
-	return answer, nil
+	answer, err = finder_result(&blk.f, werr, tolerated)
+	return answer, hook.memory_budget_error(&s.blocks, err)
 }
 
 // Copies the bytes of the finder's answer out of the window `text` once the answer is complete and not yet copied.
@@ -197,14 +184,8 @@ scan_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 // ends, so the read keeps only what the walk needs, and the document is `.Held`. A walk that holds comments back past a
 // window's end keeps their bytes for a scan of facts, which copies them out in the window that gives them.
 read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (doc: tape.Document, err: tape.Error) {
-	if e := tape.options_refused(format, opts); e != nil {
+	if e := scan_refused(format, opts, demand); e != nil {
 		return {}, e
-	}
-	if !path_dups(format, opts) {
-		return {}, tape.Bad_Option{"dups"}
-	}
-	if scan_refuses(demand) {
-		return {}, tape.Bad_Option{"path"}
 	}
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return

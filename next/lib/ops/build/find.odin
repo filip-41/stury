@@ -27,8 +27,6 @@ Finder :: struct {
 	entered:   int,
 	replacers: int, // entered containers whose answer a later member or element can replace
 	dups:      tape.Duplicates, // the read's policy, resolved
-	first:     bool, // under `.First` the first member of a repeated key answers
-	group:     bool, // under `.Group` each member of a repeated key answers in turn, the first that gives one taken
 	rewalks:   bool, // the format has `.Rewalk`
 	stop:      bool, // `stop_early`
 	want:      bool, // the next value token is the one the path takes
@@ -87,11 +85,15 @@ Find_Level :: struct {
 	object:  bool,
 }
 
-// The steps a find follows of `path`: a `Descend` at its end answers first the value the steps before it reach, so it
-// is left out. False for a `Descend` with steps after it, which a find refuses, as its answers lie at any depth, which
-// takes a scan's set of steps live in each container where a find holds a level per step.
+// The steps a find of `format` under `opts` follows of `path`, or why the find is refused, as `path_read_refused` judges
+// it. A `Descend` at its end answers first the value the steps before it reach, so it is left out. A `Descend` with
+// steps after it is refused, as its answers lie at any depth, which takes a scan's set of steps live in each container
+// where a find holds a level per step.
 @(private)
-find_steps :: proc "contextless" (path: []tape.Step) -> ([]tape.Step, bool) {
+find_path :: proc "contextless" (format: ^tape.Format, opts: tape.Options, path: []tape.Step) -> ([]tape.Step, tape.Error) {
+	if e := path_read_refused(format, opts); e != nil {
+		return nil, e
+	}
 	n := len(path)
 	for n > 0 {
 		if _, descends := path[n - 1].(tape.Descend); !descends {
@@ -101,10 +103,10 @@ find_steps :: proc "contextless" (path: []tape.Step) -> ([]tape.Step, bool) {
 	}
 	for s in path[:n] {
 		if _, descends := s.(tape.Descend); descends {
-			return nil, false
+			return nil, tape.Bad_Option{"path"}
 		}
 	}
-	return path[:n], true
+	return path[:n], nil
 }
 
 // The answer while the value taken last has given none, which `[]` of an empty array leaves. A path that ends with it
@@ -122,11 +124,10 @@ finder_start :: proc(f: ^Finder, src: []u8, format: ^tape.Format, steps: []tape.
 	MAX_ANSWERS :: int(min(u64(max(u32)), u64(max(int) / (2 * size_of(tape.Span_Answer)))))
 	answers := 0
 	rewalks := .Rewalk in format.caps && rewalk != nil
-	text := len(src) if rewalk != nil else max(int)
 	for step, i in steps {
 		#partial switch v in step {
 		case tape.Index, tape.Slice:
-			if size := finder_ring_size(steps, i, text, rewalks); size > 0 {
+			if size := finder_ring_size(steps, i, src, rewalk != nil, rewalks); size > 0 {
 				if size > MAX_ANSWERS - answers {
 					return .Out_Of_Memory
 				}
@@ -149,7 +150,7 @@ finder_start :: proc(f: ^Finder, src: []u8, format: ^tape.Format, steps: []tape.
 	f.src, f.key_text, f.steps, f.format, f.respell, f.rewalk, f.answer, f.allocator = src, src, steps, format, respell, rewalk, FIND_NONE, allocator
 	f.bounds, f.rewalks, f.ctx = format.bounds, rewalks, context
 	f.dups = tape.read_dups(format, dups)
-	f.first, f.group, f.stop, f.want = f.dups == .First, f.dups == .Group, read.stop_early, true
+	f.stop, f.want = read.stop_early, true
 	return nil
 }
 
@@ -345,12 +346,11 @@ finder_focus :: #force_inline proc "contextless" (h: ^Finder) #no_bounds_check {
 	}
 }
 
-// Whether the `Name` of level `lv` may take a member. `none` is true while the value taken last has given no answer.
-// Under `.Last` it takes every member of the key, under `.First` the first, and under `.Group` each until one gives
-// an answer.
+// Whether the `Name` of level `lv` may take a member, as `tape.name_take` judges it. `none` is true while the value
+// taken last has given no answer: under `.Group` the members of the key are taken until one gives an answer.
 @(private)
 finder_names :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level, none: bool) -> bool {
-	return none if h.group else !lv.chosen || !h.first
+	return none if h.dups == .Group else tape.name_take(h.dups, lv.chosen) != .Pass
 }
 
 @(private)
@@ -385,16 +385,24 @@ finder_keyed :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token) -> 
 	return finder_step(h, t, true)
 }
 
-// The answer of a walk the finder read to its end or stop.
-finder_answer :: #force_inline proc "contextless" (f: ^Finder) -> tape.Span_Answer {
+// The answer of a walk the finder read to its end or stop, which ended with `err` and broke a rule its tolerances let it
+// break when `tolerated`, or the error: the walk's, or a refused growth of a walk read again.
+finder_result :: #force_inline proc "contextless" (f: ^Finder, err: tape.Error, tolerated: bool) -> (tape.Span_Answer, tape.Error) {
+	if err != nil {
+		return {}, err
+	}
+	if f.refused {
+		return {}, runtime.Allocator_Error.Out_Of_Memory
+	}
 	if f.answer.outcome == .Not_Loaded {
-		return {outcome = .Missing}
+		return {outcome = .Missing, tolerated = tolerated}, nil
 	}
 	// A spelled number counts at least one digit, so a spelling of 0 is one the walk left out.
 	if f.answer.kind == .Number && f.answer.spelling == 0 {
 		f.answer.spelling = f.respell(f.src, f.answer.lo, f.answer.hi)
 	}
-	return f.answer
+	f.answer.tolerated = tolerated
+	return f.answer, nil
 }
 
 @(private)
@@ -417,7 +425,7 @@ finder_step :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, $NAM
 		return .Next
 	}
 	if h.settled {
-		return .Rest if t.kind == .Array || t.kind == .Object else .Next
+		return read_rest(t)
 	}
 	if t.kind == .End {
 		when NAMES {
@@ -525,7 +533,7 @@ finder_value :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #n
 		return finder_reach(h, t, .Found)
 	}
 	if step := h.steps[at]; tape.step_enters(step, t.kind) {
-		ring := u32(finder_ring_size(h.steps, at, len(h.src) if h.rewalk != nil else max(int), h.rewalks))
+		ring := u32(finder_ring_size(h.steps, at, h.src, h.rewalk != nil, h.rewalks))
 		return finder_enter(h, tape.step_replaces(step, h.dups), t, ring, tape.step_replays(h.steps, at, h.rewalks))
 	}
 	if t.kind == .Null && tape.path_refused(u64(at), u64(h.alls_end)) == .Missing {
@@ -844,14 +852,14 @@ finder_answers_reserve :: #force_no_inline proc "contextless" (h: ^Finder, entri
 	return true
 }
 
-// Returns the ring entries the negative `Index` or `Slice` end of step `at` needs over a text of `n` bytes: one per
-// element it reaches back to, but none for an `Index` of `-1` when it keeps answers, since the last element's is in
-// hand at the close. An element takes at least one byte, so a ring of more than `n` entries holds nothing more.
+// Returns the ring entries the negative `Index` or `Slice` end of step `at` needs over `src`, read with a `rewalk` when
+// `rewalk` is set: one per element it reaches back to, as `ring_entries` bounds them, but none for an `Index` of `-1`
+// when it keeps answers, since the last element's is in hand at the close.
 @(private)
-finder_ring_size :: #force_inline proc "contextless" (steps: []tape.Step, at: int, n: int, rewalks: bool) -> int {
+finder_ring_size :: #force_inline proc "contextless" (steps: []tape.Step, at: int, src: []u8, rewalk, rewalks: bool) -> int {
 	reach := tape.step_reach(steps[at])
 	if _, index := steps[at].(tape.Index); index && reach == 1 && !tape.step_replays(steps, at, rewalks) {
 		return 0
 	}
-	return int(min(reach, u64(n)))
+	return int(min(ring_entries(reach, src, rewalk), u64(max(int))))
 }

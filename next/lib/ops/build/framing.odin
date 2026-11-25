@@ -139,10 +139,7 @@ frame_steps :: proc(r: ^$R, f: ^Frame($L), format: ^tape.Format, rules: ^tape.Ru
 	if r.at == .Start {
 		r.at = .Open
 	}
-	dups := format.dups if r.opts.dups == .Default else r.opts.dups
-	if dups == .Refuse {
-		dups = .Last
-	}
+	dups := tape.read_dups(format, r.opts.dups)
 	last := len(r.path)
 	root: L
 	for {
@@ -291,19 +288,13 @@ frame_take :: proc "contextless" (r: ^tape.Records, f: ^Frame($L), lv: ^L, k: in
 	#partial switch s in r.path[k] {
 	case tape.Name:
 		if tape.key_names(format, r.src, r.key, string(s)) {
-			#partial switch dups {
-			case .First:
-				take = !lv.taken
-			case .Group:
-				take = true
-			case:
-				if f.given {
-					head, _ := format.bounds(r.src, r.key)
-					records_stop(r, tape.Fault{at = r.key.lo - u64(head), rules = rules, kind = .Duplicate_Key})
-					return false
-				}
-				take = true
+			how := tape.name_take(dups, lv.taken)
+			if how == .Replace && f.given {
+				head, _ := format.bounds(r.src, r.key)
+				records_stop(r, tape.Fault{at = r.key.lo - u64(head), rules = rules, kind = .Duplicate_Key})
+				return false
 			}
+			take = how != .Pass
 		}
 	case tape.Index:
 		take = lv.passed == u64(s) + 1

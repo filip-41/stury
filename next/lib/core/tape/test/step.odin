@@ -165,6 +165,41 @@ all_takes_by_limit_object_and_policy :: proc(t: ^testing.T) {
 	}
 }
 
+// A child is taken by its place as its step's own rule takes it, an element only in an array, and by no `Name`.
+@(test)
+children_take_by_their_step_rule :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for count in u64(0) ..= 4 {
+		for e in u64(0) ..< count {
+			for object in ([]bool{false, true}) {
+				for i in i64(-3) ..= 3 {
+					at, in_array := tape.index_in(i, count)
+					testing.expectf(t, tape.child_takes(tape.Index(i), e, count, object, .Last) == (!object && in_array && at == e), "[%d] %d of %d object %v", i, e, count, object)
+				}
+				for s in slices() {
+					testing.expectf(t, tape.child_takes(s, e, count, object, .Last) == (!object && tape.slice_takes(s, e, count)), "%v %d of %d object %v", s, e, count, object)
+				}
+				for dups in tape.Duplicates.Default ..= tape.Duplicates.Group {
+					testing.expect_value(t, tape.child_takes(tape.All{2}, e, count, object, dups), tape.all_takes(2, e, object, dups))
+				}
+				testing.expect(t, !tape.child_takes(tape.Name("a"), e, count, object, .Last))
+			}
+		}
+	}
+}
+
+// The first member of a key is taken under every policy, and a later one passed under `.First`, taken in place of the
+// one before under `.Last` and beside it under any other.
+@(test)
+names_take_repeated_keys_by_policy :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for dups in tape.Duplicates.Default ..= tape.Duplicates.Group {
+		testing.expect_value(t, tape.name_take(dups, false), tape.Name_Take.Take)
+		want := tape.Name_Take.Pass if dups == .First else .Replace if dups == .Last else .Take
+		testing.expect_value(t, tape.name_take(dups, true), want)
+	}
+}
+
 // Steps that take back, take one, replace and replay, each over the policies.
 @(test)
 steps_take_one_replace_and_replay :: proc(t: ^testing.T) {

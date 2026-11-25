@@ -20,12 +20,7 @@ import "stury:lib/core/tape"
 @(require_results)
 query :: proc(r: tape.Reader, demand: ^tape.Demand, opts := tape.Options{}, allocator := context.allocator) -> (result: tape.Document, err: tape.Error) {
 	format := r.doc.format
-	if format != nil {
-		tape.options_refused(format, opts) or_return
-	}
-	if !path_dups(format, opts) {
-		return {}, tape.Bad_Option{"dups"}
-	}
+	path_read_refused(format, opts) or_return
 	m: hook.Memory_Budget
 	a := read_allocator(&m, opts, allocator)
 	room: Query_Room = ---
@@ -600,23 +595,20 @@ query_step :: proc(q: ^Query) -> runtime.Allocator_Error #no_bounds_check {
 		for n in q.live[f.live:][:f.n_live] {
 			dn := &dm.nodes[n]
 			for &e in dm.edges[dn.edges:][:dn.n_edges] {
-				takes := false
-				#partial switch s in e.step {
-				case tape.All:
-					takes = tape.all_takes(s.limit, index, object, q.dups)
+				// The pairs hold the children a `Name` or an `Index` takes.
+				#partial switch _ in e.step {
+				case tape.Name, tape.Index, tape.Descend:
+					continue
 				case tape.Slice:
-					if !object {
-						if f.count < 0 {
-							// The count is not known, so no element is known to be taken or not.
-							if index == 0 {
-								paths_fail(q, dm, e.to, .Not_Loaded, 0, at, at, 2 * u64(at), query_answer) or_return
-							}
-							continue
+					if !object && f.count < 0 {
+						// The count is not known, so no element is known to be taken or not.
+						if index == 0 {
+							paths_fail(q, dm, e.to, .Not_Loaded, 0, at, at, 2 * u64(at), query_answer) or_return
 						}
-						takes = tape.slice_takes(s, index, u64(f.count))
+						continue
 					}
 				}
-				if !takes {
+				if !tape.child_takes(e.step, index, u64(f.count), object, q.dups) {
 					continue
 				}
 				if p != .Found {
