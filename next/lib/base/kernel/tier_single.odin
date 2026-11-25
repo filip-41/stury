@@ -31,7 +31,7 @@ tier :: proc "contextless" () -> Tier {
 // `runtime_swizzle` to, so its lanes are read one at a time.
 @(private)
 lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
-	when ODIN_ARCH == .wasm32 && !intrinsics.has_target_feature("simd128") {
+	when (ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32) && !intrinsics.has_target_feature("simd128") {
 		table := transmute([16]u8)t
 		index := transmute([16]u8)i
 		r: [16]u8

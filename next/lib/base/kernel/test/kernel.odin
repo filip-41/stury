@@ -323,7 +323,10 @@ compress_keeps_lanes_in_order :: proc(t: ^testing.T) {
 	}
 	masks: [dynamic]u64
 	defer delete(masks)
-	append(&masks, 0, ~u64(0), 0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555, 1, 1 << 63, 0xFF, 0xFF00_0000_0000_0000)
+	append(&masks, 0, ~u64(0), 0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555, 1, 1 << 63, 0xFF, 0xFF00_0000_0000_0000, 0x00FF_FFFF_FFFF_FFFF, 0x01FF_FFFF_FFFF_FFFF)
+	for lane in 0 ..< 64 {
+		append(&masks, u64(1) << uint(lane))
+	}
 	for _ in 0 ..< testkit.rounds(4096) {
 		append(&masks, rand.uint64())
 	}

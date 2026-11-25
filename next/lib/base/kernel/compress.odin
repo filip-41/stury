@@ -1,12 +1,22 @@
+// `simd` is unused on scalar WebAssembly (`SCALAR_WASM`), where `compress` runs a byte bit-scan loop.
+#+vet !unused-imports
 package kernel
 
 import "base:intrinsics"
 import "core:simd"
 
-// For each 8-bit mask, the positions of its set bits, lowest first, one per byte: shuffle indices that gather the kept
-// lanes to the front of a register.
-@(private, rodata)
-KEEP_LANES: [256]u64 = {
+when ODIN_ENDIAN != .Little {
+	#panic("kernel compress requires little-endian")
+}
+
+@(private = "file")
+SCALAR_WASM :: (ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32) && !intrinsics.has_target_feature("simd128")
+
+when !SCALAR_WASM {
+	// For each 8-bit mask, the positions of its set bits, lowest first, one per byte: shuffle indices that gather the kept
+	// lanes to the front of a register.
+	@(private = "file", rodata)
+	KEEP_LANES: [256]u64 = {
 	0x0000000000000000, 0x0000000000000000, 0x0000000000000001, 0x0000000000000100,
 	0x0000000000000002, 0x0000000000000200, 0x0000000000000201, 0x0000000000020100,
 	0x0000000000000003, 0x0000000000000300, 0x0000000000000301, 0x0000000000030100,
@@ -71,25 +81,42 @@ KEEP_LANES: [256]u64 = {
 	0x0000000706050402, 0x0000070605040200, 0x0000070605040201, 0x0007060504020100,
 	0x0000000706050403, 0x0000070605040300, 0x0000070605040301, 0x0007060504030100,
 	0x0000070605040302, 0x0007060504030200, 0x0007060504030201, 0x0706050403020100,
+	}
+
+	@(private = "file")
+	HI_OFFSET :: V{0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8}
 }
 
-// Stores the lanes of `b` that `keep` marks, in order, at `out`, and returns their count. Writes up to 64 bytes at
-// `out`, so the caller keeps that room free.
+// Stores the lanes of `b` that `keep` marks, in order, at `out`, and returns their count. On SIMD targets it performs
+// eight unconditional 8-byte stores (writing 8 to 64 bytes even when `keep == 0`), so `out` must be non-nil with 64
+// writable bytes. `#no_bounds_check` relies on that 64-byte output room and the `& 0xff` indices into `KEEP_LANES`.
+// On amd64, callers must carry `FEATURES[.V2]` (or `.V3`) so `lookup` inlines as `pshufb`/`vpshufb`.
+@(require_results)
 compress :: #force_inline proc "contextless" (b: Block, keep: u64, out: [^]u8) -> int #no_bounds_check {
-	counts := transmute(u64)simd.count_ones(transmute(#simd[8]u8)keep)
-	// Byte k of `running` counts the lanes the groups below k keep.
-	ONES :: 0x0101_0101_0101_0101
-	running := (counts * ONES) << 8
-	#unroll for k in 0 ..< 4 {
-		shift := 16 * uint(k)
-		lo := keep >> shift & 0xff
-		hi := keep >> (shift + 8) & 0xff
-		// The second row's indices move to lanes 8 to 15 by a vector add: an integer add would cross from a general
-		// register into a vector lane, which is slow on arm64.
-		lanes := transmute(V)[2]u64{KEEP_LANES[lo], KEEP_LANES[hi]} + V{8 = 8, 9 = 8, 10 = 8, 11 = 8, 12 = 8, 13 = 8, 14 = 8, 15 = 8}
-		packed := transmute([2]u64)lookup(Tier(0), b[k], lanes)
-		intrinsics.unaligned_store((^u64)(out[int(running >> shift & 0xff):]), packed[0])
-		intrinsics.unaligned_store((^u64)(out[int(running >> (shift + 8) & 0xff):]), packed[1])
+	when SCALAR_WASM {
+		bytes := transmute([64]u8)b
+		n := 0
+		for m := keep; m != 0; m &= m - 1 {
+			out[n] = bytes[intrinsics.count_trailing_zeros(m)]
+			n += 1
+		}
+		return n
+	} else {
+		counts := transmute(u64)simd.count_ones(transmute(#simd[8]u8)keep)
+		// Byte k of `running` counts the lanes the groups below k keep.
+		ONES :: 0x0101_0101_0101_0101
+		running := (counts * ONES) << 8
+		#unroll for k in 0 ..< 4 {
+			shift := 16 * uint(k)
+			lo := keep >> shift & 0xff
+			hi := keep >> (shift + 8) & 0xff
+			// The second row's indices move to lanes 8 to 15 by a vector add: an integer add would cross from a general
+			// register into a vector lane, which is slow on arm64.
+			lanes := transmute(V)[2]u64{KEEP_LANES[lo], KEEP_LANES[hi]} + HI_OFFSET
+			packed := transmute([2]u64)lookup(Tier(0), b[k], lanes)
+			intrinsics.unaligned_store((^u64)(out[int(running >> shift & 0xff):]), packed[0])
+			intrinsics.unaligned_store((^u64)(out[int(running >> (shift + 8) & 0xff):]), packed[1])
+		}
+		return int(running >> 56 + counts >> 56)
 	}
-	return int(running >> 56 + counts >> 56)
 }
