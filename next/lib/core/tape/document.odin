@@ -26,6 +26,7 @@ destroy :: proc {
 	destroy_document,
 	destroy_demand,
 	destroy_index,
+	destroy_line_index,
 	destroy_children,
 	destroy_pieces,
 	destroy_records,
@@ -74,6 +75,7 @@ clone_document :: proc(doc: ^Document, allocator := context.allocator) -> (c: Do
 		}
 		if doc.ext != nil {
 			c.ext = ext_make(doc.ext.held, doc.ext.format, allocator) or_return
+			c.ext.origin = doc.ext.origin
 		}
 	}
 	if x := doc.partial; x != nil {
@@ -214,6 +216,7 @@ Doc_Ext :: struct {
 	// Under `.Held`, where the bytes of each token are in `Document.src`, sorted by offset: a token's span starts at the
 	// last `lo` at or before its own.
 	held:   []Held_Span,
+	origin: Origin,
 	format: Format_Ext,
 }
 

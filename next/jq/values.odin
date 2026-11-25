@@ -240,7 +240,7 @@ read_json :: proc(m: ^Machine, s: string) -> (res: query.Value, status: query.St
 		return query.NULL, raise_owned_text(m, string(out[:]))
 	}
 	doc.flags += {.Owns_Src}
-	return query.document_value(h, doc, true)
+	return query.document_value(h, doc, true, synthetic = true)
 }
 
 @(private)
@@ -435,6 +435,54 @@ v_constant :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value
 		return query.double_value(0), .Ok
 	}
 	return query.NULL, .Ok
+}
+
+// `where`: source location of `.` (or its nearest enclosing document-origin value along active pipes), or `null`.
+// Text formats return `{"line": L, "column": C}` (with `"file": F` when known); binary formats (`line == 0`) return
+// `{"offset": N}` (with `"file": F` when known), matching v1.
+@(private)
+v_where :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	at := x if query.has_doc_origin(x) else m.origin
+	file_val := query.ABSENT
+	defer query.release(h, file_val)
+	file := ""
+	place: tape.Place
+	ok := false
+	if m.hooks != nil && m.hooks.place != nil {
+		file, place, ok = m.hooks.place(m.hooks.data, at, h)
+	} else {
+		place, ok = query.value_place(h, at)
+		if ok && m.hooks != nil && m.hooks.input_filename != nil {
+			fs: query.Status
+			file_val, fs = m.hooks.input_filename(m.hooks.data, h)
+			if fs != .Ok {
+				return query.NULL, fs
+			}
+			if query.is_text(file_val) {
+				file = query.text_of(file_val)
+			}
+		}
+	}
+	if !ok {
+		return query.NULL, .Ok
+	}
+	fields := 2 + int(file != "")
+	out := query.make_object(h, fields) or_return
+	defer if status != .Ok {
+		query.release(h, out)
+	}
+	if file != "" {
+		fv := query.text_value(h, file) or_return
+		query.object_put_fresh(h, &out, query.text_borrowed("file"), fv) or_return
+	}
+	if place.line == 0 {
+		query.object_put_fresh(h, &out, query.text_borrowed("offset"), query.int_value(i64(place.byte))) or_return
+	} else {
+		query.object_put_fresh(h, &out, query.text_borrowed("line"), query.int_value(i64(place.line))) or_return
+		query.object_put_fresh(h, &out, query.text_borrowed("column"), query.int_value(i64(place.col))) or_return
+	}
+	return out, .Ok
 }
 
 @(private)

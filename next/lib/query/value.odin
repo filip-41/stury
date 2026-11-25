@@ -84,6 +84,8 @@ BLOCK_HAS_CONTAINER :: u8(2)
 BLOCK_HAS_PARTIAL :: u8(4)
 @(private)
 BLOCK_HAS_DOC :: u8(8) // `Str_Block` carries a retained `^Doc_Block` at its tail and `node` in its header
+@(private)
+BLOCK_SYNTHETIC :: u8(16) // `Doc_Block` parsed from a synthetic string (e.g. `fromjson`), not an input document
 
 // The header of every block a value holds.
 Block :: struct {
@@ -193,6 +195,8 @@ Heap :: struct {
 	depth:     int,
 	// A read reached a value a partial document did not keep, which it read as absent.
 	tainted:         bool,
+	// Retain document origins on null, boolean, and decoded string scalars (enabled only when `where` runs).
+	keep_origins:    bool,
 	// Optional hook (wired by `Overlay` in Phase 2A) backing writes to fact paths.
 	write_fact:      Fact_Writer,
 	write_fact_data: rawptr,
@@ -624,10 +628,13 @@ free_one :: proc(h: ^Heap, kind: Kind, b: ^Block) {
 // The value of a document the run reads: its root, holding the document's block, which frees the document with its last
 // value when `owned`. `.Absent` for a document with no root, as a partial read that kept none.
 @(require_results)
-document_value :: proc(h: ^Heap, doc: tape.Document, owned: bool) -> (res: Value, status: Status) {
+document_value :: proc(h: ^Heap, doc: tape.Document, owned: bool, synthetic := false) -> (res: Value, status: Status) {
 	b := alloc_block(h, size_of(Doc_Block)) or_return
 	d := (^Doc_Block)(b)
 	d.doc, d.owned = doc, owned
+	if synthetic {
+		d.flags |= BLOCK_SYNTHETIC
+	}
 	d.index = {allocator = heap_allocator(h)}
 	whole := Value{p = d, n = u32(tape.ROOT), kind = .Node, held = true}
 	root_idx, p := tape.root(reader(d))
@@ -638,9 +645,9 @@ document_value :: proc(h: ^Heap, doc: tape.Document, owned: bool) -> (res: Value
 	}
 	whole.n = u32(root_idx)
 	if k := doc.nodes[root_idx].kind; k != .Array && k != .Object {
-		// A scalar root is the value it reads as, a text decoded, like every scalar a container gives.
+		// A scalar root is the value it reads as, a text decoded, keeping its document origin unless synthetic.
 		defer release(h, whole)
-		return node_value(h, d, root_idx)
+		return node_value(h, d, root_idx, !synthetic)
 	}
 	return whole, .Ok
 }

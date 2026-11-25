@@ -271,9 +271,9 @@ doc_keeps_origin :: #force_inline proc "contextless" (d: ^Doc_Block) -> bool {
 // a string with an escape decoded into a string of the heap (carrying `(d, at)` when `doc_keeps_origin`), anything else
 // the node, holding the block.
 @(private, require_results)
-node_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) #no_bounds_check {
+node_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, force_origin := false) -> (res: Value, status: Status) #no_bounds_check {
 	t := d.doc.nodes[at]
-	keep_origin := doc_keeps_origin(d)
+	keep_origin := force_origin || h.keep_origins || doc_keeps_origin(d)
 	#partial switch t.kind {
 	case .Null:
 		if !keep_origin {
@@ -1049,6 +1049,11 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 			k = ck
 		}
 		if t := type_of(x); t == .Array || t == .Object {
+			if len(frames) >= depth_limit(h) {
+				release(h, k)
+				release(h, x)
+				return NULL, fail(h, .Depth, .None)
+			}
 			child, made := open(h, x, k)
 			if _, aerr := append(&frames, child); aerr != nil {
 				cursor_close(&child.c)

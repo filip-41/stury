@@ -169,6 +169,7 @@ Frame_Kind :: enum u8 {
 	Update_Each,
 	Gen,
 	Css,
+	Origin,
 }
 
 // The header of every frame: what kind it is, where its outputs go and the frame below it.

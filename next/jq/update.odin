@@ -1,5 +1,6 @@
 package jq
 
+import "base:intrinsics"
 import "stury:lib/query"
 
 // Path expressions and the assignments over them: `path(f)`, and `a = b`, `a |= f`, `a op= b`, `a //= b`, which take the
@@ -270,10 +271,17 @@ update_next :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 			}
 			if .Native not_in n.b.flags {
 				f.got = false
+				if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(cur) {
+					if os := push_origin(m, cur, f); os != .Ok {
+						query.release(h, cur)
+						s = os
+						break
+					}
+				}
 				r.n, r.input, r.path, r.env, r.k, r.track, r.mode = n.b, cur, query.ABSENT, env_retain(f.env), f, false, .Eval
 				return
 			}
-			v, found, vs := eval_native(m, n.b, cur, f.env)
+			v, found, vs := eval_native_maybe_origin(m, n.b, cur, f.env)
 			s = vs
 			if s == .Ok && found {
 				f.state, s = query.set_path(h, f.state, p, v)

@@ -922,7 +922,7 @@ demand_builtin :: proc(a: ^Analyzer, n: ^Node, b: ^Builtin, out: Need, env: ^Var
 			args_need = need_join(a, args_need, demand_node(a, arg, whole_need(.Whole_Op), env))
 		}
 		switch b.name {
-		case "not", "type":
+		case "not", "type", "where":
 			return need_join(a, args_need, grain_need(a, .Exists))
 		case "length", "keys", "keys_unsorted":
 			return need_join(a, args_need, grain_need(a, .Keys))

@@ -83,3 +83,38 @@ Span_Answer :: struct {
 answer_node :: proc "contextless" (a: Span_Answer) -> Node {
 	return {lo = a.lo + u64(a.head), n = u32(a.hi - a.lo - u64(a.head) - u64(a.tail)), kind = a.kind, role = .Value, spelling = a.spelling}
 }
+
+// Whether two path steps are identical.
+step_equal :: proc "contextless" (a, b: Step) -> bool {
+	switch x in a {
+	case Name:
+		y, ok := b.(Name)
+		return ok && x == y
+	case Index:
+		y, ok := b.(Index)
+		return ok && x == y
+	case All:
+		y, ok := b.(All)
+		return ok && x == y
+	case Slice:
+		y, ok := b.(Slice)
+		return ok && x == y
+	case Descend:
+		_, ok := b.(Descend)
+		return ok
+	}
+	return false
+}
+
+// Whether two paths hold identical steps.
+steps_equal :: proc "contextless" (a, b: []Step) -> bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for s, i in a {
+		if !step_equal(s, b[i]) {
+			return false
+		}
+	}
+	return true
+}

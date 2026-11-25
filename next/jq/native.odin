@@ -101,6 +101,9 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 		if xg != .Value {
 			return x, xg
 		}
+		if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(x) {
+			return native_with_origin(m, n.b, x, env)
+		}
 		return native(m, n.b, x, env)
 	case .Binary:
 		r, leaf_r := leaf_value(m, n.b, input, env)
@@ -435,7 +438,7 @@ native_update :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (
 					return query.NULL, .Failed
 				}
 			}
-			v, vg := native(m, n.b, cur, env)
+			v, vg := native_maybe_origin(m, n.b, cur, env)
 			if vg == .Failed || h.tainted {
 				if vg == .Value {
 					query.release(h, v)
@@ -519,10 +522,13 @@ native_update :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (
 				return query.NULL, .Failed
 			}
 		}
-		v, vg := native(m, n.b, cur, env)
-		if vg == .Failed {
+		v, vg := native_maybe_origin(m, n.b, cur, env)
+		if vg == .Failed || h.tainted {
+			if vg == .Value {
+				query.release(h, v)
+			}
 			query.release(h, state)
-			return query.NULL, .Failed
+			return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
 		}
 		if vg == .None {
 			dels, ds := query.make_array(h, 1)
@@ -612,7 +618,11 @@ native_map :: proc(m: ^Machine, it, t, f: ^Node, input: query.Value, env: ^Env) 
 			}
 			y, yg := query.retain(x), Got.Value
 			if f != nil {
-				y, yg = native(m, f, y, env)
+				if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(y) {
+					y, yg = native_with_origin(m, f, y, env)
+				} else {
+					y, yg = native(m, f, y, env)
+				}
 			}
 			if yg == .None {
 				continue
@@ -650,7 +660,11 @@ native_map :: proc(m: ^Machine, it, t, f: ^Node, input: query.Value, env: ^Env) 
 		}
 		y, yg := x, Got.Value
 		if f != nil {
-			y, yg = native(m, f, x, env)
+			if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(x) {
+				y, yg = native_with_origin(m, f, x, env)
+			} else {
+				y, yg = native(m, f, x, env)
+			}
 		}
 		if yg == .None {
 			continue
@@ -660,6 +674,18 @@ native_map :: proc(m: ^Machine, it, t, f: ^Node, input: query.Value, env: ^Env) 
 			return query.NULL, .Failed
 		}
 	}
+}
+
+// Evaluates `n` on `input` (which has a document origin) while setting `m.origin` to `input` and restoring on return.
+@(private, cold)
+native_with_origin :: #force_no_inline proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: query.Value, got: Got) {
+	prev := m.origin
+	m.origin = query.retain(input)
+	defer {
+		query.release(m.h, m.origin)
+		m.origin = prev
+	}
+	return native(m, n, input, env)
 }
 
 // The value of a node that reads no more than its input or scope, held, or false for any other node.
@@ -836,7 +862,7 @@ eval_by_keys :: proc(m: ^Machine, input: query.Value, key_expr: ^Node, env: ^Env
 				}
 				m.steps -= 1
 			}
-			y, yg := native(m, key_expr, query.retain(x), env)
+			y, yg := native_maybe_origin(m, key_expr, query.retain(x), env)
 			if yg == .None {
 				query.release(h, keys)
 				return query.NULL, .None, true
@@ -871,7 +897,7 @@ eval_by_keys :: proc(m: ^Machine, input: query.Value, key_expr: ^Node, env: ^Env
 		if !more {
 			return keys, .Value, false
 		}
-		y, yg := native(m, key_expr, x, env)
+		y, yg := native_maybe_origin(m, key_expr, x, env)
 		if yg == .None {
 			query.release(h, keys)
 			return query.NULL, .None, true

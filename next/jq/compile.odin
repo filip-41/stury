@@ -11,13 +11,14 @@ import "stury:lib/query"
 
 // A compiled program, immutable once made, so runs on many threads may share it.
 Program :: struct {
-	unit:    Unit,
-	body:    ^Node,
-	globals: []string, // the variables a run binds, by slot: `$ENV`, `$__prog_args`, then the caller's
-	funcs:   [dynamic]^Func, // every function the program reaches
-	prelude: ^Node, // the definitions of `PRELUDE`, chained by `a`
-	empty:   query.Value, // an empty array, frozen
-	modules: Modules, // what `get_search_list`, `modulemeta` and the linker were given
+	unit:       Unit,
+	body:       ^Node,
+	globals:    []string, // the variables a run binds, by slot: `$ENV`, `$__prog_args`, then the caller's
+	funcs:      [dynamic]^Func, // every function the program reaches
+	prelude:    ^Node, // the definitions of `PRELUDE`, chained by `a`
+	empty:      query.Value, // an empty array, frozen
+	modules:    Modules, // what `get_search_list`, `modulemeta` and the linker were given
+	uses_where: bool, // true when any reachable node calls `where/0`
 }
 
 Compile_Options :: struct {
@@ -491,6 +492,9 @@ mark :: proc(prog: ^Program) {
 		}
 	}
 	for n in order {
+		if n.kind == .Call && n.builtin != nil && n.builtin.fn == v_where {
+			prog.uses_where = true
+		}
 		h := 0
 		native := .Single in n.flags && native_kind(n)
 		for i in 0 ..< child_count(n) {

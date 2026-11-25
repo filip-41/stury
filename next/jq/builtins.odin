@@ -133,6 +133,7 @@ BUILTINS := [?]Builtin {
 	{name = "lgamma_r", arity = 0, kind = .Value, native = true, fn = v_frexp},
 	{name = "input_filename", arity = 0, kind = .Value, native = true, fn = v_constant},
 	{name = "input_line_number", arity = 0, kind = .Value, native = true, fn = v_constant},
+	{name = "where", arity = 0, kind = .Value, native = true, fn = v_where},
 	{name = "builtins", arity = 0, kind = .Value, native = true, fn = v_builtins},
 	{name = "now", arity = 0, kind = .Value, native = true, fn = v_constant},
 	{name = "have_literal_numbers", arity = 0, kind = .Value, native = true, fn = v_constant},

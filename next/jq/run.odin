@@ -33,6 +33,9 @@ Hooks :: struct {
 	markup:            proc(data: rawptr, doc: ^tape.Document) -> (opts: css.Options, ok: bool),
 	// Parses JSON text for `fromjson`. Without it `fromjson` fails.
 	parse_json:        Json_Parser,
+	// Where a value came from in the run's input, for the `where` builtin (and `--where` callers).
+	// `ok` false for none. When nil, `where` falls back to `query.value_place` and `input_filename`.
+	place:             proc(data: rawptr, v: query.Value, h: ^query.Heap) -> (file: string, place: tape.Place, ok: bool),
 }
 
 Run :: struct {
@@ -71,6 +74,18 @@ run_value :: proc(run: ^Run, input: query.Value, out: Output, data: rawptr) -> R
 	m.out, m.out_data = out, data
 	m.brk, m.through, m.over = nil, nil, false
 	m.steps = m.budget if m.budget > 0 else -1
+	m.track_origin = m.prog.uses_where || (m.hooks != nil && m.hooks.place != nil)
+	prev_keep := m.h.keep_origins
+	if m.track_origin {
+		m.h.keep_origins = true
+		m.origin = query.retain(input) if query.has_doc_origin(input) else query.ABSENT
+	}
+	defer if m.track_origin {
+		query.release(m.h, m.origin)
+		m.origin = query.ABSENT
+		m.h.keep_origins = prev_keep
+		m.track_origin = false
+	}
 	sig := drive(m, m.prog.body, input, nil)
 	if m.h.tainted || sig == .Taint {
 		return .Tainted

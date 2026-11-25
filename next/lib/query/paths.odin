@@ -332,6 +332,7 @@ set :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 	switch {
 	case (tt == .Object || tt == .Null || tt == .Absent) && kt == .String:
 		if tt != .Object {
+			release(h, t)
 			out, s = make_object(h, 1)
 		} else if t.kind == .Node {
 			out, s = built(h, t)
@@ -347,6 +348,7 @@ set :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 		}
 	case (tt == .Array || tt == .Null || tt == .Absent) && kt == .Number:
 		if tt != .Array {
+			release(h, t)
 			out, s = make_array(h, 1)
 		} else if t.kind == .Node {
 			out, s = built(h, t)

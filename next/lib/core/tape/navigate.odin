@@ -27,6 +27,7 @@ Doc_Index :: struct {
 	repeats:   []u64, // a bit per node, set for an examined object two of whose members share a key
 	entries:   [dynamic]Index_Entry,
 	table:     []u32, // one past an entry, by its node's hash, 0 for an empty slot, at most half full
+	lines:     Line_Index, // lazy 4 KiB line-checkpoint table and cursor for `node_place`
 	allocator: runtime.Allocator,
 }
 
@@ -504,6 +505,7 @@ destroy_index :: proc(x: ^Doc_Index) {
 	if x.examined != nil {
 		free(raw_data(x.examined), x.allocator)
 	}
+	destroy_line_index(&x.lines)
 	x^ = {}
 }
 

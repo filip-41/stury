@@ -202,26 +202,11 @@ validate_path_facts :: proc(h: ^Heap, keys: []Value) -> Status {
 	return .Ok
 }
 
-// Extracts the `(Doc_Block, Node_Index)` origin of `v` when `v` came from a document (`.Node` or doc-backed `.String`).
-@(private = "file")
-value_doc_origin :: #force_inline proc "contextless" (v: Value) -> (d: ^Doc_Block, at: tape.Node_Index, ok: bool) {
-	if v.kind == .Node {
-		return (^Doc_Block)(v.p), tape.Node_Index(v.n), true
-	}
-	if v.kind == .String && v.held {
-		sb := (^Str_Block)(block_of(v))
-		if sb != nil && sb.flags & BLOCK_HAS_DOC != 0 {
-			return str_doc_slot(sb)^, tape.Node_Index(sb.node), true
-		}
-	}
-	return nil, tape.NO_NODE, false
-}
-
 // Reads fact `kind` (or attribute `attr` when `is_attr`) on `v`.
 // Sets `h.tainted = true` if `v` belongs to a partial document scanned without facts (`!Partial.facts`).
 @(require_results)
 fact_read :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr := "", is_attr := false) -> (res: Value, status: Status) {
-	d, at, from_doc := value_doc_origin(v)
+	d, at, from_doc := value_doc_origin(v, true)
 	if !from_doc {
 		return NULL, .Ok
 	}

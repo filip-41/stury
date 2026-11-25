@@ -1036,7 +1036,7 @@ run_fold_update :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame, e: ^Env) {
 		state := run.v
 		run.v = query.ABSENT
 		if .Native in upd.flags {
-			out, found, us := eval_native(m, upd, state, e)
+			out, found, us := eval_native_maybe_origin(m, upd, state, e)
 			env_release(m, e)
 			if us != .Ok {
 				r.sig, r.mode = .Fail, .Ret
@@ -1054,6 +1054,14 @@ run_fold_update :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame, e: ^Env) {
 			return
 		}
 		u.owner = run
+		if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(state) {
+			if os := push_origin(m, state, u); os != .Ok {
+				env_release(m, e)
+				query.release(h, state)
+				r.sig, r.mode = .Fail, .Ret
+				return
+			}
+		}
 		r.n, r.input, r.path, r.env, r.k, r.track, r.mode = upd, state, query.ABSENT, e, u, false, .Eval
 		return
 	}
@@ -1067,6 +1075,14 @@ run_fold_update :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame, e: ^Env) {
 	// The state moves into the update: one that gives nothing leaves null, as jq's does.
 	state := run.v
 	run.v = query.NULL
+	if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(state) {
+		if os := push_origin(m, state, u); os != .Ok {
+			env_release(m, e)
+			query.release(h, state)
+			r.sig, r.mode = .Fail, .Ret
+			return
+		}
+	}
 	r.n, r.input, r.path, r.env, r.k, r.track, r.mode = upd, state, query.ABSENT, e, u, false, .Eval
 }
 
@@ -1094,7 +1110,7 @@ emit_foreach_item :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame) {
 		if n.kind == .Reduce && .Native in n.c.flags {
 			state := run.v
 			run.v = query.ABSENT
-			out, found, us := eval_native(m, n.c, state, run.env)
+			out, found, us := eval_native_maybe_origin(m, n.c, state, run.env)
 			if us != .Ok {
 				r.sig, r.mode = .Fail, .Ret
 				return

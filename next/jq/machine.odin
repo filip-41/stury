@@ -1,5 +1,6 @@
 package jq
 
+import "base:intrinsics"
 import "stury:lib/query"
 
 // The evaluator: a push model on an explicit stack. A filter sends each output on, and the answer steers it: `.Go`
@@ -37,8 +38,10 @@ Machine :: struct {
 	over:     bool, // the run ended as the step budget ran out
 	budget:   int, // the evaluations a run may take, 0 for any
 	steps:    int, // the evaluations left before the step budget runs out, negative for no budget
-	regexes:  query.Regex_Cache, // the patterns this run compiled
-	css:      Selector_Cache, // the CSS selectors this run compiled
+	regexes:      query.Regex_Cache, // the patterns this run compiled
+	css:          Selector_Cache, // the CSS selectors this run compiled
+	origin:       query.Value, // retained nearest document-origin value along active pipes (`track_origin` only)
+	track_origin: bool, // enabled only when the program calls `where` or `Hooks.place != nil`
 }
 
 // How `halt` or `halt_error` ended a run.
@@ -122,6 +125,12 @@ Range_Frame :: struct {
 Count_Frame :: struct {
 	using frame: Frame,
 	left:        i64,
+}
+
+@(private)
+Origin_Frame :: struct {
+	using frame: Frame,
+	prev:        query.Value, // retained previous `m.origin`, restored on `.Ret`
 }
 
 @(private)
@@ -334,6 +343,13 @@ eval_once :: #force_inline proc(m: ^Machine, r: ^Regs) {
 			if s != .Ok || !found {
 				finish(m, r, fail_status(s))
 				return
+			}
+			if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(out) {
+				if os := push_origin(m, out, r.k); os != .Ok {
+					query.release(h, out)
+					finish(m, r, .Fail)
+					return
+				}
 			}
 			r.input, r.n = out, n.b
 			return
@@ -548,6 +564,15 @@ step_emit :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 	switch f.kind {
 	case .Pipe:
 		p := (^Input_Frame)(f)
+		if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(r.v) {
+			if os := push_origin(m, r.v, p.k); os != .Ok {
+				query.release(h, r.v)
+				query.release(h, r.vpath)
+				r.v, r.vpath = query.ABSENT, query.ABSENT
+				r.sig, r.mode = .Fail, .Ret
+				return
+			}
+		}
 		r.n, r.input, r.path, r.env, r.k, r.track = p.n, r.v, r.vpath, env_retain(p.env), p.k, p.track
 		r.v, r.vpath, r.mode = query.ABSENT, query.ABSENT, .Eval
 	case .Collect:
@@ -675,7 +700,7 @@ step_emit :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 		}
 		r.n, r.input, r.path, r.env, r.k, r.track, r.mode = run.n.d, r.v, not_path_marker(m, r.v) if run.track else query.ABSENT, env_retain(p.env), run.k, run.track, .Eval
 		r.v = query.ABSENT
-	case .Label, .Out, .Comma, .Iter, .Range, .Cut, .Gen, .Css, .Args:
+	case .Label, .Out, .Comma, .Iter, .Range, .Cut, .Gen, .Css, .Args, .Origin:
 		// These frames give their outputs straight to `k`: none is a `k` itself.
 		r.k = f.k
 	case .Limit:
@@ -828,6 +853,11 @@ step_ret :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 		}
 	case .Skip, .Arg:
 		pop_frame(m)
+	case .Origin:
+		of := (^Origin_Frame)(f)
+		query.release(h, m.origin)
+		m.origin = of.prev
+		pop_frame(m)
 	case .Gen:
 		if sig == .Go {
 			if steps^ == 0 {
@@ -921,6 +951,9 @@ drop_frame :: proc(m: ^Machine, f: ^Frame) {
 		drop_destruct(m, (^Destruct_Frame)(f))
 	case .Css:
 		drop_css(m, (^Css_Frame)(f))
+	case .Origin:
+		of := (^Origin_Frame)(f)
+		query.release(h, of.prev)
 	}
 }
 
@@ -949,6 +982,51 @@ var_value :: #force_inline proc(m: ^Machine, n: ^Node, env: ^Env) -> query.Value
 	}
 	e := env_up(env, n.ref.hops)
 	return query.retain(env_slots(e)[n.ref.slot].value)
+}
+
+// Updates `m.origin` for a continuation targeting `k`, coalescing into an existing top `Origin_Frame`
+// targeting the same `k` so tail recursion under `where` stays O(1) in stack space.
+@(private, cold)
+push_origin :: #force_no_inline proc(m: ^Machine, v: query.Value, k: ^Frame) -> query.Status {
+	if m.stack.top != nil && m.stack.top.kind == .Origin && m.stack.top.k == k {
+		query.release(m.h, m.origin)
+		m.origin = query.retain(v)
+		return .Ok
+	}
+	of, os := push(m, Origin_Frame, .Origin, k)
+	if os != .Ok {
+		return os
+	}
+	of.prev = m.origin
+	m.origin = query.retain(v)
+	return .Ok
+}
+
+// Evaluates native node `n` on `input` while setting `m.origin` to `input` for its duration.
+@(private, cold)
+eval_native_origin :: #force_no_inline proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (query.Value, bool, query.Status) {
+	prev := m.origin
+	m.origin = query.retain(input)
+	v, found, s := eval_native(m, n, input, env)
+	query.release(m.h, m.origin)
+	m.origin = prev
+	return v, found, s
+}
+
+@(private)
+eval_native_maybe_origin :: #force_inline proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (query.Value, bool, query.Status) {
+	if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(input) {
+		return eval_native_origin(m, n, input, env)
+	}
+	return eval_native(m, n, input, env)
+}
+
+@(private)
+native_maybe_origin :: #force_inline proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (query.Value, Got) {
+	if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(input) {
+		return native_with_origin(m, n, input, env)
+	}
+	return native(m, n, input, env)
 }
 
 // jq's truth: anything but null and false.
