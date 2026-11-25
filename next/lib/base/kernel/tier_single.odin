@@ -23,13 +23,14 @@ VECTOR_BYTES :: [Tier]int {
 	.Base = 16,
 }
 
-tier :: proc "contextless" () -> Tier {
+@(require_results)
+tier :: #force_inline proc "contextless" () -> Tier {
 	return .Base
 }
 
 // Lane j is `t[i[j]]`, for indices below 16. WebAssembly without `simd128` has no variable shuffle to lower
 // `runtime_swizzle` to, so its lanes are read one at a time.
-@(private)
+@(private, require_results)
 lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
 	when IS_WASM && !intrinsics.has_target_feature("simd128") {
 		table := transmute([16]u8)t
@@ -44,12 +45,12 @@ lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
 	}
 }
 
-@(private)
+@(private, require_results)
 scan :: #force_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
 	return scan_op(.Base, src, c, s, OP)
 }
 
-@(private)
+@(private, require_results)
 find_set :: #force_inline proc "contextless" (src: []u8, t: Byte_Set) -> int {
 	return set_loop(.Base, src, t)
 }

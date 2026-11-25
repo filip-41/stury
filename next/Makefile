@@ -20,6 +20,7 @@ TEST_FLAGS := $(TEST_BASE_FLAGS) -define:TEST_TIMEOUT_SECONDS=120
 
 # Tests need an OS (`core:testing` imports `core:os`), so only the library is checked for wasm.
 TEST_LINT_TARGETS := linux_amd64 windows_amd64 linux_riscv64
+FREESTANDING_AMD64_PKGS := lib/base/kernel
 # The walks' states end in `#must_tail` calls, which WebAssembly runs with its tail-call feature. `odin check` takes no
 # target features, and only a program that calls the reads compiles their walks, so `WASM_PKG` exports a caller of each
 # read and is built for every wasm target and feature set.
@@ -104,6 +105,9 @@ lint-check:
 		for t in $(TEST_LINT_TARGETS); do \
 			echo "== $$p ($$t)"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) -target:$$t || exit 1; \
 		done; \
+	done
+	@for p in $(FREESTANDING_AMD64_PKGS); do \
+		echo "== $$p (freestanding_amd64_sysv)"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) -target:freestanding_amd64_sysv || exit 1; \
 	done
 	@for p in $(TEST_PKGS); do \
 		echo "== $$p"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) || exit 1; \
