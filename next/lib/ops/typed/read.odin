@@ -298,6 +298,11 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	}
 	regs := hook.Regs{NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}
 	_, err, _ := walk(src, opts, &hk, &regs, allocator, &h.ctx)
+	if err == nil {
+		err = h.err
+	} else if !h.dead {
+		settle_open(h, regs, h.sp)
+	}
 	if h.frames != h.home {
 		runtime.heap_free(h.frames)
 	}
@@ -309,11 +314,6 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	}
 	if h.held != nil {
 		held_free(h)
-	}
-	if err == nil {
-		err = h.err
-	} else if !h.dead {
-		settle_open(h, regs, h.sp)
 	}
 	return hook.memory_budget_error(&m, err)
 }

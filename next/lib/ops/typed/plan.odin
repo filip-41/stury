@@ -437,7 +437,10 @@ fill_wrapper :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, kind: Read_Ki
 fill_union :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, v: ^runtime.Type_Info_Union) {
 	m := &b.meta[b.records[at].meta]
 	if len(v.variants) == 1 && !v.no_nil {
-		m.tag, m.tag_size = u32(v.tag_offset), u8(v.tag_type.size)
+		// A `Maybe` of a pointer holds no tag past its bytes: nil is the zero pointer (`tag_offset == ti.size`).
+		if v.tag_offset < uintptr(ti.size) {
+			m.tag, m.tag_size = u32(v.tag_offset), u8(v.tag_type.size)
+		}
 		fill_wrapper(b, at, ti, .Maybe, v.variants[0])
 		return
 	}

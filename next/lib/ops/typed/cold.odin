@@ -500,11 +500,13 @@ wrapped :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, rec: ^Re
 	case .Maybe:
 		if t.kind == .Null {
 			intrinsics.mem_zero(rawptr(dest), int(m.size))
-			write_size(dest + uintptr(m.tag), 0, int(m.tag_size))
+			if m.tag_size != 0 {
+				write_size(dest + uintptr(m.tag), 0, int(m.tag_size))
+			}
 			s.c += u64(rec.stride)
 			return s, .Next
 		}
-		if read_size(dest + uintptr(m.tag), int(m.tag_size)) == 0 {
+		if m.tag_size != 0 && read_size(dest + uintptr(m.tag), int(m.tag_size)) == 0 {
 			if scalar {
 				tag = 1
 			} else {

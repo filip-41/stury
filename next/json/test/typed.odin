@@ -1381,6 +1381,39 @@ a_value_a_wrapper_refuses_has_the_wrappers_path :: proc(t: ^testing.T) {
 }
 
 @(test)
+a_pointer_maybe_reads_repeats_and_marshals_within_its_bytes :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	S :: struct {
+		w: Maybe(^Point),
+	}
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	alloc := mem.tracking_allocator(&track)
+
+	s: S
+	expect_nil(t, json.unmarshal(transmute([]u8)string(`{"w":{"x":1,"y":2},"w":{"x":3,"y":4}}`), &s, opts = {dups = .Last}, allocator = alloc))
+	p, ok := s.w.?
+	testing.expect_value(t, ok, true)
+	testing.expect_value(t, p^, Point{3, 4})
+	out, merr := json.marshal(&s, allocator = context.temp_allocator)
+	testing.expect_value(t, merr, nil)
+	testing.expect_value(t, string(out), `{"w":{"x":3,"y":4}}`)
+	free(p, alloc)
+	s.w = nil
+
+	expect_nil(t, json.unmarshal(transmute([]u8)string(`{"w":{"x":5,"y":6},"w":null}`), &s, opts = {dups = .Last}, allocator = alloc))
+	testing.expect_value(t, s.w == nil, true)
+	out_nil, merr_nil := json.marshal(&s, allocator = context.temp_allocator)
+	testing.expect_value(t, merr_nil, nil)
+	testing.expect_value(t, string(out_nil), `{"w":null}`)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
+@(test)
 a_refused_wrapper_element_leaves_the_rest_as_it_was_and_nothing_allocated :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
