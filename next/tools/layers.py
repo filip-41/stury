@@ -14,14 +14,13 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LAYERS = ["lib/base", "lib/core", "lib/ops", "lib/schema", "lib/query"]
 # The top-level packages above the formats. Any other top-level directory is a format, which imports only the
-# layers below it.
+# layers below lib/query. Query frontends (`jq`, `jsonpath`) import only `lib/*` (no formats, no host).
+QUERY_FRONTENDS = {"jq", "jsonpath"}
 TOP_EDGES = {
     "stury": {"engine", "jq", "jsonpath"},
     "engine": {"host"},
     "cli": {"engine", "host"},
     "capi": {"stury", "engine"},
-    "jq": set(),
-    "jsonpath": set(),
 }
 HOST = "host"
 IMPORT = re.compile(r'^\s*import\s+(?:\w+\s+)?"([^"]+)"|^\s*(?:\w+\s+)?"(stury:[^"]+)"', re.M)
@@ -40,7 +39,7 @@ def is_test(rel: str) -> bool:
 
 
 def is_format(rel: str) -> bool:
-    return layer(rel) == len(LAYERS) and rel != HOST and rel not in TOP_EDGES
+    return layer(rel) == len(LAYERS) and rel != HOST and rel not in TOP_EDGES and rel not in QUERY_FRONTENDS
 
 
 def allowed(src: str, dst: str) -> bool:
@@ -54,10 +53,12 @@ def allowed(src: str, dst: str) -> bool:
             return d == 0
         # The ops are independent consumers of the core, so one never builds on another.
         return d < s or d == s and LAYERS[s] != "lib/ops"
+    if src in QUERY_FRONTENDS:
+        return d < len(LAYERS)
     if src in TOP_EDGES:
         return d < len(LAYERS) or dst == HOST or dst in TOP_EDGES[src] or is_format(dst)
-    # A format or host: only the layers below.
-    return d < len(LAYERS)
+    # A format or host: only the layers below lib/query.
+    return d < len(LAYERS) - 1
 
 
 def main() -> int:

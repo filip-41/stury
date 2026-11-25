@@ -3,9 +3,12 @@ package wasm_exports
 
 import "base:runtime"
 import "core:mem"
+import "stury:jq"
 import "stury:json"
 import "stury:lib/base/regex"
 import "stury:lib/core/tape"
+import "stury:lib/ops/css"
+import "stury:lib/query"
 
 // Every tolerance and a step budget, which a walk with `LAX` counts, so the object holds those walks too.
 TOLERANT :: json.Options{tolerate = {.Invalid_Utf8, .Non_Finite, .Lone_Surrogate}, budget = {steps = 1 << 40}}
@@ -255,4 +258,71 @@ regex_matches :: proc "c" (pattern: [^]u8, n: int, text: [^]u8, m: int) -> int {
 	}
 	found, search_err := regex.search(&re, string(text[:m]), 0, nil, &scratch)
 	return -1 if search_err.kind != .None else int(found)
+}
+
+@(export)
+query_digest_len :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	h: query.Heap
+	query.heap_init(&h, context.allocator)
+	defer query.heap_destroy(&h)
+	v, s := query.digest_hex(&h, string(p[:n]), .Sha256)
+	if s != .Ok {
+		return -1
+	}
+	defer query.release(&h, v)
+	return len(query.text_of(v))
+}
+
+@(export)
+css_select_count :: proc "c" (sel_p: [^]u8, sel_n: int, doc_p: [^]u8, doc_n: int) -> int {
+	context = runtime.default_context()
+	sel, err := css.compile(string(sel_p[:sel_n]), context.allocator)
+	if err != nil {
+		return -1
+	}
+	defer css.destroy(&sel)
+	doc, derr := json.build(doc_p[:doc_n], .Json, {}, context.allocator)
+	if derr != nil {
+		return -1
+	}
+	defer tape.destroy(&doc)
+	found, serr := css.select(&doc, tape.ROOT, &sel, {}, context.allocator)
+	if serr != nil {
+		return -1
+	}
+	defer css.destroy_found(&found)
+	return len(found.matches)
+}
+
+@(export)
+jq_eval_count :: proc "c" (prog_p: [^]u8, prog_n: int, in_p: [^]u8, in_n: int) -> int {
+	context = runtime.default_context()
+	prog, errors := jq.compile(string(prog_p[:prog_n]))
+	defer jq.destroy_program(prog)
+	if len(errors) > 0 {
+		return -1
+	}
+	h: query.Heap
+	query.heap_init(&h, context.allocator)
+	defer query.heap_destroy(&h)
+	doc, derr := json.build(in_p[:in_n], .Json, {}, context.allocator)
+	if derr != nil {
+		return -1
+	}
+	input, s := query.document_value(&h, doc, true)
+	if s != .Ok {
+		return -1
+	}
+	count := 0
+	sink :: proc(data: rawptr, v: query.Value, h: ^query.Heap) -> bool {
+		(^int)(data)^ += 1
+		query.release(h, v)
+		return true
+	}
+	run: jq.Run
+	jq.run_init(&run, prog, &h, nil)
+	defer jq.run_destroy(&run)
+	end := jq.run_value(&run, input, sink, &count)
+	return count if end == .Done else -1
 }
