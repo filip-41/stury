@@ -120,6 +120,56 @@ find_matches_decoded_keys :: proc(t: ^testing.T) {
 	expect_find(t, {"{'\\x41\\q':1}", {tape.Name("Aq")}, .Default, .Found, "1"}, .Json5)
 }
 
+// A key whose escapes leave its last byte out of it is ruled out by that byte, without a decode, and a key whose
+// escapes reach its last byte is still decoded and compared. Covers `\uXXXX`, a surrogate pair, `\\`, `\n`, `\"` and a
+// multi-byte text, at the end of a key and before other bytes.
+@(test)
+find_rules_out_escaped_keys_by_their_tail :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// `\u0061` ends the key: the last byte of the text is the escape's, so the key is decoded.
+	expect_find(t, {`{"a\u0061":1}`, {tape.Name("aa")}, .Default, .Found, "1"})
+	expect_find(t, {`{"a\u0061":1}`, {tape.Name("ab")}, .Default, .Missing, ""})
+	// The escape ends before the last byte, which is the key's own: `b` rules `aax` out with no decode.
+	expect_find(t, {`{"a\u0061b":1}`, {tape.Name("aab")}, .Default, .Found, "1"})
+	expect_find(t, {`{"a\u0061b":1}`, {tape.Name("aax")}, .Default, .Missing, ""})
+	// A surrogate pair's second half ends the key, and one followed by a byte leaves that byte the key's.
+	expect_find(t, {`{"\ud83d\ude00x":1}`, {tape.Name("\U0001F600x")}, .Default, .Found, "1"})
+	expect_find(t, {`{"\ud83d\ude00x":1}`, {tape.Name("\U0001F600y")}, .Default, .Missing, ""})
+	expect_find(t, {`{"\ud83d\ude00":1}`, {tape.Name("\U0001F600a")}, .Default, .Missing, ""})
+	// `\\`, `\n` and `\"` end the key, and each decodes to a byte that no raw byte of the key gives.
+	expect_find(t, {`{"a\\":1}`, {tape.Name(`a\`)}, .Default, .Found, "1"})
+	expect_find(t, {`{"a\\":1}`, {tape.Name("ab")}, .Default, .Missing, ""})
+	expect_find(t, {`{"a\n":1}`, {tape.Name("a\n")}, .Default, .Found, "1"})
+	expect_find(t, {`{"a\n":1}`, {tape.Name("an")}, .Default, .Missing, ""})
+	expect_find(t, {`{"a\"":1}`, {tape.Name(`a"`)}, .Default, .Found, "1"})
+	expect_find(t, {`{"a\"":1}`, {tape.Name("a?")}, .Default, .Missing, ""})
+	// A `\uXXXX` that decodes to two bytes, at the end and before the key's last byte.
+	expect_find(t, {`{"a\u00e9":1}`, {tape.Name("a\u00e9")}, .Default, .Found, "1"})
+	expect_find(t, {`{"a\u00e9x":1}`, {tape.Name("a\u00e9y")}, .Default, .Missing, ""})
+	// The escapes the tail check reads past: a `\u` six bytes before a last byte that is not `u`, and a `\` two
+	// bytes before a last byte that is not escaped.
+	expect_find(t, {`{"\u0061\u0062c":1}`, {tape.Name("abc")}, .Default, .Found, "1"})
+	expect_find(t, {`{"\u0061\u0062c":1}`, {tape.Name("abd")}, .Default, .Missing, ""})
+	// A repeated key still answers by policy, decoded or not.
+	expect_find(t, {`{"k\u0061100000":1,"ka199999":2}`, {tape.Name("ka199999")}, .Default, .Found, "2"})
+	expect_find(t, {`{"k\u0061100000":1,"ka199999":2}`, {tape.Name("ka199999")}, .Last, .Found, "2"})
+	expect_find(t, {`{"ka199999":2,"k\u0061100000":1}`, {tape.Name("ka199999")}, .First, .Found, "2"})
+}
+
+// A key longer than the two words a compare loads is read whole, so the bytes between the words still keep a key
+// that is not the step's from being taken.
+@(test)
+find_reads_long_keys_whole :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Twenty bytes: the first and last eight match the step's, the four between do not.
+	expect_find(t, {`{"0123456789abcdefghij":1}`, {tape.Name("01234567XXabcdefghij")}, .Default, .Missing, ""})
+	expect_find(t, {`{"01234567XXabcdefghij":1}`, {tape.Name("01234567XXabcdefghij")}, .Default, .Found, "1"})
+	expect_find(t, {`{"0123456789abcdefghij":1}`, {tape.Name("0123456789abcdefghij")}, .Default, .Found, "1"})
+	// An escaped key longer than the words is decoded as it is compared, at any length.
+	expect_find(t, {`{"\u00610123456789abcdefghij":1}`, {tape.Name("a0123456789abcdefghij")}, .Default, .Found, "1"})
+	expect_find(t, {`{"\u00610123456789abcdefghij":1}`, {tape.Name("a0123456789abcdefghik")}, .Default, .Missing, ""})
+}
+
 // A path holds any number of steps, and a negative index reaches any distance from the end.
 @(test)
 find_takes_any_path :: proc(t: ^testing.T) {

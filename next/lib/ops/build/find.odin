@@ -592,12 +592,52 @@ finder_enter :: #force_inline proc "contextless" (h: ^Finder, replaces: bool, t:
 	return .Next
 }
 
+// Whether the key `t` of `h.key_text` reads as `name`, as `tape.key_names` judges it, with the escaped keys ruled out
+// first by the two checks below. In line in `finder_key`, which is out of line, so the states that emit a key keep the
+// small compares of `finder_hook` alone.
+// `#no_bounds_check` invariant, which `tape.key_names` and `same_text` hold too: `t.lo + u64(t.n) <= u64(len(h.key_text))`.
+@(private, require_results)
+finder_names_key :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, name: string) -> bool #no_bounds_check {
+	if t.spelling & tape.SPELLING_CREDIT_EXACT != 0 {
+		// An escaped key's source span is longer than its text. One subtract turns it into the decoded length, so a
+		// key of a different length needs no decode.
+		if int(t.n) - int(tape.spelling_credit(t.spelling)) != len(name) {
+			return false
+		}
+		// A key whose last byte is its own and differs there is no key the step names, so it needs no decode:
+		// `same_text` would decode it to find that its last byte differs.
+		if n := int(t.n); n > 0 && len(name) > 0 {
+			raw := raw_data(h.key_text)[t.lo:][:n]
+			if raw[n - 1] != name[len(name) - 1] && finder_tail_own(raw) {
+				return false
+			}
+		}
+	}
+	return tape.key_names(h.format, h.key_text, t, name)
+}
+
+// Whether the last byte of the escaped key text `raw` is a byte of the key's text and not part of an escape. Every
+// escape of a key the walk credits is one `spell.string_escape` reads, and so begins with `\`: the `\` and the character
+// it escapes, which are two bytes, or `\uXXXX`, which are six, or a surrogate pair's two, which are twelve. A walk of
+// JSON is the only one that credits a key (`st_key_string_escaped` reads the credit with `json.key_escaped_head`), so a
+// key that carries an exact credit holds only these escapes. An escape that reaches the last byte is then either the
+// two-byte one, which puts its `\` at `raw[n - 2]`, or a `\u` one, whose `\u` at `raw[n - 6..n - 5]` is the second
+// half's when a pair reaches there. Every other last byte is the key's own.
+@(private, require_results)
+finder_tail_own :: #force_inline proc "contextless" (raw: []u8) -> bool #no_bounds_check {
+	n := len(raw)
+	if n >= 2 && raw[n - 2] == '\\' {
+		return false
+	}
+	return !(n >= 6 && raw[n - 6] == '\\' && raw[n - 5] == 'u')
+}
+
 @(private)
 finder_key :: proc "contextless" (h: ^Finder, t: tape.Token) -> hook.Action #no_bounds_check {
 	lv := &h.levels[h.entered - 1]
 	#partial switch step in h.steps[h.entered - 1] {
 	case tape.Name:
-		if finder_names(h, lv, h.answer.outcome == .Not_Loaded) && tape.key_names(h.format, h.key_text, t, string(step)) {
+		if finder_names(h, lv, h.answer.outcome == .Not_Loaded) && finder_names_key(h, t, string(step)) {
 			finder_take(h, lv)
 		}
 	case tape.All:
