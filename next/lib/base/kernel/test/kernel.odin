@@ -484,6 +484,51 @@ index_set_every_cut :: proc(t: ^testing.T) {
 	}
 }
 
+// Checks `byte_set` and `index_set` on boundary sets: empty (constructed and zero-value), full 256-byte, and the exact
+// 8-vs-9 distinct non-empty row threshold (with empty rows present).
+@(test)
+byte_set_boundaries :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	all: [256]u8
+	for i in 0 ..< 256 {
+		all[i] = u8(i)
+	}
+	empty := k.byte_set({})
+	zero: k.Byte_Set
+	testing.expect(t, empty.buckets)
+	testing.expect(t, !zero.buckets)
+	testing.expect_value(t, k.index_set(nil, empty), -1)
+	testing.expect_value(t, k.index_set(nil, zero), -1)
+	for cut in ([?]int{0, 1, 15, 16, 63, 64, 65, 130, 256}) {
+		testing.expect_value(t, k.index_set(all[:cut], empty), -1)
+		testing.expect_value(t, k.index_set(all[:cut], zero), -1)
+	}
+
+	full := k.byte_set({max(u64), max(u64), max(u64), max(u64)})
+	testing.expect(t, full.buckets)
+	testing.expect_value(t, k.index_set(nil, full), -1)
+	testing.expect_value(t, k.index_set(all[:0], full), -1)
+	for i in 0 ..< 256 {
+		testing.expect_value(t, k.index_set(all[i:], full), 0)
+		testing.expect_value(t, k.index_set(all[i:i + 1], full), 0)
+	}
+
+	// 8 distinct non-empty rows plus 8 empty rows still fits in the bucket form; a 9th distinct non-empty row drops to
+	// the general form.
+	eight_bytes := [?]u8{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77}
+	nine_bytes := [?]u8{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
+	eight := k.byte_set(member_bits(eight_bytes[:]))
+	nine := k.byte_set(member_bits(nine_bytes[:]))
+	testing.expect(t, eight.buckets)
+	testing.expect(t, !nine.buckets)
+	for b in 0 ..< 256 {
+		want8 := 0 if b < 0x80 && (b >> 4) == (b & 0x0f) else -1
+		want9 := 0 if b < 0x90 && (b >> 4) == (b & 0x0f) else -1
+		testing.expect_value(t, k.index_set(all[b:b + 1], eight), want8)
+		testing.expect_value(t, k.index_set(all[b:b + 1], nine), want9)
+	}
+}
+
 // Checks `quote_run` and `quote_cut` against a scan a byte at a time, on every stretch of random texts of quotes,
 // escapes, brackets and separators, from both starts and both escape carries.
 @(test)
@@ -766,6 +811,9 @@ scans_stop_at_unmapped_memory :: proc(t: ^testing.T) {
 		testing.expectf(t, k.count_chars(edge) == k.count_chars(mid), "count_chars %d", n)
 		set := k.byte_set(member_bits({',', 0, 0xC3}))
 		testing.expectf(t, k.index_set(edge, set) == k.index_set(mid, set), "index_set %d", n)
+		general := k.byte_set(member_bits({',', 0, 0xC3, 0x11, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}))
+		testing.expect(t, !general.buckets)
+		testing.expectf(t, k.index_set(edge, general) == k.index_set(mid, general), "index_set general %d", n)
 		testing.expectf(t, k.utf8_valid(edge) == k.utf8_valid(mid), "utf8_valid %d", n)
 		for nest in ([2]bool{false, true}) {
 			cut := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = nest}
