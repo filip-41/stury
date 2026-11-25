@@ -90,7 +90,7 @@ dense_sample :: proc "contextless" (src: []u8) -> bool {
 dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $MODE: Dense_Mode) -> (w, i: int, escapes: u64) #no_bounds_check {
 	in_string, odd := s.in_string, s.odd
 	for i = lo; i < hi; i += 64 {
-		b := kernel.load_block(T, src, i)
+		b := kernel.load_block(src, i)
 		drop: u64
 		when MODE == .Blind {
 			// A block with no blank, nearly every block of a dense text, is stored with one test and no mask: a space is

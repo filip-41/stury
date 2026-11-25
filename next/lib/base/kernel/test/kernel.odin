@@ -929,16 +929,42 @@ reads_past_the_end_stay_in_the_page :: proc(t: ^testing.T) {
 	for &b, i in region {
 		b = u8(i % 251 + 1)
 	}
-	sanitized := ODIN_SANITIZER_FLAGS & {.Address, .Thread} != {}
+	sanitized := ODIN_SANITIZER_FLAGS != {}
 	// A load of 16 bytes at `at` may read past the text where it ends in the page.
 	for at in ([]int{0, 1, 2, PAGE - 17, PAGE - 16, PAGE - 15, PAGE - 1, PAGE, PAGE + 1}) {
-		_, _, ok := k.head16(raw_data(region)[at:], 5)
+		v, live, ok := k.head16(raw_data(region)[at:], 5)
 		want := !sanitized && at % PAGE <= PAGE - 16
 		testing.expectf(t, ok == want, "head16 at page offset %d: %v, want %v", at % PAGE, ok, want)
+		if ok {
+			got_v := transmute([16]u8)v
+			got_live := transmute([16]u8)live
+			for i in 0 ..< 16 {
+				if i < 5 {
+					testing.expectf(t, got_v[i] == region[at + i], "head16 v[%d] at %d", i, at)
+				}
+				testing.expectf(t, got_live[i] == (0xFF if i < 5 else 0), "head16 live[%d] at %d", i, at)
+			}
+		}
+	}
+	// Check every live length `n` in `1..15` returns exact prefix bytes and mask.
+	for n in 1 ..< 16 {
+		at := 37
+		v, live, ok := k.head16(raw_data(region)[at:], n)
+		testing.expect_value(t, ok, !sanitized)
+		if ok {
+			got_v := transmute([16]u8)v
+			got_live := transmute([16]u8)live
+			for i in 0 ..< 16 {
+				if i < n {
+					testing.expectf(t, got_v[i] == region[at + i], "head16 n=%d v[%d]", n, i)
+				}
+				testing.expectf(t, got_live[i] == (0xFF if i < n else 0), "head16 n=%d live[%d]", n, i)
+			}
+		}
 	}
 	_, _, ok := k.head16(nil, 5)
 	testing.expect(t, !ok, "head16 of nil")
-	// The block is the text's bytes then zeros, wherever the text lies against the page.
+	// The block is the text's bytes then zeros, wherever the text lies against the page, for `lo == 0` and `lo > 0`.
 	for at in ([]int{0, 1, PAGE - 64, PAGE - 63, PAGE - 40, PAGE, PAGE + 1}) {
 		for n in 1 ..< 64 {
 			text := region[at:at + n]
@@ -951,6 +977,117 @@ reads_past_the_end_stay_in_the_page :: proc(t: ^testing.T) {
 					break
 				}
 			}
+		}
+	}
+	// `load_padded` with `lo > 0` and `load_block` across `1..=65` remaining bytes, including page-crossing starts.
+	for lo in ([]int{0, 1, 7, 17, 64, PAGE - 64, PAGE - 63, PAGE - 31, PAGE}) {
+		for rem in 1 ..= 65 {
+			src := region[:lo + rem]
+			if rem < 64 {
+				got_pad := transmute([64]u8)k.load_padded(src, lo)
+				for i in 0 ..< 64 {
+					want := src[lo + i] if i < rem else 0
+					if got_pad[i] != want {
+						testing.expectf(t, false, "load_padded lo=%d rem=%d byte %d: %d, want %d", lo, rem, i, got_pad[i], want)
+						break
+					}
+				}
+			}
+			got_blk := transmute([64]u8)k.load_block(src, lo)
+			for i in 0 ..< 64 {
+				want := src[lo + i] if i < rem else 0
+				if got_blk[i] != want {
+					testing.expectf(t, false, "load_block lo=%d rem=%d byte %d: %d, want %d", lo, rem, i, got_blk[i], want)
+					break
+				}
+			}
+		}
+	}
+}
+
+@(test, enable_target_feature = FEATURES)
+control_or_high16_every_byte_and_lane :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Every byte value in every lane, surrounded by printable ASCII, for both `del = false` and `del = true`.
+	for byte_val in 0 ..< 256 {
+		c := u8(byte_val)
+		want_no_del: u8 = 0xFF if (c < 0x20 || c >= 0x80) else 0
+		want_del: u8 = 0xFF if (c < 0x20 || c == 0x7f || c >= 0x80) else 0
+		for lane in 0 ..< 16 {
+			in_bytes: [16]u8 = 'a'
+			in_bytes[lane] = c
+			v := transmute(#simd[16]u8)in_bytes
+			got_no_del := transmute([16]u8)k.control_or_high16(v, false)
+			got_del := transmute([16]u8)k.control_or_high16(v, true)
+			for i in 0 ..< 16 {
+				w0 := want_no_del if i == lane else 0
+				w1 := want_del if i == lane else 0
+				if got_no_del[i] != w0 {
+					testing.expectf(t, false, "control_or_high16(0x%02x, false) lane %d at %d: 0x%02x, want 0x%02x", c, lane, i, got_no_del[i], w0)
+					return
+				}
+				if got_del[i] != w1 {
+					testing.expectf(t, false, "control_or_high16(0x%02x, true) lane %d at %d: 0x%02x, want 0x%02x", c, lane, i, got_del[i], w1)
+					return
+				}
+			}
+		}
+	}
+	// Full 16-lane sweep across all 256 bytes in consecutive chunks of 16.
+	for base := 0; base < 256; base += 16 {
+		in_bytes: [16]u8
+		for i in 0 ..< 16 {
+			in_bytes[i] = u8(base + i)
+		}
+		v := transmute(#simd[16]u8)in_bytes
+		got_no_del := transmute([16]u8)k.control_or_high16(v, false)
+		got_del := transmute([16]u8)k.control_or_high16(v, true)
+		for i in 0 ..< 16 {
+			c := in_bytes[i]
+			testing.expect_value(t, got_no_del[i], u8(0xFF if (c < 0x20 || c >= 0x80) else 0))
+			testing.expect_value(t, got_del[i], u8(0xFF if (c < 0x20 || c == 0x7f || c >= 0x80) else 0))
+		}
+	}
+}
+
+@(test)
+live16_every_length :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for n in 0 ..= 16 {
+		got := transmute([16]u8)k.live16(n)
+		for i in 0 ..< 16 {
+			want: u8 = 0xFF if i < n else 0
+			testing.expectf(t, got[i] == want, "live16(%d)[%d]: 0x%02x, want 0x%02x", n, i, got[i], want)
+		}
+	}
+}
+
+@(test)
+load8_and_store16_unaligned :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src: [32]u8
+	for &b, i in src {
+		b = u8(0x11 + i * 7)
+	}
+	for off in 0 ..< 8 {
+		got := k.load8(raw_data(src[off:]))
+		want: u64
+		for j in 0 ..< 8 {
+			want |= u64(src[off + j]) << uint(j * 8)
+		}
+		testing.expectf(t, got == want, "load8 off=%d: 0x%016x, want 0x%016x", off, got, want)
+	}
+	payload: [16]u8
+	for &b, i in payload {
+		b = u8(0xA0 + i)
+	}
+	vec := transmute(#simd[16]u8)payload
+	for off in 0 ..< 16 {
+		dst: [48]u8 = 0x55
+		k.store16(raw_data(dst[off:]), vec)
+		for i in 0 ..< len(dst) {
+			want: u8 = payload[i - off] if (i >= off && i < off + 16) else 0x55
+			testing.expectf(t, dst[i] == want, "store16 off=%d byte %d: 0x%02x, want 0x%02x", off, i, dst[i], want)
 		}
 	}
 }

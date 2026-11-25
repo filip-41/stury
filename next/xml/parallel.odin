@@ -194,7 +194,6 @@ part_scan :: proc "contextless" (src: []u8, lo, hi: int, last: bool, locals: []P
 		Quote, // in an attribute value of a start tag, which `quote` ends
 		End, // in an end tag
 	}
-	TIER :: kernel.Tier(0)
 	text := src[:hi]
 	mode := Mode.Text
 	quote: u8
@@ -203,7 +202,7 @@ part_scan :: proc "contextless" (src: []u8, lo, hi: int, last: bool, locals: []P
 	chars := false
 	base, pos := lo, uint(0)
 	blocks: for base < hi {
-		b := kernel.load_block(TIER, text, base)
+		b := kernel.load_block(text, base)
 		m := kernel.pack_n([4]kernel.Block{kernel.eq(b, '<'), kernel.eq(b, '>'), kernel.eq(b, '"'), kernel.eq(b, '\'')})
 		lt, gt, dq, sq, other := m[0], m[1], m[2], m[3], ~kernel.pack(kernel.below(b, 0x21))
 		for pos < 64 {

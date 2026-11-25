@@ -117,7 +117,7 @@ in_set :: #force_inline proc "contextless" (
 // The first index of `src` whose byte is in `t`, or -1. The bucket form is chosen once, outside the loop.
 @(private)
 set_loop :: #force_inline proc "contextless" ($T: Tier, src: []u8, t: Byte_Set) -> int {
-	when (ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32) && !intrinsics.has_target_feature("simd128") {
+	when IS_WASM && !intrinsics.has_target_feature("simd128") {
 		if t.buckets {
 			lo := transmute([16]u8)t.lo_tbl
 			hi := transmute([16]u8)t.hi_tbl

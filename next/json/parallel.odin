@@ -221,7 +221,7 @@ lex_pair :: proc "contextless" (src: []u8, lo, hi: int, $S: Spec) -> (runs: [2]L
 	odd: u64
 	base := lo
 	for ; base < hi; base += 64 {
-		b := kernel.load_block(STATE_TIER, text, base)
+		b := kernel.load_block(text, base)
 		when S != .Json {
 			if lex_marks(b, S) != 0 {
 				break
@@ -308,7 +308,7 @@ lex_on :: proc "contextless" (run: ^Lex_Run, src: []u8, lo, hi, base: int, odd: 
 	odd := odd
 	base := base
 	for ; base < hi; base += 64 {
-		b := kernel.load_block(STATE_TIER, text, base)
+		b := kernel.load_block(text, base)
 		escaped := kernel.escaped(kernel.pack(kernel.eq(b, '\\')), &odd)
 		q := kernel.pack(kernel.eq(b, '"')) &~ escaped
 		m := lex_brackets(b)

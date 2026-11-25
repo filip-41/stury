@@ -226,7 +226,7 @@ read_chunk_in :: #force_inline proc "contextless" (src: []u8, c: ^Chunk, $S: Spe
 	text := src[:c.hi]
 	bare := S == .Csv && .Bare_Quote in p.tolerate
 	for base := c.lo; base < c.hi; base += 64 {
-		b := kernel.load(raw_data(text)[base:]) if c.hi - base >= 64 else kernel.load_padded(text, base)
+		b := kernel.load_block(text, base)
 		m := kernel.pack_n([4]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, p.delim), kernel.eq(b, '\n'), kernel.eq(b, p.comment)})
 		q := m[0] if S == .Csv else 0
 		marks := m[3] if p.comment != 0 else 0

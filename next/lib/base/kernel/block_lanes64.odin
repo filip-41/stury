@@ -12,9 +12,6 @@ when ODIN_ENDIAN != .Little {
 @(private)
 PMULL :: false
 
-@(private = "file")
-IS_WASM :: ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32
-
 // Block operations on one 64-lane vector, which LLVM splits to four SSE or two AVX2 registers on x86.
 
 // Loads 64 unaligned bytes from `p`. The caller guarantees 64 readable bytes at `p`.

@@ -229,7 +229,7 @@ scan_op :: #force_inline proc "contextless" ($T: Tier, src: []u8, c: u8, s: ^Quo
 	} else {
 		inq := ~u64(0) if s.quoted else 0
 		for lo := 0; lo < len(src); lo += 64 {
-			b := load_block(T, src, lo)
+			b := load_block(src, lo)
 			q := pack(eq(b, s.quote))
 			if s.escape != 0 {
 				e := escaped(pack(eq(b, s.escape)), &s.odd)

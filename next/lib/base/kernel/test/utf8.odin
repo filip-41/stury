@@ -15,7 +15,7 @@ kernel_utf8 :: proc(src: []u8, skip_ascii: bool) -> bool {
 	s: k.Utf8_State
 	high: bool
 	for lo := 0; lo < len(src); lo += 64 {
-		b := k.load_block(T, src, lo)
+		b := k.load_block(src, lo)
 		k.utf8_next(T, b, skip_ascii && k.is_ascii(b), &s, &high)
 	}
 	return k.utf8_ok(s)

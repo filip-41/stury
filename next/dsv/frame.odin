@@ -257,7 +257,7 @@ line_end_in_blocks :: #force_inline proc "contextless" (src: []u8, start: int, $
 		_, _, _ = in_quote, closed, begun
 	}
 	for pos := start; pos < n; pos += 64 {
-		b := kernel.load(raw_data(src)[pos:]) if n - pos >= 64 else kernel.load_padded(src, pos)
+		b := kernel.load_block(src, pos)
 		when S == .Csv {
 			m := kernel.pack_n([3]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, delim), kernel.eq(b, '\n')})
 			q, d, nl := m[0], m[1], m[2]
