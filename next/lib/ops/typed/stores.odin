@@ -476,7 +476,7 @@ text_time :: proc "contextless" (h: ^Reader, t: tape.Token) -> (time.Time, Typed
 		return {}, .Bad_Date_Time
 	}
 	defer free_held(h, held)
-	nsec, spelled, in_range := spell.date_time_nsec(text)
+	nsec, spelled, in_range := spell.date_time_nsec(text, h.optional_seconds)
 	if !spelled {
 		return {}, .Bad_Date_Time
 	}

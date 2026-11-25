@@ -52,6 +52,9 @@ unmarshal_type :: #force_inline proc(src: []u8, target: rawptr, T: typeid, spec:
 @(private)
 unmarshal_as :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: Spec, $LAX: bool, read: Unmarshal_Options, opts: Options, allocator: runtime.Allocator) -> tape.Error {
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^typed.Text_Reader, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
+		when S == .Toml_1_1 {
+			h.optional_seconds = true
+		}
 		on :: #force_inline proc "contextless" (h: ^typed.Text_Reader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 			return typed.text_hook(h, s, t, number_value)
 		}

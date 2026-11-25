@@ -73,8 +73,9 @@ Reader :: struct {
 	borrow:    bool,
 	first:     bool, // repeated keys under `.First`
 	unknown:   bool, // `refuse_unknown`
-	made:      bool, // the read made its plan, and frees it on return
-	dead:      bool, // a refusal ended the read, and the walk judges the rest of the text
+	made:             bool, // the read made its plan, and frees it on return
+	dead:             bool, // a refusal ended the read, and the walk judges the rest of the text
+	optional_seconds: bool, // a date-time may omit `:SS`, as TOML 1.1 allows
 	err:       tape.Error, // the first refusal
 	// The registers of the outermost wrapper whose element is being read, nil outside one. A refusal of the element is
 	// the wrapper's, as its registers name the element's place.

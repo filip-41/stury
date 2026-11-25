@@ -245,6 +245,18 @@ clock = 07:32:00
 	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = true\n"), &only_time, allocator = context.temp_allocator), .Expected_Date_Time, 4)
 	// A number names no instant either.
 	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = 86400\n"), &only_time, allocator = context.temp_allocator), .Expected_Date_Time, 4)
+	// Space-separated timestamps longer than 64 bytes read cleanly.
+	long_src := "v = 2024-01-01 00:00:00.000000000000000000000000000000000000000000000Z\n"
+	testing.expect_value(t, toml.unmarshal(transmute([]u8)long_src, &only_time, allocator = context.temp_allocator), nil)
+	testing.expect_value(t, time.to_unix_nanoseconds(only_time.v), 1_704_067_200_000_000_000)
+	// TOML 1.1 optional seconds unmarshal into `time.Time`, while TOML 1.0 still refuses omitted seconds.
+	short_times: struct {
+		a, b: time.Time,
+	}
+	testing.expect_value(t, toml.unmarshal(transmute([]u8)string("a = 1979-05-27T07:32Z\nb = 1979-05-27 07:32+01:00\n"), &short_times, .Toml_1_1, allocator = context.temp_allocator), nil)
+	testing.expect_value(t, time.to_unix_nanoseconds(short_times.a), 296_638_320_000_000_000)
+	testing.expect_value(t, time.to_unix_nanoseconds(short_times.b), 296_634_720_000_000_000)
+	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = \"1979-05-27T07:32Z\"\n"), &only_time, .Toml_1_0, allocator = context.temp_allocator), .Bad_Date_Time, 4)
 }
 
 @(test)
