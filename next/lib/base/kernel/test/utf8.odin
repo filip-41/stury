@@ -244,38 +244,92 @@ utf8_lead_every_position :: proc(t: ^testing.T) {
 	}
 }
 
-// Whether the block after `prev`, read from `utf8_after`'s state, is UTF-8.
-@(enable_target_feature = FEATURES)
-utf8_after :: proc(prev, next: [64]u8) -> bool {
-	prev, next := prev, next
-	s := k.utf8_after(k.load(raw_data(prev[:])))
-	high := true
-	b := k.load(raw_data(next[:]))
-	k.utf8_next(T, b, k.is_ascii(b), &s, &high)
-	return k.utf8_ok(s)
-}
-
-// Checks `utf8_after`, for a caller that carries the last block between texts, against a sequence the block leaves
-// open: E2 at its end, then 82 41 or 82 AC.
-@(test)
-utf8_after_reads_open_sequence :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	prev, next: [64]u8
-	for i in 0 ..< 64 {
-		prev[i], next[i] = 'a', 'a'
-	}
-	prev[63], next[0], next[1] = 0xe2, 0x82, 0x41
-	testing.expect(t, !utf8_after(prev, next), "E2 82 41 read as UTF-8")
-	next[1] = 0xac
-	testing.expect(t, utf8_after(prev, next), "E2 82 AC read as an error")
-}
-
 // Whether `utf8_stop` of the register holding byte `last` finds `buf[:last + 1]` clean, as a text of one block.
 @(enable_target_feature = FEATURES)
 stop_clean :: proc(buf: ^[64]u8, last: int) -> bool {
 	s: k.Utf8_State
 	b := k.load(raw_data(buf[:]))
 	return k.utf8_stop(T, b, k.is_ascii(b), &s, false, u64(last))
+}
+
+// Empty and nil slices are valid UTF-8.
+@(test)
+utf8_valid_empty :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	testing.expect(t, k.utf8_valid(nil), "nil slice read as invalid UTF-8")
+	empty: []u8
+	testing.expect(t, k.utf8_valid(empty), "empty slice read as invalid UTF-8")
+	buf: [1]u8
+	testing.expect(t, k.utf8_valid(buf[:0]), "zero-length subslice read as invalid UTF-8")
+}
+
+// Runs `prev` through `utf8_next` and then stops on `next` at `last` with `high == true`.
+@(enable_target_feature = FEATURES)
+stop_after_block :: proc(prev, next: ^[64]u8, last: int) -> bool {
+	s: k.Utf8_State
+	high: bool
+	pb := k.load(raw_data(prev[:]))
+	k.utf8_next(T, pb, k.is_ascii(pb), &s, &high)
+	nb := k.load(raw_data(next[:]))
+	return k.utf8_stop(T, nb, k.is_ascii(nb), &s, high, u64(last))
+}
+
+// `utf8_stop` with `high == true` at `last == 0`: catches an open 2-, 3-, or 4-byte sequence from the prior block,
+// and accepts a completed sequence, for both all-ASCII `next` and non-ASCII junk past `last`.
+@(test)
+utf8_stop_with_high_at_zero :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	open_tails := [][]u8{
+		{0xc2},
+		{0xe2},
+		{0xe2, 0x82},
+		{0xf0},
+		{0xf0, 0x9f},
+		{0xf0, 0x9f, 0x9a},
+	}
+	for tail in open_tails {
+		prev: [64]u8
+		for &b in prev {
+			b = 'a'
+		}
+		copy(prev[64 - len(tail):], tail)
+		for ascii in ([2]bool{true, false}) {
+			next: [64]u8
+			for &b in next {
+				b = 'a'
+			}
+			next[0] = '"'
+			if !ascii {
+				next[1] = 0xff
+				next[2] = 0x80
+			}
+			testing.expectf(t, !stop_after_block(&prev, &next, 0), "open tail % x, ascii %v: passed", tail, ascii)
+		}
+	}
+	closed_tails := [][]u8{
+		{0xc3, 0xa9},
+		{0xe2, 0x82, 0xac},
+		{0xf0, 0x9f, 0x9a, 0x80},
+	}
+	for tail in closed_tails {
+		prev: [64]u8
+		for &b in prev {
+			b = 'a'
+		}
+		copy(prev[64 - len(tail):], tail)
+		for ascii in ([2]bool{true, false}) {
+			next: [64]u8
+			for &b in next {
+				b = 'a'
+			}
+			next[0] = '"'
+			if !ascii {
+				next[1] = 0xff
+				next[2] = 0xc0
+			}
+			testing.expectf(t, stop_after_block(&prev, &next, 0), "closed tail % x, ascii %v: failed", tail, ascii)
+		}
+	}
 }
 
 // `utf8_stop` checks the bytes up to its stop and none past it, though they share the register: random text with a

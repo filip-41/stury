@@ -318,7 +318,7 @@ run_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8, $M
 				ends = bs[k + 1] == '>'
 			}
 			if ends {
-				// The run ends in this block, so only the vectors up to its end are read.
+				// The run ends in this block, so `utf8_stop` judges its bytes up to its end and none past it.
 				if !kernel.utf8_stop(T, b, ascii, &u, high, k) {
 					return nil, false
 				}
