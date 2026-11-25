@@ -11,7 +11,7 @@ import "stury:lib/core/tape"
 @(private)
 V :: #simd[16]u8
 
-@(private = "file")
+@(private)
 SCALAR_WASM :: (ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32) && !intrinsics.has_target_feature("simd128")
 
 // Whether the token from `p` to `q` is longer than `Token.n` holds.
@@ -245,48 +245,34 @@ string_lean :: #force_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> (
 // `escape_len` accepts within a block (`ok == true`). No escape may run into the first block.
 @(private, require_results)
 string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8, $quote: u8) -> (q: [^]u8, ok: bool) #no_bounds_check {
+	q, ok, _ = string_escaped_scan(bs, end, quote, false)
+	return
+}
+
+// Like `string_escaped`, with `first_slash` signaling that `bs[0] == '\\'` and every byte before `bs` is printable
+// ASCII: the first block skips the empty-block `any_lane` probe and sets `utf8_tail = true` (with `ok == false`) when
+// the first block closes with valid escapes and failed only on `ctl` (so `st_string_escaped_utf8` can validate UTF-8
+// without rescanning from the opening quote).
+@(private, require_results)
+string_escaped_scan :: #force_inline proc "contextless" (bs, end: [^]u8, $quote: u8, first_slash: bool) -> (q: [^]u8, ok, utf8_tail: bool) #no_bounds_check {
 	when SCALAR_WASM {
-		return nil, false
+		return nil, false, false
 	} else {
+		start := bs
 		bs := bs
 		// 1 when an odd run of backslashes ends the previous block, escaping the first byte of this one.
 		odd: u64
+		if !first_slash {
+			for intrinsics.ptr_sub(end, bs) >= 64 && !kernel.any_lane(string_stops_block(kernel.load(bs), quote)) {
+				bs = bs[64:]
+			}
+		}
 		for intrinsics.ptr_sub(end, bs) >= 64 {
 			b := kernel.load(bs)
-			if odd == 0 && !kernel.any_lane(string_stops_block(b, quote)) {
-				bs = bs[64:]
-				continue
-			}
 			// `ctl` holds both control bytes (< 0x20) and non-ASCII bytes (>= 0x80), so non-ASCII bytes after the closing
 			// quote are masked out instead of rejecting the whole block.
 			m := kernel.pack_n([3]kernel.Block{kernel.eq(b, quote), kernel.eq(b, '\\'), control_or_high_block(b)})
 			quotes, slash, ctl := m[0], m[1], m[2]
-			// A block with at most one backslash and no escape running into it reads that escape alone and skips the
-			// class masks. Sparse escapes are the common case.
-			if odd == 0 && slash & (slash - 1) == 0 {
-				covered: u64
-				if slash != 0 {
-					k := intrinsics.count_trailing_zeros(slash)
-					n := escape_len(bs[k:], end)
-					if n == 0 || k + n > 64 {
-						return nil, false
-					}
-					covered = (u64(1) << n - 1) << k
-				}
-				real := quotes &~ covered
-				if real == 0 {
-					if ctl != 0 {
-						return nil, false
-					}
-					bs = bs[64:]
-					continue
-				}
-				kq := intrinsics.count_trailing_zeros(real)
-				if ctl & (u64(1) << kq - 1) != 0 {
-					return nil, false
-				}
-				return bs[kq + 1:], true
-			}
 			escaped := kernel.escaped(slash, &odd)
 			c := kernel.classes(STATE_TIER, b, ESCAPE_CLASSES)
 			n := kernel.pack_n([4]kernel.Block{kernel.has(c, ESC_LETTER | ESC_U), kernel.has(c, ESC_U), kernel.has(c, ESC_HEX), kernel.has(c, ESC_D)})
@@ -294,31 +280,65 @@ string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8, $quote: u8) 
 			u &= escaped
 			digits := u << 1 | u << 2 | u << 3 | u << 4
 			// A surrogate half's `\u` has `d` then a digit of 8 to B (high half) or C to F (low half), and a high half's
-			// `\u` is six lanes before its low half's.
+			// `\u` is six lanes before its low half's. Every `\u` digit is checked against `hex` in `bad`, so among valid
+			// hex digits `(b | 0x20) >= '8'` selects 8..F and `(b | 0x20) > 'b'` selects C..F with no table load.
 			half := u & (d >> 1)
-			high, low: u64
-			if half != 0 {
-				c2 := kernel.classes(STATE_TIER, b, SURROGATE_CLASSES)
-				h2 := kernel.pack_n([2]kernel.Block{kernel.has(c2, SUR_HIGH), kernel.has(c2, SUR_LOW)})
-				high, low = half & (h2[0] >> 2), half & (h2[1] >> 2)
+			bl := kernel.Block{
+				simd.bit_or(b[0], V(0x20)),
+				simd.bit_or(b[1], V(0x20)),
+				simd.bit_or(b[2], V(0x20)),
+				simd.bit_or(b[3], V(0x20)),
 			}
+			h2 := kernel.pack_n([2]kernel.Block{kernel.below(bl, '8'), kernel.below(bl, 'c')})
+			surr_ge8, surr_low := ~h2[0], ~h2[1]
+			high := half & ((surr_ge8 &~ surr_low) >> 2)
+			low := half & (surr_low >> 2)
 			// A `\u` escape whose digits run past the block returns false, for the byte reader to settle.
-			bad := escaped &~ letter | digits &~ hex | high &~ (low >> 6) | low &~ (high << 6) | u >> 60 << 60 | ctl
+			esc_bad := escaped &~ letter | digits &~ hex | high &~ (low >> 6) | low &~ (high << 6) | u >> 60 << 60
+			bad := esc_bad | ctl
 			real := quotes &~ escaped &~ digits
 			if real == 0 {
 				if bad != 0 {
-					return nil, false
+					return nil, false, false
 				}
 				bs = bs[64:]
+				if odd == 0 {
+					for intrinsics.ptr_sub(end, bs) >= 64 && !kernel.any_lane(string_stops_block(kernel.load(bs), quote)) {
+						bs = bs[64:]
+					}
+				}
 				continue
 			}
 			k := intrinsics.count_trailing_zeros(real)
-			if bad & (u64(1) << k - 1) != 0 {
-				return nil, false
+			mask := u64(1) << k - 1
+			if intrinsics.expect(bad & mask != 0, false) {
+				return nil, false, first_slash && bs == start && esc_bad & mask == 0
 			}
-			return bs[k + 1:], true
+			return bs[k + 1:], true, false
 		}
-		return nil, false
+		return nil, false, false
+	}
+}
+
+when !SCALAR_WASM {
+	// Validates the single-block UTF-8 escaped tail from `bs` (where `end - bs >= 64`, every byte before `bs` is
+	// printable ASCII, and `string_escaped` already proved every escape before the closing quote is valid and every
+	// `\u` has 4 hex digits, so `quotes &~ escaped` finds the exact same closing quote index `k`).
+	@(private, require_results)
+	string_escaped_utf8 :: #force_inline proc "contextless" (bs: [^]u8) -> (q: [^]u8, ok: bool) #no_bounds_check {
+		b := kernel.load(bs)
+		m := kernel.pack_n([3]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, '\\'), kernel.below(b, 0x20)})
+		odd: u64
+		escaped := kernel.escaped(m[1], &odd)
+		k := intrinsics.count_trailing_zeros(m[0] &~ escaped)
+		if m[2] & (u64(1) << k - 1) != 0 {
+			return nil, false
+		}
+		u: kernel.Utf8_State
+		if !kernel.utf8_stop(STATE_TIER, b, false, &u, false, k) {
+			return nil, false
+		}
+		return bs[k + 1:], true
 	}
 }
 
@@ -337,18 +357,6 @@ when !SCALAR_WASM {
 	ESCAPE_CLASSES := kernel.Nibble_Table {
 		lo = {0x20, 0x60, 0x6d, 0x60, 0xe8, 0x70, 0x64, 0x20, 0x20, 0x20, 0x00, 0x00, 0x02, 0x00, 0x04, 0x01},
 		hi = {0x00, 0x00, 0x01, 0x20, 0xc0, 0x02, 0xc4, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-	}
-
-	@(private = "file")
-	SUR_HIGH :: 0x03
-	@(private = "file")
-	SUR_LOW :: 0x04
-
-	// The classes of a surrogate half's second hex digit, `SUR_HIGH` for 8 to B and `SUR_LOW` for C to F.
-	@(private = "file", rodata)
-	SURROGATE_CLASSES := kernel.Nibble_Table {
-		lo = {0x00, 0x02, 0x02, 0x04, 0x04, 0x04, 0x04, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-		hi = {0x00, 0x00, 0x00, 0x01, 0x06, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 	}
 }
 

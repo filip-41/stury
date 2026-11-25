@@ -1,9 +1,11 @@
 package json
 
 import "base:intrinsics"
+import "base:runtime"
 import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 
 // The levels below an array's depth `st_number_blocks` looks at for arrays it may close.
 @(private)
@@ -89,8 +91,18 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64
 			// A number's end is the byte after its last, a comma or a close. The end at `p` is the number the hook was
 			// given before this state.
 			t := Block_Tokens{q, after_num & ~num & ~u64(q == p), dot, open | comma, open, close}
-			if stop := block_tokens(w, on, &hs, t, start, dot_at); stop != nil {
-				return stopped(w, hs, stop)
+			when !LAX && H == build.Builder {
+				if on == build.builder_hook {
+					block_tokens_builder(w.hooks, w.base, &hs, t, start, dot_at, false)
+				} else if on == build.builder_hook_facts {
+					block_tokens_builder(w.hooks, w.base, &hs, t, start, dot_at, true)
+				} else if stop := block_tokens(w, on, &hs, t, start, dot_at); stop != nil {
+					return stopped(w, hs, stop)
+				}
+			} else {
+				if stop := block_tokens(w, on, &hs, t, start, dot_at); stop != nil {
+					return stopped(w, hs, stop)
+				}
 			}
 			top := 63 - u64(intrinsics.count_leading_zeros(t.seps))
 			start, dot_at = q[top + 1:], nil
@@ -176,6 +188,80 @@ block_tokens :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), $o
 		}
 	}
 	return nil
+}
+
+// `block_tokens` specialized for `build.Builder` with loop-invariant pointers kept in SSA registers so node stores
+// never force LLVM to reload `w.base`, `w.hooks`, `h.doc.nodes`, or `h.stack` per token. The caller checked room for
+// 64 nodes and depth for `dep + opens`, so every store is in bounds and no token can stop or grow.
+//
+// Mask invariants from `st_number_blocks`'s `bad` check:
+// - Every bit in `t.ends` is either a `,` (`t.seps & bit != 0`) or a `]` (`t.seps & bit == 0`), never `[`.
+// - Every bit in `ev` with `t.ends & bit == 0` is either `[` (`t.opens & bit != 0`) or `]`, so `t.closes` need not stay live.
+// - Each number has at most one `.`, so the lowest bit of `dots` before `x` is its own and `dots &= dots - 1` consumes it.
+@(private = "file")
+block_tokens_builder :: #force_inline proc "contextless" (h: ^build.Builder, base: [^]u8, hs: ^hook.Regs, t: Block_Tokens, start, dot_at: [^]u8, $FACTS: bool) #no_bounds_check {
+	nodes := raw_data(h.doc.nodes)
+	opens := raw_data(h.stack)
+	num, dot, dots := start, dot_at, t.dots
+	a, b, c := hs.a, hs.b, hs.c
+	for ev := t.ends | t.opens | t.closes; ev != 0; ev &= ev - 1 {
+		bit := ev & -ev
+		x := t.base[intrinsics.count_trailing_zeros(ev):]
+		if t.ends & bit != 0 {
+			if dots != 0 {
+				if d := t.base[intrinsics.count_trailing_zeros(dots):]; uintptr(d) < uintptr(x) {
+					dot = d
+					dots &= dots - 1
+				}
+			}
+			digits_at := num[u64(num[0] == '-'):]
+			int_end, frac := x, u64(0)
+			if dot != nil {
+				int_end, frac = dot, u64(intrinsics.ptr_sub(x, dot)) - 1
+			}
+			spelling := tape.number_spelling(0, u64(intrinsics.ptr_sub(int_end, digits_at)), frac)
+			tok := tape.Token{u64(intrinsics.ptr_sub(num, base)), u32(intrinsics.ptr_sub(x, num)), .Number, .Value, spelling}
+			((^[2]u64)(uintptr(a)))^ = transmute([2]u64)tok
+			a += size_of(tape.Node)
+			b += 1
+			dot = nil
+			if t.seps & bit != 0 {
+				num = x[1:]
+				continue
+			}
+		} else if t.opens & bit != 0 {
+			num, dot = x[1:], nil
+			tok := tape.Token{u64(intrinsics.ptr_sub(x, base)), 1, .Array, .Value, 0}
+			((^[2]u64)(uintptr(a)))^ = transmute([2]u64)tok
+			idx := u64((uintptr(a) - uintptr(nodes)) / size_of(tape.Node))
+			opens[c] = b + 1
+			c += 1
+			a += size_of(tape.Node)
+			b = idx << 32
+			continue
+		}
+		if t.seps & (bit << 1) != 0 {
+			num, dot = x[2:], nil
+		}
+		cur := u32((uintptr(a) - uintptr(nodes)) / size_of(tape.Node))
+		open := u32(b >> 32)
+		count := u32(b)
+		when FACTS {
+			h.closed = tape.Node_Index(open)
+		}
+		n := &nodes[open]
+		n.n = cur - open
+		n.spelling = u16(min(count, u32(tape.MAX_CHILDREN)))
+		if intrinsics.expect(count >= u32(tape.MAX_CHILDREN), false) {
+			counts := (^runtime.Raw_Dynamic_Array)(&h.counts)
+			cn := counts.len
+			([^]tape.Child_Count)(counts.data)[cn] = {tape.Node_Index(open), count}
+			counts.len = cn + 1
+		}
+		c -= 1
+		b = opens[c]
+	}
+	hs.a, hs.b, hs.c = a, b, c
 }
 
 // The mask `x` moved one byte later, with the previous block's last byte from `prev` in its first.

@@ -367,3 +367,196 @@ skipped_value_truncated_after_colon :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// Direct Builder loops in `st_open_run`, `st_close`, and `st_number_blocks` match the standard token path across deep
+// nesting, >MAX_CHILDREN wide containers, JSONC trailing comments (`h.closed`), and multi-block coordinate arrays.
+@(test)
+builder_fast_loops_open_close_and_number_blocks :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+
+	// Deep nesting: exercises `st_open_run` and `st_close` direct Builder loops for both `.Json` and `.Jsonc`.
+	DEPTH :: 1100
+	opens := strings.repeat("[", DEPTH, context.temp_allocator)
+	closes := strings.repeat("]", DEPTH, context.temp_allocator)
+	for spec in ([]json.Spec{.Json, .Jsonc}) {
+		tail := " // end\n" if spec == .Jsonc else ""
+		src := strings.concatenate({opens, "42", closes, tail}, context.temp_allocator)
+		doc, err := json.build(transmute([]u8)src, spec)
+		defer tape.destroy(&doc)
+		testing.expectf(t, err == nil, "%v deep: %v", spec, err)
+		testing.expect_value(t, len(doc.nodes), DEPTH + 1)
+		testing.expect_value(t, doc.root_close, u64(2 * DEPTH + 2))
+		testing.expect_value(t, doc.nodes[0].n, u32(DEPTH + 1))
+		testing.expect_value(t, doc.nodes[DEPTH].kind, tape.Kind.Number)
+		if spec == .Jsonc {
+			testing.expectf(t, len(doc.facts) == 1 && doc.facts[0].kind == .Comment_Inline && doc.facts[0].node == tape.ROOT, "jsonc deep facts: %v", doc.facts)
+		}
+	}
+
+	// Wide container > MAX_CHILDREN closing via `st_close` (overflowing into `h.counts`).
+	WIDE :: int(tape.MAX_CHILDREN) + 60
+	wb := strings.builder_make(context.temp_allocator)
+	strings.write_string(&wb, "[[")
+	for i in 0 ..< WIDE {
+		if i > 0 {
+			strings.write_byte(&wb, ',')
+		}
+		strings.write_string(&wb, "[]")
+	}
+	strings.write_string(&wb, "]]")
+	wdoc, werr := json.build(transmute([]u8)strings.to_string(wb))
+	defer tape.destroy(&wdoc)
+	testing.expect_value(t, werr, nil)
+	testing.expect_value(t, len(wdoc.nodes), WIDE + 2)
+	testing.expect_value(t, tape.child_count(&wdoc, 1, wdoc.nodes[1]), WIDE)
+
+	// Multi-block coordinate array comparing tight `st_number_blocks` against spaced fallback that stays out of blocks.
+	tight := strings.builder_make(context.temp_allocator)
+	spaced := strings.builder_make(context.temp_allocator)
+	strings.write_string(&tight, "[[0,1]")
+	strings.write_string(&spaced, "[ [ 0 , 1 ]")
+	for i in 0 ..< 120 {
+		if i % 15 == 0 {
+			strings.write_string(&tight, ",[]")
+			strings.write_string(&spaced, " , [ ]")
+		} else if i % 11 == 0 {
+			// >31-digit number to test digit-count saturation in `block_tokens_builder`.
+			strings.write_string(&tight, ",[-123456789012345678901234567890123456.789,0]")
+			strings.write_string(&spaced, " , [ -123456789012345678901234567890123456.789 , 0 ]")
+		} else {
+			fmt.sbprintf(&tight, ",[-%d.%d,%d,[%d]]", i + 10, (i * 37) % 1000, i, -i)
+			fmt.sbprintf(&spaced, " , [ -%d.%d , %d , [ %d ] ]", i + 10, (i * 37) % 1000, i, -i)
+		}
+	}
+	strings.write_string(&tight, "]")
+	strings.write_string(&spaced, " ]")
+	for spec in ([]json.Spec{.Json, .Jsonc}) {
+		tail := " // after\n" if spec == .Jsonc else ""
+		tsrc := strings.concatenate({strings.to_string(tight), tail}, context.temp_allocator)
+		ssrc := strings.concatenate({strings.to_string(spaced), tail}, context.temp_allocator)
+		tdoc, terr := json.build(transmute([]u8)tsrc, spec)
+		defer tape.destroy(&tdoc)
+		sdoc, serr := json.build(transmute([]u8)ssrc, spec)
+		defer tape.destroy(&sdoc)
+		testing.expectf(t, terr == nil && serr == nil, "%v: %v / %v", spec, terr, serr)
+		if testing.expect_value(t, len(tdoc.nodes), len(sdoc.nodes)) {
+			for i in 0 ..< len(tdoc.nodes) {
+				a, b := tdoc.nodes[i], sdoc.nodes[i]
+				if a.kind != b.kind || a.n != b.n || a.spelling != b.spelling || a.role != b.role {
+					testing.expectf(t, false, "%v node %d mismatch: %v vs %v", spec, i, a, b)
+					break
+				}
+				if a.kind == .Number {
+					atxt := tsrc[a.lo:a.lo + u64(a.n)]
+					btxt := ssrc[b.lo:b.lo + u64(b.n)]
+					if atxt != btxt {
+						testing.expectf(t, false, "%v number %d text: %q vs %q", spec, i, atxt, btxt)
+						break
+					}
+				}
+			}
+		}
+		if spec == .Jsonc {
+			testing.expectf(t, len(tdoc.facts) == 1 && tdoc.facts[0].kind == .Comment_Inline && tdoc.facts[0].node == tape.ROOT, "jsonc blocks facts: %v", tdoc.facts)
+		}
+	}
+}
+
+// `string_escaped_scan` table-free surrogate classification, plain-block skip loop, and `st_string_escaped_utf8`
+// handle every hex boundary, valid/invalid UTF-8, control bytes, and long sparse escapes cleanly.
+@(test)
+string_escaped_surrogates_and_utf8_tail :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+
+	// Every hex digit in the 2nd position of `\uD<x>00`: 0..7 are BMP (valid), 8..B/a..b are high, C..F/c..f are low.
+	for d in ([]u8{'0', '7'}) {
+		src := fmt.tprintf(`["\uD%c00","%s"]`, d, strings.repeat(" ", 70, context.temp_allocator))
+		doc, err := json.build(transmute([]u8)src)
+		testing.expectf(t, err == nil, "BMP \\uD%c00: %v", d, err)
+		tape.destroy(&doc)
+	}
+	for d in ([]u8{'8', '9', 'A', 'B', 'a', 'b'}) {
+		// Valid pair with lowercase and uppercase low surrogate.
+		for lo in ([]u8{'C', 'F', 'c', 'f'}) {
+			src := fmt.tprintf(`["\uD%c00\uD%c00","%s"]`, d, lo, strings.repeat(" ", 70, context.temp_allocator))
+			doc, err := json.build(transmute([]u8)src)
+			testing.expectf(t, err == nil, "pair \\uD%c00\\uD%c00: %v", d, lo, err)
+			tape.destroy(&doc)
+		}
+		// Lone high surrogate: rejected strictly, accepted with .Lone_Surrogate.
+		lone_src := fmt.tprintf(`["\uD%c00x","%s"]`, d, strings.repeat(" ", 70, context.temp_allocator))
+		doc, err := json.build(transmute([]u8)lone_src)
+		kind, at := fault_of(err)
+		testing.expectf(t, kind == .Bad_Escape && at == 2, "strict lone high \\uD%c00: %v", d, err)
+		tape.destroy(&doc)
+		ldoc, lerr := json.build(transmute([]u8)lone_src, opts = {tolerate = {.Lone_Surrogate}})
+		testing.expectf(t, lerr == nil, "lax lone high \\uD%c00: %v", d, lerr)
+		tape.destroy(&ldoc)
+	}
+	for d in ([]u8{'C', 'D', 'E', 'F', 'c', 'd', 'e', 'f'}) {
+		lone_src := fmt.tprintf(`["\uD%c00","%s"]`, d, strings.repeat(" ", 70, context.temp_allocator))
+		doc, err := json.build(transmute([]u8)lone_src)
+		kind, at := fault_of(err)
+		testing.expectf(t, kind == .Bad_Escape && at == 2, "strict lone low \\uD%c00: %v", d, err)
+		tape.destroy(&doc)
+		ldoc, lerr := json.build(transmute([]u8)lone_src, opts = {tolerate = {.Lone_Surrogate}})
+		testing.expectf(t, lerr == nil, "lax lone low \\uD%c00: %v", d, lerr)
+		tape.destroy(&ldoc)
+	}
+
+	// 1-block escaped UTF-8 strings (hitting `st_string_escaped_utf8`): valid 2/3/4-byte, invalid UTF-8, control byte.
+	buf: [256]u8
+	pad := strings.repeat(" ", 70, context.temp_allocator)
+	utf8_valid := []struct {
+		body, want: string,
+	} {
+		{`\n café`, "\n café"},
+		{`a\t日本語😀b`, "a\t日本語😀b"},
+		{`\"é\"\\ü`, "\"é\"\\ü"},
+		{`\uD83D\uDE00 é`, "😀 é"},
+	}
+	for c in utf8_valid {
+		src := strings.concatenate({`["`, c.body, `","`, pad, `"]`}, context.temp_allocator)
+		doc, err := json.build(transmute([]u8)src)
+		testing.expectf(t, err == nil, "utf8 escaped %q: %v", c.body, err)
+		if err == nil {
+			got, ok := tape.node_text(&doc, 1, buf[:])
+			testing.expectf(t, ok && got == c.want, "utf8 escaped %q: got %q want %q", c.body, got, c.want)
+		}
+		tape.destroy(&doc)
+		verr := json.validate(transmute([]u8)src)
+		testing.expectf(t, verr == nil, "validate utf8 escaped %q: %v", c.body, verr)
+	}
+
+	// Invalid UTF-8 inside 1-block escaped string.
+	bad_utf8 := strings.concatenate({`["\n`, "\xC3(", `","`, pad, `"]`}, context.temp_allocator)
+	bdoc, berr := json.build(transmute([]u8)bad_utf8)
+	bkind, bat := fault_of(berr)
+	testing.expectf(t, bkind == .Bad_Char && bat == 4, "bad utf8 escaped: %v", berr)
+	tape.destroy(&bdoc)
+	ldoc, lerr := json.build(transmute([]u8)bad_utf8, opts = {tolerate = {.Invalid_Utf8}})
+	testing.expectf(t, lerr == nil, "lax bad utf8 escaped: %v", lerr)
+	tape.destroy(&ldoc)
+
+	// Control byte inside 1-block escaped UTF-8 string.
+	ctrl_utf8 := strings.concatenate({`["\né`, "\x01", `","`, pad, `"]`}, context.temp_allocator)
+	cdoc, cerr := json.build(transmute([]u8)ctrl_utf8)
+	ckind, cat := fault_of(cerr)
+	testing.expectf(t, ckind == .Bad_Char && cat == 6, "ctrl utf8 escaped: %v", cerr)
+	tape.destroy(&cdoc)
+
+	// Multi-block sparse escaped string (>200 bytes) exercising the plain-block skip loop in `string_escaped_scan`.
+	long_mid := strings.repeat("a", 220, context.temp_allocator)
+	long_src := strings.concatenate({`["\n`, long_mid, `\t`, long_mid, `"]`}, context.temp_allocator)
+	long_want := strings.concatenate({"\n", long_mid, "\t", long_mid}, context.temp_allocator)
+	long_doc, long_err := json.build(transmute([]u8)long_src)
+	testing.expectf(t, long_err == nil, "long sparse escaped: %v", long_err)
+	if long_err == nil {
+		lbuf := make([]u8, len(long_want) + 16, context.temp_allocator)
+		got, ok := tape.node_text(&long_doc, 1, lbuf)
+		testing.expectf(t, ok && got == long_want, "long sparse escaped decode: ok=%v len=%d/%d", ok, len(got), len(long_want))
+	}
+	tape.destroy(&long_doc)
+}

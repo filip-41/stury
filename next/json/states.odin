@@ -1,8 +1,10 @@
 package json
 
 import "base:intrinsics"
+import "base:runtime"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 
 // The walk's states, one procedure per place in the grammar. Each takes the cursor `p`, `end` one past the text, `d`
 // the depth shifted left once with the open container's kind in bit 0 (1 for an object), `w` the rest of the walk
@@ -305,15 +307,20 @@ st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: 
 st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q: [^]u8
-	ok: bool
+	ok, utf8_tail: bool
 	when S == .Json5 {
 		if w.refused < BLOCK_RETIRE {
-			q, ok = string_escaped(w.resume, end, '"')
+			q, ok, utf8_tail = string_escaped_scan(w.resume, end, '"', true)
 		}
 	} else {
-		q, ok = string_escaped(w.resume, end, '"')
+		q, ok, utf8_tail = string_escaped_scan(w.resume, end, '"', true)
 	}
 	if !ok {
+		when !SCALAR_WASM {
+			if utf8_tail {
+				return #must_tail st_string_escaped_utf8(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+		}
 		return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	if too_wide(p, q) {
@@ -327,6 +334,32 @@ st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u6
 		return #must_tail st_grow_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// The state at a value string whose first 64-byte escaped block from `w.resume` had valid escapes and a closing quote
+// but failed `ctl` on non-ASCII bytes. Kept as a separate tail-called state so `st_string_escaped` stays 0-frame.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_string_escaped_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	when !SCALAR_WASM {
+		q, ok := string_escaped_utf8(w.resume)
+		if !ok {
+			return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+		if too_wide(p, q) {
+			return fault(w, hs, p, .Too_Wide)
+		}
+		a := emit_string(w, on, &hs, .Value, p, q, tape.SPELLING_DECODE)
+		if a == .Stop {
+			return stopped(w, hs, q)
+		}
+		if grows(C, a) {
+			return #must_tail st_grow_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	} else {
+		return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
 }
 
 // The state at a value string whose first byte past printable ASCII is no backslash, within 32 bytes.
@@ -851,6 +884,41 @@ st_open_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind
 	hs := hook.Regs{s0, s1, s2}
 	p, d := p, d
 	stack, depth := w.stack, w.depth
+	when !LAX && H == build.Builder {
+		if on == build.builder_hook || on == build.builder_hook_facts {
+			base := w.base
+			rooms := w.rooms
+			h := w.hooks
+			opens := raw_data(h.stack)
+			idx := u64((uintptr(hs.a) - uintptr(raw_data(h.doc.nodes))) / size_of(tape.Node))
+			lvl := level(0, m)
+			dep := d >> 1
+			for {
+				if dep >= depth {
+					return #must_tail st_deepen_run(p, end, dep << 1, ind, w, hs.a, hs.b, hs.c, m, on)
+				}
+				stack[dep] = lvl
+				lo := u64(intrinsics.ptr_sub(p, base))
+				if uintptr(hs.a) == rooms {
+					w.grow = lo
+					return #must_tail st_grow_value(p, end, dep << 1, ind, w, hs.a, hs.b, hs.c, m, on)
+				}
+				tok := tape.Token{lo, 1, .Array, .Value, 0}
+				((^[2]u64)(uintptr(hs.a)))^ = transmute([2]u64)tok
+				opens[hs.c] = hs.b + 1
+				hs.c += 1
+				hs.a += size_of(tape.Node)
+				hs.b = idx << 32
+				idx += 1
+				dep += 1
+				p = p[1:]
+				if p >= end || p[0] != '[' {
+					break
+				}
+			}
+			return #must_tail st_open(p, end, dep << 1, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+	}
 	for {
 		if d >> 1 >= depth {
 			return #must_tail st_deepen_run(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
@@ -1180,6 +1248,41 @@ st_close :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: I
 	// The depth is carried apart from the kind bit, so the next close does not wait on the stack's load.
 	depth := d >> 1
 	stack := w.stack
+	when !LAX && H == build.Builder {
+		if on == build.builder_hook || on == build.builder_hook_facts {
+			h := w.hooks
+			nodes := raw_data(h.doc.nodes)
+			opens := raw_data(h.stack)
+			cur := u32((uintptr(hs.a) - uintptr(nodes)) / size_of(tape.Node))
+			last_open: tape.Node_Index
+			for {
+				open := u32(hs.b >> 32)
+				count := u32(hs.b)
+				last_open = tape.Node_Index(open)
+				n := &nodes[open]
+				n.n = cur - open
+				n.spelling = u16(min(count, u32(tape.MAX_CHILDREN)))
+				if intrinsics.expect(count >= u32(tape.MAX_CHILDREN), false) {
+					counts := (^runtime.Raw_Dynamic_Array)(&h.counts)
+					cn := counts.len
+					([^]tape.Child_Count)(counts.data)[cn] = {tape.Node_Index(open), count}
+					counts.len = cn + 1
+				}
+				hs.c -= 1
+				hs.b = opens[hs.c]
+				depth -= 1
+				p = p[1:]
+				if depth == 0 || p >= end || u32(p[0]) != stack[depth] & 0xFF {
+					break
+				}
+			}
+			if on == build.builder_hook_facts {
+				h.closed = last_open
+			}
+			top := stack[depth]
+			return #must_tail st_after(p, end, depth << 1 | u64(top >> 5 & 1), ind, w, hs.a, hs.b, hs.c, u64(top >> 8), on)
+		}
+	}
 	for {
 		if emit(w, on, &hs, .End, .Value, p, p[1:], 0) == .Stop {
 			return stopped(w, hs, p[1:])
