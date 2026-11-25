@@ -157,6 +157,87 @@ classes_of_every_byte :: proc(t: ^testing.T) {
 	}
 }
 
+// Checks `classes` and `has` on deterministic boundaries: zero `Nibble_Table{}`, shared-bit high-nibble rows (including
+// sign-bit class `0x80` and bytes >= 0x80), `has(c, 0)`, `has(c, 0x80)`, `has(c, 0xff)`, and `any_lane(has(c, bits))`
+// in every lane.
+@(test, enable_target_feature = FEATURES)
+classes_and_has_boundaries :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Shared-bit high-nibble table:
+	// - bit 0x01: 0x00 and 0xF0 (high nibbles 0x0 and 0xF share low nibble 0x0)
+	// - bit 0x02: 0x8F and 0xFF (high nibbles 0x8 and 0xF share low nibble 0xF, bytes >= 0x80)
+	// - bit 0x40: 'A'..'F' (0x41..0x46) and 'a'..'f' (0x61..0x66) share one bit across high nibbles 0x4 and 0x6
+	// - bit 0x80: 'D' (0x44) and 'd' (0x64) share sign-bit class 0x80 (and also carry bit 0x40)
+	table := k.Nibble_Table {
+		lo = {0x01, 0x40, 0x40, 0x40, 0xc0, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02},
+		hi = {0x01, 0x00, 0x00, 0x00, 0xc0, 0x00, 0xc0, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03},
+	}
+	zero: k.Nibble_Table
+	buf: [64]u8
+	for block in 0 ..< 4 {
+		for &b, i in buf {
+			b = u8(64 * block + i)
+		}
+		bv := k.load(raw_data(buf[:]))
+		cz := k.classes(T, bv, zero)
+		for bits in ([?]u8{0, 0x01, 0x80, 0xff}) {
+			mz := k.has(cz, bits)
+			testing.expect_value(t, k.pack(mz), 0)
+			testing.expect(t, !k.any_lane(mz))
+		}
+		c := k.classes(T, bv, table)
+		cases := [?]struct {
+			bits: u8,
+			want: u64,
+		}{
+			{0x00, 0},
+			{0x01, reference_set(buf[:], "\x00\xf0")},
+			{0x02, reference_set(buf[:], "\x8f\xff")},
+			{0x40, reference_set(buf[:], "ABCDEFabcdef")},
+			{0x80, reference_set(buf[:], "Dd")},
+			{0xff, reference_set(buf[:], "\x00\xf0\x8f\xffABCDEFabcdef")},
+		}
+		for tc in cases {
+			m := k.has(c, tc.bits)
+			testing.expectf(t, k.pack(m) == tc.want, "block %d, bits 0x%02x: %x, want %x", block, tc.bits, k.pack(m), tc.want)
+			testing.expectf(t, k.any_lane(m) == (tc.want != 0), "block %d, bits 0x%02x: any_lane mismatch", block, tc.bits)
+		}
+	}
+	// Single-lane sweep across all 64 lanes for `any_lane(has(...))` with sign-bit `0x80` and high byte `0xFF`.
+	for &b in buf {
+		b = 'z'
+	}
+	c_none := k.classes(T, k.load(raw_data(buf[:])), table)
+	for bits in ([?]u8{0x00, 0x01, 0x02, 0x40, 0x80, 0xff}) {
+		testing.expect(t, !k.any_lane(k.has(c_none, bits)))
+	}
+	for lane in 0 ..< 64 {
+		bit := u64(1) << u64(lane)
+		buf[lane] = 'D'
+		cd := k.classes(T, k.load(raw_data(buf[:])), table)
+		testing.expect_value(t, k.pack(k.has(cd, 0x00)), 0)
+		testing.expect(t, !k.any_lane(k.has(cd, 0x00)))
+		testing.expect_value(t, k.pack(k.has(cd, 0x01)), 0)
+		testing.expect(t, !k.any_lane(k.has(cd, 0x01)))
+		testing.expect_value(t, k.pack(k.has(cd, 0x40)), bit)
+		testing.expect(t, k.any_lane(k.has(cd, 0x40)))
+		testing.expect_value(t, k.pack(k.has(cd, 0x80)), bit)
+		testing.expect(t, k.any_lane(k.has(cd, 0x80)))
+		testing.expect_value(t, k.pack(k.has(cd, 0xff)), bit)
+		testing.expect(t, k.any_lane(k.has(cd, 0xff)))
+
+		buf[lane] = 0xff
+		cf := k.classes(T, k.load(raw_data(buf[:])), table)
+		testing.expect_value(t, k.pack(k.has(cf, 0x02)), bit)
+		testing.expect(t, k.any_lane(k.has(cf, 0x02)))
+		testing.expect_value(t, k.pack(k.has(cf, 0x80)), 0)
+		testing.expect(t, !k.any_lane(k.has(cf, 0x80)))
+		testing.expect_value(t, k.pack(k.has(cf, 0xff)), bit)
+		testing.expect(t, k.any_lane(k.has(cf, 0xff)))
+		buf[lane] = 'z'
+	}
+}
+
 // Sets bit `i % 64` of `quotes[i / 64]` for each quote in `src` that no backslash escapes. A backslash escapes the
 // next byte unless it is escaped itself.
 reference_escaped :: proc(src: []u8, quotes: []u64) {
