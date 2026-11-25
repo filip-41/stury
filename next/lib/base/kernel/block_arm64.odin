@@ -97,6 +97,7 @@ foreign _ {
 
 // Whether the floor tier's procedures take the carry-less multiply, which every Apple silicon CPU has and another arm64
 // target has only when its build names `aes`.
+@(private)
 PMULL :: ODIN_OS == .Darwin || intrinsics.has_target_feature("aes")
 
 // `prefix_xor` as a carry-less multiply by all ones, inlined by LLVM into callers built with `FEATURES`. Safe only
