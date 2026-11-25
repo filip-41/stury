@@ -22,7 +22,7 @@ Records :: struct {
 	member:         u32, // under `.Members` and `.Elements`, the child read next
 	// Under `.Members` and `.Elements`, the walk's count of `Budget.steps`, which counts the containers of the text.
 	steps:          u64,
-	tree_allocator: runtime.Allocator, // where `held` lives: `opts.scratch` when set, else `r.allocator`
+	tree_allocator: runtime.Allocator, // where `held` lives: `hook.scratch` of the records' options
 	tree_budget:    hook.Memory_Budget, // counts `held` against `Budget.memory`
 }
 
@@ -211,12 +211,7 @@ record_frame :: proc(r: ^Records, $S: Spec) -> (lo, cut: u64, ok: bool) {
 // counted in the walk's order give, as the containers outside the one reached are not walked.
 @(private)
 members_open :: proc(r: ^Records, $S: Spec) -> bool {
-	base := r.opts.scratch if r.opts.scratch.procedure != nil else r.allocator
-	tree_allocator := base
-	if r.opts.budget.memory != 0 {
-		r.tree_budget = {backing = base, limit = r.opts.budget.memory}
-		tree_allocator = hook.memory_budget(&r.tree_budget)
-	}
+	tree_allocator := hook.scratch(r.opts, r.allocator, &r.tree_budget)
 	r.tree_allocator = tree_allocator
 	context.allocator = tree_allocator
 	r.at = .Open

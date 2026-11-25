@@ -27,38 +27,52 @@ Read_Budget :: struct {
 }
 
 // Starts `b` for a read under `opts` backed by `caller`, returning the allocator for the read's own blocks. When
-// `opts.budget.memory` is 0, returns `caller` untouched.
+// `opts.budget.memory` is 0, returns `caller` untouched. Otherwise the read's blocks and its scratch share the limit.
 read_budget :: #force_inline proc "contextless" (b: ^Read_Budget, opts: tape.Options, caller: runtime.Allocator) -> runtime.Allocator {
 	if opts.budget.memory == 0 {
 		return caller
 	}
-	if opts.scratch.procedure != nil {
+	if backing, ok := scratch_backing(opts); ok {
 		b.main = {backing = caller, limit = opts.budget.memory, peer = &b.scratch}
-		b.scratch = {backing = opts.scratch, limit = opts.budget.memory, peer = &b.main}
+		b.scratch = {backing = backing, limit = opts.budget.memory, peer = &b.main}
 	} else {
 		b.main = {backing = caller, limit = opts.budget.memory}
 	}
 	return memory_budget(&b.main)
 }
 
-// The allocator for memory a read holds only while it runs and frees before returning: `opts.scratch` when set, else
+// The allocator for memory a read holds only while it runs and frees before returning, see `scratch_backing`, else
 // `allocator`. Under `opts.budget.memory`, scratch blocks share the read's limit: when `allocator` is a `Read_Budget`
-// whose peer backs `opts.scratch`, returns that peer; otherwise counts against `opts.budget.memory` in `local`,
-// reading `allocator`'s budget if any without writing `peer` or `refused` into any caller's `Memory_Budget`. Never
-// falls back to the default heap.
+// whose peer backs the scratch, returns that peer; otherwise counts against `opts.budget.memory` in `local`, reading
+// `allocator`'s budget if any without writing `peer` or `refused` into any caller's `Memory_Budget`.
 scratch :: proc "contextless" (opts: tape.Options, allocator: runtime.Allocator, local: ^Memory_Budget) -> runtime.Allocator {
-	if opts.scratch.procedure == nil {
+	backing, ok := scratch_backing(opts)
+	if !ok {
 		return allocator
 	}
 	if opts.budget.memory == 0 {
-		return opts.scratch
+		return backing
 	}
 	m := budget_of(allocator)
-	if m != nil && m.peer != nil && m.peer.backing == opts.scratch {
+	if m != nil && m.peer != nil && m.peer.backing == backing {
 		return memory_budget(m.peer)
 	}
-	local^ = {backing = opts.scratch, limit = opts.budget.memory, peer = m}
+	local^ = {backing = backing, limit = opts.budget.memory, peer = m}
 	return memory_budget(local)
+}
+
+// Where a read's scratch comes from: `opts.scratch` when set, else the runtime's default heap. False on a build whose
+// default allocator is the nil or panic one (a freestanding target), where scratch stays in the read's allocator.
+@(private)
+scratch_backing :: #force_inline proc "contextless" (opts: tape.Options) -> (runtime.Allocator, bool) {
+	if opts.scratch.procedure != nil {
+		return opts.scratch, true
+	}
+	when ODIN_DEFAULT_TO_NIL_ALLOCATOR || ODIN_DEFAULT_TO_PANIC_ALLOCATOR {
+		return {}, false
+	} else {
+		return {runtime.default_allocator_proc, nil}, true
+	}
 }
 
 @(private)

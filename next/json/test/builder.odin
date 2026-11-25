@@ -522,8 +522,8 @@ budgeted_facts_back_off_under_tight_memory :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(doc2.facts), 20)
 }
 
-// Deep nesting past `FRAME_DEPTH` routes `Builder.stack` through `Options.scratch` when given, reducing peak memory
-// taken from the document's arena, and respects `Budget.memory` without speculative `doc.nodes` doubling.
+// Deep nesting past `FRAME_DEPTH` routes `Builder.stack` through `Options.scratch`, reducing peak memory taken from the
+// document's arena against the opt-out (the arena itself as `scratch`), and respects `Budget.memory` without speculative `doc.nodes` doubling.
 @(test)
 deep_build_uses_scratch_and_tight_budget :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -534,7 +534,7 @@ deep_build_uses_scratch_and_tight_budget :: proc(t: ^testing.T) {
 	defer delete(buf_no_scratch)
 	arena_no_scratch: mem.Arena
 	mem.arena_init(&arena_no_scratch, buf_no_scratch)
-	doc0, err0 := json.build(src, .Json, {budget = {depth = DEPTH}}, mem.arena_allocator(&arena_no_scratch))
+	doc0, err0 := json.build(src, .Json, {budget = {depth = DEPTH}, scratch = mem.arena_allocator(&arena_no_scratch)}, mem.arena_allocator(&arena_no_scratch))
 	testing.expect_value(t, err0, nil)
 	testing.expect_value(t, len(doc0.nodes), DEPTH)
 

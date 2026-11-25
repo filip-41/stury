@@ -138,8 +138,8 @@ memory_budget_peers_share_a_limit :: proc(t: ^testing.T) {
 	testing.expect_value(t, runtime.mem_free_with_size(raw_data(second), 40, hook.memory_budget(&b)), nil)
 }
 
-// `hook.scratch` defaults to the caller's allocator, uses `Options.scratch` directly with no budget, shares one limit
-// through `Read_Budget` when set, and never writes `peer` or `refused` into a caller's `Memory_Budget`.
+// `hook.scratch` defaults to the runtime's heap, uses `Options.scratch` directly with no budget, shares one limit
+// through `Read_Budget`, and never writes `peer` or `refused` into a caller's `Memory_Budget`.
 @(test)
 scratch_counts_without_mutating_caller_budget :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -148,9 +148,9 @@ scratch_counts_without_mutating_caller_budget :: proc(t: ^testing.T) {
 	mem.arena_init(&arena, backing[:])
 	arena_a := mem.arena_allocator(&arena)
 
-	// Unset scratch keeps the caller's allocator (no default-heap fallback).
+	// Unset scratch takes the runtime's heap, not the caller's allocator.
 	local: hook.Memory_Budget
-	testing.expect(t, hook.scratch({}, arena_a, &local).procedure == arena_a.procedure)
+	testing.expect(t, hook.scratch({}, arena_a, &local).procedure == runtime.default_allocator_proc)
 
 	// Explicit scratch with no budget returns `opts.scratch` untouched.
 	caller_m := hook.Memory_Budget{backing = context.allocator, limit = 100}

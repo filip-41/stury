@@ -1072,7 +1072,8 @@ scan_mixed_limited_and_unlimited_paths_no_underflow :: proc(t: ^testing.T) {
 }
 
 // `Scanner` routes transient scratch lists and its `marks`/`made`/`done` block through `Options.scratch` so document
-// arenas stay unpolluted while `Budget.memory` still counts scratch usage.
+// arenas stay unpolluted while `Budget.memory` still counts scratch usage. The baseline passes the arena itself as
+// `scratch`, the opt-out that keeps every block in the caller's allocator.
 @(test)
 scan_routes_transient_scratch_and_tracks_budget :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -1103,7 +1104,7 @@ scan_routes_transient_scratch_and_tracks_budget :: proc(t: ^testing.T) {
 	defer delete(buf_no_scratch)
 	arena_no_scratch: mem.Arena
 	mem.arena_init(&arena_no_scratch, buf_no_scratch)
-	doc0, err0 := json.scan(src, &d, allocator = mem.arena_allocator(&arena_no_scratch))
+	doc0, err0 := json.scan(src, &d, opts = {scratch = mem.arena_allocator(&arena_no_scratch)}, allocator = mem.arena_allocator(&arena_no_scratch))
 	testing.expect_value(t, err0, nil)
 	testing.expect(t, doc0.partial != nil && len(doc0.partial.answers) == 50 * PATHS)
 

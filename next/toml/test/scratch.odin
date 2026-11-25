@@ -1,5 +1,5 @@
-// Tests of `Options.scratch` on TOML build, typed reads and records: default caller allocator, arena peak reduction
-// with a heap scratch, and shared `Budget.memory` enforcement in both modes.
+// Tests of `Options.scratch` on TOML build, typed reads and records: the default heap scratch, the opt-out that keeps
+// the tree in the caller's allocator, arena peaks, and shared `Budget.memory` enforcement in both modes.
 package toml_tests
 
 import "base:runtime"
@@ -35,35 +35,44 @@ scratch_sample :: proc(count: int, allocator: runtime.Allocator) -> []u8 {
 	return transmute([]u8)strings.to_string(b)
 }
 
-// With no `Options.scratch` set, the TOML table tree comes from the caller's allocator (seen by a tracking allocator
-// and kept in an arena). With a heap scratch, the arena keeps only the result and the scratch allocator frees every
-// block before the read returns.
+// With no `Options.scratch` set, the TOML table tree comes from the default heap, so the caller's allocator sees only
+// the result. With the caller's allocator passed as `scratch`, the tree comes from it (seen by a tracking allocator,
+// kept in an arena). A scratch allocator frees every block before the read returns.
 @(test)
 scratch_moves_toml_tree_out_of_arena :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := scratch_sample(400, context.allocator)
 	defer delete(src)
 
-	// 1. Default (no scratch): tracking allocator sees tree allocations (peak > final live) and zero leaks.
+	// 1. Opt-out (the caller's allocator as scratch): the tracking allocator sees the tree (peak > final live). Default:
+	// it sees less, as the tree comes from the heap. Zero leaks in both.
 	{
-		track: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track, context.allocator)
-		defer mem.tracking_allocator_destroy(&track)
-		alloc := mem.tracking_allocator(&track)
-
-		doc, err := toml.build(src, allocator = alloc)
+		kept: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&kept, context.allocator)
+		defer mem.tracking_allocator_destroy(&kept)
+		doc, err := toml.build(src, opts = {scratch = mem.tracking_allocator(&kept)}, allocator = mem.tracking_allocator(&kept))
 		expect_nil(t, err)
-		testing.expect(t, track.peak_memory_allocated > track.current_memory_allocated)
+		testing.expect(t, kept.peak_memory_allocated > kept.current_memory_allocated)
 		toml.destroy(&doc)
-		testing.expect_value(t, len(track.allocation_map), 0)
-		testing.expect_value(t, len(track.bad_free_array), 0)
+		testing.expect_value(t, len(kept.allocation_map), 0)
+		testing.expect_value(t, len(kept.bad_free_array), 0)
+
+		heaped: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&heaped, context.allocator)
+		defer mem.tracking_allocator_destroy(&heaped)
+		doc2, err2 := toml.build(src, allocator = mem.tracking_allocator(&heaped))
+		expect_nil(t, err2)
+		testing.expectf(t, heaped.peak_memory_allocated < kept.peak_memory_allocated, "default peak %d should be under the opt-out's %d", heaped.peak_memory_allocated, kept.peak_memory_allocated)
+		toml.destroy(&doc2)
+		testing.expect_value(t, len(heaped.allocation_map), 0)
+		testing.expect_value(t, len(heaped.bad_free_array), 0)
 	}
 
-	// 2. Arena build: heap scratch sharply lowers arena peak vs no scratch, and frees all scratch blocks.
+	// 2. Arena build: a heap scratch sharply lowers arena peak against the opt-out, and frees all scratch blocks.
 	arena_no_scratch: virtual.Arena
 	testing.expect_value(t, virtual.arena_init_growing(&arena_no_scratch), nil)
 	defer virtual.arena_destroy(&arena_no_scratch)
-	doc_plain, err_plain := toml.build(src, allocator = virtual.arena_allocator(&arena_no_scratch))
+	doc_plain, err_plain := toml.build(src, opts = {scratch = virtual.arena_allocator(&arena_no_scratch)}, allocator = virtual.arena_allocator(&arena_no_scratch))
 	expect_nil(t, err_plain)
 	peak_plain := arena_no_scratch.total_used
 
@@ -84,13 +93,14 @@ scratch_moves_toml_tree_out_of_arena :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(scratch_track.allocation_map), 0)
 	testing.expect_value(t, len(scratch_track.bad_free_array), 0)
 
-	// 3. Typed unmarshal into an arena: heap scratch lowers arena peak (borrowed & copied) with zero scratch leaks.
+	// 3. Typed unmarshal into an arena: a heap scratch lowers arena peak against the opt-out (borrowed & copied) with
+	// zero scratch leaks.
 	for borrow in ([]bool{true, false}) {
 		a_plain: virtual.Arena
 		testing.expect_value(t, virtual.arena_init_growing(&a_plain), nil)
 		defer virtual.arena_destroy(&a_plain)
 		out_plain: Scratch_Doc
-		expect_nil(t, toml.unmarshal(src, &out_plain, read = {borrow_strings = borrow}, allocator = virtual.arena_allocator(&a_plain)))
+		expect_nil(t, toml.unmarshal(src, &out_plain, read = {borrow_strings = borrow}, opts = {scratch = virtual.arena_allocator(&a_plain)}, allocator = virtual.arena_allocator(&a_plain)))
 
 		a_sc: virtual.Arena
 		testing.expect_value(t, virtual.arena_init_growing(&a_sc), nil)

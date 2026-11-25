@@ -59,10 +59,8 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 	}
 	m: hook.Read_Budget
 	allocator := hook.read_budget(&m, opts, caller)
-	scratch := opts.scratch
-	if opts.budget.memory != 0 && scratch.procedure != nil {
-		scratch = hook.memory_budget(&m.scratch)
-	}
+	scratch_local: hook.Memory_Budget
+	scratch := hook.scratch(opts, allocator, &scratch_local)
 	depth := min(read_depth(opts), u64(len(src)))
 	most := node_most(bound(src, depth), opts)
 	frames: [FRAME_DEPTH]u64 = ---

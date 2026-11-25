@@ -48,8 +48,9 @@ Options :: struct {
 	// takes the family's defaults.
 	format:   Format_Options,
 	// Where short-lived scratch memory freed before a read returns comes from (as a TOML read's table tree). Zero
-	// takes the caller's allocator; pass the heap or a second arena so a read into an arena keeps only its result.
-	// Counted against `Budget.memory` with the read's own blocks.
+	// takes the runtime's default heap, so a read into an arena keeps only its result, or the read's allocator on a
+	// build with no heap (a freestanding target). Pass the read's allocator here to keep every block in it. Counted
+	// against `Budget.memory` with the read's own blocks.
 	scratch:  runtime.Allocator,
 }
 
