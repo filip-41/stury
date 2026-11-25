@@ -25,7 +25,9 @@ HEX_NIBBLE: [256]u8 = {
 	'a' = 10, 'b' = 11, 'c' = 12, 'd' = 13, 'e' = 14, 'f' = 15,
 }
 
-// The four hex digits at `h` as a 16-bit value, and whether all four are hex digits. Four bytes must be readable.
+// The four hex digits at `h` as a 16-bit value, and whether all four are hex digits. Four bytes must be readable;
+// `unit` is unspecified when `ok` is false.
+@(require_results)
 hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool) #no_bounds_check {
 	a := HEX_NIBBLE[h[0]]
 	b := HEX_NIBBLE[h[1]]
@@ -34,25 +36,33 @@ hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool) #no
 	return u32(a) << 12 | u32(b) << 8 | u32(c) << 4 | u32(d), (a | b | c | d) & 0xf0 == 0
 }
 
-// The value of the four hex digits at `h`, which must all be hex digits.
-hex4_value :: #force_inline proc "contextless" (h: [^]u8) -> u32 #no_bounds_check {
-	w := u32(intrinsics.unaligned_load((^u32le)(h)))
+// The value of the four hex digits at `h`, which must all be hex digits. Four bytes must be readable.
+@(require_results)
+hex4_value :: #force_inline proc "contextless" (h: [^]u8) -> u32 {
+	w := u32(intrinsics.unaligned_load((^u32be)(h)))
 	v := (w & 0x0F0F_0F0F) + ((w >> 6) & 0x0101_0101) * 9
-	r := intrinsics.byte_swap(v)
-	p := (r | (r >> 4)) & 0x00FF_00FF
+	p := (v | (v >> 4)) & 0x00FF_00FF
 	return ((p >> 8) | p) & 0xFFFF
 }
 
-// The number of UTF-8 bytes the code point `r` decodes to.
+// The number of UTF-8 bytes the code point `r` (`0 <= r <= 0x10FFFF`) encodes to.
+@(require_results)
 rune_len :: #force_inline proc "contextless" (r: rune) -> u32 {
-	if r < 0x80 do return 1
-	if r < 0x800 do return 2
-	if r < 0x10000 do return 3
+	if r < 0x80 {
+		return 1
+	}
+	if r < 0x800 {
+		return 2
+	}
+	if r < 0x10000 {
+		return 3
+	}
 	return 4
 }
 
 // The code point and length of the escape whose backslash is at `e`, `room` bytes before the end. The length is 0 for
 // a bad escape.
+@(require_results)
 string_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: rune, n: int) #no_bounds_check {
 	if room < 2 {
 		return 0, 0
@@ -66,8 +76,10 @@ string_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: r
 	return unicode_escape(e, room)
 }
 
-// The code point and length of the `\u` escape whose backslash is at `e`, `room` bytes before the end, a surrogate pair
-// read as one. The length is 6 or 12, and 0 for a short escape, a bad hex digit or a lone half.
+// The code point and length of the `\u` escape at `e`, `room` bytes before the end, a surrogate pair read as one.
+// The caller has checked `e[0:2] == "\\u"`. The length is 6 or 12, and 0 for a short escape, a bad hex digit or a
+// lone half.
+@(private = "file", require_results)
 unicode_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: rune, n: int) #no_bounds_check {
 	if room < 6 {
 		return 0, 0
@@ -91,16 +103,19 @@ unicode_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: 
 }
 
 // The code point the UTF-16 surrogate halves `high` and `low` stand for.
+@(require_results)
 surrogate_pair :: #force_inline proc "contextless" (high, low: u32) -> rune {
 	return 0x10000 + rune(high - 0xD800) << 10 + rune(low - 0xDC00)
 }
 
 // Whether `unit` is a UTF-16 high surrogate, 0xD800 to 0xDBFF.
+@(require_results)
 high_surrogate :: #force_inline proc "contextless" (unit: u32) -> bool {
 	return unit - 0xD800 < 0x400
 }
 
 // Whether `unit` is a UTF-16 low surrogate, 0xDC00 to 0xDFFF.
+@(require_results)
 low_surrogate :: #force_inline proc "contextless" (unit: u32) -> bool {
 	return unit - 0xDC00 < 0x400
 }
