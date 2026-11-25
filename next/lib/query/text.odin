@@ -48,7 +48,8 @@ make_text :: proc(h: ^Heap, n: int, room := 0) -> (Value, [^]u8, Status) {
 	if u64(n) > u64(max(u32)) {
 		return NULL, nil, fail(h, .Range, .To_Text)
 	}
-	size := block_room(size_of(Str_Block) + max(n, room))
+	raw_size := (size_of(Str_Block) + max(n, room) + 7) & ~int(7)
+	size := block_room(raw_size)
 	b, s := alloc_block(h, size)
 	if s != .Ok {
 		return NULL, nil, s
@@ -57,6 +58,23 @@ make_text :: proc(h: ^Heap, n: int, room := 0) -> (Value, [^]u8, Status) {
 	x.cap = u32(size - size_of(Str_Block))
 	bytes := ([^]u8)(uintptr(x) + size_of(Str_Block))
 	return {s = bytes, n = u32(n), kind = .String, held = true}, bytes, .Ok
+}
+
+// Like `make_text`, attaching retained document origin `(d, at)` at the block's tail so fact readers
+// and partial-doc tainting see the source node of decoded document strings.
+@(private, require_results)
+make_doc_text :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, n: int) -> (Value, [^]u8, Status) {
+	room := ((n + 7) & ~int(7)) + size_of(^Doc_Block)
+	v, p, s := make_text(h, n, room)
+	if s != .Ok {
+		return NULL, nil, s
+	}
+	sb := (^Str_Block)(block_of(v))
+	sb.flags |= BLOCK_HAS_DOC
+	sb.node = u32(at)
+	d.rc += 1
+	str_doc_slot(sb)^ = d
+	return v, p, .Ok
 }
 
 // A copy of `s` the run owns.
@@ -100,7 +118,7 @@ text_append :: proc(h: ^Heap, acc: ^Value, b: string) -> Status {
 	n := int(v.n)
 	if v.kind == .String && unique(v) {
 		x := (^Str_Block)(block_of(v))
-		if n + len(b) <= int(x.cap) {
+		if x.flags & BLOCK_HAS_DOC == 0 && n + len(b) <= int(x.cap) {
 			runtime.mem_copy_non_overlapping(v.s[n:], raw_data(b), len(b))
 			acc.n = u32(n + len(b))
 			return .Ok

@@ -27,7 +27,7 @@ Options :: tape.Options
 
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Xml = {name = "xml", id = ID, facts = FACTS, options = .Xml, dups = .Group, refuses = {.Invalid_Utf8}, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, text_ext = prolog_ext, close_end = close_end, expanded = expanded_names},
+	.Xml = {name = "xml", id = ID, facts = FACTS, options = .Xml, dups = .Group, refuses = {.Invalid_Utf8}, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, text_ext = prolog_ext, close_end = close_end, expanded = expanded_names, attribute = attribute, namespace = namespace},
 }
 
 // The facts an XML document holds.

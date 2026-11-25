@@ -15,6 +15,7 @@ Signal :: enum u8 {
 	Break,
 	Fail,
 	Halt,
+	Taint,
 }
 
 // Where a run's outputs go, each the sink's to release: false stops the run.
@@ -136,6 +137,10 @@ drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal
 	for {
 		switch r.mode {
 		case .Eval:
+			if m.h.tainted {
+				taint_abort(m, &r)
+				continue
+			}
 			if steps == 0 {
 				over_budget(m, &r)
 				continue
@@ -143,7 +148,16 @@ drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal
 			steps -= 1
 			step_eval(m, &r, &steps)
 		case .Emit:
+			if m.h.tainted {
+				taint_abort(m, &r)
+				continue
+			}
 			if r.k == nil {
+				if query.value_has_partial(r.v) {
+					m.h.tainted = true
+					taint_abort(m, &r)
+					continue
+				}
 				query.release(m.h, r.vpath)
 				r.vpath = query.ABSENT
 				if !m.out(m.out_data, r.v, m.h) {
@@ -157,6 +171,9 @@ drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal
 			}
 			step_emit(m, &r, &steps)
 		case .Ret:
+			if m.h.tainted {
+				r.sig = .Taint
+			}
 			if m.stack.top == base {
 				return r.sig
 			}
@@ -168,7 +185,18 @@ drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal
 // Whether the heap holds an error that `try`, `?` and `?//` must not catch.
 @(private)
 is_fatal_error :: #force_inline proc "contextless" (h: ^query.Heap) -> bool {
-	return h.err.kind == .Memory || h.err.kind == .Budget
+	return h.tainted || h.err.kind == .Memory || h.err.kind == .Budget
+}
+
+// Ends the run as a read reached an unloaded value of a partial document: nothing catches it.
+@(private, cold)
+taint_abort :: proc(m: ^Machine, r: ^Regs) {
+	query.release(m.h, m.halt.value)
+	m.halt = {}
+	query.release(m.h, r.v)
+	query.release(m.h, r.vpath)
+	r.v, r.vpath = query.ABSENT, query.ABSENT
+	finish(m, r, .Taint)
 }
 
 // Ends the run as the step budget ran out: no `try` catches it.
@@ -250,6 +278,10 @@ step_eval :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 			steps^ = m.steps
 		}
 		if r.mode != .Eval {
+			return
+		}
+		if m.h.tainted {
+			taint_abort(m, r)
 			return
 		}
 		if steps^ == 0 {

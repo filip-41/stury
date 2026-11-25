@@ -1455,27 +1455,27 @@ true
 
 setpath(["a", {"fact": "comment"}, 0]; "x")
 {"a":1,"b":[2,1]}
-%%ERROR Cannot index number with object ({"fact":"comment"})
+%%ERROR A comment step must be the last step of a path
 
 getpath(["a", {"fact": "comment"}, 0])
 {"a":1,"b":[2,1]}
-%%ERROR Cannot index number with object ({"fact":"comment"})
+%%ERROR A comment step must be the last step of a path
 
 getpath(["a", {"fact": "bogus"}])
 {"a":1,"b":null}
-%%ERROR Cannot index number with object ({"fact":"bogus"})
+%%ERROR unknown fact .@bogus, the facts are comment, comment_inline, comment_foot, tag, anchor, alias, style, name, namespace, content, pi, doctype, directives, attrs, comment_head
 
 null | getpath([{"fact": "bogus"}])
 {"a":1,"b":null}
-null
+%%ERROR unknown fact .@bogus, the facts are comment, comment_inline, comment_foot, tag, anchor, alias, style, name, namespace, content, pi, doctype, directives, attrs, comment_head
 
 setpath([{"fact": "bogus"}]; 1)
 {"a":1,"b":null}
-%%ERROR Cannot index object with object ({"fact":"bogus"})
+%%ERROR unknown fact .@bogus, the facts are comment, comment_inline, comment_foot, tag, anchor, alias, style, name, namespace, content, pi, doctype, directives, attrs, comment_head
 
 delpaths([[{"fact": "bogus"}]])
 null
-null
+%%ERROR unknown fact .@bogus, the facts are comment, comment_inline, comment_foot, tag, anchor, alias, style, name, namespace, content, pi, doctype, directives, attrs, comment_head
 
 
 # libc

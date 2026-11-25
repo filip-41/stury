@@ -23,6 +23,12 @@ got_of :: #force_inline proc "contextless" (s: query.Status) -> Got {
 @(private)
 eval_native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: query.Value, found: bool, status: query.Status) {
 	v, g := native(m, n, input, env)
+	if m.h.tainted {
+		if g == .Value {
+			query.release(m.h, v)
+		}
+		return query.ABSENT, false, .Ok
+	}
 	return v, g == .Value, .Error if g == .Failed else .Ok
 }
 
@@ -130,9 +136,12 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 		return v, got_of(s)
 	case .And, .Or:
 		l, lg := native(m, n.a, query.retain(input), env)
-		if lg != .Value {
+		if lg != .Value || h.tainted {
+			if lg == .Value {
+				query.release(h, l)
+			}
 			query.release(h, input)
-			return l, lg
+			return query.ABSENT if h.tainted else l, .None if h.tainted else lg
 		}
 		t := truthy(l)
 		query.release(h, l)
@@ -149,6 +158,13 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 		return query.bool_value(t), .Value
 	case .Alt:
 		l, lg := native(m, n.a, query.retain(input), env)
+		if h.tainted {
+			if lg == .Value {
+				query.release(h, l)
+			}
+			query.release(h, input)
+			return query.ABSENT, .None
+		}
 		if lg == .Failed || lg == .Value && truthy(l) {
 			query.release(h, input)
 			return l, lg
@@ -157,9 +173,12 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 		return native(m, n.b, input, env)
 	case .If:
 		c, cg := native(m, n.a, query.retain(input), env)
-		if cg != .Value {
+		if cg != .Value || h.tainted {
+			if cg == .Value {
+				query.release(h, c)
+			}
 			query.release(h, input)
-			return c, cg
+			return query.ABSENT if h.tainted else c, .None if h.tainted else cg
 		}
 		t := truthy(c)
 		query.release(h, c)
@@ -399,22 +418,30 @@ native_update :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (
 			return v, got_of(s)
 		case .Modify:
 			cur, s := query.get(h, input, k)
-			if s != .Ok {
+			if s != .Ok || h.tainted {
+				query.release(h, cur)
 				query.release(h, input)
-				return query.NULL, .Failed
+				return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
 			}
 			state := input
 			if (cur.kind == .Array || cur.kind == .Object || cur.kind == .String) && query.type_of(k) != .Object {
 				state, s = query.set_one(h, state, k, query.NULL)
-				if s != .Ok {
+				if s != .Ok || h.tainted {
 					query.release(h, cur)
+					if h.tainted {
+						query.release(h, state)
+						return query.ABSENT, .None
+					}
 					return query.NULL, .Failed
 				}
 			}
 			v, vg := native(m, n.b, cur, env)
-			if vg == .Failed {
+			if vg == .Failed || h.tainted {
+				if vg == .Value {
+					query.release(h, v)
+				}
 				query.release(h, state)
-				return query.NULL, .Failed
+				return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
 			}
 			if vg == .None {
 				out, ds := query.del_one(h, state, k)
@@ -424,9 +451,10 @@ native_update :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (
 			return out, got_of(ss)
 		case:
 			cur, s := query.get(h, input, k)
-			if s != .Ok {
+			if s != .Ok || h.tainted {
+				query.release(h, cur)
 				query.release(h, input)
-				return query.NULL, .Failed
+				return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
 			}
 			state := input
 			if n.op == .Add && (cur.kind == .Array || cur.kind == .Object || cur.kind == .String) && query.type_of(k) != .Object {

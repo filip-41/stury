@@ -246,6 +246,12 @@ update_next :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 	n := f.n
 	paths := query.items_of(f.paths)
 	for ; f.i < len(paths); f.i += 1 {
+		if h.tainted {
+			drop_update(m, f)
+			pop_frame(m)
+			r.sig, r.mode = .Taint, .Ret
+			return
+		}
 		p := paths[f.i]
 		s := query.Status.Ok
 		#partial switch n.op {
@@ -298,10 +304,10 @@ update_next :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 				f.state, s = query.set_path(h, f.state, p, v)
 			}
 		}
-		if s != .Ok {
+		if s != .Ok || h.tainted {
 			drop_update(m, f)
 			pop_frame(m)
-			r.sig, r.mode = .Fail, .Ret
+			r.sig, r.mode = .Taint if h.tainted else .Fail, .Ret
 			return
 		}
 	}

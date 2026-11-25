@@ -78,15 +78,56 @@ OPERATORS := [?]struct {
 	sym:  Sym,
 }{{"?//", .Alternation}, {"//=", .Set_Alt}, {"!=", .Neq}, {"==", .Eq}, {"//", .Alt}, {"|=", .Set_Pipe}, {"+=", .Set_Plus}, {"-=", .Set_Minus}, {"*=", .Set_Mult}, {"/=", .Set_Div}, {"%=", .Set_Mod}, {"<=", .Less_Eq}, {">=", .Greater_Eq}, {"..", .Rec}, {"?", .Question}, {"=", .Assign}, {";", .Semi}, {",", .Comma}, {":", .Colon}, {"|", .Pipe}, {"+", .Plus}, {"-", .Minus}, {"*", .Star}, {"/", .Slash}, {"%", .Percent}, {"<", .Less}, {">", .Greater}}
 
+// stury's fact accessors, which `rest`, the program after a `.`, starts with: `@` and a name of the catalogue
+// (`query.fact_named`). jq reads `.@name` only as `.@name "string"`, a format applied to a string key, which stays so.
+@(private = "file")
+fact_accessor :: proc(rest: string) -> (name: string, known: bool) {
+	end := run_end(rest, 1, ident_byte)
+	name = rest[:end]
+	if len(name) == 1 {
+		return "", true
+	}
+	_, known = query.fact_named(name[1:])
+	for end < len(rest) && kernel.is_ws(rest[end]) {
+		end += 1
+	}
+	if end < len(rest) && rest[end] == '"' {
+		return "", true
+	}
+	return name, known
+}
+
 @(private = "file")
 lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 	s := p.src
 	start := p.pos
 	c := s[start]
 	next: u8 = s[start + 1] if start + 1 < len(s) else 0
+	after: u8 = s[start + 2] if start + 2 < len(s) else 0
+	fact, known := "", true
+	if c == '.' && next == '@' {
+		fact, known = fact_accessor(s[start + 1:])
+	}
 	switch {
+	case c == '.' && (next == '@' && after == '(' || next == '&' && after == '['):
+		p.computed[start + 2] = .Fact if next == '@' else .Attribute
+		p.pos += 2
+		return .Dot, {}
+	case c == '(' && p.computed[start] == .Fact:
+		p.pos += 1
+		append(&p.modes, Mode.Fact)
+		return .LBracket, {}
 	case is_digit(c) || (c == '.' && is_digit(next)):
 		return .Literal, {value = lex_number(p)}
+	case !known && len(fact) > 1:
+		p.pos += 1 + len(fact)
+		report(p, {start, p.pos}, fmt.aprintf("unknown fact .%s, the facts are %s", fact, query.FACT_LIST))
+		return .Field, {text = "@comment"}
+	case fact != "":
+		p.pos += 1 + len(fact)
+		return .Field, {text = fact}
+	case c == '.' && next == '&' && attribute_start(s, start + 2):
+		return lex_attribute(p)
 	case c == '.' && ident_start(next):
 		p.pos = run_end(s, start + 1, ident_byte)
 		return .Field, {text = s[start + 1:p.pos]}
@@ -133,13 +174,45 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 	return .Invalid, {}
 }
 
+// Whether an attribute accessor's name starts at `at`: a name, or a quoted name.
+@(private = "file")
+attribute_start :: proc(s: string, at: int) -> bool {
+	return at < len(s) && (ident_start(s[at]) || s[at] == '"')
+}
+
+// `.&name` or `.&"name"`, an attribute read by its name as written.
+@(private = "file")
+lex_attribute :: proc(p: ^Parser) -> (Sym, Sem) {
+	s := p.src
+	at := p.pos + 2
+	if s[at] == '"' {
+		end := at + 1
+		for end < len(s) && s[end] != '"' {
+			end += 1
+		}
+		if end >= len(s) {
+			p.pos = end
+			report(p, {p.pos - 1, p.pos}, "unterminated attribute name")
+			return .Field, {text = "&"}
+		}
+		p.pos = end + 1
+		return .Field, {text = strings.concatenate({"&", s[at + 1:end]})}
+	}
+	end := at
+	for end < len(s) && (ident_byte(s[end]) || s[end] == ':' || s[end] == '-') {
+		end += 1
+	}
+	p.pos = end
+	return .Field, {text = s[at - 1:end]}
+}
+
 // A closing bracket ends the innermost (), [], {} or interpolation it matches, or is invalid.
 @(private = "file")
 close :: proc(p: ^Parser, c: u8) -> Sym {
 	CLOSING := [Mode]struct {
 		c:   u8,
 		sym: Sym,
-	}{.Paren = {')', .RParen}, .Bracket = {']', .RBracket}, .Brace = {'}', .RBrace}, .Interp = {')', .QQ_Interp_End}, .String = {}}
+	}{.Paren = {')', .RParen}, .Bracket = {']', .RBracket}, .Brace = {'}', .RBrace}, .Interp = {')', .QQ_Interp_End}, .Fact = {')', .RBracket}, .String = {}}
 	if len(p.modes) == 0 || CLOSING[p.modes[len(p.modes) - 1]].c != c {
 		return .Invalid
 	}

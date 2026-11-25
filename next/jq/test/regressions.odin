@@ -212,7 +212,7 @@ hooks_modules_data_seq_toarray_removed_and_partial_css :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, eval(t, `import "seq" as $s; $s`, mods), `[1,2,{"a":3}]`)
 
-	// css on partial XML document taints heap and emits empty without raising a catchable error.
+	// css on partial XML document taints heap and aborts uncatchably (not caught by try) with 0 outputs.
 	prog, perrs := jq.compile(`[try css("li") catch "err"]`)
 	defer jq.destroy_program(prog)
 	testing.expect_value(t, len(perrs), 0)
@@ -232,11 +232,9 @@ hooks_modules_data_seq_toarray_removed_and_partial_css :: proc(t: ^testing.T) {
 	jq.run_init(&run, prog, &h, nil, &css_hooks)
 	outs := Outputs{h = &h}
 	rend := jq.run_value(&run, inp, collect, &outs)
-	testing.expect_value(t, rend, jq.Run_End.Done)
+	testing.expect_value(t, rend, jq.Run_End.Tainted)
 	testing.expect(t, h.tainted)
-	testing.expect_value(t, len(outs.vals), 1)
-	testing.expect_value(t, show(&h, outs.vals[0]), "[]")
-	query.release(&h, outs.vals[0])
+	testing.expect_value(t, len(outs.vals), 0)
 	jq.run_destroy(&run)
 	testing.expect_value(t, query.heap_live(&h), u64(0))
 }

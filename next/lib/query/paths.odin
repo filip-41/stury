@@ -11,6 +11,20 @@ import "core:math"
 @(require_results)
 get :: proc(h: ^Heap, t, key: Value) -> (res: Value, status: Status) {
 	tt, kt := type_of(t), type_of(key)
+	if kt == .Object {
+		if kind, is_attr, is_fact := fact_step(h, key); is_fact {
+			if is_attr {
+				an := fact_step_attr(h, key) or_return
+				defer release(h, an)
+				return fact_read(h, t, .Attribute, text_of(an), true)
+			}
+			return fact_read(h, t, kind)
+		}
+		if unk, is_unk := unknown_fact_step(h, key); is_unk {
+			defer release(h, unk)
+			return NULL, fail_unknown_fact(h, text_of(unk))
+		}
+	}
 	switch {
 	case tt == .Object && kt == .String:
 		v := member(h, t, text_of(key)) or_return
@@ -129,7 +143,7 @@ slice :: proc(h: ^Heap, t, from, to: Value) -> (res: Value, status: Status) {
 	if tt == .String {
 		return text_slice(h, t, lo, hi)
 	}
-	if lo == 0 && hi == n {
+	if lo == 0 && hi == n && !value_has_partial(t) {
 		return retain(t), .Ok
 	}
 	out := make_array(h, hi - lo) or_return
@@ -178,6 +192,7 @@ get_path :: proc(h: ^Heap, v, path: Value) -> (res: Value, status: Status) {
 	if len(items_of(keys)) > depth_limit(h) {
 		return NULL, fail(h, .Depth, .Get_Path)
 	}
+	validate_path_facts(h, items_of(keys)) or_return
 	cur := retain(v)
 	for k in items_of(keys) {
 		if t := type_of(cur); t == .Null || t == .Absent {
@@ -215,6 +230,11 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 		release(h, v)
 		release(h, x)
 		return NULL, fail(h, .Depth, .Set_Path)
+	}
+	if fs := validate_path_facts(h, keys); fs != .Ok {
+		release(h, v)
+		release(h, x)
+		return NULL, fs
 	}
 	if len(keys) == 0 {
 		release(h, v)
@@ -353,16 +373,40 @@ set :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 			}
 			return out, .Ok
 		}
-	case (tt == .Array || tt == .Null || tt == .Absent) && kt == .Object:
-		return set_slice(h, t, key, x)
-	case tt == .String && kt == .Object:
-		from, to, ks := slice_key(h, key)
-		if ks == .Ok {
-			release(h, from)
-			release(h, to)
-			s = fail(h, .Types, .Set_Path, t, key, "Cannot update string slices")
+	case kt == .Object:
+		if kind, is_attr, is_fact := fact_step(h, key); is_fact {
+			if is_attr {
+				an, as := fact_step_attr(h, key)
+				if as != .Ok {
+					release(h, out)
+					release(h, x)
+					return NULL, as
+				}
+				defer release(h, an)
+				return fact_write(h, out, .Attribute, text_of(an), true, x)
+			}
+			return fact_write(h, out, kind, "", false, x)
+		}
+		if unk, is_unk := unknown_fact_step(h, key); is_unk {
+			defer release(h, unk)
+			release(h, out)
+			release(h, x)
+			return NULL, fail_unknown_fact(h, text_of(unk))
+		}
+		if tt == .Array || tt == .Null || tt == .Absent {
+			return set_slice(h, t, key, x)
+		}
+		if tt == .String {
+			from, to, ks := slice_key(h, key)
+			if ks == .Ok {
+				release(h, from)
+				release(h, to)
+				s = fail(h, .Types, .Set_Path, t, key, "Cannot update string slices")
+			} else {
+				s = ks
+			}
 		} else {
-			s = ks
+			s = fail(h, .Types, .Index, t, key)
 		}
 	case tt == .Array && kt == .Array:
 		s = fail(h, .Types, .Set_Path, t, key, "Cannot update field at array index of array")
@@ -455,6 +499,11 @@ del_paths :: proc(h: ^Heap, v, paths: Value) -> (res: Value, status: Status) {
 			release(h, l)
 			release(h, v)
 			return NULL, fail(h, .Depth, .Delete_Paths)
+		}
+		if fs := validate_path_facts(h, items_of(l)); fs != .Ok {
+			release(h, l)
+			release(h, v)
+			return NULL, fs
 		}
 		if _, err := append(&lists, l); err != nil {
 			release(h, l)
@@ -550,6 +599,52 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 del_keys :: proc(h: ^Heap, t: Value, keys: []Value) -> (res: Value, status: Status) {
 	if len(keys) == 0 {
 		return t, .Ok
+	}
+	// Handle fact-step deletions (`del(.a.@comment)`, `del(.r.&k)`) separately from container member/element deletions.
+	has_fact := false
+	for k in keys {
+		if _, _, is_fact := fact_step(h, k); is_fact {
+			has_fact = true
+			break
+		}
+	}
+	if has_fact {
+		rest := make([dynamic]Value, 0, len(keys), heap_allocator(h))
+		facts := make([dynamic]Value, 0, len(keys), heap_allocator(h))
+		defer delete(rest)
+		defer delete(facts)
+		for k in keys {
+			if _, _, is_fact := fact_step(h, k); is_fact {
+				if _, err := append(&facts, k); err != nil {
+					release(h, t)
+					return NULL, fail_memory(h)
+				}
+			} else {
+				if _, err := append(&rest, k); err != nil {
+					release(h, t)
+					return NULL, fail_memory(h)
+				}
+			}
+		}
+		cur := t
+		if len(rest) > 0 {
+			cur = del_keys(h, cur, rest[:]) or_return
+		}
+		for fk in facts {
+			kind, is_attr, _ := fact_step(h, fk)
+			if is_attr {
+				an, as := fact_step_attr(h, fk)
+				if as != .Ok {
+					release(h, cur)
+					return NULL, as
+				}
+				defer release(h, an)
+				cur = fact_write(h, cur, .Attribute, text_of(an), true, NULL) or_return
+			} else {
+				cur = fact_write(h, cur, kind, "", false, NULL) or_return
+			}
+		}
+		return cur, .Ok
 	}
 	#partial switch type_of(t) {
 	case .Null, .Absent:

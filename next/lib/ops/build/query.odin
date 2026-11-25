@@ -741,7 +741,9 @@ query_document :: proc(q: ^Query) -> (result: tape.Document, err: runtime.Alloca
 @(private)
 query_result :: proc "contextless" (doc: ^tape.Document, x: ^tape.Partial) -> tape.Document {
 	if src := doc.partial; src != nil {
-		x.kept, x.missing, x.names, x.dups = src.kept, src.missing, src.names, src.dups
+		x.kept, x.missing, x.names, x.dups, x.facts = src.kept, src.missing, src.names, src.dups, src.facts
+	} else {
+		x.facts = true
 	}
 	result := doc^
 	result.partial = x

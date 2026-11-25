@@ -259,6 +259,8 @@ BUILTINS := [?]Builtin {
 	{name = "ip_in_cidr", arity = 1, kind = .Value, native = true, fn = v_address},
 	{name = "_pointer_tokens", arity = 1, kind = .Value, native = true, fn = v_pointer},
 	{name = "_pointer_index", kind = .Value, native = true, fn = v_pointer},
+	{name = "_fact_step", arity = 1, kind = .Value, native = true, fn = v_fact_step},
+	{name = "_attribute_step", arity = 1, kind = .Value, native = true, fn = v_attribute_step},
 	{name = "css", arity = 1, kind = .Generator, op = .Css},
 }
 

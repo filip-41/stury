@@ -146,6 +146,11 @@ Format :: struct {
 	// `.Not_Loaded` when `doc` did not keep the declarations that decide it. Nil for a format whose names have no
 	// namespace, which reads such a name as written.
 	expanded: proc "contextless" (doc: ^Document, key: Node_Index, name: string) -> Presence,
+	// The name and value tokens of attribute fact `f` of `doc`, nil for a format with no attributes.
+	attribute: proc "contextless" (doc: ^Document, f: Fact) -> (name, value: Token),
+	// The namespace URI of the element at `at` of `doc`, `.Missing` for none, `.Not_Loaded` when `doc` lacks its
+	// declarations. Nil for a format with no namespaces.
+	namespace: proc "contextless" (doc: ^Document, at: Node_Index) -> (uri: string, p: Presence),
 }
 
 // The reads of one spec of a format, for a caller that picks the format at run time. They are not on `Format`: the

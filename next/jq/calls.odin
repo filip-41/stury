@@ -396,6 +396,10 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 	case .Range:
 		start_range(m, r, vals)
 	case .Input:
+		if h.tainted {
+			finish(m, r, .Taint)
+			return
+		}
 		v, ok, s := next_input(m)
 		if s == .Ok && !ok {
 			s = raise_text(m, "No more inputs")
@@ -406,6 +410,10 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 		}
 		value_out(m, r, v)
 	case .Inputs:
+		if h.tainted {
+			finish(m, r, .Taint)
+			return
+		}
 		f := push_or_fail(m, r, Frame, .Gen)
 		if f == nil {
 			return
@@ -413,6 +421,11 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 		finish(m, r, .Go)
 		resume_gen(m, r, f)
 	case .Debug, .Stderr:
+		if h.tainted || query.value_has_partial(r.input) {
+			h.tainted = true
+			finish(m, r, .Taint)
+			return
+		}
 		if m.hooks != nil {
 			hook := m.hooks.debug if b.op == .Debug else m.hooks.stderr
 			if hook != nil {
@@ -421,10 +434,19 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 		}
 		give(m, r, query.retain(r.input))
 	case .Halt:
+		if h.tainted {
+			finish(m, r, .Taint)
+			return
+		}
 		query.release(h, m.halt.value)
 		m.halt = {halted = true}
 		finish(m, r, .Halt)
 	case .Halt_Error:
+		if h.tainted || query.value_has_partial(r.input) {
+			h.tainted = true
+			finish(m, r, .Taint)
+			return
+		}
 		if query.type_of(vals[0]) != .Number {
 			raise_text(m, "halt_error/1: number required")
 			finish(m, r, .Fail)
@@ -490,8 +512,11 @@ next_input :: proc(m: ^Machine) -> (v: query.Value, ok: bool, status: query.Stat
 
 @(private)
 resume_gen :: proc(m: ^Machine, r: ^Regs, f: ^Frame) {
-	if r.sig != .Go || m.hooks == nil || m.hooks.input == nil {
+	if r.sig != .Go || m.h.tainted || m.hooks == nil || m.hooks.input == nil {
 		pop_frame(m)
+		if m.h.tainted {
+			r.sig = .Taint
+		}
 		return
 	}
 	v, ok, s := next_input(m)

@@ -145,6 +145,13 @@ step_apply :: proc(m: ^Machine, r: ^Regs, n: ^Node, t, tpath: query.Value, key, 
 		r.sig, r.mode = fail_status(s), .Ret
 		return
 	}
+	if r.track && path_ends_in_fact(h, tpath) {
+		s := query.fail_fact_msg(h, "A comment step must be the last step of a path")
+		query.release(h, t)
+		query.release(h, tpath)
+		r.sig, r.mode = fail_status(s), .Ret
+		return
+	}
 	if n.kind == .Iterate {
 		iterate(m, r, n, t, tpath)
 		return
@@ -162,7 +169,15 @@ step_apply :: proc(m: ^Machine, r: ^Regs, n: ^Node, t, tpath: query.Value, key, 
 			step_key = n.value
 		}
 		if n.kind == .Slice {
-			step_key = slice_key(m, from, to)
+			ks: query.Status
+			step_key, ks = slice_key(m, from, to)
+			if ks != .Ok {
+				query.release(h, t)
+				query.release(h, tpath)
+				query.release(h, v)
+				r.sig, r.mode = .Fail, .Ret
+				return
+			}
 		}
 		p, ps := path_append(m, tpath, step_key)
 		if n.kind == .Slice {
@@ -183,11 +198,14 @@ step_apply :: proc(m: ^Machine, r: ^Regs, n: ^Node, t, tpath: query.Value, key, 
 
 // The key a slice's path holds: `{"start": from, "end": to}`.
 @(private)
-slice_key :: proc(m: ^Machine, from, to: query.Value) -> query.Value {
-	o, _ := query.make_object(m.h, 2)
-	_ = query.object_put(m.h, &o, query.text_borrowed("start"), query.retain(from) if from.kind != .Absent else query.NULL)
-	_ = query.object_put(m.h, &o, query.text_borrowed("end"), query.retain(to) if to.kind != .Absent else query.NULL)
-	return o
+slice_key :: proc(m: ^Machine, from, to: query.Value) -> (res: query.Value, status: query.Status) {
+	o := query.make_object(m.h, 2) or_return
+	defer if status != .Ok {
+		query.release(m.h, o)
+	}
+	query.object_put_fresh(m.h, &o, query.text_borrowed("start"), query.retain(from) if from.kind != .Absent else query.NULL) or_return
+	query.object_put_fresh(m.h, &o, query.text_borrowed("end"), query.retain(to) if to.kind != .Absent else query.NULL) or_return
+	return o, .Ok
 }
 
 // jq's error for a step on what a path expression made that is no path.
@@ -217,12 +235,15 @@ iterate :: proc(m: ^Machine, r: ^Regs, n: ^Node, t, tpath: query.Value) {
 		r.sig, r.mode = fail_status(s), .Ret
 		return
 	}
-	count := query.length_of(h, t)
-	if count == 0 {
-		query.release(h, t)
-		query.release(h, tpath)
-		r.sig, r.mode = .Go, .Ret
-		return
+	count := -1
+	if t.kind != .Node || (^query.Doc_Block)(t.p).doc.partial == nil {
+		count = query.length_of(h, t)
+		if count == 0 {
+			query.release(h, t)
+			query.release(h, tpath)
+			r.sig, r.mode = .Go, .Ret
+			return
+		}
 	}
 	f, s := push(m, Iter_Frame, .Iter, r.k)
 	if s != .Ok {
@@ -271,10 +292,12 @@ next_child :: proc(m: ^Machine, r: ^Regs, f: ^Iter_Frame) {
 	}
 	query.release(h, key)
 	f.i += 1
-	f.left -= 1
-	if f.left <= 0 {
-		drop_iter(m, f)
-		pop_frame(m)
+	if f.left > 0 {
+		f.left -= 1
+		if f.left == 0 {
+			drop_iter(m, f)
+			pop_frame(m)
+		}
 	}
 	r.v, r.k, r.mode = v, k, .Emit
 }

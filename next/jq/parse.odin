@@ -53,7 +53,16 @@ Mode :: enum u8 {
 	Bracket,
 	Brace,
 	Interp,
+	Fact, // the parentheses of `.@(name)`, which close as a bracket does
 	String,
+}
+
+// The two spellings of a fact step with a computed name, `.@(name)` and `.&[name]`, found by where their bracket opens.
+@(private)
+Computed_Step :: enum u8 {
+	None,
+	Fact,
+	Attribute,
 }
 
 // A symbol's semantic value: what a token carries, or what a rule built.
@@ -81,6 +90,7 @@ Parser :: struct {
 	file:      string, // the module's path, "" for the program
 	unit:      ^Unit,
 	max_depth: int, // the deepest parse stack, bison's YYMAXDEPTH, past which a parse is "memory exhausted"
+	computed:  map[int]Computed_Step, // opening bracket offsets of `.@(name)` and `.&[name]`
 }
 
 // The memory of a program and the modules it links: nodes, names and constants in one arena freed whole, and every

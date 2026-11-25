@@ -1005,8 +1005,8 @@ scan_element :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: 
 			case tape.All:
 				if tape.all_takes(step.limit, index, false, h.dups) {
 					scan_put(&h.picks, edge.to)
-					// A limit leaves the array partial, so each element it keeps holds its place.
-					h.by_place ||= step.limit > 0
+					// A step or path limit leaves the array partial, so each element it keeps holds its place.
+					h.by_place ||= step.limit > 0 || h.demand.limited
 				} else if h.settles && index == u64(step.limit) && !scan_cut(h, edge.to, d) {
 					return s, false
 				}
@@ -1885,6 +1885,7 @@ scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, mis
 	}
 	n_missing := rounds * len(first_missing) + len(rest_missing)
 	x := tape.partial_block(paths, live, len(h.kept), n_missing, names, h.dups, allocator) or_return
+	x.facts = h.facts
 	doc.partial = x
 	// Each path's answers in document order, in three steps: count them, turn the counts into starts, place the
 	// answers.

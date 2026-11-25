@@ -79,6 +79,7 @@ clone_document :: proc(doc: ^Document, allocator := context.allocator) -> (c: Do
 	if x := doc.partial; x != nil {
 		owned := .Borrowed not_in doc.flags
 		y := partial_block(len(x.starts) - 1, len(x.answers), len(x.kept) if owned else 0, len(x.missing) if owned else 0, len(x.names) if owned else 0, x.dups, allocator) or_return
+		y.facts = x.facts
 		copy(y.answers, x.answers)
 		copy(y.starts, x.starts)
 		if owned {
@@ -370,6 +371,7 @@ Partial :: struct {
 	missing: []Missing_Name, // sorted by node
 	names:   []u8, // the missing names' bytes
 	dups:    Duplicates, // the policy the read took repeated keys by, never `.Default`
+	facts:   bool, // whether the partial read kept facts (`Demand.facts`)
 }
 
 // The bytes of one token's authored span, from offset `lo` of the text, at `at` in `Document.src`.

@@ -59,3 +59,48 @@ apply_step :: proc(m: ^Machine, n: ^Node, t, key, from, to: query.Value) -> (res
 	}
 	return v, true, .Ok
 }
+
+// Whether tracked path `p` ends in a fact step (which must be the last step of any path).
+@(private)
+path_ends_in_fact :: proc(h: ^query.Heap, p: query.Value) -> bool {
+	if p.kind != .Array {
+		return false
+	}
+	items := query.items_of(p)
+	if len(items) == 0 {
+		return false
+	}
+	_, _, is_fact := query.fact_step(h, items[len(items) - 1])
+	return is_fact
+}
+
+// `_fact_step(name)`: builds the fact path step `{"fact": ...}` for `.@(expr)`.
+@(private)
+v_fact_step :: proc(m: ^Machine, _: ^Builtin, _: query.Value, args: []query.Value) -> (query.Value, query.Status) {
+	if !query.is_text(args[0]) {
+		out := make([dynamic]u8, m.h.allocator)
+		defer delete(out)
+		append(&out, "a fact name is a string, not ")
+		typed(m.h, &out, args[0])
+		return query.NULL, raise_owned_text(m, string(out[:]))
+	}
+	name := query.text_of(args[0])
+	kind, known := query.fact_named(name)
+	if !known {
+		return query.NULL, query.fail_unknown_fact(m.h, name)
+	}
+	return query.fact_key(m.h, kind)
+}
+
+// `_attribute_step(name)`: builds the attribute path step `{"fact": "attribute", "name": name}` for `.&[expr]`.
+@(private)
+v_attribute_step :: proc(m: ^Machine, _: ^Builtin, _: query.Value, args: []query.Value) -> (query.Value, query.Status) {
+	if !query.is_text(args[0]) {
+		out := make([dynamic]u8, m.h.allocator)
+		defer delete(out)
+		append(&out, "an attribute name is a string, not ")
+		typed(m.h, &out, args[0])
+		return query.NULL, raise_owned_text(m, string(out[:]))
+	}
+	return query.attribute_key(m.h, query.text_of(args[0]))
+}

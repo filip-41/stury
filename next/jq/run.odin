@@ -40,10 +40,11 @@ Run :: struct {
 }
 
 Run_End :: enum u8 {
-	Done, // every output given
-	Failed, // an error nothing caught, in the heap
-	Halted, // `halt` or `halt_error`: `run_halt` says how
+	Done,    // every output given
+	Failed,  // an error nothing caught, in the heap
+	Halted,  // `halt` or `halt_error`: `run_halt` says how
 	Stopped, // the output sink asked to stop
+	Tainted, // a read reached a value a partial document did not keep (uncatchable)
 }
 
 // Prepares a run of `prog` over heap `h`, its variables `globals` by slot of `Program.globals`, a missing one null.
@@ -63,10 +64,18 @@ run_value :: proc(run: ^Run, input: query.Value, out: Output, data: rawptr) -> R
 	m := &run.m
 	query.release(m.h, m.halt.value)
 	m.halt = {}
+	if m.h.tainted {
+		query.release(m.h, input)
+		return .Tainted
+	}
 	m.out, m.out_data = out, data
 	m.brk, m.through, m.over = nil, nil, false
 	m.steps = m.budget if m.budget > 0 else -1
-	switch drive(m, m.prog.body, input, nil) {
+	sig := drive(m, m.prog.body, input, nil)
+	if m.h.tainted || sig == .Taint {
+		return .Tainted
+	}
+	switch sig {
 	case .Go:
 		return .Done
 	case .Fail:
@@ -75,6 +84,8 @@ run_value :: proc(run: ^Run, input: query.Value, out: Output, data: rawptr) -> R
 		return .Failed if m.over else .Halted
 	case .Break:
 		return .Stopped
+	case .Taint:
+		return .Tainted
 	}
 	return .Done
 }

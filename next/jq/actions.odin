@@ -135,16 +135,29 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		report(p, at, `try .["field"] instead of .field for unusually named fields`)
 		r = {node = node(p, .Identity, at = at)}
 	case 74, 75:
-		r = {node = index(p, v[1].node, v[3].node, rule == 74, at)}
+		r = {node = index(p, v[1].node, dynamic_step(p, v[3].node, l[2]), rule == 74, at)}
 	case 76, 77:
-		r = {node = index(p, v[1].node, v[4].node, rule == 76, at)}
+		r = {node = index(p, v[1].node, dynamic_step(p, v[4].node, l[3]), rule == 76, at)}
 	case 78, 79, 80, 81:
+		bracket := l[2] if rule == 78 || rule == 79 else l[3]
+		if p.computed[bracket.start] != .None {
+			report(p, at, "expected a fact or attribute name")
+		}
 		r = {node = mk(p, Node{kind = .Iterate, a = v[1].node, flags = opt_flag(rule == 78 || rule == 80), loc = at})}
 	case 82, 85:
+		if p.computed[l[2].start] != .None {
+			report(p, at, "a fact or attribute step cannot be a slice")
+		}
 		r = {node = mk(p, Node{kind = .Slice, a = v[1].node, b = v[3].node, c = v[5].node, flags = opt_flag(rule == 82), loc = at})}
 	case 83, 86:
+		if p.computed[l[2].start] != .None {
+			report(p, at, "a fact or attribute step cannot be a slice")
+		}
 		r = {node = mk(p, Node{kind = .Slice, a = v[1].node, b = v[3].node, flags = opt_flag(rule == 83), loc = at})}
 	case 84, 87:
+		if p.computed[l[2].start] != .None {
+			report(p, at, "a fact or attribute step cannot be a slice")
+		}
 		r = {node = mk(p, Node{kind = .Slice, a = v[1].node, c = v[4].node, flags = opt_flag(rule == 84), loc = at})}
 	case 88:
 		r = {node = node(p, .Try, v[1].node, at = at)}
@@ -335,9 +348,31 @@ index :: proc(p: ^Parser, target, key: ^Node, opt: bool, at: Loc) -> ^Node {
 	return mk(p, Node{kind = .Index, a = target, b = key, flags = flags, loc = at})
 }
 
-// `target.name`.
+// The key `.@(name)` or `.&[name]` gives, `key` as written when `bracket`, where it opens, is neither.
+@(private = "file")
+dynamic_step :: proc(p: ^Parser, key: ^Node, bracket: Loc) -> ^Node {
+	step := p.computed[bracket.start]
+	if step == .None {
+		return key
+	}
+	name := "_fact_step" if step == .Fact else "_attribute_step"
+	args := make([]^Node, 1)
+	args[0] = key
+	return mk(p, Node{kind = .Call, name = name, args = args, loc = key.loc})
+}
+
+// `target.name`. A fact accessor (`@name`) or attribute accessor (`&name`) is `target` indexed by that fact step.
 @(private = "file")
 field :: proc(p: ^Parser, target: ^Node, name: string, name_at: Loc, opt: bool, at: Loc) -> ^Node {
+	if len(name) > 0 && name[0] == '&' {
+		k, _ := query.attribute_key(&p.unit.heap, name[1:])
+		return index(p, target, literal(p, freeze(p, k), name_at), opt, at)
+	}
+	if len(name) > 0 && name[0] == '@' {
+		kind, _ := query.fact_named(name[1:])
+		k, _ := query.fact_key(&p.unit.heap, kind)
+		return index(p, target, literal(p, freeze(p, k), name_at), opt, at)
+	}
 	return index(p, target, literal(p, query.text_borrowed(name), name_at), opt, at)
 }
 

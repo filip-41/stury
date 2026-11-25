@@ -156,6 +156,9 @@ append_owned :: proc(h: ^Heap, a: ^Value, x: Value) -> Status #no_bounds_check {
 	}
 	if x.kind >= .Array {
 		b.flags |= BLOCK_HAS_CONTAINER
+		if value_has_partial(x) {
+			b.flags |= BLOCK_HAS_PARTIAL
+		}
 	}
 	return .Ok
 }
@@ -183,6 +186,9 @@ array_put :: proc(h: ^Heap, a: ^Value, i: int, x: Value) -> Status #no_bounds_ch
 	}
 	if x.kind >= .Array {
 		b.flags |= BLOCK_HAS_CONTAINER
+		if value_has_partial(x) {
+			b.flags |= BLOCK_HAS_PARTIAL
+		}
 	}
 	return .Ok
 }
@@ -216,21 +222,74 @@ note_presence :: #force_inline proc "contextless" (h: ^Heap, p: tape.Presence) {
 	}
 }
 
-// The value of node `at` of document block `d`: null and booleans as themselves, a string with an escape decoded into
-// a string of the heap, anything else the node, holding the block.
+// Whether node `at` of partial document `doc` or any descendant in its subtree is marked `CONTAINER_PARTIAL`.
+@(private)
+node_has_partial :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> bool #no_bounds_check {
+	if doc.partial == nil || int(at) >= len(doc.nodes) {
+		return false
+	}
+	t := doc.nodes[at]
+	if t.kind < .Array {
+		return false
+	}
+	if t.spelling & tape.CONTAINER_PARTIAL != 0 {
+		return true
+	}
+	end := min(at + tape.Node_Index(t.n), tape.Node_Index(len(doc.nodes)))
+	for i := at + 1; i < end; i += 1 {
+		n := doc.nodes[i]
+		if n.kind >= .Array && n.spelling & tape.CONTAINER_PARTIAL != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether `v` is or contains a partial document container (an unloaded subtree that must not be emitted whole).
+// O(1) on scalars, whole-doc nodes, and built containers (tracked via `BLOCK_HAS_PARTIAL`, no DAG walk).
+value_has_partial :: #force_inline proc "contextless" (v: Value) -> bool {
+	if v.kind < .Array {
+		return false
+	}
+	if v.kind == .Node {
+		d := (^Doc_Block)(v.p)
+		return node_has_partial(&d.doc, tape.Node_Index(v.n))
+	}
+	if b := block_of(v); b != nil {
+		return b.flags & BLOCK_HAS_PARTIAL != 0
+	}
+	return false
+}
+
+// Whether nodes of `d` may carry facts or belong to a partial document (so scalars keep their document origin).
+@(private)
+doc_keeps_origin :: #force_inline proc "contextless" (d: ^Doc_Block) -> bool {
+	return d.doc.present != {} || d.doc.partial != nil || (d.doc.format != nil && (d.doc.format.attribute != nil || d.doc.format.fact_name != nil))
+}
+
+// The value of node `at` of document block `d`: null and booleans as themselves (or as `.Node` when `doc_keeps_origin`),
+// a string with an escape decoded into a string of the heap (carrying `(d, at)` when `doc_keeps_origin`), anything else
+// the node, holding the block.
 @(private, require_results)
 node_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) #no_bounds_check {
 	t := d.doc.nodes[at]
+	keep_origin := doc_keeps_origin(d)
 	#partial switch t.kind {
 	case .Null:
-		return NULL, .Ok
+		if !keep_origin {
+			return NULL, .Ok
+		}
 	case .False:
-		return FALSE, .Ok
+		if !keep_origin {
+			return FALSE, .Ok
+		}
 	case .True:
-		return TRUE, .Ok
+		if !keep_origin {
+			return TRUE, .Ok
+		}
 	case .String, .Plain, .Bytes:
 		if t.role == .Key || tape.text_decodes(t) || t.kind == .Bytes {
-			return decoded_text(h, d, at)
+			return decoded_text(h, d, at, keep_origin && t.role != .Key)
 		}
 	}
 	d.rc += 1
@@ -243,11 +302,26 @@ node_at :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, st
 	return node_value(h, d, at)
 }
 
-// The text of a document token decoded into a string of the heap.
+// The text of a document token decoded into a string of the heap, optionally retaining `(d, origin)` for facts.
 @(private)
-token_text_value :: proc(h: ^Heap, d: ^Doc_Block, t: tape.Token) -> (res: Value, status: Status) {
+token_text_value :: proc(h: ^Heap, d: ^Doc_Block, t: tape.Token, attach_doc := false, origin := tape.NO_NODE) -> (res: Value, status: Status) {
 	room := tape.text_room(&d.doc, t)
-	v, p := make_text(h, room) or_return
+	if room == 0 {
+		raw := string(tape.span_bytes(&d.doc, t.lo, t.n))
+		if !attach_doc {
+			return text_value(h, raw)
+		}
+		v, p := make_doc_text(h, d, origin, len(raw)) or_return
+		runtime.mem_copy_non_overlapping(p, raw_data(raw), len(raw))
+		return v, .Ok
+	}
+	v: Value
+	p: [^]u8
+	if attach_doc {
+		v, p = make_doc_text(h, d, origin, room) or_return
+	} else {
+		v, p = make_text(h, room) or_return
+	}
 	s, ok := tape.node_text(&d.doc, t, p[:room])
 	if !ok {
 		release(h, v)
@@ -256,7 +330,12 @@ token_text_value :: proc(h: ^Heap, d: ^Doc_Block, t: tape.Token) -> (res: Value,
 	// The decode may be its bytes in the text, which `buf` did not take.
 	if raw_data(s) != p {
 		release(h, v)
-		return text_value(h, s)
+		if !attach_doc {
+			return text_value(h, s)
+		}
+		w, wp := make_doc_text(h, d, origin, len(s)) or_return
+		runtime.mem_copy_non_overlapping(wp, raw_data(s), len(s))
+		return w, .Ok
 	}
 	v.n = u32(len(s))
 	return v, .Ok
@@ -264,13 +343,13 @@ token_text_value :: proc(h: ^Heap, d: ^Doc_Block, t: tape.Token) -> (res: Value,
 
 // The text of a key or a string node that holds an escape, decoded into a string of the heap.
 @(private)
-decoded_text :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) {
+decoded_text :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, attach_doc := false) -> (res: Value, status: Status) {
 	t := d.doc.nodes[at]
 	if t.role == .Key && (t.kind == .String || t.kind == .Plain) && !tape.text_decodes(t) {
 		d.rc += 1
 		return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
 	}
-	return token_text_value(h, d, t)
+	return token_text_value(h, d, t, attach_doc, at)
 }
 
 // The key of the built object entry or the document member whose key node is `at`, as a string value.
@@ -539,6 +618,9 @@ object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_boun
 		}
 		if x.kind >= .Array {
 			b.flags |= BLOCK_HAS_CONTAINER
+			if value_has_partial(x) {
+				b.flags |= BLOCK_HAS_PARTIAL
+			}
 		}
 		return .Ok
 	}
@@ -559,6 +641,9 @@ object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_boun
 	}
 	if x.kind >= .Array {
 		b.flags |= BLOCK_HAS_CONTAINER
+		if value_has_partial(x) {
+			b.flags |= BLOCK_HAS_PARTIAL
+		}
 	}
 	if b.slot_log2 != 0 {
 		if has_slot && !grew {
@@ -591,6 +676,9 @@ object_put_fresh :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #n
 	}
 	if x.kind >= .Array {
 		b.flags |= BLOCK_HAS_CONTAINER
+		if value_has_partial(x) {
+			b.flags |= BLOCK_HAS_PARTIAL
+		}
 	}
 	if b.slot_log2 != 0 {
 		slot_put(b, text_of(key), b.len - 1)
@@ -695,6 +783,9 @@ cursor_open :: proc(h: ^Heap, v: Value) -> (c: Cursor, s: Status) {
 		return c, fail_memory(h)
 	}
 	note_presence(h, p)
+	if p != .Found {
+		c.of = ABSENT
+	}
 	return c, .Ok
 }
 
@@ -703,6 +794,8 @@ cursor_open :: proc(h: ^Heap, v: Value) -> (c: Cursor, s: Status) {
 @(require_results)
 cursor_next :: proc(h: ^Heap, c: ^Cursor) -> (key, value: Value, more: bool, s: Status) #no_bounds_check {
 	#partial switch c.of.kind {
+	case .Absent:
+		return ABSENT, ABSENT, false, .Ok
 	case .Array:
 		items := items_of(c.of)
 		if int(c.at) >= len(items) {
@@ -720,27 +813,22 @@ cursor_next :: proc(h: ^Heap, c: ^Cursor) -> (key, value: Value, more: bool, s: 
 		return retain(e.key), retain(e.value), true, .Ok
 	}
 	d := (^Doc_Block)(c.of.p)
-	for {
-		k, at, p := tape.next_child(reader(d), &c.children)
-		if p == .Missing {
-			return ABSENT, ABSENT, false, .Ok
-		}
-		if p != .Found {
-			note_presence(h, p)
-			continue
-		}
-		if k != tape.NO_NODE {
-			key = key_value(h, d, k) or_return
-		} else if c.children.keys_n != 0 {
-			key = token_text_value(h, d, tape.cell_key(reader(d), c.children)) or_return
-		}
-		value, s = node_value(h, d, at)
-		if s != .Ok {
-			release(h, key)
-			return ABSENT, ABSENT, false, s
-		}
-		return key, value, true, .Ok
+	k, at, p := tape.next_child(reader(d), &c.children)
+	if p != .Found {
+		note_presence(h, p)
+		return ABSENT, ABSENT, false, .Ok
 	}
+	if k != tape.NO_NODE {
+		key = key_value(h, d, k) or_return
+	} else if c.children.keys_n != 0 {
+		key = token_text_value(h, d, tape.cell_key(reader(d), c.children)) or_return
+	}
+	value, s = node_value(h, d, at)
+	if s != .Ok {
+		release(h, key)
+		return ABSENT, ABSENT, false, s
+	}
+	return key, value, true, .Ok
 }
 
 cursor_close :: proc(c: ^Cursor) {
@@ -768,14 +856,14 @@ grouped :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	}
 	defer tape.destroy_children(&c)
 	note_presence(h, p)
+	if p != .Found {
+		return out, .Ok
+	}
 	for {
 		k, at, q := tape.next_child(reader(d), &c, .Group)
-		if q == .Missing {
-			return out, .Ok
-		}
 		if q != .Found {
 			note_presence(h, q)
-			continue
+			return out, .Ok
 		}
 		key := key_value(h, d, k) or_return
 		x, s := node_value(h, d, at)
@@ -880,6 +968,16 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		return
 	}
 	scalar :: proc(h: ^Heap, x: Value) -> (Value, Status) {
+		if x.kind == .Node {
+			#partial switch type_of(x) {
+			case .Null:
+				return NULL, .Ok
+			case .False:
+				return FALSE, .Ok
+			case .True:
+				return TRUE, .Ok
+			}
+		}
 		if is_text(x) {
 			return text_value(h, text_of(x))
 		}

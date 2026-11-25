@@ -80,12 +80,16 @@ text_borrowed :: #force_inline proc "contextless" (s: string) -> Value {
 BLOCK_HAS_HELD :: u8(1)
 @(private)
 BLOCK_HAS_CONTAINER :: u8(2)
+@(private)
+BLOCK_HAS_PARTIAL :: u8(4)
+@(private)
+BLOCK_HAS_DOC :: u8(8) // `Str_Block` carries a retained `^Doc_Block` at its tail and `node` in its header
 
 // The header of every block a value holds.
 Block :: struct {
 	rc:        u32,
 	class:     u8, // its size class in the heap, `DIRECT` for one allocated on its own
-	flags:     u8, // `BLOCK_HAS_HELD`, `BLOCK_HAS_CONTAINER` for containers
+	flags:     u8, // `BLOCK_HAS_HELD`, `BLOCK_HAS_CONTAINER`, `BLOCK_HAS_PARTIAL`, `BLOCK_HAS_DOC`
 	slot_log2: u8, // for `Object_Block`: log2(slot_count), 0 when no table
 	_:         u8,
 }
@@ -93,8 +97,13 @@ Block :: struct {
 @(private)
 Str_Block :: struct {
 	using block: Block,
-	cap:         u32, // the bytes after the header
-	_:           u32,
+	cap:         u32, // the bytes after the header (including tail `^Doc_Block` when `BLOCK_HAS_DOC`)
+	node:        u32, // document node index when `BLOCK_HAS_DOC`
+}
+
+@(private)
+str_doc_slot :: #force_inline proc "contextless" (s: ^Str_Block) -> ^^Doc_Block {
+	return (^^Doc_Block)(uintptr(s) + size_of(Str_Block) + uintptr(s.cap) - size_of(^Doc_Block))
 }
 
 @(private)
@@ -183,7 +192,10 @@ Heap :: struct {
 	// `tape.DEFAULT_DEPTH`.
 	depth:     int,
 	// A read reached a value a partial document did not keep, which it read as absent.
-	tainted:   bool,
+	tainted:         bool,
+	// Optional hook (wired by `Overlay` in Phase 2A) backing writes to fact paths.
+	write_fact:      Fact_Writer,
+	write_fact_data: rawptr,
 }
 
 // What an operation gives beside its value: `.Error` with the error in `Heap.err`.
@@ -574,6 +586,13 @@ free_one :: proc(h: ^Heap, kind: Kind, b: ^Block) {
 	#partial switch kind {
 	case .String:
 		s := (^Str_Block)(b)
+		if s.flags & BLOCK_HAS_DOC != 0 {
+			d := str_doc_slot(s)^
+			d.rc -= 1
+			if d.rc == 0 {
+				free_one(h, .Node, d)
+			}
+		}
 		free_block(h, b, int(s.cap) + size_of(Str_Block))
 	case .Big:
 		x := (^Big_Block)(b)
