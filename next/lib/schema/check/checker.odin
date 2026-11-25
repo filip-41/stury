@@ -1223,7 +1223,7 @@ normalize_token_number :: proc(h: ^Checker, t: tape.Token, raw_text: string, buf
 				return "", false, false
 			}
 			if .Binary in h.format.caps {
-				return strconv.write_float(buf, f, 'g', -1, 64), false, true
+				return strconv.write_float(buf, f, 'g', -1, 64, {}), false, true
 			}
 			// Text format (TOML/JSON5): strip `_` / leading `+` / leading `.` without lossy `f64` round-trip!
 			return rules.normalize_decimal_text(raw_text, buf, h.scratch)
@@ -1317,7 +1317,7 @@ judge_scalar_core :: proc(h: ^Checker, l: ^rules.Leaf, kind: tape.Kind, text: st
 					if math.is_nan(f) || math.is_inf(f, 0) {
 						non_finite = true
 					} else if .Binary in h.format.caps {
-						num_text = strconv.write_float(num_buf[:], f, 'g', -1, 64)
+						num_text = strconv.write_float(num_buf[:], f, 'g', -1, 64, {})
 						is_int = !l.integer_spelled && rules.integral(rules.decimal_of(num_text))
 					} else {
 						nt, nown, nok := rules.normalize_decimal_text(num_text, num_buf[:], h.scratch)
@@ -1739,13 +1739,20 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 // Uses an explicit heap stack (zero unbounded recursion) and allocates zero `context.temp_allocator` memory.
 @(require_results)
 check_document :: proc(doc: ^tape.Document, plan: ^Plan, opts := Options{}, sink: ^Sink = nil, allocator := context.allocator) -> Result {
+	return check_document_node(doc, tape.ROOT, plan, opts, sink, allocator)
+}
+
+// Checks a subtree of an already-built `tape.Document` starting at `node` against compiled `plan`.
+// Uses an explicit heap stack (zero unbounded recursion) and allocates zero `context.temp_allocator` memory.
+@(require_results)
+check_document_node :: proc(doc: ^tape.Document, node: tape.Node_Index, plan: ^Plan, opts := Options{}, sink: ^Sink = nil, allocator := context.allocator) -> Result {
 	if doc == nil || plan == nil || len(plan.records) == 0 {
 		return {valid = false, err = {kind = .Bad_Option, keyword = "plan"}}
 	}
 	if doc.partial != nil {
 		return {valid = false, err = {kind = .Unsupported, keyword = "partial"}}
 	}
-	if len(doc.nodes) == 0 {
+	if len(doc.nodes) == 0 || node == tape.NO_NODE || int(node) >= len(doc.nodes) {
 		return {valid = false, err = {kind = .Walk}}
 	}
 
@@ -1764,7 +1771,7 @@ check_document :: proc(doc: ^tape.Document, plan: ^Plan, opts := Options{}, sink
 	from := len(sink.entries) if sink != nil else 0
 	defer checker_cleanup(&h)
 
-	ok := walk_document_node(&h, doc, 0, &plan.records[0])
+	ok := walk_document_node(&h, doc, node, &plan.records[0])
 	if !ok && h.need_reread && !h.reread_runs && h.fatal == .None {
 		// Rare case: document had duplicate keys under `.First`/`.Last` and wasn't deduplicated during build.
 		if sink != nil {
@@ -1776,7 +1783,7 @@ check_document :: proc(doc: ^tape.Document, plan: ^Plan, opts := Options{}, sink
 		h.xml_ext = doc.ext
 		h.no_factor = true
 		h.judge_dups = true
-		ok = walk_document_node(&h, doc, 0, &plan.records[0])
+		ok = walk_document_node(&h, doc, node, &plan.records[0])
 	}
 
 	if sink != nil {

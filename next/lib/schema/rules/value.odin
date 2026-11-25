@@ -132,7 +132,7 @@ value_number_text :: proc(v: Value, buf: []u8, allocator := context.allocator) -
 		if math.is_nan(x) || math.is_inf(x, 0) {
 			return "", false, false
 		}
-		return strconv.write_float(buf, x, 'g', -1, 64), false, true
+		return strconv.write_float(buf, x, 'g', -1, 64, {}), false, true
 	case Number_Text:
 		if !valid_decimal_text(x.text) {
 			return normalize_decimal_text(x.text, buf, allocator)
@@ -157,11 +157,11 @@ value_number_text :: proc(v: Value, buf: []u8, allocator := context.allocator) -
 						return "", false, false
 					}
 					if is_bin {
-						return strconv.write_float(buf, f, 'g', -1, 64), false, true
+						return strconv.write_float(buf, f, 'g', -1, 64, {}), false, true
 					}
 					raw_s, raw_own, raw_ok := node_text_alloc(x.doc, t, buf, allocator)
 					if !raw_ok {
-						return strconv.write_float(buf, f, 'g', -1, 64), false, true
+						return strconv.write_float(buf, f, 'g', -1, 64, {}), false, true
 					}
 					if valid_decimal_text(raw_s) {
 						return raw_s, raw_own, true
