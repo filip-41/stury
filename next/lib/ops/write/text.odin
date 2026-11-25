@@ -39,13 +39,13 @@ Lanes16 :: #simd[16]u8
 
 // The bytes of a text that a writer spells as more than themselves.
 Escape_Set :: enum u8 {
-	Xml_Text, // `&`, `<`, `>` and a control byte but tab and line feed
+	Xml_Text, // `&`, `<`, `>`, 0xEF (lead of U+FFFE/U+FFFF noncharacters) and a control byte but tab and line feed
 	Toml_Basic, // `"`, `\\`, a control byte, DEL and a byte past ASCII
 }
 
 @(private, rodata)
 ESCAPED := [Escape_Set][256]bool {
-	.Xml_Text   = {0 ..< 9 = true, 11 ..< 32 = true, '&' = true, '<' = true, '>' = true},
+	.Xml_Text   = {0 ..< 9 = true, 11 ..< 32 = true, '&' = true, '<' = true, '>' = true, 0xEF = true},
 	.Toml_Basic = {0 ..< 32 = true, '"' = true, '\\' = true, 0x7F ..= 0xFF = true},
 }
 
@@ -91,7 +91,7 @@ word_hits :: #force_inline proc "contextless" (x: u64, $SET: Escape_Set) -> bool
 	}
 	small := (x - 0x20 * ONES) & ~x & HIGH
 	when SET == .Xml_Text {
-		return small | has_zero(x ~ '&' * ONES) | has_zero(x ~ '<' * ONES) | has_zero(x ~ '>' * ONES) != 0
+		return small | has_zero(x ~ '&' * ONES) | has_zero(x ~ '<' * ONES) | has_zero(x ~ '>' * ONES) | has_zero(x ~ 0xEF * ONES) != 0
 	} else {
 		return small | has_zero(x ~ '"' * ONES) | has_zero(x ~ '\\' * ONES) | has_zero(x ~ 0x7F * ONES) | x & HIGH != 0
 	}
@@ -114,7 +114,7 @@ hits :: #force_inline proc "contextless" (v: Lanes16, $SET: Escape_Set) -> bool 
 	control := control_lanes(v)
 	when SET == .Xml_Text {
 		plain := simd.lanes_eq(v, Lanes16('\t')) | simd.lanes_eq(v, Lanes16('\n'))
-		return kernel.any_lane16(simd.bit_and_not(control, plain) | simd.lanes_eq(v, Lanes16('&')) | simd.lanes_eq(v, Lanes16('<')) | simd.lanes_eq(v, Lanes16('>')))
+		return kernel.any_lane16(simd.bit_and_not(control, plain) | simd.lanes_eq(v, Lanes16('&')) | simd.lanes_eq(v, Lanes16('<')) | simd.lanes_eq(v, Lanes16('>')) | simd.lanes_eq(v, Lanes16(0xEF)))
 	} else {
 		return kernel.any_lane16(control | simd.lanes_eq(v, Lanes16('"')) | simd.lanes_eq(v, Lanes16('\\')) | simd.lanes_ge(v, Lanes16(0x7F)))
 	}

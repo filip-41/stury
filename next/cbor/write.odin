@@ -5,21 +5,26 @@ import "core:io"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 
-// CBOR's writer: the layout of a document's values as an item of `spec`, and the spelling of its scalars. Every head is
-// the shortest that holds its argument and a float the narrowest that holds its value (RFC 8949 section 4.1), so each
-// spec's preferred rules hold, and a container has a definite length. `.Deterministic` and `.Length_First` write each
-// object's members in the order of their keys' encodings, which for text keys is their length, then their bytes. A
-// number past 64 bits with an integer value is a bignum, a byte string is a byte string, and every other scalar is
-// the text of its value. A tag of a CBOR document is kept on its value.
+// CBOR's writer: the layout of a document's values as an item of `spec`, and the spelling of its scalars. `.Cbor`
+// copies a whole CBOR document verbatim where it can; `.Preferred`, `.Deterministic` and `.Length_First` write every
+// head in its shortest form, every float in its narrowest form (RFC 8949 section 4.1), and every container with a
+// definite length. `.Deterministic` and `.Length_First` write each map's members in the order of their keys'
+// encodings (length-first, then byte order for text keys) and refuse repeated keys. A number past 64 bits with an
+// integer value is a bignum, a byte string is a byte string, and every other scalar is the text of its value. A tag of
+// a CBOR document is kept on its value.
 
 Write_Options :: write.Options
 Write_Error :: write.Error
+Token_Kind :: write.Token_Kind
+Record_Framing :: write.Record_Framing
+Refused :: write.Refused
+Refusal :: write.Refusal
 
 // Writes value `opts.node` of `doc`, a document of any format, as an item of `spec` in a buffer from `allocator` that
 // the caller owns. Returns the kinds of the facts `doc` holds that the item does not: every kind but `.Tag`, and the
 // tags of a document that is no CBOR's. A value with no CBOR spelling is `Refused` with its node: a number that is no
-// integer past 64 bits, and under `.Deterministic` and `.Length_First` a key that is no text. A partial container is
-// `Refused{.Partial}`.
+// integer past 64 bits, and under `.Deterministic` and `.Length_First` a key that is no text or a repeated key. A
+// partial container is `Refused{.Partial}`.
 write :: proc(doc: ^tape.Document, spec := Spec.Cbor, opts := Write_Options{}, allocator := context.allocator) -> (text: []u8, dropped: tape.Facts, err: Write_Error) {
 	return write.to_buffer(doc, u8(spec), opts, allocator, write_out)
 }
@@ -35,10 +40,12 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 	if spec > u8(max(Spec)) {
 		return {}, tape.Bad_Option{"spec"}
 	}
-	if opts.format != nil || opts.indent != 0 || opts.tab || opts.ascii || opts.framing != .None {
-		return {}, tape.Bad_Option{"format" if opts.format != nil else "indent"}
+	if opts.format != nil || opts.indent != 0 || opts.tab || opts.ascii || opts.framing != .None || opts.grow_header || len(opts.header) > 0 {
+		opt := "format" if opts.format != nil else "header" if len(opts.header) > 0 || opts.grow_header else "indent"
+		return {}, tape.Bad_Option{opt}
 	}
-	if Spec(spec) == .Cbor {
+	strict := Spec(spec) != .Cbor
+	if !strict {
 		if text, whole := verbatim_item(doc, opts); whole {
 			write.put(out, text)
 			return doc.present - {.Tag}, out.err
@@ -49,15 +56,15 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 		return {}, e
 	}
 	ordered := Spec(spec) == .Deterministic || Spec(spec) == .Length_First
-	w.sort_keys, w.length_first = w.sort_keys || ordered, ordered
+	w.sort_keys, w.length_first, w.no_dups = w.sort_keys || ordered, ordered, ordered
 	tagged := read_as_cbor(doc)
 	facts, tables := write.tree_facts(&w), write.tree_tables(&w)
 	lost := false
 	switch {
-	case facts && tables: write_steps(out, &w, ordered, tagged, &lost, true, true)
-	case facts: write_steps(out, &w, ordered, tagged, &lost, true, false)
-	case tables: write_steps(out, &w, ordered, tagged, &lost, false, true)
-	case: write_steps(out, &w, ordered, tagged, &lost, false, false)
+	case facts && tables: write_steps(out, &w, strict, ordered, tagged, &lost, true, true)
+	case facts: write_steps(out, &w, strict, ordered, tagged, &lost, true, false)
+	case tables: write_steps(out, &w, strict, ordered, tagged, &lost, false, true)
+	case: write_steps(out, &w, strict, ordered, tagged, &lost, false, false)
 	}
 	dropped := write.tree_end(&w)
 	if lost && !tagged {
@@ -76,14 +83,14 @@ verbatim_item :: proc "contextless" (doc: ^tape.Document, opts: Write_Options) -
 	if !read_as_cbor(doc) || opts.node != tape.ROOT || opts.sort_keys || doc.partial != nil || doc.ext != nil || len(doc.nodes) == 0 {
 		return nil, false
 	}
-	if doc.flags & {.Stopped, .Tolerated, .Cut, .Held, .Dropped, .Borrowed} != {} || doc.root_close != u64(len(doc.src)) || doc.nodes[0].role != .Value {
+	if doc.flags - {.Owns_Src} != {} || doc.root_close != u64(len(doc.src)) || doc.nodes[0].role != .Value {
 		return nil, false
 	}
 	return doc.src, true
 }
 
 @(private)
-write_steps :: proc(out: ^write.Out, w: ^write.Tree, ordered, tagged: bool, lost: ^bool, $FACTS, $TABLES: bool) {
+write_steps :: proc(out: ^write.Out, w: ^write.Tree, strict, ordered, tagged: bool, lost: ^bool, $FACTS, $TABLES: bool) {
 	for {
 		s := write.tree_next(w, FACTS, TABLES)
 		if s.kind == .Done {
@@ -97,13 +104,13 @@ write_steps :: proc(out: ^write.Out, w: ^write.Tree, ordered, tagged: bool, lost
 				w.err = write.Refused{s.key, .No_Spelling}
 				return
 			}
-			if !put_scalar(out, w, s.key) {
+			if !put_scalar(out, w, s.key, strict) {
 				return
 			}
 		}
 		when FACTS {
 			if tagged {
-				put_tags(out, w, s.facts)
+				put_tags(out, w, s.node, s.facts, strict)
 			} else {
 				put_named_tags(out, w, s, lost)
 			}
@@ -116,7 +123,7 @@ write_steps :: proc(out: ^write.Out, w: ^write.Tree, ordered, tagged: bool, lost
 				return
 			}
 			put_head(out, 5 if node.kind == .Object else 4, u64(count))
-		} else if !put_scalar(out, w, s.node) {
+		} else if !put_scalar(out, w, s.node, strict) {
 			return
 		}
 	}
@@ -160,11 +167,34 @@ put_named_tags :: proc(out: ^write.Out, w: ^write.Tree, s: write.Step, lost: ^bo
 	lost^ ||= put_text_tags(out, tags[:k], text) < k
 }
 
-// Writes the tags of `facts` before their value, in the order they were read.
+// Whether CBOR number node `t` is a tag-folded number (bignum, decimal fraction or bigfloat).
 @(private)
-put_tags :: proc(out: ^write.Out, w: ^write.Tree, facts: []tape.Fact) {
-	for f in facts {
-		if f.kind != .Tag || f.n == 0 {
+is_cbor_folded :: #force_inline proc "contextless" (t: tape.Node) -> bool {
+	if t.kind != .Number || t.n == 0 {
+		return false
+	}
+	switch t.spelling & tape.NUMBER_KIND {
+	case NUMBER_BIG, NUMBER_BIG_NEGATIVE, NUMBER_DECIMAL, NUMBER_BIGFLOAT:
+		return true
+	}
+	return false
+}
+
+// Writes the tags of `facts` before their value, in the order they were read. Under `strict`, the innermost tag of a
+// folded number (tags 2..5) is skipped because `put_cbor_folded` writes its preferred tag or collapses it to an integer.
+@(private)
+put_tags :: proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index, facts: []tape.Fact, strict: bool) {
+	skip := -1
+	if strict && is_cbor_folded(w.nodes[at]) {
+		for i := len(facts) - 1; i >= 0; i -= 1 {
+			if facts[i].kind == .Tag && facts[i].n > 0 {
+				skip = i
+				break
+			}
+		}
+	}
+	for f, i in facts {
+		if f.kind != .Tag || f.n == 0 || i == skip {
 			continue
 		}
 		span := tape.span_bytes(w.doc, f.lo, f.n)
@@ -205,7 +235,7 @@ put_head :: proc(out: ^write.Out, major: u8, arg: u64) #no_bounds_check {
 
 // Writes the scalar at node `at`. False with `w.err` set when it has no spelling or memory is refused.
 @(private)
-put_scalar :: proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index) -> bool {
+put_scalar :: proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index, strict: bool) -> bool {
 	t := w.nodes[at]
 	#partial switch t.kind {
 	case .Null:
@@ -215,7 +245,7 @@ put_scalar :: proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index) -> bool
 	case .True:
 		write.put_byte(out, 0xF5)
 	case .Number:
-		return put_number(out, w, at, t)
+		return put_number(out, w, at, t, strict)
 	case .Bytes, .String, .Plain:
 		s, ok := write.text_of(w, at)
 		if !ok {
@@ -227,15 +257,82 @@ put_scalar :: proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index) -> bool
 	return true
 }
 
+// Re-encodes a CBOR bignum payload `span` (definite or indefinite byte string) into preferred form: an integer head if
+// its stripped magnitude fits 64 bits, else tag 2/3 with a definite byte string with no leading zero bytes.
 @(private)
-put_number :: proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index, t: tape.Node) -> bool {
-	// A number read from CBOR as a big number, decimal fraction or big float keeps its bytes, and its tag is a fact.
-	if read_as_cbor(w.doc) && t.n > 0 {
-		switch t.spelling & tape.NUMBER_KIND {
-		case NUMBER_BIG, NUMBER_BIG_NEGATIVE, NUMBER_DECIMAL, NUMBER_BIGFLOAT:
-			write.put(out, tape.span_bytes(w.doc, t.lo, t.n))
-			return true
+put_cbor_bignum :: proc(out: ^write.Out, span: []u8, negative: bool) {
+	r := string_run(span)
+	total := 0
+	arg: u64
+	for chunk in text_next(&r) {
+		for b in chunk {
+			if total == 0 && b == 0 {
+				continue
+			}
+			if total < 8 {
+				arg = arg << 8 | u64(b)
+			}
+			total += 1
 		}
+	}
+	if total <= 8 {
+		put_head(out, 1 if negative else 0, arg)
+		return
+	}
+	put_head(out, 6, 3 if negative else 2)
+	put_head(out, 2, u64(total))
+	r2 := string_run(span)
+	started := false
+	for chunk in text_next(&r2) {
+		if started {
+			write.put(out, chunk)
+			continue
+		}
+		for b, i in chunk {
+			if b != 0 {
+				started = true
+				write.put(out, chunk[i:])
+				break
+			}
+		}
+	}
+}
+
+// Re-encodes a CBOR folded number (bignum, decimal fraction or bigfloat) in preferred definite form.
+@(private)
+put_cbor_folded :: proc(out: ^write.Out, span: []u8, kind: u16) {
+	switch kind {
+	case NUMBER_BIG, NUMBER_BIG_NEGATIVE:
+		put_cbor_bignum(out, span, kind == NUMBER_BIG_NEGATIVE)
+	case NUMBER_DECIMAL, NUMBER_BIGFLOAT:
+		put_head(out, 6, 5 if kind == NUMBER_BIGFLOAT else 4)
+		write.put_byte(out, 0x82)
+		pos := array_body(span)
+		emajor, earg, ehl := head_of(span[pos:])
+		put_head(out, emajor, earg)
+		m := span[pos + ehl:]
+		if m[0] >> 5 <= 1 {
+			mmajor, marg, _ := head_of(m)
+			put_head(out, mmajor, marg)
+		} else {
+			_, mtag, mhl := head_of(m)
+			put_cbor_bignum(out, m[mhl:], mtag == 3)
+		}
+	}
+}
+
+@(private)
+put_number :: proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index, t: tape.Node, strict: bool) -> bool {
+	// A number read from CBOR as a big number, decimal fraction or big float keeps its bytes under `.Cbor`, and is
+	// re-encoded into preferred definite form under stricter specs.
+	if read_as_cbor(w.doc) && is_cbor_folded(t) {
+		span := tape.span_bytes(w.doc, t.lo, t.n)
+		if !strict {
+			write.put(out, span)
+		} else {
+			put_cbor_folded(out, span, t.spelling & tape.NUMBER_KIND)
+		}
+		return true
 	}
 	n, ok := tape.node_number(w.doc, at)
 	if ok {
@@ -273,7 +370,7 @@ put_number :: proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index, t: tape
 }
 
 // Writes the integer `text` (an optional minus sign and digits) as a bignum, tag 2 or 3 and its magnitude as a byte
-// string. False for any other text, and for a magnitude of 4096 digits or more.
+// string. False for any other text, and for a magnitude past 4096 digits.
 @(private)
 put_bignum :: proc(out: ^write.Out, text: string) -> bool {
 	negative := len(text) > 0 && text[0] == '-'

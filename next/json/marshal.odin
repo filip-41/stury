@@ -18,7 +18,7 @@ marshal :: proc(value: ^$T, opts := Write_Options{}, plan: ^Plan = nil, allocato
 	if err = writer_start(&w, opts, {}, allocator); err != nil {
 		return nil, err
 	}
-	if err = marshal_tokens(&w, value, T, plan, allocator); err != nil {
+	if err = marshal_into(&w, value, T, plan, allocator); err != nil {
 		_, _ = writer_end(&w)
 		return nil, err
 	}
@@ -28,14 +28,14 @@ marshal :: proc(value: ^$T, opts := Write_Options{}, plan: ^Plan = nil, allocato
 // `marshal` into `sink`, through a buffer of `write.SINK_BYTES` from `allocator`. On a refusal or a failed sink the
 // sink may hold a prefix of the text.
 marshal_to :: proc(sink: io.Writer, value: ^$T, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> Write_Error {
-	w: Writer
 	if sink.procedure == nil {
 		return tape.Bad_Option{"sink"}
 	}
+	w: Writer
 	if err := writer_start(&w, opts, sink, allocator); err != nil {
 		return err
 	}
-	if err := marshal_tokens(&w, value, T, plan, allocator); err != nil {
+	if err := marshal_into(&w, value, T, plan, allocator); err != nil {
 		_, _ = writer_end(&w)
 		return err
 	}
@@ -44,33 +44,17 @@ marshal_to :: proc(sink: io.Writer, value: ^$T, opts := Write_Options{}, plan: ^
 }
 
 @(private)
-marshal_tokens :: proc(w: ^Writer, value: rawptr, T: typeid, plan: ^Plan, allocator: runtime.Allocator) -> Write_Error {
-	made: Plan
-	plan := plan
-	if plan == nil {
-		e: Error
-		if made, e = typed.plan_make(T, TAG, {}, allocator); e != nil {
-			if memory, ok := e.(runtime.Allocator_Error); ok {
-				return memory
-			}
-			bad, _ := e.(tape.Bad_Option)
-			return bad
+marshal_into :: proc(w: ^Writer, value: rawptr, T: typeid, plan: ^Plan, allocator: runtime.Allocator) -> Write_Error {
+	werr, err := typed.marshal(value, T, TAG, plan, w, token, allocator)
+	if werr != nil {
+		return werr
+	}
+	if err != nil {
+		if memory, ok := err.(runtime.Allocator_Error); ok {
+			return memory
 		}
-		plan = &made
-	}
-	defer if plan == &made {
-		typed.plan_destroy(&made)
-	}
-	err, why, memory := typed.marshal(plan, value, w, token, allocator)
-	switch {
-	case err != nil:
-		return err
-	case memory != nil:
-		return memory
-	case why == .Raw:
-		return tape.Bad_Option{"raw"}
-	case why == .Time:
-		return tape.Bad_Option{"time"}
+		bad, _ := err.(tape.Bad_Option)
+		return bad
 	}
 	return nil
 }

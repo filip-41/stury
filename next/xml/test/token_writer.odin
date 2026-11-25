@@ -1,7 +1,6 @@
 package xml_tests
 
 import "core:testing"
-import "stury:lib/ops/write"
 import "stury:testkit"
 import "stury:xml"
 
@@ -13,7 +12,7 @@ tokens_write_an_element :: proc(t: ^testing.T) {
 	w: xml.Writer
 	testing.expect(t, xml.writer_start(&w, .Xml, {indent = 2}) == nil)
 	steps := [?]struct {
-		kind: write.Token_Kind,
+		kind: xml.Token_Kind,
 		text: string,
 	}{{.Object, ""}, {.Key, "r"}, {.Object, ""}, {.Key, "a"}, {.Number, "1"}, {.Key, "b"}, {.Array, ""}, {.String, "x&y"}, {.String, "z"}, {.Close, ""}, {.Close, ""}, {.Close, ""}}
 	for step in steps {
@@ -25,12 +24,35 @@ tokens_write_an_element :: proc(t: ^testing.T) {
 }
 
 @(test)
+tokens_validate_names_and_indent_mixed_content :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Invalid element name must be refused (neutral Token_Tape format, never treated as native XML).
+	w: xml.Writer
+	testing.expect(t, xml.writer_start(&w) == nil)
+	for s in ([?]struct{kind: xml.Token_Kind, text: string}{{.Object, ""}, {.Key, "123 bad>name"}, {.String, "v"}, {.Close, ""}}) {
+		testing.expect(t, xml.token(&w, s.kind, s.text) == nil)
+	}
+	_, bad_err := xml.writer_end(&w)
+	r, ok := bad_err.(xml.Refused)
+	testing.expectf(t, ok && r.why == .No_Spelling, "bad name: %v", bad_err)
+
+	// Mixed `#text` content under `indent = 2` does not insert whitespace around `#text` children.
+	testing.expect(t, xml.writer_start(&w, .Xml, {indent = 2}) == nil)
+	for s in ([?]struct{kind: xml.Token_Kind, text: string}{{.Object, ""}, {.Key, "r"}, {.Object, ""}, {.Key, "#text"}, {.String, "hi"}, {.Key, "b"}, {.String, "x"}, {.Close, ""}, {.Close, ""}}) {
+		testing.expect(t, xml.token(&w, s.kind, s.text) == nil)
+	}
+	mixed, merr := xml.writer_end(&w)
+	defer delete(mixed)
+	testing.expectf(t, merr == nil && string(mixed) == "<r>hi<b>x</b></r>\n", "mixed indent: %v %q", merr, mixed)
+}
+
+@(test)
 an_unfinished_sequence_is_refused :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	w: xml.Writer
 	testing.expect(t, xml.writer_start(&w) == nil)
 	testing.expect(t, xml.token(&w, .Object) == nil)
 	_, err := xml.writer_end(&w)
-	refused, ok := err.(write.Refused)
+	refused, ok := err.(xml.Refused)
 	testing.expect(t, ok && refused.why == .Malformed)
 }

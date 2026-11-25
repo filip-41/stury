@@ -150,3 +150,77 @@ tokens_write_an_indefinite_item_and_refuse_a_malformed_one :: proc(t: ^testing.T
 	want := []u8{0xBF, 0x61, 'a', 0x9F, 0x01, 0xF9, 0x3E, 0x00, 0xFF, 0xFF}
 	testing.expectf(t, err == nil && string(item) == string(want), "% x %v", item, err)
 }
+
+@(test)
+cbor_strict_specs_reencode_folded_numbers_and_refuse_dups :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Non-preferred CBOR folded numbers: small bignum, leading-zero bignum, indefinite bignum, indefinite decimal, indefinite bigfloat.
+	cases := [?]struct {
+		src:  []u8,
+		want: []u8,
+	}{
+		{{0xC2, 0x41, 0x01}, {0x01}},
+		{{0xC3, 0x41, 0x00}, {0x20}},
+		{{0xC2, 0x4A, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0xC2, 0x49, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+		{{0xC2, 0x5F, 0x42, 0x00, 0x01, 0x48, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF}, {0xC2, 0x49, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+		{{0xC4, 0x9F, 0x21, 0x19, 0x6A, 0xB3, 0xFF}, {0xC4, 0x82, 0x21, 0x19, 0x6A, 0xB3}},
+		{{0xC5, 0x9F, 0x21, 0x18, 0x03, 0xFF}, {0xC5, 0x82, 0x21, 0x03}},
+	}
+	for c, k in cases {
+		doc, err := cbor.build(c.src, .Cbor)
+		defer cbor.destroy(&doc)
+		testing.expectf(t, err == nil, "case %d build: %v", k, err)
+		for spec in ([?]cbor.Spec{.Preferred, .Deterministic, .Length_First}) {
+			out, _, werr := cbor.write(&doc, spec)
+			defer delete(out)
+			testing.expectf(t, werr == nil && string(out) == string(c.want), "case %d %v: %v % x", k, spec, werr, out)
+			testing.expectf(t, cbor.validate(out, spec) == nil, "case %d %v validate: %v", k, spec, cbor.validate(out, spec))
+		}
+	}
+
+	// Duplicate map keys are refused under `.Deterministic` and `.Length_First`.
+	dup_doc, derr := json.build(transmute([]u8)string(`{"a":1,"a":2}`), .Json, {dups = .All})
+	defer json.destroy(&dup_doc)
+	testing.expect(t, derr == nil)
+	for spec in ([?]cbor.Spec{.Deterministic, .Length_First}) {
+		_, _, werr := cbor.write(&dup_doc, spec)
+		r, ok := werr.(cbor.Refused)
+		testing.expectf(t, ok && r.why == .No_Spelling, "dup %v: %v", spec, werr)
+	}
+
+	// Oversized integer (> 4096 digits) is refused BEFORE sequence_take, leaving the token writer valid.
+	big := make([]u8, 4097)
+	defer delete(big)
+	for &b in big {
+		b = '9'
+	}
+	w: cbor.Writer
+	testing.expect(t, cbor.writer_start(&w) == nil)
+	testing.expect(t, cbor.token(&w, .Array) == nil)
+	terr := cbor.token(&w, .Number, string(big))
+	r, ok := terr.(cbor.Refused)
+	testing.expectf(t, ok && r.why == .No_Spelling && r.node == 1, "big int: %v", terr)
+	testing.expect(t, cbor.token(&w, .Number, "42") == nil)
+	testing.expect(t, cbor.token(&w, .Close) == nil)
+	out, eerr := cbor.writer_end(&w)
+	defer delete(out)
+	want_after := []u8{0x9F, 0x18, 42, 0xFF}
+	testing.expectf(t, eerr == nil && string(out) == string(want_after), "after big int: %v % x", eerr, out)
+
+	// `-0.0` preserves its sign bit in CBOR marshal (0xF9 0x80 0x00).
+	neg_zero := -0.0
+	nz, nzerr := cbor.marshal(&neg_zero, .Preferred)
+	defer delete(nz)
+	want_nz := []u8{0xF9, 0x80, 0x00}
+	testing.expectf(t, nzerr == nil && string(nz) == string(want_nz), "neg zero: %v % x", nzerr, nz)
+
+	// `verbatim_item` allowlist: `.Dropped` forces re-encode rather than raw `doc.src` copy.
+	raw_dups := []u8{0xA2, 0x61, 'a', 0x01, 0x61, 'a', 0x02}
+	ddoc, dderr := cbor.build(raw_dups, .Cbor, {dups = .Last})
+	defer cbor.destroy(&ddoc)
+	testing.expect(t, dderr == nil && .Dropped in ddoc.flags)
+	dout, _, dwerr := cbor.write(&ddoc, .Cbor)
+	defer delete(dout)
+	want_dropped := []u8{0xA1, 0x61, 'a', 0x02}
+	testing.expectf(t, dwerr == nil && string(dout) == string(want_dropped), "dropped flag: %v % x", dwerr, dout)
+}

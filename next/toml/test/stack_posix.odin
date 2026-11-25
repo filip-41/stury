@@ -89,6 +89,18 @@ read_nested :: proc(read: int, text: []u8) -> bool {
 	}
 }
 
+@(private = "file")
+write_nested_dotted :: proc(_: int, text: []u8) -> bool {
+	doc, err := toml.build(text, .Toml_1_0, {budget = {depth = 20_000}})
+	if err != nil {
+		return false
+	}
+	defer tape.destroy(&doc)
+	out, _, werr := toml.write(&doc, .Toml_1_0)
+	defer delete(out)
+	return werr == nil && string(out) == string(text)
+}
+
 // A thread of one MiB reads a text of 100,000 levels, which the levels past the frame take from the allocator and not
 // from the stack.
 @(test)
@@ -99,4 +111,13 @@ reads_nest_100000_levels_in_one_mib :: proc(t: ^testing.T) {
 		testkit.expect_reads_on_thread(t, 1 << 20, 6 + testkit.DEEP_READS, text, fmt.tprint(nesting), read_nested)
 		free_all(context.temp_allocator)
 	}
+}
+
+// A thread of one MiB writes 10,000+ nested dotted keys without overflowing the native stack.
+@(test)
+writes_deep_dotted_keys_in_one_mib :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	text := nested_text(12_000, .Dotted_Key)
+	testkit.expect_reads_on_thread(t, 1 << 20, 1, text, "Dotted_Key write", write_nested_dotted)
+	free_all(context.temp_allocator)
 }

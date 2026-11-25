@@ -23,6 +23,9 @@ writer_start :: proc(w: ^Writer, opts := Write_Options{}, sink := io.Writer{}, a
 	if opts.format != nil {
 		return tape.Bad_Option{"format"}
 	}
+	if opts.grow_header || len(opts.header) > 0 {
+		return tape.Bad_Option{"header" if len(opts.header) > 0 else "options"}
+	}
 	if opts.framing == .Lines && !write.compact(opts) {
 		return tape.Bad_Option{"framing"}
 	}
@@ -105,6 +108,11 @@ token :: proc(w: ^Writer, kind: write.Token_Kind, text := "") -> Write_Error {
 		write.put_byte(out, '\n')
 	}
 	return w.out.err
+}
+
+// Writes value `node` of `doc`, a document of any format, as tokens into `w`, as `dsv.put` writes a record.
+put :: proc(w: ^Writer, doc: ^tape.Document, node := tape.ROOT) -> Write_Error {
+	return write.tokens_of(doc, node, w, token, w.seq.allocator)
 }
 
 // Ends the text. The bytes of a buffer writer are returned, which the caller owns and frees with its allocator, and a

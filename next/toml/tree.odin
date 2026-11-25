@@ -107,7 +107,7 @@ Table_Tree :: struct {
 
 // Why an insertion refused.
 @(private)
-Refusal :: enum u8 {
+Tree_Refusal :: enum u8 {
 	None,
 	Redefined, // a table written twice, or a header over a dotted table
 	Duplicate, // a key written twice
@@ -256,7 +256,7 @@ index_grow :: #force_no_inline proc(t: ^Table_Tree) -> bool #no_bounds_check {
 // members, when its earlier members join it too. A container node is refused past the depth limit,
 // since its token opens a level.
 @(private)
-add_node :: proc(t: ^Table_Tree, parent: u32, part: ^Part, value: tape.Token, kind: Node_Kind, flags: bit_set[Flag; u8]) -> (id: u32, r: Refusal) #no_bounds_check {
+add_node :: proc(t: ^Table_Tree, parent: u32, part: ^Part, value: tape.Token, kind: Node_Kind, flags: bit_set[Flag; u8]) -> (id: u32, r: Tree_Refusal) #no_bounds_check {
 	depth := t.nodes[parent].depth + 1
 	if kind != .Scalar && depth + 1 > t.max_depth {
 		return NIL, .Too_Deep
@@ -308,7 +308,7 @@ grow_nodes :: proc(t: ^Table_Tree) -> bool {
 // The member a dotted key's part `part` names in table `cur`, which the key creates when it is new, with its token at
 // `lo`, the key part after it. An existing one is reached only when a dotted key made it.
 @(private)
-dotted_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32, first: bool, r: Refusal) #no_bounds_check {
+dotted_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32, first: bool, r: Tree_Refusal) #no_bounds_check {
 	id = find_child(t, cur, part.name)
 	if id == NIL {
 		id, r = add_node(t, cur, part, {lo = lo, kind = .Object, spelling = STYLE_DOTTED}, .Table, {.Dotted})
@@ -323,7 +323,7 @@ dotted_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32,
 
 // The scalar slot a key's last part names in table `cur`. The value is set once it has been read.
 @(private)
-leaf_key :: proc(t: ^Table_Tree, cur: u32, part: ^Part) -> (id: u32, r: Refusal) #no_bounds_check {
+leaf_key :: proc(t: ^Table_Tree, cur: u32, part: ^Part) -> (id: u32, r: Tree_Refusal) #no_bounds_check {
 	if find_child(t, cur, part.name) != NIL {
 		return NIL, .Duplicate
 	}
@@ -333,7 +333,7 @@ leaf_key :: proc(t: ^Table_Tree, cur: u32, part: ^Part) -> (id: u32, r: Refusal)
 // A table or array element a header's path passes through, a new table's token at `lo`, the key part after it. An
 // array of tables continues in its last element.
 @(private)
-header_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32, r: Refusal) #no_bounds_check {
+header_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32, r: Tree_Refusal) #no_bounds_check {
 	id = find_child(t, cur, part.name)
 	if id == NIL {
 		return add_node(t, cur, part, {lo = lo, kind = .Object}, .Table, {})
@@ -359,7 +359,7 @@ header_step :: proc(t: ^Table_Tree, cur: u32, part: ^Part, lo: u64) -> (id: u32,
 // other headers' paths made, which keeps its token as a walk may have given it. `heads` says whether the comments
 // above the header are the table's: false once a walk gave its key, as they would come after it.
 @(private)
-header_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, body: u64) -> (id: u32, heads: bool, r: Refusal) #no_bounds_check {
+header_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, body: u64) -> (id: u32, heads: bool, r: Tree_Refusal) #no_bounds_check {
 	id = find_child(t, cur, part.name)
 	if id == NIL {
 		id, r = add_node(t, cur, part, {lo = body, kind = .Object}, .Table, {.Header})
@@ -380,7 +380,7 @@ header_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, body: u64) -> (id: u3
 // The new element table of the array of tables a `[[header]]` at `start` ends in, its token at `body`, the byte past
 // the header.
 @(private)
-array_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, start, body: u64) -> (id: u32, r: Refusal) #no_bounds_check {
+array_leaf :: proc(t: ^Table_Tree, cur: u32, part: ^Part, start, body: u64) -> (id: u32, r: Tree_Refusal) #no_bounds_check {
 	array := find_child(t, cur, part.name)
 	if array == NIL {
 		array, r = add_node(t, cur, part, {lo = start, kind = .Array}, .Array, {.Tables})

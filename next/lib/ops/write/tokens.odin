@@ -12,6 +12,7 @@ import "stury:lib/core/tape"
 Token_Kind :: tape.Token_Kind
 
 // The levels a sequence holds in itself. Past them its stack comes from the writer's allocator.
+@(private)
 TOKEN_LEVELS :: 64
 
 @(private)

@@ -546,6 +546,9 @@ fill_bit_set :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, v: ^runtime.T
 	#partial switch e in elem.variant {
 	case ^runtime.Type_Info_Enum:
 		m.enum_info = e
+		if b_int, ok := runtime.type_info_base(e.base).variant.(^runtime.Type_Info_Integer); ok {
+			m.signed = b_int.signed
+		}
 	case ^runtime.Type_Info_Integer:
 		m.signed = e.signed
 	case ^runtime.Type_Info_Rune:

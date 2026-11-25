@@ -22,8 +22,12 @@ Writer :: struct {
 // procedure, which `writer_end` returns. `opts.framing` and `opts.format` are `Bad_Option`, and so are options `write`
 // refuses.
 writer_start :: proc(w: ^Writer, spec := Spec.Toml_1_0, opts := Write_Options{}, sink := io.Writer{}, allocator := context.allocator) -> Write_Error {
-	if opts.format != nil || opts.framing != .None || opts.ascii {
-		return tape.Bad_Option{"format" if opts.format != nil else "options"}
+	if u8(spec) > u8(max(Spec)) {
+		return tape.Bad_Option{"spec"}
+	}
+	if opts.format != nil || opts.framing != .None || opts.ascii || opts.grow_header || len(opts.header) > 0 {
+		opt := "format" if opts.format != nil else "header" if len(opts.header) > 0 || opts.grow_header else "options"
+		return tape.Bad_Option{opt}
 	}
 	w^ = {spec = spec, opts = opts, sink = sink, allocator = allocator}
 	if e := write.token_tape_start(&w.tape, false, 0, allocator); e != nil {
@@ -37,7 +41,7 @@ writer_start :: proc(w: ^Writer, spec := Spec.Toml_1_0, opts := Write_Options{},
 // `.Number`, which must be a JSON number. The other kinds take none. A token the sequence cannot take here is
 // `Refused{index, .Malformed}`, and a text with no spelling `Refused{index, .No_Spelling}`; neither is taken, and the
 // writer takes the next token.
-token :: proc(w: ^Writer, kind: write.Token_Kind, text := "") -> Write_Error {
+token :: proc(w: ^Writer, kind: Token_Kind, text := "") -> Write_Error {
 	return write.token_tape_take(&w.tape, kind, text)
 }
 
@@ -49,7 +53,10 @@ writer_end :: proc(w: ^Writer) -> (text: []u8, err: Write_Error) {
 	if !write.token_tape_done(&w.tape) {
 		return nil, write.Refused{tape.Node_Index(w.tape.seq.taken), .Malformed}
 	}
-	doc := write.token_tape_document(&w.tape, as(w.spec))
+	doc, derr := write.token_tape_document(&w.tape)
+	if derr != nil {
+		return nil, derr
+	}
 	if w.sink.procedure != nil {
 		_, err = write.to_sink(w.sink, &doc, u8(w.spec), w.opts, w.allocator, write_out)
 		return nil, err

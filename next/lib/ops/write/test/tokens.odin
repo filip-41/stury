@@ -144,4 +144,20 @@ documents_write_a_record :: proc(t: ^testing.T) {
 	}
 	_, _, err := json.write(&doc, .Json, {framing = .Lines, indent = 2})
 	testing.expect(t, err != nil)
+
+	// Comments are dropped cleanly under `.Lines` framing so NDJSON never contains embedded newlines.
+	commented, _ := json.build(transmute([]u8)string("// head\n{\"a\": 1 /* mid */}\n// foot\n"), .Jsonc)
+	defer json.destroy(&commented)
+	line, dropped, lerr := json.write(&commented, .Jsonc, {framing = .Lines})
+	defer delete(line)
+	testing.expectf(t, lerr == nil && string(line) == "{\"a\":1}\n" && dropped == {.Comment, .Comment_Inline, .Comment_Foot}, "lines comments: %v %q %v", lerr, line, dropped)
+
+	// `json.put` streams documents into a `json.Writer`.
+	w: json.Writer
+	testing.expect(t, json.writer_start(&w, {framing = .Lines}) == nil)
+	testing.expect(t, json.put(&w, &doc) == nil)
+	testing.expect(t, json.put(&w, &commented) == nil)
+	streamed, serr := json.writer_end(&w)
+	defer delete(streamed)
+	testing.expectf(t, serr == nil && string(streamed) == "{\"a\":[1,2]}\n{\"a\":1}\n", "json.put: %v %q", serr, streamed)
 }

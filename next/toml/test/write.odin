@@ -1,9 +1,9 @@
 package toml_tests
 
+import "core:strings"
 import "core:testing"
 import "stury:json"
 import "stury:lib/core/tape"
-import "stury:lib/ops/write"
 import "stury:testkit"
 import "stury:toml"
 
@@ -77,7 +77,7 @@ values_with_no_toml_spelling_are_refused :: proc(t: ^testing.T) {
 		doc, _ := json.build(transmute([]u8)src)
 		defer json.destroy(&doc)
 		_, _, err := toml.write(&doc)
-		refused, ok := err.(write.Refused)
+		refused, ok := err.(toml.Refused)
 		testing.expectf(t, ok && refused.why == .No_Spelling, "%s: %v", src, err)
 	}
 	doc, _ := json.build(transmute([]u8)string(`{"a":1}`))
@@ -109,4 +109,98 @@ toml_numbers_write_as_the_reader_read_them :: proc(t: ^testing.T) {
 	again, _, rerr := toml.write(&back)
 	defer delete(again)
 	testing.expectf(t, rerr == nil && string(again) == want, "%v\n%s", rerr, again)
+}
+
+@(test)
+toml_write_partial_dups_v11_utf8_and_deep_dotted :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// 1. Partial documents from `toml.scan` are refused with `.Partial`.
+	demand, _ := tape.demand_of([][]tape.Step{{tape.Name("a")}})
+	defer tape.destroy(&demand)
+	part, perr := toml.scan(transmute([]u8)string("a = 1\nb = 2\n"), &demand)
+	defer toml.destroy(&part)
+	testing.expect(t, perr == nil)
+	_, _, pwerr := toml.write(&part)
+	pr, pok := pwerr.(toml.Refused)
+	testing.expectf(t, pok && pr.why == .Partial, "partial root: %v", pwerr)
+
+	demand2, _ := tape.demand_of([][]tape.Step{{tape.Name("arr"), tape.Index(0)}})
+	defer tape.destroy(&demand2)
+	part2, perr2 := toml.scan(transmute([]u8)string("arr = [1, 2, 3]\n"), &demand2)
+	defer toml.destroy(&part2)
+	testing.expect(t, perr2 == nil)
+	_, _, pwerr2 := toml.write(&part2)
+	pr2, pok2 := pwerr2.(toml.Refused)
+	testing.expectf(t, pok2 && pr2.why == .Partial, "partial array: %v", pwerr2)
+
+	// 2. Duplicate keys from non-TOML docs (e.g. JSON built with `dups = .All`) are refused.
+	dup_doc, derr := json.build(transmute([]u8)string(`{"a":1,"a":2}`), .Json, {dups = .All})
+	defer json.destroy(&dup_doc)
+	testing.expect(t, derr == nil)
+	for sort in ([?]bool{false, true}) {
+		_, _, dwerr := toml.write(&dup_doc, .Toml_1_0, {sort_keys = sort})
+		dr, dok := dwerr.(toml.Refused)
+		testing.expectf(t, dok && dr.why == .No_Spelling, "dup sort=%v: %v", sort, dwerr)
+	}
+
+	// 3. TOML 1.1 no-seconds times/datetimes gain `:00` when written as TOML 1.0.
+	v11_src := "t = 07:32\nld = 1979-05-27T07:32\nod1 = 1979-05-27T07:32Z\nod2 = 1979-05-27 07:32+02:00\nd = 1979-05-27\n"
+	v11_doc, v11_err := toml.build(transmute([]u8)v11_src, .Toml_1_1)
+	defer toml.destroy(&v11_doc)
+	testing.expectf(t, v11_err == nil, "v11 build: %v", v11_err)
+	as_10, _, w10_err := toml.write(&v11_doc, .Toml_1_0)
+	defer delete(as_10)
+	want_10 := "t = 07:32:00\nld = 1979-05-27T07:32:00\nod1 = 1979-05-27T07:32:00Z\nod2 = 1979-05-27 07:32:00+02:00\nd = 1979-05-27\n"
+	testing.expectf(t, w10_err == nil && string(as_10) == want_10, "v11->v10: %v\n%s", w10_err, as_10)
+	testing.expectf(t, toml.validate(as_10, .Toml_1_0) == nil, "validate v10: %v", toml.validate(as_10, .Toml_1_0))
+
+	// 4. `Comment_Foot` on an inline table in TOML 1.1 written as TOML 1.0 (not broken) is reported in `dropped`.
+	foot_src := "t = {\n  a = 1,\n  # foot\n}\n"
+	foot_doc, foot_err := toml.build(transmute([]u8)foot_src, .Toml_1_1)
+	defer toml.destroy(&foot_doc)
+	testing.expectf(t, foot_err == nil, "foot build: %v", foot_err)
+	foot_out, foot_dropped, foot_werr := toml.write(&foot_doc, .Toml_1_0)
+	defer delete(foot_out)
+	testing.expectf(t, foot_werr == nil && .Comment_Foot in foot_dropped, "foot dropped: %v %v %q", foot_werr, foot_dropped, foot_out)
+
+	// 5. Invalid UTF-8 in a comment is dropped cleanly, and invalid UTF-8 in a literal string falls back to basic string.
+	cmt_buf := transmute([]u8)strings.clone("// bad X comment\n{\"a\": 1}")
+	defer delete(cmt_buf)
+	bad_cmt, berr := json.build(cmt_buf, .Jsonc)
+	defer json.destroy(&bad_cmt)
+	testing.expect(t, berr == nil)
+	cmt_buf[7] = 0xff
+	bad_out, bad_dropped, bwerr := toml.write(&bad_cmt, .Toml_1_0)
+	defer delete(bad_out)
+	testing.expectf(t, bwerr == nil && .Comment in bad_dropped && toml.validate(bad_out, .Toml_1_0) == nil, "bad utf8 comment: %v %v %q", bwerr, bad_dropped, bad_out)
+
+	lit_buf := transmute([]u8)strings.clone("a = 'badX'\n")
+	defer delete(lit_buf)
+	lit_doc, lerr := toml.build(lit_buf, .Toml_1_0)
+	defer toml.destroy(&lit_doc)
+	testing.expect(t, lerr == nil)
+	lit_buf[8] = 0xff
+	lit_out, _, lwerr := toml.write(&lit_doc, .Toml_1_0)
+	defer delete(lit_out)
+	testing.expectf(t, lwerr == nil && toml.validate(lit_out, .Toml_1_0) == nil && string(lit_out) == "a = \"bad\ufffd\"\n", "bad utf8 literal: %v %q", lwerr, lit_out)
+
+	// 6. Deep dotted keys (10,000+ levels) write iteratively without native stack overflow.
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	DEPTH :: 10_000
+	for i in 0 ..< DEPTH {
+		if i > 0 {
+			strings.write_byte(&b, '.')
+		}
+		strings.write_byte(&b, 'a')
+	}
+	strings.write_string(&b, " = 1\n")
+	deep_src := transmute([]u8)strings.to_string(b)
+	deep_doc, deep_err := toml.build(deep_src, .Toml_1_0, {budget = {depth = DEPTH + 16}})
+	defer toml.destroy(&deep_doc)
+	testing.expectf(t, deep_err == nil, "deep build: %v", deep_err)
+	deep_out, _, deep_werr := toml.write(&deep_doc, .Toml_1_0)
+	defer delete(deep_out)
+	testing.expectf(t, deep_werr == nil && string(deep_out) == string(deep_src), "deep write: %v len=%d", deep_werr, len(deep_out))
 }

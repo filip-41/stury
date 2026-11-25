@@ -6,24 +6,31 @@ import "stury:lib/core/tape"
 import "stury:lib/ops/typed"
 
 Plan :: typed.Plan
+plan_destroy :: typed.plan_destroy
 
 @(private)
 TAG :: "xml"
 
-// Typed writes: an Odin value written as a XML text by the plan a typed read of its type is made by, so the names,
-// enums and `-` of the tags are the ones a read takes and `unmarshal` returns the value. The plan of a call is made and
-// freed with it when none is given. The value must write as an object of one member, the root element, as `write` takes it.
+// The plan of `T` for XML writes, as `typed.plan_make` makes it, which `marshal` and `marshal_to` take.
+@(require_results)
+plan_make :: proc($T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (Plan, tape.Error) {
+	return typed.plan_make(T, TAG, opts, allocator)
+}
 
-// Writes `value`, of a type the plan takes, as a XML text of `spec` under `opts` in a buffer from `allocator` that the
-// caller owns. `plan` is the plan of `T` that `plan_make` made, which a call that writes many values of one type makes
-// once, else nil. A `Raw` member or a `time.Time` outside years 0 to 9999 is `Bad_Option` naming it, and a value with no
-// XML spelling, a null or a non-finite float, is `Refused`.
+// Typed writes: an Odin value written as an XML text by the plan `plan_make` makes, so the names, enums and `-` of
+// the tags are the ones `marshal` writes by. The plan of a call is made and freed with it when none is given. The
+// value must write as an object of one member, the root element, as `write` takes it.
+
+// Writes `value`, of a type the plan takes, as an XML text of `spec` under `opts` in a buffer from `allocator` that
+// the caller owns. `plan` is the plan of `T` that `plan_make` made, which a call that writes many values of one type
+// makes once, else nil. A `Raw` member or a `time.Time` outside years 0 to 9999 is `Bad_Option` naming it, and a value
+// with no XML spelling, a non-finite float or an invalid element name, is `Refused`.
 marshal :: proc(value: ^$T, spec := Spec.Xml, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> (text: []u8, err: Write_Error) {
 	w: Writer
 	if err = writer_start(&w, spec, opts, {}, allocator); err != nil {
 		return nil, err
 	}
-	if err = marshal_tokens(&w, value, T, plan, allocator); err != nil {
+	if err = marshal_into(&w, value, T, plan, allocator); err != nil {
 		_, _ = writer_end(&w)
 		return nil, err
 	}
@@ -33,14 +40,14 @@ marshal :: proc(value: ^$T, spec := Spec.Xml, opts := Write_Options{}, plan: ^Pl
 // `marshal` into `sink`, through a buffer of `write.SINK_BYTES` from `allocator`. On a refusal or a failed sink the
 // sink may hold a prefix of the text.
 marshal_to :: proc(sink: io.Writer, value: ^$T, spec := Spec.Xml, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> Write_Error {
-	w: Writer
 	if sink.procedure == nil {
 		return tape.Bad_Option{"sink"}
 	}
+	w: Writer
 	if err := writer_start(&w, spec, opts, sink, allocator); err != nil {
 		return err
 	}
-	if err := marshal_tokens(&w, value, T, plan, allocator); err != nil {
+	if err := marshal_into(&w, value, T, plan, allocator); err != nil {
 		_, _ = writer_end(&w)
 		return err
 	}
@@ -49,33 +56,17 @@ marshal_to :: proc(sink: io.Writer, value: ^$T, spec := Spec.Xml, opts := Write_
 }
 
 @(private)
-marshal_tokens :: proc(w: ^Writer, value: rawptr, T: typeid, plan: ^Plan, allocator: runtime.Allocator) -> Write_Error {
-	made: Plan
-	plan := plan
-	if plan == nil {
-		e: Error
-		if made, e = typed.plan_make(T, TAG, {}, allocator); e != nil {
-			if memory, ok := e.(runtime.Allocator_Error); ok {
-				return memory
-			}
-			bad, _ := e.(tape.Bad_Option)
-			return bad
+marshal_into :: proc(w: ^Writer, value: rawptr, T: typeid, plan: ^Plan, allocator: runtime.Allocator) -> Write_Error {
+	werr, err := typed.marshal(value, T, TAG, plan, w, token, allocator)
+	if werr != nil {
+		return werr
+	}
+	if err != nil {
+		if memory, ok := err.(runtime.Allocator_Error); ok {
+			return memory
 		}
-		plan = &made
-	}
-	defer if plan == &made {
-		typed.plan_destroy(&made)
-	}
-	err, why, memory := typed.marshal(plan, value, w, token, allocator)
-	switch {
-	case err != nil:
-		return err
-	case memory != nil:
-		return memory
-	case why == .Raw:
-		return tape.Bad_Option{"raw"}
-	case why == .Time:
-		return tape.Bad_Option{"time"}
+		bad, _ := err.(tape.Bad_Option)
+		return bad
 	}
 	return nil
 }

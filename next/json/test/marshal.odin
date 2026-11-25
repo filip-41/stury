@@ -175,3 +175,60 @@ a_value_with_no_json_spelling_is_refused :: proc(t: ^testing.T) {
 	bad, is_bad := err.(tape.Bad_Option)
 	testing.expectf(t, is_bad && bad.option == "raw", "%v", err)
 }
+
+@(private = "file")
+High_Enum :: enum u64 {
+	Low  = 1,
+	High = 1 << 63,
+}
+
+@(private = "file")
+Wide_Bits :: bit_set[0 ..= 127; u128]
+
+@(private = "file")
+Arr_Omit :: struct {
+	zeros:   [3]int `json:",omitempty"`,
+	nonzero: [3]int `json:",omitempty"`,
+}
+
+@(test)
+marshal_edge_cases_plan_array_bits_enum_negzero :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	context.allocator = context.temp_allocator
+
+	// 1. Mismatched or zero Plan is refused with Bad_Option{"plan"}.
+	a := Inner{1, "x"}
+	wrong_plan, perr := json.plan_make(Kitchen)
+	testing.expect(t, perr == nil)
+	_, err := json.marshal(&a, {}, &wrong_plan)
+	testing.expect_value(t, err, json.Write_Error(json.Bad_Option{"plan"}))
+	zero_plan: json.Plan
+	_, err = json.marshal(&a, {}, &zero_plan)
+	testing.expect_value(t, err, json.Write_Error(json.Bad_Option{"plan"}))
+
+	// 2. Fixed array `omitempty` inspects ALL elements, not just element 0.
+	ao := Arr_Omit{zeros = {0, 0, 0}, nonzero = {0, 1, 0}}
+	atext, ok := marshal_text(t, &ao)
+	testing.expectf(t, ok && atext == `{"nonzero":[0,1,0]}`, "array omitempty: %s", atext)
+
+	// 3. 128-bit `bit_set` marshals and unmarshals bits past 63.
+	wb := Wide_Bits{0, 63, 64, 127}
+	wtext, wok := marshal_text(t, &wb)
+	testing.expectf(t, wok && wtext == `[0,63,64,127]`, "128-bit bit_set: %s", wtext)
+	wb_back: Wide_Bits
+	testing.expect(t, json.unmarshal(transmute([]u8)wtext, &wb_back) == nil && wb_back == wb)
+
+	// 4. Unsigned u64 enum >= 2^63 with `.Int` marshals as unsigned, not negative.
+	eplan, eerr := json.plan_make(High_Enum, {enums = .Int})
+	testing.expect(t, eerr == nil)
+	he := High_Enum.High
+	htext, hok := marshal_text(t, &he, {}, &eplan)
+	testing.expectf(t, hok && htext == "9223372036854775808", "u64 enum: %s", htext)
+
+	// 5. `-0.0` preserves its sign bit and `.0`.
+	nz := -0.0
+	nztext, nzok := marshal_text(t, &nz)
+	testing.expectf(t, nzok && nztext == "-0.0", "neg zero: %s", nztext)
+	nz_back: f64
+	testing.expect(t, json.unmarshal(transmute([]u8)nztext, &nz_back) == nil && math.sign_bit(nz_back))
+}

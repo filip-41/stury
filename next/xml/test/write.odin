@@ -1,5 +1,6 @@
 package xml_tests
 
+import "core:strings"
 import "core:testing"
 import "stury:json"
 import "stury:lib/core/tape"
@@ -115,4 +116,68 @@ xml_texts_with_no_decode_hold_no_byte_to_escape :: proc(t: ^testing.T) {
 		testing.expectf(t, berr == nil, "%q: %v", text, berr)
 		testkit.values_agree(t, &doc, tape.ROOT, &back, tape.ROOT, {facts = {.Attribute, .Comment}}, "xml")
 	}
+}
+
+@(test)
+xml_write_hardening_and_consistency :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// 1. Spec 0x80 (deleted FROM_TOKENS bit) is refused with Bad_Option{"spec"}.
+	doc, _ := json.build(transmute([]u8)string(`{"a":1}`))
+	defer json.destroy(&doc)
+	_, _, serr := xml.write(&doc, xml.Spec(0x80))
+	testing.expect_value(t, serr, xml.Write_Error(xml.Bad_Option{"spec"}))
+
+	// 2. Root `#text`, colons in non-XML names, invalid Unicode name chars, and U+FFFE/U+FFFF are refused.
+	for bad in ([?]string{
+		`{"#text":"hello"}`,
+		`{"a:b":1}`,
+		`{":":1}`,
+		"{\"\u00a0\":1}",
+		"{\"a\":\"\ufffe\"}",
+		"{\"a\":\"\uffff\"}",
+		"{\"r\":{\"#text\":\"ok\ufffe\"}}",
+	}) {
+		bdoc, berr := json.build(transmute([]u8)bad)
+		defer json.destroy(&bdoc)
+		testing.expectf(t, berr == nil, "build %q: %v", bad, berr)
+		_, _, werr := xml.write(&bdoc)
+		r, ok := werr.(xml.Refused)
+		testing.expectf(t, ok && r.why == .No_Spelling, "%q: %v", bad, werr)
+	}
+
+	// Valid Unicode XML name succeeds.
+	udoc, _ := json.build(transmute([]u8)string(`{"élém":"ok"}`))
+	defer json.destroy(&udoc)
+	utext, _, uerr := xml.write(&udoc)
+	defer delete(utext)
+	testing.expectf(t, uerr == nil && string(utext) == "<élém>ok</élém>" && xml.validate(utext) == nil, "unicode name: %v %q", uerr, utext)
+
+	// 3. Comments with U+FFFE/U+FFFF or invalid UTF-8 are dropped cleanly so output validates.
+	for csrc in ([?]string{"// bad \ufffe\n{\"r\":1}", "// bad \uffff\n{\"r\":1}"}) {
+		cdoc, cerr := json.build(transmute([]u8)csrc, .Jsonc)
+		defer json.destroy(&cdoc)
+		testing.expect(t, cerr == nil)
+		ctext, cdropped, cwerr := xml.write(&cdoc)
+		defer delete(ctext)
+		testing.expectf(t, cwerr == nil && .Comment in cdropped && xml.validate(ctext) == nil, "%q: %v %v %q", csrc, cwerr, cdropped, ctext)
+	}
+	bad_cmt := transmute([]u8)strings.clone("// bad X\n{\"r\":1}")
+	defer delete(bad_cmt)
+	cdoc, cerr := json.build(bad_cmt, .Jsonc)
+	defer json.destroy(&cdoc)
+	testing.expect(t, cerr == nil)
+	bad_cmt[7] = 0xff
+	ctext, cdropped, cwerr := xml.write(&cdoc)
+	defer delete(ctext)
+	testing.expectf(t, cwerr == nil && .Comment in cdropped && xml.validate(ctext) == nil, "bad utf8 comment: %v %v %q", cwerr, cdropped, ctext)
+
+	// 4. `>` is handled consistently between plain leaf elements and attributed/mixed elements on XML reads.
+	raw_src := `<r><a k="1">1 > 0</a><b>1 > 0</b><c>1 > 0<d/></c></r>`
+	rdoc, rerr := xml.build(transmute([]u8)raw_src)
+	defer xml.destroy(&rdoc)
+	testing.expect(t, rerr == nil)
+	rout, _, rwerr := xml.write(&rdoc)
+	defer delete(rout)
+	testing.expectf(t, rwerr == nil && string(rout) == raw_src && xml.validate(rout) == nil, "raw > consistency: %v\n%s", rwerr, rout)
 }

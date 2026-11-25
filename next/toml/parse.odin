@@ -63,7 +63,7 @@ no_memory :: proc "contextless" (p: ^Parser) -> bool {
 
 // Turns the tree's refusal `r` of an insertion at byte `at` into its fault, and returns whether there was none.
 @(private)
-refused :: proc "contextless" (p: ^Parser, r: Refusal, at: int) -> bool {
+refused :: proc "contextless" (p: ^Parser, r: Tree_Refusal, at: int) -> bool {
 	switch r {
 	case .None:
 		return true
@@ -398,7 +398,7 @@ header :: proc(p: ^Parser) -> bool #no_bounds_check {
 	}
 	last := &p.parts[len(p.parts) - 1]
 	id: u32
-	r: Refusal
+	r: Tree_Refusal
 	heads := true
 	if array {
 		id, r = array_leaf(&p.tree, cur, last, u64(start), u64(p.pos))

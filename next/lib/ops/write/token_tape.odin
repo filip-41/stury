@@ -3,6 +3,7 @@ package write
 import "base:runtime"
 import "core:slice"
 import "core:unicode/utf8"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
 // The tokens of a target that lays out a whole document, which a token writer cannot write as they come: TOML puts a
@@ -65,6 +66,12 @@ token_tape_take :: proc(t: ^Token_Tape, kind: Token_Kind, text: string) -> Error
 	if _, err := sequence_take(&t.seq, kind); err != nil {
 		return err
 	}
+	return token_tape_push(t, kind, text)
+}
+
+// Appends an already-validated token `kind` with `text` to `t`, updating open containers and child counts.
+@(private)
+token_tape_push :: proc(t: ^Token_Tape, kind: Token_Kind, text: string) -> Error {
 	if kind == .Close {
 		closed := pop(&t.open)
 		count := closed.children
@@ -115,6 +122,7 @@ token_tape_take :: proc(t: ^Token_Tape, kind: Token_Kind, text: string) -> Error
 
 // Whether `text` is the text a token of `kind` takes: valid UTF-8 for a `.Key` or `.String`, a JSON number's text for a
 // `.Number`.
+@(private)
 token_text_ok :: proc "contextless" (kind: Token_Kind, text: string) -> bool {
 	if kind == .Key || kind == .String {
 		return utf8.valid_string(text)
@@ -124,6 +132,7 @@ token_text_ok :: proc "contextless" (kind: Token_Kind, text: string) -> bool {
 
 // Empties a framed `t`, which holds its memory, to take the next tokens as a tape of its own. A document made of it is
 // no longer valid.
+@(private)
 token_tape_reset :: proc(t: ^Token_Tape) {
 	clear(&t.nodes)
 	clear(&t.texts)
@@ -139,17 +148,50 @@ token_tape_done :: proc "contextless" (t: ^Token_Tape) -> bool {
 	return sequence_done(&t.seq) || t.framed && t.seq.depth == 0
 }
 
-// The document of the tokens, of `format`, whose nodes point into the tape. It holds nothing of its own, so it is not
-// destroyed and is valid until the tape is dropped. The tokens must be a whole text.
-token_tape_document :: proc(t: ^Token_Tape, format: ^tape.Format) -> tape.Document {
+// The neutral format of a `Token_Tape` document: decoded UTF-8 strings and strict decimal numbers, with no format
+// identity, options, facts or capabilities, so target writers never mistake token input for a native read.
+@(private, rodata)
+TOKEN_FORMAT := tape.Format {
+	name      = "tokens",
+	id        = 0,
+	options   = .None,
+	facts     = {},
+	caps      = {},
+	dups      = .Last,
+	number    = token_number,
+	same_text = token_same_text,
+	key_hash  = token_key_hash,
+}
+
+@(private)
+token_number :: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number {
+	n, _ := spell.number_strict(src, t.lo, t.lo + u64(t.n))
+	return n
+}
+
+@(private)
+token_same_text :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {
+	return t.n == o.n && string(src[t.lo:][:t.n]) == string(other[o.lo:][:o.n])
+}
+
+@(private)
+token_key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {
+	return tape.text_hash(src[t.lo:][:t.n])
+}
+
+// The document of the tokens, whose nodes point into the tape under the neutral token format. It holds nothing of its
+// own, so it is not destroyed and is valid until the tape is dropped. The tokens must be a whole text.
+token_tape_document :: proc(t: ^Token_Tape) -> (doc: tape.Document, err: runtime.Allocator_Error) {
 	if t.framed {
 		count := t.open[0].children
 		t.nodes[0].n = u32(len(t.nodes))
 		t.nodes[0].spelling = u16(min(count, u32(tape.MAX_CHILDREN)))
 		if count >= u32(tape.MAX_CHILDREN) {
-			append(&t.counts, tape.Child_Count{node = 0, count = count})
+			if _, err = append(&t.counts, tape.Child_Count{node = 0, count = count}); err != nil {
+				return {}, err
+			}
 		}
 	}
 	slice.sort_by(t.counts[:], proc(a, b: tape.Child_Count) -> bool {return a.node < b.node})
-	return {src = t.texts[:], nodes = t.nodes[:], counts = t.counts[:], format = format, allocator = t.allocator}
+	return {src = t.texts[:], nodes = t.nodes[:], counts = t.counts[:], format = &TOKEN_FORMAT, allocator = t.allocator}, nil
 }

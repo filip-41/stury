@@ -28,6 +28,9 @@ Options :: struct {
 	// it the header is the caller's, else the first row's keys, rows are written as they come, and a later row's key the
 	// header lacks is `Refused{.Row_Keys}`. A write of a document writes the union of its keys either way.
 	grow_header: bool,
+	// A delimited token writer's column names, in the order they are written, nil for the first row's keys.
+	// `Bad_Option{"header"}` under `grow_header` or when a key repeats.
+	header:      []string,
 	// The target's own options, as a read takes them: a delimited target's `Dsv_Options`. Nil takes those a delimited
 	// document was read with, else the target's defaults. Another family's options are `Bad_Option{"format"}`.
 	format: tape.Format_Options,

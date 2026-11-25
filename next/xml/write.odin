@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:encoding/base64"
 import "core:io"
+import "stury:lib/base/spell"
 import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
@@ -16,6 +17,10 @@ import "stury:lib/ops/write"
 
 Write_Options :: write.Options
 Write_Error :: write.Error
+Token_Kind :: write.Token_Kind
+Record_Framing :: write.Record_Framing
+Refused :: write.Refused
+Refusal :: write.Refusal
 
 // Writes value `opts.node` of `doc`, a document of any format, as a text of `spec` in a buffer from `allocator` that
 // the caller owns. Returns the kinds of the facts `doc` holds that the text does not: none of an XML document, of
@@ -56,27 +61,23 @@ Writing :: struct {
 	w:      ^write.Tree,
 	doc:    ^tape.Document,
 	stack:  [dynamic]Open_Frame,
-	unit:   []u8, // what one level of indent is
-	xml:    bool, // the document is an XML text, whose attributes, instructions and declarations are written
-	read:   bool, // the document is the read of an XML text, whose texts with no decode hold no byte to escape but `>`
-	open:   bool, // a start tag is written but for its `>`
+	width:   int, // bytes of indent a level
+	fill:    u64, // eight bytes of indent
+	xml:     bool, // the document is a real XML read, whose names/texts/attributes/instructions are XML's own
+	raw_xml: bool, // `xml` and `doc.flags` has neither `.Held` nor `.Tolerated`, so decode-free strings copy verbatim
+	open:    bool, // a start tag is written but for its `>`
 	wrote:  bool,
 	pretty: bool, // the text is indented
 }
 
-// Added to the spec of a write of a document the token writer made, whose texts are values and not the text of a read.
 @(private)
-FROM_TOKENS :: u8(0x80)
-
-@(private)
-write_out :: proc(out: ^write.Out, doc: ^tape.Document, tagged: u8, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
-	read := tagged & FROM_TOKENS == 0
-	spec := tagged & ~FROM_TOKENS
+write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
 	if spec > u8(max(Spec)) {
 		return {}, tape.Bad_Option{"spec"}
 	}
-	if opts.format != nil || opts.ascii || opts.sort_keys || opts.framing != .None {
-		return {}, tape.Bad_Option{"format" if opts.format != nil else "options"}
+	if opts.format != nil || opts.ascii || opts.sort_keys || opts.framing != .None || opts.grow_header || len(opts.header) > 0 {
+		opt := "format" if opts.format != nil else "header" if len(opts.header) > 0 || opts.grow_header else "options"
+		return {}, tape.Bad_Option{opt}
 	}
 	w: write.Tree
 	x := doc.format == &FORMATS[.Xml]
@@ -86,8 +87,11 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, tagged: u8, opts: Write_
 	if doc.nodes[opts.node].kind != .Object || tape.child_count(doc, opts.node, doc.nodes[opts.node]) != 1 {
 		w.err = write.Refused{opts.node, .No_Spelling}
 	} else {
-		s := Writing{out = out, w = &w, doc = doc, xml = x, read = x && read, pretty = !write.compact(opts)}
-		s.unit = transmute([]u8)string("\t") if opts.tab else TABS[:int(opts.indent)]
+		width, fill := int(opts.indent), u64(0x2020202020202020)
+		if opts.tab {
+			width, fill = 1, 0x0909090909090909
+		}
+		s := Writing{out = out, w = &w, doc = doc, width = width, fill = fill, xml = x, raw_xml = x && doc.flags & {.Held, .Tolerated} == {}, pretty = !write.compact(opts)}
 		s.stack.allocator = allocator
 		facts, tables := write.tree_facts(&w), write.tree_tables(&w)
 		switch {
@@ -105,9 +109,6 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, tagged: u8, opts: Write_
 	return dropped, w.err
 }
 
-@(private, rodata)
-TABS := [255]u8{0 ..< 255 = ' '}
-
 @(private)
 fail :: proc(w: ^write.Tree, at: tape.Node_Index) {
 	if w.err == nil {
@@ -123,12 +124,39 @@ begin :: #force_inline proc(s: ^Writing, level: int, pretty: bool) {
 		s.open = false
 	}
 	if pretty && s.wrote {
-		write.put_byte(s.out, '\n')
-		for _ in 0 ..< level {
-			write.put(s.out, s.unit)
-		}
+		line_indent(s.out, s, level)
 	}
 	s.wrote = true
+}
+
+// A line end and the indent of `level` levels, written in eight-byte stores.
+@(private)
+line_indent :: #force_inline proc(out: ^write.Out, s: ^Writing, level: int) #no_bounds_check {
+	n := level * s.width
+	if n + 9 > write.ROOM_MAX {
+		line_indent_long(out, s, n)
+		return
+	}
+	p := write.room(out, n + 9)
+	p[0] = '\n'
+	for k := 0; k < n; k += 8 {
+		intrinsics.unaligned_store((^u64)(p[1 + k:]), s.fill)
+	}
+	out.cursor += n + 1
+}
+
+@(private, cold)
+line_indent_long :: #force_no_inline proc(out: ^write.Out, s: ^Writing, n: int) {
+	write.put_byte(out, '\n')
+	for left := n; left > 0; {
+		k := min(left, write.ROOM_MAX - 8)
+		p := write.room(out, k + 8)
+		for i := 0; i < k; i += 8 {
+			intrinsics.unaligned_store((^u64)(p[i:]), s.fill)
+		}
+		out.cursor += k
+		left -= k
+	}
 }
 
 // Writes the facts among `facts` of the kinds `kinds`, each on a line at `level` when `pretty`: a comment as XML spells
@@ -166,15 +194,29 @@ put_misc :: proc(s: ^Writing, facts: []tape.Fact, kinds: tape.Facts, level: int,
 	}
 }
 
-// Whether `body` can stand in a comment: no `--`, no `-` at its end, and no control character but tab and the line ends.
+// Whether `body` can stand in an XML comment: valid UTF-8, no U+FFFE/U+FFFF noncharacter, no `--`, no trailing `-`,
+// and no control character but tab and the line ends.
 @(private)
-comment_holds :: proc "contextless" (body: []u8) -> bool {
+comment_holds :: proc "contextless" (body: []u8) -> bool #no_bounds_check {
 	prev := u8(0)
-	for c in body {
+	p := raw_data(body)
+	end := intrinsics.ptr_offset(p, len(body))
+	for i := 0; i < len(body); {
+		c := body[i]
+		if c >= 0x80 {
+			q, kind := spell.utf8_char(p[i:], end)
+			if kind != .None || c == 0xef && non_char(p[i:], end) {
+				return false
+			}
+			prev = 0
+			i = intrinsics.ptr_sub(q, p)
+			continue
+		}
 		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' || c == '-' && prev == '-' {
 			return false
 		}
 		prev = c
+		i += 1
 	}
 	return prev != '-'
 }
@@ -306,6 +348,10 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 			}
 		}
 		if name == TEXT_KEY {
+			if parent.root {
+				fail(w, name_node)
+				return
+			}
 			begin(s, 0, false)
 			if step.kind == .Open || !put_text(s, step.node) {
 				fail(w, step.node)
@@ -410,6 +456,13 @@ scalar_text :: #force_inline proc(w: ^write.Tree, at: tape.Node_Index, buf: ^[wr
 	return "", false
 }
 
+// Whether node `at` is an XML text node whose source bytes already passed XML validation with no decoding needed, so
+// they hold no `<`, `&`, CR, control byte, `]]>` or U+FFFE/U+FFFF noncharacter and can be copied verbatim.
+@(private)
+is_raw_xml_text :: #force_inline proc "contextless" (s: ^Writing, node: tape.Node) -> bool {
+	return s.raw_xml && node.kind == .String && node.spelling & tape.SPELLING_DECODE == 0
+}
+
 // Writes the element `<name>text</name>` whole when the scalar at `at` has a text with nothing to escape that fits one
 // room of the output, with one copy per part. Returns false, having written nothing, for any other.
 @(private)
@@ -418,10 +471,7 @@ put_leaf :: proc(s: ^Writing, name: string, at: tape.Node_Index) -> bool {
 	text, ok := scalar_text(s.w, at, &buf)
 	n := len(name)
 	total := 2 * n + len(text) + 5
-	// The reader reads a text with a `<`, `&`, CR or control byte as decoded or refuses it, so a text of a read with no
-	// decode is written as it stands, a `>` too.
-	node := s.w.nodes[at]
-	raw := s.read && node.kind == .String && node.spelling & tape.SPELLING_DECODE == 0 && .Held not_in s.doc.flags
+	raw := is_raw_xml_text(s, s.w.nodes[at])
 	if !ok || total + 16 > write.ROOM_MAX {
 		return false
 	}
@@ -444,13 +494,14 @@ put_leaf :: proc(s: ^Writing, name: string, at: tape.Node_Index) -> bool {
 }
 
 // Writes the text of the scalar at `at`, `&`, `<`, `>` and a carriage return as references. False for a number with no
-// text, a control character that XML forbids, or with `w.err` set when memory is refused.
+// text, a control character or U+FFFE/U+FFFF noncharacter that XML forbids, or with `w.err` set when memory is refused.
 @(private)
 put_text :: proc(s: ^Writing, at: tape.Node_Index) -> bool {
 	out, w := s.out, s.w
 	s.wrote = true
 	buf: [write.NUMBER_ROOM]u8 = ---
-	if w.nodes[at].kind == .Bytes {
+	node := w.nodes[at]
+	if node.kind == .Bytes {
 		payload, ok := write.text_of(w, at)
 		if !ok {
 			return false
@@ -468,6 +519,10 @@ put_text :: proc(s: ^Writing, at: tape.Node_Index) -> bool {
 	if !ok {
 		return false
 	}
+	if is_raw_xml_text(s, node) {
+		write.put(out, transmute([]u8)text)
+		return true
+	}
 	b := transmute([]u8)text
 	for len(b) > 0 {
 		clean := write.clean_prefix(b, .Xml_Text)
@@ -475,8 +530,17 @@ put_text :: proc(s: ^Writing, at: tape.Node_Index) -> bool {
 		if clean == len(b) {
 			break
 		}
+		c := b[clean]
+		if c == 0xef {
+			if non_char(raw_data(b[clean:]), intrinsics.ptr_offset(raw_data(b), len(b))) {
+				return false
+			}
+			write.put_byte(out, c)
+			b = b[clean + 1:]
+			continue
+		}
 		ref: string
-		switch b[clean] {
+		switch c {
 		case '&': ref = "&amp;"
 		case '<': ref = "&lt;"
 		case '>': ref = "&gt;"
@@ -490,15 +554,14 @@ put_text :: proc(s: ^Writing, at: tape.Node_Index) -> bool {
 	return true
 }
 
-// Whether `s` is an XML name that a key can spell: a letter, `_` or `:` and then letters, digits, `.`, `-`, `_` and
-// `:`, or any character past ASCII.
+// Whether `s` is an XML NCName that a non-XML key can spell (valid XML 1.0 Name with no colons/unbound prefixes).
 @(private)
 is_name :: proc "contextless" (s: string) -> bool {
-	for c, i in transmute([]u8)s {
-		letter := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || c == ':' || c >= 0x80
-		if !(letter || i > 0 && (c >= '0' && c <= '9' || c == '.' || c == '-')) {
-			return false
-		}
+	if len(s) == 0 {
+		return false
 	}
-	return len(s) > 0
+	p := raw_data(s)
+	end := intrinsics.ptr_offset(p, len(s))
+	q, fault, colon := name_end_colon(p, end)
+	return fault == .None && q == end && !colon
 }

@@ -84,9 +84,10 @@ Tree :: struct {
 	scratch:   []u8, // decoded texts, from `allocator`
 	// Under `sort_keys`, the members of the open objects, each object's above its parent's. The members leave text
 	// order, so a node's facts are found by its index.
-	sort_keys: bool,
+	sort_keys:    bool,
 	length_first: bool, // with `sort_keys`, a shorter key first, as CBOR orders text keys
-	pairs:     [dynamic]Pair,
+	no_dups:      bool, // with `sort_keys`, a repeated key in an object is `Refused{.No_Spelling}`
+	pairs:        [dynamic]Pair,
 	allocator: runtime.Allocator,
 	err:       Error,
 	room:      [FRAME_ROOM]Frame,
@@ -314,6 +315,15 @@ sort_members :: proc(w: ^Tree, f: ^Frame) {
 	} else {
 		slice.stable_sort_by(members, proc(a, b: Pair) -> bool {return a.name < b.name})
 	}
+	if w.no_dups {
+		for i in 1 ..< len(members) {
+			if members[i].name == members[i - 1].name {
+				w.err = Refused{members[i].key if members[i].key != tape.NO_NODE else f.node, .No_Spelling}
+				w.i, w.depth = w.end, 0
+				return
+			}
+		}
+	}
 }
 
 // Frees the names of `pairs[lo:]` the walk cloned and drops those members.
@@ -442,12 +452,26 @@ plain_members :: #force_inline proc "contextless" (w: ^Tree, at: tape.Node_Index
 }
 
 // `tape.children` of the container at `at` for a walk that takes every member as written (`.Group`), which skips the
-// check of an object's keys for a repeat that `.Group` does not use. A table's rows and a partial container go through
-// `tape.children`.
-children_as_written :: proc(w: ^Tree, at: tape.Node_Index) -> (c: tape.Children, err: runtime.Allocator_Error) #no_bounds_check {
+// check of an object's keys for a repeat that `.Group` does not use. A partial container sets `w.err = Refused{at, .Partial}`.
+children_as_written :: proc(w: ^Tree, at: tape.Node_Index) -> (c: tape.Children, ok: bool) #no_bounds_check {
 	if plain_members(w, at) {
-		return tape.Children{container = at, next = at + 1}, nil
+		return tape.Children{container = at, next = at + 1}, true
 	}
-	c, _, err = tape.children(w.reader, at, w.allocator)
-	return
+	if w.nodes[at].kind >= .Array && w.nodes[at].spelling & tape.CONTAINER_PARTIAL != 0 {
+		w.err = Refused{at, .Partial}
+		return {}, false
+	}
+	p: tape.Presence
+	aerr: runtime.Allocator_Error
+	c, p, aerr = tape.children(w.reader, at, w.allocator)
+	if aerr != nil {
+		w.err = aerr
+		return {}, false
+	}
+	if p == .Not_Loaded {
+		tape.destroy_children(&c)
+		w.err = Refused{at, .Partial}
+		return {}, false
+	}
+	return c, true
 }

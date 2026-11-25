@@ -1,6 +1,8 @@
 package typed
 
+import "base:intrinsics"
 import "base:runtime"
+import "core:math"
 import "core:strconv"
 import "core:time"
 import "stury:lib/core/tape"
@@ -8,16 +10,8 @@ import "stury:lib/core/tape"
 // A typed write gives a value of the plan's type to a writer as tokens, by the same plan a read fills it by: the
 // members' names, renames, enum spellings, `-` and `omitempty` come from it, so a write then a read returns the value.
 // A struct's members go in the plan's order and a map's entries in the order its table holds them. The walk keeps its
-// open containers on a stack of its own, so a value nested as deep as its memory holds takes no native recursion.
-
-// Why a plan or a value has no tokens.
-Marshal_Refusal :: enum u8 {
-	None,
-	// The type holds a `Raw`, which is a text of one format and no token.
-	Raw,
-	// A `time.Time` outside the years 0 to 9999.
-	Time,
-}
+// open containers on a stack of its own, inline up to `INLINE_FRAMES` and spilled to the allocator past that, so a
+// value nested as deep as its memory holds takes no native recursion.
 
 @(private)
 Write_Frame_Kind :: enum u8 {
@@ -37,26 +31,47 @@ Write_Frame :: struct {
 	i, n: int,
 }
 
-// What a scalar is written as: its kind and text, which lives in the caller's buffer or in `held`.
+// What a scalar is written as: its kind and text, which lives in the caller's buffer or in the value itself.
 @(private)
 Scalar :: struct {
 	kind: tape.Token_Kind,
 	text: string,
-	held: []u8,
 }
 
 @(private)
 SCALAR_ROOM :: 64
 
-// Writes the value `value` points at, of the type `plan` is of, to `w` by `token`, one call each, with `err` the first
-// error `token` returns, whose writer then holds a prefix. A value the plan has no tokens for is `refusal`. The frames
-// of open containers come from `allocator`, so a refused allocation stops the write with the writer at a prefix and
-// `refusal` `.None`, as a `token` error would, but through `Allocator_Error`. A target that tags a date-time gives `tag`,
-// which is called with "datetime" before the token of a `time.Time`.
-marshal :: proc(plan: ^Plan, value: rawptr, w: ^$W, $token: proc(w: ^W, kind: tape.Token_Kind, text: string) -> $E, allocator := context.allocator, tag: proc(w: ^W, name: string) -> E = nil) -> (err: E, refusal: Marshal_Refusal, memory: runtime.Allocator_Error) {
-	stack: [dynamic]Write_Frame
-	stack.allocator = allocator
-	defer delete(stack)
+// Open containers kept in the stack frame of `marshal`; deeper values spill to the allocator.
+@(private)
+INLINE_FRAMES :: 64
+
+// Writes the value `value` points at, of type `T`, by `plan` (or a plan made for `T` under `tag_key` and freed on
+// return when `plan` is nil), to `w` by `token`, one call each. Returns `werr` for the first error `token` or `tag`
+// returns (leaving the writer at a prefix), or `err` for a bad plan/value, a `Raw` member, an out-of-range `time.Time`,
+// or an allocator failure. A target that tags a date-time gives `tag`, called with "datetime" before a `time.Time`.
+marshal :: proc(value: rawptr, T: typeid, tag_key: string, plan: ^Plan, w: ^$W, $token: proc(w: ^W, kind: tape.Token_Kind, text: string) -> $E, allocator := context.allocator, tag: proc(w: ^W, name: string) -> E = nil) -> (werr: E, err: tape.Error) {
+	if value == nil {
+		return {}, tape.Bad_Option{"value"}
+	}
+	plan := plan
+	made: Plan
+	if plan == nil {
+		if made, err = plan_make(T, tag_key, {}, allocator); err != nil {
+			return {}, err
+		}
+		plan = &made
+	} else if plan.type != T || plan.tag != tag_key || plan.root == nil {
+		return {}, tape.Bad_Option{"plan"}
+	}
+	defer if plan == &made {
+		plan_destroy(&made)
+	}
+	inline_frames: [INLINE_FRAMES]Write_Frame = ---
+	frames := raw_data(inline_frames[:])
+	sp, cap_frames := 0, INLINE_FRAMES
+	defer if cap_frames > INLINE_FRAMES {
+		runtime.mem_free_with_size(frames, cap_frames * size_of(Write_Frame), allocator)
+	}
 	buf: [SCALAR_ROOM]u8 = ---
 	rec, at := (^Record)(uintptr(plan.root) - size_of(Record)), uintptr(value)
 	for {
@@ -78,10 +93,10 @@ marshal :: proc(plan: ^Plan, value: rawptr, w: ^$W, $token: proc(w: ^W, kind: ta
 				}
 				rec, at = element_of(rec), to
 			case .Union:
-				tag := u32(load_size(at + uintptr(m.tag), int(m.tag_size)))
+				tag_v := u32(load_size(at + uintptr(m.tag), int(m.tag_size)))
 				arm: ^Arm
 				for &a in plan.arms[m.arms:][:m.count] {
-					if a.tag == tag {
+					if a.tag == tag_v {
 						arm = &a
 					}
 				}
@@ -97,14 +112,14 @@ marshal :: proc(plan: ^Plan, value: rawptr, w: ^$W, $token: proc(w: ^W, kind: ta
 		m := &plan.meta[rec.meta]
 		switch {
 		case null:
-			if err = token(w, .Null, ""); err != nil {
+			if werr = token(w, .Null, ""); werr != nil {
 				return
 			}
 		case rec.kind == .Struct || rec.kind == .Required:
-			if _, memory = append(&stack, Write_Frame{.Struct, rec, at, 0, int(m.count)}); memory != nil {
+			if !push_frame(&frames, &sp, &cap_frames, Write_Frame{.Struct, rec, at, 0, int(m.count)}, allocator, &err) {
 				return
 			}
-			if err = token(w, .Object, ""); err != nil {
+			if werr = token(w, .Object, ""); werr != nil {
 				return
 			}
 		case rec.kind == .Slice || rec.kind == .Dynamic || rec.kind == .Array:
@@ -113,50 +128,47 @@ marshal :: proc(plan: ^Plan, value: rawptr, w: ^$W, $token: proc(w: ^W, kind: ta
 				raw := (^runtime.Raw_Slice)(at)
 				data, n = uintptr(raw.data), raw.len
 			}
-			if _, memory = append(&stack, Write_Frame{.List, rec, data, 0, n}); memory != nil {
+			if !push_frame(&frames, &sp, &cap_frames, Write_Frame{.List, rec, data, 0, n}, allocator, &err) {
 				return
 			}
-			if err = token(w, .Array, ""); err != nil {
+			if werr = token(w, .Array, ""); werr != nil {
 				return
 			}
 		case rec.kind == .Map:
-			if _, memory = append(&stack, Write_Frame{.Map, rec, at, 0, runtime.map_cap((^runtime.Raw_Map)(at)^)}); memory != nil {
+			if !push_frame(&frames, &sp, &cap_frames, Write_Frame{.Map, rec, at, 0, runtime.map_cap((^runtime.Raw_Map)(at)^)}, allocator, &err) {
 				return
 			}
-			if err = token(w, .Object, ""); err != nil {
+			if werr = token(w, .Object, ""); werr != nil {
 				return
 			}
 		case rec.kind == .Bit_Set:
-			if _, memory = append(&stack, Write_Frame{.Bits, rec, at, 0, int(m.count)}); memory != nil {
+			if !push_frame(&frames, &sp, &cap_frames, Write_Frame{.Bits, rec, at, 0, int(m.count)}, allocator, &err) {
 				return
 			}
-			if err = token(w, .Array, ""); err != nil {
+			if werr = token(w, .Array, ""); werr != nil {
 				return
 			}
 		case:
-			s, why := scalar_of(plan, rec, at, &buf, allocator)
-			if why != .None {
-				return {}, why, nil
+			s, serr := scalar_of(plan, rec, at, &buf)
+			if serr != nil {
+				return {}, serr
 			}
 			// A `time.Time` is a date-time, which a target that tags them does.
 			if tag != nil && rec.kind == .Time {
-				if err = tag(w, "datetime"); err != nil {
-					delete(s.held, allocator)
+				if werr = tag(w, "datetime"); werr != nil {
 					return
 				}
 			}
-			err = token(w, s.kind, s.text)
-			delete(s.held, allocator)
-			if err != nil {
+			if werr = token(w, s.kind, s.text); werr != nil {
 				return
 			}
 		}
 		// The next value: a member, an element, an entry or a bit, or the close of the container that has no more.
 		next: for {
-			if len(stack) == 0 {
+			if sp == 0 {
 				return
 			}
-			f := &stack[len(stack) - 1]
+			f := &frames[sp - 1]
 			switch f.kind {
 			case .Struct:
 				block := ([^]Record)(f.rec.first)
@@ -168,7 +180,7 @@ marshal :: proc(plan: ^Plan, value: rawptr, w: ^$W, $token: proc(w: ^W, kind: ta
 					if mm.omit_empty && is_empty(plan, member, at) || mm.omit_unset && is_unset(plan, member, at) {
 						continue
 					}
-					if err = token(w, .Key, mm.name); err != nil {
+					if werr = token(w, .Key, mm.name); werr != nil {
 						return
 					}
 					rec = member
@@ -192,13 +204,8 @@ marshal :: proc(plan: ^Plan, value: rawptr, w: ^$W, $token: proc(w: ^W, kind: ta
 						continue
 					}
 					key := runtime.map_cell_index_dynamic(ks, info.ks, uintptr(i))
-					text, held, why := key_text(plan, f.rec, key, &buf, allocator)
-					if why != .None {
-						return {}, why, nil
-					}
-					err = token(w, .Key, text)
-					delete(held, allocator)
-					if err != nil {
+					text := key_text(plan, f.rec, key, &buf)
+					if werr = token(w, .Key, text); werr != nil {
 						return
 					}
 					rec, at = element_of(f.rec), runtime.map_cell_index_dynamic(vs, info.vs, uintptr(i))
@@ -206,28 +213,55 @@ marshal :: proc(plan: ^Plan, value: rawptr, w: ^$W, $token: proc(w: ^W, kind: ta
 				}
 			case .Bits:
 				mm := &plan.meta[f.rec.meta]
-				bits := load_size(f.data, int(mm.size))
-				for f.i < f.n {
+				limit := min(f.n, int(mm.size) * 8)
+				for f.i < limit {
 					i := f.i
 					f.i += 1
-					if bits >> uint(i) & 1 == 0 {
+					if ((^u8)(f.data + uintptr(i >> 3))^ >> uint(i & 7)) & 1 == 0 {
 						continue
 					}
 					elem := element_of(f.rec)
-					value := mm.lower + i64(i)
-					text, named := spell_enum_value(plan, &plan.meta[elem.meta], value, &buf)
-					if err = token(w, .String if named else .Number, text); err != nil {
+					v := mm.lower + i64(i)
+					text, named := spell_enum_value(plan, &plan.meta[elem.meta], v, &buf)
+					if werr = token(w, .String if named else .Number, text); werr != nil {
 						return
 					}
 					continue next
 				}
 			}
-			if err = token(w, .Close, ""); err != nil {
+			if werr = token(w, .Close, ""); werr != nil {
 				return
 			}
-			pop(&stack)
+			sp -= 1
 		}
 	}
+}
+
+@(private)
+push_frame :: #force_inline proc(frames: ^[^]Write_Frame, sp, cap_frames: ^int, frame: Write_Frame, allocator: runtime.Allocator, err: ^tape.Error) -> bool #no_bounds_check {
+	if sp^ == cap_frames^ && !grow_frames(frames, cap_frames, allocator, err) {
+		return false
+	}
+	frames^[sp^] = frame
+	sp^ += 1
+	return true
+}
+
+@(private, cold)
+grow_frames :: #force_no_inline proc(frames: ^[^]Write_Frame, cap_frames: ^int, allocator: runtime.Allocator, err: ^tape.Error) -> bool {
+	next_cap := cap_frames^ * 2
+	raw, aerr := runtime.mem_alloc_non_zeroed(next_cap * size_of(Write_Frame), align_of(Write_Frame), allocator)
+	if aerr != nil || raw_data(raw) == nil {
+		err^ = aerr if aerr != nil else runtime.Allocator_Error.Out_Of_Memory
+		return false
+	}
+	grown := ([^]Write_Frame)(raw_data(raw))
+	intrinsics.mem_copy_non_overlapping(grown, frames^, cap_frames^ * size_of(Write_Frame))
+	if cap_frames^ > INLINE_FRAMES {
+		runtime.mem_free_with_size(frames^, cap_frames^ * size_of(Write_Frame), allocator)
+	}
+	frames^, cap_frames^ = grown, next_cap
+	return true
 }
 
 // The record a list's, map's, pointer's or `Maybe`'s `first` reads its element by, which lies before it.
@@ -251,6 +285,7 @@ load_size :: proc "contextless" (at: uintptr, size: int) -> u64 {
 @(private)
 is_empty :: proc(plan: ^Plan, rec: ^Record, at: uintptr) -> bool {
 	m := &plan.meta[rec.meta]
+	bytes := uintptr(m.size)
 	#partial switch rec.kind {
 	case .String, .Slice, .Dynamic:
 		return (^runtime.Raw_Slice)(at).len == 0
@@ -258,8 +293,10 @@ is_empty :: proc(plan: ^Plan, rec: ^Record, at: uintptr) -> bool {
 		return runtime.map_len((^runtime.Raw_Map)(at)^) == 0
 	case .Maybe, .Ptr, .Union:
 		return is_unset(plan, rec, at)
+	case .Array:
+		bytes = uintptr(m.size) * uintptr(m.count)
 	}
-	for i in 0 ..< uintptr(m.size) {
+	for i in 0 ..< bytes {
 		if (^u8)(at + i)^ != 0 {
 			return false
 		}
@@ -299,7 +336,7 @@ spell_enum_value :: proc(plan: ^Plan, m: ^Meta, value: i64, buf: ^[SCALAR_ROOM]u
 			}
 		}
 	}
-	if m.signed || m.enum_info != nil {
+	if m.signed {
 		return strconv.write_int(buf[:], value, 10), false
 	}
 	return strconv.write_uint(buf[:], u64(value), 10), false
@@ -307,21 +344,21 @@ spell_enum_value :: proc(plan: ^Plan, m: ^Meta, value: i64, buf: ^[SCALAR_ROOM]u
 
 // The text of the map key at `key`, of a map record `rec`: a string, an integer or an enum's name.
 @(private)
-key_text :: proc(plan: ^Plan, rec: ^Record, key: uintptr, buf: ^[SCALAR_ROOM]u8, allocator: runtime.Allocator) -> (text: string, held: []u8, why: Marshal_Refusal) {
+key_text :: proc(plan: ^Plan, rec: ^Record, key: uintptr, buf: ^[SCALAR_ROOM]u8) -> string {
 	m := &plan.meta[rec.meta]
 	#partial switch m.key_kind {
 	case .String:
-		return (^string)(key)^, nil, .None
+		return (^string)(key)^
 	case .Enum:
 		size := int(m.map_info.ks.size_of_type)
 		v := load_size(key, size)
 		signed := is_signed(m.enum_info.base)
-		text, _ = spell_enum_value(plan, &Meta{enum_info = m.enum_info, signed = signed}, sign_extend(v, size) if signed else i64(v), buf)
-		return text, nil, .None
+		text, _ := spell_enum_value(plan, &Meta{enum_info = m.enum_info, signed = signed}, sign_extend(v, size) if signed else i64(v), buf)
+		return text
 	case .I8, .I16, .I32, .I64:
-		return strconv.write_int(buf[:], sign_extend(load_size(key, int(m.map_info.ks.size_of_type)), int(m.map_info.ks.size_of_type)), 10), nil, .None
+		return strconv.write_int(buf[:], sign_extend(load_size(key, int(m.map_info.ks.size_of_type)), int(m.map_info.ks.size_of_type)), 10)
 	}
-	return strconv.write_uint(buf[:], load_size(key, int(m.map_info.ks.size_of_type)), 10), nil, .None
+	return strconv.write_uint(buf[:], load_size(key, int(m.map_info.ks.size_of_type)), 10)
 }
 
 @(private)
@@ -342,43 +379,102 @@ sign_extend :: proc "contextless" (v: u64, size: int) -> i64 {
 	return i64(v)
 }
 
-// The token of the scalar of `rec` at `at`: its text in `buf`, or in a block from `allocator` that `held` names.
+// The token of the scalar of `rec` at `at`, spelled into `buf` without allocating.
 @(private)
-scalar_of :: proc(plan: ^Plan, rec: ^Record, at: uintptr, buf: ^[SCALAR_ROOM]u8, allocator: runtime.Allocator) -> (s: Scalar, why: Marshal_Refusal) {
+scalar_of :: proc(plan: ^Plan, rec: ^Record, at: uintptr, buf: ^[SCALAR_ROOM]u8) -> (s: Scalar, err: tape.Error) {
 	m := &plan.meta[rec.meta]
 	#partial switch rec.kind {
 	case .String:
-		return {.String, (^string)(at)^, nil}, .None
+		return {.String, (^string)(at)^}, nil
 	case .Bool:
-		return {.True if (^bool)(at)^ else .False, "", nil}, .None
+		return {.True if (^bool)(at)^ else .False, ""}, nil
 	case .Bool_Wide:
-		return {.True if load_size(at, int(m.size)) != 0 else .False, "", nil}, .None
+		return {.True if load_size(at, int(m.size)) != 0 else .False, ""}, nil
 	case .I8, .I16, .I32, .I64:
-		return {.Number, strconv.write_int(buf[:], sign_extend(load_size(at, int(m.size)), int(m.size)), 10), nil}, .None
+		return {.Number, strconv.write_int(buf[:], sign_extend(load_size(at, int(m.size)), int(m.size)), 10)}, nil
 	case .U8, .U16, .U32, .U64:
-		return {.Number, strconv.write_uint(buf[:], load_size(at, int(m.size)), 10), nil}, .None
+		return {.Number, strconv.write_uint(buf[:], load_size(at, int(m.size)), 10)}, nil
 	case .F32:
-		return {.Number, float_text(buf, f64((^f32)(at)^), 32), nil}, .None
+		return {.Number, float_text(buf, f64((^f32)(at)^), 32)}, nil
 	case .F64:
-		return {.Number, float_text(buf, (^f64)(at)^, 64), nil}, .None
+		return {.Number, float_text(buf, (^f64)(at)^, 64)}, nil
 	case .Enum:
 		signed := is_signed(m.enum_info.base)
 		raw := load_size(at, int(m.size))
 		text, named := spell_enum_value(plan, &Meta{enum_info = m.enum_info, signed = signed}, sign_extend(raw, int(m.size)) if signed else i64(raw), buf)
-		return {.String if named else .Number, text, nil}, .None
+		return {.String if named else .Number, text}, nil
 	case .Time:
-		text, ok := time.time_to_rfc3339((^time.Time)(at)^, 0, true, allocator)
+		text, ok := rfc3339_text((^time.Time)(at)^, buf)
 		if !ok {
-			return {}, .Time
+			return {}, tape.Bad_Option{"time"}
 		}
-		return {.String, text, transmute([]u8)text}, .None
+		return {.String, text}, nil
 	}
-	return {}, .Raw
+	return {}, tape.Bad_Option{"raw"}
 }
 
-// The shortest text of `f` that reads back as it, with no plus sign.
+// Formats `t` in UTC RFC 3339 into `buf` with no allocation. False outside years 0..9999.
 @(private)
-float_text :: proc(buf: ^[SCALAR_ROOM]u8, f: f64, bits: int) -> string {
-	text := strconv.write_float(buf[:], f, 'g', -1, bits)
-	return text[1:] if len(text) > 0 && text[0] == '+' else text
+rfc3339_text :: proc(t: time.Time, buf: ^[SCALAR_ROOM]u8) -> (string, bool) #no_bounds_check {
+	dt, ok := time.time_to_datetime(t)
+	if !ok || dt.year < 0 || dt.year >= 10_000 {
+		return "", false
+	}
+	put_digits :: #force_inline proc "contextless" (dst: []u8, at: int, width: int, val: i64) #no_bounds_check {
+		v := val
+		for k := width - 1; k >= 0; k -= 1 {
+			dst[at + k] = '0' + u8(v % 10)
+			v /= 10
+		}
+	}
+	put_digits(buf[:], 0, 4, dt.year)
+	buf[4] = '-'
+	put_digits(buf[:], 5, 2, i64(dt.month))
+	buf[7] = '-'
+	put_digits(buf[:], 8, 2, i64(dt.day))
+	buf[10] = 'T'
+	put_digits(buf[:], 11, 2, i64(dt.hour))
+	buf[13] = ':'
+	put_digits(buf[:], 14, 2, i64(dt.minute))
+	buf[16] = ':'
+	put_digits(buf[:], 17, 2, i64(dt.second))
+	o := 19
+	nanos := t._nsec % 1_000_000_000
+	if nanos < 0 {
+		nanos += 1_000_000_000
+	}
+	if nanos != 0 {
+		buf[o] = '.'
+		o += 1
+		digits := 9
+		for nanos % 10 == 0 {
+			nanos /= 10
+			digits -= 1
+		}
+		put_digits(buf[:], o, digits, nanos)
+		o += digits
+	}
+	buf[o] = 'Z'
+	o += 1
+	return string(buf[:o]), true
+}
+
+// The shortest text of `f` that reads back as it, with no plus sign and `.0` appended to a finite whole float so
+// `-0.0` keeps its sign bit and formats that tell floats from integers preserve the float kind.
+@(private)
+float_text :: proc(buf: ^[SCALAR_ROOM]u8, f: f64, bits: int) -> string #no_bounds_check {
+	raw := strconv.write_float(buf[:len(buf) - 2], f, 'g', -1, bits)
+	start := 1 if len(raw) > 0 && raw[0] == '+' else 0
+	text := raw[start:]
+	if !math.is_nan(f) && !math.is_inf(f) {
+		for c in transmute([]u8)text {
+			if c == '.' || c == 'e' || c == 'E' {
+				return text
+			}
+		}
+		end := start + len(text)
+		buf[end], buf[end + 1] = '.', '0'
+		return string(buf[start:end + 2])
+	}
+	return text
 }

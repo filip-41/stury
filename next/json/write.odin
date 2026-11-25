@@ -16,6 +16,10 @@ import "stury:lib/ops/write"
 
 Write_Options :: write.Options
 Write_Error :: write.Error
+Token_Kind :: write.Token_Kind
+Record_Framing :: write.Record_Framing
+Refused :: write.Refused
+Refusal :: write.Refusal
 
 // Writes value `opts.node` of `doc`, a document of any format, as a text of `spec`, in a buffer from `allocator` that
 // the caller owns. Returns the kinds of the facts `doc` holds that the text does not: every fact for `.Json`, and the
@@ -40,6 +44,9 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 	}
 	if opts.format != nil {
 		return {}, tape.Bad_Option{"format"}
+	}
+	if opts.grow_header || len(opts.header) > 0 {
+		return {}, tape.Bad_Option{"header" if len(opts.header) > 0 else "options"}
 	}
 	if opts.framing == .Lines && !write.compact(opts) {
 		return {}, tape.Bad_Option{"framing"}
@@ -108,7 +115,9 @@ write_rows_of_text :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^La
 @(private)
 write_as :: #force_no_inline proc(out: ^write.Out, doc: ^tape.Document, $T: Spec, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
 	w: write.Tree
-	if e := write.tree_start(&w, doc, opts, FORMATS[T].facts, allocator); e != nil {
+	// NDJSON lines cannot hold raw line breaks, so comments are dropped cleanly under `.Lines`.
+	holds := tape.Facts{} if opts.framing == .Lines else FORMATS[T].facts
+	if e := write.tree_start(&w, doc, opts, holds, allocator); e != nil {
 		return {}, e
 	}
 	l := Layout{width = int(opts.indent), fill = 0x2020202020202020}

@@ -9,6 +9,10 @@ import "stury:lib/ops/write"
 
 Write_Options :: write.Options
 Write_Error :: write.Error
+Token_Kind :: write.Token_Kind
+Record_Framing :: write.Record_Framing
+Refused :: write.Refused
+Refusal :: write.Refusal
 
 // Writes value `opts.node` of `doc`, a document of any format, as a text of `spec`, a record a line, in a buffer from
 // `allocator` that the caller owns. The value is a table a delimited read built, or an array of objects, the first
@@ -31,22 +35,32 @@ write_to :: proc(sink: io.Writer, doc: ^tape.Document, spec := Spec.Csv, opts :=
 
 @(private)
 write_out :: proc(out: ^write.Out, doc: ^tape.Document, wanted: u8, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
-	return write_rows(out, doc, wanted, opts, allocator, nil)
-}
-
-// `write_out`, of one batch of a table written in batches when `stream` is given.
-@(private)
-write_rows :: proc(out: ^write.Out, doc: ^tape.Document, wanted: u8, opts: Write_Options, allocator: runtime.Allocator, stream: ^write.Table_Stream) -> (tape.Facts, write.Error) {
 	if wanted > u8(max(Spec)) {
 		return {}, tape.Bad_Option{"spec"}
 	}
+	if opts.indent != 0 || opts.tab || opts.ascii || opts.framing != .None || opts.grow_header || len(opts.header) > 0 {
+		opt := "indent" if opts.indent != 0 || opts.tab else "ascii" if opts.ascii else "framing" if opts.framing != .None else "header"
+		return {}, tape.Bad_Option{opt}
+	}
 	spec := Spec(wanted)
-	d, given := opts.format.(tape.Dsv_Options)
+	cells, d, verbatim, err := resolve_options(spec, opts, doc, allocator)
+	if err != nil {
+		return {}, err
+	}
+	return write.table(out, doc, &FORMATS[spec], cells, d, verbatim, opts, allocator)
+}
+
+// Validates `opts.format` for `spec`, inheriting options from `doc` when it is a delimited document, and resolves its
+// delimiter and cell rules.
+@(private)
+resolve_options :: proc(spec: Spec, opts: Write_Options, doc: ^tape.Document, allocator: runtime.Allocator) -> (cells: write.Cells, d: tape.Dsv_Options, verbatim: bool, err: Write_Error) {
+	given: bool
+	d, given = opts.format.(tape.Dsv_Options)
 	if !given && opts.format != nil {
-		return {}, tape.Bad_Option{"format"}
+		return {}, {}, false, tape.Bad_Option{"format"}
 	}
 	read: Maybe(tape.Dsv_Options)
-	if doc.ext != nil {
+	if doc != nil && doc.ext != nil {
 		if ext, tabular := doc.ext.format.(tape.Tabular_Ext); tabular {
 			if doc.format == &FORMATS[spec] {
 				read = ext.options
@@ -62,16 +76,15 @@ write_rows :: proc(out: ^write.Out, doc: ^tape.Document, wanted: u8, opts: Write
 	// A read refuses the options a write cannot use either: a delimiter or comment byte the spec cannot frame.
 	if e := validate(nil, spec, {format = d}, allocator); e != nil {
 		if bad, refused := e.(tape.Bad_Option); refused {
-			return {}, bad
+			return {}, {}, false, bad
 		}
 	}
 	d.delimiter = spec_delimiter(spec, d.delimiter)
 	// A text of `spec` written under the options it was read with keeps the cells it read plainly.
-	verbatim := false
 	if r, ok := read.?; ok {
 		r.delimiter, r.crlf = spec_delimiter(spec, r.delimiter), d.crlf
 		verbatim = r == d
 	}
-	cells := [Spec]write.Cells{.Csv = .Quoted, .Tsv = .Escaped, .Plain = .Bare}
-	return write.table(out, doc, &FORMATS[spec], cells[spec], d, verbatim, opts, allocator, stream)
+	table_cells := [Spec]write.Cells{.Csv = .Quoted, .Tsv = .Escaped, .Plain = .Bare}
+	return table_cells[spec], d, verbatim, nil
 }

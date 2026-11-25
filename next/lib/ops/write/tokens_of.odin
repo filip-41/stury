@@ -49,12 +49,12 @@ tokens_of :: proc(doc: ^tape.Document, node: tape.Node_Index, w: ^$W, $token: pr
 				return
 			}
 		}
-		if tagged {
+		n := t.nodes[s.node]
+		if tagged && n.kind != .Bytes {
 			if err = node_tags(&t, s.node, w, tag); err != nil {
 				return
 			}
 		}
-		n := t.nodes[s.node]
 		switch n.kind {
 		case .Object:
 			err = token(w, .Object, "")
@@ -99,7 +99,7 @@ tokens_of :: proc(doc: ^tape.Document, node: tape.Node_Index, w: ^$W, $token: pr
 }
 
 // Gives `tag` the tags of node `at`, each a name: a date-time's type a format spells (`datetime`, `date-local`), the text
-// of a tag a text holds (`!!timestamp`), or the number of a CBOR tag in decimal.
+// of a tag a text holds (`!!timestamp`), or the number of a binary format's tag in decimal.
 @(private)
 node_tags :: proc(t: ^Tree, at: tape.Node_Index, w: ^$W, tag: proc(w: ^W, name: string) -> Error) -> Error {
 	doc := t.doc
@@ -112,38 +112,19 @@ node_tags :: proc(t: ^Tree, at: tape.Node_Index, w: ^$W, tag: proc(w: ^W, name: 
 		if f.kind != .Tag || f.n == 0 {
 			continue
 		}
-		span := tape.span_bytes(doc, f.lo, f.n)
 		if .Binary not_in doc.format.caps {
-			tag(w, string(span)) or_return
+			tag(w, string(tape.span_bytes(doc, f.lo, f.n))) or_return
 			continue
 		}
-		// A byte string is a string of its base64 in tokens, and a big number is the number its text spells, so their
-		// tags would stand on another value.
-		buf: [20]u8
-		number := head_text(span, &buf)
-		if doc.nodes[at].kind == .Bytes || doc.nodes[at].kind == .Number && (number == "2" || number == "3" || number == "4" || number == "5") {
-			continue
+		if n, ok := tape.fact_number(doc, f); ok {
+			buf: [20]u8
+			tag(w, uint_text(buf[:], n.bits)) or_return
 		}
-		tag(w, number) or_return
 	}
 	return nil
 }
 
-// The argument of the CBOR head `span` in decimal: in the low bits of its first byte, or in the bytes after it.
 @(private)
-head_text :: proc(span: []u8, buf: ^[20]u8) -> string {
-	arg, size := u64(span[0] & 31), 0
-	switch arg {
-	case 24: size = 1
-	case 25: size = 2
-	case 26: size = 4
-	case 27: size = 8
-	}
-	if size > 0 {
-		arg = 0
-		for b in span[1:][:min(size, len(span) - 1)] {
-			arg = arg << 8 | u64(b)
-		}
-	}
-	return strconv.write_uint(buf[:], arg, 10)
+uint_text :: proc(buf: []u8, v: u64) -> string {
+	return strconv.write_uint(buf, v, 10)
 }
