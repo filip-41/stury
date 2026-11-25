@@ -325,3 +325,45 @@ room_grows_inside_learned_gaps :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// A truncated JSONC or JSON5 object ending right after a skipped key's colon (or after comments following that colon)
+// faults `Truncated` without reading past `end`. Exact-size heap allocations catch any 1-byte over-read under ASan.
+@(test)
+skipped_value_truncated_after_colon :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Want :: struct {
+		b: int,
+	}
+	demand, derr := tape.demand_of({{tape.Name("b")}})
+	testing.expect_value(t, derr, nil)
+	defer tape.destroy_demand(&demand)
+
+	inputs := [?]string {
+		`{"a":`,
+		`{"a":   `,
+		`{"a": // c`,
+		`{"a": /* c */`,
+		`{"a": /* c */   `,
+	}
+	for spec in ([]json.Spec{.Jsonc, .Json5}) {
+		for src in inputs {
+			buf := make([]u8, len(src), context.allocator)
+			defer delete(buf, context.allocator)
+			copy(buf, src)
+
+			_, ferr := json.find(buf, {tape.Name("b")}, spec)
+			fkind, fat := fault_of(ferr)
+			testing.expectf(t, fkind == .Truncated && fat == u64(len(buf)), "find %v %q: %v", spec, src, ferr)
+
+			doc, serr := json.scan(buf, &demand, spec)
+			defer tape.destroy(&doc)
+			skind, sat := fault_of(serr)
+			testing.expectf(t, skind == .Truncated && sat == u64(len(buf)), "scan %v %q: %v", spec, src, serr)
+
+			dst: Want
+			uerr := json.unmarshal(buf, &dst, spec)
+			ukind, uat := fault_of(uerr)
+			testing.expectf(t, ukind == .Truncated && uat == u64(len(buf)), "unmarshal %v %q: %v", spec, src, uerr)
+		}
+	}
+}

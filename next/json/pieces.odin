@@ -375,7 +375,7 @@ piece_grow_inner :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, 
 piece_walk :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, p, end: [^]u8, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
 	s := pw.s
 	if !s.started || s.place == PLACE_ROOT && s.last == 0 && s.cut.on == 0 && s.run.state == 0 {
-		return enter(p, end, INDENT_START, w, w.regs^, GAP_START, on)
+		return enter(p, end, indent_start(w), w, w.regs^, GAP_START, on)
 	}
 	when ODIN_DEBUG || ODIN_SANITIZER_FLAGS != {} {
 		if (piece_cut_keep(s.cut) if s.cut.on != 0 else piece_keep_from(s, S)) < pw.from {
@@ -674,15 +674,15 @@ piece_keep_rooms :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) {
 enter_place :: #force_no_inline proc "contextless" (place: u8, p, end: [^]u8, d: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	switch place {
 	case PLACE_OPEN:
-		return st_open(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_open(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	case PLACE_COLON:
-		return st_colon(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_colon(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	case PLACE_VALUE:
-		return st_value(piece_skip_white(p, end, S), end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_value(piece_skip_white(p, end, S), end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	case PLACE_MEMBER:
-		return st_member_ws(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_member_ws(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	}
-	return st_after(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	return st_after(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 }
 
 // Handles the bytes after the root value ending at `p`, in a window that more bytes may follow. A run of comments is
@@ -912,16 +912,16 @@ piece_run_end :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk
 enter_run :: #force_no_inline proc "contextless" (run: u8, crossed: bool, p, end: [^]u8, d: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	switch run {
 	case RUN_VALUE:
-		return st_value(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_value(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	case RUN_KEY:
-		return st_key(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_key(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	case RUN_COLON:
-		return st_colon(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_colon(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	}
 	if crossed {
-		return st_member_ws(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_member_ws(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	}
-	return st_after_ws(p, end, d, INDENT_START, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	return st_after_ws(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
 }
 
 // The offset of the first byte of the comments that run `s.run` holds back, which a hook that reads a comment's bytes

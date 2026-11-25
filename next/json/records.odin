@@ -607,7 +607,7 @@ key_walk :: proc "contextless" (r: ^Records, w: ^Walk($S, Member_Key, $LAX, $C),
 		w.steps[0] = left
 	}
 	w.depth = min(w.limit, WALK_LEVELS)
-	res := enter_member(raw_data(r.src)[at:], raw_data(r.src)[len(r.src):], MEMBER_LEVEL, INDENT_START, w, regs^, GAP_OFF, member_key_hook)
+	res := enter_member(raw_data(r.src)[at:], raw_data(r.src)[len(r.src):], MEMBER_LEVEL, indent_start(w), w, regs^, GAP_OFF, member_key_hook)
 	w.hooks, w.regs, w.ctx, w.stack, w.allocator = nil, nil, nil, nil, {}
 	return res
 }
@@ -659,7 +659,7 @@ record_walk :: #force_inline proc "contextless" (r: ^Records, w: ^Walk($S, $H, $
 	when .Walk in C {
 		h.walk = w
 	}
-	res := enter(raw_data(r.src)[lo:], end, INDENT_START, w, regs^, GAP_START, on)
+	res := enter(raw_data(r.src)[lo:], end, indent_start(w), w, regs^, GAP_START, on)
 	when TAIL {
 		res = walk_tail(w, res, end, on)
 	}

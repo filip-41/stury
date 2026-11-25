@@ -5,13 +5,13 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // The walk's states, one procedure per place in the grammar. Each takes the cursor `p`, `end` one past the text, `d`
-// the depth shifted left once with the open container's kind in bit 0 (1 for an object), `ind` the predicted indent
-// (whitespace.odin), `w` the rest of the walk, `s0`, `s1` and `s2` the hook's registers and `m` the open object's gap
+// the depth shifted left once with the open container's kind in bit 0 (1 for an object), `w` the rest of the walk
+// `ind` the predicted indent (in `Walk.ind` on AMD64 via zero-sized `Indent_Arg`, live register elsewhere), `w` the rest of the walk, `s0`, `s1` and `s2` the hook's registers and `m` the open object's gap
 // slot, dormant or past the table where it matches no gaps (members.odin).
 
 // The state at the start of a value, past white space.
 @(private, enable_target_feature = STATE_FEATURES)
-st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if p >= end {
 		return fault(w, hs, end, .Truncated)
@@ -122,7 +122,7 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 			if c < GAP_DORMANT_MARK + GAP_ROWS {
 				return #must_tail st_open_row_second(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, m, on)
 			}
-			return #must_tail st_open(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, u64(c) * GAP_MEMBERS, on)
+			return #must_tail st_open(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 		} else {
 			return #must_tail st_open(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
@@ -169,7 +169,7 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 
 // The state at an object's key, past white space, which reads on through the colon to the value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if p >= end {
 		return fault(w, hs, end, .Truncated)
@@ -215,15 +215,13 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 	}
 	if r := colon_fast(q, end); r != nil {
 		if gaps_on(m) {
-			if gap_learn(w, m, p, q, r) {
-				when .Skips in C {
-					if a == .Skip {
-						stop_gaps(w, q, d)
-						return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
-					}
+			w.resume = p
+			when .Skips in C {
+				if a == .Skip {
+					return #must_tail st_gap_learn_skip(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 				}
-				return #must_tail st_stop_gaps(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 			}
+			return #must_tail st_gap_learn(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 		when .Skips in C {
 			if a == .Skip {
@@ -237,8 +235,7 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 		if gap_miss(w, p) {
 			when .Skips in C {
 				if a == .Skip {
-					stop_gaps(w, q, d)
-					return #must_tail st_skip_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+					return #must_tail st_stop_gaps_skip(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 				}
 			}
 			return #must_tail st_stop_gaps(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
@@ -252,9 +249,9 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m), on)
 }
 
-// The start of a member's value when the colon after the key at `p` is flush against it or a pretty printer's `": "`,
-// `" : "` or `" :"`, else nil, when `st_colon` must read the colon.
-@(private)
+// The start of a member's value when the colon after the key ending at `q` is flush against it or a pretty printer's
+// `": "`, `" : "` or `" :"`, else nil, when `st_colon` must read the colon.
+@(private, require_results)
 colon_fast :: #force_inline proc "contextless" (q, end: [^]u8) -> [^]u8 {
 	if intrinsics.ptr_sub(end, q) > 2 && q[0] == ':' {
 		if q[1] > ' ' {
@@ -279,8 +276,8 @@ colon_fast :: #force_inline proc "contextless" (q, end: [^]u8) -> [^]u8 {
 // inlined, so a plain ASCII string makes no call. It reads on past those 32 bytes, which `string_short` judged, when the
 // text holds them: that is the only way it is entered, a probe that is short of the text's end returns at once without
 // judging a byte.
-@(private, enable_target_feature = STATE_FEATURES)
-st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, escape, ok, escaped := string_lean(p[32:] if intrinsics.ptr_sub(end, p) > 32 else p, end, '"')
 	if !ok {
@@ -304,8 +301,8 @@ st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, 
 }
 
 // The state at a value string whose first escape is at `w.resume`.
-@(private, enable_target_feature = STATE_FEATURES)
-st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q: [^]u8
 	ok: bool
@@ -333,8 +330,9 @@ st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, in
 }
 
 // The state at a value string whose first byte past printable ASCII is no backslash, within 32 bytes.
-@(private, enable_target_feature = STATE_FEATURES)
-st_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+// Caller guarantees `ptr_sub(end, p) > 32` so `string_utf8` may load 32 bytes unchecked from `p[1:]`.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, ok := string_utf8(p)
 	if !ok {
@@ -351,8 +349,8 @@ st_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 }
 
 // The state at a value string past ASCII, or one the faster readers refused.
-@(private, enable_target_feature = STATE_FEATURES)
-st_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, spelling, kind := string_long(w, p, end)
 	if kind != .None {
@@ -373,8 +371,8 @@ st_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 
 // The state at a key `string_probe` refused, longer than `PROBE_MAX` or past printable ASCII. It reads on past the
 // `PROBE_MAX` bytes the probe judged, as `st_string` does for `string_short`'s.
-@(private, enable_target_feature = STATE_FEATURES)
-st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, escape, ok, escaped := string_lean(p[PROBE_MAX:] if intrinsics.ptr_sub(end, p) > PROBE_MAX else p, end, '"')
 	if !ok {
@@ -403,8 +401,8 @@ st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 }
 
 // The state at a key whose first escape is at `w.resume`.
-@(private, enable_target_feature = STATE_FEATURES)
-st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, at, credit, ok := key_escaped_head(w.resume, end)
 	spelling := tape.SPELLING_DECODE
@@ -435,8 +433,11 @@ st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d
 }
 
 // The state at a key whose first byte past printable ASCII is no backslash, within `PROBE_MAX` bytes.
-@(private, enable_target_feature = STATE_FEATURES)
-st_key_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+// Caller guarantees `ptr_sub(end, p) > 32` (enforced by `string_probe` since `PROBE_MAX >= 32`) so `string_utf8` may
+// load 32 bytes unchecked from `p[1:]`.
+#assert(PROBE_MAX >= 32)
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_key_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, ok := string_utf8(p)
 	if !ok {
@@ -458,8 +459,8 @@ st_key_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 }
 
 // The state at a key past ASCII, or one the faster readers refused.
-@(private, enable_target_feature = STATE_FEATURES)
-st_key_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_key_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, spelling, kind := string_long(w, p, end)
 	if kind != .None {
@@ -485,7 +486,7 @@ st_key_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 
 // The state right after a key.
 @(private, enable_target_feature = STATE_FEATURES)
-st_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if intrinsics.ptr_sub(end, p) > 2 && p[0] == ':' && p[1] == ' ' && p[2] > ' ' {
 		return #must_tail st_value(p[2:], end, d, ind, w, hs.a, hs.b, hs.c, m, on)
@@ -504,7 +505,7 @@ st_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 
 // `st_colon` after a key the hook answered `Skip` on, whose value gives no token. Comments before the colon are given.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_skip_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_skip_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, kind := colon(p, end)
 	when S != .Json {
@@ -527,9 +528,10 @@ st_skip_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 
 // The state right after an open bracket.
 @(private, enable_target_feature = STATE_FEATURES)
-st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	ind := ind
+	pind := indent_ptr(w, &ind)
 	if gaps_on(m) {
 		if d & 1 != 0 {
 			if r, key, nl := gap_match(w, p, end, m); r != nil {
@@ -542,7 +544,7 @@ st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 				}
 				if nl {
 					// The members are a step deeper, as `indent_predicted` would have found at a line break.
-					ind = ind &~ 0xffff_ff00 | ((ind >> 8 + ind >> 32) & 0xff_ffff) << 8
+					pind^ = pind^ &~ 0xffff_ff00 | ((pind^ >> 8 + pind^ >> 32) & 0xff_ffff) << 8
 				}
 				when .Skips in C {
 					if a == .Skip {
@@ -562,7 +564,7 @@ st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 			w.gap_lo = at(w, p)
 		}
 	}
-	q := indent_fast(p, end, &ind, .Open)
+	q := indent_fast(p, end, pind, .Open)
 	if q == nil {
 		return #must_tail st_open_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
@@ -579,7 +581,7 @@ st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 }
 
 // The stack entry of a container opened in container `d`, whose gap slot is `m`.
-@(private)
+@(private = "file", require_results)
 level :: #force_inline proc "contextless" (d, m: u64) -> u32 {
 	#assert(']' | 1 << 5 == '}')
 	return u32(']' | (d & 1) << 5 | m << 8)
@@ -587,7 +589,7 @@ level :: #force_inline proc "contextless" (d, m: u64) -> u32 {
 
 // One past the closing quote of the key token `key` a gap matched, where a stop at it ends the walk as one in the
 // key's states does.
-@(private)
+@(private = "file", require_results)
 past_key :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), key: tape.Token) -> [^]u8 {
 	return w.base[key.lo + u64(key.n) + 1:]
 }
@@ -596,9 +598,39 @@ past_key :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), key: t
 // members and the objects at its place in the tree match no more gaps, and an array holding it reads on without
 // them, as its other objects are of that row. Other rows match on, against the limit less `GAP_MISS_FLOOR`.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_stop_gaps :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_stop_gaps :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	stop_gaps(w, p, d)
 	return #must_tail st_colon(p, end, d, ind, w, s0, s1, s2, GAP_OFF, on)
+}
+
+// `st_stop_gaps` after a key the hook answered `Skip` on.
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_stop_gaps_skip :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	stop_gaps(w, p, d)
+	return #must_tail st_skip_colon(p, end, d, ind, w, s0, s1, s2, GAP_OFF, on)
+}
+
+// Learns slot `m`'s gap around the key starting at `w.resume` and ending at `p`, then continues to its value, or
+// retires the object's row when misses pass their limit.
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_gap_learn :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	r := colon_fast(p, end)
+	if gap_learn(w, m, w.resume, p, r) {
+		stop_gaps(w, p, d)
+		return #must_tail st_colon(p, end, d, ind, w, s0, s1, s2, GAP_OFF, on)
+	}
+	return #must_tail st_value(r, end, d, ind, w, s0, s1, s2, gap_next(m), on)
+}
+
+// `st_gap_learn` after a key the hook answered `Skip` on.
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_gap_learn_skip :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	r := colon_fast(p, end)
+	if gap_learn(w, m, w.resume, p, r) {
+		stop_gaps(w, p, d)
+		return #must_tail st_skip_colon(p, end, d, ind, w, s0, s1, s2, GAP_OFF, on)
+	}
+	return #must_tail st_skip_value(r, end, d, ind, w, s0, s1, s2, gap_next(m), on)
 }
 
 // Retires the row of the object `d` names, whose key ends at `p`, as `st_stop_gaps` does.
@@ -616,8 +648,8 @@ stop_gaps :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p: [^
 
 // The state at the open bracket `p` of a container a hook skips. Judges what it holds with no hooks, gives its `End`
 // and goes on after it.
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_skip_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_skip_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	r := pass_over(w, p, end, d, ind, hs, m, true)
 	if u8(r) != 0 {
@@ -635,8 +667,11 @@ st_skip_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 // short string, a number or a literal here, any other value as `pass_over` judges it. Comments before it are given,
 // and a byte that starts no value faults as `st_value` faults it.
 @(private, enable_target_feature = STATE_FEATURES)
-st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
+	if p >= end {
+		return fault(w, hs, end, .Truncated)
+	}
 	p := p
 	when S != .Json {
 		if opens_run(p, end, S) {
@@ -645,10 +680,10 @@ st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 				return result
 			}
 			p = q
+			if p >= end {
+				return fault(w, hs, end, .Truncated)
+			}
 		}
-	}
-	if p >= end {
-		return fault(w, hs, end, .Truncated)
 	}
 	#partial switch VALUE_CLASS[p[0]] {
 	case .String:
@@ -656,7 +691,7 @@ st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 	case .Number:
-		if q, _, kind := hook_number(p, end, H, C, S); kind == .None && !too_wide(p, q) {
+		if q, _, kind := tape.number_scan(p, end, false, S == .Json5); kind == .None && !too_wide(p, q) {
 			if gaps_on(m) {
 				return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 			}
@@ -685,8 +720,8 @@ st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 
 // The state at the open bracket `p` of a container a scan keeps whole. The scanner's builder stores the container,
 // and the hook is given its `End`.
-@(private, enable_target_feature = STATE_FEATURES)
-st_keep_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_keep_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	r := keep_over(w, p, end, d, ind, &hs, m, false)
 	if u8(r) != 0 {
@@ -700,8 +735,8 @@ st_keep_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 }
 
 // `st_keep_open` for an object a scan keeps as its members, each container value as one node.
-@(private, enable_target_feature = STATE_FEATURES)
-st_keep_stubs_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_keep_stubs_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	r := keep_over(w, p, end, d, ind, &hs, m, true)
 	if u8(r) != 0 {
@@ -716,8 +751,8 @@ st_keep_stubs_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 
 // The state at the open bracket `p` of a container once a hook wants no more tokens. Judges the rest of the text in
 // the same walk with no hooks.
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_rest :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_rest :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	// A walk's hooks are behind a pointer, so a walk with `No_Hooks` has the same layout, its stack and gaps included.
 	#assert(size_of(Walk(S, H, LAX, C)) == size_of(Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS)))
 	when LAX {
@@ -729,16 +764,16 @@ st_rest :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 
 // The state at an object's open bracket whose parent slot has no row yet, the first object there, which reads its
 // members on the row's dormant slots.
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_open_new_row :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_open_new_row :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	row := gap_new_row(&w.gaps, m)
 	return #must_tail st_open(p, end, d, ind, w, s0, s1, s2, GAP_DORMANT + row * GAP_MEMBERS, on)
 }
 
 // The state at an object's open bracket that is the second object at its parent slot's place, which reads its
 // members on the row's dormant slots too, as a row learned from the second object pays only from the third.
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_open_row_second :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_open_row_second :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	c := &w.gaps.child[m & (GAP_DORMANT - 1)]
 	c^ -= GAP_DORMANT_MARK - GAP_SECOND_MARK
 	return #must_tail st_open(p, end, d, ind, w, s0, s1, s2, GAP_DORMANT + u64(c^ - GAP_SECOND_MARK) * GAP_MEMBERS, on)
@@ -746,8 +781,8 @@ st_open_row_second :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 
 // The state at an object's open bracket that is the third object at its parent slot's place, whose row goes live:
 // its slots are zeroed, the only write to them before a learn, and its members read on them.
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_open_row_live :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_open_row_live :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	return #must_tail st_open(p, end, d, ind, w, s0, s1, s2, gap_row_live(&w.gaps, m), on)
 }
 
@@ -755,7 +790,7 @@ st_open_row_live :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind
 // token's value, key, or the `st_open` or `st_after` whose gap match gave the key. A growth refused stops the walk at
 // `p`.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_grow_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_grow_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if !grow_room(w, &hs) {
 		return stopped(w, hs, p)
@@ -764,7 +799,7 @@ st_grow_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 }
 
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_grow_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_grow_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if !grow_room(w, &hs) {
 		return stopped(w, hs, p)
@@ -772,8 +807,8 @@ st_grow_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 	return #must_tail st_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_grow_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_grow_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if !grow_room(w, &hs) {
 		return stopped(w, hs, p)
@@ -781,8 +816,8 @@ st_grow_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 	return #must_tail st_open(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_grow_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_grow_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if !grow_room(w, &hs) {
 		return stopped(w, hs, p)
@@ -791,8 +826,8 @@ st_grow_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 }
 
 // The state at an open bracket past the levels the walk holds.
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_deepen :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_deepen :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if k := deepen(w, &hs, p, s2); k != 0 {
 		return too_deep(w, hs, p, k)
@@ -800,8 +835,8 @@ st_deepen :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, 
 	return #must_tail st_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_deepen_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_deepen_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if k := deepen(w, &hs, p, s2); k != 0 {
 		return too_deep(w, hs, p, k)
@@ -810,8 +845,9 @@ st_deepen_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 }
 
 // The state at an array's first element when it is an array, which reads the run of open brackets.
-@(private, enable_target_feature = STATE_FEATURES)
-st_open_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+// Caller guarantees `d & 1 == 0` (enclosing container is an array), so `level(0, m)` records an array level.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_open_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	p, d := p, d
 	stack, depth := w.stack, w.depth
@@ -850,11 +886,12 @@ st_open_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 }
 
 // `st_open` where white space follows the open bracket.
-@(private, enable_target_feature = STATE_FEATURES)
-st_open_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_open_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	ind := ind
-	q := skip_indent(p, end, &ind, .Open)
+	pind := indent_ptr(w, &ind)
+	q := skip_indent(p, end, pind, .Open)
 	if q < end && q[0] == ']' | u8(d & 1) << 5 {
 		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
@@ -866,9 +903,10 @@ st_open_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 
 // The state right after a value, which reads a comma and the next member, the container's close, or the root's end.
 @(private, enable_target_feature = STATE_FEATURES)
-st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	ind := ind
+	pind := indent_ptr(w, &ind)
 	if d < 2 {
 		return done(w, hs, p)
 	}
@@ -900,12 +938,12 @@ st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 			w.gap_lo = at(w, p)
 		}
 	}
-	q := indent_fast(p, end, &ind, .Close)
+	q := indent_fast(p, end, pind, .Close)
 	if q == nil {
 		return #must_tail st_after_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	if q[0] == ',' {
-		r := indent_fast(q[1:], end, &ind, .Member)
+		r := indent_fast(q[1:], end, pind, .Member)
 		if r == nil {
 			return #must_tail st_member_ws(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
@@ -925,16 +963,17 @@ st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 
 // `st_after` once no gap matches, which reads a comma and the next member or the container's close. Only the states of
 // a member whose gap matched enter it, so it is never at the root and has no root's end to read.
-@(private, enable_target_feature = STATE_FEATURES)
-st_after_unmatched :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_after_unmatched :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	ind := ind
-	q := indent_fast(p, end, &ind, .Close)
+	pind := indent_ptr(w, &ind)
+	q := indent_fast(p, end, pind, .Close)
 	if q == nil {
 		return #must_tail st_after_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	if q[0] == ',' {
-		r := indent_fast(q[1:], end, &ind, .Member)
+		r := indent_fast(q[1:], end, pind, .Member)
 		if r == nil {
 			return #must_tail st_member_ws(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
@@ -953,8 +992,8 @@ st_after_unmatched :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 }
 
 // The state at a string value whose member's gap matched, which matches the gap after it too.
-@(private, enable_target_feature = STATE_FEATURES)
-st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, stop, ok, escaped := string_short(p, end, '"')
 	if !ok {
@@ -1003,8 +1042,8 @@ st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 }
 
 // The state at a number value whose member's gap matched, which matches the gap after it too.
-@(private, enable_target_feature = STATE_FEATURES)
-st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, spelling, kind := hook_number(p, end, H, C, S)
 	if kind != .None {
@@ -1056,8 +1095,8 @@ st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 }
 
 // The state at a literal value whose member's gap matched, which matches the gap after it too.
-@(private, enable_target_feature = STATE_FEATURES)
-st_hit_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_hit_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, k := literal(p, end)
 	if q == nil {
@@ -1100,10 +1139,11 @@ st_hit_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 
 // `st_after` where white space follows the value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_after_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_after_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	ind := ind
-	q := skip_indent(p, end, &ind, .Close)
+	pind := indent_ptr(w, &ind)
+	q := skip_indent(p, end, pind, .Close)
 	if q >= end {
 		return fault(w, hs, end, .Truncated)
 	}
@@ -1121,10 +1161,11 @@ st_after_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 
 // The state right after a comma, at white space or the text's end.
 @(private, enable_target_feature = STATE_FEATURES)
-st_member_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_member_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	ind := ind
-	q := skip_indent(p, end, &ind, .Member)
+	pind := indent_ptr(w, &ind)
+	q := skip_indent(p, end, pind, .Member)
 	if d & 1 != 0 {
 		return #must_tail st_key(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
@@ -1133,7 +1174,7 @@ st_member_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 
 // The state at the close bracket of container `d`, which reads the run of closes after it too.
 @(private, enable_target_feature = STATE_FEATURES)
-st_close :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_close :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	p := p
 	// The depth is carried apart from the kind bit, so the next close does not wait on the stack's load.
@@ -1155,19 +1196,20 @@ st_close :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 
 // The state right after a number in an array, or without gap matching in an object. Runs of numbers in an array go on
 // in `st_number_run`, and runs of flush members with number values in `st_member_run`.
-@(private, enable_target_feature = STATE_FEATURES)
-st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	ind := ind
+	pind := indent_ptr(w, &ind)
 	if d < 2 {
 		return done(w, hs, p)
 	}
-	q := indent_fast(p, end, &ind, .Close)
+	q := indent_fast(p, end, pind, .Close)
 	if q == nil {
 		return #must_tail st_after_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 	if q[0] == ',' {
-		r := indent_fast(q[1:], end, &ind, .Member)
+		r := indent_fast(q[1:], end, pind, .Member)
 		if r == nil {
 			return #must_tail st_member_ws(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
@@ -1196,9 +1238,10 @@ st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 }
 
 // The state at a number after a comma in an array, which reads numbers while each is followed by a comma and, after at
-// most one space, another number.
-@(private, enable_target_feature = STATE_FEATURES)
-st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+// most one space, another number. Caller guarantees `d >= 2 && d & 1 == 0` (inside an array), relied on when entering
+// `st_number_blocks` on `q[0] == ']'`.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	p := p
 	q: [^]u8
@@ -1247,12 +1290,11 @@ st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
-// The state at a key flush after a comma, which reads members while each is flush against the last and has a number
-// value. A walk with gaps matches them in `st_after` instead.
-@(private, enable_target_feature = STATE_FEATURES)
-st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+// The state at a key flush after a comma, which reads flush members with number values. A walk with gaps matches them
+// in `st_after` instead.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
-	ind := ind
 	p, m := p, m
 	// The slot advances by one a member up to its row's last slot, so it is the run's start plus the members read,
 	// clamped where the run leaves.
@@ -1340,20 +1382,20 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 				return #must_tail st_grow_value(r, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
 			}
 		}
-		if intrinsics.ptr_sub(end, n) <= 2 || n[0] != ',' {
+		if n >= end || n[0] != ',' {
 			return #must_tail st_after_number(n, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
 		}
-		next := indent_fast(n[1:], end, &ind, .Member)
-		if next == nil {
-			return #must_tail st_member_ws(n[1:], end, d, ind, w, hs.a, hs.b, hs.c, value, on)
+		next := n[1:]
+		if next >= end || next[0] <= ' ' {
+			return #must_tail st_member_ws(next, end, d, ind, w, hs.a, hs.b, hs.c, value, on)
 		}
 		p = next
 		run += 1
 	}
 }
 
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_bad_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	q, kind := literal_fault(p, end)
 	return fault(w, hook.Regs{s0, s1, s2}, q, kind, .Literal if kind == .Bad_Char else .None)
 }
@@ -1362,7 +1404,7 @@ st_bad_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 // send a fault here compile none of that choice.
 
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_bad_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	when S != .Json5 {
 		if .Non_Finite in w.tolerate && (p[0] == '+' || p[0] == 'I' || p[0] == 'N') {
 			return #must_tail st_number5(p, end, d, ind, w, s0, s1, s2, m, on)
@@ -1374,17 +1416,17 @@ st_bad_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 
 // `st_bad_value` where an object's key must start.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_bad_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	return fault(w, hook.Regs{s0, s1, s2}, p, .Bad_Char, key_detail(p, end))
 }
 
 // `st_bad_value` after a value, at a byte that is no comma and no close of its container.
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_bad_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	return fault(w, hook.Regs{s0, s1, s2}, p, .Bad_Char, after_detail(p, d))
 }
 
-@(private)
+@(private = "file")
 Byte_Class :: enum u8 {
 	Bad,
 	String,
@@ -1394,7 +1436,7 @@ Byte_Class :: enum u8 {
 	Array,
 }
 
-@(private, rodata)
+@(private = "file", rodata)
 VALUE_CLASS := [256]Byte_Class {
 	'"' = .String,
 	'-' = .Number,

@@ -16,7 +16,7 @@ FLOOR_LEVELS :: 8
 // `.Number_Blocks` enters it, and a `Stop` ends the walk at its token. It answers no `Grow`, as a block is given only
 // while the room has place for it, nor `Skip`, `Rest` or `Keep`, which such a hook never gives.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
+st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result #no_bounds_check {
 	hs := hook.Regs{s0, s1, s2}
 	dep := d >> 1
 	// The depth a close may bring the walk down to, with every container from it to `dep` an array. Depth 0 is the

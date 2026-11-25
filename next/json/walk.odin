@@ -41,13 +41,14 @@ Walk :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	rooms:     uintptr,
 	hooks:     ^H,
 	stack:     [^]u32, // per open level, its parent's close bracket in the low byte and gap slot above, restored at its close
+	ind:       u64, // the predicted indent (whitespace.odin)
+	depth:     u64, // levels `stack` and the hook hold
+	gap_lo:    u64, // where the gap being read started
 	regs:      ^hook.Regs, // the hook's registers where the walk ended
 	resume:    [^]u8, // where a string's first escape is, from the state that found it
 	allocator: runtime.Allocator, // what `stack` grows in past the frame's levels
-	depth:     u64, // levels `stack` and the hook hold
 	limit:     u64, // `Budget.depth`
 	room:      u64, // levels `stack` holds
-	gap_lo:    u64, // where the gap being read started
 	grow:      u64, // where the token that found the hook's room full starts
 	gaps:      Gaps,
 	owned:     bool, // `stack` is the allocator's
@@ -56,14 +57,42 @@ Walk :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	tolerated: bool, // the walk took a rule of `tolerate`
 	rested:    bool, // with `.Skips`, the hook answered `Rest`, so the root's foot comments are not its
 	refused:   u8, // with JSON5, strings the block reader refused, less those it read, see `BLOCK_RETIRE`
-	// Leaves no gap, as Odin zeroes a struct with one that is declared `---`. The fields before `depth` are eight
-	// pointers.
+	// Leaves no gap, as Odin zeroes a struct with one that is declared `---`. Pointer runs before `u64` fields are
+	// multiples of four pointers, so alignment stays gap-free on both 64-bit and `wasm32`.
 	_:         [2]u8,
 	// With `LAX`, one more than the containers the walk may still open, 0 once it opened one past `Budget.steps`.
 	steps:     [int(LAX)]u64,
 	ctx:       ^runtime.Context, // the caller's, for the calls of `allocator`, nil only when the frame's levels suffice
 	// With `LAX`, the text in pieces the walk reads a window of, nil for a whole text.
 	piece:     [int(LAX)]^Piece_Walk,
+}
+
+// On AMD64, `ind` lives in `Walk.ind` so `preserve/none` states take 8 register arguments instead of 9, avoiding
+// register exhaustion and red-zone spills. On ARM64 and WASM32, registers/locals are plentiful so `ind` stays a live
+// state argument with zero memory traffic.
+@(private)
+IND_IN_WALK :: ODIN_ARCH == .amd64
+
+@(private)
+Indent_Arg :: [0]u64 when IND_IN_WALK else u64
+
+@(private, require_results)
+indent_ptr :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), ind: ^Indent_Arg) -> ^u64 {
+	when IND_IN_WALK {
+		return &w.ind
+	} else {
+		return ind
+	}
+}
+
+@(private, require_results)
+indent_start :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) -> Indent_Arg {
+	when IND_IN_WALK {
+		w.ind = INDENT_START
+		return {}
+	} else {
+		return INDENT_START
+	}
 }
 
 // The kernel tier the states are built for. The floor, as the walk's 16-byte reads gain nothing from a wider tier.
@@ -97,10 +126,10 @@ walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, $
 		if pw != nil {
 			r = piece_walk(&w, pw, p, end, on)
 		} else {
-			r = enter(p, end, INDENT_START, &w, regs^, m, on)
+			r = enter(p, end, indent_start(&w), &w, regs^, m, on)
 		}
 	} else {
-		r = enter(p, end, INDENT_START, &w, regs^, m, on)
+		r = enter(p, end, indent_start(&w), &w, regs^, m, on)
 	}
 	when LAX {
 		// A foot read on from a run of comments was judged to the text's end, whose bytes before the window are gone.
@@ -141,7 +170,7 @@ walk_init :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: 
 @(private)
 walk_start :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, stack: [^]u32, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, limit: u64, tolerate: tape.Tolerances, steps: u64) {
 	w.base, w.hooks, w.stack, w.regs, w.allocator, w.ctx = raw_data(src), h, stack, regs, allocator, ctx
-	w.limit, w.room, w.owned = min(limit, MAX_LEVELS), WALK_LEVELS, false
+	w.ind, w.limit, w.room, w.owned = INDENT_START, min(limit, MAX_LEVELS), WALK_LEVELS, false
 	when S == .Json5 {
 		w.refused = 0
 	}
@@ -229,12 +258,12 @@ walk_again :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, lo: u64
 	#assert(.Rooms not_in C)
 	levels: [REWALK_LEVELS]u32 = ---
 	saved := hook.levels_scope(w, 0)
-	wregs, resume, gap_lo, grow := w.regs, w.resume, w.gap_lo, w.grow
+	wregs, resume, ind, gap_lo, grow := w.regs, w.resume, w.ind, w.gap_lo, w.grow
 	w.stack, w.regs, w.limit, w.room = raw_data(levels[:]), regs, MAX_LEVELS, REWALK_LEVELS
 	w.depth = hook.held_depth(w.hooks, regs, REWALK_LEVELS)
-	r := enter(raw_data(src)[lo:], raw_data(src)[len(src):], INDENT_START, w, regs^, GAP_OFF, on)
+	r := enter(raw_data(src)[lo:], raw_data(src)[len(src):], indent_start(w), w, regs^, GAP_OFF, on)
 	hook.levels_leave(w, saved)
-	w.regs, w.resume, w.gap_lo, w.grow = wregs, resume, gap_lo, grow
+	w.regs, w.resume, w.ind, w.gap_lo, w.grow = wregs, resume, ind, gap_lo, grow
 	return r
 }
 
@@ -244,12 +273,12 @@ walk_again :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, lo: u64
 // this is a call of its own, whose frame has none.
 when .Address in ODIN_SANITIZER_FLAGS {
 	@(private)
-	enter :: #force_no_inline proc "contextless" (p, end: [^]u8, ind: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	enter :: #force_no_inline proc "contextless" (p, end: [^]u8, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 		return st_value(p, end, 0, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 } else {
 	@(private)
-	enter :: #force_inline proc "contextless" (p, end: [^]u8, ind: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	enter :: #force_inline proc "contextless" (p, end: [^]u8, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 		return st_value(p, end, 0, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 }
@@ -257,12 +286,12 @@ when .Address in ODIN_SANITIZER_FLAGS {
 // `enter` past a comma in the container `d` names, as a walk of a seam starts.
 when .Address in ODIN_SANITIZER_FLAGS {
 	@(private)
-	enter_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	enter_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 		return st_member_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 } else {
 	@(private)
-	enter_member :: #force_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	enter_member :: #force_inline proc "contextless" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 		return st_member_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	}
 }
@@ -273,14 +302,20 @@ when .Address in ODIN_SANITIZER_FLAGS {
 // it. It is a call because `#must_tail` cannot jump between walks. `given` says the hook was given the value's token,
 // a container's whose step the walk took.
 @(private, cold)
-pass_over :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, d, ind: u64, hs: hook.Regs, m: u64, given: bool) -> hook.Walk_Result {
+pass_over :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, d: u64, ind: Indent_Arg, hs: hook.Regs, m: u64, given: bool) -> hook.Walk_Result {
 	#assert(size_of(Walk(S, H, LAX, C)) == size_of(Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS)))
 	when LAX {
 		w.steps[0] += u64(given) // the container's step, taken again as its bracket is read again
 	}
+	when IND_IN_WALK {
+		saved_ind := w.ind
+	}
 	saved := hook.levels_scope(w, d >> 1)
 	r := enter(p, end, ind, (^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS))(w), hs, m, hook.no_hook)
 	hook.levels_leave(w, saved)
+	when IND_IN_WALK {
+		w.ind = saved_ind
+	}
 	return r
 }
 
@@ -288,7 +323,7 @@ pass_over :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p,
 // `Whole`, in the same walk read as one of the inner hook, as `pass_over` judges one. `hs` are the hook's registers,
 // which leave it past the container.
 @(private)
-keep_over :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, d, ind: u64, hs: ^hook.Regs, m: u64, $STUBS: bool) -> hook.Walk_Result {
+keep_over :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, d: u64, ind: Indent_Arg, hs: ^hook.Regs, m: u64, $STUBS: bool) -> hook.Walk_Result {
 	K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 3)
 	Inner :: intrinsics.type_polymorphic_record_parameter_value(K, 0)
 	when STUBS {
@@ -301,7 +336,7 @@ keep_over :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, en
 // The inner walk reads the inner hook's room when it starts, and the walk the hook's room when it ends, as a hook with
 // `.Rooms` is given a node only while its room has place for it, in every walk.
 @(private)
-keep_through :: #force_no_inline proc "contextless" ($Inner: typeid, $of: proc "contextless" (h: rawptr) -> rawptr, $keep: proc "contextless" (h: rawptr, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, d, ind: u64, hs: ^hook.Regs, m: u64) -> hook.Walk_Result {
+keep_through :: #force_no_inline proc "contextless" ($Inner: typeid, $of: proc "contextless" (h: rawptr) -> rawptr, $keep: proc "contextless" (h: rawptr, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, d: u64, ind: Indent_Arg, hs: ^hook.Regs, m: u64) -> hook.Walk_Result {
 	IC :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(Inner, hook.PROTOCOL_FIELD), 0)
 	#assert(size_of(Walk(S, H, LAX, C)) == size_of(Walk(S, Inner, LAX, IC)))
 	on :: #force_inline proc "contextless" (h: ^Inner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
@@ -309,6 +344,9 @@ keep_through :: #force_no_inline proc "contextless" ($Inner: typeid, $of: proc "
 	}
 	inner := (^Walk(S, Inner, LAX, IC))(w)
 	hooks := w.hooks
+	when IND_IN_WALK {
+		saved_ind := w.ind
+	}
 	saved := hook.levels_scope(w, d >> 1)
 	inner.hooks = (^Inner)(of(hooks))
 	when LAX {
@@ -320,6 +358,9 @@ keep_through :: #force_no_inline proc "contextless" ($Inner: typeid, $of: proc "
 	r := enter(p, end, ind, inner, hs^, m, on)
 	hs^ = w.regs^
 	hook.levels_leave(w, saved)
+	when IND_IN_WALK {
+		w.ind = saved_ind
+	}
 	w.hooks = hooks
 	when .Rooms in C {
 		w.rooms = hook.rooms_end(hooks)

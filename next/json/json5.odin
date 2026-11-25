@@ -73,7 +73,7 @@ SPELLING_JSON5 :: u16(1 << 11)
 // The state at a JSON5 number that JSON's grammar refused, or that starts with `+`, `.`, `I` or `N`. In JSON and JSONC,
 // a walk that tolerates `.Non_Finite` reads JSON5's non-finite numbers here.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	when S == .Json5 {
 		q, spelling, kind := number5(p, end)
@@ -266,7 +266,7 @@ escape5 :: #force_inline proc "contextless" (e, end: [^]u8, tol: tape.Tolerances
 
 // The state at a single-quoted JSON5 string value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q, stop, ok, _ := string_short(p, end, '\'')
 	if !ok {
@@ -286,7 +286,7 @@ st_string5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 // The state at a single-quoted JSON5 string that `string_short` refused, at the first byte it stopped at, `w.resume`,
 // nil for none within 32 bytes.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string5_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_string5_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q: [^]u8
 	ok: bool
@@ -328,7 +328,7 @@ st_string5_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 // passes any other key to `st_spec_key`. No gap is learned around an unquoted key, so a walk with gaps counts its
 // member as a miss.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_ident :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_key_ident :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	q := ident_ascii(p, end)
 	if q == nil {
@@ -391,7 +391,7 @@ ident_ascii :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bou
 // The state at a JSON5 key that JSON refused, a single-quoted string or an ECMAScript 5.1 IdentifierName, which reads on
 // through the colon to the value. A byte that starts no key faults `Bad_Char`.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+st_key5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	quoted := p[0] == '\''
 	q: [^]u8

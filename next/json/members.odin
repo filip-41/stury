@@ -162,7 +162,7 @@ gap_next :: #force_inline proc "contextless" (m: u64) -> u64 {
 }
 
 // The start of the value after `p` when the text at `p` repeats slot `m`'s gap, with the key token the gap holds, else
-// nil. Each gap length has a branch with constant offsets, so the value's start does not wait on the slot's load.
+// nil.
 @(private)
 gap_match :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), p, end: [^]u8, m: u64) -> (r: [^]u8, key: tape.Token, nl: bool) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) <= GAP_MAX + 8 {
@@ -237,23 +237,70 @@ expected_at :: #force_inline proc "contextless" (b: u64, p, end: [^]u8) -> [^]u8
 	return p[n + 2:] if kernel.load8(p[1:]) == e.head && kernel.load8(p[n - 7:]) == e.tail else nil
 }
 
-// One past the `n`-byte gap at `p` matching `e` followed by a value-start byte, or nil on mismatch.
+// One past the `n`-byte gap at `p` matching `e` followed by a value-start byte, or nil on mismatch. Both `p` and `e`
+// have over `GAP_MAX + 8` readable bytes ahead (`gap_match`).
+// On AMD64 (32 KB L1I), the 62-way jump table inlined across the 5 gap states blows out L1I (~31 KB -> ~6 KB with the
+// 4-bucket overlap compare). On ARM64 (192 KB L1I) and WASM32, exact-width jump-table dispatch avoids data-dependent
+// bucket branch mispredictions on mixed-length schemas (`citm`, `logs`, `pretty`).
 @(private)
 gap_match_len :: #force_inline proc "contextless" (p, e: [^]u8, n: int) -> [^]u8 #no_bounds_check {
-	#unroll for k in 3 ..= GAP_MAX {
-		if n == k {
-			if !gap_equal(p, e, k) || p[k] <= ' ' {
+	when ODIN_ARCH == .amd64 {
+		when ODIN_ENDIAN != .Little {
+			#panic("json: gap_match_len requires a little-endian target")
+		}
+		k := u64(n)
+		if k <= 16 {
+			if k >= 8 {
+				if ((kernel.load8(p) ~ kernel.load8(e)) | (kernel.load8(p[k - 8:]) ~ kernel.load8(e[k - 8:]))) != 0 || p[k] <= ' ' {
+					return nil
+				}
+				return p[k:]
+			}
+			if k < 3 {
+				return nil
+			}
+			wp := kernel.load8(p)
+			mask := (~u64(0)) >> (((8 - k) << 3) & 63)
+			if ((wp ~ kernel.load8(e)) & mask) != 0 || u8(wp >> ((k << 3) & 63)) <= ' ' {
 				return nil
 			}
 			return p[k:]
 		}
+		if k <= 32 {
+			a := simd.bit_xor(kernel.load16(p), kernel.load16(e))
+			b := simd.bit_xor(kernel.load16(p[k - 16:]), kernel.load16(e[k - 16:]))
+			if !kernel.all_zero(simd.bit_or(a, b)) || p[k] <= ' ' {
+				return nil
+			}
+			return p[k:]
+		}
+		if k <= GAP_MAX {
+			a := simd.bit_xor(kernel.load16(p), kernel.load16(e))
+			b := simd.bit_xor(kernel.load16(p[16:]), kernel.load16(e[16:]))
+			c := simd.bit_xor(kernel.load16(p[k - 32:]), kernel.load16(e[k - 32:]))
+			d := simd.bit_xor(kernel.load16(p[k - 16:]), kernel.load16(e[k - 16:]))
+			if !kernel.all_zero(simd.bit_or(simd.bit_or(a, b), simd.bit_or(c, d))) || p[k] <= ' ' {
+				return nil
+			}
+			return p[k:]
+		}
+		return nil
+	} else {
+		#unroll for k in 3 ..= GAP_MAX {
+			if n == k {
+				if !gap_equal(p, e, k) || p[k] <= ' ' {
+					return nil
+				}
+				return p[k:]
+			}
+		}
+		return nil
 	}
-	return nil
 }
 
 // Whether the `k` bytes at `p` and `e` are equal, compared with overlapping loads. Both `p` and `e` have over
 // `GAP_MAX + 8` readable bytes ahead, and `k` is a constant where `gap_match_len` inlines it.
-@(private)
+@(private = "file")
 gap_equal :: #force_inline proc "contextless" (p, e: [^]u8, k: int) -> bool #no_bounds_check {
 	if k < 8 {
 		return ((kernel.load8(p) ~ kernel.load8(e)) & (u64(1) << (8 * u64(k)) - 1)) == 0

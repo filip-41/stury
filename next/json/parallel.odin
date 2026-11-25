@@ -658,7 +658,7 @@ walk_seam :: proc "contextless" (src: []u8, from: int, opens: []tape.Kind, $S: S
 		m = gap_row_live(&w.gaps, m)
 	}
 	end := raw_data(src)[len(src):]
-	r := enter_member(raw_data(src)[from:], end, d, INDENT_START, &w, regs^, m, on)
+	r := enter_member(raw_data(src)[from:], end, d, indent_start(&w), &w, regs^, m, on)
 	r = walk_tail(&w, r, end, on)
 	return r, w.tolerated
 }
