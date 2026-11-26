@@ -7,8 +7,52 @@ import "base:runtime"
 import "core:mem"
 import "core:reflect"
 import "core:strings"
+import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/schema/rules"
+
+@(private)
+NO_KEY :: max(u64)
+
+@(private)
+KEY_MASK :: u64(0xFFFF_FFFF) | u64(0xFFFF) << 32 | u64(tape.SPELLING_DECODE) << 48
+
+@(private)
+Stream_Field_Flag :: enum u8 {
+	Read_Only,
+	Write_Only,
+	Optional,
+	Required,
+	Not_Null,
+	Has_Default,
+	Nonzero_Default,
+	Has_After,
+	Omit_Empty,
+	Omit_Unset,
+	Is_Root,
+	Is_Elem,
+}
+
+@(private)
+Stream_Field_Flags :: bit_set[Stream_Field_Flag; u16]
+
+// 48-byte hot record for both `.Expects` streaming load and direct-buffer JSON dump.
+// Zero pointers so `size_of(Stream_Field) == hook.EXPECTED_STRIDE` on both 64-bit and wasm32.
+@(private)
+Stream_Field :: struct {
+	using expected: hook.Expected_Key,
+	node:           i32,
+	rule_idx:       i32,
+	offset:         u32,
+	struct_idx:     i32,
+	field_idx:      u16,
+	flags:          Stream_Field_Flags,
+	key_off:        u16,
+	key_size:       u8,
+	kind:           Type_Kind,
+}
+
+#assert(size_of(Stream_Field) == hook.EXPECTED_STRIDE)
 
 @(private)
 Type_Kind :: enum u8 {
@@ -19,26 +63,27 @@ Type_Kind :: enum u8 {
 
 @(private)
 Type_Node :: struct {
-	kind:        Type_Kind,
-	type:        typeid,
-	ti:          ^runtime.Type_Info,
-	size, align: int,
-	child:       i32,
-	key_node:    i32,
-	count:       int,
-	tag_offset:  uintptr,
-	tag_size:    int,
-	no_nil:      bool,
-	pure_maybe:  bool,
-	len_offset:  uintptr,
-	bit_lower:   i64,
-	struct_idx:  i32,
-	enum_idx:    i32,
-	union_idx:   i32,
-	custom_idx:  i32,
-	rule_idx:    i32,
-	has_unique:  bool,
-	judged:      bool,
+	kind:           Type_Kind,
+	type:           typeid,
+	ti:             ^runtime.Type_Info,
+	size, align:    int,
+	child:          i32,
+	key_node:       i32,
+	count:          int,
+	tag_offset:     uintptr,
+	tag_size:       int,
+	no_nil:         bool,
+	pure_maybe:     bool,
+	len_offset:     uintptr,
+	bit_lower:      i64,
+	struct_idx:     i32,
+	enum_idx:       i32,
+	union_idx:      i32,
+	custom_idx:     i32,
+	rule_idx:       i32,
+	elem_field_idx: i32,
+	has_unique:     bool,
+	judged:         bool,
 }
 
 @(private)
@@ -67,6 +112,14 @@ Struct_Info :: struct {
 	name:              string,
 	fields:            []Field_Info,
 	slots:             []u32,
+	stream_fields:     []Stream_Field,
+	req_mask0:         u64,
+	def_mask0:         u64,
+	has_req_hi:        bool,
+	has_def_hi:        bool,
+	has_omit_tag:      bool,
+	has_optional:      bool,
+	has_field_afters:  bool,
 	has_fields_set:    bool,
 	fields_set_offset: uintptr,
 	capture_idx:       i32,
@@ -108,19 +161,25 @@ Union_Info :: struct {
 
 @(private)
 Type_Plan :: struct {
-	root:        i32,
-	type:        typeid,
-	tag:         string,
-	nodes:       []Type_Node,
-	structs:     []Struct_Info,
-	enums:       []Enum_Info,
-	unions:      []Union_Info,
-	customs:     []Custom_Of,
-	rule_sets:   []rules.Rules,
-	leaves:      []rules.Leaf,
-	arena:       mem.Dynamic_Arena,
-	arena_ready: bool,
-	allocator:   runtime.Allocator,
+	root:           i32,
+	type:           typeid,
+	tag:            string,
+	nodes:          []Type_Node,
+	structs:        []Struct_Info,
+	enums:          []Enum_Info,
+	unions:         []Union_Info,
+	customs:        []Custom_Of,
+	rule_sets:      []rules.Rules,
+	leaves:         []rules.Leaf,
+	root_field:     Stream_Field,
+	elem_fields:    []Stream_Field,
+	json_keys:      []u8,
+	dump_hint:      int,
+	can_stream:     bool,
+	has_validators: bool,
+	arena:          mem.Dynamic_Arena,
+	arena_ready:    bool,
+	allocator:      runtime.Allocator,
 }
 
 @(private)
@@ -175,6 +234,7 @@ build_type_plan :: proc(reg: ^Registry, T: typeid, tag: string, defaults: []Defa
 	if b.err != nil { return p, b.err }
 	p.nodes, p.structs, p.enums, p.unions = b.nodes[:], b.structs[:], b.enums[:], b.unions[:]
 	p.customs, p.rule_sets, p.leaves = b.customs[:], b.rule_sets[:], b.leaves[:]
+	if ferr := finalize_stream_plan(&p, arena); ferr != nil { return p, ferr }
 	return p, nil
 }
 
@@ -222,7 +282,7 @@ compile_type_node :: proc(b: ^Plan_Builder, ti: ^runtime.Type_Info) -> i32 {
 	if existing, ok := b.type_cache[ti.id]; ok { return existing }
 
 	idx := i32(len(b.nodes))
-	if !b_push(b, &b.nodes, Type_Node{type = ti.id, ti = ti, size = ti.size, align = ti.align, child = -1, key_node = -1, struct_idx = -1, enum_idx = -1, union_idx = -1, custom_idx = -1}) { return -1 }
+	if !b_push(b, &b.nodes, Type_Node{type = ti.id, ti = ti, size = ti.size, align = ti.align, child = -1, key_node = -1, struct_idx = -1, enum_idx = -1, union_idx = -1, custom_idx = -1, elem_field_idx = -1}) { return -1 }
 	if _, merr := map_insert(&b.type_cache, ti.id, idx); merr != nil { b.err = merr; return idx }
 
 	type_mr: Member_Rule
@@ -510,4 +570,156 @@ struct_find_field :: proc "contextless" (s: ^Struct_Info, name: string) -> int {
 find_struct_info :: proc "contextless" (plan: ^Type_Plan, S: typeid) -> ^Struct_Info {
 	for &s in plan.structs { if s.type == S { return &s } }
 	return nil
+}
+
+@(private)
+is_clean_ascii_key :: proc "contextless" (name: string) -> bool {
+	for c in transmute([]u8)name {
+		if c < 0x20 || c >= 0x80 || c == '"' || c == '\\' { return false }
+	}
+	return true
+}
+
+@(private)
+set_expected_key :: proc "contextless" (e: ^hook.Expected_Key, name: string) {
+	n := len(name)
+	for c in transmute([]u8)name {
+		if c == '"' || c == '\\' || c < 0x20 { e^ = {word = NO_KEY}; return }
+	}
+	e.word = tape.key_word(u64(n))
+	e.head, e.tail = 0, 0
+	for i in 0 ..< min(n, 8) { e.head |= u64(name[i]) << (8 * uint(i)) }
+	if n <= 8 {
+		e.tail = ~u64(0) >> (64 - 8 * uint(n)) if n > 0 else 0
+		return
+	}
+	for i in 0 ..< 8 { e.tail |= u64(name[n - 8 + i]) << (8 * uint(i)) }
+}
+
+@(private)
+finalize_stream_plan :: proc(p: ^Type_Plan, arena: runtime.Allocator) -> runtime.Allocator_Error {
+	p.can_stream = true
+	keys_buf := make([dynamic]u8, 0, 256, arena) or_return
+	elem_buf := make([dynamic]Stream_Field, 0, 16, arena) or_return
+
+	for &tn in p.nodes {
+		if tn.kind == .Union || tn.kind == .Value || tn.kind == .Custom || tn.kind == .Bit_Set || tn.kind == .Raw || tn.has_unique || tn.judged {
+			p.can_stream = false
+		}
+		if tn.child >= 0 {
+			ctn := &p.nodes[tn.child]
+			tn.elem_field_idx = i32(len(elem_buf))
+			append(&elem_buf, Stream_Field{
+				expected   = {word = NO_KEY},
+				node       = tn.child,
+				rule_idx   = ctn.rule_idx,
+				struct_idx = ctn.struct_idx,
+				flags      = {.Is_Elem},
+				kind       = ctn.kind,
+			}) or_return
+		}
+	}
+
+	for &si in p.structs {
+		if si.capture_idx >= 0 { p.can_stream = false }
+		if len(si.validators) > 0 { p.has_validators = true }
+		sfs := make([]Stream_Field, len(si.fields) + 1, arena) or_return
+		for &f, fi in si.fields {
+			ftn := &p.nodes[f.node]
+			if f.has_before || f.has_unique { p.can_stream = false }
+			if len(f.afters) > 0 { si.has_field_afters = true; p.has_validators = true }
+			if f.access == .Write_Only || f.omit_empty || f.omit_unset { si.has_omit_tag = true }
+			if f.optional { si.has_optional = true }
+
+			sf := Stream_Field{
+				expected   = {word = NO_KEY},
+				node       = f.node,
+				rule_idx   = f.rule_idx if f.rule_idx > 0 else ftn.rule_idx,
+				offset     = u32(f.offset),
+				struct_idx = ftn.struct_idx,
+				field_idx  = u16(fi),
+				kind       = ftn.kind,
+			}
+			if f.access == .Read_Only  { sf.flags += {.Read_Only} }
+			if f.access == .Write_Only { sf.flags += {.Write_Only} }
+			if f.optional              { sf.flags += {.Optional} }
+			if f.required              { sf.flags += {.Required} }
+			if f.not_null              { sf.flags += {.Not_Null} }
+			if f.omit_empty            { sf.flags += {.Omit_Empty} }
+			if f.omit_unset            { sf.flags += {.Omit_Unset} }
+			if len(f.afters) > 0       { sf.flags += {.Has_After} }
+			if f.has_default {
+				sf.flags += {.Has_Default}
+				if !default_is_zero(f.make_default, f.default_data) {
+					sf.flags += {.Nonzero_Default}
+					if fi < 64 { si.def_mask0 |= u64(1) << uint(fi) } else { si.has_def_hi = true }
+				}
+			}
+			if f.required {
+				if fi < 64 { si.req_mask0 |= u64(1) << uint(fi) } else { si.has_req_hi = true }
+			}
+			if f.access != .Read_Only {
+				set_expected_key(&sf.expected, f.name)
+			}
+			if len(f.name) + 3 <= int(max(u8)) && len(keys_buf) <= int(max(u16)) && is_clean_ascii_key(f.name) {
+				off := len(keys_buf)
+				append(&keys_buf, '"') or_return
+				append(&keys_buf, ..transmute([]u8)f.name) or_return
+				append(&keys_buf, '"', ':') or_return
+				sf.key_off = u16(off)
+				sf.key_size = u8(len(f.name) + 3)
+			}
+			sfs[fi] = sf
+		}
+		sfs[len(si.fields)] = Stream_Field{expected = {word = NO_KEY}, node = -1, struct_idx = -1, kind = .Invalid}
+		si.stream_fields = sfs
+	}
+
+	if len(elem_buf) > 0 {
+		append(&elem_buf, Stream_Field{expected = {word = NO_KEY}, node = -1, struct_idx = -1, kind = .Invalid}) or_return
+	}
+	if len(keys_buf) > 0 {
+		pad: [16]u8
+		append(&keys_buf, ..pad[:]) or_return
+	}
+	p.json_keys = keys_buf[:]
+	p.elem_fields = elem_buf[:]
+	p.dump_hint = estimate_dump_size(p, p.root, 0)
+
+	rtn := &p.nodes[p.root]
+	p.root_field = Stream_Field{
+		expected   = {word = NO_KEY},
+		node       = p.root,
+		rule_idx   = rtn.rule_idx,
+		struct_idx = rtn.struct_idx,
+		flags      = {.Is_Root},
+		kind       = rtn.kind,
+	}
+	return nil
+}
+
+@(private)
+estimate_dump_size :: proc(p: ^Type_Plan, node_idx: i32, depth: int) -> int {
+	if node_idx < 0 || depth > 8 { return 32 }
+	tn := &p.nodes[node_idx]
+	#partial switch tn.kind {
+	case .Struct:
+		si := &p.structs[tn.struct_idx]
+		est := 2
+		for f in si.fields {
+			if f.access == .Write_Only { continue }
+			est += len(f.name) + 4 + estimate_dump_size(p, f.node, depth + 1)
+		}
+		return est
+	case .String, .Email, .Cstring: return 32
+	case .I8 ..= .F64:              return 12
+	case .Bool, .Bool_Wide:         return 6
+	case .Maybe, .Ptr:              return estimate_dump_size(p, tn.child, depth + 1)
+	}
+	return 64
+}
+
+// Estimated compact JSON byte size for initial output buffer sizing.
+dump_size_hint :: proc "contextless" (m: ^Model($T)) -> int {
+	return m.plan.dump_hint if m != nil else 0
 }

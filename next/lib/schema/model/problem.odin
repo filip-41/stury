@@ -70,6 +70,7 @@ Sink :: struct {
 	allocator:   runtime.Allocator,
 	arena:       mem.Dynamic_Arena,
 	arena_ready: bool,
+	arena_dirty: bool,
 	oom:         bool,
 }
 
@@ -95,9 +96,12 @@ sink_clear :: proc(s: ^Sink) {
 	if s == nil {
 		return
 	}
-	clear(&s.entries)
-	if s.arena_ready {
+	if len(s.entries) > 0 {
+		clear(&s.entries)
+	}
+	if s.arena_dirty && s.arena_ready {
 		mem.dynamic_arena_reset(&s.arena)
+		s.arena_dirty = false
 	}
 	s.truncated, s.oom = false, false
 }
@@ -124,6 +128,7 @@ sink_push :: proc(s: ^Sink, fallback: runtime.Allocator, kind: Error_Kind, at: u
 		return false
 	}
 	arena := sink_ensure(s, fallback)
+	s.arena_dirty = true
 	entry, err := make_sink_entry(arena, kind, at, steps, operand, want)
 	if err != nil {
 		s.oom = true
@@ -137,9 +142,44 @@ sink_push :: proc(s: ^Sink, fallback: runtime.Allocator, kind: Error_Kind, at: u
 }
 
 @(private)
+format_pointer_fast :: proc(steps: []tape.Step, allocator: runtime.Allocator) -> (string, runtime.Allocator_Error) {
+	if len(steps) == 0 { return "", nil }
+	// Fast path: check if any step needs RFC 6901 `~` / `/` escaping or integer formatting.
+	n := 0
+	simple := true
+	for s in steps {
+		if nm, is_nm := s.(tape.Name); is_nm {
+			n += 1 + len(string(nm))
+			for c in transmute([]u8)string(nm) {
+				if c == '~' || c == '/' { simple = false; break }
+			}
+		} else {
+			simple = false
+			break
+		}
+	}
+	if !simple {
+		return check.format_pointer(steps, allocator)
+	}
+	buf, err := runtime.mem_alloc_non_zeroed(n, 1, allocator)
+	if err != nil { return "", err }
+	pos := 0
+	for s in steps {
+		nm := string(s.(tape.Name))
+		buf[pos] = '/'
+		pos += 1
+		if len(nm) > 0 {
+			copy(buf[pos:], nm)
+			pos += len(nm)
+		}
+	}
+	return string(buf[:n]), nil
+}
+
+@(private)
 make_sink_entry :: proc(arena: runtime.Allocator, kind: Error_Kind, at: u64, steps: []tape.Step, operand: string, want: Want) -> (e: Error_Entry, err: runtime.Allocator_Error) {
 	e = {kind = kind, at = at, want = {type = want.type}}
-	e.pointer = check.format_pointer(steps, arena) or_return
+	e.pointer = format_pointer_fast(steps, arena) or_return
 	e.path = clone_steps(steps, arena) or_return
 	if len(operand) > 0 {
 		e.operand = strings.clone(operand, arena) or_return
@@ -192,7 +232,7 @@ record_failure :: proc(
 make_owned_error :: proc(kind: Error_Kind, at: u64, steps: []tape.Step, operand: string, want: Want, allocator: runtime.Allocator, oom: ^bool) -> Model_Error {
 	ptr, op, wt: string
 	if len(steps) > 0 {
-		p, err := check.format_pointer(steps, allocator)
+		p, err := format_pointer_fast(steps, allocator)
 		if err != nil {
 			if oom != nil { oom^ = true }
 			return {kind = kind, at = at}

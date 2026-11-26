@@ -1,10 +1,13 @@
 // Default constant storage and factory defaults (backed by `mem.Dynamic_Arena`, WASM-clean).
 package model
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:math"
 import "core:mem"
 import "core:reflect"
+import "core:time"
+import "core:encoding/uuid"
 
 Make_Default :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error
 
@@ -12,16 +15,63 @@ Make_Default :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtim
 Default_Of :: struct { type: typeid, field: string, make: Make_Default, data: rawptr }
 
 @(private)
-Constant :: struct { type: ^runtime.Type_Info, value: rawptr }
+Constant_Kind :: enum u8 { Complex, Pod, String }
+
+@(private)
+Constant :: struct {
+	type:    ^runtime.Type_Info,
+	value:   rawptr,
+	size:    int,
+	kind:    Constant_Kind,
+	is_zero: bool,
+}
+
+@(private)
+constant_kind_of :: proc(ti: ^runtime.Type_Info) -> Constant_Kind {
+	if ti == nil { return .Complex }
+	if ti.id == time.Time || ti.id == uuid.Identifier { return .Pod }
+	base := runtime.type_info_base(ti)
+	#partial switch v in base.variant {
+	case ^runtime.Type_Info_Boolean, ^runtime.Type_Info_Integer, ^runtime.Type_Info_Float, ^runtime.Type_Info_Enum, ^runtime.Type_Info_Bit_Set:
+		return .Pod
+	case ^runtime.Type_Info_String:
+		return .Complex if v.is_cstring else .String
+	}
+	return .Complex
+}
+
+@(private)
+bytes_all_zero :: proc "contextless" (p: rawptr, n: int) -> bool {
+	if p == nil || n <= 0 { return true }
+	b := ([^]u8)(p)[:n]
+	for x in b { if x != 0 { return false } }
+	return true
+}
+
+@(private)
+default_is_zero :: proc "contextless" (make_fn: Make_Default, data: rawptr) -> bool {
+	if data == nil { return false }
+	if make_fn == copied_pod || make_fn == copied_string {
+		return (^Constant)(data).is_zero
+	}
+	return false
+}
 
 @(private)
 default_constant :: proc(reg: ^Registry, member: ^runtime.Type_Info, field: string, value: any) -> (held: ^Constant, err: Error) {
 	memory := reg_arena(reg)
 	held = new(Constant, memory) or_return
 	held.type = member
+	held.size = member.size
+	held.kind = constant_kind_of(member)
 	held.value = mem.alloc(max(member.size, 1), member.align, memory) or_return
 	fits := default_into(held.value, member, value, memory) or_return
 	if !fits { return nil, Model_Error{kind = .Wrong_Kind, pointer = field, want = {member.id, type_name_short(member)}} }
+	if held.kind == .Pod {
+		held.is_zero = bytes_all_zero(held.value, held.size)
+	} else if held.kind == .String {
+		held.is_zero = len((^string)(held.value)^) == 0
+	}
 	return held, nil
 }
 
@@ -34,12 +84,36 @@ copied_defaults :: proc(reg: ^Registry, arena, scratch: runtime.Allocator) -> (o
 		if x.make != copied_constant || x.data == nil { continue }
 		from := (^Constant)(x.data)
 		c := new(Constant, arena) or_return
-		c.type = from.type
+		c.type, c.size, c.kind, c.is_zero = from.type, from.size, from.kind, from.is_zero
 		c.value = mem.alloc(max(from.type.size, 1), from.type.align, arena) or_return
 		copy_value(c.value, from.value, from.type, arena, scratch) or_return
 		out[i].data = c
+		switch c.kind {
+		case .Pod:     out[i].make = copied_pod
+		case .String:  out[i].make = copied_string
+		case .Complex: out[i].make = copied_constant
+		}
 	}
 	return out, nil
+}
+
+@(private)
+copied_pod :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+	c := (^Constant)(data)
+	if c.size > 0 { intrinsics.mem_copy_non_overlapping(dest, c.value, c.size) }
+	return nil
+}
+
+@(private)
+copied_string :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+	s := (^string)((^Constant)(data).value)^
+	n := len(s)
+	if n == 0 { (^string)(dest)^ = ""; return nil }
+	raw, err := allocator.procedure(allocator.data, .Alloc_Non_Zeroed, n, 1, nil, 0)
+	if err != nil || len(raw) < n || raw_data(raw) == nil { return err if err != nil else .Out_Of_Memory }
+	stream_copy_short(raw_data(raw), raw_data(s), n)
+	(^runtime.Raw_String)(dest)^ = {raw_data(raw), n}
+	return nil
 }
 
 @(private)

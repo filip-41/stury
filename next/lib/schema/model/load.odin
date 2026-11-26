@@ -35,15 +35,20 @@ resolve_dups :: proc "contextless" (dups: tape.Duplicates, format: ^tape.Format)
 
 @(private)
 Scratch_Scope :: struct {
-	rb:       hook.Read_Budget,
-	local_mb: hook.Memory_Budget,
-	arena:    mem.Dynamic_Arena,
-	out:      runtime.Allocator,
-	scratch:  runtime.Allocator,
+	rb:        hook.Read_Budget,
+	local_mb:  hook.Memory_Budget,
+	arena:     mem.Dynamic_Arena,
+	has_arena: bool,
+	out:       runtime.Allocator,
+	scratch:   runtime.Allocator,
 }
 
 @(private)
 scratch_begin :: proc(sc: ^Scratch_Scope, opts: Load_Opts, allocator: runtime.Allocator) {
+	if opts.scratch.procedure == mem.arena_allocator_proc && opts.budget.memory == 0 {
+		sc.out, sc.scratch = allocator, opts.scratch
+		return
+	}
 	t_opts := tape.Options{budget = opts.budget, scratch = opts.scratch}
 	sc.out = hook.read_budget(&sc.rb, t_opts, allocator)
 	scr_backing := hook.scratch(t_opts, sc.out, &sc.local_mb)
@@ -52,11 +57,14 @@ scratch_begin :: proc(sc: ^Scratch_Scope, opts: Load_Opts, allocator: runtime.Al
 		block_sz = max(int(opts.budget.memory / 2), 256)
 	}
 	mem.dynamic_arena_init(&sc.arena, scr_backing, scr_backing, block_size = block_sz)
+	sc.has_arena = true
 	sc.scratch = mem.dynamic_arena_allocator(&sc.arena)
 }
 
 @(private)
-scratch_end :: proc(sc: ^Scratch_Scope) { mem.dynamic_arena_destroy(&sc.arena) }
+scratch_end :: proc(sc: ^Scratch_Scope) {
+	if sc.has_arena { mem.dynamic_arena_destroy(&sc.arena) }
+}
 
 @(private)
 scratch_oom_error :: proc "contextless" (sc: ^Scratch_Scope) -> Error {
@@ -99,7 +107,9 @@ load :: proc(
 		return berr
 	}
 	defer tape.destroy(&doc)
-	return load_document(m, &doc, out, sink, opts, allocator)
+	if len(doc.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "document"}} }
+	if doc.partial != nil { return Model_Error{kind = .Unsupported, want = {text = "partial"}} }
+	return load_value_scoped(m, rules.Node_Ref{doc = &doc, node = tape.ROOT}, out, sink, opts, policy, &sc)
 }
 
 @(require_results)
@@ -121,14 +131,21 @@ load_value :: proc(m: ^Model($T), v: rules.Value, out: ^T, sink: ^Sink = nil, op
 	policy, ok := resolve_dups(opts.dups, fmt)
 	if !ok { return Model_Error{kind = .Bad_Option, want = {text = "dups"}} }
 
-	mem.zero(out, size_of(T))
 	sc: Scratch_Scope
 	scratch_begin(&sc, opts, allocator)
 	defer scratch_end(&sc)
+	return load_value_scoped(m, v, out, sink, opts, policy, &sc)
+}
 
+@(private)
+load_value_scoped :: proc(m: ^Model($T), v: rules.Value, out: ^T, sink: ^Sink, opts: Load_Opts, policy: tape.Duplicates, sc: ^Scratch_Scope) -> Error {
+	if m == nil || out == nil || len(m.plan.nodes) == 0 {
+		return Model_Error{kind = .Bad_Option, want = {text = "target"}}
+	}
+	mem.zero(out, size_of(T))
 	from := len(sink.entries) if sink != nil else 0
 	l, lerr := loader_make(&m.plan, m.judging, policy, opts.budget, sink, sc.out, sc.scratch)
-	if lerr != nil { return scratch_oom_error(&sc) }
+	if lerr != nil { return scratch_oom_error(sc) }
 	defer loader_cleanup(&l)
 
 	decode_loop(&l, m.plan.root, v, rawptr(out), nil, nil)
@@ -139,7 +156,7 @@ load_value :: proc(m: ^Model($T), v: rules.Value, out: ^T, sink: ^Sink = nil, op
 	}
 	if l.oom {
 		error_destroy(l.first, sc.out); free_value(out, type_info_of(T), sc.out)
-		return scratch_oom_error(&sc)
+		return scratch_oom_error(sc)
 	}
 	if l.first.kind != .None {
 		free_value(out, type_info_of(T), sc.out)
@@ -202,12 +219,49 @@ budget_leave :: #force_inline proc "contextless" (b: ^Budget_Tracker) { if b.dep
 @(private)
 emit_leaf_fails :: proc(leaf: ^rules.Leaf, fails: bit_set[rules.Error_Kind; u64], members: bool, at: u64, steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator, scratch: runtime.Allocator, silent: bool) -> bool {
 	if fails == {} { return true }
+	op_buf: [64]u8 = ---
 	for fk in fails {
-		if !record_failure(sink, first, oom, allocator, map_rules_kind(fk), at, steps, rules.operand_text(leaf, fk, members, scratch), {}, silent) {
-			return false
+		op := ""
+		op_heap := false
+		#partial switch fk {
+		case .Too_Short:     op = fmt_bound_buf(op_buf[:], "at least ", leaf.min_length, " character")
+		case .Too_Long:      op = fmt_bound_buf(op_buf[:], "at most ", leaf.max_length, " character")
+		case .Too_Few:       op = fmt_bound_buf(op_buf[:], "at least ", leaf.min_members if members else leaf.min_items, " member" if members else " element")
+		case .Too_Many:      op = fmt_bound_buf(op_buf[:], "at most ", leaf.max_members if members else leaf.max_items, " member" if members else " element")
+		case .Below_Minimum, .Above_Maximum:
+			low := fk == .Below_Minimum
+			x := leaf.minimum if low else leaf.maximum
+			if x.whole {
+				op = fmt_int_bound_buf(op_buf[:], ("greater than " if low else "less than ") if x.exclusive else ("at least " if low else "at most "), x.int)
+			} else {
+				op = rules.operand_text(leaf, fk, members, scratch); op_heap = true
+			}
+		case .Wrong_Kind:
+			op = rules.operand_text(leaf, fk, members, scratch); op_heap = true
 		}
+		ok := record_failure(sink, first, oom, allocator, map_rules_kind(fk), at, steps, op, {}, silent)
+		if op_heap && len(op) > 0 { delete(op, scratch) }
+		if !ok { return false }
 	}
 	return false
+}
+
+@(private)
+fmt_bound_buf :: proc "contextless" (buf: []u8, pfx: string, n: u64, noun: string) -> string #no_bounds_check {
+	pos := 0
+	copy(buf[pos:], pfx); pos += len(pfx)
+	pos += dump_put_u64(raw_data(buf[pos:]), n)
+	copy(buf[pos:], noun); pos += len(noun)
+	if n != 1 { buf[pos] = 's'; pos += 1 }
+	return string(buf[:pos])
+}
+
+@(private)
+fmt_int_bound_buf :: proc "contextless" (buf: []u8, pfx: string, v: i64) -> string #no_bounds_check {
+	pos := 0
+	copy(buf[pos:], pfx); pos += len(pfx)
+	pos += dump_put_i64(raw_data(buf[pos:]), v)
+	return string(buf[:pos])
 }
 
 @(private)
@@ -860,10 +914,10 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 				}
 				if !budget_enter(&l.budget, at) || !budget_step(&l.budget, at) { return }
 				n := len(elems)
-				if (tn.kind == .Array && n < tn.count && !loader_fail(l, .Too_Few, at)) || ((tn.kind == .Array || tn.kind == .Fixed_List) && n > tn.count && !loader_fail(l, .Too_Many, at)) {
-					budget_leave(&l.budget); continue
-				}
-				if !check_count_leaf(l.plan, rule_idx, u64(n), false, at, l.steps[:], l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent) {
+				cap_bad := (tn.kind == .Array && n < tn.count) || ((tn.kind == .Array || tn.kind == .Fixed_List) && n > tn.count)
+				if cap_bad {
+					if !loader_fail(l, .Too_Few if n < tn.count else .Too_Many, at) { budget_leave(&l.budget); continue }
+				} else if !check_count_leaf(l.plan, rule_idx, u64(n), false, at, l.steps[:], l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent) {
 					l.fail_count += 1
 					if loader_stopped(l) { budget_leave(&l.budget); return }
 				}
@@ -1124,64 +1178,74 @@ decode_scalar :: proc(l: ^Loader, tn: ^Type_Node, v: rules.Value, dest: rawptr, 
 	}
 }
 
+// Shared cold helpers used by both `load.odin` and `stream.odin`.
 @(private)
-decode_map_key :: proc(l: ^Loader, key_tn: ^Type_Node, text: string, dest: rawptr, at: u64) -> bool {
+parse_int_decimal :: proc(tn: ^Type_Node, text: string, dest: rawptr) -> (small: Maybe(i64), kind: Error_Kind) {
+	d := rules.decimal_of(text)
+	if !rules.integral(d) { return nil, .Wrong_Kind }
+	lim := LIMITS[int(tn.kind) - int(Type_Kind.I8)]
+	if rules.decimal_compare(d, rules.decimal_of(lim[0])) < 0 { return nil, .Below_Minimum }
+	if rules.decimal_compare(d, rules.decimal_of(lim[1])) > 0 { return nil, .Above_Maximum }
+	if tn.kind <= .I64 {
+		iv, _ := rules.decimal_i64(d); small = iv
+		stream_store_int(uintptr(dest), u64(iv), tn.kind)
+	} else {
+		uv: u64
+		if iv, fits := rules.decimal_i64(d); fits && iv >= 0 { uv, small = u64(iv), iv } else { uv = decimal_u64(d) }
+		stream_store_int(uintptr(dest), uv, tn.kind)
+	}
+	return small, .None
+}
+
+@(private)
+parse_map_key_text :: proc(plan: ^Type_Plan, key_tn: ^Type_Node, text: string, dest: rawptr, allocator: runtime.Allocator) -> Error_Kind {
 	#partial switch key_tn.kind {
 	case .String:
-		s, err := strings.clone(text, l.allocator)
-		if err != nil { l.oom = true; return false }
-		(^string)(dest)^ = s; return true
+		s, err := strings.clone(text, allocator)
+		if err != nil { return .No_Memory }
+		(^string)(dest)^ = s; return .None
 	case .Cstring:
-		cs, err := strings.clone_to_cstring(text, l.allocator)
-		if err != nil { l.oom = true; return false }
-		(^cstring)(dest)^ = cs; return true
+		cs, err := strings.clone_to_cstring(text, allocator)
+		if err != nil { return .No_Memory }
+		(^cstring)(dest)^ = cs; return .None
 	case .Enum:
-		ei := &l.plan.enums[key_tn.enum_idx]
+		ei := &plan.enums[key_tn.enum_idx]
 		if ei.by_name {
-			for name, i in ei.names { if name == text { store_enum_value(dest, key_tn.size, ei.values[i]); return true } }
-			return loader_fail(l, .Not_A_Member, at)
+			for name, i in ei.names { if name == text { store_enum_value(dest, key_tn.size, ei.values[i]); return .None } }
+			return .Not_A_Member
 		}
 		if ei.is_unsigned {
 			uv, ok := strconv.parse_u64_of_base(text, 10)
-			if !ok { return loader_fail(l, .Wrong_Kind, at) }
-			for ev in ei.values { if u64(ev) == uv { store_enum_value(dest, key_tn.size, i64(uv)); return true } }
-			return loader_fail(l, .Not_A_Member, at)
+			if !ok { return .Wrong_Kind }
+			for ev in ei.values { if u64(ev) == uv { store_enum_value(dest, key_tn.size, i64(uv)); return .None } }
+			return .Not_A_Member
 		}
 		iv, ok := strconv.parse_i64_of_base(text, 10)
-		if !ok { return loader_fail(l, .Wrong_Kind, at) }
-		for ev in ei.values { if ev == iv { store_enum_value(dest, key_tn.size, iv); return true } }
-		return loader_fail(l, .Not_A_Member, at)
+		if !ok { return .Wrong_Kind }
+		for ev in ei.values { if ev == iv { store_enum_value(dest, key_tn.size, iv); return .None } }
+		return .Not_A_Member
 	case .I8 ..= .U64:
-		return decode_int_text(l, key_tn, text, dest, 0, at)
+		_, k := parse_int_decimal(key_tn, text, dest)
+		return k
 	}
-	return loader_fail(l, .Unsupported, at)
+	return .Unsupported
+}
+
+@(private)
+decode_map_key :: proc(l: ^Loader, key_tn: ^Type_Node, text: string, dest: rawptr, at: u64) -> bool {
+	k := parse_map_key_text(l.plan, key_tn, text, dest, l.allocator)
+	if k == .None { return true }
+	if k == .No_Memory { l.oom = true; return false }
+	want := Want{type = key_tn.type, text = type_name_short(key_tn.ti)} if (k == .Wrong_Kind && key_tn.kind >= .I8 && key_tn.kind <= .U64) else Want{}
+	return loader_fail(l, k, at, "", want)
 }
 
 @(private)
 decode_int_text :: proc(l: ^Loader, tn: ^Type_Node, text: string, dest: rawptr, rule_idx: i32, at: u64) -> bool {
-	d := rules.decimal_of(text)
-	if !rules.integral(d) { return loader_fail(l, .Wrong_Kind, at, "", {type = tn.type, text = type_name_short(tn.ti)}) }
-	lim := LIMITS[int(tn.kind) - int(Type_Kind.I8)]
-	if rules.decimal_compare(d, rules.decimal_of(lim[0])) < 0 { return loader_fail(l, .Below_Minimum, at) }
-	if rules.decimal_compare(d, rules.decimal_of(lim[1])) > 0 { return loader_fail(l, .Above_Maximum, at) }
-	small: Maybe(i64)
-	if tn.kind <= .I64 {
-		iv, _ := rules.decimal_i64(d); small = iv
-		#partial switch tn.kind {
-		case .I8:  (^i8)(dest)^ = i8(iv)
-		case .I16: (^i16)(dest)^ = i16(iv)
-		case .I32: (^i32)(dest)^ = i32(iv)
-		case .I64: (^i64)(dest)^ = iv
-		}
-	} else {
-		uv: u64
-		if iv, fits := rules.decimal_i64(d); fits && iv >= 0 { uv, small = u64(iv), iv } else { uv = decimal_u64(d) }
-		#partial switch tn.kind {
-		case .U8:  (^u8)(dest)^ = u8(uv)
-		case .U16: (^u16)(dest)^ = u16(uv)
-		case .U32: (^u32)(dest)^ = u32(uv)
-		case .U64: (^u64)(dest)^ = uv
-		}
+	small, k := parse_int_decimal(tn, text, dest)
+	if k != .None {
+		want := Want{type = tn.type, text = type_name_short(tn.ti)} if k == .Wrong_Kind else Want{}
+		return loader_fail(l, k, at, "", want)
 	}
 	if !check_number_leaf(l.plan, rule_idx, text, small, at, l.steps[:], l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent) {
 		l.fail_count += 1; return false

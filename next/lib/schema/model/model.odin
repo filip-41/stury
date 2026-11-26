@@ -204,6 +204,9 @@ compile :: proc(reg: ^Registry, $T: typeid, tag := "json", allocator := context.
 	defaults := copied_defaults(reg, mem.dynamic_arena_allocator(&m.constants), scratch) or_return
 	m.plan = build_type_plan(reg, T, m.tag, defaults, allocator, scratch) or_return
 	m.judging = judging_of(reg, &m.plan, allocator, scratch) or_return
+	if m.judging != nil {
+		m.plan.can_stream = false
+	}
 	return m, nil
 }
 
