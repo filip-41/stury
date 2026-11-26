@@ -1480,16 +1480,29 @@ scan_grow_to :: #force_no_inline proc "contextless" (h: ^Scanner, list: ^Scan_Ra
 	}
 	context = h.b.ctx
 	cur_cap := int(list.cap)
+	in_room := scan_in_room(h, list.data)
 	doubled := 2 * cur_cap if cur_cap <= max_items / 2 else max_items
 	want := min(max(doubled, 8, least), max_items)
-	data: []u8
-	err: runtime.Allocator_Error
-	if scan_in_room(h, list.data) {
-		if data, err = runtime.mem_alloc_non_zeroed(want * size, align, h.scratch); err == nil {
-			runtime.mem_copy_non_overlapping(raw_data(data), list.data, int(list.len) * size)
+	if h.b.budget != nil {
+		held_cap := 0 if in_room else cur_cap
+		left_items := int(min(hook.memory_budget_left(h.b.budget) / u64(size), u64(max_items - held_cap)))
+		fit := held_cap + left_items
+		want = min(want, max(held_cap + max((fit - held_cap) / 2, 1), least))
+	}
+	alloc_or_resize :: #force_inline proc(h: ^Scanner, list: ^Scan_Raw_List, in_room: bool, cur_cap, want, size, align: int) -> ([]u8, runtime.Allocator_Error) {
+		if in_room {
+			data, err := runtime.mem_alloc_non_zeroed(want * size, align, h.scratch)
+			if err == nil && raw_data(data) != nil {
+				runtime.mem_copy_non_overlapping(raw_data(data), list.data, int(list.len) * size)
+			}
+			return data, err
 		}
-	} else {
-		data, err = runtime.non_zero_mem_resize(list.data, cur_cap * size, want * size, align, h.scratch)
+		return runtime.non_zero_mem_resize(list.data, cur_cap * size, want * size, align, h.scratch)
+	}
+	data, err := alloc_or_resize(h, list, in_room, cur_cap, want, size, align)
+	for err == .Out_Of_Memory && want > least {
+		want = least + (want - least) / 2
+		data, err = alloc_or_resize(h, list, in_room, cur_cap, want, size, align)
 	}
 	if e := took(err, raw_data(data), want * size); e != nil {
 		if h.b.err == nil {

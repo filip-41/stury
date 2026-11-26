@@ -12,7 +12,10 @@ import "core:strings"
 @(private)
 bare_address :: proc(s: string) -> bool {
 	colons := strings.count(s, ":")
-	if colons == 1 || strings.contains_any(s, "[]%") {
+	if len(s) == 0 || colons == 1 || strings.contains_any(s, "[]%") {
+		return false
+	}
+	if s[len(s) - 1] == '.' || s[len(s) - 1] == ':' && !strings.has_suffix(s, "::") || s[0] == ':' && !strings.has_prefix(s, "::") {
 		return false
 	}
 	dotted := s[strings.last_index_byte(s, ':') + 1:]
@@ -29,8 +32,9 @@ parse_address :: proc(s: string) -> (a: net.Address, ok: bool) {
 		return nil, false
 	}
 	// `core:net` takes at most six colons before a dotted tail, which a leading `::` and five groups pass. That `::`
-	// stands for one zero group there, so the address reads the same with it written `0:`.
-	if strings.has_prefix(s, "::") && strings.count(s, ":") == 7 && strings.contains_rune(s, '.') {
+	// stands for one zero group there, so the address reads the same with it written `0:`. Reject `:::` and a second
+	// `::`, which stripping one leading `:` would otherwise turn into a valid address.
+	if strings.has_prefix(s, "::") && len(s) > 2 && s[2] != ':' && !strings.contains(s[2:], "::") && strings.count(s, ":") == 7 && strings.contains_rune(s, '.') {
 		buf: [64]u8
 		if len(s) >= len(buf) {
 			return nil, false

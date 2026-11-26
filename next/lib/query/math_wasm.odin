@@ -4,8 +4,8 @@ import "core:math"
 
 // `sin`, `cos`, `exp` and `pow` of C's libm. `core:math` reaches them through LLVM's intrinsics, which a WebAssembly
 // target with no C library leaves undefined, so its object would import them. The procedures are plain so a host
-// can compare them with its own libm, and only a wasm target without a JavaScript host exports them under libm's
-// names, which keeps the freestanding and WASI objects free of those imports.
+// can compare them with its own libm, and only a wasm target without a JavaScript host defines weak C symbols under
+// libm's names, keeping freestanding and WASI objects zero-import while letting a real libm override them at link time.
 
 libm_sin :: proc "contextless" (x: f64) -> f64 {
 	s, _ := math.sincos_f64(x)
@@ -164,23 +164,23 @@ libm_pow :: proc "contextless" (x, y: f64) -> f64 {
 	return -r if negative else r
 }
 
-when ODIN_ARCH == .wasm32 && ODIN_OS == .Freestanding {
-	@(export, link_name = "sin")
+when ODIN_ARCH == .wasm32 && ODIN_OS != .JS {
+	@(require, linkage = "weak", link_name = "sin")
 	c_sin :: proc "c" (x: f64) -> f64 {
 		return libm_sin(x)
 	}
 
-	@(export, link_name = "cos")
+	@(require, linkage = "weak", link_name = "cos")
 	c_cos :: proc "c" (x: f64) -> f64 {
 		return libm_cos(x)
 	}
 
-	@(export, link_name = "exp")
+	@(require, linkage = "weak", link_name = "exp")
 	c_exp :: proc "c" (x: f64) -> f64 {
 		return libm_exp(x)
 	}
 
-	@(export, link_name = "pow")
+	@(require, linkage = "weak", link_name = "pow")
 	c_pow :: proc "c" (x, y: f64) -> f64 {
 		return libm_pow(x, y)
 	}

@@ -151,6 +151,23 @@ builder_scratch :: #force_inline proc "contextless" (h: ^Builder) -> runtime.All
 	return h.scratch if h.scratch.procedure != nil else h.doc.allocator
 }
 
+// Whether `a` and `c` (typically `doc.allocator` and `counts.allocator`) draw from the same underlying allocator,
+// including when wrapped in paired `Memory_Budget` peers.
+@(private)
+same_backing :: proc "contextless" (b: ^Builder, a, c: runtime.Allocator) -> bool {
+	if a == c {
+		return true
+	}
+	if b.budget != nil && b.budget.peer != nil {
+		main := hook.memory_budget(b.budget)
+		peer := hook.memory_budget(b.budget.peer)
+		if a == main && c == peer || a == peer && c == main {
+			return b.budget.backing == b.budget.peer.backing
+		}
+	}
+	return false
+}
+
 // Whether `a` supports freeing individual blocks, so allocations after `doc.nodes` do not prevent it from growing.
 @(private)
 allocator_has_free :: proc(a: runtime.Allocator) -> bool {
@@ -193,7 +210,7 @@ builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 	b.flags = {.Borrowed} | ({.Lent} if len(lent) > 0 else {})
 	b.facts, b.most, b.full, b.stubs, b.unstored, b.budget = nil, most, 0, 0, 0, budget
 	b.counts = {}
-	b.counts.allocator = b.doc.allocator
+	b.counts.allocator = builder_scratch(b)
 	if len(counts_buf) > 0 {
 		rc := (^runtime.Raw_Dynamic_Array)(&b.counts)
 		rc.data = raw_data(counts_buf)
@@ -206,11 +223,25 @@ builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 		b.err = builder_reserve_counts(b, max(counts, len(b.doc.nodes)))
 		return
 	}
-	// Pre-reserve `counts = most` ahead of `doc.nodes` only when unbudgeted, past the inline/borrowed capacity, and on
-	// an allocator without `.Free` (such as a bump arena) so `doc.nodes` remains the last block and can grow in place.
-	if wide_room(counts) > cap(b.counts) && budget == nil && !allocator_has_free(b.doc.allocator) {
-		if b.err = builder_reserve_counts(b, counts); b.err != nil {
-			return
+	if b.doc.allocator.procedure == nil {
+		b.err = .Out_Of_Memory
+		return
+	}
+	// When `counts` shares a non-freeing allocator (such as a bump arena) with `doc.nodes`, pre-reserve the worst-case
+	// counts ahead of `doc.nodes` so `doc.nodes` remains the last block and can grow in place. Under a budget, cap by
+	// the most nodes that fit in the budget so tiny budgets on huge single-node texts reserve nothing extra.
+	if same_backing(b, b.counts.allocator, b.doc.allocator) && !allocator_has_free(b.doc.allocator) {
+		counts_cap := counts
+		if counts_cap == 0 && (budget != nil || most <= len(src) + 2) {
+			counts_cap = most
+		}
+		if budget != nil {
+			counts_cap = min(counts_cap, builder_fit(b, 0))
+		}
+		if wide_room(counts_cap) > cap(b.counts) {
+			if b.err = builder_reserve_counts(b, counts_cap); b.err != nil {
+				return
+			}
 		}
 	}
 	room := clamp(nodes, 1, most)
@@ -226,6 +257,7 @@ builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 	if b.err = took(err, raw_data(raw), room); b.err != nil {
 		if .Counts_Borrowed not_in b.flags && cap(b.counts) > 0 {
 			delete(b.counts)
+			b.counts = {}
 		}
 		return
 	}
@@ -878,17 +910,49 @@ builder_end_fail :: #force_no_inline proc(h: ^Builder, e: tape.Error) -> tape.Er
 builder_finish_counts :: #force_no_inline proc(h: ^Builder) -> ([]tape.Child_Count, runtime.Allocator_Error) {
 	// Counts are in closing order, an inner container before the one holding it, so they need sorting by node.
 	slice.sort_by(h.counts[:], proc(a, b: tape.Child_Count) -> bool { return a.node < b.node })
-	if .Counts_Borrowed in h.flags {
-		raw, err := runtime.mem_alloc_non_zeroed(len(h.counts) * size_of(tape.Child_Count), align_of(tape.Child_Count), h.doc.allocator)
-		if e := took(err, raw_data(raw), len(h.counts)); e != nil {
+	if .Counts_Borrowed in h.flags || !same_backing(h, h.counts.allocator, h.doc.allocator) {
+		n := len(h.counts)
+		if .Counts_Borrowed not_in h.flags {
+			if n <= 64 {
+				tmp: [64]tape.Child_Count = ---
+				copy(tmp[:n], h.counts[:])
+				delete(h.counts)
+				h.counts = {}
+				raw, err := runtime.mem_alloc_non_zeroed(n * size_of(tape.Child_Count), align_of(tape.Child_Count), h.doc.allocator)
+				if e := took(err, raw_data(raw), n); e != nil {
+					return nil, e
+				}
+				out := ([^]tape.Child_Count)(raw_data(raw))[:n]
+				copy(out, tmp[:n])
+				return out, nil
+			}
+			if h.counts.allocator.procedure != nil {
+				shrink(&h.counts)
+			}
+		}
+		raw, err := runtime.mem_alloc_non_zeroed(n * size_of(tape.Child_Count), align_of(tape.Child_Count), h.doc.allocator)
+		if e := took(err, raw_data(raw), n); e != nil {
+			if .Counts_Borrowed not_in h.flags {
+				delete(h.counts)
+				h.counts = {}
+			}
 			return nil, e
 		}
-		out := ([^]tape.Child_Count)(raw_data(raw))[:len(h.counts)]
+		out := ([^]tape.Child_Count)(raw_data(raw))[:n]
 		copy(out, h.counts[:])
+		if .Counts_Borrowed not_in h.flags {
+			delete(h.counts)
+			h.counts = {}
+		}
 		return out, nil
 	}
 	if h.counts.allocator.procedure != nil {
 		shrink(&h.counts)
+	}
+	if h.counts.allocator != h.doc.allocator && h.budget != nil && h.budget.peer != nil {
+		bytes := u64(cap(h.counts) * size_of(tape.Child_Count))
+		h.budget.peer.held -= min(h.budget.peer.held, bytes)
+		h.budget.held += bytes
 	}
 	return h.counts[:], nil
 }

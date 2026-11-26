@@ -9,10 +9,11 @@ import "stury:lib/ops/build"
 // Reads a text in windows. The walk of the whole text goes on from window to window in the state it paused in, its
 // frames, namespaces and DTD kept in the read's state, and reads a unit of markup only once the window holds it whole
 // (`Units`), so every token, fault and answer is the whole read's. The prolog is read once the window holds it with the
-// root's start tag, and the epilog in the last window. A window keeps from the text run of the innermost open element,
-// from its start tag while it has given no `Object`, and from the internal subset while there is one, as the DTD's
-// entities and attribute defaults are read in place there. The names of the other open elements and the namespaces in
-// scope are copied out of the window.
+// root's start tag, and the epilog in the last window. A window keeps from the text run of the innermost open element
+// and from its start tag while it has given no `Object`. The names of the other open elements, the namespaces in scope,
+// and what the DTD needs from the internal subset (entity replacement texts, plus the subset's bytes when markup
+// entities or defaulted namespace declarations refer to it) are copied out of the window so consumed bytes past the
+// subset are released.
 
 // The walk a read of a text in pieces keeps, laid out as the walk of every hook.
 @(private)
@@ -27,8 +28,12 @@ Piece :: struct {
 	pause:       Pause,
 	// The names of the open elements, each with its `<`, which their frames read once the window no longer holds them.
 	tags:        [dynamic]u8,
+	// Copy of `[subset_lo, subset_hi)` when the DTD has markup entities or defaulted namespace attributes.
+	subset:      [dynamic]u8,
 	inner:       u64, // the start tag of the innermost open element, which the window holds while it has no `Object`
 	begun:       bool, // the walk holds memory, from its first window until it ends
+	dtd_owned:   bool, // entity texts (and `subset` if needed) have been copied out of the window
+	keep_subset: bool, // a defaulted qualified attribute still reads its name from `w.base[fact_lo:]`
 }
 
 // Frees the state of a read of a text in pieces, whose lists the read's own allocator holds.
@@ -47,6 +52,7 @@ piece_free :: proc(p: ^tape.Pieces) {
 		w.ctx = nil
 	}
 	delete(s.tags)
+	delete(s.subset)
 	hook.piece_release(p)
 }
 
@@ -68,7 +74,8 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 	walk := kept^
 	w := &walk
 	defer {
-		w.hooks, w.regs, w.ctx = nil, nil, nil
+		w.hooks, w.regs, w.ctx, w.subset = nil, nil, nil, nil
+		w.in_subset = false
 		if w.dtd != nil {
 			w.dtd.grab.ctx = nil
 		}
@@ -84,13 +91,15 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 			return 0, runtime.Allocator_Error.Out_Of_Memory, false
 		}
 		w.depth = hook.held_depth(h, regs, min(w.limit, WALK_LEVELS))
-		s.tags.allocator, s.steps_buf.allocator = lists, lists
+		s.tags.allocator, s.subset.allocator, s.steps_buf.allocator = lists, lists, lists
 		s.started, s.begun = true, true
 	} else if d := s.pause.depth; d > 0 && .Object not_in w.stack[d - 1].flags {
 		w.stack[d - 1].tag = base[s.inner:]
 	}
 	walk_bind(w, base, h, regs, ctx)
 	w.allocator, w.pause = lists, &s.pause
+	w.subset = raw_data(s.subset) if len(s.subset) > 0 else nil
+	w.in_subset = false
 	if w.dtd != nil {
 		w.dtd.src, w.dtd.grab.ctx = text, ctx
 	}
@@ -108,6 +117,19 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 	r := resume(w, text, base[to:], regs^, on)
 	when .Walk in C {
 		h.walk = nil
+	}
+	when H == build.Finder {
+		if t := w.dtd; t != nil && len(s.subset) > 0 {
+			if a := h.answer; a.outcome != .Not_Loaded && !h.pending && a.hi > a.lo && s.answer != {a.lo, a.hi} && a.lo >= t.subset_lo && a.hi <= t.subset_hi {
+				buf, berr := make([]u8, a.hi - a.lo, lists)
+				if berr != nil {
+					return 0, berr, false
+				}
+				copy(buf, s.subset[a.lo - t.subset_lo:a.hi - t.subset_lo])
+				delete(p.text, lists)
+				p.text, s.answer = buf, {a.lo, a.hi}
+			}
+		}
 	}
 	s.regs = regs^
 	if u8(r) == hook.WALK_MORE {
@@ -127,7 +149,7 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 // elements, as `window_hold` keeps what the walk reads past the window.
 @(private)
 piece_hold :: proc(p: ^tape.Pieces, s: ^Piece, w: ^Walk($H, $LAX), to: u64) -> tape.Error {
-	keep := window_hold(w, s.pause.at, s.pause.depth, &s.tags, &s.inner) or_return
+	keep := window_hold(w, s.pause.at, s.pause.depth, &s.tags, &s.inner, &s.subset, &s.dtd_owned, &s.keep_subset) or_return
 	clear(&s.steps_buf)
 	at_ := 0
 	for f in w.stack[:s.pause.depth] {
@@ -141,10 +163,12 @@ piece_hold :: proc(p: ^tape.Pieces, s: ^Piece, w: ^Walk($H, $LAX), to: u64) -> t
 // Copies out of the window what walk `w`, paused at `paused_at` with `d` open elements, reads past the bytes the next
 // window keeps, and gives the first byte it keeps. The names of the open elements go to `tags`, each with its `<`, but
 // the innermost's while it has given no `Object`, whose start tag the window keeps, at `inner^`, `max(u64)` for none.
-// The namespaces in scope are copied out too. The window keeps the text run of the innermost open element, and the
-// internal subset while there is one, as the DTD's entities and attribute defaults are read in place there.
+// The namespaces in scope are copied out too. The window keeps the text run of the innermost open element. When
+// `subset`/`dtd_owned`/`keep_subset` are provided (piece reads), entity replacement texts and (if needed for markup
+// entities or defaulted namespace attributes) the internal subset bytes are copied out once so the window can release
+// bytes past the subset.
 @(private)
-window_hold :: proc(w: ^Walk($H, $LAX), paused_at, d: u64, tags: ^[dynamic]u8, inner: ^u64) -> (keep: u64, err: tape.Error) {
+window_hold :: proc(w: ^Walk($H, $LAX), paused_at, d: u64, tags: ^[dynamic]u8, inner: ^u64, subset: ^[dynamic]u8 = nil, dtd_owned: ^bool = nil, keep_subset: ^bool = nil) -> (keep: u64, err: tape.Error) {
 	keep, inner^ = paused_at, max(u64)
 	size := 0
 	for f in w.stack[:d] {
@@ -171,12 +195,69 @@ window_hold :: proc(w: ^Walk($H, $LAX), paused_at, d: u64, tags: ^[dynamic]u8, i
 		keep = min(keep, w.stack[d - 1].text_lo)
 	}
 	if t := w.dtd; t != nil && t.subset_hi != 0 {
-		keep = min(keep, t.subset_lo)
+		if subset != nil && dtd_owned != nil && keep_subset != nil {
+			if !dtd_owned^ {
+				dtd_own_subset(w, t, subset, keep_subset) or_return
+				dtd_owned^ = true
+			}
+			if keep_subset^ {
+				keep = min(keep, t.subset_lo)
+			}
+		} else {
+			keep = min(keep, t.subset_lo)
+		}
 	}
 	if !ns_own(w) {
 		return keep, runtime.Allocator_Error.Out_Of_Memory
 	}
 	return keep, nil
+}
+
+// Copies entity replacement texts (and, if markup entities or defaulted namespace declarations need it, the internal
+// subset slice) out of the current window while it still covers `[t.subset_lo, t.subset_hi)`.
+@(private = "file")
+dtd_own_subset :: proc(w: ^Walk($H, $LAX), t: ^Dtd, subset: ^[dynamic]u8, keep_subset: ^bool) -> runtime.Allocator_Error {
+	// Measure general entities before setting `.Stored` so `respelled` still sees any literal in `t.src` while valid,
+	// and well-formed entities cache `.Measured` + `.Markup`/`.Element`/`.Respelled`.
+	need_subset := false
+	for _, i in t.entities {
+		e := &t.entities[i]
+		if e.flags & {.Parameter, .External, .Unparsed} == {} {
+			_, flags, kind, _ := measure(t, u32(i), 0)
+			if kind == .None && .Markup in flags && .Respelled not_in flags {
+				need_subset = true
+			}
+		}
+	}
+	for &e in t.entities {
+		if e.flags & {.Stored, .External} == {} {
+			lo, ok := dtd_bytes(t, w.base[e.text_lo:][:e.text_n])
+			if !ok {
+				return .Out_Of_Memory
+			}
+			e.text_lo = lo
+			e.flags += {.Stored}
+		}
+	}
+	has_qualified := false
+	for a in t.attrs {
+		if !a.defaulted {
+			continue
+		}
+		if a.qualified {
+			has_qualified = true
+		}
+		if declares_ns(raw_data(t.bytes[a.name_lo:]), int(a.name_n)) {
+			need_subset = true
+		}
+	}
+	keep_subset^ = has_qualified
+	if !has_qualified && need_subset && t.subset_hi > t.subset_lo {
+		n := int(t.subset_hi - t.subset_lo)
+		resize(subset, n) or_return
+		copy(subset[:], w.base[t.subset_lo:t.subset_hi])
+	}
+	return nil
 }
 
 // Copies the prefix and the URI of each namespace declaration in scope that points into the window into a block of

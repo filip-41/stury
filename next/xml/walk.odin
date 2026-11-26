@@ -153,6 +153,8 @@ Walk :: struct($H: typeid, $LAX: bool) {
 	ns_cap:     u32,
 	// The DTD the text declares, nil for none, and the run `st_halt` acts on.
 	dtd:        ^Dtd,
+	// Copy of the DTD internal subset when a piece window has released it, nil otherwise.
+	subset:     [^]u8,
 	halt:       Run,
 	expansion:  u64, // `Budget.expansion`
 	allocator:  runtime.Allocator, // what `stack` grows in past the frame's levels
@@ -171,6 +173,8 @@ Walk :: struct($H: typeid, $LAX: bool) {
 	tolerated:  bool, // the walk read a reference to an entity whose text is not read
 	// The walk reads the prolog only, to the DTD, as the decode of a node of no document does.
 	dtd_only:   bool,
+	// Walking a markup entity literal inside `subset` rather than `base`.
+	in_subset:  bool,
 }
 
 
@@ -430,7 +434,22 @@ refused :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), hs: hook.Reg
 
 @(private)
 at :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), p: [^]u8) -> u64 {
+	when LAX {
+		if w.in_subset {
+			return u64(intrinsics.ptr_sub(p, w.subset)) + w.dtd.subset_lo
+		}
+	}
 	return u64(intrinsics.ptr_sub(p, w.base))
+}
+
+@(private)
+ptr_at :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), lo: u64) -> [^]u8 {
+	when LAX {
+		if w.in_subset {
+			return w.subset[lo - w.dtd.subset_lo:]
+		}
+	}
+	return w.base[lo:]
 }
 
 // A walk's result in one word, as `hook.Walk_Result` packs it: the offset, the detail and a fault kind or an outcome.
@@ -516,7 +535,16 @@ emit_text :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "co
 		return emit(w, on, hs, .Null, .Value, lo, n)
 	}
 	if !decode && w.infer && u64(n) <= u64(max(u32)) {
-		t := tape.infer_token(w.base, lo, u32(n))
+		t: tape.Token
+		when LAX {
+			if w.in_subset {
+				t = tape.infer_token(w.subset, lo - w.dtd.subset_lo, u32(n))
+			} else {
+				t = tape.infer_token(w.base, lo, u32(n))
+			}
+		} else {
+			t = tape.infer_token(w.base, lo, u32(n))
+		}
 		return emit(w, on, hs, t.kind, .Value, lo, n, t.spelling)
 	}
 	return emit(w, on, hs, .String, .Value, lo, n, text_spelling(decode, .Dtd in f.flags))
@@ -1035,7 +1063,7 @@ st_misc :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 		// The whitespace before the run, which `st_content` has passed, says whether the first comment is on the line
 		// where the element before it ended.
 		lead := p
-		for lead > w.base[f.text_lo:] && kernel.is_ws(lead[-1]) {
+		for at(w, lead) > f.text_lo && kernel.is_ws(lead[-1]) {
 			lead = lead[-1:]
 		}
 		if x, at_ := give_misc(w, on, &hs, lead, q, end, inline, .Comment_Foot if foot else .Comment); x != .Next {
@@ -1111,6 +1139,19 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 		}
 		after = q[1:]
 	}
+	if intrinsics.expect(w.dtd != nil && w.dtd.depth > 0 && d <= w.dtd.stack[w.dtd.depth - 1].depth, false) {
+		t := w.dtd
+		fr := t.stack[t.depth - 1]
+		when LAX {
+			if w.subset != nil {
+				w.in_subset = t.depth > 1
+				if !w.in_subset {
+					dtd_bind_hook_src(w, t, false)
+				}
+			}
+		}
+		return fault(w, hs, fr.at, .Bad_Char, .Entity_Boundary)
+	}
 	when H != hook.No_Hooks {
 		C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
 		when .Skips in C && !LAX {
@@ -1152,7 +1193,7 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 			} else {
 				lo := f.text_lo
 				// A run of white space alone is no text run, so no scan judged its line ends.
-				decode := .Decode in f.flags || .Seen not_in f.flags && has_cr(w.base[lo:], p)
+				decode := .Decode in f.flags || .Seen not_in f.flags && has_cr(ptr_at(w, lo), p)
 				if x := emit_text(w, on, &hs, f, lo, int(at(w, p) - lo), decode); x != .Next {
 					return refused(w, hs, x, p)
 				}

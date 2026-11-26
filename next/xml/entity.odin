@@ -406,7 +406,7 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 		t.stack[t.depth] = {name_after[1:], end, amp, d, f.tag, i}
 		t.depth += 1
 		t.flags += {.In_Place}
-		lit := w.base[e.lit_lo:]
+		lit := w.subset[e.lit_lo - t.subset_lo:] if w.subset != nil else w.base[e.lit_lo:]
 		if .Element in e.flags {
 			// The element's `Object` opens before its first child, whose start would deepen the walk, does.
 			if d >= w.depth {
@@ -421,11 +421,25 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 		} else {
 			f.flags += {.Decode, .Dtd}
 		}
+		when LAX {
+			if w.subset != nil {
+				w.in_subset = true
+				dtd_bind_hook_src(w, t, true)
+			}
+		}
 		return #must_tail st_content(lit, lit[e.lit_n:], d, w, hs.a, hs.b, hs.c, on)
 	}
 	if r.kind == .Truncated && r.q == end && t.depth > 0 {
 		fr := t.stack[t.depth - 1]
 		if d != fr.depth || f.tag != fr.tag {
+			when LAX {
+				if w.subset != nil {
+					w.in_subset = t.depth > 1
+					if !w.in_subset {
+						dtd_bind_hook_src(w, t, false)
+					}
+				}
+			}
 			return fault(w, hs, fr.at, .Bad_Char, .Entity_Boundary)
 		}
 		t.depth -= 1
@@ -442,11 +456,43 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 			if res, done := text_member(w, on, &hs, f, end); done {
 				return res
 			}
+			when LAX {
+				if t.depth == 0 {
+					w.in_subset = false
+					if w.subset != nil {
+						dtd_bind_hook_src(w, t, false)
+					}
+				}
+			}
 			f.text_lo = at(w, fr.resume)
+		} else {
+			when LAX {
+				if t.depth == 0 {
+					w.in_subset = false
+					if w.subset != nil {
+						dtd_bind_hook_src(w, t, false)
+					}
+				}
+			}
 		}
 		return #must_tail st_content(fr.resume, fr.end, d, w, hs.a, hs.b, hs.c, on)
 	}
 	return run_fault(w, hs, r)
+}
+
+// Points `Finder` / `Scanner` key/source slices at the copied DTD subset while walking a markup entity literal inside
+// `w.subset`, and restores them to `t.src` on exit.
+@(private)
+dtd_bind_hook_src :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), t: ^Dtd, in_subset: bool) {
+	when H == build.Finder || H == build.Scanner {
+		src := hook.piece_src(w.subset[:t.subset_hi - t.subset_lo], t.subset_lo) if in_subset else t.src
+		when H == build.Finder {
+			w.hooks.src = src
+			w.hooks.key_text = src
+		} else {
+			w.hooks.key_text = src
+		}
+	}
 }
 
 // The result of a walk over a text with a DTD, `r`: a text that ends inside a replacement text is the fault of the
@@ -456,7 +502,18 @@ dtd_end :: proc "contextless" (w: ^Walk($H, $LAX), r: u64) -> u64 {
 	t := w.dtd
 	r := r
 	if t.depth > 0 && tape.Fault_Kind(r & 0xff) == .Truncated {
+		when LAX {
+			if w.subset != nil {
+				w.in_subset = t.depth > 1
+			}
+		}
 		r = fault_at(at(w, t.stack[t.depth - 1].at), .Bad_Char, u8(Detail.Entity_Boundary))
+	}
+	when LAX {
+		if w.in_subset {
+			w.in_subset = false
+			dtd_bind_hook_src(w, t, false)
+		}
 	}
 	if (u8(r) == 0 || u8(r) == hook.WALK_STOPPED) && !dtd_give(t, w.base, w.hooks, w.ctx) {
 		r = fault_at(0, NO_MEMORY)
@@ -503,7 +560,7 @@ st_defaults :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^W
 	qualified := false
 	for i := dtd_find(&t.view, .Element, tag[1:][:f.name_n]); i != NO_DECL; i = t.attrs[i].next {
 		a := t.attrs[i]
-		name := w.base[a.fact_lo:]
+		name := raw_data(t.bytes[a.name_lo:])
 		if !a.defaulted || tag_has(w, name, u64(a.name_n)) {
 			continue
 		}
@@ -513,7 +570,8 @@ st_defaults :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^W
 		spelling := markup.attribute_spelling(int(a.lead), true) | (ATTRIBUTE_DTD if dtd_decodes(t) else 0) | (ATTRIBUTE_TOKENIZED if a.tokenized else 0)
 		if declares_ns(name, int(a.name_n)) {
 			spelling |= ATTRIBUTE_NS
-			_, value := markup.attribute_parts(t.src[a.fact_lo:][:a.fact_n], markup.attribute_spelling(int(a.lead), true))
+			fact_bytes := w.subset[a.fact_lo - t.subset_lo:][:a.fact_n] if w.subset != nil else t.src[a.fact_lo:][:a.fact_n]
+			_, value := markup.attribute_parts(fact_bytes, markup.attribute_spelling(int(a.lead), true))
 			rule, no_memory := declare(w, name, int(a.name_n), value, e)
 			if no_memory {
 				return fault(w, hs, tag, NO_MEMORY)
