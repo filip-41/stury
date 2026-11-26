@@ -1,6 +1,7 @@
 package write
 
 import "base:runtime"
+import "core:io"
 import "core:slice"
 import "core:unicode/utf8"
 import "stury:lib/base/spell"
@@ -194,4 +195,59 @@ token_tape_document :: proc(t: ^Token_Tape) -> (doc: tape.Document, err: runtime
 	}
 	slice.sort_by(t.counts[:], proc(a, b: tape.Child_Count) -> bool {return a.node < b.node})
 	return {src = t.texts[:], nodes = t.nodes[:], counts = t.counts[:], format = &TOKEN_FORMAT, allocator = t.allocator}, nil
+}
+
+// The token writer of a target that lays out a whole document: the tokens are held in a `Token_Tape`, the whole text
+// whether it goes to a sink or a buffer, and the target's `write_out` writes their document at `tape_writer_end`. It
+// points into itself, so it is not copied once `tape_writer_start` returns.
+Tape_Writer :: struct {
+	tokens:    Token_Tape,
+	// Facts of the tokens' nodes in node order, which the caller owns and may set before `tape_writer_end`.
+	facts:     []tape.Fact,
+	write_out: Write_Out,
+	opts:      Options,
+	sink:      io.Writer,
+	allocator: runtime.Allocator,
+	spec:      u8,
+}
+
+// Starts `w` to write a text of `spec` under `opts` by `write_out` into `sink`, or into a buffer from `allocator` when
+// `sink` has no procedure. The target judges `spec` and `opts` first. Tokens hold no node to start at, so `opts.node`
+// is `Bad_Option{"node"}`.
+@(require_results)
+tape_writer_start :: proc(w: ^Tape_Writer, spec: u8, opts: Options, sink: io.Writer, allocator: runtime.Allocator, write_out: Write_Out) -> Error {
+	if opts.node != tape.ROOT {
+		return tape.Bad_Option{"node"}
+	}
+	w^ = {write_out = write_out, opts = opts, sink = sink, allocator = allocator, spec = spec}
+	token_tape_start(&w.tokens, false, 0, allocator) or_return
+	return nil
+}
+
+// Ends `w` and writes its text: the bytes of a buffer writer, which the caller owns and frees with `w`'s allocator, or
+// none for a sink writer. A text that is no whole sequence is `Refused{index, .Malformed}`, and a refusal of
+// `write_out` names a node of the tokens' document. `w`'s tokens are freed, and `w` is not used again.
+@(require_results)
+tape_writer_end :: proc(w: ^Tape_Writer) -> (text: []u8, err: Error) {
+	defer token_tape_drop(&w.tokens)
+	if !token_tape_done(&w.tokens) {
+		return nil, Refused{tape.Node_Index(w.tokens.seq.taken), .Malformed}
+	}
+	doc := token_tape_document(&w.tokens) or_return
+	doc.facts = w.facts
+	for f in w.facts {
+		doc.present += {f.kind}
+	}
+	if w.sink.procedure != nil {
+		_, err = to_sink(w.sink, &doc, w.spec, w.opts, w.allocator, w.write_out)
+		return nil, err
+	}
+	text, _, err = to_buffer(&doc, w.spec, w.opts, w.allocator, w.write_out)
+	return
+}
+
+// Frees what `w` holds without writing text. `w` is not used again.
+tape_writer_drop :: proc(w: ^Tape_Writer) {
+	token_tape_drop(&w.tokens)
+	w^ = {}
 }

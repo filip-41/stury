@@ -20,6 +20,7 @@ Writer :: struct {
 // procedure, which `writer_end` returns. `opts.framing` makes each root value a record and lets there be any number of
 // them. `opts.node`, `opts.sort_keys` and `opts.format` have no meaning for tokens, and `opts.format` is
 // `Bad_Option{"format"}`.
+@(require_results)
 writer_start :: proc(w: ^Writer, opts := Write_Options{}, sink := io.Writer{}, allocator := context.allocator) -> Write_Error {
 	if opts.format != nil {
 		return tape.Bad_Option{"format"}
@@ -43,6 +44,7 @@ writer_start :: proc(w: ^Writer, opts := Write_Options{}, sink := io.Writer{}, a
 // of a `.Number`, which must be a JSON number. The other kinds take none. A token the sequence cannot take here is
 // `Refused{index, .Malformed}`, and a text with no JSON spelling `Refused{index, .No_Spelling}`; neither writes a
 // byte, and the writer takes the next token. A refused allocation or a failed sink ends the writer.
+@(require_results)
 token :: proc(w: ^Writer, kind: write.Token_Kind, text := "") -> Write_Error {
 	if w.out.err != nil {
 		return w.out.err
@@ -112,6 +114,7 @@ token :: proc(w: ^Writer, kind: write.Token_Kind, text := "") -> Write_Error {
 }
 
 // Writes value `node` of `doc`, a document of any format, as tokens into `w`, as `dsv.put` writes a record.
+@(require_results)
 put :: proc(w: ^Writer, doc: ^tape.Document, node := tape.ROOT) -> Write_Error {
 	return write.tokens_of(doc, node, w, token, w.seq.allocator)
 }
@@ -119,6 +122,7 @@ put :: proc(w: ^Writer, doc: ^tape.Document, node := tape.ROOT) -> Write_Error {
 // Ends the text. The bytes of a buffer writer are returned, which the caller owns and frees with its allocator, and a
 // sink writer returns none. A text that is no whole sequence, a container open or no root value, is
 // `Refused{index, .Malformed}`, which leaves no text, though a sink holds what it was given. `w` is not used again.
+@(require_results)
 writer_end :: proc(w: ^Writer) -> (text: []u8, err: Write_Error) {
 	whole := write.sequence_done(&w.seq) || w.opts.framing != .None && w.seq.depth == 0
 	taken := w.seq.taken

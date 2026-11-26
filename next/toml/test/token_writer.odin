@@ -72,3 +72,11 @@ a_root_that_is_no_table_is_refused_at_the_end :: proc(t: ^testing.T) {
 	refused, ok := err.(toml.Refused)
 	testing.expect(t, ok && refused.why == .No_Spelling)
 }
+
+@(test)
+writer_start_refuses_a_node :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	w: toml.Writer
+	testing.expect_value(t, toml.writer_start(&w, .Toml_1_0, {node = 1}), toml.Write_Error(toml.Bad_Option{"node"}))
+	testing.expect_value(t, toml.writer_start(&w, .Toml_1_0, {ascii = true}), toml.Write_Error(toml.Bad_Option{"options"}))
+}

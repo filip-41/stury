@@ -24,6 +24,7 @@ Writer :: struct {
 // Starts `w` to write into `sink`, or into a buffer from `allocator` when `sink` has no procedure, which `writer_end`
 // returns. `opts` takes nothing a CBOR token writer has no use for: an indent, `ascii`, `node`, `sort_keys`, a framing,
 // `grow_header`, `header` and `format` are `Bad_Option`.
+@(require_results)
 writer_start :: proc(w: ^Writer, opts := Write_Options{}, sink := io.Writer{}, allocator := context.allocator) -> Write_Error {
 	if opts.indent != 0 || opts.tab || opts.ascii || opts.node != 0 || opts.sort_keys || opts.framing != .None || opts.grow_header || len(opts.header) > 0 || opts.format != nil {
 		return tape.Bad_Option{"options"}
@@ -43,6 +44,7 @@ MAX_PENDING_TAGS :: 4
 
 // Tags the next value, which may be a key, with CBOR tag `number`. The tag is written with the value, and dropped when
 // the next token closes a container. More than `MAX_PENDING_TAGS` for one value is `Refused{index, .Malformed}`.
+@(require_results)
 tag :: proc(w: ^Writer, number: u64) -> Write_Error {
 	if w.held == len(w.tags) {
 		return write.Refused{tape.Node_Index(w.seq.taken), .Malformed}
@@ -69,6 +71,7 @@ tag_text :: proc(w: ^Writer, name: string) -> Write_Error {
 
 // Writes the value of `doc`, a document of any format, at `node` as tokens, with its tags that CBOR spells, a
 // record's value as `dsv.put` writes one.
+@(require_results)
 put :: proc(w: ^Writer, doc: ^tape.Document, node := tape.ROOT) -> Write_Error {
 	return write.tokens_of(doc, node, w, token, w.seq.allocator, tag_text)
 }
@@ -77,6 +80,7 @@ put :: proc(w: ^Writer, doc: ^tape.Document, node := tape.ROOT) -> Write_Error {
 // `Refused{index, .Malformed}`, and a text with no CBOR spelling, invalid UTF-8 or a number that is no integer past
 // 64 bits and no float (or an integer past 4096 digits), `Refused{index, .No_Spelling}`; neither writes a byte, and
 // the writer takes the next token.
+@(require_results)
 token :: proc(w: ^Writer, kind: Token_Kind, text := "") -> Write_Error {
 	if w.out.err != nil {
 		return w.out.err
@@ -163,6 +167,7 @@ token :: proc(w: ^Writer, kind: Token_Kind, text := "") -> Write_Error {
 }
 
 // Ends the item, as `json.writer_end` ends a text.
+@(require_results)
 writer_end :: proc(w: ^Writer) -> (item: []u8, err: Write_Error) {
 	whole := write.sequence_done(&w.seq)
 	taken := w.seq.taken
@@ -202,7 +207,7 @@ marshal_to :: proc(sink: io.Writer, value: ^$T, spec := Spec.Cbor, opts := Write
 // Token tape with pending named tags (for `time.Time`), used when marshalling to definite/sorted CBOR specs.
 @(private)
 Tagged_Tape :: struct {
-	tokens:  write.Token_Tape,
+	tw:      write.Tape_Writer,
 	facts:   [dynamic]tape.Fact,
 	pending: [MAX_PENDING_TAGS]string,
 	held:    int,
@@ -211,7 +216,7 @@ Tagged_Tape :: struct {
 @(private)
 tagged_tape_tag :: proc(tt: ^Tagged_Tape, name: string) -> Write_Error {
 	if tt.held == len(tt.pending) {
-		return write.Refused{tape.Node_Index(tt.tokens.seq.taken), .Malformed}
+		return write.Refused{tape.Node_Index(tt.tw.tokens.seq.taken), .Malformed}
 	}
 	tt.pending[tt.held] = name
 	tt.held += 1
@@ -221,17 +226,17 @@ tagged_tape_tag :: proc(tt: ^Tagged_Tape, name: string) -> Write_Error {
 @(private)
 tagged_tape_token :: proc(tt: ^Tagged_Tape, kind: Token_Kind, text: string) -> Write_Error {
 	if tt.held > 0 && kind != .Close {
-		node := tape.Node_Index(len(tt.tokens.nodes))
+		node := tape.Node_Index(len(tt.tw.tokens.nodes))
 		for name in tt.pending[:tt.held] {
-			lo := u64(len(tt.tokens.texts))
-			append(&tt.tokens.texts, name) or_return
+			lo := u64(len(tt.tw.tokens.texts))
+			append(&tt.tw.tokens.texts, name) or_return
 			if _, err := append(&tt.facts, tape.Fact{node = node, kind = .Tag, lo = lo, n = u32(len(name))}); err != nil {
 				return err
 			}
 		}
 	}
 	tt.held = 0
-	return write.token_tape_take(&tt.tokens, kind, text)
+	return write.token_tape_take(&tt.tw.tokens, kind, text)
 }
 
 @(private)
@@ -272,33 +277,15 @@ marshal_out :: proc(value: rawptr, T: typeid, spec: Spec, opts: Write_Options, p
 	}
 	tt: Tagged_Tape
 	tt.facts.allocator = allocator
-	if e := write.token_tape_start(&tt.tokens, false, 0, allocator); e != nil {
-		write.token_tape_drop(&tt.tokens)
-		return nil, e
-	}
+	write.tape_writer_start(&tt.tw, u8(spec), opts, sink, allocator, write_out) or_return
 	defer {
-		write.token_tape_drop(&tt.tokens)
+		write.tape_writer_drop(&tt.tw)
 		delete(tt.facts)
 	}
 	werr, terr := typed.marshal(value, T, TAG, plan, &tt, tagged_tape_token, allocator, tagged_tape_tag)
 	if err = marshal_error(werr, terr); err != nil {
 		return nil, err
 	}
-	if !write.token_tape_done(&tt.tokens) {
-		return nil, write.Refused{tape.Node_Index(tt.tokens.seq.taken), .Malformed}
-	}
-	doc, derr := write.token_tape_document(&tt.tokens)
-	if derr != nil {
-		return nil, derr
-	}
-	if len(tt.facts) > 0 {
-		doc.facts = tt.facts[:]
-		doc.present = {.Tag}
-	}
-	if sink.procedure != nil {
-		_, err = write.to_sink(sink, &doc, u8(spec), opts, allocator, write_out)
-		return nil, err
-	}
-	item, _, err = write.to_buffer(&doc, u8(spec), opts, allocator, write_out)
-	return
+	tt.tw.facts = tt.facts[:]
+	return write.tape_writer_end(&tt.tw)
 }

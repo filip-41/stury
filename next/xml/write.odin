@@ -71,12 +71,8 @@ Writing :: struct {
 
 @(private)
 write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
-	if spec > u8(max(Spec)) {
-		return {}, tape.Bad_Option{"spec"}
-	}
-	if opts.format != nil || opts.ascii || opts.sort_keys || opts.framing != .None || opts.grow_header || len(opts.header) > 0 {
-		opt := "format" if opts.format != nil else "header" if len(opts.header) > 0 || opts.grow_header else "options"
-		return {}, tape.Bad_Option{opt}
+	if e := write_check(spec, opts); e != nil {
+		return {}, e
 	}
 	w: write.Tree
 	x := doc.format == &FORMATS[.Xml]
@@ -106,6 +102,19 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 		w.err = out.err
 	}
 	return dropped, w.err
+}
+
+// Refuses a `spec` XML does not have and the options XML writes no text under.
+@(private)
+write_check :: proc "contextless" (spec: u8, opts: Write_Options) -> Write_Error {
+	if spec > u8(max(Spec)) {
+		return tape.Bad_Option{"spec"}
+	}
+	if opts.format != nil || opts.ascii || opts.sort_keys || opts.framing != .None || opts.grow_header || len(opts.header) > 0 {
+		opt := "format" if opts.format != nil else "header" if len(opts.header) > 0 || opts.grow_header else "options"
+		return tape.Bad_Option{opt}
+	}
+	return nil
 }
 
 @(private)

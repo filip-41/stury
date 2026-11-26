@@ -151,14 +151,23 @@ push_pending :: #force_inline proc(t: ^Writing, p: Pending) -> bool {
 	return true
 }
 
+// Refuses a `spec` TOML does not have and the options TOML writes no text under.
 @(private)
-write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
+write_check :: proc "contextless" (spec: u8, opts: Write_Options) -> Write_Error {
 	if spec > u8(max(Spec)) {
-		return {}, tape.Bad_Option{"spec"}
+		return tape.Bad_Option{"spec"}
 	}
 	if opts.format != nil || opts.ascii || opts.framing != .None || opts.grow_header || len(opts.header) > 0 {
 		opt := "format" if opts.format != nil else "header" if len(opts.header) > 0 || opts.grow_header else "options"
-		return {}, tape.Bad_Option{opt}
+		return tape.Bad_Option{opt}
+	}
+	return nil
+}
+
+@(private)
+write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
+	if e := write_check(spec, opts); e != nil {
+		return {}, e
 	}
 	t := Writing{out = out, sort = opts.sort_keys, root = opts.node}
 	t.path.allocator, t.dots.allocator, t.via.allocator, t.tmp.allocator, t.pending.allocator, t.members.allocator = allocator, allocator, allocator, allocator, allocator, allocator
