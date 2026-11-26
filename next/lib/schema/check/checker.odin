@@ -39,8 +39,10 @@ Frame :: struct {
 	is_choice:      bool, // container opened for a single live `Factor_Choice` inside a factored object
 	is_group_array: bool, // synthetic array frame grouping contiguous `.Group` (XML) sibling elements
 	in_seq:         bool,
+	has_key:        bool,
 	key_owned:      bool,
 	has_tracker:    bool,
+	count_keys:     bool,
 	saved_failed:   bool, // saved `h.failed` when `is_choice` isolates a speculative choice
 }
 
@@ -80,9 +82,11 @@ Checker :: struct {
 	quiet:          bool,
 	failed:         bool,
 	fatal:          Error_Kind,
-	need_reread:    bool,
-	reread_runs:    bool,
-	dup_hit:        bool,
+	need_reread:      bool,
+	reread_runs:      bool,
+	buffering_choice: bool,
+	choice_sink_fo:   i16,
+	dup_hit:          bool,
 	dup_at:         u64,
 	first_err:      Check_Error,
 	first_arena:    ^mem.Dynamic_Arena,
@@ -99,11 +103,19 @@ Checker :: struct {
 	trackers:       [dynamic]Key_Tracker,
 	tracked:        int,
 	tracker0_used:  bool,
-	parent:         ^Checker,    // lazy outer checker chain when running `subcheck_node` (zero path alloc unless error!)
-	parent_owner:   ^Record,
-	parent_extra:   []tape.Step,
-	nest_depth:     int,         // subcheck nesting depth
-	ctx:            ^runtime.Context,
+	arr_uniq_in_use: bool,
+	arr_uniq_n:      u8,
+	arr_uniq_slots:  [64]u8,
+	arr_uniq_spells: [32]u16,
+	arr_uniq_strs:   [32]string,
+	parent:            ^Checker,    // lazy outer checker chain when running `subcheck_node` (zero path alloc unless error!)
+	parent_owner:      ^Record,
+	parent_inst_owner: ^Record,     // optional instance-only parent member override (used by `replay_stream_factored`)
+	parent_extra:      []tape.Step,
+	nest_depth:        int,         // subcheck nesting depth
+	at_bias:           u64,         // byte offset bias when replaying a self-contained stream slice
+	subwalk_fn:        proc(src: []u8, opts: tape.Options, sub: ^Checker, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool),
+	ctx:               ^runtime.Context,
 	frames_buf:     [16]Frame,
 	factored_buf:   [INLINE_FACTORED]Factored_Open,
 	tracker0:       Key_Tracker, // inline slot 0 (unzeroed until first unnamed-key tracker opens!)
@@ -176,6 +188,8 @@ checker_start :: #force_inline proc(h: ^Checker, plan: ^Plan, src: []u8, format:
 	h.fatal = .None
 	h.need_reread = false
 	h.reread_runs = false
+	h.buffering_choice = false
+	h.choice_sink_fo = -1
 	h.dup_hit = false
 	h.dup_at = tape.NO_BYTE
 	h.first_arena = nil
@@ -193,10 +207,14 @@ checker_start :: #force_inline proc(h: ^Checker, plan: ^Plan, src: []u8, format:
 	h.trackers.allocator = scratch
 	h.tracked = 0
 	h.tracker0_used = false
+	h.arr_uniq_in_use = false
 	h.parent = nil
 	h.parent_owner = nil
+	h.parent_inst_owner = nil
 	h.parent_extra = nil
 	h.nest_depth = 0
+	h.at_bias = 0
+	h.subwalk_fn = nil
 	h.ctx = ctx
 	return {b = u64(uintptr(plan.root))}
 }
@@ -204,7 +222,7 @@ checker_start :: #force_inline proc(h: ^Checker, plan: ^Plan, src: []u8, format:
 @(private)
 checker_cleanup :: #force_inline proc(h: ^Checker) {
 	// Fast exit on the zero-allocation happy path!
-	if h.capture_depth == 0 && h.sp == 0 && !h.frames_heap && !h.tracker0_used && len(h.trackers) == 0 && !h.owns_pool && !h.xml_ext_owned && h.first_arena == nil {
+	if h.capture_depth == 0 && h.sp == 0 && h.nf == 0 && !h.arr_uniq_in_use && !h.frames_heap && !h.tracker0_used && len(h.trackers) == 0 && !h.owns_pool && !h.xml_ext_owned && h.first_arena == nil {
 		return
 	}
 	checker_cleanup_slow(h)
@@ -215,6 +233,11 @@ checker_cleanup_slow :: #force_no_inline proc(h: ^Checker) {
 	for h.capture_depth > 0 {
 		capture_abort(h)
 	}
+	for h.nf > 0 {
+		h.nf -= 1
+		factored_cleanup(h, factored_at(h, h.nf))
+	}
+	h.arr_uniq_in_use = false
 	for i in 0 ..< h.sp {
 		if h.frames[i].key_owned {
 			delete(h.frames[i].key_name, h.scratch)
@@ -520,8 +543,10 @@ checker_hook :: #force_inline proc "contextless" (h: ^Checker, s: hook.Regs, t: 
 						f.is_choice = false
 						f.is_group_array = false
 						f.in_seq = can_seq
+						f.has_key = false
 						f.key_owned = false
 						f.has_tracker = false
+						f.count_keys = false
 						f.saved_failed = false
 						next_b := u64(uintptr(r.first)) if can_seq else u64(uintptr(&DEAD_RECORD))
 						return {s.a, next_b, s.c}, .Next
@@ -552,8 +577,10 @@ checker_hook :: #force_inline proc "contextless" (h: ^Checker, s: hook.Regs, t: 
 						f.is_choice = false
 						f.is_group_array = false
 						f.in_seq = false
+						f.has_key = false
 						f.key_owned = false
 						f.has_tracker = false
+						f.count_keys = false
 						f.saved_failed = false
 						u := &h.plan.uses[r.meta]
 						return {s.a, u64(uintptr(&h.plan.records[u.items])), s.c}, .Next
@@ -638,15 +665,15 @@ checker_step_capture :: #force_no_inline proc "contextless" (h: ^Checker, s: hoo
 	if done {
 		cap_slot := h.pool.captures[h.capture_depth - 1]
 		saved_b := cap_slot.saved_b
-		for_factor := cap_slot.for_factor
+		in_factored := cap_slot.for_factor || cap_slot.for_arr_elem
 		passed := capture_finish(h)
 		if h.fatal != .None {
 			return s, .Stop
 		}
 		restored := hook.Regs{s.a, saved_b, s.c}
 		if !passed {
-			if for_factor {
-				// Inside a factored object: `capture_finish` marked `fo.failed` and returned false only if doomed!
+			if in_factored {
+				// Inside a factored container: `capture_finish` marked `fo.failed` and returned false only if doomed!
 				fo := factored_at(h, h.nf - 1)
 				if !h.need_reread {
 					fail_doomed_factored(h, fo)
@@ -658,7 +685,7 @@ checker_step_capture :: #force_no_inline proc "contextless" (h: ^Checker, s: hoo
 				return restored, .Stop
 			}
 		}
-		if for_factor {
+		if in_factored {
 			return restored, .Next
 		}
 		return after_value(h, restored), .Next
@@ -690,6 +717,7 @@ on_key :: #force_inline proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.T
 
 	key_str := string(h.src[t.lo:][:t.n])
 	f.key_name = key_str
+	f.has_key = true
 	owner := f.owner
 	m := &h.plan.meta[owner.meta]
 
@@ -724,7 +752,7 @@ on_key :: #force_inline proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.T
 	}
 
 	// Ultra-fast unnamed-key `.Skip` (zero `Plan.uses` load, zero `context` — e.g. `code-climate`, `aws-cdk`!):
-	if .Has_Additional not_in owner.flags && .Has_Keys not_in owner.flags && .Counted not_in owner.flags && !h.judge_dups && h.dups != .Refuse {
+	if .Has_Additional not_in owner.flags && .Has_Keys not_in owner.flags && .Counted not_in owner.flags && !f.count_keys && !h.judge_dups && h.dups != .Refuse {
 		nothing_b := u64(uintptr(&h.plan.records[h.plan.nothing]))
 		return {s.a, nothing_b, s.c}, .Skip
 	}
@@ -737,7 +765,7 @@ on_key_named_cold :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.R
 	if .Has_Keys in owner.flags {
 		u := &h.plan.uses[owner.meta]
 		kl := &h.plan.leaves[u.keys - 1]
-		if !string_passes_leaf(h, kl, key_str, t.lo, owner, true) {
+		if !string_passes_leaf(h, kl, key_str, t.lo, owner, true, u.keys_site) {
 			h.failed = true
 			if can_stop_early(h) {
 				return s, .Stop
@@ -774,7 +802,7 @@ on_key_unnamed_cold :: #force_no_inline proc "contextless" (h: ^Checker, s: hook
 	u := &h.plan.uses[owner.meta]
 	// Unnamed key: lazily track duplicates ONLY when a repeat of an unnamed key can affect the result!
 	// Inside `walk_document_node` under `.Group` (`h.in_doc_group`), tags are already grouped into unique buckets.
-	need_unk_track := (h.judge_dups && !h.in_doc_group) || ((h.dups == .First || h.dups == .Last) && (u.keys > 0 || u.pattern > 0 || m.counted || (u.additional > 0 && (!u.add_false || h.sink != nil)))) || (h.dups == .Group && !h.in_doc_group && (u.pattern > 0 || u.additional > 0 || m.counted || u.keys > 0))
+	need_unk_track := (h.judge_dups && !h.in_doc_group) || ((h.dups == .First || h.dups == .Last) && (u.keys > 0 || u.pattern > 0 || m.counted || f.count_keys || (u.additional > 0 && (!u.add_false || h.sink != nil)))) || (h.dups == .Group && !h.in_doc_group && (u.pattern > 0 || u.additional > 0 || m.counted || f.count_keys || u.keys > 0))
 	if need_unk_track {
 		if !f.has_tracker {
 			tidx := open_tracker(h)
@@ -808,7 +836,7 @@ on_key_unnamed_cold :: #force_no_inline proc "contextless" (h: ^Checker, s: hook
 	// `propertyNames` leaf check on unnamed key!
 	if u.keys > 0 {
 		kl := &h.plan.leaves[u.keys - 1]
-		if !string_passes_leaf(h, kl, key_str, t.lo, owner, true) {
+		if !string_passes_leaf(h, kl, key_str, t.lo, owner, true, u.keys_site) {
 			h.failed = true
 			if can_stop_early(h) {
 				return s, .Stop
@@ -901,10 +929,16 @@ on_key_cold :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.Regs, t
 			h.fatal = .No_Memory
 			return s, .Stop
 		}
-		defer if owned {
+		fo := factored_at(h, h.nf - 1)
+		save_key := fo.collect_errors || (!h.first_recorded && h.sink == nil && !fo.saved_quiet && fo.factor.direct_errors)
+		f.has_key = save_key
+		if save_key {
+			f.key_name = key_str
+			f.key_owned = owned
+		}
+		defer if !save_key && owned {
 			delete(key_str, h.scratch)
 		}
-		fo := factored_at(h, h.nf - 1)
 		skip, doomed := factored_key(h, fo, key_str, owned, t.lo)
 		if h.fatal != .None || doomed {
 			if h.fatal == .None && !h.need_reread {
@@ -933,6 +967,7 @@ on_key_cold :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.Regs, t
 		return s, .Stop
 	}
 	f.key_name = key_str
+	f.has_key = true
 	f.key_owned = owned
 
 	owner := f.owner
@@ -1053,8 +1088,8 @@ on_value :: proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token) -> (ho
 		if .Held in r.flags {
 			// In non-quiet mode, if a redirect landed on a non-factored still-`.Held` arm (e.g. `not`/`if`),
 			// revert to `orig_r` so `on_value_held` preserves exact `instance_location` & `keyword_location`.
-			// (Redirected `.Factored` objects keep `orig_r` via `f.parent_b = s.b`.)
-			if !h.quiet && r != orig_r && !(.Factored in r.flags && t.kind == .Object && !h.no_factor && !h.judge_dups) {
+			// (Redirected `.Factored` containers keep `orig_r` via `f.parent_b = s.b`.)
+			if !h.quiet && r != orig_r && !(.Factored in r.flags && factor_for_token(&h.plan.uses[r.meta], t.kind) != nil && !h.no_factor && !h.judge_dups) {
 				r = orig_r
 			}
 			return on_value_held(h, s, t, r)
@@ -1149,6 +1184,56 @@ on_value_scalar_slow :: #force_no_inline proc "contextless" (h: ^Checker, s: hoo
 on_value_factored :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) #no_bounds_check {
 	context = h.ctx^
 	fo := factored_at(h, h.nf - 1)
+	if fo.factor.arr != nil {
+		h.frames[h.sp - 1].count += 1
+		if t.kind != .Object && t.kind != .Array {
+			doomed := factored_arr_scalar(h, fo, t)
+			if h.fatal != .None {
+				return s, .Stop
+			}
+			if doomed {
+				fail_doomed_factored(h, fo)
+				return s, .Stop
+			}
+			return s, .Next
+		}
+		choice_rec, use_fork, for_elem, skip, doomed := factored_arr_container(h, fo, t)
+		if h.fatal != .None {
+			return s, .Stop
+		}
+		if doomed {
+			fail_doomed_factored(h, fo)
+			return s, .Stop
+		}
+		if skip {
+			if h.dups != .Refuse {
+				h.skip_end = true
+				return s, .Skip
+			}
+			nothing := &h.plan.records[h.plan.nothing - 1]
+			return open_container(h, s, t, nothing, is_choice = false)
+		}
+		if for_elem || use_fork {
+			if !capture_start(h, fo.owner, t.lo, s.b, for_factor = !for_elem, fm = fo.active_member, for_arr_elem = for_elem) {
+				return s, .Stop
+			}
+			_, ok := capture_feed(h, t)
+			if !ok {
+				return s, .Stop
+			}
+			return {s.a, u64(uintptr(&DEAD_RECORD)), s.c}, .Next
+		}
+		if fo.collect_errors {
+			choice_sink_ensure(h, fo)
+			fo.choice_mark = len(fo.choice_sink.entries)
+			fo.choice_base_kw = factored_outer_kw_len(h, fo)
+			h.sink = &fo.choice_sink
+			h.quiet = false
+			h.buffering_choice = true
+			h.choice_sink_fo = i16(h.nf - 1)
+		}
+		return open_container(h, s, t, choice_rec, is_choice = true)
+	}
 	if t.kind != .Object && t.kind != .Array {
 		doomed := factored_scalar(h, fo, t)
 		if h.fatal != .None {
@@ -1186,7 +1271,17 @@ on_value_factored :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.R
 		}
 		return {s.a, u64(uintptr(&DEAD_RECORD)), s.c}, .Next
 	}
-	return open_container(h, s, t, choice_rec, is_choice = true)
+	count_keys := fm_has_count_leaves(h.plan, fo.active_member, t.kind == .Object)
+	if fo.collect_errors {
+		choice_sink_ensure(h, fo)
+		fo.choice_mark = len(fo.choice_sink.entries)
+		fo.choice_base_kw = factored_outer_kw_len(h, fo)
+		h.sink = &fo.choice_sink
+		h.quiet = false
+		h.buffering_choice = true
+		h.choice_sink_fo = i16(h.nf - 1)
+	}
+	return open_container(h, s, t, choice_rec, is_choice = true, count_keys = count_keys)
 }
 
 @(private = "file")
@@ -1199,26 +1294,29 @@ on_value_held :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.Regs,
 		h.need_reread = true
 		return s, .Stop
 	}
-	// Stage 1-4: factored held object fast path!
-	if .Factored in r.flags && t.kind == .Object && !h.no_factor && !h.judge_dups {
-		if factored_open(h, r, u.factor, t.lo) {
-			f := frame_push_slot(h)
-			if f == nil {
-				h.nf -= 1
+	// Stage 1-4: factored held object or array fast path!
+	if .Factored in r.flags && !h.no_factor && !h.judge_dups {
+		if fac := factor_for_token(u, t.kind); fac != nil {
+			if factored_open(h, r, fac, t.lo) {
+				f := frame_push_slot(h)
+				if f == nil {
+					h.nf -= 1
+					factored_cleanup(h, factored_at(h, h.nf))
+					return s, .Stop
+				}
+				f^ = Frame{
+					is_object = (t.kind == .Object),
+					is_factored = true,
+					owner = r,
+					parent_b = s.b,
+					open_at = t.lo,
+					tracker_idx = -1,
+				}
+				return {s.a, u64(uintptr(&DEAD_RECORD)), s.c}, .Next
+			}
+			if h.fatal != .None {
 				return s, .Stop
 			}
-			f^ = Frame{
-				is_object = true,
-				is_factored = true,
-				owner = r,
-				parent_b = s.b,
-				open_at = t.lo,
-				tracker_idx = -1,
-			}
-			return {s.a, u64(uintptr(&DEAD_RECORD)), s.c}, .Next
-		}
-		if h.fatal != .None {
-			return s, .Stop
 		}
 	}
 	if t.kind != .Object && t.kind != .Array {
@@ -1244,7 +1342,7 @@ on_value_held :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.Regs,
 }
 
 @(private)
-open_container :: proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token, r: ^Record, is_choice: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
+open_container :: proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token, r: ^Record, is_choice: bool, count_keys := false) -> (hook.Regs, hook.Action) #no_bounds_check {
 	max_depth := int(h.budget.depth) if h.budget.depth > 0 else int(tape.DEFAULT_DEPTH)
 	if h.sp + h.nest_depth >= max_depth {
 		h.fatal = .Exceeded
@@ -1252,7 +1350,7 @@ open_container :: proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token, 
 	}
 
 	r := r
-	if is_choice && .Held in r.flags {
+	if is_choice && .Held in r.flags && (h.quiet || h.sink == nil) {
 		for hops := 0; hops < 4 && (.Held in r.flags); hops += 1 {
 			u := &h.plan.uses[r.meta]
 			if u.verdict_rec > 0 {
@@ -1319,8 +1417,10 @@ open_container :: proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token, 
 		f.is_choice = is_choice
 		f.is_group_array = false
 		f.in_seq = can_seq
+		f.has_key = false
 		f.key_owned = false
 		f.has_tracker = false
+		f.count_keys = count_keys
 		f.saved_failed = saved_failed
 		next_b := u64(uintptr(block_start)) if can_seq else u64(uintptr(&DEAD_RECORD))
 		return {s.a, next_b, s.c}, .Next
@@ -1356,8 +1456,10 @@ open_container :: proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token, 
 	f.is_choice = is_choice
 	f.is_group_array = false
 	f.in_seq = false
+	f.has_key = false
 	f.key_owned = false
 	f.has_tracker = false
+	f.count_keys = false
 	f.saved_failed = saved_failed
 	return {s.a, u64(uintptr(&h.plan.records[u.items])), s.c}, .Next
 }
@@ -1366,28 +1468,37 @@ open_container :: proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token, 
 open_choice_held_cold :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token, r: ^Record) -> (hook.Regs, hook.Action) #no_bounds_check {
 	context = h.ctx^
 	u := &h.plan.uses[r.meta]
-	if .Factored in r.flags && t.kind == .Object && !h.no_factor && !h.judge_dups {
-		if factored_open(h, r, u.factor, t.lo) {
-			f := frame_push_slot(h)
-			if f == nil {
-				h.nf -= 1
+	if .Factored in r.flags && !h.no_factor && !h.judge_dups {
+		if fac := factor_for_token(u, t.kind); fac != nil {
+			if factored_open(h, r, fac, t.lo) {
+				f := frame_push_slot(h)
+				if f == nil {
+					h.nf -= 1
+					factored_cleanup(h, factored_at(h, h.nf))
+					return s, .Stop
+				}
+				f^ = Frame{
+					is_object = (t.kind == .Object),
+					is_factored = true,
+					is_choice = true,
+					owner = r,
+					parent_b = s.b,
+					open_at = t.lo,
+					tracker_idx = -1,
+				}
+				h.choice_depth += 1
+				return {s.a, u64(uintptr(&DEAD_RECORD)), s.c}, .Next
+			}
+			if h.fatal != .None {
 				return s, .Stop
 			}
-			f^ = Frame{
-				is_object = true,
-				is_factored = true,
-				is_choice = true,
-				owner = r,
-				parent_b = s.b,
-				open_at = t.lo,
-				tracker_idx = -1,
-			}
-			h.choice_depth += 1
-			return {s.a, u64(uintptr(&DEAD_RECORD)), s.c}, .Next
 		}
-		if h.fatal != .None {
-			return s, .Stop
-		}
+	}
+	if outer_fo := factored_at(h, h.nf - 1); outer_fo.collect_errors {
+		h.sink = outer_fo.saved_sink
+		h.quiet = true
+		h.buffering_choice = outer_fo.saved_buffering
+		h.choice_sink_fo = outer_fo.saved_choice_fo
 	}
 	if !capture_start(h, r, t.lo, s.b, for_factor = true, fm = factored_at(h, h.nf - 1).active_member) {
 		return s, .Stop
@@ -1409,19 +1520,28 @@ open_container_type_err :: #force_no_inline proc "contextless" (h: ^Checker, s: 
 	defer if len(exp) > 0 {
 		delete(exp, h.scratch)
 	}
-	if !is_choice {
+	if !is_choice || (h.sink != nil && !h.quiet) {
 		orig_r := (^Record)(uintptr(s.b) - size_of(Record)) if (s.b != 0 && s.b != u64(uintptr(&DEAD_RECORD))) else r
-		err_owner := orig_r if r.meta != orig_r.meta else r
-		alt_site := h.plan.uses[r.meta].site if r.meta != orig_r.meta else nil
+		err_owner := orig_r if (!is_choice && r.meta != orig_r.meta) else r
+		alt_site := h.plan.uses[r.meta].site if (!is_choice && r.meta != orig_r.meta) else nil
 		if h.sink != nil && !h.quiet {
 			record_failure(h, kind, t.lo, kw, exp, err_owner, alt_site = alt_site)
 		} else {
 			record_first_failure(h, kind, t.lo, kw, exp, err_owner, alt_site = alt_site)
 		}
-		h.failed = true
+		if !is_choice {
+			h.failed = true
+		}
 	}
 	if is_choice {
 		fo := factored_at(h, h.nf - 1)
+		if fo.collect_errors {
+			record_choice_span(h, fo)
+			h.sink = fo.saved_sink
+			h.quiet = true
+			h.buffering_choice = fo.saved_buffering
+			h.choice_sink_fo = fo.saved_choice_fo
+		}
 		if fo.active_member != nil && fo.active_choice >= 0 {
 			fo.failed |= fo.active_member.choices[fo.active_choice].parts
 		}
@@ -1557,47 +1677,95 @@ on_end_cold :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.Regs, t
 		if f.is_choice {
 			h.choice_depth -= 1
 		}
-		passed, owner, open_at := factored_close(h)
-		if !passed {
-			if f.is_choice && h.nf > 0 {
-				outer_fo := factored_at(h, h.nf - 1)
-				if outer_fo.active_member != nil && outer_fo.active_choice >= 0 {
-					outer_fo.failed |= outer_fo.active_member.choices[outer_fo.active_choice].parts
-				}
-				outer_fo.active_member = nil
-				outer_fo.active_choice = -1
-				if can_doom_factored(h, outer_fo.factor, outer_fo.failed) {
-					fail_doomed_factored(h, outer_fo)
+		closing_fo := factored_at(h, h.nf - 1)
+		closing_factor := closing_fo.factor
+		closing_direct := closing_factor.direct_errors
+		closing_failed := closing_fo.failed
+		inner_cnt := closing_fo.seen_count
+		fo_doc := closing_fo.doc
+		fo_doc_node := closing_fo.doc_node
+		passed, owner, open_at, arr_uniq_fail, emitted := factored_close(h)
+		if !passed && !emitted && !h.quiet && (h.sink != nil || (!h.first_recorded && closing_direct)) {
+			inst_owner := owner
+			if !f.is_choice && f.parent_b != 0 && f.parent_b != u64(uintptr(&DEAD_RECORD)) {
+				inst_owner = (^Record)(uintptr(f.parent_b) - size_of(Record))
+			}
+			if fo_doc != nil {
+				emitted = replay_doc_factored(h, fo_doc, fo_doc_node, owner, inst_owner, inst_owner if inst_owner != owner else nil)
+				if h.fatal != .None {
 					return s, .Stop
 				}
-				return {s.a, f.parent_b, s.c}, .Next
+			} else if h.subwalk_fn != nil && t.lo < u64(len(h.src)) && t.lo >= open_at {
+				emitted = replay_stream_factored(h, owner, inst_owner, open_at, t.lo + 1, inst_owner if inst_owner != owner else nil)
+				if h.fatal != .None {
+					return s, .Stop
+				}
+				if h.sink == nil && !h.first_recorded {
+					emitted = false
+				}
 			}
-			if h.sink != nil && !h.quiet {
+			if !emitted && h.sink != nil {
+				if f.is_choice && h.nf > 0 {
+					outer_fo := factored_at(h, h.nf - 1)
+					h.sink = outer_fo.saved_sink
+					h.quiet = outer_fo.saved_quiet
+					h.buffering_choice = outer_fo.saved_buffering
+					h.choice_sink_fo = outer_fo.saved_choice_fo
+				}
 				h.need_reread = true
 				h.reread_runs = true
 				return s, .Stop
 			}
+		}
+		if f.is_choice && h.nf > 0 {
+			outer_fo := factored_at(h, h.nf - 1)
+			finish_choice_leaf_counts(h, outer_fo, f.is_object, inner_cnt, open_at)
+			if !passed && outer_fo.active_member != nil && outer_fo.active_choice >= 0 {
+				outer_fo.failed |= outer_fo.active_member.choices[outer_fo.active_choice].parts
+			}
+			if outer_fo.collect_errors {
+				record_choice_span(h, outer_fo)
+				h.sink = outer_fo.saved_sink
+				h.quiet = true
+				h.buffering_choice = outer_fo.saved_buffering
+				h.choice_sink_fo = outer_fo.saved_choice_fo
+			}
+			outer_fo.active_member = nil
+			outer_fo.active_choice = -1
+			if can_doom_factored(h, outer_fo.factor, outer_fo.failed) {
+				fail_doomed_factored(h, outer_fo)
+				return s, .Stop
+			}
+			return {s.a, f.parent_b, s.c}, .Next
+		}
+		if !passed {
 			h.failed = true
-			err_owner := owner
-			alt_site: []tape.Step
-			if !f.is_choice && f.parent_b != 0 && f.parent_b != u64(uintptr(&DEAD_RECORD)) {
-				orig := (^Record)(uintptr(f.parent_b) - size_of(Record))
-				if orig.meta != owner.meta {
-					err_owner = orig
-					alt_site = h.plan.uses[owner.meta].site
+			if !emitted && h.sink != nil && !h.quiet {
+				h.need_reread = true
+				h.reread_runs = true
+				return s, .Stop
+			}
+			if !emitted {
+				err_owner := owner
+				alt_site: []tape.Step
+				if !f.is_choice && f.parent_b != 0 && f.parent_b != u64(uintptr(&DEAD_RECORD)) {
+					orig := (^Record)(uintptr(f.parent_b) - size_of(Record))
+					if orig.meta != owner.meta {
+						err_owner = orig
+						alt_site = h.plan.uses[owner.meta].site
+					}
+				}
+				if arr_uniq_fail {
+					record_first_failure(h, .Not_Unique, open_at, "uniqueItems", "", err_owner, alt_site = alt_site)
+				} else {
+					kind, kw := factored_circuit_first_err(closing_factor, closing_failed)
+					record_first_failure(h, kind, open_at, kw, "", err_owner, alt_site = alt_site)
 				}
 			}
-			record_first_failure(h, .No_Arm, open_at, "anyOf", "", err_owner, alt_site = alt_site)
 			if can_stop_early(h) {
 				return s, .Stop
 			}
 			return after_value(h, {s.a, f.parent_b, s.c}), .Next
-		}
-		if f.is_choice && h.nf > 0 {
-			outer_fo := factored_at(h, h.nf - 1)
-			outer_fo.active_member = nil
-			outer_fo.active_choice = -1
-			return {s.a, f.parent_b, s.c}, .Next
 		}
 		return after_value(h, {s.a, f.parent_b, s.c}), .Next
 	}
@@ -1628,16 +1796,17 @@ on_end_settle_cold :: #force_no_inline proc "contextless" (h: ^Checker, f: ^Fram
 	}
 	choice_failed := false
 
+	emit_here := !f.is_choice || (h.sink != nil && !h.quiet)
 	if f.is_object {
 		if .Counted in owner.flags {
 			l := &h.plan.leaves[owner.rule_set - 1]
 			fails := rules.judge_count(f.count, l.min_members, l.max_members)
 			if fails != {} {
 				choice_failed = true
-				if !f.is_choice {
+				if emit_here {
 					emit_leaf_failures(h, l, fails, f.open_at, err_owner, true, alt_site)
 					h.failed = true
-					if can_stop_early(h) {
+					if !f.is_choice && can_stop_early(h) {
 						return s, .Stop
 					}
 				}
@@ -1651,7 +1820,7 @@ on_end_settle_cold :: #force_no_inline proc "contextless" (h: ^Checker, f: ^Fram
 					for req_idx in end_m.required {
 						if !frame_is_seen(f, req_idx) {
 							choice_failed = true
-							if !f.is_choice {
+							if emit_here {
 								req_name := h.plan.meta[m.block + req_idx].name
 								if h.sink != nil && !h.quiet {
 									record_failure(h, .Missing_Field, f.open_at, "required", req_name, err_owner, alt_site = alt_site)
@@ -1659,7 +1828,7 @@ on_end_settle_cold :: #force_no_inline proc "contextless" (h: ^Checker, f: ^Fram
 									record_first_failure(h, .Missing_Field, f.open_at, "required", req_name, err_owner, alt_site = alt_site)
 								}
 								h.failed = true
-								if can_stop_early(h) {
+								if !f.is_choice && can_stop_early(h) {
 									return s, .Stop
 								}
 							}
@@ -1674,7 +1843,7 @@ on_end_settle_cold :: #force_no_inline proc "contextless" (h: ^Checker, f: ^Fram
 						for want_idx in req.wants {
 							if !frame_is_seen(f, want_idx) {
 								choice_failed = true
-								if !f.is_choice {
+								if emit_here {
 									want_name := h.plan.meta[m.block + want_idx].name
 									if h.sink != nil && !h.quiet {
 										record_failure(h, .Missing_Field, f.open_at, req.keyword, want_name, err_owner, alt_site = alt_site)
@@ -1682,7 +1851,7 @@ on_end_settle_cold :: #force_no_inline proc "contextless" (h: ^Checker, f: ^Fram
 										record_first_failure(h, .Missing_Field, f.open_at, req.keyword, want_name, err_owner, alt_site = alt_site)
 									}
 									h.failed = true
-									if can_stop_early(h) {
+									if !f.is_choice && can_stop_early(h) {
 										return s, .Stop
 									}
 								}
@@ -1701,10 +1870,10 @@ on_end_settle_cold :: #force_no_inline proc "contextless" (h: ^Checker, f: ^Fram
 			fails := rules.judge_count(f.count, l.min_items, l.max_items)
 			if fails != {} {
 				choice_failed = true
-				if !f.is_choice {
+				if emit_here {
 					emit_leaf_failures(h, l, fails, f.open_at, err_owner, false, alt_site)
 					h.failed = true
-					if can_stop_early(h) {
+					if !f.is_choice && can_stop_early(h) {
 						return s, .Stop
 					}
 				}
@@ -1719,14 +1888,44 @@ on_end_settle_cold :: #force_no_inline proc "contextless" (h: ^Checker, f: ^Fram
 	return after_value(h, {s.a, f.parent_b, s.c}), .Next
 }
 
+@(private)
+record_choice_span :: proc(h: ^Checker, outer_fo: ^Factored_Open) {
+	if !outer_fo.collect_errors || outer_fo.active_member == nil || outer_fo.active_choice < 0 {
+		return
+	}
+	end := len(outer_fo.choice_sink.entries)
+	if end > outer_fo.choice_mark {
+		ch := outer_fo.active_member.choices[outer_fo.active_choice]
+		factored_buf_err(h, outer_fo, Factored_Err{
+			kind = .Choice_Span,
+			no_emit_mask = outer_fo.factor.no_emit_mask,
+			choice_from = outer_fo.choice_mark,
+			choice_to = end,
+			base_kw_len = outer_fo.choice_base_kw,
+			sites = ch.sites,
+		})
+	}
+}
+
 @(private = "file")
 finish_choice_close :: proc(h: ^Checker, f: ^Frame, s: hook.Regs, choice_failed: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
+	if f.is_object && f.in_seq {
+		_ = flush_sequential(h, f, s.b)
+	}
 	h.choice_depth -= 1
 	failed_here := choice_failed || h.failed
 	h.failed = f.saved_failed
 	outer_fo := factored_at(h, h.nf - 1)
+	finish_choice_leaf_counts(h, outer_fo, f.is_object, f.count, f.open_at)
 	if failed_here && outer_fo.active_member != nil && outer_fo.active_choice >= 0 {
 		outer_fo.failed |= outer_fo.active_member.choices[outer_fo.active_choice].parts
+	}
+	if outer_fo.collect_errors {
+		record_choice_span(h, outer_fo)
+		h.sink = outer_fo.saved_sink
+		h.quiet = true
+		h.buffering_choice = outer_fo.saved_buffering
+		h.choice_sink_fo = outer_fo.saved_choice_fo
 	}
 	outer_fo.active_member = nil
 	outer_fo.active_choice = -1
@@ -1998,7 +2197,7 @@ resolve_plain_token :: proc(h: ^Checker, l: ^rules.Leaf, text: string) -> (kind:
 	return .String, {}, false
 }
 
-@(private = "file")
+@(private)
 eval_scalar_leaf :: proc(h: ^Checker, l: ^rules.Leaf, t: tape.Token) -> rules.Failures {
 	buf: [128]u8 = ---
 	text, owned, ok := token_decoded_scalar(h, t, buf[:])
@@ -2306,24 +2505,35 @@ judge_scalar_core :: proc(h: ^Checker, l: ^rules.Leaf, kind: tape.Kind, text: st
 }
 
 @(private)
-string_passes_leaf :: proc(h: ^Checker, l: ^rules.Leaf, text: string, at: u64, owner: ^Record, is_key: bool) -> bool {
+key_fails_leaf :: proc(h: ^Checker, l: ^rules.Leaf, text: string) -> rules.Failures {
 	fails: rules.Failures
 	if .String not_in l.kinds {
 		fails += {.Wrong_Kind}
 	} else {
 		sf, sok := run_judge_string(h, l, text)
 		if !sok {
-			return false
+			return {}
 		}
 		fails += sf
 	}
 	if l.has_enum && !rules.enum_has(l, .String, text, h.scratch) {
 		fails += {.Not_A_Member}
 	}
+	return fails
+}
+
+@(private)
+string_passes_leaf :: proc(h: ^Checker, l: ^rules.Leaf, text: string, at: u64, owner: ^Record, is_key: bool, keys_site: []tape.Step = nil) -> bool {
+	fails := key_fails_leaf(h, l, text)
+	if h.fatal != .None {
+		return false
+	}
 	if fails == {} {
 		return true
 	}
 	if is_key {
+		has_ks := len(keys_site) > 0
+		extra := "" if has_ks else "propertyNames"
 		for k in fails {
 			kw := keyword_of_kind(k, l, false)
 			exp := rules.operand_text(l, k, false, h.scratch)
@@ -2331,9 +2541,9 @@ string_passes_leaf :: proc(h: ^Checker, l: ^rules.Leaf, text: string, at: u64, o
 				delete(exp, h.scratch)
 			}
 			if h.sink != nil && !h.quiet {
-				record_failure(h, k, at, kw, exp, owner, extra_kw = "propertyNames")
+				record_failure(h, k, at, kw, exp, owner, extra_kw = extra, alt_site = keys_site, replace_top = has_ks)
 			} else {
-				record_first_failure(h, k, at, kw, exp, owner, extra_kw = "propertyNames")
+				record_first_failure(h, k, at, kw, exp, owner, extra_kw = extra, alt_site = keys_site, replace_top = has_ks)
 				break
 			}
 		}
@@ -2453,17 +2663,23 @@ subcheck_node :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, r
 	sub_opts := Options{dups = h.dups, budget = h.budget, scratch = h.scratch}
 	_ = checker_start(&sub, h.plan, doc.src, doc.format, sub_opts, h.sink if emit else nil, &memo, h.allocator, h.scratch, h.mem_budget, &ctx)
 	sub.xml_ext = doc.ext
+	sub.judge_dups = h.judge_dups
 	sub.steps_used = h.steps_used
 	sub.nodes_seen = h.nodes_seen
 	sub.quiet = quiet || h.quiet
 	sub.no_factor = h.no_factor
-	sub.pool = h.pool
+	sub.pool = nil
 	sub.owns_pool = false
-	sub.nf = h.nf
+	sub.nf = 0
+	sub.buffering_choice = h.buffering_choice
+	sub.choice_sink_fo = -1
 	sub.parent = h
 	sub.parent_owner = owner
+	sub.parent_inst_owner = nil
 	sub.parent_extra = extra_path
 	sub.nest_depth = h.sp + h.nest_depth + 1
+	sub.at_bias = h.at_bias
+	sub.subwalk_fn = h.subwalk_fn
 	defer {
 		h.steps_used = sub.steps_used
 		h.nodes_seen = sub.nodes_seen
@@ -2767,8 +2983,13 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 			h.fatal = .Unsupported
 			return true, false
 		}
-		opened_fac := is_object && h.nf > pre_nf && h.sp > pre_sp && h.frames[h.sp - 1].is_factored
+		opened_fac := h.nf > pre_nf && h.sp > pre_sp && h.frames[h.sp - 1].is_factored
 		fac_rec := h.frames[h.sp - 1].owner if opened_fac else nil
+		if opened_fac {
+			opened_fo := factored_at(h, h.nf - 1)
+			opened_fo.doc = cur_doc
+			opened_fo.doc_node = node
+		}
 		grouped: []Group_Bucket
 		if is_object && h.dups == .Group {
 			g, gok := build_group_buckets(h, r, cur_doc, &it)
@@ -2813,7 +3034,14 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 					// Save index `fo_idx` and re-fetch `fo` after `subcheck_node`/`eval_held_node` (which can grow `pool.factored`)!
 					fo_idx := h.nf - 1
 					fo := factored_at(h, fo_idx)
-					choice_rec, use_fork, skip, doomed := factored_container(h, fo, tok)
+					choice_rec: ^Record
+					use_fork, for_elem, skip, doomed: bool
+					if fo.factor.arr != nil {
+						h.frames[h.sp - 1].count += 1
+						choice_rec, use_fork, for_elem, skip, doomed = factored_arr_container(h, fo, tok)
+					} else {
+						choice_rec, use_fork, skip, doomed = factored_container(h, fo, tok)
+					}
 					if h.fatal != .None {
 						return true, false
 					}
@@ -2822,6 +3050,17 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 						return true, false
 					}
 					if skip {
+						return false, false
+					}
+					if for_elem {
+						ok_el, _ := factored_arr_eval_elem_node(h, {}, cur_doc, node, fo_idx, fo.active_member, fo.seen_count - 1, adopt_doc = false)
+						if h.fatal != .None {
+							return true, false
+						}
+						if !ok_el {
+							fail_doomed_factored(h, factored_at(h, fo_idx))
+							return true, false
+						}
 						return false, false
 					}
 					if use_fork {
@@ -2835,7 +3074,7 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 					}
 					// Single choice container: if it's a non-factored held container, evaluate directly on `cur_doc`!
 					cr := choice_rec
-					if .Held in cr.flags {
+					if .Held in cr.flags && (!fo.collect_errors) {
 						for hops := 0; hops < 4 && (.Held in cr.flags); hops += 1 {
 							vr := h.plan.uses[cr.meta].verdict_rec
 							if vr <= 0 {
@@ -2844,17 +3083,40 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 							cr = &h.plan.records[vr - 1]
 						}
 					}
-					if .Held in cr.flags && !(.Factored in cr.flags && n.kind == .Object && !h.no_factor && !h.judge_dups) {
+					if .Held in cr.flags && !(factor_for_token(&h.plan.uses[cr.meta], n.kind) != nil && !h.no_factor && !h.judge_dups) {
 						saved_q := h.quiet
-						h.quiet = true
+						saved_sk := h.sink
+						saved_buf := h.buffering_choice
+						saved_cfo := h.choice_sink_fo
+						if fo.collect_errors {
+							choice_sink_ensure(h, fo)
+							fo.choice_mark = len(fo.choice_sink.entries)
+							fo.choice_base_kw = factored_outer_kw_len(h, fo)
+							h.sink = &fo.choice_sink
+							h.quiet = false
+							h.buffering_choice = true
+							h.choice_sink_fo = i16(fo_idx)
+						} else {
+							h.quiet = true
+						}
 						passed := eval_held_node(h, cur_doc, node, cr, n.lo)
 						h.quiet = saved_q
+						h.sink = saved_sk
+						h.buffering_choice = saved_buf
+						h.choice_sink_fo = saved_cfo
 						if h.fatal != .None {
 							return true, false
 						}
 						fo = factored_at(h, fo_idx)
+						if fo.active_member != nil && len(fo.active_member.leaves) > 0 {
+							cnt_i, _, _ := tape.length(r, node, h.scratch)
+							finish_choice_leaf_counts(h, fo, n.kind == .Object, u64(max(cnt_i, 0)), n.lo)
+						}
 						if !passed && fo.active_member != nil && fo.active_choice >= 0 {
 							fo.failed |= fo.active_member.choices[fo.active_choice].parts
+						}
+						if fo.collect_errors {
+							record_choice_span(h, fo)
 						}
 						fo.active_member = nil
 						fo.active_choice = -1
@@ -2865,10 +3127,20 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 						return false, false
 					}
 					// Otherwise fall through to normal `open_container`!
+					count_keys := fm_has_count_leaves(h.plan, fo.active_member, n.kind == .Object)
+					if fo.collect_errors {
+						choice_sink_ensure(h, fo)
+						fo.choice_mark = len(fo.choice_sink.entries)
+						fo.choice_base_kw = factored_outer_kw_len(h, fo)
+						h.sink = &fo.choice_sink
+						h.quiet = false
+						h.buffering_choice = true
+						h.choice_sink_fo = i16(fo_idx)
+					}
 					pre_nf := h.nf
 					pre_sp := h.sp
 					act: hook.Action
-					regs^, act = open_container(h, regs^, tok, cr, is_choice = true)
+					regs^, act = open_container(h, regs^, tok, cr, is_choice = true, count_keys = count_keys)
 					if act == .Stop || h.fatal != .None {
 						return true, false
 					}
@@ -2902,7 +3174,7 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 					}
 				}
 				// If still `.Held` (non-factored), evaluate directly on `cur_doc` using original `rec` so error locations stay intact!
-				if .Held in eff.flags && !(.Factored in eff.flags && n.kind == .Object && !h.no_factor && !h.judge_dups) {
+				if .Held in eff.flags && !(factor_for_token(&h.plan.uses[eff.meta], n.kind) != nil && !h.no_factor && !h.judge_dups) {
 					if h.budget.nodes > 0 {
 						h.nodes_seen += 1
 						if h.nodes_seen > u64(h.budget.nodes) {
@@ -3201,6 +3473,7 @@ check_stream :: proc(
 	ctx := context
 	chk := checker_ptr(&h)
 	regs := checker_start(chk, plan, src, format, opts, sink, &memo, allocator, scratch, mem_b, &ctx)
+	install_subwalk(chk, format, t_opts.pieces == nil, H, walk)
 	load_xml_ext(chk, src, format, scratch)
 	when H == Refusing_Checker {
 		open_buf: [64]Open_Key = ---
@@ -3333,6 +3606,184 @@ check_stream :: proc(
 }
 
 @(private = "file")
+install_subwalk :: #force_inline proc(
+	chk: ^Checker,
+	format: ^tape.Format,
+	allow_rewalk: bool,
+	$H: typeid,
+	$walk: proc "contextless" (src: []u8, opts: tape.Options, h: ^H, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool),
+) {
+	if format == nil || !allow_rewalk || .Rewalk not_in format.caps || format.id < tape.FORMAT_ID_JSON || format.id >= tape.FORMAT_ID_JSON + 3 {
+		return
+	}
+	when H == Checker {
+		chk.subwalk_fn = proc(sub_src: []u8, w_opts: tape.Options, sub: ^Checker, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
+			return walk(sub_src, w_opts, sub, regs, a, ctx)
+		}
+	} else {
+		chk.subwalk_fn = proc(sub_src: []u8, w_opts: tape.Options, sub: ^Checker, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
+			rc: Refusing_Checker = ---
+			rc.checker = sub^
+			if !sub.frames_heap {
+				rc.checker.frames = rc.checker.frames_buf[:]
+			}
+			rc.checker.trackers.allocator = sub.scratch
+			rc.checker.ctx = ctx
+			open_buf: [64]Open_Key = ---
+			rc.open_keys = {}
+			open_keys_start(&rc.open_keys, open_buf[:], sub_src, rc.checker.format, rc.checker.xml_ext, sub.scratch, ctx)
+			defer open_keys_cleanup(&rc.open_keys)
+			n, werr, tol := walk(sub_src, w_opts, &rc, regs, a, ctx)
+			settle_refusing_keys(&rc, &rc.checker)
+			sub^ = rc.checker
+			sub.ctx = ctx
+			if !rc.checker.frames_heap {
+				sub.frames = sub.frames_buf[:]
+			}
+			return n, werr, tol
+		}
+	}
+}
+
+@(private = "file")
+replay_doc_factored :: #force_no_inline proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owner, inst_owner: ^Record, orig_owner: ^Record = nil) -> bool {
+	max_depth := int(h.budget.depth) if h.budget.depth > 0 else int(tape.DEFAULT_DEPTH)
+	if h.sp + h.nest_depth >= max_depth {
+		h.fatal = .Exceeded
+		return false
+	}
+	mark := sink_mark(h.sink)
+	sub: Checker = ---
+	memo: hook.Expected_Memo = ---
+	ctx := h.ctx^
+	sub_opts := Options{dups = h.dups, budget = h.budget, scratch = h.scratch}
+	_ = checker_start(&sub, h.plan, doc.src, doc.format, sub_opts, h.sink, &memo, h.allocator, h.scratch, h.mem_budget, &ctx)
+	sub.xml_ext = doc.ext if doc.ext != nil else h.xml_ext
+	sub.judge_dups = h.judge_dups
+	sub.in_doc_group = h.in_doc_group
+	sub.steps_used = h.steps_used
+	sub.nodes_seen = h.nodes_seen
+	sub.quiet = false
+	sub.no_factor = true
+	sub.buffering_choice = h.buffering_choice
+	sub.choice_sink_fo = -1
+	sub.subwalk_fn = h.subwalk_fn
+	sub.at_bias = h.at_bias
+	sub.parent = h
+	sub.parent_owner = orig_owner
+	sub.parent_inst_owner = inst_owner
+	sub.nest_depth = h.sp + h.nest_depth
+	defer {
+		h.steps_used = sub.steps_used
+		h.nodes_seen = sub.nodes_seen
+		if sub.fatal != .None && h.fatal == .None {
+			h.fatal = sub.fatal
+		}
+		destroy_first_arena(&sub)
+		checker_cleanup(&sub)
+	}
+	_ = walk_document_node(&sub, doc, node, owner)
+	if sub.fatal != .None {
+		h.fatal = sub.fatal
+		sink_restore(h.sink, mark)
+		return false
+	}
+	if sub.need_reread {
+		sink_restore(h.sink, mark)
+		h.need_reread = true
+		h.reread_runs = false
+		return false
+	}
+	if sub.first_recorded && !h.first_recorded && !h.quiet {
+		copy_first_error(h, &sub)
+	}
+	return h.sink != nil || h.first_recorded
+}
+
+@(private = "file")
+replay_stream_factored :: #force_no_inline proc(h: ^Checker, owner, inst_owner: ^Record, open_at, close_end: u64, orig_owner: ^Record = nil) -> bool {
+	if close_end > u64(len(h.src)) || close_end <= open_at || h.subwalk_fn == nil {
+		return false
+	}
+	mark := sink_mark(h.sink)
+	sub_src := h.src[open_at:close_end]
+	sub: Checker = ---
+	memo: hook.Expected_Memo = ---
+	ctx := h.ctx^
+	sub_opts := Options{dups = h.dups, budget = h.budget, scratch = h.scratch}
+	_ = checker_start(&sub, h.plan, sub_src, h.format, sub_opts, h.sink, &memo, h.allocator, h.scratch, h.mem_budget, &ctx)
+	sub.xml_ext = h.xml_ext
+	sub.judge_dups = h.judge_dups
+	sub.steps_used = h.steps_used
+	sub.nodes_seen = h.nodes_seen
+	sub.quiet = false
+	sub.no_factor = true
+	sub.buffering_choice = h.buffering_choice
+	sub.choice_sink_fo = -1
+	sub.subwalk_fn = h.subwalk_fn
+	sub.at_bias = h.at_bias + open_at
+	sub.parent = h
+	sub.parent_owner = orig_owner
+	sub.parent_inst_owner = inst_owner
+	sub.nest_depth = h.sp + h.nest_depth
+	defer {
+		h.steps_used = sub.steps_used
+		h.nodes_seen = sub.nodes_seen
+		if sub.fatal != .None && h.fatal == .None {
+			h.fatal = sub.fatal
+		}
+		destroy_first_arena(&sub)
+		checker_cleanup(&sub)
+	}
+
+	t_opts := tape.Options{dups = h.dups, scratch = h.scratch}
+	if h.budget.depth > 0 {
+		used_depth := h.sp + h.nest_depth
+		if used_depth >= int(h.budget.depth) {
+			h.fatal = .Exceeded
+			sink_restore(h.sink, mark)
+			return false
+		}
+		t_opts.budget.depth = u32(int(h.budget.depth) - used_depth)
+	}
+	if h.budget.steps > 0 {
+		if h.steps_used >= h.budget.steps {
+			h.fatal = .Exceeded
+			sink_restore(h.sink, mark)
+			return false
+		}
+		t_opts.budget.steps = h.budget.steps - h.steps_used
+	}
+
+	sub_regs := hook.Regs{b = u64(uintptr(&h.plan.solo[2 * int(owner.meta) + 1]))}
+	_, werr, _ := h.subwalk_fn(sub_src, t_opts, &sub, &sub_regs, h.scratch, &ctx)
+	if werr != nil {
+		if _, is_ex := werr.(tape.Exceeded); is_ex && h.fatal == .None {
+			h.fatal = .Exceeded
+		} else if h.fatal == .None {
+			h.fatal = .Walk
+		}
+		sink_restore(h.sink, mark)
+		return false
+	}
+	if sub.fatal != .None {
+		h.fatal = sub.fatal
+		sink_restore(h.sink, mark)
+		return false
+	}
+	if sub.need_reread {
+		sink_restore(h.sink, mark)
+		h.need_reread = true
+		h.reread_runs = false
+		return false
+	}
+	if sub.first_recorded && !h.first_recorded && !h.quiet {
+		copy_first_error(h, &sub)
+	}
+	return true
+}
+
+@(private = "file")
 load_xml_ext :: proc(chk: ^Checker, src: []u8, format: ^tape.Format, scratch: runtime.Allocator) {
 	if format != nil && format.text_ext != nil {
 		if ext, ok := format.text_ext(src, scratch); ok && ext != nil {
@@ -3395,7 +3846,7 @@ destroy_first_arena :: proc(h: ^Checker) {
 	}
 }
 
-@(private = "file")
+@(private)
 charge_output_budget :: proc(h: ^Checker, bytes: u64) -> bool {
 	if h.mem_budget == nil || bytes == 0 {
 		return true
@@ -3656,7 +4107,8 @@ tracker_add :: proc(h: ^Checker, tr: ^Key_Tracker, name: string, need_clone: boo
 @(private)
 append_current_instance_path :: proc(h: ^Checker, out: ^[dynamic]tape.Step, cur_owner: ^Record = nil) {
 	if h.parent != nil {
-		append_current_instance_path(h.parent, out, h.parent_owner)
+		p_owner := h.parent_inst_owner if h.parent_inst_owner != nil else h.parent_owner
+		append_current_instance_path(h.parent, out, p_owner)
 		if len(h.parent_extra) > 0 {
 			append(out, ..h.parent_extra)
 		}
@@ -3676,11 +4128,18 @@ append_current_instance_path :: proc(h: ^Checker, out: ^[dynamic]tape.Step, cur_
 					rec = cur_owner
 				}
 				if rec != nil {
-					if nm := h.plan.meta[rec.meta].name; len(nm) > 0 {
+					nm := h.plan.meta[rec.meta].name
+					is_member := len(nm) > 0
+					if !is_member && fr.owner != nil {
+						om := &h.plan.meta[fr.owner.meta]
+						rec_idx := i32((uintptr(rec) - uintptr(raw_data(h.plan.records))) / size_of(Record))
+						is_member = om.members > 0 && rec_idx >= om.block && rec_idx < om.block + om.members
+					}
+					if is_member {
 						append(out, tape.Name(nm))
 					}
 				}
-			} else if len(fr.key_name) > 0 {
+			} else if fr.has_key {
 				append(out, tape.Name(fr.key_name))
 			}
 		} else {
@@ -3693,11 +4152,12 @@ append_current_instance_path :: proc(h: ^Checker, out: ^[dynamic]tape.Step, cur_
 // Appends the current keyword path (from lazy `parent` chain + open container `Use.site`s + `owner`'s site) into `out`.
 // Preserves original `parent_b` sites when `verdict_rec` or `obj_arm`/`arr_arm` redirected a container!
 @(private)
-append_current_keyword_path :: proc(h: ^Checker, out: ^[dynamic]tape.Step, owner: ^Record, alt_site: []tape.Step = nil) {
+append_current_keyword_path :: proc(h: ^Checker, out: ^[dynamic]tape.Step, owner: ^Record, alt_site: []tape.Step = nil, replace_top := false) {
 	if h.parent != nil {
 		append_current_keyword_path(h.parent, out, h.parent_owner)
 	}
-	for i in 0 ..< h.sp {
+	limit := h.sp - 1 if (replace_top && h.sp > 0) else h.sp
+	for i in 0 ..< limit {
 		fr := &h.frames[i]
 		if fr.owner != nil {
 			if !fr.is_choice && !fr.is_group_array && fr.parent_b != 0 && fr.parent_b != u64(uintptr(&DEAD_RECORD)) {
@@ -3709,7 +4169,7 @@ append_current_keyword_path :: proc(h: ^Checker, out: ^[dynamic]tape.Step, owner
 			append(out, ..h.plan.uses[fr.owner.meta].site)
 		}
 	}
-	if owner != nil {
+	if owner != nil && !replace_top {
 		// Avoid duplicating if `owner` is already the top frame's owner.
 		if h.sp == 0 || h.frames[h.sp - 1].owner != owner {
 			append(out, ..h.plan.uses[owner.meta].site)
@@ -3721,7 +4181,7 @@ append_current_keyword_path :: proc(h: ^Checker, out: ^[dynamic]tape.Step, owner
 }
 
 @(private)
-build_check_error :: proc(h: ^Checker, arena: runtime.Allocator, kind: Error_Kind, at: u64, keyword: string, expected: string, owner: ^Record, extra_kw := "", alt_site: []tape.Step = nil) -> (Check_Error, bool) {
+build_check_error :: proc(h: ^Checker, arena: runtime.Allocator, kind: Error_Kind, at: u64, keyword: string, expected: string, owner: ^Record, extra_kw := "", alt_site: []tape.Step = nil, replace_top := false) -> (Check_Error, bool) {
 	inst_steps := make([dynamic]tape.Step, h.scratch)
 	kw_steps := make([dynamic]tape.Step, h.scratch)
 	defer {
@@ -3729,7 +4189,7 @@ build_check_error :: proc(h: ^Checker, arena: runtime.Allocator, kind: Error_Kin
 		delete(kw_steps)
 	}
 	append_current_instance_path(h, &inst_steps, owner)
-	append_current_keyword_path(h, &kw_steps, owner, alt_site)
+	append_current_keyword_path(h, &kw_steps, owner, alt_site, replace_top)
 	if len(extra_kw) > 0 {
 		if _, err := append(&kw_steps, tape.Name(extra_kw)); err != nil {
 			h.fatal = .No_Memory
@@ -3744,9 +4204,11 @@ build_check_error :: proc(h: ^Checker, arena: runtime.Allocator, kind: Error_Kin
 	}
 
 	// Account output memory against `Budget.memory` BEFORE allocating into caller-owned `Sink` / `first_arena` (B-C9)!
-	est_bytes := u64(size_of(Check_Error)) + u64(len(expected) + len(keyword)) + u64(len(inst_steps) + len(kw_steps)) * u64(size_of(tape.Step) + 16)
-	if !charge_output_budget(h, est_bytes) {
-		return {}, false
+	if !h.buffering_choice {
+		est_bytes := u64(size_of(Check_Error)) + u64(len(expected) + len(keyword)) + u64(len(inst_steps) + len(kw_steps)) * u64(size_of(tape.Step) + 16)
+		if !charge_output_budget(h, est_bytes) {
+			return {}, false
+		}
 	}
 
 	inst_ptr, ierr := format_pointer(inst_steps[:], arena)
@@ -3789,7 +4251,7 @@ build_check_error :: proc(h: ^Checker, arena: runtime.Allocator, kind: Error_Kin
 	}
 	return Check_Error{
 		kind = kind,
-		at = at,
+		at = at + h.at_bias,
 		instance_location = inst_ptr,
 		keyword_location = kw_ptr,
 		keyword = kw_str,
@@ -3800,13 +4262,13 @@ build_check_error :: proc(h: ^Checker, arena: runtime.Allocator, kind: Error_Kin
 }
 
 @(private)
-record_failure :: proc(h: ^Checker, kind: Error_Kind, at: u64, keyword: string, expected: string, owner: ^Record, extra_kw := "", alt_site: []tape.Step = nil) {
+record_failure :: proc(h: ^Checker, kind: Error_Kind, at: u64, keyword: string, expected: string, owner: ^Record, extra_kw := "", alt_site: []tape.Step = nil, replace_top := false) {
 	if h.sink == nil {
-		record_first_failure(h, kind, at, keyword, expected, owner, extra_kw, alt_site)
+		record_first_failure(h, kind, at, keyword, expected, owner, extra_kw, alt_site, replace_top)
 		return
 	}
-	arena := sink_ensure(h.sink, h.allocator)
-	entry, ok := build_check_error(h, arena, kind, at, keyword, expected, owner, extra_kw, alt_site)
+	arena := sink_ensure(h.sink, h.scratch if h.buffering_choice else h.allocator)
+	entry, ok := build_check_error(h, arena, kind, at, keyword, expected, owner, extra_kw, alt_site, replace_top)
 	if !ok {
 		h.sink.oom = true
 		return
@@ -3814,28 +4276,51 @@ record_failure :: proc(h: ^Checker, kind: Error_Kind, at: u64, keyword: string, 
 	if _, err := append(&h.sink.entries, entry); err != nil {
 		h.sink.oom = true
 		h.fatal = .No_Memory
+		return
+	}
+	if h.buffering_choice {
+		cfo_h := h
+		for cfo_h != nil && cfo_h.choice_sink_fo < 0 {
+			cfo_h = cfo_h.parent
+		}
+		if cfo_h != nil && int(cfo_h.choice_sink_fo) < cfo_h.nf {
+			cfo := factored_at(cfo_h, int(cfo_h.choice_sink_fo))
+			for len(cfo.choice_no_member) < len(cfo.choice_sink.entries) - 1 {
+				append(&cfo.choice_no_member, false)
+			}
+			no_mem := replace_top && ((cfo_h == h && h.sp == cfo.parent_sp + 2) || (cfo_h != h && h.parent == cfo_h && h.sp == 1 && h.parent_owner != nil))
+			append(&cfo.choice_no_member, no_mem)
+		}
 	}
 }
 
 @(private)
-record_first_failure :: proc(h: ^Checker, kind: Error_Kind, at: u64, keyword: string, expected: string, owner: ^Record, extra_kw := "", alt_site: []tape.Step = nil) {
-	if h.first_recorded || h.quiet {
-		return
-	}
+checker_first_arena_ensure :: proc(h: ^Checker, charge_budget := true) -> (runtime.Allocator, bool) {
 	if h.first_arena == nil {
-		if !charge_output_budget(h, u64(size_of(mem.Dynamic_Arena))) {
-			return
+		if charge_budget && !charge_output_budget(h, u64(size_of(mem.Dynamic_Arena))) {
+			return {}, false
 		}
 		a, err := new(mem.Dynamic_Arena, h.allocator)
 		if err != nil {
 			h.fatal = .No_Memory
-			return
+			return {}, false
 		}
 		mem.dynamic_arena_init(a, h.allocator, h.allocator, block_size = 512)
 		h.first_arena = a
 	}
-	arena := mem.dynamic_arena_allocator(h.first_arena)
-	if entry, ok := build_check_error(h, arena, kind, at, keyword, expected, owner, extra_kw, alt_site); ok {
+	return mem.dynamic_arena_allocator(h.first_arena), true
+}
+
+@(private)
+record_first_failure :: proc(h: ^Checker, kind: Error_Kind, at: u64, keyword: string, expected: string, owner: ^Record, extra_kw := "", alt_site: []tape.Step = nil, replace_top := false) {
+	if h.first_recorded || h.quiet {
+		return
+	}
+	arena, aok := checker_first_arena_ensure(h)
+	if !aok {
+		return
+	}
+	if entry, ok := build_check_error(h, arena, kind, at, keyword, expected, owner, extra_kw, alt_site, replace_top); ok {
 		h.first_err = entry
 		h.first_recorded = true
 	}

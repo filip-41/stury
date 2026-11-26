@@ -140,30 +140,40 @@ conjoin_verdict :: proc(b: ^Builder, d: ^rules.Description, arena, tables: runti
 	if edge != {} {
 		return rules.NONE
 	}
-	if cached, seen := b.conjoined[node]; seen {
+	ck := block_key(nil, i32(node), b.scope)
+	if cached, seen := b.conjoined[ck]; seen {
 		return cached.node
 	}
 	// Guard against cycles during conjoining.
-	b.conjoined[node] = {node = rules.NONE}
+	b.conjoined[ck] = {node = rules.NONE}
 	n := &d.nodes[node]
-	if len(n.all_of) == 0 && n.ref == nil {
+	if len(n.all_of) == 0 && n.ref == nil && n.dynamic_ref == nil {
 		return rules.NONE
 	}
 	// Must have no non-conjoinable keywords on the outer node itself.
 	if !conjoinable_node(n) {
 		return rules.NONE
 	}
-	// Collect flat list of all nodes reachable via `allOf` and `$ref`.
+	// Collect flat list of all nodes reachable via `allOf`, `$ref`, and `$dynamicRef`.
+	Stack_Item :: struct {
+		node:  rules.Node_Index,
+		scope: i32,
+	}
 	parts := make([dynamic]rules.Node_Index, tables)
-	vis := make(map[rules.Node_Index]bool, 16, tables)
-	stack := make([dynamic]rules.Node_Index, tables)
-	append(&stack, node)
+	vis := make(map[Block_Key]bool, 16, tables)
+	stack := make([dynamic]Stack_Item, tables)
+	saved_top := b.scope
+	enter_scope(b, d, arena, node)
+	append(&stack, Stack_Item{node, b.scope})
+	b.scope = saved_top
 	for len(stack) > 0 {
-		cur := pop(&stack)
-		if cur == rules.NONE || vis[cur] {
+		it := pop(&stack)
+		cur := it.node
+		cur_vk := block_key(nil, i32(cur), it.scope)
+		if cur == rules.NONE || vis[cur_vk] {
 			continue
 		}
-		vis[cur] = true
+		vis[cur_vk] = true
 		cn := &d.nodes[cur]
 		// Do not flatten across distinct schema resources when dynamic anchors exist (A-C4)!
 		if len(d.anchors) > 0 && cn.resource != n.resource {
@@ -192,10 +202,24 @@ conjoin_verdict :: proc(b: ^Builder, d: ^rules.Description, arena, tables: runti
 		}
 		append(&parts, cur)
 		if r, has := cn.ref.?; has {
-			append(&stack, r)
+			sv := b.scope
+			b.scope = it.scope
+			enter_scope(b, d, arena, r)
+			rs := b.scope
+			b.scope = sv
+			append(&stack, Stack_Item{r, rs})
+		}
+		if dr, has := cn.dynamic_ref.?; has {
+			sv := b.scope
+			b.scope = it.scope
+			target := dynamic_target(b, d, cn, dr)
+			enter_scope(b, d, arena, target)
+			ts := b.scope
+			b.scope = sv
+			append(&stack, Stack_Item{target, ts})
 		}
 		for a in cn.all_of {
-			append(&stack, a)
+			append(&stack, Stack_Item{a, it.scope})
 		}
 	}
 	if len(parts) <= 1 {
@@ -257,13 +281,13 @@ conjoin_verdict :: proc(b: ^Builder, d: ^rules.Description, arena, tables: runti
 	}
 	new_idx := rules.Node_Index(len(d.nodes))
 	append(&d.nodes, merged)
-	b.conjoined[node] = {node = new_idx}
+	b.conjoined[ck] = {node = new_idx}
 	return new_idx
 }
 
 @(private = "file")
 conjoinable_node :: proc "contextless" (n: ^rules.Node) -> bool {
-	if len(n.any_of) > 0 || len(n.one_of) > 0 || n.not != nil || n.cond != {} || n.dynamic_ref != nil || n.unevaluated_items != nil || n.unevaluated_properties != nil {
+	if len(n.any_of) > 0 || len(n.one_of) > 0 || n.not != nil || n.cond != {} || n.unevaluated_items != nil || n.unevaluated_properties != nil {
 		return false
 	}
 	if n.rules.unique {

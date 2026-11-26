@@ -200,7 +200,7 @@ static_set :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index, s
 	}
 	seen[node] = true
 	n := &d.nodes[node]
-	if len(n.any_of) > 0 || len(n.one_of) > 0 || (n.cond.test != nil && (n.cond.then != nil || n.cond.other != nil)) || n.dynamic_ref != nil {
+	if len(n.any_of) > 0 || len(n.one_of) > 0 || n.cond.test != nil || n.dynamic_ref != nil {
 		out.static = false
 		return
 	}
@@ -462,10 +462,12 @@ collect_evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.All
 		}
 		append(inners, Inner{kind = .One, arms = arms, evals = evals})
 	}
-	if test, has := n.cond.test.?; has && (n.cond.then != nil || n.cond.other != nil) {
+	if test, has := n.cond.test.?; has {
 		inn := Inner{
 			kind = .If,
 			test = arm_record(b, d, arena, test, nil),
+			then = -1,
+			other = -1,
 			test_eval = evaluates(b, d, arena, test),
 		}
 		if th, has_th := n.cond.then.?; has_th {

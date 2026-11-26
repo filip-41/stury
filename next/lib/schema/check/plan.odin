@@ -91,6 +91,7 @@ Use :: struct {
 	arr_arm:     i32, // for single `.One`/`.Any`: `1 + idx` if unique arm accepts `.Array`, `-1` if none, `0` if 2+
 	regex:       ^regex.Regex,
 	site:        []tape.Step,
+	keys_site:   []tape.Step, // optional replacement site relative to parent Factor when `propertyNames` came from merged `patternProperties`
 	step:        bool,
 	inside:      bool,
 	add_false:   bool, // true when `additional` is `false` (`kinds == {}`)
@@ -98,7 +99,20 @@ Use :: struct {
 	verdict:     []Apply,
 	requires:    []Requires,
 	factor:      ^Factor,
+	arr_factor:  ^Factor,
 	member:      ^Factor_Member,
+}
+
+// Returns the compiled `Factor` (object or array) matching token kind `k`, or nil if none.
+@(private)
+factor_for_token :: #force_inline proc "contextless" (u: ^Use, k: tape.Kind) -> ^Factor {
+	if k == .Object {
+		return u.factor
+	}
+	if k == .Array {
+		return u.arr_factor
+	}
+	return nil
 }
 
 // A `dependentRequired` (or Draft 4/7 array `dependencies`) constraint on an object block.
@@ -177,8 +191,9 @@ compile :: proc(d: ^rules.Description, allocator := context.allocator) -> (p: Pl
 	b.ends = make(map[i32]i32, 32, tables)
 	b.scopes = make([dynamic]Scope, tables)
 	b.evaluated = make(map[Block_Key]^Evaluates, 16, tables)
-	b.conjoined = make(map[rules.Node_Index]Conjoined, 16, tables)
+	b.conjoined = make(map[Block_Key]Conjoined, 16, tables)
 	b.pairs = make(map[[2]rules.Node_Index]rules.Node_Index, 16, tables)
+	b.keys_sites = make(map[rules.Node_Index][]tape.Step, 8, tables)
 	b.inline = make(map[i32]Inline_Pattern, 8, tables)
 	b.programs = make(rules.Programs, 16, tables)
 	b.unevaluated = make(map[[2]i32]bool, 8, tables)
@@ -281,8 +296,9 @@ Builder :: struct {
 	scope:       i32,
 	scopes:      [dynamic]Scope,
 	evaluated:   map[Block_Key]^Evaluates,
-	conjoined:   map[rules.Node_Index]Conjoined,
+	conjoined:   map[Block_Key]Conjoined,
 	pairs:       map[[2]rules.Node_Index]rules.Node_Index,
+	keys_sites:  map[rules.Node_Index][]tape.Step,
 	inline:      map[i32]Inline_Pattern,
 	programs:    rules.Programs,
 	unevaluated: map[[2]i32]bool,
@@ -603,11 +619,85 @@ struct_block :: proc(b: ^Builder, key: Block_Key, m: ^Meta, members: []rules.Mem
 	return at
 }
 
+// Whether `n` is a pure `$dynamicRef`/`$recursiveRef` forwarding node and nothing else.
+@(private)
+dynamic_ref_only :: proc "contextless" (n: ^rules.Node) -> bool {
+	return n.dynamic_ref != nil && n.ref == nil && n.kinds == rules.EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 && !n.has_enum && n.const_of == nil && len(n.any_of) == 0 && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil && n.cond == {} && n.unevaluated_items == nil && n.unevaluated_properties == nil
+}
+
+// Follows any chain of pure `$ref` (`rules.ref_only`) and pure `$dynamicRef`/`$recursiveRef` (`dynamic_ref_only`)
+// while updating `b.scope` via `enter_scope`. Optionally appends each hop's keyword into `step_words`.
+@(private)
+resolve_end :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, use: rules.Node_Index, step_words: ^[dynamic]string = nil) -> rules.Node_Index {
+	if use == rules.NONE {
+		return rules.NONE
+	}
+	cur := use
+	inline_seen: [8]u64 = ---
+	seen_n := 0
+	wide_seen: map[u64]bool
+	for {
+		if cur == rules.NONE || int(cur) >= len(d.nodes) {
+			return rules.NONE
+		}
+		enter_scope(b, d, arena, cur)
+		key := u64(u32(cur)) | (u64(b.scope) << 32)
+		if seen_n < len(inline_seen) {
+			for j in 0 ..< seen_n {
+				if inline_seen[j] == key {
+					return rules.NONE
+				}
+			}
+			inline_seen[seen_n] = key
+			seen_n += 1
+		} else {
+			if len(wide_seen) == 0 {
+				wide_seen = make(map[u64]bool, 16, b.tables)
+				for j in 0 ..< seen_n {
+					wide_seen[inline_seen[j]] = true
+				}
+			}
+			if wide_seen[key] {
+				return rules.NONE
+			}
+			wide_seen[key] = true
+		}
+		n := &d.nodes[cur]
+		if rules.ref_only(n) {
+			if step_words != nil {
+				append(step_words, rules.ref_keyword(n))
+			}
+			cur = n.ref.?
+			continue
+		}
+		if dynamic_ref_only(n) {
+			if step_words != nil {
+				append(step_words, rules.dynamic_keyword(n))
+			}
+			cur = dynamic_target(b, d, n, n.dynamic_ref.?)
+			continue
+		}
+		return cur
+	}
+	return rules.NONE
+}
+
+// Read-only variant of `resolve_end` that preserves `b.scope`.
+@(private)
+resolve_end_ro :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, use: rules.Node_Index) -> rules.Node_Index {
+	saved := b.scope
+	defer b.scope = saved
+	return resolve_end(b, d, arena, use)
+}
+
 // Enqueues a `Checked` record fill on the explicit worklist `b.fills` (no native recursion).
 @(private)
 fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, at: int, use: rules.Node_Index, name: string, edge: rules.Rules, site: []tape.Step, bare := false, step := false) {
-	_, refs := rules.ref_end(d, use)
-	steps, err := make([]tape.Step, len(site) + refs, arena)
+	saved_scope := b.scope
+	words := make([dynamic]string, b.tables)
+	_ = resolve_end(b, d, arena, use, &words)
+	b.scope = saved_scope
+	steps, err := make([]tape.Step, len(site) + len(words), arena)
 	if err != nil {
 		refuse_plan(b, .No_Memory)
 		return
@@ -620,10 +710,8 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 			steps[i] = v
 		}
 	}
-	hop := use
-	for &s in steps[len(site):] {
-		s = tape.Name(rules.ref_keyword(&d.nodes[hop]))
-		hop = d.nodes[hop].ref.?
+	for w, i in words {
+		steps[len(site) + i] = tape.Name(w)
 	}
 	x := Fill{
 		at = i32(at),
@@ -631,7 +719,7 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		name = clone_str(b, arena, name),
 		edge = edge,
 		steps = steps,
-		scope = b.scope,
+		scope = saved_scope,
 		nest = i32(b.nest),
 		bare = bare,
 		step = step,
@@ -670,11 +758,7 @@ fill_one :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, x
 	}
 	b.nest += 1
 	at, use, name, edge, bare := int(x.at), x.use, x.name, x.edge, x.bare
-	node, refs := rules.ref_end(d, use)
-	for y, hop := use, 0; y != rules.NONE && hop <= refs; hop += 1 {
-		enter_scope(b, d, arena, y)
-		y = d.nodes[y].ref.? or_else node
-	}
+	node := resolve_end(b, d, arena, use)
 
 	f := Record{word = NO_KEY, meta = u32(at), kind = .Checked}
 	m := Meta{name = name, block = -1}
@@ -692,10 +776,11 @@ fill_one :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, x
 			u.verdict_rec = u.verdict[0].record + 1
 		}
 		u.factor = factor_of(b, d, arena, node, edge)
+		u.arr_factor = array_factor_of(b, d, arena, node, edge)
 		if len(u.applies) > 0 {
 			f.flags += {.Held}
 		}
-		if u.factor != nil {
+		if u.factor != nil || u.arr_factor != nil {
 			f.flags += {.Factored}
 		}
 	} else if node != rules.NONE {
@@ -732,7 +817,7 @@ fill_one :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, x
 			if o.additional != rules.NONE {
 				other := UNEVALUATED_PROPERTIES[:] if b.unevaluated[{0, n.object}] else ADDITIONAL[:]
 				u.additional = checked_block(b, d, arena, block_key(typeid_of(Maybe(rules.Object)), n.object, b.scope), nil, o.additional, other)
-				add_end, _ := rules.ref_end(d, o.additional)
+				add_end := resolve_end_ro(b, d, arena, o.additional)
 				u.add_false = add_end != rules.NONE && d.nodes[add_end].kinds == {}
 				f.flags += {.Has_Additional}
 			}
@@ -742,18 +827,23 @@ fill_one :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, x
 				u.regex = p.regex
 				f.flags += {.Has_Additional}
 			}
-			if keys, _ := rules.ref_end(d, o.keys); keys != rules.NONE && !holds(b, d, keys, {}) {
+			saved_kscope := b.scope
+			if keys := resolve_end(b, d, arena, o.keys); keys != rules.NONE && !holds(b, d, keys, {}) {
 				u.keys = checked_leaf(b, &d.nodes[keys], {}, arena)
 				if u.keys > 0 {
 					f.flags += {.Has_Keys}
+					if ks, has_ks := b.keys_sites[node]; has_ks {
+						u.keys_site = ks
+					}
 				}
 			}
+			b.scope = saved_kscope
 		}
 		if .Array in n.kinds || n.array >= 0 {
 			a := d.arrays[n.array] if n.array >= 0 else rules.Array{items = rules.NONE}
 			rest := UNEVALUATED_ITEMS[:] if b.unevaluated[{1, n.array}] else ADDITIONAL_ITEMS[:] if a.tuple else ITEMS[:]
 			u.items = checked_block(b, d, arena, block_key(typeid_of(rules.Array), n.array, b.scope), a.prefix, a.items, rest, "items" if a.tuple else "prefixItems")
-			items, _ := rules.ref_end(d, a.items)
+			items := resolve_end_ro(b, d, arena, a.items)
 			u.inside = len(a.prefix) > 0 || items != rules.NONE
 			if u.inside {
 				f.flags += {.Inside}

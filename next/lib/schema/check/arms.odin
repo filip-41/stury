@@ -115,7 +115,11 @@ holds :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index, edge: 
 				return true
 			}
 		}
-		if keys, _ := rules.ref_end(d, o.keys); keys != rules.NONE && holds(b, d, keys, {}) {
+		saved_ks := b.scope
+		keys := resolve_end(b, d, b.arena, o.keys)
+		key_held := keys != rules.NONE && holds(b, d, keys, {})
+		b.scope = saved_ks
+		if key_held {
 			return true
 		}
 	}
@@ -315,15 +319,12 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 		if len(deps) > 0 {
 			append(&list, Apply{kind = .Dependent, keyword = kw, dependents = deps[:]})
 		}
-		if keys, hops := rules.ref_end(d, o.keys); keys != rules.NONE && holds(b, d, keys, {}) {
+		saved_ks := b.scope
+		keys := resolve_end(b, d, arena, o.keys)
+		b.scope = saved_ks
+		if keys != rules.NONE && holds(b, d, keys, {}) {
 			site := [1]tape.Step{tape.Name("propertyNames")}
-			saved := b.scope
-			for y, hop := o.keys, 0; y != rules.NONE && hop <= hops; hop += 1 {
-				enter_scope(b, d, arena, y)
-				y = d.nodes[y].ref.? or_else keys
-			}
-			rec := arm_record(b, d, arena, keys, site[:])
-			b.scope = saved
+			rec := arm_record(b, d, arena, o.keys, site[:])
 			append(&list, Apply{kind = .Names, keyword = "propertyNames", record = rec})
 		}
 	}
@@ -543,13 +544,14 @@ Held_Capture :: struct {
 	open_at:        u64,
 	saved_b:        u64,
 	depth:          int,
-	for_factor:     bool,           // true if capturing a multi-choice factored member!
-	factor_member:  ^Factor_Member, // active factored member when `for_factor == true`
+	for_factor:     bool,            // true if capturing a multi-choice factored member!
+	for_arr_elem:   bool,            // true if capturing a container element of an open `Factor_Array`
+	factor_member:  ^Factor_Member,  // active factored member when `for_factor` or `for_arr_elem`
 	active:         bool,
 }
 
 @(private)
-capture_start :: proc(h: ^Checker, owner: ^Record, at: u64, saved_b: u64, for_factor := false, fm: ^Factor_Member = nil) -> bool {
+capture_start :: proc(h: ^Checker, owner: ^Record, at: u64, saved_b: u64, for_factor := false, fm: ^Factor_Member = nil, for_arr_elem := false) -> bool {
 	if h.capture_depth >= MAX_HELD_CAPTURES {
 		h.fatal = .Exceeded
 		return false
@@ -564,6 +566,7 @@ capture_start :: proc(h: ^Checker, owner: ^Record, at: u64, saved_b: u64, for_fa
 		saved_b = saved_b,
 		depth = 0,
 		for_factor = for_factor,
+		for_arr_elem = for_arr_elem,
 		factor_member = fm,
 		active = true,
 	}
@@ -664,27 +667,90 @@ eval_factored_fork_node :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Nod
 		root_k := doc.nodes[node].kind
 		cnt_i, _, _ := tape.length(tape.Reader{doc = doc}, node, h.scratch)
 		cnt := u64(max(cnt_i, 0))
+		collect := fo.collect_errors
+		at := doc.nodes[node].lo
+		is_obj := (fo.factor.arr == nil)
+		cur_key := h.frames[h.sp - 1].key_name if (is_obj && h.sp > 0) else ""
+		cur_owned := h.frames[h.sp - 1].key_owned if (is_obj && h.sp > 0) else false
+		elem_idx := fo.seen_count - 1 if !is_obj else 0
+
 		for fl in fm.leaves {
 			l := &h.plan.leaves[fl.leaf - 1]
+			fails: rules.Failures
 			if root_k == .Object {
-				if .Object not_in l.kinds || cnt < l.min_members || cnt > l.max_members {
-					fo.failed |= fl.parts
+				if .Object not_in l.kinds || l.has_enum {
+					fails += {.Wrong_Kind} if .Object not_in l.kinds else {.Not_A_Member}
 				}
+				fails += rules.judge_count(cnt, l.min_members, l.max_members)
 			} else if root_k == .Array {
-				if .Array not_in l.kinds || cnt < l.min_items || cnt > l.max_items {
-					fo.failed |= fl.parts
+				if .Array not_in l.kinds || l.has_enum {
+					fails += {.Wrong_Kind} if .Array not_in l.kinds else {.Not_A_Member}
+				}
+				fails += rules.judge_count(cnt, l.min_items, l.max_items)
+			}
+			if fails != {} {
+				fo.failed |= fl.parts
+				if (fl.parts & ~fo.factor.no_emit_mask) != 0 {
+					if collect {
+						factored_buf_leaf_fails(h, fo, l, fails, at, root_k == .Object, fl.sites, 0, cur_key, cur_owned, elem_idx, has_member = true)
+						if h.fatal != .None {
+							return true
+						}
+						fo = factored_at(h, fo_idx)
+					} else if factored_can_record_first(h, fo) {
+						record_first_factored_leaf_fails(h, fo, l, fails, at, root_k == .Object, fl.sites, 0, cur_key, elem_idx, has_member = true)
+						fo = factored_at(h, fo_idx)
+					}
 				}
 			}
 		}
+
+		outer_kw_len := 0
+		if collect && len(fm.choices) > 0 {
+			outer_kw_len = factored_outer_kw_len(h, fo)
+			choice_sink_ensure(h, fo)
+		}
+
 		for ch in fm.choices {
 			fo = factored_at(h, fo_idx)
-			if fo.factor.monotone && (ch.parts & ~fo.failed) == 0 {
+			if !collect && fo.factor.monotone && (ch.parts & ~fo.failed) == 0 {
 				continue
 			}
-			passed := subcheck_node(h, doc, node, ch.record, nil, nil, quiet = true)
+			mark := 0
+			saved_sink := h.sink
+			saved_quiet := h.quiet
+			saved_buf := h.buffering_choice
+			saved_cfo := h.choice_sink_fo
+			if collect {
+				mark = len(fo.choice_sink.entries)
+				h.sink = &fo.choice_sink
+				h.quiet = false
+				h.buffering_choice = true
+				h.choice_sink_fo = i16(fo_idx)
+			}
+			passed := subcheck_node(h, doc, node, ch.record, nil, fo.owner if collect else nil, quiet = !collect)
+			if collect {
+				h.sink = saved_sink
+				h.quiet = saved_quiet
+				h.buffering_choice = saved_buf
+				h.choice_sink_fo = saved_cfo
+			}
 			fo = factored_at(h, fo_idx)
 			if !passed {
 				fo.failed |= ch.parts
+				if collect {
+					end := len(fo.choice_sink.entries)
+					if end > mark {
+						factored_buf_err(h, fo, Factored_Err{
+							kind = .Choice_Span,
+							no_emit_mask = fo.factor.no_emit_mask,
+							choice_from = mark,
+							choice_to = end,
+							base_kw_len = outer_kw_len,
+							sites = ch.sites,
+						})
+					}
+				}
 			}
 			if h.fatal != .None {
 				return true
@@ -707,11 +773,14 @@ capture_finish :: proc(h: ^Checker) -> bool {
 	if h.xml_ext != nil && saved_ext == nil {
 		doc.ext = h.xml_ext
 	}
+	adopted := false
 	defer {
-		if saved_ext == nil && doc.ext == h.xml_ext {
-			doc.ext = nil
+		if !adopted {
+			if saved_ext == nil && doc.ext == h.xml_ext {
+				doc.ext = nil
+			}
+			tape.destroy(&doc)
 		}
-		tape.destroy(&doc)
 	}
 	c.active = false
 	if berr != nil {
@@ -721,6 +790,11 @@ capture_finish :: proc(h: ^Checker) -> bool {
 			h.fatal = .No_Memory
 		}
 		return false
+	}
+	if c.for_arr_elem {
+		ok: bool
+		ok, adopted = factored_arr_finish_elem_capture(h, doc, c.owner, h.nf - 1, c.factor_member, c.open_at)
+		return ok
 	}
 	if c.for_factor {
 		return !eval_factored_fork_node(h, &doc, 0, h.nf - 1, c.factor_member)
@@ -1019,24 +1093,27 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 				}
 			}
 		}
+		ok := true
 		if hits < ap.min_contains {
 			kw := "minContains" if ap.min_contains > 1 else "contains"
 			if emit {
 				record_failure(h, .Too_Few, at, kw, "", owner)
+				ok = false
 			} else {
 				record_first_failure(h, .Too_Few, at, kw, "", owner)
+				return false
 			}
-			return false
 		}
 		if hits > ap.max_contains {
 			if emit {
 				record_failure(h, .Too_Many, at, "maxContains", "", owner)
+				ok = false
 			} else {
 				record_first_failure(h, .Too_Many, at, "maxContains", "", owner)
+				return false
 			}
-			return false
 		}
-		return true
+		return ok
 	case .Unique:
 		if k != .Array {
 			return true
