@@ -15,18 +15,20 @@ import "stury:lib/query"
 // constructs degrade only the affected part to `.Whole`.
 
 Analyze_Options :: struct {
-	null_input: bool, // -n: `.` is null, inputs come through `input`/`inputs`
-	slurp:      bool, // -s: `.` is an array of all input records
-	raw_input:  bool, // -R: inputs are raw strings
-	stream:     bool, // --stream: always demands whole
+	null_input:       bool, // -n: `.` is null, inputs come through `input`/`inputs`
+	slurp:            bool, // -s: `.` is an array of all input records
+	raw_input:        bool, // -R: inputs are raw strings
+	stream:           bool, // --stream: always demands whole
+	materialize_each: bool, // keep synthesized split `each_body` AST nodes in `owned_nodes` (caller MUST use `jq.destroy_plan`)
 }
 
-// A jq program's query plan: the shared `query.Plan` contract plus borrowed AST roots for the hints.
+// A jq program's query plan: the shared `query.Plan` contract plus borrowed/owned AST roots for the hints.
 Plan :: struct {
 	using contract: query.Plan,
-	each_body:      ^Node, // borrowed from `Program`; set when `hints.split.has_each`
+	each_body:      ^Node, // borrowed from `Program` or `owned_nodes`; set when `hints.split.has_each`
 	tail_body:      ^Node, // borrowed from `Program`; set when `hints.split.has_tail`
 	pred_body:      ^Node, // borrowed from `Program`; set when `hints.conditional.active`
+	owned_nodes:    [dynamic]^Node, // synthesized hint AST nodes freed by `jq.destroy_plan` (populated only when `materialize_each`)
 }
 
 @(private = "file")
@@ -94,6 +96,11 @@ analyze :: proc(prog: ^Program, opts := Analyze_Options{}, allocator := context.
 	return plan
 }
 
+// Reports whether `prog` is the bare identity filter `.`.
+is_identity :: proc "contextless" (prog: ^Program) -> bool {
+	return prog != nil && prog.body != nil && prog.body.kind == .Identity
+}
+
 // Analyzes `prog` with named external `$var` bindings `ext_vars`, returning the shared `query.Plan` contract.
 // Each variable in `ext_vars` is recorded in `plan.aux` with its pruned `Source_Demand`.
 // Free the returned plan with `query.destroy_plan`.
@@ -110,6 +117,7 @@ analyze_with_vars :: proc(
 	if !valid {
 		return {}, false
 	}
+	destroy_jq_extras(&jq_plan)
 	return jq_plan.contract, true
 }
 
@@ -180,7 +188,7 @@ analyze_plan_with_vars :: proc(
 
 	// Extract optional execution hints (only for standard non-slurp, non-null-input, non-raw runs).
 	if !opts.null_input && !opts.slurp && !opts.raw_input {
-		extract_hints(&a, prog.body, &plan, allocator)
+		extract_hints(&a, prog.body, &plan, opts.materialize_each, allocator)
 	}
 	return plan, true
 }
@@ -245,7 +253,21 @@ finalize_ext_aux :: proc(a: ^Analyzer, contract: ^query.Plan, allocator: runtime
 	}
 }
 
+@(private = "file")
+destroy_jq_extras :: proc(p: ^Plan) {
+	if p == nil {
+		return
+	}
+	a := p.allocator
+	for n in p.owned_nodes {
+		free(n, a)
+	}
+	delete(p.owned_nodes)
+	p.owned_nodes = nil
+}
+
 destroy_plan :: proc(p: ^Plan) {
+	destroy_jq_extras(p)
 	query.destroy_plan(&p.contract)
 	p^ = {}
 }
@@ -1199,86 +1221,151 @@ is_non_filtering :: proc(n: ^Node) -> bool {
 @(private = "file")
 collect_serial :: proc(prog: ^Program, alloc: runtime.Allocator) -> query.Serial_Flags {
 	why: query.Serial_Flags
+	if prog == nil || prog.body == nil {
+		return why
+	}
+	Frame :: struct {
+		n:       ^Node,
+		exit_fn: ^Func,
+	}
 	on := make([dynamic]^Func, 0, 16, alloc)
 	done := make([dynamic]^Func, 0, 16, alloc)
-	walk :: proc(n: ^Node, on, done: ^[dynamic]^Func, why: ^query.Serial_Flags) {
+	stack := make([dynamic]Frame, 0, 64, alloc)
+	append(&stack, Frame{n = prog.body})
+	for len(stack) > 0 {
+		fr := pop(&stack)
+		if fr.exit_fn != nil {
+			pop(&on)
+			append(&done, fr.exit_fn)
+			continue
+		}
+		n := fr.n
 		if n == nil {
-			return
+			continue
+		}
+		for i := child_count(n) - 1; i >= 0; i -= 1 {
+			if c := child(n, i); c != nil {
+				append(&stack, Frame{n = c})
+			}
 		}
 		if n.kind == .Call {
 			if n.builtin != nil {
 				#partial switch n.builtin.op {
 				case .Input, .Inputs:
-					why^ += {.Inputs}
+					why += {.Inputs}
 				case .Debug, .Stderr:
-					why^ += {.Messages}
+					why += {.Messages}
 				case .Halt, .Halt_Error:
-					why^ += {.Halts}
+					why += {.Halts}
 				case .None:
 					if n.builtin.name == "input_filename" || n.builtin.name == "input_line_number" {
-						why^ += {.Position}
+						why += {.Position}
 					}
 				}
 			}
 			if n.ref.kind == .Def && n.callee != nil {
 				f := n.callee
 				if f.prelude && f.name == "recurse" && len(n.args) > 0 {
-					why^ += {.Recurses}
+					why += {.Recurses}
 				}
 				if slice.contains(on[:], f) {
-					why^ += {.Recurses}
+					why += {.Recurses}
 				} else if !slice.contains(done[:], f) {
-					append(on, f)
-					walk(f.body, on, done, why)
-					pop(on)
-					append(done, f)
+					append(&on, f)
+					append(&stack, Frame{exit_fn = f})
+					if f.body != nil {
+						append(&stack, Frame{n = f.body})
+					}
 				}
 			}
 		}
-		for i in 0 ..< child_count(n) {
-			walk(child(n, i), on, done, why)
+	}
+	return why
+}
+
+// Returns a `[]bool` mask indexed by `prog.globals` indicating which global variables are reachable
+// from `prog.body`. Caller owns and frees the returned slice with `delete(..., allocator)`.
+used_globals_of :: proc(prog: ^Program, allocator := context.allocator) -> []bool {
+	if prog == nil {
+		return nil
+	}
+	n_globals := len(prog.globals)
+	if n_globals == 0 {
+		return nil
+	}
+	used := make([]bool, n_globals, allocator)
+	if prog.body == nil {
+		return used
+	}
+	seen := make([dynamic]^Func, 0, 16, allocator)
+	defer delete(seen)
+	stack := make([dynamic]^Node, 0, 64, allocator)
+	defer delete(stack)
+	append(&stack, prog.body)
+	for len(stack) > 0 {
+		n := pop(&stack)
+		if n.kind == .Var && n.ref.kind == .Global && int(n.ref.slot) < len(used) {
+			used[n.ref.slot] = true
+		} else if n.kind == .Call && n.ref.kind == .Def && n.callee != nil {
+			f := n.callee
+			if !slice.contains(seen[:], f) {
+				append(&seen, f)
+				if f.body != nil {
+					append(&stack, f.body)
+				}
+			}
+		}
+		for i := 0; i < child_count(n); i += 1 {
+			if c := child(n, i); c != nil {
+				append(&stack, c)
+			}
 		}
 	}
-	walk(prog.body, &on, &done, &why)
-	return why
+	return used
 }
 
 @(private = "file")
 collect_ext_reachable :: proc(a: ^Analyzer) {
-	on := make([dynamic]^Func, 0, 16, a.scratch)
-	done := make([dynamic]^Func, 0, 16, a.scratch)
-	walk_ext :: proc(an: ^Analyzer, node: ^Node, on_fns, done_fns: ^[dynamic]^Func) {
-		if node == nil {
-			return
-		}
-		if node.kind == .Var && node.ref.kind == .Global && int(node.ref.slot) < len(an.global_to_ext) {
-			if ext_i := an.global_to_ext[node.ref.slot]; ext_i >= 0 {
-				an.ext_reachable[ext_i] = true
-				an.has_reachable_ext = true
+	if a.prog == nil || a.prog.body == nil {
+		return
+	}
+	seen := make([dynamic]^Func, 0, 16, a.scratch)
+	stack := make([dynamic]^Node, 0, 64, a.scratch)
+	append(&stack, a.prog.body)
+	for len(stack) > 0 {
+		node := pop(&stack)
+		if node.kind == .Var && node.ref.kind == .Global && int(node.ref.slot) < len(a.global_to_ext) {
+			if ext_i := a.global_to_ext[node.ref.slot]; ext_i >= 0 {
+				a.ext_reachable[ext_i] = true
+				a.has_reachable_ext = true
 			}
 		} else if node.kind == .Call && node.ref.kind == .Def && node.callee != nil {
 			fn := node.callee
-			if !slice.contains(on_fns[:], fn) && !slice.contains(done_fns[:], fn) {
-				append(on_fns, fn)
-				walk_ext(an, fn.body, on_fns, done_fns)
-				pop(on_fns)
-				append(done_fns, fn)
+			if !slice.contains(seen[:], fn) {
+				append(&seen, fn)
+				if fn.body != nil {
+					append(&stack, fn.body)
+				}
 			}
 		}
-		for i in 0 ..< child_count(node) {
-			walk_ext(an, child(node, i), on_fns, done_fns)
+		for i := 0; i < child_count(node); i += 1 {
+			if c := child(node, i); c != nil {
+				append(&stack, c)
+			}
 		}
 	}
-	walk_ext(a, a.prog.body, &on, &done)
 }
 
 @(private = "file")
 needs_facts :: proc(prog: ^Program, alloc: runtime.Allocator) -> bool {
+	if prog == nil || prog.body == nil {
+		return false
+	}
 	seen := make([dynamic]^Func, 0, 16, alloc)
-	walk :: proc(prog: ^Program, n: ^Node, seen: ^[dynamic]^Func) -> bool {
-		if n == nil {
-			return false
-		}
+	stack := make([dynamic]^Node, 0, 64, alloc)
+	append(&stack, prog.body)
+	for len(stack) > 0 {
+		n := pop(&stack)
 		if n.kind == .Index && n.b.kind == .Literal {
 			if _, _, is_fact := query.fact_step_literal(n.b.value); is_fact {
 				return true
@@ -1289,31 +1376,30 @@ needs_facts :: proc(prog: ^Program, alloc: runtime.Allocator) -> bool {
 				return true
 			}
 			if n.ref.kind == .Def && n.callee != nil && !slice.contains(seen[:], n.callee) {
-				append(seen, n.callee)
-				if walk(prog, n.callee.body, seen) {
-					return true
+				append(&seen, n.callee)
+				if n.callee.body != nil {
+					append(&stack, n.callee.body)
 				}
 			}
 		}
-		for i in 0 ..< child_count(n) {
-			if walk(prog, child(n, i), seen) {
-				return true
+		for i := 0; i < child_count(n); i += 1 {
+			if c := child(n, i); c != nil {
+				append(&stack, c)
 			}
 		}
-		return false
 	}
-	return walk(prog, prog.body, &seen)
+	return false
 }
 
 // ---- Plan Hints extraction
 
 @(private = "file")
-extract_hints :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, allocator: runtime.Allocator) {
+extract_hints :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, materialize: bool, allocator: runtime.Allocator) {
 	root := unwrap_defs(body)
 	if root == nil {
 		return
 	}
-	extract_split(a, root, plan, allocator)
+	extract_split(a, root, plan, materialize, allocator)
 	extract_projection(a, root, plan, allocator)
 	extract_conditional(a, root, plan, allocator)
 }
@@ -1330,7 +1416,7 @@ unwrap_defs :: proc "contextless" (n: ^Node) -> ^Node {
 // Hint 1: Per_Element_Split — `.prefix[] | each`, `[.prefix[] | each] | tail`, `.prefix | map(each) | tail`,
 // `.prefix | length`, `[.prefix[] | each] | length`, or `reduce .prefix[] as $x (init; update)`.
 @(private = "file")
-extract_split :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, allocator: runtime.Allocator) {
+extract_split :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, materialize: bool, allocator: runtime.Allocator) {
 	steps := make([dynamic]tape.Step, 0, 4, a.scratch)
 
 	// 1. `.prefix | length` or `length` or `[.prefix[] | each] | length`.
@@ -1345,7 +1431,7 @@ extract_split :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, allocator: runtime
 		}
 		clear(&steps)
 		if body.a.kind == .Array && body.a.a != nil {
-			if each, borrowed, ok := split_iterate_prefix(a, body.a.a, &steps); ok {
+			if each, borrowed, ok := split_iterate_prefix(a, body.a.a, &steps, &plan.owned_nodes if materialize else nil, allocator); ok {
 				each_d: query.Source_Demand
 				if each != nil {
 					each_d = finalize_need(a, demand_node(a, each, empty_need(), nil), allocator)
@@ -1376,7 +1462,7 @@ extract_split :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, allocator: runtime
 
 	// 3. `[.prefix[] | each] | tail` or `.prefix | map(each) | tail`.
 	clear(&steps)
-	if each, tail, borrowed, ok := split_collect(a, body, &steps); ok {
+	if each, tail, borrowed, ok := split_collect(a, body, &steps, &plan.owned_nodes if materialize else nil, allocator); ok {
 		tail_elem := array_element_need(a, demand_node(a, tail, whole_need(.Identity), nil)) if tail != nil else whole_need(.Identity)
 		each_need := demand_node(a, each, tail_elem, nil) if each != nil else tail_elem
 		plan.hints.split = {
@@ -1391,9 +1477,9 @@ extract_split :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, allocator: runtime
 		return
 	}
 
-	// 4. `.prefix[] | each` (stream, including multi-stage left-associated pipes `.prefix[] | f | g`).
+	// 4. `.prefix[] | each` (stream, including postfix chains `.prefix[].field` and multi-stage pipes `.prefix[] | f | g`).
 	clear(&steps)
-	if each, borrowed, ok := split_iterate_prefix(a, body, &steps); ok {
+	if each, borrowed, ok := split_iterate_prefix(a, body, &steps, &plan.owned_nodes if materialize else nil, allocator); ok {
 		each_d := finalize_need(a, demand_node(a, each, whole_need(.Identity), nil), allocator) if each != nil else query.whole_demand(false, .Identity)
 		plan.hints.split = {
 			kind        = .Stream,
@@ -1426,11 +1512,118 @@ static_name_steps :: proc(n: ^Node, steps: ^[dynamic]tape.Step) -> bool {
 	return true
 }
 
-// Matches `.NAME...[]` followed by zero or more left-associated `| stage` pipes.
-// Re-associates multi-stage tails (`.items[] | f | g`) in `a.scratch` for `each_demand` analysis;
-// `borrowed` is true when `each` points directly into `Program`'s AST (safe to keep past `analyze`).
+// Matches `.NAME` and non-negative constant `.[IDX]` chains starting at `.`.
 @(private = "file")
-split_iterate_prefix :: proc(a: ^Analyzer, n: ^Node, steps: ^[dynamic]tape.Step) -> (each: ^Node, borrowed, ok: bool) {
+static_prefix_steps :: proc(n: ^Node, steps: ^[dynamic]tape.Step) -> bool {
+	at := len(steps)
+	cur := n
+	for cur != nil {
+		if .Opt in cur.flags {
+			resize(steps, at)
+			return false
+		}
+		#partial switch cur.kind {
+		case .Identity:
+			return true
+		case .Field:
+			inject_at(steps, at, tape.Name(cur.name))
+			cur = cur.a
+		case .Index:
+			if idx, ok := literal_nonneg_int(cur.b); ok {
+				inject_at(steps, at, tape.Index(idx))
+				cur = cur.a
+				continue
+			}
+			resize(steps, at)
+			return false
+		case:
+			resize(steps, at)
+			return false
+		}
+	}
+	resize(steps, at)
+	return false
+}
+
+@(private = "file")
+is_const_literal_expr :: proc "contextless" (n: ^Node) -> bool {
+	if n == nil {
+		return false
+	}
+	if n.kind == .Literal {
+		return true
+	}
+	if n.kind == .Neg && n.a != nil && n.a.kind == .Literal {
+		return true
+	}
+	return false
+}
+
+@(private = "file")
+mk_plan_node :: proc(a: ^Analyzer, owned: ^[dynamic]^Node, val: Node, allocator: runtime.Allocator) -> ^Node {
+	if owned == nil {
+		return new_clone(val, a.scratch)
+	}
+	if owned.allocator.procedure == nil {
+		owned.allocator = allocator
+	}
+	x := new_clone(val, allocator)
+	append(owned, x)
+	return x
+}
+
+@(private = "file")
+recompute_plan_marks :: proc(n: ^Node) {
+	if n == nil {
+		return
+	}
+	a, b, c := n.a, n.b, n.c
+	single := is_single(a) && is_single(b) && is_single(c)
+	nat := false
+	h := 0
+	if a != nil {
+		h = max(h, int(a.height))
+	}
+	if b != nil {
+		h = max(h, int(b.height))
+	}
+	if c != nil {
+		h = max(h, int(c.height))
+	}
+	n.height = u8(min(h + 1, 255))
+	#partial switch n.kind {
+	case .Identity, .Literal, .Var:
+		single = true
+		nat = true
+	case .Field, .Index, .Slice, .Pipe:
+		nat = single && (a == nil || .Native in a.flags) && (b == nil || .Native in b.flags) && (c == nil || .Native in c.flags) && int(n.height) <= NATIVE_HEIGHT
+	case .Iterate:
+		single = false
+		nat = false
+	}
+	if single {
+		n.flags += {.Single}
+	} else {
+		n.flags -= {.Single}
+	}
+	if nat {
+		n.flags += {.Native}
+	} else {
+		n.flags -= {.Native}
+	}
+}
+
+// Matches `.prefix[]` (plus optional postfix field/index/slice/iterate steps like `.logs[].msg` or `.logs[][]`)
+// followed by zero or more left-associated `| stage` pipes.
+// Re-associates synthesized AST nodes in `owned` when non-nil so `each` outlives `analyze`; otherwise keeps `borrowed = false`.
+@(private = "file")
+split_iterate_prefix :: proc(
+	a: ^Analyzer,
+	n: ^Node,
+	steps: ^[dynamic]tape.Step,
+	owned: ^[dynamic]^Node,
+	allocator: runtime.Allocator,
+) -> (each: ^Node, borrowed, ok: bool) {
 	at := len(steps)
 	stages := make([dynamic]^Node, 0, 4, a.scratch)
 	cur := n
@@ -1440,33 +1633,97 @@ split_iterate_prefix :: proc(a: ^Analyzer, n: ^Node, steps: ^[dynamic]tape.Step)
 	}
 	append(&stages, cur)
 	i := len(stages) - 1
-	for i > 0 && static_name_steps(stages[i], steps) {
+	for i > 0 && static_prefix_steps(stages[i], steps) {
 		i -= 1
 	}
+
 	head := stages[i]
-	if head == nil || head.kind != .Iterate || (.Opt in head.flags) || !static_name_steps(head.a, steps) {
+	wraps := make([dynamic]^Node, 0, 4, a.scratch)
+	for head != nil {
+		if head.kind == .Iterate && (.Opt not_in head.flags) && static_prefix_steps(head.a, steps) {
+			break
+		}
+		#partial switch head.kind {
+		case .Field:
+			append(&wraps, head)
+			head = head.a
+		case .Iterate:
+			append(&wraps, head)
+			head = head.a
+		case .Index:
+			if !is_const_literal_expr(head.b) {
+				resize(steps, at)
+				return nil, false, false
+			}
+			append(&wraps, head)
+			head = head.a
+		case .Slice:
+			if (head.b != nil && !is_const_literal_expr(head.b)) || (head.c != nil && !is_const_literal_expr(head.c)) {
+				resize(steps, at)
+				return nil, false, false
+			}
+			append(&wraps, head)
+			head = head.a
+		case:
+			resize(steps, at)
+			return nil, false, false
+		}
+	}
+	if head == nil || head.kind != .Iterate || (.Opt in head.flags) {
 		resize(steps, at)
 		return nil, false, false
 	}
+
+	each_head: ^Node
+	if len(wraps) > 0 {
+		cur_e := mk_plan_node(a, owned, Node{kind = .Identity}, allocator)
+		recompute_plan_marks(cur_e)
+		#reverse for w in wraps {
+			clone := w^
+			clone.a = cur_e
+			node_p := mk_plan_node(a, owned, clone, allocator)
+			recompute_plan_marks(node_p)
+			cur_e = node_p
+		}
+		each_head = cur_e
+	}
+
 	if i == 0 {
-		return nil, true, true
+		return each_head, each_head == nil || owned != nil, true
 	}
-	if i == 1 {
-		return stages[0], true, true
+	if each_head == nil {
+		if i == 1 {
+			return stages[0], true, true
+		}
+		tail := stages[i - 1]
+		for j := i - 2; j >= 0; j -= 1 {
+			pipe_n := mk_plan_node(a, owned, Node{kind = .Pipe, a = tail, b = stages[j]}, allocator)
+			recompute_plan_marks(pipe_n)
+			tail = pipe_n
+		}
+		return tail, owned != nil, true
 	}
-	tail := stages[i - 1]
-	for j := i - 2; j >= 0; j -= 1 {
-		tail = new_clone(Node{kind = .Pipe, a = tail, b = stages[j]}, a.scratch)
+	tail := each_head
+	for j := i - 1; j >= 0; j -= 1 {
+		pipe_n := mk_plan_node(a, owned, Node{kind = .Pipe, a = tail, b = stages[j]}, allocator)
+		recompute_plan_marks(pipe_n)
+		tail = pipe_n
 	}
-	return tail, false, true
+	return tail, owned != nil, true
 }
 
-// Matches `[.NAME...[] | each] | tail` or `.NAME... | map(each) | tail` (with optional `| tail`).
+// Matches `[.prefix[] | each] | tail` or `.prefix | map(each) | tail` (with optional `| tail`).
 @(private = "file")
-split_collect :: proc(a: ^Analyzer, n: ^Node, steps: ^[dynamic]tape.Step) -> (each, tail: ^Node, borrowed, ok: bool) {
+split_collect :: proc(
+	a: ^Analyzer,
+	n: ^Node,
+	steps: ^[dynamic]tape.Step,
+	owned: ^[dynamic]^Node,
+	allocator: runtime.Allocator,
+) -> (each, tail: ^Node, borrowed, ok: bool) {
 	at := len(steps)
 	c := n
-	for c != nil && c.kind == .Pipe && static_name_steps(c.a, steps) {
+	for c != nil && c.kind == .Pipe && static_prefix_steps(c.a, steps) {
 		c = c.b
 	}
 	if c != nil && c.kind == .Pipe {
@@ -1480,8 +1737,8 @@ split_collect :: proc(a: ^Analyzer, n: ^Node, steps: ^[dynamic]tape.Step) -> (ea
 		return c.args[0], tail, true, true
 	}
 	if c.kind == .Array && c.a != nil {
-		if e, b, matched := split_iterate_prefix(a, c.a, steps); matched {
-			return e, tail, b, true
+		if e, e_borrowed, matched := split_iterate_prefix(a, c.a, steps, owned, allocator); matched {
+			return e, tail, e_borrowed, true
 		}
 	}
 	resize(steps, at)

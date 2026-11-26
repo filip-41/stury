@@ -1,6 +1,7 @@
 package jq
 
 import "base:intrinsics"
+import "stury:lib/core/tape"
 import "stury:lib/query"
 
 // The evaluator: a push model on an explicit stack. A filter sends each output on, and the answer steers it: `.Go`
@@ -42,6 +43,8 @@ Machine :: struct {
 	css:          Selector_Cache, // the CSS selectors this run compiled
 	origin:       query.Value, // retained nearest document-origin value along active pipes (`track_origin` only)
 	track_origin: bool, // enabled only when the program calls `where` or `Hooks.place != nil`
+	count_mode:   bool, // when true, counts top-level outputs without retaining or materializing them
+	out_count:    u64,
 }
 
 // How `halt` or `halt_error` ended a run.
@@ -162,13 +165,20 @@ drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal
 				continue
 			}
 			if r.k == nil {
+				query.release(m.h, r.vpath)
+				r.vpath = query.ABSENT
+				if m.count_mode {
+					query.release(m.h, r.v)
+					r.v = query.ABSENT
+					m.out_count += 1
+					r.sig, r.mode = .Go, .Ret
+					continue
+				}
 				if query.value_has_partial(r.v) {
 					m.h.tainted = true
 					taint_abort(m, &r)
 					continue
 				}
-				query.release(m.h, r.vpath)
-				r.vpath = query.ABSENT
 				if !m.out(m.out_data, r.v, m.h) {
 					m.brk = nil
 					r.sig, r.mode = .Break, .Ret
@@ -326,6 +336,19 @@ eval_once :: #force_inline proc(m: ^Machine, r: ^Regs) {
 	case .Var:
 		value_out(m, r, var_value(m, n, r.env))
 	case .Field, .Index, .Slice, .Iterate:
+		if n.kind == .Iterate && !r.track && m.steps < 0 && n.a.kind == .Identity &&
+		   ((r.k != nil && r.k.kind == .Tally) || (r.k == nil && m.count_mode)) {
+			if cnt, ok := tally_container_length(m, n, r.input); ok {
+				env_release(m, r.env)
+				r.env = nil
+				query.release(h, r.input)
+				query.release(h, r.path)
+				r.input, r.path = query.ABSENT, query.ABSENT
+				add_tally_count(m, r.k, cnt)
+				r.sig, r.mode = .Go, .Ret
+				return
+			}
+		}
 		eval_step(m, r)
 	case .Pipe:
 		if n.a.kind == .Array && n.a.a != nil && !r.track && counts_outputs(n.b) {
@@ -640,6 +663,17 @@ step_emit :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 		give_value(m, r, f, query.bool_value(t))
 	case .Step:
 		p := (^Step_Frame)(f)
+		if p.n.kind == .Iterate && !p.track && m.steps < 0 &&
+		   ((p.k != nil && p.k.kind == .Tally) || (p.k == nil && m.count_mode)) {
+			if cnt, ok := tally_container_length(m, p.n, r.v); ok {
+				query.release(h, r.v)
+				query.release(h, r.vpath)
+				r.v, r.vpath = query.ABSENT, query.ABSENT
+				add_tally_count(m, p.k, cnt)
+				r.sig, r.mode = .Go, .Ret
+				return
+			}
+		}
 		t, tp := r.v, r.vpath
 		r.v, r.vpath = query.ABSENT, query.ABSENT
 		r.k, r.track = p.k, p.track
@@ -1040,4 +1074,38 @@ truthy :: #force_inline proc "contextless" (v: query.Value) -> bool {
 		return t != .Null && t != .False
 	}
 	return true
+}
+
+@(private = "file")
+tally_container_length :: #force_inline proc(m: ^Machine, n: ^Node, t: query.Value) -> (count: int, ok: bool) #no_bounds_check {
+	tt := query.type_of(t)
+	if tt != .Array && tt != .Object {
+		return 0, .Opt in n.flags
+	}
+	if t.kind == .Overlay {
+		return 0, false
+	}
+	if t.kind == .Node {
+		d := (^query.Doc_Block)(t.p)
+		if d.doc.format != nil && d.doc.format.dups == .Group {
+			return 0, false
+		}
+		if d.doc.nodes[t.n].spelling & tape.CONTAINER_PARTIAL != 0 {
+			return 0, false
+		}
+	}
+	cnt := query.length_of(m.h, t)
+	if m.h.tainted {
+		return 0, false
+	}
+	return cnt, true
+}
+
+@(private = "file")
+add_tally_count :: #force_inline proc(m: ^Machine, k: ^Frame, cnt: int) {
+	if k != nil {
+		(^Count_Frame)(k).left += i64(cnt)
+	} else {
+		m.out_count += u64(cnt)
+	}
 }

@@ -23,6 +23,27 @@ check_stdout_write :: proc(ok: bool, w: io.Writer, stderr_w: io.Writer) -> int {
 }
 
 @(private = "file")
+should_init_verb_pool :: proc(opts: ^Options, alloc: runtime.Allocator) -> bool {
+	if opts.threads == 1 {
+		return false
+	}
+	if opts.threads > 1 || len(opts.files) > 1 {
+		return true
+	}
+	if len(opts.files) == 1 && opts.files[0] != "-" {
+		fi, err := os.stat(opts.files[0], alloc)
+		if err != nil {
+			return false
+		}
+		sz := fi.size
+		is_reg := fi.type == .Regular
+		os.file_info_delete(fi, alloc)
+		return is_reg && sz >= 4 << 20
+	}
+	return false
+}
+
+@(private = "file")
 run_with_options :: proc(
 	opts: ^Options,
 	stdin_override: Maybe([]u8),
@@ -68,7 +89,10 @@ run_with_options :: proc(
 	}
 
 	pool: host.Pool
-	pool_ready := opts.threads != 1 && host.pool_init(&pool, opts.threads) == nil
+	pool_ready := false
+	if opts.command != .Run && should_init_verb_pool(opts, alloc) {
+		pool_ready = host.pool_init(&pool, opts.threads) == nil
+	}
 	defer if pool_ready {
 		host.pool_destroy(&pool)
 	}

@@ -1284,3 +1284,390 @@ regression_dsv_dups_same_arena_ctx_gates_and_direct_oom :: proc(t: ^testing.T) {
 		testing.expect_value(t, res.err, engine.Exec_Error.No_Memory)
 	}
 }
+
+@(test)
+regression_fast_json_canonical_and_spine_coarse_fallbacks :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	pool: host.Pool
+	testing.expect(t, host.pool_init(&pool, 4) == nil)
+	defer host.pool_destroy(&pool)
+	runner := &pool.runner
+
+	pad_size := max(int(engine.SPINE_PARALLEL_FROM), int(engine.RECORDS_PARALLEL_FROM), 16 * 1024)
+
+	eval_norm :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
+		_ = ctx
+		_ = meta
+		h: query.Heap
+		query.heap_init(&h, context.allocator)
+		defer query.heap_destroy(&h)
+		v, s := query.document_value(&h, doc^, owned = false)
+		if s != .Ok {
+			return .Failed
+		}
+		defer query.release(&h, v)
+		buf := make([dynamic]u8, context.allocator)
+		defer delete(buf)
+		if query.write_json(&h, &buf, v) != .Ok {
+			return .Write_Error
+		}
+		return .None if engine.emit_bytes(emit, buf[:]) else .Stopped
+	}
+
+	// 1. Non-canonical JSON (`\/`, `\u0041`, `\x7f`) must bypass `fast_json` and match jq canonical formatter output.
+	for bad_doc in ([]string{
+		`{"s":"a\/b"}`,
+		`{"s":"\u0041"}`,
+		"{\"s\":\"a\x7fb\"}",
+	}) {
+		p, _ := jq.compile(`.`)
+		defer jq.destroy_program(p)
+		pl := jq.analyze(p)
+		defer jq.destroy_plan(&pl)
+		dec := engine.decide(&pl.contract, json.Spec.Json, .Single)
+
+		st: Reg_Lines
+		st = {alloc = context.allocator}
+		defer reg_lines_destroy(&st)
+
+		res := engine.execute(&pl.contract, &dec, transmute([]u8)bad_doc, {
+			eval      = eval_norm,
+			fast_json = .Compact,
+			emit      = {fn = reg_lines_emit, data = &st},
+		})
+		testing.expect_value(t, res.err, engine.Exec_Error.None)
+		testing.expect_value(t, len(st.lines), 1)
+		if strings.contains(bad_doc, `\/`) {
+			testing.expect_value(t, st.lines[0], `{"s":"a/b"}`)
+		} else if strings.contains(bad_doc, `\u0041`) {
+			testing.expect_value(t, st.lines[0], `{"s":"A"}`)
+		} else {
+			testing.expect_value(t, st.lines[0], `{"s":"a\u007fb"}`)
+		}
+	}
+
+	// 2. `exec_spine_coarse_parallel` malformed trailing shell after `]` falls back cleanly to `.Read_Error`.
+	{
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		strings.write_string(&sb, `{"items":[`)
+		for i := 0; strings.builder_len(sb) < pad_size || i < 200; i += 1 {
+			if i > 0 {
+				strings.write_byte(&sb, ',')
+			}
+			fmt.sbprintf(&sb, "{{\"id\":%d,\"msg\":\"ok_%d\"}}", i, i)
+		}
+		strings.write_string(&sb, `],"broken":}`)
+		corrupt := transmute([]u8)strings.to_string(sb)
+
+		p, _ := jq.compile(`.items[] | .id`)
+		defer jq.destroy_program(p)
+		pl := jq.analyze(p, {materialize_each = true})
+		defer jq.destroy_plan(&pl)
+		dec := engine.decide(&pl.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(corrupt)})
+		testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
+
+		st: Reg_Lines = {alloc = context.allocator}
+		defer reg_lines_destroy(&st)
+		res := engine.execute(&pl.contract, &dec, corrupt, {
+			eval      = eval_norm,
+			eval_each = eval_norm,
+			runner    = runner,
+			emit      = {fn = reg_lines_emit, data = &st},
+		})
+		testing.expect_value(t, res.err, engine.Exec_Error.Read_Error)
+		testing.expect(t, len(st.lines) > 0)
+	}
+}
+
+// Regressions (B2/B3/B4): sequential `Record_Meta.record_index` across coarse waves, accurate `res.records`
+// across `skip_bad`/`Wrong_Kind`/`tainted_reran`, `.Seq` `finish_serial_tail`, `can_use_spine_parallel` guards,
+// and `can_fast_json_doc` excluding `dups = .All`.
+@(test)
+regression_coarse_record_index_counts_seq_tail_and_guards :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	pool: host.Pool
+	testing.expect(t, host.pool_init(&pool, 4) == nil)
+	defer host.pool_destroy(&pool)
+	runner := &pool.runner
+
+	pad_size := max(int(engine.RECORDS_PARALLEL_FROM), int(engine.SPINE_PARALLEL_FROM), 16 * 1024)
+
+	emit_rec_index :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
+		_ = ctx
+		_ = doc
+		buf: [32]u8
+		s := fmt.bprintf(buf[:], "%d", meta.record_index)
+		return .None if engine.emit_bytes(emit, transmute([]u8)s) else .Stopped
+	}
+
+	// 1. B2: `.Lines` coarse parallel with blank lines emits exact sequential `record_index` 0..N-1.
+	{
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		n_recs := 0
+		for strings.builder_len(sb) < pad_size || n_recs < 300 {
+			if n_recs % 17 == 5 {
+				strings.write_byte(&sb, '\n')
+			}
+			fmt.sbprintf(&sb, "{{\"id\":%d,\"msg\":\"row_%d_padding_bytes_0123456789\"}}\n", n_recs, n_recs)
+			n_recs += 1
+		}
+		nd := transmute([]u8)strings.to_string(sb)
+
+		p, _ := jq.compile(`.id + 0`)
+		defer jq.destroy_program(p)
+		pl := jq.analyze(p)
+		defer jq.destroy_plan(&pl)
+		dec := engine.decide(&pl.contract, json.Spec.Json, .Lines, {runner = runner, input_bytes = len(nd)})
+		testing.expect_value(t, dec.kind, engine.Route_Kind.Records_Parallel)
+
+		lb := Reg_Lines{alloc = context.allocator}
+		defer reg_lines_destroy(&lb)
+		res := engine.execute(&pl.contract, &dec, nd, {
+			eval   = emit_rec_index,
+			runner = runner,
+			emit   = {fn = reg_lines_emit, data = &lb},
+		})
+		testing.expect_value(t, res.err, engine.Exec_Error.None)
+		testing.expect_value(t, res.records, u64(n_recs))
+		testing.expect_value(t, len(lb.lines), n_recs)
+		for i in 0 ..< n_recs {
+			want_buf: [32]u8
+			want := fmt.bprintf(want_buf[:], "%d", i)
+			testing.expectf(t, lb.lines[i] == want, "line %d: got %q, want %q", i, lb.lines[i], want)
+		}
+	}
+
+	// 2. B2: `.Seq` coarse parallel: exact sequential `record_index` + `.Seq` `finish_serial_tail` advancing past `\n` to next `0x1e`
+	// and exact `res.records` when earlier records in the tainted chunk emitted nothing (`empty`).
+	{
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		n_recs := 0
+		for strings.builder_len(sb) < pad_size || n_recs < 300 {
+			strings.write_byte(&sb, 0x1e)
+			fmt.sbprintf(&sb, "{{\"id\":%d,\"msg\":\"seq_row_%d_padding_0123456789\"}}\n", n_recs, n_recs)
+			n_recs += 1
+		}
+		seq_src := transmute([]u8)strings.to_string(sb)
+
+		p, _ := jq.compile(`.id + 0`)
+		defer jq.destroy_program(p)
+		pl := jq.analyze(p)
+		defer jq.destroy_plan(&pl)
+		dec := engine.decide(&pl.contract, json.Spec.Json, .Seq, {runner = runner, input_bytes = len(seq_src)})
+		testing.expect_value(t, dec.kind, engine.Route_Kind.Records_Parallel)
+
+		lb := Reg_Lines{alloc = context.allocator}
+		defer reg_lines_destroy(&lb)
+		res := engine.execute(&pl.contract, &dec, seq_src, {
+			eval   = emit_rec_index,
+			runner = runner,
+			emit   = {fn = reg_lines_emit, data = &lb},
+		})
+		testing.expect_value(t, res.err, engine.Exec_Error.None)
+		testing.expect_value(t, res.records, u64(n_recs))
+		testing.expect_value(t, len(lb.lines), n_recs)
+		for i in 0 ..< n_recs {
+			want_buf: [32]u8
+			want := fmt.bprintf(want_buf[:], "%d", i)
+			testing.expect_value(t, lb.lines[i], want)
+		}
+
+		// Record 0 emits nothing, Record 1 taints with partial document (`emitted_items == 0`), Record 2..N follow `\n\x1e`:
+		// triggers `.Tainted_Rec` + `finish_serial_tail` on chunk 0, verifying zero tail corruption and exact `res.records`.
+		eval_seq_taint :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
+			_ = ctx
+			if meta.record_index == 0 {
+				return .None // valid record emitting 0 items before tainted record
+			}
+			if meta.record_index == 1 && doc.partial != nil {
+				return .Tainted
+			}
+			buf: [32]u8
+			s := fmt.bprintf(buf[:], "%d", meta.record_index)
+			return .None if engine.emit_bytes(emit, transmute([]u8)s) else .Stopped
+		}
+
+		lb_t := Reg_Lines{alloc = context.allocator}
+		defer reg_lines_destroy(&lb_t)
+		res_t := engine.execute(&pl.contract, &dec, seq_src, {
+			eval                 = eval_seq_taint,
+			runner               = runner,
+			rerun_whole_on_taint = true,
+			emit                 = {fn = reg_lines_emit, data = &lb_t},
+		})
+		testing.expect_value(t, res_t.err, engine.Exec_Error.None)
+		testing.expect(t, res_t.reran_whole)
+		testing.expect_value(t, res_t.records, u64(n_recs))
+		testing.expect_value(t, len(lb_t.lines), n_recs - 1)
+		for i in 0 ..< len(lb_t.lines) {
+			want_buf: [32]u8
+			want := fmt.bprintf(want_buf[:], "%d", i + 1)
+			testing.expect_value(t, lb_t.lines[i], want)
+		}
+	}
+
+	// 3. B2: `.Spine_Parallel` coarse parallel (`exec_spine_coarse_parallel`) passes exact sequential `record_index` 0..M-1.
+	{
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		strings.write_string(&sb, `{"items":[`)
+		n_elems := 0
+		for strings.builder_len(sb) < pad_size || n_elems < 350 {
+			if n_elems > 0 {
+				strings.write_byte(&sb, ',')
+			}
+			fmt.sbprintf(&sb, "{{\"id\":%d,\"msg\":\"elem_%d_padding_0123456789\"}}", n_elems, n_elems)
+			n_elems += 1
+		}
+		strings.write_string(&sb, `]}`)
+		sp_src := transmute([]u8)strings.to_string(sb)
+
+		p, _ := jq.compile(`.items[] | .id`)
+		defer jq.destroy_program(p)
+		pl := jq.analyze(p, {materialize_each = true})
+		defer jq.destroy_plan(&pl)
+		dec := engine.decide(&pl.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(sp_src)})
+		testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
+
+		lb := Reg_Lines{alloc = context.allocator}
+		defer reg_lines_destroy(&lb)
+		res := engine.execute(&pl.contract, &dec, sp_src, {
+			eval      = emit_rec_index,
+			eval_each = emit_rec_index,
+			runner    = runner,
+			emit      = {fn = reg_lines_emit, data = &lb},
+		})
+		testing.expect_value(t, res.err, engine.Exec_Error.None)
+		testing.expect_value(t, res.records, u64(n_elems))
+		testing.expect_value(t, len(lb.lines), n_elems)
+		for i in 0 ..< n_elems {
+			want_buf: [32]u8
+			want := fmt.bprintf(want_buf[:], "%d", i)
+			testing.expectf(t, lb.lines[i] == want, "spine elem %d: got %q, want %q", i, lb.lines[i], want)
+		}
+	}
+
+	// 4. B2: `exec_direct_coarse_parallel` preserves exact `res.records` and `Wrong_Kind` `record_index` when `slot.events` is populated.
+	{
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		valid_rows := 0
+		wrong_idx := 0
+		for strings.builder_len(sb) < pad_size || valid_rows < 300 {
+			if valid_rows == 150 {
+				strings.write_string(&sb, "{bad\n") // syntax fault skipped under `skip_bad`
+			} else if valid_rows == 200 {
+				wrong_idx = valid_rows + 1 // +1 for skipped bad record in serial count parity
+				strings.write_string(&sb, "42\n") // Wrong_Kind fallback (`eval` inspects `meta.record_index`)
+			}
+			fmt.sbprintf(&sb, "{{\"id\":%d,\"pad\":\"direct_row_%d_0123456789\"}}\n", valid_rows, valid_rows)
+			valid_rows += 1
+		}
+		dir_src := transmute([]u8)strings.to_string(sb)
+
+		p, _ := jq.compile(`.id`)
+		defer jq.destroy_program(p)
+		pl := jq.analyze(p)
+		defer jq.destroy_plan(&pl)
+		dec := engine.decide(&pl.contract, json.Spec.Json, .Lines, {runner = runner, input_bytes = len(dir_src)})
+		testing.expect_value(t, dec.kind, engine.Route_Kind.Projection_Direct)
+
+		Wrong_Ctx :: struct {
+			saw_idx: u64,
+			called:  int,
+		}
+		eval_wrong :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
+			_ = doc
+			w := (^Wrong_Ctx)(ctx)
+			w.saw_idx = meta.record_index
+			w.called += 1
+			return .None if engine.emit_bytes(emit, transmute([]u8)string("wrong_ok")) else .Stopped
+		}
+		bad_skip :: proc(ctx: rawptr, bad: tape.Bad_Record) -> bool {
+			_ = ctx
+			_ = bad
+			return true
+		}
+
+		wc := Wrong_Ctx{}
+		lb := Reg_Lines{alloc = context.allocator}
+		defer reg_lines_destroy(&lb)
+		res := engine.execute(&pl.contract, &dec, dir_src, {
+			eval          = eval_wrong,
+			eval_ctx      = &wc,
+			skip_bad      = true,
+			on_bad_record = bad_skip,
+			runner        = runner,
+			emit          = {fn = reg_lines_emit, data = &lb},
+		})
+		testing.expect_value(t, res.err, engine.Exec_Error.None)
+		testing.expect_value(t, res.bad_records, u64(1))
+		testing.expect_value(t, wc.called, 1)
+		testing.expect_value(t, wc.saw_idx, u64(wrong_idx))
+		testing.expect_value(t, res.records, u64(valid_rows + 2))
+		testing.expect_value(t, len(lb.lines), valid_rows + 1)
+	}
+
+	// 5. B3: `can_use_spine_parallel` rejects `where_mode = true` and `plan.serial != {}`.
+	{
+		p_wh, _ := jq.compile(`.logs[] | .a`)
+		defer jq.destroy_program(p_wh)
+		pl_wh := jq.analyze(p_wh)
+		defer jq.destroy_plan(&pl_wh)
+		dw := engine.decide(&pl_wh.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = 1 << 20, where_mode = true})
+		testing.expect(t, dw.kind != .Spine_Parallel)
+		testing.expect_value(t, dw.kind, engine.Route_Kind.Scan)
+
+		p_ln, _ := jq.compile(`.logs[] | input_line_number`)
+		defer jq.destroy_program(p_ln)
+		pl_ln := jq.analyze(p_ln)
+		defer jq.destroy_plan(&pl_ln)
+		dl := engine.decide(&pl_ln.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = 1 << 20})
+		testing.expect(t, dl.kind != .Spine_Parallel)
+	}
+
+	// 6. B4: `can_fast_json_doc` refuses `opts.read.dups == .All` so evaluator deduplication runs consistently.
+	{
+		p_id, _ := jq.compile(`.`)
+		defer jq.destroy_program(p_id)
+		pl_id := jq.analyze(p_id)
+		defer jq.destroy_plan(&pl_id)
+		dec := engine.decide(&pl_id.contract, json.Spec.Json, .Single, {dups = .All})
+
+		eval_jq_ident :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
+			_ = ctx
+			_ = meta
+			h: query.Heap
+			query.heap_init(&h, context.allocator)
+			defer query.heap_destroy(&h)
+			v, s := query.document_value(&h, doc^, owned = false)
+			if s != .Ok {
+				return .Failed
+			}
+			defer query.release(&h, v)
+			buf := make([dynamic]u8, context.allocator)
+			defer delete(buf)
+			if query.write_json(&h, &buf, v) != .Ok {
+				return .Write_Error
+			}
+			return .None if engine.emit_bytes(emit, buf[:]) else .Stopped
+		}
+
+		lb := Reg_Lines{alloc = context.allocator}
+		defer reg_lines_destroy(&lb)
+		res := engine.execute(&pl_id.contract, &dec, transmute([]u8)string(`{"a":1,"a":2}`), {
+			eval      = eval_jq_ident,
+			fast_json = .Compact,
+			read      = {dups = .All},
+			emit      = {fn = reg_lines_emit, data = &lb},
+		})
+		testing.expect_value(t, res.err, engine.Exec_Error.None)
+		testing.expect_value(t, len(lb.lines), 1)
+		testing.expect_value(t, lb.lines[0], `{"a":2}`)
+	}
+}

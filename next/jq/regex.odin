@@ -1,5 +1,7 @@
 package jq
 
+import "base:runtime"
+import "core:unicode/utf8"
 import "stury:lib/query"
 
 // jq's `_match_impl`, which the prelude's `match`, `test`, `capture`, `scan`, `splits`, `split/2`, `sub` and `gsub` are
@@ -169,4 +171,324 @@ capture_object :: proc(h: ^query.Heap, re: ^query.Regex, s: string, found: []int
 	}
 	put(h, &c, "name", name) or_return
 	return c, .Ok
+}
+
+@(private = "file")
+node_uses_regex :: proc "contextless" (root: ^Node) -> bool {
+	if root == nil {
+		return false
+	}
+	stack: [64]^Node
+	sp := 1
+	stack[0] = root
+	for sp > 0 {
+		sp -= 1
+		cur := stack[sp]
+		if cur.kind == .Call && ((cur.builtin != nil && cur.builtin.fn == v_match_impl) || cur.ref.kind == .Def) {
+			return true
+		}
+		for i in 0 ..< child_count(cur) {
+			if c := child(cur, i); c != nil {
+				if sp >= len(stack) {
+					return true
+				}
+				stack[sp] = c
+				sp += 1
+			}
+		}
+	}
+	return false
+}
+
+// Fast native execution for prelude `sub`/`gsub` over text inputs with literal/native pattern,
+// optional literal/native flags, and literal or native single-output replacement expressions.
+// Avoids allocating match/capture arrays per match and `reduce`/`range` VM continuations.
+@(private)
+eval_sub_fast :: proc(m: ^Machine, r: ^Regs, fn: ^Func, n: ^Node) -> bool {
+	if r.track || m.steps >= 0 || m.track_origin {
+		return false
+	}
+	if !query.is_text(r.input) {
+		return false
+	}
+	is_gsub := fn.name == "gsub"
+	if !is_gsub && fn.name != "sub" {
+		return false
+	}
+	re_expr := n.args[0]
+	if re_expr == nil || (re_expr.kind != .Literal && .Native not_in re_expr.flags) {
+		return false
+	}
+	has_flags_arg := len(n.args) == 3
+	flags_expr := n.args[2] if has_flags_arg else nil
+	if has_flags_arg && (flags_expr == nil || (flags_expr.kind != .Literal && .Native not_in flags_expr.flags)) {
+		return false
+	}
+	rep_node, rep_env := closure_target(n.args[1], r.env)
+	if rep_node == nil {
+		return false
+	}
+	rep_is_lit := rep_node.kind == .Literal
+	if rep_is_lit {
+		if rep_node.value.kind != .String {
+			return false
+		}
+	} else if .Native not_in rep_node.flags || node_uses_regex(rep_node) {
+		return false
+	}
+
+	h := m.h
+	re_val := query.ABSENT
+	re_owned := false
+	if re_expr.kind == .Literal {
+		re_val = re_expr.value
+	} else {
+		rf: bool
+		rs: query.Status
+		re_val, rf, rs = eval_native(m, re_expr, query.retain(r.input), r.env)
+		re_owned = true
+		if rs != .Ok || !rf {
+			query.release(h, re_val)
+			if !h.tainted {
+				query.clear_error(h)
+			}
+			return false
+		}
+	}
+	defer if re_owned {
+		query.release(h, re_val)
+	}
+	if !query.is_text(re_val) {
+		return false
+	}
+
+	opts := query.Regex_Flags{}
+	global := is_gsub
+	if has_flags_arg {
+		fl_val := query.ABSENT
+		fl_owned := false
+		if flags_expr.kind == .Literal {
+			fl_val = flags_expr.value
+		} else {
+			ff: bool
+			fs: query.Status
+			fl_val, ff, fs = eval_native(m, flags_expr, query.retain(r.input), r.env)
+			fl_owned = true
+			if fs != .Ok || !ff {
+				query.release(h, fl_val)
+				if !h.tainted {
+					query.clear_error(h)
+				}
+				return false
+			}
+		}
+		fopts, fglob, fst := regex_flags(m, fl_val)
+		if fl_owned {
+			query.release(h, fl_val)
+		}
+		if fst != .Ok {
+			if !h.tainted {
+				query.clear_error(h)
+			}
+			return false
+		}
+		opts = fopts
+		global = true if is_gsub else fglob
+	}
+
+	re, rerr := query.regex_compile(h, &m.regexes, re_val, .Oniguruma, opts)
+	if rerr != .Ok {
+		if !h.tainted {
+			query.clear_error(h)
+		}
+		return false
+	}
+
+	s := query.text_of(r.input)
+	groups := query.regex_groups(re)
+	width := 2 * (groups + 1)
+	found_stack: [32]int
+	found_heap: []int
+	found: []int
+	if width <= len(found_stack) {
+		found = found_stack[:width]
+	} else {
+		aerr: runtime.Allocator_Error
+		found_heap, aerr = make([]int, width, h.allocator)
+		if aerr != nil {
+			return false
+		}
+		found = found_heap
+	}
+	defer if len(found_heap) > 0 {
+		delete(found_heap, h.allocator)
+	}
+
+	hit, hs := query.regex_search(h, &m.regexes, re, s, 0, found)
+	if hs != .Ok {
+		if !h.tainted {
+			query.clear_error(h)
+		}
+		return false
+	}
+	if !hit {
+		out := r.input
+		r.input = query.ABSENT
+		give(m, r, out)
+		return true
+	}
+
+	is_ascii := true
+	for c in transmute([]u8)s {
+		if c >= 0x80 {
+			is_ascii = false
+			break
+		}
+	}
+	if !is_ascii && !utf8.valid_string(s) {
+		return false
+	}
+
+	is_rune_bound :: #force_inline proc "contextless" (s: string, at: int) -> bool #no_bounds_check {
+		return at <= len(s) && (at == len(s) || s[at] & 0xC0 != 0x80)
+	}
+	if !is_rune_bound(s, found[0]) || !is_rune_bound(s, found[1]) {
+		return false
+	}
+
+	lit_rep := query.text_of(rep_node.value) if rep_is_lit else ""
+	sb, sberr := make([dynamic]u8, 0, len(s) + 16, h.allocator)
+	if sberr != nil {
+		return false
+	}
+	defer delete(sb)
+
+	cap_obj := query.ABSENT
+	defer query.release(h, cap_obj)
+	cap_ready := false
+	named_groups := 0
+	if !rep_is_lit {
+		for g in 1 ..= groups {
+			if query.regex_group_name(re, g) != "" {
+				named_groups += 1
+			}
+		}
+	}
+
+	prev := 0
+	for {
+		if found[0] > prev {
+			if _, aerr := append(&sb, s[prev:found[0]]); aerr != nil {
+				return false
+			}
+		}
+		if rep_is_lit {
+			if len(lit_rep) > 0 {
+				if _, aerr := append(&sb, lit_rep); aerr != nil {
+					return false
+				}
+			}
+		} else {
+			if cap_obj.kind == .Absent || !query.unique(cap_obj) {
+				query.release(h, cap_obj)
+				cap_ready = false
+				cs: query.Status
+				cap_obj, cs = query.make_object(h, named_groups)
+				if cs != .Ok {
+					query.clear_error(h)
+					return false
+				}
+			}
+			if named_groups > 0 {
+				need_owned_keys := !cap_ready
+				for g in 1 ..= groups {
+					gname := query.regex_group_name(re, g)
+					if gname == "" {
+						continue
+					}
+					lo, hi := found[2 * g], found[2 * g + 1]
+					val := query.NULL
+					if lo >= 0 {
+						if lo == hi || found[0] == found[1] {
+							val = query.text_borrowed("")
+						} else {
+							if !is_rune_bound(s, lo) || !is_rune_bound(s, hi) {
+								return false
+							}
+							val = query.text_borrowed(s[lo:hi])
+						}
+					}
+					k: query.Value
+					if need_owned_keys {
+						ks: query.Status
+						k, ks = query.text_value(h, gname)
+						if ks != .Ok {
+							query.clear_error(h)
+							return false
+						}
+					} else {
+						k = query.text_borrowed(gname)
+					}
+					if ps := query.object_put(h, &cap_obj, k, val); ps != .Ok {
+						query.clear_error(h)
+						return false
+					}
+				}
+				cap_ready = true
+			}
+			rep, rep_found, rep_st := eval_native(m, rep_node, query.retain(cap_obj), rep_env)
+			if rep_st != .Ok || !rep_found || query.type_of(rep) != .String {
+				query.release(h, rep)
+				if !h.tainted {
+					query.clear_error(h)
+				}
+				return false
+			}
+			rt := query.text_of(rep)
+			if len(rt) > 0 {
+				if _, aerr := append(&sb, rt); aerr != nil {
+					query.release(h, rep)
+					return false
+				}
+			}
+			query.release(h, rep)
+		}
+
+		prev = found[1]
+		if !global {
+			break
+		}
+		at := found[1] if found[1] > found[0] else found[1] + 1
+		if at > len(s) {
+			break
+		}
+		nhit, nhs := query.regex_search(h, &m.regexes, re, s, at, found)
+		if nhs != .Ok {
+			if !h.tainted {
+				query.clear_error(h)
+			}
+			return false
+		}
+		if !nhit {
+			break
+		}
+		if !is_rune_bound(s, found[0]) || !is_rune_bound(s, found[1]) {
+			return false
+		}
+	}
+
+	if prev < len(s) {
+		if _, aerr := append(&sb, s[prev:]); aerr != nil {
+			return false
+		}
+	}
+	out, os := query.text_value(h, string(sb[:]))
+	if os != .Ok {
+		if !h.tainted {
+			query.clear_error(h)
+		}
+		return false
+	}
+	give(m, r, out)
+	return true
 }

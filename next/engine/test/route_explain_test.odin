@@ -447,3 +447,50 @@ plan_pin_json_roundtrip_and_comparison :: proc(t: ^testing.T) {
 		testing.expect_value(t, sp.format, "é😀")
 	}
 }
+
+@(test)
+route_projection_direct_parallel_and_length_each :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	pool: host.Pool
+	testing.expect(t, host.pool_init(&pool, 4) == nil)
+	defer host.pool_destroy(&pool)
+	runner := &pool.runner
+
+	{
+		prog, plan := plan_for(t, `.id`)
+		defer jq.destroy_program(prog)
+		defer jq.destroy_plan(&plan)
+
+		d_par := engine.decide(&plan.contract, json.Spec.Json, .Lines, {runner = runner, input_bytes = 1 << 20})
+		testing.expect_value(t, d_par.kind, engine.Route_Kind.Projection_Direct)
+		testing.expect(t, d_par.parallel)
+		testing.expect(t, .Parallel_Worker_Pool in d_par.whys)
+
+		d_seq := engine.decide(&plan.contract, json.Spec.Json, .Seq, {runner = runner, input_bytes = 1 << 20})
+		testing.expect_value(t, d_seq.kind, engine.Route_Kind.Projection_Direct)
+		testing.expect(t, d_seq.parallel)
+
+		d_single := engine.decide(&plan.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = 1 << 20})
+		testing.expect_value(t, d_single.kind, engine.Route_Kind.Projection_Direct)
+		testing.expect(t, !d_single.parallel)
+
+		d_serial_ctx := engine.decide(&plan.contract, json.Spec.Json, .Lines, {runner = runner, input_bytes = 1 << 20, serial_eval_ctx = true})
+		testing.expect_value(t, d_serial_ctx.kind, engine.Route_Kind.Projection_Direct)
+		testing.expect(t, !d_serial_ctx.parallel)
+
+		d_csv := engine.decide(&plan.contract, dsv.Spec.Csv, .Lines, {runner = runner, input_bytes = 1 << 20})
+		testing.expect_value(t, d_csv.kind, engine.Route_Kind.Projection_Direct)
+		testing.expect(t, !d_csv.parallel)
+	}
+
+	{
+		prog, plan := plan_for(t, `[.items[].msg | splits(" +")] | length`)
+		defer jq.destroy_program(prog)
+		defer jq.destroy_plan(&plan)
+
+		d_len := engine.decide(&plan.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = 1 << 20})
+		testing.expect_value(t, d_len.kind, engine.Route_Kind.Spine_Parallel)
+		testing.expect(t, d_len.parallel)
+	}
+}

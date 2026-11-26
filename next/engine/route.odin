@@ -225,6 +225,14 @@ decide :: proc(plan: ^query.Plan, spec: Spec, framing := Framing.Single, opts :=
 		if can_use_projection_direct(plan, entry, opts) {
 			d.kind = .Projection_Direct
 			d.active_hint = .Projection_Direct
+			d.parallel = (framing == .Lines || framing == .Seq) &&
+				entry.family == .Json &&
+				has_runner &&
+				!opts.serial_eval_ctx &&
+				(opts.input_bytes == 0 || opts.input_bytes >= RECORDS_PARALLEL_FROM)
+			if d.parallel {
+				d.whys += {.Parallel_Worker_Pool}
+			}
 			d.whys += {.Projection_Direct_Hit}
 			d.primary_why = .Projection_Direct_Hit
 			return d
@@ -345,8 +353,11 @@ can_use_conditional_whole :: proc "contextless" (plan: ^query.Plan, entry: Forma
 
 @(private = "file")
 can_use_spine_parallel :: proc "contextless" (plan: ^query.Plan, entry: Format_Entry, has_runner, parallel_blocked: bool, opts: Route_Options) -> bool {
+	if plan.serial != {} || opts.where_mode {
+		return false
+	}
 	sp := &plan.hints.split
-	if sp.kind != .Stream && sp.kind != .Collect {
+	if sp.kind != .Stream && sp.kind != .Collect && !(sp.kind == .Length && sp.has_each) {
 		return false
 	}
 	if !has_runner || parallel_blocked {

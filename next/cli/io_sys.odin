@@ -1,15 +1,13 @@
 package cli
 
 import "base:runtime"
+import "core:c/libc"
 import "core:fmt"
 import "core:io"
-import "core:math/rand"
 import "core:os"
 import "core:strconv"
 import "core:strings"
-import "core:time"
-import "core:time/datetime"
-import "core:time/timezone"
+import "core:sync"
 import "stury:engine"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
@@ -468,7 +466,9 @@ write_plan_pin_file :: proc(path: string, data: []u8, stderr_w: io.Writer, alloc
 	err: os.Error
 	digits: [24]u8
 	for _ in 0 ..< 64 {
-		num := strconv.write_uint(digits[:], rand.uint64(), 10)
+		rv: u64
+		runtime.rand_bytes((^[8]u8)(&rv)[:])
+		num := strconv.write_uint(digits[:], rv, 10)
 		tmp = strings.concatenate({dir, "/.stury-plan-", num, ".tmp"}, alloc)
 		f, err = os.open(tmp, {.Read, .Write, .Create, .Excl}, {.Read_User, .Write_User, .Read_Group, .Read_Other})
 		if err != os.General_Error.Exist && err != .Exist {
@@ -963,7 +963,9 @@ atomic_write_file :: proc(path: string, data: []u8, alloc: runtime.Allocator) ->
 	err: os.Error
 	digits: [24]u8
 	for _ in 0 ..< 64 {
-		num := strconv.write_uint(digits[:], rand.uint64(), 10)
+		rv: u64
+		runtime.rand_bytes((^[8]u8)(&rv)[:])
+		num := strconv.write_uint(digits[:], rv, 10)
 		tmp = strings.concatenate({dir, "/.stury-", num, ".tmp"}, alloc)
 		f, err = os.open(tmp, {.Read, .Write, .Create, .Excl}, {.Read_User, .Write_User})
 		if err != os.General_Error.Exist && err != .Exist {
@@ -1006,52 +1008,175 @@ atomic_write_file :: proc(path: string, data: []u8, alloc: runtime.Allocator) ->
 	return err
 }
 
-// Cross-platform local timezone cache loaded once per query/edit invocation.
+// Lazy cross-platform local timezone cache initialized on first timezone lookup (no startup `/etc/localtime` I/O).
 Zone_Cache :: struct {
-	region: ^datetime.TZ_Region,
-	alloc:  runtime.Allocator,
+	lock:  sync.Mutex,
+	names: [dynamic]string,
+	alloc: runtime.Allocator,
 }
 
 zone_cache_init :: proc(zc: ^Zone_Cache, alloc: runtime.Allocator) {
-	reg, ok := timezone.region_load("local", alloc)
-	zc^ = {
-		region = reg if ok else nil,
-		alloc  = alloc,
-	}
+	zc^ = {alloc = alloc}
+	zc.names.allocator = alloc
 }
 
 zone_cache_destroy :: proc(zc: ^Zone_Cache) {
-	if zc != nil && zc.region != nil {
-		timezone.region_destroy(zc.region, zc.alloc)
-		zc.region = nil
+	if zc == nil {
+		return
+	}
+	for s in zc.names {
+		delete(s, zc.alloc)
+	}
+	delete(zc.names)
+	zc^ = {}
+}
+
+@(private = "file")
+intern_zone_name_locked :: proc(zc: ^Zone_Cache, raw: string) -> string {
+	for s in zc.names {
+		if s == raw {
+			return s
+		}
+	}
+	c := strings.clone(raw, zc.alloc)
+	append(&zc.names, c)
+	return c
+}
+
+when ODIN_OS == .Windows {
+	foreign import win_ucrt "system:libucrt.lib"
+	@(default_calling_convention = "c")
+	foreign win_ucrt {
+		@(link_name = "_localtime64_s")
+		win_localtime64_s :: proc(tm_out: ^libc.tm, timer: ^libc.time_t) -> i32 ---
+	}
+
+	@(private = "file")
+	floor_div_i64 :: proc "contextless" (a, b: i64) -> i64 {
+		q := a / b
+		if a % b != 0 && (a < 0) != (b < 0) {
+			q -= 1
+		}
+		return q
+	}
+
+	@(private = "file")
+	floor_mod_i64 :: proc "contextless" (a, b: i64) -> i64 {
+		m := a % b
+		if m < 0 {
+			m += b
+		}
+		return m
+	}
+
+	@(private = "file")
+	civil_to_unix :: proc "contextless" (y, m, d, hr, mn, sc: i64) -> i64 {
+		y2 := y - 1 if m <= 2 else y
+		era := floor_div_i64(y2, 400)
+		yoe := y2 - era * 400
+		doy := (153 * (m - 3 if m > 2 else m + 9) + 2) / 5 + d - 1
+		days := era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
+		return days * 86400 + hr * 3600 + mn * 60 + sc
+	}
+
+	@(private = "file")
+	unix_to_civil :: proc "contextless" (secs: i64) -> (y, m, d, hr, mn, sc: i64) {
+		z := floor_div_i64(secs, 86400)
+		rem := secs - z * 86400
+		hr = rem / 3600
+		mn = (rem % 3600) / 60
+		sc = rem % 60
+		z += 719468
+		era := floor_div_i64(z, 146097)
+		doe := z - era * 146097
+		yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+		y = yoe + era * 400
+		doy := doe - (365 * yoe + yoe / 4 - yoe / 100)
+		mp := (5 * doy + 2) / 153
+		d = doy - (153 * mp + 2) / 5 + 1
+		m = mp + (3 if mp < 10 else -9)
+		if m <= 2 {
+			y += 1
+		}
+		return
+	}
+} else {
+	when ODIN_OS == .Darwin {
+		foreign import pos_libc "system:System"
+	} else {
+		foreign import pos_libc "system:c"
+	}
+	when ODIN_OS == .NetBSD {
+		@(private = "file")
+		LLOCALTIME_R :: "__localtime_r50"
+	} else {
+		@(private = "file")
+		LLOCALTIME_R :: "localtime_r"
+	}
+	@(default_calling_convention = "c")
+	foreign pos_libc {
+		@(link_name = LLOCALTIME_R)
+		posix_localtime_r :: proc(timer: ^libc.time_t, result: ^libc.tm) -> ^libc.tm ---
 	}
 }
 
 local_zone_at :: proc(data: rawptr, secs: i64) -> (query.Zone, bool) {
 	zc := (^Zone_Cache)(data)
-	if zc == nil || zc.region == nil {
+	if zc == nil {
 		return {offset = 0, name = "UTC"}, true
 	}
-	tm := time.unix(secs, 0)
-	utc_dt, ok1 := time.time_to_datetime(tm)
-	if !ok1 {
-		return {}, false
+	sync.mutex_guard(&zc.lock)
+	when ODIN_OS == .Windows {
+		WIN_MAX_TIME :: i64(32535215999) // 3000-12-31T23:59:59Z; `_localtime64_s` fails outside [0, WIN_MAX_TIME].
+		query_secs := secs
+		if query_secs < 0 || query_secs > WIN_MAX_TIME {
+			y, m, d, hr, mn, sc := unix_to_civil(secs)
+			is_leap := y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+			jan1_wd := floor_mod_i64(floor_div_i64(civil_to_unix(y, 1, 1, 0, 0, 0), 86400) + 4, 7)
+			eq_y := i64(1996)
+			for cand := i64(1996); cand <= 2023; cand += 1 {
+				c_leap := cand % 4 == 0
+				c_wd := floor_mod_i64(floor_div_i64(civil_to_unix(cand, 1, 1, 0, 0, 0), 86400) + 4, 7)
+				if c_leap == is_leap && c_wd == jan1_wd {
+					eq_y = cand
+					break
+				}
+			}
+			query_secs = civil_to_unix(eq_y, m, d, hr, mn, sc)
+		}
+		t := libc.time_t(query_secs)
+		tm_buf: libc.tm
+		if win_localtime64_s(&tm_buf, &t) != 0 {
+			return {}, false
+		}
+		local_secs := civil_to_unix(
+			i64(tm_buf.tm_year) + 1900,
+			i64(tm_buf.tm_mon) + 1,
+			i64(tm_buf.tm_mday),
+			i64(tm_buf.tm_hour),
+			i64(tm_buf.tm_min),
+			i64(tm_buf.tm_sec),
+		)
+		zbuf: [64]u8
+		zn := int(libc.strftime(raw_data(zbuf[:]), len(zbuf), "%Z", &tm_buf))
+		zstr := intern_zone_name_locked(zc, string(zbuf[:zn])) if zn > 0 else "UTC"
+		return {offset = local_secs - query_secs, name = zstr}, true
+	} else {
+		t := libc.time_t(secs)
+		tm_buf: libc.tm
+		tm_ptr := posix_localtime_r(&t, &tm_buf)
+		if tm_ptr == nil {
+			return {}, false
+		}
+		zstr := "UTC"
+		if tm_buf.tm_zone != nil {
+			zs := string(cstring(tm_buf.tm_zone))
+			if zs != "" {
+				zstr = intern_zone_name_locked(zc, zs)
+			}
+		}
+		return {offset = i64(tm_buf.tm_gmtoff), name = zstr}, true
 	}
-	local_dt, ok2 := timezone.datetime_to_tz(utc_dt, zc.region)
-	if !ok2 {
-		return {}, false
-	}
-	local_dt_plain := local_dt
-	local_dt_plain.tz = nil
-	local_tm, ok3 := time.datetime_to_time(local_dt_plain)
-	if !ok3 {
-		return {}, false
-	}
-	offset := time.to_unix_seconds(local_tm) - secs
-	utc_for_name := utc_dt
-	utc_for_name.tz = zc.region
-	short, ok4 := timezone.shortname(utc_for_name)
-	return {offset = offset, name = short if ok4 else "UTC"}, true
 }
 
 count_newlines :: proc "contextless" (b: []u8) -> i64 {

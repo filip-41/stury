@@ -2,7 +2,6 @@ package cli
 
 import "base:runtime"
 import "core:bytes"
-import "core:crypto"
 import "core:fmt"
 import "core:io"
 import "core:os"
@@ -12,6 +11,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import "stury:engine"
+import "stury:host"
 import "stury:jq"
 import "stury:jsonpath"
 import "stury:lib/core/tape"
@@ -80,6 +80,9 @@ Shared_Jq_State :: struct {
 	each_prog:         ^jq.Program,
 	pred_prog:         ^jq.Program,
 	tail_prog:         ^jq.Program,
+	used_globals:      []bool,
+	ident_main:        bool,
+	fast_json:         engine.Fast_Json_Mode,
 	compact_cfg:       Render_Config,
 	env_entries:       []string,
 	vars:              []Preloaded_Var,
@@ -316,6 +319,11 @@ locked_alloc_fn :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignm
 }
 
 @(private = "file")
+is_thread_safe_heap :: proc(a: runtime.Allocator) -> bool {
+	return a.procedure == runtime.heap_allocator().procedure
+}
+
+@(private = "file")
 format_arg_parse_err :: proc(label: string, src: []u8, err: tape.Error, alloc: runtime.Allocator) -> string {
 	sb := strings.builder_make(alloc)
 	if err != nil {
@@ -350,6 +358,8 @@ shared_jq_init :: proc(
 		o             = o,
 		cfg           = cfg,
 		main_prog     = prog,
+		used_globals  = jq.used_globals_of(prog, alloc),
+		ident_main    = jq.is_identity(prog),
 		compact_cfg   = {
 			compact   = true,
 			raw0      = false,
@@ -365,9 +375,16 @@ shared_jq_init :: proc(
 		stderr_w      = stderr_w,
 		alloc         = alloc,
 	}
-	sh.locked_alloc = runtime.Allocator{procedure = locked_alloc_fn, data = sh}
+	if !o.raw && !o.join && !o.raw0 && !o.sort_keys && !o.ascii && !cfg.color && !o.seq && !cfg.to_tabular && !cfg.to_non_json && !o.where_mode && !o.exit_status && !o.skip_bad && o.budget == {} {
+		if o.compact {
+			sh.fast_json = .Compact
+		} else if !o.tab && o.indent == 2 {
+			sh.fast_json = .Pretty2
+		}
+	}
+	sh.locked_alloc = alloc if is_thread_safe_heap(alloc) else runtime.Allocator{procedure = locked_alloc_fn, data = sh}
 	sh.free_workers = make([dynamic]^Jq_Worker, sh.locked_alloc)
-	zone_cache_init(&sh.zones, alloc)
+	zone_cache_init(&sh.zones, sh.locked_alloc)
 
 	if o.stream {
 		sp, serrs := jq.compile("tostream", {}, alloc)
@@ -389,7 +406,8 @@ shared_jq_init :: proc(
 		}
 	}
 
-	if (plan.hints.split.kind == .Stream || plan.hints.split.kind == .Collect) && (!plan.hints.split.has_each || plan.each_body != nil) {
+	need_each := plan.hints.split.kind == .Stream || plan.hints.split.kind == .Collect || (plan.hints.split.kind == .Length && plan.hints.split.has_each)
+	if need_each && (!plan.hints.split.has_each || plan.each_body != nil) {
 		if plan.hints.split.has_each {
 			ep := new_clone(prog^, alloc)
 			ep.body = plan.each_body
@@ -415,8 +433,10 @@ shared_jq_init :: proc(
 		sh.pred_prog = pp
 	}
 
-	if ev, ev_err := os.environ(alloc); ev_err == nil {
-		sh.env_entries = ev
+	if len(sh.used_globals) == 0 || sh.used_globals[0] {
+		if ev, ev_err := os.environ(alloc); ev_err == nil {
+			sh.env_entries = ev
+		}
 	}
 
 	sh.vars = make([]Preloaded_Var, len(o.vars), alloc)
@@ -573,8 +593,14 @@ shared_jq_destroy :: proc(sh: ^Shared_Jq_State) {
 	free(sh.tail_prog, a)
 	jq.destroy_program(sh.stream_prog)
 	jq.destroy_program(sh.ident_prog)
+	delete(sh.used_globals, a)
 	zone_cache_destroy(&sh.zones)
 	free(sh, a)
+}
+
+@(private = "file")
+global_needed :: #force_inline proc "contextless" (used: []bool, idx: int) -> bool {
+	return len(used) == 0 || (idx < len(used) && used[idx])
 }
 
 build_globals_from_shared :: proc(h: ^query.Heap, prog: ^jq.Program, sh: ^Shared_Jq_State, alloc: runtime.Allocator) -> ([]query.Value, bool) {
@@ -590,131 +616,170 @@ build_globals_from_shared :: proc(h: ^query.Heap, prog: ^jq.Program, sh: ^Shared
 		delete(globals, alloc)
 	}
 
-	// Slot 0: `$ENV` populated cleanly with zero double-release on `object_put`.
-	if env_obj, eok := query.make_object(h, len(sh.env_entries)); eok == .Ok {
-		env_ok := true
-		for entry in sh.env_entries {
-			eq := strings.index_byte(entry, '=')
-			k := entry[:eq] if eq >= 0 else entry
-			v := entry[eq + 1:] if eq >= 0 else ""
-			ks, s1 := query.text_value(h, k)
-			vs, s2 := query.text_value(h, v)
-			if s1 != .Ok || s2 != .Ok {
-				query.release(h, ks)
-				query.release(h, vs)
-				env_ok = false
-				break
+	// Slot 0: `$ENV` populated ONLY when referenced by the filter.
+	if global_needed(sh.used_globals, 0) {
+		if env_obj, eok := query.make_object(h, len(sh.env_entries)); eok == .Ok {
+			env_ok := true
+			for entry in sh.env_entries {
+				eq := strings.index_byte(entry, '=')
+				k := entry[:eq] if eq >= 0 else entry
+				v := entry[eq + 1:] if eq >= 0 else ""
+				ks, s1 := query.text_value(h, k)
+				vs, s2 := query.text_value(h, v)
+				if s1 != .Ok || s2 != .Ok {
+					query.release(h, ks)
+					query.release(h, vs)
+					env_ok = false
+					break
+				}
+				if query.object_put(h, &env_obj, ks, vs) != .Ok {
+					env_ok = false
+					break
+				}
 			}
-			if query.object_put(h, &env_obj, ks, vs) != .Ok {
-				env_ok = false
-				break
+			if env_ok {
+				globals[0] = env_obj
+			} else {
+				query.release(h, env_obj)
+				return nil, false
 			}
-		}
-		if env_ok {
-			globals[0] = env_obj
 		} else {
-			query.release(h, env_obj)
 			return nil, false
 		}
 	}
 
-	prog_args, ps := query.make_array(h, len(sh.pos))
-	named_obj, ns := query.make_object(h, len(sh.vars))
-	defer {
-		query.release(h, prog_args)
-		query.release(h, named_obj)
-	}
-	if ps != .Ok || ns != .Ok {
-		return nil, false
-	}
-
-	for pp in sh.pos {
-		v: query.Value
-		st: query.Status
-		if pp.is_json {
-			v, st = query.document_value(h, pp.doc, owned = false)
-		} else {
-			v, st = query.text_value(h, pp.raw_text)
-		}
-		if st != .Ok || query.append_owned(h, &prog_args, v) != .Ok {
-			return nil, false
-		}
-	}
-	globals[1] = query.retain(prog_args)
-
-	for pv in sh.vars {
-		slot := -1
-		for name, idx in prog.globals {
-			if idx >= 2 && name == pv.name {
-				slot = idx
-				break
-			}
-		}
-		if slot < 0 {
+	args_slot := -1
+	build_cfg_slot := -1
+	need_any_var := false
+	for name, idx in prog.globals {
+		if !global_needed(sh.used_globals, idx) {
 			continue
 		}
-		val: query.Value
-		st := query.Status.Ok
-		switch pv.kind {
-		case .Arg, .Raw_File:
-			val, st = query.text_value(h, pv.raw_text)
-		case .Arg_Json:
-			val, st = query.document_value(h, pv.doc, owned = false)
-		case .Slurp_File:
-			val, st = query.make_array(h, len(pv.slurp_docs))
-			if st == .Ok {
-				for sd in pv.slurp_docs {
-					dv, dst := query.document_value(h, sd, owned = false)
-					if dst != .Ok || query.append_owned(h, &val, dv) != .Ok {
-						query.release(h, val)
-						val = query.NULL
-						st = .Error
-						break
+		if name == "ARGS" {
+			args_slot = idx
+		} else if name == "JQ_BUILD_CONFIGURATION" {
+			build_cfg_slot = idx
+		} else if idx >= 2 {
+			need_any_var = true
+		}
+	}
+	need_prog_args := global_needed(sh.used_globals, 1)
+
+	prog_args := query.ABSENT
+	named_obj := query.ABSENT
+	defer {
+		if prog_args.kind != .Absent {
+			query.release(h, prog_args)
+		}
+		if named_obj.kind != .Absent {
+			query.release(h, named_obj)
+		}
+	}
+	if need_prog_args || args_slot >= 0 {
+		ps: query.Status
+		prog_args, ps = query.make_array(h, len(sh.pos))
+		if ps != .Ok {
+			return nil, false
+		}
+		for pp in sh.pos {
+			v: query.Value
+			st: query.Status
+			if pp.is_json {
+				v, st = query.document_value(h, pp.doc, owned = false)
+			} else {
+				v, st = query.text_value(h, pp.raw_text)
+			}
+			if st != .Ok || query.append_owned(h, &prog_args, v) != .Ok {
+				return nil, false
+			}
+		}
+		if need_prog_args {
+			globals[1] = query.retain(prog_args)
+		}
+	}
+	if args_slot >= 0 {
+		ns: query.Status
+		named_obj, ns = query.make_object(h, len(sh.vars))
+		if ns != .Ok {
+			return nil, false
+		}
+	}
+
+	if need_any_var || args_slot >= 0 {
+		for pv in sh.vars {
+			slot := -1
+			for name, idx in prog.globals {
+				if idx >= 2 && name == pv.name {
+					slot = idx
+					break
+				}
+			}
+			if slot < 0 {
+				continue
+			}
+			if args_slot < 0 && !global_needed(sh.used_globals, slot) {
+				continue
+			}
+			val: query.Value
+			st := query.Status.Ok
+			switch pv.kind {
+			case .Arg, .Raw_File:
+				val, st = query.text_value(h, pv.raw_text)
+			case .Arg_Json:
+				val, st = query.document_value(h, pv.doc, owned = false)
+			case .Slurp_File:
+				val, st = query.make_array(h, len(pv.slurp_docs))
+				if st == .Ok {
+					for sd in pv.slurp_docs {
+						dv, dst := query.document_value(h, sd, owned = false)
+						if dst != .Ok || query.append_owned(h, &val, dv) != .Ok {
+							query.release(h, val)
+							val = query.NULL
+							st = .Error
+							break
+						}
 					}
 				}
 			}
-		}
-		if st != .Ok {
-			return nil, false
-		}
-		if globals[slot].kind == .Null || globals[slot].kind == .Absent {
-			query.release(h, globals[slot])
-			globals[slot] = query.retain(val)
-		}
-		if ex, _ := query.member(h, named_obj, pv.name); ex.kind == .Absent {
-			if ks, kok := query.text_value(h, pv.name); kok == .Ok {
-				_ = query.object_put(h, &named_obj, ks, query.retain(val))
+			if st != .Ok {
+				return nil, false
 			}
-		} else {
-			query.release(h, ex)
+			if global_needed(sh.used_globals, slot) && (globals[slot].kind == .Null || globals[slot].kind == .Absent) {
+				query.release(h, globals[slot])
+				globals[slot] = query.retain(val)
+			}
+			if named_obj.kind != .Absent {
+				if ex, _ := query.member(h, named_obj, pv.name); ex.kind == .Absent {
+					if ks, kok := query.text_value(h, pv.name); kok == .Ok {
+						_ = query.object_put(h, &named_obj, ks, query.retain(val))
+					}
+				} else {
+					query.release(h, ex)
+				}
+			}
+			query.release(h, val)
 		}
-		query.release(h, val)
 	}
 
-	args_obj, as := query.make_object(h, 2)
-	if as == .Ok {
+	if args_slot >= 0 {
+		args_obj, as := query.make_object(h, 2)
+		if as != .Ok {
+			return nil, false
+		}
 		if k1, s1 := query.text_value(h, "positional"); s1 == .Ok {
 			_ = query.object_put(h, &args_obj, k1, query.retain(prog_args))
 		}
 		if k2, s2 := query.text_value(h, "named"); s2 == .Ok {
 			_ = query.object_put(h, &args_obj, k2, query.retain(named_obj))
 		}
+		query.release(h, globals[args_slot])
+		globals[args_slot] = args_obj
 	}
-	for name, idx in prog.globals {
-		if name == "ARGS" {
-			query.release(h, globals[idx])
-			globals[idx] = args_obj
-			args_obj = query.ABSENT
+	if build_cfg_slot >= 0 {
+		if bv, bs := query.text_value(h, BUILD_CONFIG); bs == .Ok {
+			query.release(h, globals[build_cfg_slot])
+			globals[build_cfg_slot] = bv
 		}
-		if name == "JQ_BUILD_CONFIGURATION" {
-			if bv, bs := query.text_value(h, BUILD_CONFIG); bs == .Ok {
-				query.release(h, globals[idx])
-				globals[idx] = bv
-			}
-		}
-	}
-	if args_obj.kind != .Absent {
-		query.release(h, args_obj)
 	}
 	ok = true
 	return globals, true
@@ -770,7 +835,7 @@ new_jq_worker :: proc(sh: ^Shared_Jq_State, alloc: runtime.Allocator, exclusive:
 		markup     = markup_opts_for_jq,
 		parse_json = parse_json_for_jq,
 		now        = proc(_: rawptr) -> f64 {return f64(time.time_to_unix_nano(time.now())) / 1e9},
-		random     = proc(_: rawptr, b: []u8) {crypto.rand_bytes(b)},
+		random     = proc(_: rawptr, b: []u8) {runtime.rand_bytes(b)},
 		debug      = proc(d: rawptr, v: query.Value, h: ^query.Heap) {hook_msg((^Jq_Worker)(d).shared, v, h, true)},
 		stderr     = proc(d: rawptr, v: query.Value, h: ^query.Heap) {hook_msg((^Jq_Worker)(d).shared, v, h, false)},
 		input      = proc(d: rawptr, h: ^query.Heap) -> (query.Value, bool, query.Status) {return hook_next_input(&(^Jq_Worker)(d).hook_ctx, h)},
@@ -779,11 +844,9 @@ new_jq_worker :: proc(sh: ^Shared_Jq_State, alloc: runtime.Allocator, exclusive:
 			return query.text_value(h, fp)
 		},
 		input_line_number = proc(d: rawptr) -> i64 {return (^Jq_Worker)(d).hook_ctx.line_number},
-	}
-	if sh.zones.region != nil {
-		w.hooks.zone = proc(d: rawptr, secs: i64) -> (query.Zone, bool) {
+		zone = proc(d: rawptr, secs: i64) -> (query.Zone, bool) {
 			return local_zone_at(&(^Jq_Worker)(d).shared.zones, secs)
-		}
+		},
 	}
 	jq.run_init(&w.run, sh.main_prog, &w.h, globs, &w.hooks, steps = int(sh.budget.steps))
 	if sh.each_prog != nil {
@@ -1202,7 +1265,9 @@ eval_jq_with :: proc(
 			sh.direct_tab.suppress_next_hdr = true
 		}
 	}
-	merge_worker_outcome(sh, cur_w, {file_idx = meta.file_index, rec_idx = meta.record_index}, ee, count_e)
+	if !((ee == .None || ee == .Stopped) && !sh.o.exit_status && !cur_w.nul_err) {
+		merge_worker_outcome(sh, cur_w, {file_idx = meta.file_index, rec_idx = meta.record_index}, ee, count_e)
+	}
 	return ee
 }
 
@@ -1222,6 +1287,135 @@ eval_jq_each :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta,
 		return .No_Memory
 	}
 	return eval_jq_with(w, true, doc, meta, emit)
+}
+
+@(private = "file")
+eval_jq_each_count :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta) -> (count: u64, err: engine.Exec_Error) {
+	w := (^Jq_Worker)(ctx)
+	if w == nil {
+		return 0, .No_Memory
+	}
+	sh := w.shared
+	cur_w := w
+	acquired := false
+	if !w.is_exclusive {
+		cw, ok := acquire_worker(sh)
+		if !ok {
+			return 0, .No_Memory
+		}
+		cw.file_name = meta.file_path if meta.file_path != "" else w.file_name
+		cur_w = cw
+		acquired = true
+	}
+	defer if acquired {
+		release_worker(sh, cur_w)
+	}
+
+	cur_w.hook_ctx.file_path = meta.file_path if meta.file_path != "" else cur_w.file_name
+	cur_w.hook_ctx.line_number = i64(meta.record_index) + 1
+	cur_w.h.keep_origins = sh.where_mode
+	cur_w.h.tainted = false
+	query.clear_error(&cur_w.h)
+	cur_w.out_count = 0
+	cur_w.last_falsy = false
+	cur_w.has_halt = false
+	cur_w.nul_err = false
+	if cur_w.err_msg != "" {
+		delete(cur_w.err_msg, cur_w.alloc)
+		cur_w.err_msg = ""
+	}
+	if cur_w.halt_msg != "" {
+		delete(cur_w.halt_msg, cur_w.alloc)
+		cur_w.halt_msg = ""
+	}
+
+	if len(doc.nodes) > 0 && sh.o.xml_arrays == .Schema && sh.xml_schema_desc != nil && doc.format != nil && doc.format.options == .Xml {
+		if nerr := engine.apply_xml_arrays(doc, .Schema, sh.xml_schema_desc, cur_w.alloc); nerr != nil {
+			cur_w.err_msg = strings.clone("XML array normalization failed", cur_w.alloc)
+			merge_worker_outcome(sh, cur_w, {file_idx = meta.file_index, rec_idx = meta.record_index}, .Failed, false)
+			return 0, .Failed
+		}
+	}
+
+	run_ptr := &cur_w.each_run if cur_w.has_each_run else &cur_w.run
+	inp: query.Value
+	if len(doc.nodes) == 0 {
+		inp = query.NULL
+	} else {
+		st: query.Status
+		inp, st = query.document_value(&cur_w.h, doc^, owned = false)
+		if st != .Ok {
+			return 0, .Failed
+		}
+	}
+
+	cnt, end := jq.run_count(run_ptr, inp)
+	ee := engine.Exec_Error.None
+	if cur_w.h.tainted || end == .Tainted {
+		return 0, .Tainted
+	}
+	switch end {
+	case .Done:
+	case .Stopped:
+		ee = .Stopped
+	case .Tainted:
+		return 0, .Tainted
+	case .Halted:
+		hs := jq.run_halt(run_ptr)
+		cur_w.has_halt = true
+		cur_w.halt_code = hs.code
+		format_halt_message(cur_w, hs)
+		ee = .Halted
+	case .Failed:
+		e := query.take_error(&cur_w.h)
+		cur_w.err_msg = jq.error_message(&cur_w.h, &e, cur_w.alloc)
+		query.destroy_error(&cur_w.h, &e)
+		ee = .Failed
+	}
+	if ee != .None {
+		merge_worker_outcome(sh, cur_w, {file_idx = meta.file_index, rec_idx = meta.record_index}, ee, false)
+		return 0, ee
+	}
+	return cnt, .None
+}
+
+@(private = "file")
+emit_jq_spine_length :: proc(ctx: rawptr, total: u64, emit: engine.Emitter) -> engine.Exec_Error {
+	pw := (^Jq_Worker)(ctx)
+	if pw == nil || pw.shared == nil {
+		return .No_Memory
+	}
+	sh := pw.shared
+	cur_w := pw
+	acquired := false
+	if !pw.is_exclusive {
+		cw, ok := acquire_worker(sh)
+		if !ok {
+			return .No_Memory
+		}
+		cw.file_name = pw.file_name
+		cur_w = cw
+		acquired = true
+	}
+	defer if acquired {
+		release_worker(sh, cur_w)
+	}
+	cur_w.hook_ctx.file_path = pw.file_name
+	cur_w.h.keep_origins = sh.where_mode
+	cur_w.h.tainted = false
+	query.clear_error(&cur_w.h)
+	cur_w.out_count = 1
+	cur_w.last_falsy = false
+	cur_w.nul_err = false
+
+	val := query.int_value(i64(total)) if total <= u64(max(i64)) else query.double_value(f64(total))
+	ee := emit_rendered_jq_value(cur_w, val, {file_path = pw.file_name}, emit, sh.cfg, true)
+	if !((ee == .None || ee == .Stopped) && !sh.o.exit_status && !cur_w.nul_err) {
+		merge_worker_outcome(sh, cur_w, {file_idx = max(int), rec_idx = max(u64)}, ee, true)
+	} else if sh.o.exit_status {
+		merge_worker_outcome(sh, cur_w, {file_idx = max(int), rec_idx = max(u64)}, ee, true)
+	}
+	return ee
 }
 
 @(private = "file")
@@ -1916,7 +2110,8 @@ decide_file_route :: proc(
 	if e, ok := engine.entry_of_spec(sp); ok && e.id == .Json && eff_fr == .Single && !o.seq {
 		keep_single := (dec.kind == .Spine_Parallel && has_each_cb) ||
 			(dec.kind == .Conditional_Whole && (has_pred_cb || (plan != nil && plan.hints.conditional.cmp.op != .None))) ||
-			(dec.kind == .Projection_Direct && !direct_blocked)
+			(dec.kind == .Projection_Direct && !direct_blocked) ||
+			(dec.kind == .Whole && runner != nil && runner.threads > 0 && input_bytes >= max(engine.RECORDS_PARALLEL_FROM, 4096) && !o.skip_bad)
 		if !keep_single {
 			eff_fr = .Concatenated
 			dec = engine.decide(plan, sp, eff_fr, ropts)
@@ -2173,28 +2368,41 @@ exec_jq_on_bytes :: proc(
 			eff_emit = engine.Emitter{fn = direct_nl_emit, data = osink}
 		}
 	}
+	coalesce_opt := !cfg.to_tabular && !cfg.to_non_json && !o.unbuffered && !o.each
+	direct_nl_opt := coalesce_opt && !cfg.to_tabular
+	sp_hint := &plan.hints.split if plan != nil else nil
+	has_count_cb := sh.each_prog != nil && sp_hint != nil && sp_hint.kind == .Length && sp_hint.has_each
+	fast_each_opt := sh.fast_json if (sp_hint != nil && (sp_hint.kind == .Stream || (sp_hint.kind == .Collect && !sp_hint.has_tail)) && !sp_hint.has_each) else .None
+	collect_compact_opt := sp_hint != nil && sp_hint.kind == .Collect && !sp_hint.has_tail && sh.collect_each && !o.raw && !o.join && !o.raw0 && !o.sort_keys && !o.ascii && o.compact && !cfg.color && !o.seq && !cfg.to_tabular && !cfg.to_non_json && !o.where_mode && !o.exit_status
 	eopts := engine.Exec_Options{
-		eval                 = eval_jq_doc,
-		eval_ctx             = worker,
-		eval_each            = eval_jq_each if sh.each_prog != nil else nil,
-		eval_each_ctx        = worker if sh.each_prog != nil else nil,
-		pred_eval            = eval_jq_pred if sh.pred_prog != nil else nil,
-		pred_ctx             = sh if sh.pred_prog != nil else nil,
-		spine_collect        = eval_spine_collect if sh.tail_prog != nil else nil,
-		on_bad_record        = bad_cb if skip_active else nil,
-		bad_ctx              = bad_ctx,
-		workers              = {init = worker_hook_init, fini = worker_hook_fini},
-		emit                 = eff_emit,
-		read                 = ro,
-		runner               = runner,
-		direct_out           = direct_out_of(o.to_spec),
-		direct_csv_header    = !o.dsv_out.no_header,
-		skip_bad             = skip_active,
-		eval_ctx_thread_safe = true,
-		rerun_whole_on_taint = true,
-		file_index           = fidx,
-		file_path            = disp,
-		allocator            = sh.locked_alloc,
+		eval                   = eval_jq_doc,
+		eval_ctx               = worker,
+		eval_each              = eval_jq_each if sh.each_prog != nil else nil,
+		eval_each_ctx          = worker if sh.each_prog != nil else nil,
+		eval_each_count        = eval_jq_each_count if has_count_cb else nil,
+		emit_spine_length      = emit_jq_spine_length if has_count_cb else nil,
+		pred_eval              = eval_jq_pred if sh.pred_prog != nil else nil,
+		pred_ctx               = sh if sh.pred_prog != nil else nil,
+		spine_collect          = eval_spine_collect if sh.tail_prog != nil else nil,
+		on_bad_record          = bad_cb if skip_active else nil,
+		bad_ctx                = bad_ctx,
+		workers                = {init = worker_hook_init, fini = worker_hook_fini},
+		emit                   = eff_emit,
+		read                   = ro,
+		runner                 = runner,
+		direct_out             = direct_out_of(o.to_spec),
+		direct_csv_header      = !o.dsv_out.no_header,
+		skip_bad               = skip_active,
+		fast_json              = sh.fast_json if sh.ident_main else .None,
+		fast_json_each         = fast_each_opt,
+		coalesce_emit          = coalesce_opt,
+		direct_append_nl       = direct_nl_opt,
+		spine_collect_compact  = collect_compact_opt,
+		eval_ctx_thread_safe   = true,
+		rerun_whole_on_taint   = true,
+		file_index             = fidx,
+		file_path              = disp,
+		allocator              = sh.locked_alloc,
 	}
 	res = engine.execute(plan, &dec, b, eopts)
 	sh.direct_tab_active = false
@@ -2503,7 +2711,7 @@ run_jq_query :: proc(
 	}
 	defer jq.destroy_program(prog)
 
-	plan := jq.analyze(prog, {null_input = o.null_input, slurp = o.slurp, raw_input = o.raw_input, stream = o.stream}, alloc)
+	plan := jq.analyze(prog, {null_input = o.null_input, slurp = o.slurp, raw_input = o.raw_input, stream = o.stream, materialize_each = true}, alloc)
 	defer jq.destroy_plan(&plan)
 
 	osink: Out_Stream
@@ -2555,13 +2763,23 @@ run_jq_query :: proc(
 	fb := [1]string{"-"}
 	paths := o.files[:] if len(o.files) > 0 else fb[:]
 	has_in_files := len(o.files) > 0 || !o.null_input || (.Inputs in plan.serial) || (.Position in plan.serial)
-	runner := base_runner if ((!cfg.to_tabular || can_direct_tabular(o, cfg, o.to_spec)) && !cfg.one_doc && !o.unbuffered) else nil
+	parallel_allowed := o.threads != 1 && (!cfg.to_tabular || can_direct_tabular(o, cfg, o.to_spec)) && !cfg.one_doc && !o.unbuffered
+	parallel_min_bytes := parallel_min_bytes_of(o)
+	lazy_pool: host.Pool
+	has_lazy_pool := false
+	defer if has_lazy_pool {
+		host.pool_destroy(&lazy_pool)
+	}
+	runner := (^tape.Runner)(nil)
+	if parallel_allowed && (base_runner != nil || (o.threads > 1 && (o.explain || o.plan_out != "" || o.plan_file != ""))) {
+		runner = ensure_lazy_pool(base_runner, &lazy_pool, &has_lazy_pool, o)
+	}
 
 	emit := engine.Emitter{fn = out_sink_emit, data = &osink}
 	exit_code := EXIT_OK
 
 	if o.each {
-		exit_code = run_jq_each_files(o, cfg, &plan.contract, sh, worker, &osink, emit, &qw, &pin, paths, stdin_override, runner, stderr_w, alloc)
+		exit_code = run_jq_each_files(o, cfg, &plan.contract, sh, worker, &osink, emit, &qw, &pin, paths, stdin_override, base_runner, &lazy_pool, &has_lazy_pool, parallel_allowed, parallel_min_bytes, stderr_w, alloc)
 		if osink.failed {
 			return report_out_stream_error(&osink, stderr_w)
 		}
@@ -2682,7 +2900,7 @@ run_jq_query :: proc(
 	direct_guard := plan.contract.hints.projection.shape != .None && projection_direct_blocked(o, cfg, 1)
 	can_files_par := len(paths) > 1 &&
 		same_spec &&
-		runner != nil &&
+		parallel_allowed &&
 		plan.contract.serial == {} &&
 		!cfg.to_tabular &&
 		!cfg.one_doc &&
@@ -2725,6 +2943,7 @@ run_jq_query :: proc(
 				}
 				delete(finputs, alloc)
 			}
+			runner = ensure_lazy_pool(base_runner, &lazy_pool, &has_lazy_pool, o)
 			if o.explain || o.plan_out != "" || o.plan_file != "" {
 				fdec, _ := decide_file_route(o, cfg, &plan.contract, finputs[0].spec, finputs[0].framing, len(finputs[0].src), runner, len(finputs), sh.each_prog != nil, sh.pred_prog != nil, stderr_w, alloc)
 				if pcode := plan_pin_apply(&pin, &fdec, stderr_w, alloc); pcode != EXIT_OK {
@@ -2734,6 +2953,11 @@ run_jq_query :: proc(
 			ro := read_opts_of(o, finputs[0].spec, runner)
 			use_direct_par := plan.contract.hints.projection.shape != .None && !cfg.to_non_json && !cfg.join && !cfg.raw0
 			par_emit := engine.Emitter{fn = direct_nl_emit, data = &osink} if use_direct_par else emit
+			sp_files := &plan.contract.hints.split
+			has_count_files := sh.each_prog != nil && sp_files.kind == .Length && sp_files.has_each
+			fast_each_files := sh.fast_json if ((sp_files.kind == .Stream || (sp_files.kind == .Collect && !sp_files.has_tail)) && !sp_files.has_each) else .None
+			collect_compact_files := sp_files.kind == .Collect && !sp_files.has_tail && sh.collect_each && !o.raw && !o.join && !o.raw0 && !o.sort_keys && !o.ascii && o.compact && !cfg.color && !o.seq && !cfg.to_tabular && !cfg.to_non_json && !o.where_mode && !o.exit_status
+			coalesce_files := !cfg.to_tabular && !cfg.to_non_json && !o.unbuffered && !o.each
 			res := engine.execute_files(
 				&plan.contract,
 				finputs,
@@ -2745,22 +2969,29 @@ run_jq_query :: proc(
 					serial_eval_ctx   = cfg.one_doc,
 				},
 				{
-					eval                 = eval_jq_doc,
-					eval_ctx             = worker,
-					eval_each            = eval_jq_each if sh.each_prog != nil else nil,
-					eval_each_ctx        = worker if sh.each_prog != nil else nil,
-					pred_eval            = eval_jq_pred if sh.pred_prog != nil else nil,
-					pred_ctx             = sh if sh.pred_prog != nil else nil,
-					spine_collect        = eval_spine_collect if sh.tail_prog != nil else nil,
-					workers              = {init = worker_hook_init, fini = worker_hook_fini},
-					emit                 = par_emit,
-					read                 = ro,
-					runner               = runner,
-					direct_out           = direct_out_of(o.to_spec),
-					direct_csv_header    = !o.dsv_out.no_header,
-					eval_ctx_thread_safe = true,
-					rerun_whole_on_taint = true,
-					allocator            = sh.locked_alloc,
+					eval                  = eval_jq_doc,
+					eval_ctx              = worker,
+					eval_each             = eval_jq_each if sh.each_prog != nil else nil,
+					eval_each_ctx         = worker if sh.each_prog != nil else nil,
+					eval_each_count       = eval_jq_each_count if has_count_files else nil,
+					emit_spine_length     = emit_jq_spine_length if has_count_files else nil,
+					pred_eval             = eval_jq_pred if sh.pred_prog != nil else nil,
+					pred_ctx              = sh if sh.pred_prog != nil else nil,
+					spine_collect         = eval_spine_collect if sh.tail_prog != nil else nil,
+					workers               = {init = worker_hook_init, fini = worker_hook_fini},
+					emit                  = par_emit,
+					read                  = ro,
+					runner                = runner,
+					direct_out            = direct_out_of(o.to_spec),
+					direct_csv_header     = !o.dsv_out.no_header,
+					fast_json             = sh.fast_json if sh.ident_main else .None,
+					fast_json_each        = fast_each_files,
+					coalesce_emit         = coalesce_files,
+					direct_append_nl      = coalesce_files,
+					spine_collect_compact = collect_compact_files,
+					eval_ctx_thread_safe  = true,
+					rerun_whole_on_taint  = true,
+					allocator             = sh.locked_alloc,
 				},
 			)
 			if osink.failed || !out_stream_flush(&osink) {
@@ -2796,6 +3027,10 @@ run_jq_query :: proc(
 		}
 		disp := "<stdin>" if p == "-" else p
 		sp, fr := detect_file_spec(o, p)
+		cur_runner := runner
+		if cur_runner == nil && parallel_allowed && len(b) >= parallel_min_bytes {
+			cur_runner = ensure_lazy_pool(base_runner, &lazy_pool, &has_lazy_pool, o)
+		}
 		res, pin_code := exec_jq_on_bytes(
 			o,
 			cfg,
@@ -2805,7 +3040,7 @@ run_jq_query :: proc(
 			&osink,
 			emit,
 			&qw,
-			runner,
+			cur_runner,
 			b,
 			disp,
 			sp,
@@ -2913,6 +3148,29 @@ Quarantine_Bad_Ctx :: struct {
 }
 
 @(private = "file")
+ensure_lazy_pool :: proc(base_runner: ^tape.Runner, lazy: ^host.Pool, has_lazy: ^bool, o: ^Options) -> ^tape.Runner {
+	if base_runner != nil {
+		return base_runner
+	}
+	if !has_lazy^ {
+		if host.pool_init(lazy, o.threads) != nil {
+			return nil
+		}
+		has_lazy^ = true
+	}
+	return &lazy.runner
+}
+
+@(private = "file")
+parallel_min_bytes_of :: #force_inline proc "contextless" (o: ^Options) -> int {
+	base := min(engine.RECORDS_PARALLEL_FROM, engine.SPINE_PARALLEL_FROM)
+	if o.threads <= 0 && engine.SPINE_PARALLEL_FROM > 0 {
+		return max(base, 4 << 20)
+	}
+	return base
+}
+
+@(private = "file")
 run_jq_each_files :: proc(
 	o: ^Options,
 	cfg: ^Render_Config,
@@ -2925,13 +3183,21 @@ run_jq_each_files :: proc(
 	pin: ^Plan_Pin_State,
 	paths: []string,
 	stdin_override: Maybe([]u8),
-	runner: ^tape.Runner,
+	base_runner: ^tape.Runner,
+	lazy_pool: ^host.Pool,
+	has_lazy_pool: ^bool,
+	parallel_allowed: bool,
+	parallel_min_bytes: int,
 	stderr_w: io.Writer,
 	alloc: runtime.Allocator,
 ) -> int {
 	show_labels := !o.no_filename && len(paths) > 1
 	has_open_err := false
 	worst := EXIT_OK
+	runner := (^tape.Runner)(nil)
+	if parallel_allowed && (base_runner != nil || (o.threads > 1 && (o.explain || o.plan_out != "" || o.plan_file != ""))) {
+		runner = ensure_lazy_pool(base_runner, lazy_pool, has_lazy_pool, o)
+	}
 
 	for p in paths {
 		single_path := [1]string{p}
@@ -3014,8 +3280,12 @@ run_jq_each_files :: proc(
 			}
 			disp := "<stdin>" if p == "-" else p
 			sp, fr := detect_file_spec(o, p)
+			cur_runner := runner
+			if cur_runner == nil && parallel_allowed && len(b) >= parallel_min_bytes {
+				cur_runner = ensure_lazy_pool(base_runner, lazy_pool, has_lazy_pool, o)
+			}
 			bad_ctx: Quarantine_Bad_Ctx
-			res, pcode := exec_jq_on_bytes(o, cfg, plan, sh, worker, osink, emit, qw, runner, b, disp, sp, fr, 0, 1, &bad_ctx, pin, stderr_w, alloc)
+			res, pcode := exec_jq_on_bytes(o, cfg, plan, sh, worker, osink, emit, qw, cur_runner, b, disp, sp, fr, 0, 1, &bad_ctx, pin, stderr_w, alloc)
 			if pcode != EXIT_OK {
 				if owned {
 					delete(b, alloc)
@@ -3814,7 +4084,7 @@ run_jsonpath_query :: proc(
 		alloc           = alloc,
 		xml_schema_desc = xml_sc.description if xml_sc != nil else nil,
 	}
-	sh.locked_alloc = runtime.Allocator{procedure = jp_locked_alloc_fn, data = &sh}
+	sh.locked_alloc = alloc if is_thread_safe_heap(alloc) else runtime.Allocator{procedure = jp_locked_alloc_fn, data = &sh}
 	sh.free_workers = make([dynamic]^Jp_Worker, sh.locked_alloc)
 	defer {
 		for fw in sh.free_workers {
@@ -3865,7 +4135,17 @@ run_jsonpath_query :: proc(
 
 	fb := [1]string{"-"}
 	paths := o.files[:] if len(o.files) > 0 else fb[:]
-	runner := base_runner if ((!cfg.to_tabular || can_direct_tabular(o, cfg, o.to_spec)) && !cfg.one_doc && !o.unbuffered) else nil
+	parallel_allowed := o.threads != 1 && (!cfg.to_tabular || can_direct_tabular(o, cfg, o.to_spec)) && !cfg.one_doc && !o.unbuffered
+	parallel_min_bytes := parallel_min_bytes_of(o)
+	lazy_pool: host.Pool
+	has_lazy_pool := false
+	defer if has_lazy_pool {
+		host.pool_destroy(&lazy_pool)
+	}
+	runner := (^tape.Runner)(nil)
+	if parallel_allowed && (base_runner != nil || (o.threads > 1 && (o.explain || o.plan_out != "" || o.plan_file != ""))) {
+		runner = ensure_lazy_pool(base_runner, &lazy_pool, &has_lazy_pool, o)
+	}
 	emit := engine.Emitter{fn = out_sink_emit, data = &osink}
 	has_open_err := false
 
@@ -3877,11 +4157,15 @@ run_jsonpath_query :: proc(
 		}
 		disp := "<stdin>" if p == "-" else p
 		sp, fr := detect_file_spec(o, p)
-		ro := read_opts_of(o, sp, runner)
+		cur_runner := runner
+		if cur_runner == nil && parallel_allowed && len(b) >= parallel_min_bytes {
+			cur_runner = ensure_lazy_pool(base_runner, &lazy_pool, &has_lazy_pool, o)
+		}
+		ro := read_opts_of(o, sp, cur_runner)
 		worker.file_name = disp
-		dec, eff_fr := decide_file_route(o, cfg, &prog.plan, sp, fr, len(b), runner, 1, false, false, stderr_w, alloc, total_files = len(paths))
+		dec, eff_fr := decide_file_route(o, cfg, &prog.plan, sp, fr, len(b), cur_runner, 1, false, false, stderr_w, alloc, total_files = len(paths))
 		if dec.kind == .Projection_Direct && cfg.to_tabular && worker.tw != nil && worker.tw.stream.headed {
-			fallback_non_direct_route(&dec, o, cfg, &prog.plan, runner, len(b))
+			fallback_non_direct_route(&dec, o, cfg, &prog.plan, cur_runner, len(b))
 		}
 		can_fallback_concat := eff_fr == .Single && dec.entry.id == .Json
 		pin_active := pin.has_expected || pin.out_path != ""
@@ -3903,7 +4187,7 @@ run_jsonpath_query :: proc(
 			pin_applied = true
 		} else if pin_active && pin.has_expected && !engine.compare_plan_pin(pin.expected, engine.plan_pin_of(&dec)) {
 			cand2 := engine.decide(&prog.plan, sp, .Concatenated, {
-				runner            = runner,
+				runner            = cur_runner,
 				where_mode        = o.where_mode,
 				dups              = o.dups,
 				file_count        = 1,
@@ -3912,7 +4196,7 @@ run_jsonpath_query :: proc(
 				serial_eval_ctx   = cfg.one_doc || cfg.to_tabular,
 			})
 			if cand2.kind == .Projection_Direct && (projection_direct_blocked(o, cfg, len(paths)) || (cfg.to_tabular && worker.tw != nil && worker.tw.stream.headed)) {
-				fallback_non_direct_route(&cand2, o, cfg, &prog.plan, runner, len(b))
+				fallback_non_direct_route(&cand2, o, cfg, &prog.plan, cur_runner, len(b))
 			}
 			if !engine.compare_plan_pin(pin.expected, engine.plan_pin_of(&cand2)) || engine.validate(b, sp, ro, alloc) == nil {
 				if pcode := plan_pin_apply(&pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
@@ -3963,7 +4247,7 @@ run_jsonpath_query :: proc(
 			workers              = {init = jp_worker_init, fini = jp_worker_fini},
 			emit                 = eff_emit,
 			read                 = ro,
-			runner               = runner,
+			runner               = cur_runner,
 			direct_out           = direct_out_of(o.to_spec),
 			direct_csv_header    = !o.dsv_out.no_header,
 			eval_ctx_thread_safe = true,
@@ -3979,7 +4263,7 @@ run_jsonpath_query :: proc(
 			if fe, ok_e := engine.entry_of_spec(sp); ok_e && fe.id == .Json {
 				if f, is_f := res.read_err.(tape.Fault); is_f && f.kind == .Bad_Char {
 					dec2 := engine.decide(&prog.plan, sp, .Concatenated, {
-						runner            = runner,
+						runner            = cur_runner,
 						where_mode        = o.where_mode,
 						dups              = o.dups,
 						file_count        = 1,
@@ -3988,7 +4272,7 @@ run_jsonpath_query :: proc(
 						serial_eval_ctx   = cfg.one_doc || cfg.to_tabular,
 					})
 					if dec2.kind == .Projection_Direct && (projection_direct_blocked(o, cfg, len(paths)) || (cfg.to_tabular && worker.tw != nil && worker.tw.stream.headed)) {
-						fallback_non_direct_route(&dec2, o, cfg, &prog.plan, runner, len(b))
+						fallback_non_direct_route(&dec2, o, cfg, &prog.plan, cur_runner, len(b))
 					}
 					if pin_active {
 						if pcode := plan_pin_apply(&pin, &dec2, stderr_w, alloc); pcode != EXIT_OK {

@@ -1,8 +1,13 @@
 package engine
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:sync"
+import "stury:json"
+import "stury:lib/base/kernel"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
+import ops_build "stury:lib/ops/build"
 import "stury:lib/ops/write"
 import "stury:lib/query"
 
@@ -101,6 +106,8 @@ execute_files_parallel :: proc(
 		opts:         Exec_Options,
 		slots:        []Slot_Buffer,
 		parent_alloc: runtime.Allocator,
+		use_lock:     bool,
+		lock_scratch: bool,
 		alloc_lock:   sync.Mutex,
 	}
 
@@ -123,11 +130,13 @@ execute_files_parallel :: proc(
 		opts         = opts,
 		slots        = slots,
 		parent_alloc = alloc,
+		use_lock     = !is_thread_safe_heap(alloc),
+		lock_scratch = has_custom_scratch(opts.read.scratch),
 	}
 
 	run_file :: proc(arg: rawptr, k: int) {
 		j := (^File_Job)(arg)
-		lalloc := runtime.Allocator{procedure = locked_alloc_proc, data = j}
+		lalloc := runtime.Allocator{procedure = locked_alloc_proc, data = j} if j.use_lock else j.parent_alloc
 		sb := &j.slots[k]
 		sb.chunks.allocator = lalloc
 		sb.offs.allocator = lalloc
@@ -156,7 +165,7 @@ execute_files_parallel :: proc(
 		f_opts.file_index = k
 		f_opts.file_path = f.path
 		f_opts.allocator = lalloc
-		if j.opts.read.scratch.procedure != nil {
+		if j.lock_scratch {
 			f_opts.read.scratch = runtime.Allocator{procedure = locked_scratch_proc, data = j}
 		}
 		f_opts.emit = Emitter{fn = slot_emit_fn, data = sb}
@@ -230,6 +239,7 @@ eval_record_batch_parallel :: proc(
 		base_rec_idx:  u64,
 		opts:          ^Exec_Options,
 		slots:         []Slot_Buffer,
+		use_lock:      bool,
 		alloc_lock:    sync.Mutex,
 	}
 
@@ -247,6 +257,7 @@ eval_record_batch_parallel :: proc(
 		base_rec_idx  = base_rec_idx,
 		opts          = opts,
 		slots         = slots,
+		use_lock      = !is_thread_safe_heap(opts.allocator),
 	}
 
 	worker_fn :: proc(arg: rawptr, k: int) {
@@ -255,7 +266,7 @@ eval_record_batch_parallel :: proc(
 		if r_info.err != nil {
 			return
 		}
-		lalloc := runtime.Allocator{procedure = locked_alloc_fn, data = j}
+		lalloc := runtime.Allocator{procedure = locked_alloc_fn, data = j} if j.use_lock else j.opts.allocator
 		sb := &j.slots[k]
 		sb.chunks.allocator = lalloc
 		sb.offs.allocator = lalloc
@@ -380,6 +391,8 @@ eval_record_batch_whole_parallel :: proc(
 		base_rec_idx: u64,
 		opts:         ^Exec_Options,
 		slots:        []Slot_Buffer,
+		use_lock:     bool,
+		lock_scratch: bool,
 		alloc_lock:   sync.Mutex,
 	}
 
@@ -403,6 +416,8 @@ eval_record_batch_whole_parallel :: proc(
 		base_rec_idx = base_rec_idx,
 		opts         = opts,
 		slots        = slots,
+		use_lock     = !is_thread_safe_heap(opts.allocator),
+		lock_scratch = has_custom_scratch(rec_ro.scratch),
 	}
 
 	worker_fn :: proc(arg: rawptr, k: int) {
@@ -411,7 +426,7 @@ eval_record_batch_whole_parallel :: proc(
 		if r_info.err != nil {
 			return
 		}
-		lalloc := runtime.Allocator{procedure = locked_alloc_fn, data = j}
+		lalloc := runtime.Allocator{procedure = locked_alloc_fn, data = j} if j.use_lock else j.opts.allocator
 		sb := &j.slots[k]
 		sb.chunks.allocator = lalloc
 		sb.offs.allocator = lalloc
@@ -419,7 +434,7 @@ eval_record_batch_whole_parallel :: proc(
 
 		w_ro := j.rec_ro
 		w_ro.runner = nil
-		if j.rec_ro.scratch.procedure != nil {
+		if j.lock_scratch {
 			w_ro.scratch = runtime.Allocator{procedure = locked_scratch_fn, data = j}
 		}
 
@@ -515,12 +530,32 @@ spine_fallback :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: ^Exec
 @(private)
 exec_spine_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: ^Exec_Options) -> Exec_Result {
 	sp := &plan.hints.split
+	is_length := sp.kind == .Length && sp.has_each
 	if dups_needs_build(dec.entry, opts.read.dups) || opts.eval_each == nil {
 		return spine_fallback_whole(dec, src, opts)
 	}
 	if opts.runner == nil || opts.runner.threads <= 0 || len(src) < SPINE_PARALLEL_FROM {
 		return spine_fallback(plan, dec, src, opts)
 	}
+	if sp.kind == .Collect && opts.spine_collect == nil && !opts.spine_collect_compact {
+		return spine_fallback(plan, dec, src, opts)
+	}
+	if is_length && (opts.eval_each_count == nil || opts.emit_spine_length == nil) {
+		return spine_fallback(plan, dec, src, opts)
+	}
+
+	if dec.entry.id == .Json &&
+		opts.read.pieces == nil &&
+		opts.read.tolerate == {} &&
+		opts.read.budget == {} &&
+		opts.max_bytes == 0 &&
+		len(src) >= max(SPINE_PARALLEL_FROM, 4096) &&
+		can_parallel_eval(opts.workers.init != nil, opts.eval_each_ctx, true, opts.eval_ctx_thread_safe) {
+		if cres, handled := exec_spine_coarse_parallel(plan, dec, src, opts); handled {
+			return cres
+		}
+	}
+
 	if sp.kind == .Collect && opts.spine_collect == nil {
 		return spine_fallback(plan, dec, src, opts)
 	}
@@ -587,6 +622,7 @@ exec_spine_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: 
 	docs: [RECORD_BATCH_SIZE]tape.Document
 	res: Exec_Result
 	downstream_emitted := u64(0)
+	length_total := u64(0)
 
 	for {
 		n := tape.records_scan(recs, &dem, out_recs[:], docs[:], {}, opts.allocator)
@@ -602,53 +638,74 @@ exec_spine_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: 
 		}
 		valid_n := err_idx if err_idx >= 0 else n
 		if valid_n > 0 {
-			sub: Exec_Result
-			if can_par_each && valid_n > 1 {
-				sub = eval_record_batch_parallel(
-					dec,
-					src,
-					out_recs[:valid_n],
-					docs[:valid_n],
-					!use_partial,
-					res.records,
-					downstream_emitted,
-					sp.kind == .Stream,
-					0,
-					&each_opts,
-				)
-			} else {
-				sub = eval_spine_batch_serial(
-					dec,
-					src,
-					out_recs[:valid_n],
-					docs[:valid_n],
-					!use_partial,
-					res.records,
-					downstream_emitted,
-					sp.kind == .Stream,
-					&each_opts,
-				)
-			}
-			res.records += sub.records
-			if sp.kind == .Stream {
-				res.emitted += sub.emitted
-				downstream_emitted += sub.emitted
-			}
-			res.tainted ||= sub.tainted
-			res.reran_whole ||= sub.reran_whole
-			if ce.oom || sub.err == .No_Memory {
-				res.err = .No_Memory
-				res.read_err = runtime.Allocator_Error.Out_Of_Memory if sub.read_err == nil else sub.read_err
-				return res
-			}
-			if sub.err != .None {
-				if sub.err == .Tainted && downstream_emitted == 0 && (opts.rerun_whole_on_taint || dec.rerun_safe) {
-					return spine_fallback_whole(dec, src, opts, reran = true)
+			if is_length {
+				cnt, csub := eval_spine_count_batch(dec, src, out_recs[:valid_n], docs[:valid_n], !use_partial, res.records, can_par_each, &each_opts)
+				res.records += csub.records
+				res.tainted ||= csub.tainted
+				if csub.err == .No_Memory {
+					res.err = .No_Memory
+					res.read_err = csub.read_err
+					return res
 				}
-				res.err = sub.err
-				res.read_err = sub.read_err
-				res.write_err = sub.write_err
-				return res
+				if csub.err != .None {
+					if csub.err == .Tainted && (opts.rerun_whole_on_taint || dec.rerun_safe) {
+						return spine_fallback_whole(dec, src, opts, reran = true)
+					}
+					res.err = csub.err
+					res.read_err = csub.read_err
+					res.write_err = csub.write_err
+					return res
+				}
+				length_total += cnt
+			} else {
+				sub: Exec_Result
+				if can_par_each && valid_n > 1 {
+					sub = eval_record_batch_parallel(
+						dec,
+						src,
+						out_recs[:valid_n],
+						docs[:valid_n],
+						!use_partial,
+						res.records,
+						downstream_emitted,
+						sp.kind == .Stream,
+						0,
+						&each_opts,
+					)
+				} else {
+					sub = eval_spine_batch_serial(
+						dec,
+						src,
+						out_recs[:valid_n],
+						docs[:valid_n],
+						!use_partial,
+						res.records,
+						downstream_emitted,
+						sp.kind == .Stream,
+						&each_opts,
+					)
+				}
+				res.records += sub.records
+				if sp.kind == .Stream {
+					res.emitted += sub.emitted
+					downstream_emitted += sub.emitted
+				}
+				res.tainted ||= sub.tainted
+				res.reran_whole ||= sub.reran_whole
+				if ce.oom || sub.err == .No_Memory {
+					res.err = .No_Memory
+					res.read_err = runtime.Allocator_Error.Out_Of_Memory if sub.read_err == nil else sub.read_err
+					return res
+				}
+				if sub.err != .None {
+					if sub.err == .Tainted && downstream_emitted == 0 && (opts.rerun_whole_on_taint || dec.rerun_safe) {
+						return spine_fallback_whole(dec, src, opts, reran = true)
+					}
+					res.err = sub.err
+					res.read_err = sub.read_err
+					res.write_err = sub.write_err
+					return res
+				}
 			}
 		}
 		if err_idx >= 0 {
@@ -672,6 +729,16 @@ exec_spine_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: 
 		if ferr != nil || ans.outcome != .Found || ans.kind != .Array {
 			return spine_fallback_whole(dec, src, opts)
 		}
+	}
+	if is_length {
+		g := Guard_Emit{inner = opts.emit}
+		cerr := opts.emit_spine_length(opts.eval_ctx, length_total, Emitter{fn = guard_emit_fn, data = &g})
+		res.emitted += g.emitted
+		if g.stopped && cerr == .None {
+			cerr = .Stopped
+		}
+		res.err = cerr
+		return res
 	}
 	if sp.kind == .Collect && opts.spine_collect != nil {
 		doc_w: tape.Document
@@ -753,4 +820,1484 @@ eval_spine_batch_serial :: proc(
 		}
 	}
 	return res
+}
+
+@(private = "file")
+eval_spine_count_batch :: proc(
+	dec: ^Decision,
+	src: []u8,
+	out_recs: []tape.Record,
+	docs: []tape.Document,
+	clear_partial: bool,
+	base_rec_idx: u64,
+	can_par_each: bool,
+	each_opts: ^Exec_Options,
+) -> (total: u64, res: Exec_Result) {
+	_ = dec
+	if !can_par_each || len(out_recs) <= 1 {
+		for r_info, i in out_recs {
+			raw := record_slice(src, r_info)
+			meta := make_record_meta(each_opts, base_rec_idx + u64(i), r_info, raw)
+			res.records += 1
+			doc_val := docs[i]
+			if clear_partial && doc_val.partial != nil {
+				doc_val.partial = nil
+			}
+			cnt, err := each_opts.eval_each_count(each_opts.eval_ctx, &doc_val, meta)
+			if err != .None {
+				res.err = err
+				res.tainted ||= err == .Tainted
+				return total, res
+			}
+			total += cnt
+		}
+		return total, res
+	}
+
+	Count_Slot :: struct {
+		count: u64,
+		err:   Exec_Error,
+	}
+	slots, serr := make([]Count_Slot, len(out_recs), each_opts.allocator)
+	if serr != nil {
+		return 0, {err = .No_Memory, read_err = serr}
+	}
+	defer delete(slots, each_opts.allocator)
+
+	Count_Job :: struct {
+		src:           []u8,
+		out_recs:      []tape.Record,
+		docs:          []tape.Document,
+		clear_partial: bool,
+		base_rec_idx:  u64,
+		opts:          ^Exec_Options,
+		slots:         []Count_Slot,
+		use_lock:      bool,
+		alloc_lock:    sync.Mutex,
+	}
+	locked_alloc_fn :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_ptr: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
+		j := (^Count_Job)(data)
+		sync.mutex_guard(&j.alloc_lock)
+		return j.opts.allocator.procedure(j.opts.allocator.data, mode, size, alignment, old_ptr, old_size, loc)
+	}
+	job := Count_Job{
+		src           = src,
+		out_recs      = out_recs,
+		docs          = docs,
+		clear_partial = clear_partial,
+		base_rec_idx  = base_rec_idx,
+		opts          = each_opts,
+		slots         = slots,
+		use_lock      = !is_thread_safe_heap(each_opts.allocator),
+	}
+	worker_fn :: proc(arg: rawptr, k: int) {
+		j := (^Count_Job)(arg)
+		lalloc := runtime.Allocator{procedure = locked_alloc_fn, data = j} if j.use_lock else j.opts.allocator
+		wctx := j.opts.eval_ctx
+		if j.opts.workers.init != nil {
+			wctx = j.opts.workers.init(j.opts.eval_ctx, k, lalloc)
+		}
+		defer if j.opts.workers.fini != nil {
+			j.opts.workers.fini(j.opts.eval_ctx, k, wctx)
+		}
+		doc_val := j.docs[k]
+		if j.clear_partial && doc_val.partial != nil {
+			doc_val.partial = nil
+		}
+		meta := make_record_meta(j.opts, j.base_rec_idx + u64(k), j.out_recs[k], record_slice(j.src, j.out_recs[k]))
+		cnt, err := j.opts.eval_each_count(wctx, &doc_val, meta)
+		j.slots[k] = {count = cnt, err = err}
+	}
+	tape.fan_each(each_opts.runner, len(out_recs), worker_fn, &job)
+	for s in slots {
+		res.records += 1
+		if s.err != .None {
+			res.err = s.err
+			res.tainted ||= s.err == .Tainted
+			return total, res
+		}
+		total += s.count
+	}
+	return total, res
+}
+
+@(private = "file")
+Coarse_Event_Kind :: enum u8 {
+	Emit_Slice,
+	Ack_Recs,
+	Bad_Record,
+	Tainted_Rec,
+}
+
+@(private = "file")
+Coarse_Event :: struct {
+	kind:    Coarse_Event_Kind,
+	off, sz: int,
+	count:   u64,
+	recs:    u64,
+	rec_idx: u64,
+	rec:     tape.Record,
+}
+
+@(private = "file")
+Coarse_Chunk_Slot :: struct {
+	base_idx:          u64,
+	out_buf:           [dynamic]u8,
+	offs, lens:        [dynamic]int,
+	events:            [dynamic]Coarse_Event,
+	records:           u64,
+	emitted_items:     u64,
+	item_count:        u64,
+	err:               Exec_Error,
+	read_err:          tape.Error,
+	write_err:         write.Error,
+	tainted:           bool,
+	read_err_fallback: bool,
+	oom:               bool,
+}
+
+@(private = "file")
+coarse_chunk_slot_destroy :: proc(s: ^Coarse_Chunk_Slot) {
+	delete(s.out_buf)
+	delete(s.offs)
+	delete(s.lens)
+	delete(s.events)
+}
+
+@(private = "file")
+adjust_chunk_err_offset :: proc "contextless" (err: tape.Error, base_off: u64) -> tape.Error {
+	if err == nil || base_off == 0 {
+		return err
+	}
+	if f, ok := err.(tape.Fault); ok && f.at != tape.NO_BYTE {
+		f.at += base_off
+		return f
+	}
+	if ex, ok := err.(tape.Exceeded); ok && ex.at != tape.NO_BYTE {
+		ex.at += base_off
+		return ex
+	}
+	return err
+}
+
+@(private = "file")
+adjust_chunk_rec_offset :: proc "contextless" (r: tape.Record, base_off: u64) -> tape.Record {
+	if base_off == 0 {
+		return r
+	}
+	out := r
+	out.lo += base_off
+	out.hi += base_off
+	out.err = adjust_chunk_err_offset(out.err, base_off)
+	return out
+}
+
+// Counts non-empty delimited JSON records in `src[lo:hi]` under `.Lines` or `.Seq`, matching `json.record_frame`.
+@(private = "file")
+count_json_records_chunk :: proc "contextless" (src: []u8, lo, hi: u64, tf: tape.Framing) -> (count: u64) #no_bounds_check {
+	base := raw_data(src)
+	end := base[hi:]
+	pos := lo
+	if tf == .Lines {
+		for pos < hi {
+			p := u64(intrinsics.ptr_sub(kernel.skip_ws(base[pos:], end), base))
+			if p >= hi {
+				break
+			}
+			count += 1
+			if i := kernel.index_byte(src[p:hi], '\n'); i >= 0 {
+				pos = p + u64(i) + 1
+			} else {
+				break
+			}
+		}
+		return
+	}
+	for pos < hi {
+		p := u64(intrinsics.ptr_sub(kernel.skip_ws(base[pos:], end), base))
+		if p >= hi {
+			break
+		}
+		if src[p] == 0x1e {
+			pos = p + 1
+			continue
+		}
+		count += 1
+		if i := kernel.index_byte(src[p:hi], 0x1e); i >= 0 {
+			pos = p + u64(i) + 1
+		} else {
+			break
+		}
+	}
+	return
+}
+
+// Coarse chunk-level `.Records_Parallel` execution for strict JSON `.Lines` / `.Seq`:
+// Wave 1 counts delimited records per chunk for exact sequential `Record_Meta.record_index`.
+// Wave 2 runs one `hook.fan_each` across ~128 newline/RS chunks instead of 64-record micro-barriers,
+// reusing per-chunk worker hooks, `json.Records`, and output buffers.
+@(private)
+exec_records_coarse_parallel :: proc(
+	dec: ^Decision,
+	src: []u8,
+	tf: tape.Framing,
+	ro: tape.Options,
+	dem: ^tape.Demand,
+	clear_partial: bool,
+	opts: ^Exec_Options,
+) -> (
+	res: Exec_Result,
+	handled: bool,
+) {
+	jspec, is_json := dec.spec.(json.Spec)
+	if !is_json || jspec != .Json {
+		return {}, false
+	}
+	delim := u8('\n') if tf == .Lines else 0x1e
+	bom := u64(spell.bom_length(src))
+	chunks: [ops_build.MAX_RECORD_CHUNKS]ops_build.Record_Chunk = ---
+	nc := ops_build.cut_delim_chunks(src, bom, delim, ro.runner, chunks[:])
+	if nc < 2 {
+		return {}, false
+	}
+
+	slots, serr := make([]Coarse_Chunk_Slot, nc, opts.allocator)
+	if serr != nil {
+		return {err = .No_Memory, read_err = serr}, true
+	}
+	defer {
+		for &s in slots {
+			coarse_chunk_slot_destroy(&s)
+		}
+		delete(slots, opts.allocator)
+	}
+
+	Count_Rec_Job :: struct {
+		src:    []u8,
+		tf:     tape.Framing,
+		chunks: []ops_build.Record_Chunk,
+		slots:  []Coarse_Chunk_Slot,
+	}
+	count_chunk :: proc(arg: rawptr, k: int) {
+		j := (^Count_Rec_Job)(arg)
+		c := j.chunks[k]
+		j.slots[k].base_idx = count_json_records_chunk(j.src, c.lo, c.hi, j.tf)
+	}
+	cjob := Count_Rec_Job{src = src, tf = tf, chunks = chunks[:nc], slots = slots}
+	tape.fan_each(ro.runner, nc, count_chunk, &cjob)
+	running_idx := u64(0)
+	for &s in slots {
+		cnt := s.base_idx
+		s.base_idx = running_idx
+		running_idx += cnt
+	}
+
+	Coarse_Rec_Job :: struct {
+		dec:           ^Decision,
+		src:           []u8,
+		tf:            tape.Framing,
+		jspec:         json.Spec,
+		ro:            tape.Options,
+		dem:           ^tape.Demand,
+		clear_partial: bool,
+		opts:          ^Exec_Options,
+		chunks:        []ops_build.Record_Chunk,
+		slots:         []Coarse_Chunk_Slot,
+		use_lock:      bool,
+		lock_scratch:  bool,
+		alloc_lock:    sync.Mutex,
+	}
+
+	locked_alloc_fn :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_ptr: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
+		j := (^Coarse_Rec_Job)(data)
+		sync.mutex_guard(&j.alloc_lock)
+		return j.opts.allocator.procedure(j.opts.allocator.data, mode, size, alignment, old_ptr, old_size, loc)
+	}
+
+	locked_scratch_fn :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_ptr: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
+		j := (^Coarse_Rec_Job)(data)
+		sync.mutex_guard(&j.alloc_lock)
+		return j.ro.scratch.procedure(j.ro.scratch.data, mode, size, alignment, old_ptr, old_size, loc)
+	}
+
+	job := Coarse_Rec_Job{
+		dec           = dec,
+		src           = src,
+		tf            = tf,
+		jspec         = jspec,
+		ro            = ro,
+		dem           = dem,
+		clear_partial = clear_partial,
+		opts          = opts,
+		chunks        = chunks[:nc],
+		slots         = slots,
+		use_lock      = !is_thread_safe_heap(opts.allocator),
+		lock_scratch  = has_custom_scratch(ro.scratch),
+	}
+
+	Rec_Emit_Ctx :: struct {
+		slot:          ^Coarse_Chunk_Slot,
+		flushed:       int,
+		pending_items: u64,
+		pending_recs:  u64,
+		coalesce:      bool,
+	}
+
+	flush_rec_pending :: proc(ec: ^Rec_Emit_Ctx) -> bool {
+		if len(ec.slot.out_buf) > ec.flushed {
+			if _, aerr := append(&ec.slot.events, Coarse_Event{
+				kind  = .Emit_Slice,
+				off   = ec.flushed,
+				sz    = len(ec.slot.out_buf) - ec.flushed,
+				count = ec.pending_items,
+				recs  = ec.pending_recs,
+			}); aerr != nil {
+				ec.slot.err = .No_Memory
+				ec.slot.read_err = aerr
+				return false
+			}
+			ec.flushed = len(ec.slot.out_buf)
+			ec.pending_items = 0
+			ec.pending_recs = 0
+		} else if ec.pending_recs > 0 {
+			if _, aerr := append(&ec.slot.events, Coarse_Event{
+				kind = .Ack_Recs,
+				recs = ec.pending_recs,
+			}); aerr != nil {
+				ec.slot.err = .No_Memory
+				ec.slot.read_err = aerr
+				return false
+			}
+			ec.pending_recs = 0
+		}
+		return true
+	}
+
+	rec_emit_fn :: proc(data: rawptr, bytes: []u8) -> bool {
+		ec := (^Rec_Emit_Ctx)(data)
+		off := len(ec.slot.out_buf)
+		if _, aerr := append(&ec.slot.out_buf, ..bytes); aerr != nil {
+			ec.slot.err = .No_Memory
+			ec.slot.read_err = aerr
+			return false
+		}
+		ec.slot.emitted_items += 1
+		ec.pending_items += 1
+		if !ec.coalesce {
+			if _, aerr := append(&ec.slot.events, Coarse_Event{
+				kind  = .Emit_Slice,
+				off   = off,
+				sz    = len(bytes),
+				count = 1,
+				recs  = ec.pending_recs,
+			}); aerr != nil {
+				resize(&ec.slot.out_buf, off)
+				ec.slot.err = .No_Memory
+				ec.slot.read_err = aerr
+				return false
+			}
+			ec.flushed = len(ec.slot.out_buf)
+			ec.pending_items = 0
+			ec.pending_recs = 0
+		}
+		return true
+	}
+
+	run_chunk :: proc(arg: rawptr, k: int) {
+		j := (^Coarse_Rec_Job)(arg)
+		lalloc := runtime.Allocator{procedure = locked_alloc_fn, data = j} if j.use_lock else j.opts.allocator
+		slot := &j.slots[k]
+		c := j.chunks[k]
+		chunk_len := int(c.hi - c.lo)
+		init_cap := max(chunk_len * (2 if j.opts.fast_json == .Pretty2 else 1), 256)
+		slot.out_buf = make([dynamic]u8, 0, init_cap, lalloc)
+		slot.events.allocator = lalloc
+
+		chunk_ro := j.ro
+		chunk_ro.runner = nil
+		if j.lock_scratch {
+			chunk_ro.scratch = runtime.Allocator{procedure = locked_scratch_fn, data = j}
+		}
+		base_off := u64(0)
+		chunk_src := j.src[:c.hi]
+		if j.tf == .Seq && k > 0 {
+			base_off = c.lo - 1
+			chunk_src = j.src[base_off:c.hi]
+		}
+		lr := json.records_open(chunk_src, j.tf, j.jspec, chunk_ro)
+		defer tape.destroy_records(&lr)
+		lr.skip_bad = j.opts.skip_bad
+		lr.max_bytes = j.opts.max_bytes
+		if j.tf == .Lines && k > 0 {
+			lr.pos = c.lo
+			lr.at = .Open
+		}
+		if lr.err != nil {
+			err_v := adjust_chunk_err_offset(lr.err, base_off)
+			slot.err = .No_Memory if is_alloc_err(err_v) else .Read_Error
+			slot.read_err = err_v
+			return
+		}
+
+		wctx := j.opts.eval_ctx
+		has_wctx := false
+		defer if has_wctx && j.opts.workers.fini != nil {
+			j.opts.workers.fini(j.opts.eval_ctx, k, wctx)
+		}
+
+		ec := Rec_Emit_Ctx{slot = slot, coalesce = j.opts.coalesce_emit}
+		local_idx := u64(0)
+		out_recs: [RECORD_BATCH_SIZE]tape.Record = ---
+		docs: [RECORD_BATCH_SIZE]tape.Document = ---
+		for {
+			n := json.records_scan(&lr, j.dem, out_recs[:], docs[:], {}, lalloc)
+			if n == 0 {
+				break
+			}
+			for i in 0 ..< n {
+				r_info := adjust_chunk_rec_offset(out_recs[i], base_off)
+				if r_info.err != nil {
+					local_idx += 1
+					if !flush_rec_pending(&ec) {
+						return
+					}
+					if _, aerr := append(&slot.events, Coarse_Event{kind = .Bad_Record, rec = r_info}); aerr != nil {
+						slot.err = .No_Memory
+						slot.read_err = aerr
+						return
+					}
+					continue
+				}
+				raw := record_slice(j.src, r_info)
+				if can_fast_json_doc(j.dec, &docs[i], j.opts.fast_json, j.opts) {
+					off := len(slot.out_buf)
+					if append_fast_json_doc(&slot.out_buf, &docs[i], j.opts.fast_json, true) {
+						slot.records += 1
+						ec.pending_recs += 1
+						slot.emitted_items += 1
+						ec.pending_items += 1
+						local_idx += 1
+						if !ec.coalesce {
+							if _, aerr := append(&slot.events, Coarse_Event{
+								kind  = .Emit_Slice,
+								off   = off,
+								sz    = len(slot.out_buf) - off,
+								count = 1,
+								recs  = ec.pending_recs,
+							}); aerr != nil {
+								resize(&slot.out_buf, off)
+								slot.err = .No_Memory
+								slot.read_err = aerr
+								return
+							}
+							ec.flushed = len(slot.out_buf)
+							ec.pending_items = 0
+							ec.pending_recs = 0
+						}
+						continue
+					}
+				}
+				if !has_wctx {
+					if j.opts.workers.init != nil {
+						wctx = j.opts.workers.init(j.opts.eval_ctx, k, lalloc)
+					}
+					has_wctx = true
+				}
+				doc_val := docs[i]
+				if j.clear_partial && doc_val.partial != nil {
+					doc_val.partial = nil
+				}
+				rec_idx := slot.base_idx + local_idx
+				local_idx += 1
+				slot.records += 1
+				ec.pending_recs += 1
+				meta := make_record_meta(j.opts, rec_idx, r_info, raw)
+				eval_err := j.opts.eval(wctx, &doc_val, meta, Emitter{fn = rec_emit_fn, data = &ec})
+				if slot.err == .No_Memory {
+					return
+				}
+				if eval_err == .Tainted {
+					if slot.emitted_items > 0 {
+						if len(slot.events) > 0 && !flush_rec_pending(&ec) {
+							return
+						}
+						slot.err = .Tainted
+						slot.tainted = true
+						return
+					}
+					slot.records -= 1
+					ec.pending_recs -= 1
+					if !flush_rec_pending(&ec) {
+						return
+					}
+					if _, aerr := append(&slot.events, Coarse_Event{kind = .Tainted_Rec, rec = r_info, rec_idx = rec_idx}); aerr != nil {
+						slot.err = .No_Memory
+						slot.read_err = aerr
+						return
+					}
+					slot.tainted = true
+					return
+				}
+				if eval_err != .None {
+					if len(slot.events) > 0 && !flush_rec_pending(&ec) {
+						return
+					}
+					slot.err = eval_err
+					return
+				}
+			}
+		}
+		if len(slot.events) > 0 {
+			if !flush_rec_pending(&ec) {
+				return
+			}
+		}
+		if lr.err != nil {
+			err_v := adjust_chunk_err_offset(lr.err, base_off)
+			slot.err = .No_Memory if is_alloc_err(err_v) else .Read_Error
+			slot.read_err = err_v
+		}
+	}
+
+	tape.fan_each(ro.runner, nc, run_chunk, &job)
+
+	finish_serial_tail :: proc(dec: ^Decision, src: []u8, c: ops_build.Record_Chunk, start_pos: u64, tf: tape.Framing, ro: tape.Options, dem: ^tape.Demand, clear_partial: bool, opts: ^Exec_Options, res: ^Exec_Result) -> bool {
+		tail_ro := ro
+		tail_ro.runner = nil
+		base_off := u64(0)
+		chunk_src := src[:c.hi]
+		if tf == .Seq && start_pos > 0 {
+			// Advance forward to the next 0x1e record separator (skipping trailing newline/whitespace after a value's end).
+			p := start_pos
+			for p < c.hi && src[p] != 0x1e {
+				p += 1
+			}
+			if p >= c.hi {
+				return true
+			}
+			base_off = p
+			chunk_src = src[base_off:c.hi]
+		}
+		recs, open_err_res, open_ok := open_framed_records(chunk_src, dec.spec, tf, tail_ro, nil, opts)
+		if !open_ok {
+			merge_result(res, open_err_res)
+			return false
+		}
+		defer tape.destroy_records(recs)
+		if tf == .Lines && start_pos > recs.pos {
+			recs.pos = start_pos
+			recs.at = .Open
+		}
+		out_recs: [RECORD_BATCH_SIZE]tape.Record
+		docs: [RECORD_BATCH_SIZE]tape.Document
+		for {
+			n := tape.records_scan(recs, dem, out_recs[:], docs[:], {}, opts.allocator)
+			if n == 0 {
+				break
+			}
+			for i in 0 ..< n {
+				r_info := adjust_chunk_rec_offset(out_recs[i], base_off)
+				if r_info.err != nil {
+					if !handle_bad_record(opts, src, r_info, res) {
+						return false
+					}
+					continue
+				}
+				raw := record_slice(src, r_info)
+				rec_idx := res.records
+				res.records += 1
+				doc_ptr := &docs[i]
+				whole_doc: tape.Document
+				if clear_partial && doc_ptr.partial != nil {
+					whole_doc = doc_ptr^
+					whole_doc.partial = nil
+					doc_ptr = &whole_doc
+				}
+				meta := make_record_meta(opts, rec_idx, r_info, raw)
+				g := Guard_Emit{inner = opts.emit}
+				eval_err := opts.eval(opts.eval_ctx, doc_ptr, meta, Emitter{fn = guard_emit_fn, data = &g})
+				res.emitted += g.emitted
+				if eval_err == .Tainted {
+					if res.emitted == 0 && (opts.rerun_whole_on_taint || dec.rerun_safe) && can_build_single_record(dec, raw) {
+						sub := exec_single_record_whole(dec, raw, meta, opts)
+						res.emitted += sub.emitted
+						res.reran_whole = true
+						if sub.err != .None {
+							res.err = sub.err
+							res.read_err = sub.read_err
+							return false
+						}
+						continue
+					}
+					res.err = .Tainted
+					res.tainted = true
+					return false
+				}
+				if g.stopped && eval_err == .None {
+					eval_err = .Stopped
+				}
+				if eval_err != .None {
+					res.err = eval_err
+					return false
+				}
+			}
+		}
+		if recs.err != nil {
+			err_v := adjust_chunk_err_offset(recs.err, base_off)
+			res.err = .No_Memory if is_alloc_err(err_v) else .Read_Error
+			res.read_err = err_v
+			return false
+		}
+		return true
+	}
+
+	for &slot, k in slots {
+		if slot.err == .No_Memory {
+			res.err = .No_Memory
+			res.read_err = slot.read_err
+			return res, true
+		}
+		if len(slot.events) == 0 {
+			res.records += slot.records
+			if len(slot.out_buf) > 0 {
+				if !emit_bytes(opts.emit, slot.out_buf[:]) {
+					res.err = .Stopped
+					return res, true
+				}
+				res.emitted += slot.emitted_items
+			}
+			if slot.err != .None {
+				res.err = slot.err
+				res.read_err = slot.read_err
+				res.write_err = slot.write_err
+				return res, true
+			}
+			continue
+		}
+		tainted_reran := false
+		tainted_rec: tape.Record
+		for ev in slot.events {
+			switch ev.kind {
+			case .Emit_Slice:
+				res.records += ev.recs
+				if ev.sz > 0 {
+					if !emit_bytes(opts.emit, slot.out_buf[ev.off:][:ev.sz]) {
+						res.err = .Stopped
+						return res, true
+					}
+					res.emitted += ev.count
+				}
+			case .Ack_Recs:
+				res.records += ev.recs
+			case .Bad_Record:
+				if !handle_bad_record(opts, src, ev.rec, &res) {
+					return res, true
+				}
+			case .Tainted_Rec:
+				res.records += 1
+				raw := record_slice(src, ev.rec)
+				if res.emitted == 0 && (opts.rerun_whole_on_taint || dec.rerun_safe) && can_build_single_record(dec, raw) {
+					meta := make_record_meta(opts, ev.rec_idx, ev.rec, raw)
+					sub := exec_single_record_whole(dec, raw, meta, opts)
+					res.emitted += sub.emitted
+					res.reran_whole = true
+					if sub.err != .None {
+						res.err = sub.err
+						res.read_err = sub.read_err
+						return res, true
+					}
+					tainted_reran = true
+					tainted_rec = ev.rec
+				} else {
+					res.err = .Tainted
+					res.tainted = true
+					return res, true
+				}
+			}
+		}
+		if tainted_reran {
+			if tainted_rec.hi < chunks[k].hi {
+				if !finish_serial_tail(dec, src, chunks[k], tainted_rec.hi, tf, ro, dem, clear_partial, opts, &res) {
+					return res, true
+				}
+			}
+			continue
+		}
+		if slot.err != .None {
+			res.err = slot.err
+			res.read_err = slot.read_err
+			res.write_err = slot.write_err
+			return res, true
+		}
+	}
+	return res, true
+}
+
+@(private = "file")
+Spine_Quotes :: struct {
+	quoted: bool,
+	odd:    bool,
+	depth:  [2]int,
+	low:    [2]int,
+}
+
+@(private = "file", enable_target_feature = kernel.FEATURES[kernel.Tier(0)])
+spine_quote_run :: proc "contextless" (src: []u8) -> (res: Spine_Quotes) #no_bounds_check {
+	n := len(src)
+	if n == 0 {
+		return
+	}
+	odd := u64(0)
+	parity := u64(0)
+	d0, low0 := 0, 0
+	d1, low1 := 0, 0
+	for base := 0; base < n; base += 64 {
+		rem := min(64, n - base)
+		valid := ~u64(0) if rem == 64 else (u64(1) << uint(rem)) - 1
+		b := kernel.load_block(src, base)
+		esc := kernel.escaped(kernel.pack(kernel.eq(b, '\\')) & valid, &odd)
+		q := (kernel.pack(kernel.eq(b, '"')) & valid) &~ esc
+		in0 := kernel.prefix_xor(kernel.Tier(0), q) ~ parity
+		out0 := (~in0) & valid
+		out1 := in0 & valid
+		opens := (kernel.pack(kernel.eq(b, '[')) | kernel.pack(kernel.eq(b, '{'))) & valid
+		closes := (kernel.pack(kernel.eq(b, ']')) | kernel.pack(kernel.eq(b, '}'))) & valid
+		m0 := (opens | closes) & out0
+		for m0 != 0 {
+			bit := m0 & (~m0 + 1)
+			d0 += 1 if (opens & bit) != 0 else -1
+			if d0 < low0 {
+				low0 = d0
+			}
+			m0 &= m0 - 1
+		}
+		m1 := (opens | closes) & out1
+		for m1 != 0 {
+			bit := m1 & (~m1 + 1)
+			d1 += 1 if (opens & bit) != 0 else -1
+			if d1 < low1 {
+				low1 = d1
+			}
+			m1 &= m1 - 1
+		}
+		parity = ~u64(0) if ((in0 >> uint(rem - 1)) & 1) != 0 else 0
+	}
+	bs := 0
+	for k := n - 1; k >= 0 && src[k] == '\\'; k -= 1 {
+		bs += 1
+	}
+	res = {
+		quoted = parity != 0,
+		odd    = (bs & 1) != 0,
+		depth  = {d0, d1},
+		low    = {low0, low1},
+	}
+	return
+}
+
+@(private = "file", enable_target_feature = kernel.FEATURES[kernel.Tier(0)])
+spine_scan_commas :: proc "contextless" (src: []u8, entry_quoted: bool, entry_depth: int) -> (first_comma: int, trailing_commas: u64) #no_bounds_check {
+	first_comma = -1
+	n := len(src)
+	if n == 0 || entry_depth < 0 {
+		return
+	}
+	odd := u64(0)
+	parity := ~u64(0) if entry_quoted else u64(0)
+	depth := entry_depth
+	for base := 0; base < n; base += 64 {
+		rem := min(64, n - base)
+		valid := ~u64(0) if rem == 64 else (u64(1) << uint(rem)) - 1
+		b := kernel.load_block(src, base)
+		esc := kernel.escaped(kernel.pack(kernel.eq(b, '\\')) & valid, &odd)
+		q := (kernel.pack(kernel.eq(b, '"')) & valid) &~ esc
+		in_q := kernel.prefix_xor(kernel.Tier(0), q) ~ parity
+		out := (~in_q) & valid
+		opens := (kernel.pack(kernel.eq(b, '[')) | kernel.pack(kernel.eq(b, '{'))) & valid
+		closes := (kernel.pack(kernel.eq(b, ']')) | kernel.pack(kernel.eq(b, '}'))) & valid
+		commas := kernel.pack(kernel.eq(b, ',')) & valid
+		ev := (opens | closes | commas) & out
+		for ev != 0 {
+			idx := int(intrinsics.count_trailing_zeros(ev))
+			bit := u64(1) << uint(idx)
+			if (opens & bit) != 0 {
+				depth += 1
+			} else if (closes & bit) != 0 {
+				depth -= 1
+				if depth < 0 {
+					return
+				}
+			} else if depth == 0 {
+				if first_comma < 0 {
+					first_comma = base + idx
+				} else {
+					trailing_commas += 1
+				}
+			}
+			ev &= ev - 1
+		}
+		parity = ~u64(0) if ((in_q >> uint(rem - 1)) & 1) != 0 else 0
+	}
+	return
+}
+
+@(private = "file")
+Spine_Quote_Chunk :: struct {
+	lo, hi:          int,
+	q:               Spine_Quotes,
+	entry_quoted:    bool,
+	entry_depth:     int,
+	comma_rel:       int,
+	trailing_commas: u64,
+}
+
+@(private = "file")
+Spine_Part :: struct {
+	lo, hi:   int,
+	base_idx: u64,
+}
+
+// Finds closing bracket of the array in `sub` starting at `start_depth` and `start_quoted`.
+@(private = "file")
+find_spine_close :: proc "contextless" (sub: []u8, start_depth: int, start_quoted: bool) -> (rel: int, is_arr_close: bool) #no_bounds_check {
+	depth := start_depth
+	quoted := start_quoted
+	esc := false
+	for b, i in sub {
+		if esc {
+			esc = false
+			continue
+		}
+		if quoted {
+			if b == '\\' {
+				esc = true
+			} else if b == '"' {
+				quoted = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			quoted = true
+		case '[', '{':
+			depth += 1
+		case ']', '}':
+			depth -= 1
+			if depth < 0 {
+				return i, b == ']'
+			}
+		}
+	}
+	return -1, false
+}
+
+// Coarse 3-wave Hint 1 execution for strict JSON arrays:
+// Wave 1: `kernel.quote_run` scans ~16-64 KiB array chunks to locate `]`.
+// Wave 2: outer shell `json.validate` + `json.find(sp.prefix)` + `kernel.quote_cut` comma cuts.
+// Wave 3: each chunk parses/evaluates ALL its elements via one `json.records_open(.Elements)`
+// into ONE contiguous per-chunk output buffer, eliminating 578 barriers and 36k heap allocs.
+@(private = "file")
+exec_spine_coarse_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: ^Exec_Options) -> (res: Exec_Result, handled: bool) {
+	if dec.entry.id != .Json || opts.read.pieces != nil || opts.read.tolerate != {} || opts.read.budget != {} || opts.max_bytes != 0 || dec.keep_origins {
+		return {}, false
+	}
+	sp := &plan.hints.split
+	at, _, sok := json.spine(src, .Json, {dups = opts.read.dups, budget = opts.read.budget})
+	if !sok || int(at) + 1 >= len(src) {
+		return {}, false
+	}
+	inner := src[at + 1:]
+	n_inner := len(inner)
+	chunk_min := max(min(SPINE_PARALLEL_FROM / 16, 16384), 2048)
+	want := min((opts.runner.threads + 1) * 4, n_inner / chunk_min, ops_build.MAX_RECORD_CHUNKS)
+	if want < 2 {
+		return {}, false
+	}
+
+	qchunks: [ops_build.MAX_RECORD_CHUNKS]Spine_Quote_Chunk
+	qnc := 0
+	lo := 0
+	for k in 0 ..< want {
+		hi := n_inner if k == want - 1 else max(lo, n_inner * (k + 1) / want)
+		if hi < n_inner {
+			for hi < n_inner && hi > lo && inner[hi - 1] == '\\' {
+				hi += 1
+			}
+		}
+		if hi > lo {
+			qchunks[qnc] = {lo = lo, hi = hi}
+			qnc += 1
+			lo = hi
+		}
+		if lo >= n_inner {
+			break
+		}
+	}
+	if qnc < 2 {
+		return {}, false
+	}
+
+	Quote_Job :: struct {
+		inner:  []u8,
+		chunks: []Spine_Quote_Chunk,
+	}
+	run_q :: proc(arg: rawptr, k: int) {
+		j := (^Quote_Job)(arg)
+		c := &j.chunks[k]
+		c.q = spine_quote_run(j.inner[c.lo:c.hi])
+	}
+	qjob := Quote_Job{inner = inner, chunks = qchunks[:qnc]}
+	tape.fan_each(opts.runner, qnc, run_q, &qjob)
+
+	quoted := false
+	depth := 0
+	close_chunk := -1
+	for k in 0 ..< qnc {
+		c := &qchunks[k]
+		c.entry_quoted = quoted
+		c.entry_depth = depth
+		g := 1 if quoted else 0
+		if depth + c.q.low[g] < 0 {
+			close_chunk = k
+			break
+		}
+		depth += c.q.depth[g]
+		quoted = quoted != c.q.quoted
+		if k < qnc - 1 && c.q.odd {
+			return {}, false
+		}
+	}
+	if close_chunk < 0 {
+		return {}, false
+	}
+	cc := qchunks[close_chunk]
+	close_rel, is_arr_close := find_spine_close(inner[cc.lo:cc.hi], cc.entry_depth, cc.entry_quoted)
+	if close_rel < 0 || !is_arr_close {
+		return {}, false
+	}
+	close_inner_off := cc.lo + close_rel
+	abs_close := int(at + 1) + close_inner_off
+
+	shell_len := int(at) + 2 + len(src) - (abs_close + 1)
+	if shell_len > max(len(src) / 2, 1 << 20) {
+		return {}, false
+	}
+	shell, sh_err := make([]u8, shell_len, opts.allocator)
+	if sh_err != nil {
+		return {err = .No_Memory, read_err = sh_err}, true
+	}
+	defer delete(shell, opts.allocator)
+	copy(shell, src[:at])
+	shell[at] = '['
+	shell[at + 1] = ']'
+	copy(shell[at + 2:], src[abs_close + 1:])
+
+	v_opts := json.Options{dups = opts.read.dups, runner = opts.runner}
+	if json.validate(shell, .Json, v_opts) != nil {
+		return {}, false
+	}
+	ans, ferr := json.find(shell, sp.prefix, .Json, {stop_early = true}, v_opts, opts.allocator)
+	if ferr != nil || ans.outcome != .Found || ans.kind != .Array || ans.lo != at {
+		return {}, false
+	}
+
+	Comma_Job :: struct {
+		inner:           []u8,
+		chunks:          []Spine_Quote_Chunk,
+		close_chunk:     int,
+		close_inner_off: int,
+	}
+	run_comma :: proc(arg: rawptr, k: int) {
+		j := (^Comma_Job)(arg)
+		c := &j.chunks[k]
+		hi := j.close_inner_off if k == j.close_chunk else c.hi
+		if hi <= c.lo {
+			c.comma_rel = -1
+			c.trailing_commas = 0
+			return
+		}
+		c.comma_rel, c.trailing_commas = spine_scan_commas(j.inner[c.lo:hi], c.entry_quoted, c.entry_depth)
+	}
+	cjob := Comma_Job{inner = inner, chunks = qchunks[:close_chunk + 1], close_chunk = close_chunk, close_inner_off = close_inner_off}
+	tape.fan_each(opts.runner, close_chunk + 1, run_comma, &cjob)
+
+	parts: [ops_build.MAX_RECORD_CHUNKS + 1]Spine_Part
+	np := 0
+	prev := int(at) + 1
+	acc := u64(0)
+	pending_elem := u64(0)
+	for k in 0 ..= close_chunk {
+		crel := qchunks[k].comma_rel
+		if crel >= 0 {
+			cabs := int(at + 1) + qchunks[k].lo + crel
+			parts[np] = {lo = prev, hi = cabs, base_idx = acc}
+			acc += pending_elem + 1
+			np += 1
+			prev = cabs + 1
+			pending_elem = qchunks[k].trailing_commas
+		}
+	}
+	parts[np] = {lo = prev, hi = abs_close, base_idx = acc}
+	np += 1
+	if np < 2 {
+		return {}, false
+	}
+
+	use_partial := dec.entry.supports_scan && sp.each_demand.mode == .Partial
+	dem, dem_owned, derr := prepare_demand(&sp.each_demand if use_partial else nil, dec.keep_facts || !use_partial, opts.allocator)
+	if derr != nil {
+		return {err = .No_Memory, read_err = derr}, true
+	}
+	defer if dem_owned {
+		tape.destroy_demand(&dem)
+	}
+
+	slots, serr := make([]Coarse_Chunk_Slot, np, opts.allocator)
+	if serr != nil {
+		return {err = .No_Memory, read_err = serr}, true
+	}
+	defer {
+		for &s in slots {
+			coarse_chunk_slot_destroy(&s)
+		}
+		delete(slots, opts.allocator)
+	}
+
+	is_length := sp.kind == .Length && sp.has_each
+	is_collect := sp.kind == .Collect
+	collect_compact := is_collect && opts.spine_collect_compact && !sp.has_tail
+
+	Spine_Eval_Job :: struct {
+		dec:             ^Decision,
+		sp:              ^query.Per_Element_Split,
+		src:             []u8,
+		dem:             ^tape.Demand,
+		clear_partial:   bool,
+		opts:            ^Exec_Options,
+		parts:           []Spine_Part,
+		slots:           []Coarse_Chunk_Slot,
+		is_length:       bool,
+		is_collect:      bool,
+		collect_compact: bool,
+		use_lock:        bool,
+		alloc_lock:      sync.Mutex,
+	}
+
+	locked_alloc_fn :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_ptr: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
+		j := (^Spine_Eval_Job)(data)
+		sync.mutex_guard(&j.alloc_lock)
+		return j.opts.allocator.procedure(j.opts.allocator.data, mode, size, alignment, old_ptr, old_size, loc)
+	}
+
+	job := Spine_Eval_Job{
+		dec             = dec,
+		sp              = sp,
+		src             = src,
+		dem             = &dem,
+		clear_partial   = !use_partial,
+		opts            = opts,
+		parts           = parts[:np],
+		slots           = slots,
+		is_length       = is_length,
+		is_collect      = is_collect,
+		collect_compact = collect_compact,
+		use_lock        = !is_thread_safe_heap(opts.allocator),
+	}
+
+	Spine_Emit_Ctx :: struct {
+		slot:            ^Coarse_Chunk_Slot,
+		is_collect:      bool,
+		collect_compact: bool,
+		store_slices:    bool,
+	}
+
+	spine_chunk_emit_fn :: proc(data: rawptr, bytes: []u8) -> bool {
+		sc := (^Spine_Emit_Ctx)(data)
+		slot := sc.slot
+		if sc.is_collect {
+			trimmed := bytes[:len(bytes) - 1] if (sc.collect_compact && len(bytes) > 0 && bytes[len(bytes) - 1] == '\n') else bytes
+			if sc.collect_compact {
+				if slot.item_count > 0 {
+					if _, aerr := append(&slot.out_buf, ','); aerr != nil {
+						slot.err = .No_Memory
+						slot.read_err = aerr
+						return false
+					}
+				}
+				if _, aerr := append(&slot.out_buf, ..trimmed); aerr != nil {
+					slot.err = .No_Memory
+					slot.read_err = aerr
+					return false
+				}
+				slot.item_count += 1
+				slot.emitted_items += 1
+				return true
+			}
+			off := len(slot.out_buf)
+			if _, aerr := append(&slot.out_buf, ..bytes); aerr != nil {
+				slot.err = .No_Memory
+				slot.read_err = aerr
+				return false
+			}
+			if _, aerr := append(&slot.offs, off); aerr != nil {
+				slot.err = .No_Memory
+				slot.read_err = aerr
+				return false
+			}
+			if _, aerr := append(&slot.lens, len(bytes)); aerr != nil {
+				slot.err = .No_Memory
+				slot.read_err = aerr
+				return false
+			}
+			slot.emitted_items += 1
+			return true
+		}
+
+		off := len(slot.out_buf)
+		if _, aerr := append(&slot.out_buf, ..bytes); aerr != nil {
+			slot.err = .No_Memory
+			slot.read_err = aerr
+			return false
+		}
+		slot.emitted_items += 1
+		if sc.store_slices {
+			if _, aerr := append(&slot.offs, off); aerr != nil {
+				slot.err = .No_Memory
+				slot.read_err = aerr
+				return false
+			}
+			if _, aerr := append(&slot.lens, len(bytes)); aerr != nil {
+				slot.err = .No_Memory
+				slot.read_err = aerr
+				return false
+			}
+		}
+		return true
+	}
+
+	run_part :: proc(arg: rawptr, k: int) {
+		j := (^Spine_Eval_Job)(arg)
+		lalloc := runtime.Allocator{procedure = locked_alloc_fn, data = j} if j.use_lock else j.opts.allocator
+		slot := &j.slots[k]
+		p := j.parts[k]
+		plen := p.hi - p.lo
+		if !j.is_length {
+			cap_guess := max(plen * (2 if j.opts.fast_json_each == .Pretty2 else 1), 256)
+			slot.out_buf = make([dynamic]u8, 0, cap_guess, lalloc)
+		}
+		if (j.is_collect && !j.collect_compact) || (!j.is_length && !j.is_collect && !j.opts.coalesce_emit) {
+			slot.offs.allocator = lalloc
+			slot.lens.allocator = lalloc
+		}
+
+		wrapped, werr := make([]u8, plen + 2, lalloc)
+		if werr != nil {
+			slot.err = .No_Memory
+			slot.read_err = werr
+			return
+		}
+		defer delete(wrapped, lalloc)
+		wrapped[0] = '['
+		copy(wrapped[1:], j.src[p.lo:p.hi])
+		wrapped[len(wrapped) - 1] = ']'
+
+		chunk_ro := json.Options{dups = j.opts.read.dups}
+		lr := json.records_open(wrapped, .Elements, .Json, chunk_ro)
+		defer tape.destroy_records(&lr)
+		if lr.err != nil {
+			slot.read_err_fallback = true
+			return
+		}
+
+		wctx := j.opts.eval_each_ctx
+		has_wctx := false
+		defer if has_wctx && j.opts.workers.fini != nil {
+			j.opts.workers.fini(j.opts.eval_each_ctx, k, wctx)
+		}
+
+		sc := Spine_Emit_Ctx{
+			slot            = slot,
+			is_collect      = j.is_collect,
+			collect_compact = j.collect_compact,
+			store_slices    = !j.is_length && !j.is_collect && !j.opts.coalesce_emit,
+		}
+		local_idx := u64(0)
+		out_recs: [RECORD_BATCH_SIZE]tape.Record = ---
+		docs: [RECORD_BATCH_SIZE]tape.Document = ---
+		for {
+			n := json.records_scan(&lr, j.dem, out_recs[:], docs[:], {}, lalloc)
+			if n == 0 {
+				break
+			}
+			for i in 0 ..< n {
+				r_info := out_recs[i]
+				if r_info.err != nil {
+					slot.read_err_fallback = true
+					return
+				}
+				slot.records += 1
+				raw := record_slice(wrapped, r_info)
+				rec_idx := p.base_idx + local_idx
+				local_idx += 1
+
+				if j.is_length {
+					if !has_wctx {
+						if j.opts.workers.init != nil {
+							wctx = j.opts.workers.init(j.opts.eval_each_ctx, k, lalloc)
+						}
+						has_wctx = true
+					}
+					doc_val := docs[i]
+					if j.clear_partial && doc_val.partial != nil {
+						doc_val.partial = nil
+					}
+					meta := Record_Meta{
+						file_index   = j.opts.file_index,
+						file_path    = j.opts.file_path,
+						record_index = rec_idx,
+						lo           = u64(p.lo) + r_info.lo - 1,
+						hi           = u64(p.lo) + r_info.hi - 1,
+						raw_bytes    = raw,
+					}
+					cnt, cerr := j.opts.eval_each_count(wctx, &doc_val, meta)
+					if cerr != .None {
+						slot.err = cerr
+						slot.tainted ||= cerr == .Tainted
+						return
+					}
+					slot.item_count += cnt
+					continue
+				}
+
+				if !j.sp.has_each && can_fast_json_doc(j.dec, &docs[i], j.opts.fast_json_each, j.opts) {
+					off := len(slot.out_buf)
+					if j.collect_compact && slot.item_count > 0 {
+						append(&slot.out_buf, ',')
+					}
+					if append_fast_json_doc(&slot.out_buf, &docs[i], .Compact if j.is_collect else j.opts.fast_json_each, !j.is_collect) {
+						if j.collect_compact {
+							slot.item_count += 1
+							slot.emitted_items += 1
+						} else if j.is_collect {
+							if _, a1 := append(&slot.offs, off); a1 != nil {
+								slot.err = .No_Memory; slot.read_err = a1; return
+							}
+							if _, a2 := append(&slot.lens, len(slot.out_buf) - off); a2 != nil {
+								slot.err = .No_Memory; slot.read_err = a2; return
+							}
+							slot.emitted_items += 1
+						} else {
+							slot.emitted_items += 1
+							if sc.store_slices {
+								if _, a1 := append(&slot.offs, off); a1 != nil {
+									slot.err = .No_Memory; slot.read_err = a1; return
+								}
+								if _, a2 := append(&slot.lens, len(slot.out_buf) - off); a2 != nil {
+									slot.err = .No_Memory; slot.read_err = a2; return
+								}
+							}
+						}
+						continue
+					}
+					resize(&slot.out_buf, off)
+				}
+
+				if !has_wctx {
+					if j.opts.workers.init != nil {
+						wctx = j.opts.workers.init(j.opts.eval_each_ctx, k, lalloc)
+					}
+					has_wctx = true
+				}
+				doc_val := docs[i]
+				if j.clear_partial && doc_val.partial != nil {
+					doc_val.partial = nil
+				}
+				meta := Record_Meta{
+					file_index   = j.opts.file_index,
+					file_path    = j.opts.file_path,
+					record_index = rec_idx,
+					lo           = u64(p.lo) + r_info.lo - 1,
+					hi           = u64(p.lo) + r_info.hi - 1,
+					raw_bytes    = raw,
+				}
+				eval_err := j.opts.eval_each(wctx, &doc_val, meta, Emitter{fn = spine_chunk_emit_fn, data = &sc})
+				if slot.err == .No_Memory {
+					return
+				}
+				if eval_err == .Tainted {
+					slot.err = .Tainted
+					slot.tainted = true
+					return
+				}
+				if eval_err != .None {
+					slot.err = eval_err
+					return
+				}
+			}
+		}
+		if lr.err != nil || slot.records == 0 {
+			slot.read_err_fallback = true
+		}
+	}
+
+	tape.fan_each(opts.runner, np, run_part, &job)
+
+	for &slot in slots {
+		if slot.err == .No_Memory {
+			return {err = .No_Memory, read_err = slot.read_err}, true
+		}
+		if slot.read_err_fallback {
+			return {}, false
+		}
+	}
+
+	if is_length {
+		total_count := u64(0)
+		for &slot in slots {
+			res.records += slot.records
+			if slot.err != .None {
+				if slot.err == .Tainted && (opts.rerun_whole_on_taint || dec.rerun_safe) {
+					return spine_fallback_whole(dec, src, opts, reran = true), true
+				}
+				res.err = slot.err
+				res.tainted ||= slot.tainted
+				return res, true
+			}
+			total_count += slot.item_count
+		}
+		g := Guard_Emit{inner = opts.emit}
+		cerr := opts.emit_spine_length(opts.eval_ctx, total_count, Emitter{fn = guard_emit_fn, data = &g})
+		res.emitted += g.emitted
+		if g.stopped && cerr == .None {
+			cerr = .Stopped
+		}
+		res.err = cerr
+		return res, true
+	}
+
+	if is_collect {
+		total_items := 0
+		for &slot in slots {
+			res.records += slot.records
+			if slot.err != .None {
+				if slot.err == .Tainted && (opts.rerun_whole_on_taint || dec.rerun_safe) {
+					return spine_fallback_whole(dec, src, opts, reran = true), true
+				}
+				res.err = slot.err
+				res.tainted ||= slot.tainted
+				return res, true
+			}
+			if !collect_compact {
+				total_items += len(slot.offs)
+			}
+		}
+		if collect_compact {
+			open_b := [1]u8{'['}
+			if !emit_bytes(opts.emit, open_b[:]) {
+				res.err = .Stopped
+				return res, true
+			}
+			need_sep := false
+			comma_b := [1]u8{','}
+			for &slot in slots {
+				if slot.item_count == 0 {
+					continue
+				}
+				if need_sep {
+					if !emit_bytes(opts.emit, comma_b[:]) {
+						res.err = .Stopped
+						return res, true
+					}
+				}
+				if len(slot.out_buf) > 0 {
+					if !emit_bytes(opts.emit, slot.out_buf[:]) {
+						res.err = .Stopped
+						return res, true
+					}
+				}
+				need_sep = true
+			}
+			close_nl := [2]u8{']', '\n'}
+			if !emit_bytes(opts.emit, close_nl[:]) {
+				res.err = .Stopped
+				return res, true
+			}
+			res.emitted = 1
+			return res, true
+		}
+
+		item_outputs, io_err := make([][]u8, total_items, opts.allocator)
+		if io_err != nil {
+			res.err = .No_Memory
+			res.read_err = io_err
+			return res, true
+		}
+		defer delete(item_outputs, opts.allocator)
+		idx := 0
+		for &slot in slots {
+			for k in 0 ..< len(slot.offs) {
+				item_outputs[idx] = slot.out_buf[slot.offs[k]:][:slot.lens[k]]
+				idx += 1
+			}
+		}
+		doc_w: tape.Document
+		doc_ptr: ^tape.Document = nil
+		has_doc := false
+		if opts.spine_collect_needs_doc {
+			ro_w := build_tape_opts(opts, allow_parallel = false)
+			wdoc, werr := build(src, dec.spec, ro_w, opts.allocator)
+			if werr != nil {
+				res.err = .No_Memory if is_alloc_err(werr) else .Read_Error
+				res.read_err = werr
+				return res, true
+			}
+			doc_w = wdoc
+			has_doc = true
+			doc_ptr = &doc_w
+		}
+		defer if has_doc {
+			tape.destroy(&doc_w)
+		}
+		g := Guard_Emit{inner = opts.emit}
+		cerr := opts.spine_collect(opts.eval_ctx, doc_ptr, item_outputs, Emitter{fn = guard_emit_fn, data = &g})
+		res.emitted += g.emitted
+		if g.stopped && cerr == .None {
+			cerr = .Stopped
+		}
+		res.err = cerr
+		return res, true
+	}
+
+	// `.Stream`: emit chunks in deterministic order.
+	for &slot in slots {
+		res.records += slot.records
+		if opts.coalesce_emit {
+			if len(slot.out_buf) > 0 {
+				if !emit_bytes(opts.emit, slot.out_buf[:]) {
+					res.err = .Stopped
+					return res, true
+				}
+				res.emitted += slot.emitted_items
+			}
+		} else {
+			for k in 0 ..< len(slot.offs) {
+				if !emit_bytes(opts.emit, slot.out_buf[slot.offs[k]:][:slot.lens[k]]) {
+					res.err = .Stopped
+					return res, true
+				}
+				res.emitted += 1
+			}
+		}
+		if slot.err != .None {
+			if slot.err == .Tainted && res.emitted == 0 && (opts.rerun_whole_on_taint || dec.rerun_safe) {
+				return spine_fallback_whole(dec, src, opts, reran = true), true
+			}
+			res.err = slot.err
+			res.read_err = slot.read_err
+			res.write_err = slot.write_err
+			res.tainted ||= slot.tainted
+			return res, true
+		}
+	}
+	return res, true
 }

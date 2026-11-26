@@ -64,14 +64,27 @@ run_init :: proc(run: ^Run, prog: ^Program, h: ^query.Heap, globals: []query.Val
 
 // Runs the program on `input`, which it takes, each output to `out`, which takes it.
 run_value :: proc(run: ^Run, input: query.Value, out: Output, data: rawptr) -> Run_End {
+	_, end := run_exec(run, input, out, data, count_only = false)
+	return end
+}
+
+// Runs the program on `input`, which it takes, counting outputs without materializing or emitting them.
+run_count :: proc(run: ^Run, input: query.Value) -> (count: u64, end: Run_End) {
+	return run_exec(run, input, nil, nil, count_only = true)
+}
+
+@(private = "file")
+run_exec :: proc(run: ^Run, input: query.Value, out: Output, data: rawptr, count_only: bool) -> (count: u64, end: Run_End) {
 	m := &run.m
 	query.release(m.h, m.halt.value)
 	m.halt = {}
 	if m.h.tainted {
 		query.release(m.h, input)
-		return .Tainted
+		return 0, .Tainted
 	}
 	m.out, m.out_data = out, data
+	m.count_mode = count_only
+	m.out_count = 0
 	m.brk, m.through, m.over = nil, nil, false
 	m.steps = m.budget if m.budget > 0 else -1
 	m.track_origin = m.prog.uses_where || (m.hooks != nil && m.hooks.place != nil)
@@ -80,29 +93,32 @@ run_value :: proc(run: ^Run, input: query.Value, out: Output, data: rawptr) -> R
 		m.h.keep_origins = true
 		m.origin = query.retain(input) if query.has_doc_origin(input) else query.ABSENT
 	}
-	defer if m.track_origin {
-		query.release(m.h, m.origin)
-		m.origin = query.ABSENT
-		m.h.keep_origins = prev_keep
-		m.track_origin = false
+	defer {
+		m.count_mode = false
+		if m.track_origin {
+			query.release(m.h, m.origin)
+			m.origin = query.ABSENT
+			m.h.keep_origins = prev_keep
+			m.track_origin = false
+		}
 	}
 	sig := drive(m, m.prog.body, input, nil)
 	if m.h.tainted || sig == .Taint {
-		return .Tainted
+		return m.out_count, .Tainted
 	}
 	switch sig {
 	case .Go:
-		return .Done
+		return m.out_count, .Done
 	case .Fail:
-		return .Failed
+		return m.out_count, .Failed
 	case .Halt:
-		return .Failed if m.over else .Halted
+		return m.out_count, .Failed if m.over else .Halted
 	case .Break:
-		return .Stopped
+		return m.out_count, .Stopped
 	case .Taint:
-		return .Tainted
+		return m.out_count, .Tainted
 	}
-	return .Done
+	return m.out_count, .Done
 }
 
 // How `halt` or `halt_error` ended the last run: the exit code and halt_error's value, held by the run.

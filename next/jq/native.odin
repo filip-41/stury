@@ -846,8 +846,8 @@ native_call :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (re
 	// avoiding per-element 1-element wrapper array allocations.
 	unwrapped_keys := false
 	if b.fn == v_by && len(n.args) == 1 && query.type_of(input) == .Array {
-		if key_expr, ok := unwrap_by_key(n.args[0]); ok {
-			keys, kg, fell_back := eval_by_keys(m, input, key_expr, env)
+		if key_expr, key_env, ok := unwrap_by_key_env(n.args[0], env); ok {
+			keys, kg, fell_back := eval_by_keys(m, input, key_expr, key_env)
 			if !fell_back {
 				if kg != .Value {
 					query.release(h, input)
@@ -877,23 +877,24 @@ native_call :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (re
 	return v, got_of(s)
 }
 
-// Checks whether `arg` has the shape `[.[] | [f]]` (from `map([f])` in `group_by`/`sort_by`/...) with native `f`.
+// Checks whether `arg` has the shape `[.[] | [f]]` (from `map([f])` in `group_by`/`sort_by`/...) with native resolved `f`.
 @(private)
-unwrap_by_key :: proc(arg: ^Node) -> (key_expr: ^Node, ok: bool) {
+unwrap_by_key_env :: proc(arg: ^Node, env: ^Env) -> (key_expr: ^Node, key_env: ^Env, ok: bool) {
 	if arg == nil || arg.kind != .Array || arg.a == nil {
-		return nil, false
+		return nil, nil, false
 	}
 	t, f, is_map := map_parts(arg.a)
 	if !is_map || t.kind != .Identity || f == nil || f.kind != .Array || f.a == nil {
-		return nil, false
+		return nil, nil, false
 	}
-	if .Native not_in f.a.flags {
-		return nil, false
+	resolved, renv := closure_target(f.a, env)
+	if .Native not_in resolved.flags {
+		return nil, nil, false
 	}
-	if _, _, inner_map := map_parts(f.a); inner_map {
-		return nil, false
+	if _, _, inner_map := map_parts(resolved); inner_map {
+		return nil, nil, false
 	}
-	return f.a, true
+	return resolved, renv, true
 }
 
 // Evaluates `key_expr` once per element of array `input` directly into a flat keys array.

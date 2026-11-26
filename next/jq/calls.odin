@@ -42,6 +42,11 @@ eval_call :: proc(m: ^Machine, r: ^Regs) {
 		return
 	case .Def:
 		fn := n.callee
+		if fn.prelude && !r.track && (len(n.args) == 2 || len(n.args) == 3) && (fn.name == "gsub" || fn.name == "sub") {
+			if eval_sub_fast(m, r, fn, n) {
+				return
+			}
+		}
 		base := env_up(r.env, n.ref.hops)
 		if len(fn.params) == 0 {
 			e := env_retain(base)
@@ -69,6 +74,29 @@ eval_call :: proc(m: ^Machine, r: ^Regs) {
 		return
 	}
 	b := n.builtin
+	if b.fn == v_by && len(n.args) == 1 && !r.track && query.type_of(r.input) == .Array {
+		if key_expr, key_env, ok := unwrap_by_key_env(n.args[0], r.env); ok {
+			keys, kg, fell_back := eval_by_keys(m, r.input, key_expr, key_env)
+			if !fell_back {
+				if kg != .Value {
+					finish(m, r, fail_status(.Error if kg == .Failed else .Ok))
+					return
+				}
+				inp := r.input
+				if b.takes_input {
+					r.input = query.ABSENT
+				}
+				v, s := b.fn(m, b, inp, {keys})
+				query.release(m.h, keys)
+				if s != .Ok {
+					finish(m, r, .Fail)
+					return
+				}
+				value_out(m, r, v)
+				return
+			}
+		}
+	}
 	mask := value_args(b, len(n.args))
 	if mask == 0 {
 		start_builtin(m, r, n, nil)

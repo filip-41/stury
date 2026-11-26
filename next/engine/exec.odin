@@ -3,6 +3,7 @@ package engine
 import "base:runtime"
 import "stury:dsv"
 import "stury:json"
+import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 import "stury:lib/query"
@@ -56,9 +57,22 @@ Eval_Doc_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta,
 // Evaluates only a predicate over a partial document built from `pred_demand` (`Conditional_Whole`).
 Pred_Doc_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta) -> (matched: bool, err: Exec_Error)
 
+// Counts items emitted for one element sub-document in Hint 1 `.Length` (`[.prefix[] | each] | length`) without formatting outputs.
+Count_Doc_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta) -> (count: u64, err: Exec_Error)
+
+// Emits final integer count in Hint 1 `.Length` (`[.prefix[] | each] | length`) via caller's output configuration.
+Emit_Total_Proc :: #type proc(ctx: rawptr, total: u64, emit: Emitter) -> Exec_Error
+
 // Optional combiner callback for Hint 1 `.Collect` (`[.prefix[] | each] | tail`).
 // `doc` is nil unless `Exec_Options.spine_collect_needs_doc` is set.
 Spine_Collect_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, item_outputs: [][]u8, emit: Emitter) -> Exec_Error
+
+// Direct strict-JSON formatting fast path when caller outputs plain compact or 2-space pretty JSON for identity filters.
+Fast_Json_Mode :: enum u8 {
+	None,
+	Compact,
+	Pretty2,
+}
 
 // Bad-record notification callback during record iteration; return false to abort.
 Bad_Record_Proc :: #type proc(ctx: rawptr, bad: tape.Bad_Record) -> bool
@@ -87,6 +101,8 @@ Exec_Options :: struct {
 	eval_ctx:                rawptr,
 	eval_each:               Eval_Doc_Proc,      // element evaluator for Hint 1 (nil falls back to whole-doc `eval`)
 	eval_each_ctx:           rawptr,
+	eval_each_count:         Count_Doc_Proc,     // optional element counter for Hint 1 `.Length` with `has_each`
+	emit_spine_length:       Emit_Total_Proc,    // optional total count formatter for Hint 1 `.Length` with `has_each`
 	pred_eval:               Pred_Doc_Proc,      // optional predicate evaluator when `Simple_Compare` not used
 	pred_ctx:                rawptr,
 	spine_collect:           Spine_Collect_Proc, // optional tail combiner for Hint 1 `.Collect`
@@ -100,9 +116,14 @@ Exec_Options :: struct {
 	direct_csv_header:       bool,
 	skip_bad:                bool,
 	max_bytes:               u64,
-	rerun_whole_on_taint:    bool, // opt-in caller rerun ONLY when `emitted == 0`
-	eval_ctx_thread_safe:    bool, // set true only when non-nil `eval_ctx` is safe without `workers.init`
-	spine_collect_needs_doc: bool, // when true, `.Collect` parses root document to pass to `spine_collect`
+	fast_json:               Fast_Json_Mode, // fast strict-JSON serializer bypass for whole/record identity `.` outputs
+	fast_json_each:          Fast_Json_Mode, // fast strict-JSON serializer bypass for Hint 1 identity element streams
+	coalesce_emit:           bool,           // coalesce parallel chunk bytes into 1 emit call per chunk when safe
+	direct_append_nl:        bool,           // append `\n` inside `.Projection_Direct` JSON row buffer
+	spine_collect_compact:   bool,           // emit compact `[` + chunk items + `]\n` directly when `!sp.has_tail`
+	rerun_whole_on_taint:    bool,           // opt-in caller rerun ONLY when `emitted == 0`
+	eval_ctx_thread_safe:    bool,           // set true only when non-nil `eval_ctx` is safe without `workers.init`
+	spine_collect_needs_doc: bool,           // when true, `.Collect` parses root document to pass to `spine_collect`
 	file_index:              int,
 	file_path:               string,
 	allocator:               runtime.Allocator,
@@ -390,6 +411,254 @@ dsv_header_end_of :: proc "contextless" (dec: ^Decision, ro: tape.Options, recs:
 	return recs.pos
 }
 
+@(private = "file")
+Fast_Json_Frame :: struct {
+	end_idx:    int,
+	key_start:  int,
+	key_bloom:  u64,
+	is_obj:     bool,
+	need_comma: bool,
+	expect_val: bool,
+}
+
+@(private)
+is_thread_safe_heap :: proc(a: runtime.Allocator) -> bool {
+	return a.procedure == runtime.heap_allocator().procedure
+}
+
+@(private)
+has_custom_scratch :: proc(s: runtime.Allocator) -> bool {
+	return s.procedure != nil && s.procedure != runtime.heap_allocator().procedure
+}
+
+// Rejects raw JSON bytes containing `\/`, `\uXXXX`, or literal DEL (0x7F) where canonical jq
+// formatting normalizes or escapes differently from the authored source bytes.
+@(private)
+has_noncanonical_json_bytes :: proc "contextless" (b: []u8) -> bool {
+	if len(b) == 0 {
+		return false
+	}
+	if kernel.index_byte(b, 0x7f) >= 0 {
+		return true
+	}
+	pos := 0
+	for pos < len(b) {
+		rel := kernel.index_byte(b[pos:], '\\')
+		if rel < 0 {
+			return false
+		}
+		esc := pos + rel + 1
+		if esc >= len(b) {
+			return true
+		}
+		c := b[esc]
+		if c == 'u' || c == '/' {
+			return true
+		}
+		pos = esc + 1
+	}
+	return false
+}
+
+@(private)
+can_fast_json_doc :: proc "contextless" (dec: ^Decision, doc: ^tape.Document, mode: Fast_Json_Mode, opts: ^Exec_Options) -> bool {
+	if mode == .None || dec.entry.id != .Json {
+		return false
+	}
+	if opts.read.tolerate != {} || opts.read.budget != {} || opts.max_bytes != 0 || opts.read.dups == .All {
+		return false
+	}
+	if dec.keep_facts || dec.keep_origins || doc.format == nil {
+		return false
+	}
+	if doc.flags & {.Tolerated, .Held, .Stopped, .Cut} != {} || len(doc.nodes) == 0 {
+		return false
+	}
+	root := doc.nodes[0]
+	if root.role != .Value || int(root.n) != len(doc.nodes) {
+		return false
+	}
+	lo := root.lo
+	if root.kind == .String && lo > 0 {
+		lo -= 1
+	}
+	if doc.root_close > u64(len(doc.src)) || lo > doc.root_close {
+		return false
+	}
+	return !has_noncanonical_json_bytes(doc.src[lo:doc.root_close])
+}
+
+// Directly serializes a strict canonical JSON document (`Compact` or `Pretty2`) into `buf`
+// without `query.Heap` conversion. Returns false (restoring `len(buf)`) on partial/dup edge cases.
+@(private)
+append_fast_json_doc :: proc(buf: ^[dynamic]u8, doc: ^tape.Document, mode: Fast_Json_Mode, append_nl: bool) -> bool #no_bounds_check {
+	if mode == .None || len(doc.nodes) == 0 {
+		return false
+	}
+	saved := len(buf)
+	est := int(doc.root_close - doc.nodes[0].lo) + (len(doc.nodes) * 4 if mode == .Pretty2 else 8)
+	if aerr := reserve(buf, saved + max(est, 16)); aerr != nil {
+		resize(buf, saved)
+		return false
+	}
+	check_dups := doc.partial != nil
+	frames: [64]Fast_Json_Frame = ---
+	depth := 0
+	obj_keys: [64]tape.Node = ---
+	key_count := 0
+
+	append_spaces :: #force_inline proc(out: ^[dynamic]u8, n: int) {
+		if n <= 0 {
+			return
+		}
+		spaces := "                                                                "
+		rem := n
+		for rem > len(spaces) {
+			append(out, spaces)
+			rem -= len(spaces)
+		}
+		append(out, spaces[:rem])
+	}
+
+	nodes := doc.nodes
+	src := doc.src
+	pretty := mode == .Pretty2
+	for idx := 0; idx < len(nodes); idx += 1 {
+		for depth > 0 && idx >= frames[depth - 1].end_idx {
+			depth -= 1
+			f := &frames[depth]
+			if check_dups && f.is_obj {
+				key_count = f.key_start
+			}
+			if pretty {
+				append(buf, '\n')
+				append_spaces(buf, depth * 2)
+			}
+			append(buf, '}' if f.is_obj else ']')
+		}
+		if depth > 0 {
+			top := &frames[depth - 1]
+			if top.expect_val {
+				top.expect_val = false
+			} else {
+				if top.need_comma {
+					append(buf, ',')
+				}
+				top.need_comma = true
+				if pretty {
+					append(buf, '\n')
+					append_spaces(buf, depth * 2)
+				}
+			}
+		}
+
+		t := nodes[idx]
+		if t.role == .Key {
+			if depth <= 0 || !frames[depth - 1].is_obj {
+				resize(buf, saved)
+				return false
+			}
+			top := &frames[depth - 1]
+			if check_dups {
+				if key_count >= len(obj_keys) {
+					resize(buf, saved)
+					return false
+				}
+				h := u32(t.n) * 0x9e3779b1
+				if t.n > 0 {
+					h ~= u32(src[t.lo]) * 0x85ebca6b ~ u32(src[t.lo + u64(t.n) - 1]) * 0xc2b2ae35
+				}
+				bit := u64(1) << (h & 63)
+				if top.key_bloom & bit != 0 {
+					kraw := src[t.lo:][:t.n]
+					for k in obj_keys[top.key_start:key_count] {
+						if k.n == t.n && (t.n == 0 || runtime.memory_compare(raw_data(src[k.lo:]), raw_data(kraw), int(t.n)) == 0) {
+							resize(buf, saved)
+							return false
+						}
+					}
+				}
+				top.key_bloom |= bit
+				obj_keys[key_count] = t
+				key_count += 1
+			}
+			append(buf, '"')
+			append(buf, ..src[t.lo:][:t.n])
+			append(buf, "\": " if pretty else "\":")
+			top.expect_val = true
+			continue
+		}
+		if t.role != .Value {
+			resize(buf, saved)
+			return false
+		}
+		#partial switch t.kind {
+		case .Null:
+			append(buf, "null")
+		case .False:
+			append(buf, "false")
+		case .True:
+			append(buf, "true")
+		case .Number:
+			append(buf, ..src[t.lo:][:t.n])
+		case .String:
+			append(buf, '"')
+			append(buf, ..src[t.lo:][:t.n])
+			append(buf, '"')
+		case .Array, .Object:
+			if t.spelling & tape.CONTAINER_PARTIAL != 0 {
+				resize(buf, saved)
+				return false
+			}
+			is_obj := t.kind == .Object
+			if t.n <= 1 {
+				append(buf, "{}" if is_obj else "[]")
+			} else {
+				if depth >= len(frames) {
+					resize(buf, saved)
+					return false
+				}
+				append(buf, '{' if is_obj else '[')
+				frames[depth] = {
+					end_idx   = idx + int(t.n),
+					key_start = key_count,
+					is_obj    = is_obj,
+				}
+				depth += 1
+			}
+		case:
+			resize(buf, saved)
+			return false
+		}
+	}
+	for depth > 0 {
+		depth -= 1
+		f := &frames[depth]
+		if pretty {
+			append(buf, '\n')
+			append_spaces(buf, depth * 2)
+		}
+		append(buf, '}' if f.is_obj else ']')
+	}
+	if append_nl {
+		append(buf, '\n')
+	}
+	return true
+}
+
+@(private)
+emit_fast_json_doc :: proc(doc: ^tape.Document, mode: Fast_Json_Mode, emit: Emitter, alloc: runtime.Allocator) -> (res: Exec_Result, ok: bool) {
+	buf := make([dynamic]u8, 0, max(int(doc.root_close - doc.nodes[0].lo) + 16, 64), alloc)
+	defer delete(buf)
+	if !append_fast_json_doc(&buf, doc, mode, true) {
+		return {}, false
+	}
+	if !emit_bytes(emit, buf[:]) {
+		return {err = .Stopped}, true
+	}
+	return {emitted = 1}, true
+}
+
 @(private)
 exec_whole :: proc(dec: ^Decision, src: []u8, opts: ^Exec_Options) -> Exec_Result {
 	ro := build_tape_opts(opts, allow_parallel = true)
@@ -402,6 +671,11 @@ exec_whole :: proc(dec: ^Decision, src: []u8, opts: ^Exec_Options) -> Exec_Resul
 	meta := Record_Meta{file_index = opts.file_index, file_path = opts.file_path, lo = 0, hi = u64(len(src)), raw_bytes = src}
 	if opts.eval == nil {
 		return exec_emit_default_doc(&doc, opts.emit, opts.allocator)
+	}
+	if can_fast_json_doc(dec, &doc, opts.fast_json, opts) {
+		if fres, ok := emit_fast_json_doc(&doc, opts.fast_json, opts.emit, opts.allocator); ok {
+			return fres
+		}
 	}
 	g := Guard_Emit{inner = opts.emit}
 	e := opts.eval(opts.eval_ctx, &doc, meta, Emitter{fn = guard_emit_fn, data = &g})
@@ -489,6 +763,21 @@ exec_records :: proc(
 		tape.destroy_demand(&dem)
 	}
 
+	if parallel &&
+		ro.runner != nil &&
+		ro.runner.threads > 0 &&
+		dec.entry.family == .Json &&
+		(tf == .Lines || tf == .Seq) &&
+		ro.pieces == nil &&
+		(plan == nil || plan.serial == {}) &&
+		opts.eval != nil &&
+		can_parallel_eval(opts.workers.init != nil, opts.eval_ctx, true, opts.eval_ctx_thread_safe) &&
+		len(src) >= max(RECORDS_PARALLEL_FROM, 4096) {
+		if cres, handled := exec_records_coarse_parallel(dec, src, tf, ro, &dem, !use_partial, opts); handled {
+			return cres
+		}
+	}
+
 	recs, open_err_res, open_ok := open_framed_records(src, dec.spec, tf, ro, nil, opts)
 	if !open_ok {
 		return open_err_res
@@ -498,6 +787,8 @@ exec_records :: proc(
 	dsv_header_end := dsv_header_end_of(dec, ro, recs)
 	dsv_row_buf := make([dynamic]u8, opts.allocator)
 	defer delete(dsv_row_buf)
+	fast_buf := make([dynamic]u8, opts.allocator)
+	defer delete(fast_buf)
 
 	out_recs: [RECORD_BATCH_SIZE]tape.Record
 	docs: [RECORD_BATCH_SIZE]tape.Document
@@ -549,6 +840,17 @@ exec_records :: proc(
 					return res
 				}
 				continue
+			}
+			if can_fast_json_doc(dec, doc_ptr, opts.fast_json, opts) {
+				clear(&fast_buf)
+				if append_fast_json_doc(&fast_buf, doc_ptr, opts.fast_json, true) {
+					if !emit_bytes(opts.emit, fast_buf[:]) {
+						res.err = .Stopped
+						return res
+					}
+					res.emitted += 1
+					continue
+				}
 			}
 			g := Guard_Emit{inner = opts.emit}
 			eval_err := opts.eval(opts.eval_ctx, doc_ptr, meta, Emitter{fn = guard_emit_fn, data = &g})

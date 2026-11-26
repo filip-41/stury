@@ -954,3 +954,325 @@ exec_files_parallel_order_and_errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(lb_bad.lines), 1)
 	testing.expect_value(t, lb_bad.lines[0], `["ok",1]`)
 }
+
+@(test)
+exec_coarse_parallel_paths_parity :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	pool: host.Pool
+	testing.expect(t, host.pool_init(&pool, 4) == nil)
+	defer host.pool_destroy(&pool)
+	runner := &pool.runner
+
+	Raw_Accum :: struct {
+		sb: strings.Builder,
+	}
+	raw_emit :: proc(data: rawptr, bytes: []u8) -> bool {
+		a := (^Raw_Accum)(data)
+		strings.write_bytes(&a.sb, bytes)
+		return true
+	}
+
+	min_bytes := max(int(engine.RECORDS_PARALLEL_FROM), int(engine.SPINE_PARALLEL_FROM), 32 * 1024)
+
+	// 1. `exec_direct_coarse_parallel` on large NDJSON (`.Emit_Slice`, `.Wrong_Kind` fallback via `null`, and error parity).
+	{
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		for idx := 0; strings.builder_len(sb) < min_bytes || idx < 400; idx += 1 {
+			if idx == 150 {
+				strings.write_string(&sb, "{\"v\":null,\"pad\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}\n")
+			} else {
+				fmt.sbprintf(&sb, "{{\"v\":{{\"x\":%d}},\"pad\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}\n", idx)
+			}
+		}
+		nd := transmute([]u8)strings.to_string(sb)
+
+		r_par, d_par, l_par := run_jq_engine(
+			t,
+			`.v.x`,
+			json.Spec.Json,
+			.Lines,
+			nd,
+			{runner = runner, input_bytes = len(nd)},
+			{runner = runner, coalesce_emit = true, direct_append_nl = true},
+		)
+		defer destroy_lines(&l_par)
+		testing.expect_value(t, d_par.kind, engine.Route_Kind.Projection_Direct)
+		testing.expect(t, d_par.parallel)
+		testing.expect_value(t, r_par.err, engine.Exec_Error.None)
+
+		r_ser, _, l_ser := run_jq_engine(t, `.v.x`, json.Spec.Json, .Lines, nd)
+		defer destroy_lines(&l_ser)
+		testing.expect_value(t, r_ser.err, engine.Exec_Error.None)
+
+		par_cat := strings.concatenate(l_par.lines[:])
+		defer delete(par_cat)
+		ser_cat := make_joined_lines(l_ser.lines[:])
+		defer delete(ser_cat)
+		testing.expect_value(t, par_cat, ser_cat)
+
+		// Non-object `.v` (number `1`) also preserves `.Failed` parity between coarse parallel and serial.
+		sb_bad := strings.builder_make()
+		defer strings.builder_destroy(&sb_bad)
+		for idx := 0; strings.builder_len(sb_bad) < min_bytes || idx < 400; idx += 1 {
+			if idx == 150 {
+				strings.write_string(&sb_bad, "{\"v\":1,\"pad\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}\n")
+			} else {
+				fmt.sbprintf(&sb_bad, "{{\"v\":{{\"x\":%d}},\"pad\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}\n", idx)
+			}
+		}
+		nd_bad := transmute([]u8)strings.to_string(sb_bad)
+		rp_b, _, lp_b := run_jq_engine(t, `.v.x`, json.Spec.Json, .Lines, nd_bad, {runner = runner, input_bytes = len(nd_bad)}, {runner = runner, coalesce_emit = true, direct_append_nl = true})
+		defer destroy_lines(&lp_b)
+		rs_b, _, ls_b := run_jq_engine(t, `.v.x`, json.Spec.Json, .Lines, nd_bad)
+		defer destroy_lines(&ls_b)
+		testing.expect_value(t, rp_b.err, engine.Exec_Error.Failed)
+		testing.expect_value(t, rs_b.err, engine.Exec_Error.Failed)
+	}
+
+	// 2. `exec_records_coarse_parallel` on large NDJSON (`.Compact` fast_json + general evaluator + non-canonical fallback).
+	{
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		for idx := 0; strings.builder_len(sb) < min_bytes || idx < 400; idx += 1 {
+			if idx == 77 {
+				strings.write_string(&sb, "{\"s\":\"a\\/b\\u0041\",\"n\":77}\n")
+			} else {
+				fmt.sbprintf(&sb, "{{\"s\":\"row_%d_payload_0123456789abcdef\",\"n\":%d}}\n", idx, idx)
+			}
+		}
+		nd := transmute([]u8)strings.to_string(sb)
+
+		prog, perrs := jq.compile(`.`)
+		testing.expect_value(t, len(perrs), 0)
+		defer jq.destroy_program(prog)
+		plan := jq.analyze(prog)
+		defer jq.destroy_plan(&plan)
+
+		st: Jq_Eval_State
+		eval_state_init(&st, prog, false)
+		defer eval_state_destroy(&st)
+
+		dec_par := engine.decide(&plan.contract, json.Spec.Json, .Lines, {runner = runner, input_bytes = len(nd)})
+		testing.expect_value(t, dec_par.kind, engine.Route_Kind.Records_Parallel)
+
+		acc_par := Raw_Accum{sb = strings.builder_make()}
+		defer strings.builder_destroy(&acc_par.sb)
+		res_par := engine.execute(&plan.contract, &dec_par, nd, {
+			eval          = jq_doc_eval_nl,
+			eval_ctx      = &st,
+			workers       = {init = worker_eval_init, fini = worker_eval_fini},
+			runner        = runner,
+			fast_json     = .Compact,
+			coalesce_emit = true,
+			emit          = {fn = raw_emit, data = &acc_par},
+		})
+		testing.expect_value(t, res_par.err, engine.Exec_Error.None)
+
+		dec_ser := engine.decide(&plan.contract, json.Spec.Json, .Lines)
+		acc_ser := Raw_Accum{sb = strings.builder_make()}
+		defer strings.builder_destroy(&acc_ser.sb)
+		res_ser := engine.execute(&plan.contract, &dec_ser, nd, {
+			eval     = jq_doc_eval_nl,
+			eval_ctx = &st,
+			emit     = {fn = raw_emit, data = &acc_ser},
+		})
+		testing.expect_value(t, res_ser.err, engine.Exec_Error.None)
+		testing.expect_value(t, strings.to_string(acc_par.sb), strings.to_string(acc_ser.sb))
+	}
+
+	// 3. `exec_spine_coarse_parallel`: `.Stream` (quoted string crossing chunk boundary + `.Pretty2`), `.Collect` compact, and `.Length` with `eval_each_count`.
+	{
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		strings.write_string(&sb, `{"items":[`)
+		for idx := 0; strings.builder_len(sb) < min_bytes || idx < 450; idx += 1 {
+			if idx > 0 {
+				strings.write_byte(&sb, ',')
+			}
+			fmt.sbprintf(&sb, "{{\"id\":%d,\"msg\":\"alpha beta gamma_%d\"}}", idx, idx)
+		}
+		// Add a trailing long quoted string right before closing `]` so `close_chunk.entry_quoted == true` can occur.
+		strings.write_string(&sb, `,{"id":999999,"msg":"`)
+		for _ in 0 ..< 4096 {
+			strings.write_byte(&sb, 'q')
+		}
+		strings.write_string(&sb, `"}]}`)
+		doc_bytes := transmute([]u8)strings.to_string(sb)
+
+		// 3a. `.Stream` `.Compact` identity (`fast_json_each = .Compact` + `coalesce_emit`)
+		{
+			p_full, _ := jq.compile(`.items[]`)
+			defer jq.destroy_program(p_full)
+			pl := jq.analyze(p_full, {materialize_each = true})
+			defer jq.destroy_plan(&pl)
+			p_id, _ := jq.compile(`.`)
+			defer jq.destroy_program(p_id)
+
+			st_full, st_each: Jq_Eval_State
+			eval_state_init(&st_full, p_full, false)
+			defer eval_state_destroy(&st_full)
+			eval_state_init(&st_each, p_id, false)
+			defer eval_state_destroy(&st_each)
+
+			dec := engine.decide(&pl.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(doc_bytes)})
+			testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
+
+			acc_s := Raw_Accum{sb = strings.builder_make()}
+			defer strings.builder_destroy(&acc_s.sb)
+			r_s := engine.execute(&pl.contract, &dec, doc_bytes, {
+				eval           = jq_doc_eval_nl,
+				eval_ctx       = &st_full,
+				eval_each      = jq_doc_eval_nl,
+				eval_each_ctx  = &st_each,
+				workers        = {init = worker_eval_init, fini = worker_eval_fini},
+				runner         = runner,
+				fast_json_each = .Compact,
+				coalesce_emit  = true,
+				emit           = {fn = raw_emit, data = &acc_s},
+			})
+			testing.expect_value(t, r_s.err, engine.Exec_Error.None)
+
+			_, _, l_w := run_jq_engine(t, `.items[]`, json.Spec.Json, .Single, doc_bytes, {force_whole = true})
+			defer destroy_lines(&l_w)
+			want_s := make_joined_lines(l_w.lines[:])
+			defer delete(want_s)
+			testing.expect_value(t, strings.to_string(acc_s.sb), want_s)
+		}
+
+		// 3b. `.Collect` compact (`[.items[] | {id}]` -> `spine_collect_compact = true`)
+		{
+			p_full, _ := jq.compile(`.items | map({id})`)
+			defer jq.destroy_program(p_full)
+			pl := jq.analyze(p_full, {materialize_each = true})
+			defer jq.destroy_plan(&pl)
+
+			p_each := p_full^
+			p_each.body = pl.each_body
+
+			st_full, st_each: Jq_Eval_State
+			eval_state_init(&st_full, p_full, false)
+			defer eval_state_destroy(&st_full)
+			eval_state_init(&st_each, &p_each, false)
+			defer eval_state_destroy(&st_each)
+
+			dec := engine.decide(&pl.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(doc_bytes)})
+			testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
+
+			acc_c := Raw_Accum{sb = strings.builder_make()}
+			defer strings.builder_destroy(&acc_c.sb)
+			r_c := engine.execute(&pl.contract, &dec, doc_bytes, {
+				eval                  = jq_doc_eval_nl,
+				eval_ctx              = &st_full,
+				eval_each             = jq_doc_eval,
+				eval_each_ctx         = &st_each,
+				workers               = {init = worker_eval_init, fini = worker_eval_fini},
+				runner                = runner,
+				spine_collect_compact = true,
+				emit                  = {fn = raw_emit, data = &acc_c},
+			})
+			testing.expect_value(t, r_c.err, engine.Exec_Error.None)
+
+			_, _, l_w := run_jq_engine(t, `.items | map({id})`, json.Spec.Json, .Single, doc_bytes, {force_whole = true})
+			defer destroy_lines(&l_w)
+			want := fmt.aprintf("%s\n", l_w.lines[0])
+			defer delete(want)
+			testing.expect_value(t, strings.to_string(acc_c.sb), want)
+		}
+
+		// 3c. `.Length` with `eval_each_count` + `emit_spine_length`
+		{
+			p_full, _ := jq.compile(`[.items[].msg | splits(" +")] | length`)
+			defer jq.destroy_program(p_full)
+			pl := jq.analyze(p_full, {materialize_each = true})
+			defer jq.destroy_plan(&pl)
+
+			p_each := p_full^
+			p_each.body = pl.each_body
+
+			st_full, st_each: Jq_Eval_State
+			eval_state_init(&st_full, p_full, false)
+			defer eval_state_destroy(&st_full)
+			eval_state_init(&st_each, &p_each, false)
+			defer eval_state_destroy(&st_each)
+
+			dec := engine.decide(&pl.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(doc_bytes)})
+			testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
+
+			count_each :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta) -> (u64, engine.Exec_Error) {
+				_ = meta
+				st := (^Jq_Eval_State)(ctx)
+				st.h.tainted = false
+				query.clear_error(&st.h)
+				inp, s := query.document_value(&st.h, doc^, owned = false)
+				if s != .Ok {
+					return 0, .Failed
+				}
+				c, end := jq.run_count(&st.run, inp)
+				if st.h.tainted || end == .Tainted {
+					return 0, .Tainted
+				}
+				if end != .Done {
+					return 0, .Failed
+				}
+				return c, .None
+			}
+			emit_total :: proc(ctx: rawptr, total: u64, emit: engine.Emitter) -> engine.Exec_Error {
+				_ = ctx
+				buf: [32]u8
+				s := fmt.bprintf(buf[:], "%d", total)
+				return .None if engine.emit_bytes(emit, transmute([]u8)s) else .Stopped
+			}
+
+			lb_cnt := Lines_Buf{alloc = context.allocator}
+			defer destroy_lines(&lb_cnt)
+			r_cnt := engine.execute(&pl.contract, &dec, doc_bytes, {
+				eval              = jq_doc_eval,
+				eval_ctx          = &st_full,
+				eval_each         = jq_doc_eval,
+				eval_each_ctx     = &st_each,
+				eval_each_count   = count_each,
+				emit_spine_length = emit_total,
+				workers           = {init = worker_eval_init, fini = worker_eval_fini},
+				runner            = runner,
+				emit              = {fn = lines_emit, data = &lb_cnt},
+			})
+			testing.expect_value(t, r_cnt.err, engine.Exec_Error.None)
+
+			_, _, lb_w := run_jq_engine(t, `[.items[].msg | splits(" +")] | length`, json.Spec.Json, .Single, doc_bytes, {force_whole = true})
+			defer destroy_lines(&lb_w)
+			testing.expect_value(t, len(lb_cnt.lines), 1)
+			testing.expect_value(t, lb_cnt.lines[0], lb_w.lines[0])
+		}
+	}
+}
+
+@(private = "file")
+make_joined_lines :: proc(lines: []string) -> string {
+	sb := strings.builder_make()
+	defer strings.builder_destroy(&sb)
+	for l in lines {
+		strings.write_string(&sb, l)
+		strings.write_byte(&sb, '\n')
+	}
+	return strings.clone(strings.to_string(sb))
+}
+
+@(private = "file")
+jq_doc_eval_nl :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
+	Emit_NL :: struct {
+		inner: engine.Emitter,
+		buf:   [dynamic]u8,
+	}
+	nl_fn :: proc(d: rawptr, bytes: []u8) -> bool {
+		en := (^Emit_NL)(d)
+		clear(&en.buf)
+		append(&en.buf, ..bytes)
+		append(&en.buf, '\n')
+		return engine.emit_bytes(en.inner, en.buf[:])
+	}
+	en := Emit_NL{inner = emit, buf = make([dynamic]u8, 0, 128, context.allocator)}
+	defer delete(en.buf)
+	return jq_doc_eval(ctx, doc, meta, engine.Emitter{fn = nl_fn, data = &en})
+}
