@@ -295,6 +295,27 @@ locked_alloc_fn :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignm
 	return sh.alloc.procedure(sh.alloc.data, mode, size, alignment, old_ptr, old_size, loc)
 }
 
+@(private = "file")
+format_arg_parse_err :: proc(label: string, src: []u8, err: tape.Error, alloc: runtime.Allocator) -> string {
+	sb := strings.builder_make(alloc)
+	if err != nil {
+		err_buf: [512]u8
+		snip_buf: [1024]u8
+		at, msg, snip, has_place := tape_error_parts(src, err, engine.spec_of_id(.Json), &err_buf, &snip_buf)
+		if has_place && len(src) > 0 {
+			pl := tape.offset_place(src, nil, at)
+			fmt.sbprintf(&sb, "%s (%d:%d: %s)", label, pl.line, pl.col, msg)
+			if snip != "" {
+				strings.write_byte(&sb, '\n')
+				strings.write_string(&sb, strings.trim_right(snip, "\n"))
+			}
+			return strings.to_string(sb)
+		}
+	}
+	strings.write_string(&sb, label)
+	return strings.to_string(sb)
+}
+
 shared_jq_init :: proc(
 	o: ^Options,
 	cfg: ^Render_Config,
@@ -385,11 +406,14 @@ shared_jq_init :: proc(
 		case .Arg:
 			pv.raw_text = vs.raw
 		case .Arg_Json:
-			doc, derr := engine.build(transmute([]u8)vs.raw, engine.spec_of_id(.Json), {budget = o.budget}, alloc)
+			raw_b := transmute([]u8)vs.raw
+			doc, derr := engine.build(raw_b, engine.spec_of_id(.Json), {budget = o.budget}, alloc)
 			if derr != nil {
 				sh.vars[i] = pv
 				shared_jq_destroy(sh)
-				return nil, fmt.aprintf("invalid JSON text passed to --argjson: %s", vs.raw, allocator = alloc)
+				lbl := fmt.aprintf("invalid JSON text passed to --argjson: %s", vs.raw, allocator = alloc)
+				defer delete(lbl, alloc)
+				return nil, format_arg_parse_err(lbl, raw_b, derr, alloc)
 			}
 			pv.doc = doc
 			pv.has_doc = true
@@ -414,26 +438,38 @@ shared_jq_init :: proc(
 			docs := make([dynamic]tape.Document, alloc)
 			it, ok := rec_loop_open(data, engine.spec_of_id(.Json), .Concatenated, {budget = o.budget}, false, vs.raw, io.Writer{}, alloc)
 			if !ok {
+				open_e := it.open_err
 				delete(docs)
 				sh.vars[i] = pv
+				lbl := fmt.aprintf("parse error in --slurpfile %s", vs.raw, allocator = alloc)
+				defer delete(lbl, alloc)
+				msg := format_arg_parse_err(lbl, data, open_e, alloc)
 				shared_jq_destroy(sh)
-				return nil, fmt.aprintf("parse error in --slurpfile %s", vs.raw, allocator = alloc)
+				return nil, msg
 			}
 			bad_slurp := false
+			bad_err: tape.Error
+			bad_src: []u8 = data
 			for rec, _, rec_err in rec_loop_next(&it) {
 				if rec_err != nil {
 					bad_slurp = true
+					bad_err = rec_err
+					bad_src = data
 					break
 				}
 				doc, berr := engine.build(rec, engine.spec_of_id(.Json), {budget = o.budget}, alloc)
 				if berr != nil {
 					bad_slurp = true
+					bad_err = berr
+					bad_src = rec
 					break
 				}
 				append(&docs, doc)
 			}
 			if !bad_slurp && it.tail_err != nil {
 				bad_slurp = true
+				bad_err = it.tail_err
+				bad_src = data
 			}
 			rec_loop_close(&it)
 			if bad_slurp {
@@ -442,8 +478,11 @@ shared_jq_init :: proc(
 				}
 				delete(docs)
 				sh.vars[i] = pv
+				lbl := fmt.aprintf("parse error in --slurpfile %s", vs.raw, allocator = alloc)
+				defer delete(lbl, alloc)
+				msg := format_arg_parse_err(lbl, bad_src, bad_err, alloc)
 				shared_jq_destroy(sh)
-				return nil, fmt.aprintf("parse error in --slurpfile %s", vs.raw, allocator = alloc)
+				return nil, msg
 			}
 			pv.slurp_docs = docs[:]
 		}
@@ -454,11 +493,14 @@ shared_jq_init :: proc(
 	for ps, i in o.positional {
 		pp := Preloaded_Pos{raw_text = ps.raw, is_json = ps.is_json}
 		if ps.is_json {
-			doc, derr := engine.build(transmute([]u8)ps.raw, engine.spec_of_id(.Json), {budget = o.budget}, alloc)
+			raw_b := transmute([]u8)ps.raw
+			doc, derr := engine.build(raw_b, engine.spec_of_id(.Json), {budget = o.budget}, alloc)
 			if derr != nil {
 				sh.pos[i] = pp
 				shared_jq_destroy(sh)
-				return nil, fmt.aprintf("invalid JSON for --jsonargs: %s", ps.raw, allocator = alloc)
+				lbl := fmt.aprintf("invalid JSON for --jsonargs: %s", ps.raw, allocator = alloc)
+				defer delete(lbl, alloc)
+				return nil, format_arg_parse_err(lbl, raw_b, derr, alloc)
 			}
 			pp.doc = doc
 			pp.has_doc = true
@@ -1528,7 +1570,29 @@ hook_next_input :: proc(hc: ^Hook_Ctx, h: ^query.Heap) -> (query.Value, bool, qu
 						continue
 					}
 					if berr != nil {
-						_ = print_tape_error(hc.stderr_w, hc.file_path, berr, rec, hc.cur_spec)
+						adj_err := berr
+						hdr_len := u64(len(hc.dsv_header))
+						use_row_place := true
+						if f, is_f := adj_err.(tape.Fault); is_f && f.at != tape.NO_BYTE {
+							if f.at >= hdr_len {
+								f.at -= hdr_len
+								adj_err = f
+							} else {
+								use_row_place = false
+							}
+						} else if ex, is_ex := adj_err.(tape.Exceeded); is_ex && ex.at != tape.NO_BYTE {
+							if ex.at >= hdr_len {
+								ex.at -= hdr_len
+								adj_err = ex
+							} else {
+								use_row_place = false
+							}
+						}
+						if use_row_place {
+							_ = print_tape_error(hc.stderr_w, hc.file_path, adj_err, rec, hc.cur_spec, false, hc.file_buf, rinfo.lo)
+						} else {
+							_ = print_tape_error(hc.stderr_w, hc.file_path, berr, hc.dsv_header, hc.cur_spec, false, hc.file_buf, 0)
+						}
 					}
 					hook_ctx_close_file(hc)
 					return query.NULL, true, .Error
@@ -1558,7 +1622,6 @@ hook_next_input :: proc(hc: ^Hook_Ctx, h: ^query.Heap) -> (query.Value, bool, qu
 				}
 				return elem, true, .Ok
 			}
-			_ = rinfo
 			rec_copy := slice.clone(rec, hc.alloc)
 			dv, berr, mem_ok := build_doc_val(h, rec_copy, hc.cur_spec, ro, hc.alloc, owns_src = true)
 			if berr != nil || !mem_ok {
@@ -1569,7 +1632,7 @@ hook_next_input :: proc(hc: ^Hook_Ctx, h: ^query.Heap) -> (query.Value, bool, qu
 					continue
 				}
 				if berr != nil {
-					_ = print_tape_error(hc.stderr_w, hc.file_path, berr, rec, hc.cur_spec)
+					_ = print_tape_error(hc.stderr_w, hc.file_path, berr, rec, hc.cur_spec, false, hc.file_buf, rinfo.lo)
 				}
 				hook_ctx_close_file(hc)
 				return query.NULL, true, .Error
@@ -1712,10 +1775,25 @@ compile_jq_cmd :: proc(
 	p, errs := jq.compile(filter_text, {variables = var_names[:], modules = mods}, alloc)
 	if len(errs) > 0 {
 		jq.destroy_program(p)
+		snip_buf: [1024]u8
 		for e in errs {
-			m := jq.locate(e, alloc)
-			fmt.wprintf(stderr_w, "jq: error: %s\n", m)
-			delete(m, alloc)
+			if e.kind == .Located && len(e.src) > 0 {
+				esrc := transmute([]u8)e.src
+				off := u64(max(e.loc.start, 0))
+				pl := tape.offset_place(esrc, nil, off)
+				fl := e.file if e.file != "" else (ft if (has_f && o.from_file) else "<top-level>")
+				if snip, has_snip := tape.error_snippet(snip_buf[:], esrc, off); has_snip {
+					fmt.wprintf(stderr_w, "jq: error: %s:%d:%d: %s\n%s", fl, pl.line, pl.col, e.msg, snip)
+				} else {
+					fmt.wprintf(stderr_w, "jq: error: %s:%d:%d: %s\n", fl, pl.line, pl.col, e.msg)
+				}
+			} else if e.kind == .Raw {
+				fmt.wprintf(stderr_w, "%s\n", e.msg)
+			} else {
+				m := jq.locate(e, alloc)
+				fmt.wprintf(stderr_w, "jq: error: %s\n", m)
+				delete(m, alloc)
+			}
 		}
 		fmt.wprintf(stderr_w, "jq: %d compile error%s\n", len(errs), "" if len(errs) == 1 else "s")
 		return nil, origin_dir, false, EXIT_COMPILE
@@ -1947,9 +2025,10 @@ exec_jq_on_bytes :: proc(
 	fidx: int,
 	total_files: int,
 	bad_ctx: ^Quarantine_Bad_Ctx,
+	pin: ^Plan_Pin_State,
 	stderr_w: io.Writer,
 	alloc: runtime.Allocator,
-) -> engine.Exec_Result {
+) -> (res: engine.Exec_Result, pin_code: int) {
 	ro := read_opts_of(o, sp, runner)
 	worker.file_name = disp
 	worker.hook_ctx = {
@@ -1977,6 +2056,35 @@ exec_jq_on_bytes :: proc(
 	if dec.kind == .Projection_Direct && cfg.to_tabular && worker.tw != nil && worker.tw.stream.headed {
 		fallback_non_direct_route(&dec, o, cfg, plan, runner, len(b))
 	}
+	can_fallback_concat := eff_fr == .Single && dec.entry.id == .Json
+	pin_active := pin != nil && (pin.has_expected || pin.out_path != "")
+	pin_applied := false
+	if pin_active && !can_fallback_concat {
+		if pcode := plan_pin_apply(pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+			return {}, pcode
+		}
+		pin_applied = true
+	} else if pin_active && pin.has_expected && !engine.compare_plan_pin(pin.expected, engine.plan_pin_of(&dec)) {
+		// Pre-check whether `.Concatenated` fallback could match; if not (or `b` is a valid single doc), fail before emitting.
+		cand2 := engine.decide(plan, sp, .Concatenated, {
+			runner            = runner,
+			where_mode        = o.where_mode,
+			dups              = o.dups,
+			file_count        = 1,
+			input_bytes       = len(b),
+			allow_rerun_whole = true,
+			serial_eval_ctx   = cfg.one_doc || cfg.to_tabular,
+		})
+		if cand2.kind == .Projection_Direct && (projection_direct_blocked(o, cfg, total_files) || (cfg.to_tabular && worker.tw != nil && worker.tw.stream.headed)) {
+			fallback_non_direct_route(&cand2, o, cfg, plan, runner, len(b))
+		}
+		if !engine.compare_plan_pin(pin.expected, engine.plan_pin_of(&cand2)) || engine.validate(b, sp, ro, alloc) == nil {
+			if pcode := plan_pin_apply(pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+				return {}, pcode
+			}
+			pin_applied = true
+		}
+	}
 	use_direct := dec.kind == .Projection_Direct
 	if use_direct && cfg.to_tabular && worker.tw != nil && total_files == 1 && !worker.tw.stream.headed {
 		_ = finish_tab_writer(worker.tw, osink, stderr_w, alloc)
@@ -1984,7 +2092,7 @@ exec_jq_on_bytes :: proc(
 	}
 	if !use_direct && cfg.to_tabular {
 		if !ensure_jq_tab_writer(o, cfg, worker, osink, alloc) {
-			return {err = .Write_Error}
+			return {err = .Write_Error}, EXIT_OK
 		}
 	}
 	is_seq := eff_fr == .Seq
@@ -2044,7 +2152,7 @@ exec_jq_on_bytes :: proc(
 		file_path            = disp,
 		allocator            = sh.locked_alloc,
 	}
-	res := engine.execute(plan, &dec, b, eopts)
+	res = engine.execute(plan, &dec, b, eopts)
 	sh.direct_tab_active = false
 	sh.direct_tab.suppress_next_hdr = false
 	// Rare fallback: single large `.Json` tried `.Single` for `.Spine_Parallel`/direct cleanly falls back to `.Concatenated` ONLY if trailing tokens exist.
@@ -2063,10 +2171,16 @@ exec_jq_on_bytes :: proc(
 				if dec2.kind == .Projection_Direct && (projection_direct_blocked(o, cfg, total_files) || (cfg.to_tabular && worker.tw != nil && worker.tw.stream.headed)) {
 					fallback_non_direct_route(&dec2, o, cfg, plan, runner, len(b))
 				}
+				if pin_active {
+					if pcode := plan_pin_apply(pin, &dec2, stderr_w, alloc); pcode != EXIT_OK {
+						return {}, pcode
+					}
+					pin_applied = true
+				}
 				use_direct2 := dec2.kind == .Projection_Direct
 				if !use_direct2 && cfg.to_tabular {
 					if !ensure_jq_tab_writer(o, cfg, worker, osink, alloc) {
-						return {err = .Write_Error}
+						return {err = .Write_Error}, EXIT_OK
 					}
 				}
 				eopts2 := eopts
@@ -2087,7 +2201,12 @@ exec_jq_on_bytes :: proc(
 			}
 		}
 	}
-	return res
+	if pin_active && !pin_applied {
+		if pcode := plan_pin_apply(pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+			return {}, pcode
+		}
+	}
+	return res, EXIT_OK
 }
 
 @(private = "file")
@@ -2099,6 +2218,7 @@ stream_stdin_delim :: proc(
 	osink: ^Out_Stream,
 	emit: engine.Emitter,
 	qw: ^Quarantine_Writer,
+	pin: ^Plan_Pin_State,
 	stderr_w: io.Writer,
 	alloc: runtime.Allocator,
 ) -> (handled: bool, had_bad: bool, exit_code: int) {
@@ -2121,8 +2241,22 @@ stream_stdin_delim :: proc(
 	}
 	defer byte_stream_close(&bs)
 
-	if o.explain {
-		_, _ = decide_file_route(o, cfg, plan, sp, fr, 0, nil, 1, false, false, stderr_w, alloc)
+	if o.explain || o.plan_out != "" || o.plan_file != "" {
+		dec := engine.decide(plan, sp, fr, {dups = o.dups, where_mode = o.where_mode})
+		// `stream_stdin_delim` always builds each delimited record whole and evaluates serially.
+		dec.kind = .Records_Serial
+		dec.active_hint = .None
+		dec.parallel = false
+		dec.demand_mode = .Whole
+		dec.primary_why = .Records_Framing
+		dec.whys += {.Records_Framing}
+		dec.whys -= {.Projection_Direct_Hit, .Conditional_Whole_Hit}
+		if o.explain {
+			explain_decision(stderr_w, plan, &dec, alloc)
+		}
+		if pcode := plan_pin_apply(pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+			return true, false, pcode
+		}
 	}
 	delim := u8(0x1e) if fr == .Seq else '\n'
 	span_buf := make([dynamic]u8, 0, 1024, alloc)
@@ -2185,7 +2319,12 @@ stream_stdin_delim :: proc(
 				tape.destroy_document(&doc)
 				f := tape.Fault{at = u64(len(span)), kind = .Bad_Number}
 				if stderr_w.procedure != nil {
-					fmt.wprintf(stderr_w, "stury: ignoring parse error: <stdin>:%d:%d: Potentially truncated top-level numeric value\n", line_base + count_newlines(span), len(span) + 1)
+					snip_buf: [1024]u8
+					if snip, has_snip := tape.error_snippet(snip_buf[:], span, u64(len(span))); has_snip {
+						fmt.wprintf(stderr_w, "stury: ignoring parse error: <stdin>:%d:%d: Potentially truncated top-level numeric value\n%s", line_base + count_newlines(span), len(span) + 1, snip)
+					} else {
+						fmt.wprintf(stderr_w, "stury: ignoring parse error: <stdin>:%d:%d: Potentially truncated top-level numeric value\n", line_base + count_newlines(span), len(span) + 1)
+					}
 				}
 				if qw != nil && qw.active {
 					_ = quarantine_write_bad(qw, rec_no, "<stdin>", f, span, sp, alloc)
@@ -2342,6 +2481,12 @@ run_jq_query :: proc(
 	sh.serial_worker = worker
 	defer free_jq_worker(worker)
 
+	pin: Plan_Pin_State
+	if !plan_pin_init(&pin, o, stderr_w, alloc) {
+		return EXIT_USAGE
+	}
+	defer plan_pin_destroy(&pin)
+
 	qw: Quarantine_Writer
 	if o.quarantine != "" {
 		if !quarantine_open(&qw, o.quarantine, stderr_w, alloc) {
@@ -2359,7 +2504,7 @@ run_jq_query :: proc(
 	exit_code := EXIT_OK
 
 	if o.each {
-		exit_code = run_jq_each_files(o, cfg, &plan.contract, sh, worker, &osink, emit, &qw, paths, stdin_override, runner, stderr_w, alloc)
+		exit_code = run_jq_each_files(o, cfg, &plan.contract, sh, worker, &osink, emit, &qw, &pin, paths, stdin_override, runner, stderr_w, alloc)
 		if osink.failed {
 			return report_out_stream_error(&osink, stderr_w)
 		}
@@ -2391,9 +2536,14 @@ run_jq_query :: proc(
 			hook_ctx_close(&worker.hook_ctx)
 			worker.hook_ctx.paths = nil
 		}
-		if o.explain {
+		if o.explain || o.plan_out != "" || o.plan_file != "" {
 			dec := engine.decide(&plan.contract, o.from_spec, .Single, {null_input = true, runner = runner, dups = o.dups, where_mode = o.where_mode})
-			explain_decision(stderr_w, &plan.contract, &dec, alloc)
+			if o.explain {
+				explain_decision(stderr_w, &plan.contract, &dec, alloc)
+			}
+			if pcode := plan_pin_apply(&pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+				return pcode
+			}
 		}
 		worker.file_name = "<null>"
 		ee := run_prog_on_value(worker, &worker.run, query.NULL, {file_path = "<null>"}, emit, cfg, true)
@@ -2415,7 +2565,7 @@ run_jq_query :: proc(
 	}
 
 	if o.raw_input || o.slurp || o.stream {
-		exit_code = run_jq_special(o, cfg, &plan.contract, sh, worker, &osink, emit, &qw, paths, stdin_override, runner, stderr_w, alloc)
+		exit_code = run_jq_special(o, cfg, &plan.contract, sh, worker, &osink, emit, &qw, &pin, paths, stdin_override, runner, stderr_w, alloc)
 		if worker.tw != nil {
 			tcode := finish_tab_writer(worker.tw, &osink, stderr_w, alloc)
 			worker.tw = nil
@@ -2434,7 +2584,7 @@ run_jq_query :: proc(
 
 	// Fast path: chunked streaming of NDJSON / `.Seq` directly from live stdin pipe!
 	if len(paths) == 1 && paths[0] == "-" && stdin_override == nil {
-		handled, bad_s, scode := stream_stdin_delim(o, cfg, &plan.contract, worker, &osink, emit, &qw, stderr_w, alloc)
+		handled, bad_s, scode := stream_stdin_delim(o, cfg, &plan.contract, worker, &osink, emit, &qw, &pin, stderr_w, alloc)
 		if handled {
 			if worker.tw != nil {
 				tcode := finish_tab_writer(worker.tw, &osink, stderr_w, alloc)
@@ -2516,8 +2666,11 @@ run_jq_query :: proc(
 				}
 				delete(finputs, alloc)
 			}
-			if o.explain {
-				_, _ = decide_file_route(o, cfg, &plan.contract, finputs[0].spec, finputs[0].framing, len(finputs[0].src), runner, len(finputs), sh.each_prog != nil, sh.pred_prog != nil, stderr_w, alloc)
+			if o.explain || o.plan_out != "" || o.plan_file != "" {
+				fdec, _ := decide_file_route(o, cfg, &plan.contract, finputs[0].spec, finputs[0].framing, len(finputs[0].src), runner, len(finputs), sh.each_prog != nil, sh.pred_prog != nil, stderr_w, alloc)
+				if pcode := plan_pin_apply(&pin, &fdec, stderr_w, alloc); pcode != EXIT_OK {
+					return pcode
+				}
 			}
 			ro := read_opts_of(o, finputs[0].spec, runner)
 			use_direct_par := plan.contract.hints.projection.shape != .None && !cfg.to_non_json && !cfg.join && !cfg.raw0
@@ -2584,7 +2737,7 @@ run_jq_query :: proc(
 		}
 		disp := "<stdin>" if p == "-" else p
 		sp, fr := detect_file_spec(o, p)
-		res := exec_jq_on_bytes(
+		res, pin_code := exec_jq_on_bytes(
 			o,
 			cfg,
 			&plan.contract,
@@ -2601,9 +2754,23 @@ run_jq_query :: proc(
 			fidx,
 			len(paths),
 			&bad_ctx,
+			&pin,
 			stderr_w,
 			alloc,
 		)
+		if pin_code != EXIT_OK {
+			if owned {
+				delete(b, alloc)
+			}
+			if worker.tw != nil {
+				_ = finish_tab_writer(worker.tw, &osink, stderr_w, alloc)
+				worker.tw = nil
+			}
+			if osink.failed || !out_stream_flush(&osink) {
+				return report_out_stream_error(&osink, stderr_w)
+			}
+			return EXIT_USAGE if has_open_err else pin_code
+		}
 		if res.bad_records > 0 && o.skip_bad {
 			had_bad = true
 		}
@@ -2696,6 +2863,7 @@ run_jq_each_files :: proc(
 	osink: ^Out_Stream,
 	emit: engine.Emitter,
 	qw: ^Quarantine_Writer,
+	pin: ^Plan_Pin_State,
 	paths: []string,
 	stdin_override: Maybe([]u8),
 	runner: ^tape.Runner,
@@ -2738,6 +2906,21 @@ run_jq_each_files :: proc(
 				stderr_w       = stderr_w,
 				alloc          = sh.locked_alloc,
 			}
+			if o.explain || o.plan_out != "" || o.plan_file != "" {
+				dec := engine.decide(plan, o.from_spec, .Single, {null_input = true, runner = runner, dups = o.dups, where_mode = o.where_mode})
+				if o.explain {
+					explain_decision(stderr_w, plan, &dec, alloc)
+				}
+				if pcode := plan_pin_apply(pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+					hook_ctx_close(&worker.hook_ctx)
+					worker.hook_ctx.paths = nil
+					if worker.tw != nil {
+						_ = finish_tab_writer(worker.tw, osink, stderr_w, alloc)
+						worker.tw = nil
+					}
+					return EXIT_USAGE if has_open_err else pcode
+				}
+			}
 			worker.file_name = "<null>"
 			ee := run_prog_on_value(worker, &worker.run, query.NULL, {file_path = "<null>"}, emit, cfg, true)
 			merge_worker_outcome(sh, worker, {}, ee, true)
@@ -2755,7 +2938,7 @@ run_jq_each_files :: proc(
 				return fcode
 			}
 		} else if o.raw_input || o.slurp || o.stream {
-			fcode = run_jq_special(o, cfg, plan, sh, worker, osink, emit, qw, single_path[:], stdin_override, runner, stderr_w, alloc)
+			fcode = run_jq_special(o, cfg, plan, sh, worker, osink, emit, qw, pin, single_path[:], stdin_override, runner, stderr_w, alloc)
 			if fcode == EXIT_USAGE {
 				has_open_err = true
 			}
@@ -2772,7 +2955,17 @@ run_jq_each_files :: proc(
 			disp := "<stdin>" if p == "-" else p
 			sp, fr := detect_file_spec(o, p)
 			bad_ctx: Quarantine_Bad_Ctx
-			res := exec_jq_on_bytes(o, cfg, plan, sh, worker, osink, emit, qw, runner, b, disp, sp, fr, 0, 1, &bad_ctx, stderr_w, alloc)
+			res, pcode := exec_jq_on_bytes(o, cfg, plan, sh, worker, osink, emit, qw, runner, b, disp, sp, fr, 0, 1, &bad_ctx, pin, stderr_w, alloc)
+			if pcode != EXIT_OK {
+				if owned {
+					delete(b, alloc)
+				}
+				if worker.tw != nil {
+					_ = finish_tab_writer(worker.tw, osink, stderr_w, alloc)
+					worker.tw = nil
+				}
+				return EXIT_USAGE if has_open_err else pcode
+			}
 			fcode = handle_shared_result(o, sh, worker, res, disp, b, sp, stderr_w, alloc)
 			if owned {
 				delete(b, alloc)
@@ -2841,6 +3034,7 @@ run_jq_special :: proc(
 	osink: ^Out_Stream,
 	emit: engine.Emitter,
 	qw: ^Quarantine_Writer,
+	pin: ^Plan_Pin_State,
 	paths: []string,
 	stdin_override: Maybe([]u8),
 	runner: ^tape.Runner,
@@ -2850,10 +3044,15 @@ run_jq_special :: proc(
 	if !ensure_jq_tab_writer(o, cfg, w, osink, alloc) {
 		return EXIT_RUNTIME
 	}
-	if o.explain {
+	if o.explain || o.plan_out != "" || o.plan_file != "" {
 		sp, fr := detect_file_spec(o, paths[0] if len(paths) > 0 else "-")
 		dec := engine.decide(plan, sp, fr, {runner = runner, slurp = o.slurp, raw_input = o.raw_input, dups = o.dups, where_mode = o.where_mode})
-		explain_decision(stderr_w, plan, &dec, alloc)
+		if o.explain {
+			explain_decision(stderr_w, plan, &dec, alloc)
+		}
+		if pcode := plan_pin_apply(pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+			return pcode
+		}
 	}
 	if o.raw_input {
 		if o.slurp {
@@ -3021,7 +3220,7 @@ run_jq_special :: proc(
 		}
 
 		rec_idx := i64(0)
-		for rec, _, rerr in rec_loop_next(&it) {
+		for rec, rinfo, rerr in rec_loop_next(&it) {
 			rec_idx += 1
 			if rerr != nil {
 				if serr_mode {
@@ -3035,7 +3234,7 @@ run_jq_special :: proc(
 					}
 					_ = print_tape_error(stderr_w, disp, rerr, b, sp, ignoring = true)
 					if qw != nil && qw.active {
-						_ = quarantine_write_bad(qw, rec_idx, disp, rerr, rec, sp, alloc)
+						_ = quarantine_write_bad(qw, rec_idx, disp, rerr, rec, sp, alloc, b)
 					}
 					continue
 				}
@@ -3053,7 +3252,7 @@ run_jq_special :: proc(
 				if owned {
 					delete(b, alloc)
 				}
-				return print_tape_error(stderr_w, disp, berr, rec, sp) if berr != nil else EXIT_RUNTIME
+				return print_tape_error(stderr_w, disp, berr, rec, sp, false, b, rinfo.lo) if berr != nil else EXIT_RUNTIME
 			}
 			if !o.stream {
 				_ = query.append_owned(&w.h, &arr, dv)
@@ -3501,12 +3700,27 @@ run_jsonpath_query :: proc(
 	pool: ^host.Pool,
 	alloc: runtime.Allocator,
 ) -> int {
-	prog, cerr := jsonpath.compile(o.filter.? or_else "$", {max_depth = int(o.budget.depth)}, alloc)
+	jp_src := o.filter.? or_else "$"
+	prog, cerr := jsonpath.compile(jp_src, {max_depth = int(o.budget.depth)}, alloc)
 	defer jsonpath.destroy_program(prog)
 	if cerr.kind != .None {
-		fmt.wprintf(stderr_w, "stury: jsonpath error at %d: %s\n", cerr.offset, cerr.message)
+		jp_bytes := transmute([]u8)jp_src
+		off := u64(max(cerr.offset, 0))
+		pl := tape.offset_place(jp_bytes, nil, off)
+		snip_buf: [1024]u8
+		if snip, has_snip := tape.error_snippet(snip_buf[:], jp_bytes, off); has_snip {
+			fmt.wprintf(stderr_w, "stury: jsonpath error: <jsonpath>:%d:%d: %s\n%s", pl.line, pl.col, cerr.message, snip)
+		} else {
+			fmt.wprintf(stderr_w, "stury: jsonpath error: <jsonpath>:%d:%d: %s\n", pl.line, pl.col, cerr.message)
+		}
 		return EXIT_COMPILE
 	}
+
+	pin: Plan_Pin_State
+	if !plan_pin_init(&pin, o, stderr_w, alloc) {
+		return EXIT_USAGE
+	}
+	defer plan_pin_destroy(&pin)
 
 	osink: Out_Stream
 	out_stream_init(&osink, stdout_w, o.unbuffered, cfg.color)
@@ -3590,6 +3804,54 @@ run_jsonpath_query :: proc(
 		if dec.kind == .Projection_Direct && cfg.to_tabular && worker.tw != nil && worker.tw.stream.headed {
 			fallback_non_direct_route(&dec, o, cfg, &prog.plan, runner, len(b))
 		}
+		can_fallback_concat := eff_fr == .Single && dec.entry.id == .Json
+		pin_active := pin.has_expected || pin.out_path != ""
+		pin_applied := false
+		if pin_active && !can_fallback_concat {
+			if pcode := plan_pin_apply(&pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+				if owned {
+					delete(b, alloc)
+				}
+				if worker.tw != nil {
+					_ = finish_tab_writer(worker.tw, &osink, stderr_w, alloc)
+					worker.tw = nil
+				}
+				if osink.failed || !out_stream_flush(&osink) {
+					return report_out_stream_error(&osink, stderr_w)
+				}
+				return EXIT_USAGE if has_open_err else pcode
+			}
+			pin_applied = true
+		} else if pin_active && pin.has_expected && !engine.compare_plan_pin(pin.expected, engine.plan_pin_of(&dec)) {
+			cand2 := engine.decide(&prog.plan, sp, .Concatenated, {
+				runner            = runner,
+				where_mode        = o.where_mode,
+				dups              = o.dups,
+				file_count        = 1,
+				input_bytes       = len(b),
+				allow_rerun_whole = true,
+				serial_eval_ctx   = cfg.one_doc || cfg.to_tabular,
+			})
+			if cand2.kind == .Projection_Direct && (projection_direct_blocked(o, cfg, len(paths)) || (cfg.to_tabular && worker.tw != nil && worker.tw.stream.headed)) {
+				fallback_non_direct_route(&cand2, o, cfg, &prog.plan, runner, len(b))
+			}
+			if !engine.compare_plan_pin(pin.expected, engine.plan_pin_of(&cand2)) || engine.validate(b, sp, ro, alloc) == nil {
+				if pcode := plan_pin_apply(&pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+					if owned {
+						delete(b, alloc)
+					}
+					if worker.tw != nil {
+						_ = finish_tab_writer(worker.tw, &osink, stderr_w, alloc)
+						worker.tw = nil
+					}
+					if osink.failed || !out_stream_flush(&osink) {
+						return report_out_stream_error(&osink, stderr_w)
+					}
+					return EXIT_USAGE if has_open_err else pcode
+				}
+				pin_applied = true
+			}
+		}
 		use_direct := dec.kind == .Projection_Direct
 		if use_direct && cfg.to_tabular && worker.tw != nil && len(paths) == 1 && !worker.tw.stream.headed {
 			_ = finish_tab_writer(worker.tw, &osink, stderr_w, alloc)
@@ -3649,6 +3911,22 @@ run_jsonpath_query :: proc(
 					if dec2.kind == .Projection_Direct && (projection_direct_blocked(o, cfg, len(paths)) || (cfg.to_tabular && worker.tw != nil && worker.tw.stream.headed)) {
 						fallback_non_direct_route(&dec2, o, cfg, &prog.plan, runner, len(b))
 					}
+					if pin_active {
+						if pcode := plan_pin_apply(&pin, &dec2, stderr_w, alloc); pcode != EXIT_OK {
+							if owned {
+								delete(b, alloc)
+							}
+							if worker.tw != nil {
+								_ = finish_tab_writer(worker.tw, &osink, stderr_w, alloc)
+								worker.tw = nil
+							}
+							if osink.failed || !out_stream_flush(&osink) {
+								return report_out_stream_error(&osink, stderr_w)
+							}
+							return EXIT_USAGE if has_open_err else pcode
+						}
+						pin_applied = true
+					}
 					use_direct2 := dec2.kind == .Projection_Direct
 					if !use_direct2 && cfg.to_tabular && worker.tw == nil {
 						tw, tok := start_tab_writer(o, cfg, out_stream_writer(&osink), alloc)
@@ -3676,6 +3954,21 @@ run_jsonpath_query :: proc(
 					sh.direct_tab_active = false
 					sh.direct_tab.suppress_next_hdr = false
 				}
+			}
+		}
+		if pin_active && !pin_applied {
+			if pcode := plan_pin_apply(&pin, &dec, stderr_w, alloc); pcode != EXIT_OK {
+				if owned {
+					delete(b, alloc)
+				}
+				if worker.tw != nil {
+					_ = finish_tab_writer(worker.tw, &osink, stderr_w, alloc)
+					worker.tw = nil
+				}
+				if osink.failed || !out_stream_flush(&osink) {
+					return report_out_stream_error(&osink, stderr_w)
+				}
+				return EXIT_USAGE if has_open_err else pcode
 			}
 		}
 		if res.err != .None && res.err != .Stopped {

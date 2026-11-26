@@ -332,3 +332,118 @@ route_dups_where_facts_and_serial_eval_ctx :: proc(t: ^testing.T) {
 		testing.expect(t, .Eval_Ctx_Serial in d_files.whys)
 	}
 }
+
+@(test)
+plan_pin_json_roundtrip_and_comparison :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	pool: host.Pool
+	testing.expect(t, host.pool_init(&pool, 4) == nil)
+	defer host.pool_destroy(&pool)
+	runner := &pool.runner
+
+	// 1. Canonical JSON determinism & roundtrip across routes.
+	{
+		prog, plan := plan_for(t, `{a: .x, b: .y}`)
+		defer jq.destroy_program(prog)
+		defer jq.destroy_plan(&plan)
+
+		dec := engine.decide(&plan.contract, json.Spec.Json, .Single)
+		j1 := engine.explain_pin_json(&dec)
+		defer delete(j1)
+		j2 := engine.explain_pin_json(&dec)
+		defer delete(j2)
+		testing.expect_value(t, j1, j2)
+		testing.expect_value(
+			t,
+			j1,
+			"{\"route\":\"projection_direct\",\"framing\":\"single\",\"parallel\":false,\"hint\":\"projection_direct\",\"demand_kind\":\"partial\",\"format\":\"json\"}\n",
+		)
+
+		parsed, ok := engine.parse_plan_pin_json(j1)
+		testing.expect(t, ok, j1)
+		defer engine.destroy_plan_pin(&parsed)
+		testing.expect(t, engine.compare_plan_pin(parsed, engine.plan_pin_of(&dec)))
+	}
+
+	// 2. Parallel spine split pin & diff detection when downgraded to serial scan or whole.
+	{
+		prog, plan := plan_for(t, `.items[] | .id`)
+		defer jq.destroy_program(prog)
+		defer jq.destroy_plan(&plan)
+
+		dec_par := engine.decide(&plan.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = 1 << 20})
+		pin_json := engine.explain_pin_json(&dec_par)
+		defer delete(pin_json)
+		testing.expect(t, strings.contains(pin_json, `"route":"spine_parallel"`), pin_json)
+		testing.expect(t, strings.contains(pin_json, `"parallel":true`), pin_json)
+		testing.expect(t, strings.contains(pin_json, `"hint":"spine_split"`), pin_json)
+
+		expected, pok := engine.parse_plan_pin_json(pin_json)
+		testing.expect(t, pok)
+		defer engine.destroy_plan_pin(&expected)
+
+		dec_ser := engine.decide(&plan.contract, json.Spec.Json, .Single)
+		diff_sb := strings.builder_make()
+		defer strings.builder_destroy(&diff_sb)
+		matched := engine.compare_plan_pin(expected, engine.plan_pin_of(&dec_ser), &diff_sb)
+		testing.expect(t, !matched)
+		diff_txt := strings.to_string(diff_sb)
+		testing.expect(t, strings.contains(diff_txt, "expected route spine_parallel, got scan"), diff_txt)
+		testing.expect(t, strings.contains(diff_txt, "expected parallel true, got false"), diff_txt)
+		testing.expect(t, strings.contains(diff_txt, "expected hint spine_split, got none"), diff_txt)
+	}
+
+	// 3. Reordered keys and whitespace parse cleanly; missing fields / bad JSON are rejected.
+	{
+		reordered := "{\n  \"format\": \"toml\",\n  \"demand_kind\": \"whole\",\n  \"hint\": \"none\",\n  \"parallel\": false,\n  \"framing\": \"single\",\n  \"route\": \"whole\"\n}\n"
+		pin, ok := engine.parse_plan_pin_json(reordered)
+		testing.expect(t, ok)
+		defer engine.destroy_plan_pin(&pin)
+		testing.expect_value(t, pin.route, "whole")
+		testing.expect_value(t, pin.format, "toml")
+		testing.expect_value(t, pin.demand_kind, "whole")
+
+		for bad in ([]string{
+			"",
+			"{}",
+			`{"route":"whole"}`,
+			`{"route":"whole","framing":"single","parallel":"false","hint":"none","demand_kind":"whole","format":"json"}`,
+			`{"route":"whole","framing":"single","parallel":false,"hint":"none","demand_kind":"whole","format":"json","extra":"x"}`,
+			`{"route":"whole","framing":"single","parallel":false,"hint":"none","demand_kind":"whole","format":"json"} trailing`,
+			`{"route":"whole","framing":"single","parallel":false,"hint":"none","demand_kind":"whole","format":"\u00ZZ"}`,
+			`{"route":"whole","framing":"single","parallel":false,"hint":"none","demand_kind":"whole","format":"\uD800"}`,
+			`{"route":"whole","framing":"single","parallel":false,"hint":"none","demand_kind":"whole","format":"\uDC00"}`,
+		}) {
+			bp, bok := engine.parse_plan_pin_json(bad)
+			engine.destroy_plan_pin(&bp)
+			testing.expect(t, !bok, bad)
+		}
+	}
+
+	// 4. `\uXXXX` escapes (including control byte `\u001f` emitted by `explain_pin_json` and UTF-16 surrogate pairs) round-trip cleanly.
+	{
+		dec := engine.Decision{
+			kind        = .Whole,
+			framing     = .Single,
+			active_hint = .None,
+			demand_mode = .Whole,
+			entry       = {name = "f\x1fx"},
+		}
+		j := engine.explain_pin_json(&dec)
+		defer delete(j)
+		testing.expect(t, strings.contains(j, `"format":"f\u001fx"`), j)
+
+		parsed, ok := engine.parse_plan_pin_json(j)
+		testing.expect(t, ok, j)
+		defer engine.destroy_plan_pin(&parsed)
+		testing.expect(t, engine.compare_plan_pin(parsed, engine.plan_pin_of(&dec)))
+		testing.expect_value(t, parsed.format, "f\x1fx")
+
+		sur := `{"route":"whole","framing":"single","parallel":false,"hint":"none","demand_kind":"whole","format":"\u00e9\uD83D\uDE00"}`
+		sp, sok := engine.parse_plan_pin_json(sur)
+		testing.expect(t, sok)
+		defer engine.destroy_plan_pin(&sp)
+		testing.expect_value(t, sp.format, "é😀")
+	}
+}

@@ -318,35 +318,27 @@ read_opts_of :: proc(o: ^Options, sp: engine.Spec, runner: ^tape.Runner) -> tape
 	return ro
 }
 
-tape_error_parts :: proc(src: []u8, err: tape.Error, sp: engine.Spec, err_buf: ^[512]u8, note_buf: ^[256]u8) -> (at: u64, msg, note: string, has_place: bool) {
+tape_error_parts :: proc(src: []u8, err: tape.Error, sp: engine.Spec, err_buf: ^[512]u8, note_buf: ^[1024]u8) -> (at: u64, msg, note: string, has_place: bool) {
 	e, _ := engine.entry_of_spec(sp)
 	if f, is_f := err.(tape.Fault); is_f {
 		at = f.at
 		has_place = f.at != tape.NO_BYTE
 		msg = fault_sentence(err_buf[:], f, src, e.format)
-		if has_place && len(src) > 0 {
-			note = fault_caret_note(note_buf[:], src, f.at)
+		if has_place && !e.binary && len(src) > 0 {
+			if snip, ok := tape.error_snippet(note_buf[:], src, f.at); ok {
+				note = snip
+			}
 		}
 		return
 	}
 	if ex, is_ex := err.(tape.Exceeded); is_ex {
 		at = ex.at
 		has_place = ex.at != tape.NO_BYTE
-		msg = "Exceeds limit"
-		#partial switch ex.kind {
-		case .Depth:
-			msg = "Value nests deeper than limit"
-		case .Nodes:
-			msg = "Too many nodes"
-		case .Memory:
-			msg = "Exceeds memory limit"
-		case .Steps:
-			msg = "Exceeds step limit"
-		case .Expansion:
-			msg = "Exceeds the expansion limit"
-		}
-		if has_place && len(src) > 0 {
-			note = fault_caret_note(note_buf[:], src, ex.at)
+		msg = exceeded_sentence(ex.kind)
+		if has_place && !e.binary && len(src) > 0 {
+			if snip, ok := tape.error_snippet(note_buf[:], src, ex.at); ok {
+				note = snip
+			}
 		}
 		return
 	}
@@ -355,6 +347,23 @@ tape_error_parts :: proc(src: []u8, err: tape.Error, sp: engine.Spec, err_buf: ^
 		msg = fmt.bprintf(err_buf[:], "invalid option: %s", bo.option)
 	}
 	return
+}
+
+@(private = "file")
+exceeded_sentence :: proc "contextless" (kind: tape.Budget_Kind) -> string {
+	#partial switch kind {
+	case .Depth:
+		return "Value nests deeper than limit"
+	case .Nodes:
+		return "Too many nodes"
+	case .Memory:
+		return "Exceeds memory limit"
+	case .Steps:
+		return "Exceeds step limit"
+	case .Expansion:
+		return "Exceeds the expansion limit"
+	}
+	return "Exceeds limit"
 }
 
 @(private = "file")
@@ -375,51 +384,6 @@ fault_sentence :: proc(buf: []u8, f: tape.Fault, src: []u8, fmt_ptr: ^tape.Forma
 	return full
 }
 
-@(private = "file")
-fault_caret_note :: proc(buf: []u8, src: []u8, offset: u64) -> string {
-	NOTE_REACH :: 40
-	at := min(int(offset), len(src))
-	if at == len(src) && at > 0 && src[at - 1] == '\n' {
-		at -= 1
-	}
-	first, last := at, at
-	for first > 0 && src[first - 1] != '\n' && at - first < NOTE_REACH {
-		first -= 1
-	}
-	for last < len(src) && src[last] != '\n' && src[last] != '\r' && last - at < NOTE_REACH {
-		last += 1
-	}
-	line_len := last - first
-	pad_len := at - first
-	n := 0
-	for i in 0 ..< line_len {
-		if n >= len(buf) {
-			break
-		}
-		c := src[first + i]
-		buf[n] = ' ' if (c < 0x20 && c != '\t' || c == 0x7f) else c
-		n += 1
-	}
-	if n < len(buf) {
-		buf[n] = '\n'
-		n += 1
-	}
-	for i in 0 ..< pad_len {
-		if n >= len(buf) {
-			break
-		}
-		c := src[first + i]
-		buf[n] = '\t' if c == '\t' else ' '
-		n += 1
-	}
-	if n + 2 <= len(buf) {
-		buf[n] = '^'
-		buf[n + 1] = '\n'
-		n += 2
-	}
-	return string(buf[:n])
-}
-
 print_tape_error :: proc(
 	stderr_w: io.Writer,
 	file: string,
@@ -434,23 +398,185 @@ print_tape_error :: proc(
 		return EXIT_RUNTIME
 	}
 	err_buf: [512]u8
-	note_buf: [256]u8
+	snip_buf: [1024]u8
 	e, _ := engine.entry_of_spec(sp)
 	prefix := "stury: ignoring parse error" if ignoring else "stury: parse error"
 	psrc := place_src if len(place_src) > 0 else src
-	if f, is_f := err.(tape.Fault); is_f && f.at != tape.NO_BYTE && !e.binary && len(psrc) > 0 {
-		off := min(place_off + f.at, u64(len(psrc)))
-		lidx := tape.Line_Index{allocator = runtime.heap_allocator()}
-		defer tape.destroy_line_index(&lidx)
-		pl := tape.offset_place(psrc, &lidx, off, 0, 1, runtime.heap_allocator())
-		sent := fault_sentence(err_buf[:], f, psrc, e.format)
-		note := fault_caret_note(note_buf[:], psrc, off)
-		fmt.wprintf(stderr_w, "%s: %s:%d:%d: %s\n%s", prefix, file, pl.line, pl.col, sent, note)
+	msg_src := src if len(src) > 0 else psrc
+	at := tape.NO_BYTE
+	sent := ""
+	if f, is_f := err.(tape.Fault); is_f && f.at != tape.NO_BYTE {
+		at = f.at
+		sent = fault_sentence(err_buf[:], f, msg_src, e.format)
+	} else if ex, is_ex := err.(tape.Exceeded); is_ex && ex.at != tape.NO_BYTE {
+		at = ex.at
+		sent = exceeded_sentence(ex.kind)
+	}
+	if at != tape.NO_BYTE && !e.binary && len(psrc) > 0 {
+		off := min(place_off + at, u64(len(psrc)))
+		pl := tape.offset_place(psrc, nil, off)
+		if snip, has_snip := tape.error_snippet(snip_buf[:], psrc, off); has_snip {
+			fmt.wprintf(stderr_w, "%s: %s:%d:%d: %s\n%s", prefix, file, pl.line, pl.col, sent, snip)
+		} else {
+			fmt.wprintf(stderr_w, "%s: %s:%d:%d: %s\n", prefix, file, pl.line, pl.col, sent)
+		}
 		return EXIT_RUNTIME
 	}
-	msg := tape.error_message(err_buf[:], err, psrc, e.format)
+	msg := tape.error_message(err_buf[:], err, msg_src, e.format)
 	fmt.wprintf(stderr_w, "%s (%s): %s\n", prefix, file, msg if msg != "" else "parse error")
 	return EXIT_RUNTIME
+}
+
+// Writes `data` cleanly to `path`, creating or atomically replacing regular files (refusing symlinks/special files).
+write_plan_pin_file :: proc(path: string, data: []u8, stderr_w: io.Writer, alloc: runtime.Allocator) -> bool {
+	if path == "/dev/stdout" || path == "/dev/stderr" {
+		target := os.stdout if path == "/dev/stdout" else os.stderr
+		n, werr := os.write(target, data)
+		if werr != nil || n < len(data) {
+			if stderr_w.procedure != nil {
+				fmt.wprintf(stderr_w, "stury: error: Could not write plan file %s: %s\n", path, os.error_string(werr) if werr != nil else "short write")
+			}
+			return false
+		}
+		return true
+	}
+	if info, lerr := os.lstat(path, alloc); lerr == nil {
+		ftype := info.type
+		os.file_info_delete(info, alloc)
+		if ftype != .Regular {
+			if stderr_w.procedure != nil {
+				fmt.wprintf(stderr_w, "stury: error: Could not write plan file %s: not a regular file\n", path)
+			}
+			return false
+		}
+	} else if lerr != os.General_Error.Not_Exist && lerr != .Not_Exist {
+		if stderr_w.procedure != nil {
+			fmt.wprintf(stderr_w, "stury: error: Could not stat plan file %s: %s\n", path, os.error_string(lerr))
+		}
+		return false
+	}
+	dir := os.dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	f: ^os.File
+	tmp: string
+	err: os.Error
+	digits: [24]u8
+	for _ in 0 ..< 64 {
+		num := strconv.write_uint(digits[:], rand.uint64(), 10)
+		tmp = strings.concatenate({dir, "/.stury-plan-", num, ".tmp"}, alloc)
+		f, err = os.open(tmp, {.Read, .Write, .Create, .Excl}, {.Read_User, .Write_User, .Read_Group, .Read_Other})
+		if err != os.General_Error.Exist && err != .Exist {
+			break
+		}
+		delete(tmp, alloc)
+		tmp = ""
+	}
+	if err != nil || f == nil {
+		if tmp != "" {
+			delete(tmp, alloc)
+		}
+		if stderr_w.procedure != nil {
+			fmt.wprintf(stderr_w, "stury: error: Could not write plan file %s: %s\n", path, os.error_string(err))
+		}
+		return false
+	}
+	defer delete(tmp, alloc)
+	if n, werr := os.write(f, data); werr != nil {
+		err = werr
+	} else if n < len(data) {
+		err = io.Error.Short_Write
+	}
+	if err == nil {
+		if syerr := os.sync(f); syerr != nil && syerr != io.Error.Unsupported {
+			err = syerr
+		}
+	}
+	if close_err := os.close(f); err == nil && close_err != nil {
+		err = close_err
+	}
+	if err == nil {
+		err = os.rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.remove(tmp)
+		if stderr_w.procedure != nil {
+			fmt.wprintf(stderr_w, "stury: error: Could not write plan file %s: %s\n", path, os.error_string(err))
+		}
+		return false
+	}
+	return true
+}
+
+Plan_Pin_State :: struct {
+	has_expected: bool,
+	expected:     engine.Plan_Pin,
+	out_path:     string,
+	written:      bool,
+	alloc:        runtime.Allocator,
+}
+
+plan_pin_init :: proc(ps: ^Plan_Pin_State, o: ^Options, stderr_w: io.Writer, alloc: runtime.Allocator) -> bool {
+	ps^ = {
+		out_path = o.plan_out,
+		alloc    = alloc,
+	}
+	if o.plan_file == "" {
+		return true
+	}
+	raw, rok := read_path_or_stdin(o.plan_file, false, stderr_w, alloc)
+	if !rok {
+		return false
+	}
+	defer delete(raw, alloc)
+	pin, pok := engine.parse_plan_pin_json(string(raw), alloc)
+	if !pok {
+		if stderr_w.procedure != nil {
+			fmt.wprintf(stderr_w, "stury: error: invalid plan file %s\n", o.plan_file)
+		}
+		return false
+	}
+	ps.expected = pin
+	ps.has_expected = true
+	return true
+}
+
+plan_pin_destroy :: proc(ps: ^Plan_Pin_State) {
+	if ps == nil {
+		return
+	}
+	if ps.has_expected {
+		engine.destroy_plan_pin(&ps.expected, ps.alloc)
+	}
+	ps^ = {}
+}
+
+// Verifies `dec` against `--plan-file` (exit `EXIT_FALSY` on mismatch) and writes `--plan-out` (exit `EXIT_USAGE` on write error).
+plan_pin_apply :: proc(ps: ^Plan_Pin_State, dec: ^engine.Decision, stderr_w: io.Writer, alloc: runtime.Allocator) -> int {
+	if ps == nil || dec == nil {
+		return EXIT_OK
+	}
+	if ps.has_expected {
+		actual := engine.plan_pin_of(dec)
+		diff_sb := strings.builder_make(alloc)
+		defer strings.builder_destroy(&diff_sb)
+		if !engine.compare_plan_pin(ps.expected, actual, &diff_sb) {
+			if stderr_w.procedure != nil {
+				fmt.wprintf(stderr_w, "stury: plan mismatch: %s\n", strings.to_string(diff_sb))
+			}
+			return EXIT_FALSY
+		}
+	}
+	if ps.out_path != "" && !ps.written {
+		pin_json := engine.explain_pin_json(dec, alloc)
+		defer delete(pin_json, alloc)
+		if !write_plan_pin_file(ps.out_path, transmute([]u8)pin_json, stderr_w, alloc) {
+			return EXIT_USAGE
+		}
+		ps.written = true
+	}
+	return EXIT_OK
 }
 
 // Persistent record-iterator wrapping `tape.records_find` cleanly across a buffer slice.

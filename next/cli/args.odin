@@ -140,6 +140,8 @@ Options :: struct {
 	count:             int,
 	seed:              u64,
 	quarantine:        string,
+	plan_out:          string,
+	plan_file:         string,
 	schema_file:       string,
 	schema_ref:        string,
 	schema_package:    string,
@@ -230,7 +232,7 @@ opt_arity :: proc(flag: string, cmd := Command.Run) -> int {
 	}
 	switch flag {
 	case "--indent", "--max-depth", "--max-memory", "--max-steps", "--max-nodes", "--expansion-limit", "--threads",
-	     "--from", "--in", "--to", "--out", "--dups", "--quarantine", "-L", "--library-path",
+	     "--from", "--in", "--to", "--out", "--dups", "--quarantine", "--plan-out", "--plan-file", "-L", "--library-path",
 	     "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--package",
 	     "--seed", "--count", "--old-schema", "--new-schema", "--compat", "--key",
 	     "--delimiter", "--comment", "--out-delimiter", "--out-comment":
@@ -449,6 +451,16 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 		o.where_mode = true
 	case "explain":
 		o.explain = true
+	case "plan-out":
+		if val == "" {
+			return strings.clone("--plan-out takes a file path", a)
+		}
+		o.plan_out = val
+	case "plan-file":
+		if val == "" {
+			return strings.clone("--plan-file takes a file path", a)
+		}
+		o.plan_file = val
 	case "in-place":
 		o.in_place = true
 	case "check":
@@ -765,6 +777,9 @@ validate_options :: proc(o: ^Options) -> string {
 	if o.jsonpath && o.command != .Run {
 		return strings.clone("--jsonpath can only be used with query execution", a)
 	}
+	if (o.plan_out != "" || o.plan_file != "") && o.command != .Run {
+		return strings.clone("--plan-out/--plan-file can only be used with query execution", a)
+	}
 	if (o.command == .Edit || o.command == .Fmt) && o.in_place && o.check {
 		return strings.clone("--in-place rewrites each file; --check only reads it", a)
 	}
@@ -879,5 +894,6 @@ Usage:  stury [options] <jq filter> [file...] | stury --jsonpath [options] <json
 Options: -n -R -s -c -r -j --raw-output0 -a -S -C -M --tab --indent N -e -f -L dir
          --arg k v --argjson k v --rawfile k f --slurpfile k f --args --jsonargs
          --jsonpath/--path --seq --stream --stream-errors --from fmt --to fmt
-         --explain --where --threads N --dups policy --skip-bad --quarantine f -V -h --
+         --explain --plan-out f --plan-file f --where --threads N --dups policy
+         --skip-bad --quarantine f -V -h --
 `

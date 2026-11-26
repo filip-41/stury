@@ -363,7 +363,19 @@ compile_schema_file :: proc(o: ^Options, path: string, stderr_w: io.Writer, allo
 		c, cerr = schema.compile_document(&doc, tape.ROOT, sopts, alloc)
 	}
 	if cerr.kind != .None {
-		fmt.wprintf(stderr_w, "stury: error: schema %s: %s\n", path, cerr.message)
+		if cerr.kind == .Parse && cerr.tape_err != nil {
+			_ = print_tape_error(stderr_w, path, cerr.tape_err, data, sp)
+		} else if cerr.at != tape.NO_BYTE && !se.binary && len(data) > 0 {
+			pl := tape.offset_place(data, nil, cerr.at)
+			snip_buf: [1024]u8
+			if snip, has_snip := tape.error_snippet(snip_buf[:], data, cerr.at); has_snip {
+				fmt.wprintf(stderr_w, "stury: error: schema %s:%d:%d: %s\n%s", path, pl.line, pl.col, cerr.message, snip)
+			} else {
+				fmt.wprintf(stderr_w, "stury: error: schema %s:%d:%d: %s\n", path, pl.line, pl.col, cerr.message)
+			}
+		} else {
+			fmt.wprintf(stderr_w, "stury: error: schema %s: %s\n", path, cerr.message)
+		}
 		schema.error_destroy(&cerr)
 		return nil, {}, false
 	}
@@ -610,11 +622,19 @@ check_bytes_schema :: proc(
 	case .Lines:
 		lidx := tape.Line_Index{allocator = alloc}
 		defer tape.destroy_line_index(&lidx)
+		snip_buf: [1024]u8
 		for ce in entries {
 			off := min(place_off + ce.at, u64(len(psrc)))
 			pl := tape.offset_place(psrc, &lidx, off, 0, 1, alloc)
 			msg := schema.error_message(ce, alloc)
 			loc := ce.instance_location if ce.instance_location != "" else "/"
+			if !e.binary && len(psrc) > 0 {
+				if snip, has_snip := tape.error_snippet(snip_buf[:], psrc, off); has_snip {
+					fmt.wprintf(stderr_w, "%s:%d:%d: %s at %s\n%s", display, pl.line, pl.col, msg, loc, snip)
+					delete(msg, alloc)
+					continue
+				}
+			}
 			fmt.wprintf(stderr_w, "%s:%d:%d: %s at %s\n", display, pl.line, pl.col, msg, loc)
 			delete(msg, alloc)
 		}
@@ -773,7 +793,7 @@ run_fmt :: proc(
 				}
 				continue
 			}
-			for rec, _, err in rec_loop_next(&it) {
+			for rec, rinfo, err in rec_loop_next(&it) {
 				if err != nil {
 					_ = print_tape_error(stderr_w, disp, err, src, sp)
 					failed = true
@@ -784,7 +804,7 @@ run_fmt :: proc(
 				}
 				part, dr, ferr := engine.format(rec, sp, to_sp, ro, wopts, alloc)
 				if ferr != nil {
-					_ = report_format_error(ferr, disp, rec, sp, &osink, stderr_w, alloc)
+					_ = report_format_error(ferr, disp, rec, sp, &osink, stderr_w, alloc, src, rinfo.lo)
 					failed = true
 					break
 				}
@@ -860,10 +880,12 @@ report_format_error :: proc(
 	osink: ^Out_Stream,
 	stderr_w: io.Writer,
 	alloc: runtime.Allocator,
+	place_src: []u8 = nil,
+	place_off: u64 = 0,
 ) -> int {
 	switch err in ferr {
 	case tape.Error:
-		return print_tape_error(stderr_w, display, err, src, sp)
+		return print_tape_error(stderr_w, display, err, src, sp, false, place_src, place_off)
 	case write.Error:
 		if ioe, is_io := err.(io.Error); is_io {
 			osink.failed = true
@@ -903,11 +925,13 @@ edit_run_doc :: proc(
 	display: string,
 	stderr_w: io.Writer,
 	alloc: runtime.Allocator,
+	place_src: []u8 = nil,
+	place_off: u64 = 0,
 ) -> (parts: [dynamic][]u8, last_falsy, halted: bool, code: int) {
 	parts = make([dynamic][]u8, alloc)
 	doc, berr := engine.build(src, sp, ro, alloc)
 	if berr != nil {
-		_ = print_tape_error(stderr_w, display, berr, src, sp)
+		_ = print_tape_error(stderr_w, display, berr, src, sp, false, place_src, place_off)
 		return parts, false, false, EXIT_RUNTIME
 	}
 	h: query.Heap
@@ -1157,7 +1181,7 @@ run_edit :: proc(
 				}
 				span_idx := len(spans)
 				append(&spans, Edit_Span{lo = rinfo.lo, end = end_pos})
-				parts, lf, hlt, ec := edit_run_doc(o, sh, worker, rec, sp, ro, false, disp, stderr_w, alloc)
+				parts, lf, hlt, ec := edit_run_doc(o, sh, worker, rec, sp, ro, false, disp, stderr_w, alloc, src, rinfo.lo)
 				if hlt {
 					for pt in parts {
 						delete(pt, alloc)
@@ -1347,7 +1371,7 @@ build_diff_document :: proc(
 			write.token_tape_drop(&tt)
 			return {}, {}, false, false
 		}
-		for rec, _, err in rec_loop_next(&it) {
+		for rec, rinfo, err in rec_loop_next(&it) {
 			if err != nil {
 				_ = print_tape_error(stderr_w, display, err, src, sp)
 				write.token_tape_drop(&tt)
@@ -1355,7 +1379,7 @@ build_diff_document :: proc(
 			}
 			rdoc, berr := engine.build(rec, sp, ro, alloc)
 			if berr != nil {
-				_ = print_tape_error(stderr_w, display, berr, rec, sp)
+				_ = print_tape_error(stderr_w, display, berr, rec, sp, false, src, rinfo.lo)
 				write.token_tape_drop(&tt)
 				return {}, {}, false, false
 			}
@@ -1849,14 +1873,14 @@ infer_file_into :: proc(inf: ^schema.Inferred, o: ^Options, path: string, stdin_
 			return EXIT_RUNTIME
 		}
 		defer rec_loop_close(&it)
-		for rec, _, err in rec_loop_next(&it) {
+		for rec, rinfo, err in rec_loop_next(&it) {
 			if err != nil {
 				_ = print_tape_error(stderr_w, display, err, src, sp)
 				return EXIT_RUNTIME
 			}
 			doc, berr := engine.build(rec, sp, ro, alloc)
 			if berr != nil {
-				_ = print_tape_error(stderr_w, display, berr, rec, sp)
+				_ = print_tape_error(stderr_w, display, berr, rec, sp, false, src, rinfo.lo)
 				return EXIT_RUNTIME
 			}
 			ierr := schema.infer_document(inf, &doc, tape.ROOT, alloc)
