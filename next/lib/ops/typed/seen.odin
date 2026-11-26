@@ -28,7 +28,7 @@ key_miss :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 // every later key of the object comes here. Under `.Last` a repeat is reset before it is read again, and the cursor
 // moves to the solo record when a member after this one was read, so a key the cursor matches is never a repeat.
 @(private)
-struct_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Frame, owner: ^Record) -> (hook.Regs, hook.Action) {
+struct_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Frame, owner: ^Record) -> (hook.Regs, hook.Action) #no_bounds_check {
 	s := s
 	m := &h.plan.meta[owner.meta]
 	i := member_index(h, owner, m, t)
@@ -68,45 +68,61 @@ SCAN_MEMBERS :: 8
 // Invariant for `#no_bounds_check`: the walk gives a plain key's span inside the text, `t.lo + u64(t.n) <= h.len`.
 @(private)
 member_index :: proc "contextless" (h: ^Reader, owner: ^Record, m: ^Meta, t: tape.Token) -> int #no_bounds_check {
+	plain := t.kind == .String && t.spelling & tape.SPELLING_DECODE == 0
+	if plain && m.len_mask & (u64(1) << min(u64(t.n), 63)) == 0 {
+		return -1
+	}
 	members := ([^]Record)(owner.first)
 	// `key_hit` matches a plain string key alone, by the bytes in the text, as `Format.key_hash` hashes one: every
 	// other key reads through the format's reader, which may decode an escape or a number's digits.
-	plain := t.kind == .String && t.spelling & tape.SPELLING_DECODE == 0
 	if m.count <= SCAN_MEMBERS {
-		unspelled := false
-		for i in 0 ..< int(m.count) {
-			r := &members[i]
-			if key_hit(h, r, t) {
-				return i
+		if plain && t.n <= 8 && t.lo + 8 <= h.len {
+			when ODIN_ENDIAN != .Little {
+				#panic("member_index assumes little-endian Token layout")
 			}
-			unspelled = unspelled || r.word == NO_KEY
-		}
-		// Every member was compared, so a plain key the scan missed is no member's: the table would compare the same
-		// names again, by `same_text`, and find none. Two cases the scan cannot judge are left to the table: a member
-		// whose name holds a byte a key spells with an escape has no `word`, and a key of at most eight bytes with
-		// fewer than eight bytes of text after it is no `key_hit`'s.
-		wide_enough := t.n > 8 || t.lo + 8 <= h.len
-		if plain && wide_enough && !unspelled {
-			return -1
+			w := load8(h.base[t.lo:])
+			t_word := (transmute([2]u64)t)[1] & KEY_MASK
+			for i in 0 ..< int(m.count) {
+				r := &members[i]
+				if r.word == t_word && (w ~ r.head) & r.tail == 0 {
+					return i
+				}
+			}
+			if !m.unspelled {
+				return -1
+			}
+		} else {
+			for i in 0 ..< int(m.count) {
+				r := &members[i]
+				if key_hit(h, r, t) {
+					return i
+				}
+			}
+			// Every member was compared, so a plain key the scan missed is no member's unless a name requires escape
+			// decoding (`unspelled`) or the key lies within 8 bytes of the buffer end where `key_hit` declines short loads.
+			wide_enough := t.n > 8 || t.lo + 8 <= h.len
+			if plain && wide_enough && !m.unspelled {
+				return -1
+			}
 		}
 	}
 	src := h.base[:h.len]
 	mask := m.slots_n - 1
 	// A plain key hashes as its bytes in the text, which is the plan's `tape.text_hash` of a member's name, so the
 	// table takes it with no indirect call; a decoded key reads through the format, out of line.
-	hash: u32
-	if plain {
-		hash = tape.text_hash(src[t.lo:][:t.n])
-	} else {
-		hash = member_hash(h, src, t)
-	}
+	hash := tape.text_hash(src[t.lo:][:t.n]) if plain else member_hash(h, src, t)
 	at := hash & mask
 	for {
 		k := h.plan.slots[m.slots + at]
 		if k == 0 {
 			return -1
 		}
-		if tape.key_names(h.format, src, t, h.plan.meta[members[k - 1].meta].name) {
+		r := &members[k - 1]
+		if plain && r.word != NO_KEY && (t.n > 8 || t.lo + 8 <= h.len) {
+			if key_hit(h, r, t) {
+				return int(k - 1)
+			}
+		} else if tape.key_names(h.format, src, t, h.plan.meta[r.meta].name) {
 			return int(k - 1)
 		}
 		at = (at + 1) & mask
@@ -121,12 +137,17 @@ member_hash :: #force_no_inline proc "contextless" (h: ^Reader, src: []u8, t: ta
 
 // Starts tracking which members of the struct in frame `f` were read, false when memory is refused.
 @(private)
-seen_start :: proc "contextless" (h: ^Reader, f: ^Frame, m: ^Meta) -> bool {
-	context = h.ctx
+seen_start :: #force_inline proc "contextless" (h: ^Reader, f: ^Frame, m: ^Meta) -> bool {
 	f.seen, f.run = f.seen | SEEN_ON, 0
 	if m.count <= SEEN_BITS {
 		return true
 	}
+	return seen_start_wide(h, f, m)
+}
+
+@(private = "file", cold)
+seen_start_wide :: #force_no_inline proc "contextless" (h: ^Reader, f: ^Frame, m: ^Meta) -> bool {
+	context = h.ctx
 	words, err := runtime.mem_alloc(int(wide_words(m)) * size_of(u64), align_of(u64), h.scratch)
 	if err != nil {
 		return false
@@ -143,12 +164,17 @@ wide_words :: #force_inline proc "contextless" (m: ^Meta) -> u32 {
 
 // Frees the words a struct's frame tracks its wide members in.
 @(private)
-seen_end :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Record) {
-	context = h.ctx
+seen_end :: #force_inline proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Record) {
 	if f.seen & SEEN_WIDE != 0 {
-		runtime.mem_free_with_size(f.data, int(wide_words(&h.plan.meta[owner.meta])) * size_of(u64), h.scratch)
-		f.seen &~= SEEN_WIDE
+		seen_end_wide(h, f, owner)
 	}
+}
+
+@(private = "file", cold)
+seen_end_wide :: #force_no_inline proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Record) {
+	context = h.ctx
+	runtime.mem_free_with_size(f.data, int(wide_words(&h.plan.meta[owner.meta])) * size_of(u64), h.scratch)
+	f.seen &~= SEEN_WIDE
 }
 
 // Sets member `i`'s mark in frame `f` and says whether it was set.

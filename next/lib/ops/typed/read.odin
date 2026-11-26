@@ -290,11 +290,25 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	#assert(size_of(m_buf) == size_of(hook.Read_Budget))
 	#assert(align_of(hook.Read_Budget) <= align_of(u64))
 	m := (^hook.Read_Budget)(&m_buf[0])
-	allocator := hook.read_budget(m, opts, caller)
 	scratch_buf: [size_of(hook.Memory_Budget) / size_of(u64)]u64 = ---
 	#assert(size_of(scratch_buf) == size_of(hook.Memory_Budget))
 	#assert(align_of(hook.Memory_Budget) <= align_of(u64))
-	scratch := hook.scratch(opts, allocator, (^hook.Memory_Budget)(&scratch_buf[0]))
+	allocator := caller
+	scratch: runtime.Allocator
+	if opts.budget.memory == 0 {
+		if opts.scratch.procedure != nil {
+			scratch = opts.scratch
+		} else {
+			when ODIN_DEFAULT_TO_NIL_ALLOCATOR || ODIN_DEFAULT_TO_PANIC_ALLOCATOR {
+				scratch = allocator
+			} else {
+				scratch = {runtime.default_allocator_proc, nil}
+			}
+		}
+	} else {
+		allocator = hook.read_budget(m, opts, caller)
+		scratch = hook.scratch(opts, allocator, (^hook.Memory_Budget)(&scratch_buf[0]))
+	}
 	frames: [FRAME_ROOM]Frame = ---
 	flags: Reader_Flags
 	if dups == .First {
@@ -387,7 +401,9 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	} else if .Dead not_in h.flags {
 		settle_open(h, regs, h.sp)
 	}
-	cleanup_reader(h, BEFORE_ROOM)
+	if h.frames != h.home || h.map_keys != nil || h.zero != nil || len(h.before) > BEFORE_ROOM || h.held != nil {
+		cleanup_reader(h, BEFORE_ROOM)
+	}
 	return hook.memory_budget_error(&m.main, err) if opts.budget.memory != 0 else err
 }
 

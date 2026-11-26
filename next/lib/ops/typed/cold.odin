@@ -18,7 +18,7 @@ key_span :: #force_inline proc "contextless" (h: ^Reader, t: tape.Token) -> stri
 // Moves a map's value cursor to the entry of key `t`, made zero when it is new. Under `.Last` a key the map holds is
 // read again from zero, and under `.First` a key this read met in the object before is passed.
 @(private)
-map_key :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Frame, owner: ^Record) -> (hook.Regs, hook.Action) {
+map_key :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, f: ^Frame, owner: ^Record) -> (hook.Regs, hook.Action) {
 	context = h.ctx
 	s := s
 	if h.path != nil {
@@ -425,9 +425,10 @@ indirect :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 			return refuse_memory(h, s, t)
 		}
 		// A map that holds entries at its open tracks the keys `.First` met in a set of its own. One with a block is the
-		// target's, as the read makes a map empty.
+		// target's, as the read makes a map empty. Hold when `h.before` snapshots the target (serial `.Last`/`.Refuse` or
+		// parallel prefix under any duplicate policy) so `undo_target` restores caller entries cleanly.
 		f.seen = u64((^runtime.Raw_Map)(dest).len != 0)
-		if .First not_in h.flags && runtime.map_data((^runtime.Raw_Map)(dest)^) != 0 && !hold_map(h, dest, m.map_info) {
+		if len(h.before) > 0 && runtime.map_data((^runtime.Raw_Map)(dest)^) != 0 && !hold_map(h, dest, m.map_info) {
 			return refuse_memory(h, s, t)
 		}
 		return {NO_LIMIT, u64(uintptr(rec.first)), 0}, .Next
@@ -562,7 +563,7 @@ wrapped :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, rec: ^Re
 			}
 			(^rawptr)(dest)^ = raw_data(block)
 			made = true
-		} else if .First not_in h.flags && !hold_pointee(h, uintptr((^rawptr)(dest)^), int(m.size)) {
+		} else if len(h.before) > 0 && !hold_pointee(h, uintptr((^rawptr)(dest)^), int(m.size)) {
 			return refuse_memory(h, s, t)
 		}
 		target = uintptr((^rawptr)(dest)^)

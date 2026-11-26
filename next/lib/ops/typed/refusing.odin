@@ -145,6 +145,18 @@ repeat_at :: #force_inline proc "contextless" (h: ^Refusing_Reader, k: tape.Toke
 	h.repeat = min(h.repeat, k.lo - u64(head))
 }
 
+// Frees the temporary duplicate-key arrays of `Refusing_Reader`, safe to invoke repeatedly.
+@(private)
+refusing_free :: proc "contextless" (h: ^Refusing_Reader) {
+	context = h.ctx
+	delete(h.keys)
+	delete(h.opens)
+	delete(h.hashed)
+	h.keys = {}
+	h.opens = {}
+	h.hashed = {}
+}
+
 // The error of a refusing read whose walk ended with `err`: a repeated key, judged in the objects still open too, unless
 // a fault of the walk comes before it in the text. Frees what the hook kept.
 refusing_end :: proc "contextless" (h: ^Refusing_Reader, err: tape.Error, rules: ^tape.Rules) -> tape.Error {
@@ -152,9 +164,7 @@ refusing_end :: proc "contextless" (h: ^Refusing_Reader, err: tape.Error, rules:
 	for len(h.opens) > 0 && h.refused == nil {
 		close_keys(h)
 	}
-	delete(h.keys)
-	delete(h.opens)
-	delete(h.hashed)
+	refusing_free(h)
 	if h.refused != nil && err == nil {
 		return h.refused
 	}

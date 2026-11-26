@@ -185,6 +185,9 @@ worker_block_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alig
 	b := (^Worker_Block)(data)
 	#partial switch mode {
 	case .Alloc, .Alloc_Non_Zeroed:
+		if size <= 0 {
+			return nil, nil
+		}
 		out, err := worker_block_take(b, size, alignment)
 		if err == nil && mode == .Alloc {
 			runtime.mem_zero(raw_data(out), size)
@@ -194,13 +197,20 @@ worker_block_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alig
 		if old_memory == nil {
 			return worker_block_proc(data, .Alloc if mode == .Resize else .Alloc_Non_Zeroed, size, alignment, nil, 0, loc)
 		}
-		at := int(uintptr(old_memory) - uintptr(raw_data(b.buf)))
-		if b.buf != nil && at == b.last && at + size <= len(b.buf) {
-			b.used = at + size
-			if mode == .Resize && size > old_size {
-				runtime.mem_zero(&b.buf[at + old_size], size - old_size)
+		if size <= 0 {
+			return nil, nil
+		}
+		old_p := uintptr(old_memory)
+		buf_p := uintptr(raw_data(b.buf))
+		if b.buf != nil && old_p >= buf_p && old_p < buf_p + uintptr(len(b.buf)) {
+			at := int(old_p - buf_p)
+			if at == b.last && at + size <= len(b.buf) {
+				b.used = at + size
+				if mode == .Resize && size > old_size {
+					runtime.mem_zero(&b.buf[at + old_size], size - old_size)
+				}
+				return b.buf[at:][:size], nil
 			}
-			return b.buf[at:][:size], nil
 		}
 		if size <= old_size {
 			return ([^]u8)(old_memory)[:size], nil
@@ -209,7 +219,9 @@ worker_block_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alig
 		if err != nil {
 			return nil, err
 		}
-		runtime.mem_copy_non_overlapping(raw_data(out), old_memory, old_size)
+		if old_size > 0 {
+			runtime.mem_copy_non_overlapping(raw_data(out), old_memory, old_size)
+		}
 		if mode == .Resize {
 			runtime.mem_zero(&out[old_size], size - old_size)
 		}
@@ -242,7 +254,7 @@ worker_block_take :: #force_inline proc(b: ^Worker_Block, size, alignment: int) 
 @(private, cold)
 worker_block_grow :: proc(b: ^Worker_Block, size, align: int) -> ([]u8, runtime.Allocator_Error) {
 	grow := max(b.next, size + align)
-	data, err := pool_alloc_locked(b.pool, grow, 64, false)
+	data, err := pool_alloc_locked(b.pool, grow, max(align, 64), false)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +264,6 @@ worker_block_grow :: proc(b: ^Worker_Block, size, align: int) -> ([]u8, runtime.
 }
 
 // Mutex-guarded scratch allocator (also counting against `pool.limit` when `pool != nil && pool.limit != 0`).
-@(private)
 parallel_scratch_backing :: #force_inline proc "contextless" (opts: tape.Options, caller: runtime.Allocator) -> runtime.Allocator {
 	if opts.scratch.procedure != nil {
 		return opts.scratch
@@ -279,30 +290,34 @@ locked_scratch_allocator :: proc "contextless" (s: ^Locked_Scratch) -> runtime.A
 @(private)
 locked_scratch_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
 	s := (^Locked_Scratch)(data)
-	if s.pool != nil && s.pool.limit != 0 {
+	if s.pool != nil {
 		sync.mutex_guard(&s.pool.lock)
-		grows := 0
-		#partial switch mode {
-		case .Alloc, .Alloc_Non_Zeroed:
-			grows = size
-		case .Resize, .Resize_Non_Zeroed:
-			grows = size - old_size
-		}
-		if grows > 0 && u64(grows) > s.pool.limit - min(s.pool.held, s.pool.limit) {
-			s.pool.refused = true
-			return nil, .Out_Of_Memory
+		if s.pool.limit != 0 {
+			grows := 0
+			#partial switch mode {
+			case .Alloc, .Alloc_Non_Zeroed:
+				grows = size
+			case .Resize, .Resize_Non_Zeroed:
+				grows = size - old_size
+			}
+			if grows > 0 && u64(grows) > s.pool.limit - min(s.pool.held, s.pool.limit) {
+				s.pool.refused = true
+				return nil, .Out_Of_Memory
+			}
 		}
 		block, err := s.backing.procedure(s.backing.data, mode, size, alignment, old_memory, old_size, loc)
 		if err != nil {
 			return block, err
 		}
-		#partial switch mode {
-		case .Alloc, .Alloc_Non_Zeroed:
-			s.pool.held += u64(size)
-		case .Resize, .Resize_Non_Zeroed:
-			s.pool.held = s.pool.held - min(s.pool.held, u64(old_size)) + u64(size)
-		case .Free:
-			s.pool.held -= min(s.pool.held, u64(old_size))
+		if s.pool.limit != 0 {
+			#partial switch mode {
+			case .Alloc, .Alloc_Non_Zeroed:
+				s.pool.held += u64(size)
+			case .Resize, .Resize_Non_Zeroed:
+				s.pool.held = s.pool.held - min(s.pool.held, u64(old_size)) + u64(size)
+			case .Free:
+				s.pool.held -= min(s.pool.held, u64(old_size))
+			}
 		}
 		return block, nil
 	}
@@ -369,6 +384,37 @@ parallel_prepare :: proc(
 	return
 }
 
+// Checks preconditions for `read_parallel_list`, verifying that `T` is a slice or dynamic array.
+parallel_list_ready :: proc(
+	target: rawptr,
+	T: typeid,
+	format: ^tape.Format,
+	tag: string,
+	opts: tape.Options,
+	uopts: Unmarshal_Options,
+	caller: runtime.Allocator,
+) -> bool {
+	if target == nil || opts.runner == nil || opts.runner.threads <= 0 || opts.pieces != nil || opts.budget.steps != 0 || tape.options_refused(format, opts) != nil {
+		return false
+	}
+	dups := format.dups if opts.dups == .Default else opts.dups
+	if dups == .All || dups == .Group || parallel_alloc_class(caller, opts) == .Serial {
+		return false
+	}
+	if uopts.plan != nil {
+		if uopts.plan.type != T || !(len(uopts.plan.tag) == len(tag) && (raw_data(uopts.plan.tag) == raw_data(tag) || uopts.plan.tag == tag)) {
+			return false
+		}
+		root_rec := (^Record)(uintptr(uopts.plan.root) - size_of(Record))
+		return root_rec.kind == .Slice || root_rec.kind == .Dynamic
+	}
+	#partial switch _ in runtime.type_info_base(type_info_of(T)).variant {
+	case ^runtime.Type_Info_Slice, ^runtime.Type_Info_Dynamic_Array:
+		return true
+	}
+	return false
+}
+
 // Direct parallel typed read for a root list (such as DSV rows). Returns `done = false` to fall back to serial.
 @(require_results)
 read_parallel_list :: proc(
@@ -385,6 +431,7 @@ read_parallel_list :: proc(
 	$H: typeid,
 	$walk_part: proc(k: int, p: Parallel_Part, h: ^H, regs: ^hook.Regs, data: rawptr) -> Part_Result,
 	data: rawptr,
+	initial_held := u64(0),
 ) -> (err: tape.Error, done: bool) {
 	if len(parts) < 2 || len(parts) > MAX_PARALLEL_PARTS {
 		return nil, false
@@ -401,7 +448,7 @@ read_parallel_list :: proc(
 	if root_rec.kind != .Slice && root_rec.kind != .Dynamic {
 		return nil, false
 	}
-	pool := Block_Pool{backing = caller, limit = opts.budget.memory}
+	pool := Block_Pool{backing = caller, limit = opts.budget.memory, held = initial_held}
 	list := Parallel_List{owner = root_rec, dest = uintptr(target), depth = 1}
 	ok := parallel_list_workers(src, format, rules, plan, list, parts, dups, uopts, opts, caller, class, &pool, made, H, walk_part, data)
 	return nil, ok
@@ -444,7 +491,7 @@ read_parallel_spine :: proc(
 	}
 	pool := Block_Pool{backing = caller, limit = opts.budget.memory}
 	scratch_backing := parallel_scratch_backing(opts, caller)
-	lscratch := Locked_Scratch{backing = scratch_backing, pool = &pool if opts.budget.memory != 0 else nil}
+	lscratch := Locked_Scratch{backing = scratch_backing, pool = &pool}
 	scratch := locked_scratch_allocator(&lscratch)
 	prefix_block := Worker_Block{pool = &pool, last = -1, next = BLOCK_MIN}
 	prefix_alloc := worker_block_allocator(&prefix_block) if class == .Blocks else caller
@@ -477,8 +524,11 @@ read_parallel_spine :: proc(
 		intrinsics.mem_copy_non_overlapping(raw_data(probe.before), target, int(size))
 	}
 	defer cleanup_reader(&probe.inner, len(before_buf))
+	when H == Refusing_Reader {
+		defer refusing_free(&probe.inner)
+	}
 	regs := hook.Regs{NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}
-	_, perr, _ := walk_prefix(src, opts, &probe, &regs, prefix_alloc, &probe.ctx)
+	_, perr, _ := walk_prefix(src, opts, &probe, &regs, scratch, &probe.ctx)
 	if probe.found.owner == nil {
 		// No large list was opened: the prefix walk already read the entire text!
 		when H == Refusing_Reader {
@@ -490,12 +540,12 @@ read_parallel_spine :: proc(
 			settle_open(&probe.inner, regs, probe.sp)
 		}
 		if pool.refused {
-			undo_target(&probe.inner, target)
+			undo_target(&probe.inner, target, scratch_backing)
 			return nil, false
 		}
 		if perr != nil {
 			// If anything failed (e.g. refusal/syntax error), restore target and let serial report exact error/budget.
-			undo_target(&probe.inner, target)
+			undo_target(&probe.inner, target, scratch_backing)
 			return nil, false
 		}
 		return nil, true
@@ -504,14 +554,14 @@ read_parallel_spine :: proc(
 		if .Dead not_in probe.flags {
 			settle_open(&probe.inner, regs, probe.sp)
 		}
-		undo_target(&probe.inner, target)
+		undo_target(&probe.inner, target, scratch_backing)
 		return nil, false
 	}
 	parts: [MAX_PARALLEL_PARTS]Parallel_Part
 	n_parts, list_close, split_ok := split_list(src, probe.found, opts, parts[:], scratch, data)
 	if !split_ok || n_parts < 2 {
 		settle_open(&probe.inner, regs, probe.sp)
-		undo_target(&probe.inner, target)
+		undo_target(&probe.inner, target, scratch_backing)
 		return nil, false
 	}
 	Spine_Part_Wrap :: struct {
@@ -525,7 +575,7 @@ read_parallel_spine :: proc(
 	wrap := Spine_Part_Wrap{found = probe.found, data = data}
 	if !parallel_list_workers(src, format, rules, plan, probe.found, parts[:n_parts], dups, uopts, opts, caller, class, &pool, made, H, wrap_walk, &wrap) {
 		settle_open(&probe.inner, regs, probe.sp)
-		undo_target(&probe.inner, target)
+		undo_target(&probe.inner, target, scratch_backing)
 		return nil, false
 	}
 	// Close the list frame on the prefix reader and walk the suffix serially.
@@ -543,14 +593,14 @@ read_parallel_spine :: proc(
 	n_opens := probe.sp - 1
 	if n_opens > len(opens_buf) {
 		settle_open(&probe.inner, regs, probe.sp)
-		undo_target(&probe.inner, target)
+		undo_target(&probe.inner, target, scratch_backing)
 		return nil, false
 	}
 	for i in 0 ..< n_opens {
 		owner := frame_owner(&probe.frames[i + 1])
 		opens_buf[i] = .Object if (owner.kind == .Struct || owner.kind == .Required || owner.kind == .Map) else .Array
 	}
-	_, serr, _ := walk_suffix(src, list_close, opens_buf[:n_opens], opts, &probe.inner, &regs, prefix_alloc, &probe.ctx, data)
+	_, serr, _ := walk_suffix(src, list_close, opens_buf[:n_opens], opts, &probe.inner, &regs, scratch, &probe.ctx, data)
 	when H == Refusing_Reader {
 		serr = refusing_end(&probe.inner, serr, rules)
 	}
@@ -561,7 +611,7 @@ read_parallel_spine :: proc(
 		if .Dead not_in probe.flags {
 			settle_open(&probe.inner, regs, probe.sp)
 		}
-		undo_target(&probe.inner, target)
+		undo_target(&probe.inner, target, scratch_backing)
 		return nil, false
 	}
 	return nil, true
@@ -593,7 +643,7 @@ parallel_list_workers :: proc(
 	elem_size := int(elem_meta.size)
 	elem_align := max(int(elem_meta.align), 1)
 	scratch_backing := parallel_scratch_backing(opts, caller)
-	lscratch := Locked_Scratch{backing = scratch_backing, pool = pool if opts.budget.memory != 0 else nil}
+	lscratch := Locked_Scratch{backing = scratch_backing, pool = pool}
 	// If `opts.scratch` is unset and no budget is active on a hosted build, `runtime.heap_allocator()` is already thread-safe with no lock.
 	scratch := scratch_backing if opts.scratch.procedure == nil && opts.budget.memory == 0 && !(ODIN_DEFAULT_TO_NIL_ALLOCATOR || ODIN_DEFAULT_TO_PANIC_ALLOCATOR) else locked_scratch_allocator(&lscratch)
 	outs: [MAX_PARALLEL_PARTS]Worker_Out
@@ -712,6 +762,8 @@ parallel_list_workers :: proc(
 	}
 	if !ok {
 		// Release every element allocated on the heap in `.Direct` mode so zero memory leaks before serial retry.
+		// `.Direct` only runs with `caller == runtime.heap_allocator()` and `opts.budget.memory == 0`, so using
+		// `caller` for `rel.scratch` avoids partial `release` failure (and retry double-free) under tight `opts.scratch`.
 		if class == .Direct && elem_meta.frees {
 			elem_rec := &([^]Record)(list.owner.first)[-1]
 			ctx := context
@@ -723,7 +775,7 @@ parallel_list_workers :: proc(
 				format    = format,
 				allocator = caller,
 				caller    = caller,
-				scratch   = scratch,
+				scratch   = caller,
 				ctx       = ctx,
 			}
 			for k in 0 ..< n_parts {
@@ -861,8 +913,14 @@ init_reader :: #force_inline proc(
 }
 
 // Restores `target` to its exact pre-read bytes from `h.before` and `h.held`, releasing anything allocated into it.
+// Uses unbudgeted `undo_scratch` when supplied so rollback succeeds even after `pool.limit` has been exhausted.
 @(private)
-undo_target :: proc(h: ^Reader, target: rawptr) {
+undo_target :: proc(h: ^Reader, target: rawptr, undo_scratch := runtime.Allocator{}) {
+	saved := h.scratch
+	if undo_scratch.procedure != nil {
+		h.scratch = undo_scratch
+	}
+	defer h.scratch = saved
 	root_rec := (^Record)(uintptr(h.plan.root) - size_of(Record))
 	_ = reset(h, root_rec, uintptr(target), true)
 }

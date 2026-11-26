@@ -552,7 +552,7 @@ walk_part :: proc "contextless" (src: []u8, $S: Spec, p: Pass_Options, h: ^build
 // Parallel typed unmarshal of a delimited text into a slice or dynamic array of rows.
 @(private)
 unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: Spec, read: Unmarshal_Options, opts: Options, caller: runtime.Allocator) -> (tape.Error, bool) {
-	if typed.parallel_alloc_class(caller, opts) == .Serial {
+	if !typed.parallel_list_ready(target, T, &FORMATS[S], TAG, opts, read, caller) {
 		return nil, false
 	}
 	p := options_resolved(S, opts)
@@ -562,7 +562,8 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 		return nil, false
 	}
 	head := scan_record(src, first, 0, S, p.delim)
-	scratch := opts.scratch if opts.scratch.procedure != nil else runtime.heap_allocator()
+	mb: hook.Memory_Budget
+	scratch := hook.scratch(opts, caller, &mb) if opts.budget.memory != 0 else typed.parallel_scratch_backing(opts, caller)
 	frame: [FRAME_KEYS]tape.Token = ---
 	keys: []tape.Token
 	data_start := u64(start)
@@ -586,7 +587,7 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 	}
 	raw_chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk
 	nc := plan_dsv_records_chunks(src, data_start, S, p, opts.runner, raw_chunks[:], scratch)
-	if nc < 2 {
+	if nc < 2 || mb.refused {
 		return nil, false
 	}
 	parts: [typed.MAX_PARALLEL_PARTS]typed.Parallel_Part
@@ -606,7 +607,7 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 		w: Pass(S, typed.Cells_Reader, false, C)
 		pass_start(&w, part.to, hk, d.p, 0)
 		w.p, w.keys, w.width = d.p, d.keys, d.width
-		w.in_header, w.opened, w.unclosed = false, true, true
+		w.in_header, w.opened, w.unclosed = false, true, k != d.n_parts - 1
 		cells: [hook.COLUMN_BITS]tape.Token = ---
 		hk.replay.fixed, hk.replay.cells = .Ragged not_in d.p.tolerate, cells[:]
 		r: hook.Walk_Result
@@ -627,5 +628,5 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 		return {err = err, astray = astray}
 	}
 	td := Typed_Data{src = src, p = p, keys = keys, width = head.cells, n_parts = nc}
-	return typed.read_parallel_list(src, target, T, &FORMATS[S], &RULES, TAG, opts, read, caller, parts[:nc], typed.Cells_Reader, walk_part_typed, &td)
+	return typed.read_parallel_list(src, target, T, &FORMATS[S], &RULES, TAG, opts, read, caller, parts[:nc], typed.Cells_Reader, walk_part_typed, &td, mb.held)
 }

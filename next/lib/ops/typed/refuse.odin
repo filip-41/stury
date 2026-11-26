@@ -90,8 +90,8 @@ refuse_memory :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, 
 // Ends the read with refusal `detail` at byte `at`, the first refusal it meets. `n` frames are open, and the path to the
 // value refused steps into each one's child, the last one's by the registers `leaf` when not nil, and then to member
 // `name` when it is not empty.
-@(private)
-refuse_at :: proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, detail: Typed_Refusal, at: u64, n: int, leaf: ^hook.Regs, name := "") -> (hook.Regs, hook.Action) {
+@(private, cold)
+refuse_at :: #force_no_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: tape.Token, detail: Typed_Refusal, at: u64, n: int, leaf: ^hook.Regs, name := "") -> (hook.Regs, hook.Action) {
 	if .Dead not_in h.flags {
 		h.err = tape.Fault{at = at, rules = &RULES, kind = .Refused, detail = u8(detail)}
 		s, leaf := s, leaf

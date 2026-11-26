@@ -182,7 +182,10 @@ walk_part :: proc "contextless" (src: []u8, from, to: int, $S: Spec, opts: Optio
 // Parallel typed unmarshal for root CBOR arrays using `plan_parts` seams aligned to depth 1.
 @(private)
 unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: Spec, $REFUSE: bool, read: Unmarshal_Options, opts: Options, caller: runtime.Allocator) -> (tape.Error, bool) {
-	if len(src) == 0 || src[0] >> 5 != 4 || typed.parallel_alloc_class(caller, opts) == .Serial {
+	if len(src) == 0 || src[0] >> 5 != 4 || (src[0] != 0x9f && src[0] & 31 >= 28) {
+		return nil, false
+	}
+	if !typed.parallel_list_ready(target, T, &FORMATS[S], TAG, opts, read, caller) {
 		return nil, false
 	}
 	// Determine the root array head length (supports both definite and indefinite arrays).
@@ -199,7 +202,7 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 	want := min(build.chunk_count(opts.runner, len(src)), typed.MAX_PARALLEL_PARTS)
 	m: hook.Memory_Budget
 	plan: Part_Plan
-	scratch := opts.scratch if opts.scratch.procedure != nil else runtime.heap_allocator()
+	scratch := typed.parallel_scratch_backing(opts, caller)
 	if _, pok := plan_parallel(src, S, want, opts, scratch, &plan, &m); !pok {
 		return nil, false
 	}
@@ -240,6 +243,8 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 	}
 	parts[n_parts] = {from = cur, to = len(src)}
 	n_parts += 1
+	destroy_plan(&plan)
+	plan = {}
 	H :: typed.Refusing_Reader when REFUSE else typed.Text_Reader
 	Typed_Data :: struct {
 		src:      []u8,

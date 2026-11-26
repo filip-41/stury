@@ -91,6 +91,7 @@ Meta :: struct {
 	required:  u32, // a struct's: one past its last `required` member
 	solo:      u32, // a member's solo pair in `Plan.records`, its copy and an `End`, by the pair's `End`
 	lower:     i64, // a `Bit_Set`'s lowest element
+	len_mask:  u64, // for a struct's `End` and record meta: bit `min(len(name), 63)` set per member key length
 	tag_size:  u8, // a `Union`'s tag bytes
 	key_kind:  Read_Kind, // a `Map`'s key: `String`, an integer kind or `Enum`
 	zeroed:    bool, // a list whose new elements start zeroed, as their readers may leave bytes unwritten
@@ -99,6 +100,7 @@ Meta :: struct {
 	omit_empty: bool, // a member a write leaves out when its value is empty (`omitempty`)
 	omit_unset: bool, // a member a write leaves out when it is a nil pointer, `Maybe` or union (`omitunset`)
 	signed:    bool, // a `Bit_Set` of integers
+	unspelled: bool, // for a struct's meta: whether any member key requires decoding (`word == NO_KEY`)
 }
 
 // A union's arm: the classes of value it takes and its tag value, its block's `b`.
@@ -907,10 +909,14 @@ plan_finish :: proc(b: ^Builder, p: ^Plan) -> tape.Error {
 	for block, end in b.ends {
 		m := &p.meta[p.records[end].meta]
 		table := p.slots[m.slots:][:m.slots_n]
+		len_mask := u64(0)
+		unspelled := false
 		for k in 0 ..< int(m.count) {
 			member := &p.records[block + k]
 			name := p.meta[member.meta].name
 			key_of(member, name)
+			len_mask |= u64(1) << min(u64(len(name)), 63)
+			unspelled = unspelled || member.word == NO_KEY
 			at := tape.text_hash(transmute([]u8)name) & (m.slots_n - 1)
 			for table[at] != 0 {
 				if p.meta[p.records[block + int(table[at]) - 1].meta].name == name {
@@ -920,12 +926,14 @@ plan_finish :: proc(b: ^Builder, p: ^Plan) -> tape.Error {
 			}
 			table[at] = u32(k + 1)
 		}
+		m.len_mask = len_mask
+		m.unspelled = unspelled
 	}
 	for &r in p.records {
 		if r.kind == .Struct {
 			end := p.meta[p.records[b.ends[int(uintptr(r.first))]].meta]
 			m := &p.meta[r.meta]
-			m.count, m.required, m.slots, m.slots_n = end.count, end.required, end.slots, end.slots_n
+			m.count, m.required, m.slots, m.slots_n, m.len_mask, m.unspelled = end.count, end.required, end.slots, end.slots_n, end.len_mask, end.unspelled
 			r.kind = .Required if end.required > 0 else .Struct
 		}
 		if r.first != nil {

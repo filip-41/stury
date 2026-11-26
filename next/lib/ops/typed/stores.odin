@@ -39,7 +39,7 @@ token_text :: proc "contextless" (h: ^Reader, t: tape.Token, buf: []u8) -> (s: s
 	}
 	room := h.format.room(src, t, nil)
 	err: runtime.Allocator_Error
-	if held, err = runtime.mem_alloc_non_zeroed(room, 1, h.scratch); err != nil {
+	if held, err = runtime.mem_alloc_non_zeroed(room, 1, h.scratch); err != nil || len(held) < room {
 		return "", nil, false
 	}
 	s, ok = tape.node_text_of(h.format, src, t, held)
@@ -49,12 +49,16 @@ token_text :: proc "contextless" (h: ^Reader, t: tape.Token, buf: []u8) -> (s: s
 // Stores the text of string token `t` at `dest`: a span of the text when the read borrows and it has nothing to decode,
 // else a copy in the read's allocator, returned too when `held` asks for it. False when memory is refused.
 @(private)
-store_text :: proc "contextless" (h: ^Reader, t: tape.Token, dest: uintptr, $held: bool) -> ([]u8, bool) {
-	if t.spelling & tape.SPELLING_DECODE == 0 && h.borrow {
-		(^runtime.Raw_String)(dest)^ = {h.base[t.lo:], int(t.n)}
-		return nil, true
-	}
-	if !store_string(h, t, dest) {
+store_text :: #force_inline proc "contextless" (h: ^Reader, t: tape.Token, dest: uintptr, $held: bool) -> ([]u8, bool) {
+	if t.spelling & tape.SPELLING_DECODE == 0 {
+		if h.borrow {
+			(^runtime.Raw_String)(dest)^ = {h.base[t.lo:], int(t.n)}
+			return nil, true
+		}
+		if !copy_span(h, dest, t.lo, t.n) {
+			return nil, false
+		}
+	} else if !store_string(h, t, dest) {
 		return nil, false
 	}
 	when held {
@@ -66,7 +70,7 @@ store_text :: proc "contextless" (h: ^Reader, t: tape.Token, dest: uintptr, $hel
 }
 
 // Stores the `n` bytes of the text at `lo` at `dest` as a copy in the read's allocator, the zero string when `n` is 0,
-// so no string points into the text. False when memory is refused, which leaves the zero string.
+// so no string points into the text. False when memory is refused, which leaves `dest` untouched.
 @(private)
 copy_span :: #force_no_inline proc "contextless" (h: ^Reader, dest: uintptr, lo: u64, n: u32) -> bool {
 	text := (^runtime.Raw_String)(dest)
@@ -74,10 +78,12 @@ copy_span :: #force_no_inline proc "contextless" (h: ^Reader, dest: uintptr, lo:
 		text^ = {}
 		return true
 	}
+	if h.allocator.procedure == nil {
+		return false
+	}
 	context = h.ctx
 	buf, err := h.allocator.procedure(h.allocator.data, .Alloc_Non_Zeroed, int(n), 1, nil, 0)
-	if err != nil {
-		text^ = {}
+	if err != nil || len(buf) < int(n) {
 		return false
 	}
 	copy_short(raw_data(buf), h.base[lo:], int(n))
@@ -124,16 +130,16 @@ store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: tape.Token, 
 			return true
 		}
 		buf, err := runtime.mem_alloc_non_zeroed(int(t.n), 1, h.allocator)
-		if err != nil {
+		if err != nil || len(buf) < int(t.n) {
 			return false
 		}
-		intrinsics.mem_copy_non_overlapping(raw_data(buf), h.base[t.lo:], int(t.n))
+		copy_short(raw_data(buf), h.base[t.lo:], int(t.n))
 		(^runtime.Raw_String)(dest)^ = {raw_data(buf), int(t.n)}
 		return true
 	}
 	room := h.format.room(src, t, nil)
 	buf, err := runtime.mem_alloc_non_zeroed(room, 1, h.allocator)
-	if err != nil {
+	if err != nil || len(buf) < room {
 		return false
 	}
 	text, _ := h.format.decode(src, t, buf, nil)
@@ -169,7 +175,7 @@ store_bytes :: proc "contextless" (h: ^Reader, t: tape.Token, rec: ^Record, dest
 		data = nil
 		if len(text) > 0 {
 			block, err := runtime.mem_alloc_non_zeroed(len(text), 1, h.allocator)
-			if err != nil {
+			if err != nil || len(block) < len(text) {
 				return false
 			}
 			copy(block, text)
