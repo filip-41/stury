@@ -128,6 +128,17 @@ materialize_subtree :: proc(
 	if ov == nil || ov.base == nil {
 		return {}, refuse(.No_Document, "materialize_subtree requires an overlay")
 	}
+	if ov.unlinked_parents {
+		need_link := true
+		if root_h != NO_HANDLE {
+			if rn, ok := get_node(ov, root_h); ok && rn.state == .Replaced && rn.val.kind < .Array {
+				need_link = false
+			}
+		}
+		if need_link {
+			ensure_linked(ov) or_return
+		}
+	}
 
 	Mat_Frame :: struct {
 		node_idx:   int,

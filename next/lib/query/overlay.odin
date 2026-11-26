@@ -1092,7 +1092,7 @@ is_leaf_or_provenance :: proc "contextless" (ov: ^edit.Overlay, v: Value) -> boo
 	if v.kind == .Overlay {
 		ob, _, n, ok := resolve_overlay(v)
 		if ok && ob.ov == ov {
-			if n.state == .Ancestor && !n.has_edits && n.base != tape.NO_NODE && len(n.facts) == 0 {
+			if !ov.unlinked_parents && n.state == .Ancestor && !n.has_edits && n.base != tape.NO_NODE && len(n.facts) == 0 {
 				return true
 			}
 			if n.state == .Replaced && n.val.kind == .Base_Ref && len(n.facts) == 0 {
@@ -1116,7 +1116,7 @@ try_set_leaf_or_ref :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, v:
 	if v.kind == .Overlay {
 		ob, _, n, ok := resolve_overlay(v)
 		if ok && ob.ov == ov {
-			if n.state == .Ancestor && !n.has_edits && n.base != tape.NO_NODE && len(n.facts) == 0 {
+			if !ov.unlinked_parents && n.state == .Ancestor && !n.has_edits && n.base != tape.NO_NODE && len(n.facts) == 0 {
 				return true, edit.set(ov, target, edit.val_base_ref(n.base))
 			}
 			if n.state == .Replaced && n.val.kind == .Base_Ref && len(n.facts) == 0 {

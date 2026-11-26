@@ -1,6 +1,8 @@
 package edit
 
 import "base:runtime"
+import "core:container/handle_map"
+import "core:container/xar"
 import "core:slice"
 import "stury:lib/core/tape"
 
@@ -31,7 +33,7 @@ commit_tabular :: proc(
 	res: Commit_Result,
 	err: Error,
 ) {
-	fast, _, fast_res, gerr := commit_guard(ov, spec.target, opts, true, spec.validate, spec.data, allocator)
+	fast, target, fast_res, gerr := commit_guard(ov, spec.target, opts, true, spec.validate, spec.data, allocator)
 	if gerr != nil {
 		return {}, gerr
 	}
@@ -61,6 +63,10 @@ commit_tabular :: proc(
 		delim = ','
 	}
 
+	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 4096}
+	defer runtime.arena_destroy(&arena)
+	scratch := runtime.arena_allocator(&arena)
+
 	cx := Tabular_Cx {
 		ov        = ov,
 		doc       = doc,
@@ -70,30 +76,45 @@ commit_tabular :: proc(
 		delim     = delim,
 		comment   = comment_byte,
 		no_header = no_header,
-		eol       = detect_eol(doc.src),
-		allocator = allocator,
+		allocator = scratch,
 	}
-	cx.splices = make([dynamic]Splice, 0, 16, allocator)
-	defer {
-		for s in cx.splices {
-			if s.text != nil {
-				delete(s.text, allocator)
-			}
-			for m in s.moves {
-				if m.written && m.text != nil {
-					delete(m.text, allocator)
+	cx.splices = make([dynamic]Splice, 0, max(8, xar.len(ov.nodes.items)), scratch)
+
+	if !ov.has_structural {
+		it := handle_map.dynamic_iterator_make(&ov.nodes)
+		for n in dynamic_iter_next(&it) {
+			if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
+				clo, chi, clok := node_byte_span(doc, n.base)
+				if !clok {
+					return {}, refuse(.Bad_Handle, "cannot locate cell span", n.base)
 				}
-			}
-			if s.moves != nil {
-				delete(s.moves, allocator)
+				text: []u8
+				if n.val.kind == .Raw {
+					text = transmute([]u8)n.val.text
+				} else {
+					buf := make([dynamic]u8, 0, 32, scratch)
+					spec.spell_cell(spec.data, ov, n.handle, &buf) or_return
+					text = buf[:]
+				}
+				append(&cx.splices, Splice {
+					lo           = clo,
+					hi           = chi,
+					text         = text,
+					seq          = len(cx.splices),
+					base_node    = n.base,
+					subtree_only = true,
+				}) or_return
 			}
 		}
-		delete(cx.splices)
-	}
-
-	if ov.root != NO_HANDLE {
-		if err = compose_tabular_root(&cx, ov.root); err != nil {
-			return {}, err
+	} else {
+		if ov.unlinked_parents {
+			ensure_linked(ov) or_return
+		}
+		cx.eol = detect_eol(doc.src)
+		if ov.root != NO_HANDLE {
+			if err = compose_tabular_root(&cx, ov.root); err != nil {
+				return {}, err
+			}
 		}
 	}
 
@@ -102,11 +123,19 @@ commit_tabular :: proc(
 		return {}, serr
 	}
 	if spec.validate != nil {
-		if verr := spec.validate(spec.data, out, allocator); verr != nil {
-			delete(out, allocator)
-			delete(recs, allocator)
-			delete(rew, allocator)
-			return {}, convert_tape_error(verr)
+		need_full := target != doc.format || len(recs) == 0
+		if !need_full {
+			for rec in recs {
+				if !rec.subtree_only || rec.full_rewalk || !is_simple_dsv_cell(out[rec.dst_lo:rec.dst_hi], cx.delim, cx.comment, rec.dst_lo == 0) {
+					need_full = true
+					break
+				}
+			}
+		}
+		if need_full {
+			if verr := spec.validate(spec.data, out, allocator); verr != nil {
+				return fail_commit_validation(out, recs, rew, verr, allocator)
+			}
 		}
 	}
 	return Commit_Result {
@@ -177,18 +206,7 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 	if !ok || !rn.has_edits {
 		return nil
 	}
-	hdr_keys, owned_hdr := tabular_header_keys(cx, cx.allocator)
-	defer {
-		if hdr_keys != nil {
-			delete(hdr_keys, cx.allocator)
-		}
-		for s in owned_hdr {
-			delete(s, cx.allocator)
-		}
-		if owned_hdr != nil {
-			delete(owned_hdr, cx.allocator)
-		}
-	}
+	hdr_keys, _ := tabular_header_keys(cx, cx.allocator)
 
 	Row_Item :: struct {
 		node:    tape.Node_Index,
@@ -196,7 +214,6 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 		deleted: bool,
 	}
 	rows := make([dynamic]Row_Item, 0, 16, cx.allocator)
-	defer delete(rows)
 	d := rn.delta
 	c, p, cerr := tape.children(tape.Reader{doc = cx.doc}, tape.ROOT, cx.allocator)
 	if cerr != nil {
@@ -249,10 +266,7 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 		}
 		if rown.state == .Replaced {
 			buf := make([dynamic]u8, 0, 64, cx.allocator)
-			if err := spell_tabular_row(cx, rh, hdr_keys, &buf); err != nil {
-				delete(buf)
-				return err
-			}
+			spell_tabular_row(cx, rh, hdr_keys, &buf) or_return
 			row_end := row.hi
 			if row_end > row.lo && cx.src[row_end - 1] == '\n' {
 				row_end -= 1
@@ -292,15 +306,10 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 				if cn.state == .Replaced {
 					clo, chi, clok := node_byte_span(cx.doc, cell_node)
 					if !clok {
-						tape.destroy_children(&rc)
 						return refuse(.Bad_Handle, "cannot locate cell span", cell_node)
 					}
 					buf := make([dynamic]u8, 0, 32, cx.allocator)
-					if err := cx.spec.spell_cell(cx.spec.data, cx.ov, ch, &buf); err != nil {
-						delete(buf)
-						tape.destroy_children(&rc)
-						return err
-					}
+					cx.spec.spell_cell(cx.spec.data, cx.ov, ch, &buf) or_return
 					append(&cx.splices, Splice{lo = clo, hi = chi, text = buf[:], seq = len(cx.splices), base_node = cell_node, subtree_only = true})
 				}
 			}
@@ -354,17 +363,11 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 	// Group EOF insertions into ONE splice so multiple EOF inserts never emit a double blank line!
 	eof_buf: [dynamic]u8
 	eof_started := false
-	defer if eof_buf.allocator.procedure != nil {
-		delete(eof_buf)
-	}
 	for ins in d.inserted_elems {
 		if ins.at >= 0 && ins.at < len(rows) {
 			pos := rows[ins.at].lo
 			b := make([dynamic]u8, 0, 64, cx.allocator)
-			if err := spell_tabular_row(cx, ins.value, hdr_keys, &b); err != nil {
-				delete(b)
-				return err
-			}
+			spell_tabular_row(cx, ins.value, hdr_keys, &b) or_return
 			append(&b, cx.eol)
 			append(&cx.splices, Splice{lo = pos, hi = pos, text = b[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
 		} else {
@@ -382,7 +385,6 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 	if eof_started {
 		pos := u64(len(cx.src))
 		append(&cx.splices, Splice{lo = pos, hi = pos, text = eof_buf[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
-		eof_buf = {} // transferred ownership to `cx.splices`
 	}
 	return nil
 }

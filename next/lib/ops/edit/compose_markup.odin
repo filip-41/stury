@@ -1,6 +1,8 @@
 package edit
 
 import "base:runtime"
+import "core:container/handle_map"
+import "core:container/xar"
 import "core:slice"
 import "core:strings"
 import "stury:lib/base/kernel"
@@ -55,7 +57,7 @@ commit_markup :: proc(
 	res: Commit_Result,
 	err: Error,
 ) {
-	fast, _, fast_res, gerr := commit_guard(ov, spec.target, opts, true, spec.validate, spec.data, allocator)
+	fast, target, fast_res, gerr := commit_guard(ov, spec.target, opts, true, spec.validate, spec.data, allocator)
 	if gerr != nil {
 		return {}, gerr
 	}
@@ -70,36 +72,48 @@ commit_markup :: proc(
 		}
 	}
 
+	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 4096}
+	defer runtime.arena_destroy(&arena)
+	scratch := runtime.arena_allocator(&arena)
+
 	cx := Markup_Cx {
 		ov        = ov,
 		doc       = doc,
 		src       = doc.src,
 		spec      = spec,
 		opts      = opts,
-		eol       = detect_eol(doc.src),
-		allocator = allocator,
+		allocator = scratch,
 	}
-	cx.splices = make([dynamic]Splice, 0, 16, allocator)
-	defer {
-		for s in cx.splices {
-			if s.text != nil {
-				delete(s.text, allocator)
-			}
-			for m in s.moves {
-				if m.written && m.text != nil {
-					delete(m.text, allocator)
+	cx.splices = make([dynamic]Splice, 0, max(8, xar.len(ov.nodes.items)), scratch)
+
+	if !ov.has_structural {
+		it := handle_map.dynamic_iterator_make(&ov.nodes)
+		for n in dynamic_iter_next(&it) {
+			if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
+				bn := doc.nodes[n.base]
+				if spec.is_void == nil && n.val.kind == .Raw && !(bn.n == 0 && bn.lo < u64(len(doc.src)) && doc.src[bn.lo] == '/') {
+					append(&cx.splices, Splice {
+						lo           = bn.lo,
+						hi           = bn.lo + u64(bn.n),
+						text         = transmute([]u8)n.val.text,
+						seq          = len(cx.splices),
+						base_node    = n.base,
+						subtree_only = true,
+					}) or_return
+				} else {
+					emit_markup_replace(&cx, n.handle, n) or_return
 				}
 			}
-			if s.moves != nil {
-				delete(s.moves, allocator)
-			}
 		}
-		delete(cx.splices)
-	}
-
-	if ov.root != NO_HANDLE {
-		if err = compose_markup_walk(&cx, ov.root); err != nil {
-			return {}, err
+	} else {
+		if ov.unlinked_parents {
+			ensure_linked(ov) or_return
+		}
+		cx.eol = detect_eol(doc.src)
+		if ov.root != NO_HANDLE {
+			if err = compose_markup_walk(&cx, ov.root); err != nil {
+				return {}, err
+			}
 		}
 	}
 
@@ -108,11 +122,19 @@ commit_markup :: proc(
 		return {}, serr
 	}
 	if spec.validate != nil {
-		if verr := spec.validate(spec.data, out, allocator); verr != nil {
-			delete(out, allocator)
-			delete(recs, allocator)
-			delete(rew, allocator)
-			return {}, convert_tape_error(verr)
+		need_full := target != doc.format || len(recs) == 0
+		if !need_full {
+			for rec in recs {
+				if !rec.subtree_only || rec.full_rewalk || !is_simple_xml_text(out[rec.dst_lo:rec.dst_hi]) {
+					need_full = true
+					break
+				}
+			}
+		}
+		if need_full {
+			if verr := spec.validate(spec.data, out, allocator); verr != nil {
+				return fail_commit_validation(out, recs, rew, verr, allocator)
+			}
 		}
 	}
 	return Commit_Result {
@@ -265,14 +287,8 @@ emit_markup_replace :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node) -> Error {
 			return refuse(.Bad_Name, "invalid XML root element name", v)
 		}
 		buf := make([dynamic]u8, 0, 64, cx.allocator)
-		if err := spell_xml_element(cx, m.key, m.value, &buf); err != nil {
-			delete(buf)
-			return err
-		}
-		if _, aerr := append(&cx.splices, Splice{lo = el.lo, hi = el.hi, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = true}); aerr != nil {
-			delete(buf)
-			return aerr
-		}
+		spell_xml_element(cx, m.key, m.value, &buf) or_return
+		append(&cx.splices, Splice{lo = el.lo, hi = el.hi, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
 		return nil
 	}
 
@@ -283,14 +299,8 @@ emit_markup_replace :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node) -> Error {
 		}
 		node := cx.doc.nodes[v]
 		buf := make([dynamic]u8, 0, 32, cx.allocator)
-		if err := cx.spec.spell_content(cx.spec.data, cx.ov, h, &buf); err != nil {
-			delete(buf)
-			return err
-		}
-		if _, aerr := append(&cx.splices, Splice{lo = node.lo, hi = node.lo + u64(node.n), text = buf[:], seq = len(cx.splices), base_node = v, subtree_only = true}); aerr != nil {
-			delete(buf)
-			return aerr
-		}
+		cx.spec.spell_content(cx.spec.data, cx.ov, h, &buf) or_return
+		append(&cx.splices, Splice{lo = node.lo, hi = node.lo + u64(node.n), text = buf[:], seq = len(cx.splices), base_node = v, subtree_only = true}) or_return
 		return nil
 	}
 
@@ -308,26 +318,16 @@ emit_markup_replace :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node) -> Error {
 				return refuse(.Nested_Markup_Array, "XML does not support nested arrays", v)
 			}
 		}
-		// Replace `v`'s content with item 0.
-		if err := emit_element_content_splice(cx, v, el, tag_name, n.elems[0]); err != nil {
-			return err
-		}
-		// Append items `1..` after `el.hi` inheriting sibling whitespace!
+		emit_element_content_splice(cx, v, el, tag_name, n.elems[0]) or_return
 		if len(n.elems) > 1 {
 			lead, lo, hi := markup_extent(cx, v)
 			sep := string(cx.src[lead:lo])
 			more := make([dynamic]u8, 0, 64, cx.allocator)
 			for eh in n.elems[1:] {
 				append(&more, sep)
-				if err := spell_xml_element(cx, tag_name, eh, &more); err != nil {
-					delete(more)
-					return err
-				}
+				spell_xml_element(cx, tag_name, eh, &more) or_return
 			}
-			if _, aerr := append(&cx.splices, Splice{lo = hi, hi = hi, text = more[:], seq = len(cx.splices), base_node = v, full_rewalk = true}); aerr != nil {
-				delete(more)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = hi, hi = hi, text = more[:], seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
 		}
 		if len(n.facts) > 0 {
 			emit_markup_facts(cx, n) or_return
@@ -335,10 +335,7 @@ emit_markup_replace :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node) -> Error {
 		return nil
 	}
 
-	// Single element content replacement (keeps start tag & attributes untouched!).
-	if err := emit_element_content_splice(cx, v, el, tag_name, h); err != nil {
-		return err
-	}
+	emit_element_content_splice(cx, v, el, tag_name, h) or_return
 	if len(n.facts) > 0 {
 		emit_markup_facts(cx, n) or_return
 	}
@@ -348,48 +345,20 @@ emit_markup_replace :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node) -> Error {
 @(private = "file")
 emit_element_content_splice :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Markup_Element, tag_name: string, val_h: Handle) -> Error {
 	buf := make([dynamic]u8, 0, 64, cx.allocator)
-	if err := cx.spec.spell_content(cx.spec.data, cx.ov, val_h, &buf); err != nil {
-		delete(buf)
-		return err
-	}
+	cx.spec.spell_content(cx.spec.data, cx.ov, val_h, &buf) or_return
 	if len(buf) > 0 && cx.spec.is_void != nil && cx.spec.is_void(tag_name) {
-		delete(buf)
 		return refuse(.Void_Content, "void element cannot hold content", v, el.lo)
 	}
 	if !el.empty {
-		if _, aerr := append(&cx.splices, Splice {
-			lo           = el.open,
-			hi           = el.close,
-			text         = buf[:],
-			seq          = len(cx.splices),
-			base_node    = v,
-			subtree_only = true,
-		}); aerr != nil {
-			delete(buf)
-			return aerr
-		}
+		append(&cx.splices, Splice{lo = el.open, hi = el.close, text = buf[:], seq = len(cx.splices), base_node = v, subtree_only = true}) or_return
 	} else if len(buf) > 0 {
-		// Expand self-closing `<a .../>` into `<a ...>content</a>` keeping all attributes verbatim!
 		expanded := make([dynamic]u8, 0, len(buf) + len(tag_name) + 5, cx.allocator)
 		append(&expanded, '>')
 		append(&expanded, ..buf[:])
 		append(&expanded, "</")
 		append(&expanded, tag_name)
 		append(&expanded, '>')
-		delete(buf)
-		if _, aerr := append(&cx.splices, Splice {
-			lo           = el.open,
-			hi           = el.hi,
-			text         = expanded[:],
-			seq          = len(cx.splices),
-			base_node    = v,
-			subtree_only = true,
-		}); aerr != nil {
-			delete(expanded)
-			return aerr
-		}
-	} else {
-		delete(buf)
+		append(&cx.splices, Splice{lo = el.open, hi = el.hi, text = expanded[:], seq = len(cx.splices), base_node = v, subtree_only = true}) or_return
 	}
 	return nil
 }
@@ -529,14 +498,8 @@ emit_xml_attribute_fact :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Markup_E
 			quote = cx.src[vt.lo - 1]
 		}
 		buf := make([dynamic]u8, 0, len(f.values[0]) + 4, cx.allocator)
-		if err := cx.spec.spell_attr_val(cx.spec.data, f.values[0], quote, &buf); err != nil {
-			delete(buf)
-			return err
-		}
-		if _, aerr := append(&cx.splices, Splice{lo = vt.lo, hi = vt.lo + u64(vt.n), text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = touches_xmlns}); aerr != nil {
-			delete(buf)
-			return aerr
-		}
+		cx.spec.spell_attr_val(cx.spec.data, f.values[0], quote, &buf) or_return
+		append(&cx.splices, Splice{lo = vt.lo, hi = vt.lo + u64(vt.n), text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = touches_xmlns}) or_return
 		return nil
 	}
 
@@ -546,22 +509,15 @@ emit_xml_attribute_fact :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Markup_E
 	append(&buf, ' ')
 	append(&buf, f.attr)
 	append(&buf, `="`)
-	if err := cx.spec.spell_attr_val(cx.spec.data, f.values[0], '"', &buf); err != nil {
-		delete(buf)
-		return err
-	}
+	cx.spec.spell_attr_val(cx.spec.data, f.values[0], '"', &buf) or_return
 	append(&buf, '"')
-	if _, aerr := append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = touches_xmlns}); aerr != nil {
-		delete(buf)
-		return aerr
-	}
+	append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = touches_xmlns}) or_return
 	return nil
 }
 
 @(private = "file")
 emit_xml_comment_fact :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Markup_Element, f: Fact_Override) -> Error {
 	existing := make([dynamic]tape.Fact, 0, 4, cx.allocator)
-	defer delete(existing)
 	for bf in tape.facts_of(cx.doc, v) {
 		if bf.kind == f.kind {
 			append(&existing, bf)
@@ -569,18 +525,13 @@ emit_xml_comment_fact :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Markup_Ele
 	}
 	if f.deleted || len(f.values) == 0 {
 		for bf in existing {
-			lo := bf.lo
-			hi := bf.lo + u64(bf.n)
-			if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, seq = len(cx.splices), base_node = v, full_rewalk = true}); aerr != nil {
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = bf.lo, hi = bf.lo + u64(bf.n), seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
 		}
 		return nil
 	}
 	buf := make([dynamic]u8, 0, 64, cx.allocator)
 	for body, i in f.values {
 		if !xml_comment_valid(body) {
-			delete(buf)
 			return refuse(.Bad_Xml_Comment, "XML comment cannot contain '--' or end with '-'", v, el.lo)
 		}
 		if i > 0 {
@@ -599,10 +550,7 @@ emit_xml_comment_fact :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Markup_Ele
 	if len(existing) > 0 {
 		lo := existing[0].lo
 		hi := existing[len(existing) - 1].lo + u64(existing[len(existing) - 1].n)
-		if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = true}); aerr != nil {
-			delete(buf)
-			return aerr
-		}
+		append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
 		return nil
 	}
 	ins_at: u64
@@ -612,21 +560,16 @@ emit_xml_comment_fact :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Markup_Ele
 	case .Comment_Inline:
 		ins_at = el.hi
 	case .Comment_Foot:
-		// Root document foot comment goes in the epilogue AFTER the root element's closing tag (`el.hi`), not inside it!
 		if v == tape.ROOT {
 			ins_at = el.hi
 		} else {
 			if el.empty {
-				delete(buf)
 				return refuse(.Fact_No_Place, "self-closing XML element cannot hold a foot comment", v, el.lo)
 			}
 			ins_at = el.close
 		}
 	}
-	if _, aerr := append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = true}); aerr != nil {
-		delete(buf)
-		return aerr
-	}
+	append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
 	return nil
 }
 
@@ -647,7 +590,6 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 		is_text:    bool,
 	}
 	items := make([dynamic]Child_Item, 0, 8, cx.allocator)
-	defer delete(items)
 
 	c, p, cerr := tape.children(tape.Reader{doc = cx.doc}, base_c, cx.allocator)
 	if cerr != nil {
@@ -701,7 +643,6 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 
 	// Push surviving edited child subtrees (marking extra unedited siblings deleted if first sibling was array-replaced).
 	array_replaced := make([dynamic]string, 0, 2, cx.allocator)
-	defer delete(array_replaced)
 	for &it in items {
 		if it.deleted {
 			continue
@@ -728,7 +669,6 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 	// Reorder children via `Move` splices.
 	if len(d.order) > 0 {
 		deleted_flags := make([]bool, len(items), cx.allocator)
-		defer delete(deleted_flags, cx.allocator)
 		for it, i in items {
 			if it.is_text {
 				return refuse(.Layout_Reflow_Needed, "cannot reorder XML element containing #text runs", base_c)
@@ -738,7 +678,6 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 		validate_order(d.order, deleted_flags, len(d.inserted_members), cx.allocator) or_return
 
 		places := make([dynamic]int, 0, len(items), cx.allocator)
-		defer delete(places)
 		for it, i in items {
 			if !it.deleted {
 				append(&places, i)
@@ -762,10 +701,7 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 				} else {
 					ins := d.inserted_members[k - len(items)]
 					b := make([dynamic]u8, 0, 64, cx.allocator)
-					if err := spell_xml_element(cx, ins.key, ins.value, &b); err != nil {
-						delete(b)
-						return err
-					}
+					spell_xml_element(cx, ins.key, ins.value, &b) or_return
 					append(&moves, Move{text = b[:], written = true})
 				}
 			}
@@ -818,68 +754,44 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 			for ins in d.inserted_members {
 				if ins.key == markup.TEXT_KEY {
 					if node_kind(cx.ov, ins.value) == .Array || node_kind(cx.ov, ins.value) == .Object {
-						delete(b)
 						return refuse(.Text_Markup, "cannot insert element or array as #text", base_c)
 					}
-					if err := cx.spec.spell_content(cx.spec.data, cx.ov, ins.value, &b); err != nil {
-						delete(b)
-						return err
-					}
-				} else if err := spell_xml_element(cx, ins.key, ins.value, &b); err != nil {
-					delete(b)
-					return err
+					cx.spec.spell_content(cx.spec.data, cx.ov, ins.value, &b) or_return
+				} else {
+					spell_xml_element(cx, ins.key, ins.value, &b) or_return
 				}
 			}
 			append(&b, "</")
 			append(&b, p_name)
 			append(&b, '>')
-			if _, aerr := append(&cx.splices, Splice{lo = parent_el.open, hi = parent_el.hi, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}); aerr != nil {
-				delete(b)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = parent_el.open, hi = parent_el.hi, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
 			return nil
 		}
-		sep := ""
-		if len(items) > 0 {
-			last := items[len(items) - 1]
-			sep = string(cx.src[last.lead:last.lo])
-		}
+		sep := string(cx.src[items[len(items) - 1].lead:items[len(items) - 1].lo]) if len(items) > 0 else ""
 		for ins in d.inserted_members {
 			if ins.key == markup.TEXT_KEY {
 				if node_kind(cx.ov, ins.value) == .Array || node_kind(cx.ov, ins.value) == .Object {
 					return refuse(.Text_Markup, "cannot insert element or array as #text", base_c)
 				}
 				b := make([dynamic]u8, 0, 32, cx.allocator)
-				if err := cx.spec.spell_content(cx.spec.data, cx.ov, ins.value, &b); err != nil {
-					delete(b)
-					return err
-				}
+				cx.spec.spell_content(cx.spec.data, cx.ov, ins.value, &b) or_return
 				pos := items[ins.at].lo if ins.at >= 0 && ins.at < len(items) else (items[len(items) - 1].hi if len(items) > 0 else parent_el.close)
 				append(&cx.splices, Splice{lo = pos, hi = pos, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true})
 				continue
 			}
 			b := make([dynamic]u8, 0, 64, cx.allocator)
 			if ins.at >= 0 && ins.at < len(items) {
-				if err := spell_xml_element(cx, ins.key, ins.value, &b); err != nil {
-					delete(b)
-					return err
-				}
+				spell_xml_element(cx, ins.key, ins.value, &b) or_return
 				append(&b, sep)
 				pos := items[ins.at].lo
 				append(&cx.splices, Splice{lo = pos, hi = pos, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true})
 			} else if len(items) > 0 {
 				append(&b, sep)
-				if err := spell_xml_element(cx, ins.key, ins.value, &b); err != nil {
-					delete(b)
-					return err
-				}
+				spell_xml_element(cx, ins.key, ins.value, &b) or_return
 				pos := items[len(items) - 1].hi
 				append(&cx.splices, Splice{lo = pos, hi = pos, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true})
 			} else {
-				if err := spell_xml_element(cx, ins.key, ins.value, &b); err != nil {
-					delete(b)
-					return err
-				}
+				spell_xml_element(cx, ins.key, ins.value, &b) or_return
 				append(&cx.splices, Splice{lo = parent_el.close, hi = parent_el.close, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true})
 			}
 		}

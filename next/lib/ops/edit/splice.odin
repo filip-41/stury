@@ -1,8 +1,10 @@
 package edit
 
 import "base:runtime"
-import "core:container/handle_map"
+import "core:bytes"
+import "core:math"
 import "core:slice"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
 // Byte-level splice engine and shared composer utilities.
@@ -84,25 +86,32 @@ apply_splices :: proc(
 	err: Error,
 ) {
 	has_moves := false
-	for s in splices {
+	strictly_sorted := true
+	prev_lo := u64(0)
+	for s, i in splices {
 		if len(s.moves) > 0 {
 			has_moves = true
-			break
 		}
+		if i > 0 && s.lo <= prev_lo {
+			strictly_sorted = false
+		}
+		prev_lo = s.lo
 	}
-	slice.sort_by(splices, proc(a, b: Splice) -> bool {
-		if a.lo != b.lo {
-			return a.lo < b.lo
-		}
-		am, bm := len(a.moves) > 0, len(b.moves) > 0
-		if am != bm {
-			return am
-		}
-		if a.hi != b.hi {
-			return a.hi < b.hi if !am else a.hi > b.hi
-		}
-		return a.seq < b.seq
-	})
+	if !strictly_sorted || has_moves {
+		slice.sort_by(splices, proc(a, b: Splice) -> bool {
+			if a.lo != b.lo {
+				return a.lo < b.lo
+			}
+			am, bm := len(a.moves) > 0, len(b.moves) > 0
+			if am != bm {
+				return am
+			}
+			if a.hi != b.hi {
+				return a.hi < b.hi if !am else a.hi > b.hi
+			}
+			return a.seq < b.seq
+		})
+	}
 	if !has_moves {
 		return apply_flat_splices(src, splices, allocator)
 	}
@@ -133,20 +142,24 @@ apply_flat_splices :: proc(
 			n_rewritten += 1
 		}
 	}
-	raw, aerr := make([]u8, int(total), allocator)
-	if aerr != nil {
-		return nil, nil, nil, aerr
+	raw: []u8
+	if total > 0 {
+		raw_mem, aerr := runtime.mem_alloc_non_zeroed(int(total), 1, allocator)
+		if aerr != nil {
+			return nil, nil, nil, aerr
+		}
+		raw = raw_mem[:int(total)]
 	}
-	defer if err != nil {
+	defer if err != nil && raw != nil {
 		delete(raw, allocator)
 	}
 	recs: []Splice_Record
 	if len(splices) > 0 {
-		rerr: runtime.Allocator_Error
-		recs, rerr = make([]Splice_Record, len(splices), allocator)
+		rmem, rerr := runtime.mem_alloc_non_zeroed(len(splices) * size_of(Splice_Record), align_of(Splice_Record), allocator)
 		if rerr != nil {
 			return nil, nil, nil, rerr
 		}
+		recs = ([^]Splice_Record)(raw_data(rmem))[:len(splices)]
 	}
 	defer if err != nil && recs != nil {
 		delete(recs, allocator)
@@ -410,13 +423,12 @@ line_indent :: proc "contextless" (src: []u8, pos: u64) -> string {
 }
 
 detect_eol :: proc "contextless" (src: []u8) -> string {
-	for i := 0; i < len(src); i += 1 {
-		if src[i] == '\n' {
-			if i > 0 && src[i - 1] == '\r' {
-				return "\r\n"
-			}
-			return "\n"
+	limit := min(len(src), 65536)
+	if i := bytes.index_byte(src[:limit], '\n'); i >= 0 {
+		if i > 0 && src[i - 1] == '\r' {
+			return "\r\n"
 		}
+		return "\n"
 	}
 	return "\n"
 }
@@ -510,16 +522,129 @@ validate_order :: proc(order: []u32, deleted: []bool, insert_count: int, allocat
 	return nil
 }
 
-// Returns true if any edited node in `ov` carries a `.Raw` value (which must be validated by the format parser).
-overlay_has_raw :: proc(ov: ^Overlay) -> bool {
-	if ov == nil {
+@(private)
+fail_commit_validation :: proc(
+	out: []u8,
+	recs: []Splice_Record,
+	rew: []Byte_Range,
+	verr: tape.Error,
+	allocator: runtime.Allocator,
+) -> (Commit_Result, Error) {
+	delete(out, allocator)
+	delete(recs, allocator)
+	delete(rew, allocator)
+	return {}, convert_tape_error(verr)
+}
+
+@(private)
+has_utf8_bom :: #force_inline proc "contextless" (b: []u8) -> bool {
+	return len(b) >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF
+}
+
+// Sound O(len) fast-path check for a single self-contained JSON/JSONC/JSON5 scalar literal
+// (RFC 8259 number, `true`/`false`/`null`, or unescaped printable ASCII double-quoted string).
+// Any other value (containers, escapes, non-ASCII, comments, malformed input) returns false and falls back to `spec.validate`.
+@(private)
+is_simple_json_scalar :: proc "contextless" (frag: []u8) -> bool {
+	if len(frag) == 0 {
 		return false
 	}
-	it := handle_map.dynamic_iterator_make(&ov.nodes)
-	for n in dynamic_iter_next(&it) {
-		if n.state == .Replaced && n.val.kind == .Raw {
-			return true
+	switch frag[0] {
+	case '0' ..= '9', '-':
+		_, ok := spell.number_strict(frag, 0, u64(len(frag)))
+		return ok
+	case 't':
+		return string(frag) == "true"
+	case 'f':
+		return string(frag) == "false"
+	case 'n':
+		return string(frag) == "null"
+	case '"':
+		if len(frag) < 2 || frag[len(frag) - 1] != '"' {
+			return false
 		}
+		for b in frag[1 : len(frag) - 1] {
+			if b < 0x20 || b >= 0x80 || b == '"' || b == '\\' {
+				return false
+			}
+		}
+		return true
 	}
 	return false
+}
+
+// Sound O(len) fast-path check for a single self-contained TOML 1.0/1.1 scalar literal
+// (i64 integer, finite f64 float, `true`/`false`, or unescaped printable ASCII basic string).
+@(private)
+is_simple_toml_scalar :: proc "contextless" (frag: []u8) -> bool {
+	if len(frag) == 0 {
+		return false
+	}
+	switch frag[0] {
+	case '0' ..= '9', '-':
+		sn, ok := spell.number_strict(frag, 0, u64(len(frag)))
+		if !ok {
+			return false
+		}
+		if sn.kind == .Int {
+			return true
+		}
+		// Only accept `.Float` when the text is genuinely a float literal (contains `.`, `e`, or `E`),
+		// never an out-of-range integer (`< min(i64)` or `> max(u64)`) that `number_strict` widened to `f64`!
+		if sn.kind == .Float && !math.is_inf(transmute(f64)sn.bits) {
+			for b in frag {
+				if b == '.' || b == 'e' || b == 'E' {
+					return true
+				}
+			}
+		}
+		return false
+	case 't':
+		return string(frag) == "true"
+	case 'f':
+		return string(frag) == "false"
+	case '"':
+		if len(frag) < 2 || frag[len(frag) - 1] != '"' {
+			return false
+		}
+		for b in frag[1 : len(frag) - 1] {
+			if b < 0x20 || b >= 0x7F || b == '"' || b == '\\' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// Sound O(len) fast-path check for pure ASCII XML 1.0 CharData with no markup-significant bytes (`<`, `&`, `]`, `>`).
+@(private)
+is_simple_xml_text :: proc "contextless" (frag: []u8) -> bool {
+	for b in frag {
+		if b >= 0x80 || b == '<' || b == '&' || b == ']' || b == '>' {
+			return false
+		}
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			return false
+		}
+	}
+	return true
+}
+
+// Sound O(len) fast-path check for a single plain ASCII DSV cell containing no delimiter, quote, escape, line break,
+// leading comment marker, or file-start BOM.
+@(private)
+is_simple_dsv_cell :: proc "contextless" (frag: []u8, delim, comment: u8, at_start: bool) -> bool {
+	if at_start && has_utf8_bom(frag) {
+		return false
+	}
+	if comment != 0 && len(frag) > 0 && frag[0] == comment {
+		return false
+	}
+	for b in frag {
+		if b >= 0x80 || b == delim || b == '\n' || b == '\r' || b == '"' || b == '\\' {
+			return false
+		}
+	}
+	return true
 }

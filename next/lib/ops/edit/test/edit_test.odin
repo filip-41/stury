@@ -1,12 +1,15 @@
 package edit_tests
 
 import "base:runtime"
+import "core:mem"
 import "core:testing"
 import "stury:cbor"
 import "stury:dsv"
+import "stury:jq"
 import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/ops/edit"
+import "stury:lib/query"
 import "stury:testkit"
 import "stury:toml"
 import "stury:xml"
@@ -476,5 +479,276 @@ overlay_chained_container_deltas_and_splice_fixes :: proc(t: ^testing.T) {
 			testing.expect_value(t, spliced.nodes[i].lo, fresh.nodes[i].lo)
 			testing.expect_value(t, spliced.nodes[i].n, fresh.nodes[i].n)
 		}
+	}
+}
+
+@(test)
+review_fixes_regressions :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	alloc := runtime.heap_allocator()
+
+	// 1. TOML out-of-range integer literals via `.Raw` MUST be rejected, while valid min(i64) and floats succeed.
+	{
+		src := transmute([]u8)string("v = 1\n")
+		doc, err := toml.build(src, .Toml_1_0, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+		vn, _ := tape.member(tape.Reader{doc = &doc}, tape.ROOT, "v")
+
+		for bad in ([]string{"-9223372036854775809", "18446744073709551616", "99999999999999999999"}) {
+			ov: toml.Overlay
+			testing.expect(t, toml.edit_init(&ov, &doc, alloc) == nil)
+			vh, _ := edit.handle_for_base(&ov, vn)
+			testing.expect(t, edit.set(&ov, vh, edit.val_raw(bad)) == nil)
+			res, cerr := toml.commit(&ov, .Toml_1_0, {}, alloc)
+			edit.destroy_commit_result(&res)
+			toml.edit_destroy(&ov)
+			testing.expectf(t, cerr != nil, "TOML out-of-range integer %q must be rejected", bad)
+		}
+		for good in ([]string{"-9223372036854775808", "3.14", "1e5"}) {
+			ov: toml.Overlay
+			testing.expect(t, toml.edit_init(&ov, &doc, alloc) == nil)
+			vh, _ := edit.handle_for_base(&ov, vn)
+			testing.expect(t, edit.set(&ov, vh, edit.val_raw(good)) == nil)
+			res, cerr := toml.commit(&ov, .Toml_1_0, {}, alloc)
+			testing.expectf(t, cerr == nil, "valid TOML scalar %q failed: %v", good, cerr)
+			edit.destroy_commit_result(&res)
+			toml.edit_destroy(&ov)
+		}
+	}
+
+	// 2. Duplicate-key reflow detection on `handle_for_base` + `set` (direct, nested, and escaped keys).
+	{
+		cases := [?]struct {
+			src:     string,
+			target:  tape.Node_Index,
+			want_ok: string,
+		}{
+			{`{"a": 1, "a": 2}`, 4, `{"a":99}`},
+			{`{"a": {"x": 1}, "a": {"x": 2}}`, 8, `{"a":{"x":99}}`},
+			{`{"a": 1, "\u0061": 2}`, 4, `{"a":99}`},
+		}
+		for c in cases {
+			doc, err := json.build(transmute([]u8)c.src, .Json, {}, alloc)
+			testing.expect(t, err == nil)
+			defer tape.destroy_document(&doc)
+
+			ov: json.Overlay
+			testing.expect(t, json.edit_init(&ov, &doc, alloc) == nil)
+			defer json.edit_destroy(&ov)
+
+			h, herr := edit.handle_for_base(&ov, c.target)
+			testing.expect(t, herr == nil)
+			testing.expect(t, edit.set(&ov, h, edit.val_int(99)) == nil)
+
+			res0, cerr0 := json.commit(&ov, .Json, {reflow = false}, alloc)
+			edit.destroy_commit_result(&res0)
+			ref, is_ref := cerr0.(edit.Refusal)
+			testing.expectf(t, is_ref && ref.kind == .Layout_Reflow_Needed, "%s: expected Layout_Reflow_Needed, got %v", c.src, cerr0)
+
+			res1, cerr1 := json.commit(&ov, .Json, {reflow = true}, alloc)
+			testing.expectf(t, cerr1 == nil, "%s reflow failed: %v", c.src, cerr1)
+			testing.expect_value(t, string(res1.bytes), c.want_ok)
+			testing.expect(t, len(res1.rewritten) > 0)
+			edit.destroy_commit_result(&res1)
+		}
+
+		// Also verify `jq` `.a = 99` on `{"a": 1, "a": 2}` refuses without reflow and deduplicates with reflow.
+		{
+			doc, derr := json.build(transmute([]u8)string(`{"a": 1, "a": 2}`), .Json, {}, alloc)
+			testing.expect(t, derr == nil)
+			prog, perrs := jq.compile(`.a = 99`)
+			defer jq.destroy_program(prog)
+			testing.expect_value(t, len(perrs), 0)
+
+			qh: query.Heap
+			query.heap_init(&qh, alloc)
+			defer query.heap_destroy(&qh)
+
+			inp, qov, qst := query.overlay_from_doc(&qh, doc, doc_owned = true)
+			testing.expect_value(t, qst, query.Status.Ok)
+
+			run: jq.Run
+			jq.run_init(&run, prog, &qh, nil)
+			defer jq.run_destroy(&run)
+			Collect :: struct {
+				h:   ^query.Heap,
+				val: query.Value,
+				n:   int,
+			}
+			col := Collect{h = &qh}
+			sink :: proc(data: rawptr, v: query.Value, _: ^query.Heap) -> bool {
+				c := (^Collect)(data)
+				if c.n == 0 {
+					c.val = query.retain(v)
+				}
+				c.n += 1
+				return true
+			}
+			end := jq.run_value(&run, inp, sink, &col)
+			testing.expect_value(t, end, jq.Run_End.Done)
+			testing.expect_value(t, col.n, 1)
+			defer query.release(&qh, col.val)
+			testing.expect(t, query.reconcile_overlay(&qh, qov, col.val) == nil)
+
+			r0, ce0 := json.commit(qov, .Json, {reflow = false}, alloc)
+			edit.destroy_commit_result(&r0)
+			ref, is_ref := ce0.(edit.Refusal)
+			testing.expectf(t, is_ref && ref.kind == .Layout_Reflow_Needed, "jq .a=99 expected Layout_Reflow_Needed, got %v", ce0)
+
+			r1, ce1 := json.commit(qov, .Json, {reflow = true}, alloc)
+			testing.expectf(t, ce1 == nil, "jq .a=99 reflow failed: %v", ce1)
+			testing.expect_value(t, string(r1.bytes), `{"a":99}`)
+			testing.expect(t, len(r1.rewritten) > 0)
+			edit.destroy_commit_result(&r1)
+		}
+	}
+
+	// 3. `Budget.depth` enforced on `.Raw` nested containers in both JSON and TOML.
+	{
+		d := tape.DEFAULT_DEPTH - 1
+		// JSON: depth DEFAULT_DEPTH - 1 array `[...[1]...]` + `val_raw("[[[1]]]")` exceeds DEFAULT_DEPTH!
+		jsrc := make([]u8, 2 * d + 1, alloc)
+		defer delete(jsrc, alloc)
+		for i in 0 ..< d {
+			jsrc[i] = '['
+			jsrc[len(jsrc) - 1 - i] = ']'
+		}
+		jsrc[d] = '1'
+		jdoc, jerr := json.build(jsrc, .Json, {}, alloc)
+		testing.expect(t, jerr == nil)
+		defer tape.destroy_document(&jdoc)
+		jov: json.Overlay
+		testing.expect(t, json.edit_init(&jov, &jdoc, alloc) == nil)
+		defer json.edit_destroy(&jov)
+		leaf_h, _ := edit.handle_for_base(&jov, tape.Node_Index(d))
+		testing.expect(t, edit.set(&jov, leaf_h, edit.val_raw("[[[1]]]")) == nil)
+		jres, jcerr := json.commit(&jov, .Json, {}, alloc)
+		edit.destroy_commit_result(&jres)
+		jex, is_jex := jcerr.(tape.Exceeded)
+		testing.expectf(t, is_jex && jex.kind == .Depth, "JSON depth exceed expected, got %v", jcerr)
+
+		// TOML: depth DEFAULT_DEPTH - 1 array `v=[...[1]...]` + `val_raw("{a={b={c=1}}}")` exceeds DEFAULT_DEPTH!
+		// (`v=` adds root table depth 1, so `d - 1` brackets leaves 1 level of headroom.)
+		td := d - 1
+		tsrc := make([]u8, 2 + 2 * td + 1, alloc)
+		defer delete(tsrc, alloc)
+		tsrc[0], tsrc[1] = 'v', '='
+		for i in 0 ..< td {
+			tsrc[2 + i] = '['
+			tsrc[len(tsrc) - 1 - i] = ']'
+		}
+		tsrc[2 + td] = '1'
+		tdoc, terr := toml.build(tsrc, .Toml_1_0, {}, alloc)
+		testing.expect(t, terr == nil)
+		defer tape.destroy_document(&tdoc)
+		tov: toml.Overlay
+		testing.expect(t, toml.edit_init(&tov, &tdoc, alloc) == nil)
+		defer toml.edit_destroy(&tov)
+		// Nodes: 0=root, 1=key("v"), 2..2+td-1=arrays, 2+td=leaf `1`.
+		tleaf_h, _ := edit.handle_for_base(&tov, tape.Node_Index(2 + td))
+		testing.expect(t, edit.set(&tov, tleaf_h, edit.val_raw("{a={b={c=1}}}")) == nil)
+		tres, tcerr := toml.commit(&tov, .Toml_1_0, {}, alloc)
+		edit.destroy_commit_result(&tres)
+		tex, is_tex := tcerr.(tape.Exceeded)
+		testing.expectf(t, is_tex && tex.kind == .Depth, "TOML depth exceed expected, got %v", tcerr)
+	}
+
+	// 4. Bounded 16 KiB caller allocator succeeds on 1-scalar edit commits for all 4 text composers.
+	{
+		backing: [16 * 1024]u8
+		ba: mem.Arena
+		// JSON
+		{
+			doc, _ := json.build(transmute([]u8)string(`{"a": 1}`), .Json, {}, alloc)
+			defer tape.destroy_document(&doc)
+			ov: json.Overlay
+			_ = json.edit_init(&ov, &doc, alloc)
+			defer json.edit_destroy(&ov)
+			h, _ := edit.handle_for_base(&ov, 2)
+			_ = edit.set(&ov, h, edit.val_raw("2"))
+			mem.arena_init(&ba, backing[:])
+			res, cerr := json.commit(&ov, .Json, {}, mem.arena_allocator(&ba))
+			testing.expectf(t, cerr == nil && string(res.bytes) == `{"a": 2}`, "JSON 16KiB commit failed: %v", cerr)
+		}
+		// TOML
+		{
+			doc, _ := toml.build(transmute([]u8)string("a = 1\n"), .Toml_1_0, {}, alloc)
+			defer tape.destroy_document(&doc)
+			ov: toml.Overlay
+			_ = toml.edit_init(&ov, &doc, alloc)
+			defer toml.edit_destroy(&ov)
+			h, _ := edit.handle_for_base(&ov, 2)
+			_ = edit.set(&ov, h, edit.val_raw("2"))
+			mem.arena_init(&ba, backing[:])
+			res, cerr := toml.commit(&ov, .Toml_1_0, {}, mem.arena_allocator(&ba))
+			testing.expectf(t, cerr == nil && string(res.bytes) == "a = 2\n", "TOML 16KiB commit failed: %v", cerr)
+		}
+		// XML
+		{
+			doc, _ := xml.build(transmute([]u8)string(`<r><a>1</a></r>`), .Xml, {}, alloc)
+			defer tape.destroy_document(&doc)
+			ov: xml.Overlay
+			_ = xml.edit_init(&ov, &doc, alloc)
+			defer xml.edit_destroy(&ov)
+			rn, _ := tape.member(tape.Reader{doc = &doc}, tape.ROOT, "r")
+			an, _ := tape.member(tape.Reader{doc = &doc}, rn, "a")
+			h, _ := edit.handle_for_base(&ov, an)
+			_ = edit.set(&ov, h, edit.val_raw("2"))
+			mem.arena_init(&ba, backing[:])
+			res, cerr := xml.commit(&ov, {}, mem.arena_allocator(&ba))
+			testing.expectf(t, cerr == nil && string(res.bytes) == `<r><a>2</a></r>`, "XML 16KiB commit failed: %v", cerr)
+		}
+		// DSV
+		{
+			doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv, {}, alloc)
+			defer tape.destroy_document(&doc)
+			ov: dsv.Overlay
+			_ = dsv.edit_init(&ov, &doc, alloc)
+			defer dsv.edit_destroy(&ov)
+			row0, _ := tape.element(tape.Reader{doc = &doc}, tape.ROOT, 0)
+			cell, _ := tape.member(tape.Reader{doc = &doc}, row0, "b")
+			h, _ := edit.handle_for_base(&ov, cell)
+			_ = edit.set(&ov, h, edit.val_raw("9"))
+			mem.arena_init(&ba, backing[:])
+			res, cerr := dsv.commit(&ov, .Csv, {}, mem.arena_allocator(&ba))
+			testing.expectf(t, cerr == nil && string(res.bytes) == "a,b\n1,9\n", "DSV 16KiB commit failed: %v", cerr)
+		}
+	}
+
+	// 5. Non-`.Raw` leaf fast-path edit (`val_int`, `val_string`) keeps `ov.parents == nil` (no `ensure_parents`).
+	{
+		doc, err := json.build(transmute([]u8)string(`{"a": 1, "b": "old"}`), .Json, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+		ov: json.Overlay
+		testing.expect(t, json.edit_init(&ov, &doc, alloc) == nil)
+		defer json.edit_destroy(&ov)
+		ha, _ := edit.handle_for_base(&ov, 2)
+		hb, _ := edit.handle_for_base(&ov, 4)
+		testing.expect(t, edit.set(&ov, ha, edit.val_int(42)) == nil)
+		testing.expect(t, edit.set(&ov, hb, edit.val_string("new")) == nil)
+		res, cerr := json.commit(&ov, .Json, {}, alloc)
+		testing.expect(t, cerr == nil)
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, string(res.bytes), `{"a": 42, "b": "new"}`)
+		testing.expect(t, ov.parents == nil)
+	}
+
+	// 6. Setting a `.Key` handle via `handle_for_base` + `set` does NOT corrupt JSON output.
+	{
+		doc, err := json.build(transmute([]u8)string(`{"a": 1}`), .Json, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+		ov: json.Overlay
+		testing.expect(t, json.edit_init(&ov, &doc, alloc) == nil)
+		defer json.edit_destroy(&ov)
+		// Node 1 is `.Key` ("a").
+		kh, _ := edit.handle_for_base(&ov, 1)
+		testing.expect(t, edit.set(&ov, kh, edit.val_int(999)) == nil)
+		res, cerr := json.commit(&ov, .Json, {}, alloc)
+		testing.expect(t, cerr == nil)
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, string(res.bytes), `{"a": 1}`)
 	}
 }

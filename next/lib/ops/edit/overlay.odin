@@ -97,28 +97,32 @@ Fact_Override :: struct {
 }
 
 Edit_Node :: struct {
-	handle:    Handle,
-	base:      tape.Node_Index, // `tape.NO_NODE` for newly constructed nodes
-	base_ref:  tape.Node_Index, // non-NO_NODE when constructed from `.Base_Ref` and later structurally edited
-	parent:    Handle,
-	state:     Node_State,
-	val:       Edit_Value,
-	elems:     [dynamic]Handle,
-	members:   [dynamic]Object_Entry,
-	delta:     ^Container_Delta, // lazily allocated only when `state == .Container_Delta`
-	facts:     [dynamic]Fact_Override,
-	has_edits: bool,
+	handle:     Handle,
+	base:       tape.Node_Index, // `tape.NO_NODE` for newly constructed nodes
+	base_ref:   tape.Node_Index, // non-NO_NODE when constructed from `.Base_Ref` and later structurally edited
+	parent:     Handle,
+	state:      Node_State,
+	val_inline: bool,            // true when `val.text`/`val.raw` points into `inline_buf` (stable in `xar`)
+	has_edits:  bool,
+	val:        Edit_Value,
+	inline_buf: [16]u8,          // inline SSO storage for short scalar text/raw/bytes (zero heap alloc)
+	elems:      [dynamic]Handle,
+	members:    [dynamic]Object_Entry,
+	delta:      ^Container_Delta, // lazily allocated only when `state == .Container_Delta`
+	facts:      [dynamic]Fact_Override,
 }
 
 Overlay :: struct {
-	base:      ^tape.Document,
-	allocator: runtime.Allocator,
-	nodes:     handle_map.Dynamic_Handle_Map(Edit_Node, Handle),
-	root:      Handle,
-	by_base:   map[tape.Node_Index]Handle,
-	parents:   []tape.Node_Index,
-	present:   tape.Facts,
-	dirty:     bool,
+	base:             ^tape.Document,
+	allocator:        runtime.Allocator,
+	nodes:            handle_map.Dynamic_Handle_Map(Edit_Node, Handle),
+	root:             Handle,
+	by_base:          map[tape.Node_Index]Handle,
+	parents:          []tape.Node_Index,
+	present:          tape.Facts,
+	dirty:            bool,
+	unlinked_parents: bool, // true when some base node(s) have `parent == NO_HANDLE` pending lazy `ensure_linked`
+	has_structural:   bool, // true on any container delta, fact edit, container/root/key replace, or non-scalar value
 }
 
 init :: proc(ov: ^Overlay, base: ^tape.Document, allocator := context.allocator) -> Error {
@@ -209,7 +213,8 @@ free_container_delta :: proc(ov: ^Overlay, d: ^Container_Delta) {
 
 @(private)
 reset_node_deltas :: proc(ov: ^Overlay, n: ^Edit_Node) {
-	free_edit_value(ov, &n.val)
+	free_edit_value(ov, &n.val, n.val_inline)
+	n.val_inline = false
 	clear(&n.elems)
 	for m in n.members {
 		delete(m.key, ov.allocator)
@@ -234,16 +239,18 @@ free_edit_node :: proc(ov: ^Overlay, n: ^Edit_Node) {
 }
 
 @(private)
-free_edit_value :: proc(ov: ^Overlay, v: ^Edit_Value) {
-	a := ov.allocator
-	#partial switch v.kind {
-	case .String, .Number_Text, .Raw:
-		if len(v.text) > 0 {
-			delete(v.text, a)
-		}
-	case .Bytes:
-		if v.raw != nil {
-			delete(v.raw, a)
+free_edit_value :: proc(ov: ^Overlay, v: ^Edit_Value, is_inline := false) {
+	if !is_inline {
+		a := ov.allocator
+		#partial switch v.kind {
+		case .String, .Number_Text, .Raw:
+			if len(v.text) > 0 {
+				delete(v.text, a)
+			}
+		case .Bytes:
+			if v.raw != nil {
+				delete(v.raw, a)
+			}
 		}
 	}
 	v^ = {}
@@ -350,6 +357,7 @@ enter_container_delta :: proc(ov: ^Overlay, n: ^Edit_Node) -> (^Container_Delta,
 		n.val = {}
 	}
 	n.state = .Container_Delta
+	ov.has_structural = true
 	return ensure_delta(ov, n)
 }
 
@@ -425,57 +433,116 @@ ensure_parents :: proc(ov: ^Overlay) -> runtime.Allocator_Error {
 	return nil
 }
 
+// Returns a stable `Handle` for `base_node` in O(1) without scanning `ov.base.nodes` for parent links.
+// Parent links are materialized lazily by `ensure_linked` only when a tree-walk commit or `materialize_subtree` needs them.
 handle_for_base :: proc(ov: ^Overlay, base_node: tape.Node_Index) -> (Handle, Error) {
+	return handle_for_base_with_parent(ov, base_node, NO_HANDLE)
+}
+
+// Fast base handle creation; attaches `parent_h` when known (e.g. `set_path`, `set_member`, `set_element`),
+// otherwise defers parent linking via `ov.unlinked_parents`.
+@(private)
+handle_for_base_with_parent :: proc(ov: ^Overlay, base_node: tape.Node_Index, parent_h: Handle) -> (Handle, Error) {
 	if base_node == tape.NO_NODE || int(base_node) >= len(ov.base.nodes) {
 		return NO_HANDLE, refuse(.Bad_Handle, "base node out of range", base_node)
 	}
 	if h, ok := ov.by_base[base_node]; ok {
+		if parent_h != NO_HANDLE && base_node != tape.ROOT {
+			if cn, cok := get_node(ov, h); cok && cn.parent == NO_HANDLE {
+				cn.parent = parent_h
+				if cn.has_edits {
+					mark_edited(ov, parent_h)
+				}
+			}
+		}
 		return h, nil
 	}
 	if base_node == tape.ROOT {
 		return ensure_root(ov)
 	}
-	if err := ensure_parents(ov); err != nil {
+	h, err := handle_map.dynamic_add(&ov.nodes, Edit_Node {
+		base     = base_node,
+		base_ref = tape.NO_NODE,
+		parent   = parent_h,
+		state    = .Ancestor,
+	})
+	if err != nil {
 		return NO_HANDLE, err
+	}
+	ov.by_base[base_node] = h
+	if parent_h == NO_HANDLE {
+		ov.unlinked_parents = true
+	}
+	return h, nil
+}
+
+// Lazily links any base nodes created via `handle_for_base` up to `ov.root`, propagating `has_edits`.
+ensure_linked :: proc(ov: ^Overlay) -> runtime.Allocator_Error {
+	if ov == nil || !ov.unlinked_parents {
+		return nil
+	}
+	ensure_parents(ov) or_return
+	unlinked := make([dynamic]Handle, 0, 16, ov.allocator)
+	defer delete(unlinked)
+	it := handle_map.dynamic_iterator_make(&ov.nodes)
+	for n in dynamic_iter_next(&it) {
+		if n.base != tape.NO_NODE && n.base != tape.ROOT && n.parent == NO_HANDLE {
+			append(&unlinked, n.handle) or_return
+		}
 	}
 	chain := make([dynamic]tape.Node_Index, 0, 16, ov.allocator)
 	defer delete(chain)
-	cur := base_node
-	parent_h := NO_HANDLE
-	for {
-		if existing, ok := ov.by_base[cur]; ok {
-			parent_h = existing
-			break
+	for h in unlinked {
+		n, ok := get_node(ov, h)
+		if !ok || n.parent != NO_HANDLE {
+			continue
 		}
-		if _, err := append(&chain, cur); err != nil {
-			return NO_HANDLE, err
+		bn := n.base
+		edited := n.has_edits
+		clear(&chain)
+		cur := ov.parents[bn]
+		parent_h := NO_HANDLE
+		for cur != tape.NO_NODE {
+			if existing, has := ov.by_base[cur]; has {
+				parent_h = existing
+				break
+			}
+			append(&chain, cur) or_return
+			if cur == tape.ROOT {
+				break
+			}
+			cur = ov.parents[cur]
 		}
-		if cur == tape.ROOT {
-			break
+		#reverse for anc in chain {
+			ah, aerr := handle_map.dynamic_add(&ov.nodes, Edit_Node {
+				base     = anc,
+				base_ref = tape.NO_NODE,
+				parent   = parent_h,
+				state    = .Ancestor,
+			})
+			if aerr != nil {
+				return aerr
+			}
+			ov.by_base[anc] = ah
+			if anc == tape.ROOT {
+				ov.root = ah
+			}
+			parent_h = ah
 		}
-		p := ov.parents[cur]
-		if p == tape.NO_NODE {
-			break
+		if n2, ok2 := get_node(ov, h); ok2 {
+			n2.parent = parent_h
 		}
-		cur = p
+		if edited && parent_h != NO_HANDLE {
+			mark_edited(ov, parent_h)
+		}
 	}
-	#reverse for bn in chain {
-		h, err := handle_map.dynamic_add(&ov.nodes, Edit_Node {
-			base     = bn,
-			base_ref = tape.NO_NODE,
-			parent   = parent_h,
-			state    = .Ancestor,
-		})
-		if err != nil {
-			return NO_HANDLE, err
+	if ov.root == NO_HANDLE {
+		if rh, has := ov.by_base[tape.ROOT]; has {
+			ov.root = rh
 		}
-		ov.by_base[bn] = h
-		if bn == tape.ROOT {
-			ov.root = h
-		}
-		parent_h = h
 	}
-	return parent_h, nil
+	ov.unlinked_parents = false
+	return nil
 }
 
 @(private)
@@ -492,17 +559,54 @@ mark_edited :: proc(ov: ^Overlay, h: Handle) {
 	}
 }
 
+@(private)
+try_inline_bytes :: #force_inline proc "contextless" (val: Edit_Value) -> (src: []u8, ok: bool) {
+	#partial switch val.kind {
+	case .String, .Number_Text, .Raw:
+		if len(val.text) <= 16 {
+			return transmute([]u8)val.text, true
+		}
+	case .Bytes:
+		if len(val.raw) <= 16 {
+			return val.raw, true
+		}
+	}
+	return nil, false
+}
+
+@(private)
+store_inline_bytes :: #force_inline proc "contextless" (n: ^Edit_Node, kind: Value_Kind, src: []u8) {
+	n.val = {kind = kind}
+	n.val_inline = true
+	if len(src) > 0 {
+		copy(n.inline_buf[:len(src)], src)
+		if kind == .Bytes {
+			n.val.raw = n.inline_buf[:len(src)]
+		} else {
+			n.val.text = string(n.inline_buf[:len(src)])
+		}
+	}
+}
+
 new_node :: proc(ov: ^Overlay, val: Edit_Value) -> (Handle, Error) {
-	cloned, cerr := clone_value(ov, val)
-	if cerr != nil {
-		return NO_HANDLE, cerr
+	inline_src, can_inline := try_inline_bytes(val)
+	cloned: Edit_Value
+	if can_inline {
+		cloned.kind = val.kind
+	} else {
+		cerr: runtime.Allocator_Error
+		cloned, cerr = clone_value(ov, val)
+		if cerr != nil {
+			return NO_HANDLE, cerr
+		}
 	}
 	node := Edit_Node {
-		base      = tape.NO_NODE,
-		base_ref  = tape.NO_NODE,
-		state     = .Replaced,
-		val       = cloned,
-		has_edits = true,
+		base       = tape.NO_NODE,
+		base_ref   = tape.NO_NODE,
+		state      = .Replaced,
+		val_inline = can_inline,
+		val        = cloned,
+		has_edits  = true,
 	}
 	if aerr := assign_children(ov, &node, NO_HANDLE, val); aerr != nil {
 		free_edit_node(ov, &node)
@@ -514,6 +618,9 @@ new_node :: proc(ov: ^Overlay, val: Edit_Value) -> (Handle, Error) {
 		return NO_HANDLE, err
 	}
 	if created, ok := get_node(ov, h); ok {
+		if can_inline {
+			store_inline_bytes(created, val.kind, inline_src)
+		}
 		for eh in created.elems {
 			if cn, cok := get_node(ov, eh); cok {
 				cn.parent = h
@@ -567,17 +674,57 @@ prune_base_descendants :: proc(ov: ^Overlay, base_c: tape.Node_Index) {
 }
 
 // Replaces `target`'s value in place, preserving its stable `Handle`, `base`, `parent`, and any `facts`.
-// Clones `val` BEFORE freeing old storage so self-assignment (`set(ov, h, n.val)`) is UAF-free!
+// Copies/clones `val` BEFORE freeing old storage so self-assignment (`set(ov, h, n.val)`) is UAF-free!
 set :: proc(ov: ^Overlay, target: Handle, val: Edit_Value) -> Error {
 	n, ok := get_node(ov, target)
 	if !ok {
 		return refuse(.Bad_Handle, "invalid overlay handle")
 	}
-	cloned, cerr := clone_value(ov, val)
-	if cerr != nil {
-		return cerr
+	// Fast path for scalar replacements (no child slice zeroing/allocation).
+	if val.kind != .Array && val.kind != .Object {
+		inline_src, can_inline := try_inline_bytes(val)
+		inline_tmp: [16]u8 = ---
+		cloned: Edit_Value
+		if can_inline {
+			if len(inline_src) > 0 {
+				copy(inline_tmp[:len(inline_src)], inline_src)
+			}
+		} else {
+			cerr: runtime.Allocator_Error
+			cloned, cerr = clone_value(ov, val)
+			if cerr != nil {
+				return cerr
+			}
+		}
+		if n.base != tape.NO_NODE {
+			bn := ov.base.nodes[n.base]
+			if n.base == tape.ROOT || bn.kind >= .Array || bn.role != .Value {
+				ov.has_structural = true
+				if n.state != .Replaced {
+					prune_base_descendants(ov, n.base)
+				}
+			}
+		} else {
+			ov.has_structural = true
+		}
+		if val.kind == .Base_Ref {
+			ov.has_structural = true
+		}
+		if n.state != .Ancestor {
+			reset_node_deltas(ov, n)
+		}
+		n.state = .Replaced
+		if can_inline {
+			store_inline_bytes(n, val.kind, inline_tmp[:len(inline_src)])
+		} else {
+			n.val = cloned
+			n.val_inline = false
+		}
+		mark_edited(ov, target)
+		return nil
 	}
-	// Copy incoming child lists before resetting old ones in case `val.elems`/`val.entries` aliases `n`'s own slices.
+
+	// Container replacement (`.Array` / `.Object`): copy child lists before resetting old ones in case of aliasing.
 	new_elems: [dynamic]Handle
 	new_members: [dynamic]Object_Entry
 	if val.kind == .Array && len(val.elems) > 0 {
@@ -592,19 +739,18 @@ set :: proc(ov: ^Overlay, target: Handle, val: Edit_Value) -> Error {
 					delete(m.key, ov.allocator)
 				}
 				delete(new_members)
-				free_edit_value(ov, &cloned)
 				return kerr
 			}
 			append(&new_members, Object_Entry{key = k, value = entry.value})
 		}
 	}
-
+	ov.has_structural = true
 	if n.base != tape.NO_NODE && n.state != .Replaced {
 		prune_base_descendants(ov, n.base)
 	}
 	reset_node_deltas(ov, n)
 	n.state = .Replaced
-	n.val = cloned
+	n.val = {kind = val.kind}
 	if val.kind == .Array {
 		delete(n.elems)
 		n.elems = new_elems
@@ -613,7 +759,7 @@ set :: proc(ov: ^Overlay, target: Handle, val: Edit_Value) -> Error {
 				cn.parent = target
 			}
 		}
-	} else if val.kind == .Object {
+	} else {
 		delete(n.members)
 		n.members = new_members
 		for entry in n.members {
@@ -775,7 +921,7 @@ set_member :: proc(ov: ^Overlay, obj: Handle, key: string, val: Edit_Value) -> (
 		for r in d.renamed_members {
 			if r.new_key == key {
 				if child_base, p := tape.member(tape.Reader{doc = ov.base}, base_obj, r.old_key); p == .Found {
-					ch := handle_for_base(ov, child_base) or_return
+					ch := handle_for_base_with_parent(ov, child_base, obj) or_return
 					set(ov, ch, val) or_return
 					return ch, nil
 				}
@@ -792,7 +938,7 @@ set_member :: proc(ov: ^Overlay, obj: Handle, key: string, val: Edit_Value) -> (
 					if len(d.order) > 0 && bidx >= 0 {
 						order_on_insert(ov, d, u32(bidx), -1) or_return
 					}
-					ch := handle_for_base(ov, child_base) or_return
+					ch := handle_for_base_with_parent(ov, child_base, obj) or_return
 					set(ov, ch, val) or_return
 					return ch, nil
 				}
@@ -813,10 +959,10 @@ set_member :: proc(ov: ^Overlay, obj: Handle, key: string, val: Edit_Value) -> (
 			return insert_member(ov, obj, -1, key, val)
 		}
 	}
-	// 5. Base member exists directly in `base_obj` -> update its stable base handle in place (O(1) + ancestor chain)!
+	// 5. Base member exists directly in `base_obj` -> update its stable base handle in place (O(1) + parent link)!
 	if base_obj != tape.NO_NODE && n.base != tape.NO_NODE {
 		if child_base, p := tape.member(tape.Reader{doc = ov.base}, base_obj, key); p == .Found {
-			ch := handle_for_base(ov, child_base) or_return
+			ch := handle_for_base_with_parent(ov, child_base, obj) or_return
 			set(ov, ch, val) or_return
 			return ch, nil
 		}
@@ -1109,7 +1255,7 @@ set_element :: proc(ov: ^Overlay, arr: Handle, index: int, val: Edit_Value) -> (
 	if n.state == .Ancestor && n.base != tape.NO_NODE {
 		elem_base, p := tape.element(tape.Reader{doc = ov.base}, base_arr, index)
 		if p == .Found {
-			ch := handle_for_base(ov, elem_base) or_return
+			ch := handle_for_base_with_parent(ov, elem_base, arr) or_return
 			set(ov, ch, val) or_return
 			return ch, nil
 		}
@@ -1135,7 +1281,7 @@ set_element :: proc(ov: ^Overlay, arr: Handle, index: int, val: Edit_Value) -> (
 		ch := e.handle
 		if ch == NO_HANDLE {
 			if n.base != tape.NO_NODE {
-				ch = handle_for_base(ov, e.base) or_return
+				ch = handle_for_base_with_parent(ov, e.base, arr) or_return
 				set(ov, ch, val) or_return
 				return ch, nil
 			}
@@ -1298,6 +1444,7 @@ set_fact :: proc(
 		return refuse(.Bad_Handle, "invalid overlay handle")
 	}
 	fo := make_fact_override(ov, kind, values, attr, num_tag, padded, false) or_return
+	ov.has_structural = true
 	for &f in n.facts {
 		if f.kind == kind && (kind != .Attribute || f.attr == attr) {
 			free_fact_override(ov, &f)
@@ -1326,6 +1473,7 @@ del_fact :: proc(ov: ^Overlay, target: Handle, kind: tape.Fact_Kind, attr := "")
 	}
 	// Allocate replacement override BEFORE freeing the previous one so OOM never corrupts state!
 	fo := make_fact_override(ov, kind, nil, attr, nil, false, true) or_return
+	ov.has_structural = true
 	for &f in n.facts {
 		if f.kind == kind && (kind != .Attribute || f.attr == attr) {
 			free_fact_override(ov, &f)
@@ -1405,7 +1553,7 @@ set_path :: proc(ov: ^Overlay, steps: []tape.Step, val: Edit_Value) -> (res: Han
 			}
 			ch, cb, found := lookup_member(ov, cur, string(s))
 			if found {
-				cur = ch if ch != NO_HANDLE else (handle_for_base(ov, cb) or_return)
+				cur = ch if ch != NO_HANDLE else (handle_for_base_with_parent(ov, cb, cur) or_return)
 			} else {
 				_, next_idx := steps[i + 1].(tape.Index)
 				cur = set_member(ov, cur, string(s), val_array() if next_idx else val_object()) or_return
@@ -1416,7 +1564,7 @@ set_path :: proc(ov: ^Overlay, steps: []tape.Step, val: Edit_Value) -> (res: Han
 			}
 			ch, cb, found := lookup_element(ov, cur, int(s))
 			if found {
-				cur = ch if ch != NO_HANDLE else (handle_for_base(ov, cb) or_return)
+				cur = ch if ch != NO_HANDLE else (handle_for_base_with_parent(ov, cb, cur) or_return)
 			} else {
 				_, next_idx := steps[i + 1].(tape.Index)
 				cur = set_element(ov, cur, int(s), val_array() if next_idx else val_object()) or_return
@@ -1440,13 +1588,13 @@ del_path :: proc(ov: ^Overlay, steps: []tape.Step) -> Error {
 			if !found {
 				return nil
 			}
-			cur = ch if ch != NO_HANDLE else (handle_for_base(ov, cb) or_return)
+			cur = ch if ch != NO_HANDLE else (handle_for_base_with_parent(ov, cb, cur) or_return)
 		case tape.Index:
 			ch, cb, found := lookup_element(ov, cur, int(s))
 			if !found {
 				return nil
 			}
-			cur = ch if ch != NO_HANDLE else (handle_for_base(ov, cb) or_return)
+			cur = ch if ch != NO_HANDLE else (handle_for_base_with_parent(ov, cb, cur) or_return)
 		case tape.All, tape.Slice, tape.Descend:
 			return refuse(.Bad_Path, "path delete requires concrete Name/Index steps")
 		}

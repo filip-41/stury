@@ -2,6 +2,8 @@ package edit
 
 import "base:runtime"
 import "core:bytes"
+import "core:container/handle_map"
+import "core:container/xar"
 import "core:slice"
 import "core:unicode/utf8"
 import "stury:lib/core/tape"
@@ -60,7 +62,7 @@ commit_section :: proc(
 	res: Commit_Result,
 	err: Error,
 ) {
-	fast, _, fast_res, gerr := commit_guard(ov, spec.target, opts, true, spec.validate, spec.data, allocator)
+	fast, target, fast_res, gerr := commit_guard(ov, spec.target, opts, true, spec.validate, spec.data, allocator)
 	if gerr != nil {
 		return {}, gerr
 	}
@@ -73,43 +75,56 @@ commit_section :: proc(
 		return {}, refuse(.Root_Shape, "TOML document root must be a table (object)", tape.ROOT)
 	}
 
+	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 4096}
+	defer runtime.arena_destroy(&arena)
+	scratch := runtime.arena_allocator(&arena)
+
 	cx := Section_Cx {
 		ov        = ov,
 		doc       = doc,
 		src       = doc.src,
 		spec      = spec,
 		opts      = opts,
-		eol       = detect_eol(doc.src),
-		allocator = allocator,
+		allocator = scratch,
 	}
-	cx.splices = make([dynamic]Splice, 0, 16, allocator)
-	cx.sections = make([dynamic]Toml_Section, 0, 8, allocator)
-	defer {
-		for s in cx.splices {
-			if s.text != nil {
-				delete(s.text, allocator)
-			}
-			for m in s.moves {
-				if m.written && m.text != nil {
-					delete(m.text, allocator)
+	cx.splices = make([dynamic]Splice, 0, max(8, xar.len(ov.nodes.items)), scratch)
+
+	if !ov.has_structural {
+		it := handle_map.dynamic_iterator_make(&ov.nodes)
+		for n in dynamic_iter_next(&it) {
+			if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
+				if n.val.kind == .Null || n.val.kind == .None {
+					return {}, refuse(.Unspellable_Value, "TOML has no null value", n.base)
+				}
+				if n.val.kind == .Raw {
+					lo, hi, ok := node_byte_span(doc, n.base)
+					if !ok {
+						return {}, refuse(.Bad_Handle, "cannot locate base value span", n.base)
+					}
+					append(&cx.splices, Splice {
+						lo           = lo,
+						hi           = hi,
+						text         = transmute([]u8)n.val.text,
+						seq          = len(cx.splices),
+						base_node    = n.base,
+						subtree_only = true,
+					}) or_return
+				} else {
+					emit_section_replace(&cx, n.handle, n) or_return
 				}
 			}
-			if s.moves != nil {
-				delete(s.moves, allocator)
+		}
+	} else {
+		if ov.unlinked_parents {
+			ensure_linked(ov) or_return
+		}
+		cx.eol = detect_eol(doc.src)
+		cx.sections = make([dynamic]Toml_Section, 0, 8, scratch)
+		scan_toml_sections(&cx) or_return
+		if ov.root != NO_HANDLE {
+			if err = compose_section_walk(&cx, ov.root); err != nil {
+				return {}, err
 			}
-		}
-		delete(cx.splices)
-		for sec in cx.sections {
-			delete(sec.path, allocator)
-		}
-		delete(cx.sections)
-	}
-
-	scan_toml_sections(&cx) or_return
-
-	if ov.root != NO_HANDLE {
-		if err = compose_section_walk(&cx, ov.root); err != nil {
-			return {}, err
 		}
 	}
 
@@ -118,11 +133,38 @@ commit_section :: proc(
 		return {}, serr
 	}
 	if spec.validate != nil {
-		if verr := spec.validate(spec.data, out, allocator); verr != nil {
-			delete(out, allocator)
-			delete(recs, allocator)
-			delete(rew, allocator)
-			return {}, convert_tape_error(verr)
+		need_full := target != doc.format || len(recs) == 0
+		if !need_full {
+			chk: [256]u8
+			chk[0], chk[1], chk[2], chk[3] = 'v', ' ', '=', ' '
+			for rec in recs {
+				if !rec.subtree_only || rec.full_rewalk {
+					need_full = true
+					break
+				}
+				frag := out[rec.dst_lo:rec.dst_hi]
+				if is_simple_toml_scalar(frag) {
+					continue
+				}
+				if len(frag) > len(chk) - 4 ||
+					bytes.index_byte(frag, '#') >= 0 ||
+					bytes.index_byte(frag, '\n') >= 0 ||
+					bytes.index_byte(frag, '\r') >= 0 ||
+					bytes.index_byte(frag, '[') >= 0 ||
+					bytes.index_byte(frag, '{') >= 0 {
+					need_full = true
+					break
+				}
+				copy(chk[4:], frag)
+				if verr := spec.validate(spec.data, chk[:4 + len(frag)], scratch); verr != nil {
+					return fail_commit_validation(out, recs, rew, verr, allocator)
+				}
+			}
+		}
+		if need_full {
+			if verr := spec.validate(spec.data, out, allocator); verr != nil {
+				return fail_commit_validation(out, recs, rew, verr, allocator)
+			}
 		}
 	}
 	return Commit_Result {
@@ -447,29 +489,10 @@ emit_section_full_reflow :: proc(cx: ^Section_Cx) -> Error {
 		return refuse(.Layout_Reflow_Needed, "TOML document reflow requires spell_document", tape.ROOT)
 	}
 	// Clear prior partial splices so whole-document splice is the sole splice!
-	for s in cx.splices {
-		if s.text != nil {
-			delete(s.text, cx.allocator)
-		}
-		for m in s.moves {
-			if m.written && m.text != nil {
-				delete(m.text, cx.allocator)
-			}
-		}
-		if s.moves != nil {
-			delete(s.moves, cx.allocator)
-		}
-	}
 	clear(&cx.splices)
 	buf := make([dynamic]u8, 0, 128, cx.allocator)
-	if err := cx.spec.spell_document(cx.spec.data, cx.ov, &buf); err != nil {
-		delete(buf)
-		return err
-	}
-	if _, aerr := append(&cx.splices, Splice{lo = 0, hi = u64(len(cx.src)), text = buf[:], seq = 0, base_node = tape.ROOT, full_rewalk = true, rewritten = true}); aerr != nil {
-		delete(buf)
-		return aerr
-	}
+	cx.spec.spell_document(cx.spec.data, cx.ov, &buf) or_return
+	append(&cx.splices, Splice{lo = 0, hi = u64(len(cx.src)), text = buf[:], seq = 0, base_node = tape.ROOT, full_rewalk = true, rewritten = true}) or_return
 	cx.reflowed = true
 	return nil
 }
@@ -484,16 +507,7 @@ Section_Frame :: struct {
 compose_section_walk :: proc(cx: ^Section_Cx, root: Handle) -> Error {
 	stack := make([dynamic]Section_Frame, 0, 32, cx.allocator)
 	owned_paths := make([dynamic]string, 0, 8, cx.allocator)
-	defer {
-		for s in owned_paths {
-			delete(s, cx.allocator)
-		}
-		delete(owned_paths)
-		delete(stack)
-	}
-	if _, aerr := append(&stack, Section_Frame{h = root}); aerr != nil {
-		return aerr
-	}
+	append(&stack, Section_Frame{h = root}) or_return
 
 	for len(stack) > 0 && !cx.reflowed {
 		fr := pop(&stack)
@@ -607,21 +621,8 @@ emit_section_replace :: proc(cx: ^Section_Cx, h: Handle, n: ^Edit_Node) -> Error
 	}
 	style_override, tag_override := node_style_and_tag(cx.ov, h)
 	buf := make([dynamic]u8, 0, 64, cx.allocator)
-	if err := cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, style_override, tag_override); err != nil {
-		delete(buf)
-		return err
-	}
-	if _, aerr := append(&cx.splices, Splice {
-		lo           = lo,
-		hi           = hi,
-		text         = buf[:],
-		seq          = len(cx.splices),
-		base_node    = n.base,
-		subtree_only = true,
-	}); aerr != nil {
-		delete(buf)
-		return aerr
-	}
+	cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, style_override, tag_override) or_return
+	append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = n.base, subtree_only = true}) or_return
 	if len(n.facts) > 0 {
 		emit_section_facts(cx, h, n) or_return
 	}
@@ -690,14 +691,8 @@ emit_section_facts :: proc(cx: ^Section_Cx, h: Handle, n: ^Edit_Node) -> Error {
 	}
 	if need_respell {
 		buf := make([dynamic]u8, 0, 32, cx.allocator)
-		if err := cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, style_override, tag_override); err != nil {
-			delete(buf)
-			return err
-		}
-		if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = n.base, subtree_only = true}); aerr != nil {
-			delete(buf)
-			return aerr
-		}
+		cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, style_override, tag_override) or_return
+		append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = n.base, subtree_only = true}) or_return
 	}
 	return nil
 }
@@ -705,7 +700,6 @@ emit_section_facts :: proc(cx: ^Section_Cx, h: Handle, n: ^Edit_Node) -> Error {
 @(private = "file")
 emit_toml_comment :: proc(cx: ^Section_Cx, node: tape.Node_Index, f: Fact_Override, stmt_ls, val_hi: u64) -> Error {
 	existing := make([dynamic]tape.Fact, 0, 4, cx.allocator)
-	defer delete(existing)
 	for bf in tape.facts_of(cx.doc, node) {
 		if bf.kind == f.kind {
 			append(&existing, bf)
@@ -723,9 +717,7 @@ emit_toml_comment :: proc(cx: ^Section_Cx, node: tape.Node_Index, f: Fact_Overri
 					lo -= 1
 				}
 			}
-			if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = lo, hi = hi, seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		}
 		return nil
 	}
@@ -742,19 +734,12 @@ emit_toml_comment :: proc(cx: ^Section_Cx, node: tape.Node_Index, f: Fact_Overri
 		if len(existing) > 0 {
 			lo := line_start(cx.src, existing[0].lo)
 			hi := next_line(cx.src, existing[len(existing) - 1].lo + u64(existing[len(existing) - 1].n))
-			if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(buf)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		} else {
-			if _, aerr := append(&cx.splices, Splice{lo = stmt_ls, hi = stmt_ls, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(buf)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = stmt_ls, hi = stmt_ls, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		}
 	} else {
 		if len(f.values) > 1 {
-			delete(buf)
 			return refuse(.Fact_No_Place, "a TOML line holds at most one inline comment", node, val_hi)
 		}
 		append(&buf, " #")
@@ -768,15 +753,9 @@ emit_toml_comment :: proc(cx: ^Section_Cx, node: tape.Node_Index, f: Fact_Overri
 				lo -= 1
 			}
 			hi := existing[len(existing) - 1].lo + u64(existing[len(existing) - 1].n)
-			if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(buf)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		} else {
-			if _, aerr := append(&cx.splices, Splice{lo = val_hi, hi = val_hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(buf)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = val_hi, hi = val_hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		}
 	}
 	return nil
@@ -816,10 +795,7 @@ emit_toml_foot_comment :: proc(cx: ^Section_Cx, f: Fact_Override) -> Error {
 		append(&buf, line)
 		append(&buf, cx.eol)
 	}
-	if _, aerr := append(&cx.splices, Splice{lo = eof, hi = eof, text = buf[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true}); aerr != nil {
-		delete(buf)
-		return aerr
-	}
+	append(&cx.splices, Splice{lo = eof, hi = eof, text = buf[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true}) or_return
 	return nil
 }
 
@@ -947,37 +923,20 @@ emit_toml_inline_delta :: proc(
 	// Spell inserted items (honoring child `.Style` and `.Tag` overrides).
 	ins_count := len(d.inserted_members) if is_obj else len(d.inserted_elems)
 	ins_texts := make([][]u8, ins_count, cx.allocator)
-	defer {
-		for t in ins_texts {
-			if t != nil {
-				delete(t, cx.allocator)
-			}
-		}
-		delete(ins_texts, cx.allocator)
-	}
 	if is_obj {
 		for ins, i in d.inserted_members {
 			b := make([dynamic]u8, 0, 32, cx.allocator)
-			if serr := cx.spec.spell_key(cx.spec.data, ins.key, &b); serr != nil {
-				delete(b)
-				return serr
-			}
+			cx.spec.spell_key(cx.spec.data, ins.key, &b) or_return
 			append(&b, " = ")
 			st_o, tg_o := node_style_and_tag(cx.ov, ins.value)
-			if verr := cx.spec.spell_value(cx.spec.data, cx.ov, ins.value, &b, st_o, tg_o); verr != nil {
-				delete(b)
-				return verr
-			}
+			cx.spec.spell_value(cx.spec.data, cx.ov, ins.value, &b, st_o, tg_o) or_return
 			ins_texts[i] = b[:]
 		}
 	} else {
 		for ins, i in d.inserted_elems {
 			b := make([dynamic]u8, 0, 32, cx.allocator)
 			st_o, tg_o := node_style_and_tag(cx.ov, ins.value)
-			if verr := cx.spec.spell_value(cx.spec.data, cx.ov, ins.value, &b, st_o, tg_o); verr != nil {
-				delete(b)
-				return verr
-			}
+			cx.spec.spell_value(cx.spec.data, cx.ov, ins.value, &b, st_o, tg_o) or_return
 			ins_texts[i] = b[:]
 		}
 	}
@@ -1183,14 +1142,6 @@ emit_toml_table_delta :: proc(
 		renamed_to: string,
 	}
 	members := make([dynamic]T_Member, 0, 8, cx.allocator)
-	defer {
-		for &m in members {
-			delete(m.key, cx.allocator)
-			delete(m.full_path, cx.allocator)
-			delete(m.ranges)
-		}
-		delete(members)
-	}
 	c, p, cerr := tape.children(tape.Reader{doc = cx.doc}, base_c, cx.allocator)
 	if cerr != nil {
 		return cerr
@@ -1274,22 +1225,13 @@ emit_toml_table_delta :: proc(
 				if len(sec.path) > len(m.full_path) {
 					append(&nb, sec.path[len(m.full_path):])
 				}
-				if _, aerr := append(&cx.splices, Splice{lo = sec.header_key_lo, hi = sec.header_key_hi, text = nb[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}); aerr != nil {
-					delete(nb)
-					return aerr
-				}
+				append(&cx.splices, Splice{lo = sec.header_key_lo, hi = sec.header_key_hi, text = nb[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
 			}
 		} else {
 			if klo, khi, kok := node_byte_span(cx.doc, m.kn); kok {
 				kb := make([dynamic]u8, 0, len(m.renamed_to) + 2, cx.allocator)
-				if serr := cx.spec.spell_key(cx.spec.data, m.renamed_to, &kb); serr != nil {
-					delete(kb)
-					return serr
-				}
-				if _, aerr := append(&cx.splices, Splice{lo = klo, hi = khi, text = kb[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}); aerr != nil {
-					delete(kb)
-					return aerr
-				}
+				cx.spec.spell_key(cx.spec.data, m.renamed_to, &kb) or_return
+				append(&cx.splices, Splice{lo = klo, hi = khi, text = kb[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
 			}
 		}
 	}
@@ -1415,13 +1357,9 @@ emit_toml_table_delta :: proc(
 			prefixed := make([dynamic]u8, 0, len(cx.eol) + len(txt), cx.allocator)
 			append(&prefixed, cx.eol)
 			append(&prefixed, ..txt)
-			delete(txt, cx.allocator)
 			txt = prefixed[:]
 		}
-		if _, aerr := append(&cx.splices, Splice{lo = pos, hi = pos, text = txt, seq = len(cx.splices), base_node = base_c, full_rewalk = true}); aerr != nil {
-			delete(txt, cx.allocator)
-			return aerr
-		}
+		append(&cx.splices, Splice{lo = pos, hi = pos, text = txt, seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
 	}
 	return nil
 }
@@ -1448,7 +1386,7 @@ spell_toml_table_body :: proc(cx: ^Section_Cx, obj_h: Handle, out: ^[dynamic]u8)
 }
 
 @(private = "file")
-spell_toml_member_line :: proc(cx: ^Section_Cx, key: string, val_h: Handle, path_pref: string) -> ([]u8, Error) {
+spell_toml_member_line :: proc(cx: ^Section_Cx, key: string, val_h: Handle, path_pref: string) -> (out: []u8, err: Error) {
 	b := make([dynamic]u8, 0, 64, cx.allocator)
 	if node_kind(cx.ov, val_h) == .Object {
 		append(&b, cx.eol)
@@ -1457,28 +1395,16 @@ spell_toml_member_line :: proc(cx: ^Section_Cx, key: string, val_h: Handle, path
 			append(&b, path_pref)
 			append(&b, '.')
 		}
-		if serr := cx.spec.spell_key(cx.spec.data, key, &b); serr != nil {
-			delete(b)
-			return nil, serr
-		}
+		cx.spec.spell_key(cx.spec.data, key, &b) or_return
 		append(&b, ']')
 		append(&b, cx.eol)
-		if err := spell_toml_table_body(cx, val_h, &b); err != nil {
-			delete(b)
-			return nil, err
-		}
+		spell_toml_table_body(cx, val_h, &b) or_return
 		return b[:], nil
 	}
-	if serr := cx.spec.spell_key(cx.spec.data, key, &b); serr != nil {
-		delete(b)
-		return nil, serr
-	}
+	cx.spec.spell_key(cx.spec.data, key, &b) or_return
 	append(&b, " = ")
 	st_o, tg_o := node_style_and_tag(cx.ov, val_h)
-	if verr := cx.spec.spell_value(cx.spec.data, cx.ov, val_h, &b, st_o, tg_o); verr != nil {
-		delete(b)
-		return nil, verr
-	}
+	cx.spec.spell_value(cx.spec.data, cx.ov, val_h, &b, st_o, tg_o) or_return
 	append(&b, cx.eol)
 	return b[:], nil
 }
@@ -1532,14 +1458,6 @@ emit_toml_aot_delta :: proc(
 
 	// Spell inserted AOT elements.
 	ins_texts := make([][]u8, len(d.inserted_elems), cx.allocator)
-	defer {
-		for t in ins_texts {
-			if t != nil {
-				delete(t, cx.allocator)
-			}
-		}
-		delete(ins_texts, cx.allocator)
-	}
 	for ins, i in d.inserted_elems {
 		if node_kind(cx.ov, ins.value) != .Object {
 			return refuse(.Unspellable_Value, "TOML array of tables requires table elements", n.base)
@@ -1549,10 +1467,7 @@ emit_toml_aot_delta :: proc(
 		append(&b, path_pref)
 		append(&b, "]]")
 		append(&b, cx.eol)
-		if err := spell_toml_table_body(cx, ins.value, &b); err != nil {
-			delete(b)
-			return err
-		}
+		spell_toml_table_body(cx, ins.value, &b) or_return
 		ins_texts[i] = b[:]
 	}
 

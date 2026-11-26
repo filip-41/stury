@@ -48,6 +48,9 @@ commit_binary :: proc(
 	if fast {
 		return fast_res, nil
 	}
+	if ov.unlinked_parents {
+		ensure_linked(ov) or_return
+	}
 
 	doc := ov.base
 	cx := Binary_Cx {

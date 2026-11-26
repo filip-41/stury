@@ -2,6 +2,9 @@ package edit
 
 import "base:runtime"
 import "core:bytes"
+import "core:container/handle_map"
+import "core:container/xar"
+import "core:slice"
 import "stury:lib/core/tape"
 
 // Bracket-family composer (JSON, JSONC, JSON5).
@@ -63,44 +66,58 @@ commit_bracket :: proc(
 		return fast_res, nil
 	}
 	doc := ov.base
+	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 4096}
+	defer runtime.arena_destroy(&arena)
+	scratch := runtime.arena_allocator(&arena)
 
+	strip_comments := !spec.allows_comments && (doc.present & tape.COMMENTS) != {}
 	cx := Bracket_Cx {
 		ov        = ov,
 		doc       = doc,
 		src       = doc.src,
 		spec      = spec,
 		opts      = opts,
-		eol       = detect_eol(doc.src),
-		allocator = allocator,
+		allocator = scratch,
 	}
-	cx.splices = make([dynamic]Splice, 0, 16, allocator)
-	defer {
-		for s in cx.splices {
-			if s.text != nil {
-				delete(s.text, allocator)
-			}
-			for m in s.moves {
-				if m.written && m.text != nil {
-					delete(m.text, allocator)
+	cx.splices = make([dynamic]Splice, 0, max(8, xar.len(ov.nodes.items)), scratch)
+
+	used_fast := false
+	if !ov.has_structural && !strip_comments {
+		sorted_bases := true
+		prev_base := tape.Node_Index(0)
+		has_prev := false
+		it := handle_map.dynamic_iterator_make(&ov.nodes)
+		for n in dynamic_iter_next(&it) {
+			if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
+				if has_prev && n.base < prev_base {
+					sorted_bases = false
 				}
-			}
-			if s.moves != nil {
-				delete(s.moves, allocator)
+				prev_base = n.base
+				has_prev = true
+				emit_bracket_replace(&cx, n.handle, n) or_return
 			}
 		}
-		delete(cx.splices)
-	}
-
-	if !spec.allows_comments && (doc.present & tape.COMMENTS) != {} {
-		cx.dropped += doc.present & tape.COMMENTS
-		if err = strip_source_comments(&cx); err != nil {
-			return {}, err
+		if !bracket_fast_has_duplicate_key(doc, cx.splices[:], sorted_bases, scratch) {
+			used_fast = true
+		} else {
+			clear(&cx.splices)
 		}
 	}
-
-	if ov.root != NO_HANDLE {
-		if err = compose_bracket_walk(&cx, ov.root); err != nil {
-			return {}, err
+	if !used_fast {
+		if ov.unlinked_parents {
+			ensure_linked(ov) or_return
+		}
+		cx.eol = detect_eol(doc.src)
+		if strip_comments {
+			cx.dropped += doc.present & tape.COMMENTS
+			if err = strip_source_comments(&cx); err != nil {
+				return {}, err
+			}
+		}
+		if ov.root != NO_HANDLE {
+			if err = compose_bracket_walk(&cx, ov.root); err != nil {
+				return {}, err
+			}
 		}
 	}
 
@@ -108,34 +125,35 @@ commit_bracket :: proc(
 	if serr != nil {
 		return {}, serr
 	}
-	// Validate result if format supplied a validator.
-	// Local-only O(edited bytes) validation is valid ONLY when target matches base format, no `.Raw` values were
-	// spliced (which could contain unbalanced tokens), and every splice is a pure `subtree_only && !full_rewalk` replace.
+	// Validate result: fast O(|edited bytes|) local validation when target matches base format and every splice
+	// is a pure `subtree_only && !full_rewalk` replacement whose fragment cannot affect surrounding tokens or depth.
 	if spec.validate != nil {
-		local_only := target == doc.format && len(recs) > 0 && !overlay_has_raw(ov)
-		if local_only {
+		need_full := target != doc.format || len(recs) == 0
+		if !need_full {
 			for rec in recs {
 				if !rec.subtree_only || rec.full_rewalk {
-					local_only = false
+					need_full = true
 					break
+				}
+				frag := out[rec.dst_lo:rec.dst_hi]
+				if is_simple_json_scalar(frag) {
+					continue
+				}
+				if has_utf8_bom(frag) ||
+					bytes.index_byte(frag, '[') >= 0 ||
+					bytes.index_byte(frag, '{') >= 0 ||
+					(spec.allows_comments && bytes.index(frag, transmute([]u8)string("//")) >= 0) {
+					need_full = true
+					break
+				}
+				if verr := spec.validate(spec.data, frag, scratch); verr != nil {
+					return fail_commit_validation(out, recs, rew, verr, allocator)
 				}
 			}
 		}
-		if local_only {
-			for rec in recs {
-				if verr := spec.validate(spec.data, out[rec.dst_lo:rec.dst_hi], allocator); verr != nil {
-					delete(out, allocator)
-					delete(recs, allocator)
-					delete(rew, allocator)
-					return {}, convert_tape_error(verr)
-				}
-			}
-		} else {
+		if need_full {
 			if verr := spec.validate(spec.data, out, allocator); verr != nil {
-				delete(out, allocator)
-				delete(recs, allocator)
-				delete(rew, allocator)
-				return {}, convert_tape_error(verr)
+				return fail_commit_validation(out, recs, rew, verr, allocator)
 			}
 		}
 	}
@@ -336,22 +354,33 @@ emit_bracket_replace :: proc(cx: ^Bracket_Cx, h: Handle, n: ^Edit_Node) -> Error
 	if !ok {
 		return refuse(.Bad_Handle, "cannot locate base node span", n.base)
 	}
-	indent := line_indent(cx.src, lo)
-	unit := bracket_default_unit(cx)
-	buf := make([dynamic]u8, 0, 64, cx.allocator)
-	if err := cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, indent, unit, cx.eol, style_override_of(n)); err != nil {
-		delete(buf)
-		return err
+	text: []u8
+	if n.val.kind == .Raw {
+		text = transmute([]u8)n.val.text
+	} else {
+		needs_indent := n.val.kind == .Array || n.val.kind == .Object ||
+			(n.val.kind == .Base_Ref && n.val.base_ref != tape.NO_NODE && cx.doc.nodes[n.val.base_ref].kind >= .Array)
+		indent := line_indent(cx.src, lo) if needs_indent else ""
+		eol := cx.eol
+		if needs_indent && len(eol) == 0 {
+			eol = detect_eol(cx.src)
+			cx.eol = eol
+		}
+		unit := bracket_default_unit(cx) if needs_indent else ""
+		buf := make([dynamic]u8, 0, 64, cx.allocator)
+		if err := cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, indent, unit, eol, style_override_of(n)); err != nil {
+			return err
+		}
+		text = buf[:]
 	}
 	if _, aerr := append(&cx.splices, Splice {
 		lo           = lo,
 		hi           = hi,
-		text         = buf[:],
+		text         = text,
 		seq          = len(cx.splices),
 		base_node    = n.base,
 		subtree_only = true,
 	}); aerr != nil {
-		delete(buf)
 		return aerr
 	}
 	// Also emit any fact edits attached directly to the replaced node!
@@ -390,23 +419,9 @@ emit_bracket_facts :: proc(cx: ^Bracket_Cx, h: Handle, n: ^Edit_Node) -> Error {
 		case .Style:
 			// Style-only edit on an unreplaced scalar (e.g., changing quote style in JSON5).
 			if n.state != .Replaced && !f.deleted && len(f.values) > 0 {
-				indent := line_indent(cx.src, lo)
 				buf := make([dynamic]u8, 0, 32, cx.allocator)
-				if err := cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, indent, bracket_default_unit(cx), cx.eol, f.values[0]); err != nil {
-					delete(buf)
-					return err
-				}
-				if _, aerr := append(&cx.splices, Splice {
-					lo           = lo,
-					hi           = hi,
-					text         = buf[:],
-					seq          = len(cx.splices),
-					base_node    = n.base,
-					subtree_only = true,
-				}); aerr != nil {
-					delete(buf)
-					return aerr
-				}
+				cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, "", "", cx.eol, f.values[0]) or_return
+				append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = n.base, subtree_only = true}) or_return
 			}
 		case:
 			// Facts JSON/JSONC/JSON5 cannot emit (tags, anchors, attributes, etc.) are dropped cleanly per analysis.md §2.
@@ -482,17 +497,12 @@ emit_bracket_comment_fact :: proc(
 			lo := line_start(cx.src, existing[0].lo) if first_on_line(cx.src, existing[0].lo) else existing[0].lo
 			last := existing[len(existing) - 1]
 			hi := next_line(cx.src, last.lo + u64(last.n)) if first_on_line(cx.src, last.lo) else last.lo + u64(last.n)
-			// Prepend indent if starting at line_start.
 			full := make([dynamic]u8, 0, len(indent) + len(buf), cx.allocator)
 			if first_on_line(cx.src, existing[0].lo) {
 				append(&full, indent)
 			}
 			append(&full, ..buf[:])
-			delete(buf)
-			if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, text = full[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(full)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = lo, hi = hi, text = full[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		} else {
 			ins_at := line_start(cx.src, head_anchor) if first_on_line(cx.src, head_anchor) else head_anchor
 			full := make([dynamic]u8, 0, len(indent) + len(buf), cx.allocator)
@@ -500,11 +510,7 @@ emit_bracket_comment_fact :: proc(
 				append(&full, indent)
 			}
 			append(&full, ..buf[:])
-			delete(buf)
-			if _, aerr := append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = full[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(full)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = full[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		}
 	case .Comment_Inline:
 		append(&buf, " ")
@@ -515,12 +521,8 @@ emit_bracket_comment_fact :: proc(
 				lo -= 1
 			}
 			hi := existing[len(existing) - 1].lo + u64(existing[len(existing) - 1].n)
-			if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(buf)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		} else {
-			// Place inline comment after trailing comma if present on the same line, else right after value.
 			ins_at := val_hi
 			q := val_hi
 			for q < u64(len(cx.src)) && (cx.src[q] == ' ' || cx.src[q] == '\t') {
@@ -529,17 +531,12 @@ emit_bracket_comment_fact :: proc(
 			if q < u64(len(cx.src)) && cx.src[q] == ',' {
 				ins_at = q + 1
 			}
-			if _, aerr := append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(buf)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		}
 	case .Comment_Foot:
-		// Foot comment goes just before the container's closing bracket/brace.
 		close_at := val_hi - 1 if val_hi > 0 else val_hi
 		c_indent := line_indent(cx.src, close_at)
 		inner_indent := strings_concat2(c_indent, bracket_default_unit(cx), cx.allocator)
-		defer delete(inner_indent, cx.allocator)
 		if len(existing) > 0 {
 			for line, i in f.values {
 				if i > 0 {
@@ -550,10 +547,7 @@ emit_bracket_comment_fact :: proc(
 			}
 			lo := line_start(cx.src, existing[0].lo) if first_on_line(cx.src, existing[0].lo) else existing[0].lo
 			hi := existing[len(existing) - 1].lo + u64(existing[len(existing) - 1].n)
-			if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(buf)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		} else {
 			if !first_on_line(cx.src, close_at) {
 				append(&buf, cx.eol)
@@ -564,13 +558,9 @@ emit_bracket_comment_fact :: proc(
 				append(&buf, cx.eol)
 			}
 			ins_at := line_start(cx.src, close_at) if first_on_line(cx.src, close_at) else close_at
-			if _, aerr := append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}); aerr != nil {
-				delete(buf)
-				return aerr
-			}
+			append(&cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		}
 	case .Tag, .Anchor, .Alias, .Instruction, .Instruction_Foot, .Doctype, .Directive, .Attribute, .Style, .Name, .Namespace, .Content, .Absent:
-		delete(buf)
 	}
 	return nil
 }
@@ -678,16 +668,8 @@ emit_bracket_container_delta :: proc(cx: ^Bracket_Cx, h: Handle, n: ^Edit_Node, 
 							if kok {
 								q := cx.src[klo] if klo < u64(len(cx.src)) && (cx.src[klo] == '"' || cx.src[klo] == '\'') else u8('"')
 								kb := make([dynamic]u8, 0, len(r.new_key) + 2, cx.allocator)
-								if serr := cx.spec.spell_key(cx.spec.data, r.new_key, &kb, q); serr != nil {
-									delete(kb)
-									free_tmp_text(kstr, cx.allocator)
-									return serr
-								}
-								if _, aerr := append(&cx.splices, Splice{lo = klo, hi = khi, text = kb[:], seq = len(cx.splices), base_node = base_c, full_rewalk = false}); aerr != nil {
-									delete(kb)
-									free_tmp_text(kstr, cx.allocator)
-									return aerr
-								}
+								cx.spec.spell_key(cx.spec.data, r.new_key, &kb, q) or_return
+								append(&cx.splices, Splice{lo = klo, hi = khi, text = kb[:], seq = len(cx.splices), base_node = base_c}) or_return
 							}
 							break
 						}
@@ -727,37 +709,19 @@ emit_bracket_container_delta :: proc(cx: ^Bracket_Cx, h: Handle, n: ^Edit_Node, 
 	ins_count := len(d.inserted_members) if is_obj else len(d.inserted_elems)
 	ins_texts := make([][]u8, ins_count, cx.allocator)
 	ins_ats := make([]int, ins_count, cx.allocator)
-	defer {
-		for t in ins_texts {
-			if t != nil {
-				delete(t, cx.allocator)
-			}
-		}
-		delete(ins_texts, cx.allocator)
-		delete(ins_ats, cx.allocator)
-	}
 	if is_obj {
 		for ins, i in d.inserted_members {
 			b := make([dynamic]u8, 0, 64, cx.allocator)
-			if serr := cx.spec.spell_key(cx.spec.data, ins.key, &b, layout.key_quote); serr != nil {
-				delete(b)
-				return serr
-			}
+			cx.spec.spell_key(cx.spec.data, ins.key, &b, layout.key_quote) or_return
 			append(&b, layout.colon)
-			if verr := cx.spec.spell_value(cx.spec.data, cx.ov, ins.value, &b, layout.item_indent, layout.unit, cx.eol, ""); verr != nil {
-				delete(b)
-				return verr
-			}
+			cx.spec.spell_value(cx.spec.data, cx.ov, ins.value, &b, layout.item_indent, layout.unit, cx.eol, "") or_return
 			ins_texts[i] = b[:]
 			ins_ats[i] = ins.at
 		}
 	} else {
 		for ins, i in d.inserted_elems {
 			b := make([dynamic]u8, 0, 64, cx.allocator)
-			if verr := cx.spec.spell_value(cx.spec.data, cx.ov, ins.value, &b, layout.item_indent, layout.unit, cx.eol, ""); verr != nil {
-				delete(b)
-				return verr
-			}
+			cx.spec.spell_value(cx.spec.data, cx.ov, ins.value, &b, layout.item_indent, layout.unit, cx.eol, "") or_return
 			ins_texts[i] = b[:]
 			ins_ats[i] = ins.at
 		}
@@ -896,10 +860,237 @@ scan_for_comma :: proc "contextless" (src: []u8, lo, hi: u64) -> i64 {
 	return -1
 }
 
+@(private = "file")
+node_after_fast :: #force_inline proc "contextless" (nodes: []tape.Node, idx: tape.Node_Index) -> tape.Node_Index #no_bounds_check {
+	t := nodes[idx]
+	return idx + (tape.Node_Index(t.n) if t.kind >= .Array else 1)
+}
+
+@(private = "file")
+key_has_duplicate :: #force_inline proc "contextless" (
+	doc: ^tape.Document,
+	obj, end, kn: tape.Node_Index,
+) -> bool #no_bounds_check {
+	nodes := doc.nodes
+	src := doc.src
+	knode := nodes[kn]
+	if knode.spelling & tape.SPELLING_DECODE == 0 {
+		klen := knode.n
+		kbytes := string(src[knode.lo : knode.lo + u64(klen)])
+		for ok := obj + 1; ok < end; ok = node_after_fast(nodes, ok + 1) {
+			if ok == kn {
+				continue
+			}
+			on := nodes[ok]
+			if on.spelling & tape.SPELLING_DECODE == 0 {
+				if on.n == klen && string(src[on.lo : on.lo + u64(klen)]) == kbytes {
+					return true
+				}
+			} else if tape.same_keys(doc.format, src, knode, src, on) {
+				return true
+			}
+		}
+		return false
+	}
+	for ok := obj + 1; ok < end; ok = node_after_fast(nodes, ok + 1) {
+		if ok != kn && tape.same_keys(doc.format, src, knode, src, nodes[ok]) {
+			return true
+		}
+	}
+	return false
+}
+
+// Fast O(K) check whether small unescaped object `obj` (<= 64 keys) has zero duplicate keys using a stack hash set.
+// Returns `true` only when every key is unescaped and pairwise distinct; any escaped key, >64 keys, or collision
+// returns `false` so the caller checks the edited key via `key_has_duplicate`.
+@(private = "file")
+object_keys_all_unique :: proc "contextless" (doc: ^tape.Document, obj, end: tape.Node_Index, n_keys: int) -> bool #no_bounds_check {
+	nodes := doc.nodes
+	src := doc.src
+	mask := u32(15)
+	if n_keys > 8 {
+		mask = 31 if n_keys <= 16 else (63 if n_keys <= 32 else 127)
+	}
+	slots: [128]tape.Node_Index = ---
+	slice.zero(slots[:mask + 1])
+	max_seen := int(mask >> 1) + 1
+	seen := 0
+	for ok := obj + 1; ok < end; ok = node_after_fast(nodes, ok + 1) {
+		if seen >= max_seen {
+			return false
+		}
+		seen += 1
+		kn := nodes[ok]
+		if kn.spelling & tape.SPELLING_DECODE != 0 {
+			return false
+		}
+		h := kn.n * 2654435761
+		if kn.n > 0 {
+			h ~= u32(src[kn.lo]) * 16777619 ~ u32(src[kn.lo + u64(kn.n) - 1])
+		}
+		slot := h & mask
+		for {
+			prev := slots[slot]
+			if prev == 0 {
+				slots[slot] = ok
+				break
+			}
+			pn := nodes[prev]
+			if pn.n == kn.n && string(src[pn.lo : pn.lo + u64(pn.n)]) == string(src[kn.lo : kn.lo + u64(kn.n)]) {
+				return false
+			}
+			slot = (slot + 1) & mask
+		}
+	}
+	return true
+}
+
+// Forward skip-cursor check over all ancestor objects of `splices` (zero `ensure_parents` scan).
+// Checks each ancestor object at most once via `object_keys_all_unique`, falling back to exact `key_has_duplicate`
+// only when an object has >64 keys, escaped keys, or an actual duplicate key.
+@(private = "file")
+bracket_fast_has_duplicate_key :: proc(
+	doc: ^tape.Document,
+	splices: []Splice,
+	sorted: bool,
+	scratch: runtime.Allocator,
+) -> bool #no_bounds_check {
+	if len(splices) == 0 || len(doc.nodes) == 0 || doc.nodes[0].kind < .Array {
+		return false
+	}
+	nodes := doc.nodes
+	edited_buf: []tape.Node_Index
+	if !sorted {
+		eb, aerr := make([]tape.Node_Index, len(splices), scratch)
+		if aerr != nil {
+			return true
+		}
+		for s, i in splices {
+			eb[i] = s.base_node
+		}
+		slice.sort(eb)
+		edited_buf = eb
+	}
+	Skip_Frame :: struct {
+		node:     tape.Node_Index,
+		end:      tape.Node_Index,
+		cur:      tape.Node_Index,
+		last_kn:  tape.Node_Index,
+		n_keys:   int,
+		is_obj:   bool,
+		dup_free: bool,
+		has_dups: bool,
+	}
+	stack_buf: [64]Skip_Frame = ---
+	stack_len := 1
+	root_is_obj := nodes[0].kind == .Object
+	root_nk := tape.child_count(doc, 0, nodes[0]) if root_is_obj else 0
+	stack_buf[0] = Skip_Frame {
+		node     = 0,
+		end      = tape.Node_Index(nodes[0].n),
+		cur      = 1,
+		last_kn  = tape.NO_NODE,
+		n_keys   = root_nk,
+		is_obj   = root_is_obj,
+		dup_free = !root_is_obj || (root_nk >= 0 && root_nk <= 1),
+	}
+	for si := 0; si < len(splices); si += 1 {
+		target := splices[si].base_node if sorted else edited_buf[si]
+		for stack_len > 0 && target >= stack_buf[stack_len - 1].end {
+			stack_len -= 1
+		}
+		if stack_len == 0 {
+			return true
+		}
+		descend: for stack_buf[stack_len - 1].node < target {
+			fr := &stack_buf[stack_len - 1]
+			if fr.is_obj {
+				kn := fr.cur
+				for kn < fr.end {
+					vn := kn + 1
+					if vn >= fr.end {
+						return true
+					}
+					after := node_after_fast(nodes, vn)
+					if after <= target {
+						kn = after
+						continue
+					}
+					fr.cur = kn
+					if !fr.dup_free && kn != fr.last_kn {
+						fr.last_kn = kn
+						if !fr.has_dups {
+							if fr.n_keys >= 0 && fr.n_keys <= 64 && object_keys_all_unique(doc, fr.node, fr.end, fr.n_keys) {
+								fr.dup_free = true
+							} else {
+								fr.has_dups = true
+							}
+						}
+						if fr.has_dups && key_has_duplicate(doc, fr.node, fr.end, kn) {
+							return true
+						}
+					}
+					if vn == target {
+						break descend
+					}
+					if nodes[vn].kind < .Array || stack_len >= len(stack_buf) {
+						return true
+					}
+					child_is_obj := nodes[vn].kind == .Object
+					nk := tape.child_count(doc, vn, nodes[vn]) if child_is_obj else 0
+					stack_buf[stack_len] = Skip_Frame {
+						node     = vn,
+						end      = after,
+						cur      = vn + 1,
+						last_kn  = tape.NO_NODE,
+						n_keys   = nk,
+						is_obj   = child_is_obj,
+						dup_free = !child_is_obj || (nk >= 0 && nk <= 1),
+					}
+					stack_len += 1
+					continue descend
+				}
+				return true
+			} else {
+				en := fr.cur
+				for en < fr.end {
+					after := node_after_fast(nodes, en)
+					if after <= target {
+						en = after
+						continue
+					}
+					fr.cur = en
+					if en == target {
+						break descend
+					}
+					if nodes[en].kind < .Array || stack_len >= len(stack_buf) {
+						return true
+					}
+					child_is_obj := nodes[en].kind == .Object
+					nk := tape.child_count(doc, en, nodes[en]) if child_is_obj else 0
+					stack_buf[stack_len] = Skip_Frame {
+						node     = en,
+						end      = after,
+						cur      = en + 1,
+						last_kn  = tape.NO_NODE,
+						n_keys   = nk,
+						is_obj   = child_is_obj,
+						dup_free = !child_is_obj || (nk >= 0 && nk <= 1),
+					}
+					stack_len += 1
+					continue descend
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Checks whether an edited base object contains duplicate keys where either a duplicated key is edited/deleted/renamed,
 // OR the object has ANY structural delta (preventing shadowed-key slice panics!).
 @(private = "file")
-bracket_has_edited_duplicate_key :: proc(cx: ^Bracket_Cx, n: ^Edit_Node) -> (bool, Error) {
+bracket_has_edited_duplicate_key :: proc(cx: ^Bracket_Cx, n: ^Edit_Node) -> (dup: bool, err: Error) {
 	if n.base == tape.NO_NODE {
 		return false, nil
 	}
@@ -912,14 +1103,6 @@ bracket_has_edited_duplicate_key :: proc(cx: ^Bracket_Cx, n: ^Edit_Node) -> (boo
 		edited: bool,
 	}
 	seen := make(map[string]Key_Count, 8, cx.allocator)
-	owned := make([dynamic]Tmp_Text, 0, 8, cx.allocator)
-	defer {
-		delete(seen)
-		for k in owned {
-			free_tmp_text(k, cx.allocator)
-		}
-		delete(owned)
-	}
 	d := n.delta
 	end := n.base + tape.Node_Index(obj_node.n)
 	for kn := n.base + 1; kn < end; kn = tape.node_after(cx.doc, kn + 1) {
@@ -928,10 +1111,6 @@ bracket_has_edited_duplicate_key :: proc(cx: ^Bracket_Cx, n: ^Edit_Node) -> (boo
 			break
 		}
 		tk := decode_node_text_tmp(cx.doc, kn, cx.allocator)
-		if _, aerr := append(&owned, tk); aerr != nil {
-			free_tmp_text(tk, cx.allocator)
-			return false, aerr
-		}
 		is_ed := n.state == .Container_Delta
 		if !is_ed {
 			if ch, has := cx.ov.by_base[vn]; has {
@@ -978,22 +1157,8 @@ emit_bracket_reflow :: proc(cx: ^Bracket_Cx, h: Handle, base_c: tape.Node_Index,
 	indent := line_indent(cx.src, c_lo)
 	unit := bracket_default_unit(cx) if is_multiline else ""
 	buf := make([dynamic]u8, 0, 128, cx.allocator)
-	if err := cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, indent, unit, cx.eol, ""); err != nil {
-		delete(buf)
-		return err
-	}
-	if _, aerr := append(&cx.splices, Splice {
-		lo           = c_lo,
-		hi           = c_hi,
-		text         = buf[:],
-		seq          = len(cx.splices),
-		base_node    = base_c,
-		subtree_only = true,
-		rewritten    = true,
-	}); aerr != nil {
-		delete(buf)
-		return aerr
-	}
+	cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, indent, unit, cx.eol, "") or_return
+	append(&cx.splices, Splice{lo = c_lo, hi = c_hi, text = buf[:], seq = len(cx.splices), base_node = base_c, subtree_only = true, rewritten = true}) or_return
 	return nil
 }
 
@@ -1059,14 +1224,6 @@ emit_bracket_reorder :: proc(
 	}
 
 	moves := make([dynamic]Move, 0, len(order) * 3, cx.allocator)
-	defer if err != nil || !ok {
-		for m in moves {
-			if m.written && m.text != nil {
-				delete(m.text, cx.allocator)
-			}
-		}
-		delete(moves)
-	}
 
 	for raw, pos in order {
 		k := int(raw)
@@ -1219,21 +1376,12 @@ emit_bracket_insert_delete :: proc(
 		}
 		ins_lo := c_lo + 1 if n == 0 else c_hi - 1
 		ins_hi := c_hi - 1
-		if _, aerr := append(&cx.splices, Splice{lo = ins_lo, hi = ins_hi, text = b[:], seq = len(cx.splices), base_node = base_c}); aerr != nil {
-			delete(b)
-			return aerr
-		}
+		append(&cx.splices, Splice{lo = ins_lo, hi = ins_hi, text = b[:], seq = len(cx.splices), base_node = base_c}) or_return
 		return nil
 	}
 
 	// Group inserts by slot: `slot = next surviving item index >= at`, or `n` for tail after `last_surv`.
 	slots := make([][dynamic]int, n + 1, cx.allocator)
-	defer {
-		for s in slots {
-			delete(s)
-		}
-		delete(slots, cx.allocator)
-	}
 	for ins_i in 0 ..< len(ins_texts) {
 		at := ins_ats[ins_i]
 		slot := n
@@ -1305,10 +1453,7 @@ emit_bracket_insert_delete :: proc(
 			}
 		}
 		ins_pos := items[k].head_lo
-		if _, aerr := append(&cx.splices, Splice{lo = ins_pos, hi = ins_pos, text = b[:], seq = len(cx.splices), base_node = base_c}); aerr != nil {
-			delete(b)
-			return aerr
-		}
+		append(&cx.splices, Splice{lo = ins_pos, hi = ins_pos, text = b[:], seq = len(cx.splices), base_node = base_c}) or_return
 	}
 
 	// 3. Emit grouped tail inserts after `items[last_surv]` as ONE splice!
@@ -1362,10 +1507,7 @@ emit_bracket_insert_delete :: proc(
 		if !layout.multiline && bytes.index(b[:], transmute([]u8)string("//")) >= 0 {
 			append(&b, cx.eol)
 		}
-		if _, aerr := append(&cx.splices, Splice{lo = ins_pos, hi = ins_pos, text = b[:], seq = len(cx.splices), base_node = base_c}); aerr != nil {
-			delete(b)
-			return aerr
-		}
+		append(&cx.splices, Splice{lo = ins_pos, hi = ins_pos, text = b[:], seq = len(cx.splices), base_node = base_c}) or_return
 	}
 	return nil
 }
