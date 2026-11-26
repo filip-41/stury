@@ -29,94 +29,55 @@ Format_Write_To_Proc :: proc(w: io.Writer, doc: ^tape.Document, opts: write.Opti
 // Emits `v` according to `m` and `opts` into a self-contained `tape.Document` owned by `allocator` (zero double-copy!).
 @(require_results)
 dump_document :: proc(m: ^Model($T), v: ^T, opts := Dump_Opts{}, sink: ^Sink = nil, allocator := context.allocator) -> (doc: tape.Document, err: Error) {
-	if m == nil || v == nil || len(m.plan.nodes) == 0 {
-		return {}, Model_Error{kind = .Bad_Option, want = {text = "value"}}
-	}
-	sc: Scratch_Scope
-	sp := (^Scratch_Scope)(rawptr(&sc))
-	scratch_begin(sp, {}, allocator)
-	defer scratch_end(sp)
-
+	if m == nil || v == nil || len(m.plan.nodes) == 0 { return {}, Model_Error{kind = .Bad_Option, want = {text = "value"}} }
 	tt: write.Token_Tape
-	if aerr := write.token_tape_start(&tt, false, 0, allocator); aerr != nil {
-		return {}, aerr
-	}
+	write.token_tape_start(&tt, false, 0, allocator) or_return
 	defer write.token_tape_drop(&tt)
-
-	dump_tokens_inner(&m.plan, m.judging, rawptr(v), &tt, opts, sink, allocator, sp.scratch) or_return
-	view, terr := write.token_tape_document(&tt)
-	if terr != nil {
-		return {}, terr
-	}
-	view.flags += {.Owns_Src}
-	tt.nodes, tt.texts, tt.counts = {}, {}, {}
+	dump_tokens(m, v, &tt, opts, sink, allocator) or_return
+	view := write.token_tape_document(&tt) or_return
+	view.flags += {.Owns_Src}; tt.nodes, tt.texts, tt.counts = {}, {}, {}
 	return view, nil
 }
 
 @(require_results)
 dump_tokens :: proc(m: ^Model($T), v: ^T, tt: ^write.Token_Tape, opts := Dump_Opts{}, sink: ^Sink = nil, allocator := context.allocator) -> Error {
-	if m == nil || v == nil || tt == nil || len(m.plan.nodes) == 0 {
-		return Model_Error{kind = .Bad_Option, want = {text = "value"}}
-	}
-	sc: Scratch_Scope
-	sp := (^Scratch_Scope)(rawptr(&sc))
-	scratch_begin(sp, {}, allocator)
-	defer scratch_end(sp)
-	return dump_tokens_inner(&m.plan, m.judging, rawptr(v), tt, opts, sink, allocator, sp.scratch)
+	if m == nil || v == nil || tt == nil || len(m.plan.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "value"}} }
+	ls := Lazy_Scratch{backing = allocator}; defer lazy_scratch_end(&ls)
+	scr := lazy_scratch_get(&ls)
+	omit_state := Dump_Omit{plan = &m.plan, opts = opts}
+	mem.dynamic_arena_init(&omit_state.defaults, scr, scr); defer mem.dynamic_arena_destroy(&omit_state.defaults)
+	omit_hook := Omit_Hook{fn = dump_field_omitted, ctx = &omit_state}
+	if opts.check { dump_check_with_omit(&m.plan, m.judging, rawptr(v), sink, &omit_hook, allocator, scr) or_return }
+	return emit_node(&m.plan, tt, m.plan.root, rawptr(v), &omit_hook, sink, allocator, scr)
 }
 
 @(require_results)
 dump :: proc(m: ^Model($T), v: ^T, format_write: Format_Write_Proc, opts := Dump_Opts{}, wopts := write.Options{}, sink: ^Sink = nil, allocator := context.allocator) -> (text: []u8, err: Error) {
-	if format_write == nil {
-		return nil, Model_Error{kind = .Bad_Option, want = {text = "format_write"}}
-	}
-	doc := dump_document(m, v, opts, sink, allocator) or_return
-	defer tape.destroy(&doc)
+	if format_write == nil { return nil, Model_Error{kind = .Bad_Option, want = {text = "format_write"}} }
+	doc := dump_document(m, v, opts, sink, allocator) or_return; defer tape.destroy(&doc)
 	bytes, _, werr := format_write(&doc, wopts, allocator)
-	if werr != nil {
-		return nil, werr
-	}
-	return bytes, nil
+	return bytes, werr if werr != nil else nil
 }
 
 @(require_results)
 dump_stream :: proc(w: io.Writer, m: ^Model($T), v: ^T, format_write_to: Format_Write_To_Proc, opts := Dump_Opts{}, wopts := write.Options{}, sink: ^Sink = nil, allocator := context.allocator) -> Error {
-	if format_write_to == nil {
-		return Model_Error{kind = .Bad_Option, want = {text = "format_write_to"}}
-	}
-	doc := dump_document(m, v, opts, sink, allocator) or_return
-	defer tape.destroy(&doc)
+	if format_write_to == nil { return Model_Error{kind = .Bad_Option, want = {text = "format_write_to"}} }
+	doc := dump_document(m, v, opts, sink, allocator) or_return; defer tape.destroy(&doc)
 	_, werr := format_write_to(w, &doc, wopts, allocator)
 	return werr if werr != nil else nil
 }
 
 @(private)
-Dump_Omit :: struct {
-	plan:       ^Type_Plan,
-	opts:       Dump_Opts,
-	defaults:   mem.Dynamic_Arena,
-	made:       map[rawptr]rawptr,
-	zero:       rawptr,
-	zero_size:  int,
-	zero_align: int,
-}
+Dump_Omit :: struct { plan: ^Type_Plan, opts: Dump_Opts, defaults: mem.Dynamic_Arena, made: map[rawptr]rawptr, zero: rawptr, zero_size, zero_align: int }
 
 @(private)
 dump_field_omitted :: proc(ctx: rawptr, si: ^Struct_Info, fi: int, struct_ptr: rawptr) -> bool {
-	o := (^Dump_Omit)(ctx)
-	f := &si.fields[fi]
-	field_ptr := rawptr(uintptr(struct_ptr) + f.offset)
-	ftn := &o.plan.nodes[f.node]
-
-	if f.omit_unset && holds_null_value(o.plan, ftn, field_ptr) { return true }
-	if f.omit_empty && is_empty_value(o.plan, ftn, field_ptr) { return true }
-	if !f.optional { return false }
+	o := (^Dump_Omit)(ctx); f := &si.fields[fi]; field_ptr := rawptr(uintptr(struct_ptr) + f.offset); ftn := &o.plan.nodes[f.node]
+	if .Omit_Unset in f.flags && holds_null_value(o.plan, ftn, field_ptr) { return true }
+	if .Omit_Empty in f.flags && is_empty_value(o.plan, ftn, field_ptr) { return true }
+	if .Optional not_in f.flags { return false }
 	if o.opts.exclude_none && holds_null_value(o.plan, ftn, field_ptr) { return true }
-	if o.opts.exclude_unset && si.has_fields_set && f.access != .Read_Only {
-		if !fields_set_has((^Fields_Set)(uintptr(struct_ptr) + si.fields_set_offset)^, fi) {
-			return true
-		}
-	}
+	if o.opts.exclude_unset && si.has_fields_set && .Read_Only not_in f.flags && !fields_set_has((^Fields_Set)(uintptr(struct_ptr) + si.fields_set_offset)^, fi) { return true }
 	if !o.opts.exclude_defaults { return false }
 	def_ptr := default_value_for(o, f, ftn)
 	return def_ptr != nil && equal_values(field_ptr, def_ptr, ftn.ti, mem.dynamic_arena_allocator(&o.defaults))
@@ -125,12 +86,10 @@ dump_field_omitted :: proc(ctx: rawptr, si: ^Struct_Info, fi: int, struct_ptr: r
 @(private)
 default_value_for :: proc(o: ^Dump_Omit, f: ^Field_Info, ftn: ^Type_Node) -> rawptr {
 	memory := mem.dynamic_arena_allocator(&o.defaults)
-	if !f.has_default {
+	if .Has_Default not_in f.flags {
 		need_align := max(ftn.align, 16)
 		if o.zero == nil || o.zero_size < ftn.size || o.zero_align < need_align {
-			sz := max(ftn.size, 64)
-			z, err := mem.alloc(sz, need_align, memory)
-			if err != nil { return nil }
+			sz := max(ftn.size, 64); z, err := mem.alloc(sz, need_align, memory); if err != nil { return nil }
 			o.zero, o.zero_size, o.zero_align = z, sz, need_align
 		}
 		return o.zero
@@ -150,12 +109,8 @@ holds_null_value :: proc(plan: ^Type_Plan, tn: ^Type_Node, ptr: rawptr) -> bool 
 	case .Ptr:         return (^rawptr)(ptr)^ == nil
 	case .Cstring:     return (^cstring)(ptr)^ == nil
 	case .Number_Text: return (^Number_Text)(ptr)^.text == ""
-	case .Union:
-		u := &plan.unions[tn.union_idx]
-		return !u.no_nil && read_union_tag(ptr, u.tag_offset, u.tag_size) == 0
-	case .Value:
-		_, is_null := (^rules.Value)(ptr)^.(rules.Null)
-		return is_null || (^rules.Value)(ptr)^ == nil
+	case .Union:       u := &plan.unions[tn.union_idx]; return !u.no_nil && read_union_tag(ptr, u.tag_offset, u.tag_size) == 0
+	case .Value:       _, is_null := (^rules.Value)(ptr)^.(rules.Null); return is_null || (^rules.Value)(ptr)^ == nil
 	}
 	return false
 }
@@ -164,269 +119,21 @@ holds_null_value :: proc(plan: ^Type_Plan, tn: ^Type_Node, ptr: rawptr) -> bool 
 is_empty_value :: proc(plan: ^Type_Plan, tn: ^Type_Node, ptr: rawptr) -> bool {
 	if holds_null_value(plan, tn, ptr) { return true }
 	#partial switch tn.kind {
-	case .String, .Email:             return len((^string)(ptr)^) == 0
-	case .Cstring:                    return len(string((^cstring)(ptr)^)) == 0
-	case .Bytes, .Base64, .Hex:       return len((^[]u8)(ptr)^) == 0
-	case .Bool:                       return !(^bool)(ptr)^
-	case .Bool_Wide:                  return !read_wide_bool(ptr, tn.size)
-	case .I8 ..= .I64:                return read_signed_int(ptr, tn.kind) == 0
-	case .U8 ..= .U64:                return read_unsigned_int(ptr, tn.kind) == 0
-	case .F32:                        return (^f32)(ptr)^ == 0
-	case .F64:                        return (^f64)(ptr)^ == 0
+	case .String, .Email:               return len((^string)(ptr)^) == 0
+	case .Cstring:                      return len(string((^cstring)(ptr)^)) == 0
+	case .Bytes, .Base64, .Hex:         return len((^[]u8)(ptr)^) == 0
+	case .Bool:                         return !(^bool)(ptr)^
+	case .Bool_Wide:                    return !read_wide_bool(ptr, tn.size)
+	case .I8 ..= .I64:                  return read_signed_int(ptr, tn.kind) == 0
+	case .U8 ..= .U64:                  return read_unsigned_int(ptr, tn.kind) == 0
+	case .F32:                          return (^f32)(ptr)^ == 0
+	case .F64:                          return (^f64)(ptr)^ == 0
 	case .Slice, .Dynamic, .Fixed_List: _, n := list_span(tn, ptr); return n == 0
-	case .Map:                        return (^runtime.Raw_Map)(ptr).len == 0
+	case .Map:                          return (^runtime.Raw_Map)(ptr).len == 0
+	case .Bit_Set, .Array:              return bytes_all_zero(ptr, tn.size)
+	case .Decimal:                      d := (^Decimal)(ptr)^; return d.text == "" || (rules.valid_decimal_text(d.text) && rules.decimal_of(d.text).head == "")
 	}
 	return false
-}
-
-@(private)
-dump_tokens_inner :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, tt: ^write.Token_Tape, opts: Dump_Opts, sink: ^Sink, allocator, scratch: runtime.Allocator) -> Error {
-	omit_state := Dump_Omit{plan = plan, opts = opts}
-	mem.dynamic_arena_init(&omit_state.defaults, scratch, scratch)
-	defer mem.dynamic_arena_destroy(&omit_state.defaults)
-
-	omit_hook := Omit_Hook{fn = dump_field_omitted, ctx = &omit_state}
-	if opts.check {
-		dump_check_with_omit(plan, judging, val_ptr, sink, &omit_hook, allocator, scratch) or_return
-	}
-	em := Emitter{plan = plan, tt = tt, omit = &omit_hook, allocator = allocator, scratch = scratch}
-	return emit_node(&em, plan.root, val_ptr, "")
-}
-
-@(private)
-Emitter :: struct {
-	plan:      ^Type_Plan,
-	tt:        ^write.Token_Tape,
-	omit:      ^Omit_Hook,
-	allocator: runtime.Allocator,
-	scratch:   runtime.Allocator,
-}
-
-@(private)
-emit_tok :: #force_inline proc(em: ^Emitter, kind: write.Token_Kind, text: string) -> Error {
-	werr := write.token_tape_take(em.tt, kind, text)
-	return werr if werr != nil else nil
-}
-
-@(private)
-Emit_Frame_Kind :: enum u8 { Node, Close, Struct_Fields, List_Elems, Map_Entries }
-
-@(private)
-Emit_Frame :: struct {
-	kind:     Emit_Frame_Kind,
-	node_idx: i32,
-	ptr:      rawptr,
-	tag_key:  string,
-	tag_val:  string,
-	si:       ^Struct_Info,
-	idx:      int,
-	count:    int,
-	stride:   uintptr,
-	base:     uintptr,
-	entries:  []Sorted_Map_Entry,
-	is_cap:   bool,
-}
-
-@(private)
-push_e :: #force_inline proc(s: ^[dynamic]Emit_Frame, f: Emit_Frame) -> Error {
-	_, err := append(s, f)
-	return err if err != nil else nil
-}
-
-@(private)
-emit_node :: proc(em: ^Emitter, root_idx: i32, root_ptr: rawptr, root_tag_key: string, root_tag_val := "") -> Error {
-	stack, serr := make([dynamic]Emit_Frame, 0, 32, em.scratch)
-	if serr != nil { return serr }
-	defer delete(stack)
-	push_e(&stack, {kind = .Node, node_idx = root_idx, ptr = root_ptr, tag_key = root_tag_key, tag_val = root_tag_val}) or_return
-
-	for len(stack) > 0 {
-		top := &stack[len(stack) - 1]
-		switch top.kind {
-		case .Close:
-			pop(&stack)
-			emit_tok(em, .Close, "") or_return
-
-		case .Struct_Fields:
-			si := top.si
-			if top.idx < len(si.fields) {
-				fi := top.idx; top.idx += 1
-				f := &si.fields[fi]
-				if f.access == .Write_Only || (em.omit != nil && em.omit.fn(em.omit.ctx, si, fi, top.ptr)) {
-					continue
-				}
-				emit_tok(em, .Key, f.name) or_return
-				push_e(&stack, {kind = .Node, node_idx = f.node, ptr = rawptr(uintptr(top.ptr) + f.offset)}) or_return
-				continue
-			}
-			ptr := top.ptr; pop(&stack)
-			if si.capture_idx >= 0 {
-				cap_tn := &em.plan.nodes[si.capture_node]
-				entries, merr := collect_sorted_map_entries(cap_tn.ti, rawptr(uintptr(ptr) + si.capture_offset), em.scratch)
-				if merr != nil { return merr }
-				if len(entries) > 0 {
-					push_e(&stack, {kind = .Map_Entries, node_idx = cap_tn.child, si = si, entries = entries, is_cap = true}) or_return
-				}
-			}
-
-		case .List_Elems:
-			if top.idx >= top.count { pop(&stack); continue }
-			i := top.idx; top.idx += 1
-			push_e(&stack, {kind = .Node, node_idx = top.node_idx, ptr = rawptr(top.base + uintptr(i) * top.stride)}) or_return
-
-		case .Map_Entries:
-			if top.idx >= len(top.entries) { pop(&stack); continue }
-			e := top.entries[top.idx]; top.idx += 1
-			if top.is_cap && struct_find_field(top.si, e.key_text) >= 0 {
-				return make_owned_error(.Duplicate_Key, 0, {tape.Name(e.key_text)}, "", {}, em.allocator, nil)
-			}
-			emit_tok(em, .Key, e.key_text) or_return
-			push_e(&stack, {kind = .Node, node_idx = top.node_idx, ptr = e.val_ptr}) or_return
-
-		case .Node:
-			f := pop(&stack)
-			tn := &em.plan.nodes[f.node_idx]
-			ptr := f.ptr
-			#partial switch tn.kind {
-			case .Maybe:
-				if !maybe_is_set(tn, ptr) { emit_tok(em, .Null, "") or_return } else {
-					push_e(&stack, {kind = .Node, node_idx = tn.child, ptr = ptr, tag_key = f.tag_key, tag_val = f.tag_val}) or_return
-				}
-			case .Ptr:
-				if inner := (^rawptr)(ptr)^; inner == nil { emit_tok(em, .Null, "") or_return } else {
-					push_e(&stack, {kind = .Node, node_idx = tn.child, ptr = inner, tag_key = f.tag_key, tag_val = f.tag_val}) or_return
-				}
-			case .Struct:
-				emit_tok(em, .Object, "") or_return
-				if f.tag_key != "" {
-					emit_tok(em, .Key, f.tag_key) or_return
-					emit_tok(em, .String, f.tag_val) or_return
-				}
-				push_e(&stack, {kind = .Close}) or_return
-				push_e(&stack, {kind = .Struct_Fields, si = &em.plan.structs[tn.struct_idx], ptr = ptr}) or_return
-			case .Slice, .Dynamic, .Array, .Fixed_List:
-				base, n := list_span(tn, ptr)
-				emit_tok(em, .Array, "") or_return
-				push_e(&stack, {kind = .Close}) or_return
-				if n > 0 {
-					push_e(&stack, {kind = .List_Elems, node_idx = tn.child, base = base, count = n, stride = uintptr(em.plan.nodes[tn.child].size)}) or_return
-				}
-			case .Map:
-				emit_tok(em, .Object, "") or_return
-				push_e(&stack, {kind = .Close}) or_return
-				entries, merr := collect_sorted_map_entries(tn.ti, ptr, em.scratch)
-				if merr != nil { return merr }
-				if len(entries) > 0 { push_e(&stack, {kind = .Map_Entries, node_idx = tn.child, entries = entries}) or_return }
-			case .Bit_Set:
-				emit_bit_set(em, tn, ptr) or_return
-			case .Union:
-				u := &em.plan.unions[tn.union_idx]
-				arm_idx := int(read_union_tag(ptr, u.tag_offset, u.tag_size)) - (0 if u.no_nil else 1)
-				if arm_idx < 0 { emit_tok(em, .Null, "") or_return } else if arm_idx >= len(u.arms) { return Model_Error{kind = .No_Arm} } else {
-					arm := u.arms[arm_idx]
-					tkey := u.tag_key if u.mode == .Tag && u.tag_key != "" && arm.is_struct && arm.name != "" else ""
-					push_e(&stack, {kind = .Node, node_idx = arm.node, ptr = ptr, tag_key = tkey, tag_val = arm.name}) or_return
-				}
-			case .Custom:
-				c := &em.plan.customs[tn.custom_idx]
-				ctn := &em.plan.nodes[tn.child]
-				cbuf, cerr := runtime.mem_alloc(max(ctn.size, 1), ctn.align, em.scratch)
-				if cerr != nil { return cerr }
-				if ck := c.convert_to(c.to, ptr, raw_data(cbuf), em.scratch); ck != .None { return Model_Error{kind = ck} }
-				push_e(&stack, {kind = .Node, node_idx = tn.child, ptr = raw_data(cbuf)}) or_return
-			case .Enum:
-				ei := &em.plan.enums[tn.enum_idx]
-				ev := read_enum_value(ptr, tn.size, ei.ti)
-				found := false
-				for val, i in ei.values {
-					if val == ev {
-						found = true
-						if ei.by_name { emit_tok(em, .String, ei.names[i]) or_return } else {
-							buf: [32]u8 = ---
-							emit_tok(em, .Number, strconv.write_uint(buf[:], u64(ev), 10) if ei.is_unsigned else strconv.write_int(buf[:], ev, 10)) or_return
-						}
-						break
-					}
-				}
-				if !found { return Model_Error{kind = .Not_A_Member} }
-			case .String, .Email:
-				emit_tok(em, .String, (^string)(ptr)^) or_return
-			case .Cstring:
-				if cs := (^cstring)(ptr)^; cs == nil { emit_tok(em, .Null, "") or_return } else { emit_tok(em, .String, string(cs)) or_return }
-			case .Bytes, .Base64:
-				enc, err := encode_base64((^[]u8)(ptr)^, em.scratch)
-				if err != nil { return err }
-				emit_tok(em, .String, enc) or_return
-			case .Hex:
-				enc, err := encode_hex((^Hex)(ptr)^, em.scratch)
-				if err != nil { return err }
-				emit_tok(em, .String, enc) or_return
-			case .Bool:
-				emit_tok(em, .True if (^bool)(ptr)^ else .False, "") or_return
-			case .Bool_Wide:
-				emit_tok(em, .True if read_wide_bool(ptr, tn.size) else .False, "") or_return
-			case .I8 ..= .I64:
-				buf: [32]u8 = ---
-				emit_tok(em, .Number, strconv.write_int(buf[:], read_signed_int(ptr, tn.kind), 10)) or_return
-			case .U8 ..= .U64:
-				buf: [32]u8 = ---
-				emit_tok(em, .Number, strconv.write_uint(buf[:], read_unsigned_int(ptr, tn.kind), 10)) or_return
-			case .F32:
-				x := (^f32)(ptr)^
-				if math.is_nan(x) || math.is_inf(x, 0) { return Model_Error{kind = .Non_Finite} }
-				buf: [64]u8 = ---
-				emit_tok(em, .Number, strconv.write_float(buf[:], f64(x), 'g', -1, 32, {})) or_return
-			case .F64:
-				x := (^f64)(ptr)^
-				if math.is_nan(x) || math.is_inf(x, 0) { return Model_Error{kind = .Non_Finite} }
-				buf: [64]u8 = ---
-				emit_tok(em, .Number, strconv.write_float(buf[:], x, 'g', -1, 64, {})) or_return
-			case .Number_Text:
-				if nt := (^Number_Text)(ptr)^; nt.text == "" { emit_tok(em, .Null, "") or_return } else { emit_tok(em, .Number, nt.text) or_return }
-			case .Time:
-				buf: [40]u8 = ---
-				s, ok := format_rfc3339_utc((^time.Time)(ptr)^, &buf)
-				if !ok { return Model_Error{kind = .Bad_Format} }
-				emit_tok(em, .String, s) or_return
-			case .Uuid:
-				buf: [36]u8 = ---
-				emit_tok(em, .String, format_uuid((^uuid.Identifier)(ptr)^, &buf)) or_return
-			case .Decimal:
-				d := (^Decimal)(ptr)^
-				emit_tok(em, .Number, d.text if d.text != "" else "0") or_return
-			case .Value:
-				emit_rules_value_tokens(em.tt, (^rules.Value)(ptr)^, em.scratch) or_return
-			case .Raw:
-				return Model_Error{kind = .Unsupported, want = {text = "Raw"}}
-			case:
-				return Model_Error{kind = .Unsupported}
-			}
-		}
-	}
-	return nil
-}
-
-@(private)
-emit_bit_set :: proc(em: ^Emitter, tn: ^Type_Node, ptr: rawptr) -> Error {
-	emit_tok(em, .Array, "") or_return
-	bytes := ([^]u8)(ptr)[:tn.size]
-	buf: [32]u8 = ---
-	for bit in 0 ..< tn.count {
-		if (bytes[bit / 8] >> uint(bit % 8)) & 1 == 0 { continue }
-		val := tn.bit_lower + i64(bit)
-		if tn.enum_idx >= 0 {
-			ei := &em.plan.enums[tn.enum_idx]
-			for ev, i in ei.values {
-				if ev == val {
-					if ei.by_name { emit_tok(em, .String, ei.names[i]) or_return } else { emit_tok(em, .Number, strconv.write_int(buf[:], val, 10)) or_return }
-					break
-				}
-			}
-		} else {
-			emit_tok(em, .Number, strconv.write_int(buf[:], val, 10)) or_return
-		}
-	}
-	return emit_tok(em, .Close, "")
 }
 
 // ============================================================================
@@ -454,7 +161,10 @@ Dump_Frame_Mode :: enum u8 { Root, Struct, List, Map, Bits }
 // Zero-padding layout so `[DUMP_INLINE_FRAMES]Dump_Frame = ---` is never zeroed by Odin.
 @(private)
 Dump_Frame :: struct {
-	sf:        ^Stream_Field,
+	u:         struct #raw_union {
+		sf:    ^Stream_Field,
+		total: int,
+	},
 	si:        ^Struct_Info,
 	at:        uintptr,
 	left:      int,
@@ -469,52 +179,37 @@ Dump_Frame :: struct {
 when size_of(uintptr) == 8 { #assert(size_of(Dump_Frame) == 64) }
 
 @(private)
-Lazy_Scratch :: struct {
-	arena:   mem.Dynamic_Arena,
-	ready:   bool,
-	backing: runtime.Allocator,
-}
-
+Lazy_Scratch :: struct { arena: mem.Dynamic_Arena, ready: bool, backing: runtime.Allocator }
 @(private)
 lazy_scratch_get :: proc(ls: ^Lazy_Scratch) -> runtime.Allocator {
-	if !ls.ready {
-		mem.dynamic_arena_init(&ls.arena, ls.backing, ls.backing, block_size = 16 * 1024)
-		ls.ready = true
-	}
+	if !ls.ready { mem.dynamic_arena_init(&ls.arena, ls.backing, ls.backing, block_size = 16 * 1024); ls.ready = true }
 	return mem.dynamic_arena_allocator(&ls.arena)
 }
-
 @(private)
-lazy_scratch_end :: proc(ls: ^Lazy_Scratch) {
-	if ls.ready { mem.dynamic_arena_destroy(&ls.arena) }
-}
+lazy_scratch_end :: proc(ls: ^Lazy_Scratch) { if ls.ready { mem.dynamic_arena_destroy(&ls.arena) } }
 
 @(private)
 dump_check_with_omit :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, sink: ^Sink, omit_hook: ^Omit_Hook, allocator, scratch: runtime.Allocator) -> Error {
-	if verr := validate_inner(plan, judging, val_ptr, sink, {scratch = scratch}, omit_hook, allocator); verr != nil {
-		if me, is_me := verr.(Model_Error); is_me {
-			code := error_code(me.kind)
-			if me.owned {
-				delete(me.operand, allocator); delete(me.want.text, allocator)
-				wt, cerr := strings.clone(code, allocator)
-				if cerr != nil { delete(me.pointer, allocator); return cerr }
-				return Model_Error{kind = .Check_Failed, at = me.at, pointer = me.pointer, want = {text = wt}, owned = true}
-			}
-			return Model_Error{kind = .Check_Failed, at = me.at, pointer = me.pointer, want = {text = code}}
-		}
-		return verr
+	verr := validate_inner(plan, judging, val_ptr, sink, {scratch = scratch}, omit_hook, allocator)
+	if verr == nil { return nil }
+	me, is_me := verr.(Model_Error); if !is_me { return verr }
+	code := error_code(me.kind)
+	if me.owned {
+		delete(me.operand, allocator); delete(me.want.text, allocator)
+		wt, cerr := strings.clone(code, allocator)
+		if cerr != nil { delete(me.pointer, allocator); return cerr }
+		return Model_Error{kind = .Check_Failed, at = me.at, pointer = me.pointer, want = {text = wt}, owned = true}
 	}
-	return nil
+	return Model_Error{kind = .Check_Failed, at = me.at, pointer = me.pointer, want = {text = code}}
 }
 
 @(private)
 dump_check_value :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, opts: Dump_Opts, sink: ^Sink, allocator: runtime.Allocator, ls: ^Lazy_Scratch) -> Error {
-	scratch := lazy_scratch_get(ls)
+	scr := lazy_scratch_get(ls)
 	omit_state := Dump_Omit{plan = plan, opts = opts}
-	mem.dynamic_arena_init(&omit_state.defaults, scratch, scratch)
-	defer mem.dynamic_arena_destroy(&omit_state.defaults)
+	mem.dynamic_arena_init(&omit_state.defaults, scr, scr); defer mem.dynamic_arena_destroy(&omit_state.defaults)
 	omit_hook := Omit_Hook{fn = dump_field_omitted, ctx = &omit_state}
-	return dump_check_with_omit(plan, judging, val_ptr, sink, &omit_hook, allocator, scratch)
+	return dump_check_with_omit(plan, judging, val_ptr, sink, &omit_hook, allocator, scr)
 }
 
 // Writes `v` directly as JSON into `w` via format callbacks, avoiding `Token_Tape`, `tape.Document`, and per-call arenas.
@@ -573,7 +268,7 @@ dump_json :: proc(
 		tag_key, tag_val: string
 
 		if cur.mode == .Struct {
-			sf := cur.sf
+			sf := cur.u.sf
 			if cur.check_opt {
 				for sf.kind != .Invalid {
 					if .Write_Only in sf.flags || dump_sf_omitted(&omit_state, cur.si, sf, cur.at) {
@@ -651,7 +346,7 @@ dump_json :: proc(
 				p = room(w, 2 + JSON_LEAF_ROOM)
 				when PRETTY { p[0], p[1] = ':', ' '; p = p[2:]; cursor^ += 2 } else { p[0] = ':'; p = p[1:]; cursor^ += 1 }
 			}
-			cur.sf = intrinsics.ptr_offset(sf, 1)
+			cur.u.sf = intrinsics.ptr_offset(sf, 1)
 			vkind, vnode, vsidx, va = sf.kind, sf.node, sf.struct_idx, cur.at + uintptr(sf.offset)
 		} else if cur.mode == .List {
 			if cur.left == 0 {
@@ -694,11 +389,7 @@ dump_json :: proc(
 			}
 			e := cur.entries[cur.step]; cur.step += 1
 			if cur.is_cap && struct_find_field(cur.si, e.key_text) >= 0 {
-				first: Model_Error
-				oom := false
-				_ = record_failure(sink, &first, &oom, allocator, .Duplicate_Key, 0, {tape.Name(e.key_text)}, "", {}, false)
-				if oom { return runtime.Allocator_Error.Out_Of_Memory }
-				return first
+				return dump_json_fail(frames, top, &cur, sink, allocator, .Duplicate_Key)
 			}
 			when PRETTY {
 				p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
@@ -777,8 +468,7 @@ dump_json :: proc(
 			case .F64:
 				n, ok := dump_put_f64(p, (^f64)(va)^)
 				if !ok {
-					if sink != nil { _ = sink_push(sink, allocator, .Non_Finite, 0, nil) }
-					return Model_Error{kind = .Non_Finite}
+					return dump_json_fail(frames, top, &cur, sink, allocator, .Non_Finite)
 				}
 				cursor^ += n
 			case .Bool:
@@ -807,7 +497,7 @@ dump_json :: proc(
 					mode      = .Struct,
 					lead      = lead,
 					check_opt = si.has_omit_tag || (any_exclude && si.has_optional),
-					sf        = raw_data(si.stream_fields),
+					u         = {sf = raw_data(si.stream_fields)},
 					si        = si,
 					at        = va,
 				}
@@ -820,7 +510,7 @@ dump_json :: proc(
 					if top >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }
 					if !dump_push_frame(&frames, &top, &cap_frames, cur, allocator) { return runtime.Allocator_Error.Out_Of_Memory }
 					p[0] = '['; cursor^ += 1
-					cur = Dump_Frame{mode = .List, lead = 0, node_idx = tn.child, at = base, left = n, step = plan.nodes[tn.child].size}
+					cur = Dump_Frame{mode = .List, lead = 0, node_idx = tn.child, at = base, left = n, step = plan.nodes[tn.child].size, u = {total = n}}
 				}
 			case .Map:
 				tn := &plan.nodes[vnode]
@@ -888,13 +578,32 @@ dump_json :: proc(
 				p[0] = '['; cursor^ += 1
 				cur = Dump_Frame{mode = .Bits, lead = 0, node_idx = vnode, at = va, left = tn.count, step = 0}
 			case:
-				if rerr := dump_put_rare(plan, &plan.nodes[vnode], rawptr(va), w, p, cursor, &ls, sink, allocator, PRETTY, room, put_string, put_line, top); rerr != nil {
+				if rerr := dump_put_rare(plan, &plan.nodes[vnode], rawptr(va), w, p, cursor, &ls, frames, top, &cur, sink, allocator, PRETTY, room, put_string, put_line); rerr != nil {
 					return rerr
 				}
 			}
 			continue next
 		}
 	}
+}
+
+@(private, cold)
+dump_json_fail :: #force_no_inline proc(frames: [^]Dump_Frame, top: int, cur: ^Dump_Frame, sink: ^Sink, allocator: runtime.Allocator, kind: Error_Kind) -> Error {
+	if sink == nil && kind != .Duplicate_Key { return Model_Error{kind = kind} }
+	steps: [dynamic]tape.Step; steps.allocator = allocator; defer delete(steps)
+	push_fr :: proc(steps: ^[dynamic]tape.Step, fr: ^Dump_Frame) -> runtime.Allocator_Error {
+		#partial switch fr.mode {
+		case .Struct: sf := intrinsics.ptr_offset(fr.u.sf, -1); _, err := append(steps, tape.Step(tape.Name(fr.si.fields[sf.field_idx].name))); return err
+		case .List:   _, err := append(steps, tape.Step(tape.Index(fr.u.total - fr.left - 1))); return err
+		case .Map:    _, err := append(steps, tape.Step(tape.Name(fr.entries[fr.step - 1].key_text))); return err
+		}
+		return nil
+	}
+	for i in 1 ..< top { push_fr(&steps, &frames[i]) or_return }
+	if cur != nil { push_fr(&steps, cur) or_return }
+	first: Model_Error; oom := false
+	_ = record_failure(sink, &first, &oom, allocator, kind, 0, steps[:], "", {}, false)
+	return runtime.Allocator_Error.Out_Of_Memory if oom else first
 }
 
 @(private)
@@ -906,9 +615,7 @@ dump_sf_omitted :: #force_inline proc(o: ^Dump_Omit, si: ^Struct_Info, sf: ^Stre
 @(private)
 dump_push_frame :: #force_inline proc(frames: ^[^]Dump_Frame, top, cap_frames: ^int, frame: Dump_Frame, allocator: runtime.Allocator) -> bool #no_bounds_check {
 	if top^ == cap_frames^ && !dump_grow_frames(frames, cap_frames, allocator) { return false }
-	frames^[top^] = frame
-	top^ += 1
-	return true
+	frames^[top^] = frame; top^ += 1; return true
 }
 
 @(private, cold)
@@ -918,88 +625,65 @@ dump_grow_frames :: #force_no_inline proc(frames: ^[^]Dump_Frame, cap_frames: ^i
 	if aerr != nil || raw_data(raw) == nil { return false }
 	grown := ([^]Dump_Frame)(raw_data(raw))
 	intrinsics.mem_copy_non_overlapping(grown, frames^, cap_frames^ * size_of(Dump_Frame))
-	if cap_frames^ > DUMP_INLINE_FRAMES {
-		runtime.mem_free_with_size(frames^, cap_frames^ * size_of(Dump_Frame), allocator)
-	}
+	if cap_frames^ > DUMP_INLINE_FRAMES { runtime.mem_free_with_size(frames^, cap_frames^ * size_of(Dump_Frame), allocator) }
 	frames^, cap_frames^ = grown, next_cap
 	return true
 }
 
 @(private, cold)
-dump_put_rare :: #force_no_inline proc(
-	plan: ^Type_Plan, tn: ^Type_Node, ptr: rawptr, w: ^$W, p: [^]u8, cursor: ^int, ls: ^Lazy_Scratch, sink: ^Sink, allocator: runtime.Allocator, $PRETTY: bool,
-	$room: proc(w: ^W, n: int) -> [^]u8,
-	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
-	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
-	depth: int,
-) -> Error #no_bounds_check {
+dump_put_scalar_into :: proc(plan: ^Type_Plan, tn: ^Type_Node, ptr: rawptr, p: [^]u8, scratch: runtime.Allocator) -> (written: int, str_val, raw_val: string, err: Error) #no_bounds_check {
 	#partial switch tn.kind {
-	case .I8:  cursor^ += dump_put_i64(p, i64((^i8)(ptr)^))
-	case .I16: cursor^ += dump_put_i64(p, i64((^i16)(ptr)^))
-	case .I32: cursor^ += dump_put_i64(p, i64((^i32)(ptr)^))
-	case .U8:  cursor^ += dump_put_u64(p, u64((^u8)(ptr)^))
-	case .U16: cursor^ += dump_put_u64(p, u64((^u16)(ptr)^))
-	case .U32: cursor^ += dump_put_u64(p, u64((^u32)(ptr)^))
-	case .U64: cursor^ += dump_put_u64(p, (^u64)(ptr)^)
+	case .I8 ..= .I64: written = dump_put_i64(p, read_signed_int(ptr, tn.kind))
+	case .U8 ..= .U64: written = dump_put_u64(p, read_unsigned_int(ptr, tn.kind))
 	case .F32:
-		x := (^f32)(ptr)^
-		if math.is_nan(x) || math.is_inf(x, 0) {
-			if sink != nil { _ = sink_push(sink, allocator, .Non_Finite, 0, nil) }
-			return Model_Error{kind = .Non_Finite}
-		}
-		cursor^ += len(strconv.write_float(p[:JSON_LEAF_ROOM - 2], f64(x), 'g', -1, 32, {}))
+		x := (^f32)(ptr)^; if math.is_nan(x) || math.is_inf(x, 0) { return 0, "", "", Model_Error{kind = .Non_Finite} }
+		written = len(strconv.write_float(p[:JSON_LEAF_ROOM - 2], f64(x), 'g', -1, 32, {}))
 	case .Bool_Wide:
-		if read_wide_bool(ptr, tn.size) { intrinsics.unaligned_store((^u32le)(p), JSON_TRUE_U32); cursor^ += 4 } else { intrinsics.unaligned_store((^u64le)(p), JSON_FALSE_U64); cursor^ += 5 }
-	case .Email:
-		if !put_string(w, p, (^string)(ptr)^) { return write.Error(write.Refused{0, .No_Spelling}) }
-	case .Cstring:
-		if cs := (^cstring)(ptr)^; cs == nil { intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4 } else if !put_string(w, p, string(cs)) { return write.Error(write.Refused{0, .No_Spelling}) }
-	case .Bytes, .Base64:
-		enc, err := encode_base64((^[]u8)(ptr)^, lazy_scratch_get(ls))
-		if err != nil { return err }
-		if !put_string(w, p, enc) { return write.Error(write.Refused{0, .No_Spelling}) }
-	case .Hex:
-		enc, err := encode_hex((^Hex)(ptr)^, lazy_scratch_get(ls))
-		if err != nil { return err }
-		if !put_string(w, p, enc) { return write.Error(write.Refused{0, .No_Spelling}) }
-	case .Number_Text:
-		nt := (^Number_Text)(ptr)^
-		if nt.text == "" { intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4 } else { dump_put_raw(w, cursor, nt.text, room) }
-	case .Decimal:
-		d := (^Decimal)(ptr)^
-		dump_put_raw(w, cursor, d.text if d.text != "" else "0", room)
-	case .Time:
-		buf: [40]u8 = ---
-		s, ok := format_rfc3339_utc((^time.Time)(ptr)^, &buf)
-		if !ok { return Model_Error{kind = .Bad_Format} }
-		p[0] = '"'; intrinsics.mem_copy_non_overlapping(p[1:], raw_data(s), len(s)); p[1 + len(s)] = '"'
-		cursor^ += len(s) + 2
-	case .Uuid:
-		buf: [36]u8 = ---
-		s := format_uuid((^uuid.Identifier)(ptr)^, &buf)
-		p[0] = '"'; intrinsics.mem_copy_non_overlapping(p[1:], raw_data(s), len(s)); p[1 + len(s)] = '"'
-		cursor^ += len(s) + 2
+		if read_wide_bool(ptr, tn.size) { intrinsics.unaligned_store((^u32le)(p), JSON_TRUE_U32); written = 4 } else { intrinsics.unaligned_store((^u64le)(p), JSON_FALSE_U64); written = 5 }
+	case .Email:   str_val = (^string)(ptr)^; if str_val == "" { p[0], p[1] = '"', '"'; written = 2 }
+	case .Cstring: if cs := (^cstring)(ptr)^; cs == nil { intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); written = 4 } else if len(string(cs)) == 0 { p[0], p[1] = '"', '"'; written = 2 } else { str_val = string(cs) }
+	case .Bytes, .Base64, .Hex:
+		enc: string; aerr: runtime.Allocator_Error
+		if tn.kind == .Hex { enc, aerr = encode_hex((^Hex)(ptr)^, scratch) } else { enc, aerr = encode_base64((^[]u8)(ptr)^, scratch) }
+		if aerr != nil { return 0, "", "", aerr }
+		if enc == "" { p[0], p[1] = '"', '"'; written = 2 } else { str_val = enc }
+	case .Number_Text: if nt := (^Number_Text)(ptr)^; nt.text == "" { intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); written = 4 } else { raw_val = nt.text }
+	case .Decimal:     d := (^Decimal)(ptr)^; raw_val = d.text if d.text != "" else "0"
+	case .Time, .Uuid:
+		buf: [40]u8 = ---; s: string
+		if tn.kind == .Time { ok: bool; s, ok = format_rfc3339_utc((^time.Time)(ptr)^, &buf); if !ok { return 0, "", "", Model_Error{kind = .Bad_Format} } } else { s = format_uuid((^uuid.Identifier)(ptr)^, (^[36]u8)(&buf)) }
+		p[0] = '"'; intrinsics.mem_copy_non_overlapping(p[1:], raw_data(s), len(s)); p[1 + len(s)] = '"'; written = len(s) + 2
 	case .Enum:
-		ei := &plan.enums[tn.enum_idx]
-		ev := read_enum_value(ptr, tn.size, ei.ti)
+		ei, ev := &plan.enums[tn.enum_idx], read_enum_value(ptr, tn.size, plan.enums[tn.enum_idx].ti)
 		for val, i in ei.values {
 			if val == ev {
-				if ei.by_name {
-					if !put_string(w, p, ei.names[i]) { return write.Error(write.Refused{0, .No_Spelling}) }
-				} else {
-					cursor^ += dump_put_u64(p, u64(ev)) if ei.is_unsigned else dump_put_i64(p, ev)
-				}
-				return nil
+				if ei.by_name { if ei.names[i] == "" { p[0], p[1] = '"', '"'; written = 2 } else { str_val = ei.names[i] } } else { written = dump_put_u64(p, u64(ev)) if ei.is_unsigned else dump_put_i64(p, ev) }
+				return
 			}
 		}
-		return Model_Error{kind = .Not_A_Member}
-	case .Value:
-		return dump_put_rules_value((^rules.Value)(ptr)^, w, p, cursor, lazy_scratch_get(ls), sink, allocator, PRETTY, room, put_string, put_line, depth)
-	case .Raw:
-		return Model_Error{kind = .Unsupported, want = {text = "Raw"}}
-	case:
-		return Model_Error{kind = .Unsupported}
+		return 0, "", "", Model_Error{kind = .Not_A_Member}
+	case .Raw: return 0, "", "", Model_Error{kind = .Unsupported, want = {text = "Raw"}}
+	case:     return 0, "", "", Model_Error{kind = .Unsupported}
 	}
+	return
+}
+
+@(private, cold)
+dump_put_rare :: #force_no_inline proc(
+	plan: ^Type_Plan, tn: ^Type_Node, ptr: rawptr, w: ^$W, p: [^]u8, cursor: ^int, ls: ^Lazy_Scratch,
+	frames: [^]Dump_Frame, top: int, cur: ^Dump_Frame, sink: ^Sink, allocator: runtime.Allocator, $PRETTY: bool,
+	$room: proc(w: ^W, n: int) -> [^]u8, $put_string: proc(w: ^W, p: [^]u8, s: string) -> bool, $put_line: proc(w: ^W, p: [^]u8, depth, after: int) -> [^]u8,
+) -> Error #no_bounds_check {
+	if tn.kind == .Value { return dump_put_rules_value((^rules.Value)(ptr)^, w, p, cursor, lazy_scratch_get(ls), frames, top, cur, sink, allocator, PRETTY, room, put_string, put_line) }
+	scr := lazy_scratch_get(ls) if (tn.kind == .Bytes || tn.kind == .Base64 || tn.kind == .Hex) else runtime.Allocator{}
+	written, str_val, raw_val, err := dump_put_scalar_into(plan, tn, ptr, p, scr)
+	if err != nil {
+		if me, ok := err.(Model_Error); ok && me.kind == .Non_Finite { return dump_json_fail(frames, top, cur, sink, allocator, .Non_Finite) }
+		return err
+	}
+	if written > 0 { cursor^ += written; return nil }
+	if str_val != "" { if !put_string(w, p, str_val) { return write.Error(write.Refused{0, .No_Spelling}) }; return nil }
+	dump_put_raw(w, cursor, raw_val, room)
 	return nil
 }
 
@@ -1014,84 +698,44 @@ dump_put_raw :: proc(w: ^$W, cursor: ^int, s: string, $room: proc(w: ^W, n: int)
 
 @(private, cold)
 dump_put_rules_value :: proc(
-	root: rules.Value, w: ^$W, p0: [^]u8, cursor: ^int, scratch: runtime.Allocator, sink: ^Sink, allocator: runtime.Allocator, $PRETTY: bool,
-	$room: proc(w: ^W, n: int) -> [^]u8,
-	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
-	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
-	base_depth: int,
+	root: rules.Value, w: ^$W, p0: [^]u8, cursor: ^int, scratch: runtime.Allocator,
+	frames: [^]Dump_Frame, top: int, cur: ^Dump_Frame, sink: ^Sink, allocator: runtime.Allocator, $PRETTY: bool,
+	$room: proc(w: ^W, n: int) -> [^]u8, $put_string: proc(w: ^W, p: [^]u8, s: string) -> bool, $put_line: proc(w: ^W, p: [^]u8, depth, after: int) -> [^]u8,
 ) -> Error #no_bounds_check {
 	Rv_Frame :: struct { is_obj: bool, idx: int, elems: []rules.Value, members: []rules.Member_Value }
-	stack := make([dynamic]Rv_Frame, 0, 8, scratch) or_return
-	defer delete(stack)
+	stack := make([dynamic]Rv_Frame, 0, 8, scratch) or_return; defer delete(stack)
 	cur_v, have_v, p := root, true, p0
 	for {
 		if !have_v {
 			if len(stack) == 0 { return nil }
-			top := &stack[len(stack) - 1]
-			n_items := len(top.members) if top.is_obj else len(top.elems)
-			if top.idx >= n_items {
-				ch := u8('}') if top.is_obj else u8(']')
-				pop(&stack)
-				when PRETTY {
-					p = room(w, 1 + JSON_LINE_MAX + 8)
-					if n_items > 0 { p = put_line(w, p, base_depth + len(stack), 1) }
-					p[0] = ch; cursor^ += 1
-				} else {
-					room(w, 1)[0] = ch; cursor^ += 1
-				}
+			fr := &stack[len(stack) - 1]
+			n_items := len(fr.members) if fr.is_obj else len(fr.elems)
+			if fr.idx >= n_items {
+				ch := u8('}') if fr.is_obj else u8(']'); pop(&stack)
+				when PRETTY { p = room(w, 1 + JSON_LINE_MAX + 8); if n_items > 0 { p = put_line(w, p, top + len(stack), 1) }; p[0] = ch; cursor^ += 1 } else { room(w, 1)[0] = ch; cursor^ += 1 }
 				continue
 			}
-			first := top.idx == 0
-			top.idx += 1
-			if top.is_obj {
-				m := top.members[top.idx - 1]
-				when PRETTY {
-					p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
-					if !first { p[0] = ','; p = p[1:]; cursor^ += 1 }
-					p = put_line(w, p, base_depth + len(stack), JSON_LEAF_ROOM)
-				} else {
-					p = room(w, 1 + JSON_LEAF_ROOM)
-					if !first { p[0] = ','; p = p[1:]; cursor^ += 1 }
-				}
-				if !put_string(w, p, m.key) { return write.Error(write.Refused{0, .No_Spelling}) }
+			first := fr.idx == 0; fr.idx += 1
+			when PRETTY { p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM); if !first { p[0] = ','; p = p[1:]; cursor^ += 1 }; p = put_line(w, p, top + len(stack), JSON_LEAF_ROOM) } else { p = room(w, 1 + JSON_LEAF_ROOM); if !first { p[0] = ','; p = p[1:]; cursor^ += 1 } }
+			if fr.is_obj {
+				m := fr.members[fr.idx - 1]; if !put_string(w, p, m.key) { return write.Error(write.Refused{0, .No_Spelling}) }
 				p = room(w, 2 + JSON_LEAF_ROOM)
 				when PRETTY { p[0], p[1] = ':', ' '; p = p[2:]; cursor^ += 2 } else { p[0] = ':'; p = p[1:]; cursor^ += 1 }
-				cur_v, have_v = m.value, true
-			} else {
-				cur_v, have_v = top.elems[top.idx - 1], true
-				when PRETTY {
-					p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
-					if !first { p[0] = ','; p = p[1:]; cursor^ += 1 }
-					p = put_line(w, p, base_depth + len(stack), JSON_LEAF_ROOM)
-				} else {
-					p = room(w, 1 + JSON_LEAF_ROOM)
-					if !first { p[0] = ','; p = p[1:]; cursor^ += 1 }
-				}
-			}
+				cur_v = m.value
+			} else { cur_v = fr.elems[fr.idx - 1] }
 		}
 		have_v = false
 		switch x in cur_v {
-		case rules.Null:        intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4
 		case bool:              if x { intrinsics.unaligned_store((^u32le)(p), JSON_TRUE_U32); cursor^ += 4 } else { intrinsics.unaligned_store((^u64le)(p), JSON_FALSE_U64); cursor^ += 5 }
 		case i64:               cursor^ += dump_put_i64(p, x)
 		case u64:               cursor^ += dump_put_u64(p, x)
-		case f64:
-			n, ok := dump_put_f64(p, x)
-			if !ok {
-				if sink != nil { _ = sink_push(sink, allocator, .Non_Finite, 0, nil) }
-				return Model_Error{kind = .Non_Finite}
-			}
-			cursor^ += n
+		case f64:               n, ok := dump_put_f64(p, x); if !ok { return dump_json_fail(frames, top, cur, sink, allocator, .Non_Finite) }; cursor^ += n
 		case rules.Number_Text: dump_put_raw(w, cursor, x.text, room)
 		case string:            if !put_string(w, p, x) { return write.Error(write.Refused{0, .No_Spelling}) }
-		case []rules.Value:
-			if base_depth + len(stack) >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }
-			p[0] = '['; cursor^ += 1; append(&stack, Rv_Frame{elems = x}) or_return
-		case []rules.Member_Value:
-			if base_depth + len(stack) >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }
-			p[0] = '{'; cursor^ += 1; append(&stack, Rv_Frame{is_obj = true, members = x}) or_return
-		case rules.Node_Ref:    cur_v = clone_rules_value(cur_v, scratch, scratch) or_return; have_v = true
-		case:                   intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4
+		case []rules.Value:     if top + len(stack) >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }; p[0] = '['; cursor^ += 1; append(&stack, Rv_Frame{elems = x}) or_return
+		case []rules.Member_Value: if top + len(stack) >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }; p[0] = '{'; cursor^ += 1; append(&stack, Rv_Frame{is_obj = true, members = x}) or_return
+		case rules.Node_Ref:  cur_v = clone_rules_value(cur_v, scratch, scratch) or_return; have_v = true
+		case rules.Null, nil: intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4
 		}
 	}
 }

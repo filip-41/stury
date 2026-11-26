@@ -8,10 +8,7 @@ import "core:reflect"
 import "core:strings"
 
 // Tracks which members of a struct were explicitly present in a load or patch (inline 128-bit + wide fallback).
-Fields_Set :: struct {
-	bits: [2]u64,
-	wide: []u64,
-}
+Fields_Set :: struct { bits: [2]u64, wide: []u64 }
 
 fields_set_has :: proc "contextless" (s: Fields_Set, idx: int) -> bool {
 	if idx < 0 { return false }
@@ -45,54 +42,29 @@ fields_set_merge :: proc(dst: ^Fields_Set, src: Fields_Set, allocator: runtime.A
 	return nil
 }
 
-fields_set_destroy :: proc(s: ^Fields_Set, allocator := context.allocator) {
-	if s == nil { return }
-	if len(s.wide) > 0 { delete(s.wide, allocator) }
-	s^ = {}
-}
+fields_set_destroy :: proc(s: ^Fields_Set, allocator := context.allocator) { if s != nil { delete(s.wide, allocator); s^ = {} } }
 
 Access :: enum u8 { Read_Write, Read_Only, Write_Only }
-
-Naming :: struct {
-	fields:       Rename,
-	enums:        Enum_Spelling,
-	enum_members: Rename,
-	union_tag:    string,
-}
-
+Naming :: struct { fields: Rename, enums: Enum_Spelling, enum_members: Rename, union_tag: string }
 Type_Rule :: struct { type: typeid, tag: string }
 Field_Rule_Of :: struct { type: typeid, field, tag: string }
 Extra :: enum u8 { Ignore, Forbid }
 
 @(private)
-Loads :: struct {
-	defaults:    [dynamic]Default_Of,
-	forbids:     [dynamic]typeid,
-	memory:      mem.Dynamic_Arena,
-	arena_ready: bool,
-	allocator:   runtime.Allocator,
-}
+Loads :: struct { defaults: [dynamic]Default_Of, forbids: [dynamic]typeid, memory: mem.Dynamic_Arena, arena_ready: bool, allocator: runtime.Allocator }
 
 Registry :: struct {
-	naming:     Naming,
-	types:      [dynamic]Type_Rule,
-	fields:     [dynamic]Field_Rule_Of,
-	loads:      Loads,
-	validators: [dynamic]Validator_Of,
-	befores:    [dynamic]Before_Of,
-	customs:    [dynamic]Custom_Of,
-	enums:      [dynamic]Enum_Rule,
-	unions:     [dynamic]Union_Rule,
-	schemas:    [dynamic]Schema_Of,
+	naming: Naming, types: [dynamic]Type_Rule, fields: [dynamic]Field_Rule_Of, loads: Loads,
+	validators: [dynamic]Validator_Of, befores: [dynamic]Before_Of, customs: [dynamic]Custom_Of,
+	enums: [dynamic]Enum_Rule, unions: [dynamic]Union_Rule, schemas: [dynamic]Schema_Of,
 }
 
 @(private)
 reg_arena :: proc(reg: ^Registry) -> runtime.Allocator {
 	if !reg.loads.arena_ready {
 		alloc := reg.loads.allocator if reg.loads.allocator.procedure != nil else context.allocator
-		reg.loads.allocator = alloc
+		reg.loads.allocator, reg.loads.arena_ready = alloc, true
 		mem.dynamic_arena_init(&reg.loads.memory, alloc, alloc)
-		reg.loads.arena_ready = true
 	}
 	return mem.dynamic_arena_allocator(&reg.loads.memory)
 }
@@ -109,39 +81,20 @@ register :: proc {
 	register_enum, register_union, register_schema,
 }
 
-register_naming :: proc(reg: ^Registry, naming: Naming) -> runtime.Allocator_Error {
-	ut := kept(reg, naming.union_tag) or_return
-	reg.naming = naming; reg.naming.union_tag = ut
-	return nil
-}
-
-register_type :: proc(reg: ^Registry, rule: Type_Rule) -> runtime.Allocator_Error {
-	_, err := append(&reg.types, Type_Rule{rule.type, kept(reg, rule.tag) or_return})
-	return err
-}
-
-register_field :: proc(reg: ^Registry, rule: Field_Rule_Of) -> runtime.Allocator_Error {
-	_, err := append(&reg.fields, Field_Rule_Of{rule.type, kept(reg, rule.field) or_return, kept(reg, rule.tag) or_return})
-	return err
-}
+register_naming :: proc(reg: ^Registry, naming: Naming) -> runtime.Allocator_Error { ut := kept(reg, naming.union_tag) or_return; reg.naming = naming; reg.naming.union_tag = ut; return nil }
+register_type :: proc(reg: ^Registry, rule: Type_Rule) -> runtime.Allocator_Error { _, err := append(&reg.types, Type_Rule{rule.type, kept(reg, rule.tag) or_return}); return err }
+register_field :: proc(reg: ^Registry, rule: Field_Rule_Of) -> runtime.Allocator_Error { _, err := append(&reg.fields, Field_Rule_Of{rule.type, kept(reg, rule.field) or_return, kept(reg, rule.tag) or_return}); return err }
 
 register_default :: proc(reg: ^Registry, $T: typeid, field: string, value: $V) -> Error where !intrinsics.type_is_proc(V) {
 	held: rawptr
-	if has_member(T, field, nil) {
-		val := value
-		c := default_constant(reg, reflect.struct_field_by_name(T, field).type, field, any{&val, typeid_of(V)}) or_return
-		held = c
-	}
+	if has_member(T, field, nil) { val := value; held = default_constant(reg, reflect.struct_field_by_name(T, field).type, field, any{&val, typeid_of(V)}) or_return }
 	if aerr := add_default(reg, {T, field, copied_constant, held}); aerr != nil { return aerr }
 	return nil
 }
 
 register_factory :: proc(reg: ^Registry, $T: typeid, field: string, make_fn: proc(allocator: runtime.Allocator) -> $V) -> runtime.Allocator_Error {
 	if has_member(T, field, nil) && !has_member(T, field, V) { return .Invalid_Argument }
-	made :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error {
-		(^V)(dest)^ = (proc(allocator: runtime.Allocator) -> V)(data)(allocator)
-		return nil
-	}
+	made :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error { (^V)(dest)^ = (proc(allocator: runtime.Allocator) -> V)(data)(allocator); return nil }
 	return add_default(reg, {T, field, made, rawptr(make_fn)})
 }
 
@@ -157,56 +110,28 @@ has_member :: proc(T: typeid, field: string, V: typeid) -> bool {
 	m := reflect.struct_field_by_name(T, field)
 	return m.name == field && m.type != nil && (V == nil || m.type.id == V)
 }
-
 @(private)
-add_default :: proc(reg: ^Registry, d: Default_Of) -> runtime.Allocator_Error {
-	entry := d; entry.field = kept(reg, d.field) or_return
-	_, err := append(&reg.loads.defaults, entry)
-	return err
-}
-
+add_default :: proc(reg: ^Registry, d: Default_Of) -> runtime.Allocator_Error { entry := d; entry.field = kept(reg, d.field) or_return; _, err := append(&reg.loads.defaults, entry); return err }
 @(private)
 add_hook :: proc(reg: ^Registry, list: ^[dynamic]$X, x: X, replace: bool) -> runtime.Allocator_Error {
-	if replace {
-		for &y in list {
-			if y.type == x.type && y.field == x.field { f := y.field; y = x; y.field = f; return nil }
-		}
-	}
-	entry := x; entry.field = kept(reg, x.field) or_return
-	_, err := append(list, entry)
-	return err
+	if replace { for &y in list { if y.type == x.type && y.field == x.field { f := y.field; y = x; y.field = f; return nil } } }
+	entry := x; entry.field = kept(reg, x.field) or_return; _, err := append(list, entry); return err
 }
 
-Model :: struct($T: typeid) {
-	plan:        Type_Plan,
-	tag:         string,
-	judging:     ^Applied,
-	constants:   mem.Dynamic_Arena,
-	const_ready: bool,
-	allocator:   runtime.Allocator,
-}
+Model :: struct($T: typeid) { plan: Type_Plan, tag: string, judging: ^Applied, constants: mem.Dynamic_Arena, const_ready: bool, allocator: runtime.Allocator }
 
 @(require_results)
 compile :: proc(reg: ^Registry, $T: typeid, tag := "json", allocator := context.allocator) -> (m: Model(T), err: Error) {
 	m.allocator, m.tag, m.const_ready = allocator, tag if tag != "" else "stury", true
 	mem.dynamic_arena_init(&m.constants, allocator, allocator)
 	defer if err != nil { model_destroy(&m) }
-
-	if reg != nil {
-		if uerr := unknown_member(reg); uerr != nil { return m, uerr }
-		if eerr := enum_rules_refused(reg); eerr.kind != .None { return m, eerr }
-	}
-	scratch_arena: mem.Dynamic_Arena
-	mem.dynamic_arena_init(&scratch_arena, allocator, allocator)
-	defer mem.dynamic_arena_destroy(&scratch_arena)
+	if reg != nil { unknown_member(reg) or_return; if eerr := enum_rules_refused(reg); eerr.kind != .None { return m, eerr } }
+	scratch_arena: mem.Dynamic_Arena; mem.dynamic_arena_init(&scratch_arena, allocator, allocator); defer mem.dynamic_arena_destroy(&scratch_arena)
 	scratch := mem.dynamic_arena_allocator(&scratch_arena)
-
 	defaults := copied_defaults(reg, mem.dynamic_arena_allocator(&m.constants), scratch) or_return
 	m.plan = build_type_plan(reg, T, m.tag, defaults, allocator, scratch) or_return
 	m.judging = judging_of(reg, &m.plan, allocator, scratch) or_return
-	if m.judging != nil {
-		m.plan.can_stream = false
-	}
+	if m.judging != nil { m.plan.can_stream = false }
 	return m, nil
 }
 
@@ -250,7 +175,6 @@ held_type :: proc(ti: ^runtime.Type_Info) -> ^runtime.Type_Info {
 
 @(private)
 forbids_extra :: proc(reg: ^Registry, owner: typeid) -> bool {
-	if reg == nil { return false }
-	for x in reg.loads.forbids { if x == owner { return true } }
+	if reg != nil { for x in reg.loads.forbids { if x == owner { return true } } }
 	return false
 }

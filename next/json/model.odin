@@ -25,55 +25,43 @@ model_bad_sink :: proc "contextless" () -> model.Error {
 // by streaming tokens over the format walk with zero intermediate `tape.Document` allocation.
 @(require_results)
 load :: #force_inline proc(
-	m: ^model.Model($T),
-	src: []u8,
-	out: ^T,
-	spec := Spec.Json,
-	sink: ^model.Sink = nil,
-	opts := model.Load_Opts{},
-	allocator := context.allocator,
+	m: ^model.Model($T), src: []u8, out: ^T, spec := Spec.Json,
+	sink: ^model.Sink = nil, opts := model.Load_Opts{}, allocator := context.allocator,
 ) -> model.Error {
 	model_probe_stack()
-	switch spec {
-	case .Json:  return load_spec(m, src, out, .Json, sink, opts, allocator)
-	case .Jsonc: return load_spec(m, src, out, .Jsonc, sink, opts, allocator)
-	case .Json5: return load_spec(m, src, out, .Json5, sink, opts, allocator)
+	if spec > .Json5 { return model.Model_Error{kind = .Bad_Option, want = {text = "spec"}} }
+	lax, refuse := opts.budget.steps != 0, opts.dups == .Default || opts.dups == .Refuse
+	#partial switch spec {
+	case .Json:  return load_as(m, src, out, .Json, lax, refuse, sink, opts, allocator)
+	case .Jsonc: return load_as(m, src, out, .Jsonc, lax, refuse, sink, opts, allocator)
+	case .Json5: return load_as(m, src, out, .Json5, lax, refuse, sink, opts, allocator)
 	}
 	return model.Model_Error{kind = .Bad_Option, want = {text = "spec"}}
 }
 
 @(private)
-load_spec :: #force_inline proc(
-	m: ^model.Model($T), src: []u8, out: ^T, $S: Spec, sink: ^model.Sink, opts: model.Load_Opts, allocator: runtime.Allocator,
+load_as :: #force_inline proc(
+	m: ^model.Model($T), src: []u8, out: ^T, $S: Spec, lax, refuse: bool, sink: ^model.Sink, opts: model.Load_Opts, allocator: runtime.Allocator,
 ) -> model.Error {
-	lax := opts.budget.steps != 0
-	if opts.dups == .Default || opts.dups == .Refuse {
-		return load_as(m, src, out, S, true, true, sink, opts, allocator) if lax else load_as(m, src, out, S, false, true, sink, opts, allocator)
-	}
-	return load_as(m, src, out, S, true, false, sink, opts, allocator) if lax else load_as(m, src, out, S, false, false, sink, opts, allocator)
+	if refuse { return load_run(m, src, out, S, true, true, sink, opts, allocator) if lax else load_run(m, src, out, S, false, true, sink, opts, allocator) }
+	return load_run(m, src, out, S, true, false, sink, opts, allocator) if lax else load_run(m, src, out, S, false, false, sink, opts, allocator)
 }
 
 @(private)
-load_as :: #force_no_inline proc(
+load_run :: #force_no_inline proc(
 	m: ^model.Model($T), src: []u8, out: ^T, $S: Spec, $LAX, $REFUSE: bool, sink: ^model.Sink, opts: model.Load_Opts, allocator: runtime.Allocator,
 ) -> model.Error {
 	walk_opts := Options{dups = opts.dups, budget = opts.budget, scratch = opts.scratch}
-	build_fb :: proc(src: []u8, opts: Options, a: runtime.Allocator) -> (tape.Document, tape.Error) {
-		return build(src, S, opts, a)
-	}
+	build_fb :: proc(src: []u8, opts: Options, a: runtime.Allocator) -> (tape.Document, tape.Error) { return build(src, S, opts, a) }
 	when REFUSE {
 		walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^model.Refusing_Loader, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-			on :: #force_inline proc "contextless" (h: ^model.Refusing_Loader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-				return model.refusing_loader_hook(h, s, t, number_value)
-			}
+			on :: #force_inline proc "contextless" (h: ^model.Refusing_Loader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) { return model.refusing_loader_hook(h, s, t, number_value) }
 			return walk_text(src, S, LAX, opts, h, regs, a, ctx, on)
 		}
 		return model.load_stream(m, src, &FORMATS[S], out, sink, opts, walk_opts, allocator, model.Refusing_Loader, walk, build_fb)
 	} else {
 		walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^model.Stream_Loader, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-			on :: #force_inline proc "contextless" (h: ^model.Stream_Loader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-				return model.stream_loader_hook(h, s, t, number_value)
-			}
+			on :: #force_inline proc "contextless" (h: ^model.Stream_Loader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) { return model.stream_loader_hook(h, s, t, number_value) }
 			return walk_text(src, S, LAX, opts, h, regs, a, ctx, on)
 		}
 		return model.load_stream(m, src, &FORMATS[S], out, sink, opts, walk_opts, allocator, model.Stream_Loader, walk, build_fb)
@@ -92,95 +80,47 @@ load_as :: #force_no_inline proc(
 // bypassing `Token_Tape`, `tape.Document`, and per-record arenas with zero double-copy.
 @(require_results)
 dump :: proc(
-	m: ^model.Model($T),
-	v: ^T,
-	opts := model.Dump_Opts{},
-	wopts := Write_Options{},
-	sink: ^model.Sink = nil,
-	allocator := context.allocator,
+	m: ^model.Model($T), v: ^T, opts := model.Dump_Opts{}, wopts := Write_Options{}, sink: ^model.Sink = nil, allocator := context.allocator,
 ) -> (text: []u8, err: model.Error) {
-	if werr := check_marshal_opts(wopts); werr != nil {
-		return nil, werr
-	}
-	pretty := !write.compact(wopts)
-	min_room := model.JSON_PRETTY_CLOSE_ROOM if pretty else max(512, model.dump_size_hint(m) * 2)
+	if werr := check_marshal_opts(wopts); werr != nil { return nil, werr }
+	min_room := model.JSON_PRETTY_CLOSE_ROOM if !write.compact(wopts) else max(512, model.dump_size_hint(m) * 2)
 	raw, aerr := runtime.mem_alloc_non_zeroed(min_room, 1, allocator)
-	if aerr != nil || raw_data(raw) == nil || len(raw) < min_room {
-		return nil, runtime.Allocator_Error.Out_Of_Memory
-	}
-	fj := Fast_Json{
-		out   = {buf = raw_data(raw), size = min_room, allocator = allocator},
-		fill  = u64(0x0909_0909_0909_0909) if wopts.tab else u64(0x2020_2020_2020_2020),
-		width = 1 if wopts.tab else int(wopts.indent),
-	}
-
-	if err = dump_into(&fj, m, v, opts, wopts, sink, allocator); err != nil {
-		write.out_drop(&fj.out)
-		return nil, err
-	}
-	t, ferr := write.out_finish(&fj.out)
-	if ferr != nil { return nil, ferr }
-	return t, nil
+	if aerr != nil || raw_data(raw) == nil || len(raw) < min_room { return nil, runtime.Allocator_Error.Out_Of_Memory }
+	fj := Fast_Json{out = {buf = raw_data(raw), size = min_room, allocator = allocator}}
+	return dump_run(&fj, m, v, opts, wopts, sink, allocator)
 }
 
 // Dumps `v` according to model `m` directly as JSON into streaming `io.Writer` `w`.
 @(require_results)
 dump_to :: proc(
-	w: io.Writer,
-	m: ^model.Model($T),
-	v: ^T,
-	opts := model.Dump_Opts{},
-	wopts := Write_Options{},
-	sink: ^model.Sink = nil,
-	allocator := context.allocator,
+	w: io.Writer, m: ^model.Model($T), v: ^T, opts := model.Dump_Opts{}, wopts := Write_Options{}, sink: ^model.Sink = nil, allocator := context.allocator,
 ) -> model.Error {
-	if w.procedure == nil {
-		return model_bad_sink()
-	}
-	if werr := check_marshal_opts(wopts); werr != nil {
-		return werr
-	}
+	if w.procedure == nil { return model_bad_sink() }
+	if werr := check_marshal_opts(wopts); werr != nil { return werr }
 	fj: Fast_Json
-	if e := write.out_start(&fj.out, allocator, w, 0); e != nil {
-		return e
-	}
-	fj.fill = u64(0x0909_0909_0909_0909) if wopts.tab else u64(0x2020_2020_2020_2020)
-	fj.width = 1 if wopts.tab else int(wopts.indent)
-
-	if err := dump_into(&fj, m, v, opts, wopts, sink, allocator); err != nil {
-		write.out_drop(&fj.out)
-		return err
-	}
-	_, ferr := write.out_finish(&fj.out)
-	return ferr if ferr != nil else nil
+	if e := write.out_start(&fj.out, allocator, w, 0); e != nil { return e }
+	_, err := dump_run(&fj, m, v, opts, wopts, sink, allocator)
+	return err
 }
 
 @(private)
-dump_into :: proc(fj: ^Fast_Json, m: ^model.Model($T), v: ^T, opts: model.Dump_Opts, wopts: Write_Options, sink: ^model.Sink, allocator: runtime.Allocator) -> model.Error {
-	if wopts.framing == .Seq {
-		fast_room(fj, 1)[0] = RECORD_SEPARATOR
-		fj.out.cursor += 1
-	}
-	pretty := !write.compact(wopts)
-	err: model.Error
+dump_run :: proc(fj: ^Fast_Json, m: ^model.Model($T), v: ^T, opts: model.Dump_Opts, wopts: Write_Options, sink: ^model.Sink, allocator: runtime.Allocator) -> ([]u8, model.Error) {
+	fj.fill = u64(0x0909_0909_0909_0909) if wopts.tab else u64(0x2020_2020_2020_2020)
+	fj.width = 1 if wopts.tab else int(wopts.indent)
+	if wopts.framing == .Seq { fast_room(fj, 1)[0] = RECORD_SEPARATOR; fj.out.cursor += 1 }
+	pretty, err := !write.compact(wopts), model.Error(nil)
 	switch {
 	case !pretty && !wopts.ascii: err = dump_mode(fj, m, v, opts, sink, false, false, allocator)
 	case pretty && !wopts.ascii:  err = dump_mode(fj, m, v, opts, sink, true, false, allocator)
 	case !pretty && wopts.ascii:  err = dump_mode(fj, m, v, opts, sink, false, true, allocator)
 	case:                         err = dump_mode(fj, m, v, opts, sink, true, true, allocator)
 	}
-	if fj.out.err != nil {
-		model.error_destroy(err, allocator)
-		return fj.out.err
-	}
-	if err != nil {
-		return err
-	}
-	if wopts.framing != .None {
-		fast_room(fj, 1)[0] = '\n'
-		fj.out.cursor += 1
-	}
-	return fj.out.err if fj.out.err != nil else nil
+	if fj.out.err != nil { model.error_destroy(err, allocator); write.out_drop(&fj.out); return nil, fj.out.err }
+	if err != nil { write.out_drop(&fj.out); return nil, err }
+	if wopts.framing != .None { fast_room(fj, 1)[0] = '\n'; fj.out.cursor += 1 }
+	t, ferr := write.out_finish(&fj.out)
+	if ferr != nil { return nil, ferr }
+	return t, fj.out.err if fj.out.err != nil else nil
 }
 
 @(private)

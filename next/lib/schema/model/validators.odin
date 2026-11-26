@@ -6,24 +6,12 @@ import "stury:lib/core/tape"
 
 @(private)
 Report_Failure :: struct { field, message: string }
+Report :: struct { failures: [dynamic]Report_Failure, allocator: runtime.Allocator, failed, oom: bool }
 
-Report :: struct {
-	failures:  [dynamic]Report_Failure,
-	allocator: runtime.Allocator,
-	failed:    bool,
-	oom:       bool,
-}
-
-fail :: proc(r: ^Report, message: string) {
-	if r == nil { return }
-	r.failed = true
-	if _, err := append(&r.failures, Report_Failure{message = message}); err != nil { r.oom = true }
-}
-
+fail :: proc(r: ^Report, message: string) { fail_at(r, "", message) }
 fail_at :: proc(r: ^Report, field, message: string) {
 	if r == nil { return }
-	r.failed = true
-	if _, err := append(&r.failures, Report_Failure{field, message}); err != nil { r.oom = true }
+	r.failed = true; if _, err := append(&r.failures, Report_Failure{field, message}); err != nil { r.oom = true }
 }
 
 @(private)
@@ -59,13 +47,10 @@ emit_report :: proc(r: ^Report, base_steps: []tape.Step, at: u64, si: ^Struct_In
 	if serr != nil { if oom != nil { oom^ = true }; return false }
 	defer delete(steps)
 	for f in r.failures {
-		clear(&steps)
-		if _, aerr := append(&steps, ..base_steps); aerr != nil { if oom != nil { oom^ = true }; return false }
+		clear(&steps); if _, aerr := append(&steps, ..base_steps); aerr != nil { if oom != nil { oom^ = true }; return false }
 		if f.field != "" {
 			wire := f.field
-			if si != nil {
-				for fld in si.fields { if fld.odin_name == f.field { wire = fld.name; break } }
-			}
+			if si != nil { for fld in si.fields { if fld.odin_name == f.field { wire = fld.name; break } } }
 			if _, aerr := append(&steps, tape.Name(wire)); aerr != nil { if oom != nil { oom^ = true }; return false }
 		}
 		if !record_failure(sink, first, oom, allocator, .Custom, at, steps[:], "", {text = f.message}, silent) { return false }

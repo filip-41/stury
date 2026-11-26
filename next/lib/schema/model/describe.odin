@@ -16,9 +16,7 @@ schema :: proc(m: ^Model($T), direction: Direction, allocator := context.allocat
 
 @(private)
 describe :: proc(plan: ^Type_Plan, direction: Direction, allocator: runtime.Allocator, judging: ^Applied = nil) -> (d: rules.Description, err: Error) {
-	if plan == nil || plan.root < 0 || int(plan.root) >= len(plan.nodes) {
-		return d, Model_Error{kind = .Bad_Option, want = {text = "plan"}}
-	}
+	if plan == nil || plan.root < 0 || int(plan.root) >= len(plan.nodes) { return d, Model_Error{kind = .Bad_Option, want = {text = "plan"}} }
 	init_desc(&d, allocator) or_return
 
 	scratch_arena: mem.Dynamic_Arena
@@ -28,28 +26,23 @@ describe :: proc(plan: ^Type_Plan, direction: Direction, allocator: runtime.Allo
 
 	r := Reading{
 		plan = plan, d = &d, direction = direction, judging = judging, allocator = allocator, scratch = scratch,
-		nodes = make(map[Desc_Use]rules.Node_Index, 32, scratch),
-		shapes = make(map[i32]i32, 32, scratch),
+		nodes = make(map[Desc_Use]rules.Node_Index, 32, scratch), shapes = make(map[i32]i32, 32, scratch),
 	}
 	d.root = desc_node_of(&r, plan.root, true, false, {})
-	if r.failed {
-		rules.description_destroy(&d)
-		return {}, runtime.Allocator_Error.Out_Of_Memory
-	}
+	if r.failed { rules.description_destroy(&d); return {}, runtime.Allocator_Error.Out_Of_Memory }
 	return d, nil
 }
 
 @(private)
 Reading :: struct {
-	plan:      ^Type_Plan,
-	d:         ^rules.Description,
-	nodes:     map[Desc_Use]rules.Node_Index,
-	shapes:    map[i32]i32,
-	failed:    bool,
-	direction: Direction,
-	judging:   ^Applied,
-	allocator: runtime.Allocator,
-	scratch:   runtime.Allocator,
+	plan:               ^Type_Plan,
+	d:                  ^rules.Description,
+	nodes:              map[Desc_Use]rules.Node_Index,
+	shapes:             map[i32]i32,
+	failed:             bool,
+	direction:          Direction,
+	judging:            ^Applied,
+	allocator, scratch: runtime.Allocator,
 }
 
 @(private)
@@ -91,9 +84,7 @@ desc_node_of :: proc(r: ^Reading, idx: i32, ruled, arm: bool, tag: Arm_Tag, not_
 	if found, ok := r.nodes[use]; ok && tag.member == "" { return found }
 
 	index := desc_add(r, &r.d.nodes, rules.Node{array = -1, object = -1})
-	if tag.member == "" {
-		if _, ferr := map_insert(&r.nodes, use, index); ferr != nil { r.failed = true }
-	}
+	if tag.member == "" { if _, ferr := map_insert(&r.nodes, use, index); ferr != nil { r.failed = true } }
 	if r.failed { return 0 }
 
 	n := rules.Node{array = -1, object = -1}
@@ -112,14 +103,10 @@ desc_node_of :: proc(r: ^Reading, idx: i32, ruled, arm: bool, tag: Arm_Tag, not_
 		cidx := desc_node_of(r, tn.child, true, false, {})
 		if !r.failed {
 			n = r.d.nodes[cidx]
-			if len(n.any_of) > 0   { n.any_of = clone_slice(n.any_of, r.allocator, &r.failed) }
-			if len(n.all_of) > 0   { n.all_of = clone_slice(n.all_of, r.allocator, &r.failed) }
-			if len(n.one_of) > 0   { n.one_of = clone_slice(n.one_of, r.allocator, &r.failed) }
-			if len(n.enum_of) > 0  { n.enum_of = clone_slice(n.enum_of, r.allocator, &r.failed) }
-			if len(n.examples) > 0 { n.examples = clone_slice(n.examples, r.allocator, &r.failed) }
+			for s in ([?]^[]rules.Node_Index{&n.any_of, &n.all_of, &n.one_of}) { if len(s^) > 0 { s^ = clone_slice(s^, r.allocator, &r.failed) } }
+			for s in ([?]^[]rules.Value{&n.enum_of, &n.examples}) { if len(s^) > 0 { s^ = clone_slice(s^, r.allocator, &r.failed) } }
 		}
-	case:
-		n = desc_leaf(r, tn, not_null)
+	case: n = desc_leaf(r, tn, not_null)
 	}
 
 	if nullable { n.kinds += {.Null} }
@@ -153,33 +140,17 @@ desc_leaf :: proc(r: ^Reading, tn: ^Type_Node, not_null: bool) -> (n: rules.Node
 	case .String, .Bytes, .Email, .Time, .Uuid: n.kinds = {.String}
 	case .Cstring:                              n.kinds = {.String} if not_null else {.String, .Null}
 	case .Bool, .Bool_Wide:                     n.kinds = {.Bool}
-	case .I8 ..= .U64:
-		n.kinds = {.Integer}
-		lim := LIMITS[int(tn.kind) - int(Type_Kind.I8)]
-		n.rules.minimum, n.rules.maximum = lim[0], lim[1]
-	case .F32: n.kinds, n.rules = {.Number}, {minimum = "-" + F32_PAST, maximum = F32_PAST, exclusive_minimum = true, exclusive_maximum = true}
-	case .F64: n.kinds, n.rules = {.Number}, {minimum = "-" + F64_PAST, maximum = F64_PAST, exclusive_minimum = true, exclusive_maximum = true}
+	case .I8 ..= .U64:                          lim := LIMITS[int(tn.kind) - int(Type_Kind.I8)]; n.kinds, n.rules.minimum, n.rules.maximum = {.Integer}, lim[0], lim[1]
+	case .F32:         n.kinds, n.rules = {.Number}, {minimum = "-" + F32_PAST, maximum = F32_PAST, exclusive_minimum = true, exclusive_maximum = true}
+	case .F64:         n.kinds, n.rules = {.Number}, {minimum = "-" + F64_PAST, maximum = F64_PAST, exclusive_minimum = true, exclusive_maximum = true}
 	case .Number_Text: n.kinds = {.Number} if not_null else {.Number, .Null}
 	case .Base64:      n.kinds, n.content_encoding = {.String}, "base64"
 	case .Hex:         n.kinds, n.content_encoding = {.String}, "base16"
 	case .Decimal:     n.kinds = {.Number, .String}
 	case .Enum:
-		ei := &r.plan.enums[tn.enum_idx]
-		if len(ei.values) == 0 {
-			n.kinds = {}
-		} else if ei.by_name || exact_enum_values(ei) {
+		if ei := &r.plan.enums[tn.enum_idx]; len(ei.values) == 0 { n.kinds = {} } else {
 			n.kinds = {.String} if ei.by_name else {.Integer}
 			n.enum_of, n.has_enum = desc_enum_operands(r, ei), true
-		} else if ei.is_unsigned {
-			n.kinds = {.Integer}
-			lo, hi := u64(ei.values[0]), u64(ei.values[0])
-			for v in ei.values[1:] { lo, hi = min(lo, u64(v)), max(hi, u64(v)) }
-			n.rules.minimum, n.rules.maximum = desc_decimal_u(r, lo), desc_decimal_u(r, hi)
-		} else {
-			n.kinds = {.Integer}
-			lo, hi := ei.values[0], ei.values[0]
-			for v in ei.values[1:] { lo, hi = min(lo, v), max(hi, v) }
-			n.rules.minimum, n.rules.maximum = desc_decimal(r, lo), desc_decimal(r, hi)
 		}
 	case: n.kinds = rules.EVERY_KIND
 	}
@@ -196,12 +167,10 @@ desc_array_of :: proc(r: ^Reading, idx: i32) -> i32 {
 		elem := rules.Node{array = -1, object = -1}
 		if tn.enum_idx >= 0 {
 			if ei := &r.plan.enums[tn.enum_idx]; len(ei.values) > 0 {
-				elem.kinds = {.String} if ei.by_name else {.Integer}
-				elem.enum_of, elem.has_enum = desc_enum_operands(r, ei), true
+				elem.kinds, elem.enum_of, elem.has_enum = {.String} if ei.by_name else {.Integer}, desc_enum_operands(r, ei), true
 			}
 		} else {
-			elem.kinds = {.Integer}
-			elem.rules.minimum, elem.rules.maximum = desc_decimal(r, tn.bit_lower), desc_decimal(r, tn.bit_lower + i64(tn.count) - 1)
+			elem.kinds, elem.rules.minimum, elem.rules.maximum = {.Integer}, desc_decimal(r, tn.bit_lower), desc_decimal(r, tn.bit_lower + i64(tn.count) - 1)
 		}
 		items = desc_add(r, &r.d.nodes, elem)
 	} else {
@@ -218,9 +187,7 @@ desc_map_of :: proc(r: ^Reading, idx: i32) -> i32 {
 	tn := &r.plan.nodes[idx]
 	additional := desc_node_of(r, tn.child, true, false, {})
 	keys := rules.NONE
-	if ktn := &r.plan.nodes[tn.key_node]; ktn.kind != .String && ktn.kind != .Cstring {
-		keys = desc_add(r, &r.d.nodes, desc_key_node(r, ktn))
-	}
+	if ktn := &r.plan.nodes[tn.key_node]; ktn.kind != .String && ktn.kind != .Cstring { keys = desc_add(r, &r.d.nodes, desc_key_node(r, ktn)) }
 	if !r.failed { r.d.objects[at].additional, r.d.objects[at].keys = additional, keys }
 	return at
 }
@@ -228,9 +195,8 @@ desc_map_of :: proc(r: ^Reading, idx: i32) -> i32 {
 @(private)
 desc_struct_of :: proc(r: ^Reading, sidx: i32, tag: Arm_Tag) -> i32 {
 	empty := rules.Object{additional = rules.NONE, keys = rules.NONE}
-	at: i32
-	fresh: bool
-	if tag.member == "" { at, fresh = desc_shape(r, -1000 - sidx, &r.d.objects, empty) } else { at = i32(desc_add(r, &r.d.objects, empty)); fresh = !r.failed }
+	at, fresh := i32(0), false
+	if tag.member == "" { at, fresh = desc_shape(r, -1000 - sidx, &r.d.objects, empty) } else { at, fresh = i32(desc_add(r, &r.d.objects, empty)), !r.failed }
 	if !fresh { return at }
 	si := &r.plan.structs[sidx]
 	members, merr := make([dynamic]rules.Member, 0, len(si.fields) + (1 if tag.member != "" else 0), r.allocator)
@@ -240,18 +206,18 @@ desc_struct_of :: proc(r: ^Reading, sidx: i32, tag: Arm_Tag) -> i32 {
 		if _, aerr := append(&members, rules.Member{name = tag.member, node = named, required = true}); aerr != nil { r.failed = true }
 	}
 	for f in si.fields {
-		if f.access == .Write_Only && r.direction == .Dump { continue }
+		if .Write_Only in f.flags && r.direction == .Dump { continue }
 		x := rules.Member{name = f.name}
-		if f.access == .Read_Only && r.direction == .Load {
+		if .Read_Only in f.flags && r.direction == .Load {
 			x.node = desc_add(r, &r.d.nodes, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1})
 			if si.forbid_extra { x.node = desc_add(r, &r.d.nodes, rules.Node{kinds = rules.EVERY_KIND, not = x.node, array = -1, object = -1}) }
 		} else {
-			x.node = desc_node_of(r, f.node, false, false, {}, f.not_null)
+			x.node = desc_node_of(r, f.node, false, false, {}, .Not_Null in f.flags)
 			if f.rule_idx > 0 { x.rules = r.plan.rule_sets[f.rule_idx - 1] }
-			x.required = f.required
+			x.required = .Required in f.flags
 		}
-		x.rules.read_only, x.rules.write_only = f.access == .Read_Only, f.access == .Write_Only
-		if r.direction == .Dump { x.required = !f.omit_empty && !f.omit_unset }
+		x.rules.read_only, x.rules.write_only = .Read_Only in f.flags, .Write_Only in f.flags
+		if r.direction == .Dump { x.required = f.flags & {.Omit_Empty, .Omit_Unset} == {} }
 		if _, aerr := append(&members, x); aerr != nil { r.failed = true }
 	}
 	r.d.objects[at].members = members[:]
@@ -284,28 +250,15 @@ desc_shape :: proc(r: ^Reading, key: i32, list: ^[dynamic]$T, empty: T) -> (at: 
 }
 
 @(private)
-exact_enum_values :: proc(ei: ^Enum_Info) -> bool {
-	for v in ei.values {
-		if ei.is_unsigned { if u64(v) > (1 << 53) { return false } } else if v < -(1 << 53) || v > (1 << 53) { return false }
-	}
-	return true
-}
-
-@(private)
 desc_enum_operands :: proc(r: ^Reading, ei: ^Enum_Info) -> []rules.Value {
 	out, aerr := make([]rules.Value, len(ei.values), r.allocator)
 	if aerr != nil { r.failed = true; return nil }
-	for &o, k in out {
-		o = rules.Value(ei.names[k]) if ei.by_name else (rules.Value(u64(ei.values[k])) if ei.is_unsigned else rules.Value(ei.values[k]))
-	}
+	for &o, k in out { o = rules.Value(ei.names[k]) if ei.by_name else (rules.Value(u64(ei.values[k])) if ei.is_unsigned else rules.Value(ei.values[k])) }
 	return out
 }
 
 @(private)
 desc_decimal :: proc(r: ^Reading, n: i64) -> string { buf: [24]u8 = ---; return desc_keep(r, strconv.write_int(buf[:], n, 10)) }
-
-@(private)
-desc_decimal_u :: proc(r: ^Reading, n: u64) -> string { buf: [24]u8 = ---; return desc_keep(r, strconv.write_uint(buf[:], n, 10)) }
 
 @(private)
 desc_keep :: proc(r: ^Reading, s: string) -> string {
@@ -338,8 +291,8 @@ desc_key_node :: proc(r: ^Reading, ktn: ^Type_Node) -> (n: rules.Node) {
 	defer strings.builder_destroy(&b)
 	strings.write_string(&b, "^(?:")
 	if n.has_enum {
+		buf: [24]u8 = ---
 		for v, i in n.enum_of {
-			buf: [24]u8 = ---
 			if i > 0 { strings.write_byte(&b, '|') }
 			#partial switch num in v {
 			case i64: strings.write_string(&b, strconv.write_int(buf[:], num, 10))
@@ -348,17 +301,9 @@ desc_key_node :: proc(r: ^Reading, ktn: ^Type_Node) -> (n: rules.Node) {
 		}
 		delete(n.enum_of, r.allocator); n.enum_of, n.has_enum = nil, false
 	} else {
-		lo, _ := strconv.parse_i128(n.rules.minimum)
-		hi, _ := strconv.parse_i128(n.rules.maximum)
-		if lo < 0 {
-			strings.write_string(&b, "-(?:")
-			magnitudes(&b, u64(max(1, -hi)), u64(-lo))
-			strings.write_string(&b, ")")
-		}
-		if hi >= 0 {
-			if lo < 0 { strings.write_byte(&b, '|') }
-			magnitudes(&b, u64(max(lo, 0)), u64(hi))
-		}
+		lo, _ := strconv.parse_i128(n.rules.minimum); hi, _ := strconv.parse_i128(n.rules.maximum)
+		if lo < 0 { strings.write_string(&b, "-(?:"); magnitudes(&b, u64(max(1, -hi)), u64(-lo)); strings.write_byte(&b, ')') }
+		if hi >= 0 { if lo < 0 { strings.write_byte(&b, '|') }; magnitudes(&b, u64(max(lo, 0)), u64(hi)) }
 	}
 	strings.write_string(&b, ")$")
 	n.kinds, n.rules = {.String}, {pattern = desc_keep(r, strings.to_string(b))}
@@ -390,7 +335,7 @@ digit_range :: proc(b: ^strings.Builder, lo, hi: string) {
 		for _ in 0 ..< n { strings.write_string(b, "[0-9]") }
 	}
 	if !to_9 { strings.write_byte(b, '|'); strings.write_byte(b, hi[0]); digit_range(b, ZEROS[:n], hi[1:]) }
-	strings.write_string(b, ")")
+	strings.write_byte(b, ')')
 }
 
 @(private, rodata)

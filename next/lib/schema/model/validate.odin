@@ -1,5 +1,5 @@
-// Iterative in-memory validation of Odin values against compiled model constraints,
-// schema applicators, write refusals (`Non_Finite`, invalid enums), budgets, and custom validators.
+// Iterative in-memory validation and token-tape emission (`validate`, `val_run_judged`, `emit_node`)
+// over compiled `Type_Plan` values, enforcing depth/budgets, applicators, and write refusals.
 package model
 
 import "base:runtime"
@@ -17,9 +17,7 @@ import "stury:lib/schema/rules"
 
 @(require_results)
 validate :: proc(m: ^Model($T), v: ^T, sink: ^Sink = nil, opts := Load_Opts{}, allocator := context.allocator) -> Error {
-	if m == nil || v == nil || len(m.plan.nodes) == 0 {
-		return Model_Error{kind = .Bad_Option, want = {text = "value"}}
-	}
+	if m == nil || v == nil || len(m.plan.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "value"}} }
 	return validate_inner(&m.plan, m.judging, rawptr(v), sink, opts, nil, allocator)
 }
 
@@ -27,362 +25,378 @@ validate :: proc(m: ^Model($T), v: ^T, sink: ^Sink = nil, opts := Load_Opts{}, a
 Omit_Pred :: proc(ctx: rawptr, si: ^Struct_Info, fi: int, struct_ptr: rawptr) -> bool
 
 @(private)
-Omit_Hook :: struct {
-	fn:  Omit_Pred,
-	ctx: rawptr,
-}
+Omit_Hook :: struct { fn: Omit_Pred, ctx: rawptr }
 
 @(private)
 validate_inner :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, sink: ^Sink, opts: Load_Opts, omit: ^Omit_Hook, allocator: runtime.Allocator) -> Error {
 	policy, ok := resolve_dups(opts.dups, nil)
-	if !ok {
-		return Model_Error{kind = .Bad_Option, want = {text = "dups"}}
-	}
+	if !ok { return Model_Error{kind = .Bad_Option, want = {text = "dups"}} }
 	sc: Scratch_Scope
 	scratch_begin(&sc, opts, allocator)
 	defer scratch_end(&sc)
 
 	from := len(sink.entries) if sink != nil else 0
 	rs, rerr := regex.scratch_make(sc.scratch)
-	if rerr.kind != .None {
-		return scratch_oom_error(&sc)
-	}
+	if rerr.kind != .None { return scratch_oom_error(&sc) }
 	defer regex.scratch_destroy(&rs)
 
-	val := Validator_State{
-		plan = plan, judging = judging, policy = policy, sink = sink, omit = omit,
-		re_scratch = rs, allocator = sc.out, scratch = sc.scratch,
+	w := Walk_State{mode = .Validate, plan = plan, judging = judging, policy = policy, sink = sink, omit = omit, re_scratch = rs, allocator = sc.out, scratch = sc.scratch}
+	budget_init(&w.budget, opts.budget)
+	w.steps.allocator = sc.scratch
+	report_init(&w.rep, sc.scratch)
+	defer report_destroy(&w.rep)
+
+	walk_loop(&w, plan.root, val_ptr)
+	if sink != nil { order_sink(sink, from) }
+	if w.budget.exceeded.kind != .None { error_destroy(w.first, sc.out); return tape.Error(w.budget.exceeded) }
+	if w.oom { error_destroy(w.first, sc.out); return scratch_oom_error(&sc) }
+	return w.first if w.first.kind != .None else nil
+}
+
+@(private)
+emit_node :: proc(plan: ^Type_Plan, tt: ^write.Token_Tape, root_idx: i32, root_ptr: rawptr, omit: ^Omit_Hook, sink: ^Sink, allocator, scratch: runtime.Allocator, silent := false) -> Error {
+	w := Walk_State{mode = .Emit, plan = plan, tt = tt, sink = sink, omit = omit, silent = silent, allocator = allocator, scratch = scratch}
+	budget_init(&w.budget, {})
+	w.steps.allocator = scratch
+	walk_loop(&w, root_idx, root_ptr)
+	if w.budget.exceeded.kind != .None { error_destroy(w.first, allocator); return tape.Error(w.budget.exceeded) }
+	if w.oom { error_destroy(w.first, allocator); return runtime.Allocator_Error.Out_Of_Memory }
+	if w.write_err != nil { error_destroy(w.first, allocator); return w.write_err }
+	return w.first if w.first.kind != .None else nil
+}
+
+@(private)
+Walk_Mode :: enum u8 { Validate, Emit }
+
+@(private)
+Walk_State :: struct {
+	mode:               Walk_Mode,
+	plan:               ^Type_Plan,
+	judging:            ^Applied,
+	tt:                 ^write.Token_Tape,
+	policy:             tape.Duplicates,
+	sink:               ^Sink,
+	omit:               ^Omit_Hook,
+	first:              Model_Error,
+	oom, silent:        bool,
+	write_err:          write.Error,
+	fail_count:         u64,
+	budget:             Budget_Tracker,
+	steps:              [dynamic]tape.Step,
+	rep:                Report,
+	re_scratch:         regex.Scratch,
+	allocator, scratch: runtime.Allocator,
+}
+
+@(private)
+walk_fail :: proc(w: ^Walk_State, kind: Error_Kind, operand := "", want := Want{}) -> bool {
+	w.fail_count += 1
+	if w.mode == .Emit && w.sink == nil && kind != .Duplicate_Key {
+		if w.first.kind == .None { w.first = {kind = kind, want = want} }
+		return false
 	}
-	budget_init(&val.budget, opts.budget)
-	val.steps.allocator = sc.scratch
-	report_init(&val.rep, sc.scratch)
-	defer report_destroy(&val.rep)
-
-	validate_loop(&val, plan.root, val_ptr)
-	if sink != nil {
-		order_sink(sink, from)
-	}
-	if val.budget.exceeded.kind != .None {
-		error_destroy(val.first, sc.out)
-		return tape.Error(val.budget.exceeded)
-	}
-	if val.oom {
-		error_destroy(val.first, sc.out)
-		return scratch_oom_error(&sc)
-	}
-	return val.first if val.first.kind != .None else nil
+	return record_failure(w.sink, &w.first, &w.oom, w.allocator, kind, 0, w.steps[:], operand, want, w.silent)
 }
 
 @(private)
-Validator_State :: struct {
-	plan:       ^Type_Plan,
-	judging:    ^Applied,
-	policy:     tape.Duplicates,
-	sink:       ^Sink,
-	omit:       ^Omit_Hook,
-	first:      Model_Error,
-	oom:        bool,
-	fail_count: u64,
-	budget:     Budget_Tracker,
-	steps:      [dynamic]tape.Step,
-	rep:        Report,
-	re_scratch: regex.Scratch,
-	allocator:  runtime.Allocator,
-	scratch:    runtime.Allocator,
+walk_emit_tok :: #force_inline proc(w: ^Walk_State, kind: write.Token_Kind, text: string) -> bool {
+	werr := write.token_tape_take(w.tt, kind, text)
+	if werr == nil { return true }
+	if _, is_oom := werr.(runtime.Allocator_Error); is_oom { w.oom = true } else { w.write_err = werr }
+	return false
 }
 
 @(private)
-val_fail :: proc(v: ^Validator_State, kind: Error_Kind, operand := "", want := Want{}) -> bool {
-	v.fail_count += 1
-	return record_failure(v.sink, &v.first, &v.oom, v.allocator, kind, 0, v.steps[:], operand, want, false)
+walk_stopped :: #force_inline proc "contextless" (w: ^Walk_State) -> bool {
+	return w.oom || w.write_err != nil || w.budget.exceeded.kind != .None || ((w.mode == .Emit || w.sink == nil) && w.first.kind != .None)
 }
 
 @(private)
-val_stopped :: #force_inline proc "contextless" (v: ^Validator_State) -> bool {
-	return v.oom || v.budget.exceeded.kind != .None || (v.sink == nil && v.first.kind != .None)
+Walk_Frame_Kind :: enum u8 { Node, Struct_Fields, Struct_Finish, Close, Field_After, List_Elems, Map_Entries, Run_Judged, Pop_Step, Leave_Depth }
+
+@(private)
+Walk_Frame :: struct {
+	kind:                     Walk_Frame_Kind,
+	node_idx, field_rule_idx: i32,
+	ptr:                      rawptr,
+	field_unique, not_null:   bool,
+	tag_key, tag_val:         string,
+	si:                       ^Struct_Info,
+	fi, idx, count:           int,
+	stride, base:             uintptr,
+	start_fails:              u64,
+	entries:                  []Sorted_Map_Entry,
+	is_cap:                   bool,
 }
 
 @(private)
-Val_Frame_Kind :: enum u8 { Node, Struct_Fields, Struct_Finish, Field_After, List_Elems, Map_Entries, Run_Judged, Pop_Step, Leave_Depth }
-
-@(private)
-Val_Frame :: struct {
-	kind:           Val_Frame_Kind,
-	node_idx:       i32,
-	ptr:            rawptr,
-	field_rule_idx: i32,
-	field_unique:   bool,
-	not_null:       bool,
-	si:             ^Struct_Info,
-	fi, idx, count: int,
-	stride, base:   uintptr,
-	start_fails:    u64,
-	entries:        []Sorted_Map_Entry,
-	is_cap:         bool,
-}
-
-@(private)
-validate_loop :: proc(v: ^Validator_State, root_idx: i32, root_ptr: rawptr) {
-	stack, serr := make([dynamic]Val_Frame, 0, 32, v.scratch)
-	if serr != nil { v.oom = true; return }
+walk_loop :: proc(w: ^Walk_State, root_idx: i32, root_ptr: rawptr) {
+	stack, serr := make([dynamic]Walk_Frame, 0, 32, w.scratch)
+	if serr != nil { w.oom = true; return }
 	defer delete(stack)
-	if !push_oom(&v.oom, &stack, Val_Frame{kind = .Node, node_idx = root_idx, ptr = root_ptr}) { return }
+	if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = root_idx, ptr = root_ptr}) { return }
 
-	for len(stack) > 0 && !val_stopped(v) {
+	for len(stack) > 0 && !walk_stopped(w) {
 		top := &stack[len(stack) - 1]
 		switch top.kind {
 		case .Pop_Step:
 			pop(&stack)
-			if len(v.steps) > 0 { pop(&v.steps) }
+			if len(w.steps) > 0 { pop(&w.steps) }
 		case .Leave_Depth:
-			pop(&stack); budget_leave(&v.budget)
+			pop(&stack); budget_leave(&w.budget)
+		case .Close:
+			pop(&stack); _ = walk_emit_tok(w, .Close, ""); budget_leave(&w.budget)
 		case .Run_Judged:
 			f := pop(&stack)
-			if !val_run_judged(v, &v.plan.nodes[f.node_idx], f.node_idx, f.field_unique, f.ptr) { v.fail_count += 1 }
+			if !val_run_judged(w, &w.plan.nodes[f.node_idx], f.node_idx, f.field_unique, f.ptr) { w.fail_count += 1 }
 		case .Field_After:
 			f := pop(&stack)
-			if v.fail_count != f.start_fails { continue }
-			report_reset(&v.rep)
-			for av in f.si.fields[f.fi].afters { av.call(f.ptr, av.fn, &v.rep) }
-			if v.rep.failed || v.rep.oom {
-				v.fail_count += 1
-				_ = emit_report(&v.rep, v.steps[:], 0, nil, v.sink, &v.first, &v.oom, v.allocator, v.scratch)
+			if w.fail_count != f.start_fails { continue }
+			report_reset(&w.rep)
+			for av in f.si.fields[f.fi].afters { av.call(f.ptr, av.fn, &w.rep) }
+			if w.rep.failed || w.rep.oom {
+				w.fail_count += 1
+				_ = emit_report(&w.rep, w.steps[:], 0, nil, w.sink, &w.first, &w.oom, w.allocator, w.scratch)
 			}
 		case .Struct_Finish:
 			f := pop(&stack)
-			tn := &v.plan.nodes[f.node_idx]
-			if tn.judged && !val_run_judged(v, tn, f.node_idx, false, f.ptr) { v.fail_count += 1 }
-			if val_stopped(v) { budget_leave(&v.budget); return }
-			if v.fail_count == f.start_fails && len(f.si.validators) > 0 {
-				report_reset(&v.rep)
-				for sv in f.si.validators { sv.call(f.ptr, sv.fn, &v.rep) }
-				if v.rep.failed || v.rep.oom {
-					v.fail_count += 1
-					_ = emit_report(&v.rep, v.steps[:], 0, f.si, v.sink, &v.first, &v.oom, v.allocator, v.scratch)
+			tn := &w.plan.nodes[f.node_idx]
+			if tn.judged && !val_run_judged(w, tn, f.node_idx, false, f.ptr) { w.fail_count += 1 }
+			if walk_stopped(w) { budget_leave(&w.budget); return }
+			if w.fail_count == f.start_fails && len(f.si.validators) > 0 {
+				report_reset(&w.rep)
+				for sv in f.si.validators { sv.call(f.ptr, sv.fn, &w.rep) }
+				if w.rep.failed || w.rep.oom {
+					w.fail_count += 1
+					_ = emit_report(&w.rep, w.steps[:], 0, f.si, w.sink, &w.first, &w.oom, w.allocator, w.scratch)
 				}
 			}
-			budget_leave(&v.budget)
+			budget_leave(&w.budget)
 		case .Struct_Fields:
 			si := top.si
 			if top.idx < len(si.fields) {
 				fi := top.idx; top.idx += 1
 				fld := &si.fields[fi]
-				if fld.access == .Write_Only || (v.omit != nil && v.omit.fn(v.omit.ctx, si, fi, top.ptr)) { continue }
-				if !push_oom(&v.oom, &v.steps, tape.Step(tape.Name(fld.name))) { return }
+				if .Write_Only in fld.flags || (w.omit != nil && w.omit.fn(w.omit.ctx, si, fi, top.ptr)) { continue }
+				if w.mode == .Emit && !walk_emit_tok(w, .Key, fld.name) { return }
+				if !push_oom(&w.oom, &w.steps, tape.Step(tape.Name(fld.name))) { return }
 				fdest := rawptr(uintptr(top.ptr) + fld.offset)
-				if !push_oom(&v.oom, &stack, Val_Frame{kind = .Pop_Step}) { return }
-				if len(fld.afters) > 0 && !push_oom(&v.oom, &stack, Val_Frame{kind = .Field_After, si = si, fi = fi, ptr = fdest, start_fails = v.fail_count}) { return }
-				if !push_oom(&v.oom, &stack, Val_Frame{kind = .Node, node_idx = fld.node, ptr = fdest, field_rule_idx = fld.rule_idx, field_unique = fld.has_unique, not_null = fld.not_null}) { return }
+				if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Pop_Step}) { return }
+				if w.mode == .Validate && len(fld.afters) > 0 && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Field_After, si = si, fi = fi, ptr = fdest, start_fails = w.fail_count}) { return }
+				if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = fld.node, ptr = fdest, field_rule_idx = fld.rule_idx, field_unique = .Has_Unique in fld.flags, not_null = .Not_Null in fld.flags}) { return }
 				continue
 			}
 			ptr := top.ptr; pop(&stack)
 			if si.capture_idx >= 0 {
-				cap_tn := &v.plan.nodes[si.capture_node]
-				entries, merr := collect_sorted_map_entries(cap_tn.ti, rawptr(uintptr(ptr) + si.capture_offset), v.scratch)
-				if merr != nil { v.oom = true; return }
-				if len(entries) > 0 && !push_oom(&v.oom, &stack, Val_Frame{kind = .Map_Entries, node_idx = cap_tn.child, si = si, entries = entries, is_cap = true}) { return }
+				cap_tn := &w.plan.nodes[si.capture_node]
+				entries, merr := collect_sorted_map_entries(cap_tn.ti, rawptr(uintptr(ptr) + si.capture_offset), w.scratch)
+				if merr != nil { w.oom = true; return }
+				if len(entries) > 0 && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Map_Entries, node_idx = cap_tn.child, si = si, entries = entries, is_cap = true}) { return }
 			}
 		case .List_Elems:
 			if top.idx >= top.count { pop(&stack); continue }
 			i := top.idx; top.idx += 1
-			if !push_oom(&v.oom, &v.steps, tape.Step(tape.Index(i))) { return }
-			child_idx, elem_ptr := top.node_idx, rawptr(top.base + uintptr(i) * top.stride)
-			if !push_oom(&v.oom, &stack, Val_Frame{kind = .Pop_Step}) || !push_oom(&v.oom, &stack, Val_Frame{kind = .Node, node_idx = child_idx, ptr = elem_ptr}) { return }
+			if !push_oom(&w.oom, &w.steps, tape.Step(tape.Index(i))) { return }
+			if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Pop_Step}) || !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = top.node_idx, ptr = rawptr(top.base + uintptr(i) * top.stride)}) { return }
 		case .Map_Entries:
 			if top.idx >= len(top.entries) { pop(&stack); continue }
 			e := top.entries[top.idx]; top.idx += 1
-			if !push_oom(&v.oom, &v.steps, tape.Step(tape.Name(e.key_text))) { return }
+			if !push_oom(&w.oom, &w.steps, tape.Step(tape.Name(e.key_text))) { return }
 			if top.is_cap && struct_find_field(top.si, e.key_text) >= 0 {
-				_ = val_fail(v, .Duplicate_Key)
-				pop(&v.steps)
-				continue
+				_ = walk_fail(w, .Duplicate_Key); pop(&w.steps); continue
 			}
-			child_idx := top.node_idx
-			if !push_oom(&v.oom, &stack, Val_Frame{kind = .Pop_Step}) || !push_oom(&v.oom, &stack, Val_Frame{kind = .Node, node_idx = child_idx, ptr = e.val_ptr}) { return }
+			if w.mode == .Emit && !walk_emit_tok(w, .Key, e.key_text) { pop(&w.steps); return }
+			if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Pop_Step}) || !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = top.node_idx, ptr = e.val_ptr}) { return }
 		case .Node:
 			f := pop(&stack)
-			if !budget_node(&v.budget, 0) { return }
-			tn := &v.plan.nodes[f.node_idx]
-			rule_idx := f.field_rule_idx if f.field_rule_idx > 0 else tn.rule_idx
-			has_unique := f.field_unique || tn.has_unique
-			ptr := f.ptr
+			if !budget_node(&w.budget, 0) { return }
+			tn := &w.plan.nodes[f.node_idx]; rule_idx := f.field_rule_idx if f.field_rule_idx > 0 else tn.rule_idx; has_unique := f.field_unique || tn.has_unique; ptr := f.ptr
 			#partial switch tn.kind {
-			case .Maybe:
-				if !maybe_is_set(tn, ptr) {
-					if f.not_null { _ = val_fail(v, .Wrong_Kind, "", {type = tn.type, text = "non-null"}) }
-				} else if !push_oom(&v.oom, &stack, Val_Frame{kind = .Node, node_idx = tn.child, ptr = ptr, field_rule_idx = rule_idx, field_unique = has_unique}) { return }
-			case .Ptr:
-				inner := (^rawptr)(ptr)^
-				if inner == nil {
-					if f.not_null { _ = val_fail(v, .Wrong_Kind, "", {type = tn.type, text = "non-null"}) }
-				} else {
-					if !budget_enter(&v.budget, 0) { return }
-					if !push_oom(&v.oom, &stack, Val_Frame{kind = .Leave_Depth}) || !push_oom(&v.oom, &stack, Val_Frame{kind = .Node, node_idx = tn.child, ptr = inner, field_rule_idx = rule_idx, field_unique = has_unique}) { return }
+			case .Maybe, .Ptr:
+				inner := ptr if tn.kind == .Maybe else (^rawptr)(ptr)^
+				set := maybe_is_set(tn, ptr) if tn.kind == .Maybe else inner != nil
+				if !set { if w.mode == .Emit { _ = walk_emit_tok(w, .Null, "") } else if f.not_null { _ = walk_fail(w, .Wrong_Kind, "", {type = tn.type, text = "non-null"}) } } else {
+					if tn.kind == .Ptr { if !budget_enter(&w.budget, 0) { return }; if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Leave_Depth}) { return } }
+					if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = tn.child, ptr = inner, field_rule_idx = rule_idx, field_unique = has_unique, tag_key = f.tag_key, tag_val = f.tag_val}) { return }
 				}
 			case .Struct:
-				if !budget_enter(&v.budget, 0) || !budget_step(&v.budget, 0) { return }
-				si := &v.plan.structs[tn.struct_idx]
-				if !push_oom(&v.oom, &stack, Val_Frame{kind = .Struct_Finish, node_idx = f.node_idx, ptr = ptr, si = si, start_fails = v.fail_count}) { return }
-				if !push_oom(&v.oom, &stack, Val_Frame{kind = .Struct_Fields, si = si, ptr = ptr}) { return }
+				if !budget_enter(&w.budget, 0) || !budget_step(&w.budget, 0) { return }
+				si := &w.plan.structs[tn.struct_idx]
+				if w.mode == .Emit {
+					if !walk_emit_tok(w, .Object, "") || (f.tag_key != "" && (!walk_emit_tok(w, .Key, f.tag_key) || !walk_emit_tok(w, .String, f.tag_val))) { budget_leave(&w.budget); return }
+					if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Close}) { return }
+				} else if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Struct_Finish, node_idx = f.node_idx, ptr = ptr, si = si, start_fails = w.fail_count}) { return }
+				if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Struct_Fields, si = si, ptr = ptr}) { return }
 			case .Slice, .Dynamic, .Array, .Fixed_List:
-				if !budget_enter(&v.budget, 0) || !budget_step(&v.budget, 0) { return }
+				if !budget_enter(&w.budget, 0) || !budget_step(&w.budget, 0) { return }
 				base, n := list_span(tn, ptr)
-				if !check_count_leaf(v.plan, rule_idx, u64(n), false, 0, v.steps[:], v.sink, &v.first, &v.oom, v.allocator, v.scratch, false) {
-					v.fail_count += 1
-					if val_stopped(v) { budget_leave(&v.budget); return }
-				}
-				if !push_oom(&v.oom, &stack, Val_Frame{kind = .Leave_Depth}) { return }
-				if (has_unique || tn.judged) && !push_oom(&v.oom, &stack, Val_Frame{kind = .Run_Judged, node_idx = f.node_idx, ptr = ptr, field_unique = has_unique}) { return }
-				if n > 0 && !push_oom(&v.oom, &stack, Val_Frame{kind = .List_Elems, node_idx = tn.child, base = base, count = n, stride = uintptr(v.plan.nodes[tn.child].size)}) { return }
-			case .Map:
-				if !budget_enter(&v.budget, 0) || !budget_step(&v.budget, 0) { return }
-				rm := (^runtime.Raw_Map)(ptr)
-				if !check_count_leaf(v.plan, rule_idx, u64(rm.len), true, 0, v.steps[:], v.sink, &v.first, &v.oom, v.allocator, v.scratch, false) {
-					v.fail_count += 1
-					if val_stopped(v) { budget_leave(&v.budget); return }
-				}
-				if !push_oom(&v.oom, &stack, Val_Frame{kind = .Leave_Depth}) { return }
-				if tn.judged && !push_oom(&v.oom, &stack, Val_Frame{kind = .Run_Judged, node_idx = f.node_idx, ptr = ptr}) { return }
-				if rm.len > 0 {
-					entries, merr := collect_sorted_map_entries(tn.ti, ptr, v.scratch)
-					if merr != nil { v.oom = true; return }
-					if !push_oom(&v.oom, &stack, Val_Frame{kind = .Map_Entries, node_idx = tn.child, entries = entries}) { return }
-				}
-			case .Bit_Set:
-				bytes, cnt := ([^]u8)(ptr)[:tn.size], u64(0)
-				for bit in 0 ..< tn.count {
-					if (bytes[bit / 8] >> uint(bit % 8)) & 1 != 0 { cnt += 1 }
-				}
-				if !check_count_leaf(v.plan, rule_idx, cnt, false, 0, v.steps[:], v.sink, &v.first, &v.oom, v.allocator, v.scratch, false) { v.fail_count += 1 }
-				if !val_stopped(v) && tn.judged && !val_run_judged(v, tn, f.node_idx, false, ptr) { v.fail_count += 1 }
-			case .Union:
-				u := &v.plan.unions[tn.union_idx]
-				arm_idx := int(read_union_tag(ptr, u.tag_offset, u.tag_size)) - (0 if u.no_nil else 1)
-				if arm_idx < 0 {
-					if tn.judged && !val_run_judged(v, tn, f.node_idx, false, ptr) { v.fail_count += 1 }
-				} else if arm_idx >= len(u.arms) {
-					_ = val_fail(v, .No_Arm)
+				if w.mode == .Validate {
+					if !check_count_leaf(w.plan, rule_idx, u64(n), false, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false) { w.fail_count += 1; if walk_stopped(w) { budget_leave(&w.budget); return } }
+					if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Leave_Depth}) { return }
+					if (has_unique || tn.judged) && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Run_Judged, node_idx = f.node_idx, ptr = ptr, field_unique = has_unique}) { return }
 				} else {
-					if tn.judged && !push_oom(&v.oom, &stack, Val_Frame{kind = .Run_Judged, node_idx = f.node_idx, ptr = ptr}) { return }
-					if !push_oom(&v.oom, &stack, Val_Frame{kind = .Node, node_idx = u.arms[arm_idx].node, ptr = ptr, field_rule_idx = rule_idx}) { return }
+					if !walk_emit_tok(w, .Array, "") { budget_leave(&w.budget); return }
+					if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Close}) { return }
+				}
+				if n > 0 && !push_oom(&w.oom, &stack, Walk_Frame{kind = .List_Elems, node_idx = tn.child, base = base, count = n, stride = uintptr(w.plan.nodes[tn.child].size)}) { return }
+			case .Map:
+				if !budget_enter(&w.budget, 0) || !budget_step(&w.budget, 0) { return }
+				rm := (^runtime.Raw_Map)(ptr)
+				if w.mode == .Validate && !check_count_leaf(w.plan, rule_idx, u64(rm.len), true, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false) { w.fail_count += 1; if walk_stopped(w) { budget_leave(&w.budget); return } }
+				entries: []Sorted_Map_Entry
+				if rm.len > 0 { merr: runtime.Allocator_Error; entries, merr = collect_sorted_map_entries(tn.ti, ptr, w.scratch); if merr != nil { budget_leave(&w.budget); w.oom = true; return } }
+				if w.mode == .Validate {
+					if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Leave_Depth}) { return }
+					if tn.judged && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Run_Judged, node_idx = f.node_idx, ptr = ptr}) { return }
+				} else {
+					if !walk_emit_tok(w, .Object, "") { budget_leave(&w.budget); return }
+					if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Close}) { return }
+				}
+				if len(entries) > 0 && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Map_Entries, node_idx = tn.child, entries = entries}) { return }
+			case .Bit_Set: walk_bit_set(w, f.node_idx, tn, ptr, rule_idx)
+			case .Union:
+				u := &w.plan.unions[tn.union_idx]; arm_idx := int(read_union_tag(ptr, u.tag_offset, u.tag_size)) - (0 if u.no_nil else 1)
+				if arm_idx < 0 { if w.mode == .Emit { _ = walk_emit_tok(w, .Null, "") } else if tn.judged && !val_run_judged(w, tn, f.node_idx, false, ptr) { w.fail_count += 1 } } else if arm_idx >= len(u.arms) { _ = walk_fail(w, .No_Arm) } else {
+					arm := u.arms[arm_idx]; tkey := u.tag_key if w.mode == .Emit && u.mode == .Tag && u.tag_key != "" && arm.is_struct && arm.name != "" else ""
+					if w.mode == .Validate && tn.judged && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Run_Judged, node_idx = f.node_idx, ptr = ptr}) { return }
+					if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = arm.node, ptr = ptr, field_rule_idx = rule_idx, tag_key = tkey, tag_val = arm.name}) { return }
 				}
 			case .Custom:
-				c, ctn := &v.plan.customs[tn.custom_idx], &v.plan.nodes[tn.child]
-				cbuf, cerr := runtime.mem_alloc(max(ctn.size, 1), ctn.align, v.scratch)
-				if cerr != nil { v.oom = true; return }
-				if ck := c.convert_to(c.to, ptr, raw_data(cbuf), v.scratch); ck != .None {
-					_ = val_fail(v, ck)
-					continue
-				}
-				if tn.judged && !push_oom(&v.oom, &stack, Val_Frame{kind = .Run_Judged, node_idx = f.node_idx, ptr = ptr}) { return }
-				if !push_oom(&v.oom, &stack, Val_Frame{kind = .Node, node_idx = tn.child, ptr = raw_data(cbuf), field_rule_idx = rule_idx, field_unique = has_unique}) { return }
-			case:
-				validate_scalar(v, f.node_idx, tn, ptr, rule_idx, f.not_null)
+				c, ctn := &w.plan.customs[tn.custom_idx], &w.plan.nodes[tn.child]
+				cbuf, cerr := runtime.mem_alloc(max(ctn.size, 1), ctn.align, w.scratch); if cerr != nil { w.oom = true; return }
+				if ck := c.convert_to(c.to, ptr, raw_data(cbuf), w.scratch); ck != .None { _ = walk_fail(w, ck); continue }
+				if w.mode == .Validate && tn.judged && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Run_Judged, node_idx = f.node_idx, ptr = ptr}) { return }
+				if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = tn.child, ptr = raw_data(cbuf), field_rule_idx = rule_idx, field_unique = has_unique, tag_key = f.tag_key, tag_val = f.tag_val}) { return }
+			case: walk_scalar(w, f.node_idx, tn, ptr, rule_idx, f.not_null)
 			}
 		}
 	}
 }
 
 @(private)
-validate_scalar :: proc(v: ^Validator_State, node_idx: i32, tn: ^Type_Node, ptr: rawptr, rule_idx: i32, not_null: bool) {
-	check_s :: #force_inline proc(v: ^Validator_State, rule_idx: i32, s: string) -> bool {
-		return check_string_leaf(v.plan, &v.re_scratch, rule_idx, s, 0, v.steps[:], v.sink, &v.first, &v.oom, v.allocator, v.scratch, false)
+walk_bit_set :: proc(w: ^Walk_State, node_idx: i32, tn: ^Type_Node, ptr: rawptr, rule_idx: i32) {
+	if w.mode == .Emit {
+		if !budget_enter(&w.budget, 0) { return }
+		defer budget_leave(&w.budget)
+		if !walk_emit_tok(w, .Array, "") { return }
 	}
-	check_n :: #force_inline proc(v: ^Validator_State, rule_idx: i32, s: string, small: Maybe(i64)) -> bool {
-		return check_number_leaf(v.plan, rule_idx, s, small, 0, v.steps[:], v.sink, &v.first, &v.oom, v.allocator, v.scratch, false)
+	bytes, cnt := ([^]u8)(ptr)[:tn.size], u64(0)
+	buf: [32]u8 = ---
+	for bit in 0 ..< tn.count {
+		if (bytes[bit / 8] >> uint(bit % 8)) & 1 == 0 { continue }
+		cnt += 1
+		if w.mode != .Emit { continue }
+		val := tn.bit_lower + i64(bit)
+		ok := false
+		if tn.enum_idx >= 0 {
+			ei := &w.plan.enums[tn.enum_idx]
+			for ev, i in ei.values {
+				if ev == val {
+					ok = walk_emit_tok(w, .String, ei.names[i]) if ei.by_name else walk_emit_tok(w, .Number, strconv.write_int(buf[:], val, 10))
+					break
+				}
+			}
+		} else { ok = walk_emit_tok(w, .Number, strconv.write_int(buf[:], val, 10)) }
+		if !ok && walk_stopped(w) { return }
 	}
-	leaf_ok := true
-	#partial switch tn.kind {
-	case .Enum:
-		ei := &v.plan.enums[tn.enum_idx]
-		if !slice.contains(ei.values, read_enum_value(ptr, tn.size, ei.ti)) {
-			leaf_ok = false; _ = val_fail(v, .Not_A_Member)
-		}
-	case .String, .Email:
-		leaf_ok = check_s(v, rule_idx, (^string)(ptr)^)
-	case .Cstring:
-		if cs := (^cstring)(ptr)^; cs == nil {
-			if not_null { leaf_ok = false; _ = val_fail(v, .Wrong_Kind, "", {type = tn.type, text = "string"}) }
-		} else {
-			leaf_ok = check_s(v, rule_idx, string(cs))
-		}
-	case .Bytes, .Base64:
-		enc, err := encode_base64((^[]u8)(ptr)^, v.scratch)
-		if err != nil { v.oom = true; return }
-		leaf_ok = check_s(v, rule_idx, enc)
-	case .Hex:
-		enc, err := encode_hex((^Hex)(ptr)^, v.scratch)
-		if err != nil { v.oom = true; return }
-		leaf_ok = check_s(v, rule_idx, enc)
-	case .I8 ..= .U64:
-		buf: [32]u8 = ---
-		if tn.kind <= .I64 {
-			iv := read_signed_int(ptr, tn.kind)
-			leaf_ok = check_n(v, rule_idx, strconv.write_int(buf[:], iv, 10), iv)
-		} else {
-			uv := read_unsigned_int(ptr, tn.kind)
-			leaf_ok = check_n(v, rule_idx, strconv.write_uint(buf[:], uv, 10), i64(uv) if uv <= u64(max(i64)) else nil)
-		}
-	case .F32:
-		x := (^f32)(ptr)^
-		if math.is_nan(x) || math.is_inf(x, 0) { leaf_ok = false; _ = val_fail(v, .Non_Finite) } else {
-			buf: [64]u8 = ---
-			leaf_ok = check_n(v, rule_idx, strconv.write_float(buf[:], f64(x), 'g', -1, 32, {}), nil)
-		}
-	case .F64:
-		x := (^f64)(ptr)^
-		if math.is_nan(x) || math.is_inf(x, 0) { leaf_ok = false; _ = val_fail(v, .Non_Finite) } else {
-			buf: [64]u8 = ---
-			leaf_ok = check_n(v, rule_idx, strconv.write_float(buf[:], x, 'g', -1, 64, {}), nil)
-		}
-	case .Number_Text:
-		if nt := (^Number_Text)(ptr)^; nt.text == "" {
-			if not_null { leaf_ok = false; _ = val_fail(v, .Wrong_Kind, "", {type = tn.type, text = "number"}) }
-		} else {
-			leaf_ok = check_n(v, rule_idx, nt.text, nil)
-		}
-	case .Time:
-		buf: [40]u8 = ---
-		if s, ok := format_rfc3339_utc((^time.Time)(ptr)^, &buf); !ok { leaf_ok = false; _ = val_fail(v, .Bad_Format) } else { leaf_ok = check_s(v, rule_idx, s) }
-	case .Uuid:
-		buf: [36]u8 = ---
-		leaf_ok = check_s(v, rule_idx, format_uuid((^uuid.Identifier)(ptr)^, &buf))
-	case .Decimal:
-		d := (^Decimal)(ptr)^
-		text := d.text if d.text != "" else "0"
-		if !rules.valid_decimal_text(text) { leaf_ok = false; _ = val_fail(v, .No_Match) } else { leaf_ok = check_n(v, rule_idx, text, nil) }
-	}
-	if !leaf_ok { v.fail_count += 1 }
-	if !val_stopped(v) && tn.judged && !val_run_judged(v, tn, node_idx, false, ptr) { v.fail_count += 1 }
+	if w.mode == .Emit { _ = walk_emit_tok(w, .Close, ""); return }
+	if !check_count_leaf(w.plan, rule_idx, cnt, false, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false) { w.fail_count += 1 }
+	if !walk_stopped(w) && tn.judged && !val_run_judged(w, tn, node_idx, false, ptr) { w.fail_count += 1 }
 }
 
 @(private)
-val_run_judged :: proc(v: ^Validator_State, tn: ^Type_Node, node_idx: i32, unique: bool, ptr: rawptr) -> bool {
-	if v.judging == nil || node_idx < 0 { return true }
-	j := judged_of(v.judging, tn.type, unique)
-	if j == nil && unique { j = judged_of(v.judging, tn.type, false) }
+walk_scalar :: proc(w: ^Walk_State, node_idx: i32, tn: ^Type_Node, ptr: rawptr, rule_idx: i32, not_null: bool) {
+	leaf_ok := true
+	check_s :: proc(w: ^Walk_State, rule_idx: i32, s: string) -> bool {
+		if w.mode == .Emit { return walk_emit_tok(w, .String, s) }
+		return check_string_leaf(w.plan, &w.re_scratch, rule_idx, s, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false)
+	}
+	check_n :: proc(w: ^Walk_State, rule_idx: i32, s: string, small: Maybe(i64)) -> bool {
+		if w.mode == .Emit { return walk_emit_tok(w, .Number, s) }
+		return check_number_leaf(w.plan, rule_idx, s, small, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false)
+	}
+	buf: [64]u8 = ---
+	#partial switch tn.kind {
+	case .Enum:
+		ei, ev := &w.plan.enums[tn.enum_idx], read_enum_value(ptr, tn.size, w.plan.enums[tn.enum_idx].ti)
+		found := false
+		for val, i in ei.values {
+			if val == ev {
+				found = true
+				if w.mode == .Emit {
+					leaf_ok = walk_emit_tok(w, .String, ei.names[i]) if ei.by_name else walk_emit_tok(w, .Number, strconv.write_uint(buf[:], u64(ev), 10) if ei.is_unsigned else strconv.write_int(buf[:], ev, 10))
+				}
+				break
+			}
+		}
+		if !found { leaf_ok = false; _ = walk_fail(w, .Not_A_Member) }
+	case .String, .Email: leaf_ok = check_s(w, rule_idx, (^string)(ptr)^)
+	case .Cstring:
+		if cs := (^cstring)(ptr)^; cs == nil {
+			if w.mode == .Emit { _ = walk_emit_tok(w, .Null, "") } else if not_null { leaf_ok = false; _ = walk_fail(w, .Wrong_Kind, "", {type = tn.type, text = "string"}) }
+		} else { leaf_ok = check_s(w, rule_idx, string(cs)) }
+	case .Bytes, .Base64, .Hex:
+		enc: string; err: runtime.Allocator_Error
+		if tn.kind == .Hex { enc, err = encode_hex((^Hex)(ptr)^, w.scratch) } else { enc, err = encode_base64((^[]u8)(ptr)^, w.scratch) }
+		if err != nil { w.oom = true; return }
+		leaf_ok = check_s(w, rule_idx, enc)
+	case .Bool, .Bool_Wide:
+		if w.mode == .Emit { _ = walk_emit_tok(w, .True if ((^bool)(ptr)^ if tn.kind == .Bool else read_wide_bool(ptr, tn.size)) else .False, "") }
+	case .I8 ..= .I64:
+		iv := read_signed_int(ptr, tn.kind); leaf_ok = check_n(w, rule_idx, strconv.write_int(buf[:], iv, 10), iv)
+	case .U8 ..= .U64:
+		uv := read_unsigned_int(ptr, tn.kind); leaf_ok = check_n(w, rule_idx, strconv.write_uint(buf[:], uv, 10), i64(uv) if uv <= u64(max(i64)) else nil)
+	case .F32, .F64:
+		x := f64((^f32)(ptr)^) if tn.kind == .F32 else (^f64)(ptr)^
+		if math.is_nan(x) || math.is_inf(x, 0) { leaf_ok = false; _ = walk_fail(w, .Non_Finite) } else { leaf_ok = check_n(w, rule_idx, strconv.write_float(buf[:], x, 'g', -1, 32 if tn.kind == .F32 else 64, {}), nil) }
+	case .Number_Text:
+		if nt := (^Number_Text)(ptr)^; nt.text == "" {
+			if w.mode == .Emit { _ = walk_emit_tok(w, .Null, "") } else if not_null { leaf_ok = false; _ = walk_fail(w, .Wrong_Kind, "", {type = tn.type, text = "number"}) }
+		} else { leaf_ok = check_n(w, rule_idx, nt.text, nil) }
+	case .Time:
+		if s, ok := format_rfc3339_utc((^time.Time)(ptr)^, (^[40]u8)(&buf)); !ok { leaf_ok = false; _ = walk_fail(w, .Bad_Format) } else { leaf_ok = check_s(w, rule_idx, s) }
+	case .Uuid: leaf_ok = check_s(w, rule_idx, format_uuid((^uuid.Identifier)(ptr)^, (^[36]u8)(&buf)))
+	case .Decimal:
+		d := (^Decimal)(ptr)^; text := d.text if d.text != "" else "0"
+		if w.mode == .Emit { _ = walk_emit_tok(w, .Number, text) } else if !rules.valid_decimal_text(text) { leaf_ok = false; _ = walk_fail(w, .No_Match) } else { leaf_ok = check_n(w, rule_idx, text, nil) }
+	case .Value:
+		if w.mode == .Emit {
+			if eerr := emit_rules_value_tokens(w.tt, (^rules.Value)(ptr)^, w.scratch); eerr != nil {
+				switch e in eerr {
+				case runtime.Allocator_Error: w.oom = true
+				case write.Error: if _, is_oom := e.(runtime.Allocator_Error); is_oom { w.oom = true } else { w.write_err = e }
+				case Model_Error: _ = walk_fail(w, e.kind, e.operand, e.want); error_destroy(e, w.scratch)
+				case tape.Error:  w.oom = true
+				}
+			}
+		}
+	case .Raw: if w.mode == .Emit { _ = walk_fail(w, .Unsupported, want = {text = "Raw"}) }
+	case:      if w.mode == .Emit { _ = walk_fail(w, .Unsupported) }
+	}
+	if !leaf_ok { w.fail_count += 1 }
+	if w.mode == .Validate && !walk_stopped(w) && tn.judged && !val_run_judged(w, tn, node_idx, false, ptr) { w.fail_count += 1 }
+}
+
+@(private)
+val_run_judged :: proc(w: ^Walk_State, tn: ^Type_Node, node_idx: i32, unique: bool, ptr: rawptr) -> bool {
+	if w.judging == nil || node_idx < 0 { return true }
+	j := judged_of(w.judging, tn.type, unique)
+	if j == nil && unique { j = judged_of(w.judging, tn.type, false) }
 	if j == nil { return true }
 	tt: write.Token_Tape
-	if write.token_tape_start(&tt, false, 0, v.scratch) != nil { v.oom = true; return false }
+	if write.token_tape_start(&tt, false, 0, w.scratch) != nil { w.oom = true; return false }
 	defer write.token_tape_drop(&tt)
-	d := Emitter{plan = v.plan, tt = &tt, allocator = v.allocator, scratch = v.scratch}
-	if eerr := emit_node(&d, node_idx, ptr, ""); eerr != nil {
+	if eerr := emit_node(w.plan, &tt, node_idx, ptr, nil, nil, w.scratch, w.scratch, silent = true); eerr != nil {
 		switch e in eerr {
-		case runtime.Allocator_Error: v.oom = true; return false
-		case tape.Error:
-			if exc, ok := e.(tape.Exceeded); ok { v.budget.exceeded = exc } else { v.oom = true }
-			return false
-		case write.Error:
-			if _, is_oom := e.(runtime.Allocator_Error); is_oom { v.oom = true; return false }
-			return true
-		case Model_Error:
-			error_destroy(e, v.allocator)
-			return true
+		case runtime.Allocator_Error: w.oom = true; return false
+		case tape.Error: if exc, ok := e.(tape.Exceeded); ok { w.budget.exceeded = exc } else { w.oom = true }; return false
+		case write.Error: if _, is_oom := e.(runtime.Allocator_Error); is_oom { w.oom = true; return false }; return true
+		case Model_Error: error_destroy(e, w.scratch); return true
 		}
 	}
 	sub_doc, terr := write.token_tape_document(&tt)
-	if terr != nil { v.oom = true; return false }
-	return run_judged_on_subdoc(j, &sub_doc, v.policy, v.budget.limit, v.steps[:], v.sink, &v.first, &v.oom, &v.budget.exceeded, v.allocator, v.scratch)
+	if terr != nil { w.oom = true; return false }
+	return run_judged_on_subdoc(j, &sub_doc, w.policy, w.budget.limit, w.steps[:], w.sink, &w.first, &w.oom, &w.budget.exceeded, w.allocator, w.scratch)
 }
 
 // ============================================================================
@@ -401,74 +415,47 @@ list_span :: proc "contextless" (tn: ^Type_Node, ptr: rawptr) -> (uintptr, int) 
 }
 
 @(private)
-read_wide_bool :: proc "contextless" (ptr: rawptr, size: int) -> bool {
+read_u64_size :: proc "contextless" (ptr: rawptr, size: int) -> u64 {
 	switch size {
-	case 2: return bool((^b16)(ptr)^)
-	case 4: return bool((^b32)(ptr)^)
-	case 8: return bool((^b64)(ptr)^)
-	}
-	return false
-}
-
-@(private)
-read_signed_int :: proc "contextless" (ptr: rawptr, kind: Type_Kind) -> i64 {
-	#partial switch kind {
-	case .I8:  return i64((^i8)(ptr)^)
-	case .I16: return i64((^i16)(ptr)^)
-	case .I32: return i64((^i32)(ptr)^)
-	case .I64: return (^i64)(ptr)^
+	case 1: return u64((^u8)(ptr)^)
+	case 2: return u64((^u16)(ptr)^)
+	case 4: return u64((^u32)(ptr)^)
+	case 8: return (^u64)(ptr)^
 	}
 	return 0
 }
 
 @(private)
-read_unsigned_int :: proc "contextless" (ptr: rawptr, kind: Type_Kind) -> u64 {
-	#partial switch kind {
-	case .U8:  return u64((^u8)(ptr)^)
-	case .U16: return u64((^u16)(ptr)^)
-	case .U32: return u64((^u32)(ptr)^)
-	case .U64: return (^u64)(ptr)^
+read_i64_size :: proc "contextless" (ptr: rawptr, size: int) -> i64 {
+	switch size {
+	case 1: return i64((^i8)(ptr)^)
+	case 2: return i64((^i16)(ptr)^)
+	case 4: return i64((^i32)(ptr)^)
+	case 8: return (^i64)(ptr)^
 	}
 	return 0
 }
+
+@(private)
+read_wide_bool :: proc "contextless" (ptr: rawptr, size: int) -> bool { return read_u64_size(ptr, size) != 0 }
+
+@(private)
+read_signed_int :: proc "contextless" (ptr: rawptr, kind: Type_Kind) -> i64 { return read_i64_size(ptr, 1 << uint(int(kind) - int(Type_Kind.I8))) }
+
+@(private)
+read_unsigned_int :: proc "contextless" (ptr: rawptr, kind: Type_Kind) -> u64 { return read_u64_size(ptr, 1 << uint(int(kind) - int(Type_Kind.U8))) }
 
 @(private)
 read_enum_value :: proc(ptr: rawptr, size: int, ei: ^runtime.Type_Info_Enum) -> i64 {
 	iv, _ := runtime.type_info_base(ei.base).variant.(^runtime.Type_Info_Integer)
-	if iv.signed {
-		switch size {
-		case 1: return i64((^i8)(ptr)^)
-		case 2: return i64((^i16)(ptr)^)
-		case 4: return i64((^i32)(ptr)^)
-		case 8: return (^i64)(ptr)^
-		}
-	} else {
-		switch size {
-		case 1: return i64((^u8)(ptr)^)
-		case 2: return i64((^u16)(ptr)^)
-		case 4: return i64((^u32)(ptr)^)
-		case 8: return i64((^u64)(ptr)^)
-		}
-	}
-	return 0
+	return read_i64_size(ptr, size) if iv.signed else i64(read_u64_size(ptr, size))
 }
 
 @(private)
-read_union_tag :: proc "contextless" (ptr: rawptr, offset: uintptr, size: int) -> i64 {
-	switch size {
-	case 1: return i64((^u8)(uintptr(ptr) + offset)^)
-	case 2: return i64((^u16)(uintptr(ptr) + offset)^)
-	case 4: return i64((^u32)(uintptr(ptr) + offset)^)
-	case 8: return (^i64)(uintptr(ptr) + offset)^
-	}
-	return 0
-}
+read_union_tag :: proc "contextless" (ptr: rawptr, offset: uintptr, size: int) -> i64 { return i64(read_u64_size(rawptr(uintptr(ptr) + offset), size)) }
 
 @(private)
-Sorted_Map_Entry :: struct {
-	key_text: string,
-	val_ptr:  rawptr,
-}
+Sorted_Map_Entry :: struct { key_text: string, val_ptr: rawptr }
 
 @(private)
 collect_sorted_map_entries :: proc(ti: ^runtime.Type_Info, map_ptr: rawptr, scratch: runtime.Allocator) -> (res: []Sorted_Map_Entry, err: runtime.Allocator_Error) {

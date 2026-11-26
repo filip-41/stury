@@ -5,12 +5,9 @@ package model
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:encoding/uuid"
 import "core:math"
 import "core:mem"
 import "core:strconv"
-import "core:strings"
-import "core:time"
 import "stury:lib/base/kernel"
 import "stury:lib/base/regex"
 import "stury:lib/base/spell"
@@ -66,11 +63,9 @@ Stream_Frame :: struct {
 	a, b, c:     u64,
 	start_fails: u64,
 	open_at:     u64,
-	seen0:       u64,
-	seen1:       u64,
+	seen:        Fields_Set,
 	key_at:      u64,
 	si:          ^Struct_Info,
-	seen_wide:   []u64,
 	cur_key:     string,
 	target:      rawptr,
 	data:        rawptr,
@@ -250,14 +245,14 @@ load_stream :: proc(
 
 	mem.zero(out, size_of(T))
 
-	rb: hook.Read_Budget
-	mb: hook.Memory_Budget
+	rb: hook.Read_Budget; mb: hook.Memory_Budget
+	rb_p, mb_p := (^hook.Read_Budget)(rawptr(&rb)), (^hook.Memory_Budget)(rawptr(&mb))
 	out_alloc := allocator
 	scr_alloc := opts.scratch if opts.scratch.procedure != nil else allocator
 	if opts.budget.memory > 0 {
 		t_opts := tape.Options{budget = opts.budget, scratch = opts.scratch}
-		out_alloc = hook.read_budget(&rb, t_opts, allocator)
-		scr_alloc = hook.scratch(t_opts, out_alloc, &mb)
+		out_alloc = hook.read_budget(rb_p, t_opts, allocator)
+		scr_alloc = hook.scratch(t_opts, out_alloc, mb_p)
 	}
 
 	frames: [STREAM_INLINE_FRAMES]Stream_Frame = ---
@@ -276,83 +271,40 @@ load_stream :: proc(
 	h.base, h.src_len = raw_data(src), u64(len(src))
 	h.frames, h.home = raw_data(frames[:]), raw_data(frames[:])
 	h.sp, h.room = 1, STREAM_INLINE_FRAMES
-	h.plan, h.format, h.sink = &m.plan, format, sink
-	h.first.kind = .None
-	h.first.owned = false
-	h.policy = policy
-	h.oom, h.fallback, h.wrote_alloc = false, false, false
-	h.has_val = m.plan.has_validators
-	h.re_ready, h.rep_ready = false, false
+	h.plan, h.format, h.sink, h.policy = &m.plan, format, sink, policy
+	h.first.kind, h.first.owned = .None, false
+	h.oom, h.fallback, h.wrote_alloc, h.re_ready, h.rep_ready, h.has_val = false, false, false, false, false, m.plan.has_validators
 	h.fail_count = 0
-	h.budget.limit = opts.budget
-	h.budget.max_depth = opts.budget.depth if opts.budget.depth > 0 else tape.DEFAULT_DEPTH
-	h.budget.depth, h.budget.nodes, h.budget.steps = 0, 0, 0
-	h.budget.exceeded.kind = .None
-	h.re_spill = &re_spill
-	h.allocator, h.scratch = out_alloc, scr_alloc
-	h.ctx = context
-	h.ctx.allocator = out_alloc
+	budget_init(&h.budget, opts.budget)
+	h.re_spill, h.allocator, h.scratch = &re_spill, out_alloc, scr_alloc
+	h.ctx = context; h.ctx.allocator = out_alloc
 	frames[0].kind = .Root
-
-	memo: hook.Expected_Memo = ---
-	h.expected = &memo
+	memo: hook.Expected_Memo = ---; h.expected = &memo
 	when H == Refusing_Loader {
 		ok_room: [OPEN_KEYS_INLINE]Open_Key = ---
 		hk.expected = &memo
-		hk.open_keys = {
-			room    = ok_room[:],
-			repeat  = NO_REPEAT,
-			base    = raw_data(src),
-			src_len = u64(len(src)),
-			format  = format,
-			scratch = scr_alloc,
-		}
-		hk.saved_b = 0
-		hk.done_saved_b = 0
-		hk.passing = 0
-		hk.done_sp = 0
-		hk.mode = .Active
+		hk.open_keys = {room = ok_room[:], repeat = NO_REPEAT, base = raw_data(src), src_len = u64(len(src)), format = format, scratch = scr_alloc}
+		hk.saved_b, hk.done_saved_b, hk.passing, hk.done_sp, hk.mode = 0, 0, 0, 0, .Active
 	}
 
-	regs := hook.Regs{
-		a = STREAM_NO_LIMIT,
-		b = u64(uintptr(&m.plan.root_field) + size_of(Stream_Field)),
-		c = u64(uintptr(out)),
-	}
+	regs := hook.Regs{STREAM_NO_LIMIT, u64(uintptr(&m.plan.root_field) + size_of(Stream_Field)), u64(uintptr(out))}
 	_, walk_err, _ := walk(src, walk_opts, hk, &regs, scr_alloc, &h.ctx)
 
 	when H == Refusing_Loader {
-		if walk_err != nil {
-			open_keys_finish_open(&hk.open_keys)
-		}
-		dup_at := hk.open_keys.repeat
-		dup_oom := hk.open_keys.oom
-		if hk.open_keys.heap {
-			delete(hk.open_keys.room, scr_alloc)
-		}
+		if walk_err != nil { open_keys_finish_open(&hk.open_keys) }
+		dup_at, dup_oom := hk.open_keys.repeat, hk.open_keys.oom
+		if hk.open_keys.heap { delete(hk.open_keys.room, scr_alloc) }
 	}
-
-	if h.sp > 1 || h.frames != h.home || h.rep_ready || (h.re_ready && h.re_spill.spilled) {
-		stream_cleanup(h)
-	}
+	if h.sp > 1 || h.frames != h.home || h.rep_ready || (h.re_ready && h.re_spill.spilled) { stream_cleanup(h) }
 
 	rollback :: #force_no_inline proc(h: ^Stream_Loader, out: ^T, sink: ^Sink, from: int, saved_trunc: bool, out_alloc: runtime.Allocator, trunc_sink: bool) {
-		if trunc_sink && sink != nil { sink_truncate(sink, from, saved_trunc) }
+		if trunc_sink && sink != nil { if len(sink.entries) > from { resize(&sink.entries, from) }; sink.truncated = saved_trunc }
 		error_destroy(h.first, out_alloc)
 		if h.wrote_alloc { free_value(out, type_info_of(T), out_alloc) } else { mem.zero(out, size_of(T)) }
 	}
-
-	if h.fallback {
-		rollback(h, out, sink, from, saved_truncated, out_alloc, true)
-		return load_via_build(m, src, out, sink, opts, walk_opts, policy, allocator, build_fallback)
-	}
-
-	// Check `.Refuse` duplicate key & walk faults (walk faults and duplicate keys take precedence over validation errors).
+	if h.fallback { rollback(h, out, sink, from, saved_truncated, out_alloc, true); return load_via_build(m, src, out, sink, opts, walk_opts, policy, allocator, build_fallback) }
 	when H == Refusing_Loader {
-		if dup_oom {
-			rollback(h, out, sink, from, saved_truncated, out_alloc, true)
-			return stream_oom_error(&rb, &mb, opts.budget.memory)
-		}
+		if dup_oom { rollback(h, out, sink, from, saved_truncated, out_alloc, true); return stream_oom_error(&rb, &mb, opts.budget.memory) }
 		if dup_at != NO_REPEAT {
 			if f, is_f := walk_err.(tape.Fault); walk_err == nil || (is_f && f.at > dup_at) {
 				rollback(h, out, sink, from, saved_truncated, out_alloc, true)
@@ -361,64 +313,19 @@ load_stream :: proc(
 			}
 		}
 	}
-
 	if walk_err != nil {
 		rollback(h, out, sink, from, saved_truncated, out_alloc, true)
-		if _, is_oom := walk_err.(runtime.Allocator_Error); is_oom && opts.budget.memory > 0 {
-			return stream_oom_error(&rb, &mb, opts.budget.memory)
-		}
+		if _, is_oom := walk_err.(runtime.Allocator_Error); is_oom && opts.budget.memory > 0 { return stream_oom_error(&rb, &mb, opts.budget.memory) }
 		return walk_err
 	}
-
 	if sink != nil && len(sink.entries) - from > 1 { order_sink(sink, from) }
-
-	if h.budget.exceeded.kind != .None {
-		rollback(h, out, sink, from, saved_truncated, out_alloc, false)
-		return tape.Error(h.budget.exceeded)
-	}
-	if h.oom {
-		rollback(h, out, sink, from, saved_truncated, out_alloc, false)
-		return stream_oom_error(&rb, &mb, opts.budget.memory)
-	}
+	if h.budget.exceeded.kind != .None { rollback(h, out, sink, from, saved_truncated, out_alloc, false); return tape.Error(h.budget.exceeded) }
+	if h.oom { rollback(h, out, sink, from, saved_truncated, out_alloc, false); return stream_oom_error(&rb, &mb, opts.budget.memory) }
 	if h.first.kind != .None {
-		if h.wrote_alloc {
-			if out_alloc.procedure == mem.arena_allocator_proc {
-				mem.zero(out, size_of(T))
-			} else {
-				stream_free_fast(&m.plan, m.plan.root, rawptr(out), out_alloc)
-			}
-		} else {
-			mem.zero(out, size_of(T))
-		}
+		if h.wrote_alloc && out_alloc.procedure != mem.arena_allocator_proc { free_value(out, type_info_of(T), out_alloc) } else { mem.zero(out, size_of(T)) }
 		return h.first
 	}
 	return nil
-}
-
-// Fast plan-driven rollback free: skips POD scalar fields and uses zero heap/RTTI overhead for flat structs.
-@(private, cold)
-stream_free_fast :: #force_no_inline proc(plan: ^Type_Plan, root_idx: i32, ptr: rawptr, allocator: runtime.Allocator) {
-	tn := &plan.nodes[root_idx]
-	if tn.kind == .Struct {
-		si := &plan.structs[tn.struct_idx]
-		all_simple := true
-		for &sf in si.stream_fields[:len(si.fields)] {
-			#partial switch sf.kind {
-			case .String, .Email:
-				s := (^string)(uintptr(ptr) + uintptr(sf.offset))
-				if len(s^) > 0 { delete(s^, allocator); s^ = "" }
-			case .Bool, .Bool_Wide, .I8 ..= .F64, .Enum, .Time, .Uuid:
-				// POD: zeroed below.
-			case:
-				all_simple = false
-			}
-		}
-		if all_simple && !si.has_fields_set {
-			mem.zero(ptr, tn.size)
-			return
-		}
-	}
-	free_value(ptr, tn.ti, allocator)
 }
 
 @(private, cold)
@@ -427,45 +334,24 @@ load_via_build :: #force_no_inline proc(
 	allocator: runtime.Allocator,
 	$build_fallback: proc(src: []u8, opts: WOpts, a: runtime.Allocator) -> (tape.Document, tape.Error),
 ) -> Error {
-	sc: Scratch_Scope
-	scratch_begin(&sc, opts, allocator)
-	defer scratch_end(&sc)
-	b_opts := walk_opts
-	b_opts.dups = policy
-	b_opts.scratch = sc.scratch
+	sc: Scratch_Scope; scratch_begin(&sc, opts, allocator); defer scratch_end(&sc)
+	b_opts := walk_opts; b_opts.dups = policy; b_opts.scratch = sc.scratch
 	doc, berr := build_fallback(src, b_opts, sc.scratch)
-	if berr != nil {
-		if f, is_fault := berr.(tape.Fault); is_fault && f.kind == .Duplicate_Key {
-			if sink != nil { _ = sink_push(sink, allocator, .Duplicate_Key, f.at, nil) }
-			return Model_Error{kind = .Duplicate_Key, at = f.at}
-		}
-		return berr
-	}
+	if berr != nil { return map_build_fault(berr, sink, allocator) }
 	defer tape.destroy(&doc)
 	return load_document(m, &doc, out, sink, opts, allocator)
 }
 
 @(private)
 stream_oom_error :: proc "contextless" (rb: ^hook.Read_Budget, mb: ^hook.Memory_Budget, mem_limit: u64) -> Error {
-	if mem_limit > 0 && (rb.main.refused || rb.scratch.refused || mb.refused) {
-		return tape.Error(tape.Exceeded{at = tape.NO_BYTE, kind = .Memory})
-	}
-	return runtime.Allocator_Error.Out_Of_Memory
-}
-
-@(private)
-sink_truncate :: proc(s: ^Sink, from: int, saved_truncated: bool) {
-	if s != nil {
-		if len(s.entries) > from { resize(&s.entries, from) }
-		s.truncated = saved_truncated
-	}
+	return oob_oom_error(mem_limit > 0 && (rb.main.refused || rb.scratch.refused || mb.refused))
 }
 
 @(private)
 stream_cleanup :: proc(h: ^Stream_Loader) {
 	for i in 1 ..< h.sp {
 		f := &h.frames[i]
-		if len(f.seen_wide) > 0 { delete(f.seen_wide, h.scratch) }
+		if len(f.seen.wide) > 0 { delete(f.seen.wide, h.scratch) }
 		if f.fflags & SF_KEY_OWNED != 0 { delete(f.cur_key, h.scratch) }
 		if f.kind == .Map {
 			if f.fflags & SF_KEY_VALID != 0 {
@@ -476,17 +362,12 @@ stream_cleanup :: proc(h: ^Stream_Loader) {
 			if f.data != nil { runtime.mem_free(f.data, h.scratch) }
 			if f.val_buf != nil { runtime.mem_free(f.val_buf, h.scratch) }
 		} else if (f.kind == .Slice || f.kind == .Dynamic) && f.data != nil {
-			// Unclosed list buffer (walk stopped/faulted mid-array) — free elements & buffer.
 			ctn := &h.plan.nodes[h.plan.nodes[f.node_idx].child]
-			for j in 0 ..< f.count {
-				free_value(rawptr(uintptr(f.data) + uintptr(j) * uintptr(f.stride)), ctn.ti, h.allocator)
-			}
+			for j in 0 ..< f.count { free_value(rawptr(uintptr(f.data) + uintptr(j) * uintptr(f.stride)), ctn.ti, h.allocator) }
 			runtime.mem_free(f.data, h.allocator)
 		}
 	}
-	if h.frames != h.home {
-		runtime.mem_free_with_size(h.frames, h.room * size_of(Stream_Frame), h.scratch)
-	}
+	if h.frames != h.home { runtime.mem_free_with_size(h.frames, h.room * size_of(Stream_Frame), h.scratch) }
 	if h.re_ready && h.re_spill.spilled { regex.scratch_destroy(&h.re_scratch) }
 	if h.rep_ready { report_destroy(&h.rep) }
 }
@@ -507,11 +388,11 @@ refusing_done_mark :: #force_inline proc "contextless" (h: ^Refusing_Loader, s: 
 	f := &h.loader.frames[h.done_sp]
 	if sf.field_idx < 63 {
 		bit := u64(1) << uint(sf.field_idx)
-		f.seen0 |= bit
-		if (f.seen0 & (bit << 1)) != 0 || ((^Stream_Field)(uintptr(r.b))).kind == .Invalid { r.b = sent }
+		f.seen.bits[0] |= bit
+		if (f.seen.bits[0] & (bit << 1)) != 0 || ((^Stream_Field)(uintptr(r.b))).kind == .Invalid { r.b = sent }
 	} else {
 		_ = stream_mark_seen_hi(&h.loader, f, int(sf.field_idx))
-		if stream_seen_has(f, int(sf.field_idx) + 1) || ((^Stream_Field)(uintptr(r.b))).kind == .Invalid { r.b = sent }
+		if fields_set_has(f.seen, int(sf.field_idx) + 1) || ((^Stream_Field)(uintptr(r.b))).kind == .Invalid { r.b = sent }
 	}
 	return r
 }
@@ -550,7 +431,7 @@ refusing_loader_hook :: #force_inline proc "contextless" (
 			sf := (^Stream_Field)(uintptr(s.b))
 			if stream_key_hit(&h.loader, sf, t) {
 				pf := &h.loader.frames[h.loader.sp - 1]
-				if sf.field_idx < 64 && (pf.seen0 & (u64(1) << uint(sf.field_idx))) == 0 {
+				if sf.field_idx < 64 && (pf.seen.bits[0] & (u64(1) << uint(sf.field_idx))) == 0 {
 					r := s; r.b += size_of(Stream_Field); return r, .Next
 				}
 			}
@@ -633,41 +514,26 @@ refusing_key_slow :: #force_no_inline proc "contextless" (h: ^Refusing_Loader, s
 		r, act := stream_key_miss(&h.loader, s, t)
 		if act == .Next {
 			sf := (^Stream_Field)(uintptr(r.b) - size_of(Stream_Field))
-			if stream_seen_has(f, int(sf.field_idx)) {
+			if fields_set_has(f.seen, int(sf.field_idx)) {
 				head, _ := h.open_keys.format.bounds(h.open_keys.base[:h.open_keys.src_len], t)
 				h.open_keys.repeat = min(h.open_keys.repeat, t.lo - u64(head))
-				h.saved_b = s.b
-				h.mode = .Skip_Next
+				h.saved_b, h.mode = s.b, .Skip_Next
 				return hook.Regs{s.a, sent, s.c}, .Next
 			}
 			return r, .Next
 		}
 		open_keys_token(&h.open_keys, t)
-		if act == .Skip {
-			h.saved_b = s.b
-			h.mode = .Skip_Next
-			return hook.Regs{s.a, sent, s.c}, .Next
-		}
-		if h.loader.fallback || h.loader.oom || h.loader.budget.exceeded.kind != .None {
-			return r, .Stop
-		}
-		h.mode = .Done
-		h.done_sp = h.loader.sp - 1
-		h.done_saved_b = sent
+		if act == .Skip { h.saved_b, h.mode = s.b, .Skip_Next; return hook.Regs{s.a, sent, s.c}, .Next }
+		if h.loader.fallback || h.loader.oom || h.loader.budget.exceeded.kind != .None { return r, .Stop }
+		h.mode, h.done_sp, h.done_saved_b = .Done, h.loader.sp - 1, sent
 		return hook.Regs{r.a, sent, r.c}, .Next
 	}
 	open_keys_token(&h.open_keys, t)
 	r, act := stream_key_miss(&h.loader, s, t)
-	if act == .Skip {
-		h.saved_b = s.b
-		h.mode = .Skip_Next
-		return hook.Regs{s.a, sent, s.c}, .Next
-	}
+	if act == .Skip { h.saved_b, h.mode = s.b, .Skip_Next; return hook.Regs{s.a, sent, s.c}, .Next }
 	if act == .Stop {
 		if h.loader.fallback || h.loader.oom || h.loader.budget.exceeded.kind != .None { return r, .Stop }
-		h.mode = .Done
-		h.done_sp = h.loader.sp - 1
-		h.done_saved_b = sent
+		h.mode, h.done_sp, h.done_saved_b = .Done, h.loader.sp - 1, sent
 		return hook.Regs{r.a, sent, r.c}, .Next
 	}
 	return r, .Next
@@ -677,34 +543,21 @@ refusing_key_slow :: #force_no_inline proc "contextless" (h: ^Refusing_Loader, s
 refusing_done_key :: #force_no_inline proc "contextless" (h: ^Refusing_Loader, t: tape.Token) #no_bounds_check {
 	f := &h.loader.frames[h.open_keys.depth]
 	if f.kind == .Struct {
-		if t.spelling & tape.SPELLING_DECODE == 0 {
-			key := string(h.open_keys.base[t.lo:][:t.n])
-			fi := struct_find_field(f.si, key)
-			if fi >= 0 && f.si.fields[fi].access != .Read_Only {
-				if stream_seen_has(f, fi) {
-					head, _ := h.open_keys.format.bounds(h.open_keys.base[:h.open_keys.src_len], t)
-					h.open_keys.repeat = min(h.open_keys.repeat, t.lo - u64(head))
-					return
-				}
-				if fi < 64 { f.seen0 |= u64(1) << uint(fi) } else { _ = stream_mark_seen_hi(&h.loader, f, fi) }
-				return
-			}
-			open_keys_token(&h.open_keys, t)
-			return
-		}
-		context = h.loader.ctx
+		key, owned, ok := "", false, true
 		buf: [128]u8 = ---
-		key, owned, ok := stream_decode_token_text(&h.loader, t, buf[:])
+		if t.spelling & tape.SPELLING_DECODE == 0 {
+			key = string(h.open_keys.base[t.lo:][:t.n])
+		} else {
+			context = h.loader.ctx
+			key, owned, ok = stream_decode_token_text(&h.loader, t, buf[:])
+		}
+		defer if owned { context = h.loader.ctx; delete(key, h.loader.scratch) }
 		if ok {
-			defer if owned { delete(key, h.loader.scratch) }
-			fi := struct_find_field(f.si, key)
-			if fi >= 0 && f.si.fields[fi].access != .Read_Only {
-				if stream_seen_has(f, fi) {
+			if fi := struct_find_field(f.si, key); fi >= 0 && .Read_Only not_in f.si.fields[fi].flags {
+				if !stream_mark_seen_hi(&h.loader, f, fi) {
 					head, _ := h.open_keys.format.bounds(h.open_keys.base[:h.open_keys.src_len], t)
 					h.open_keys.repeat = min(h.open_keys.repeat, t.lo - u64(head))
-					return
 				}
-				if fi < 64 { f.seen0 |= u64(1) << uint(fi) } else { _ = stream_mark_seen_hi(&h.loader, f, fi) }
 				return
 			}
 		}
@@ -893,7 +746,7 @@ stream_loader_hook :: #force_inline proc "contextless" (
 		f := &h.frames[h.sp]
 		if f.kind == .Struct {
 			si := f.si
-			if (si.req_mask0 & ~f.seen0) == 0 && (si.def_mask0 & ~f.seen0) == 0 && !si.has_req_hi && !si.has_def_hi && !si.has_fields_set && len(si.validators) == 0 && f.fflags & SF_HAS_AFTER == 0 && len(f.seen_wide) == 0 {
+			if (si.req_mask0 & ~f.seen.bits[0]) == 0 && (si.def_mask0 & ~f.seen.bits[0]) == 0 && !si.has_req_hi && !si.has_def_hi && !si.has_fields_set && len(si.validators) == 0 && f.fflags & SF_HAS_AFTER == 0 && len(f.seen.wide) == 0 {
 				h.budget.depth -= 1 + u32(f.fflags >> 3)
 				ret := hook.Regs{f.a, f.b, f.c}
 				if h.frames[h.sp - 1].kind == .Map {
@@ -926,18 +779,18 @@ stream_loader_hook :: #force_inline proc "contextless" (
 			fi := sf.field_idx
 			if fi < 63 {
 				bit := u64(1) << uint(fi)
-				if pf.seen0 & bit != 0 {
+				if pf.seen.bits[0] & bit != 0 {
 					return stream_dup_field(h, s, t)
 				}
-				pf.seen0 |= bit
-				if pf.seen0 & (bit << 1) != 0 {
+				pf.seen.bits[0] |= bit
+				if pf.seen.bits[0] & (bit << 1) != 0 {
 					s.b = stream_sentinel_b()
 				}
 			} else {
 				if !stream_mark_seen_hi(h, pf, int(fi)) {
 					return stream_dup_field(h, s, t)
 				}
-				if stream_seen_has(pf, int(fi) + 1) {
+				if fields_set_has(pf.seen, int(fi) + 1) {
 					s.b = stream_sentinel_b()
 				}
 			}
@@ -1075,7 +928,7 @@ stream_loader_hook :: #force_inline proc "contextless" (
 		f.kind = .Struct
 		f.node_idx = sf.node
 		f.si = si
-		f.seen0, f.seen1, f.seen_wide = 0, 0, nil
+		f.seen = {}
 		f.target = rawptr(dest)
 		f.open_at = t.lo
 		f.start_fails = h.fail_count
@@ -1184,6 +1037,16 @@ stream_alloc_str_slow :: #force_no_inline proc "contextless" (h: ^Stream_Loader,
 	return true
 }
 
+@(private, cold)
+stream_ensure_re :: proc(h: ^Stream_Loader) -> bool {
+	if h.re_ready { return true }
+	rerr: regex.Error
+	h.re_scratch, rerr = regex.scratch_make(stack_spill_allocator(h.re_spill))
+	if rerr.kind != .None { h.oom = true; return false }
+	h.re_ready = true
+	return true
+}
+
 // Combined check + copy for regex-constrained strings: one `context = h.ctx` and one call instead of two!
 @(private)
 stream_string_regex_and_copy :: #force_no_inline proc "contextless" (h: ^Stream_Loader, sf: ^Stream_Field, leaf: ^rules.Leaf, dest: uintptr, t: tape.Token) -> bool #no_bounds_check {
@@ -1195,12 +1058,7 @@ stream_string_regex_and_copy :: #force_no_inline proc "contextless" (h: ^Stream_
 		if n < leaf.min_length { fails += {.Too_Short} }
 		if n > leaf.max_length { fails += {.Too_Long} }
 	}
-	if !h.re_ready {
-		rerr: regex.Error
-		h.re_scratch, rerr = regex.scratch_make(stack_spill_allocator(h.re_spill))
-		if rerr.kind != .None { h.oom = true; return false }
-		h.re_ready = true
-	}
+	if !stream_ensure_re(h) { return false }
 	found, rerr := regex.search(leaf.pattern, str, 0, nil, &h.re_scratch, 0)
 	if rerr.kind != .None { fails += {.Pattern_Undecided} } else if !found { fails += {.No_Match} }
 	if leaf.formats != {} || fails != {} {
@@ -1239,12 +1097,7 @@ stream_check_string :: #force_inline proc "contextless" (h: ^Stream_Loader, sf: 
 @(private)
 stream_match_regex :: #force_no_inline proc "contextless" (h: ^Stream_Loader, re: ^regex.Regex, s: string) -> (found, undecided: bool) {
 	context = h.ctx
-	if !h.re_ready {
-		rs, rerr := regex.scratch_make(stack_spill_allocator(h.re_spill))
-		if rerr.kind != .None { h.oom = true; return false, false }
-		h.re_scratch = rs
-		h.re_ready = true
-	}
+	if !stream_ensure_re(h) { return false, false }
 	f, rerr := regex.search(re, s, 0, nil, &h.re_scratch, 0)
 	return f, rerr.kind != .None
 }
@@ -1291,34 +1144,22 @@ stream_key_miss :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s: ho
 		vtn := &h.plan.nodes[tn.child]
 		mem.zero(f.data, max(ktn.size, 1))
 		mem.zero(f.val_buf, max(vtn.size, 1))
+		f.count += 1
 		if !stream_decode_map_key(h, ktn, key, f.data, t.lo) {
 			if stream_stopped(h) { return s, .Stop }
 			return s, .Skip
 		}
 		f.fflags |= SF_KEY_VALID
-		f.count += 1
 		return s, .Next
 	}
 	defer if owned { delete(key, h.scratch) }
 
 	si := f.si
 	fi := struct_find_field(si, key)
-	if fi < 0 {
+	if fi < 0 || .Read_Only in si.fields[fi].flags {
 		if si.forbid_extra {
 			if h.policy != .Refuse { h.fallback = true; return s, .Stop }
-			if !stream_fail(h, .Not_Allowed, t.lo, "", {}, extra_step = tape.Step(tape.Name(key))) {
-				return s, .Stop
-			}
-		}
-		return s, .Skip
-	}
-	fld := &si.fields[fi]
-	if fld.access == .Read_Only {
-		if si.forbid_extra {
-			if h.policy != .Refuse { h.fallback = true; return s, .Stop }
-			if !stream_fail(h, .Not_Allowed, t.lo, "", {}, extra_step = tape.Step(tape.Name(key))) {
-				return s, .Stop
-			}
+			if !stream_fail(h, .Not_Allowed, t.lo, "", {}, extra_step = tape.Step(tape.Name(key))) { return s, .Stop }
 		}
 		return s, .Skip
 	}
@@ -1331,61 +1172,27 @@ stream_key_miss :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s: ho
 // because `walk_text` `st_skip_open` still delivers the matching `.End` token after skipping the container.
 @(private, cold)
 stream_skip_container :: proc "contextless" (h: ^Stream_Loader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-	if t.kind != .Object && t.kind != .Array {
-		return s, .Next
-	}
+	if t.kind != .Object && t.kind != .Array { return s, .Next }
 	if h.policy != .Refuse {
 		if h.sp == h.room && !stream_frames_grow(h) { h.oom = true; return s, .Stop }
 		f := &h.frames[h.sp]; h.sp += 1
-		f.a, f.b, f.c = s.a, s.b, s.c
-		f.kind, f.fflags, f.seen_wide = .Skipped, 0, nil
+		f.a, f.b, f.c, f.kind, f.fflags, f.seen = s.a, s.b, s.c, .Skipped, 0, {}
 	}
 	return s, .Skip
 }
 
 @(private, cold)
 stream_dup_field :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-	if h.policy == .Last {
-		h.fallback = true
-		return s, .Stop
-	}
+	if h.policy == .Last { h.fallback = true; return s, .Stop }
 	return stream_skip_container(h, s, t)
 }
 
 @(private, cold)
 stream_mark_seen_hi :: #force_no_inline proc "contextless" (h: ^Stream_Loader, f: ^Stream_Frame, fi: int) -> bool {
-	if fi < 64 {
-		bit := u64(1) << uint(fi)
-		if f.seen0 & bit != 0 { return false }
-		f.seen0 |= bit
-		return true
-	}
-	if fi < 128 {
-		bit := u64(1) << uint(fi - 64)
-		if f.seen1 & bit != 0 { return false }
-		f.seen1 |= bit
-		return true
-	}
-	w := (fi - 128) / 64
-	if w >= len(f.seen_wide) {
-		context = h.ctx
-		fresh, err := make([]u64, max(w + 1, (len(f.si.fields) - 128 + 63) / 64), h.scratch)
-		if err != nil { h.oom = true; return false }
-		if len(f.seen_wide) > 0 { copy(fresh, f.seen_wide); delete(f.seen_wide, h.scratch) }
-		f.seen_wide = fresh
-	}
-	bit := u64(1) << uint((fi - 128) % 64)
-	if f.seen_wide[w] & bit != 0 { return false }
-	f.seen_wide[w] |= bit
+	if fields_set_has(f.seen, fi) { return false }
+	context = h.ctx
+	if fields_set_set(&f.seen, fi, len(f.si.fields), h.scratch) != nil { h.oom = true; return false }
 	return true
-}
-
-@(private)
-stream_seen_has :: #force_inline proc "contextless" (f: ^Stream_Frame, fi: int) -> bool {
-	if fi < 64 { return (f.seen0 >> uint(fi)) & 1 != 0 }
-	if fi < 128 { return (f.seen1 >> uint(fi - 64)) & 1 != 0 }
-	w := (fi - 128) / 64
-	return w < len(f.seen_wide) && (f.seen_wide[w] >> uint((fi - 128) % 64)) & 1 != 0
 }
 
 @(private, cold)
@@ -1494,59 +1301,48 @@ stream_close :: #force_no_inline proc "contextless" (h: ^Stream_Loader, f: ^Stre
 	if f.kind != .Skipped { h.budget.depth -= 1 + u32(f.fflags >> 3) }
 	#partial switch f.kind {
 	case .Struct:
-		defer if len(f.seen_wide) > 0 { delete(f.seen_wide, h.scratch); f.seen_wide = nil }
+		defer if len(f.seen.wide) > 0 { delete(f.seen.wide, h.scratch); f.seen.wide = nil }
 		si := f.si
 		if si.has_fields_set && (h.first.kind == .None || h.has_val) {
 			fs := (^Fields_Set)(uintptr(f.target) + si.fields_set_offset)
-			fs.bits = {f.seen0, f.seen1}
-			if len(f.seen_wide) > 0 {
-				wcopy, werr := make([]u64, len(f.seen_wide), h.allocator)
+			fs.bits = f.seen.bits
+			if len(f.seen.wide) > 0 {
+				wcopy, werr := make([]u64, len(f.seen.wide), h.allocator)
 				if werr != nil { h.oom = true; return ret, .Stop }
-				copy(wcopy, f.seen_wide)
-				fs.wide = wcopy
-				h.wrote_alloc = true
+				copy(wcopy, f.seen.wide); fs.wide = wcopy; h.wrote_alloc = true
 			}
 		}
 
 		close_at := t.lo + 1
 		// Fast bitmask loop for fields 0..63 when missing defaults or required fields exist.
-		miss_def := si.def_mask0 & ~f.seen0
+		miss_def := si.def_mask0 & ~f.seen.bits[0]
 		for miss_def != 0 {
 			fi := int(intrinsics.count_trailing_zeros(miss_def))
 			miss_def &= miss_def - 1
 			if h.first.kind == .None || h.has_val {
 				fld := &si.fields[fi]
-				if fld.make_default(rawptr(uintptr(f.target) + fld.offset), fld.default_data, h.allocator) != nil {
-					h.oom = true; return ret, .Stop
-				}
+				if fld.make_default(rawptr(uintptr(f.target) + fld.offset), fld.default_data, h.allocator) != nil { h.oom = true; return ret, .Stop }
 				h.wrote_alloc = true
 			}
 		}
-		miss_req := si.req_mask0 & ~f.seen0
+		miss_req := si.req_mask0 & ~f.seen.bits[0]
 		for miss_req != 0 {
 			fi := int(intrinsics.count_trailing_zeros(miss_req))
 			miss_req &= miss_req - 1
-			fld := &si.fields[fi]
-			if !stream_fail_at_depth(h, h.sp + 1, .Missing_Field, close_at, "", {}, extra_step = tape.Step(tape.Name(fld.name))) {
-				return ret, .Stop
-			}
+			if !stream_fail_at_depth(h, h.sp + 1, .Missing_Field, close_at, "", {}, extra_step = tape.Step(tape.Name(si.fields[fi].name))) { return ret, .Stop }
 		}
 		if si.has_req_hi || si.has_def_hi {
 			for fi in 64 ..< len(si.fields) {
-				if stream_seen_has(f, fi) { continue }
+				if fields_set_has(f.seen, fi) { continue }
 				fld := &si.fields[fi]
-				if fld.access == .Read_Only { continue }
-				if fld.has_default {
+				if .Read_Only in fld.flags { continue }
+				if .Has_Default in fld.flags {
 					if h.first.kind == .None || h.has_val {
-						if fld.make_default(rawptr(uintptr(f.target) + fld.offset), fld.default_data, h.allocator) != nil {
-							h.oom = true; return ret, .Stop
-						}
+						if fld.make_default(rawptr(uintptr(f.target) + fld.offset), fld.default_data, h.allocator) != nil { h.oom = true; return ret, .Stop }
 						h.wrote_alloc = true
 					}
-				} else if fld.required {
-					if !stream_fail_at_depth(h, h.sp + 1, .Missing_Field, close_at, "", {}, extra_step = tape.Step(tape.Name(fld.name))) {
-						return ret, .Stop
-					}
+				} else if .Required in fld.flags {
+					if !stream_fail_at_depth(h, h.sp + 1, .Missing_Field, close_at, "", {}, extra_step = tape.Step(tape.Name(fld.name))) { return ret, .Stop }
 				}
 			}
 		}
@@ -1561,47 +1357,29 @@ stream_close :: #force_no_inline proc "contextless" (h: ^Stream_Loader, f: ^Stre
 		case .Slice:
 			if f.count > 0 && f.count < f.cap && f.stride > 0 {
 				ctn := &h.plan.nodes[tn.child]
-				exact, err := runtime.mem_alloc_non_zeroed(f.count * int(f.stride), ctn.align, h.allocator)
-				if err == nil {
+				if exact, err := runtime.mem_alloc_non_zeroed(f.count * int(f.stride), ctn.align, h.allocator); err == nil {
 					intrinsics.mem_copy_non_overlapping(raw_data(exact), f.data, f.count * int(f.stride))
 					runtime.mem_free(f.data, h.allocator)
 					f.data = raw_data(exact)
 				}
 			}
-			rs := (^runtime.Raw_Slice)(f.target)
-			rs.data, rs.len = f.data, f.count
-			f.data = nil
+			rs := (^runtime.Raw_Slice)(f.target); rs.data, rs.len = f.data, f.count; f.data = nil
 		case .Dynamic:
-			rd := (^runtime.Raw_Dynamic_Array)(f.target)
-			rd.data, rd.len, rd.cap, rd.allocator = f.data, f.count, f.cap, h.allocator
-			f.data = nil
+			rd := (^runtime.Raw_Dynamic_Array)(f.target); rd.data, rd.len, rd.cap, rd.allocator = f.data, f.count, f.cap, h.allocator; f.data = nil
 		case .Fixed_List:
 			(^int)(uintptr(f.target) + tn.len_offset)^ = min(f.count, tn.count)
 		}
-		cap_bad := (tn.kind == .Array && f.count < tn.count) || ((tn.kind == .Array || tn.kind == .Fixed_List) && f.count > tn.count)
-		if cap_bad {
+		if (tn.kind == .Array && f.count < tn.count) || ((tn.kind == .Array || tn.kind == .Fixed_List) && f.count > tn.count) {
 			if !stream_fail_at_depth(h, h.sp + 1, .Too_Few if f.count < tn.count else .Too_Many, f.open_at) { return ret, .Stop }
-		} else if f.rule_idx > 0 {
-			steps_buf: [32]tape.Step = ---
-			steps, owned := stream_build_steps(h, h.sp + 1, steps_buf[:])
-			defer if owned { delete(steps, h.scratch) }
-			if !check_count_leaf(h.plan, f.rule_idx, u64(f.count), false, f.open_at, steps, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false) {
-				h.fail_count += 1
-				if stream_stopped(h) { return ret, .Stop }
-			}
+		} else if !stream_check_count_leaf(h, h.sp + 1, f.rule_idx, u64(f.count), false, f.open_at) {
+			if stream_stopped(h) { return ret, .Stop }
 		}
 	case .Map:
 		if f.fflags & SF_KEY_OWNED != 0 { delete(f.cur_key, h.scratch); f.fflags &~= SF_KEY_OWNED }
 		if f.data != nil { runtime.mem_free(f.data, h.scratch); f.data = nil }
 		if f.val_buf != nil { runtime.mem_free(f.val_buf, h.scratch); f.val_buf = nil }
-		if f.rule_idx > 0 {
-			steps_buf: [32]tape.Step = ---
-			steps, owned := stream_build_steps(h, h.sp + 1, steps_buf[:])
-			defer if owned { delete(steps, h.scratch) }
-			if !check_count_leaf(h.plan, f.rule_idx, u64(f.count), true, f.open_at, steps, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false) {
-				h.fail_count += 1
-				if stream_stopped(h) { return ret, .Stop }
-			}
+		if !stream_check_count_leaf(h, h.sp + 1, f.rule_idx, u64(f.count), true, f.open_at) {
+			if stream_stopped(h) { return ret, .Stop }
 		}
 	}
 
@@ -1609,13 +1387,12 @@ stream_close :: #force_no_inline proc "contextless" (h: ^Stream_Loader, f: ^Stre
 		pf := &h.frames[h.sp - 1]
 		if pf.kind == .Struct {
 			if !stream_ensure_report(h) { return ret, .Stop }
-			for av in pf.si.fields[f.parent_fi].afters { av.call(f.target, av.fn, &h.rep) }
+			field_ptr := rawptr(uintptr(pf.target) + pf.si.fields[f.parent_fi].offset)
+			for av in pf.si.fields[f.parent_fi].afters { av.call(field_ptr, av.fn, &h.rep) }
 			if !stream_emit_report(h, h.sp + 1, f.open_at, nil) { return ret, .Stop }
 		}
 	}
-	if h.frames[h.sp - 1].kind == .Map {
-		return stream_map_finish_entry(h, ret)
-	}
+	if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, ret) }
 	return ret, .Next
 }
 
@@ -1642,16 +1419,29 @@ stream_emit_report :: proc(h: ^Stream_Loader, sp: int, at: u64, si: ^Struct_Info
 }
 
 @(private, cold)
+stream_emit_leaf_fails :: proc(h: ^Stream_Loader, sp: int, leaf: ^rules.Leaf, fails: bit_set[rules.Error_Kind; u64], members: bool, at: u64, sf: ^Stream_Field) -> bool {
+	h.fail_count += 1
+	steps_buf: [32]tape.Step = ---
+	steps, owned := stream_build_steps(h, sp, steps_buf[:], sf)
+	defer if owned { delete(steps, h.scratch) }
+	_ = emit_leaf_fails(leaf, fails, members, at, steps, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false)
+	return false
+}
+
+@(private, cold)
+stream_check_count_leaf :: proc(h: ^Stream_Loader, sp: int, rule_idx: i32, n: u64, members: bool, at: u64) -> bool {
+	if rule_idx <= 0 { return true }
+	leaf := &h.plan.leaves[rule_idx - 1]
+	fails := rules.judge_count(n, leaf.min_members if members else leaf.min_items, leaf.max_members if members else leaf.max_items)
+	return true if fails == {} else stream_emit_leaf_fails(h, sp, leaf, fails, members, at, nil)
+}
+
+@(private, cold)
 stream_check_num_leaf :: proc(h: ^Stream_Loader, rule_idx: i32, text: string, small: Maybe(i64), at: u64, sf: ^Stream_Field) -> bool {
 	if rule_idx <= 0 { return true }
-	steps_buf: [32]tape.Step = ---
-	steps, owned := stream_build_steps(h, h.sp, steps_buf[:], sf)
-	defer if owned { delete(steps, h.scratch) }
-	if !check_number_leaf(h.plan, rule_idx, text, small, at, steps, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false) {
-		h.fail_count += 1
-		return false
-	}
-	return true
+	leaf := &h.plan.leaves[rule_idx - 1]
+	fails := rules.judge_number(leaf, text, small)
+	return true if fails == {} else stream_emit_leaf_fails(h, h.sp, leaf, fails, false, at, sf)
 }
 
 @(private, cold)
@@ -1666,17 +1456,11 @@ stream_run_field_after :: #force_no_inline proc "contextless" (h: ^Stream_Loader
 
 @(private, cold)
 stream_build_steps :: proc(h: ^Stream_Loader, sp: int, buf: []tape.Step, leaf_sf: ^Stream_Field = nil, extra_step: Maybe(tape.Step) = nil) -> (steps: []tape.Step, owned: bool) {
-	// Count needed steps: frames[1 ..< sp] each contribute 1 step from their parent, plus optional leaf_sf/extra_step.
 	n := 0
-	// Walk frames 1 ..< sp: frame i's position inside frame i-1.
 	dyn: [dynamic]tape.Step
 	push :: proc(h: ^Stream_Loader, buf: []tape.Step, n: ^int, dyn: ^[dynamic]tape.Step, owned: ^bool, st: tape.Step) {
 		if !owned^ {
-			if n^ < len(buf) {
-				buf[n^] = st
-				n^ += 1
-				return
-			}
+			if n^ < len(buf) { buf[n^] = st; n^ += 1; return }
 			dyn^ = make([dynamic]tape.Step, 0, len(buf) * 2, h.scratch)
 			append(dyn, ..buf[:n^])
 			owned^ = true
@@ -1685,12 +1469,10 @@ stream_build_steps :: proc(h: ^Stream_Loader, sp: int, buf: []tape.Step, leaf_sf
 	}
 
 	for i in 1 ..< sp {
-		parent := &h.frames[i - 1]
-		child := &h.frames[i]
+		parent, child := &h.frames[i - 1], &h.frames[i]
 		#partial switch parent.kind {
 		case .Struct:
-			sf := (^Stream_Field)(uintptr(child.b) - size_of(Stream_Field))
-			push(h, buf, &n, &dyn, &owned, tape.Step(tape.Name(parent.si.fields[sf.field_idx].name)))
+			push(h, buf, &n, &dyn, &owned, tape.Step(tape.Name(parent.si.fields[child.parent_fi].name)))
 		case .Slice, .Dynamic, .Array, .Fixed_List:
 			push(h, buf, &n, &dyn, &owned, tape.Step(tape.Index(parent.count - 1)))
 		case .Map:
@@ -1707,9 +1489,7 @@ stream_build_steps :: proc(h: ^Stream_Loader, sp: int, buf: []tape.Step, leaf_sf
 			push(h, buf, &n, &dyn, &owned, tape.Step(tape.Name(top.cur_key)))
 		}
 	}
-	if ex, has_ex := extra_step.?; has_ex {
-		push(h, buf, &n, &dyn, &owned, ex)
-	}
+	if ex, has_ex := extra_step.?; has_ex { push(h, buf, &n, &dyn, &owned, ex) }
 	return dyn[:] if owned else buf[:n], owned
 }
 
@@ -1732,40 +1512,32 @@ stream_check_string_report :: #force_no_inline proc "contextless" (h: ^Stream_Lo
 	context = h.ctx
 	fails := init_fails
 	for fmt_kind in leaf.formats {
-		if !rules.format_valid(fmt_kind, s, h.scratch) {
-			fails += {.Bad_Format}
-		}
+		if !rules.format_valid(fmt_kind, s, h.scratch) { fails += {.Bad_Format} }
 	}
-	if fails == {} { return true }
-	h.fail_count += 1
-	steps_buf: [32]tape.Step = ---
-	steps, owned := stream_build_steps(h, h.sp, steps_buf[:], sf)
-	defer if owned { delete(steps, h.scratch) }
-	_ = emit_leaf_fails(leaf, fails, false, at, steps, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false)
-	return false
+	return true if fails == {} else stream_emit_leaf_fails(h, h.sp, leaf, fails, false, at, sf)
+}
+
+@(private, cold)
+stream_scalar_env :: proc(h: ^Stream_Loader, sf: ^Stream_Field) -> Scalar_Env {
+	return {
+		plan = h.plan, re_scratch = &h.re_scratch, stream = h, stream_sf = sf,
+		sink = h.sink, first = &h.first, oom = &h.oom, fail_count = &h.fail_count,
+		allocator = h.allocator, scratch = h.scratch, has_val = h.has_val,
+	}
 }
 
 @(private, cold)
 stream_string_decoded :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s: hook.Regs, t: tape.Token, sf: ^Stream_Field, dest: uintptr) -> (hook.Regs, hook.Action) {
 	context = h.ctx
 	buf: [256]u8 = ---
-	text, owned, ok := stream_decode_token_text(h, t, buf[:])
-	if !ok { return s, .Stop }
+	text, owned, dok := stream_decode_token_text(h, t, buf[:])
+	if !dok { return s, .Stop }
 	defer if owned { delete(text, h.scratch) }
-	if sf.rule_idx > 0 {
-		if !stream_check_string(h, sf, text, false, t.lo) {
-			if stream_stopped(h) { return s, .Stop }
-			if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
-			return s, .Next
-		}
-	}
-	if (h.first.kind == .None || h.has_val) && len(text) > 0 {
-		cl, cerr := strings.clone(text, h.allocator)
-		if cerr != nil { h.oom = true; return s, .Stop }
-		(^string)(dest)^ = cl
-		h.wrote_alloc = true
-	}
-	if .Has_After in sf.flags {
+	env := stream_scalar_env(h, sf)
+	ok := decode_scalar_common(&env, &h.plan.nodes[sf.node], rawptr(dest), sf.rule_idx, .Not_Null in sf.flags, t.lo, .String, text)
+	h.wrote_alloc ||= env.wrote
+	if stream_stopped(h) { return s, .Stop }
+	if ok && .Has_After in sf.flags {
 		if !stream_run_field_after(h, sf, dest, t.lo) { return s, .Stop }
 	}
 	if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
@@ -1779,11 +1551,7 @@ stream_number_fail :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s:
 	fails: rules.Failures
 	if leaf.minimum.set && (v < leaf.minimum.int || (v == leaf.minimum.int && leaf.minimum.exclusive)) { fails += {.Below_Minimum} }
 	if leaf.maximum.set && (v > leaf.maximum.int || (v == leaf.maximum.int && leaf.maximum.exclusive)) { fails += {.Above_Maximum} }
-	h.fail_count += 1
-	steps_buf: [32]tape.Step = ---
-	steps, owned := stream_build_steps(h, h.sp, steps_buf[:], sf)
-	defer if owned { delete(steps, h.scratch) }
-	_ = emit_leaf_fails(leaf, fails, false, t.lo, steps, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false)
+	_ = stream_emit_leaf_fails(h, h.sp, leaf, fails, false, t.lo, sf)
 	if stream_stopped(h) { return s, .Stop }
 	if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
 	return s, .Next
@@ -1792,13 +1560,13 @@ stream_number_fail :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s:
 @(private, cold)
 stream_number_text :: proc(h: ^Stream_Loader, t: tape.Token, buf: []u8) -> (s: string, owned, ok, non_finite: bool) {
 	raw := string(h.base[t.lo:][:t.n])
-	if t.spelling == 0 && rules.valid_decimal_text(raw) {
-		return raw, false, true, false
-	}
+	if t.spelling == 0 && rules.valid_decimal_text(raw) { return raw, false, true, false }
 	if h.format.number != nil {
 		num := h.format.number(h.base[:h.src_len], t)
 		switch num.kind {
-		case .Int:   return strconv.write_int(buf, i64(num.bits), 10), false, true, false
+		case .Int:
+			if num.bits == 0 && len(raw) > 0 && raw[0] == '-' { return "-0", false, true, false }
+			return strconv.write_int(buf, i64(num.bits), 10), false, true, false
 		case .Uint:  return strconv.write_uint(buf, num.bits, 10), false, true, false
 		case .Float:
 			f := transmute(f64)num.bits
@@ -1813,108 +1581,61 @@ stream_number_text :: proc(h: ^Stream_Loader, t: tape.Token, buf: []u8) -> (s: s
 }
 
 @(private, cold)
-stream_number_leaf_cold :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s: hook.Regs, t: tape.Token, sf: ^Stream_Field, v: i64) -> (hook.Regs, hook.Action) {
-	context = h.ctx
+stream_finish_num_leaf_cold :: proc(h: ^Stream_Loader, s: hook.Regs, t: tape.Token, sf: ^Stream_Field, small: Maybe(i64)) -> (hook.Regs, hook.Action) {
 	nbuf: [64]u8 = ---
 	ns, nown, nok, nf := stream_number_text(h, t, nbuf[:])
 	defer if nown { delete(ns, h.scratch) }
 	if nf {
 		_ = stream_fail(h, .Non_Finite, t.lo, sf = sf)
-		if stream_stopped(h) { return s, .Stop }
-	} else if !nok || !stream_check_num_leaf(h, sf.rule_idx, ns, v, t.lo, sf) {
-		if stream_stopped(h) { return s, .Stop }
-	} else if .Has_After in sf.flags {
+	} else if nok && stream_check_num_leaf(h, sf.rule_idx, ns, small, t.lo, sf) && .Has_After in sf.flags {
 		if !stream_run_field_after(h, sf, uintptr(s.c) + uintptr(sf.offset), t.lo) { return s, .Stop }
 	}
+	if stream_stopped(h) { return s, .Stop }
 	if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
 	return s, .Next
+}
+
+@(private, cold)
+stream_number_leaf_cold :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s: hook.Regs, t: tape.Token, sf: ^Stream_Field, v: i64) -> (hook.Regs, hook.Action) {
+	context = h.ctx
+	return stream_finish_num_leaf_cold(h, s, t, sf, v)
 }
 
 @(private, cold)
 stream_f64_leaf_cold :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s: hook.Regs, t: tape.Token, sf: ^Stream_Field, fv: f64) -> (hook.Regs, hook.Action) {
 	context = h.ctx
 	leaf := &h.plan.leaves[sf.rule_idx - 1]
-	// Fast strict-inequality failure check before falling back to exact decimal compare at boundary equality.
 	if leaf.fast && leaf.minimum.int >= -F64_EXACT_INT_MAX && leaf.minimum.int <= F64_EXACT_INT_MAX && leaf.maximum.int >= -F64_EXACT_INT_MAX && leaf.maximum.int <= F64_EXACT_INT_MAX {
 		if !(leaf.minimum.set && fv == f64(leaf.minimum.int)) && !(leaf.maximum.set && fv == f64(leaf.maximum.int)) {
 			fails: rules.Failures
 			if leaf.minimum.set && fv < f64(leaf.minimum.int) { fails += {.Below_Minimum} }
 			if leaf.maximum.set && fv > f64(leaf.maximum.int) { fails += {.Above_Maximum} }
 			if fails != {} {
-				h.fail_count += 1
-				steps_buf: [32]tape.Step = ---
-				steps, owned := stream_build_steps(h, h.sp, steps_buf[:], sf)
-				defer if owned { delete(steps, h.scratch) }
-				_ = emit_leaf_fails(leaf, fails, false, t.lo, steps, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false)
+				_ = stream_emit_leaf_fails(h, h.sp, leaf, fails, false, t.lo, sf)
 				if stream_stopped(h) { return s, .Stop }
 				if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
 				return s, .Next
 			}
 		}
 	}
-	nbuf: [64]u8 = ---
-	ns, nown, nok, nf := stream_number_text(h, t, nbuf[:])
-	defer if nown { delete(ns, h.scratch) }
-	if nf {
-		_ = stream_fail(h, .Non_Finite, t.lo, sf = sf)
-		if stream_stopped(h) { return s, .Stop }
-	} else if !nok || !stream_check_num_leaf(h, sf.rule_idx, ns, nil, t.lo, sf) {
-		if stream_stopped(h) { return s, .Stop }
-	} else if .Has_After in sf.flags {
-		if !stream_run_field_after(h, sf, uintptr(s.c) + uintptr(sf.offset), t.lo) { return s, .Stop }
-	}
-	if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
-	return s, .Next
+	return stream_finish_num_leaf_cold(h, s, t, sf, nil)
 }
 
 @(private, cold)
 stream_number_cold :: #force_no_inline proc "contextless" (h: ^Stream_Loader, s: hook.Regs, t: tape.Token, sf: ^Stream_Field, dest: uintptr) -> (hook.Regs, hook.Action) {
 	context = h.ctx
-	tn := &h.plan.nodes[sf.node]
 	nbuf: [64]u8 = ---
 	ns, nown, nok, nf := stream_number_text(h, t, nbuf[:])
 	defer if nown { delete(ns, h.scratch) }
-	if nf {
-		if !stream_fail(h, .Non_Finite, t.lo, sf = sf) { return s, .Stop }
-		if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
-		return s, .Next
-	}
-	if !nok {
-		if !stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = type_name_short(tn.ti)}, sf = sf) { return s, .Stop }
-		if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
-		return s, .Next
-	}
-	ok := true
-	if tn.kind >= .I8 && tn.kind <= .U64 {
-		ok = stream_decode_int_text(h, tn, ns, rawptr(dest), sf.rule_idx, t.lo, sf)
-	} else if tn.kind == .F32 || tn.kind == .F64 {
-		f64_v, fok := strconv.parse_f64(ns)
-		f32_v := f32(f64_v)
-		bad := !fok || (math.is_nan(f32_v) || math.is_inf(f32_v, 0) if tn.kind == .F32 else math.is_nan(f64_v) || math.is_inf(f64_v, 0))
-		if bad {
-			ok = false
-			_ = stream_fail(h, .Below_Minimum if strings.has_prefix(ns, "-") else .Above_Maximum, t.lo, sf = sf)
-		} else {
-			if tn.kind == .F32 { (^f32)(dest)^ = f32_v } else { (^f64)(dest)^ = f64_v }
-			ok = stream_check_num_leaf(h, sf.rule_idx, ns, nil, t.lo, sf)
-		}
-	}
+	env := stream_scalar_env(h, sf)
+	sk := Scalar_Kind.Non_Finite if nf else (.Number if nok else .Wrong)
+	ok := decode_scalar_common(&env, &h.plan.nodes[sf.node], rawptr(dest), sf.rule_idx, .Not_Null in sf.flags, t.lo, sk, ns)
 	if stream_stopped(h) { return s, .Stop }
 	if ok && .Has_After in sf.flags {
 		if !stream_run_field_after(h, sf, dest, t.lo) { return s, .Stop }
 	}
 	if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
 	return s, .Next
-}
-
-@(private, cold)
-stream_decode_int_text :: proc(h: ^Stream_Loader, tn: ^Type_Node, text: string, dest: rawptr, rule_idx: i32, at: u64, sf: ^Stream_Field) -> bool {
-	small, k := parse_int_decimal(tn, text, dest)
-	if k != .None {
-		want := Want{type = tn.type, text = type_name_short(tn.ti)} if k == .Wrong_Kind else Want{}
-		return stream_fail(h, k, at, "", want, sf = sf)
-	}
-	return stream_check_num_leaf(h, rule_idx, text, small, at, sf)
 }
 
 @(private, cold)
@@ -1931,73 +1652,38 @@ stream_indirect :: #force_no_inline proc "contextless" (
 	h: ^Stream_Loader, s: hook.Regs, t: tape.Token, orig_sf: ^Stream_Field, orig_dest: uintptr,
 ) -> (hook.Regs, hook.Action) #no_bounds_check {
 	context = h.ctx
-	cur_node := orig_sf.node
-	cur_rule := orig_sf.rule_idx
-	not_null := .Not_Null in orig_sf.flags
-	dest := orig_dest
-	ptr_depth := u32(0)
-	opened := false
+	cur_node, cur_rule, not_null, dest, ptr_depth, opened := orig_sf.node, orig_sf.rule_idx, .Not_Null in orig_sf.flags, orig_dest, u32(0), false
 	defer if !opened { h.budget.depth -= ptr_depth }
 
-	// Unwrap `.Maybe` and `.Ptr` wrappers.
 	for {
 		tn := &h.plan.nodes[cur_node]
-		if tn.kind == .Maybe {
-			if t.kind == .Null {
-				if not_null {
-					_ = stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = "non-null"}, sf = orig_sf)
-					if stream_stopped(h) { return s, .Stop }
-				}
-				if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
-				return s, .Next
-			}
-			if !tn.pure_maybe && tn.tag_size > 0 {
-				one := u64(1)
-				mem.copy(rawptr(dest + tn.tag_offset), &one, tn.tag_size)
-			}
-			cur_node = tn.child
-			if cur_rule <= 0 { cur_rule = h.plan.nodes[cur_node].rule_idx }
-			not_null = false
-			continue
+		if tn.kind != .Maybe && tn.kind != .Ptr { break }
+		if t.kind == .Null {
+			ok := !not_null
+			if not_null { _ = stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = "non-null"}, sf = orig_sf) }
+			if stream_stopped(h) { return s, .Stop }
+			if ok && .Has_After in orig_sf.flags { if !stream_run_field_after(h, orig_sf, orig_dest, t.lo) { return s, .Stop } }
+			if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
+			return s, .Next
 		}
-		if tn.kind == .Ptr {
-			if t.kind == .Null {
-				if not_null {
-					_ = stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = "non-null"}, sf = orig_sf)
-					if stream_stopped(h) { return s, .Stop }
-				}
-				if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
-				return s, .Next
-			}
+		if tn.kind == .Maybe {
+			if !tn.pure_maybe && tn.tag_size > 0 { one := u64(1); mem.copy(rawptr(dest + tn.tag_offset), &one, tn.tag_size) }
+		} else {
 			if ptr_depth >= 31 { h.fallback = true; return s, .Stop }
-			if h.budget.depth + 1 > h.budget.max_depth {
-				h.budget.exceeded = {at = t.lo, kind = .Depth}
-				return s, .Stop
-			}
-			h.budget.depth += 1
-			ptr_depth += 1
+			if h.budget.depth + 1 > h.budget.max_depth { h.budget.exceeded = {at = t.lo, kind = .Depth}; return s, .Stop }
+			h.budget.depth += 1; ptr_depth += 1
 			ctn := &h.plan.nodes[tn.child]
 			raw, aerr := runtime.mem_alloc(max(ctn.size, 1), ctn.align, h.allocator)
 			if aerr != nil { h.oom = true; return s, .Stop }
-			(^rawptr)(dest)^ = raw_data(raw)
-			h.wrote_alloc = true
-			dest = uintptr(raw_data(raw))
-			cur_node = tn.child
-			if cur_rule <= 0 { cur_rule = ctn.rule_idx }
-			not_null = false
-			continue
+			(^rawptr)(dest)^ = raw_data(raw); h.wrote_alloc = true; dest = uintptr(raw_data(raw))
 		}
-		break
+		cur_node = tn.child
+		if cur_rule <= 0 { cur_rule = h.plan.nodes[cur_node].rule_idx }
+		not_null = false
 	}
 
 	tn := &h.plan.nodes[cur_node]
-	eff_sf := orig_sf^
-	eff_sf.node = cur_node
-	eff_sf.kind = tn.kind
-	eff_sf.rule_idx = cur_rule
-	eff_sf.struct_idx = tn.struct_idx
 	open_flags := (u8(SF_HAS_AFTER) if .Has_After in orig_sf.flags else u8(0)) | u8(ptr_depth << 3)
-
 	skip_wrong :: proc(h: ^Stream_Loader, s: hook.Regs, t: tape.Token, sf: ^Stream_Field, want: Want) -> (hook.Regs, hook.Action) {
 		_ = stream_fail(h, .Wrong_Kind, t.lo, "", want, sf = sf)
 		if stream_stopped(h) { return s, .Stop }
@@ -2005,49 +1691,34 @@ stream_indirect :: #force_no_inline proc "contextless" (
 		if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
 		return s, .Next
 	}
+	prepare_frame :: proc(h: ^Stream_Loader, s: hook.Regs, t: tape.Token, kind: Stream_Frame_Kind, cur_node, cur_rule: i32, dest: uintptr, open_flags: u8, pfi: u16, opened: ^bool) -> (^Stream_Frame, bool) {
+		if h.budget.depth + 1 > h.budget.max_depth { h.budget.exceeded = {at = t.lo, kind = .Depth}; return nil, false }
+		if h.sp == h.room && !stream_frames_grow(h) { h.oom = true; return nil, false }
+		h.budget.depth += 1; opened^ = true
+		f := &h.frames[h.sp]; h.sp += 1
+		f^ = {a = s.a, b = s.b, c = s.c, kind = kind, node_idx = cur_node, rule_idx = cur_rule, target = rawptr(dest), open_at = t.lo, start_fails = h.fail_count, fflags = open_flags, parent_fi = pfi}
+		return f, true
+	}
 
 	#partial switch tn.kind {
 	case .Struct:
 		if t.kind != .Object { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "object"}) }
-		if h.budget.depth + 1 > h.budget.max_depth { h.budget.exceeded = {at = t.lo, kind = .Depth}; return s, .Stop }
-		if h.sp == h.room && !stream_frames_grow(h) { h.oom = true; return s, .Stop }
-		h.budget.depth += 1; opened = true
-		si := &h.plan.structs[tn.struct_idx]
-		f := &h.frames[h.sp]; h.sp += 1
-		f.a, f.b, f.c = s.a, s.b, s.c
-		f.kind, f.node_idx, f.si = .Struct, cur_node, si
-		f.seen0, f.seen1, f.seen_wide = 0, 0, nil
-		f.target, f.open_at, f.start_fails = rawptr(dest), t.lo, h.fail_count
-		f.fflags, f.parent_fi = open_flags, orig_sf.field_idx
+		f, pok := prepare_frame(h, s, t, .Struct, cur_node, cur_rule, dest, open_flags, orig_sf.field_idx, &opened)
+		if !pok { return s, .Stop }
+		si := &h.plan.structs[tn.struct_idx]; f.si = si
 		return {STREAM_NO_LIMIT, u64(uintptr(raw_data(si.stream_fields))), u64(dest)}, .Next
-
 	case .Slice, .Dynamic, .Array, .Fixed_List:
 		if t.kind != .Array { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "array"}) }
-		if h.budget.depth + 1 > h.budget.max_depth { h.budget.exceeded = {at = t.lo, kind = .Depth}; return s, .Stop }
-		if h.sp == h.room && !stream_frames_grow(h) { h.oom = true; return s, .Stop }
-		h.budget.depth += 1; opened = true
-		ctn := &h.plan.nodes[tn.child]
-		f := &h.frames[h.sp]; h.sp += 1
-		f.a, f.b, f.c = s.a, s.b, s.c
-		f.node_idx, f.rule_idx, f.target = cur_node, cur_rule, rawptr(dest)
-		f.open_at, f.start_fails = t.lo, h.fail_count
-		f.fflags, f.parent_fi = open_flags, orig_sf.field_idx
-		f.count, f.stride, f.seen_wide = 0, u32(ctn.size), nil
-		#partial switch tn.kind {
-		case .Slice:      f.kind, f.data, f.cap = .Slice, nil, 0
-		case .Dynamic:    f.kind, f.data, f.cap = .Dynamic, nil, 0
-		case .Array:      f.kind, f.data, f.cap = .Array, rawptr(dest), tn.count
-		case .Fixed_List: f.kind, f.data, f.cap = .Fixed_List, rawptr(dest), tn.count
-		}
+		fk := Stream_Frame_Kind.Slice if tn.kind == .Slice else (.Dynamic if tn.kind == .Dynamic else (.Array if tn.kind == .Array else .Fixed_List))
+		f, pok := prepare_frame(h, s, t, fk, cur_node, cur_rule, dest, open_flags, orig_sf.field_idx, &opened)
+		if !pok { return s, .Stop }
+		f.stride = u32(h.plan.nodes[tn.child].size)
+		if tn.kind == .Array || tn.kind == .Fixed_List { f.data, f.cap = rawptr(dest), tn.count }
 		return {0, u64(uintptr(&h.plan.elem_fields[tn.elem_field_idx]) + size_of(Stream_Field)), 0}, .Next
-
 	case .Map:
 		if t.kind != .Object { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "object"}) }
 		if h.policy != .Refuse { h.fallback = true; return s, .Stop }
-		if h.budget.depth + 1 > h.budget.max_depth { h.budget.exceeded = {at = t.lo, kind = .Depth}; return s, .Stop }
-		if h.sp == h.room && !stream_frames_grow(h) { h.oom = true; return s, .Stop }
-		ktn := &h.plan.nodes[tn.key_node]
-		vtn := &h.plan.nodes[tn.child]
+		ktn, vtn := &h.plan.nodes[tn.key_node], &h.plan.nodes[tn.child]
 		kbuf, kerr := runtime.mem_alloc(max(ktn.size, 1), ktn.align, h.scratch)
 		vbuf, verr := runtime.mem_alloc(max(vtn.size, 1), vtn.align, h.scratch)
 		if kerr != nil || verr != nil {
@@ -2055,190 +1726,35 @@ stream_indirect :: #force_no_inline proc "contextless" (
 			if raw_data(vbuf) != nil { runtime.mem_free(raw_data(vbuf), h.scratch) }
 			h.oom = true; return s, .Stop
 		}
-		h.budget.depth += 1; opened = true
+		f, pok := prepare_frame(h, s, t, .Map, cur_node, cur_rule, dest, open_flags, orig_sf.field_idx, &opened)
+		if !pok { runtime.mem_free(raw_data(kbuf), h.scratch); runtime.mem_free(raw_data(vbuf), h.scratch); return s, .Stop }
 		(^runtime.Raw_Map)(dest).allocator = h.allocator
-		f := &h.frames[h.sp]; h.sp += 1
-		f.a, f.b, f.c = s.a, s.b, s.c
-		f.kind, f.node_idx, f.rule_idx, f.target = .Map, cur_node, cur_rule, rawptr(dest)
-		f.data, f.val_buf, f.count = raw_data(kbuf), raw_data(vbuf), 0
-		f.open_at, f.start_fails = t.lo, h.fail_count
-		f.fflags, f.parent_fi, f.seen_wide = open_flags, orig_sf.field_idx, nil
+		f.data, f.val_buf = raw_data(kbuf), raw_data(vbuf)
 		return {0, u64(uintptr(&h.plan.elem_fields[tn.elem_field_idx]) + size_of(Stream_Field)), 0}, .Next
-
-	case .String, .Email:
-		if t.kind != .String { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "string"}) }
-		return stream_string_decoded(h, s, t, &eff_sf, dest)
-
-	case .Cstring:
-		if t.kind == .Null {
-			if not_null { _ = stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = "string"}, sf = orig_sf) }
-		} else if t.kind != .String {
-			return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "string"})
-		} else {
-			buf: [256]u8 = ---
-			text, owned, ok := stream_decode_token_text(h, t, buf[:])
-			if !ok { return s, .Stop }
-			defer if owned { delete(text, h.scratch) }
-			rule_ok := cur_rule <= 0 || stream_check_string(h, &eff_sf, text, t.spelling & tape.SPELLING_ASCII != 0 && !owned, t.lo)
-			if rule_ok && (h.first.kind == .None || h.has_val) {
-				cs, cerr := strings.clone_to_cstring(text, h.allocator)
-				if cerr != nil { h.oom = true; return s, .Stop }
-				(^cstring)(dest)^ = cs
-				h.wrote_alloc = true
-			}
-		}
-
-	case .Bool, .Bool_Wide:
-		if t.kind != .True && t.kind != .False { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "bool"}) }
-		bv := t.kind == .True
-		if tn.kind == .Bool { (^bool)(dest)^ = bv } else {
-			switch tn.size {
-			case 2: (^b16)(dest)^ = b16(bv)
-			case 4: (^b32)(dest)^ = b32(bv)
-			case 8: (^b64)(dest)^ = b64(bv)
-			}
-		}
-
-	case .I8 ..= .F64:
-		if t.kind != .Number { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = type_name_short(tn.ti)}) }
-		return stream_number_cold(h, s, t, &eff_sf, dest)
-
-	case .Number_Text:
-		if t.kind == .Null {
-			if not_null { _ = stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = "number"}, sf = orig_sf) }
-		} else if t.kind != .Number {
-			return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "number"})
-		} else {
-			nbuf: [64]u8 = ---
-			ns, nown, nok, nf := stream_number_text(h, t, nbuf[:])
-			defer if nown { delete(ns, h.scratch) }
-			if nf {
-				_ = stream_fail(h, .Non_Finite, t.lo, sf = orig_sf)
-			} else if !nok {
-				_ = stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = "number"}, sf = orig_sf)
-			} else {
-				_ = stream_check_num_leaf(h, cur_rule, ns, nil, t.lo, orig_sf)
-				if h.first.kind == .None || h.has_val {
-					cl, cerr := strings.clone(ns, h.allocator)
-					if cerr != nil { h.oom = true; return s, .Stop }
-					(^Number_Text)(dest)^ = {text = cl, value = parse_f64_approx(cl)}
-					h.wrote_alloc = true
-				}
-			}
-		}
-
-	case .Decimal:
-		if t.kind != .Number && t.kind != .String { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "decimal"}) }
-		buf: [256]u8 = ---
-		text: string
-		owned, valid := false, true
-		if t.kind == .String {
-			ok: bool
-			text, owned, ok = stream_decode_token_text(h, t, buf[:])
-			if !ok { return s, .Stop }
-			if !rules.valid_decimal_text(text) { _ = stream_fail(h, .No_Match, t.lo, sf = orig_sf); valid = false }
-			if valid && cur_rule > 0 && !stream_check_string(h, &eff_sf, text, false, t.lo) { valid = false }
-		} else {
-			nok, nf: bool
-			text, owned, nok, nf = stream_number_text(h, t, buf[:])
-			if nf { _ = stream_fail(h, .Non_Finite, t.lo, sf = orig_sf); valid = false } else if !nok {
-				_ = stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = "decimal"}, sf = orig_sf); valid = false
-			}
-		}
-		defer if owned { delete(text, h.scratch) }
-		if valid { _ = stream_check_num_leaf(h, cur_rule, text, nil, t.lo, orig_sf) }
-		if valid && (h.first.kind == .None || h.has_val) {
-			cl, cerr := strings.clone(text, h.allocator)
-			if cerr != nil { h.oom = true; return s, .Stop }
-			(^Decimal)(dest)^ = Decimal{text = cl, value = parse_f64_approx(cl)}
-			h.wrote_alloc = true
-		}
-
-	case .Time:
-		if t.kind != .String { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "date-time"}) }
-		buf: [128]u8 = ---
-		text, owned, ok := stream_decode_token_text(h, t, buf[:])
-		if !ok { return s, .Stop }
-		defer if owned { delete(text, h.scratch) }
-		tm, tk := decode_time(text, false)
-		if tk != .None {
-			_ = stream_fail(h, tk, t.lo, sf = orig_sf)
-		} else {
-			(^time.Time)(dest)^ = tm
-			if cur_rule > 0 {
-				fbuf: [40]u8 = ---
-				if canon, cok := format_rfc3339_utc(tm, &fbuf); cok {
-					_ = stream_check_string(h, &eff_sf, canon, true, t.lo)
-				}
-			}
-		}
-
-	case .Uuid, .Bytes, .Base64, .Hex:
-		want := "uuid" if tn.kind == .Uuid else ("base64" if tn.kind == .Base64 else ("hex" if tn.kind == .Hex else "string"))
-		if t.kind != .String { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = want}) }
-		buf: [256]u8 = ---
-		text, owned, ok := stream_decode_token_text(h, t, buf[:])
-		if !ok { return s, .Stop }
-		defer if owned { delete(text, h.scratch) }
-		rule_ok := cur_rule <= 0 || stream_check_string(h, &eff_sf, text, false, t.lo)
-		ck := Error_Kind.None
-		if tn.kind == .Uuid {
-			id: uuid.Identifier; id, ck = decode_uuid(text); if ck == .None { (^uuid.Identifier)(dest)^ = id }
-		} else if tn.kind == .Hex {
-			hx: Hex; hx, ck = decode_hex(text, h.allocator)
-			if ck == .None { (^Hex)(dest)^ = hx; if len(hx) > 0 { h.wrote_alloc = true } }
-		} else {
-			b64: Base64; b64, ck = decode_base64(text, h.allocator)
-			if ck == .None {
-				if tn.kind == .Bytes { (^[]u8)(dest)^ = ([]u8)(b64) } else { (^Base64)(dest)^ = b64 }
-				if len(b64) > 0 { h.wrote_alloc = true }
-			}
-		}
-		if ck == .No_Memory { h.oom = true; return s, .Stop }
-		if ck != .None && rule_ok { _ = stream_fail(h, ck, t.lo, sf = orig_sf) }
-
-	case .Enum:
-		ei := &h.plan.enums[tn.enum_idx]
-		if ei.by_name {
-			if t.kind != .String { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "string"}) }
-			buf: [128]u8 = ---
-			text, owned, ok := stream_decode_token_text(h, t, buf[:])
-			if !ok { return s, .Stop }
-			defer if owned { delete(text, h.scratch) }
-			found := false
-			for name, i in ei.names { if name == text { store_enum_value(rawptr(dest), tn.size, ei.values[i]); found = true; break } }
-			if !found { _ = stream_fail(h, .Not_A_Member, t.lo, sf = orig_sf) }
-		} else {
-			if t.kind != .Number { return skip_wrong(h, s, t, orig_sf, {type = tn.type, text = "integer"}) }
-			nbuf: [64]u8 = ---
-			ns, nown, nok, nf := stream_number_text(h, t, nbuf[:])
-			defer if nown { delete(ns, h.scratch) }
-			if nf {
-				_ = stream_fail(h, .Non_Finite, t.lo, sf = orig_sf)
-			} else if !nok {
-				_ = stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = "integer"}, sf = orig_sf)
-			} else {
-				d := rules.decimal_of(ns)
-				if !rules.integral(d) {
-					_ = stream_fail(h, .Wrong_Kind, t.lo, "", {type = tn.type, text = "integer"}, sf = orig_sf)
-				} else {
-					found := false
-					if ei.is_unsigned {
-						if !d.neg && rules.decimal_compare(d, rules.decimal_of("18446744073709551615")) <= 0 {
-							uv := decimal_u64(d)
-							for ev in ei.values { if u64(ev) == uv { store_enum_value(rawptr(dest), tn.size, i64(uv)); found = true; break } }
-						}
-					} else if iv, fits := rules.decimal_i64(d); fits {
-						for ev in ei.values { if ev == iv { store_enum_value(rawptr(dest), tn.size, iv); found = true; break } }
-					}
-					if !found { _ = stream_fail(h, .Not_A_Member, t.lo, sf = orig_sf) }
-				}
-			}
-		}
 	}
 
+	env := stream_scalar_env(h, orig_sf)
+	buf: [256]u8 = ---
+	sk := Scalar_Kind.Wrong
+	text, owned := "", false
+	#partial switch t.kind {
+	case .Null:  sk = .Null
+	case .True:  sk = .True
+	case .False: sk = .False
+	case .String:
+		dok: bool; text, owned, dok = stream_decode_token_text(h, t, buf[:])
+		if !dok { return s, .Stop }
+		sk = .String
+	case .Number:
+		nok, nf: bool; text, owned, nok, nf = stream_number_text(h, t, buf[:64])
+		sk = .Non_Finite if nf else (.Number if nok else .Wrong)
+	}
+	defer if owned { delete(text, h.scratch) }
+	ok := decode_scalar_common(&env, tn, rawptr(dest), cur_rule, not_null, t.lo, sk, text)
+	h.wrote_alloc ||= env.wrote
 	if stream_stopped(h) { return s, .Stop }
-	if .Has_After in orig_sf.flags {
+	if !ok && (t.kind == .Object || t.kind == .Array) { return stream_skip_container(h, s, t) }
+	if ok && .Has_After in orig_sf.flags {
 		if !stream_run_field_after(h, orig_sf, orig_dest, t.lo) { return s, .Stop }
 	}
 	if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, s) }
