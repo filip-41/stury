@@ -42,16 +42,20 @@ commit :: proc(
 	spec: Maybe(Spec) = nil,
 	opts := Edit_Options{},
 	allocator := context.allocator,
+	yaml_opts := tape.Yaml_Options{},
 ) -> (
 	res: Commit_Result,
 	err: Edit_Error,
 ) {
+	if yaml_opts.dialect > max(tape.Yaml_Dialect) {
+		return {}, tape.Bad_Option{"format"}
+	}
 	resolved := resolve_edit_spec(ov, spec, opts)
 	depth_budget := u32(tape.DEFAULT_DEPTH)
 	if ov != nil && ov.base != nil {
 		depth_budget = max(u32(tape.DEFAULT_DEPTH), u32(len(ov.base.nodes) + 64))
 	}
-	ctx := Yaml_Edit_Ctx{spec = resolved, depth = depth_budget}
+	ctx := Yaml_Edit_Ctx{spec = resolved, depth = depth_budget, yaml_opts = yaml_opts}
 	fast, target, fast_res, gerr := edit.commit_guard(ov, as(resolved), opts, true, yaml_edit_validate, &ctx, allocator)
 	if gerr != nil {
 		return {}, gerr
@@ -69,15 +73,16 @@ commit :: proc(
 	}
 
 	cx := Cx {
-		ov      = ov,
-		doc     = ov.base,
-		src     = ov.base.src,
-		a       = scratch,
-		spec    = resolved,
-		opts    = opts,
-		eol     = edit.detect_eol(ov.base.src),
-		step    = -1,
-		seq_off = -1,
+		ov        = ov,
+		doc       = ov.base,
+		src       = ov.base.src,
+		a         = scratch,
+		spec      = resolved,
+		opts      = opts,
+		yaml_opts = yaml_opts,
+		eol       = edit.detect_eol(ov.base.src),
+		step      = -1,
+		seq_off   = -1,
 	}
 	cx.splices = make([dynamic]edit.Splice, 0, max(8, xar.len(ov.nodes.items)), scratch) or_return
 	cx.seen = make(map[u64]struct{}, 16, scratch) or_return
@@ -125,7 +130,7 @@ commit :: proc(
 	}
 
 	// Validate edited output cleanly.
-	val_opts := Options{budget = {depth = ctx.depth}}
+	val_opts := Options{budget = {depth = ctx.depth}, format = yaml_opts}
 	need_full := target != cx.doc.format || len(recs) == 0
 	if !need_full {
 		for rec in recs {
@@ -183,13 +188,14 @@ commit_as :: proc(
 	spec: Spec,
 	opts := Edit_Options{},
 	allocator := context.allocator,
+	yaml_opts := tape.Yaml_Options{},
 ) -> (
 	res: Commit_Result,
 	err: Edit_Error,
 ) {
 	o := opts
 	o.target = as(spec)
-	return commit(ov, spec, o, allocator)
+	return commit(ov, spec, o, allocator, yaml_opts)
 }
 
 commit_document :: proc(
@@ -197,13 +203,17 @@ commit_document :: proc(
 	spec: Maybe(Spec) = nil,
 	opts := Edit_Options{},
 	allocator := context.allocator,
+	yaml_opts := tape.Yaml_Options{},
 ) -> (
 	doc: tape.Document,
 	res: Commit_Result,
 	err: Edit_Error,
 ) {
+	if yaml_opts.dialect > max(tape.Yaml_Dialect) {
+		return {}, {}, tape.Bad_Option{"format"}
+	}
 	resolved := resolve_edit_spec(ov, spec, opts)
-	res = commit(ov, resolved, opts, allocator) or_return
+	res = commit(ov, resolved, opts, allocator, yaml_opts) or_return
 	defer if err != nil {
 		edit.destroy_commit_result(&res)
 	}
@@ -211,7 +221,7 @@ commit_document :: proc(
 	if ov != nil && ov.base != nil {
 		depth_budget = max(u32(tape.DEFAULT_DEPTH), u32(len(ov.base.nodes) + 64))
 	}
-	ctx := Yaml_Edit_Ctx{spec = resolved, depth = depth_budget}
+	ctx := Yaml_Edit_Ctx{spec = resolved, depth = depth_budget, yaml_opts = yaml_opts}
 	eff_opts := opts
 	eff_opts.target = as(resolved)
 	doc = edit.splice_document(ov.base, &res, eff_opts, yaml_walk_fragment_cb, &ctx, yaml_full_build_cb, &ctx, allocator) or_return
@@ -223,6 +233,7 @@ commit_document_as :: proc(
 	spec: Spec,
 	opts := Edit_Options{},
 	allocator := context.allocator,
+	yaml_opts := tape.Yaml_Options{},
 ) -> (
 	doc: tape.Document,
 	res: Commit_Result,
@@ -230,7 +241,7 @@ commit_document_as :: proc(
 ) {
 	o := opts
 	o.target = as(spec)
-	return commit_document(ov, spec, o, allocator)
+	return commit_document(ov, spec, o, allocator, yaml_opts)
 }
 
 // Walks `src[range.lo:range.hi]` as a standalone YAML value and shifts offsets by `range.lo`.
@@ -240,12 +251,13 @@ walk_fragment :: proc(
 	ctx: edit.Fragment_Context,
 	spec := Spec.Yaml_1_2,
 	allocator := context.allocator,
+	yaml_opts := tape.Yaml_Options{},
 ) -> (
 	ft: edit.Fragment_Tape,
 	err: tape.Error,
 ) {
 	_ = ctx
-	d := build(src[range.lo:range.hi], spec, {}, allocator) or_return
+	d := build(src[range.lo:range.hi], spec, {format = yaml_opts}, allocator) or_return
 	ft_out, aerr := edit.shift_fragment_tape(&d, range.lo, 0, 0, allocator)
 	if aerr != nil {
 		return ft_out, aerr
@@ -257,8 +269,9 @@ walk_fragment :: proc(
 
 @(private = "file")
 Yaml_Edit_Ctx :: struct {
-	spec:  Spec,
-	depth: u32,
+	spec:      Spec,
+	depth:     u32,
+	yaml_opts: tape.Yaml_Options,
 }
 
 @(private = "file")
@@ -292,19 +305,19 @@ yaml_walk_fragment_cb :: proc(
 	allocator: runtime.Allocator,
 ) -> (edit.Fragment_Tape, tape.Error) {
 	yc := (^Yaml_Edit_Ctx)(data)
-	return walk_fragment(src, range, ctx, yc.spec, allocator)
+	return walk_fragment(src, range, ctx, yc.spec, allocator, yc.yaml_opts)
 }
 
 @(private = "file")
 yaml_full_build_cb :: proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> (tape.Document, tape.Error) {
 	yc := (^Yaml_Edit_Ctx)(data)
-	return build(src, yc.spec, {budget = {depth = yc.depth}}, allocator)
+	return build(src, yc.spec, {budget = {depth = yc.depth}, format = yc.yaml_opts}, allocator)
 }
 
 @(private = "file")
 yaml_edit_validate :: proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> tape.Error {
 	yc := (^Yaml_Edit_Ctx)(data)
-	return validate(src, yc.spec, {budget = {depth = yc.depth}}, allocator)
+	return validate(src, yc.spec, {budget = {depth = yc.depth}, format = yc.yaml_opts}, allocator)
 }
 
 @(private = "file")
@@ -474,13 +487,14 @@ Text_Shape :: struct {
 
 @(private = "file")
 Cx :: struct {
-	ov:       ^Overlay,
-	doc:      ^tape.Document,
-	src:      []u8,
-	a:        runtime.Allocator,
-	spec:     Spec,
-	opts:     Edit_Options,
-	eol:      string,
+	ov:        ^Overlay,
+	doc:       ^tape.Document,
+	src:       []u8,
+	a:         runtime.Allocator,
+	spec:      Spec,
+	opts:      Edit_Options,
+	yaml_opts: tape.Yaml_Options,
+	eol:       string,
 	parent:   []u32,
 	last:     []u32,
 	lo, hi:   []u64,
@@ -718,7 +732,7 @@ mark_frozen :: proc(cx: ^Cx) -> Edit_Error {
 	nodes := doc.nodes
 	cx.frozen = make([]Frozen_Kind, len(nodes), cx.a) or_return
 
-	if doc.format == &FORMATS[.Yaml_Merge] && holds_merge_key(cx.src, cx.a, max(u32(tape.DEFAULT_DEPTH), u32(len(nodes) + 64))) {
+	if doc.format == &FORMATS[.Yaml_Merge] && holds_merge_key(cx.src, cx.a, max(u32(tape.DEFAULT_DEPTH), u32(len(nodes) + 64)), cx.yaml_opts) {
 		for &fz in cx.frozen {
 			fz = .Merged
 		}
@@ -837,7 +851,7 @@ mark_frozen :: proc(cx: ^Cx) -> Edit_Error {
 }
 
 @(private = "file")
-holds_merge_key :: proc(src: []u8, allocator: runtime.Allocator, depth_budget: u32) -> bool {
+holds_merge_key :: proc(src: []u8, allocator: runtime.Allocator, depth_budget: u32, yaml_opts: tape.Yaml_Options) -> bool {
 	if !bytes.contains(src, transmute([]u8)string("<<")) {
 		return false
 	}
@@ -856,7 +870,7 @@ holds_merge_key :: proc(src: []u8, allocator: runtime.Allocator, depth_budget: u
 	}
 	regs: hook.Regs
 	ctx := context
-	_, _, _ = walk_text(src, .Yaml_1_2, false, {budget = {depth = depth_budget}}, &seek, &regs, allocator, &ctx, on, 0, allow_empty = true, check_tail = false, allow_complex = true)
+	_, _, _ = walk_text(src, .Yaml_1_2, false, {budget = {depth = depth_budget}, format = yaml_opts}, &seek, &regs, allocator, &ctx, on, 0, allow_empty = true, check_tail = false, allow_complex = true)
 	return seek.found
 }
 
@@ -1084,7 +1098,7 @@ apply_replace :: proc(cx: ^Cx, h: Handle, n: ^edit.Edit_Node) -> Edit_Error {
 	if n.val.kind == .Raw {
 		is_raw = true
 		raw_text = transmute([]u8)n.val.text
-		validate_raw_value(raw_text, cx.spec, cx.a) or_return
+		validate_raw_value(raw_text, cx.spec, cx.yaml_opts, cx.a) or_return
 	} else {
 		buf := make([dynamic]u8, 0, 64, cx.a) or_return
 		spell_overlay_value(cx, h, n, style, &buf) or_return
@@ -1175,11 +1189,11 @@ extract_fact_override :: proc "contextless" (n: ^edit.Edit_Node, kind: tape.Fact
 }
 
 @(private = "file")
-validate_raw_value :: proc(raw: []u8, spec: Spec, a: runtime.Allocator) -> Edit_Error {
+validate_raw_value :: proc(raw: []u8, spec: Spec, yaml_opts: tape.Yaml_Options, a: runtime.Allocator) -> Edit_Error {
 	if len(raw) == 0 || kernel.is_ws(raw[0]) || raw[0] == '#' || raw[0] == '%' || holds_marker(raw) {
 		return edit.refuse(.Unspellable_Value, "invalid raw YAML value")
 	}
-	doc, val, _, err := build_value(raw, spec, a)
+	doc, val, _, err := build_value(raw, spec, yaml_opts, a)
 	defer tape.destroy_document(&doc)
 	if err != nil {
 		return edit.refuse(.Unspellable_Value, "raw YAML value failed parse")
@@ -1194,14 +1208,14 @@ validate_raw_value :: proc(raw: []u8, spec: Spec, a: runtime.Allocator) -> Edit_
 }
 
 @(private = "file")
-build_value :: proc(src: []u8, spec: Spec, a: runtime.Allocator) -> (doc: tape.Document, value: tape.Node_Index, offset: u64, err: tape.Error) {
+build_value :: proc(src: []u8, spec: Spec, yaml_opts: tape.Yaml_Options, a: runtime.Allocator) -> (doc: tape.Document, value: tape.Node_Index, offset: u64, err: tape.Error) {
 	text := src
 	anchors := make([dynamic]u8, 0, 64, a) or_return
 	handles := make([dynamic]u8, 0, 64, a) or_return
 	named := 0
 	NAMES_MAX :: 64
 	for tries := 0; ; tries += 1 {
-		doc, err = build(text, spec, {}, a)
+		doc, err = build(text, spec, {format = yaml_opts}, a)
 		if err == nil {
 			if named > 0 {
 				value, _ = tape.element(tape.Reader{doc = &doc}, tape.ROOT, named)
@@ -1336,7 +1350,7 @@ spell_overlay_value :: proc(
 	if style == "flow" {
 		step_ind = 0
 	}
-	encoded, _, werr := write(&tmp_doc, cx.spec, {indent = step_ind}, cx.a)
+	encoded, _, werr := write(&tmp_doc, cx.spec, {indent = step_ind, format = cx.yaml_opts}, cx.a)
 	if werr != nil {
 		return convert_write_error(werr)
 	}
@@ -1451,7 +1465,7 @@ shape_text :: proc(cx: ^Cx, t: []u8) -> Text_Shape {
 	if nl < 0 && !may_be_block(t) {
 		return {form = .Inline}
 	}
-	doc, value, offset, err := build_value(t, cx.spec, cx.a)
+	doc, value, offset, err := build_value(t, cx.spec, cx.yaml_opts, cx.a)
 	defer tape.destroy_document(&doc)
 	if err != nil {
 		return {form = .Inline if nl < 0 else .Lines}
@@ -1582,7 +1596,7 @@ flow_text :: proc(cx: ^Cx, at: u32, t: []u8, sh: Text_Shape) -> (out: []u8, err:
 			return t, nil
 		}
 	}
-	doc, berr := build(t, cx.spec, {}, cx.a)
+	doc, berr := build(t, cx.spec, {format = cx.yaml_opts}, cx.a)
 	defer tape.destroy_document(&doc)
 	if berr != nil {
 		return t, nil
@@ -1594,7 +1608,7 @@ flow_text :: proc(cx: ^Cx, at: u32, t: []u8, sh: Text_Shape) -> (out: []u8, err:
 			return spelled, nil
 		}
 	}
-	text, _, werr := write(&doc, cx.spec, {}, cx.a)
+	text, _, werr := write(&doc, cx.spec, {format = cx.yaml_opts}, cx.a)
 	if werr != nil {
 		return t, nil
 	}
@@ -1624,7 +1638,7 @@ pair_text :: proc(cx: ^Cx, v: u32, t: []u8) -> (inner_out: []u8, ok: bool, err: 
 	if cx.doc.nodes[v].kind != .Object || cx.flags[v] & {.Flow, .Bracket} != {.Flow} {
 		return nil, false, nil
 	}
-	pair, perr := build(t, cx.spec, {}, cx.a)
+	pair, perr := build(t, cx.spec, {format = cx.yaml_opts}, cx.a)
 	defer tape.destroy_document(&pair)
 	if perr != nil || pair.nodes[tape.ROOT].kind != .Object || tape.child_count(&pair, tape.ROOT, pair.nodes[tape.ROOT]) != 1 {
 		return nil, false, nil
@@ -1637,15 +1651,15 @@ pair_text :: proc(cx: ^Cx, v: u32, t: []u8) -> (inner_out: []u8, ok: bool, err: 
 	append(&wrapped, '[') or_return
 	append(&wrapped, ..inner) or_return
 	append(&wrapped, ']') or_return
-	seq, serr := build(wrapped[:], cx.spec, {}, cx.a)
+	seq, serr := build(wrapped[:], cx.spec, {format = cx.yaml_opts}, cx.a)
 	defer tape.destroy_document(&seq)
 	if serr != nil || tape.child_count(&seq, tape.ROOT, seq.nodes[tape.ROOT]) != 1 {
 		return nil, false, nil
 	}
 	first, _ := tape.element(tape.Reader{doc = &seq}, tape.ROOT, 0)
 	// Confirm structurally identical via canonical compact YAML output comparison.
-	pa, _, ea := write(&pair, cx.spec, {}, cx.a)
-	pb, _, eb := write(&seq, cx.spec, {node = first}, cx.a)
+	pa, _, ea := write(&pair, cx.spec, {format = cx.yaml_opts}, cx.a)
+	pb, _, eb := write(&seq, cx.spec, {node = first, format = cx.yaml_opts}, cx.a)
 	defer {
 		delete(pa, cx.a)
 		delete(pb, cx.a)
@@ -2017,7 +2031,7 @@ spell_inserted_value :: proc(cx: ^Cx, ins_h: Handle) -> (out: []u8, err: Edit_Er
 	}
 	if cn.state == .Replaced && cn.val.kind == .Raw {
 		raw := transmute([]u8)cn.val.text
-		validate_raw_value(raw, cx.spec, cx.a) or_return
+		validate_raw_value(raw, cx.spec, cx.yaml_opts, cx.a) or_return
 		return raw, nil
 	}
 	b := make([dynamic]u8, 0, 64, cx.a) or_return
@@ -2716,7 +2730,7 @@ emit_yaml_reflow :: proc(cx: ^Cx, h: Handle, c: u32) -> Edit_Error {
 
 	// Reconstruct block/flow YAML via `yaml.write`.
 	step_ind := u8(cx.opts.indent) if cx.opts.indent > 0 else 2
-	encoded, dropped, werr := write(&tmp_doc, cx.spec, {indent = step_ind}, cx.a)
+	encoded, dropped, werr := write(&tmp_doc, cx.spec, {indent = step_ind, format = cx.yaml_opts}, cx.a)
 	if werr != nil {
 		return convert_write_error(werr)
 	}
@@ -2764,12 +2778,12 @@ reflow_fallback :: proc(cx: ^Cx, target: ^tape.Format, allocator: runtime.Alloca
 	defer tape.destroy_document(&tmp_doc)
 
 	step_ind := u8(cx.opts.indent) if cx.opts.indent > 0 else 2
-	encoded, dropped, werr := write(&tmp_doc, cx.spec, {indent = step_ind}, allocator)
+	encoded, dropped, werr := write(&tmp_doc, cx.spec, {indent = step_ind, format = cx.yaml_opts}, allocator)
 	if werr != nil {
 		return {}, convert_write_error(werr)
 	}
 	depth_budget := max(u32(tape.DEFAULT_DEPTH), u32(len(cx.doc.nodes) + 64))
-	if verr := validate(encoded, cx.spec, {budget = {depth = depth_budget}}, allocator); verr != nil {
+	if verr := validate(encoded, cx.spec, {budget = {depth = depth_budget}, format = cx.yaml_opts}, allocator); verr != nil {
 		delete(encoded, allocator)
 		return {}, convert_tape_error(verr)
 	}

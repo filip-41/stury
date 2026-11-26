@@ -30,6 +30,8 @@ Budget_Kind :: tape.Budget_Kind
 Pieces :: tape.Pieces
 Read_Options :: tape.Read_Options
 Duplicates :: tape.Duplicates
+Yaml_Dialect :: tape.Yaml_Dialect
+Yaml_Options :: tape.Yaml_Options
 
 // Paths and the demand of a scan.
 Step :: tape.Step

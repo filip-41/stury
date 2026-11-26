@@ -67,6 +67,7 @@ Options :: struct {
 Format_Options :: union {
 	Dsv_Options,
 	Xml_Options,
+	Yaml_Options,
 }
 
 // The family of `Format_Options` a format's reads take, `.None` for a format with no options of its own.
@@ -74,6 +75,7 @@ Options_Family :: enum u8 {
 	None,
 	Dsv,
 	Xml,
+	Yaml,
 }
 
 // `Bad_Option{"format"}` when `opts.format` holds the options of a family other than `f`'s, and
@@ -84,11 +86,16 @@ options_refused :: #force_inline proc "contextless" (f: ^Format, opts: Options) 
 	if opts.tolerate & f.refuses != {} {
 		return Bad_Option{"tolerate"}
 	}
-	switch _ in opts.format {
+	switch o in opts.format {
 	case Dsv_Options:
 		family = .Dsv
 	case Xml_Options:
 		family = .Xml
+	case Yaml_Options:
+		if o.dialect > max(Yaml_Dialect) {
+			return Bad_Option{"format"}
+		}
+		family = .Yaml
 	case nil:
 		return nil
 	}
@@ -110,6 +117,30 @@ Xml_Options :: struct {
 	// An element's text that is `true`, `false` or a JSON number, with no reference or markup in it, reads as that
 	// value, where any other text is a string.
 	infer: bool,
+}
+
+// Which YAML 1.2 standard schema resolves untagged plain scalars and validates explicit schema tags:
+// - `.Core` (default, YAML 1.2 §10.3): full Core Schema (`null`/`Null`/`NULL`/`~`/empty -> `.Null`;
+//   `true`/`True`/`TRUE`/`false`/`False`/`FALSE` -> `.True`/`.False`; decimal, `+`-prefixed, leading-zero,
+//   `.5`/`5.`, `0o` octal, `0x` hex, `.inf`/`.nan` -> `.Number`; everything else -> `.String`).
+// - `.Json` (YAML 1.2 §10.2 practical JSON Schema): only lowercase `null`, lowercase `true`/`false`, and strict
+//   RFC 8259 JSON numbers (`-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?` — no leading `+`, no leading zeros,
+//   no `0x`/`0o`, no `.inf`/`.nan`, no `.5` or `5.`) resolve to non-string scalars; `~`, `Null`, `NULL`, `True`,
+//   `False`, `0x10`, `0o10`, `+1`, `.5`, `.inf`, `.nan`, empty plain scalars, and any other plain scalar stay
+//   `.String`. Explicit `!!null`, `!!bool`, `!!int`, and `!!float` tags validate strictly against JSON Schema
+//   lexical rules.
+// - `.Failsafe` (YAML 1.2 §10.1 Failsafe Schema): every untagged scalar (including `null`, `~`, `true`, `false`,
+//   numbers, and empty plain scalars) resolves to `.String`; explicit `!!str` is accepted and non-failsafe tags
+//   are kept as generic tags with `.String` values (zero implicit coercion).
+Yaml_Dialect :: enum u8 {
+	Core,
+	Json,
+	Failsafe,
+}
+
+// The options of a YAML text. They change how scalars resolve during reads, so a document records none of them.
+Yaml_Options :: struct {
+	dialect: Yaml_Dialect,
 }
 
 // A spec of a format (e.g. JSON, JSONC and JSON5 are three), in rodata, holding what a document of it needs to be

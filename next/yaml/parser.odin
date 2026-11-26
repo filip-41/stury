@@ -103,6 +103,7 @@ Parser_State :: struct {
 	replaying:          bool,
 	needs_log:          bool,
 	resolve_scalars:    bool,
+	dialect:            tape.Yaml_Dialect,
 	merge_keys:         bool,
 	allow_complex_keys: bool,
 	holding:            bool,
@@ -128,6 +129,7 @@ parser_init :: proc(
 	allow_complex_keys: bool,
 	needs_log: bool,
 	resolve_scalars: bool,
+	dialect: tape.Yaml_Dialect,
 	scratch: runtime.Allocator,
 	sink: Token_Sink,
 	sink_data: rawptr,
@@ -140,6 +142,7 @@ parser_init :: proc(
 	p.allow_complex_keys = allow_complex_keys
 	p.needs_log = needs_log
 	p.resolve_scalars = resolve_scalars
+	p.dialect = dialect
 	p.scratch = scratch
 	p.sink = sink
 	p.sink_data = sink_data
@@ -409,25 +412,40 @@ emit_raw :: proc(p: ^Parser, tok_in: tape.Token) -> bool #no_bounds_check {
 		if p.resolve_scalars {
 			if p.tag.n == 0 && t.spelling & tape.SPELLING_DECODE == 0 {
 				if t.kind == .Plain {
-					if t.n == 0 || RESOLVABLE_LEAD[p.src[t.lo]] {
-						t = resolve_plain_fast(p, t)
+					if p.dialect == .Core {
+						if t.n == 0 || RESOLVABLE_LEAD[p.src[t.lo]] {
+							t = resolve_plain_fast(p, t)
+						} else {
+							t.kind = .String
+						}
+					} else if p.dialect == .Json {
+						t = resolve_plain_json_fast(p, t)
 					} else {
 						t.kind = .String
 					}
 				}
 			} else if t.kind == .Plain || t.kind == .String {
+				if p.dialect == .Failsafe {
+					p.tag.n = 0
+					t.kind = .String
+				} else {
+					resolved, ok := resolve_emitted_scalar(p, t)
+					if !ok {
+						return false
+					}
+					t = resolved
+				}
+			}
+		} else if p.tag.n != 0 && (t.kind == .Plain || t.kind == .String) {
+			if p.dialect == .Failsafe {
+				p.tag.n = 0
+			} else {
 				resolved, ok := resolve_emitted_scalar(p, t)
 				if !ok {
 					return false
 				}
 				t = resolved
 			}
-		} else if p.tag.n != 0 && (t.kind == .Plain || t.kind == .String) {
-			resolved, ok := resolve_emitted_scalar(p, t)
-			if !ok {
-				return false
-			}
-			t = resolved
 		}
 	}
 	if t.role == .Key && merge_starts(p, t) {
@@ -575,11 +593,57 @@ resolve_plain_fast :: #force_inline proc "contextless" (p: ^Parser, t_in: tape.T
 	return t
 }
 
-// Resolves scalar `t_in` (`.Plain` or `.String` before resolution) against any pending `p.tag` and the YAML 1.2 Core
-// Schema into its final typed `tape.Token` (`.Null`, `.False`, `.True`, `.Number`, `.Bytes`, or `.String`) and spelling.
+// Fast untagged plain-scalar resolver for `Yaml_Dialect.Json` (YAML 1.2 §10.2 practical JSON Schema): only lowercase
+// `null`, lowercase `true`/`false`, and strict RFC 8259 JSON numbers resolve to non-string scalars.
+@(private = "file")
+resolve_plain_json_fast :: #force_inline proc "contextless" (p: ^Parser, t_in: tape.Token) -> tape.Token #no_bounds_check {
+	t := t_in
+	if t_in.n == 0 {
+		t.kind = .String
+		return t
+	}
+	span := p.src[t_in.lo:][:t_in.n]
+	class, _, int_d, frac_d, has_exp := classify_json_lexical(span)
+	#partial switch class {
+	case .Null:
+		t.kind = .Null
+		if t.role == .Key {
+			t.spelling |= tape.SPELLING_DECODE
+		}
+	case .True:
+		t.kind = .True
+		if t.role == .Key {
+			t.spelling |= tape.SPELLING_DECODE
+		}
+	case .False:
+		t.kind = .False
+		if t.role == .Key {
+			t.spelling |= tape.SPELLING_DECODE
+		}
+	case .Decimal:
+		t.kind = .Number
+		sp := tape.number_spelling(u16(Number_Spelling.Plain), int_d, frac_d)
+		if has_exp {
+			sp |= tape.NUMBER_EXP
+		}
+		t.spelling = sp
+	case .Text:
+		t.kind = .String
+	}
+	return t
+}
+
+// Resolves scalar `t_in` (`.Plain` or `.String` before resolution) against any pending `p.tag` and the active YAML 1.2
+// schema dialect (`p.dialect`) into its final typed `tape.Token` (`.Null`, `.False`, `.True`, `.Number`, `.Bytes`, or
+// `.String`) and spelling.
 @(private)
 resolve_emitted_scalar :: proc(p: ^Parser, t_in: tape.Token) -> (t: tape.Token, ok: bool) #no_bounds_check {
 	t = t_in
+	if p.dialect == .Failsafe {
+		p.tag.n = 0
+		t.kind = .String
+		return t, true
+	}
 	ct := Core_Type.None
 	has_tag := p.tag.n != 0
 	if has_tag {
@@ -648,7 +712,15 @@ resolve_emitted_scalar :: proc(p: ^Parser, t_in: tape.Token) -> (t: tape.Token, 
 		return t, true
 	}
 
-	class, integer, strict, int_d, frac_d, has_exp, has_point := classify_number_lexical(text)
+	class: Class
+	integer, strict, has_exp, has_point: bool
+	int_d, frac_d: u64
+	if p.dialect == .Core {
+		class, integer, strict, int_d, frac_d, has_exp, has_point = classify_number_lexical(text)
+	} else {
+		class, integer, int_d, frac_d, has_exp = classify_json_lexical(text)
+		strict = true
+	}
 	if ct != .None {
 		if !holds(ct, class, integer) {
 			return t, fault(p, fault_at, .Bad_Char, .Tag_Mismatch)

@@ -145,7 +145,7 @@ validate_stream :: proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Op
 	}
 	sink: Token_Sink = walk_sink(hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS, hook.no_hook) when LAX else nil
 	sink_data: rawptr = &w when LAX else nil
-	parser_init(&w.p, src, opts.budget.depth, opts.budget.expansion, S == .Yaml_Merge && sink != nil, true, LAX, false, scratch, sink, sink_data)
+	parser_init(&w.p, src, opts.budget.depth, opts.budget.expansion, S == .Yaml_Merge && sink != nil, true, LAX, false, dialect_of(opts), scratch, sink, sink_data)
 	defer parser_destroy(&w.p)
 	w.p.pos = u64(spell_bom(src))
 	w.p.ls = w.p.pos
@@ -209,7 +209,7 @@ walk_text :: proc "contextless" (
 	}
 	sink: Token_Sink = walk_sink(H, LAX, C, on) if H != hook.No_Hooks else (walk_sink(H, LAX, C, on) when LAX else nil)
 	sink_data: rawptr = &w if sink != nil else nil
-	parser_init(&w.p, src, opts.budget.depth, opts.budget.expansion, S == .Yaml_Merge && sink != nil, allow_complex, H != hook.No_Hooks || LAX, H != hook.No_Hooks, scratch, sink, sink_data)
+	parser_init(&w.p, src, opts.budget.depth, opts.budget.expansion, S == .Yaml_Merge && sink != nil, allow_complex, H != hook.No_Hooks || LAX, H != hook.No_Hooks, dialect_of(opts), scratch, sink, sink_data)
 	defer parser_destroy(&w.p)
 	w.p.pos = lo
 	if lo == 0 {

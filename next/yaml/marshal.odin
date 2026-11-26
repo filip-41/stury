@@ -26,9 +26,10 @@ marshal :: proc(value: ^$T, spec := Spec.Yaml_1_2, opts := Write_Options{}, plan
 	}
 	write_check(u8(spec), opts) or_return
 	sw := Stream_Writer {
-		pretty = !write.compact(opts),
-		step   = int(opts.indent) if opts.indent > 0 else 2,
-		opts   = opts,
+		pretty  = !write.compact(opts),
+		step    = int(opts.indent) if opts.indent > 0 else 2,
+		opts    = opts,
+		dialect = write_dialect(opts),
 	}
 	sw.extra.allocator = allocator
 	defer delete(sw.extra)
@@ -62,9 +63,10 @@ marshal_to :: proc(sink: io.Writer, value: ^$T, spec := Spec.Yaml_1_2, opts := W
 	}
 	write_check(u8(spec), opts) or_return
 	sw := Stream_Writer {
-		pretty = !write.compact(opts),
-		step   = int(opts.indent) if opts.indent > 0 else 2,
-		opts   = opts,
+		pretty  = !write.compact(opts),
+		step    = int(opts.indent) if opts.indent > 0 else 2,
+		opts    = opts,
+		dialect = write_dialect(opts),
 	}
 	sw.extra.allocator = allocator
 	defer delete(sw.extra)
@@ -128,6 +130,7 @@ Stream_Frame :: struct {
 Stream_Writer :: struct {
 	out:      write.Out,
 	opts:     Write_Options,
+	dialect:  tape.Yaml_Dialect,
 	pretty:   bool,
 	step:     int,
 	frames:   [64]Stream_Frame,
@@ -190,6 +193,9 @@ stream_key_write :: #force_inline proc(sw: ^Stream_Writer, key: string, flow: bo
 
 @(private = "file")
 stream_scalar_write :: #force_inline proc(sw: ^Stream_Writer, kind: Token_Kind, text: string, flow, block: bool, block_ind: int) -> (ended: bool, err: Write_Error) {
+	if sw.dialect == .Failsafe && kind != .String {
+		return false, write.Refused{0, .No_Spelling}
+	}
 	#partial switch kind {
 	case .Null:
 		put_str(&sw.out, "null")
@@ -200,10 +206,19 @@ stream_scalar_write :: #force_inline proc(sw: ^Stream_Writer, kind: Token_Kind, 
 	case .Number:
 		switch text {
 		case "NaN":
+			if sw.dialect == .Json {
+				return false, write.Refused{0, .No_Spelling}
+			}
 			put_str(&sw.out, ".nan")
 		case "Inf", "+Inf":
+			if sw.dialect == .Json {
+				return false, write.Refused{0, .No_Spelling}
+			}
 			put_str(&sw.out, ".inf")
 		case "-Inf":
+			if sw.dialect == .Json {
+				return false, write.Refused{0, .No_Spelling}
+			}
 			put_str(&sw.out, "-.inf")
 		case:
 			put_str(&sw.out, text)

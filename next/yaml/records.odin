@@ -322,6 +322,7 @@ members_open :: proc(r: ^Records, $S: Spec) -> bool {
 			expansion = r.opts.budget.expansion,
 			memory    = r.opts.budget.memory,
 		},
+		format  = r.opts.format,
 		scratch = r.opts.scratch,
 	}
 	doc, err := build_as(r.src, S, false, build_opts, r.tree_allocator)

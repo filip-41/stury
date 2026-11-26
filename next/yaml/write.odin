@@ -36,12 +36,20 @@ write_to :: proc(sink: io.Writer, doc: ^tape.Document, spec := Spec.Yaml_1_2, op
 }
 
 @(private)
+write_dialect :: #force_inline proc "contextless" (opts: Write_Options) -> tape.Yaml_Dialect {
+	y, _ := opts.format.(tape.Yaml_Options)
+	return y.dialect
+}
+
+@(private)
 write_check :: proc "contextless" (spec: u8, opts: Write_Options) -> Write_Error {
 	if spec > u8(max(Spec)) {
 		return tape.Bad_Option{"spec"}
 	}
 	if opts.format != nil {
-		return tape.Bad_Option{"format"}
+		if y, ok := opts.format.(tape.Yaml_Options); !ok || y.dialect > max(tape.Yaml_Dialect) {
+			return tape.Bad_Option{"format"}
+		}
 	}
 	if opts.grow_header || len(opts.header) > 0 {
 		return tape.Bad_Option{"header" if len(opts.header) > 0 else "options"}
@@ -102,6 +110,7 @@ Layout :: struct {
 	w:         write.Tree,
 	out:       ^write.Out,
 	opts:      Write_Options,
+	dialect:   tape.Yaml_Dialect,
 	pretty:    bool,
 	step:      int,
 	own:       bool,
@@ -124,11 +133,12 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 		return {}, e
 	}
 	l := Layout {
-		out    = out,
-		opts   = opts,
-		pretty = !write.compact(opts),
-		step   = int(opts.indent) if opts.indent > 0 else 2,
-		sort   = opts.sort_keys,
+		out     = out,
+		opts    = opts,
+		dialect = write_dialect(opts),
+		pretty  = !write.compact(opts),
+		step    = int(opts.indent) if opts.indent > 0 else 2,
+		sort    = opts.sort_keys,
 	}
 	l.whole = .Held not_in doc.flags
 	l.own = doc.format == &FORMATS[.Yaml_1_2] || doc.format == &FORMATS[.Yaml_Merge]
@@ -467,7 +477,7 @@ put_node_start :: proc(l: ^Layout, node: tape.Node_Index, ctx: Context, ind: int
 		}
 		return put_flow_open(l, node, true)
 	case .Null:
-		if ctx != .Root && l.own && pr.tag == "" && pr.anchor == "" && n.n == 0 && style_of(n.spelling) == .Plain {
+		if l.dialect == .Core && ctx != .Root && l.own && pr.tag == "" && pr.anchor == "" && n.n == 0 && style_of(n.spelling) == .Plain {
 			put_inline_comment(l, node)
 			put_line_end(l)
 			return true
@@ -640,6 +650,9 @@ plain_direct_body :: #force_inline proc(l: ^Layout, node: tape.Node_Index, flow:
 	if s[0] == ' ' || s[len(s) - 1] == ' ' {
 		return nil, false
 	}
+	if l.dialect != .Failsafe && RESOLVABLE_LEAD[s[0]] && classify(s) != .Text {
+		return nil, false
+	}
 	if len(s) >= 3 && (s[0] == '-' && s[1] == '-' && s[2] == '-' || s[0] == '.' && s[1] == '.' && s[2] == '.') {
 		return nil, false
 	}
@@ -677,6 +690,17 @@ put_key :: proc(l: ^Layout, key: tape.Node_Index, flow: bool) -> (explicit, ok: 
 	n := l.w.nodes[key]
 	if n.kind > .Plain {
 		return false, refuse(l, key, .No_Spelling)
+	}
+	if l.dialect == .Failsafe && n.kind != .String && n.kind != .Plain {
+		return false, refuse(l, key, .No_Spelling)
+	}
+	if l.dialect == .Json && n.kind == .Number {
+		if nv, is_num := tape.node_number(l.w.doc, key); is_num && nv.kind == .Float {
+			f := transmute(f64)nv.bits
+			if math.is_nan(f) || math.is_inf(f) {
+				return false, refuse(l, key, .No_Spelling)
+			}
+		}
 	}
 	if n.kind == .Bytes {
 		has_tag := l.own && has_fact(l, key, .Tag)
@@ -759,6 +783,10 @@ put_key :: proc(l: ^Layout, key: tape.Node_Index, flow: bool) -> (explicit, ok: 
 			if number_is_quoted(nk) {
 				keeps = style_of(n.spelling)
 			} else {
+				keeps = .Plain
+			}
+		} else if n.kind == .String && style_of(n.spelling) == .Plain {
+			if l.dialect == .Failsafe || classify(transmute([]u8)text) == .Text {
 				keeps = .Plain
 			}
 		} else {
@@ -872,14 +900,29 @@ put_leaf :: proc(l: ^Layout, node: tape.Node_Index, k: tape.Kind, flow, key: boo
 		}
 		put_scalar(l.out, text, shape, l.opts.ascii)
 	case .Number:
+		if l.dialect == .Failsafe {
+			return false, refuse(l, node, .No_Spelling)
+		}
 		return false, put_number(l, node, flow, ind, tagged)
 	case .True:
+		if l.dialect == .Failsafe {
+			return false, refuse(l, node, .No_Spelling)
+		}
 		put_str(l.out, own_word(l, node, "true"))
 	case .False:
+		if l.dialect == .Failsafe {
+			return false, refuse(l, node, .No_Spelling)
+		}
 		put_str(l.out, own_word(l, node, "false"))
 	case .Null:
+		if l.dialect == .Failsafe {
+			return false, refuse(l, node, .No_Spelling)
+		}
 		put_str(l.out, own_word(l, node, "null"))
 	case .Bytes:
+		if l.dialect == .Failsafe {
+			return false, refuse(l, node, .No_Spelling)
+		}
 		encoded, bok := write.bytes_base64(&l.w, node)
 		if !bok {
 			return false, false
@@ -901,14 +944,14 @@ put_number :: proc(l: ^Layout, at: tape.Node_Index, flow: bool, ind: int, tagged
 	n := l.w.nodes[at]
 	if l.own {
 		nk := Number_Spelling(n.spelling & tape.NUMBER_KIND)
-		if !number_is_quoted(nk) && !number_is_block(nk) && n.spelling & tape.SPELLING_DECODE == 0 {
+		if (l.dialect == .Core || nk == .Plain) && !number_is_quoted(nk) && !number_is_block(nk) && n.spelling & tape.SPELLING_DECODE == 0 {
 			span := tape.span_bytes(doc, n.lo, n.n)
 			if len(span) > 0 {
 				write.put(l.out, span)
 				return true
 			}
 		}
-		if tagged {
+		if tagged && (l.dialect == .Core || nk == .Plain) {
 			text, tok := write.text_of(&l.w, at)
 			if !tok {
 				return false
@@ -935,10 +978,16 @@ put_number :: proc(l: ^Layout, at: tape.Node_Index, flow: bool, ind: int, tagged
 	if nv.kind == .Float {
 		f := transmute(f64)nv.bits
 		if math.is_nan(f) {
+			if l.dialect == .Json {
+				return refuse(l, at, .No_Spelling)
+			}
 			put_str(l.out, ".nan")
 			return true
 		}
 		if math.is_inf(f) {
+			if l.dialect == .Json {
+				return refuse(l, at, .No_Spelling)
+			}
 			put_str(l.out, "-.inf" if f < 0 else ".inf")
 			return true
 		}
@@ -949,7 +998,7 @@ put_number :: proc(l: ^Layout, at: tape.Node_Index, flow: bool, ind: int, tagged
 			style = st
 		}
 	}
-	if (style == "hex" || style == "octal") && (nv.kind == .Uint || nv.kind == .Int && i64(nv.bits) >= 0) {
+	if l.dialect == .Core && (style == "hex" || style == "octal") && (nv.kind == .Uint || nv.kind == .Int && i64(nv.bits) >= 0) {
 		put_str(l.out, "0x" if style == "hex" else "0o")
 		base := 16 if style == "hex" else 8
 		put_str(l.out, strconv.write_bits(buf[:], nv.bits, base, false, 64, "0123456789abcdef", {}))
@@ -972,7 +1021,7 @@ single_quoted_body :: #force_inline proc(l: ^Layout, node: tape.Node_Index) -> (
 		return "", false
 	}
 	n := l.w.nodes[node]
-	if style_of(n.spelling) != .Single || n.spelling & tape.SPELLING_DECODE != 0 {
+	if n.kind != .String || style_of(n.spelling) != .Single || n.spelling & tape.SPELLING_DECODE != 0 {
 		return "", false
 	}
 	if n.spelling & tape.SPELLING_ASCII != 0 {
@@ -983,7 +1032,7 @@ single_quoted_body :: #force_inline proc(l: ^Layout, node: tape.Node_Index) -> (
 
 @(private)
 own_word :: proc(l: ^Layout, node: tape.Node_Index, word: string) -> string {
-	if l.own {
+	if l.own && l.dialect == .Core {
 		n := l.w.nodes[node]
 		if style_of(n.spelling) == .Plain && n.spelling & tape.SPELLING_DECODE == 0 {
 			if span := tape.span_bytes(l.w.doc, n.lo, n.n); len(span) > 0 {

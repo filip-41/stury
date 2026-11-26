@@ -137,6 +137,85 @@ classify_number_lexical :: proc "contextless" (text: []u8) -> (class: Class, int
 	return .Decimal, integer, strict, u64(int_digits), u64(frac_digits), has_e, has_point
 }
 
+// Single-pass lexical YAML 1.2 JSON Schema classifier (`Yaml_Dialect.Json`) with ZERO binary64 conversion:
+// accepts ONLY lowercase `null`, lowercase `true`/`false`, and strict RFC 8259 JSON numbers
+// (`-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`). Everything else (including `~`, `Null`, `True`, `+1`,
+// leading zeros, `.5`, `5.`, `0x...`, `0o...`, `.inf`, `.nan`, and empty text) classifies as `.Text`.
+@(private)
+classify_json_lexical :: proc "contextless" (text: []u8) -> (class: Class, integer: bool, int_d, frac_d: u64, has_exp: bool) #no_bounds_check {
+	n := len(text)
+	if n == 0 {
+		return .Text, false, 0, 0, false
+	}
+	switch text[0] {
+	case 'n':
+		return .Null if n == 4 && string(text) == "null" else .Text, false, 0, 0, false
+	case 't':
+		return .True if n == 4 && string(text) == "true" else .Text, false, 0, 0, false
+	case 'f':
+		return .False if n == 5 && string(text) == "false" else .Text, false, 0, 0, false
+	case '-', '0' ..= '9':
+	case:
+		return .Text, false, 0, 0, false
+	}
+
+	i := 0
+	if text[0] == '-' {
+		i = 1
+		if i >= n {
+			return .Text, false, 0, 0, false
+		}
+	}
+	int_start := i
+	if text[i] == '0' {
+		i += 1
+		if i < n && text[i] >= '0' && text[i] <= '9' {
+			return .Text, false, 0, 0, false
+		}
+	} else if text[i] >= '1' && text[i] <= '9' {
+		i += 1
+		for i < n && text[i] >= '0' && text[i] <= '9' {
+			i += 1
+		}
+	} else {
+		return .Text, false, 0, 0, false
+	}
+	int_digits := i - int_start
+	has_dot := false
+	frac_digits := 0
+	if i < n && text[i] == '.' {
+		has_dot = true
+		i += 1
+		frac_start := i
+		for i < n && text[i] >= '0' && text[i] <= '9' {
+			i += 1
+		}
+		frac_digits = i - frac_start
+		if frac_digits == 0 {
+			return .Text, false, 0, 0, false
+		}
+	}
+	has_e := false
+	if i < n && (text[i] == 'e' || text[i] == 'E') {
+		has_e = true
+		i += 1
+		if i < n && (text[i] == '+' || text[i] == '-') {
+			i += 1
+		}
+		exp_start := i
+		for i < n && text[i] >= '0' && text[i] <= '9' {
+			i += 1
+		}
+		if i == exp_start {
+			return .Text, false, 0, 0, false
+		}
+	}
+	if i != n {
+		return .Text, false, 0, 0, false
+	}
+	return .Decimal, !has_dot && !has_e, u64(int_digits), u64(frac_digits), has_e
+}
+
 // `classify`, returning a `Decimal`'s `spell.Number`, whether the Core Schema reads a `Decimal` as an integer
 // (`[-+]?[0-9]+`), and whether `spell.number_strict` accepts the bytes verbatim (RFC 8259 decimal).
 @(private)

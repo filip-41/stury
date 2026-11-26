@@ -4,16 +4,24 @@ import "stury:lib/core/tape"
 
 // YAML 1.2 format handles, node spelling layout, container bounds (`close_end`), and spelled facts (`spelled_fact`).
 
-// A YAML grammar variant. Both use YAML 1.2 Core Schema resolution (`!!str`, `!!int`, `!!float`, `!!bool`, `!!null`,
-// `!!binary`); `.Yaml_Merge` also applies `<<` mapping merge keys during the walk.
+// A YAML grammar variant. Both resolve scalars according to `Yaml_Options.dialect` (default: YAML 1.2 Core Schema
+// `!!str`, `!!int`, `!!float`, `!!bool`, `!!null`, `!!binary`); `.Yaml_Merge` also applies `<<` mapping merge keys
+// during the walk.
 Spec :: enum u8 {
 	Yaml_1_2,
 	Yaml_Merge,
 }
 
-// Options of a YAML read. `budget` limits depth, nodes, memory, steps and alias `expansion`. YAML takes no tolerances
-// (`Bad_Option{"tolerate"}`) and no format-specific options (`Bad_Option{"format"}`).
+// Options of a YAML read. `budget` limits depth, nodes, memory, steps and alias `expansion`. `format` takes
+// `tape.Yaml_Options` (nil defaults to `.Core`), refusing another format's options as `Bad_Option{"format"}`.
+// YAML takes no tolerances (`Bad_Option{"tolerate"}`).
 Options :: tape.Options
+
+@(private)
+dialect_of :: #force_inline proc "contextless" (opts: Options) -> tape.Yaml_Dialect {
+	y, _ := opts.format.(tape.Yaml_Options)
+	return y.dialect
+}
 
 // Format id base for YAML specs (`FORMAT_ID_XML + 1`, wired into central `tape` constants when merged).
 @(private)
@@ -35,6 +43,7 @@ FORMATS := [Spec]tape.Format {
 		id        = ID + tape.Format_Id(Spec.Yaml_1_2),
 		facts     = FACTS,
 		caps      = CAPS,
+		options   = .Yaml,
 		dups      = .Last,
 		refuses   = {.Invalid_Utf8},
 		bounds    = bounds,
@@ -51,6 +60,7 @@ FORMATS := [Spec]tape.Format {
 		id        = ID + tape.Format_Id(Spec.Yaml_Merge),
 		facts     = FACTS,
 		caps      = CAPS,
+		options   = .Yaml,
 		dups      = .Last,
 		refuses   = {.Invalid_Utf8},
 		bounds    = bounds,
