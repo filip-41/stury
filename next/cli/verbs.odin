@@ -267,24 +267,6 @@ quarantine_write_invalid :: proc(
 	return quarantine_emit_doc(qw, &tt, alloc)
 }
 
-@(private = "file")
-verb_file_spec :: proc(o: ^Options, path: string) -> (engine.Spec, engine.Framing) {
-	sp, fr := detect_file_spec(o, path)
-	if o.merge_keys && sp == engine.spec_of_id(.Yaml) {
-		sp = engine.spec_of_id(.Yaml_Merge)
-	}
-	return sp, fr
-}
-
-@(private = "file")
-verb_read_opts :: proc(o: ^Options, sp: engine.Spec, runner: ^tape.Runner) -> tape.Options {
-	ro := read_opts_of(o, sp, runner)
-	if e, ok := engine.entry_of_spec(sp); ok && e.family == .Yaml && o.yaml_schema_set {
-		ro.format = tape.Yaml_Options{dialect = o.yaml_schema}
-	}
-	return ro
-}
-
 // ---- Schema Compilation & Path-Contained Ref Loader ----
 
 @(private)
@@ -501,9 +483,9 @@ run_check :: proc(
 			continue
 		}
 		disp := "<stdin>" if p == "-" else p
-		sp, fr := verb_file_spec(o, p)
+		sp, fr := detect_file_spec(o, p)
 		e, _ := engine.entry_of_spec(sp)
-		ro := verb_read_opts(o, sp, runner)
+		ro := read_opts_of(o, sp, runner)
 
 		if e.family == .Json && fr == .Single && len(bytes.trim_space(src)) == 0 {
 			fmt.wprintf(stderr_w, "stury: parse error (%s): No JSON text\n", disp)
@@ -626,7 +608,7 @@ check_bytes_schema :: proc(
 	use_doc := (e.family == .Dsv && o.dsv_tolerate != {}) || (e.family == .Xml && (o.xml_tolerate != {} || o.xml_arrays != .Auto))
 	res: check.Result
 	if use_doc {
-		ro := verb_read_opts(o, sp, nil)
+		ro := read_opts_of(o, sp, nil)
 		doc, berr := engine.build(src, sp, ro, alloc)
 		if berr != nil {
 			_ = print_tape_error(stderr_w, display, berr, src, sp, false, place_src, place_off)
@@ -806,9 +788,9 @@ run_fmt :: proc(
 			continue
 		}
 		disp := "<stdin>" if p == "-" else p
-		sp, fr := verb_file_spec(o, p)
+		sp, fr := detect_file_spec(o, p)
 		e, _ := engine.entry_of_spec(sp)
-		ro := verb_read_opts(o, sp, runner)
+		ro := read_opts_of(o, sp, runner)
 		to_sp := o.to_spec if o.has_to else sp
 		to_e, _ := engine.entry_of_spec(to_sp)
 		wopts := make_write_opts(o, to_sp, 0 if (!o.indent_set && (fr == .Lines || o.to_framing == .Lines)) else o.indent)
@@ -1362,9 +1344,9 @@ run_edit :: proc(
 			continue
 		}
 		disp := "<stdin>" if p == "-" else p
-		sp, fr := verb_file_spec(o, p)
+		sp, fr := detect_file_spec(o, p)
 		e, _ := engine.entry_of_spec(sp)
-		ro := verb_read_opts(o, sp, runner)
+		ro := read_opts_of(o, sp, runner)
 
 		edited: []u8
 		edited_owned := false
@@ -1670,7 +1652,7 @@ run_diff :: proc(
 			delete(src, alloc)
 		}
 		disp := "<stdin>" if o.files[0] == "-" else o.files[0]
-		sp, _ := verb_file_spec(o, o.files[0])
+		sp, _ := detect_file_spec(o, o.files[0])
 		chk := check_bytes_schema(o, sc, disp, src, sp, 1, nil, &osink, stderr_w, alloc)
 		if chk == EXIT_RUNTIME || chk == EXIT_USAGE {
 			return report_stdout_error(stderr_w, osink.io_err) if chk == EXIT_USAGE else EXIT_RUNTIME
@@ -1761,10 +1743,10 @@ run_diff :: proc(
 
 	disp_a := "<stdin>" if o.files[0] == "-" else o.files[0]
 	disp_b := "<stdin>" if o.files[1] == "-" else o.files[1]
-	sp_a, fr_a := verb_file_spec(o, o.files[0])
-	sp_b, fr_b := verb_file_spec(o, o.files[1])
-	ro_a := verb_read_opts(o, sp_a, runner)
-	ro_b := verb_read_opts(o, sp_b, runner)
+	sp_a, fr_a := detect_file_spec(o, o.files[0])
+	sp_b, fr_b := detect_file_spec(o, o.files[1])
+	ro_a := read_opts_of(o, sp_a, runner)
+	ro_b := read_opts_of(o, sp_b, runner)
 
 	doc_a, tt_a, ut_a, build_a := build_diff_document(o, src_a, disp_a, sp_a, fr_a, ro_a, stderr_w, alloc)
 	if !build_a {
@@ -2083,8 +2065,8 @@ infer_file_into :: proc(inf: ^schema.Inferred, o: ^Options, path: string, stdin_
 		delete(src, alloc)
 	}
 	display := "<stdin>" if path == "-" else path
-	sp, fr := verb_file_spec(o, path)
-	ro := verb_read_opts(o, sp, runner)
+	sp, fr := detect_file_spec(o, path)
+	ro := read_opts_of(o, sp, runner)
 	if se, ok_e := engine.entry_of_spec(sp); ok_e && !se.tabular && (fr == .Lines || fr == .Seq) {
 		it, ok := rec_loop_open(src, sp, fr, ro, false, display, stderr_w, alloc)
 		if !ok {

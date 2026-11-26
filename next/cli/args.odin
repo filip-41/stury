@@ -3,6 +3,7 @@ package cli
 import "base:runtime"
 import "core:fmt"
 import "core:io"
+import "core:os"
 import "core:strconv"
 import "core:strings"
 import "stury:engine"
@@ -82,6 +83,14 @@ Var_Spec :: struct {
 Pos_Spec :: struct {
 	raw:     string,
 	is_json: bool,
+}
+
+With_Spec :: struct {
+	name:    string,
+	path:    string,
+	has_fmt: bool,
+	spec:    engine.Spec,
+	framing: engine.Framing,
 }
 
 Options :: struct {
@@ -174,6 +183,7 @@ Options :: struct {
 	filter:            Maybe(string),
 	files:             [dynamic]string,
 	vars:              [dynamic]Var_Spec,
+	with_sources:      [dynamic]With_Spec,
 	positional:        [dynamic]Pos_Spec,
 	lib_dirs:          [dynamic]string,
 	allocator:         runtime.Allocator,
@@ -192,6 +202,7 @@ options_destroy :: proc(o: ^Options) {
 	delete(o.redact_paths)
 	delete(o.files)
 	delete(o.vars)
+	delete(o.with_sources)
 	delete(o.positional)
 	delete(o.lib_dirs)
 	o^ = {}
@@ -253,7 +264,7 @@ opt_arity :: proc(flag: string, cmd := Command.Run) -> int {
 	case "--indent", "--max-depth", "--max-memory", "--max-steps", "--max-nodes", "--expansion-limit", "--alias-limit", "--threads",
 	     "--from", "--in", "--to", "--out", "--dups", "--quarantine", "--plan-out", "--plan-file", "-L", "--library-path",
 	     "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--package", "--redact",
-	     "--seed", "--count", "--old-schema", "--new-schema", "--compat", "--key",
+	     "--seed", "--count", "--old-schema", "--new-schema", "--compat", "--key", "--with",
 	     "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--xml-arrays", "--yaml-schema":
 		return 1
 	case "--arg", "--argjson", "--rawfile", "--slurpfile":
@@ -348,6 +359,7 @@ parse_args :: proc(args: []string, allocator := context.allocator) -> (o: Option
 		to_name       = "json",
 		files        = make([dynamic]string, allocator),
 		vars         = make([dynamic]Var_Spec, allocator),
+		with_sources = make([dynamic]With_Spec, allocator),
 		positional   = make([dynamic]Pos_Spec, allocator),
 		lib_dirs     = make([dynamic]string, allocator),
 		diff_keys_raw = make([dynamic]string, allocator),
@@ -579,6 +591,15 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 		o.new_schema = val
 	case "key":
 		append(&o.diff_keys_raw, val)
+	case "with":
+		ws, werr := parse_with_spec(val, a)
+		if werr != "" {
+			return werr
+		}
+		if has_with_source(o.with_sources[:], ws.name) {
+			return fmt.aprintf("duplicate --with source %q", ws.name, allocator = a)
+		}
+		append(&o.with_sources, ws)
 	case "arg", "argjson", "rawfile", "slurpfile":
 		k, _ := choice_idx(flag, {"--arg", "--argjson", "--rawfile", "--slurpfile"})
 		// jq's first-wins variable binding rule: ignore later bindings of the same name.
@@ -720,6 +741,110 @@ has_var_spec :: proc(vars: []Var_Spec, name: string) -> bool {
 }
 
 @(private = "file")
+has_with_source :: proc(sources: []With_Spec, name: string) -> bool {
+	for ws in sources {
+		if ws.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+@(private = "file")
+is_jq_ident :: proc "contextless" (s: string) -> bool {
+	if len(s) == 0 {
+		return false
+	}
+	c0 := s[0]
+	if !((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || c0 == '_') {
+		return false
+	}
+	for i := 1; i < len(s); i += 1 {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+@(private = "file")
+parse_with_spec :: proc(raw: string, a: runtime.Allocator) -> (ws: With_Spec, err: string) {
+	eq := strings.index_byte(raw, '=')
+	if eq <= 0 || eq + 1 >= len(raw) {
+		return {}, fmt.aprintf("invalid --with %q (expected NAME=[FORMAT:]PATH)", raw, allocator = a)
+	}
+	name := raw[:eq]
+	rhs := raw[eq + 1:]
+	if !is_jq_ident(name) {
+		return {}, fmt.aprintf("invalid --with variable name %q (must be a valid jq identifier)", name, allocator = a)
+	}
+	if name == "ARGS" || name == "ENV" || name == "JQ_BUILD_CONFIGURATION" || name == "__prog_args" {
+		return {}, fmt.aprintf("--with variable name %q conflicts with built-in jq variable", name, allocator = a)
+	}
+
+	// Detect optional `format:path` prefix (while keeping Windows drive paths like `C:\...` or `C:/...` intact).
+	colon1 := strings.index_byte(rhs, ':')
+	is_win_drive := colon1 == 1 && len(rhs) >= 2 && ((rhs[0] >= 'a' && rhs[0] <= 'z') || (rhs[0] >= 'A' && rhs[0] <= 'Z'))
+	has_sep_before_colon := false
+	if colon1 > 0 {
+		for k in 0 ..< colon1 {
+			if rhs[k] == '/' || rhs[k] == '\\' {
+				has_sep_before_colon = true
+				break
+			}
+		}
+	}
+	if colon1 == 0 {
+		if os.exists(rhs) {
+			return {name = name, path = rhs}, ""
+		}
+		return {}, fmt.aprintf("invalid --with %q: empty format prefix", raw, allocator = a)
+	}
+	if colon1 > 0 && !is_win_drive && !has_sep_before_colon {
+		// Check multi-colon format specifiers first (e.g. `yaml:merge:file.yaml`, `cbor:preferred:file.cbor`).
+		after1 := rhs[colon1 + 1:]
+		if colon2_rel := strings.index_byte(after1, ':'); colon2_rel > 0 {
+			colon2 := colon1 + 1 + colon2_rel
+			sep_between := false
+			for k in colon1 + 1 ..< colon2 {
+				if rhs[k] == '/' || rhs[k] == '\\' {
+					sep_between = true
+					break
+				}
+			}
+			if !sep_between {
+				fmt2 := rhs[:colon2]
+				if sp2, fr2, ok2 := parse_format(fmt2); ok2 {
+					p2 := rhs[colon2 + 1:]
+					if p2 == "" {
+						return {}, fmt.aprintf("invalid --with %q: missing file path", raw, allocator = a)
+					}
+					return {name = name, path = p2, has_fmt = true, spec = sp2, framing = fr2}, ""
+				}
+			}
+		}
+		fmt1 := rhs[:colon1]
+		p1 := rhs[colon1 + 1:]
+		if p1 == "" {
+			if os.exists(rhs) {
+				return {name = name, path = rhs}, ""
+			}
+			return {}, fmt.aprintf("invalid --with %q: missing file path", raw, allocator = a)
+		}
+		sp1, fr1, ok1 := parse_format(fmt1)
+		if !ok1 {
+			if os.exists(rhs) {
+				return {name = name, path = rhs}, ""
+			}
+			return {}, fmt.aprintf("invalid --with %q: unknown format %q", raw, fmt1, allocator = a)
+		}
+		return {name = name, path = p1, has_fmt = true, spec = sp1, framing = fr1}, ""
+	}
+	return {name = name, path = rhs}, ""
+}
+
+@(private = "file")
 parse_short :: proc(o: ^Options, args: []string, idx: ^int) -> string {
 	a := args[idx^]
 	for k := 1; k < len(a); k += 1 {
@@ -842,6 +967,22 @@ validate_options :: proc(o: ^Options) -> string {
 	a := o.allocator
 	if o.jsonpath && o.command != .Run {
 		return strings.clone("--jsonpath can only be used with query execution", a)
+	}
+	if len(o.with_sources) > 0 {
+		if o.command != .Run {
+			return strings.clone("--with can only be used with query execution", a)
+		}
+		if o.jsonpath {
+			return strings.clone("--with cannot be combined with --jsonpath", a)
+		}
+		if o.stream || o.stream_errors {
+			return strings.clone("--with cannot be combined with --stream", a)
+		}
+		for ws in o.with_sources {
+			if has_var_spec(o.vars[:], ws.name) {
+				return fmt.aprintf("--with variable %q conflicts with --arg/--argjson/--rawfile/--slurpfile", ws.name, allocator = a)
+			}
+		}
 	}
 	if (o.plan_out != "" || o.plan_file != "") && o.command != .Run {
 		return strings.clone("--plan-out/--plan-file can only be used with query execution", a)
@@ -1013,10 +1154,10 @@ HELP_MAIN :: `stury - JSON, JSONC, JSON5, TOML, XML, CSV/TSV, CBOR, YAML, HTML a
 Usage:  stury [options] <jq filter> [file...] | stury --jsonpath [options] <jsonpath> [file...]
         stury check|fmt|edit|diff|schema [options] ...
 Options: -n -R -s -c -r -j --raw-output0 -a -S -C -M --tab --indent N -e -f -L dir
-         --arg k v --argjson k v --rawfile k f --slurpfile k f --args --jsonargs
-         --jsonpath/--path --seq --stream --stream-errors --from fmt --to fmt
-         --xml-arrays auto|always|schema --yaml-schema core|json|failsafe
-         --merge-keys --alias-limit N --schema file --redact /ptr
-         --explain --plan-out f --plan-file f --where --threads N --dups policy
-         --skip-bad --quarantine f -V -h --
+         --arg k v --argjson k v --rawfile k f --slurpfile k f --with k=[fmt:]f
+         --args --jsonargs --jsonpath/--path --seq --stream --stream-errors
+         --from fmt --to fmt --xml-arrays auto|always|schema
+         --yaml-schema core|json|failsafe --merge-keys --alias-limit N
+         --schema file --redact /ptr --explain --plan-out f --plan-file f
+         --where --threads N --dups policy --skip-bad --quarantine f -V -h --
 `

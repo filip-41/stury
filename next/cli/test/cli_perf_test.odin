@@ -318,7 +318,7 @@ cli_review_regressions_b1_b3_b4_b6_b7 :: proc(t: ^testing.T) {
 		pin_p := join_path(t, dir, "big_whole.pin.json")
 		defer delete(pin_p)
 
-		// `.[0:]`? Use `[.[]]` or `{n: (.vals | length), first: .vals[0]}`? Use `if .vals != null then (.vals | length) else 0 end` which chooses `.Whole` or `.Scan`? Wait: `.` chooses `.Whole`!
+		// Identity filter `.` selects the `.Whole` route on a single large JSON file.
 		r_norm := invoke({"--threads", "4", "-c", `.`, big_p})
 		defer run_out_destroy(&r_norm)
 		testing.expect_value(t, r_norm.code, 0)

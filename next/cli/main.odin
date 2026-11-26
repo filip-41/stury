@@ -73,7 +73,8 @@ run_with_options :: proc(
 	}
 	if opts.has_to {
 		if te, ok := engine.entry_of_spec(opts.to_spec); ok && te.binary && stdout_is_tty && !opts.in_place && !opts.check && opts.command != .Check {
-			fmt.wprintln(stderr_w, "stury: binary CBOR output will not be written to a terminal; redirect stdout or pipe to another program")
+			label := "CBOR" if te.family == .Cbor else "MessagePack" if te.family == .Msgpack else te.name
+			fmt.wprintf(stderr_w, "stury: binary %s output will not be written to a terminal; redirect stdout or pipe to another program\n", label)
 			return EXIT_USAGE
 		}
 	}

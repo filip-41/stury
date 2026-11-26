@@ -1455,3 +1455,340 @@ cli_multi_format_table_markdown_ddl_and_yaml_flags :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+cli_with_relational_joins_and_aux_demand :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	users_json := write_tmp_file(t, dir, "users.json", transmute([]u8)string(`[{"id":1,"name":"ada","role":"admin"},{"id":2,"name":"bob","role":"user"}]`)); defer delete(users_json)
+	users_map := write_tmp_file(t, dir, "users_map.json", transmute([]u8)string(`{"u1":{"name":"ada","secret":"s1"},"u2":{"name":"bob","secret":"s2"}}`)); defer delete(users_map)
+	users_csv := write_tmp_file(t, dir, "users.csv", transmute([]u8)string("id,name\n1,ada\n2,bob\n")); defer delete(users_csv)
+	users_ndjson := write_tmp_file(t, dir, "users.ndjson", transmute([]u8)string("{\"id\":1,\"name\":\"ada\"}\n{\"id\":2,\"name\":\"bob\"}\n")); defer delete(users_ndjson)
+	users_yaml := write_tmp_file(t, dir, "users.yaml", transmute([]u8)string("- id: 1\n  name: ada\n- id: 2\n  name: bob\n")); defer delete(users_yaml)
+	orders_json := write_tmp_file(t, dir, "orders.json", transmute([]u8)string(`[{"oid":10,"uid":1},{"oid":11,"uid":3},{"oid":12,"uid":2}]`)); defer delete(orders_json)
+	orders_ndjson := write_tmp_file(t, dir, "orders.ndjson", transmute([]u8)string("{\"oid\":10,\"uid\":1}\n{\"oid\":11,\"uid\":2}\n{\"oid\":12,\"uid\":1}\n{\"oid\":13,\"uid\":2}\n")); defer delete(orders_ndjson)
+	bad_json := write_tmp_file(t, dir, "bad.json", transmute([]u8)string(`{broken`)); defer delete(bad_json)
+	missing_p := join_path(t, dir, "does_not_exist.json"); defer delete(missing_p)
+
+	w_users := strings.concatenate({"users=", users_json}); defer delete(w_users)
+	w_users_eq := strings.concatenate({"--with=users=", users_json}); defer delete(w_users_eq)
+	w_map := strings.concatenate({"users=", users_map}); defer delete(w_map)
+	w_csv_fmt := strings.concatenate({"users=csv:", users_csv}); defer delete(w_csv_fmt)
+	w_csv_ext := strings.concatenate({"users=", users_csv}); defer delete(w_csv_ext)
+	w_nd_fmt := strings.concatenate({"users=ndjson:", users_ndjson}); defer delete(w_nd_fmt)
+	w_yaml_ext := strings.concatenate({"users=", users_yaml}); defer delete(w_yaml_ext)
+	w_orders := strings.concatenate({"orders=", orders_json}); defer delete(w_orders)
+	w_bad := strings.concatenate({"users=", bad_json}); defer delete(w_bad)
+	w_missing := strings.concatenate({"users=", missing_p}); defer delete(w_missing)
+
+	// 1. `hash_join`, `left_join`, `semi_join`, `anti_join`, `index_by` + `lookup`.
+	{
+		rh := invoke({"--with", w_users, "-c", `hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&rh)
+		testing.expect_value(t, rh.code, 0)
+		testing.expect_value(t, rh.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rl := invoke({"--with", w_users, "-c", `left_join($users; .uid; .id) | map({oid: .[0].oid, who: (.[1].name // "none")})`, orders_json}); defer run_out_destroy(&rl)
+		testing.expect_value(t, rl.code, 0)
+		testing.expect_value(t, rl.stdout, `[{"oid":10,"who":"ada"},{"oid":11,"who":"none"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rs := invoke({"--with", w_users, "-c", `semi_join($users; .uid; .id) | map(.oid)`, orders_json}); defer run_out_destroy(&rs)
+		testing.expect_value(t, rs.code, 0)
+		testing.expect_value(t, rs.stdout, "[10,12]\n")
+
+		ra := invoke({"--with", w_users, "-c", `anti_join($users; .uid; .id) | map(.oid)`, orders_json}); defer run_out_destroy(&ra)
+		testing.expect_value(t, ra.code, 0)
+		testing.expect_value(t, ra.stdout, "[11]\n")
+
+		ri := invoke({w_users_eq, "-c", `($users | index_by(.id)) as $u | map({oid, who: (lookup($u; .uid).name // null)})`, orders_json}); defer run_out_destroy(&ri)
+		testing.expect_value(t, ri.code, 0)
+		testing.expect_value(t, ri.stdout, `[{"oid":10,"who":"ada"},{"oid":11,"who":null},{"oid":12,"who":"bob"}]`+"\n")
+	}
+
+	// 2. Explicit format prefix (`csv:`, `ndjson:`) and extension auto-detection (`.csv`, `.yaml`).
+	{
+		rc1 := invoke({"--with", w_csv_fmt, "-c", `hash_join($users; .uid | tostring; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&rc1)
+		testing.expect_value(t, rc1.code, 0)
+		testing.expect_value(t, rc1.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rc2 := invoke({"--with", w_csv_ext, "--infer", "-c", `hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&rc2)
+		testing.expect_value(t, rc2.code, 0)
+		testing.expect_value(t, rc2.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rnd := invoke({"--with", w_nd_fmt, "-c", `hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&rnd)
+		testing.expect_value(t, rnd.code, 0)
+		testing.expect_value(t, rnd.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		ry := invoke({"--with", w_yaml_ext, "-c", `hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&ry)
+		testing.expect_value(t, ry.code, 0)
+		testing.expect_value(t, ry.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+	}
+
+	// 3. Partial pruning on aux source (`$users[.uid].name`) verified via `--explain`.
+	{
+		re := invoke_str({"--with", w_map, "--explain", "-c", `$users[.uid].name`}, `{"uid":"u1"}`); defer run_out_destroy(&re)
+		testing.expect_value(t, re.code, 0)
+		testing.expect_value(t, re.stdout, "\"ada\"\n")
+		testing.expect(t, strings.contains(re.stderr, "aux users: partial"), re.stderr)
+	}
+
+	// 4. `-n --with` joining two auxiliary sources directly, plus `--threads 2` parallel NDJSON execution.
+	{
+		rn := invoke({"-n", "--with", w_orders, "--with", w_users, "-c", `$orders | hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`}); defer run_out_destroy(&rn)
+		testing.expect_value(t, rn.code, 0)
+		testing.expect_value(t, rn.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rp := invoke({"--threads", "2", "--with", w_users, "-c", `hash_join($users; .uid; .id) | {oid: .[0].oid, who: .[1].name}`, orders_ndjson}); defer run_out_destroy(&rp)
+		testing.expect_value(t, rp.code, 0)
+		testing.expect_value(t, rp.stdout, "{\"oid\":10,\"who\":\"ada\"}\n{\"oid\":11,\"who\":\"bob\"}\n{\"oid\":12,\"who\":\"ada\"}\n{\"oid\":13,\"who\":\"bob\"}\n")
+	}
+
+	// 5. Validation errors (exit `2`) and parse error in aux source (exit `5`).
+	{
+		bad_with_cases := [][]string {
+			{"--with", w_missing, "."},
+			{"--with", "noequals", "."},
+			{"--with", "=file.json", "."},
+			{"--with", "users=", "."},
+			{"--with", "123=file.json", "."},
+			{"--with", "__prog_args=file.json", "."},
+			{"--with", "users=:file.json", "."},
+			{"--with", "users=bogusfmt:file.json", "."},
+			{"--with", "users=csv:", "."},
+			{"--with", w_users, "--with", w_users, "."},
+			{"--arg", "users", "x", "--with", w_users, "."},
+			{"--with", w_users, "--jsonpath", "$"},
+			{"--with", w_users, "--stream", "."},
+			{"fmt", "--with", w_users, orders_json},
+			{"check", "--with", w_users, orders_json},
+		}
+		for bc in bad_with_cases {
+			r := invoke_str(bc, `{}`); defer run_out_destroy(&r)
+			testing.expectf(t, r.code == 2, "expected exit 2 for %v, got %d (stderr=%q)", bc, r.code, r.stderr)
+		}
+
+		rbad := invoke_str({"--with", w_bad, "$users"}, `{}`); defer run_out_destroy(&rbad)
+		testing.expect_value(t, rbad.code, 5)
+	}
+
+	// 6. Relative Unix paths containing colons (`dir:1/users.json` and `v1:users.json`) resolve when existing on disk.
+	when ODIN_OS != .Windows {
+		tag := rand.uint64()
+		colon_dir := fmt.aprintf(".stury-colon-%d:1", tag); defer delete(colon_dir)
+		if os.make_directory(colon_dir) == nil {
+			defer _ = os.remove_all(colon_dir)
+			colon_sub := fmt.aprintf("%s/users.json", colon_dir); defer delete(colon_sub)
+			testing.expect(t, os.write_entire_file(colon_sub, transmute([]u8)string(`[{"id":1,"name":"ada"}]`)) == nil)
+			w_cdir := strings.concatenate({"users=", colon_sub}); defer delete(w_cdir)
+			rcd := invoke({"-n", "--with", w_cdir, "-c", "$users[0].name"}); defer run_out_destroy(&rcd)
+			testing.expect_value(t, rcd.code, 0)
+			testing.expect_value(t, rcd.stdout, "\"ada\"\n")
+		}
+		colon_file := fmt.aprintf(".stury-colon-%d:users.json", tag); defer delete(colon_file)
+		if os.write_entire_file(colon_file, transmute([]u8)string(`[{"id":2,"name":"bob"}]`)) == nil {
+			defer _ = os.remove(colon_file)
+			w_cfile := strings.concatenate({"users=", colon_file}); defer delete(w_cfile)
+			rcf := invoke({"-n", "--with", w_cfile, "-c", "$users[0].name"}); defer run_out_destroy(&rcf)
+			testing.expect_value(t, rcf.code, 0)
+			testing.expect_value(t, rcf.stdout, "\"bob\"\n")
+		}
+	}
+
+	// 7. `--with` compile error line numbers map back to user filter lines (not shifted by injected `JOIN_STDLIB`).
+	{
+		re1_base := invoke({"-n", ".["}); defer run_out_destroy(&re1_base)
+		re1 := invoke({"-n", "--with", w_users, ".["}); defer run_out_destroy(&re1)
+		testing.expect_value(t, re1.code, 3)
+		testing.expect_value(t, re1.stderr, re1_base.stderr)
+		testing.expect(t, strings.contains(re1.stderr, "<top-level>:1:2:"), re1.stderr)
+		testing.expect(t, !strings.contains(re1.stderr, ":74:"), re1.stderr)
+
+		re2_base := invoke({"-n", "unknown_fn"}); defer run_out_destroy(&re2_base)
+		re2 := invoke({"-n", "--with", w_users, "unknown_fn"}); defer run_out_destroy(&re2)
+		testing.expect_value(t, re2.code, 3)
+		testing.expect_value(t, re2.stderr, re2_base.stderr)
+		testing.expect(t, strings.contains(re2.stderr, "<top-level>:1:1:"), re2.stderr)
+		testing.expect(t, !strings.contains(re2.stderr, ":74:"), re2.stderr)
+
+		re3_base := invoke({"-n", "module {}; .["}); defer run_out_destroy(&re3_base)
+		re3 := invoke({"-n", "--with", w_users, "module {}; .["}); defer run_out_destroy(&re3)
+		testing.expect_value(t, re3.code, 3)
+		testing.expect_value(t, re3.stderr, re3_base.stderr)
+		testing.expect(t, strings.contains(re3.stderr, "<top-level>:1:"), re3.stderr)
+		testing.expect(t, strings.contains(re3.stderr, "module {}; .["), re3.stderr)
+	}
+}
+
+@(test)
+cli_yaml_query_flags_and_in_place_preflight :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	// 1. `--yaml-schema=failsafe` in both jq and `--jsonpath` query mode.
+	{
+		rq := invoke_str({"--from", "yaml", "--yaml-schema=failsafe", "-c", "."}, "a: 1\nb: true\n"); defer run_out_destroy(&rq)
+		testing.expect_value(t, rq.code, 0)
+		testing.expect_value(t, rq.stdout, "{\"a\":\"1\",\"b\":\"true\"}\n")
+
+		rjp := invoke_str({"--from", "yaml", "--yaml-schema=failsafe", "--jsonpath", "-c", "$.a"}, "a: 1\nb: true\n"); defer run_out_destroy(&rjp)
+		testing.expect_value(t, rjp.code, 0)
+		testing.expect_value(t, rjp.stdout, "\"1\"\n")
+	}
+
+	// 2. `--merge-keys` on extension-detected `.yaml` in jq & `--jsonpath`, plus `fmt -i --merge-keys --to yaml:merge`.
+	{
+		merge_yml :: "base: &b\n  x: 1\nchild:\n  <<: *b\n  y: 2\n"
+		mf := write_tmp_file(t, dir, "merge.yaml", transmute([]u8)string(merge_yml)); defer delete(mf)
+
+		rm := invoke({"--merge-keys", "-c", ".child.x", mf}); defer run_out_destroy(&rm)
+		testing.expect_value(t, rm.code, 0)
+		testing.expect_value(t, rm.stdout, "1\n")
+
+		rm_jp := invoke({"--merge-keys", "--jsonpath", "-c", "$.child.x", mf}); defer run_out_destroy(&rm_jp)
+		testing.expect_value(t, rm_jp.code, 0)
+		testing.expect_value(t, rm_jp.stdout, "1\n")
+
+		rfi := invoke({"fmt", "-i", "--merge-keys", "--to", "yaml:merge", mf}); defer run_out_destroy(&rfi)
+		testing.expect_value(t, rfi.code, 0)
+		saved, rerr := os.read_entire_file_from_path(mf, context.allocator)
+		testing.expect(t, rerr == nil)
+		defer delete(saved)
+		testing.expect(t, strings.contains(string(saved), "x: 1") && strings.contains(string(saved), "y: 2"), string(saved))
+	}
+}
+
+@(test)
+cli_unified_table_markdown_html_one_doc_and_tsan_parallel :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	rows_json :: `[{"name":"ada","age":36},{"name":"bob","age":42}]`
+	rows_ndjson :: "{\"name\":\"ada\",\"age\":36}\n{\"name\":\"bob\",\"age\":42}\n"
+
+	// 1. Multi-value `--to table '.[]'` and `--jsonpath --to markdown '$[*]'` emit ONE unified aligned table (1 header!).
+	{
+		rt_single := invoke_str({"--to", "table", "."}, rows_json); defer run_out_destroy(&rt_single)
+		testing.expect_value(t, rt_single.code, 0)
+
+		rt_multi := invoke_str({"--to", "table", ".[]"}, rows_json); defer run_out_destroy(&rt_multi)
+		testing.expect_value(t, rt_multi.code, 0)
+		testing.expect_value(t, rt_multi.stdout, rt_single.stdout)
+		testing.expect_value(t, strings.count(rt_multi.stdout, "name"), 1)
+		testing.expect_value(t, strings.count(rt_multi.stdout, "----"), 1)
+
+		rt_nd := invoke_str({"--from", "ndjson", "--to", "table", "."}, rows_ndjson); defer run_out_destroy(&rt_nd)
+		testing.expect_value(t, rt_nd.code, 0)
+		testing.expect_value(t, rt_nd.stdout, rt_single.stdout)
+
+		rm_single := invoke_str({"--to", "markdown", "."}, rows_json); defer run_out_destroy(&rm_single)
+		testing.expect_value(t, rm_single.code, 0)
+
+		rm_jp := invoke_str({"--jsonpath", "--to", "markdown", "$[*]"}, rows_json); defer run_out_destroy(&rm_jp)
+		testing.expect_value(t, rm_jp.code, 0)
+		testing.expect_value(t, rm_jp.stdout, rm_single.stdout)
+		testing.expect_value(t, strings.count(rm_jp.stdout, "| name"), 1)
+		testing.expect_value(t, strings.count(rm_jp.stdout, "---:"), 1)
+
+		// Single object still renders key/value table; empty filter emits nothing.
+		rt_obj := invoke_str({"--to", "table", "."}, `{"name":"ada","age":36}`); defer run_out_destroy(&rt_obj)
+		testing.expect_value(t, rt_obj.code, 0)
+		testing.expect(t, strings.contains(rt_obj.stdout, "key") && strings.contains(rt_obj.stdout, "value"), rt_obj.stdout)
+
+		rt_empty := invoke_str({"--to", "table", "empty"}, rows_json); defer run_out_destroy(&rt_empty)
+		testing.expect_value(t, rt_empty.code, 0)
+		testing.expect_value(t, rt_empty.stdout, "")
+	}
+
+	// 2. `--to html` refuses 2+ emitted values with exit `5` (`one_doc`).
+	{
+		rh1 := invoke_str({"--to", "html", "."}, `{"html":{"head":{},"body":{"p":"ok"}}}`); defer run_out_destroy(&rh1)
+		testing.expect_value(t, rh1.code, 0)
+		testing.expect(t, strings.contains(rh1.stdout, "<p>ok</p>"), rh1.stdout)
+
+		rh2 := invoke_str({"--to", "html", ".[]"}, `[{"html":{"head":{},"body":{"p":"a"}}},{"html":{"head":{},"body":{"p":"b"}}}]`); defer run_out_destroy(&rh2)
+		testing.expect_value(t, rh2.code, 5)
+		testing.expect(t, strings.contains(rh2.stderr, "--to html writes one document"), rh2.stderr)
+
+		rh2_jp := invoke_str({"--jsonpath", "--to", "html", "$[*]"}, `[{"html":{"head":{},"body":{"p":"a"}}},{"html":{"head":{},"body":{"p":"b"}}}]`); defer run_out_destroy(&rh2_jp)
+		testing.expect_value(t, rh2_jp.code, 5)
+		testing.expect(t, strings.contains(rh2_jp.stderr, "--to html writes one document"), rh2_jp.stderr)
+	}
+
+	// 3. `--threads 2` across multiple files for `--to markdown|table|yaml|msgpack|html` (TSan race regression test!).
+	{
+		f1 := write_tmp_file(t, dir, "f1.json", transmute([]u8)string(`{"name":"ada","age":36}`)); defer delete(f1)
+		f2 := write_tmp_file(t, dir, "f2.json", transmute([]u8)string(`{"name":"bob","age":42}`)); defer delete(f2)
+		h1 := write_tmp_file(t, dir, "h1.json", transmute([]u8)string(`{"html":{"head":{},"body":{"p":"a"}}}`)); defer delete(h1)
+		h2 := write_tmp_file(t, dir, "h2.json", transmute([]u8)string(`{"html":{"head":{},"body":{"p":"b"}}}`)); defer delete(h2)
+
+		rm := invoke({"--threads", "2", "--to", "markdown", ".", f1, f2}); defer run_out_destroy(&rm)
+		testing.expect_value(t, rm.code, 0)
+		testing.expect_value(t, strings.count(rm.stdout, "| name"), 1)
+		testing.expect(t, strings.contains(rm.stdout, "ada") && strings.contains(rm.stdout, "bob"), rm.stdout)
+
+		rt := invoke({"--threads", "2", "--to", "table", ".", f1, f2}); defer run_out_destroy(&rt)
+		testing.expect_value(t, rt.code, 0)
+		testing.expect_value(t, strings.count(rt.stdout, "name"), 1)
+		testing.expect(t, strings.contains(rt.stdout, "ada") && strings.contains(rt.stdout, "bob"), rt.stdout)
+
+		ry := invoke({"--threads", "2", "--to", "yaml", ".", f1, f2}); defer run_out_destroy(&ry)
+		testing.expect_value(t, ry.code, 0)
+		testing.expect(t, strings.contains(ry.stdout, "name: ada") && strings.contains(ry.stdout, "name: bob"), ry.stdout)
+
+		rmp := invoke({"--threads", "2", "--to", "msgpack", ".", f1, f2}); defer run_out_destroy(&rmp)
+		testing.expect_value(t, rmp.code, 0)
+		testing.expect(t, len(rmp.stdout) > 0, "expected msgpack bytes")
+
+		rhp := invoke({"--threads", "2", "--to", "html", ".", h1, h2}); defer run_out_destroy(&rhp)
+		testing.expect_value(t, rhp.code, 5)
+		testing.expect(t, strings.contains(rhp.stderr, "--to html writes one document"), rhp.stderr)
+	}
+
+	// 4. `Render_Table_Writer` error suppression (no spurious `"malformed output sequence"`) and no partial table flush on error.
+	{
+		raw_bin := write_tmp_file(t, dir, "raw.bin", []u8{0xff}); defer delete(raw_bin)
+		r_inv := invoke({"-n", "--rawfile", "bad", raw_bin, "--to", "table", `{"a":1},{"b":$bad}`}); defer run_out_destroy(&r_inv)
+		testing.expect_value(t, r_inv.code, 5)
+		testing.expect_value(t, r_inv.stdout, "")
+		testing.expect(t, strings.contains(r_inv.stderr, "value cannot be spelled in target format"), r_inv.stderr)
+		testing.expect(t, !strings.contains(r_inv.stderr, "malformed output sequence"), r_inv.stderr)
+
+		good_f := write_tmp_file(t, dir, "good.json", transmute([]u8)string(`{"a":1}`)); defer delete(good_f)
+		bad_f := write_tmp_file(t, dir, "bad.json", transmute([]u8)string(`{broken`)); defer delete(bad_f)
+		miss_f := join_path(t, dir, "missing_table.json"); defer delete(miss_f)
+
+		r_part := invoke({"--to", "table", ".", good_f, bad_f}); defer run_out_destroy(&r_part)
+		testing.expect_value(t, r_part.code, 5)
+		testing.expect_value(t, r_part.stdout, "")
+		testing.expect(t, len(r_part.stderr) > 0, "expected parse error on stderr")
+
+		r_jp_part := invoke({"--jsonpath", "--to", "markdown", "$", good_f, bad_f}); defer run_out_destroy(&r_jp_part)
+		testing.expect_value(t, r_jp_part.code, 5)
+		testing.expect_value(t, r_jp_part.stdout, "")
+
+		r_open := invoke({"--to", "table", ".", good_f, miss_f}); defer run_out_destroy(&r_open)
+		testing.expect_value(t, r_open.code, 2)
+		testing.expect_value(t, r_open.stdout, "")
+	}
+}
+
+@(test)
+cli_binary_tty_refusal_names_format :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	{
+		rc := invoke({"--to", "cbor", "."}, transmute([]u8)string(`{"a":1}`), stdout_tty = true); defer run_out_destroy(&rc)
+		testing.expect_value(t, rc.code, 2)
+		testing.expect(t, strings.contains(rc.stderr, "binary CBOR output"), rc.stderr)
+	}
+	{
+		rm := invoke({"--to", "msgpack", "."}, transmute([]u8)string(`{"a":1}`), stdout_tty = true); defer run_out_destroy(&rm)
+		testing.expect_value(t, rm.code, 2)
+		testing.expect(t, strings.contains(rm.stderr, "binary MessagePack output"), rm.stderr)
+		testing.expect(t, !strings.contains(rm.stderr, "CBOR"), rm.stderr)
+	}
+	{
+		rmc := invoke({"--to", "msgpack:compact", "."}, transmute([]u8)string(`{"a":1}`), stdout_tty = true); defer run_out_destroy(&rmc)
+		testing.expect_value(t, rmc.code, 2)
+		testing.expect(t, strings.contains(rmc.stderr, "binary MessagePack output"), rmc.stderr)
+	}
+}

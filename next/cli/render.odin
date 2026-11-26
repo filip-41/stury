@@ -30,6 +30,7 @@ Render_Config :: struct {
 	color:        bool,
 	to_non_json:  bool,
 	to_tabular:   bool,
+	to_render:    Output_Render,
 	one_doc:      bool,
 	grow_header:  bool,
 	indent:       i8,
@@ -665,6 +666,129 @@ table_writer_sink :: proc(sink: rawptr, kind: write.Token_Kind, text: string) ->
 
 write_table_row :: proc(h: ^query.Heap, v: query.Value, tw: ^write.Table_Writer) -> bool {
 	return value_emit_tokens(h, v, tw, table_writer_sink)
+}
+
+// Unified streaming collector for `--to table` and `--to markdown` across single- or multi-value outputs.
+Render_Table_Writer :: struct {
+	kind:      Output_Render,
+	sort_keys: bool,
+	compact:   bool,
+	no_header: bool,
+	tw:        write.Table_Render_Writer,
+	mw:        write.Markdown_Writer,
+	count:     u64,
+	failed:    bool,
+	err:       write.Error,
+	sink:      io.Writer,
+	allocator: runtime.Allocator,
+}
+
+@(private = "file")
+render_table_writer_sink :: proc(sink: rawptr, kind: write.Token_Kind, text: string) -> write.Error {
+	rtw := (^Render_Table_Writer)(sink)
+	err: write.Error
+	if rtw.kind == .Table {
+		err = write.table_render_writer_token(&rtw.tw, kind, text)
+	} else {
+		err = write.markdown_writer_token(&rtw.mw, kind, text)
+	}
+	if err != nil {
+		rtw.err = err
+	}
+	return err
+}
+
+render_table_writer_start :: proc(rtw: ^Render_Table_Writer, kind: Output_Render, o: ^Options, sink_w: io.Writer, alloc: runtime.Allocator) -> bool {
+	rtw^ = {
+		kind      = kind,
+		sort_keys = o.sort_keys,
+		compact   = o.compact,
+		no_header = o.dsv_out.no_header,
+		sink      = sink_w,
+		allocator = alloc,
+	}
+	switch kind {
+	case .Table:
+		topts := write.Table_Render_Options{
+			style     = .Compact if o.compact else .Plain,
+			sort_keys = o.sort_keys,
+			no_header = o.dsv_out.no_header,
+		}
+		if err := write.table_render_writer_start(&rtw.tw, topts, sink_w, framed = true, allocator = alloc); err != nil {
+			rtw.err = err
+			rtw.kind = .None
+			return false
+		}
+		return true
+	case .Markdown:
+		mopts := write.Markdown_Options{
+			sort_keys = o.sort_keys,
+			compact   = o.compact,
+		}
+		if err := write.markdown_writer_start(&rtw.mw, mopts, sink_w, framed = true, allocator = alloc); err != nil {
+			rtw.err = err
+			rtw.kind = .None
+			return false
+		}
+		return true
+	case .None:
+	}
+	rtw.err = tape.Bad_Option{"to"}
+	return false
+}
+
+render_table_writer_value :: proc(rtw: ^Render_Table_Writer, h: ^query.Heap, v: query.Value) -> bool {
+	if rtw.failed {
+		return false
+	}
+	if !value_emit_tokens(h, v, rtw, render_table_writer_sink) {
+		rtw.failed = true
+		return false
+	}
+	rtw.count += 1
+	return true
+}
+
+render_table_writer_drop :: proc(rtw: ^Render_Table_Writer) {
+	if rtw == nil {
+		return
+	}
+	#partial switch rtw.kind {
+	case .Table:
+		write.table_render_writer_drop(&rtw.tw)
+	case .Markdown:
+		write.markdown_writer_drop(&rtw.mw)
+	}
+	rtw^ = {}
+}
+
+render_table_writer_end :: proc(rtw: ^Render_Table_Writer) -> write.Error {
+	if rtw == nil {
+		return nil
+	}
+	defer render_table_writer_drop(rtw)
+	if rtw.failed || rtw.count == 0 {
+		return nil
+	}
+	if rtw.count == 1 {
+		tokens := &rtw.tw.tokens if rtw.kind == .Table else &rtw.mw.tokens
+		if !write.token_tape_done(tokens) {
+			return write.Refused{tape.Node_Index(tokens.seq.taken), .Malformed}
+		}
+		doc, derr := write.token_tape_document(tokens)
+		if derr != nil {
+			return derr
+		}
+		return write_doc_render_to(rtw.sink, &doc, rtw.kind, rtw.sort_keys, rtw.compact, rtw.no_header, tape.Node_Index(1), rtw.allocator)
+	}
+	if rtw.kind == .Table {
+		_, err := write.table_render_writer_end(&rtw.tw)
+		rtw.kind = .None
+		return err
+	}
+	_, err := write.markdown_writer_end(&rtw.mw)
+	rtw.kind = .None
+	return err
 }
 
 write_value_as_format :: proc(

@@ -275,19 +275,27 @@ report_stdout_os_error :: proc(stderr_w: io.Writer, err: os.Error) -> int {
 
 // Resolves input `(spec, framing)` without sniffing invalid JSON as CSV/JSON5.
 detect_file_spec :: proc(o: ^Options, path: string) -> (engine.Spec, engine.Framing) {
+	sp: engine.Spec
+	fr: engine.Framing
 	if o.has_from {
-		fr := engine.Framing.Seq if (o.seq && o.from_framing == .Single) else o.from_framing
-		return o.from_spec, fr
-	}
-	if o.seq {
-		return engine.spec_of_id(.Json), .Seq
-	}
-	if path != "-" && path != "" {
-		if e, fr, ok := engine.format_of_path(path); ok {
-			return e.spec, fr
+		sp = o.from_spec
+		fr = .Seq if (o.seq && o.from_framing == .Single) else o.from_framing
+	} else if o.seq {
+		sp = engine.spec_of_id(.Json)
+		fr = .Seq
+	} else if path != "-" && path != "" {
+		if e, ffr, ok := engine.format_of_path(path); ok {
+			sp, fr = e.spec, ffr
+		} else {
+			sp, fr = engine.spec_of_id(.Json), .Single
 		}
+	} else {
+		sp, fr = engine.spec_of_id(.Json), .Single
 	}
-	return engine.spec_of_id(.Json), .Single
+	if o.merge_keys && sp == engine.spec_of_id(.Yaml) {
+		sp = engine.spec_of_id(.Yaml_Merge)
+	}
+	return sp, fr
 }
 
 // Attaches format-specific read options strictly to matching format families.
@@ -316,6 +324,10 @@ read_opts_of :: proc(o: ^Options, sp: engine.Spec, runner: ^tape.Runner) -> tape
 			ro.format = xo
 		}
 		ro.tolerate = o.xml_tolerate
+	case .Yaml:
+		if o.yaml_schema_set {
+			ro.format = tape.Yaml_Options{dialect = o.yaml_schema}
+		}
 	}
 	return ro
 }
