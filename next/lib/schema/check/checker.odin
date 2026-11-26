@@ -1483,8 +1483,8 @@ on_end :: proc "contextless" (h: ^Checker, s: hook.Regs, t: tape.Token) -> (hook
 				return s, .Stop
 			}
 		}
-		// Fast happy-path object close (no counts, required satisfied via bitmask, no deps)!
-		if .Counted not_in owner.flags && .Has_Deps not_in owner.fast_flags {
+		// Fast happy-path object close (no counts, required satisfied via bitmask, no deps, no seen_wide)!
+		if len(f.seen_wide) == 0 && .Counted not_in owner.flags && .Has_Deps not_in owner.fast_flags {
 			req_ok := .Required not_in owner.flags
 			if !req_ok && owner.members_u16 <= 64 {
 				req_mask := h.plan.meta[owner.meta].required_mask
@@ -1546,7 +1546,7 @@ on_end_cold :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.Regs, t
 		delete(f.key_name, h.scratch)
 		f.key_owned = false
 	}
-	if len(f.seen_wide) > 0 {
+	defer if len(f.seen_wide) > 0 {
 		delete(f.seen_wide, h.scratch)
 		f.seen_wide = nil
 	}
@@ -1612,6 +1612,10 @@ on_end_cold :: #force_no_inline proc "contextless" (h: ^Checker, s: hook.Regs, t
 @(private = "file")
 on_end_settle_cold :: #force_no_inline proc "contextless" (h: ^Checker, f: ^Frame, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) #no_bounds_check {
 	context = h.ctx^
+	defer if len(f.seen_wide) > 0 {
+		delete(f.seen_wide, h.scratch)
+		f.seen_wide = nil
+	}
 	owner := f.owner
 	err_owner := owner
 	alt_site: []tape.Step

@@ -11,15 +11,19 @@ import "stury:xml"
 @(test)
 test_xml_check_parity :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	// Schema: {book: {title: string minLength 2, tag?: string}}
+	// Schema: {book: {title: string minLength 2, tag?: array of string matching ^[a-z]+$}}
+	// Per stury's markup contract, repeated XML sibling elements group into an array in document order.
 	d: rules.Description
 	d.allocator = context.allocator
 	defer rules.description_destroy(&d)
 
 	title_n := rules.Node_Index(len(d.nodes))
 	append(&d.nodes, rules.Node{kinds = {.String}, rules = {min_length = 2}, array = -1, object = -1})
-	tag_n := rules.Node_Index(len(d.nodes))
+	tag_item_n := rules.Node_Index(len(d.nodes))
 	append(&d.nodes, rules.Node{kinds = {.String}, rules = {pattern = "^[a-z]+$"}, array = -1, object = -1})
+	append(&d.arrays, rules.Array{items = tag_item_n})
+	tag_n := rules.Node_Index(len(d.nodes))
+	append(&d.nodes, rules.Node{kinds = {.Array}, array = 0, object = -1})
 	false_n := rules.Node_Index(len(d.nodes))
 	append(&d.nodes, rules.Node{kinds = {}, array = -1, object = -1})
 
@@ -49,9 +53,11 @@ test_xml_check_parity :: proc(t: ^testing.T) {
 	}
 	cases := [?]Case{
 		{`<book><title>Dune</title><tag>scifi</tag><tag>classic</tag></book>`, true},
+		{`<book><title>Dune</title><tag>scifi</tag></book>`, true},
 		{`<!DOCTYPE book [<!ENTITY t "Foundation">]><book><title>&t;</title></book>`, true},
 		{`<book><title>X</title></book>`, false},
 		{`<book><title>Dune</title><tag>BAD!</tag></book>`, false},
+		{`<book><title>Dune</title><tag>scifi</tag><tag>BAD!</tag></book>`, false},
 		{`<book><title>Dune</title><unknown>1</unknown></book>`, false},
 	}
 
