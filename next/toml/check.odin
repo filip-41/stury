@@ -6,11 +6,15 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import schema_check "stury:lib/schema/check"
 
+// The stack room a TOML check probes up front (matching `json`/`xml`/`cbor`).
+READ_STACK :: 48 * 1024
+
 // Validates `src`, a TOML text of `spec`, against compiled schema `plan` by streaming tokens
 // directly into `schema_check.Checker` with zero intermediate `tape.Document` allocation.
 // Preserves per-spec dead-stripping. Duplicate keys are natively refused by the TOML walk.
 @(require_results)
 check :: #force_inline proc(src: []u8, plan: ^schema_check.Plan, spec := Spec.Toml_1_0, opts := schema_check.Options{}, sink: ^schema_check.Sink = nil, allocator := context.allocator) -> schema_check.Result {
+	hook.probe_stack(READ_STACK)
 	lax := opts.budget.steps != 0
 	switch spec {
 	case .Toml_1_0:
@@ -31,5 +35,8 @@ check_as :: #force_no_inline proc(src: []u8, plan: ^schema_check.Plan, $S: Spec,
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^schema_check.Checker, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 		return walk_text(src, S, LAX, opts, h, regs, a, ctx, schema_check.checker_hook)
 	}
-	return schema_check.check_stream(src, plan, &FORMATS[S], opts, walk_opts, sink, allocator, schema_check.Checker, walk)
+	build_last :: proc(src: []u8, opts: Options, a: runtime.Allocator) -> (tape.Document, tape.Error) {
+		return build(src, S, opts, a)
+	}
+	return schema_check.check_stream(src, plan, &FORMATS[S], opts, walk_opts, sink, allocator, schema_check.Checker, walk, build_last)
 }

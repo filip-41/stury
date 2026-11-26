@@ -246,6 +246,12 @@ reaches_node :: proc(s: ^Path_Search, at: rules.Node_Index, depth: int) -> bool 
 				return true
 			}
 		}
+		dep_kw := "dependencies" if o.dependencies else "dependentSchemas"
+		for dep in o.dependents {
+			if dn, ok := dep.node.?; ok && through_node(s, dn, depth + 1, tape.Name(dep_kw), tape.Name(dep.name)) {
+				return true
+			}
+		}
 		if through_node(s, o.additional, depth + 1, tape.Name("additionalProperties")) ||
 		   through_node(s, o.keys, depth + 1, tape.Name("propertyNames")) {
 			return true
@@ -1035,12 +1041,41 @@ draw_object :: proc(g: ^Gen, parts: []Part, list: []^rules.Rules, depth: int) ->
 			}
 		}
 	}
+	seen_deps := make(map[rules.Node_Index]bool, 4, g.scratch)
 	for _ in 0 ..< 4 {
-		for b in blocks {
+		for b_i := 0; b_i < len(blocks); b_i += 1 {
+			b := blocks[b_i]
 			for dep in b.dependents {
-				if entry_present(entries[:], dep.name, depth) {
-					for name in dep.required {
-						obj_entry(g, &entries, name, b).required = true
+				if !entry_present(entries[:], dep.name, depth) {
+					continue
+				}
+				for name in dep.required {
+					obj_entry(g, &entries, name, b).required = true
+				}
+				if dn, has_dn := dep.node.?; has_dn && !seen_deps[dn] {
+					seen_deps[dn] = true
+					dep_parts := make([dynamic]Part, g.scratch)
+					if flatten_parts(g, &dep_parts, {node = dn}, 0) {
+						for dp in dep_parts {
+							if dp.node == rules.NONE {
+								continue
+							}
+							if !takes(g.d.nodes[dp.node].kinds, .Object) {
+								g.culprit = dp.node
+								return
+							}
+							if g.d.nodes[dp.node].object >= 0 {
+								db := &g.d.objects[g.d.nodes[dp.node].object]
+								append(&blocks, db)
+								for &m in db.members {
+									e := obj_entry(g, &entries, m.name)
+									e.required ||= m.required
+									if !m.only_required {
+										append(&e.parts, Part{node = m.node, extra = &m.rules})
+									}
+								}
+							}
+						}
 					}
 				}
 			}

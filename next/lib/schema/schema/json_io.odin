@@ -369,14 +369,13 @@ canonical_json_number :: proc(raw: string, b: ^strings.Builder) -> (string, bool
 }
 
 // ============================================================================
-// `rules.Value` -> `write.Token_Tape` (explicit stack + `write.tokens_of`)
+// Unified `rules.Value` token emitter (`value_tokens`) -> `write.Token_Tape` & `Json_Writer`
 // ============================================================================
 
-@(private)
-value_to_tape :: proc(v: rules.Value, tt: ^write.Token_Tape, allocator: runtime.Allocator) -> (doc: tape.Document, ok: bool) {
-	if write.token_tape_start(tt, false, 0, allocator) != nil {
-		return {}, false
-	}
+// Streams `v` as write tokens into `sink` via `take` using an explicit heap stack (zero recursion).
+// Delegates `Node_Ref` subtrees to `write.tokens_of` for XML `.Group`, DSV `Tabular_Ext`, `.Bytes`, and strict RFC 8259 numbers.
+@(private = "file")
+value_tokens :: proc(v: rules.Value, sink: ^$S, $take: proc(sink: ^S, kind: write.Token_Kind, text: string) -> write.Error, scratch: runtime.Allocator) -> write.Error {
 	Frame_Kind :: enum u8 {
 		Value,
 		Key,
@@ -387,130 +386,108 @@ value_to_tape :: proc(v: rules.Value, tt: ^write.Token_Tape, allocator: runtime.
 		val:  rules.Value,
 		key:  string,
 	}
-	stack, serr := make([dynamic]Frame, 0, 16, allocator)
+	stack, serr := make([dynamic]Frame, 0, 16, scratch)
 	if serr != nil {
-		write.token_tape_drop(tt)
-		return {}, false
+		return serr
 	}
 	defer delete(stack)
 	if _, aerr := append(&stack, Frame{kind = .Value, val = v}); aerr != nil {
-		write.token_tape_drop(tt)
-		return {}, false
+		return aerr
 	}
-	num_b := strings.builder_make(allocator)
+	num_b := strings.builder_make(scratch)
 	defer strings.builder_destroy(&num_b)
 	buf: [128]u8 = ---
+
 	for len(stack) > 0 {
 		fr := pop(&stack)
 		switch fr.kind {
 		case .Close:
-			if write.token_tape_take(tt, .Close, "") != nil {
-				write.token_tape_drop(tt)
-				return {}, false
-			}
+			take(sink, .Close, "") or_return
 			continue
 		case .Key:
-			if write.token_tape_take(tt, .Key, fr.key) != nil {
-				write.token_tape_drop(tt)
-				return {}, false
-			}
+			take(sink, .Key, fr.key) or_return
 			continue
 		case .Value:
 		}
 		if nr, is_ref := fr.val.(rules.Node_Ref); is_ref {
 			if nr.doc == nil || nr.node == tape.NO_NODE || int(nr.node) >= len(nr.doc.nodes) {
-				write.token_tape_drop(tt)
-				return {}, false
+				return write.Refused{}
 			}
-			if write.tokens_of(nr.doc, nr.node, tt, write.token_tape_take, allocator) != nil {
-				write.token_tape_drop(tt)
-				return {}, false
-			}
+			write.tokens_of(nr.doc, nr.node, sink, take, scratch) or_return
 			continue
 		}
 		switch rules.value_kind(fr.val) {
 		case .Null:
-			if write.token_tape_take(tt, .Null, "") != nil {
-				write.token_tape_drop(tt)
-				return {}, false
-			}
+			take(sink, .Null, "") or_return
 		case .True:
-			if write.token_tape_take(tt, .True, "") != nil {
-				write.token_tape_drop(tt)
-				return {}, false
-			}
+			take(sink, .True, "") or_return
 		case .False:
-			if write.token_tape_take(tt, .False, "") != nil {
-				write.token_tape_drop(tt)
-				return {}, false
-			}
+			take(sink, .False, "") or_return
 		case .Number:
-			raw_txt, owned, nok := rules.value_number_text(fr.val, buf[:], allocator)
+			raw_txt, owned, nok := rules.value_number_text(fr.val, buf[:], scratch)
 			if !nok {
-				write.token_tape_drop(tt)
-				return {}, false
+				return write.Refused{}
 			}
 			txt, cok := canonical_json_number(raw_txt, &num_b)
 			if owned {
-				delete(raw_txt, allocator)
+				delete(raw_txt, scratch)
 			}
-			if !cok || write.token_tape_take(tt, .Number, txt) != nil {
-				write.token_tape_drop(tt)
-				return {}, false
+			if !cok {
+				return write.Refused{}
 			}
+			take(sink, .Number, txt) or_return
 		case .String:
-			txt, owned, sok := rules.value_string(fr.val, buf[:], allocator)
+			txt, owned, sok := rules.value_string(fr.val, buf[:], scratch)
 			if !sok {
-				write.token_tape_drop(tt)
-				return {}, false
+				return write.Refused{}
 			}
-			terr := write.token_tape_take(tt, .String, txt)
+			terr := take(sink, .String, txt)
 			if owned {
-				delete(txt, allocator)
+				delete(txt, scratch)
 			}
 			if terr != nil {
-				write.token_tape_drop(tt)
-				return {}, false
+				return terr
 			}
 		case .Array:
-			if write.token_tape_take(tt, .Array, "") != nil {
-				write.token_tape_drop(tt)
-				return {}, false
-			}
+			take(sink, .Array, "") or_return
 			if _, aerr := append(&stack, Frame{kind = .Close}); aerr != nil {
-				write.token_tape_drop(tt)
-				return {}, false
+				return aerr
 			}
 			if av, is_arr := fr.val.([]rules.Value); is_arr {
 				for i := len(av) - 1; i >= 0; i -= 1 {
 					if _, aerr := append(&stack, Frame{kind = .Value, val = av[i]}); aerr != nil {
-						write.token_tape_drop(tt)
-						return {}, false
+						return aerr
 					}
 				}
 			}
 		case .Object:
-			if write.token_tape_take(tt, .Object, "") != nil {
-				write.token_tape_drop(tt)
-				return {}, false
-			}
+			take(sink, .Object, "") or_return
 			if _, aerr := append(&stack, Frame{kind = .Close}); aerr != nil {
-				write.token_tape_drop(tt)
-				return {}, false
+				return aerr
 			}
 			if ov, is_obj := fr.val.([]rules.Member_Value); is_obj {
 				for i := len(ov) - 1; i >= 0; i -= 1 {
 					if _, aerr := append(&stack, Frame{kind = .Value, val = ov[i].value}); aerr != nil {
-						write.token_tape_drop(tt)
-						return {}, false
+						return aerr
 					}
 					if _, aerr := append(&stack, Frame{kind = .Key, key = ov[i].key}); aerr != nil {
-						write.token_tape_drop(tt)
-						return {}, false
+						return aerr
 					}
 				}
 			}
 		}
+	}
+	return nil
+}
+
+@(private)
+value_to_tape :: proc(v: rules.Value, tt: ^write.Token_Tape, allocator: runtime.Allocator) -> (doc: tape.Document, ok: bool) {
+	if write.token_tape_start(tt, false, 0, allocator) != nil {
+		return {}, false
+	}
+	if value_tokens(v, tt, write.token_tape_take, allocator) != nil {
+		write.token_tape_drop(tt)
+		return {}, false
 	}
 	d, derr := write.token_tape_document(tt)
 	if derr != nil {
@@ -792,135 +769,19 @@ jw_take_token :: proc(w: ^Json_Writer, kind: write.Token_Kind, text: string) -> 
 	return nil
 }
 
-// Writes a `rules.Value` as JSON into `w` using an explicit heap stack (zero recursion).
-// Delegates `Node_Ref` subtrees to `write.tokens_of` for XML `.Group`, DSV `Tabular_Ext`, `.Bytes`, and strict RFC 8259 numbers.
+// Writes a `rules.Value` as JSON into `w` via unified `value_tokens` (explicit heap stack, zero recursion).
 @(private)
 jw_value :: proc(w: ^Json_Writer, v: rules.Value, scratch: runtime.Allocator) -> bool {
-	Op_Kind :: enum u8 {
-		Value,
-		Key,
-		Close_Array,
-		Close_Object,
-	}
-	Op :: struct {
-		kind: Op_Kind,
-		val:  rules.Value,
-		key:  string,
-	}
-	stack, serr := make([dynamic]Op, 0, 16, scratch)
-	if serr != nil {
-		w.err = .No_Memory
+	if terr := value_tokens(v, w, jw_take_token, scratch); terr != nil {
+		if _, is_alloc := terr.(runtime.Allocator_Error); is_alloc {
+			w.err = .No_Memory
+		} else if w.err == .None {
+			w.err = .Unsupported
+		}
 		return false
 	}
-	defer delete(stack)
-	if _, aerr := append(&stack, Op{kind = .Value, val = v}); aerr != nil {
+	if w.out.err != nil && w.err == .None {
 		w.err = .No_Memory
-		return false
-	}
-	num_b := strings.builder_make(scratch)
-	defer strings.builder_destroy(&num_b)
-	buf: [128]u8 = ---
-
-	for len(stack) > 0 {
-		op := pop(&stack)
-		switch op.kind {
-		case .Key:
-			jw_key(w, op.key)
-			continue
-		case .Close_Array:
-			jw_close_array(w)
-			continue
-		case .Close_Object:
-			jw_close_object(w)
-			continue
-		case .Value:
-		}
-		if nr, is_ref := op.val.(rules.Node_Ref); is_ref {
-			if nr.doc == nil || nr.node == tape.NO_NODE || int(nr.node) >= len(nr.doc.nodes) {
-				w.err = .Unsupported
-				return false
-			}
-			if terr := write.tokens_of(nr.doc, nr.node, w, jw_take_token, scratch); terr != nil {
-				if _, is_alloc := terr.(runtime.Allocator_Error); is_alloc {
-					w.err = .No_Memory
-				} else if w.err == .None {
-					w.err = .Unsupported
-				}
-				return false
-			}
-			continue
-		}
-		switch rules.value_kind(op.val) {
-		case .Null:
-			jw_null(w)
-		case .True:
-			jw_bool(w, true)
-		case .False:
-			jw_bool(w, false)
-		case .Number:
-			raw_txt, owned, nok := rules.value_number_text(op.val, buf[:], scratch)
-			if !nok {
-				w.err = .Unsupported
-				return false
-			}
-			txt, cok := canonical_json_number(raw_txt, &num_b)
-			if owned {
-				delete(raw_txt, scratch)
-			}
-			if !cok {
-				w.err = .Unsupported
-				return false
-			}
-			jw_number(w, txt)
-		case .String:
-			txt, owned, sok := rules.value_string(op.val, buf[:], scratch)
-			if !sok {
-				w.err = .Unsupported
-				return false
-			}
-			jw_string(w, txt)
-			if owned {
-				delete(txt, scratch)
-			}
-		case .Array:
-			jw_open_array(w)
-			if _, aerr := append(&stack, Op{kind = .Close_Array}); aerr != nil {
-				w.err = .No_Memory
-				return false
-			}
-			if av, is_arr := op.val.([]rules.Value); is_arr {
-				for i := len(av) - 1; i >= 0; i -= 1 {
-					if _, aerr := append(&stack, Op{kind = .Value, val = av[i]}); aerr != nil {
-						w.err = .No_Memory
-						return false
-					}
-				}
-			}
-		case .Object:
-			jw_open_object(w)
-			if _, aerr := append(&stack, Op{kind = .Close_Object}); aerr != nil {
-				w.err = .No_Memory
-				return false
-			}
-			if ov, is_obj := op.val.([]rules.Member_Value); is_obj {
-				for i := len(ov) - 1; i >= 0; i -= 1 {
-					if _, aerr := append(&stack, Op{kind = .Value, val = ov[i].value}); aerr != nil {
-						w.err = .No_Memory
-						return false
-					}
-					if _, aerr := append(&stack, Op{kind = .Key, key = ov[i].key}); aerr != nil {
-						w.err = .No_Memory
-						return false
-					}
-				}
-			}
-		}
-		if w.err != .None || w.out.err != nil {
-			if w.err == .None {
-				w.err = .No_Memory
-			}
-			return false
-		}
 	}
 	return w.err == .None && w.out.err == nil
 }

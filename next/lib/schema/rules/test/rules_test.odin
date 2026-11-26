@@ -314,4 +314,51 @@ review_regressions_rules :: proc(t: ^testing.T) {
 		testing.expect(t, !rules.format_valid(.Idn_Email, string(bad_utf8[:])))
 		testing.expect(t, !rules.format_valid(.Uri_Template, "https://example.com/it's/{id}"))
 	}
+
+	// Polish B1: combined `const` + `enum` with container operands must refuse cleanly (NOT compile to an unsatisfiable enum)!
+	{
+		obj_a := [1]rules.Member_Value{{key = "a", value = i64(1)}}
+		obj_b := [1]rules.Member_Value{{key = "b", value = i64(2)}}
+		enum_vals := [2]rules.Value{rules.Value(obj_a[:]), rules.Value(obj_b[:])}
+		n := rules.Node{
+			kinds = rules.EVERY_KIND,
+			const_of = rules.Value(obj_a[:]),
+			has_enum = true,
+			enum_of = enum_vals[:],
+			array = -1,
+			object = -1,
+		}
+		_, refused := rules.leaf_of(&n, {})
+		testing.expect_value(t, refused, "const")
+
+		// Scalar `const` + `enum` containing a container also refuses cleanly as "enum".
+		mix_vals := [2]rules.Value{i64(1), rules.Value(obj_a[:])}
+		n2 := rules.Node{
+			kinds = rules.EVERY_KIND,
+			const_of = i64(1),
+			has_enum = true,
+			enum_of = mix_vals[:],
+			array = -1,
+			object = -1,
+		}
+		_, refused2 := rules.leaf_of(&n2, {})
+		testing.expect_value(t, refused2, "enum")
+
+		// Combined scalar `const` + `enum`: matching stays satisfiable, disjoint is unsatisfiable.
+		sc_vals := [2]rules.Value{i64(1), i64(2)}
+		n3 := rules.Node{
+			kinds = rules.EVERY_KIND,
+			const_of = i64(1),
+			has_enum = true,
+			enum_of = sc_vals[:],
+			array = -1,
+			object = -1,
+		}
+		l3, r3 := rules.leaf_of(&n3, {})
+		defer delete(l3.enum_keys)
+		defer for k in l3.enum_keys { delete(k) }
+		testing.expect_value(t, r3, "")
+		testing.expect(t, rules.enum_has(&l3, .Number, "1"))
+		testing.expect(t, !rules.enum_has(&l3, .Number, "2"))
+	}
 }

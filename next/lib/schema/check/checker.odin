@@ -1998,15 +1998,14 @@ resolve_plain_token :: proc(h: ^Checker, l: ^rules.Leaf, text: string) -> (kind:
 	return .String, {}, false
 }
 
-// Judges scalar token `t` against leaf `l`, recording failures on `h` if invalid.
-@(private)
-judge_scalar_token :: proc(h: ^Checker, l: ^rules.Leaf, t: tape.Token, owner: ^Record, alt_site: []tape.Step = nil) -> bool {
+@(private = "file")
+eval_scalar_leaf :: proc(h: ^Checker, l: ^rules.Leaf, t: tape.Token) -> rules.Failures {
 	buf: [128]u8 = ---
 	text, owned, ok := token_decoded_scalar(h, t, buf[:])
 	if !ok {
 		if t.kind != .Number {
 			h.fatal = .No_Memory
-			return false
+			return {}
 		}
 		text = ""
 	}
@@ -2019,8 +2018,13 @@ judge_scalar_token :: proc(h: ^Checker, l: ^rules.Leaf, t: tape.Token, owner: ^R
 	if kind == .Plain {
 		kind, plain_num, has_plain_num = resolve_plain_token(h, l, text)
 	}
+	return judge_scalar_core(h, l, kind, text, t, plain_num, has_plain_num)
+}
 
-	fails := judge_scalar_core(h, l, kind, text, t, plain_num, has_plain_num)
+// Judges scalar token `t` against leaf `l`, recording failures on `h` if invalid.
+@(private)
+judge_scalar_token :: proc(h: ^Checker, l: ^rules.Leaf, t: tape.Token, owner: ^Record, alt_site: []tape.Step = nil) -> bool {
+	fails := eval_scalar_leaf(h, l, t)
 	if h.fatal != .None {
 		return false
 	}
@@ -2034,25 +2038,7 @@ judge_scalar_token :: proc(h: ^Checker, l: ^rules.Leaf, t: tape.Token, owner: ^R
 // Pure boolean leaf check (no error emission) used by `Factored_Open`.
 @(private)
 scalar_passes_leaf :: proc(h: ^Checker, l: ^rules.Leaf, t: tape.Token) -> bool {
-	buf: [128]u8 = ---
-	text, owned, ok := token_decoded_scalar(h, t, buf[:])
-	if !ok {
-		if t.kind != .Number {
-			h.fatal = .No_Memory
-			return false
-		}
-		text = ""
-	}
-	defer if owned {
-		delete(text, h.scratch)
-	}
-	kind := t.kind
-	plain_num: spell.Number
-	has_plain_num := false
-	if kind == .Plain {
-		kind, plain_num, has_plain_num = resolve_plain_token(h, l, text)
-	}
-	fails := judge_scalar_core(h, l, kind, text, t, plain_num, has_plain_num)
+	fails := eval_scalar_leaf(h, l, t)
 	return h.fatal == .None && fails == {}
 }
 
@@ -2415,6 +2401,7 @@ subcheck_node :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, r
 			if fast_scalar_ok(rec, tok, is_bin) {
 				return true
 			}
+			same_src := raw_data(doc.src) == raw_data(h.src) && len(doc.src) == len(h.src)
 			if quiet || h.quiet {
 				// Fast kind rejection before loading full leaf!
 				if tok.kind != .Plain {
@@ -2437,8 +2424,16 @@ subcheck_node :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, r
 						}
 					}
 				}
-				if doc.src == nil || raw_data(doc.src) == raw_data(h.src) {
+				if doc.src == nil || same_src {
 					return scalar_passes_leaf(h, &h.plan.leaves[rec.rule_set - 1], tok)
+				}
+			} else if doc.src == nil || same_src {
+				// Happy-path fast exit for deterministic subchecks: avoid `sub: Checker` setup when valid!
+				if scalar_passes_leaf(h, &h.plan.leaves[rec.rule_set - 1], tok) {
+					return true
+				}
+				if h.fatal != .None {
+					return false
 				}
 			}
 		}
@@ -2534,11 +2529,12 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 			return
 		}
 		delete(sdoc.nodes, h.scratch)
+		delete(sdoc.facts, h.scratch)
 		delete(sdoc.counts, h.scratch)
 		free(sdoc, h.scratch)
 	}
 
-	build_synthetic_array_doc :: proc(h: ^Checker, src_doc: ^tape.Document, vals: []tape.Node_Index) -> (^tape.Document, bool) {
+	build_synthetic_array_doc :: proc(h: ^Checker, src_doc: ^tape.Document, vals: []tape.Node_Index) -> (res: ^tape.Document, ok: bool) {
 		total := 1
 		for v in vals {
 			vn := src_doc.nodes[v]
@@ -2557,13 +2553,17 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 			return nil, false
 		}
 		counts := make([dynamic]tape.Child_Count, h.scratch)
+		facts := make([dynamic]tape.Fact, h.scratch)
+		defer if !ok {
+			delete(facts)
+			delete(counts)
+			delete(nodes, h.scratch)
+			free(sdoc, h.scratch)
+		}
 		sp: u16
 		if len(vals) >= int(tape.MAX_CHILDREN) {
 			sp = tape.MAX_CHILDREN
 			if _, cerr := append(&counts, tape.Child_Count{node = 0, count = u32(len(vals))}); cerr != nil {
-				delete(counts)
-				delete(nodes, h.scratch)
-				free(sdoc, h.scratch)
 				h.fatal = .No_Memory
 				return nil, false
 			}
@@ -2572,19 +2572,37 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 		}
 		first_lo := src_doc.nodes[vals[0]].lo if len(vals) > 0 else 0
 		nodes[0] = tape.Node{lo = first_lo, n = u32(total), kind = .Array, role = .Value, spelling = sp}
+		present: tape.Facts
 		pos := 1
 		for v in vals {
 			vn := src_doc.nodes[v]
 			sz := int(vn.n) if (vn.kind == .Object || vn.kind == .Array) else 1
 			copy(nodes[pos:][:sz], src_doc.nodes[v:][:sz])
+			v_end := v + tape.Node_Index(sz)
+			if len(src_doc.facts) > 0 {
+				lo, hi := 0, len(src_doc.facts)
+				for lo < hi {
+					mid := (lo + hi) / 2
+					if src_doc.facts[mid].node < v {
+						lo = mid + 1
+					} else {
+						hi = mid
+					}
+				}
+				for fi := lo; fi < len(src_doc.facts) && src_doc.facts[fi].node < v_end; fi += 1 {
+					f := src_doc.facts[fi]
+					f.node = tape.Node_Index(pos) + (f.node - v)
+					present += {f.kind}
+					if _, ferr := append(&facts, f); ferr != nil {
+						h.fatal = .No_Memory
+						return nil, false
+					}
+				}
+			}
 			if len(src_doc.counts) > 0 {
-				v_end := v + tape.Node_Index(sz)
 				for cc in src_doc.counts {
 					if cc.node >= v && cc.node < v_end {
 						if _, cerr := append(&counts, tape.Child_Count{node = tape.Node_Index(pos) + (cc.node - v), count = cc.count}); cerr != nil {
-							delete(counts)
-							delete(nodes, h.scratch)
-							free(sdoc, h.scratch)
 							h.fatal = .No_Memory
 							return nil, false
 						}
@@ -2596,9 +2614,11 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 		sdoc^ = tape.Document{
 			src = src_doc.src,
 			nodes = nodes,
+			facts = facts[:],
 			counts = counts[:],
 			format = src_doc.format,
 			ext = src_doc.ext,
+			present = present,
 		}
 		return sdoc, true
 	}
@@ -2736,6 +2756,47 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 		return true
 	}
 
+	open_doc_container :: proc(h: ^Checker, r: tape.Reader, cur_doc: ^tape.Document, node: tape.Node_Index, is_object: bool, pre_nf, pre_sp: int, sl: ^[]Doc_Frame, is_heap: ^bool, sn: ^int, owns_doc: bool) -> (stopped: bool, adopted: bool) {
+		it, p, cerr := tape.children(r, node, h.scratch)
+		if cerr != nil {
+			h.fatal = .No_Memory
+			return true, false
+		}
+		if p != .Found {
+			tape.destroy_children(&it)
+			h.fatal = .Unsupported
+			return true, false
+		}
+		opened_fac := is_object && h.nf > pre_nf && h.sp > pre_sp && h.frames[h.sp - 1].is_factored
+		fac_rec := h.frames[h.sp - 1].owner if opened_fac else nil
+		grouped: []Group_Bucket
+		if is_object && h.dups == .Group {
+			g, gok := build_group_buckets(h, r, cur_doc, &it)
+			if !gok {
+				tape.destroy_children(&it)
+				return true, false
+			}
+			grouped = g
+		}
+		if !push_doc(h, sl, is_heap, sn, Doc_Frame{
+			doc = cur_doc,
+			owns_doc = owns_doc,
+			node = node,
+			is_object = is_object,
+			iter = it,
+			open_factored = opened_fac,
+			factored_rec = fac_rec,
+			grouped = grouped,
+		}) {
+			if len(grouped) > 0 {
+				free_grouped(h, grouped)
+			}
+			tape.destroy_children(&it)
+			return true, false
+		}
+		return false, owns_doc
+	}
+
 	r := tape.Reader{doc = doc}
 	root_idx := int(root_rec.meta)
 	regs := hook.Regs{b = u64(uintptr(&h.plan.solo[2 * root_idx + 1]))}
@@ -2764,42 +2825,10 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 						return false, false
 					}
 					if use_fork {
-						fm := fo.active_member
-						fo.active_member = nil
-						fo.active_choice = -1
-						if fm != nil {
-							cnt_i, _, _ := tape.length(r, node, h.scratch)
-							cnt := u64(max(cnt_i, 0))
-							for fl in fm.leaves {
-								l := &h.plan.leaves[fl.leaf - 1]
-								if n.kind == .Object {
-									if .Object not_in l.kinds || cnt < l.min_members || cnt > l.max_members {
-										fo.failed |= fl.parts
-									}
-								} else if n.kind == .Array {
-									if .Array not_in l.kinds || cnt < l.min_items || cnt > l.max_items {
-										fo.failed |= fl.parts
-									}
-								}
+						if eval_factored_fork_node(h, cur_doc, node, fo_idx, fo.active_member) {
+							if h.fatal == .None {
+								fail_doomed_factored(h, factored_at(h, fo_idx))
 							}
-							for ch in fm.choices {
-								fo = factored_at(h, fo_idx)
-								if fo.factor.monotone && (ch.parts & ~fo.failed) == 0 {
-									continue
-								}
-								passed := subcheck_node(h, cur_doc, node, ch.record, nil, nil, quiet = true)
-								fo = factored_at(h, fo_idx)
-								if !passed {
-									fo.failed |= ch.parts
-								}
-								if h.fatal != .None {
-									return true, false
-								}
-							}
-						}
-						fo = factored_at(h, fo_idx)
-						if can_doom_factored(h, fo.factor, fo.failed) {
-							fail_doomed_factored(h, fo)
 							return true, false
 						}
 						return false, false
@@ -2849,44 +2878,7 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 						}
 						return false, false
 					}
-					it, p, cerr := tape.children(r, node, h.scratch)
-					if cerr != nil {
-						h.fatal = .No_Memory
-						return true, false
-					}
-					if p != .Found {
-						tape.destroy_children(&it)
-						h.fatal = .Unsupported
-						return true, false
-					}
-					opened_fac := n.kind == .Object && h.nf > pre_nf && h.sp > pre_sp && h.frames[h.sp - 1].is_factored
-					fac_rec := h.frames[h.sp - 1].owner if opened_fac else nil
-					grouped: []Group_Bucket
-					if n.kind == .Object && h.dups == .Group {
-						g, gok := build_group_buckets(h, r, cur_doc, &it)
-						if !gok {
-							tape.destroy_children(&it)
-							return true, false
-						}
-						grouped = g
-					}
-					if !push_doc(h, sl, is_heap, sn, Doc_Frame{
-						doc = cur_doc,
-						owns_doc = owns_doc,
-						node = node,
-						is_object = n.kind == .Object,
-						iter = it,
-						open_factored = opened_fac,
-						factored_rec = fac_rec,
-						grouped = grouped,
-					}) {
-						if len(grouped) > 0 {
-							free_grouped(h, grouped)
-						}
-						tape.destroy_children(&it)
-						return true, false
-					}
-					return false, owns_doc
+					return open_doc_container(h, r, cur_doc, node, n.kind == .Object, pre_nf, pre_sp, sl, is_heap, sn, owns_doc)
 				}
 
 				rec := (^Record)(uintptr(regs.b) - size_of(Record))
@@ -2959,44 +2951,7 @@ walk_document_node :: proc(h: ^Checker, doc: ^tape.Document, root_node: tape.Nod
 			return false, false
 		}
 		if n.kind == .Object || n.kind == .Array {
-			it, p, cerr := tape.children(r, node, h.scratch)
-			if cerr != nil {
-				h.fatal = .No_Memory
-				return true, false
-			}
-			if p != .Found {
-				tape.destroy_children(&it)
-				h.fatal = .Unsupported
-				return true, false
-			}
-			opened_fac := n.kind == .Object && h.nf > pre_nf && h.sp > pre_sp && h.frames[h.sp - 1].is_factored
-			fac_rec := h.frames[h.sp - 1].owner if opened_fac else nil
-			grouped: []Group_Bucket
-			if n.kind == .Object && h.dups == .Group {
-				g, gok := build_group_buckets(h, r, cur_doc, &it)
-				if !gok {
-					tape.destroy_children(&it)
-					return true, false
-				}
-				grouped = g
-			}
-			if !push_doc(h, sl, is_heap, sn, Doc_Frame{
-				doc = cur_doc,
-				owns_doc = owns_doc,
-				node = node,
-				is_object = n.kind == .Object,
-				iter = it,
-				open_factored = opened_fac,
-				factored_rec = fac_rec,
-				grouped = grouped,
-			}) {
-				if len(grouped) > 0 {
-					free_grouped(h, grouped)
-				}
-				tape.destroy_children(&it)
-				return true, false
-			}
-			return false, owns_doc
+			return open_doc_container(h, r, cur_doc, node, n.kind == .Object, pre_nf, pre_sp, sl, is_heap, sn, owns_doc)
 		}
 		return false, false
 	}
@@ -3246,13 +3201,7 @@ check_stream :: proc(
 	ctx := context
 	chk := checker_ptr(&h)
 	regs := checker_start(chk, plan, src, format, opts, sink, &memo, allocator, scratch, mem_b, &ctx)
-	// Load lazy XML prolog/DTD extension if format provides `text_ext` so streaming XML decodes entities!
-	if format != nil && format.text_ext != nil {
-		if ext, ok := format.text_ext(src, scratch); ok && ext != nil {
-			chk.xml_ext = ext
-			chk.xml_ext_owned = true
-		}
-	}
+	load_xml_ext(chk, src, format, scratch)
 	when H == Refusing_Checker {
 		open_buf: [64]Open_Key = ---
 		h.open_keys = {}
@@ -3263,14 +3212,7 @@ check_stream :: proc(
 
 	_, werr, _ := walk(src, t_opts, &h, &regs, scratch, &ctx)
 	when H == Refusing_Checker {
-		open_keys_end(&h.open_keys)
-		if h.open_keys.oom && chk.fatal == .None {
-			chk.fatal = .No_Memory
-		}
-		if h.open_keys.repeat != NO_REPEAT {
-			chk.dup_hit = true
-			chk.dup_at = h.open_keys.repeat
-		}
+		settle_refusing_keys(&h, chk)
 	}
 
 	// Fast exit on the common zero-error valid happy path!
@@ -3283,25 +3225,13 @@ check_stream :: proc(
 		if _, is_ex := werr.(tape.Exceeded); is_ex {
 			chk.fatal = .Exceeded
 		}
-		mem_refused := t_opts.budget.memory > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
-		return finish_result(chk, hook.memory_budget_error(&rb.main, werr) if t_opts.budget.memory > 0 else werr, mem_refused, allocator)
+		return finish_result(chk, hook.memory_budget_error(&rb.main, werr) if t_opts.budget.memory > 0 else werr, is_mem_refused(t_opts.budget.memory, &rb), allocator)
 	}
 	if chk.fatal != .None {
-		mem_refused := t_opts.budget.memory > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
-		return finish_result(chk, nil, mem_refused, allocator)
+		return finish_result(chk, nil, is_mem_refused(t_opts.budget.memory, &rb), allocator)
 	}
 	if chk.dup_hit && chk.dups == .Refuse {
-		if sink != nil {
-			record_failure(chk, .Duplicate_Key, chk.dup_at, "duplicateKey", "", &plan.records[0])
-		} else {
-			record_first_failure(chk, .Duplicate_Key, chk.dup_at, "duplicateKey", "", &plan.records[0])
-		}
-		chk.failed = true
-		if sink != nil {
-			order_entries(sink, from)
-		}
-		mem_refused := t_opts.budget.memory > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
-		return finish_result(chk, nil, mem_refused, allocator)
+		return fail_refuse_dup(chk, plan, sink, from, is_mem_refused(t_opts.budget.memory, &rb), allocator)
 	}
 
 	// Stage 4 fallback 1: a factored object failed under `sink != nil` -> single reread with `no_factor = true`!
@@ -3314,47 +3244,23 @@ check_stream :: proc(
 		}
 		checker_cleanup(chk)
 		regs = checker_start(chk, plan, src, format, opts, sink, &memo, allocator, scratch, mem_b, &ctx)
-		if format != nil && format.text_ext != nil {
-			if ext, ok := format.text_ext(src, scratch); ok && ext != nil {
-				chk.xml_ext = ext
-				chk.xml_ext_owned = true
-			}
-		}
+		load_xml_ext(chk, src, format, scratch)
 		when H == Refusing_Checker {
 			open_keys_start(&h.open_keys, open_buf[:], src, format, chk.xml_ext, scratch, &ctx)
 		}
 		chk.no_factor = true
 		_, werr, _ = walk(src, t_opts, &h, &regs, scratch, &ctx)
 		when H == Refusing_Checker {
-			open_keys_end(&h.open_keys)
-			if h.open_keys.oom && chk.fatal == .None {
-				chk.fatal = .No_Memory
-			}
-			if h.open_keys.repeat != NO_REPEAT {
-				chk.dup_hit = true
-				chk.dup_at = h.open_keys.repeat
-			}
+			settle_refusing_keys(&h, chk)
 		}
 		if werr != nil {
-			mem_refused := t_opts.budget.memory > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
-			return finish_result(chk, hook.memory_budget_error(&rb.main, werr) if t_opts.budget.memory > 0 else werr, mem_refused, allocator)
+			return finish_result(chk, hook.memory_budget_error(&rb.main, werr) if t_opts.budget.memory > 0 else werr, is_mem_refused(t_opts.budget.memory, &rb), allocator)
 		}
 		if chk.fatal != .None {
-			mem_refused := t_opts.budget.memory > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
-			return finish_result(chk, nil, mem_refused, allocator)
+			return finish_result(chk, nil, is_mem_refused(t_opts.budget.memory, &rb), allocator)
 		}
 		if chk.dup_hit && chk.dups == .Refuse {
-			if sink != nil {
-				record_failure(chk, .Duplicate_Key, chk.dup_at, "duplicateKey", "", &plan.records[0])
-			} else {
-				record_first_failure(chk, .Duplicate_Key, chk.dup_at, "duplicateKey", "", &plan.records[0])
-			}
-			chk.failed = true
-			if sink != nil {
-				order_entries(sink, from)
-			}
-			mem_refused := t_opts.budget.memory > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
-			return finish_result(chk, nil, mem_refused, allocator)
+			return fail_refuse_dup(chk, plan, sink, from, is_mem_refused(t_opts.budget.memory, &rb), allocator)
 		}
 	}
 
@@ -3370,12 +3276,7 @@ check_stream :: proc(
 			}
 			checker_cleanup(chk)
 			regs = checker_start(chk, plan, src, format, opts, sink, &memo, allocator, scratch, mem_b, &ctx)
-			if format != nil && format.text_ext != nil {
-				if ext, ok := format.text_ext(src, scratch); ok && ext != nil {
-					chk.xml_ext = ext
-					chk.xml_ext_owned = true
-				}
-			}
+			load_xml_ext(chk, src, format, scratch)
 			when H == Refusing_Checker {
 				open_keys_start(&h.open_keys, open_buf[:], src, format, chk.xml_ext, scratch, &ctx)
 			}
@@ -3383,8 +3284,7 @@ check_stream :: proc(
 			chk.judge_dups = true
 			_, werr, _ = walk(src, t_opts, &h, &regs, scratch, &ctx)
 			if werr != nil {
-				mem_refused := t_opts.budget.memory > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
-				return finish_result(chk, hook.memory_budget_error(&rb.main, werr) if t_opts.budget.memory > 0 else werr, mem_refused, allocator)
+				return finish_result(chk, hook.memory_budget_error(&rb.main, werr) if t_opts.budget.memory > 0 else werr, is_mem_refused(t_opts.budget.memory, &rb), allocator)
 			}
 		} else if build_last != nil {
 			// `.Last`: build deduplicated `tape.Document` and run `check_document` for 100% last-wins parity,
@@ -3412,8 +3312,7 @@ check_stream :: proc(
 			}
 			doc, berr := build_last(src, b_opts, scratch)
 			if berr != nil {
-				mem_refused := t_opts.budget.memory > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
-				return finish_result(chk, hook.memory_budget_error(&rb.main, berr) if t_opts.budget.memory > 0 else berr, mem_refused, allocator)
+				return finish_result(chk, hook.memory_budget_error(&rb.main, berr) if t_opts.budget.memory > 0 else berr, is_mem_refused(t_opts.budget.memory, &rb), allocator)
 			}
 			defer tape.destroy(&doc)
 			if t_opts.budget.memory > 0 {
@@ -3430,7 +3329,45 @@ check_stream :: proc(
 	if sink != nil {
 		order_entries(sink, from)
 	}
-	mem_refused := t_opts.budget.memory > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
+	return finish_result(chk, nil, is_mem_refused(t_opts.budget.memory, &rb), allocator)
+}
+
+@(private = "file")
+load_xml_ext :: proc(chk: ^Checker, src: []u8, format: ^tape.Format, scratch: runtime.Allocator) {
+	if format != nil && format.text_ext != nil {
+		if ext, ok := format.text_ext(src, scratch); ok && ext != nil {
+			chk.xml_ext = ext
+			chk.xml_ext_owned = true
+		}
+	}
+}
+
+@(private = "file")
+settle_refusing_keys :: proc(h: ^Refusing_Checker, chk: ^Checker) {
+	open_keys_end(&h.open_keys)
+	if h.open_keys.oom && chk.fatal == .None {
+		chk.fatal = .No_Memory
+	}
+	if h.open_keys.repeat != NO_REPEAT {
+		chk.dup_hit = true
+		chk.dup_at = h.open_keys.repeat
+	}
+}
+
+@(private = "file")
+is_mem_refused :: proc "contextless" (limit: u64, rb: ^hook.Read_Budget) -> bool {
+	return limit > 0 && (rb.main.refused || (rb.main.peer != nil && rb.main.peer.refused))
+}
+
+@(private = "file")
+fail_refuse_dup :: proc(chk: ^Checker, plan: ^Plan, sink: ^Sink, from: int, mem_refused: bool, allocator: runtime.Allocator) -> Result {
+	if sink != nil {
+		record_failure(chk, .Duplicate_Key, chk.dup_at, "duplicateKey", "", &plan.records[0])
+		order_entries(sink, from)
+	} else {
+		record_first_failure(chk, .Duplicate_Key, chk.dup_at, "duplicateKey", "", &plan.records[0])
+	}
+	chk.failed = true
 	return finish_result(chk, nil, mem_refused, allocator)
 }
 
@@ -3616,6 +3553,17 @@ tracker_at :: #force_inline proc "contextless" (h: ^Checker, idx: int) -> ^Key_T
 	return &h.trackers[idx - 1]
 }
 
+@(private = "file")
+reset_tracker :: proc(tr: ^Key_Tracker, scratch: runtime.Allocator) {
+	tr.small_n = 0
+	for nm in tr.owned {
+		delete(nm, scratch)
+	}
+	clear(&tr.owned)
+	clear(&tr.names)
+	clear(&tr.table)
+}
+
 @(private)
 open_tracker :: proc(h: ^Checker) -> int {
 	idx := h.tracked
@@ -3627,13 +3575,7 @@ open_tracker :: proc(h: ^Checker) -> int {
 			h.tracker0.table.allocator = h.scratch
 			h.tracker0_used = true
 		} else {
-			h.tracker0.small_n = 0
-			for nm in h.tracker0.owned {
-				delete(nm, h.scratch)
-			}
-			clear(&h.tracker0.owned)
-			clear(&h.tracker0.names)
-			clear(&h.tracker0.table)
+			reset_tracker(&h.tracker0, h.scratch)
 		}
 		h.tracked = 1
 		return 0
@@ -3648,14 +3590,7 @@ open_tracker :: proc(h: ^Checker) -> int {
 			return -1
 		}
 	} else {
-		tr := &h.trackers[heap_idx]
-		tr.small_n = 0
-		for nm in tr.owned {
-			delete(nm, h.scratch)
-		}
-		clear(&tr.owned)
-		clear(&tr.names)
-		clear(&tr.table)
+		reset_tracker(&h.trackers[heap_idx], h.scratch)
 	}
 	h.tracked += 1
 	return idx

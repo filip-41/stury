@@ -1331,9 +1331,8 @@ factored_open :: proc(h: ^Checker, owner: ^Record, f: ^Factor, at: u64) -> bool 
 			return false
 		}
 		words := (int(f.members) + 63) / 64
-		buf, err := make([]u64, words, pool_allocator(pool))
-		if err != nil {
-			h.fatal = .No_Memory
+		buf := pool_seen_wide(h, pool, h.nf, words)
+		if buf == nil {
 			return false
 		}
 		fo.seen_wide = buf
@@ -1383,7 +1382,7 @@ factored_key :: proc(h: ^Checker, fo: ^Factored_Open, key: string, key_owned: bo
 
 	// Look up in the factored block's hash table (O(1)).
 	m := &h.plan.meta[f.block + f.members]
-	idx := member_find_block(h.plan, f.block, m.slots, m.slots_n, m.name_bits, key)
+	idx := member_find(h.plan, m, key)
 	fm: ^Factor_Member
 	if idx >= 0 {
 		if factored_mark_seen(fo, idx) {
@@ -1769,28 +1768,4 @@ all_members_evaluated :: proc "contextless" (p: ^Plan, fo: ^Factored_Open, activ
 		}
 	}
 	return true
-}
-
-@(private = "file")
-member_find_block :: #force_inline proc "contextless" (p: ^Plan, block: i32, slots, slots_n: u32, name_bits: u64, name: string) -> i32 #no_bounds_check {
-	if slots_n == 0 {
-		return -1
-	}
-	if len(name) > 0 && (name_bits & name_bit(name)) == 0 {
-		return -1
-	}
-	mask := slots_n - 1
-	table := p.slots[slots:]
-	at := member_hash(name) & mask
-	for {
-		slot := table[at]
-		if slot == 0 {
-			return -1
-		}
-		idx := i32(slot - 1)
-		if p.meta[block + idx].name == name {
-			return idx
-		}
-		at = (at + 1) & mask
-	}
 }

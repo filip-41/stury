@@ -49,9 +49,9 @@ write_odin :: proc(d: ^rules.Description, package_name: string, format_assert :=
 	b := strings.builder_make(a)
 	odin_put(&b, "// The types of a schema's values, written by stury's schema.write_odin.\npackage ", package_name, "\n\n")
 	if s.fragments {
-		s.imports += {.Schema}
+		s.imports += {.Schema, .Strings}
 	}
-	if !s.defaults || s.fragments {
+	if !s.defaults || s.fragments || s.factories {
 		strings.write_string(&b, "import \"base:runtime\"\n")
 	}
 	for name, i in ODIN_IMPORTS {
@@ -94,9 +94,21 @@ REGISTER_FRAGMENT ::
 	"register_fragment :: proc(reg: ^model.Registry, T: typeid, text: string) -> model.Error {\n" +
 	"\ts, serr := schema.compile_json(transmute([]u8)text)\n" +
 	"\tif serr.kind != .None {\n" +
-	"\t\tkind := serr.kind\n" +
-	"\t\tschema.error_destroy(&serr)\n" +
-	"\t\treturn runtime.Allocator_Error.Out_Of_Memory if kind == .No_Memory else runtime.Allocator_Error.Invalid_Argument\n" +
+	"\t\tdefer schema.error_destroy(&serr)\n" +
+	"\t\tif serr.kind == .No_Memory {\n" +
+	"\t\t\treturn runtime.Allocator_Error.Out_Of_Memory\n" +
+	"\t\t}\n" +
+	"\t\tkind: model.Error_Kind = .Unsupported if serr.kind == .Unsupported else .Bad_Option if serr.kind == .Bad_Option else .Walk if serr.kind == .Parse else .Check_Failed\n" +
+	"\t\top, err1 := strings.clone(serr.keyword)\n" +
+	"\t\tif err1 != nil {\n" +
+	"\t\t\treturn err1\n" +
+	"\t\t}\n" +
+	"\t\tmsg, err2 := strings.clone(serr.message)\n" +
+	"\t\tif err2 != nil {\n" +
+	"\t\t\tdelete(op)\n" +
+	"\t\t\treturn err2\n" +
+	"\t\t}\n" +
+	"\t\treturn model.Model_Error{kind = kind, at = serr.at, operand = op, want = {text = msg}, owned = true}\n" +
 	"\t}\n" +
 	"\tdefer schema.destroy(s)\n" +
 	"\tmodel.register_schema(reg, T, s.description) or_return\n" +
@@ -127,6 +139,7 @@ root_spelled :: proc(d: ^rules.Description, format_assert: bool, hint: string, a
 @(private = "file")
 Odin_Import :: enum u8 {
 	Uuid,
+	Strings,
 	Time,
 	Rules,
 	Schema,
@@ -134,10 +147,11 @@ Odin_Import :: enum u8 {
 
 @(private = "file", rodata)
 ODIN_IMPORTS := [Odin_Import]string {
-	.Uuid   = "import \"core:encoding/uuid\"\n",
-	.Time   = "import \"core:time\"\n",
-	.Rules  = "import rules \"stury:lib/schema/rules\"\n",
-	.Schema = "import schema \"stury:lib/schema/schema\"\n",
+	.Uuid    = "import \"core:encoding/uuid\"\n",
+	.Strings = "import \"core:strings\"\n",
+	.Time    = "import \"core:time\"\n",
+	.Rules   = "import rules \"stury:lib/schema/rules\"\n",
+	.Schema  = "import schema \"stury:lib/schema/schema\"\n",
 }
 
 @(private = "file")
@@ -153,6 +167,7 @@ Source :: struct {
 	format_assert: bool,
 	fragments:     bool,
 	defaults:      bool,
+	factories:     bool,
 	decls:         [dynamic]Decl,
 	of_node:       map[Odin_Part]int,
 	taken:         map[string]bool,
@@ -457,19 +472,21 @@ odin_literal :: proc(b: ^strings.Builder, text: string, newline := false) {
 @(private = "file")
 names_node :: proc(s: ^Source, o: rules.Object) -> rules.Node_Index {
 	b := strings.builder_make(s.a)
-	if len(o.members) > 0 {
-		strings.write_string(&b, "^(?:")
-		for m, j in o.members {
-			if j > 0 {
-				strings.write_byte(&b, '|')
-			}
-			for c in m.name {
-				if strings.contains_rune(`\^$.|?*+()[]{}/-`, c) {
-					strings.write_byte(&b, '\\')
-				}
-				strings.write_rune(&b, c)
-			}
+	emitted := 0
+	for m in o.members {
+		if m.only_required {
+			continue
 		}
+		strings.write_string(&b, "|" if emitted > 0 else "^(?:")
+		for c in m.name {
+			if strings.contains_rune(`\^$.|?*+()[]{}/-`, c) {
+				strings.write_byte(&b, '\\')
+			}
+			strings.write_rune(&b, c)
+		}
+		emitted += 1
+	}
+	if emitted > 0 {
 		strings.write_string(&b, ")$")
 	}
 	for p in o.patterns {
@@ -1134,7 +1151,7 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Odin_Part, r: rule
 		member_tag(s, &b, name, m, field, value.rules, (absent || strings.has_prefix(t, "^") || t == NUMBER_TEXT) && !takes_null(s, node), absent, unset)
 		strings.write_string(&b, ",\n")
 		if !m.required {
-			default_spelled(s, name, field, node, value)
+			default_spelled(s, name, field, t, node, value)
 		}
 	}
 	odin_put(&b, "\t", odin_unique(&fields, "set", s.a), ": model.Fields_Set,\n")
@@ -1153,7 +1170,7 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Odin_Part, r: rule
 }
 
 @(private = "file")
-default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, v: Spelled) {
+default_spelled :: proc(s: ^Source, owner, field, field_type: string, at: rules.Node_Index, v: Spelled) {
 	x, has := s.d.nodes[at].default_of.?
 	if !has {
 		if found := odin_target(s, at); found != rules.NONE {
@@ -1183,6 +1200,13 @@ default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, 
 	}
 	if !held {
 		odin_refuse(s, "default")
+		return
+	}
+	if strings.has_prefix(field_type, "^") {
+		s.factories = true
+		odin_put(&s.registers, "\tmodel.register_factory(reg, ", owner, ", ")
+		strings.write_quoted_string(&s.registers, field)
+		odin_put(&s.registers, ", proc(a: runtime.Allocator) -> ", field_type, " {\n\t\tp, _ := new_clone(", value, ", a)\n\t\treturn p\n\t}) or_return\n")
 		return
 	}
 	s.defaults = true
@@ -1263,7 +1287,62 @@ NUMBER_TEXT :: "model.Number_Text"
 f64_holds :: proc(r: rules.Rules) -> bool {
 	low, low_ok := strconv.parse_f64(r.minimum)
 	high, high_ok := strconv.parse_f64(r.maximum)
-	return low_ok && high_ok && abs(low) <= max(f64) && abs(high) <= max(f64)
+	if !low_ok || !high_ok || abs(low) > max(f64) || abs(high) > max(f64) {
+		return false
+	}
+	return r.multiple_of == "" || f64_exact_decimal(r.multiple_of)
+}
+
+// Whether positive finite decimal literal `text` is represented exactly in IEEE-754 binary64 (`f64`).
+@(private = "file")
+f64_exact_decimal :: proc "contextless" (text: string) -> bool {
+	if !rules.valid_decimal_text(text) {
+		return false
+	}
+	d := rules.decimal_of(text)
+	if d.wide != "" || d.neg || d.head == "" {
+		return false
+	}
+	nd := len(d.head) + len(d.tail)
+	k := d.point - i128(nd)
+	if nd > 38 || k < -55 || k > 22 {
+		return false
+	}
+	sig := u128(0)
+	for c in transmute([]u8)d.head {
+		sig = sig * 10 + u128(c - '0')
+	}
+	for c in transmute([]u8)d.tail {
+		sig = sig * 10 + u128(c - '0')
+	}
+	if k < 0 {
+		for _ in 0 ..< int(-k) {
+			if sig % 5 != 0 {
+				return false
+			}
+			sig /= 5
+		}
+	} else {
+		for _ in 0 ..< int(k) {
+			if sig > max(u128) / 5 {
+				return false
+			}
+			sig *= 5
+		}
+	}
+	e := k
+	for sig > 0 && (sig & 1) == 0 {
+		sig >>= 1
+		e += 1
+	}
+	if sig >= (u128(1) << 53) || e < -1074 {
+		return false
+	}
+	bits := i128(0)
+	for tmp := sig; tmp > 0; tmp >>= 1 {
+		bits += 1
+	}
+	return e + bits - 1 <= 1023
 }
 
 @(private = "file")
@@ -1281,6 +1360,12 @@ default_number :: proc(x: rules.Value, base: string, a: runtime.Allocator) -> (s
 	text, _ = strings.replace_all(text, "E", "e", a)
 	switch base {
 	case NUMBER_TEXT:
+		f, fok := strconv.parse_f64(text)
+		if fok && abs(f) <= max(f64) {
+			fbuf: [64]u8 = ---
+			val_s := strconv.write_float(fbuf[:], f, 'g', -1, 64, {})
+			return strings.concatenate({NUMBER_TEXT, `{text = "`, text, `", value = `, val_s, `}`}, a), true
+		}
 		return strings.concatenate({NUMBER_TEXT, `{text = "`, text, `"}`}, a), true
 	case "f64":
 		f, fok := strconv.parse_f64(text)

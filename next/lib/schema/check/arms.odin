@@ -4,7 +4,6 @@
 package check
 
 import "base:runtime"
-import "core:mem"
 import "core:slice"
 import "stury:lib/base/regex"
 import "stury:lib/core/hook"
@@ -443,17 +442,17 @@ has_own_keywords :: proc(b: ^Builder, d: ^rules.Description, n: ^rules.Node, edg
 
 @(private)
 Pool :: struct {
-	allocator:      runtime.Allocator,
-	arena:          mem.Dynamic_Arena,
-	arena_ready:    bool,
-	factored:       [dynamic]Factored_Open,
-	captures:       [MAX_HELD_CAPTURES]^Held_Capture,
+	allocator: runtime.Allocator,
+	factored:  [dynamic]Factored_Open,
+	seen_wide: [dynamic][]u64, // per-depth reusable wide seen-bitmasks (zeroed & reused across factored_open calls)
+	captures:  [MAX_HELD_CAPTURES]^Held_Capture,
 }
 
 @(private)
 pool_init :: proc(p: ^Pool, allocator: runtime.Allocator) {
 	p^ = {allocator = allocator}
 	p.factored.allocator = allocator
+	p.seen_wide.allocator = allocator
 }
 
 @(private)
@@ -466,20 +465,37 @@ pool_destroy :: proc(p: ^Pool) {
 			free(c, p.allocator)
 		}
 	}
-	delete(p.factored)
-	if p.arena_ready {
-		mem.dynamic_arena_destroy(&p.arena)
+	for sw in p.seen_wide {
+		delete(sw, p.allocator)
 	}
+	delete(p.seen_wide)
+	delete(p.factored)
 	p^ = {}
 }
 
+// Returns a zeroed `words`-long `[]u64` slot for factored depth `depth`, reusing existing storage across objects.
 @(private)
-pool_allocator :: proc(p: ^Pool) -> runtime.Allocator {
-	if !p.arena_ready {
-		mem.dynamic_arena_init(&p.arena, p.allocator, p.allocator, block_size = 4096)
-		p.arena_ready = true
+pool_seen_wide :: proc(h: ^Checker, p: ^Pool, depth, words: int) -> []u64 {
+	if depth >= len(p.seen_wide) {
+		if resize(&p.seen_wide, depth + 1) != nil {
+			h.fatal = .No_Memory
+			return nil
+		}
 	}
-	return mem.dynamic_arena_allocator(&p.arena)
+	slot := &p.seen_wide[depth]
+	if len(slot^) < words {
+		delete(slot^, p.allocator)
+		buf, err := make([]u64, words, p.allocator)
+		if err != nil {
+			slot^ = nil
+			h.fatal = .No_Memory
+			return nil
+		}
+		slot^ = buf
+	} else {
+		slice.zero(slot^[:words])
+	}
+	return slot^[:words]
 }
 
 @(private)
@@ -637,6 +653,48 @@ capture_abort :: proc(h: ^Checker) {
 	c.active = false
 }
 
+// Evaluates a multi-choice factored container member (`fm.leaves` + `fm.choices`) on `doc` at `node`.
+// Re-fetches `fo` via `fo_idx` across `subcheck_node` calls because nested factored objects can grow `h.pool.factored`.
+@(private)
+eval_factored_fork_node :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, fo_idx: int, fm: ^Factor_Member) -> (doomed: bool) {
+	fo := factored_at(h, fo_idx)
+	fo.active_member = nil
+	fo.active_choice = -1
+	if fm != nil {
+		root_k := doc.nodes[node].kind
+		cnt_i, _, _ := tape.length(tape.Reader{doc = doc}, node, h.scratch)
+		cnt := u64(max(cnt_i, 0))
+		for fl in fm.leaves {
+			l := &h.plan.leaves[fl.leaf - 1]
+			if root_k == .Object {
+				if .Object not_in l.kinds || cnt < l.min_members || cnt > l.max_members {
+					fo.failed |= fl.parts
+				}
+			} else if root_k == .Array {
+				if .Array not_in l.kinds || cnt < l.min_items || cnt > l.max_items {
+					fo.failed |= fl.parts
+				}
+			}
+		}
+		for ch in fm.choices {
+			fo = factored_at(h, fo_idx)
+			if fo.factor.monotone && (ch.parts & ~fo.failed) == 0 {
+				continue
+			}
+			passed := subcheck_node(h, doc, node, ch.record, nil, nil, quiet = true)
+			fo = factored_at(h, fo_idx)
+			if !passed {
+				fo.failed |= ch.parts
+			}
+			if h.fatal != .None {
+				return true
+			}
+		}
+	}
+	fo = factored_at(h, fo_idx)
+	return can_doom_factored(h, fo.factor, fo.failed)
+}
+
 // Finishes the innermost `Held_Capture`, runs all `Apply` arms (or factored multi-choices) against the
 // captured mini `tape.Document`, and frees the mini document immediately!
 @(private)
@@ -665,49 +723,7 @@ capture_finish :: proc(h: ^Checker) -> bool {
 		return false
 	}
 	if c.for_factor {
-		// Multi-choice member inside an open factored object!
-		// Re-fetch `fo` via `fo_idx` after `subcheck_node` because nested factored objects can grow `h.pool.factored`!
-		fo_idx := h.nf - 1
-		fo := factored_at(h, fo_idx)
-		fm := c.factor_member
-		fo.active_member = nil
-		fo.active_choice = -1
-		if fm != nil {
-			root_k := doc.nodes[0].kind
-			cnt_i, _, _ := tape.length(tape.Reader{doc = &doc}, 0, h.scratch)
-			cnt := u64(max(cnt_i, 0))
-			for fl in fm.leaves {
-				l := &h.plan.leaves[fl.leaf - 1]
-				if root_k == .Object {
-					if .Object not_in l.kinds || cnt < l.min_members || cnt > l.max_members {
-						fo.failed |= fl.parts
-					}
-				} else if root_k == .Array {
-					if .Array not_in l.kinds || cnt < l.min_items || cnt > l.max_items {
-						fo.failed |= fl.parts
-					}
-				}
-			}
-			for ch in fm.choices {
-				fo = factored_at(h, fo_idx)
-				if fo.factor.monotone && (ch.parts & ~fo.failed) == 0 {
-					continue
-				}
-				passed := subcheck_node(h, &doc, 0, ch.record, nil, nil, quiet = true)
-				fo = factored_at(h, fo_idx)
-				if !passed {
-					fo.failed |= ch.parts
-				}
-				if h.fatal != .None {
-					return false
-				}
-			}
-		}
-		fo = factored_at(h, fo_idx)
-		if can_doom_factored(h, fo.factor, fo.failed) {
-			return false
-		}
-		return true
+		return !eval_factored_fork_node(h, &doc, 0, h.nf - 1, c.factor_member)
 	}
 	// Normal held value: evaluate all `Apply` arms of `c.owner` on `doc` node 0!
 	return eval_held_node(h, &doc, 0, c.owner, c.open_at)
@@ -748,16 +764,16 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 	r := tape.Reader{doc = doc}
 	switch ap.kind {
 	case .Own:
-		return subcheck_node(h, doc, node, ap.record, nil, owner, quiet = !emit)
+		return subcheck_node(h, doc, node, ap.record, nil, owner, quiet = h.quiet)
 	case .Ref:
-		return subcheck_node(h, doc, node, ap.record, nil, owner, quiet = !emit)
+		return subcheck_node(h, doc, node, ap.record, nil, owner, quiet = h.quiet)
 	case .All:
 		ok := true
 		for rec in ap.arms {
 			if !charge_step_one(h) {
 				return false
 			}
-			if !subcheck_node(h, doc, node, rec, nil, owner, quiet = !emit) {
+			if !subcheck_node(h, doc, node, rec, nil, owner, quiet = h.quiet) {
 				ok = false
 				if !emit {
 					return false
@@ -843,12 +859,12 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 		}
 		if cond_ok {
 			if ap.then_rec >= 0 {
-				return subcheck_node(h, doc, node, ap.then_rec, nil, owner, quiet = !emit)
+				return subcheck_node(h, doc, node, ap.then_rec, nil, owner, quiet = h.quiet)
 			}
 			return true
 		}
 		if ap.else_rec >= 0 {
-			return subcheck_node(h, doc, node, ap.else_rec, nil, owner, quiet = !emit)
+			return subcheck_node(h, doc, node, ap.else_rec, nil, owner, quiet = h.quiet)
 		}
 		return true
 	case .Dependent:
@@ -858,7 +874,7 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 		ok := true
 		for dep in ap.dependents {
 			if object_has_key(h, doc, node, dep.name) {
-				if !subcheck_node(h, doc, node, dep.record, nil, owner, quiet = !emit) {
+				if !subcheck_node(h, doc, node, dep.record, nil, owner, quiet = h.quiet) {
 					ok = false
 					if !emit {
 						return false
@@ -907,7 +923,7 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 				if found {
 					matched = true
 					step := [1]tape.Step{tape.Name(key_str)}
-					if !subcheck_node(h, doc, vn, pat.record, step[:], owner, quiet = !emit) {
+					if !subcheck_node(h, doc, vn, pat.record, step[:], owner, quiet = h.quiet) {
 						ok = false
 						if !emit {
 							if key_owned {
@@ -920,7 +936,7 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 			}
 			if !matched && ap.additional >= 0 {
 				step := [1]tape.Step{tape.Name(key_str)}
-				if !subcheck_node(h, doc, vn, ap.additional, step[:], owner, quiet = !emit) {
+				if !subcheck_node(h, doc, vn, ap.additional, step[:], owner, quiet = h.quiet) {
 					ok = false
 					if !emit {
 						if key_owned {
@@ -963,7 +979,7 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 				h.fatal = .No_Memory
 				return false
 			}
-			res := subcheck_key_string(h, key_str, doc, ap.record, owner, quiet = !emit)
+			res := subcheck_key_string(h, key_str, doc, ap.record, owner, quiet = h.quiet)
 			if key_owned {
 				delete(key_str, h.scratch)
 			}
@@ -1222,29 +1238,162 @@ check_unique_items :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Ind
 	return true
 }
 
+// Shared collector state for runtime `unevaluatedProperties` & `unevaluatedItems` annotation gathering.
+@(private = "file")
+Eval_Collector :: struct {
+	is_items:   bool,
+	all_eval:   bool,
+	vis:        map[^Evaluates]bool,
+	names:      map[string]bool,
+	pats:       [dynamic]^regex.Regex,
+	prefix_max: int,
+	eval_bits:  []bool,
+}
+
+@(private = "file")
+gather_runtime_eval :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, ev: ^Evaluates, c: ^Eval_Collector) {
+	if ev == nil || c.all_eval || h.fatal != .None || c.vis[ev] {
+		return
+	}
+	c.vis[ev] = true
+	if c.is_items {
+		if ev.all_items {
+			c.all_eval = true
+			return
+		}
+		if ev.items > c.prefix_max {
+			c.prefix_max = ev.items
+		}
+	} else {
+		if ev.all_members {
+			c.all_eval = true
+			return
+		}
+		for nm in ev.names {
+			c.names[nm] = true
+		}
+		for re in ev.patterns {
+			append(&c.pats, re)
+		}
+	}
+	for sub in ev.refs {
+		gather_runtime_eval(h, doc, node, sub, c)
+	}
+	for inn in ev.inner {
+		if c.all_eval || h.fatal != .None {
+			return
+		}
+		switch inn.kind {
+		case .Any:
+			for arm_rec, i in inn.arms {
+				if subcheck_node(h, doc, node, arm_rec, nil, nil, quiet = true) {
+					gather_runtime_eval(h, doc, node, inn.evals[i], c)
+				}
+				if h.fatal != .None {
+					return
+				}
+			}
+		case .One:
+			// B-H6: `oneOf` ONLY exports annotations when EXACTLY ONE arm passes!
+			hits := 0
+			hit_idx := -1
+			for arm_rec, i in inn.arms {
+				if subcheck_node(h, doc, node, arm_rec, nil, nil, quiet = true) {
+					hits += 1
+					hit_idx = i
+				}
+				if h.fatal != .None {
+					return
+				}
+			}
+			if hits == 1 {
+				gather_runtime_eval(h, doc, node, inn.evals[hit_idx], c)
+			}
+		case .If:
+			cond_ok := subcheck_node(h, doc, node, inn.test, nil, nil, quiet = true)
+			if h.fatal != .None {
+				return
+			}
+			if cond_ok {
+				gather_runtime_eval(h, doc, node, inn.test_eval, c)
+				if inn.then >= 0 && subcheck_node(h, doc, node, inn.then, nil, nil, quiet = true) {
+					gather_runtime_eval(h, doc, node, inn.then_eval, c)
+				}
+			} else if inn.other >= 0 && subcheck_node(h, doc, node, inn.other, nil, nil, quiet = true) {
+				gather_runtime_eval(h, doc, node, inn.other_eval, c)
+			}
+		case .Dependent:
+			if !c.is_items && object_has_key(h, doc, node, inn.name) {
+				if subcheck_node(h, doc, node, inn.body, nil, nil, quiet = true) {
+					gather_runtime_eval(h, doc, node, inn.body_eval, c)
+				}
+			}
+		case .Contains:
+			if c.is_items {
+				// B-H6: `contains` ONLY exports evaluated item annotations when `minContains <= hits <= maxContains`!
+				r := tape.Reader{doc = doc}
+				it, p, cerr := tape.children(r, node, h.scratch)
+				if cerr != nil {
+					h.fatal = .No_Memory
+					return
+				}
+				defer tape.destroy_children(&it)
+				if p == .Found {
+					matched := make([dynamic]int, h.scratch)
+					defer delete(matched)
+					idx := 0
+					for {
+						_, ch, cp := tape.next_child(r, &it)
+						if cp != .Found {
+							break
+						}
+						if subcheck_node(h, doc, ch, inn.body, nil, nil, quiet = true) {
+							append(&matched, idx)
+						}
+						if h.fatal != .None {
+							return
+						}
+						idx += 1
+					}
+					hits := u64(len(matched))
+					if hits >= inn.min_contains && hits <= inn.max_contains {
+						for m_idx in matched {
+							if m_idx < len(c.eval_bits) {
+								c.eval_bits[m_idx] = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // Runtime evaluation of `unevaluatedProperties` using `ap.evals` (`Evaluates`).
 @(private = "file")
 eval_unevaluated_properties :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owner: ^Record, ap: ^Apply, emit: bool) -> bool {
-	ev_names, nerr := make(map[string]bool, 16, h.scratch)
+	c: Eval_Collector
+	nerr: runtime.Allocator_Error
+	c.names, nerr = make(map[string]bool, 16, h.scratch)
 	if nerr != nil {
 		h.fatal = .No_Memory
 		return false
 	}
-	defer delete(ev_names)
-	ev_pats := make([dynamic]^regex.Regex, h.scratch)
-	defer delete(ev_pats)
-	vis, verr := make(map[^Evaluates]bool, 16, h.scratch)
+	defer delete(c.names)
+	c.pats = make([dynamic]^regex.Regex, h.scratch)
+	defer delete(c.pats)
+	verr: runtime.Allocator_Error
+	c.vis, verr = make(map[^Evaluates]bool, 16, h.scratch)
 	if verr != nil {
 		h.fatal = .No_Memory
 		return false
 	}
-	defer delete(vis)
-	all_eval := false
-	gather_runtime_eval_props(h, doc, node, ap.evals, &vis, &all_eval, &ev_names, &ev_pats)
+	defer delete(c.vis)
+	gather_runtime_eval(h, doc, node, ap.evals, &c)
 	if h.fatal != .None {
 		return false
 	}
-	if all_eval {
+	if c.all_eval {
 		return true
 	}
 	ok := true
@@ -1272,9 +1421,9 @@ eval_unevaluated_properties :: proc(h: ^Checker, doc: ^tape.Document, node: tape
 			h.fatal = .No_Memory
 			return false
 		}
-		evaluated := ev_names[key_str]
+		evaluated := c.names[key_str]
 		if !evaluated {
-			for re in ev_pats {
+			for re in c.pats {
 				found, rok := run_regex_search(h, re, key_str)
 				if !rok {
 					if key_owned {
@@ -1290,7 +1439,7 @@ eval_unevaluated_properties :: proc(h: ^Checker, doc: ^tape.Document, node: tape
 		}
 		if !evaluated {
 			step := [1]tape.Step{tape.Name(key_str)}
-			res := subcheck_node(h, doc, vn, ap.record, step[:], owner, quiet = !emit)
+			res := subcheck_node(h, doc, vn, ap.record, step[:], owner, quiet = h.quiet)
 			if key_owned {
 				delete(key_str, h.scratch)
 			}
@@ -1307,80 +1456,6 @@ eval_unevaluated_properties :: proc(h: ^Checker, doc: ^tape.Document, node: tape
 	return ok
 }
 
-@(private = "file")
-gather_runtime_eval_props :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, ev: ^Evaluates, vis: ^map[^Evaluates]bool, all_eval: ^bool, names: ^map[string]bool, pats: ^[dynamic]^regex.Regex) {
-	if ev == nil || all_eval^ || h.fatal != .None || vis[ev] {
-		return
-	}
-	vis[ev] = true
-	if ev.all_members {
-		all_eval^ = true
-		return
-	}
-	for nm in ev.names {
-		names[nm] = true
-	}
-	for re in ev.patterns {
-		append(pats, re)
-	}
-	for sub in ev.refs {
-		gather_runtime_eval_props(h, doc, node, sub, vis, all_eval, names, pats)
-	}
-	for inn in ev.inner {
-		if all_eval^ || h.fatal != .None {
-			return
-		}
-		switch inn.kind {
-		case .Any:
-			for arm_rec, i in inn.arms {
-				if subcheck_node(h, doc, node, arm_rec, nil, nil, quiet = true) {
-					gather_runtime_eval_props(h, doc, node, inn.evals[i], vis, all_eval, names, pats)
-				}
-				if h.fatal != .None {
-					return
-				}
-			}
-		case .One:
-			// B-H6: `oneOf` ONLY exports annotations when EXACTLY ONE arm passes!
-			hits := 0
-			hit_idx := -1
-			for arm_rec, i in inn.arms {
-				if subcheck_node(h, doc, node, arm_rec, nil, nil, quiet = true) {
-					hits += 1
-					hit_idx = i
-				}
-				if h.fatal != .None {
-					return
-				}
-			}
-			if hits == 1 {
-				gather_runtime_eval_props(h, doc, node, inn.evals[hit_idx], vis, all_eval, names, pats)
-			}
-		case .If:
-			cond_ok := subcheck_node(h, doc, node, inn.test, nil, nil, quiet = true)
-			if h.fatal != .None {
-				return
-			}
-			if cond_ok {
-				gather_runtime_eval_props(h, doc, node, inn.test_eval, vis, all_eval, names, pats)
-				if inn.then >= 0 && subcheck_node(h, doc, node, inn.then, nil, nil, quiet = true) {
-					gather_runtime_eval_props(h, doc, node, inn.then_eval, vis, all_eval, names, pats)
-				}
-			} else if inn.other >= 0 && subcheck_node(h, doc, node, inn.other, nil, nil, quiet = true) {
-				gather_runtime_eval_props(h, doc, node, inn.other_eval, vis, all_eval, names, pats)
-			}
-		case .Dependent:
-			if object_has_key(h, doc, node, inn.name) {
-				if subcheck_node(h, doc, node, inn.body, nil, nil, quiet = true) {
-					gather_runtime_eval_props(h, doc, node, inn.body_eval, vis, all_eval, names, pats)
-				}
-			}
-		case .Contains:
-			// Does not apply to object properties.
-		}
-	}
-}
-
 // Runtime evaluation of `unevaluatedItems` using `ap.evals` (`Evaluates`).
 @(private = "file")
 eval_unevaluated_items :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owner: ^Record, ap: ^Apply, emit: bool) -> bool {
@@ -1393,25 +1468,26 @@ eval_unevaluated_items :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node
 	if cnt <= 0 {
 		return true
 	}
-	all_eval := false
-	prefix_max := 0
-	eval_bits, eerr := make([]bool, cnt, h.scratch)
+	c := Eval_Collector{is_items = true}
+	eerr: runtime.Allocator_Error
+	c.eval_bits, eerr = make([]bool, cnt, h.scratch)
 	if eerr != nil {
 		h.fatal = .No_Memory
 		return false
 	}
-	defer delete(eval_bits, h.scratch)
-	vis, verr := make(map[^Evaluates]bool, 16, h.scratch)
+	defer delete(c.eval_bits, h.scratch)
+	verr: runtime.Allocator_Error
+	c.vis, verr = make(map[^Evaluates]bool, 16, h.scratch)
 	if verr != nil {
 		h.fatal = .No_Memory
 		return false
 	}
-	defer delete(vis)
-	gather_runtime_eval_items(h, doc, node, ap.evals, &vis, &all_eval, &prefix_max, eval_bits)
+	defer delete(c.vis)
+	gather_runtime_eval(h, doc, node, ap.evals, &c)
 	if h.fatal != .None {
 		return false
 	}
-	if all_eval || prefix_max >= cnt {
+	if c.all_eval || c.prefix_max >= cnt {
 		return true
 	}
 	ok := true
@@ -1433,9 +1509,9 @@ eval_unevaluated_items :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node
 		if !charge_step_one(h) {
 			return false
 		}
-		if idx >= prefix_max && !eval_bits[idx] {
+		if idx >= c.prefix_max && !c.eval_bits[idx] {
 			step := [1]tape.Step{tape.Index(idx)}
-			if !subcheck_node(h, doc, ch, ap.record, step[:], owner, quiet = !emit) {
+			if !subcheck_node(h, doc, ch, ap.record, step[:], owner, quiet = h.quiet) {
 				ok = false
 				if !emit {
 					return false
@@ -1445,104 +1521,4 @@ eval_unevaluated_items :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node
 		idx += 1
 	}
 	return ok
-}
-
-@(private = "file")
-gather_runtime_eval_items :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, ev: ^Evaluates, vis: ^map[^Evaluates]bool, all_eval: ^bool, prefix_max: ^int, eval_bits: []bool) {
-	if ev == nil || all_eval^ || h.fatal != .None || vis[ev] {
-		return
-	}
-	vis[ev] = true
-	if ev.all_items {
-		all_eval^ = true
-		return
-	}
-	if ev.items > prefix_max^ {
-		prefix_max^ = ev.items
-	}
-	for sub in ev.refs {
-		gather_runtime_eval_items(h, doc, node, sub, vis, all_eval, prefix_max, eval_bits)
-	}
-	for inn in ev.inner {
-		if all_eval^ || h.fatal != .None {
-			return
-		}
-		switch inn.kind {
-		case .Any:
-			for arm_rec, i in inn.arms {
-				if subcheck_node(h, doc, node, arm_rec, nil, nil, quiet = true) {
-					gather_runtime_eval_items(h, doc, node, inn.evals[i], vis, all_eval, prefix_max, eval_bits)
-				}
-				if h.fatal != .None {
-					return
-				}
-			}
-		case .One:
-			// B-H6: `oneOf` ONLY exports annotations when EXACTLY ONE arm passes!
-			hits := 0
-			hit_idx := -1
-			for arm_rec, i in inn.arms {
-				if subcheck_node(h, doc, node, arm_rec, nil, nil, quiet = true) {
-					hits += 1
-					hit_idx = i
-				}
-				if h.fatal != .None {
-					return
-				}
-			}
-			if hits == 1 {
-				gather_runtime_eval_items(h, doc, node, inn.evals[hit_idx], vis, all_eval, prefix_max, eval_bits)
-			}
-		case .If:
-			cond_ok := subcheck_node(h, doc, node, inn.test, nil, nil, quiet = true)
-			if h.fatal != .None {
-				return
-			}
-			if cond_ok {
-				gather_runtime_eval_items(h, doc, node, inn.test_eval, vis, all_eval, prefix_max, eval_bits)
-				if inn.then >= 0 && subcheck_node(h, doc, node, inn.then, nil, nil, quiet = true) {
-					gather_runtime_eval_items(h, doc, node, inn.then_eval, vis, all_eval, prefix_max, eval_bits)
-				}
-			} else if inn.other >= 0 && subcheck_node(h, doc, node, inn.other, nil, nil, quiet = true) {
-				gather_runtime_eval_items(h, doc, node, inn.other_eval, vis, all_eval, prefix_max, eval_bits)
-			}
-		case .Contains:
-			// B-H6: `contains` ONLY exports evaluated item annotations when `minContains <= hits <= maxContains`!
-			r := tape.Reader{doc = doc}
-			it, p, cerr := tape.children(r, node, h.scratch)
-			if cerr != nil {
-				h.fatal = .No_Memory
-				return
-			}
-			defer tape.destroy_children(&it)
-			if p == .Found {
-				matched := make([dynamic]int, h.scratch)
-				defer delete(matched)
-				idx := 0
-				for {
-					_, ch, cp := tape.next_child(r, &it)
-					if cp != .Found {
-						break
-					}
-					if subcheck_node(h, doc, ch, inn.body, nil, nil, quiet = true) {
-						append(&matched, idx)
-					}
-					if h.fatal != .None {
-						return
-					}
-					idx += 1
-				}
-				hits := u64(len(matched))
-				if hits >= inn.min_contains && hits <= inn.max_contains {
-					for m_idx in matched {
-						if m_idx < len(eval_bits) {
-							eval_bits[m_idx] = true
-						}
-					}
-				}
-			}
-		case .Dependent:
-			// Does not apply to array items.
-		}
-	}
 }

@@ -2,8 +2,10 @@
 // structs, optional/nullable fields, tags, enums, unions, recursive pointers, formats, fragments, and errors.
 package schema_test
 
+import "base:runtime"
 import "core:strings"
 import "core:testing"
+import "stury:lib/schema/model"
 import "stury:lib/schema/schema"
 import "stury:testkit"
 
@@ -169,5 +171,116 @@ odin_recursive_judged_wide_struct_anyof_default_and_number_text :: proc(t: ^test
 		testing.expect(t, strings.contains(src, "amount: Maybe(model.Number_Text)"))
 		testing.expect(t, !strings.contains(src, "rules.Number_Text"))
 		testing.expect(t, strings.contains(src, "register :: proc(reg: ^model.Registry) -> model.Error"))
+	}
+}
+
+@(test)
+odin_pointer_defaults_names_node_number_text_f64_and_fragment_errors :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// 1. Optional `^T` recursive field with scalar `default`: emits `model.register_factory` + `import "base:runtime"`, NOT broken `register_default`!
+	{
+		c := compile_or_fail(t, `{
+			"$defs": {
+				"item": {
+					"anyOf": [
+						{"type": "string"},
+						{
+							"type": "object",
+							"properties": {
+								"next": {"$ref": "#/$defs/item", "default": "leaf"}
+							}
+						}
+					]
+				}
+			},
+			"$ref": "#/$defs/item"
+		}`)
+		defer schema.destroy(c)
+		src, err := schema.write_odin(c.description, "ptr_def_pkg")
+		defer schema.error_destroy(&err)
+		testing.expectf(t, err.kind == .None, "ptr default write_odin failed: %v %q", err.kind, err.keyword)
+		defer delete(src)
+		testing.expect(t, strings.contains(src, `import "base:runtime"`))
+		testing.expect(t, strings.contains(src, `next: ^Item`))
+		testing.expect(t, strings.contains(src, `model.register_factory(reg,`))
+		testing.expect(t, strings.contains(src, `new_clone(`))
+		testing.expect(t, !strings.contains(src, `model.register_default(reg,`))
+	}
+
+	// 2. `names_node`: `required`-only key alongside `patternProperties` + `additionalProperties: false` must NOT be added to `^(?:...)$`!
+	{
+		c := compile_or_fail(t, `{
+			"type": "object",
+			"properties": {"id": {"type": "integer"}},
+			"required": ["id", "x_req"],
+			"patternProperties": {"^x_": {"type": "string"}},
+			"additionalProperties": false
+		}`)
+		defer schema.destroy(c)
+		src, err := schema.write_odin(c.description, "names_pkg")
+		defer schema.error_destroy(&err)
+		testing.expectf(t, err.kind == .None, "names_node write_odin failed: %v %q", err.kind, err.keyword)
+		defer delete(src)
+		testing.expect(t, strings.contains(src, `^(?:id)$`))
+		testing.expect(t, !strings.contains(src, `^(?:id|x_req)$`))
+	}
+
+	// 3. `f64_holds` checks `multipleOf` binary64 exactness (`0.1` -> `model.Number_Text`, `0.25` -> `f64`)
+	//    AND `Number_Text` default populates both `.text` and `.value`!
+	{
+		c := compile_or_fail(t, `{
+			"type": "object",
+			"properties": {
+				"price": {"type": "number", "minimum": 0, "maximum": 100, "multipleOf": 0.1, "default": 1.5},
+				"quarter": {"type": "number", "minimum": 0, "maximum": 100, "multipleOf": 0.25, "default": 0.5}
+			}
+		}`)
+		defer schema.destroy(c)
+		src, err := schema.write_odin(c.description, "num_pkg")
+		defer schema.error_destroy(&err)
+		testing.expectf(t, err.kind == .None, "f64_holds write_odin failed: %v %q", err.kind, err.keyword)
+		defer delete(src)
+		testing.expect(t, strings.contains(src, `price: Maybe(model.Number_Text)`))
+		testing.expect(t, strings.contains(src, `model.Number_Text{text = "1.5", value = 1.5}`))
+		testing.expect(t, strings.contains(src, `quarter: Maybe(f64)`))
+	}
+
+	// 4. `REGISTER_FRAGMENT` preserves `model.Model_Error` detail (does NOT coerce all failures to `Invalid_Argument`).
+	{
+		c := compile_or_fail(t, `{"type": "integer", "not": {"const": 0}}`)
+		defer schema.destroy(c)
+		src, err := schema.write_odin(c.description, "frag_pkg")
+		defer schema.error_destroy(&err)
+		testing.expectf(t, err.kind == .None, "fragment write_odin failed: %v %q", err.kind, err.keyword)
+		defer delete(src)
+		testing.expect(t, strings.contains(src, `import "core:strings"`))
+		testing.expect(t, strings.contains(src, `model.Model_Error{`))
+		testing.expect(t, !strings.contains(src, `Invalid_Argument`))
+	}
+
+	// 5. Real `model.compile` verification of emitted `register_factory` on `^T` and `model.Number_Text{text, value}`!
+	{
+		Node_Item :: union #no_nil {
+			string,
+			Node_Obj,
+		}
+		Node_Obj :: struct {
+			next:  ^Node_Item               `json:",omitempty" model:"optional,not_null"`,
+			price: Maybe(model.Number_Text) `json:",omitempty" model:"optional,not_null,>=0,<=100,multiple_of=0.1"`,
+			set:   model.Fields_Set,
+		}
+		reg: model.Registry
+		defer model.registry_destroy(&reg)
+		ferr := model.register_factory(&reg, Node_Obj, "next", proc(a: runtime.Allocator) -> ^Node_Item {
+			p, _ := new_clone(Node_Item(string("leaf")), a)
+			return p
+		})
+		testing.expect_value(t, ferr, runtime.Allocator_Error.None)
+		derr := model.register_default(&reg, Node_Obj, "price", model.Number_Text{text = "1.5", value = 1.5})
+		testing.expect_value(t, derr, nil)
+		m, cerr := model.compile(&reg, Node_Obj)
+		testing.expect_value(t, cerr, nil)
+		defer model.destroy(&m)
 	}
 }

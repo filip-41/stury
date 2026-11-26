@@ -956,6 +956,7 @@ plan_finish :: proc(b: ^Builder) {
 			}
 			table[at] = u32(k + 1)
 		}
+		b.meta[end].block = block
 		b.meta[end].slots = off
 		b.meta[end].slots_n = cap_n
 		b.meta[end].name_bits = bits

@@ -4,6 +4,7 @@ package schema_test
 
 import "core:testing"
 import "stury:json"
+import "stury:lib/core/tape"
 import "stury:lib/schema/check"
 import "stury:lib/schema/schema"
 import "stury:testkit"
@@ -211,5 +212,31 @@ sample_uri_template_prefix_contains_multipleof_minprops :: proc(t: ^testing.T) {
 		for b in out {
 			expect_json_valid(t, c, string(b), true)
 		}
+	}
+
+	// 5. Polish B6: `reaches_node` traverses `dependentSchemas` so `no_sample_error` keeps `Error.path`.
+	{
+		c := compile_or_fail(t, `{
+			"type": "object",
+			"properties": {"a": {"type": "integer"}},
+			"required": ["a"],
+			"dependentSchemas": {
+				"a": {
+					"properties": {"b": {"type": "integer", "minimum": 10, "maximum": 5}},
+					"required": ["b"]
+				}
+			}
+		}`)
+		defer schema.destroy(c)
+		_, nerr := schema.sample(c.description, {seed = 1, tries = 8})
+		defer schema.error_destroy(&nerr)
+		testing.expect_value(t, nerr.kind, schema.Error_Kind.No_Sample)
+		saw_dep := false
+		for step in nerr.path {
+			if nm, ok := step.(tape.Name); ok && string(nm) == "dependentSchemas" {
+				saw_dep = true
+			}
+		}
+		testing.expectf(t, saw_dep, "expected Error.path to traverse dependentSchemas, got %v", nerr.path)
 	}
 }

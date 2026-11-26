@@ -392,6 +392,37 @@ fetch :: proc(r: ^Reader, uri: string) -> (sc: Scope, found: bool) {
 	return
 }
 
+// Registers a loaded `tape.Document` in `r.res.documents`, `r.sources`, and `r.loaded[uri]`, freeing it on OOM.
+@(private = "file")
+register_loaded_doc :: proc(r: ^Reader, uri: string, loaded_doc: tape.Document, owned: bool) -> (source: int, ok: bool) {
+	doc, derr := new(tape.Document, r.res.allocator)
+	if derr != nil || doc == nil {
+		if owned {
+			ld := loaded_doc
+			tape.destroy_document(&ld)
+		}
+		if r.err.kind == .None {
+			r.err = make_error(.No_Memory, "$ref", "out of memory", allocator = r.err_alloc)
+		}
+		return 0, false
+	}
+	doc^ = loaded_doc
+	if _, aerr := append(&r.res.documents, Owned_Doc{doc = doc, owned = owned}); aerr != nil {
+		if owned {
+			tape.destroy_document(doc)
+		}
+		free(doc, r.res.allocator)
+		if r.err.kind == .None {
+			r.err = make_error(.No_Memory, "$ref", "out of memory", allocator = r.err_alloc)
+		}
+		return 0, false
+	}
+	append(&r.sources, doc)
+	idx := len(r.sources) - 1
+	r.loaded[uri] = idx
+	return idx, true
+}
+
 // Loads an external resource by normalized URI from vendored `META` or the caller's VFS `Resolver.loader`.
 // Zero OS calls!
 @(private)
@@ -401,30 +432,11 @@ load :: proc(r: ^Reader, uri: string) -> (source: int, found: bool) {
 	}
 	// 1. Vendored meta-schemas (`#load`, always RFC 8259 JSON — never parsed via caller's `opts.parse`).
 	if meta_text, is_meta := meta_schema_text(uri); is_meta {
-		doc, derr := new(tape.Document, r.res.allocator)
-		if derr != nil || doc == nil {
-			if r.err.kind == .None {
-				r.err = make_error(.No_Memory, "$ref", "out of memory", allocator = r.err_alloc)
-			}
-			return 0, false
-		}
 		built, ok := parse_json_owned(transmute([]u8)meta_text, r.res.allocator)
 		if !ok {
-			free(doc, r.res.allocator)
 			return 0, false
 		}
-		doc^ = built
-		if _, aerr := append(&r.res.documents, Owned_Doc{doc = doc, owned = true}); aerr != nil {
-			tape.destroy_document(doc)
-			free(doc, r.res.allocator)
-			if r.err.kind == .None {
-				r.err = make_error(.No_Memory, "$ref", "out of memory", allocator = r.err_alloc)
-			}
-			return 0, false
-		}
-		append(&r.sources, doc)
-		r.loaded[uri] = len(r.sources) - 1
-		return len(r.sources) - 1, true
+		return register_loaded_doc(r, uri, built, true)
 	}
 
 	// 2. VFS `load_doc` callback (returns a pre-parsed `tape.Document`).
@@ -444,31 +456,7 @@ load :: proc(r: ^Reader, uri: string) -> (source: int, found: bool) {
 			return 0, false
 		}
 		if ok {
-			doc, derr := new(tape.Document, r.res.allocator)
-			if derr != nil || doc == nil {
-				if owned {
-					ld := loaded_doc
-					tape.destroy_document(&ld)
-				}
-				if r.err.kind == .None {
-					r.err = make_error(.No_Memory, "$ref", "out of memory", allocator = r.err_alloc)
-				}
-				return 0, false
-			}
-			doc^ = loaded_doc
-			if _, aerr := append(&r.res.documents, Owned_Doc{doc = doc, owned = owned}); aerr != nil {
-				if owned {
-					tape.destroy_document(doc)
-				}
-				free(doc, r.res.allocator)
-				if r.err.kind == .None {
-					r.err = make_error(.No_Memory, "$ref", "out of memory", allocator = r.err_alloc)
-				}
-				return 0, false
-			}
-			append(&r.sources, doc)
-			r.loaded[uri] = len(r.sources) - 1
-			return len(r.sources) - 1, true
+			return register_loaded_doc(r, uri, loaded_doc, owned)
 		}
 	}
 
@@ -485,30 +473,11 @@ load :: proc(r: ^Reader, uri: string) -> (source: int, found: bool) {
 					return 0, false
 				}
 			}
-			doc, derr := new(tape.Document, r.res.allocator)
-			if derr != nil || doc == nil {
-				if r.err.kind == .None {
-					r.err = make_error(.No_Memory, "$ref", "out of memory", allocator = r.err_alloc)
-				}
-				return 0, false
-			}
 			built, parsed := parse_schema_bytes(r.res, bytes, r.res.allocator)
 			if !parsed {
-				free(doc, r.res.allocator)
 				return 0, false
 			}
-			doc^ = built
-			if _, aerr := append(&r.res.documents, Owned_Doc{doc = doc, owned = true}); aerr != nil {
-				tape.destroy_document(doc)
-				free(doc, r.res.allocator)
-				if r.err.kind == .None {
-					r.err = make_error(.No_Memory, "$ref", "out of memory", allocator = r.err_alloc)
-				}
-				return 0, false
-			}
-			append(&r.sources, doc)
-			r.loaded[uri] = len(r.sources) - 1
-			return len(r.sources) - 1, true
+			return register_loaded_doc(r, uri, built, true)
 		}
 	}
 

@@ -1987,3 +1987,329 @@ test_audit_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(sink.entries), 0)
 	}
 }
+
+@(test)
+polish_b_regression_tests :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	expect_xml :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want_valid: bool, loc := #caller_location) {
+		src := transmute([]u8)input
+		rs := xml.check(src, plan, .Xml)
+		defer check.result_destroy(&rs)
+		testing.expectf(t, rs.valid == want_valid, "xml stream: got %v want %v for %s", rs.valid, want_valid, input, loc = loc)
+
+		sink_s: check.Sink
+		check.sink_init(&sink_s)
+		defer check.sink_destroy(&sink_s)
+		rss := xml.check(src, plan, .Xml, {}, &sink_s)
+		defer check.result_destroy(&rss)
+		testing.expect_value(t, rss.valid, want_valid, loc = loc)
+
+		doc, berr := xml.build(src)
+		testing.expect_value(t, berr, nil, loc = loc)
+		defer tape.destroy(&doc)
+		rd := check.check_document(&doc, plan)
+		defer check.result_destroy(&rd)
+		testing.expect_value(t, rd.valid, want_valid, loc = loc)
+
+		sink_d: check.Sink
+		check.sink_init(&sink_d)
+		defer check.sink_destroy(&sink_d)
+		rds := check.check_document(&doc, plan, {}, &sink_d)
+		defer check.result_destroy(&rds)
+		testing.expect_value(t, rds.valid, want_valid, loc = loc)
+		testing.expect_value(t, len(sink_s.entries), len(sink_d.entries), loc = loc)
+	}
+
+	// 1. [HIGH] Combined `const` + `enum` with container operands: `{const: {"a": 1}, enum: [{"a": 1}, {"b": 2}]}`.
+	{
+		b := db_init()
+		obj_a := [1]rules.Member_Value{{key = "a", value = i64(1)}}
+		obj_b := [1]rules.Member_Value{{key = "b", value = i64(2)}}
+		root := make_node()
+		root.const_of = rules.Value(obj_a[:])
+		root.has_enum = true
+		root.enum_of = db_vals(&b, rules.Value(obj_a[:]), rules.Value(obj_b[:]))
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		expect_json(t, &plan, `{"a": 1}`, true)
+		expect_json(t, &plan, `{"b": 2}`, false)
+		expect_json(t, &plan, `{"a": 2}`, false)
+	}
+
+	// 2. [HIGH] XML `.Group` synthetic array builder preserves `facts` & `present` (attributes/namespaces on grouped elements).
+	{
+		b := db_init()
+		str_n := db_node(&b, make_node({.String}, {min_length = 1}))
+		item_n := make_node({.Object})
+		item_n.object = db_obj(&b, rules.Object{
+			members = {{name = "v", node = str_n, required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		item_idx := db_node(&b, item_n)
+		arr_n := make_node({.Array}, {min_items = 2, unique = true})
+		arr_n.array = db_arr(&b, rules.Array{items = item_idx, contains = item_idx})
+		inner := make_node({.Object})
+		inner.object = db_obj(&b, rules.Object{
+			members = {{name = "item", node = db_node(&b, arr_n), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {{name = "r", node = db_node(&b, inner), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		// Repeated `<item>` elements carrying XML attributes and namespaces pass through `build_synthetic_array_doc`.
+		expect_xml(t, &plan, `<r><item id="1" xmlns:ns="http://example.com"><v>alpha</v></item><item id="2"><v>beta</v></item></r>`, true)
+		expect_xml(t, &plan, `<r><item id="1"><v>same</v></item><item id="2"><v>same</v></item></r>`, false)
+		expect_xml(t, &plan, `<r><item id="1"><v>ok</v></item><item id="2"><v></v></item></r>`, false)
+	}
+
+	// 3. [HIGH] Verdict (`sink == nil`) vs Error (`sink != nil`) parity on deterministic `.Held` `Apply` subchecks.
+	{
+		expect_verdict_error_parity :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want_kind: check.Error_Kind, want_kw, want_inst: string) {
+			src := transmute([]u8)input
+			rv := json.check(src, plan, .Json)
+			defer check.result_destroy(&rv)
+			testing.expect(t, !rv.valid)
+
+			sink: check.Sink
+			check.sink_init(&sink)
+			defer check.sink_destroy(&sink)
+			rs := json.check(src, plan, .Json, {}, &sink)
+			defer check.result_destroy(&rs)
+			testing.expect(t, !rs.valid)
+			testing.expect(t, len(sink.entries) > 0)
+
+			testing.expect_value(t, rv.err.kind, want_kind)
+			testing.expect_value(t, rv.err.keyword, want_kw)
+			testing.expect_value(t, rv.err.instance_location, want_inst)
+			testing.expect_value(t, rv.err.kind, rs.err.kind)
+			testing.expect_value(t, rv.err.keyword, rs.err.keyword)
+			testing.expect_value(t, rv.err.instance_location, rs.err.instance_location)
+			testing.expect_value(t, rv.err.keyword_location, rs.err.keyword_location)
+		}
+
+		// 3a. `if`/`then`/`else` deterministic body subcheck (scalar -> non-factored `.Held`)
+		{
+			b := db_init()
+			test_n := db_node(&b, make_node({.Integer}, {minimum = "0"}))
+			then_n := db_node(&b, make_node({.Integer}, {minimum = "10"}))
+			else_n := db_node(&b, make_node({.String}, {min_length = 4}))
+			root := make_node()
+			root.cond = {test = test_n, then = then_n, other = else_n}
+			b.d.root = db_node(&b, root)
+			plan, err := check.compile(&b.d)
+			rules.description_destroy(&b.d)
+			testing.expect_value(t, err.kind, check.Error_Kind.None)
+			defer check.plan_destroy(&plan)
+
+			expect_json(t, &plan, `15`, true)
+			expect_json(t, &plan, `"abcd"`, true)
+			expect_verdict_error_parity(t, &plan, `3`, .Below_Minimum, "minimum", "")
+			expect_verdict_error_parity(t, &plan, `"ab"`, .Too_Short, "minLength", "")
+		}
+
+		// 3b. `dependentSchemas` deterministic subcheck (non-factored: combined with held `propertyNames`)
+		{
+			b := db_init()
+			str_min := db_node(&b, make_node({.String}, {min_length = 4}))
+			dep_obj := make_node({.Object})
+			dep_obj.object = db_obj(&b, rules.Object{
+				members = {{name = "b", node = str_min, required = true}},
+				additional = rules.NONE,
+				keys = rules.NONE,
+			})
+			pn_not := db_node(&b, make_node({.String}, {pattern = "^_forbidden$"}))
+			pn := make_node({.String})
+			pn.not = pn_not
+			root := make_node({.Object})
+			root.object = db_obj(&b, rules.Object{
+				dependents = {{name = "a", node = db_node(&b, dep_obj)}},
+				additional = rules.NONE,
+				keys = db_node(&b, pn),
+			})
+			b.d.root = db_node(&b, root)
+			plan, err := check.compile(&b.d)
+			rules.description_destroy(&b.d)
+			testing.expect_value(t, err.kind, check.Error_Kind.None)
+			defer check.plan_destroy(&plan)
+
+			expect_json(t, &plan, `{"a": 1, "b": "abcd"}`, true)
+			expect_verdict_error_parity(t, &plan, `{"a": 1, "b": "xy"}`, .Too_Short, "minLength", "/b")
+		}
+
+		// 3c. `patternProperties` (>4 patterns -> non-factored `.Patterns`) deterministic subcheck
+		{
+			b := db_init()
+			num_max := db_node(&b, make_node({.Integer}, {maximum = "5"}))
+			str_n := db_node(&b, make_node({.String}))
+			root := make_node({.Object})
+			root.object = db_obj(&b, rules.Object{
+				patterns = {
+					{expression = "^n_", node = num_max},
+					{expression = "^a_", node = str_n},
+					{expression = "^b_", node = str_n},
+					{expression = "^c_", node = str_n},
+					{expression = "^d_", node = str_n},
+				},
+				additional = rules.NONE,
+				keys = rules.NONE,
+			})
+			b.d.root = db_node(&b, root)
+			plan, err := check.compile(&b.d)
+			rules.description_destroy(&b.d)
+			testing.expect_value(t, err.kind, check.Error_Kind.None)
+			defer check.plan_destroy(&plan)
+
+			expect_json(t, &plan, `{"n_1": 3, "a_1": "ok"}`, true)
+			expect_verdict_error_parity(t, &plan, `{"n_1": 9}`, .Above_Maximum, "maximum", "/n_1")
+		}
+
+		// 3d. `unevaluatedProperties` & `unevaluatedItems` deterministic subchecks
+		{
+			b := db_init()
+			int_n := db_node(&b, make_node({.Integer}))
+			str_min := db_node(&b, make_node({.String}, {min_length = 3}))
+			root := make_node({.Object})
+			root.object = db_obj(&b, rules.Object{
+				members = {{name = "ok", node = int_n}},
+				additional = rules.NONE,
+				keys = rules.NONE,
+			})
+			root.unevaluated_properties = str_min
+			b.d.root = db_node(&b, root)
+			plan, err := check.compile(&b.d)
+			rules.description_destroy(&b.d)
+			testing.expect_value(t, err.kind, check.Error_Kind.None)
+			defer check.plan_destroy(&plan)
+
+			expect_json(t, &plan, `{"ok": 1, "extra": "abc"}`, true)
+			expect_verdict_error_parity(t, &plan, `{"ok": 1, "extra": "x"}`, .Too_Short, "minLength", "/extra")
+		}
+		{
+			b := db_init()
+			int_n := db_node(&b, make_node({.Integer}))
+			str_min := db_node(&b, make_node({.String}, {min_length = 3}))
+			root := make_node({.Array})
+			root.array = db_arr(&b, rules.Array{prefix = {int_n}, items = rules.NONE})
+			root.unevaluated_items = str_min
+			b.d.root = db_node(&b, root)
+			plan, err := check.compile(&b.d)
+			rules.description_destroy(&b.d)
+			testing.expect_value(t, err.kind, check.Error_Kind.None)
+			defer check.plan_destroy(&plan)
+
+			expect_json(t, &plan, `[1, "abc"]`, true)
+			expect_verdict_error_parity(t, &plan, `[1, "a"]`, .Too_Short, "minLength", "/1")
+		}
+
+		// 3e. Held `propertyNames` (with `not`) deterministic subcheck
+		{
+			b := db_init()
+			bad_key := db_node(&b, make_node({.String}, {pattern = "^bad"}))
+			pn := make_node({.String})
+			pn.not = bad_key
+			root := make_node({.Object})
+			root.object = db_obj(&b, rules.Object{additional = rules.NONE, keys = db_node(&b, pn)})
+			b.d.root = db_node(&b, root)
+			plan, err := check.compile(&b.d)
+			rules.description_destroy(&b.d)
+			testing.expect_value(t, err.kind, check.Error_Kind.None)
+			defer check.plan_destroy(&plan)
+
+			expect_json(t, &plan, `{"good": 1}`, true)
+			expect_verdict_error_parity(t, &plan, `{"bad_key": 1}`, .Not_Allowed, "not", "")
+		}
+
+		// 3f. Non-conjoined `allOf` + `$ref` deterministic subchecks (array with `uniqueItems` prevents conjoining)
+		{
+			b := db_init()
+			int_min := db_node(&b, make_node({.Integer}, {minimum = "5"}))
+			arr_ref := make_node({.Array})
+			arr_ref.array = db_arr(&b, rules.Array{items = int_min})
+			ref_idx := db_node(&b, arr_ref)
+			root := make_node({.Array}, {unique = true})
+			root.ref = ref_idx
+			b.d.root = db_node(&b, root)
+			plan, err := check.compile(&b.d)
+			rules.description_destroy(&b.d)
+			testing.expect_value(t, err.kind, check.Error_Kind.None)
+			defer check.plan_destroy(&plan)
+
+			expect_json(t, &plan, `[5, 6]`, true)
+			expect_verdict_error_parity(t, &plan, `[5, 2]`, .Below_Minimum, "minimum", "/1")
+		}
+	}
+
+	// 7. [MEDIUM] Wide (>64 members) factored objects in a long array reuse pooled `seen_wide` without linear growth!
+	{
+		b := db_init()
+		int_n := db_node(&b, make_node({.Integer}))
+		str_n := db_node(&b, make_node({.String}))
+		// Build two wide (>64 members) object arms for `anyOf` so factoring activates with `f.members > 64`.
+		m1 := make([]rules.Member, 70)
+		m2 := make([]rules.Member, 70)
+		names := make([]string, 70)
+		defer {
+			for nm in names { delete(nm) }
+			delete(names)
+			delete(m1)
+			delete(m2)
+		}
+		for i in 0 ..< 70 {
+			nb := strings.builder_make()
+			strings.write_string(&nb, "k")
+			strings.write_int(&nb, i)
+			names[i] = strings.to_string(nb)
+			m1[i] = {name = names[i], node = int_n, required = i == 0}
+			m2[i] = {name = names[i], node = str_n, required = i == 0}
+		}
+		arm1 := make_node({.Object})
+		arm1.object = db_obj(&b, rules.Object{members = m1, additional = rules.NONE, keys = rules.NONE})
+		arm2 := make_node({.Object})
+		arm2.object = db_obj(&b, rules.Object{members = m2, additional = rules.NONE, keys = rules.NONE})
+		elem := make_node({.Object})
+		elem.any_of = db_ids(&b, db_node(&b, arm1), db_node(&b, arm2))
+		root := make_node({.Array})
+		root.array = db_arr(&b, rules.Array{items = db_node(&b, elem)})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		// Build a JSON array of 200 wide objects; with pooled `seen_wide`, memory stays tiny (~few KiB) instead of growing linearly!
+		jb := strings.builder_make()
+		defer strings.builder_destroy(&jb)
+		strings.write_byte(&jb, '[')
+		for i in 0 ..< 200 {
+			if i > 0 {
+				strings.write_byte(&jb, ',')
+			}
+			if i % 2 == 0 {
+				strings.write_string(&jb, `{"k0":1,"k69":2}`)
+			} else {
+				strings.write_string(&jb, `{"k0":"a","k69":"b"}`)
+			}
+		}
+		strings.write_byte(&jb, ']')
+		js := strings.to_string(jb)
+		res := json.check(transmute([]u8)js, &plan, .Json, {budget = {memory = 64 * 1024}})
+		defer check.result_destroy(&res)
+		testing.expectf(t, res.valid, "wide factored array failed: %v", res.err.kind)
+	}
+}

@@ -148,26 +148,34 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs:
 	if edge.assert_format && !edge.format_foreign {
 		l.formats += {format_of(edge.format)} - {.None}
 	}
-	operands := n.enum_of
 	l.has_enum, l.constant = n.const_of != nil || n.has_enum, n.const_of != nil
+	l.fast &&= !l.has_enum
+	if !l.has_enum || refused != "" {
+		return
+	}
+	if c, has := n.const_of.?; has {
+		if ck := value_kind(c); ck == .Object || ck == .Array {
+			return l, "const"
+		}
+	}
+	if n.has_enum {
+		for v in n.enum_of {
+			if vk := value_kind(v); vk == .Object || vk == .Array {
+				return l, "enum"
+			}
+		}
+	}
+	operands := n.enum_of
 	if c, has := n.const_of.?; has {
 		operands = {c}
 		if n.has_enum && !operand_in(c, n.enum_of, scratch) {
 			operands, l.constant = nil, false
 		}
 	}
-	l.fast &&= !l.has_enum
-	if !l.has_enum || refused != "" {
-		return
-	}
 	keys := make([dynamic]string, 0, len(operands), allocator)
 	held: Kinds
 	for v in operands {
 		k := value_kind(v)
-		if k == .Object || k == .Array {
-			delete(keys)
-			return l, "const" if n.const_of != nil else "enum"
-		}
 		#partial switch k {
 		case .Null:         held += {.Null}
 		case .True, .False: held += {.Bool}
@@ -184,11 +192,18 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs:
 	return
 }
 
-// Whether scalar operand `c` is in `operands` by its enum index key, false for a container.
+// Whether operand `c` is in `operands` (by enum index key for scalars, or exact `value_equal` for containers).
 @(private)
 operand_in :: proc(c: Value, operands: []Value, scratch: runtime.Allocator) -> bool {
 	k := value_kind(c)
 	if k == .Object || k == .Array {
+		for v in operands {
+			if value_kind(v) == k {
+				if eq, err := value_equal(c, v, .Last, scratch); err == nil && eq {
+					return true
+				}
+			}
+		}
 		return false
 	}
 	want := operand_key(c, k, scratch, scratch)
