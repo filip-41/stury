@@ -8,6 +8,7 @@ import "stury:capi"
 import "stury:cbor"
 import "stury:dsv"
 import "stury:engine"
+import "stury:html"
 import "stury:jq"
 import "stury:json"
 import "stury:jsonpath"
@@ -19,12 +20,15 @@ import "stury:lib/ops/edit"
 import "stury:lib/ops/write"
 import "stury:lib/query"
 import schema_check "stury:lib/schema/check"
+import ddl_pkg "stury:lib/schema/ddl"
 import "stury:lib/schema/model"
 import "stury:lib/schema/rules"
 import schema_pkg "stury:lib/schema/schema"
+import "stury:msgpack"
 import "stury:stury"
 import "stury:toml"
 import "stury:xml"
+import "stury:yaml"
 
 // Every tolerance and a step budget, which a walk with `LAX` counts, so the object holds those walks too.
 TOLERANT :: json.Options{tolerate = {.Invalid_Utf8, .Non_Finite, .Lone_Surrogate}, budget = {steps = 1 << 40}}
@@ -673,4 +677,143 @@ capi_validate_wasm :: proc "c" (p: [^]u8, n: int) -> u32 {
 	defer capi.stury_arena_free(a)
 	err := capi.stury_validate(a, p, c.size_t(n), u32(engine.Format_Id.Json), nil)
 	return u32(err.code)
+}
+
+// Phase 4: YAML 1.2 + Yaml_Merge + dialects (`stury:yaml`).
+@(export)
+yaml_surface_wasm :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	src := p[:n]
+	if yaml.validate(src, .Yaml_1_2) != nil {
+		return -1
+	}
+	doc, berr := yaml.build(src, .Yaml_Merge, {format = tape.Yaml_Options{dialect = .Json}})
+	if berr != nil {
+		return -1
+	}
+	defer tape.destroy(&doc)
+
+	written, _, werr := yaml.write(&doc, .Yaml_1_2, {indent = 2})
+	if werr != nil {
+		return -1
+	}
+	defer delete(written)
+
+	ov: edit.Overlay
+	if ierr := yaml.edit_init(&ov, &doc); ierr != nil {
+		return -1
+	}
+	defer yaml.edit_destroy(&ov)
+	cres, cerr := yaml.commit(&ov, .Yaml_1_2)
+	if cerr != nil {
+		return -1
+	}
+	defer edit.destroy_commit_result(&cres)
+	return len(written) + len(cres.bytes)
+}
+
+// Phase 4: HTML5 Document + Fragment (`stury:html`).
+@(export)
+html_surface_wasm :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	src := p[:n]
+	if html.validate(src, .Html) != nil {
+		return -1
+	}
+	doc, berr := html.build(src, .Html)
+	if berr != nil {
+		return -1
+	}
+	defer tape.destroy(&doc)
+
+	frag, ferr := html.build(src, .Fragment)
+	if ferr != nil {
+		return -1
+	}
+	defer tape.destroy(&frag)
+
+	written, _, werr := html.write(&doc, .Html)
+	if werr != nil {
+		return -1
+	}
+	defer delete(written)
+
+	ov: edit.Overlay
+	if ierr := html.edit_init(&ov, &doc); ierr != nil {
+		return -1
+	}
+	defer html.edit_destroy(&ov)
+	cres, cerr := html.commit(&ov)
+	if cerr != nil {
+		return -1
+	}
+	defer edit.destroy_commit_result(&cres)
+	return len(written) + len(frag.nodes) + len(cres.bytes)
+}
+
+// Phase 4: MessagePack + Compact (`stury:msgpack`).
+@(export)
+msgpack_surface_wasm :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	src := p[:n]
+	if msgpack.validate(src, .Msgpack) != nil {
+		return -1
+	}
+	doc, berr := msgpack.build(src, .Compact)
+	if berr != nil {
+		return -1
+	}
+	defer tape.destroy(&doc)
+
+	written, _, werr := msgpack.write(&doc, .Compact)
+	if werr != nil {
+		return -1
+	}
+	defer delete(written)
+
+	ov: edit.Overlay
+	if ierr := msgpack.edit_init(&ov, &doc); ierr != nil {
+		return -1
+	}
+	defer msgpack.edit_destroy(&ov)
+	cres, cerr := msgpack.commit(&ov, .Compact)
+	if cerr != nil {
+		return -1
+	}
+	defer edit.destroy_commit_result(&cres)
+	return len(written) + len(cres.bytes)
+}
+
+// Phase 4: SQL DDL schema frontend (`stury:lib/schema/ddl`) + Table/Markdown writers (`stury:lib/ops/write`).
+@(export)
+ddl_and_table_markdown_wasm :: proc "c" (sql_p: [^]u8, sql_n: int, doc_p: [^]u8, doc_n: int) -> int {
+	context = runtime.default_context()
+	compiled, derr := ddl_pkg.compile_ddl(sql_p[:sql_n])
+	if derr.kind != .None {
+		ddl_pkg.error_destroy(&derr)
+		return -1
+	}
+	defer ddl_pkg.destroy(compiled)
+
+	doc, berr := json.build(doc_p[:doc_n], .Json)
+	if berr != nil {
+		return -1
+	}
+	defer tape.destroy(&doc)
+
+	chk := schema_check.check_document(&doc, &compiled.plan)
+	defer schema_check.result_destroy(&chk)
+
+	tbl, terr := write.write_table(&doc)
+	if terr != nil {
+		return -1
+	}
+	defer delete(tbl)
+
+	md, merr := write.write_markdown(&doc)
+	if merr != nil {
+		return -1
+	}
+	defer delete(md)
+	return len(tbl) + len(md) + (1 if chk.valid else 0)
 }

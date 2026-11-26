@@ -5,11 +5,14 @@ import "core:strings"
 import "core:unicode/utf8"
 import "stury:cbor"
 import "stury:dsv"
+import "stury:html"
 import "stury:json"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
+import "stury:msgpack"
 import "stury:toml"
 import "stury:xml"
+import "stury:yaml"
 
 // Format detection by file path (extension with optional trailing compression suffix)
 // and by content inspection (magic bytes / leading grammar heuristics).
@@ -133,10 +136,13 @@ detect_format :: proc(src: []u8, allocator := context.allocator) -> (entry: Form
 		return {}, .Single, false
 	}
 	bom := spell.bom_length(src)
-	// Binary / non-UTF-8 / high-major CBOR check before text heuristics.
+	// Binary / non-UTF-8 / high-major CBOR & MessagePack check before text heuristics.
 	if bom == 0 && looks_binary_cbor(src) {
 		if is_valid_cbor(src, allocator) {
 			return entry_of_detect(.Cbor, cbor_framing(src, allocator))
+		}
+		if is_valid_msgpack(src, allocator) {
+			return entry_of_detect(.Msgpack, msgpack_framing(src, allocator))
 		}
 	}
 
@@ -163,10 +169,20 @@ detect_format :: proc(src: []u8, allocator := context.allocator) -> (entry: Form
 		}
 	}
 
-	// XML starts with `<` (declaration, comment, DOCTYPE, processing instruction, or root element).
+	// Explicit HTML5 document signatures (`<!DOCTYPE html` / `<html`) vs XML.
 	if first == '<' {
+		if looks_like_html(src[p:]) && html.validate(src, .Html, {}, allocator) == nil {
+			return entry_of_detect(.Html, .Single)
+		}
 		if xml.validate(src, .Xml, {}, allocator) == nil {
 			return entry_of_detect(.Xml, .Single)
+		}
+	}
+
+	// Explicit YAML document markers (`%YAML ...` or `---` line).
+	if (first == '%' || first == '-') && looks_like_yaml_marker(src[p:]) {
+		if yaml.validate(src, .Yaml_1_2, {}, allocator) == nil {
+			return entry_of_detect(.Yaml, yaml_framing(src, allocator))
 		}
 	}
 
@@ -260,10 +276,10 @@ looks_binary_cbor :: proc "contextless" (src: []u8) -> bool #no_bounds_check {
 		return false
 	}
 	// Non-UTF-8 bytes or non-whitespace ASCII control bytes strongly signal binary data;
-	// printable UTF-8 ASCII text (e.g. `//`, `#`, ` `) must go through text detectors.
+	// printable UTF-8 ASCII text and JSON5 whitespace (`\t`, `\n`, `\v`, `\f`, `\r`) must go through text detectors.
 	has_ctrl := false
 	for b in src[:min(len(src), 256)] {
-		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' && b != 0x1E {
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' && b != 0x0B && b != 0x0C && b != 0x1E {
 			has_ctrl = true
 			break
 		}
@@ -315,6 +331,99 @@ cbor_framing :: proc(src: []u8, allocator: runtime.Allocator) -> Framing {
 		return .Single
 	}
 	return .Concatenated
+}
+
+@(private = "file")
+is_valid_msgpack :: proc(src: []u8, allocator: runtime.Allocator) -> bool {
+	if msgpack.validate(src, .Msgpack, {}, allocator) == nil {
+		return true
+	}
+	// Require at least one high-bit MessagePack header byte (`>= 0x80`) before accepting a concatenated stream,
+	// so pure ASCII bytes (`0x00..0x7f`) cannot masquerade as a stream of 1-byte positive fixints.
+	has_high := false
+	for b in src[:min(len(src), 256)] {
+		if b >= 0x80 {
+			has_high = true
+			break
+		}
+	}
+	if !has_high {
+		return false
+	}
+	r := msgpack.records_open(src, .Concatenated, .Msgpack)
+	defer tape.destroy_records(&r)
+	if r.err != nil {
+		return false
+	}
+	rec: [8]tape.Record
+	n := msgpack.records_validate(&r, rec[:], allocator)
+	return n == 0 && r.err == nil && r.index > 0
+}
+
+@(private = "file")
+msgpack_framing :: proc(src: []u8, allocator: runtime.Allocator) -> Framing {
+	if msgpack.validate(src, .Msgpack, {}, allocator) == nil {
+		return .Single
+	}
+	return .Concatenated
+}
+
+@(private = "file")
+looks_like_html :: proc "contextless" (s: []u8) -> bool {
+	if len(s) >= 14 && ascii_eq_fold(string(s[:14]), "<!doctype html") {
+		if len(s) == 14 {
+			return true
+		}
+		next := s[14]
+		return is_ascii_ws(next) || next == '>'
+	}
+	if len(s) >= 5 && ascii_eq_fold(string(s[:5]), "<html") {
+		if len(s) == 5 {
+			return true
+		}
+		next := s[5]
+		return is_ascii_ws(next) || next == '>' || next == '/'
+	}
+	return false
+}
+
+@(private = "file")
+looks_like_yaml_marker :: proc "contextless" (s: []u8) -> bool {
+	if len(s) >= 6 && string(s[:5]) == "%YAML" && (s[5] == ' ' || s[5] == '\t') {
+		return true
+	}
+	if len(s) >= 3 && s[0] == '-' && s[1] == '-' && s[2] == '-' {
+		if len(s) == 3 || s[3] == '\n' || s[3] == '\r' {
+			return true
+		}
+		if s[3] == ' ' || s[3] == '\t' {
+			i := 3
+			for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+				i += 1
+			}
+			// Avoid misclassifying TOML bare-key assignments like `--- = 1`.
+			if i < len(s) && s[i] == '=' {
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
+
+@(private = "file")
+yaml_framing :: proc(src: []u8, allocator: runtime.Allocator) -> Framing {
+	r := yaml.records_open(src, .Concatenated, .Yaml_1_2)
+	defer tape.destroy_records(&r)
+	if r.err != nil {
+		return .Single
+	}
+	rec: [4]tape.Record
+	_ = yaml.records_validate(&r, rec[:], allocator)
+	if r.index > 1 {
+		return .Concatenated
+	}
+	return .Single
 }
 
 @(private = "file")

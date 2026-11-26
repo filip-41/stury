@@ -753,6 +753,118 @@ static void test_null_and_overflow_safety(void) {
     stury_arena_free(a);
 }
 
+/* -------------------------------------------------------------------------
+ * 8. YAML, HTML, and MessagePack through libstury
+ * ------------------------------------------------------------------------- */
+static void test_yaml_html_msgpack(void) {
+    stury_arena_t *a = stury_arena_new();
+    CHECK(a != NULL);
+
+    /* Name, path, detection, caps, and facts */
+    CHECK_EQ_U64(stury_format_by_name("yaml", 4), STURY_FORMAT_YAML);
+    CHECK_EQ_U64(stury_format_by_name("yaml:merge", 10), STURY_FORMAT_YAML_MERGE);
+    CHECK_EQ_U64(stury_format_by_name("html", 4), STURY_FORMAT_HTML);
+    CHECK_EQ_U64(stury_format_by_name("html:fragment", 13), STURY_FORMAT_HTML_FRAGMENT);
+    CHECK_EQ_U64(stury_format_by_name("msgpack", 7), STURY_FORMAT_MSGPACK);
+    CHECK_EQ_U64(stury_format_by_name("msgpack:compact", 15), STURY_FORMAT_MSGPACK_COMPACT);
+
+    CHECK_EQ_U64(stury_format_of_path("app.yaml", 8), STURY_FORMAT_YAML);
+    CHECK_EQ_U64(stury_format_of_path("page.html", 9), STURY_FORMAT_HTML);
+    CHECK_EQ_U64(stury_format_of_path("blob.mpk", 8), STURY_FORMAT_MSGPACK);
+
+    {
+        const char *y = "---\nname: ada\n";
+        const char *h = "<!DOCTYPE html><html><body><p>ada</p></body></html>";
+        const uint8_t m[4] = {0x81, 0xA1, 'k', 0x05};
+        CHECK_EQ_U64(stury_format_detect(u8_ptr(y), strlen(y)), STURY_FORMAT_YAML);
+        CHECK_EQ_U64(stury_format_detect(u8_ptr(h), strlen(h)), STURY_FORMAT_HTML);
+        CHECK_EQ_U64(stury_format_detect(m, sizeof(m)), STURY_FORMAT_MSGPACK);
+        CHECK((stury_format_caps(STURY_FORMAT_MSGPACK) & STURY_CAP_BINARY) != 0);
+        CHECK((stury_format_facts(STURY_FORMAT_HTML) & STURY_FACT_ATTRIBUTE) != 0);
+        CHECK((stury_format_facts(STURY_FORMAT_YAML) & STURY_FACT_COMMENT) != 0);
+    }
+
+    /* YAML -> JSON -> MessagePack -> JSON + schema check + jq query */
+    {
+        const char *yml = "# cfg\nname: ada\nage: 36\n";
+        uint8_t *j_out = NULL;
+        size_t j_len = 0;
+        stury_facts_t dropped = 0;
+        CHECK_EQ_U64(stury_validate(a, u8_ptr(yml), strlen(yml), STURY_FORMAT_YAML, NULL).code, STURY_OK);
+        CHECK_EQ_U64(
+            stury_convert(a, u8_ptr(yml), strlen(yml), STURY_FORMAT_YAML, STURY_FORMAT_JSON, NULL, &j_out, &j_len, &dropped).code,
+            STURY_OK);
+        CHECK(bytes_eq(j_out, j_len, "{\"name\":\"ada\",\"age\":36}"));
+        CHECK((dropped & STURY_FACT_COMMENT) != 0);
+
+        uint8_t *mp_out = NULL;
+        size_t mp_len = 0;
+        CHECK_EQ_U64(
+            stury_convert(a, j_out, j_len, STURY_FORMAT_JSON, STURY_FORMAT_MSGPACK_COMPACT, NULL, &mp_out, &mp_len, NULL).code,
+            STURY_OK);
+        CHECK(mp_out != NULL && mp_len > 0);
+        CHECK_EQ_U64(stury_validate(a, mp_out, mp_len, STURY_FORMAT_MSGPACK_COMPACT, NULL).code, STURY_OK);
+
+        uint8_t *back = NULL;
+        size_t back_len = 0;
+        CHECK_EQ_U64(
+            stury_convert(a, mp_out, mp_len, STURY_FORMAT_MSGPACK, STURY_FORMAT_JSON, NULL, &back, &back_len, NULL).code,
+            STURY_OK);
+        CHECK(bytes_eq(back, back_len, "{\"name\":\"ada\",\"age\":36}"));
+
+        /* Schema check over YAML and MessagePack */
+        const char *sc_src = "{\"type\":\"object\",\"required\":[\"name\",\"age\"],\"properties\":{\"name\":{\"type\":\"string\"},\"age\":{\"type\":\"integer\"}}}";
+        stury_schema_t *sc = NULL;
+        bool valid = false;
+        CHECK_EQ_U64(stury_schema_compile(a, u8_ptr(sc_src), strlen(sc_src), &sc).code, STURY_OK);
+        CHECK_EQ_U64(stury_schema_check(a, sc, u8_ptr(yml), strlen(yml), STURY_FORMAT_YAML, NULL, &valid).code, STURY_OK);
+        CHECK(valid);
+        valid = false;
+        CHECK_EQ_U64(stury_schema_check(a, sc, mp_out, mp_len, STURY_FORMAT_MSGPACK, NULL, &valid).code, STURY_OK);
+        CHECK(valid);
+        stury_schema_free(sc);
+
+        /* jq eval over YAML and MessagePack */
+        stury_jq_t *jqp = NULL;
+        CHECK_EQ_U64(stury_jq_compile(a, ".name", 5, &jqp).code, STURY_OK);
+        emit_collector_t col;
+        memset(&col, 0, sizeof(col));
+        CHECK_EQ_U64(stury_jq_eval(a, jqp, u8_ptr(yml), strlen(yml), STURY_FORMAT_YAML, NULL, jq_collect_cb, &col).code, STURY_OK);
+        CHECK_EQ_U64(col.count, 1);
+        CHECK(strcmp(col.values[0], "\"ada\"") == 0);
+        memset(&col, 0, sizeof(col));
+        CHECK_EQ_U64(stury_jq_eval(a, jqp, mp_out, mp_len, STURY_FORMAT_MSGPACK, NULL, jq_collect_cb, &col).code, STURY_OK);
+        CHECK_EQ_U64(col.count, 1);
+        CHECK(strcmp(col.values[0], "\"ada\"") == 0);
+        stury_jq_free(jqp);
+    }
+
+    /* HTML validate, build, write to JSON, and jq query */
+    {
+        const char *h = "<!DOCTYPE html><html><body><p>hello</p></body></html>";
+        stury_doc_t *doc = NULL;
+        CHECK_EQ_U64(stury_validate(a, u8_ptr(h), strlen(h), STURY_FORMAT_HTML, NULL).code, STURY_OK);
+        CHECK_EQ_U64(stury_build(a, u8_ptr(h), strlen(h), STURY_FORMAT_HTML, NULL, &doc).code, STURY_OK);
+        CHECK(doc != NULL && stury_doc_node_count(doc) > 0);
+        uint8_t *out = NULL;
+        size_t out_len = 0;
+        CHECK_EQ_U64(stury_write(a, doc, STURY_FORMAT_JSON, &out, &out_len, NULL).code, STURY_OK);
+        CHECK(bytes_contains(out, out_len, "\"hello\""));
+        stury_doc_free(doc);
+
+        stury_jq_t *jqp = NULL;
+        CHECK_EQ_U64(stury_jq_compile(a, ".html.body.p", 12, &jqp).code, STURY_OK);
+        emit_collector_t col;
+        memset(&col, 0, sizeof(col));
+        CHECK_EQ_U64(stury_jq_eval(a, jqp, u8_ptr(h), strlen(h), STURY_FORMAT_HTML, NULL, jq_collect_cb, &col).code, STURY_OK);
+        CHECK_EQ_U64(col.count, 1);
+        CHECK(strcmp(col.values[0], "\"hello\"") == 0);
+        stury_jq_free(jqp);
+    }
+
+    stury_arena_free(a);
+}
+
 int main(void) {
     test_abi_layout();
     test_arena_and_formats();
@@ -761,6 +873,7 @@ int main(void) {
     test_schema();
     test_jq_and_jsonpath();
     test_null_and_overflow_safety();
+    test_yaml_html_msgpack();
 
     if (g_failures > 0) {
         fprintf(stderr, "c_consumer_test: %d/%d checks FAILED\n", g_failures, g_checks);

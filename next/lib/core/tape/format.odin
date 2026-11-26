@@ -27,11 +27,14 @@ Format_Id :: distinct u16
 
 // Central base `Format_Id` assignments for built-in format families. Each format claims `len(Spec)` consecutive IDs
 // from its base so specs cannot silently collide across packages.
-FORMAT_ID_JSON :: Format_Id(1)  // 1..3: Json, Jsonc, Json5
-FORMAT_ID_DSV  :: Format_Id(4)  // 4..6: Csv, Tsv, Plain
-FORMAT_ID_CBOR :: Format_Id(7)  // 7..10: Cbor, Preferred, Deterministic, Length_First
-FORMAT_ID_TOML :: Format_Id(11) // 11..12: Toml_1_0, Toml_1_1
-FORMAT_ID_XML  :: Format_Id(13) // 13: Xml
+FORMAT_ID_JSON    :: Format_Id(1)  // 1..3: Json, Jsonc, Json5
+FORMAT_ID_DSV     :: Format_Id(4)  // 4..6: Csv, Tsv, Plain
+FORMAT_ID_CBOR    :: Format_Id(7)  // 7..10: Cbor, Preferred, Deterministic, Length_First
+FORMAT_ID_TOML    :: Format_Id(11) // 11..12: Toml_1_0, Toml_1_1
+FORMAT_ID_XML     :: Format_Id(13) // 13: Xml
+FORMAT_ID_YAML    :: Format_Id(14) // 14..15: Yaml_1_2, Yaml_Merge
+FORMAT_ID_HTML    :: Format_Id(16) // 16..17: Html, Fragment
+FORMAT_ID_MSGPACK :: Format_Id(18) // 18..19: Msgpack, Compact
 
 // Options of a read of any format.
 Options :: struct {

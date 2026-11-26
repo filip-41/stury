@@ -43,14 +43,37 @@ Render_Config :: struct {
 	docs_emitted: u64,
 }
 
+@(private = "file", rodata)
+RENDER_TAG_TABLE := [1]string{"table"}
+@(private = "file", rodata)
+RENDER_TAG_MARKDOWN := [1]string{"markdown"}
+
 make_write_opts :: proc(o: ^Options, sp: engine.Spec, indent_val: i8) -> write.Options {
+	if sp == nil {
+		if o.to_render == .Table {
+			return {
+				indent      = 0 if o.compact else 1,
+				sort_keys   = o.sort_keys,
+				grow_header = o.dsv_out.no_header,
+				header      = RENDER_TAG_TABLE[:],
+			}
+		}
+		if o.to_render == .Markdown {
+			return {
+				indent    = 0 if o.compact else 1,
+				sort_keys = o.sort_keys,
+				header    = RENDER_TAG_MARKDOWN[:],
+			}
+		}
+		return {}
+	}
 	e, ok := engine.entry_of_spec(sp)
 	if !ok {
 		return {}
 	}
 	ind := u8(0) if o.compact else u8(max(indent_val, 0))
 	tab := o.tab && !o.compact
-	#partial switch e.family {
+	switch e.family {
 	case .Json:
 		fr := write.Record_Framing.None
 		if o.seq || o.to_framing == .Seq {
@@ -71,8 +94,63 @@ make_write_opts :: proc(o: ^Options, sp: engine.Spec, indent_val: i8) -> write.O
 		}
 	case .Cbor:
 		return {sort_keys = o.sort_keys}
+	case .Yaml:
+		return {
+			indent    = ind,
+			tab       = tab,
+			sort_keys = o.sort_keys,
+			format    = tape.Yaml_Options{dialect = o.yaml_schema} if o.yaml_schema_set else nil,
+		}
+	case .Html:
+		return {indent = ind, tab = tab, ascii = o.ascii}
+	case .Msgpack:
+		return {sort_keys = o.sort_keys}
 	}
 	return {}
+}
+
+write_doc_render_to :: proc(sink_w: io.Writer, doc: ^tape.Document, kind: Output_Render, sort_keys, compact, no_header: bool, node: tape.Node_Index, alloc: runtime.Allocator) -> write.Error {
+	switch kind {
+	case .Table:
+		topts := write.Table_Render_Options{
+			node      = node,
+			style     = .Compact if compact else .Plain,
+			sort_keys = sort_keys,
+			no_header = no_header,
+		}
+		return write.write_table_to(sink_w, doc, topts, alloc)
+	case .Markdown:
+		mopts := write.Markdown_Options{
+			node      = node,
+			sort_keys = sort_keys,
+			compact   = compact,
+		}
+		return write.write_markdown_to(sink_w, doc, mopts, alloc)
+	case .None:
+	}
+	return tape.Bad_Option{"to"}
+}
+
+write_doc_render :: proc(doc: ^tape.Document, kind: Output_Render, sort_keys, compact, no_header: bool, node: tape.Node_Index, alloc: runtime.Allocator) -> ([]u8, write.Error) {
+	switch kind {
+	case .Table:
+		topts := write.Table_Render_Options{
+			node      = node,
+			style     = .Compact if compact else .Plain,
+			sort_keys = sort_keys,
+			no_header = no_header,
+		}
+		return write.write_table(doc, topts, alloc)
+	case .Markdown:
+		mopts := write.Markdown_Options{
+			node      = node,
+			sort_keys = sort_keys,
+			compact   = compact,
+		}
+		return write.write_markdown(doc, mopts, alloc)
+	case .None:
+	}
+	return nil, tape.Bad_Option{"to"}
 }
 
 // Parses `$JQ_COLORS` as jq's `jq_set_colors`: up to 8 colon-separated codes, empty trailing slot kept default (`cli.tsv:708`).
@@ -599,6 +677,36 @@ write_value_as_format :: proc(
 	max_depth: int,
 	alloc: runtime.Allocator,
 ) -> (bool, string) {
+	if to == nil && len(wopts.header) == 1 {
+		rkind := Output_Render.Table if wopts.header[0] == "table" else .Markdown if wopts.header[0] == "markdown" else .None
+		if rkind != .None {
+			tt: write.Token_Tape
+			if write.token_tape_start(&tt, false, max_depth, alloc) != nil {
+				return false, strings.clone("out of memory", alloc)
+			}
+			defer write.token_tape_drop(&tt)
+			if !value_emit_tokens(h, v, &tt, token_tape_sink) {
+				return false, strings.clone("cannot serialize value", alloc)
+			}
+			doc, derr := write.token_tape_document(&tt)
+			if derr != nil {
+				return false, strings.clone("out of memory", alloc)
+			}
+			if sink_w.procedure != nil {
+				if werr := write_doc_render_to(sink_w, &doc, rkind, wopts.sort_keys, wopts.indent == 0, wopts.grow_header, tape.ROOT, alloc); werr != nil {
+					return false, write_error_string(werr, alloc)
+				}
+				return true, ""
+			}
+			text, werr := write_doc_render(&doc, rkind, wopts.sort_keys, wopts.indent == 0, wopts.grow_header, tape.ROOT, alloc)
+			if werr != nil {
+				return false, write_error_string(werr, alloc)
+			}
+			defer delete(text, alloc)
+			append(out, ..text)
+			return true, ""
+		}
+	}
 	entry, found := engine.entry_of_spec(to)
 	if !wopts.sort_keys && !wopts.ascii && found && !entry.tabular {
 		ov_ob := (^query.Overlay_Block)(v.p) if v.kind == .Overlay else (^query.Overlay_Block)(h.write_fact_data)
@@ -622,7 +730,8 @@ write_value_as_format :: proc(
 					}
 				}
 			} else if ov_ob.ov.dirty || v.kind == .Overlay {
-				if cres, cerr := engine.reconcile_edit(h, ov_ob.ov, v, to, {indent = wopts.indent, tab = wopts.tab}, alloc); cerr == nil {
+				yopts, _ := wopts.format.(tape.Yaml_Options)
+				if cres, cerr := engine.reconcile_edit(h, ov_ob.ov, v, to, {indent = wopts.indent, tab = wopts.tab}, alloc, yopts); cerr == nil {
 					defer edit.destroy_commit_result(&cres)
 					if sink_w.procedure != nil {
 						if !write_all_to(sink_w, cres.bytes) {

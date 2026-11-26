@@ -6,6 +6,7 @@ Never leaves build artifacts in the git working tree.
 """
 
 import argparse
+import ctypes
 import os
 import pathlib
 import platform
@@ -65,6 +66,83 @@ def fix_darwin_install_name(lib_path: pathlib.Path) -> None:
     tool = shutil.which("install_name_tool")
     if tool:
         subprocess.run([tool, "-id", str(lib_path), str(lib_path)], check=True)
+
+
+def run_py_extra_formats(lib_path: pathlib.Path) -> None:
+    """Verifies YAML, HTML, and MessagePack through libstury via Python ctypes."""
+    print("== run Python ctypes smoke for YAML, HTML, and MessagePack")
+
+    class SturyErr(ctypes.Structure):
+        _fields_ = [("code", ctypes.c_uint32), ("at", ctypes.c_uint64), ("message", ctypes.c_char_p)]
+
+    EMIT_FN = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t)
+    lib = ctypes.CDLL(str(lib_path))
+    vp, cp, sz, u32, u16 = ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_uint16
+    u8p = ctypes.POINTER(ctypes.c_uint8)
+
+    lib.stury_arena_new.restype = vp
+    lib.stury_arena_free.argtypes = [vp]
+    lib.stury_format_by_name.argtypes = [cp, sz]
+    lib.stury_format_by_name.restype = u32
+    lib.stury_validate.argtypes = [vp, cp, sz, u32, vp]
+    lib.stury_validate.restype = SturyErr
+    lib.stury_convert.argtypes = [vp, cp, sz, u32, u32, vp, ctypes.POINTER(u8p), ctypes.POINTER(sz), ctypes.POINTER(u16)]
+    lib.stury_convert.restype = SturyErr
+    lib.stury_jq_compile.argtypes = [vp, cp, sz, ctypes.POINTER(vp)]
+    lib.stury_jq_compile.restype = SturyErr
+    lib.stury_jq_free.argtypes = [vp]
+    lib.stury_jq_eval.argtypes = [vp, vp, cp, sz, u32, vp, EMIT_FN, vp]
+    lib.stury_jq_eval.restype = SturyErr
+
+    FMT_JSON = 0
+    FMT_YAML = 13
+    FMT_YAML_MERGE = 14
+    FMT_HTML = 15
+    FMT_HTML_FRAG = 16
+    FMT_MSGPACK = 17
+    FMT_MSGPACK_COMPACT = 18
+
+    assert lib.stury_format_by_name(b"yaml", 4) == FMT_YAML
+    assert lib.stury_format_by_name(b"yaml:merge", 10) == FMT_YAML_MERGE
+    assert lib.stury_format_by_name(b"html", 4) == FMT_HTML
+    assert lib.stury_format_by_name(b"html:fragment", 13) == FMT_HTML_FRAG
+    assert lib.stury_format_by_name(b"msgpack", 7) == FMT_MSGPACK
+    assert lib.stury_format_by_name(b"msgpack:compact", 15) == FMT_MSGPACK_COMPACT
+
+    arena = lib.stury_arena_new()
+    assert arena
+    try:
+        out_p, out_len = u8p(), sz()
+        yml = b"name: ada\nage: 36\n"
+        assert lib.stury_validate(arena, yml, len(yml), FMT_YAML, None).code == 0
+        assert lib.stury_convert(arena, yml, len(yml), FMT_YAML, FMT_MSGPACK_COMPACT, None, ctypes.byref(out_p), ctypes.byref(out_len), None).code == 0
+        mp_bytes = ctypes.string_at(out_p, out_len.value)
+        assert lib.stury_validate(arena, mp_bytes, len(mp_bytes), FMT_MSGPACK_COMPACT, None).code == 0
+        assert lib.stury_convert(arena, mp_bytes, len(mp_bytes), FMT_MSGPACK, FMT_JSON, None, ctypes.byref(out_p), ctypes.byref(out_len), None).code == 0
+        assert ctypes.string_at(out_p, out_len.value) == b'{"name":"ada","age":36}'
+
+        html = b"<!DOCTYPE html><html><body><p>ada</p></body></html>"
+        assert lib.stury_validate(arena, html, len(html), FMT_HTML, None).code == 0
+        assert lib.stury_convert(arena, html, len(html), FMT_HTML, FMT_JSON, None, ctypes.byref(out_p), ctypes.byref(out_len), None).code == 0
+        assert b'"ada"' in ctypes.string_at(out_p, out_len.value)
+
+        jqp = vp()
+        assert lib.stury_jq_compile(arena, b".name", 5, ctypes.byref(jqp)).code == 0
+        try:
+            hits: list[bytes] = []
+
+            @EMIT_FN
+            def on_emit(_ctx, ptr, length):
+                hits.append(ctypes.string_at(ptr, length))
+                return True
+
+            assert lib.stury_jq_eval(arena, jqp, yml, len(yml), FMT_YAML, None, on_emit, None).code == 0
+            assert lib.stury_jq_eval(arena, jqp, mp_bytes, len(mp_bytes), FMT_MSGPACK, None, on_emit, None).code == 0
+            assert hits == [b'"ada"', b'"ada"']
+        finally:
+            lib.stury_jq_free(jqp)
+    finally:
+        lib.stury_arena_free(arena)
 
 
 def default_odin() -> str:
@@ -174,11 +252,12 @@ def main() -> int:
         )
         run([str(bin_cxx11)], label="run c_consumer_test (C++11)")
 
-        # 5. Python ctypes v2 smoke test
+        # 5. Python ctypes v2 smoke test (all 8 formats)
         run(
             [sys.executable, str(PY_SMOKE), "--lib", str(lib_plain)],
             label="run test_pystury_v2.py (Python ctypes)",
         )
+        run_py_extra_formats(lib_plain)
 
         # 6. Clang ASan cross-language FFI memory safety test
         if not args.skip_asan:

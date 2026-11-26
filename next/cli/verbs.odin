@@ -17,6 +17,7 @@ import "stury:lib/ops/edit"
 import "stury:lib/ops/write"
 import "stury:lib/query"
 import "stury:lib/schema/check"
+import "stury:lib/schema/ddl"
 import "stury:lib/schema/model"
 import "stury:lib/schema/rules"
 import "stury:lib/schema/schema"
@@ -217,6 +218,7 @@ quarantine_write_invalid :: proc(
 	alloc: runtime.Allocator,
 	place_src: []u8 = nil,
 	place_off: u64 = 0,
+	redact_paths: []string = nil,
 ) -> bool {
 	if qw == nil || !qw.active || qw.write_failed {
 		return false
@@ -258,11 +260,30 @@ quarantine_write_invalid :: proc(
 		qw.write_failed = true
 		return false
 	}
-	if model.write_problem_tokens(&tt, me, {title = "Invalid input", status = 422}, false, alloc) != nil {
+	popts := model.Problem_Opts{redact = len(redact_paths) > 0, redact_paths = redact_paths}
+	if model.write_problem_tokens(&tt, me, {title = "Invalid input", status = 422}, false, alloc, popts) != nil {
 		qw.write_failed = true
 		return false
 	}
 	return quarantine_emit_doc(qw, &tt, alloc)
+}
+
+@(private = "file")
+verb_file_spec :: proc(o: ^Options, path: string) -> (engine.Spec, engine.Framing) {
+	sp, fr := detect_file_spec(o, path)
+	if o.merge_keys && sp == engine.spec_of_id(.Yaml) {
+		sp = engine.spec_of_id(.Yaml_Merge)
+	}
+	return sp, fr
+}
+
+@(private = "file")
+verb_read_opts :: proc(o: ^Options, sp: engine.Spec, runner: ^tape.Runner) -> tape.Options {
+	ro := read_opts_of(o, sp, runner)
+	if e, ok := engine.entry_of_spec(sp); ok && e.family == .Yaml && o.yaml_schema_set {
+		ro.format = tape.Yaml_Options{dialect = o.yaml_schema}
+	}
+	return ro
 }
 
 // ---- Schema Compilation & Path-Contained Ref Loader ----
@@ -348,13 +369,47 @@ compile_schema_file :: proc(o: ^Options, path: string, stderr_w: io.Writer, allo
 		dups          = o.dups,
 		budget        = o.budget,
 	}
+	ext := filepath.ext(path)
+	if strings.equal_fold(ext, ".sql") || strings.equal_fold(ext, ".ddl") {
+		d, derr := ddl.compile_description(data, {dups = o.dups, budget = o.budget}, alloc)
+		if derr.kind != .None {
+			if derr.line > 0 {
+				fmt.wprintf(stderr_w, "stury: error: schema %s:%d:%d: %s\n", path, derr.line, derr.col, derr.message)
+			} else {
+				fmt.wprintf(stderr_w, "stury: error: schema %s: %s\n", path, derr.message)
+			}
+			ddl.error_destroy(&derr)
+			return nil, {}, false
+		}
+		desc, aerr := new(rules.Description, alloc)
+		if aerr != nil || desc == nil {
+			rules.description_destroy(&d)
+			fmt.wprintf(stderr_w, "stury: error: schema %s: out of memory\n", path)
+			return nil, {}, false
+		}
+		desc^ = d
+		c, cerr := schema.compile_description(desc, sopts, alloc)
+		if cerr.kind != .None {
+			rules.description_destroy(desc)
+			free(desc, alloc)
+			fmt.wprintf(stderr_w, "stury: error: schema %s: %s\n", path, cerr.message)
+			schema.error_destroy(&cerr)
+			return nil, {}, false
+		}
+		c.owns_description = true
+		return c, rc, true
+	}
 	se, _ := engine.entry_of_spec(sp)
 	c: ^schema.Compiled
 	cerr: schema.Error
 	if se.id == .Json {
 		c, cerr = schema.compile_json(data, sopts, alloc)
 	} else {
-		doc, berr := engine.build(data, sp, {budget = o.budget, dups = o.dups}, alloc)
+		bo := tape.Options{budget = o.budget, dups = o.dups}
+		if se.family == .Yaml && o.yaml_schema_set {
+			bo.format = tape.Yaml_Options{dialect = o.yaml_schema}
+		}
+		doc, berr := engine.build(data, sp, bo, alloc)
 		if berr != nil {
 			_ = print_tape_error(stderr_w, path, berr, data, sp)
 			return nil, {}, false
@@ -448,9 +503,9 @@ run_check :: proc(
 			continue
 		}
 		disp := "<stdin>" if p == "-" else p
-		sp, fr := detect_file_spec(o, p)
+		sp, fr := verb_file_spec(o, p)
 		e, _ := engine.entry_of_spec(sp)
-		ro := read_opts_of(o, sp, runner)
+		ro := verb_read_opts(o, sp, runner)
 
 		if e.family == .Json && fr == .Single && len(bytes.trim_space(src)) == 0 {
 			fmt.wprintf(stderr_w, "stury: parse error (%s): No JSON text\n", disp)
@@ -573,7 +628,7 @@ check_bytes_schema :: proc(
 	use_doc := (e.family == .Dsv && o.dsv_tolerate != {}) || (e.family == .Xml && (o.xml_tolerate != {} || o.xml_arrays != .Auto))
 	res: check.Result
 	if use_doc {
-		ro := read_opts_of(o, sp, nil)
+		ro := verb_read_opts(o, sp, nil)
 		doc, berr := engine.build(src, sp, ro, alloc)
 		if berr != nil {
 			_ = print_tape_error(stderr_w, display, berr, src, sp, false, place_src, place_off)
@@ -601,7 +656,8 @@ check_bytes_schema :: proc(
 		res = engine.check_document(&doc, &sc.plan, {dups = check_dups, budget = o.budget}, &sink, alloc)
 	} else {
 		dopts, has_dsv := dsv_opts_for(o, sp)
-		res = engine.check_schema(src, sp, &sc.plan, {dups = o.dups, budget = o.budget}, &sink, alloc, dopts if has_dsv else {})
+		yopts := tape.Yaml_Options{dialect = o.yaml_schema} if (e.family == .Yaml && o.yaml_schema_set) else {}
+		res = engine.check_schema(src, sp, &sc.plan, {dups = o.dups, budget = o.budget}, &sink, alloc, dopts if has_dsv else {}, yopts)
 	}
 	defer check.result_destroy(&res)
 
@@ -626,7 +682,7 @@ check_bytes_schema :: proc(
 	}
 
 	if qw != nil && qw.active {
-		_ = quarantine_write_invalid(qw, rec_no, display, sink.entries[:], src, alloc, place_src, place_off)
+		_ = quarantine_write_invalid(qw, rec_no, display, sink.entries[:], src, alloc, place_src, place_off, o.redact_paths[:])
 	}
 	entries := sink.entries[:]
 	truncated := false
@@ -670,7 +726,8 @@ check_bytes_schema :: proc(
 		tt: write.Token_Tape
 		if write.token_tape_start(&tt, false, 0, alloc) == nil {
 			defer write.token_tape_drop(&tt)
-			if model.write_problem_tokens(&tt, me, {title = "Invalid input", status = 422}, truncated, alloc) == nil {
+			popts := model.Problem_Opts{redact = len(o.redact_paths) > 0, redact_paths = o.redact_paths[:]}
+			if model.write_problem_tokens(&tt, me, {title = "Invalid input", status = 422}, truncated, alloc, popts) == nil {
 				if doc, derr := write.token_tape_document(&tt); derr == nil {
 					if !write_doc_line(osink, &doc, engine.spec_of_id(.Json), {}, alloc) {
 						return EXIT_USAGE
@@ -752,9 +809,9 @@ run_fmt :: proc(
 			continue
 		}
 		disp := "<stdin>" if p == "-" else p
-		sp, fr := detect_file_spec(o, p)
+		sp, fr := verb_file_spec(o, p)
 		e, _ := engine.entry_of_spec(sp)
-		ro := read_opts_of(o, sp, runner)
+		ro := verb_read_opts(o, sp, runner)
 		to_sp := o.to_spec if o.has_to else sp
 		to_e, _ := engine.entry_of_spec(to_sp)
 		wopts := make_write_opts(o, to_sp, 0 if (!o.indent_set && (fr == .Lines || o.to_framing == .Lines)) else o.indent)
@@ -776,7 +833,24 @@ run_fmt :: proc(
 			before_bytes := osink.total_written
 			dropped: tape.Facts
 			ferr: engine.Format_Error
-			if e.family == .Xml && o.xml_arrays == .Schema && sc != nil {
+			if o.to_render != .None {
+				doc: tape.Document
+				if e.family == .Xml && o.xml_arrays == .Schema && sc != nil {
+					doc, ferr = build_xml_schema_doc(src, sp, ro, sc.description, alloc)
+				} else {
+					berr: tape.Error
+					doc, berr = engine.build(src, sp, ro, alloc)
+					if berr != nil {
+						ferr = berr
+					}
+				}
+				if ferr == nil {
+					defer tape.destroy_document(&doc)
+					if werr := write_doc_render_to(out_stream_writer(&osink), &doc, o.to_render, o.sort_keys, o.compact, o.dsv_out.no_header, tape.ROOT, alloc); werr != nil {
+						ferr = werr
+					}
+				}
+			} else if e.family == .Xml && o.xml_arrays == .Schema && sc != nil {
 				doc, derr := build_xml_schema_doc(src, sp, ro, sc.description, alloc)
 				if derr != nil {
 					ferr = derr
@@ -832,53 +906,133 @@ run_fmt :: proc(
 		formatted: []u8
 		dropped: tape.Facts
 		if !e.tabular && (fr == .Lines || fr == .Seq) {
-			fb_out := make([dynamic]u8, 0, len(src), alloc)
-			failed := false
-			it, ok := rec_loop_open(src, sp, fr, ro, false, disp, stderr_w, alloc)
-			if !ok {
-				delete(fb_out)
-				worst = max(worst, EXIT_RUNTIME)
-				if owned {
-					delete(src, alloc)
+			if o.to_render != .None {
+				docs := make([dynamic]tape.Document, alloc)
+				defer {
+					for &d in docs {
+						tape.destroy_document(&d)
+					}
+					delete(docs)
 				}
-				continue
+				failed := false
+				it, ok := rec_loop_open(src, sp, fr, ro, false, disp, stderr_w, alloc)
+				if !ok {
+					worst = max(worst, EXIT_RUNTIME)
+					if owned {
+						delete(src, alloc)
+					}
+					continue
+				}
+				for rec, rinfo, err in rec_loop_next(&it) {
+					if err != nil {
+						_ = print_tape_error(stderr_w, disp, err, src, sp)
+						failed = true
+						break
+					}
+					d, berr := engine.build(rec, sp, ro, alloc)
+					if berr != nil {
+						_ = print_tape_error(stderr_w, disp, berr, rec, sp, false, src, rinfo.lo)
+						failed = true
+						break
+					}
+					append(&docs, d)
+				}
+				tail_bad := it.tail_err != nil
+				rec_loop_close(&it)
+				if failed || tail_bad {
+					worst = max(worst, EXIT_RUNTIME)
+					if owned {
+						delete(src, alloc)
+					}
+					continue
+				}
+				wtxt: []u8
+				werr: write.Error
+				if o.to_render == .Table {
+					wtxt, werr = write.write_table_docs(docs[:], {style = .Compact if o.compact else .Plain, sort_keys = o.sort_keys, no_header = o.dsv_out.no_header}, alloc)
+				} else {
+					wtxt, werr = write.write_markdown_docs(docs[:], {sort_keys = o.sort_keys, compact = o.compact}, alloc)
+				}
+				if werr != nil {
+					fcode := report_format_error(werr, disp, src, sp, &osink, stderr_w, alloc)
+					if owned {
+						delete(src, alloc)
+					}
+					if fcode == EXIT_USAGE {
+						return report_stdout_error(stderr_w, osink.io_err)
+					}
+					worst = max(worst, fcode)
+					continue
+				}
+				formatted = wtxt
+			} else {
+				fb_out := make([dynamic]u8, 0, len(src), alloc)
+				failed := false
+				it, ok := rec_loop_open(src, sp, fr, ro, false, disp, stderr_w, alloc)
+				if !ok {
+					delete(fb_out)
+					worst = max(worst, EXIT_RUNTIME)
+					if owned {
+						delete(src, alloc)
+					}
+					continue
+				}
+				for rec, rinfo, err in rec_loop_next(&it) {
+					if err != nil {
+						_ = print_tape_error(stderr_w, disp, err, src, sp)
+						failed = true
+						break
+					}
+					if o.to_framing == .Seq || fr == .Seq {
+						append(&fb_out, 0x1e)
+					}
+					part, dr, ferr := engine.format(rec, sp, to_sp, ro, wopts, alloc)
+					if ferr != nil {
+						_ = report_format_error(ferr, disp, rec, sp, &osink, stderr_w, alloc, src, rinfo.lo)
+						failed = true
+						break
+					}
+					dropped += dr
+					append(&fb_out, ..part)
+					append(&fb_out, '\n')
+					delete(part, alloc)
+				}
+				tail_bad := it.tail_err != nil
+				rec_loop_close(&it)
+				if failed || tail_bad {
+					delete(fb_out)
+					worst = max(worst, EXIT_RUNTIME)
+					if owned {
+						delete(src, alloc)
+					}
+					continue
+				}
+				formatted = fb_out[:]
 			}
-			for rec, rinfo, err in rec_loop_next(&it) {
-				if err != nil {
-					_ = print_tape_error(stderr_w, disp, err, src, sp)
-					failed = true
-					break
-				}
-				if o.to_framing == .Seq || fr == .Seq {
-					append(&fb_out, 0x1e)
-				}
-				part, dr, ferr := engine.format(rec, sp, to_sp, ro, wopts, alloc)
-				if ferr != nil {
-					_ = report_format_error(ferr, disp, rec, sp, &osink, stderr_w, alloc, src, rinfo.lo)
-					failed = true
-					break
-				}
-				dropped += dr
-				append(&fb_out, ..part)
-				append(&fb_out, '\n')
-				delete(part, alloc)
-			}
-			tail_bad := it.tail_err != nil
-			rec_loop_close(&it)
-			if failed || tail_bad {
-				delete(fb_out)
-				worst = max(worst, EXIT_RUNTIME)
-				if owned {
-					delete(src, alloc)
-				}
-				continue
-			}
-			formatted = fb_out[:]
 		} else {
 			ftxt: []u8
 			dr: tape.Facts
 			ferr: engine.Format_Error
-			if e.family == .Xml && o.xml_arrays == .Schema && sc != nil {
+			if o.to_render != .None {
+				doc: tape.Document
+				if e.family == .Xml && o.xml_arrays == .Schema && sc != nil {
+					doc, ferr = build_xml_schema_doc(src, sp, ro, sc.description, alloc)
+				} else {
+					berr: tape.Error
+					doc, berr = engine.build(src, sp, ro, alloc)
+					if berr != nil {
+						ferr = berr
+					}
+				}
+				if ferr == nil {
+					defer tape.destroy_document(&doc)
+					wtxt, werr := write_doc_render(&doc, o.to_render, o.sort_keys, o.compact, o.dsv_out.no_header, tape.ROOT, alloc)
+					ftxt = wtxt
+					if werr != nil {
+						ferr = werr
+					}
+				}
+			} else if e.family == .Xml && o.xml_arrays == .Schema && sc != nil {
 				doc, derr := build_xml_schema_doc(src, sp, ro, sc.description, alloc)
 				if derr != nil {
 					ferr = derr
@@ -1081,7 +1235,8 @@ edit_run_doc :: proc(
 		vt := query.type_of(v)
 		last_falsy = (vt == .Null || vt == .False)
 		if i == 0 {
-			cres, cerr := engine.reconcile_edit(&h, ov, v, sp, eopts, alloc)
+			yopts := tape.Yaml_Options{dialect = o.yaml_schema} if o.yaml_schema_set else {}
+			cres, cerr := engine.reconcile_edit(&h, ov, v, sp, eopts, alloc, yopts)
 			if cerr != nil {
 				edit.destroy_commit_result(&cres)
 				msg := edit_error_text(cerr, alloc)
@@ -1210,9 +1365,9 @@ run_edit :: proc(
 			continue
 		}
 		disp := "<stdin>" if p == "-" else p
-		sp, fr := detect_file_spec(o, p)
+		sp, fr := verb_file_spec(o, p)
 		e, _ := engine.entry_of_spec(sp)
-		ro := read_opts_of(o, sp, &pool.runner if pool != nil else nil)
+		ro := verb_read_opts(o, sp, &pool.runner if pool != nil else nil)
 
 		edited: []u8
 		edited_owned := false
@@ -1519,7 +1674,7 @@ run_diff :: proc(
 			delete(src, alloc)
 		}
 		disp := "<stdin>" if o.files[0] == "-" else o.files[0]
-		sp, _ := detect_file_spec(o, o.files[0])
+		sp, _ := verb_file_spec(o, o.files[0])
 		chk := check_bytes_schema(o, sc, disp, src, sp, 1, nil, &osink, stderr_w, alloc)
 		if chk == EXIT_RUNTIME || chk == EXIT_USAGE {
 			return report_stdout_error(stderr_w, osink.io_err) if chk == EXIT_USAGE else EXIT_RUNTIME
@@ -1610,10 +1765,10 @@ run_diff :: proc(
 
 	disp_a := "<stdin>" if o.files[0] == "-" else o.files[0]
 	disp_b := "<stdin>" if o.files[1] == "-" else o.files[1]
-	sp_a, fr_a := detect_file_spec(o, o.files[0])
-	sp_b, fr_b := detect_file_spec(o, o.files[1])
-	ro_a := read_opts_of(o, sp_a, runner)
-	ro_b := read_opts_of(o, sp_b, runner)
+	sp_a, fr_a := verb_file_spec(o, o.files[0])
+	sp_b, fr_b := verb_file_spec(o, o.files[1])
+	ro_a := verb_read_opts(o, sp_a, runner)
+	ro_b := verb_read_opts(o, sp_b, runner)
 
 	doc_a, tt_a, ut_a, build_a := build_diff_document(o, src_a, disp_a, sp_a, fr_a, ro_a, stderr_w, alloc)
 	if !build_a {
@@ -1932,8 +2087,8 @@ infer_file_into :: proc(inf: ^schema.Inferred, o: ^Options, path: string, stdin_
 		delete(src, alloc)
 	}
 	display := "<stdin>" if path == "-" else path
-	sp, fr := detect_file_spec(o, path)
-	ro := read_opts_of(o, sp, runner)
+	sp, fr := verb_file_spec(o, path)
+	ro := verb_read_opts(o, sp, runner)
 	if se, ok_e := engine.entry_of_spec(sp); ok_e && !se.tabular && (fr == .Lines || fr == .Seq) {
 		it, ok := rec_loop_open(src, sp, fr, ro, false, display, stderr_w, alloc)
 		if !ok {
@@ -1969,6 +2124,19 @@ infer_file_into :: proc(inf: ^schema.Inferred, o: ^Options, path: string, stdin_
 
 @(private = "file")
 emit_schema_text :: proc(osink: ^Out_Stream, txt: []u8, o: ^Options, ind: i8, alloc: runtime.Allocator) -> (formatted_ok: bool, io_ok: bool) {
+	if o.to_render != .None {
+		doc, berr := engine.build(txt, engine.spec_of_id(.Json), {}, alloc)
+		if berr != nil {
+			return false, true
+		}
+		defer tape.destroy_document(&doc)
+		ft, werr := write_doc_render(&doc, o.to_render, o.sort_keys, o.compact, o.dsv_out.no_header, tape.ROOT, alloc)
+		if werr != nil {
+			return false, true
+		}
+		defer delete(ft, alloc)
+		return true, out_stream_bytes_nl(osink, ft)
+	}
 	if o.has_to && o.to_name != "json" {
 		ft, _, ferr := engine.format(txt, engine.spec_of_id(.Json), o.to_spec, {}, make_write_opts(o, o.to_spec, ind), alloc)
 		if ferr != nil {

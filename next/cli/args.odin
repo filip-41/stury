@@ -54,6 +54,12 @@ Color_Mode :: enum u8 {
 	Never,
 }
 
+Output_Render :: enum u8 {
+	None,
+	Table,
+	Markdown,
+}
+
 Var_Kind :: enum u8 {
 	Arg,
 	Arg_Json,
@@ -133,6 +139,7 @@ Options :: struct {
 	from_framing:      engine.Framing,
 	to_framing:        engine.Framing,
 	to_name:           string,
+	to_render:         Output_Render,
 	dups:              tape.Duplicates,
 	budget:            tape.Budget,
 	threads:           int,
@@ -156,6 +163,11 @@ Options :: struct {
 	xml_tolerate:      tape.Tolerances,
 	xml_arrays:        tape.Xml_Arrays,
 	xml_arrays_set:    bool,
+	yaml_schema:       tape.Yaml_Dialect,
+	yaml_schema_set:   bool,
+	merge_keys:        bool,
+	alias_limit_set:   bool,
+	redact_paths:      [dynamic]string,
 	diff_arrays:       diff.Arrays,
 	diff_keys_raw:     [dynamic]string,
 	diff_keys:         [dynamic]diff.Key_Rule,
@@ -177,6 +189,7 @@ options_destroy :: proc(o: ^Options) {
 	}
 	delete(o.diff_keys)
 	delete(o.diff_keys_raw)
+	delete(o.redact_paths)
 	delete(o.files)
 	delete(o.vars)
 	delete(o.positional)
@@ -185,14 +198,18 @@ options_destroy :: proc(o: ^Options) {
 }
 
 parse_format :: proc(raw: string) -> (spec: engine.Spec, framing: engine.Framing, ok: bool) {
-	if strings.equal_fold(raw, "yaml") ||
-	   strings.equal_fold(raw, "yml") ||
-	   strings.equal_fold(raw, "html") ||
-	   strings.equal_fold(raw, "htm") {
-		return nil, .Single, false
-	}
 	e, fr, found := engine.format_and_framing_by_name(raw)
 	return e.spec, fr, found
+}
+
+parse_output_render :: proc(raw: string) -> (Output_Render, bool) {
+	if strings.equal_fold(raw, "table") {
+		return .Table, true
+	}
+	if strings.equal_fold(raw, "markdown") || strings.equal_fold(raw, "md") {
+		return .Markdown, true
+	}
+	return .None, false
 }
 
 @(private = "file")
@@ -233,11 +250,11 @@ opt_arity :: proc(flag: string, cmd := Command.Run) -> int {
 		return 0
 	}
 	switch flag {
-	case "--indent", "--max-depth", "--max-memory", "--max-steps", "--max-nodes", "--expansion-limit", "--threads",
+	case "--indent", "--max-depth", "--max-memory", "--max-steps", "--max-nodes", "--expansion-limit", "--alias-limit", "--threads",
 	     "--from", "--in", "--to", "--out", "--dups", "--quarantine", "--plan-out", "--plan-file", "-L", "--library-path",
-	     "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--package",
+	     "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--package", "--redact",
 	     "--seed", "--count", "--old-schema", "--new-schema", "--compat", "--key",
-	     "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--xml-arrays":
+	     "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--xml-arrays", "--yaml-schema":
 		return 1
 	case "--arg", "--argjson", "--rawfile", "--slurpfile":
 		return 2
@@ -335,6 +352,7 @@ parse_args :: proc(args: []string, allocator := context.allocator) -> (o: Option
 		lib_dirs     = make([dynamic]string, allocator),
 		diff_keys_raw = make([dynamic]string, allocator),
 		diff_keys    = make([dynamic]diff.Key_Rule, allocator),
+		redact_paths = make([dynamic]string, allocator),
 		allocator    = allocator,
 	}
 	sub_cmd, sub_idx := detect_subcommand(args)
@@ -505,6 +523,28 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 		} else {
 			return fmt.aprintf("invalid --xml-arrays %s (expected auto, always, or schema)", val, allocator = a)
 		}
+	case "yaml-schema":
+		if idx, ok := choice_idx(val, {"core", "json", "failsafe"}); ok {
+			o.yaml_schema = tape.Yaml_Dialect(idx)
+			o.yaml_schema_set = true
+		} else {
+			return fmt.aprintf("invalid --yaml-schema %s (expected core, json, or failsafe)", val, allocator = a)
+		}
+	case "merge-keys":
+		o.merge_keys = true
+	case "redact":
+		if val == "" || val[0] != '/' {
+			return strings.clone("--redact takes an RFC 6901 JSON Pointer starting with /", a)
+		}
+		for idx := 1; idx < len(val); idx += 1 {
+			if val[idx] == '~' {
+				if idx + 1 >= len(val) || (val[idx + 1] != '0' && val[idx + 1] != '1') {
+					return fmt.aprintf("invalid --redact pointer %q: malformed RFC 6901 ~ escape", val, allocator = a)
+				}
+				idx += 1
+			}
+		}
+		append(&o.redact_paths, val)
 	case "out-no-header":
 		o.dsv_out.no_header, o.dsv_out_set = true, true
 	case "crlf":
@@ -552,6 +592,20 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 		}
 		o.compact, o.indent, o.indent_set, o.tab = false, i8(n), true, n < 0
 	case "from", "in", "to", "out":
+		if flag == "--to" || flag == "--out" {
+			if r, is_r := parse_output_render(val); is_r {
+				o.has_to = true
+				o.to_spec = nil
+				o.to_framing = .Single
+				o.to_name = "table" if r == .Table else "markdown"
+				o.to_render = r
+				return ""
+			}
+		} else {
+			if _, is_r := parse_output_render(val); is_r {
+				return fmt.aprintf("--from %s is not supported (%s is output-only)", val, val, allocator = a)
+			}
+		}
 		sp, fr, ok := parse_format(val)
 		if !ok {
 			return fmt.aprintf("unknown format %q", val, allocator = a)
@@ -559,7 +613,7 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 		if flag == "--from" || flag == "--in" {
 			o.has_from, o.from_spec, o.from_framing = true, sp, fr
 		} else {
-			o.has_to, o.to_spec, o.to_framing, o.to_name = true, sp, fr, val
+			o.has_to, o.to_spec, o.to_framing, o.to_name, o.to_render = true, sp, fr, val, .None
 		}
 	case "dups":
 		if idx, ok := choice_idx(val, {"default", "last", "first", "all", "refuse"}); ok {
@@ -573,7 +627,7 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 			return strings.clone("--threads takes a positive integer", a)
 		}
 		o.threads = n
-	case "max-depth", "max-memory", "max-steps", "max-nodes", "expansion-limit":
+	case "max-depth", "max-memory", "max-steps", "max-nodes", "expansion-limit", "alias-limit":
 		n, ok := strconv.parse_u64_of_base(val, 10)
 		if !ok || n == 0 || ((flag == "--max-depth" || flag == "--max-nodes") && n > u64(max(u32))) {
 			return fmt.aprintf("%s takes a positive integer", flag, allocator = a)
@@ -589,6 +643,9 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 			o.budget.nodes = u32(n)
 		case "--expansion-limit":
 			o.budget.expansion = n
+		case "--alias-limit":
+			o.budget.expansion = n
+			o.alias_limit_set = true
 		}
 	case "delimiter", "comment", "out-delimiter", "out-comment":
 		b, ok := parse_char_arg(val)
@@ -841,9 +898,35 @@ validate_options :: proc(o: ^Options) -> string {
 			}
 		}
 	}
+	if o.yaml_schema_set || o.merge_keys || o.alias_limit_set {
+		yflag := "--yaml-schema" if o.yaml_schema_set else "--merge-keys" if o.merge_keys else "--alias-limit"
+		if o.null_input {
+			return fmt.aprintf("%s cannot be used with --null-input", yflag, allocator = a)
+		}
+		if o.has_from {
+			if fe, ok := engine.entry_of_spec(o.from_spec); ok && fe.family != .Yaml {
+				return fmt.aprintf("%s applies to YAML input, not --from %s", yflag, fe.name, allocator = a)
+			}
+			if o.merge_keys && o.from_spec == engine.spec_of_id(.Yaml) {
+				o.from_spec = engine.spec_of_id(.Yaml_Merge)
+			}
+		} else if len(o.files) == 0 {
+			return fmt.aprintf("%s applies to YAML input; pass --from yaml for stdin", yflag, allocator = a)
+		} else {
+			for p in o.files {
+				sp, _ := detect_file_spec(o, p)
+				if fe, ok := engine.entry_of_spec(sp); ok && fe.family != .Yaml {
+					return fmt.aprintf("%s applies to YAML input, not %s (%s)", yflag, p, fe.name, allocator = a)
+				}
+			}
+		}
+	}
 	if o.comments {
 		if o.command != .Schema || o.schema_verb != .Sample {
 			return strings.clone("--comments only applies to schema sample", a)
+		}
+		if o.to_render != .None {
+			return fmt.aprintf("--comments writes a description as a comment, and %s holds no comment", o.to_name, allocator = a)
 		}
 		if te, tok := engine.entry_of_spec(o.to_spec); tok {
 			holds_comment := (.Comment in te.format.facts) if !te.tabular else (o.dsv_out.comment != 0)
@@ -867,7 +950,11 @@ validate_options :: proc(o: ^Options) -> string {
 		}
 	}
 	if o.has_to {
-		if te, tok := engine.entry_of_spec(o.to_spec); tok {
+		if o.to_render != .None {
+			if o.raw0 {
+				return fmt.aprintf("--raw-output0 cannot be combined with --to %s", o.to_name, allocator = a)
+			}
+		} else if te, tok := engine.entry_of_spec(o.to_spec); tok {
 			if o.raw0 && te.family != .Json {
 				return fmt.aprintf("--raw-output0 cannot be combined with --to %s", o.to_name, allocator = a)
 			}
@@ -922,13 +1009,14 @@ write_help :: proc(w: io.Writer, cmd: Command, short := false) -> bool {
 }
 
 @(private = "file")
-HELP_MAIN :: `stury - JSON, JSONC, JSON5, TOML, XML, CSV/TSV and CBOR processor [version %s]
+HELP_MAIN :: `stury - JSON, JSONC, JSON5, TOML, XML, CSV/TSV, CBOR, YAML, HTML and MessagePack processor [version %s]
 Usage:  stury [options] <jq filter> [file...] | stury --jsonpath [options] <jsonpath> [file...]
         stury check|fmt|edit|diff|schema [options] ...
 Options: -n -R -s -c -r -j --raw-output0 -a -S -C -M --tab --indent N -e -f -L dir
          --arg k v --argjson k v --rawfile k f --slurpfile k f --args --jsonargs
          --jsonpath/--path --seq --stream --stream-errors --from fmt --to fmt
-         --xml-arrays auto|always|schema --schema file
+         --xml-arrays auto|always|schema --yaml-schema core|json|failsafe
+         --merge-keys --alias-limit N --schema file --redact /ptr
          --explain --plan-out f --plan-file f --where --threads N --dups policy
          --skip-bad --quarantine f -V -h --
 `

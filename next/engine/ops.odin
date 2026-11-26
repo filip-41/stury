@@ -3,6 +3,7 @@ package engine
 import "core:io"
 import "stury:cbor"
 import "stury:dsv"
+import "stury:html"
 import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/ops/diff"
@@ -10,8 +11,10 @@ import "stury:lib/ops/edit"
 import ops_write "stury:lib/ops/write"
 import "stury:lib/query"
 import schema_check "stury:lib/schema/check"
+import "stury:msgpack"
 import "stury:toml"
 import "stury:xml"
+import "stury:yaml"
 
 // Runtime-dispatched universal operations over any registered format spec or runtime handle:
 // validate, build, find, scan, records, write, format conversion, schema check, diff, edit commit, and reconcile.
@@ -94,6 +97,12 @@ write :: proc(doc: ^tape.Document, to: Spec, opts := ops_write.Options{}, alloca
 		return dsv.write(doc, target, opts, allocator)
 	case cbor.Spec:
 		return cbor.write(doc, target, opts, allocator)
+	case yaml.Spec:
+		return yaml.write(doc, target, opts, allocator)
+	case html.Spec:
+		return html.write(doc, target, opts, allocator)
+	case msgpack.Spec:
+		return msgpack.write(doc, target, opts, allocator)
 	case nil:
 	}
 	return nil, {}, tape.Bad_Option{"to"}
@@ -113,10 +122,22 @@ write_to :: proc(sink: io.Writer, doc: ^tape.Document, to: Spec, opts := ops_wri
 		return dsv.write_to(sink, doc, target, opts, allocator)
 	case cbor.Spec:
 		return cbor.write_to(sink, doc, target, opts, allocator)
+	case yaml.Spec:
+		return yaml.write_to(sink, doc, target, opts, allocator)
+	case html.Spec:
+		return html.write_to(sink, doc, target, opts, allocator)
+	case msgpack.Spec:
+		return msgpack.write_to(sink, doc, target, opts, allocator)
 	case nil:
 	}
 	return {}, tape.Bad_Option{"to"}
 }
+
+// Output-only plain-text aligned table and GitHub-Flavored Markdown writers over any `tape.Document`.
+write_table :: ops_write.write_table
+write_table_to :: ops_write.write_table_to
+write_markdown :: ops_write.write_markdown
+write_markdown_to :: ops_write.write_markdown_to
 
 // Reads `src` in `from` format and writes it in `to` format into a newly allocated buffer.
 // Returns `dropped` indicating fact kinds held by the parsed document that `to` could not emit.
@@ -163,7 +184,7 @@ format_to :: proc(sink: io.Writer, src: []u8, from, to: Spec, read := tape.Optio
 
 // Streaming format schema validation directly over `src` under `spec`.
 @(require_results)
-check_schema :: proc(src: []u8, spec: Spec, plan: ^schema_check.Plan, opts := schema_check.Options{}, sink: ^schema_check.Sink = nil, allocator := context.allocator, dsv_opts := tape.Dsv_Options{}) -> schema_check.Result {
+check_schema :: proc(src: []u8, spec: Spec, plan: ^schema_check.Plan, opts := schema_check.Options{}, sink: ^schema_check.Sink = nil, allocator := context.allocator, dsv_opts := tape.Dsv_Options{}, yaml_opts := tape.Yaml_Options{}) -> schema_check.Result {
 	switch s in spec {
 	case json.Spec:
 		return json.check(src, plan, s, opts, sink, allocator)
@@ -175,6 +196,12 @@ check_schema :: proc(src: []u8, spec: Spec, plan: ^schema_check.Plan, opts := sc
 		return dsv.check(src, plan, s, opts, sink, allocator, dsv_opts)
 	case cbor.Spec:
 		return cbor.check(src, plan, s, opts, sink, allocator)
+	case yaml.Spec:
+		return yaml.check(src, plan, s, opts, sink, allocator, yaml_opts)
+	case html.Spec:
+		return html.check(src, plan, s, opts, sink, allocator)
+	case msgpack.Spec:
+		return msgpack.check(src, plan, s, opts, sink, allocator)
 	case nil:
 	}
 	return {valid = false, err = {kind = .Bad_Option, keyword = "spec"}}
@@ -259,9 +286,12 @@ resolve_edit_target :: proc "contextless" (ov: ^edit.Overlay, target: Spec, opts
 	return nil, eff_opts, false
 }
 
+// Initializes an overlay over `doc` for format-preserving edits.
+edit_init :: edit.init
+
 // Commits edits in `ov` to bytes in the resolved target format.
 @(require_results)
-edit_commit :: proc(ov: ^edit.Overlay, target: Spec = nil, opts := edit.Options{}, allocator := context.allocator) -> (res: edit.Commit_Result, err: edit.Error) {
+edit_commit :: proc(ov: ^edit.Overlay, target: Spec = nil, opts := edit.Options{}, allocator := context.allocator, yaml_opts := tape.Yaml_Options{}) -> (res: edit.Commit_Result, err: edit.Error) {
 	if ov == nil || ov.base == nil {
 		return {}, edit.refuse(.No_Document, "edit_commit requires an initialized overlay")
 	}
@@ -280,6 +310,12 @@ edit_commit :: proc(ov: ^edit.Overlay, target: Spec = nil, opts := edit.Options{
 		return dsv.commit(ov, s, eff_opts, allocator)
 	case cbor.Spec:
 		return cbor.commit(ov, s, eff_opts, allocator)
+	case yaml.Spec:
+		return yaml.commit(ov, s, eff_opts, allocator, yaml_opts)
+	case html.Spec:
+		return html.commit(ov, eff_opts, allocator)
+	case msgpack.Spec:
+		return msgpack.commit(ov, s, eff_opts, allocator)
 	case nil:
 	}
 	return {}, tape.Bad_Option{"target"}
@@ -287,7 +323,7 @@ edit_commit :: proc(ov: ^edit.Overlay, target: Spec = nil, opts := edit.Options{
 
 // Commits edits in `ov` to bytes and incrementally splices the resulting `tape.Document`.
 @(require_results)
-edit_commit_document :: proc(ov: ^edit.Overlay, target: Spec = nil, opts := edit.Options{}, allocator := context.allocator) -> (doc: tape.Document, res: edit.Commit_Result, err: edit.Error) {
+edit_commit_document :: proc(ov: ^edit.Overlay, target: Spec = nil, opts := edit.Options{}, allocator := context.allocator, yaml_opts := tape.Yaml_Options{}) -> (doc: tape.Document, res: edit.Commit_Result, err: edit.Error) {
 	if ov == nil || ov.base == nil {
 		return {}, {}, edit.refuse(.No_Document, "edit_commit_document requires an initialized overlay")
 	}
@@ -306,6 +342,12 @@ edit_commit_document :: proc(ov: ^edit.Overlay, target: Spec = nil, opts := edit
 		return dsv.commit_document(ov, s, eff_opts, allocator)
 	case cbor.Spec:
 		return cbor.commit_document(ov, s, eff_opts, allocator)
+	case yaml.Spec:
+		return yaml.commit_document(ov, s, eff_opts, allocator, yaml_opts)
+	case html.Spec:
+		return html.commit_document(ov, eff_opts, allocator)
+	case msgpack.Spec:
+		return msgpack.commit_document(ov, s, eff_opts, allocator)
 	case nil:
 	}
 	return {}, {}, tape.Bad_Option{"target"}
@@ -320,12 +362,13 @@ reconcile_edit :: proc(
 	target: Spec = nil,
 	opts := edit.Options{},
 	allocator := context.allocator,
+	yaml_opts := tape.Yaml_Options{},
 ) -> (
 	res: edit.Commit_Result,
 	err: edit.Error,
 ) {
 	query.reconcile_overlay(h, ov, result) or_return
-	return edit_commit(ov, target, opts, allocator)
+	return edit_commit(ov, target, opts, allocator, yaml_opts)
 }
 
 // Reconciles query output `result` onto `ov` via provenance and commits a spliced `tape.Document`.
@@ -337,11 +380,12 @@ reconcile_edit_document :: proc(
 	target: Spec = nil,
 	opts := edit.Options{},
 	allocator := context.allocator,
+	yaml_opts := tape.Yaml_Options{},
 ) -> (
 	doc: tape.Document,
 	res: edit.Commit_Result,
 	err: edit.Error,
 ) {
 	query.reconcile_overlay(h, ov, result) or_return
-	return edit_commit_document(ov, target, opts, allocator)
+	return edit_commit_document(ov, target, opts, allocator, yaml_opts)
 }

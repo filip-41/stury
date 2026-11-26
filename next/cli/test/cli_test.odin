@@ -108,8 +108,10 @@ parses_args_help_version_and_errors :: proc(t: ^testing.T) {
 	}
 	bad_cases := [][]string {
 		{"--unknown-flag", "."},
-		{"--from", "yaml", "."},
-		{"--to", "html", "."},
+		{"--from", "bogusfmt", "."},
+		{"--to", "bogusfmt", "."},
+		{"--from", "table", "."},
+		{"--from", "markdown", "."},
 		{"--indent", "9", "."},
 		{"--arg", "k"},
 		{"-L"},
@@ -1295,5 +1297,161 @@ cli_xml_arrays_always_and_schema_end_to_end :: proc(t: ^testing.T) {
 		defer delete(pin_raw)
 		testing.expect(t, strings.contains(string(pin_raw), `"route":"whole"`), string(pin_raw))
 		testing.expect(t, strings.contains(string(pin_raw), `"hint":"none"`), string(pin_raw))
+	}
+}
+
+@(test)
+cli_multi_format_table_markdown_ddl_and_yaml_flags :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	// 1. YAML, YAML:merge, HTML, and MessagePack across validate, check, fmt, edit, diff, and query.
+	yaml_src :: "# hdr\nuser:\n  name: ada\n  age: 36\n"
+	yaml_file := write_tmp_file(t, dir, "user.yaml", transmute([]u8)string(yaml_src)); defer delete(yaml_file)
+	html_src :: `<!DOCTYPE html><html><body><p id="msg">hello</p></body></html>`
+	html_file := write_tmp_file(t, dir, "page.html", transmute([]u8)string(html_src)); defer delete(html_file)
+
+	{
+		// validate & check on YAML, HTML
+		rv := invoke({"validate", yaml_file}); defer run_out_destroy(&rv)
+		testing.expect_value(t, rv.code, 0)
+		rh := invoke({"validate", html_file}); defer run_out_destroy(&rh)
+		testing.expect_value(t, rh.code, 0)
+
+		// fmt YAML -> JSON and JSON -> YAML
+		rf1 := invoke({"fmt", "--to", "json", "-c", yaml_file}); defer run_out_destroy(&rf1)
+		testing.expect_value(t, rf1.code, 0)
+		testing.expect_value(t, rf1.stdout, "{\"user\":{\"name\":\"ada\",\"age\":36}}\n")
+
+		rf2 := invoke_str({"fmt", "--from", "json", "--to", "yaml"}, `{"user":{"name":"ada","age":36}}`); defer run_out_destroy(&rf2)
+		testing.expect_value(t, rf2.code, 0)
+		testing.expect(t, strings.contains(rf2.stdout, "name: ada"), rf2.stdout)
+
+		// fmt HTML -> JSON
+		rfh := invoke({"fmt", "--to", "json", "-c", html_file}); defer run_out_destroy(&rfh)
+		testing.expect_value(t, rfh.code, 0)
+		testing.expect(t, strings.contains(rfh.stdout, `"hello"`), rfh.stdout)
+
+		// fmt JSON -> MessagePack -> JSON + validate MessagePack
+		rfm := invoke_str({"fmt", "--from", "json", "--to", "msgpack:compact"}, `{"a":1,"b":"ok"}`); defer run_out_destroy(&rfm)
+		testing.expect_value(t, rfm.code, 0)
+		mp_file := write_tmp_file(t, dir, "data.mpk", transmute([]u8)rfm.stdout); defer delete(mp_file)
+
+		rvm := invoke({"validate", mp_file}); defer run_out_destroy(&rvm)
+		testing.expect_value(t, rvm.code, 0)
+
+		rmj := invoke({"fmt", "--to", "json", "-c", mp_file}); defer run_out_destroy(&rmj)
+		testing.expect_value(t, rmj.code, 0)
+		testing.expect_value(t, rmj.stdout, "{\"a\":1,\"b\":\"ok\"}\n")
+
+		// query (jq & JSONPath) over YAML, HTML, MessagePack
+		rqy := invoke({"-r", ".user.name", yaml_file}); defer run_out_destroy(&rqy)
+		testing.expect_value(t, rqy.code, 0)
+		testing.expect_value(t, rqy.stdout, "ada\n")
+
+		rqh := invoke({"--jsonpath", "-c", "$.html.body.p", html_file}); defer run_out_destroy(&rqh)
+		testing.expect_value(t, rqh.code, 0)
+		testing.expect_value(t, rqh.stdout, "\"hello\"\n")
+
+		rqm := invoke({"-r", ".b", mp_file}); defer run_out_destroy(&rqm)
+		testing.expect_value(t, rqm.code, 0)
+		testing.expect_value(t, rqm.stdout, "ok\n")
+
+		// edit YAML preserving comment
+		rey := invoke({"edit", ".user.age = 37", yaml_file}); defer run_out_destroy(&rey)
+		testing.expect_value(t, rey.code, 0)
+		testing.expect(t, strings.contains(rey.stdout, "# hdr") && strings.contains(rey.stdout, "37"), rey.stdout)
+
+		// diff YAML vs JSON (identical -> exit 0)
+		j_same := write_tmp_file(t, dir, "same.json", transmute([]u8)string(`{"user":{"name":"ada","age":36}}`)); defer delete(j_same)
+		rdy := invoke({"diff", yaml_file, j_same}); defer run_out_destroy(&rdy)
+		testing.expect_value(t, rdy.code, 0)
+	}
+
+	// 2. `--to table` and `--to markdown` on both `fmt` and query output.
+	{
+		rows_json :: `[{"name":"ada","age":36},{"name":"bob","age":42}]`
+		rt_fmt := invoke_str({"fmt", "--to", "table"}, rows_json); defer run_out_destroy(&rt_fmt)
+		testing.expect_value(t, rt_fmt.code, 0)
+		testing.expect(t, strings.contains(rt_fmt.stdout, "name") && strings.contains(rt_fmt.stdout, "ada") && strings.contains(rt_fmt.stdout, "42"), rt_fmt.stdout)
+
+		rm_fmt := invoke_str({"fmt", "--to", "markdown"}, rows_json); defer run_out_destroy(&rm_fmt)
+		testing.expect_value(t, rm_fmt.code, 0)
+		testing.expect(t, strings.contains(rm_fmt.stdout, "| name") && strings.contains(rm_fmt.stdout, "---:"), rm_fmt.stdout)
+
+		// Query output rendered with `--to table` and `--to markdown` via `render.odin`.
+		rt_q := invoke_str({"--to", "table", "."}, rows_json); defer run_out_destroy(&rt_q)
+		testing.expect_value(t, rt_q.code, 0)
+		testing.expect(t, strings.contains(rt_q.stdout, "ada") && strings.contains(rt_q.stdout, "bob"), rt_q.stdout)
+
+		rm_q := invoke_str({"--to", "markdown", "."}, rows_json); defer run_out_destroy(&rm_q)
+		testing.expect_value(t, rm_q.code, 0)
+		testing.expect(t, strings.contains(rm_q.stdout, "| name") && strings.contains(rm_q.stdout, "| ada"), rm_q.stdout)
+	}
+
+	// 3. SQL DDL frontend (`check --schema users.sql`, `diff --old-schema v1.sql --new-schema v2.sql`, `schema sample users.sql`).
+	{
+		ddl_v1 :: "CREATE TABLE users (\n  name VARCHAR(50) NOT NULL,\n  age INT NOT NULL CHECK (age >= 0)\n);\n"
+		ddl_v2 :: "CREATE TABLE users (\n  name VARCHAR(50) NOT NULL,\n  age INT NOT NULL CHECK (age >= 0),\n  email VARCHAR(100)\n);\n"
+		sql_v1 := write_tmp_file(t, dir, "users_v1.sql", transmute([]u8)string(ddl_v1)); defer delete(sql_v1)
+		sql_v2 := write_tmp_file(t, dir, "users_v2.sql", transmute([]u8)string(ddl_v2)); defer delete(sql_v2)
+
+		rc_ok := invoke_str({"check", "--schema", sql_v1}, `{"name":"ada","age":36}`); defer run_out_destroy(&rc_ok)
+		testing.expect_value(t, rc_ok.code, 0)
+
+		rc_bad := invoke_str({"check", "--schema", sql_v1}, `{"name":"ada","age":-3}`); defer run_out_destroy(&rc_bad)
+		testing.expect_value(t, rc_bad.code, 1)
+
+		// `--redact` masks error details on sensitive fields in `--report problem`.
+		rc_red := invoke_str({"check", "--schema", sql_v1, "--report", "problem", "--redact", "/age"}, `{"name":"ada","age":-3}`); defer run_out_destroy(&rc_red)
+		testing.expect_value(t, rc_red.code, 1)
+		testing.expect(t, strings.contains(rc_red.stdout, "[REDACTED]"), rc_red.stdout)
+
+		rd_ddl := invoke({"diff", "--old-schema", sql_v1, "--new-schema", sql_v2, "--compat", "backward"}); defer run_out_destroy(&rd_ddl)
+		testing.expect_value(t, rd_ddl.code, 0)
+
+		rs_ddl := invoke({"schema", "sample", sql_v1}); defer run_out_destroy(&rs_ddl)
+		testing.expect_value(t, rs_ddl.code, 0)
+		testing.expect(t, strings.contains(rs_ddl.stdout, `"name"`), rs_ddl.stdout)
+	}
+
+	// 4. `--yaml-schema core|json|failsafe`, `--merge-keys`, `--alias-limit` + usage error validation.
+	{
+		rf_fs := invoke_str({"fmt", "--from", "yaml", "--yaml-schema=failsafe", "--to", "json", "-c"}, "a: 1\nb: true\n"); defer run_out_destroy(&rf_fs)
+		testing.expect_value(t, rf_fs.code, 0)
+		testing.expect_value(t, rf_fs.stdout, "{\"a\":\"1\",\"b\":\"true\"}\n")
+
+		rf_js := invoke_str({"fmt", "--from", "yaml", "--yaml-schema", "json", "--to", "json", "-c"}, "a: 0x10\nb: 42\n"); defer run_out_destroy(&rf_js)
+		testing.expect_value(t, rf_js.code, 0)
+		testing.expect_value(t, rf_js.stdout, "{\"a\":\"0x10\",\"b\":42}\n")
+
+		merge_yml :: "base: &b\n  x: 1\nchild:\n  <<: *b\n  y: 2\n"
+		rf_mg := invoke_str({"fmt", "--from", "yaml", "--merge-keys", "--to", "json", "-c"}, merge_yml); defer run_out_destroy(&rf_mg)
+		testing.expect_value(t, rf_mg.code, 0)
+		testing.expect(t, strings.contains(rf_mg.stdout, `"x":1`) && strings.contains(rf_mg.stdout, `"y":2`), rf_mg.stdout)
+
+		// Finding 4 regression: `stury edit --from yaml --yaml-schema=failsafe` preserves `.Failsafe` dialect during commit.
+		re_fs := invoke_str({"edit", "--from", "yaml", "--yaml-schema=failsafe", `.b = "01"`}, "a: 1\n"); defer run_out_destroy(&re_fs)
+		testing.expect_value(t, re_fs.code, 0)
+		rf_fs_chk := invoke_str({"fmt", "--from", "yaml", "--yaml-schema=failsafe", "--to", "json", "-c"}, re_fs.stdout); defer run_out_destroy(&rf_fs_chk)
+		testing.expect_value(t, rf_fs_chk.code, 0)
+		testing.expect_value(t, rf_fs_chk.stdout, "{\"a\":\"1\",\"b\":\"01\"}\n")
+
+		bad_yaml_flags := [][]string {
+			{"fmt", "--from", "yaml", "--yaml-schema=bogus"},
+			{"fmt", "--from", "json", "--yaml-schema=failsafe"},
+			{"fmt", "--from", "json", "--merge-keys"},
+			{"fmt", "--from", "json", "--alias-limit", "100"},
+			{"fmt", "--yaml-schema=json"},
+			{"-n", "--yaml-schema=failsafe", "."},
+			{"-n", "--merge-keys", "."},
+			{"-n", "--alias-limit", "100", "."},
+			{"check", "--redact", "/a~2"},
+			{"check", "--redact", "/a~"},
+		}
+		for bc in bad_yaml_flags {
+			r := invoke_str(bc, `{}`); defer run_out_destroy(&r)
+			testing.expectf(t, r.code == 2, "expected exit 2 for %v, got %d (stderr=%q)", bc, r.code, r.stderr)
+		}
 	}
 }

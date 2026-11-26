@@ -23,9 +23,9 @@ dialect_of :: #force_inline proc "contextless" (opts: Options) -> tape.Yaml_Dial
 	return y.dialect
 }
 
-// Format id base for YAML specs (`FORMAT_ID_XML + 1`, wired into central `tape` constants when merged).
+// Central base Format_Id for YAML specs (14..15: Yaml_1_2, Yaml_Merge).
 @(private)
-ID :: tape.Format_Id(14)
+ID :: tape.FORMAT_ID_YAML
 
 // Fact kinds recorded by YAML walks.
 @(private)

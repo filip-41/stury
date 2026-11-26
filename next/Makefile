@@ -86,6 +86,9 @@ DEEP_TEST := json_tests.reads_nest_100000_levels_in_one_mib
 DEEP_CBOR_TEST := cbor_tests.reads_nest_100000_levels_in_one_mib
 DEEP_TOML_TEST := toml_tests.reads_nest_100000_levels_in_one_mib
 DEEP_XML_TEST := xml_tests.reads_nest_100000_levels_in_one_mib
+DEEP_YAML_TEST := yaml_tests.reads_nest_100000_levels_in_one_mib
+DEEP_HTML_TEST := html_tests.reads_nest_100000_levels_in_one_mib
+DEEP_MSGPACK_TEST := msgpack_tests.reads_nest_100000_levels_in_one_mib
 DEEP_JQ_TEST := jq_tests.programs_nest_100000_levels_in_one_mib,jq_tests.runs_go_100000_levels_deep_in_one_mib
 DEEP_OPTS := none speed
 
@@ -169,8 +172,8 @@ test:
 	@for p in $(GAP_PKGS); do \
 		echo "== $$p (no gaps, no rewalk)"; $(ODIN) test $$p -o:minimal $(TEST_FLAGS) -define:JSON_GAPS=false -define:JSON_REWALK=false -out:build/test-$$(echo $$p | tr / -)-nogaps || exit 1; \
 	done
-	@for pkg in json cbor toml xml jq; do \
-		case $$pkg in json) names="$(DEEP_TEST)";; cbor) names="$(DEEP_CBOR_TEST)";; toml) names="$(DEEP_TOML_TEST)";; xml) names="$(DEEP_XML_TEST)";; *) names="$(DEEP_JQ_TEST)";; esac; \
+	@for pkg in json cbor toml xml yaml html msgpack jq; do \
+		case $$pkg in json) names="$(DEEP_TEST)";; cbor) names="$(DEEP_CBOR_TEST)";; toml) names="$(DEEP_TOML_TEST)";; xml) names="$(DEEP_XML_TEST)";; yaml) names="$(DEEP_YAML_TEST)";; html) names="$(DEEP_HTML_TEST)";; msgpack) names="$(DEEP_MSGPACK_TEST)";; *) names="$(DEEP_JQ_TEST)";; esac; \
 		for o in $(DEEP_OPTS); do \
 			echo "== $$pkg/test (100,000 levels in one MiB, -o:$$o)"; \
 			$(ODIN) test $$pkg/test -o:$$o $(TEST_FLAGS) -define:ODIN_TEST_NAMES=$$names -out:build/test-deep-$$pkg-$$o || exit 1; \
@@ -193,7 +196,7 @@ endif
 
 # The sweeps that `test` samples, read in full: every cut, every window size, every budget around the least.
 DEEP_ROUNDS ?= 16
-DEEP_PKGS := cbor/test dsv/test json/test toml/test xml/test
+DEEP_PKGS := cbor/test dsv/test html/test json/test msgpack/test toml/test xml/test yaml/test lib/schema/ddl/test
 test-deep:
 	@mkdir -p build; for p in $(DEEP_PKGS); do \
 		echo "== $$p (-define:ROUNDS=$(DEEP_ROUNDS))"; \

@@ -55,7 +55,7 @@ Arena :: struct {
 Emit_Fn :: #type proc "c" (ctx: rawptr, bytes: [^]u8, n: c.size_t) -> bool
 Jsonpath_Emit_Fn :: #type proc "c" (ctx: rawptr, bytes: [^]u8, n: c.size_t, norm_path: [^]u8, norm_path_len: c.size_t) -> bool
 
-#assert(len(engine.Format_Id) == 13)
+#assert(len(engine.Format_Id) == 19)
 #assert(size_of(tape.Caps) == size_of(u32))
 #assert(len(tape.Fact_Kind) <= 16)
 #assert(size_of(Budget) == size_of(tape.Budget))

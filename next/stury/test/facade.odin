@@ -6,12 +6,15 @@ import "core:strings"
 import "core:testing"
 import "stury:cbor"
 import "stury:dsv"
+import "stury:html"
 import "stury:json"
 import "stury:lib/core/tape"
+import "stury:msgpack"
 import "stury:stury"
 import "stury:testkit"
 import "stury:toml"
 import "stury:xml"
+import "stury:yaml"
 
 @(test)
 lookup_and_detect_formats :: proc(t: ^testing.T) {
@@ -633,4 +636,129 @@ audit_regressions_facade :: proc(t: ^testing.T) {
 		testing.expect_value(t, res.err, stury.Query_Error.None)
 		testing.expect_value(t, res.emitted, u64(3))
 	}
+}
+
+@(test)
+facade_yaml_html_msgpack_ddl_and_table_writers :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// Lookup and path detection for YAML, HTML, MessagePack.
+	e, ok := stury.format_by_name("yaml")
+	testing.expect(t, ok && e.id == .Yaml)
+	e, ok = stury.format_by_name("yaml:merge")
+	testing.expect(t, ok && e.id == .Yaml_Merge)
+	e, ok = stury.format_by_name("html")
+	testing.expect(t, ok && e.id == .Html)
+	e, ok = stury.format_by_name("html:fragment")
+	testing.expect(t, ok && e.id == .Html_Fragment)
+	e, ok = stury.format_by_name("msgpack")
+	testing.expect(t, ok && e.id == .Msgpack)
+	e, ok = stury.format_by_name("msgpack:compact")
+	testing.expect(t, ok && e.id == .Msgpack_Compact)
+
+	ep, _, pok := stury.format_of_path("service.yaml")
+	testing.expect(t, pok && ep.id == .Yaml)
+	ep, _, pok = stury.format_of_path("page.htm")
+	testing.expect(t, pok && ep.id == .Html)
+	ep, _, pok = stury.format_of_path("blob.mpk")
+	testing.expect(t, pok && ep.id == .Msgpack)
+
+	// YAML dialects (`Core` vs `Failsafe`), HTML CSS selector, and MessagePack query/check.
+	yaml_src := transmute([]u8)string("# note\nuser:\n  name: ada\n  age: 36\n")
+	ydoc, yerr := stury.build(yaml_src, yaml.Spec.Yaml_1_2)
+	testing.expect_value(t, yerr, stury.Error(nil))
+	defer stury.destroy(&ydoc)
+	ycs, yc_err := stury.comments(&ydoc)
+	testing.expect_value(t, yc_err, nil)
+	defer delete(ycs)
+	testing.expect_value(t, len(ycs), 1)
+	testing.expect_value(t, ycs[0].text, "note")
+
+	// YAML Failsafe dialect keeps `36` as a string.
+	fs_doc, fs_err := stury.build(yaml_src, yaml.Spec.Yaml_1_2, {format = stury.Yaml_Options{dialect = .Failsafe}})
+	testing.expect_value(t, fs_err, stury.Error(nil))
+	defer stury.destroy(&fs_doc)
+	fs_json, _, fsw_err := stury.write(&fs_doc, json.Spec.Json)
+	testing.expect_value(t, fsw_err, stury.Write_Error(nil))
+	defer delete(fs_json)
+	testing.expect(t, strings.contains(string(fs_json), `"36"`))
+
+	// HTML5 document + CSS selection + attributes.
+	html_src := transmute([]u8)string(`<!DOCTYPE html><html><body><div class="card" data-id="7"><p>ada</p></div></body></html>`)
+	hdoc, herr := stury.build(html_src, html.Spec.Html)
+	testing.expect_value(t, herr, stury.Error(nil))
+	defer stury.destroy(&hdoc)
+	hhits, hok := stury.css(&hdoc, "div.card")
+	testing.expect(t, hok && len(hhits.matches) == 1)
+	defer stury.destroy_css(&hhits)
+	hattrs, haerr := stury.attributes(&hdoc, hhits.matches[0].value)
+	testing.expect_value(t, haerr, nil)
+	defer stury.destroy_attributes(hattrs)
+	testing.expect_value(t, len(hattrs), 2)
+
+	// jq and JSONPath over YAML, HTML, and MessagePack.
+	mp_bytes, _, mp_ferr := stury.format(yaml_src, yaml.Spec.Yaml_1_2, msgpack.Spec.Compact)
+	testing.expect_value(t, mp_ferr, stury.Format_Error(nil))
+	defer delete(mp_bytes)
+
+	jqp, jq_errs := stury.jq_compile(".user.name")
+	testing.expect_value(t, len(jq_errs), 0)
+	defer stury.jq_destroy(jqp)
+	for pair in ([?]struct { src: []u8, spec: stury.Spec }{
+		{yaml_src, yaml.Spec.Yaml_1_2},
+		{mp_bytes, msgpack.Spec.Compact},
+	}) {
+		col: Query_Collector
+		defer destroy_collector(&col)
+		res := stury.jq_run(jqp, pair.src, pair.spec, collect_jq_out, &col)
+		defer stury.jq_run_result_destroy(&res)
+		testing.expect_value(t, res.err, stury.Query_Error.None)
+		testing.expect_value(t, len(col.values), 1)
+		testing.expect_value(t, col.values[0], `"ada"`)
+	}
+
+	jpp, jperr := stury.jsonpath_compile("$.html.body.div.p")
+	testing.expect_value(t, jperr.kind, .None)
+	defer stury.jsonpath_destroy(jpp)
+	{
+		col: Query_Collector
+		defer destroy_collector(&col)
+		res := stury.jsonpath_eval(jpp, html_src, html.Spec.Html, collect_jp_out, &col)
+		testing.expect_value(t, res.err, stury.Query_Error.None)
+		testing.expect_value(t, len(col.values), 1)
+		testing.expect_value(t, col.values[0], `"ada"`)
+	}
+
+	// SQL DDL schema compile + streaming check across JSON, YAML, and MessagePack.
+	ddl_sql := transmute([]u8)string("CREATE TABLE users (\n  name VARCHAR(50) NOT NULL,\n  age INT NOT NULL CHECK (age >= 0)\n);\n")
+	ddl_sc, ddl_err := stury.schema_compile_ddl(ddl_sql)
+	testing.expect_value(t, ddl_err.kind, stury.Ddl_Error_Kind.None)
+	defer stury.ddl_destroy(ddl_sc)
+
+	r_json := stury.check_schema(transmute([]u8)string(`{"name":"ada","age":36}`), json.Spec.Json, ddl_sc)
+	defer stury.destroy_check_result(&r_json)
+	testing.expect(t, r_json.valid)
+
+	r_yaml := stury.check_schema(transmute([]u8)string("name: ada\nage: 36\n"), yaml.Spec.Yaml_1_2, ddl_sc)
+	defer stury.destroy_check_result(&r_yaml)
+	testing.expect(t, r_yaml.valid)
+
+	r_bad := stury.check_schema(transmute([]u8)string("name: ada\nage: -1\n"), yaml.Spec.Yaml_1_2, ddl_sc)
+	defer stury.destroy_check_result(&r_bad)
+	testing.expect(t, !r_bad.valid)
+
+	// Table and Markdown writers through `stury`.
+	rows_doc, rb_err := stury.build(transmute([]u8)string(`[{"name":"ada","age":36},{"name":"bob","age":42}]`), json.Spec.Json)
+	testing.expect_value(t, rb_err, stury.Error(nil))
+	defer stury.destroy(&rows_doc)
+
+	tbl, terr := stury.write_table(&rows_doc)
+	testing.expect_value(t, terr, stury.Write_Error(nil))
+	defer delete(tbl)
+	testing.expect(t, strings.contains(string(tbl), "ada") && strings.contains(string(tbl), "42"))
+
+	md, mderr := stury.write_markdown(&rows_doc)
+	testing.expect_value(t, mderr, stury.Write_Error(nil))
+	defer delete(md)
+	testing.expect(t, strings.contains(string(md), "| name") && strings.contains(string(md), "---:"))
 }

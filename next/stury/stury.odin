@@ -9,13 +9,14 @@ import ops_diff "stury:lib/ops/diff"
 import ops_edit "stury:lib/ops/edit"
 import ops_write "stury:lib/ops/write"
 import schema_check "stury:lib/schema/check"
+import ddl_pkg "stury:lib/schema/ddl"
 import schema_pkg "stury:lib/schema/schema"
 
 // Clean universal v2 facade over all registered formats, backed by `stury:engine`, `stury:lib/core/tape`,
-// `stury:lib/ops/{write,edit,diff,css}`, `stury:lib/schema/{check,schema}`, `stury:jq`, and `stury:jsonpath`.
+// `stury:lib/ops/{write,edit,diff,css}`, `stury:lib/schema/{check,ddl,schema}`, `stury:jq`, and `stury:jsonpath`.
 //
 // Design invariants:
-// - ONE concrete, non-generic `Document` across every format (JSON, TOML, XML, DSV, CBOR).
+// - ONE concrete, non-generic `Document` across every format (JSON, TOML, XML, DSV, CBOR, YAML, HTML, MessagePack).
 // - Facts belong to the document, not its format: `doc_facts`, `comments`, and `attributes` inspect any document.
 // - Zero global mutable state, zero `core:os`, zero `core:mem/virtual`, zero `context.temp_allocator`, WASM-clean.
 
@@ -34,6 +35,9 @@ Read_Options :: tape.Read_Options
 Format_Options :: tape.Format_Options
 Dsv_Options :: tape.Dsv_Options
 Xml_Options :: tape.Xml_Options
+Xml_Arrays :: tape.Xml_Arrays
+Yaml_Options :: tape.Yaml_Options
+Yaml_Dialect :: tape.Yaml_Dialect
 Duplicates :: tape.Duplicates
 Tolerance :: tape.Tolerance
 Tolerances :: tape.Tolerances
@@ -65,6 +69,11 @@ Bad_Option :: tape.Bad_Option
 // Write, edit, diff, css, and schema types.
 Write_Options :: ops_write.Options
 Write_Error :: ops_write.Error
+Table_Style :: ops_write.Table_Style
+Object_Layout :: ops_write.Object_Layout
+Column_Align :: ops_write.Column_Align
+Table_Render_Options :: ops_write.Table_Render_Options
+Markdown_Options :: ops_write.Markdown_Options
 Overlay :: ops_edit.Overlay
 Edit_Handle :: ops_edit.Handle
 Edit_Value :: ops_edit.Edit_Value
@@ -81,6 +90,11 @@ Css_Step :: ops_css.Step
 Schema :: schema_pkg.Compiled
 Schema_Options :: schema_pkg.Options
 Schema_Error :: schema_pkg.Error
+Ddl_Compile_Options :: ddl_pkg.Compile_Options
+Ddl_Compiled :: ddl_pkg.Compiled
+Ddl_Table_Meta :: ddl_pkg.Table_Meta
+Ddl_Error :: ddl_pkg.Error
+Ddl_Error_Kind :: ddl_pkg.Error_Kind
 Check_Options :: schema_check.Options
 Check_Result :: schema_check.Result
 Check_Sink :: schema_check.Sink
@@ -93,21 +107,28 @@ scan :: engine.scan
 records_open :: engine.records_open
 write :: engine.write
 write_to :: engine.write_to
+write_table :: engine.write_table
+write_table_to :: engine.write_table_to
+write_markdown :: engine.write_markdown
+write_markdown_to :: engine.write_markdown_to
+apply_xml_arrays :: engine.apply_xml_arrays
 diff :: engine.diff_bytes
 diff_documents :: engine.diff_documents
 commit :: engine.edit_commit
 commit_document :: engine.edit_commit_document
 
-// Streaming schema validation accepting either `^schema_check.Plan` or compiled `^Schema`.
+// Streaming schema validation accepting `^schema_check.Plan`, compiled `^Schema`, or compiled `^Ddl_Compiled`.
 check_schema :: proc {
 	engine.check_schema,
 	check_schema_compiled,
+	check_schema_ddl,
 }
 
-// Document schema validation accepting either `^schema_check.Plan` or compiled `^Schema`.
+// Document schema validation accepting `^schema_check.Plan`, compiled `^Schema`, or compiled `^Ddl_Compiled`.
 check_document :: proc {
 	engine.check_document,
 	check_document_compiled,
+	check_document_ddl,
 }
 
 @(require_results)
@@ -119,17 +140,49 @@ check_schema_compiled :: proc(
 	sink: ^schema_check.Sink = nil,
 	allocator := context.allocator,
 	dsv_opts := tape.Dsv_Options{},
+	yaml_opts := tape.Yaml_Options{},
 ) -> schema_check.Result {
 	if compiled == nil {
 		return {valid = false, err = {kind = .Bad_Option, keyword = "schema"}}
 	}
-	return engine.check_schema(src, spec, &compiled.plan, opts, sink, allocator, dsv_opts)
+	return engine.check_schema(src, spec, &compiled.plan, opts, sink, allocator, dsv_opts, yaml_opts)
 }
 
 @(require_results)
 check_document_compiled :: proc(
 	doc: ^Document,
 	compiled: ^Schema,
+	opts := schema_check.Options{},
+	sink: ^schema_check.Sink = nil,
+	allocator := context.allocator,
+) -> schema_check.Result {
+	if compiled == nil {
+		return {valid = false, err = {kind = .Bad_Option, keyword = "schema"}}
+	}
+	return engine.check_document(doc, &compiled.plan, opts, sink, allocator)
+}
+
+@(require_results)
+check_schema_ddl :: proc(
+	src: []u8,
+	spec: Spec,
+	compiled: ^Ddl_Compiled,
+	opts := schema_check.Options{},
+	sink: ^schema_check.Sink = nil,
+	allocator := context.allocator,
+	dsv_opts := tape.Dsv_Options{},
+	yaml_opts := tape.Yaml_Options{},
+) -> schema_check.Result {
+	if compiled == nil {
+		return {valid = false, err = {kind = .Bad_Option, keyword = "schema"}}
+	}
+	return engine.check_schema(src, spec, &compiled.plan, opts, sink, allocator, dsv_opts, yaml_opts)
+}
+
+@(require_results)
+check_document_ddl :: proc(
+	doc: ^Document,
+	compiled: ^Ddl_Compiled,
 	opts := schema_check.Options{},
 	sink: ^schema_check.Sink = nil,
 	allocator := context.allocator,
@@ -181,6 +234,10 @@ schema_compile :: schema_pkg.compile_json
 schema_compile_document :: schema_pkg.compile_document
 schema_destroy :: schema_pkg.destroy
 schema_error_destroy :: schema_pkg.error_destroy
+schema_compile_ddl :: ddl_pkg.compile_ddl
+schema_compile_ddl_description :: ddl_pkg.compile_description
+ddl_destroy :: ddl_pkg.destroy
+ddl_error_destroy :: ddl_pkg.error_destroy
 destroy_check_result :: schema_check.result_destroy
 
 // A comment fact held by a document, attached to `node`.

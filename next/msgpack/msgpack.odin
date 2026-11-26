@@ -52,9 +52,9 @@ FORMATS := [Spec]tape.Format {
 	},
 }
 
-// Local Format_Id base for MessagePack specs (leaving ID 15 for HTML alongside YAML's 14..15).
+// Central base Format_Id for MessagePack specs (18..19: Msgpack, Compact).
 @(private)
-ID :: tape.Format_Id(16)
+ID :: tape.FORMAT_ID_MSGPACK
 
 // Returns the `tape.Format` handle of `spec`, or nil when out of range.
 as :: proc "contextless" (spec: Spec) -> ^tape.Format {

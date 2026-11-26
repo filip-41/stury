@@ -13,9 +13,9 @@ Spec :: enum u8 {
 // and `steps` (containers opened). `format` takes `tape.Xml_Options` (`infer`). Refuses `.Invalid_Utf8`.
 Options :: tape.Options
 
-// The format ids for `.Html` and `.Fragment`, following `FORMAT_ID_XML`.
+// Central base Format_Id for HTML specs (16..17: Html, Fragment).
 @(private)
-ID :: tape.FORMAT_ID_XML + 1
+ID :: tape.FORMAT_ID_HTML
 
 // The facts an HTML document holds.
 @(private)

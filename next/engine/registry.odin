@@ -2,10 +2,13 @@ package engine
 
 import "stury:cbor"
 import "stury:dsv"
+import "stury:html"
 import "stury:json"
 import "stury:lib/core/tape"
+import "stury:msgpack"
 import "stury:toml"
 import "stury:xml"
+import "stury:yaml"
 
 // Format registry: single source of truth mapping between `Format_Id`, `Spec`, `tape.Format_Id`,
 // runtime `^tape.Format` handles, `^tape.Reads` dispatch tables, names/aliases, and extensions.
@@ -17,6 +20,9 @@ Family :: enum u8 {
 	Xml,
 	Dsv,
 	Cbor,
+	Yaml,
+	Html,
+	Msgpack,
 }
 
 // Canonical format + specification identifier covering every spec in v2.
@@ -34,15 +40,24 @@ Format_Id :: enum u8 {
 	Cbor_Preferred,
 	Cbor_Deterministic,
 	Cbor_Length_First,
+	Yaml,
+	Yaml_Merge,
+	Html,
+	Html_Fragment,
+	Msgpack,
+	Msgpack_Compact,
 }
 
-// Specification union across all 5 v2 formats.
+// Specification union across all 8 v2 formats.
 Spec :: union {
 	json.Spec,
 	toml.Spec,
 	xml.Spec,
 	dsv.Spec,
 	cbor.Spec,
+	yaml.Spec,
+	html.Spec,
+	msgpack.Spec,
 }
 
 // How an input stream is framed at engine level (extending `tape.Framing` with `.Single`).
@@ -134,6 +149,27 @@ CBOR_PREF_ALIASES := [?]string{"cbor:preferred", "cbor-preferred", "cbor_preferr
 CBOR_DET_ALIASES := [?]string{"cbor:deterministic", "cbor-deterministic", "cbor_deterministic"}
 @(private = "file", rodata)
 CBOR_LF_ALIASES := [?]string{"cbor:length_first", "cbor:length-first", "cbor-length-first", "cbor_length_first"}
+
+@(private = "file", rodata)
+YAML_ALIASES := [?]string{"yml", "yaml:1.2", "yaml1.2", "yaml-1.2", "yaml_1_2"}
+@(private = "file", rodata)
+YAML_EXTS := [?]string{"yaml", "yml"}
+@(private = "file", rodata)
+YAML_MERGE_ALIASES := [?]string{"yaml-merge", "yaml_merge"}
+
+@(private = "file", rodata)
+HTML_ALIASES := [?]string{"htm", "html5"}
+@(private = "file", rodata)
+HTML_EXTS := [?]string{"html", "htm"}
+@(private = "file", rodata)
+HTML_FRAG_ALIASES := [?]string{"html-fragment", "html_fragment"}
+
+@(private = "file", rodata)
+MSGPACK_ALIASES := [?]string{"mpk", "msgpk"}
+@(private = "file", rodata)
+MSGPACK_EXTS := [?]string{"msgpack", "mpk"}
+@(private = "file", rodata)
+MSGPACK_COMPACT_ALIASES := [?]string{"msgpack-compact", "msgpack_compact", "mpk:compact"}
 
 @(private)
 FORMAT_META := [Format_Id]Format_Meta {
@@ -294,6 +330,79 @@ FORMAT_META := [Format_Id]Format_Meta {
 		supports_scan   = true,
 		binary          = true,
 	},
+	.Yaml = {
+		id              = .Yaml,
+		family          = .Yaml,
+		spec            = yaml.Spec.Yaml_1_2,
+		tape_id         = tape.FORMAT_ID_YAML + 0,
+		name            = "yaml",
+		title           = "YAML 1.2",
+		aliases         = YAML_ALIASES[:],
+		extensions      = YAML_EXTS[:],
+		default_framing = .Single,
+		supports_scan   = true,
+	},
+	.Yaml_Merge = {
+		id              = .Yaml_Merge,
+		family          = .Yaml,
+		spec            = yaml.Spec.Yaml_Merge,
+		tape_id         = tape.FORMAT_ID_YAML + 1,
+		name            = "yaml:merge",
+		title           = "YAML 1.2 (merge)",
+		aliases         = YAML_MERGE_ALIASES[:],
+		default_framing = .Single,
+		supports_scan   = true,
+	},
+	.Html = {
+		id              = .Html,
+		family          = .Html,
+		spec            = html.Spec.Html,
+		tape_id         = tape.FORMAT_ID_HTML + 0,
+		name            = "html",
+		title           = "HTML5",
+		aliases         = HTML_ALIASES[:],
+		extensions      = HTML_EXTS[:],
+		default_framing = .Single,
+		supports_scan   = false,
+		groups_dups     = true,
+	},
+	.Html_Fragment = {
+		id              = .Html_Fragment,
+		family          = .Html,
+		spec            = html.Spec.Fragment,
+		tape_id         = tape.FORMAT_ID_HTML + 1,
+		name            = "html:fragment",
+		title           = "HTML5 (fragment)",
+		aliases         = HTML_FRAG_ALIASES[:],
+		default_framing = .Single,
+		supports_scan   = false,
+		groups_dups     = true,
+	},
+	.Msgpack = {
+		id              = .Msgpack,
+		family          = .Msgpack,
+		spec            = msgpack.Spec.Msgpack,
+		tape_id         = tape.FORMAT_ID_MSGPACK + 0,
+		name            = "msgpack",
+		title           = "MessagePack",
+		aliases         = MSGPACK_ALIASES[:],
+		extensions      = MSGPACK_EXTS[:],
+		default_framing = .Concatenated,
+		supports_scan   = true,
+		binary          = true,
+	},
+	.Msgpack_Compact = {
+		id              = .Msgpack_Compact,
+		family          = .Msgpack,
+		spec            = msgpack.Spec.Compact,
+		tape_id         = tape.FORMAT_ID_MSGPACK + 1,
+		name            = "msgpack:compact",
+		title           = "MessagePack (compact)",
+		aliases         = MSGPACK_COMPACT_ALIASES[:],
+		default_framing = .Concatenated,
+		supports_scan   = true,
+		binary          = true,
+	},
 }
 
 // Converts an engine `Framing` to a `tape.Framing` when framed (`Single` returns false).
@@ -346,6 +455,21 @@ id_of_spec :: proc "contextless" (spec: Spec) -> (id: Format_Id, ok: bool) {
 		case .Deterministic: return .Cbor_Deterministic, true
 		case .Length_First:  return .Cbor_Length_First, true
 		}
+	case yaml.Spec:
+		switch s {
+		case .Yaml_1_2:   return .Yaml, true
+		case .Yaml_Merge: return .Yaml_Merge, true
+		}
+	case html.Spec:
+		switch s {
+		case .Html:     return .Html, true
+		case .Fragment: return .Html_Fragment, true
+		}
+	case msgpack.Spec:
+		switch s {
+		case .Msgpack: return .Msgpack, true
+		case .Compact: return .Msgpack_Compact, true
+		}
 	case nil:
 	}
 	return {}, false
@@ -372,6 +496,12 @@ format_handle_of_id :: proc "contextless" (id: Format_Id) -> ^tape.Format {
 	case .Cbor_Preferred:     return cbor.as(.Preferred)
 	case .Cbor_Deterministic: return cbor.as(.Deterministic)
 	case .Cbor_Length_First:  return cbor.as(.Length_First)
+	case .Yaml:               return yaml.as(.Yaml_1_2)
+	case .Yaml_Merge:         return yaml.as(.Yaml_Merge)
+	case .Html:               return html.as(.Html)
+	case .Html_Fragment:      return html.as(.Fragment)
+	case .Msgpack:            return msgpack.as(.Msgpack)
+	case .Msgpack_Compact:    return msgpack.as(.Compact)
 	}
 	return nil
 }
@@ -392,6 +522,12 @@ reads_of_id :: proc "contextless" (id: Format_Id) -> ^tape.Reads {
 	case .Cbor_Preferred:     return cbor.reads(.Preferred)
 	case .Cbor_Deterministic: return cbor.reads(.Deterministic)
 	case .Cbor_Length_First:  return cbor.reads(.Length_First)
+	case .Yaml:               return yaml.reads(.Yaml_1_2)
+	case .Yaml_Merge:         return yaml.reads(.Yaml_Merge)
+	case .Html:               return html.reads(.Html)
+	case .Html_Fragment:      return html.reads(.Fragment)
+	case .Msgpack:            return msgpack.reads(.Msgpack)
+	case .Msgpack_Compact:    return msgpack.reads(.Compact)
 	}
 	return nil
 }
