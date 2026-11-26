@@ -364,6 +364,29 @@ overlay_chain_refs :: proc(chain: []Value, target_p: rawptr) -> int {
 // `t`, taken, with `t[key]` set to `x`, taken (single-step `set_path` without allocating a path array).
 @(require_results)
 set_one :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
+	if t.kind == .Object && key.kind == .String {
+		out := t
+		if ps := object_put(h, &out, retain(key), x); ps != .Ok {
+			release(h, out)
+			return NULL, ps
+		}
+		return out, .Ok
+	}
+	return set(h, t, key, x, 0)
+}
+
+// Like `set_one`, but consumes `key` as well as `t` and `x`.
+@(require_results)
+set_one_key_owned :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
+	if t.kind == .Object && key.kind == .String {
+		out := t
+		if ps := object_put(h, &out, key, x); ps != .Ok {
+			release(h, out)
+			return NULL, ps
+		}
+		return out, .Ok
+	}
+	defer release(h, key)
 	return set(h, t, key, x, 0)
 }
 

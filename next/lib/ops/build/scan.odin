@@ -117,10 +117,11 @@ Scanner :: struct {
 	// With `facts`, the comments before the next token start at `wait_from` in the builder's facts. They mark the node
 	// `wait_at` that the token is stored at, unless the walk passes the token while that node is still the next one
 	// written.
-	wait_from: int,
-	passed:    tape.Node_Index, // with `facts`, the node written next when the walk last passed a value
-	_pad0:     u32,
-	held:      [dynamic]tape.Held_Span,
+	wait_from:    int,
+	passed:       tape.Node_Index, // with `facts`, the node written next when the walk last passed a value
+	scratch_used: bool,          // any transient scan list or marks/made/done left `room`, freed in `scanner_free`
+	_pad0:        [3]u8,
+	held:         [dynamic]tape.Held_Span,
 	bytes:     [dynamic]u8,
 	hold_from: u64,
 	held_live: int, // the bytes held once the last `hold_drop` ran
@@ -208,6 +209,10 @@ Scan_Frame_Flag :: enum u8 {
 	Slices,  // it has `Slice` steps, which pick past the ring's check in `scan_element`, so it has a ring
 	Deep,    // a demand node live in it is deep, so the marks of its `Name` steps are saved while it is open
 	Uniform, // `takes_from == 0 && takes_to == max(u64)`: every element picks the same positional demand nodes
+	// In an object that `.Passes`: its one live demand node is not deep and has multiple `Name` steps only.
+	Names,
+	// In an object that `.Passes` and `.Names`, every step's target is a 1-end leaf with `!(.Settles in h.flags) && h.made == nil`.
+	Leaves,
 }
 
 @(private)
@@ -297,6 +302,7 @@ Scan_Room :: struct {
 	picks:    [16]u32,
 	answers:  [16]Scan_Answer,
 	kept:     [16]Scan_Kept,
+	missing:  [16]Scan_Missing,
 	marks:    [32]u64,
 	made:     [32]u32,
 	done:     [32]bool,
@@ -348,6 +354,7 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 	h.hold_from, h.held_live, h.head = 0, 0, {}
 	h.room = room
 	h.scratch = scratch_alloc
+	h.scratch_used = false
 	h.marks, h.made, h.done = nil, nil, nil
 	h.frames, h.elements, h.live, h.picks, h.answers, h.kept, h.missing, h.ring, h.tokens, h.saved = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
 	defer if err != nil {
@@ -375,6 +382,7 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 		if e := took(merr, raw_data(block), total); e != nil {
 			return e
 		}
+		h.scratch_used = true
 		h.marks = ([^]u64)(raw_data(block))[:len(demand.edges)]
 		if made > 0 {
 			h.made = ([^]u32)(raw_data(block[marks:]))[:made]
@@ -413,6 +421,7 @@ scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^t
 	h.key_text = src
 	h.scattered = false
 	h.has_key = false
+	h.scratch_used = false
 	h.flags &= {.Rewalks, .Stop, .Settles}
 	h.walk, h.dropped = nil, 0
 	h.end_of, h.opens, h.pending, h.passed, h.wait_at = .None, 0, len(demand.paths), tape.NO_NODE, tape.NO_NODE
@@ -433,10 +442,17 @@ scan_lists_reset :: proc "contextless" (h: ^Scanner, room: ^Scan_Room) {
 	scan_list_room(&h.picks, room.picks[:])
 	scan_list_room(&h.answers, room.answers[:])
 	scan_list_room(&h.kept, room.kept[:])
-	h.missing, h.ring, h.tokens, h.saved = {}, {}, {}, {}
-	runtime.mem_zero(raw_data(h.marks), len(h.marks) * size_of(u64))
-	runtime.mem_zero(raw_data(h.made), len(h.made) * size_of(u32))
-	runtime.mem_zero(raw_data(h.done), len(h.done))
+	scan_list_room(&h.missing, room.missing[:])
+	h.ring, h.tokens, h.saved = {}, {}, {}
+	if len(h.marks) > 0 {
+		intrinsics.mem_zero(raw_data(h.marks), len(h.marks) * size_of(u64))
+	}
+	if len(h.made) > 0 {
+		intrinsics.mem_zero(raw_data(h.made), len(h.made) * size_of(u32))
+	}
+	if len(h.done) > 0 {
+		intrinsics.mem_zero(raw_data(h.done), len(h.done))
+	}
 }
 
 @(private)
@@ -513,25 +529,48 @@ scanner_take :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 			}
 			return s, .Next
 		}
-		h.key = t
-		h.key.spelling = tape.without_credit(h.key.spelling)
-		h.has_key = true
-		// Fast path for a single non-deep `Name` edge with an undecoded scalar key of <= 16 bytes (zero calls).
-		// Longer/decoded keys, duplicate keys, and multi-step frames route to `scan_key_slow`.
+		// Fast paths for short undecoded scalar keys in non-deep `.Passes` frames: check unmatched bitmasks first,
+		// delay `h.key`/`h.has_key` until match, avoid `h.live`, and move duplicate/slow handling out-of-line.
 		if f.u.obj.named != 0 && t.kind <= .Plain && !tape.text_decodes(t) && t.n <= 16 {
 			e := f.u.obj.named - 1
 			edge := &h.demand.edges[e]
 			if name, ok := edge.step.(tape.Name); ok && scan_key_short_eq(h.key_text, t, string(name)) {
 				if u32(h.marks[e] >> 32) != f.gen {
 					f.unmet -= 1
+					h.key = t
+					h.key.spelling = tape.without_credit(h.key.spelling)
+					h.has_key = true
 					h.marks[e] = u64(f.gen) << 32 | u64(h.answers.len)
 					h.picks.data[0] = edge.to
 					h.picks.len = 1
 				} else {
-					scan_key_slow(h, t)
+					scan_key_dup(h, f, t, e, edge.to, true)
+				}
+			}
+		} else if .Names in f.flags && t.kind <= .Plain && !tape.text_decodes(t) && t.n <= 16 {
+			dm := h.demand
+			node := &dm.nodes[h.live.data[f.live]]
+			for e in node.edges ..< node.edges + node.n_edges {
+				edge := &dm.edges[e]
+				if name, ok := edge.step.(tape.Name); ok && scan_key_short_eq(h.key_text, t, string(name)) {
+					if u32(h.marks[e] >> 32) != f.gen {
+						f.unmet -= 1
+						h.key = t
+						h.key.spelling = tape.without_credit(h.key.spelling)
+						h.has_key = true
+						h.marks[e] = u64(f.gen) << 32 | u64(h.answers.len)
+						h.picks.data[0] = edge.to
+						h.picks.len = 1
+					} else {
+						scan_key_dup(h, f, t, e, edge.to, false)
+					}
+					break
 				}
 			}
 		} else {
+			h.key = t
+			h.key.spelling = tape.without_credit(h.key.spelling)
+			h.has_key = true
 			scan_key_slow(h, t)
 		}
 		when COLUMNS {
@@ -566,7 +605,7 @@ scanner_take :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 				f.count += 1
 				return scan_pass(h, s, t)
 			}
-			if f.leaf != 0 && t.kind <= .Plain {
+			if (f.leaf != 0 || .Leaves in f.flags && h.picks.len == 1) && t.kind <= .Plain {
 				return scan_leaf(h, s, t, f)
 			}
 		}
@@ -602,15 +641,32 @@ scan_key_short_eq :: #force_inline proc "contextless" (src: []u8, t: tape.Token,
 	return n == 0 || a[0] == b[0]
 }
 
-// Out-of-line key matching for multi-step frames, decoded or >16-byte keys, non-scalar keys, and duplicate keys.
+// Out-of-line duplicate key handling for fast `.Passes` frames.
 @(private = "file")
+scan_key_dup :: #force_no_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, t: tape.Token, e, to: u32, tail_pop: bool) #no_bounds_check {
+	if h.dups == .First {
+		return
+	}
+	if h.dups == .Last {
+		scan_kill(h, int(u32(h.marks[e])), int(h.answers.len), to, tail_pop)
+	}
+	h.key = t
+	h.key.spelling = tape.without_credit(h.key.spelling)
+	h.has_key = true
+	h.marks[e] = u64(f.gen) << 32 | u64(h.answers.len)
+	h.picks.data[0] = to
+	h.picks.len = 1
+}
+
+// Out-of-line key matching for multi-step frames, decoded or >16-byte keys, non-scalar keys, and duplicate keys.
+@(private = "file", cold)
 scan_key_slow :: #force_no_inline proc "contextless" (h: ^Scanner, t: tape.Token) #no_bounds_check {
 	f := &h.frames.data[h.frames.len - 1]
 	if f.u.obj.named != 0 {
 		e := f.u.obj.named - 1
 		edge := &h.demand.edges[e]
 		if name, ok := edge.step.(tape.Name); ok && t.kind <= .Plain && tape.key_names(h.b.doc.format, h.key_text, t, string(name)) {
-			scan_name_meets(h, f, e, edge.to, false)
+			scan_name_meets(h, f, e, edge.to, false, true)
 		}
 		return
 	}
@@ -646,7 +702,9 @@ scan_key_unmatched :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Fr
 // registers at the walk's end and `root_close` is the end of the root value.
 @(require_results)
 scanner_end :: proc(h: ^Scanner, regs: hook.Regs, root_close: u64, err: tape.Error) -> (doc: tape.Document, e: tape.Error) {
-	defer scanner_free(h)
+	defer if intrinsics.expect(h.scratch_used || .Holds in h.flags, false) {
+		scanner_free(h)
+	}
 	regs := regs
 	e = err
 	if e == nil {
@@ -703,7 +761,7 @@ scanner_key :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, t:
 			edge := &dm.edges[e]
 			#partial switch step in edge.step {
 			case tape.Name:
-				if NAMED && tape.key_names(h.b.doc.format, h.key_text, t, string(step)) {
+				if NAMED && (t.n <= 16 && !tape.text_decodes(t) ? scan_key_short_eq(h.key_text, t, string(step)) : tape.key_names(h.b.doc.format, h.key_text, t, string(step))) {
 					scan_name_meets(h, f, e, edge.to, node.deep)
 				}
 			case tape.All:
@@ -718,7 +776,7 @@ scanner_key :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, t:
 // Takes the member of the object `f` whose key the `Name` of demand edge `e`, to node `to`, reads: the first of its key,
 // or under `.Last` one that takes back what the member before it answered.
 @(private = "file")
-scan_name_meets :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, e, to: u32, deep: bool) #no_bounds_check {
+scan_name_meets :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, e, to: u32, deep: bool, tail_pop := false) #no_bounds_check {
 	mark := h.marks[e]
 	if u32(mark >> 32) != f.gen {
 		f.unmet -= 1
@@ -729,7 +787,7 @@ scan_name_meets :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame
 		case .Pass:
 			return
 		case .Replace:
-			scan_kill(h, int(u32(mark)), int(h.answers.len), to)
+			scan_kill(h, int(u32(mark)), int(h.answers.len), to, tail_pop)
 		}
 	}
 	h.marks[e] = u64(f.gen) << 32 | u64(h.answers.len)
@@ -871,14 +929,16 @@ scan_stub :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (h
 	return kept, .Skip
 }
 
-// Keeps scalar child `t` of the container `f`, which its one step takes to demand node `f.leaf`: the child's node, with
-// its key in an object and its place in an array, and the answers of the paths the node ends.
-// Invariants: `f.leaf != 0` guarantees `!(.Settles in h.flags) && h.made == nil`, and when `.Object in f.flags` that
-// `h.key.kind <= .Plain && h.key.role == .Key`.
+// Keeps scalar child `t` of the container `f`, which its one matching step takes to a leaf demand node (`f.leaf` or
+// `h.picks.data[0]` under `.Leaves`): the child's node, with its key in an object and its place in an array, and the
+// answers of the paths the node ends.
+// Invariants: `(f.leaf != 0 || .Leaves in f.flags && h.picks.len == 1)` guarantees `!(.Settles in h.flags) && h.made == nil`,
+// and when `.Object in f.flags` that `h.key.kind <= .Plain && h.key.role == .Key`.
 @(private = "file")
 scan_leaf :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, f: ^Scan_Frame) -> (hook.Regs, hook.Action) #no_bounds_check {
 	dm := h.demand
-	node := dm.nodes[f.leaf]
+	leaf := f.leaf if f.leaf != 0 else h.picks.data[0]
+	node := dm.nodes[leaf]
 	is_obj := .Object in f.flags
 	if intrinsics.expect(node.n_ends == 1 && s.a + 2 * size_of(tape.Node) <= h.b.end && h.answers.len < h.answers.cap && (is_obj || h.kept.len < h.kept.cap), true) {
 		s := s
@@ -895,18 +955,18 @@ scan_leaf :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tap
 		}
 		f.count += 1
 		an := h.answers.len
-		h.answers.data[an] = {at, dm.ends[node.ends], 2 * u64(at), f.leaf, .Found, false, {}}
+		h.answers.data[an] = {at, dm.ends[node.ends], 2 * u64(at), leaf, .Found, false, {}}
 		h.answers.len = an + 1
 		((^[2]u64)(uintptr(s.a)))^ = transmute([2]u64)t
 		s.a += size_of(tape.Node)
 		s.b += 1
 		return s, .Next
 	}
-	return scan_leaf_grow(h, s, t)
+	return scan_leaf_grow(h, s, t, leaf)
 }
 
 @(private = "file", cold)
-scan_leaf_grow :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) #no_bounds_check {
+scan_leaf_grow :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, leaf: u32) -> (hook.Regs, hook.Action) #no_bounds_check {
 	s := s
 	f := &h.frames.data[s.c - 1]
 	if .Object in f.flags {
@@ -919,9 +979,9 @@ scan_leaf_grow :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs
 	}
 	f.count += 1
 	dm := h.demand
-	node := dm.nodes[f.leaf]
+	node := dm.nodes[leaf]
 	for p in dm.ends[node.ends:][:node.n_ends] {
-		scan_push(h, &h.answers, Scan_Answer{at, p, 2 * u64(at), f.leaf, .Found, false, {}})
+		scan_push(h, &h.answers, Scan_Answer{at, p, 2 * u64(at), leaf, .Found, false, {}})
 	}
 	kept, _ := builder_step(&h.b, s, t, false, true)
 	return kept, .Stop if h.b.err != nil else .Next
@@ -1050,14 +1110,19 @@ scan_keep_element :: #force_inline proc "contextless" (h: ^Scanner, d: u64, kind
 	h.frames.data[d - 1].element = kind
 }
 
+@(private = "file", cold)
+scan_pass_facts :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, lo: u64) {
+	if h.passed = builder_cursor(&h.b, s); h.passed == h.wait_at {
+		scan_unwait(h, lo)
+	}
+}
+
 // Passes a value no step took. A container is skipped, giving no more tokens up to its `End`.
 @(private = "file")
 scan_pass :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
 	h.has_key = false
-	if h.facts {
-		if h.passed = builder_cursor(&h.b, s); h.passed == h.wait_at {
-			scan_unwait(h, t.lo)
-		}
+	if intrinsics.expect(h.facts, false) {
+		scan_pass_facts(h, s, t.lo)
 	}
 	if t.kind > .Plain {
 		h.end_of = .Skipped
@@ -1096,9 +1161,10 @@ scan_limit :: #force_no_inline proc "contextless" (h: ^Scanner, path: u32) -> bo
 	return true
 }
 
-// Takes back the answers from `lo` to `hi` that came through demand node `to`.
+// Takes back the answers from `lo` to `hi` that came through demand node `to`. `tail_pop` may only be set when
+// no live mark or ring entry can point inside `(lo, hi)` (e.g. a single-edge frame's own `.Last` replacement).
 @(private)
-scan_kill :: #force_no_inline proc "contextless" (h: ^Scanner, lo, hi: int, to: u32) #no_bounds_check {
+scan_kill :: #force_no_inline proc "contextless" (h: ^Scanner, lo, hi: int, to: u32, tail_pop := false) #no_bounds_check {
 	last := h.demand.nodes[to].last
 	for &a in h.answers.data[lo:hi] {
 		if a.leaf >= to && a.leaf <= last && !a.dead {
@@ -1106,6 +1172,11 @@ scan_kill :: #force_no_inline proc "contextless" (h: ^Scanner, lo, hi: int, to: 
 			if h.made != nil && h.demand.paths[a.path].limit > 0 {
 				h.made[a.path] -= 1
 			}
+		}
+	}
+	if tail_pop && hi == int(h.answers.len) {
+		for int(h.answers.len) > lo && h.answers.data[h.answers.len - 1].dead {
+			h.answers.len -= 1
 		}
 	}
 }
@@ -1237,13 +1308,30 @@ scan_open :: proc "contextless" (h: ^Scanner, t: tape.Token, live: u32, whole: b
 		}
 	}
 	if f.n_live == 1 && f.flags & {.Indexed, .Passes} != {} {
-		if node := dm.nodes[h.live.data[live]]; node.n_edges == 1 && !node.deep && (.Indexed in f.flags || node.names == 1) {
-			if .Passes in f.flags {
-				f.u.obj.named = node.edges + 1
-			}
-			to := dm.edges[node.edges].to
-			if dm.nodes[to].n_edges == 0 && dm.nodes[to].descend == 0 && .Settles not_in h.flags && h.made == nil {
-				f.leaf = to
+		if node := &dm.nodes[h.live.data[live]]; !node.deep {
+			if node.n_edges == 1 && (.Indexed in f.flags || node.names == 1) {
+				if .Passes in f.flags {
+					f.u.obj.named = node.edges + 1
+				}
+				to := dm.edges[node.edges].to
+				if dm.nodes[to].n_edges == 0 && dm.nodes[to].descend == 0 && .Settles not_in h.flags && h.made == nil {
+					f.leaf = to
+				}
+			} else if .Passes in f.flags && node.n_edges > 1 && node.n_edges == node.names {
+				f.flags += {.Names}
+				if .Settles not_in h.flags && h.made == nil {
+					all_leaves := true
+					for e in node.edges ..< node.edges + node.n_edges {
+						to := dm.edges[e].to
+						if dm.nodes[to].n_edges != 0 || dm.nodes[to].descend != 0 || dm.nodes[to].n_ends != 1 {
+							all_leaves = false
+							break
+						}
+					}
+					if all_leaves {
+						f.flags += {.Leaves}
+					}
+				}
 			}
 		}
 	}
@@ -1296,7 +1384,7 @@ scan_restore_marks :: #force_no_inline proc "contextless" (h: ^Scanner, f: ^Scan
 }
 
 @(private = "file")
-scanner_close :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $COLUMNS: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
+scanner_close :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $COLUMNS: bool) -> (hook.Regs, hook.Action) #no_bounds_check {
 	s := s
 	d := s.c
 	f := &h.frames.data[d - 1]
@@ -1381,7 +1469,7 @@ scan_past :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, picks:
 	return scan_left(h, s)
 }
 
-@(private = "file")
+@(private = "file", cold)
 scan_settle_picks :: #force_no_inline proc "contextless" (h: ^Scanner, picks: []u32, d: u64) {
 	for n in picks {
 		scan_settle(h, n, d)
@@ -1483,6 +1571,11 @@ scan_grow_to :: #force_no_inline proc "contextless" (h: ^Scanner, list: ^Scan_Ra
 	in_room := scan_in_room(h, list.data)
 	doubled := 2 * cur_cap if cur_cap <= max_items / 2 else max_items
 	want := min(max(doubled, 8, least), max_items)
+	if in_room && h.b.budget == nil && size <= 32 {
+		want = min(max(want, 256), max_items)
+	} else if h.b.budget == nil && size == size_of(Scan_Answer) && len(h.key_text) >= 1 << 18 && cur_cap <= max_items / 4 {
+		want = min(max(4 * cur_cap, want), max_items)
+	}
 	if h.b.budget != nil {
 		held_cap := 0 if in_room else cur_cap
 		left_items := int(min(hook.memory_budget_left(h.b.budget) / u64(size), u64(max_items - held_cap)))
@@ -1511,6 +1604,7 @@ scan_grow_to :: #force_no_inline proc "contextless" (h: ^Scanner, list: ^Scan_Ra
 		return false
 	}
 	list.data, list.cap = raw_data(data), u32(want)
+	h.scratch_used = true
 	return true
 }
 

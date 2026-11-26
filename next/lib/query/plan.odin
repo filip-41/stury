@@ -214,6 +214,11 @@ finalize_source_demand :: proc(paths: []Demand_Path, facts: bool, allocator := c
 	if all_steps_unbounded_all(norm) {
 		return whole_demand(facts, .All_Steps_Only)
 	}
+	// Cost rule: wide shallow fanout (>= 5 1-step leaves directly inside unbounded `[]` without deep pruning)
+	// retains most of every flat element plus scanner bookkeeping, so building whole is faster.
+	if shallow_all_too_wide(norm) {
+		return whole_demand(facts, .Too_Wide)
+	}
 	out_paths := make([]Demand_Path, len(norm), allocator)
 	raw_steps := make([][]tape.Step, len(norm), allocator)
 	grains := make([]tape.Grain, len(norm), allocator)
@@ -311,6 +316,36 @@ all_steps_unbounded_all :: proc "contextless" (paths: []Demand_Path) -> bool {
 			if !is_all || all.limit > 0 {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// Whether every path visits all elements through an unbounded `All` and fans out across >= 5 shallow leaves at
+// depth <= 1 past the last `All`, with no `.Keys` subtree skipping, bounds, or descents.
+@(private = "file")
+shallow_all_too_wide :: proc "contextless" (paths: []Demand_Path) -> bool {
+	if len(paths) < 5 {
+		return false
+	}
+	for p in paths {
+		if p.limit > 0 || p.grain == .Keys {
+			return false
+		}
+		last_all := -1
+		for s, i in p.steps {
+			if _, is_descend := s.(tape.Descend); is_descend {
+				return false
+			}
+			if all, is_all := s.(tape.All); is_all {
+				if all.limit > 0 {
+					return false
+				}
+				last_all = i
+			}
+		}
+		if last_all < 0 || len(p.steps) - 1 - last_all > 1 {
+			return false
 		}
 	}
 	return true

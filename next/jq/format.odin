@@ -1,10 +1,77 @@
 package jq
 
 import "base:runtime"
-import "core:strconv"
 import "stury:lib/query"
 
 // jq's `@name` formats and the texts of values.
+
+@(private = "file", rodata)
+DIGIT_PAIRS := [200]u8 {
+	'0', '0', '0', '1', '0', '2', '0', '3', '0', '4', '0', '5', '0', '6', '0', '7', '0', '8', '0', '9',
+	'1', '0', '1', '1', '1', '2', '1', '3', '1', '4', '1', '5', '1', '6', '1', '7', '1', '8', '1', '9',
+	'2', '0', '2', '1', '2', '2', '2', '3', '2', '4', '2', '5', '2', '6', '2', '7', '2', '8', '2', '9',
+	'3', '0', '3', '1', '3', '2', '3', '3', '3', '4', '3', '5', '3', '6', '3', '7', '3', '8', '3', '9',
+	'4', '0', '4', '1', '4', '2', '4', '3', '4', '4', '4', '5', '4', '6', '4', '7', '4', '8', '4', '9',
+	'5', '0', '5', '1', '5', '2', '5', '3', '5', '4', '5', '5', '5', '6', '5', '7', '5', '8', '5', '9',
+	'6', '0', '6', '1', '6', '2', '6', '3', '6', '4', '6', '5', '6', '6', '6', '7', '6', '8', '6', '9',
+	'7', '0', '7', '1', '7', '2', '7', '3', '7', '4', '7', '5', '7', '6', '7', '7', '7', '8', '7', '9',
+	'8', '0', '8', '1', '8', '2', '8', '3', '8', '4', '8', '5', '8', '6', '8', '7', '8', '8', '8', '9',
+	'9', '0', '9', '1', '9', '2', '9', '3', '9', '4', '9', '5', '9', '6', '9', '7', '9', '8', '9', '9',
+}
+
+@(private = "file")
+dec_len_u64 :: #force_inline proc "contextless" (v: u64) -> int {
+	n := 1
+	x := v
+	for {
+		if x < 10 {
+			return n
+		}
+		if x < 100 {
+			return n + 1
+		}
+		if x < 1000 {
+			return n + 2
+		}
+		if x < 10000 {
+			return n + 3
+		}
+		x /= 10000
+		n += 4
+	}
+}
+
+@(private = "file")
+int_to_text :: proc(h: ^query.Heap, x: i64) -> (query.Value, query.Status) #no_bounds_check {
+	neg := x < 0
+	mag := u64(0) - u64(x) if neg else u64(x)
+	digits := dec_len_u64(mag)
+	total := digits + int(neg)
+	v, p, s := query.make_text(h, total)
+	if s != .Ok {
+		return query.NULL, s
+	}
+	if neg {
+		p[0] = '-'
+	}
+	at := total
+	for mag >= 100 {
+		q := mag / 100
+		r := (mag - q * 100) * 2
+		mag = q
+		at -= 2
+		p[at] = DIGIT_PAIRS[r]
+		p[at + 1] = DIGIT_PAIRS[r + 1]
+	}
+	if mag >= 10 {
+		r := mag * 2
+		p[at - 2] = DIGIT_PAIRS[r]
+		p[at - 1] = DIGIT_PAIRS[r + 1]
+	} else {
+		p[at - 1] = u8('0' + mag)
+	}
+	return v, .Ok
+}
 
 // `v` as JSON text, as jq's `tojson` writes it.
 @(private)
@@ -17,9 +84,14 @@ to_json :: proc(h: ^query.Heap, v: query.Value) -> (res: query.Value, status: qu
 	case .False:
 		return query.text_borrowed("false"), .Ok
 	case .Int:
-		buf: [32]u8
-		return query.text_value(h, strconv.write_int(buf[:], v.i, 10))
-	case .Double:
+		return int_to_text(h, v.i)
+	}
+	return to_json_slow(h, v)
+}
+
+@(private = "file")
+to_json_slow :: #force_no_inline proc(h: ^query.Heap, v: query.Value) -> (res: query.Value, status: query.Status) {
+	if v.kind == .Double {
 		buf: [32]u8
 		return query.text_value(h, jq_double(buf[:], v.f))
 	}

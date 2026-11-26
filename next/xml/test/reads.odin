@@ -109,3 +109,54 @@ a_read_takes_its_options :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.err, tape.Error(tape.Bad_Option{"tolerate"}))
 	testing.expect_value(t, xml.validate(deep, .Xml, {tolerate = {.Ragged, .Bare_Quote, .Non_Finite, .Lone_Surrogate}}), nil)
 }
+
+@(test)
+scan_first_and_last_match_build_with_skipped_subtrees_and_dups :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := transmute([]u8)string(
+		`<?xml version="1.0"?><!--top-->` +
+		`<logs>` +
+		`<log env="prod"><ts>t1</ts><nested k="a"><deep><item>1</item></deep><empty/></nested><id>first-id</id><id>last-id</id></log>` +
+		`<log><ts>t2</ts><other><sub/>txt</other><ping a="1"/><id>second</id></log>` +
+		`</logs>`,
+	)
+	paths := [][]tape.Step{
+		{tape.Name("logs"), tape.All{}, tape.Name("ts")},
+		{tape.Name("logs"), tape.All{}, tape.Name("id")},
+	}
+	demand, derr := xml.demand_of(paths, allocator = context.temp_allocator)
+	testing.expect_value(t, derr, nil)
+
+	bdoc, berr := xml.build(src, .Xml, {}, context.temp_allocator)
+	testing.expect_value(t, berr, nil)
+
+	for dups in ([]tape.Duplicates{.First, .Last}) {
+		want_ids := [2]string{"first-id" if dups == .First else "last-id", "second"}
+		for i in 0 ..< 2 {
+			el, mp := xml.member(reader(&bdoc), xml.ROOT, "logs", dups)
+			testing.expect_value(t, mp, tape.Presence.Found)
+			ch, cp, _ := tape.children(reader(&bdoc), el, context.temp_allocator)
+			testing.expect_value(t, cp, tape.Presence.Found)
+			log_node := xml.NO_NODE
+			for step := 0; step <= i; step += 1 {
+				_, log_node, _ = tape.next_child(reader(&bdoc), &ch)
+			}
+			id_node, ip := xml.member(reader(&bdoc), log_node, "id", dups)
+			testing.expect_value(t, ip, tape.Presence.Found)
+			testing.expect_value(t, text_of(&bdoc, id_node), want_ids[i])
+		}
+
+		for stop in ([]bool{false, true}) {
+			sdoc, serr := xml.scan(src, &demand, .Xml, {stop_early = stop}, {dups = dups}, context.temp_allocator)
+			testing.expect_value(t, serr, nil)
+			for i in 0 ..< 2 {
+				ts_at, ts_p, _ := xml.answer({doc = &sdoc}, 0, i)
+				id_at, id_p, _ := xml.answer({doc = &sdoc}, 1, i)
+				testing.expect_value(t, ts_p, tape.Presence.Found)
+				testing.expect_value(t, id_p, tape.Presence.Found)
+				testing.expect_value(t, text_of(&sdoc, ts_at), "t1" if i == 0 else "t2")
+				testing.expect_value(t, text_of(&sdoc, id_at), want_ids[i])
+			}
+		}
+	}
+}

@@ -6,6 +6,7 @@ import "core:mem/virtual"
 import "core:strings"
 import "core:testing"
 import "stury:jq"
+import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/query"
 import "stury:testkit"
@@ -267,4 +268,80 @@ math_exact_powers_and_libm_ulp_bounds :: proc(t: ^testing.T) {
 	out_ulp, end_ulp, _ := eval_expr(t, prog, "null")
 	testing.expect_value(t, end_ulp, jq.Run_End.Done)
 	testing.expect_value(t, out_ulp, `true`)
+}
+
+@(test)
+perf_paths_negative_zero_c1_and_partial_doc_parity :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	arena: virtual.Arena
+	testing.expect(t, suite_arena(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+
+	// `int_to_text` + `object_put` + `native_update` fast paths across zero, negatives, int64 bounds, COW aliasing, and errors.
+	out_ts, end_ts, _ := eval_expr(t, `[0, -1, 42, -9223372036854775808, 9223372036854775807] | map(tostring)`, "null")
+	testing.expect_value(t, end_ts, jq.Run_End.Done)
+	testing.expect_value(t, out_ts, `["0","-1","42","-9223372036854775808","9223372036854775807"]`)
+
+	out_c1, end_c1, _ := eval_expr(t, `(reduce range(40) as $i ({}; .[$i|tostring] = $i) | length), ({a:1} as $o | [$o, ($o | .a = 2 | .b = 3)])`, "null")
+	testing.expect_value(t, end_c1, jq.Run_End.Done)
+	testing.expect_value(t, out_c1, "40\n[{\"a\":1},{\"a\":2,\"b\":3}]")
+
+	out_kerr, end_kerr, _ := eval_expr(t, `try ({} | .[123] = 1) catch "badkey"`, "null")
+	testing.expect_value(t, end_kerr, jq.Run_End.Done)
+	testing.expect_value(t, out_kerr, `"badkey"`)
+
+	// `.Node` negative-zero and float arithmetic must not collapse `.Float` nodes into `.Int`, while integer comparisons work fast.
+	out_nz, end_nz, _ := eval_expr(t, `[(atan2(0; .z * 1) > 3), (atan2(0; .z + .z) > 3), (.z == 0), (.f + 0), (.f == 1), (.n == 500), (.n + 1)]`, `{"z": -0.0, "f": 1.0, "n": 500}`)
+	testing.expect_value(t, end_nz, jq.Run_End.Done)
+	testing.expect_value(t, out_nz, `[true,true,true,1,true,true,501]`)
+
+	// Partial `json.scan` matches `json.build` exactly on filtered log records (zero taints, zero leaks).
+	logs_src := `{"meta":"skip","logs":[{"ts":"t1","status":200,"id":"a","extra":[1,2]},{"ts":"t2","status":500,"id":"b","extra":{"x":9}},{"ts":"t3","status":404,"id":"c"}]}`
+	for pair in ([3][2]string{
+		{`.logs[] | select(.status == 500) | .id`, `"b"`},
+		{`.logs[] | select(.status >= 400) | .id`, "\"b\"\n\"c\""},
+		{`.logs[] | select(.status >= 400) | {ts, id}`, "{\"ts\":\"t2\",\"id\":\"b\"}\n{\"ts\":\"t3\",\"id\":\"c\"}"},
+	}) {
+		qsrc, want := pair[0], pair[1]
+		prog, errs := jq.compile(qsrc)
+		testing.expect_value(t, len(errs), 0)
+		defer jq.destroy_program(prog)
+		plan := jq.analyze(prog)
+		defer jq.destroy_plan(&plan)
+		testing.expect_value(t, plan.sources[.Main].mode, query.Demand_Mode.Partial)
+
+		h: query.Heap
+		query.heap_init(&h, runtime.heap_allocator())
+		defer query.heap_destroy(&h)
+
+		src := transmute([]u8)logs_src
+		bdoc, berr := json.build(src, .Json, {}, runtime.heap_allocator())
+		testing.expect_value(t, berr, nil)
+		sdoc, serr := json.scan(src, &plan.sources[.Main].demand, .Json, {}, {}, runtime.heap_allocator())
+		testing.expect_value(t, serr, nil)
+
+		run_doc :: proc(t: ^testing.T, prog: ^jq.Program, h: ^query.Heap, doc: tape.Document) -> string {
+			v, st := query.document_value(h, doc, true)
+			testing.expect_value(t, st, query.Status.Ok)
+			r: jq.Run
+			jq.run_init(&r, prog, h, nil)
+			defer jq.run_destroy(&r)
+			outs := Outputs{h = h}
+			end := jq.run_value(&r, v, collect, &outs)
+			testing.expect_value(t, end, jq.Run_End.Done)
+			testing.expect(t, !h.tainted)
+			lines := make([dynamic]string, context.temp_allocator)
+			for item in outs.vals {
+				append(&lines, show(h, item))
+				query.release(h, item)
+			}
+			return strings.join(lines[:], "\n", context.temp_allocator)
+		}
+		whole_out := run_doc(t, prog, &h, bdoc)
+		scan_out := run_doc(t, prog, &h, sdoc)
+		testing.expect_value(t, whole_out, want)
+		testing.expect_value(t, scan_out, want)
+		testing.expect_value(t, query.heap_live(&h), u64(0))
+	}
 }

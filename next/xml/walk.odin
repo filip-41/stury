@@ -362,8 +362,8 @@ answered :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), hs: ^hook.R
 }
 
 // Gives token `t` to the inner hook of the hook's `Keeps`, growing its room first for a node it has no place for.
-@(private)
-emit_kept :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), hs: ^hook.Regs, t: tape.Token) -> Emitted {
+@(private, cold)
+emit_kept :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), hs: ^hook.Regs, t: tape.Token) -> Emitted {
 	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
 	when .Keeps in C {
 		K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 3)
@@ -386,6 +386,20 @@ emit_kept :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), hs: ^hook.Reg
 	}
 }
 
+@(private, cold)
+emit_keep_end :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, lo: u64, n: int) -> Emitted {
+	if r := emit(w, on, hs, .End, .Value, lo, n); r != .Next {
+		return r
+	}
+	w.keep = 0
+	return .Next
+}
+
+@(private, cold)
+emit_mute_end :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, lo: u64, n: int) -> Emitted {
+	return emit(w, on, hs, .End, .Value, lo, n)
+}
+
 // Gives the `End` that closes the container of the element with `open` open elements, or the document's for
 // `DOCUMENT`, spanning `n` bytes at `lo`: to the inner hook of a keep of it and then to the hook, and to the hook alone
 // once a skip of it ends.
@@ -403,10 +417,9 @@ emit_close :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "c
 	}
 	when .Keeps in C {
 		if w.keep == open {
-			if r := emit(w, on, hs, .End, .Value, lo, n); r != .Next {
+			if r := emit_keep_end(w, on, hs, lo, n); r != .Next {
 				return r
 			}
-			w.keep = 0
 		}
 	}
 	return emit(w, on, hs, .End, .Value, lo, n)
@@ -531,10 +544,11 @@ emit_text :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "co
 	when H == hook.No_Hooks {
 		return .Next
 	}
+	kind := tape.Kind.String
+	spelling: u16
 	if n == 0 || decode && .Chars not_in f.flags {
-		return emit(w, on, hs, .Null, .Value, lo, n)
-	}
-	if !decode && w.infer && u64(n) <= u64(max(u32)) {
+		kind = .Null
+	} else if !decode && w.infer && u64(n) <= u64(max(u32)) {
 		t: tape.Token
 		when LAX {
 			if w.in_subset {
@@ -545,9 +559,11 @@ emit_text :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "co
 		} else {
 			t = tape.infer_token(w.base, lo, u32(n))
 		}
-		return emit(w, on, hs, t.kind, .Value, lo, n, t.spelling)
+		kind, spelling = t.kind, t.spelling
+	} else {
+		spelling = text_spelling(decode, .Dtd in f.flags)
 	}
-	return emit(w, on, hs, .String, .Value, lo, n, text_spelling(decode, .Dtd in f.flags))
+	return emit(w, on, hs, kind, .Value, lo, n, spelling)
 }
 
 // Opens the container of the element whose frame is `f`, with `e` open elements, when its first child starts at
@@ -556,19 +572,27 @@ emit_text :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "co
 @(private)
 open_content :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, f: ^Frame, e: u64, child: [^]u8) -> (result: u64, done: bool) {
 	if .Object not_in f.flags {
-		f.flags += {.Object}
-		if r := emit(w, on, hs, .Object, .Value, at(w, f.tag), int(f.tag_n), 0, e); r != .Next {
-			return refused(w, hs^, r, child), true
-		}
-		when H != hook.No_Hooks {
-			if .Held in f.flags {
-				if r, over := give_held(w, on, hs, f, child, .Comment); over {
-					return r, true
-				}
-			}
+		if r, over := open_element(w, on, hs, f, e, child); over {
+			return r, true
 		}
 	}
 	return text_member(w, on, hs, f, child)
+}
+
+@(private, cold)
+open_element :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, f: ^Frame, e: u64, child: [^]u8) -> (result: u64, done: bool) {
+	f.flags += {.Object}
+	if r := emit(w, on, hs, .Object, .Value, at(w, f.tag), int(f.tag_n), 0, e); r != .Next {
+		return refused(w, hs^, r, child), true
+	}
+	when H != hook.No_Hooks {
+		if .Held in f.flags {
+			if r, over := give_held(w, on, hs, f, child, .Comment); over {
+				return r, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // Gives the comments and instructions of frame `f`'s content before `upto` with role `role`: those of the first
@@ -655,26 +679,26 @@ st_start :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk
 			}
 		}
 	}
-	if q < end && q[0] == '>' && !w.tag_dtd && !colon {
-		w.stack[d] = Frame{tag = p, text_lo = at(w, q) + 1, tag_n = u32(name_n + 2), name_n = u16(name_n)}
-		when H != hook.No_Hooks {
-			if !muted {
-				if r := emit(w, on, &hs, .String, .Key, at(w, p) + 1, name_n); r != .Next {
-					return refused(w, hs, r, q)
-				}
-			}
-		}
-		return #must_tail st_content(q[1:], end, d + 1, w, hs.a, hs.b, hs.c, on)
+	fast_tag := q < end && q[0] == '>' && !w.tag_dtd && !colon
+	w.stack[d] = Frame{
+		tag     = p,
+		text_lo = at(w, q) + 1 if fast_tag else 0,
+		tag_n   = u32(name_n + 2) if fast_tag else 0,
+		name_n  = u16(name_n),
 	}
-	w.stack[d] = Frame{tag = p, name_n = u16(name_n)}
-	w.nattr = 0
-	w.tag_ns = colon
+	if !fast_tag {
+		w.nattr = 0
+		w.tag_ns = colon
+	}
 	when H != hook.No_Hooks {
 		if !muted {
 			if r := emit(w, on, &hs, .String, .Key, at(w, p) + 1, name_n); r != .Next {
 				return refused(w, hs, r, q)
 			}
 		}
+	}
+	if fast_tag {
+		return #must_tail st_content(q[1:], end, d + 1, w, hs.a, hs.b, hs.c, on)
 	}
 	return #must_tail st_attributes(q, end, d + 1, w, hs.a, hs.b, hs.c, on)
 }
@@ -1160,8 +1184,8 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 					w.mute = 0
 					if w.mute_end {
 						w.mute_end = false
-					} else if x := emit(w, on, &hs, .End, .Value, at(w, p), intrinsics.ptr_sub(after, p)); x != .Next {
-						return refused(w, hs, x, after)
+					} else {
+						return #must_tail st_end_mute(p, end, d, w, hs.a, hs.b, hs.c, on)
 					}
 				}
 				if w.ns_len == 0 && d > 1 {
@@ -1173,32 +1197,21 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 				}
 				return #must_tail st_closed(after, end, d, w, hs.a, hs.b, hs.c, on)
 			}
-		}
-		if .Object in f.flags {
-			if r, done := text_member(w, on, &hs, f, p); done {
-				return r
-			}
-			if x := emit_close(w, on, &hs, d, at(w, p), intrinsics.ptr_sub(after, p)); x != .Next {
-				return refused(w, hs, x, after)
-			}
-		} else {
-			if .Held in f.flags {
-				if r, done := give_held(w, on, &hs, f, p, .Comment_Foot); done {
-					return r
-				}
-			}
-			if passing(w) {
-				// The text of an element the hook skipped at its key gives no token.
+			if .Object not_in f.flags && .Held not_in f.flags && passing(w) {
+				// The text of an element the hook skipped at its key gives no token; finish in the fast zero-frame path.
 				w.skip_value = false
-			} else {
-				lo := f.text_lo
-				// A run of white space alone is no text run, so no scan judged its line ends.
-				decode := .Decode in f.flags || .Seen not_in f.flags && has_cr(ptr_at(w, lo), p)
-				if x := emit_text(w, on, &hs, f, lo, int(at(w, p) - lo), decode); x != .Next {
-					return refused(w, hs, x, p)
+				if w.ns_len == 0 && d > 1 {
+					pf := &w.stack[d - 2]
+					pf.text_lo = at(w, after)
+					pf.flags -= {.Seen, .Decode, .Chars, .Dtd}
+					pf.flags += {.Prev}
+					return #must_tail st_content(after, end, d - 1, w, hs.a, hs.b, hs.c, on)
 				}
+				return #must_tail st_closed(after, end, d, w, hs.a, hs.b, hs.c, on)
 			}
+			return #must_tail st_end_emit(p, end, d, w, hs.a, hs.b, hs.c, on)
 		}
+		return #must_tail st_end_emit(p, end, d, w, hs.a, hs.b, hs.c, on)
 	}
 	if w.ns_len == 0 && d > 1 {
 		when H != hook.No_Hooks || LAX {
@@ -1209,6 +1222,70 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 				pf.flags += {.Prev}
 			}
 		}
+		return #must_tail st_content(after, end, d - 1, w, hs.a, hs.b, hs.c, on)
+	}
+	return #must_tail st_closed(after, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+@(private, enable_target_feature = STATE_FEATURES)
+st_end_after :: #force_inline proc "contextless" (p, end: [^]u8, n: int) -> [^]u8 #no_bounds_check {
+	q := p[2 + n:]
+	if q < end && q[0] == '>' {
+		return q[1:]
+	}
+	return kernel.skip_ws(q, end)[1:]
+}
+
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_end_mute :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($H, $LAX), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> u64 {
+	hs := hook.Regs{s0, s1, s2}
+	after := st_end_after(p, end, int(w.stack[d - 1].name_n))
+	if x := emit_mute_end(w, on, &hs, at(w, p), intrinsics.ptr_sub(after, p)); x != .Next {
+		return refused(w, hs, x, after)
+	}
+	if w.ns_len == 0 && d > 1 {
+		pf := &w.stack[d - 2]
+		pf.text_lo = at(w, after)
+		pf.flags -= {.Seen, .Decode, .Chars, .Dtd}
+		pf.flags += {.Prev}
+		return #must_tail st_content(after, end, d - 1, w, hs.a, hs.b, hs.c, on)
+	}
+	return #must_tail st_closed(after, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+@(private, enable_target_feature = STATE_FEATURES)
+st_end_emit :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($H, $LAX), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> u64 {
+	hs := hook.Regs{s0, s1, s2}
+	f := &w.stack[d - 1]
+	after := st_end_after(p, end, int(f.name_n))
+	if .Object in f.flags {
+		if r, done := text_member(w, on, &hs, f, p); done {
+			return r
+		}
+		if x := emit_close(w, on, &hs, d, at(w, p), intrinsics.ptr_sub(after, p)); x != .Next {
+			return refused(w, hs, x, after)
+		}
+	} else {
+		if .Held in f.flags {
+			if r, done := give_held(w, on, &hs, f, p, .Comment_Foot); done {
+				return r
+			}
+		}
+		if passing(w) {
+			w.skip_value = false
+		} else {
+			lo := f.text_lo
+			decode := .Decode in f.flags || .Seen not_in f.flags && has_cr(ptr_at(w, lo), p)
+			if x := emit_text(w, on, &hs, f, lo, int(at(w, p) - lo), decode); x != .Next {
+				return refused(w, hs, x, p)
+			}
+		}
+	}
+	if w.ns_len == 0 && d > 1 {
+		pf := &w.stack[d - 2]
+		pf.text_lo = at(w, after)
+		pf.flags -= {.Seen, .Decode, .Chars, .Dtd}
+		pf.flags += {.Prev}
 		return #must_tail st_content(after, end, d - 1, w, hs.a, hs.b, hs.c, on)
 	}
 	return #must_tail st_closed(after, end, d, w, hs.a, hs.b, hs.c, on)

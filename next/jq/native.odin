@@ -57,6 +57,13 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 			v, _ := query.member(h, t, query.text_of(n.value))
 			return v if v.kind != .Absent else query.NULL, .Value
 		}
+		if t.kind == .Node && (^query.Doc_Block)(t.p).doc.nodes[t.n].kind == .Object {
+			v, ms := query.member(h, t, query.text_of(n.value))
+			if ms != .Ok {
+				return query.NULL, .Failed
+			}
+			return v if v.kind != .Absent else query.NULL, .Value
+		}
 		return step_got(apply_step(m, n, t, query.ABSENT, query.ABSENT, query.ABSENT))
 	case .Index:
 		key, kg := native(m, n.b, query.retain(input), env)
@@ -132,6 +139,27 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 		if l.kind == .Int && r.kind == .Int {
 			if v, ok := int_binary(n.op, l.i, r.i); ok {
 				return v, .Value
+			}
+		} else if (l.kind == .Int || l.kind == .Node) && (r.kind == .Int || r.kind == .Node) {
+			li, ri: i64
+			lok, rok: bool
+			if n.op >= .Eq && n.op <= .Ge {
+				li, lok = query.as_i64(l)
+				if lok {
+					ri, rok = query.as_i64(r)
+				}
+			} else {
+				li, lok = query.as_exact_i64(l)
+				if lok {
+					ri, rok = query.as_exact_i64(r)
+				}
+			}
+			if lok && rok {
+				if v, ok := int_binary(n.op, li, ri); ok {
+					query.release(h, l)
+					query.release(h, r)
+					return v, .Value
+				}
 			}
 		}
 		v, s := binary_owned(h, n.op, l, r)
@@ -347,6 +375,35 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 // Fast native path for simple non-optional updates (`. op= rhs`, `.k op= rhs`, `.[expr] op= rhs`, `.a.b = rhs`).
 @(private)
 native_update :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: query.Value, got: Got) {
+	h := m.h
+	if n.op == .Assign && n.a.a != nil && n.a.a.kind == .Identity && (n.a.kind == .Field || (n.a.kind == .Index && n.a.b != nil)) {
+		step := n.a
+		rhs, rg := native(m, n.b, query.retain(input), env)
+		if rg != .Value {
+			query.release(h, input)
+			return rhs, rg
+		}
+		if step.kind == .Field {
+			v, s := query.set_one(h, input, step.value, rhs)
+			return v, got_of(s)
+		}
+		k, kg := native(m, step.b, query.retain(input), env)
+		if kg != .Value {
+			query.release(h, rhs)
+			if kg == .None {
+				return input, .Value
+			}
+			query.release(h, input)
+			return k, kg
+		}
+		v, s := query.set_one_key_owned(h, input, k, rhs)
+		return v, got_of(s)
+	}
+	return native_update_general(m, n, input, env)
+}
+
+@(private = "file")
+native_update_general :: #force_no_inline proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: query.Value, got: Got) {
 	h := m.h
 	rhs := query.ABSENT
 	if n.op != .Modify {

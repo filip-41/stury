@@ -229,8 +229,16 @@ note_presence :: #force_inline proc "contextless" (h: ^Heap, p: tape.Presence) {
 
 // Whether node `at` of partial document `doc` or any descendant in its subtree is marked `CONTAINER_PARTIAL`.
 @(private)
-node_has_partial :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> bool #no_bounds_check {
-	if doc.partial == nil || int(at) >= len(doc.nodes) {
+node_has_partial :: #force_inline proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> bool #no_bounds_check {
+	if intrinsics.expect(doc.partial == nil, true) {
+		return false
+	}
+	return node_has_partial_slow(doc, at)
+}
+
+@(private = "file", cold)
+node_has_partial_slow :: #force_no_inline proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> bool #no_bounds_check {
+	if int(at) >= len(doc.nodes) {
 		return false
 	}
 	t := doc.nodes[at]
@@ -490,24 +498,29 @@ has_member :: proc(h: ^Heap, v: Value, key: string) -> bool {
 	return p == .Found
 }
 
+// Fast word-at-a-time hash for short (`<= 8` byte) keys in built `Object_Block.slots` tables.
+@(private = "file")
+object_key_hash_short :: #force_inline proc "contextless" (p: [^]u8, n: int) -> u32 #no_bounds_check {
+	w: u64
+	switch {
+	case n >= 4:
+		w = u64(intrinsics.unaligned_load((^u32)(p))) | u64(intrinsics.unaligned_load((^u32)(p[n - 4:]))) << 32
+	case n >= 2:
+		w = u64(intrinsics.unaligned_load((^u16)(p))) | u64(p[n - 1]) << 16
+	case n == 1:
+		w = u64(p[0])
+	}
+	h := (u64(0x9E3779B97F4A7C15) ~ w ~ u64(n) << 56) * 0x9E3779B97F4A7C15
+	h ~= h >> 32
+	return u32((h * 0x9E3779B97F4A7C15) >> 32)
+}
+
 // Fast word-at-a-time hash for built `Object_Block.slots` tables (private to this file).
 @(private = "file")
 object_key_hash :: #force_inline proc "contextless" (s: string) -> u32 #no_bounds_check {
 	n := len(s)
-	p := raw_data(s)
 	if intrinsics.expect(n <= 8, true) {
-		w: u64
-		switch {
-		case n >= 4:
-			w = u64(intrinsics.unaligned_load((^u32)(p))) | u64(intrinsics.unaligned_load((^u32)(p[n - 4:]))) << 32
-		case n >= 2:
-			w = u64(intrinsics.unaligned_load((^u16)(p))) | u64(p[n - 1]) << 16
-		case n == 1:
-			w = u64(p[0])
-		}
-		h := (u64(0x9E3779B97F4A7C15) ~ w ~ u64(n) << 56) * 0x9E3779B97F4A7C15
-		h ~= h >> 32
-		return u32((h * 0x9E3779B97F4A7C15) >> 32)
+		return object_key_hash_short(raw_data(s), n)
 	}
 	return tape.text_hash(transmute([]u8)s)
 }
@@ -525,10 +538,9 @@ entry_key_text :: #force_inline proc "contextless" (v: Value) -> string #no_boun
 	return entry_node_text(v)
 }
 
-// Fast equality of built object entry key `v` against `ks`.
+// Byte equality of two equal-or-arbitrary-length strings, fast-pathing short slices inline.
 @(private = "file")
-entry_key_eq :: #force_inline proc "contextless" (v: Value, ks: string) -> bool #no_bounds_check {
-	s := entry_key_text(v)
+raw_text_eq :: #force_inline proc "contextless" (s, ks: string) -> bool #no_bounds_check {
 	n := len(ks)
 	if len(s) != n {
 		return false
@@ -550,6 +562,12 @@ entry_key_eq :: #force_inline proc "contextless" (v: Value, ks: string) -> bool 
 		return intrinsics.unaligned_load((^u16)(a)) == intrinsics.unaligned_load((^u16)(b)) && a[n - 1] == b[n - 1]
 	}
 	return n == 0 || a[0] == b[0]
+}
+
+// Fast equality of built object entry key `v` against `ks`.
+@(private = "file")
+entry_key_eq :: #force_inline proc "contextless" (v: Value, ks: string) -> bool #no_bounds_check {
+	return raw_text_eq(entry_key_text(v), ks)
 }
 
 // The index of the entry of `o` with key `key`, -1 for none.
@@ -601,8 +619,9 @@ index_keys :: proc(h: ^Heap, o: ^Object_Block) -> Status #no_bounds_check {
 	o.slot_log2 = log2
 	slots := ([^]u32)(o.next_or_slots)
 	mask := count - 1
-	for e, i in object_entries(o) {
-		at := object_key_hash(entry_key_text(e.key)) & mask
+	entries := ([^]Entry)(uintptr(o) + size_of(Object_Block))
+	for i in 0 ..< int(o.len) {
+		at := object_key_hash(entry_key_text(entries[i].key)) & mask
 		for slots[at] != 0 {
 			at = (at + 1) & mask
 		}
@@ -624,7 +643,7 @@ slot_put :: #force_inline proc "contextless" (o: ^Object_Block, key: string, i: 
 
 // Makes the built object `o^` one the caller alone holds, with room for `more` entries past its length.
 @(private, require_results)
-own_object :: proc(h: ^Heap, o: ^Value, more: int) -> Status {
+own_object :: proc(h: ^Heap, o: ^Value, more: int) -> Status #no_bounds_check {
 	old := (^Object_Block)(o.p)
 	n := int(old.len)
 	if unique(o^) && n + more <= int(old.cap) {
@@ -663,74 +682,19 @@ own_object :: proc(h: ^Heap, o: ^Value, more: int) -> Status {
 	return .Ok
 }
 
-// Sets member `key`, a string, of the built object `o^` the caller owns to `x`. Both move into the object. A member
-// already there keeps its place.
-@(require_results)
-object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_bounds_check {
-	b := (^Object_Block)(o.p)
-	ks := entry_key_text(key)
-	k := -1
-	empty_slot := u32(0)
-	has_slot := false
-	key_hash := u32(0)
-	if slots := object_slots(b); slots != nil {
-		entries := object_entries(b)
-		mask := (u32(1) << b.slot_log2) - 1
-		key_hash = object_key_hash(ks)
-		for at := key_hash & mask; ; at = (at + 1) & mask {
-			slot := slots[at]
-			if slot == 0 {
-				empty_slot = at
-				has_slot = true
-				break
-			}
-			if entry_key_eq(entries[slot - 1].key, ks) {
-				k = int(slot - 1)
-				break
-			}
-		}
-	} else {
-		for e, i in object_entries(b) {
-			if entry_key_eq(e.key, ks) {
-				k = i
-				break
-			}
-		}
+// Marks container/partial flags on `b` when a value inserted or replaced into it may hold containers.
+@(private = "file", cold, require_results)
+object_note_container :: #force_no_inline proc "contextless" (b: ^Object_Block, x: Value) -> Status {
+	b.flags |= BLOCK_HAS_CONTAINER
+	if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
+		b.flags |= BLOCK_HAS_PARTIAL
 	}
-	if k >= 0 {
-		if s := own_object(h, o, 0); s != .Ok {
-			release(h, key)
-			release(h, x)
-			return s
-		}
-		b = (^Object_Block)(o.p)
-		e := &object_entries(b)[k]
-		release(h, e.value)
-		release(h, key)
-		e.value = x
-		if x.held {
-			b.flags |= BLOCK_HAS_HELD
-		}
-		if x.kind >= .Array {
-			b.flags |= BLOCK_HAS_CONTAINER
-			if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
-				b.flags |= BLOCK_HAS_PARTIAL
-			}
-		}
-		return .Ok
-	}
-	grew := false
-	if intrinsics.expect(!(unique(o^) && b.len < b.cap), false) {
-		if s := own_object(h, o, 1); s != .Ok {
-			release(h, key)
-			release(h, x)
-			return s
-		}
-		b = (^Object_Block)(o.p)
-		grew = true
-	}
-	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
-	b.len += 1
+	return .Ok
+}
+
+// Updates container flags on `b` after inserting `{key, x}` (or replacing an existing entry with `x`).
+@(private = "file")
+object_note_value :: #force_inline proc "contextless" (b: ^Object_Block, key, x: Value) {
 	if key.held || x.held {
 		b.flags |= BLOCK_HAS_HELD
 	}
@@ -740,20 +704,144 @@ object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_boun
 			b.flags |= BLOCK_HAS_PARTIAL
 		}
 	}
+}
+
+@(private = "file", require_results)
+object_replace_at :: #force_no_inline proc(h: ^Heap, o: ^Value, k: int, key, x: Value) -> Status #no_bounds_check {
+	if s := own_object(h, o, 0); s != .Ok {
+		release(h, key)
+		release(h, x)
+		return s
+	}
+	b := (^Object_Block)(o.p)
+	e := &object_entries(b)[k]
+	release(h, e.value)
+	release(h, key)
+	e.value = x
+	object_note_value(b, {}, x)
+	return .Ok
+}
+
+@(private = "file", cold, require_results)
+object_insert_grow :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value, ks: string, kh: u32) -> Status #no_bounds_check {
+	if s := own_object(h, o, 1); s != .Ok {
+		release(h, key)
+		release(h, x)
+		return s
+	}
+	b := (^Object_Block)(o.p)
+	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
+	b.len += 1
+	object_note_value(b, key, x)
 	if b.slot_log2 != 0 {
-		if has_slot && !grew {
-			([^]u32)(b.next_or_slots)[empty_slot] = b.len
-		} else {
-			slots := ([^]u32)(b.next_or_slots)
-			mask := (u32(1) << b.slot_log2) - 1
-			at := (key_hash if has_slot else object_key_hash(ks)) & mask
-			for slots[at] != 0 {
-				at = (at + 1) & mask
-			}
-			slots[at] = b.len
+		slots := ([^]u32)(b.next_or_slots)
+		mask := (u32(1) << b.slot_log2) - 1
+		at := kh & mask
+		for slots[at] != 0 {
+			at = (at + 1) & mask
 		}
+		slots[at] = b.len
 	} else if b.len > SMALL_ENTRIES {
 		return index_keys(h, b)
+	}
+	return .Ok
+}
+
+@(private = "file", require_results)
+object_put_small :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value) -> Status #no_bounds_check {
+	ks := entry_key_text(key)
+	b := (^Object_Block)(o.p)
+	for e, i in object_entries(b) {
+		if entry_key_eq(e.key, ks) {
+			return object_replace_at(h, o, i, key, x)
+		}
+	}
+	if intrinsics.expect(!(unique(o^) && b.len < b.cap), false) {
+		return object_insert_grow(h, o, key, x, ks, 0)
+	}
+	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
+	b.len += 1
+	object_note_value(b, key, x)
+	if b.len > SMALL_ENTRIES {
+		return index_keys(h, b)
+	}
+	return .Ok
+}
+
+@(private = "file", cold, require_results)
+object_put_slow :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value) -> Status #no_bounds_check {
+	b := (^Object_Block)(o.p)
+	ks := entry_key_text(key)
+	if b.slot_log2 == 0 {
+		return object_put_small(h, o, key, x)
+	}
+	slots := ([^]u32)(b.next_or_slots)
+	entries := object_entries(b)
+	mask := (u32(1) << b.slot_log2) - 1
+	kh := object_key_hash(ks)
+	at := kh & mask
+	for {
+		slot := slots[at]
+		if slot == 0 {
+			break
+		}
+		if entry_key_eq(entries[slot - 1].key, ks) {
+			return object_replace_at(h, o, int(slot - 1), key, x)
+		}
+		at = (at + 1) & mask
+	}
+	if intrinsics.expect(!(unique(o^) && b.len < b.cap), false) {
+		return object_insert_grow(h, o, key, x, ks, kh)
+	}
+	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
+	b.len += 1
+	slots[at] = b.len
+	object_note_value(b, key, x)
+	return .Ok
+}
+
+// Sets member `key`, a string, of the built object `o^` the caller owns to `x`. Both move into the object. A member
+// already there keeps its place.
+@(require_results)
+object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_bounds_check {
+	b := (^Object_Block)(o.p)
+	if b.slot_log2 == 0 {
+		return object_put_small(h, o, key, x)
+	}
+	if intrinsics.expect(key.kind != .String || key.n > 8, false) {
+		return object_put_slow(h, o, key, x)
+	}
+	ks := string(key.s[:key.n])
+	slots := ([^]u32)(b.next_or_slots)
+	entries := object_entries(b)
+	mask := (u32(1) << b.slot_log2) - 1
+	kh := object_key_hash_short(key.s, int(key.n))
+	at := kh & mask
+	for {
+		slot := slots[at]
+		if slot == 0 {
+			break
+		}
+		ek := entries[slot - 1].key
+		if intrinsics.expect(ek.kind != .String, false) {
+			return object_put_slow(h, o, key, x)
+		}
+		if ek.n == key.n && raw_text_eq(string(ek.s[:ek.n]), ks) {
+			return object_replace_at(h, o, int(slot - 1), key, x)
+		}
+		at = (at + 1) & mask
+	}
+	if intrinsics.expect(!(unique(o^) && b.len < b.cap), false) {
+		return object_insert_grow(h, o, key, x, ks, kh)
+	}
+	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
+	b.len += 1
+	slots[at] = b.len
+	if key.held || x.held {
+		b.flags |= BLOCK_HAS_HELD
+	}
+	if intrinsics.expect(x.kind >= .Array, false) {
+		return object_note_container(b, x)
 	}
 	return .Ok
 }
@@ -772,15 +860,7 @@ object_put_fresh :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #n
 	}
 	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
 	b.len += 1
-	if key.held || x.held {
-		b.flags |= BLOCK_HAS_HELD
-	}
-	if x.kind >= .Array {
-		b.flags |= BLOCK_HAS_CONTAINER
-		if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
-			b.flags |= BLOCK_HAS_PARTIAL
-		}
-	}
+	object_note_value(b, key, x)
 	if b.slot_log2 != 0 {
 		slot_put(b, entry_key_text(key), b.len - 1)
 	} else if b.len > SMALL_ENTRIES {
@@ -877,11 +957,6 @@ cursor_open :: proc(h: ^Heap, v: Value) -> (c: Cursor, s: Status) {
 		return c, .Ok
 	}
 	d := (^Doc_Block)(v.p)
-	if groups_names(d, v.n) {
-		c.of = grouped(h, v) or_return
-		c.h = h
-		return c, .Ok
-	}
 	p: tape.Presence
 	err: runtime.Allocator_Error
 	c.children, p, err = tape.children(reader(d), tape.Node_Index(v.n), h.allocator)
@@ -891,6 +966,13 @@ cursor_open :: proc(h: ^Heap, v: Value) -> (c: Cursor, s: Status) {
 	note_presence(h, p)
 	if p != .Found {
 		c.of = ABSENT
+		return c, .Ok
+	}
+	if groups_names(d, v.n) && !c.children.once {
+		tape.destroy_children(&c.children)
+		c.of = grouped(h, v) or_return
+		c.h = h
+		return c, .Ok
 	}
 	return c, .Ok
 }
@@ -937,6 +1019,25 @@ cursor_next :: proc(h: ^Heap, c: ^Cursor) -> (key, value: Value, more: bool, s: 
 		}
 		return cursor_next_array_slow(h, d, at)
 	}
+	if cont.kind == .Object && c.children.once && c.children.keys_n == 0 {
+		end := c.children.container + tape.Node_Index(cont.n)
+		at := c.children.next
+		if at >= end {
+			return ABSENT, ABSENT, false, .Ok
+		}
+		intrinsics.prefetch_read_data(&nodes[at + 64], 3)
+		kt := nodes[at]
+		val_at := at + 1
+		vt := nodes[val_at]
+		c.children.next = val_at + (tape.Node_Index(vt.n) if vt.kind > .Plain else 1)
+		c.children.place += 1
+		if kt.role == .Key && u8(kt.kind) - u8(tape.Kind.String) <= 1 && kt.n > 0 && kt.spelling & tape.SPELLING_DECODE == 0 &&
+		   (vt.kind == .Number || vt.kind >= .Array || (u8(vt.kind) - u8(tape.Kind.String) <= 1 && vt.role != .Key && vt.spelling & tape.SPELLING_DECODE == 0)) {
+			d.rc += 2
+			return {p = d, n = u32(at), kind = .Node, held = true}, {p = d, n = u32(val_at), kind = .Node, held = true}, true, .Ok
+		}
+		return cursor_next_object_slow(h, d, at)
+	}
 	return cursor_next_node_slow(h, d, &c.children)
 }
 
@@ -947,6 +1048,17 @@ cursor_next_array_slow :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tap
 		return ABSENT, ABSENT, false, s
 	}
 	return ABSENT, value, true, .Ok
+}
+
+@(private = "file", cold, require_results)
+cursor_next_object_slow :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (key, value: Value, more: bool, s: Status) {
+	key = key_value(h, d, at) or_return
+	value, s = node_value(h, d, at + 1)
+	if s != .Ok {
+		release(h, key)
+		return ABSENT, ABSENT, false, s
+	}
+	return key, value, true, .Ok
 }
 
 @(private = "file", cold, require_results)
@@ -982,7 +1094,7 @@ cursor_close :: proc(c: ^Cursor) {
 // in document order, at the place its first came. Each child is still its node. Only this reads a built array among
 // the children, so an array among them is a group.
 @(private, require_results)
-grouped :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
+grouped :: #force_no_inline proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	d := (^Doc_Block)(v.p)
 	out := make_object(h, length_of(h, v)) or_return
 	defer if status != .Ok {

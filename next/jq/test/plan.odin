@@ -137,6 +137,34 @@ plan_demand_paths_grains_and_limits :: proc(t: ^testing.T) {
 		testing.expect_value(t, plan.sources[.Main].reason, query.Whole_Reason.All_Steps_Only)
 	}
 
+	// Cost rule: >= 5 shallow leaves past unbounded `[]` degrades to `.Whole` (`.Too_Wide`),
+	// whereas 2 fields, nested subtrees under `[]`, or `.Keys` subtree grains stay `.Partial`.
+	{
+		prog, plan := analyze_src(t, `.logs[] | select(.status == 500) | {id, ts, level, msg}`)
+		defer jq.destroy_program(prog)
+		defer jq.destroy_plan(&plan)
+		testing.expect_value(t, plan.sources[.Main].mode, query.Demand_Mode.Whole)
+		testing.expect_value(t, plan.sources[.Main].reason, query.Whole_Reason.Too_Wide)
+	}
+	{
+		prog, plan := analyze_src(t, `.logs[] | select(.status == 500) | .id`)
+		defer jq.destroy_program(prog)
+		defer jq.destroy_plan(&plan)
+		testing.expect_value(t, plan.sources[.Main].mode, query.Demand_Mode.Partial)
+	}
+	{
+		prog, plan := analyze_src(t, `.statuses[] | {id, text, name: .user.name, count: .retweet_count, lang}`)
+		defer jq.destroy_program(prog)
+		defer jq.destroy_plan(&plan)
+		testing.expect_value(t, plan.sources[.Main].mode, query.Demand_Mode.Partial)
+	}
+	{
+		prog, plan := analyze_src(t, `.items[] | {a: (.a | length), b, c, d, e}`)
+		defer jq.destroy_program(prog)
+		defer jq.destroy_plan(&plan)
+		testing.expect_value(t, plan.sources[.Main].mode, query.Demand_Mode.Partial)
+	}
+
 	// Stream mode forces `.Whole` with `.Stream_Mode`.
 	{
 		prog, plan := analyze_src(t, `.a`, {stream = true})

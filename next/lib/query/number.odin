@@ -208,6 +208,20 @@ as_f64 :: proc(v: Value) -> f64 {
 	return 0
 }
 
+// Number `v` as an exact `i64` when held directly or stored as an `.Int` document node (never converting `.Double`/`.Float` nodes).
+as_exact_i64 :: proc(v: Value) -> (i64, bool) {
+	if v.kind == .Int {
+		return v.i, true
+	}
+	if v.kind == .Node {
+		d := (^Doc_Block)(v.p)
+		if n, nok := tape.node_number(&d.doc, tape.Node_Index(v.n)); nok && n.kind == .Int {
+			return i64(n.bits), true
+		}
+	}
+	return 0, false
+}
+
 // Number `v` as an `i64` when it is an integer in its range, with no rounding.
 as_i64 :: proc(v: Value) -> (i64, bool) {
 	#partial switch v.kind {
@@ -219,7 +233,10 @@ as_i64 :: proc(v: Value) -> (i64, bool) {
 		}
 	case .Node:
 		d := (^Doc_Block)(v.p)
-		n, _ := tape.node_number(&d.doc, tape.Node_Index(v.n))
+		n, nok := tape.node_number(&d.doc, tape.Node_Index(v.n))
+		if !nok {
+			return 0, false
+		}
 		if n.kind == .Int {
 			return i64(n.bits), true
 		}
