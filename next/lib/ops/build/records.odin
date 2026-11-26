@@ -235,10 +235,14 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 	// Each record is built in one node room the batch lends, and its nodes are copied out to their own block. A memory
 	// budget counts each record's own room instead.
 	lent: []tape.Node
+	has_mem_budget := r.opts.budget.memory != 0
+	max_depth := read_depth(r.opts)
+	delimited := r.framing == .Lines || r.framing == .Seq
+	pieces := r.opts.pieces != nil
 	for n < len(out) {
 		allocator := hook.read_budget(&m, r.opts, block)
 		scratch := hook.scratch(r.opts, allocator, &scratch_local)
-		budget := &m.main if r.opts.budget.memory != 0 else nil
+		budget := &m.main if has_mem_budget else nil
 		lo, cut, framed := frame(r, allocator)
 		if !framed {
 			r.err = hook.memory_budget_error(&m.main, r.err)
@@ -261,13 +265,13 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 			}
 			break
 		}
-		if (r.framing == .Lines || r.framing == .Seq) && cut < u64(len(r.src)) && record_too_wide(r, lo, cut) {
+		if delimited && cut < u64(len(r.src)) && record_too_wide(r, lo, cut) {
 			records_stop(r, tape.record_too_long(lo))
 			break
 		}
-		depth := min(read_depth(r.opts), cut - lo)
+		depth := min(max_depth, cut - lo)
 		most := node_most(bound(r.src[lo:cut], depth), r.opts)
-		if r.opts.budget.memory == 0 && lent == nil {
+		if !has_mem_budget && lent == nil {
 			raw, err := tape.record_block_take(&r.block, SCAN_NODES * size_of(tape.Node), align_of(tape.Node))
 			if err != nil {
 				records_stop(r, err)
@@ -329,7 +333,7 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 			break
 		}
 		root_close, werr, _ := hook.walk_error(w.res, rules)
-		if werr == nil && r.opts.pieces != nil {
+		if werr == nil && pieces {
 			// A window's bytes may go once the batch ends, so the document holds the bytes it reads.
 			if e := scanner_hold(&h, regs, r.src); e != nil {
 				werr = e

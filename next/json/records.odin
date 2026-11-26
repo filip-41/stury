@@ -33,8 +33,7 @@ Records :: struct {
 	seq_unframed:  bool,
 	skip_line:     bool,
 	// The reads of the spec and `LAX` the records were opened with, which `records_open` picks, so that a caller of one
-	// spec links the walks of that spec alone: a read that switched on `spec` here would reach every spec's walks and
-	// no build could drop the ones it never reads.
+	// spec links the walks of that spec alone.
 	validate_as:   Records_Validate,
 	find_as:       Records_Find,
 	scan_as:       Records_Scan,
@@ -55,6 +54,16 @@ Records_Reads :: struct {
 	validate: Records_Validate,
 	find:     Records_Find,
 	scan:     Records_Scan,
+}
+
+// Per-call metadata copied by value for parallel worker chunks so `&r` never escapes across `fan_each`.
+@(private)
+Chunk_Context :: struct {
+	src:       []u8,
+	opts:      Options,
+	framing:   tape.Framing,
+	max_bytes: u64,
+	seq_rs:    bool,
 }
 
 #assert(size_of(Walk(.Json5, build.Scanner, false, build.SCANNER_CAPS)) <= size_of(Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS)))
@@ -85,8 +94,12 @@ records_open :: #force_inline proc(src: []u8, framing := tape.Framing.Lines, spe
 	}
 	if e := build.records_path_refused(&FORMATS[spec], framing, path, opts); e != nil {
 		r.err, r.at = e, .Done
-	} else if e := build.frame_init(&r.frame, path); e != nil {
-		r.err, r.at = e, .Done
+	} else if len(path) >= 8 {
+		if e := build.frame_init(&r.frame, path); e != nil {
+			r.err, r.at = e, .Done
+		}
+	} else if framing == .Elements || framing == .Members {
+		r.frame.allocator = context.allocator
 	}
 	r.release = records_release
 	if framing == .Concatenated {
@@ -96,31 +109,32 @@ records_open :: #force_inline proc(src: []u8, framing := tape.Framing.Lines, spe
 		r.err, r.at = e, .Done
 	}
 	walk_init(&r.walk, src, nil, (^hook.No_Hooks)(nil), nil, {}, nil, build.read_depth(opts), opts.tolerate, opts.budget.steps)
-	// The reads of this spec and `LAX`. The switch folds at the call site of an inlined `records_open` with a constant
-	// spec and options, so the walks of the specs and `LAX` a caller never opens are dropped.
 	lax := build.read_lax(opts)
 	chosen: Records_Reads
 	if spec == .Json {
-		if lax {
-			chosen = records_reads_of(.Json, true)
-		} else {
-			chosen = records_reads_of(.Json, false)
-		}
+		chosen = records_reads_of(.Json, true) if lax else records_reads_of(.Json, false)
 	} else if spec == .Jsonc {
-		if lax {
-			chosen = records_reads_of(.Jsonc, true)
-		} else {
-			chosen = records_reads_of(.Jsonc, false)
-		}
+		chosen = records_reads_of(.Jsonc, true) if lax else records_reads_of(.Jsonc, false)
 	} else {
-		if lax {
-			chosen = records_reads_of(.Json5, true)
-		} else {
-			chosen = records_reads_of(.Json5, false)
-		}
+		chosen = records_reads_of(.Json5, true) if lax else records_reads_of(.Json5, false)
 	}
 	r.validate_as, r.find_as, r.scan_as = chosen.validate, chosen.find, chosen.scan
 	return
+}
+
+@(private)
+records_reads_of :: #force_inline proc "contextless" ($S: Spec, $LAX: bool) -> Records_Reads {
+	return {
+		validate = proc(r: ^Records, out: []tape.Record, allocator: runtime.Allocator) -> int {
+			return records_validate_as(r, out, S, LAX, allocator)
+		},
+		find = proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read: tape.Read_Options, allocator: runtime.Allocator) -> int {
+			return records_find_as(r, path, out, answers, S, LAX, read, allocator)
+		},
+		scan = proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read: tape.Read_Options, allocator: runtime.Allocator) -> int {
+			return records_scan_as(r, demand, out, docs, S, LAX, read, allocator)
+		},
+	}
 }
 
 // Reads the next records of `r` and judges each, as `validate` judges its bytes alone, keeping in `out` those that do
@@ -158,18 +172,38 @@ records_scan :: #force_inline proc(r: ^Records, demand: ^tape.Demand, out: []tap
 	return r.scan_as(r, demand, out, docs, read, allocator)
 }
 
-// Builds a worker-local `Records` cursor for parallel chunk `chunk`, with locked `scratch` and serial runner.
+// Captures parallel chunk invariants from `r` by value so `&r` is not captured inside `fan_each` jobs.
 @(private)
-chunk_records :: #force_inline proc(parent: ^Records, $S: Spec, chunk: ^build.Record_Chunk, k: int, scratch: runtime.Allocator) -> Records {
-	lr := Records {
-		records = {src = parent.src[:chunk.hi], opts = parent.opts, framing = parent.framing, pos = chunk.lo, at = .Open, max_bytes = parent.max_bytes},
-		spec    = S,
-		seq_rs  = parent.seq_rs || k > 0,
+chunk_context_of :: #force_inline proc "contextless" (r: ^Records) -> Chunk_Context {
+	return {src = r.src, opts = r.opts, framing = r.framing, max_bytes = r.max_bytes, seq_rs = r.seq_rs}
+}
+
+// Initializes caller-owned unzeroed `lr` (`Records = ---`) for parallel chunk `chunk`, with locked `scratch` and serial
+// runner, avoiding zeroing/copying the 18+ KiB `Walk.gaps` array per worker chunk.
+@(private)
+chunk_records_init :: #force_inline proc(lr: ^Records, ctx: Chunk_Context, chunk: ^build.Record_Chunk, k: int, $S: Spec, $LAX: bool, scratch: runtime.Allocator) {
+	lr.records = {
+		src       = ctx.src[:chunk.hi],
+		opts      = ctx.opts,
+		framing   = ctx.framing,
+		pos       = chunk.lo,
+		at        = .Open,
+		max_bytes = ctx.max_bytes,
 	}
 	lr.opts.runner = nil
 	lr.opts.scratch = scratch
+	lr.spec = S
+	lr.frame = {}
+	lr.window = 0
+	lr.seen = 0
+	lr.open = false
+	lr.seq_rs = ctx.seq_rs || k > 0
+	lr.seq_unframed = false
+	lr.skip_line = false
+	lr.validate_as = nil
+	lr.find_as = nil
+	lr.scan_as = nil
 	walk_init(&lr.walk, lr.src, nil, (^hook.No_Hooks)(nil), nil, {}, nil, build.read_depth(lr.opts), lr.opts.tolerate, lr.opts.budget.steps)
-	return lr
 }
 
 @(private)
@@ -194,43 +228,64 @@ records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S
 		return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, hook.no_hook)
 	}
 	if (r.framing == .Lines || r.framing == .Seq) && r.opts.runner != nil && r.opts.runner.threads > 0 && r.opts.pieces == nil && r.at != .Done && len(out) > 0 && len(r.src) - int(r.pos) >= build.parallel_records_from() && build.validate_dups(&FORMATS[S], r.opts) {
-		chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk
-		if nc := cut_json_chunks(r, chunks[:]); nc >= 2 {
-			run_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int, max_bad: int, bad_out: ^[dynamic]build.Bad_Entry, alloc, scratch: runtime.Allocator) {
-				cframe :: #force_inline proc(r: ^tape.Records, a: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
-					return record_frame_of(r, S, LAX, hook.No_Hooks, a)
-				}
-				cwalk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
-					return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, hook.no_hook)
-				}
-				lr := chunk_records((^Records)(data), S, chunk, k, scratch)
-				bad_out.allocator = alloc
-				for len(bad_out) < max_bad && lr.at != .Done {
-					buf: [1]tape.Record
-					got := build.records_validate(&lr, buf[:], &FORMATS[S], &RULES, alloc, cframe, cwalk)
-					if got == 0 {
-						break
-					}
-					if _, err := append(bad_out, build.Bad_Entry{rec = buf[0], index_after = lr.index, pos_after = lr.pos}); err != nil {
-						chunk.fatal = err
-						break
-					}
-				}
-				chunk.count = lr.index
-				chunk.end_pos = lr.pos
-				if chunk.fatal == nil {
-					chunk.fatal = lr.err
-				}
-			}
-			n, done := build.records_validate_chunks(r, out, chunks[:nc], caller, r, run_chunk)
-			sync_seq_rs(r)
-			if done {
-				return n
-			}
-			return n + build.records_validate(r, out[n:], &FORMATS[S], &RULES, caller, frame, walk)
+		n, handled := records_validate_parallel(r, out, S, LAX, caller)
+		if handled {
+			return n
 		}
 	}
-	return build.records_validate(r, out, &FORMATS[S], &RULES, caller, frame, walk)
+	return build.records_validate(r, out, &FORMATS[S], &RULES, caller, frame, walk, false)
+}
+
+@(private)
+records_validate_parallel :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S: Spec, $LAX: bool, caller: runtime.Allocator) -> (int, bool) {
+	chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk = ---
+	nc := cut_json_chunks(r, chunks[:])
+	if nc < 2 {
+		return 0, false
+	}
+	Validate_Data :: struct {
+		ctx: Chunk_Context,
+	}
+	run_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int, max_bad: int, bad_out: ^[dynamic]build.Bad_Entry, alloc, scratch: runtime.Allocator) {
+		cframe :: #force_inline proc(r: ^tape.Records, a: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
+			return record_frame_of(r, S, LAX, hook.No_Hooks, a)
+		}
+		cwalk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
+			return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, hook.no_hook)
+		}
+		d := (^Validate_Data)(data)
+		lr: Records = ---
+		chunk_records_init(&lr, d.ctx, chunk, k, S, LAX, scratch)
+		bad_out.allocator = alloc
+		for len(bad_out) < max_bad && lr.at != .Done {
+			buf: [1]tape.Record = ---
+			if build.records_validate(&lr, buf[:], &FORMATS[S], &RULES, alloc, cframe, cwalk, false) == 0 {
+				break
+			}
+			if _, err := append(bad_out, build.Bad_Entry{rec = buf[0], index_after = lr.index, pos_after = lr.pos}); err != nil {
+				chunk.fatal = err
+				break
+			}
+		}
+		chunk.count = lr.index
+		chunk.end_pos = lr.pos
+		if chunk.fatal == nil {
+			chunk.fatal = lr.err
+		}
+	}
+	vd := Validate_Data{ctx = chunk_context_of(r)}
+	n, done := build.records_validate_chunks(r, out, chunks[:nc], caller, &vd, run_chunk)
+	sync_seq_rs(r)
+	if done {
+		return n, true
+	}
+	frame :: #force_inline proc(r: ^tape.Records, a: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
+		return record_frame_of(r, S, LAX, hook.No_Hooks, a)
+	}
+	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
+		return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, hook.no_hook)
+	}
+	return n + build.records_validate(r, out[n:], &FORMATS[S], &RULES, caller, frame, walk, false), true
 }
 
 @(private)
@@ -247,48 +302,73 @@ records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []
 	}
 	cap := min(len(out), len(answers))
 	if (r.framing == .Lines || r.framing == .Seq) && r.opts.runner != nil && r.opts.runner.threads > 0 && r.opts.pieces == nil && r.quarantine == nil && r.at != .Done && cap >= 64 && len(r.src) - int(r.pos) >= build.parallel_records_from() && build.path_dups(&FORMATS[S], r.opts) {
-		chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk
-		if nc := cut_json_chunks(r, chunks[:]); nc >= 2 {
-			Find_Data :: struct {
-				r:       ^Records,
-				path:    []tape.Step,
-				out:     []tape.Record,
-				answers: []tape.Span_Answer,
-				read:    tape.Read_Options,
-			}
-			count_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int) {
-				d := (^Find_Data)(data)
-				chunk.count = count_delim_records(d.r.src, chunk.lo, chunk.hi, d.r.framing, S)
-			}
-			run_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int, alloc, scratch: runtime.Allocator) {
-				crew :: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result {
-					regs: hook.Regs
-					return walk_again((^Walk(S, build.Finder, LAX, build.FINDER_CAPS))(h.walk), h.src, lo, &regs, build.finder_hook)
-				}
-				cframe :: #force_inline proc(r: ^tape.Records, a: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
-					return record_frame_of(r, S, LAX, build.Finder, a)
-				}
-				cwalk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
-					return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, build.finder_hook)
-				}
-				d := (^Find_Data)(data)
-				if chunk.limit == 0 {
-					chunk.end_pos = chunk.lo
-					return
-				}
-				lr := chunk_records(d.r, S, chunk, k, scratch)
-				chunk.done = build.records_find(&lr, d.path, d.out[chunk.offset:][:chunk.limit], d.answers[chunk.offset:][:chunk.limit], &FORMATS[S], &RULES, d.read, alloc, tape.number_respell, crew, cframe, cwalk)
-				chunk.end_pos = lr.pos
-				chunk.fatal = lr.err
-			}
-			fd := Find_Data{r = r, path = path, out = out, answers = answers, read = read}
-			if n, done := build.records_find_chunks(r, &FORMATS[S], path, chunks[:nc], cap, caller, &fd, count_chunk, run_chunk); done {
-				sync_seq_rs(r)
-				return n
-			}
+		if n, done := records_find_parallel(r, path, out, answers, cap, S, LAX, read, caller); done {
+			return n
 		}
 	}
 	return build.records_find(r, path, out, answers, &FORMATS[S], &RULES, read, caller, tape.number_respell, rewalk, frame, walk)
+}
+
+@(private)
+records_find_parallel :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, cap: int, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (int, bool) {
+	chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk = ---
+	nc := cut_json_chunks(r, chunks[:])
+	if nc < 2 {
+		return 0, false
+	}
+	has_c0 := false
+	// Only probe chunk 0 when `cap` could possibly fit in it (`>= 2` bytes per non-empty delimited JSON record, `- 1` at EOF), avoiding redundant scan on huge batches and saving the count so chunk 0 is never counted twice.
+	if chunks[0].hi - chunks[0].lo >= u64(cap) * 2 - 1 {
+		c0 := count_delim_records_up_to(r.src, chunks[0].lo, chunks[0].hi, r.framing, S, u64(cap))
+		if c0 >= u64(cap) {
+			return 0, false
+		}
+		chunks[0].count = c0
+		has_c0 = true
+	}
+	Find_Data :: struct {
+		ctx:     Chunk_Context,
+		path:    []tape.Step,
+		out:     []tape.Record,
+		answers: []tape.Span_Answer,
+		read:    tape.Read_Options,
+		has_c0:  bool,
+	}
+	count_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int) {
+		d := (^Find_Data)(data)
+		if k == 0 && d.has_c0 {
+			return
+		}
+		chunk.count = count_delim_records(d.ctx.src, chunk.lo, chunk.hi, d.ctx.framing, S)
+	}
+	run_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int, alloc, scratch: runtime.Allocator) {
+		crew :: proc "contextless" (h: ^build.Finder, lo: u64) -> hook.Walk_Result {
+			regs: hook.Regs
+			return walk_again((^Walk(S, build.Finder, LAX, build.FINDER_CAPS))(h.walk), h.src, lo, &regs, build.finder_hook)
+		}
+		cframe :: #force_inline proc(r: ^tape.Records, a: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
+			return record_frame_of(r, S, LAX, build.Finder, a)
+		}
+		cwalk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
+			return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, build.finder_hook)
+		}
+		d := (^Find_Data)(data)
+		if chunk.limit == 0 {
+			chunk.end_pos = chunk.lo
+			return
+		}
+		lr: Records = ---
+		chunk_records_init(&lr, d.ctx, chunk, k, S, LAX, scratch)
+		chunk.done = build.records_find(&lr, d.path, d.out[chunk.offset:][:chunk.limit], d.answers[chunk.offset:][:chunk.limit], &FORMATS[S], &RULES, d.read, alloc, tape.number_respell, crew, cframe, cwalk)
+		chunk.end_pos = lr.pos
+		chunk.fatal = lr.err
+	}
+	fd := Find_Data{ctx = chunk_context_of(r), path = path, out = out, answers = answers, read = read, has_c0 = has_c0}
+	if n, done := build.records_find_chunks(r, &FORMATS[S], path, chunks[:nc], cap, caller, &fd, count_chunk, run_chunk); done {
+		sync_seq_rs(r)
+		return n, true
+	}
+	return 0, false
 }
 
 @(private)
@@ -304,58 +384,90 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 	}
 	cap := min(len(out), len(docs))
 	if (r.framing == .Lines || r.framing == .Seq) && r.opts.runner != nil && r.opts.runner.threads > 0 && r.opts.pieces == nil && r.quarantine == nil && r.at != .Done && cap >= 64 && len(r.src) - int(r.pos) >= build.parallel_records_from() {
-		chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk
-		if nc := cut_json_chunks(r, chunks[:]); nc >= 2 {
-			Scan_Data :: struct {
-				r:      ^Records,
-				demand: ^tape.Demand,
-				out:    []tape.Record,
-				docs:   []tape.Document,
-				read:   tape.Read_Options,
-			}
-			count_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int) {
-				d := (^Scan_Data)(data)
-				chunk.count = count_delim_records(d.r.src, chunk.lo, chunk.hi, d.r.framing, S)
-			}
-			run_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int, block: ^tape.Record_Block, batch_alloc, scratch: runtime.Allocator) {
-				crew :: proc "contextless" (h: ^build.Scanner, regs: ^hook.Regs, lo: u64) -> hook.Walk_Result {
-					return walk_again((^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(h.walk), h.b.doc.src, lo, regs, build.scanner_hook)
-				}
-				cframe :: #force_inline proc(r: ^tape.Records, a: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
-					return record_frame_of(r, S, LAX, build.Scanner, a)
-				}
-				cwalk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
-					return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, build.scanner_hook)
-				}
-				d := (^Scan_Data)(data)
-				if chunk.limit == 0 {
-					chunk.end_pos = chunk.lo
-					return
-				}
-				lr := chunk_records(d.r, S, chunk, k, scratch)
-				chunk.done = build.records_scan(&lr, d.demand, d.out[chunk.offset:][:chunk.limit], d.docs[chunk.offset:][:chunk.limit], &FORMATS[S], &RULES, d.read, block.backing, crew, node_bound, cframe, cwalk)
-				for i in 0 ..< chunk.done {
-					if d.docs[chunk.offset + i].allocator.procedure != nil {
-						d.docs[chunk.offset + i].allocator = batch_alloc
-					}
-				}
-				block^ = lr.block
-				chunk.end_pos = lr.pos
-				chunk.fatal = lr.err
-			}
-			sd := Scan_Data{r = r, demand = demand, out = out, docs = docs, read = read}
-			if n, done := build.records_scan_chunks(r, &FORMATS[S], demand, docs, chunks[:nc], cap, caller, &sd, count_chunk, run_chunk); done {
-				sync_seq_rs(r)
-				return n
-			}
+		if n, done := records_scan_parallel(r, demand, out, docs, cap, S, LAX, read, caller); done {
+			return n
 		}
 	}
 	return build.records_scan(r, demand, out, docs, &FORMATS[S], &RULES, read, caller, rewalk, node_bound, frame, walk)
 }
 
+@(private)
+records_scan_parallel :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, cap: int, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (int, bool) {
+	chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk = ---
+	nc := cut_json_chunks(r, chunks[:])
+	if nc < 2 {
+		return 0, false
+	}
+	has_c0 := false
+	if chunks[0].hi - chunks[0].lo >= u64(cap) * 2 - 1 {
+		c0 := count_delim_records_up_to(r.src, chunks[0].lo, chunks[0].hi, r.framing, S, u64(cap))
+		if c0 >= u64(cap) {
+			return 0, false
+		}
+		chunks[0].count = c0
+		has_c0 = true
+	}
+	Scan_Data :: struct {
+		ctx:    Chunk_Context,
+		demand: ^tape.Demand,
+		out:    []tape.Record,
+		docs:   []tape.Document,
+		read:   tape.Read_Options,
+		has_c0: bool,
+	}
+	count_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int) {
+		d := (^Scan_Data)(data)
+		if k == 0 && d.has_c0 {
+			return
+		}
+		chunk.count = count_delim_records(d.ctx.src, chunk.lo, chunk.hi, d.ctx.framing, S)
+	}
+	run_chunk :: proc(data: rawptr, chunk: ^build.Record_Chunk, k: int, block: ^tape.Record_Block, batch_alloc, scratch: runtime.Allocator) {
+		crew :: proc "contextless" (h: ^build.Scanner, regs: ^hook.Regs, lo: u64) -> hook.Walk_Result {
+			return walk_again((^Walk(S, build.Scanner, LAX, build.SCANNER_CAPS))(h.walk), h.b.doc.src, lo, regs, build.scanner_hook)
+		}
+		cframe :: #force_inline proc(r: ^tape.Records, a: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
+			return record_frame_of(r, S, LAX, build.Scanner, a)
+		}
+		cwalk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
+			return record_walked(container_of(r, Records, "records"), S, LAX, lo, cut, alone, h, regs, a, ctx, build.scanner_hook)
+		}
+		d := (^Scan_Data)(data)
+		if chunk.limit == 0 {
+			chunk.end_pos = chunk.lo
+			return
+		}
+		lr: Records = ---
+		chunk_records_init(&lr, d.ctx, chunk, k, S, LAX, scratch)
+		chunk.done = build.records_scan(&lr, d.demand, d.out[chunk.offset:][:chunk.limit], d.docs[chunk.offset:][:chunk.limit], &FORMATS[S], &RULES, d.read, block.backing, crew, node_bound, cframe, cwalk)
+		for i in 0 ..< chunk.done {
+			if d.docs[chunk.offset + i].allocator.procedure != nil {
+				d.docs[chunk.offset + i].allocator = batch_alloc
+			}
+		}
+		block^ = lr.block
+		chunk.end_pos = lr.pos
+		chunk.fatal = lr.err
+	}
+	sd := Scan_Data{ctx = chunk_context_of(r), demand = demand, out = out, docs = docs, read = read, has_c0 = has_c0}
+	if n, done := build.records_scan_chunks(r, &FORMATS[S], demand, docs, chunks[:nc], cap, caller, &sd, count_chunk, run_chunk); done {
+		sync_seq_rs(r)
+		return n, true
+	}
+	return 0, false
+}
+
 // Counts non-empty records in `src[lo:hi]` under `.Lines` or `.Seq`, matching `record_frame` exactly.
 @(private)
-count_delim_records :: proc "contextless" (src: []u8, lo, hi: u64, framing: tape.Framing, $S: Spec) -> (count: u64) #no_bounds_check {
+count_delim_records :: #force_inline proc "contextless" (src: []u8, lo, hi: u64, framing: tape.Framing, $S: Spec) -> (count: u64) {
+	return count_delim_records_up_to(src, lo, hi, framing, S, max(u64))
+}
+
+@(private)
+count_delim_records_up_to :: proc "contextless" (src: []u8, lo, hi: u64, framing: tape.Framing, $S: Spec, limit: u64) -> (count: u64) #no_bounds_check {
+	if limit == 0 {
+		return 0
+	}
 	base := raw_data(src)
 	end := base[hi:]
 	pos := lo
@@ -366,6 +478,9 @@ count_delim_records :: proc "contextless" (src: []u8, lo, hi: u64, framing: tape
 				break
 			}
 			count += 1
+			if count >= limit {
+				return
+			}
 			if i := kernel.index_byte(src[p:hi], '\n'); i >= 0 {
 				pos = p + u64(i) + 1
 			} else {
@@ -390,6 +505,9 @@ count_delim_records :: proc "contextless" (src: []u8, lo, hi: u64, framing: tape
 			continue
 		}
 		count += 1
+		if count >= limit {
+			return
+		}
 		if i := kernel.index_byte(src[p:hi], 0x1e); i >= 0 {
 			pos = p + u64(i) + 1
 		} else {
@@ -397,24 +515,6 @@ count_delim_records :: proc "contextless" (src: []u8, lo, hi: u64, framing: tape
 		}
 	}
 	return
-}
-
-// The reads of each spec and `LAX` that `records_open` gives the records, so that the record entry procs need no switch
-// on the spec: each entry is an instance of `records_validate_as` and its kin, and a build links only those an opened
-// record names.
-@(private)
-records_reads_of :: #force_inline proc($S: Spec, $LAX: bool) -> Records_Reads {
-	return {
-		validate = proc(r: ^Records, out: []tape.Record, allocator: runtime.Allocator) -> int {
-			return records_validate_as(r, out, S, LAX, allocator)
-		},
-		find = proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read: tape.Read_Options, allocator: runtime.Allocator) -> int {
-			return records_find_as(r, path, out, answers, S, LAX, read, allocator)
-		},
-		scan = proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read: tape.Read_Options, allocator: runtime.Allocator) -> int {
-			return records_scan_as(r, demand, out, docs, S, LAX, read, allocator)
-		},
-	}
 }
 
 // `record_frame` of the records `r` of a JSON spec, in the walk for hook `H`.

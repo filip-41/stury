@@ -99,6 +99,35 @@ Layout :: struct {
 	ascii:      bool, // `Options.ascii`
 }
 
+// Returns `doc`'s span of `n` bytes at offset `lo`, resolving `.Held` spans out of line with no slice bounds checks.
+// Invariant: every node and fact span `(lo, n)` of `doc` lies within `doc.src` (or a `doc.ext.held` span under `.Held`).
+@(private)
+doc_span :: #force_inline proc "contextless" (doc: ^tape.Document, lo: u64, n: u32) -> []u8 #no_bounds_check {
+	if .Held not_in doc.flags {
+		return doc.src[lo:][:n]
+	}
+	return doc_span_held(doc, lo, n)
+}
+
+@(private, cold)
+doc_span_held :: #force_no_inline proc "contextless" (doc: ^tape.Document, lo: u64, n: u32) -> []u8 #no_bounds_check {
+	held := doc.ext.held
+	l, h := 0, len(held)
+	for l < h {
+		mid := (l + h) / 2
+		if held[mid].lo <= lo {
+			l = mid + 1
+		} else {
+			h = mid
+		}
+	}
+	if l == 0 {
+		return nil
+	}
+	at := held[l - 1].at + lo - held[l - 1].lo
+	return doc.src[at:][:n]
+}
+
 // `write_rows` for the text the document holds: its own quotes when it is JSON5, the ASCII bytes when `ascii`.
 @(private)
 write_rows_of_text :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $WIDTH: int, facts: bool, spec: Spec) {
@@ -114,9 +143,21 @@ write_rows_of_text :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^La
 
 @(private)
 write_as :: #force_no_inline proc(out: ^write.Out, doc: ^tape.Document, $T: Spec, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
-	w: write.Tree
 	// NDJSON lines cannot hold raw line breaks, so comments are dropped cleanly under `.Lines`.
 	holds := tape.Facts{} if opts.framing == .Lines else FORMATS[T].facts
+	// Bypass `write.Tree` stack zeroing when a strict whole JSON document routes to `write_dense`.
+	if doc.present & holds == {} && doc.ext == nil && len(doc.nodes) > 0 && doc.nodes[0].role == .Value {
+		if dense := dense_route(doc, opts); dense != nil {
+			write_dense(out, dense)
+			return doc.present, out.err
+		}
+	}
+	return write_walked(out, doc, T, opts, holds, allocator)
+}
+
+@(private)
+write_walked :: #force_no_inline proc(out: ^write.Out, doc: ^tape.Document, $T: Spec, opts: Write_Options, holds: tape.Facts, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
+	w: write.Tree
 	if e := write.tree_start(&w, doc, opts, holds, allocator); e != nil {
 		return {}, e
 	}
@@ -130,13 +171,7 @@ write_as :: #force_no_inline proc(out: ^write.Out, doc: ^tape.Document, $T: Spec
 	l.json5 = whole && doc.format == &FORMATS[.Json5]
 	l.numbers = doc.format == &FORMATS[.Json] || doc.format == &FORMATS[.Jsonc] || doc.format == &FORMATS[.Json5] || doc.format.options == .Dsv
 	facts, tables := write.tree_facts(&w), write.tree_tables(&w)
-	dense: []u8
-	if !facts && !tables {
-		dense = dense_route(doc, opts)
-	}
-	if dense != nil {
-		write_dense(out, dense)
-	} else if !tables && (l.copy_text || l.json5 && T == .Json5 && !l.ascii) && !opts.sort_keys && .Tolerated not_in doc.flags {
+	if !tables && (l.copy_text || l.json5 && T == .Json5 && !l.ascii) && !opts.sort_keys && .Tolerated not_in doc.flags {
 		switch {
 		case write.compact(opts):
 			write_rows_of_text(out, &w, &l, false, 0, facts, T)
@@ -330,7 +365,7 @@ put_scalar :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at
 		out.cursor += 5
 	case .Number:
 		if l.numbers && (t.spelling & tape.NUMBER_KIND == 0 || T == .Json5 && l.json5) {
-			write.put(out, tape.span_bytes(w.doc, t.lo, t.n))
+			write.put(out, doc_span(w.doc, t.lo, t.n))
 			return true
 		}
 		return put_number(out, w, at, t, T)
@@ -425,10 +460,44 @@ put_key :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: t
 	return put_text_of(out, w, l, at)
 }
 
+// Grows `w.scratch` to at least `room` bytes, matching `write.scratch_grow`.
+@(private, cold)
+grow_tree_scratch :: #force_no_inline proc(w: ^write.Tree, room: int) -> bool {
+	size := max(room, 2 * len(w.scratch), 256)
+	raw, err := runtime.mem_alloc_non_zeroed(size, 1, w.allocator)
+	if err == nil && (raw_data(raw) == nil || len(raw) < size) {
+		err = .Out_Of_Memory
+	}
+	if err != nil {
+		w.err = err
+		return false
+	}
+	if w.scratch != nil {
+		delete(w.scratch, w.allocator)
+	}
+	w.scratch = raw
+	return true
+}
+
 // Writes the text of scalar node `at` as a JSON string, false with `w.err` set when it cannot be read.
+// Invariant: `at` is a valid node index and its decoded or raw bytes lie in `w.doc` / `w.scratch`.
 @(private)
-put_text_of :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: tape.Node_Index) -> bool {
-	s, ok := write.text_of(w, at)
+put_text_of :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: tape.Node_Index) -> bool #no_bounds_check {
+	doc := w.doc
+	t := doc.nodes[at]
+	if u8(t.kind) - u8(tape.Kind.String) <= 1 && t.spelling & tape.SPELLING_DECODE == 0 {
+		put_string(out, l, string(doc_span(doc, t.lo, t.n)))
+		return true
+	}
+	room := tape.text_room(doc, at)
+	if room == 0 {
+		put_string(out, l, string(doc_span(doc, t.lo, t.n)))
+		return true
+	}
+	if len(w.scratch) < room && !grow_tree_scratch(w, room) {
+		return false
+	}
+	s, ok := tape.node_text(doc, at, w.scratch)
 	if ok {
 		put_string(out, l, s)
 	}
@@ -482,7 +551,8 @@ put_ascii :: proc(out: ^write.Out, s: string, quoted: bool) {
 		switch {
 		case r >= 0x80:
 			n = rune_units(p, r)
-		case quoted && ESCAPE_OF[r] != 0:
+		case quoted && ESCAPE_OF[u8(r)] != 0:
+			// Previous arm handles `r >= 0x80` (including `utf8.RUNE_ERROR`), so here `0 <= r < 0x80`.
 			n = escape_into(p, u8(r))
 		case:
 			p[0] = u8(r)
@@ -770,7 +840,7 @@ put_number :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, at: tape.No
 	json := w.doc.format == &FORMATS[.Json5] || w.doc.format == &FORMATS[.Json] || w.doc.format == &FORMATS[.Jsonc]
 	if kind := Number_Spelling(t.spelling & tape.NUMBER_KIND); json && (kind == .Infinity || kind == .Nan) {
 		when T == .Json5 {
-			write.put(out, tape.span_bytes(w.doc, t.lo, t.n))
+			write.put(out, doc_span(w.doc, t.lo, t.n))
 			return true
 		}
 	} else {
@@ -895,8 +965,9 @@ end_comments :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, $PRE
 
 // The inline comments of the value written last, on its line. A line comment ends the line, so one that another
 // follows is written as a block comment where its body allows.
+// Invariant: `k` is a valid index in `pending`, so `k + 1 <= len(pending)`.
 @(private)
-inline_comments :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, $PRETTY: bool) {
+inline_comments :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, $PRETTY: bool) #no_bounds_check {
 	pending := l.pending
 	l.pending = nil
 	for f, k in pending {
@@ -961,8 +1032,9 @@ comment_plain :: proc "contextless" (body: []u8, $T: Spec) -> bool #no_bounds_ch
 // Writes comment `f` as a line comment when it was one and its body holds no line end, else as a block comment when
 // its body holds no `*/`, else drops it. With `block` it takes the block form where it can. In compact text a line
 // comment ends with a line end, which pretty text writes after it anyway. Returns whether it wrote a line comment.
+// Invariant: `scan` is either `nil` or `body`, so `0 <= i < len(body)` and `i + 1 < len(body)` guards `body[i + 1]`.
 @(private)
-put_comment :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, f: tape.Fact, block: bool, $T: Spec, $PRETTY: bool) -> (line_comment: bool) {
+put_comment :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, f: tape.Fact, block: bool, $T: Spec, $PRETTY: bool) -> (line_comment: bool) #no_bounds_check {
 	body, line := write.comment_body(w.doc, f)
 	can_line, can_block := true, true
 	scan := body if !comment_plain(body, T) else nil

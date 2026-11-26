@@ -41,7 +41,7 @@ ROW_CHUNK_MIN :: 16
 
 // The levels the stack of `write_rows` holds in itself. Past them it comes from the write's allocator.
 @(private)
-ROW_LEVELS :: 1024
+ROW_LEVELS :: 64
 #assert(ROW_LEVELS > 0, "the stack doubles as it grows")
 
 // An open container: the node its subtree ends before, and its close bracket.
@@ -61,9 +61,17 @@ Rows_Text :: enum {
 	Json5,
 }
 
+// Precomputed SIMD indent vectors used only when `PRETTY` is true, keeping compact `Rows` free of SIMD spills.
+@(private)
+Rows_Fill :: struct {
+	head:  #simd[16]u8, // a line end and 15 bytes of indent
+	comma: #simd[16]u8, // a comma, a line end and 14 bytes of indent
+	fill:  #simd[16]u8, // 16 bytes of indent
+}
+
 // Where a write of rows stands. `rows_run` holds it in a local, so it keeps all of it in registers.
 @(private)
-Rows :: struct {
+Rows :: struct($PRETTY: bool) {
 	p:     [^]u8, // the next byte of the output, in `rows_run`
 	stack: [^]Open_Container, // the open containers, over a sentinel that ends at no node
 	top:   int,
@@ -73,15 +81,32 @@ Rows :: struct {
 	bytes: int, // the indent of level `top`, in `rows_run`
 	width: int, // the indent's bytes a level
 	after: u32, // 0 at the start and after a key or a separator, 1 after an open bracket, 2 after a value or a close
-	head:  #simd[16]u8, // a line end and 15 bytes of indent
-	comma: #simd[16]u8, // a comma, a line end and 14 bytes of indent
-	fill:  #simd[16]u8, // 16 bytes of indent
+	fill:  [int(PRETTY)]Rows_Fill,
+}
+
+@(private)
+make_rows_fill :: #force_inline proc "contextless" (word: u64) -> Rows_Fill {
+	when ODIN_ENDIAN == .Little {
+		return {
+			head  = transmute(#simd[16]u8)[2]u64{(word &~ u64(0xFF)) | u64('\n'), word},
+			comma = transmute(#simd[16]u8)[2]u64{(word &~ u64(0xFFFF)) | u64(',') | u64('\n') << 8, word},
+			fill  = transmute(#simd[16]u8)[2]u64{word, word},
+		}
+	} else {
+		lanes := transmute([16]u8)[2]u64{word, word}
+		fill_v := transmute(#simd[16]u8)lanes
+		lanes[0] = '\n'
+		head_v := transmute(#simd[16]u8)lanes
+		lanes[0], lanes[1] = ',', '\n'
+		comma_v := transmute(#simd[16]u8)lanes
+		return {head = head_v, comma = comma_v, fill = fill_v}
+	}
 }
 
 // The first node whose token a block copy may read past the source, so `rows_run` leaves it and every later row to
 // the rare path: a token is copied in blocks of 16 bytes, at least 32 bytes, from the byte before its span.
 @(private)
-rows_copy_end :: proc "contextless" (doc: ^tape.Document) -> tape.Node_Index {
+rows_copy_end :: proc "contextless" (doc: ^tape.Document) -> tape.Node_Index #no_bounds_check {
 	for i := len(doc.nodes); i > 0; i -= 1 {
 		t := doc.nodes[i - 1]
 		if t.kind < .Array && t.lo + max(u64(t.n), 32) + 32 <= u64(len(doc.src)) {
@@ -100,7 +125,7 @@ rows_copy_end :: proc "contextless" (doc: ^tape.Document) -> tape.Node_Index {
 @(private)
 write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $WIDTH: int, $TEXT: Rows_Text, facts: bool, spec: Spec) #no_bounds_check {
 	local: [ROW_LEVELS]Open_Container = ---
-	r: Rows
+	r: Rows(PRETTY)
 	r.stack = &local[0]
 	r.stack[0].end = max(tape.Node_Index)
 	held := ROW_LEVELS
@@ -108,12 +133,7 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 	width := WIDTH if WIDTH > 0 else l.width
 	r.width = width
 	when PRETTY {
-		lanes := transmute([16]u8)[2]u64{l.fill, l.fill}
-		r.fill = transmute(#simd[16]u8)lanes
-		lanes[0] = '\n'
-		r.head = transmute(#simd[16]u8)lanes
-		lanes[0], lanes[1] = ',', '\n'
-		r.comma = transmute(#simd[16]u8)lanes
+		r.fill[0] = make_rows_fill(l.fill)
 		line_at := ROW_INDENT / width
 	} else {
 		line_at := max(int)
@@ -124,13 +144,17 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 	stop := min(rows_copy_end(w.doc), w.end)
 	f := Rows_Facts{spec = spec}
 	if facts {
-		f.frames = make([dynamic]Fact_Container, w.allocator)
+		f.frames.allocator = w.allocator
 	}
 	defer delete(f.frames)
 	i := w.i
-	f.row = write.fact_row(w, i) if facts else max(tape.Node_Index)
+	if facts {
+		f.row = write.fact_row(w, i)
+	} else {
+		f.row = max(tape.Node_Index)
+	}
 	ok: bool
-	i, ok = rows_row(out, w, l, &r, &held, &f, i, PRETTY, TEXT)
+	i, ok = rows_row(out, w, l, &r, &held, &f, i, TEXT)
 	if !ok {
 		return
 	}
@@ -145,8 +169,8 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 				owed := r.top * (r.top * width + 18)
 			} else {
 				// The rare path grows the stack, so the limit follows it.
-					r.limit = min(line_at, held - 1)
-					owed := r.top
+				r.limit = min(line_at, held - 1)
+				owed := r.top
 			}
 			write.room(out, row_room)
 			chunk := (out.size - out.cursor - owed) / row_room
@@ -172,16 +196,16 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 					// What is owed before row `i`, as `after` says.
 					when PRETTY {
 						if r.after == 2 {
-							r.p = line_start(r.p, r.comma, r.fill, 2 + r.bytes)
+							r.p = line_start(r.p, r.fill[0].comma, r.fill[0].fill, 2 + r.bytes)
 						} else if r.after == 1 {
-							r.p = line_start(r.p, r.head, r.fill, 1 + r.bytes)
+							r.p = line_start(r.p, r.fill[0].head, r.fill[0].fill, 1 + r.bytes)
 						}
 					} else {
 						r.p[0] = ','
 						r.p = r.p[int(r.after == 2):]
 					}
 					r.after = 0
-					next := rows_run(&r, nodes, src, i, PRETTY, WIDTH, TEXT)
+					next := rows_run(&r, nodes, src, i, WIDTH, TEXT)
 					out.cursor = int(intrinsics.ptr_sub(r.p, out.buf))
 					// A run that stops inside its chunk with nothing owed stops before a row it does not write, and
 					// would stop there again.
@@ -195,12 +219,12 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 		}
 		if r.stack[r.top].end == i {
 			if facts && (l.pending != nil || fact_container_closes(&f, r.top)) {
-				rows_fact_close(out, w, l, &r, &f, PRETTY)
+				rows_fact_close(out, w, l, &r, &f)
 			} else {
-				rows_close(out, l, &r, PRETTY)
+				rows_close(out, l, &r)
 			}
 		} else {
-			i, ok = rows_row(out, w, l, &r, &held, &f, i, PRETTY, TEXT)
+			i, ok = rows_row(out, w, l, &r, &held, &f, i, TEXT)
 			if !ok {
 				return
 			}
@@ -215,7 +239,7 @@ write_rows :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $
 // with its key, with no test between. Returns the row it stopped at, and `after` says what is owed before it. It calls
 // nothing and holds the cursor in a local, so the loop keeps every value in a register.
 @(private)
-rows_run :: #force_no_inline proc "contextless" (r: ^Rows, nodes: [^]tape.Node, src: [^]u8, i: tape.Node_Index, $PRETTY: bool, $WIDTH: int, $TEXT: Rows_Text) -> tape.Node_Index #no_bounds_check {
+rows_run :: #force_no_inline proc "contextless" (r: ^Rows($PRETTY), nodes: [^]tape.Node, src: [^]u8, i: tape.Node_Index, $WIDTH: int, $TEXT: Rows_Text) -> tape.Node_Index #no_bounds_check {
 	// `kind`, `role` and `spelling` are one word of a node, and a JSON key is a string. The route holds no string a
 	// tolerance read, and under `ascii` a string with no ASCII mark goes to the rare path, which respells it.
 	when TEXT == .Ascii {
@@ -298,7 +322,7 @@ rows_run :: #force_no_inline proc "contextless" (r: ^Rows, nodes: [^]tape.Node, 
 							break
 						}
 						when PRETTY {
-							p = line_start(p, c.head, c.fill, 1 + c.bytes)
+							p = line_start(p, c.fill[0].head, c.fill[0].fill, 1 + c.bytes)
 						}
 						continue
 					}
@@ -312,7 +336,7 @@ rows_run :: #force_no_inline proc "contextless" (r: ^Rows, nodes: [^]tape.Node, 
 			}
 			i += 1
 			c.p = p
-			if !before_row(&c, i, PRETTY, WIDTH) {
+			if !before_row(&c, i, WIDTH) {
 				break loop
 			}
 			p = c.p
@@ -326,7 +350,7 @@ rows_run :: #force_no_inline proc "contextless" (r: ^Rows, nodes: [^]tape.Node, 
 // Closes every container that ends before row `i` and writes the separator before that row. Returns false with
 // `after` set when `i` is where the chunk stops. `c.end` is held at `c.stop`, so this is the one test a row takes.
 @(private)
-before_row :: #force_inline proc "contextless" (c: ^Rows, i: tape.Node_Index, $PRETTY: bool, $WIDTH: int) -> bool #no_bounds_check {
+before_row :: #force_inline proc "contextless" (c: ^Rows($PRETTY), i: tape.Node_Index, $WIDTH: int) -> bool #no_bounds_check {
 	p := c.p
 	for c.end == i {
 		if i >= c.stop {
@@ -336,7 +360,7 @@ before_row :: #force_inline proc "contextless" (c: ^Rows, i: tape.Node_Index, $P
 		}
 		when PRETTY {
 			c.bytes -= WIDTH if WIDTH > 0 else c.width
-			p = line_start(p, c.head, c.fill, 1 + c.bytes)
+			p = line_start(p, c.fill[0].head, c.fill[0].fill, 1 + c.bytes)
 		}
 		p[0] = u8(c.stack[c.top].close)
 		p = p[1:]
@@ -344,7 +368,7 @@ before_row :: #force_inline proc "contextless" (c: ^Rows, i: tape.Node_Index, $P
 		c.end = min(c.stack[c.top].end, c.stop)
 	}
 	when PRETTY {
-		c.p = line_start(p, c.comma, c.fill, 2 + c.bytes)
+		c.p = line_start(p, c.fill[0].comma, c.fill[0].fill, 2 + c.bytes)
 	} else {
 		p[0] = ','
 		c.p = p[1:]
@@ -354,8 +378,9 @@ before_row :: #force_inline proc "contextless" (c: ^Rows, i: tape.Node_Index, $P
 
 // Writes row `i` with what is owed before it, with no limit on the room, the depth or the spelling. False with
 // `w.err` set when it cannot.
+// Invariant: `i` lies within `[w.i, w.end) <= len(w.nodes)` and `1 <= r.top + 1 <= held^` (growing via `grow_stack`).
 @(private, cold)
-rows_rare :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, held: ^int, i: tape.Node_Index, $PRETTY: bool, $SPEC: Spec) -> bool {
+rows_rare :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows($PRETTY), held: ^int, i: tape.Node_Index, $SPEC: Spec) -> bool #no_bounds_check {
 	t := w.nodes[i]
 	if t.kind >= .Array && r.top + 1 == held^ && !write.grow_stack(&r.stack, held, ROW_LEVELS, w.allocator, &w.err) {
 		return false
@@ -468,26 +493,27 @@ writes_at_close :: proc "contextless" (facts: []tape.Fact) -> bool {
 // Writes row `i`, and a member's value with its key, and returns the row after. A row that holds facts, or that follows
 // a value whose comments are owed, takes the facts path.
 @(private)
-rows_row :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, held: ^int, f: ^Rows_Facts, i: tape.Node_Index, $PRETTY: bool, $TEXT: Rows_Text) -> (next: tape.Node_Index, ok: bool) {
+rows_row :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows($PRETTY), held: ^int, f: ^Rows_Facts, i: tape.Node_Index, $TEXT: Rows_Text) -> (next: tape.Node_Index, ok: bool) {
 	if i == f.row || l.pending != nil {
-		return rows_fact_value(out, w, l, r, held, f, i, PRETTY)
+		return rows_fact_value(out, w, l, r, held, f, i)
 	}
-	return i + 1, rows_rare(out, w, l, r, held, i, PRETTY, Spec.Json5 when TEXT == .Json5 else Spec.Json)
+	return i + 1, rows_rare(out, w, l, r, held, i, Spec.Json5 when TEXT == .Json5 else Spec.Json)
 }
 
 // `rows_fact_value_as` for the spec of the write.
 @(private, cold)
-rows_fact_value :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, held: ^int, f: ^Rows_Facts, i: tape.Node_Index, $PRETTY: bool) -> (tape.Node_Index, bool) {
+rows_fact_value :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows($PRETTY), held: ^int, f: ^Rows_Facts, i: tape.Node_Index) -> (tape.Node_Index, bool) {
 	if f.spec == .Jsonc {
-		return rows_fact_value_as(out, w, l, r, held, f, i, .Jsonc, PRETTY)
+		return rows_fact_value_as(out, w, l, r, held, f, i, .Jsonc)
 	}
-	return rows_fact_value_as(out, w, l, r, held, f, i, .Json5, PRETTY)
+	return rows_fact_value_as(out, w, l, r, held, f, i, .Json5)
 }
 
 // Writes the value of row `i`, or the member whose key it is, as the layout loop of `write_tree` does, with the comments
 // on it, and opens its container. Returns the row after, and false with `w.err` set when it cannot.
+// Invariant: `i` (and `i + 1` for a key) lies in `w.nodes`, and `r.stack[r.top + 1]` is valid after `grow_stack`.
 @(private)
-rows_fact_value_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, held: ^int, f: ^Rows_Facts, i: tape.Node_Index, $T: Spec, $PRETTY: bool) -> (tape.Node_Index, bool) {
+rows_fact_value_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows($PRETTY), held: ^int, f: ^Rows_Facts, i: tape.Node_Index, $T: Spec) -> (tape.Node_Index, bool) #no_bounds_check {
 	at, key := i, tape.NO_NODE
 	if w.nodes[i].role == .Key {
 		key, at = i, i + 1
@@ -529,18 +555,19 @@ rows_fact_value_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows
 
 // `rows_fact_close_as` for the spec of the write.
 @(private, cold)
-rows_fact_close :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, f: ^Rows_Facts, $PRETTY: bool) {
+rows_fact_close :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows($PRETTY), f: ^Rows_Facts) {
 	if f.spec == .Jsonc {
-		rows_fact_close_as(out, w, l, r, f, .Jsonc, PRETTY)
+		rows_fact_close_as(out, w, l, r, f, .Jsonc)
 	} else {
-		rows_fact_close_as(out, w, l, r, f, .Json5, PRETTY)
+		rows_fact_close_as(out, w, l, r, f, .Json5)
 	}
 }
 
 // Writes the close of the innermost container as the layout loop of `write_tree` does, with the comments before it, and
 // its own after.
+// Invariant: `1 <= r.top < held` and `len(f.frames) > 0` when `fact_container_closes(f, r.top)` holds.
 @(private)
-rows_fact_close_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows, f: ^Rows_Facts, $T: Spec, $PRETTY: bool) {
+rows_fact_close_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows($PRETTY), f: ^Rows_Facts, $T: Spec) #no_bounds_check {
 	s := write.Step{depth = r.top - 1, kind = .Close, first = r.after == 1}
 	if fact_container_closes(f, r.top) {
 		s.facts = f.frames[len(f.frames) - 1].facts
@@ -569,8 +596,9 @@ rows_fact_end :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layo
 }
 
 // Writes the close of the innermost container, with the line before it.
+// Invariant: `write_rows` loops only while `r.top > 0` (`1 <= r.top < held`).
 @(private, cold)
-rows_close :: #force_no_inline proc(out: ^write.Out, l: ^Layout, r: ^Rows, $PRETTY: bool) {
+rows_close :: #force_no_inline proc(out: ^write.Out, l: ^Layout, r: ^Rows($PRETTY)) #no_bounds_check {
 	when PRETTY {
 		if r.after == 2 {
 			line_indent(out, l, r.top - 1)
