@@ -1,11 +1,9 @@
 package cbor
 
-import "base:runtime"
 import "core:io"
 import "core:unicode/utf8"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
-import "stury:lib/ops/typed"
 import "stury:lib/ops/write"
 
 // The token writer of CBOR: a caller writes one item token by token. A container of unknown length is indefinite
@@ -184,108 +182,4 @@ writer_drop :: proc(w: ^Writer) {
 	write.sequence_drop(&w.seq)
 	write.out_drop(&w.out)
 	w^ = {}
-}
-
-// Typed writes: `value` written by the plan a typed read of its type is made by, as `json.marshal` writes a text. Its
-// plan is the one `plan_make` of this package makes, or nil to make one for the call. Under `.Preferred`,
-// `.Deterministic` and `.Length_First` (or `opts.sort_keys`), containers are emitted with definite lengths and keys
-// sorted as the spec requires.
-marshal :: proc(value: ^$T, spec := Spec.Cbor, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> (item: []u8, err: Write_Error) {
-	return marshal_out(value, T, spec, opts, plan, {}, allocator)
-}
-
-// `marshal` into `sink`, through a buffer of `write.SINK_BYTES` from `allocator`. On a refusal or a failed sink the
-// sink may hold a prefix of the item.
-marshal_to :: proc(sink: io.Writer, value: ^$T, spec := Spec.Cbor, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> Write_Error {
-	if sink.procedure == nil {
-		return tape.Bad_Option{"sink"}
-	}
-	_, err := marshal_out(value, T, spec, opts, plan, sink, allocator)
-	return err
-}
-
-// Token tape with pending named tags (for `time.Time`), used when marshalling to definite/sorted CBOR specs.
-@(private)
-Tagged_Tape :: struct {
-	tw:      write.Tape_Writer,
-	facts:   [dynamic]tape.Fact,
-	pending: [MAX_PENDING_TAGS]string,
-	held:    int,
-}
-
-@(private)
-tagged_tape_tag :: proc(tt: ^Tagged_Tape, name: string) -> Write_Error {
-	if tt.held == len(tt.pending) {
-		return write.Refused{tape.Node_Index(tt.tw.tokens.seq.taken), .Malformed}
-	}
-	tt.pending[tt.held] = name
-	tt.held += 1
-	return nil
-}
-
-@(private)
-tagged_tape_token :: proc(tt: ^Tagged_Tape, kind: Token_Kind, text: string) -> Write_Error {
-	if tt.held > 0 && kind != .Close {
-		node := tape.Node_Index(len(tt.tw.tokens.nodes))
-		for name in tt.pending[:tt.held] {
-			lo := u64(len(tt.tw.tokens.texts))
-			append(&tt.tw.tokens.texts, name) or_return
-			if _, err := append(&tt.facts, tape.Fact{node = node, kind = .Tag, lo = lo, n = u32(len(name))}); err != nil {
-				return err
-			}
-		}
-	}
-	tt.held = 0
-	return write.token_tape_take(&tt.tw.tokens, kind, text)
-}
-
-@(private)
-marshal_error :: proc(werr: Write_Error, err: tape.Error) -> Write_Error {
-	if werr != nil {
-		return werr
-	}
-	if err != nil {
-		if memory, ok := err.(runtime.Allocator_Error); ok {
-			return memory
-		}
-		bad, _ := err.(tape.Bad_Option)
-		return bad
-	}
-	return nil
-}
-
-@(private)
-marshal_out :: proc(value: rawptr, T: typeid, spec: Spec, opts: Write_Options, plan: ^Plan, sink: io.Writer, allocator: runtime.Allocator) -> (item: []u8, err: Write_Error) {
-	if u8(spec) > u8(max(Spec)) {
-		return nil, tape.Bad_Option{"spec"}
-	}
-	if opts.format != nil || opts.indent != 0 || opts.tab || opts.ascii || opts.node != 0 || opts.framing != .None || opts.grow_header || len(opts.header) > 0 {
-		opt := "format" if opts.format != nil else "header" if len(opts.header) > 0 || opts.grow_header else "options"
-		return nil, tape.Bad_Option{opt}
-	}
-	if spec == .Cbor && !opts.sort_keys {
-		w: Writer
-		if err = writer_start(&w, opts, sink, allocator); err != nil {
-			return nil, err
-		}
-		werr, terr := typed.marshal(value, T, TAG, plan, &w, token, allocator, tag_text)
-		if err = marshal_error(werr, terr); err != nil {
-			writer_drop(&w)
-			return nil, err
-		}
-		return writer_end(&w)
-	}
-	tt: Tagged_Tape
-	tt.facts.allocator = allocator
-	write.tape_writer_start(&tt.tw, u8(spec), opts, sink, allocator, write_out) or_return
-	defer {
-		write.tape_writer_drop(&tt.tw)
-		delete(tt.facts)
-	}
-	werr, terr := typed.marshal(value, T, TAG, plan, &tt, tagged_tape_token, allocator, tagged_tape_tag)
-	if err = marshal_error(werr, terr); err != nil {
-		return nil, err
-	}
-	tt.tw.facts = tt.facts[:]
-	return write.tape_writer_end(&tt.tw)
 }

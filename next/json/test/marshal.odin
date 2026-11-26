@@ -413,3 +413,180 @@ marshal_utf8_escapes_floats_and_framing :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, tf.count, 0)
 }
+
+@(test)
+marshal_sort_keys_fast_paths_and_edges :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	heap_alloc := context.allocator
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	Big_Enum :: enum u64 {
+		Low  = 1,
+		High = 1 << 63,
+	}
+	Sorted_Inner :: struct {
+		zeta:  []f64,
+		alpha: [3]i64,
+		beta:  string `json:",omitempty"`,
+	}
+	Sorted_Doc :: struct {
+		z_field:                    i64,
+		a_field:                    string,
+		m_thirty_two_byte_key_name_:  [2]f64,
+		b_inner:                    Sorted_Inner,
+		empty_all:                  struct {
+			x: string `json:",omitempty"`,
+			y: Maybe(int) `json:",omitunset"`,
+		},
+		nested_empty:               []struct {
+			k: string `json:",omitempty"`,
+		},
+		dict_str:                   map[string]string,
+		dict_int:                   map[int]string,
+		dict_enum:                  map[Big_Enum]i64,
+	}
+
+	sd := Sorted_Doc{
+		z_field = -42,
+		a_field = "0123456789abcdef0123456789abcdef", // exact 32 B clean ASCII
+		m_thirty_two_byte_key_name_ = {-123.5, 45.0},
+		b_inner = {zeta = {1e-5, 0.25, -0.0, 999999.9999}, alpha = {10, -20, 30}},
+		nested_empty = {{}, {k = "live"}, {}},
+	}
+	sd.dict_str["b"] = "é"
+	sd.dict_str["aa"] = "clean_string_over_thirty_two_bytes_long!"
+	sd.dict_str["a"] = "x\"y\\z\n"
+	sd.dict_int[10] = "ten"
+	sd.dict_int[2] = "two"
+	sd.dict_int[-1] = "neg"
+	sd.dict_enum[.High] = 99
+	sd.dict_enum[.Low] = 1
+
+	for opts in ([?]json.Write_Options{
+		{sort_keys = true},
+		{sort_keys = true, indent = 2},
+		{sort_keys = true, tab = true},
+		{sort_keys = true, ascii = true},
+		{sort_keys = true, indent = 2, ascii = true},
+	}) {
+		text, ok := marshal_text(t, &sd, opts)
+		if !ok {
+			continue
+		}
+		back: Sorted_Doc
+		uerr := json.unmarshal(transmute([]u8)text, &back)
+		testing.expectf(t, uerr == nil, "sort_keys unmarshal %v: %v\n%s", opts, uerr, text)
+		testing.expectf(t, back.z_field == -42 && back.a_field == sd.a_field && len(back.b_inner.zeta) == 4, "sort_keys roundtrip %v", opts)
+		testing.expectf(t, back.dict_str["aa"] == sd.dict_str["aa"] && back.dict_enum[.High] == 99 && back.dict_int[2] == "two", "sort_keys maps %v", opts)
+
+		doc, berr := json.build(transmute([]u8)text)
+		testing.expectf(t, berr == nil, "sort_keys build %v: %v", opts, berr)
+		doc_text, _, werr := json.write(&doc, .Json, opts)
+		testing.expectf(t, werr == nil && string(doc_text) == text, "sort_keys matches json.write %v: %v\ngot:  %s\nwant: %s", opts, werr, text, doc_text)
+		json.destroy(&doc)
+	}
+
+	// `[]f64` and `[]i64` tight loops: empty, mixed, pretty, and NaN refusal mid-slice.
+	empty_floats := []f64{}
+	ef_text, ef_ok := marshal_text(t, &empty_floats, {indent = 2})
+	testing.expect(t, ef_ok && ef_text == "[]")
+
+	bad_slice := []f64{1.0, 2.5, math.nan_f64(), 3.0}
+	_, bserr := json.marshal(&bad_slice, {indent = 2})
+	bsr, bsok := bserr.(write.Refused)
+	testing.expectf(t, bsok && bsr.why == .No_Spelling, "nan mid-slice: %v", bserr)
+
+	// Invalid UTF-8 across inline (<=32), short, boundary (15,16,31,32,33), and multi-segment (512+) offsets.
+	for bad_off in ([?]int{0, 1, 14, 15, 16, 17, 30, 31, 32, 33, 511, 512, 513}) {
+		buf := make([]u8, max(bad_off + 4, 16))
+		for k in 0 ..< len(buf) {
+			buf[k] = 'a'
+		}
+		buf[bad_off] = 0x80
+		s := string(buf[:bad_off + 2])
+		for opts in ([?]json.Write_Options{{}, {ascii = true}}) {
+			_, serr := json.marshal(&s, opts)
+			sr, sok := serr.(write.Refused)
+			testing.expectf(t, sok && sr.why == .No_Spelling, "bad utf8 @%d opts=%v: %v", bad_off, opts, serr)
+		}
+	}
+	// Truncated lead byte at block boundary 15 followed by ASCII at 16, and exact 16-byte string ending in lead byte.
+	for lead_case in ([?]string{"0123456789abcde\xe3x", "0123456789abcde\xe3"}) {
+		lc := lead_case
+		_, lerr := json.marshal(&lc)
+		lr, lok := lerr.(write.Refused)
+		testing.expectf(t, lok && lr.why == .No_Spelling, "truncated utf8 %q: %v", lc, lerr)
+	}
+
+	// `zmij` edge-case parity against `strconv.write_float` + `.0` for both f64 and f32.
+	f64_edges := [?]f64{
+		5e-324, 2.2250738585072009e-308, 2.2250738585072014e-308, 1e-4, 9.999999999999999e-5,
+		0.5, 0.25, 1e-1, 1e5, 999999.0, 999999.5, 999999.9999999999, 1000000.0, 1e6, 1e23, 1.7976931348623157e308,
+	}
+	for fv in f64_edges {
+		v := fv
+		got, gok := marshal_text(t, &v)
+		if !gok {
+			continue
+		}
+		buf: [64]u8
+		raw := strconv.write_float(buf[:62], fv, 'g', -1, 64, {})
+		has_dot := false
+		for c in transmute([]u8)raw {
+			if c == '.' || c == 'e' || c == 'E' {
+				has_dot = true
+				break
+			}
+		}
+		want := raw
+		if !has_dot {
+			buf[len(raw)], buf[len(raw) + 1] = '.', '0'
+			want = string(buf[:len(raw) + 2])
+		}
+		testing.expectf(t, got == want, "zmij f64 %v: got %q, want %q", fv, got, want)
+	}
+	for f32v in ([?]f32{0.0, -0.0, 1.40129846e-45, 1.1754942e-38, 1e-4, 9.999999e-5, 999999.5, 1e6, 3.4028235e38}) {
+		v := f32v
+		got, gok := marshal_text(t, &v)
+		if !gok {
+			continue
+		}
+		buf: [64]u8
+		raw := strconv.write_float(buf[:62], f64(f32v), 'g', -1, 32, {})
+		has_dot := false
+		for c in transmute([]u8)raw {
+			if c == '.' || c == 'e' || c == 'E' {
+				has_dot = true
+				break
+			}
+		}
+		want := raw
+		if !has_dot {
+			buf[len(raw)], buf[len(raw) + 1] = '.', '0'
+			want = string(buf[:len(raw) + 2])
+		}
+		testing.expectf(t, got == want, "zmij f32 %v: got %q, want %q", f32v, got, want)
+	}
+
+	// Failing-allocator OOM sweep for `sort_keys = true`.
+	context.allocator = heap_alloc
+	Sort_Sweep :: struct {
+		d:    ^Sorted_Doc,
+		opts: json.Write_Options,
+	}
+	sweep_sorted :: proc(data: rawptr, a: runtime.Allocator) {
+		ss := (^Sort_Sweep)(data)
+		out, err := json.marshal(ss.d, ss.opts, nil, a)
+		if err == nil {
+			delete(out, a)
+		} else {
+			_ = err.(runtime.Allocator_Error)
+		}
+	}
+	for opts in ([?]json.Write_Options{{sort_keys = true}, {sort_keys = true, indent = 2}}) {
+		ss := Sort_Sweep{&sd, opts}
+		sw := testkit.sweep_failures(sweep_sorted, &ss)
+		testing.expectf(t, sw.bad == 0 && sw.refused >= 1, "sort_keys sweep %v: %v", opts, sw)
+	}
+}

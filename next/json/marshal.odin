@@ -69,11 +69,14 @@ check_marshal_opts :: #force_inline proc "contextless" (opts: Write_Options) -> 
 
 @(private)
 Fast_Json :: struct {
-	out:   write.Out,
-	fill:  u64,
-	width: int,
+	out:       write.Out,
+	line_fill: JSON_V,
+	fill:      u64,
+	width:     int,
 }
 
+#assert(typed.JSON_COMPACT_SLOP <= write.ROOM_MAX)
+#assert(typed.JSON_PRETTY_SLOP <= write.ROOM_MAX)
 #assert(typed.JSON_MEMBER_ROOM <= write.ROOM_MAX)
 #assert(typed.JSON_PRETTY_MEMBER_ROOM <= write.ROOM_MAX)
 #assert(typed.JSON_PRETTY_CLOSE_ROOM <= write.ROOM_MAX)
@@ -83,20 +86,35 @@ marshal_out :: proc(fj: ^Fast_Json, value: rawptr, T: typeid, opts: Write_Option
 	if opts.framing == .Seq {
 		write.put_byte(&fj.out, RECORD_SEPARATOR)
 	}
-	fj.fill = u64(0x0909_0909_0909_0909) if opts.tab else u64(0x2020_2020_2020_2020)
+	fill_u64 := u64(0x0909_0909_0909_0909) if opts.tab else u64(0x2020_2020_2020_2020)
+	fj.fill = fill_u64
+	fj.line_fill = transmute(JSON_V)[2]u64{fill_u64, fill_u64}
 	fj.width = 1 if opts.tab else int(opts.indent)
 	refusal: typed.Marshal_Refusal
 	err: tape.Error
 	pretty := !write.compact(opts)
-	switch {
-	case !pretty && !opts.ascii:
-		refusal, err = marshal_mode(fj, value, T, plan, false, false, allocator)
-	case pretty && !opts.ascii:
-		refusal, err = marshal_mode(fj, value, T, plan, true, false, allocator)
-	case !pretty && opts.ascii:
-		refusal, err = marshal_mode(fj, value, T, plan, false, true, allocator)
-	case:
-		refusal, err = marshal_mode(fj, value, T, plan, true, true, allocator)
+	if !opts.sort_keys {
+		switch {
+		case !pretty && !opts.ascii:
+			refusal, err = marshal_mode(fj, value, T, plan, false, false, false, allocator)
+		case pretty && !opts.ascii:
+			refusal, err = marshal_mode(fj, value, T, plan, true, false, false, allocator)
+		case !pretty && opts.ascii:
+			refusal, err = marshal_mode(fj, value, T, plan, false, true, false, allocator)
+		case:
+			refusal, err = marshal_mode(fj, value, T, plan, true, true, false, allocator)
+		}
+	} else {
+		switch {
+		case !pretty && !opts.ascii:
+			refusal, err = marshal_mode(fj, value, T, plan, false, false, true, allocator)
+		case pretty && !opts.ascii:
+			refusal, err = marshal_mode(fj, value, T, plan, true, false, true, allocator)
+		case !pretty && opts.ascii:
+			refusal, err = marshal_mode(fj, value, T, plan, false, true, true, allocator)
+		case:
+			refusal, err = marshal_mode(fj, value, T, plan, true, true, true, allocator)
+		}
 	}
 	if fj.out.err != nil {
 		return fj.out.err
@@ -119,30 +137,48 @@ marshal_out :: proc(fj: ^Fast_Json, value: rawptr, T: typeid, opts: Write_Option
 }
 
 @(private)
-marshal_mode :: #force_no_inline proc(fj: ^Fast_Json, value: rawptr, T: typeid, plan: ^Plan, $PRETTY, $ASCII: bool, allocator: runtime.Allocator) -> (typed.Marshal_Refusal, tape.Error) {
+marshal_mode :: #force_no_inline proc(
+	fj: ^Fast_Json,
+	value: rawptr,
+	T: typeid,
+	plan: ^Plan,
+	$PRETTY, $ASCII, $SORT_KEYS: bool,
+	allocator: runtime.Allocator,
+) -> (typed.Marshal_Refusal, tape.Error) {
 	when ASCII {
 		return typed.marshal_json(
-			value, T, TAG, plan, fj, PRETTY,
-			fast_room, fast_cursor, fast_has_err, fast_put_string_ascii, fast_put_line,
+			value, T, TAG, plan, fj, PRETTY, SORT_KEYS,
+			fast_buf_state, fast_sync_cursor, fast_grow, fast_has_err,
+			fast_put_string_inline, fast_put_string_ascii_sync, fast_put_line,
 			allocator,
 		)
 	} else {
 		return typed.marshal_json(
-			value, T, TAG, plan, fj, PRETTY,
-			fast_room, fast_cursor, fast_has_err, fast_put_string_utf8, fast_put_line,
+			value, T, TAG, plan, fj, PRETTY, SORT_KEYS,
+			fast_buf_state, fast_sync_cursor, fast_grow, fast_has_err,
+			fast_put_string_inline, fast_put_string_utf8_sync, fast_put_line,
 			allocator,
 		)
 	}
 }
 
 @(private)
-fast_room :: #force_inline proc(fj: ^Fast_Json, n: int) -> [^]u8 {
-	return write.room(&fj.out, n)
+fast_buf_state :: #force_inline proc "contextless" (fj: ^Fast_Json, slop: int) -> (buf, p, limit: [^]u8) #no_bounds_check {
+	out := &fj.out
+	return out.buf, out.buf[out.cursor:], out.buf[max(out.size - slop, 0):]
 }
 
 @(private)
-fast_cursor :: #force_inline proc "contextless" (fj: ^Fast_Json) -> ^int {
-	return &fj.out.cursor
+fast_sync_cursor :: #force_inline proc "contextless" (fj: ^Fast_Json, buf, p: [^]u8) {
+	fj.out.cursor = int(intrinsics.ptr_sub(p, buf))
+}
+
+@(private, cold)
+fast_grow :: #force_no_inline proc(fj: ^Fast_Json, buf, p: [^]u8, need, slop: int) -> ([^]u8, [^]u8, [^]u8) #no_bounds_check {
+	fj.out.cursor = int(intrinsics.ptr_sub(p, buf))
+	q := write.room(&fj.out, need)
+	out := &fj.out
+	return out.buf, q, out.buf[max(out.size - slop, 0):]
 }
 
 @(private)
@@ -151,34 +187,55 @@ fast_has_err :: #force_inline proc "contextless" (fj: ^Fast_Json) -> bool {
 }
 
 @(private)
-fast_put_line :: #force_inline proc(fj: ^Fast_Json, p: [^]u8, depth: int, after: int) -> [^]u8 #no_bounds_check {
+fast_put_line :: #force_inline proc(fj: ^Fast_Json, buf, p, limit: [^]u8, depth, after, slop: int) -> ([^]u8, [^]u8, [^]u8) #no_bounds_check {
 	n := depth * fj.width
 	if n > typed.JSON_LINE_MAX {
-		return fast_put_line_long(fj, n, after)
+		return fast_put_line_long(fj, buf, p, n, after, slop)
 	}
 	p[0] = '\n'
-	fill := fj.fill
-	for k := 0; k < n; k += 8 {
-		intrinsics.unaligned_store((^u64)(p[1 + k:]), fill)
+	fill := fj.line_fill
+	kernel.store16(p[1:], fill)
+	if n > 16 {
+		for k := 16; k < n; k += 16 {
+			kernel.store16(p[1 + k:], fill)
+		}
 	}
-	fj.out.cursor += n + 1
-	return p[n + 1:]
+	return buf, p[n + 1:], limit
 }
 
 @(private, cold)
-fast_put_line_long :: #force_no_inline proc(fj: ^Fast_Json, n: int, after: int) -> [^]u8 #no_bounds_check {
+fast_put_line_long :: #force_no_inline proc(fj: ^Fast_Json, buf, p: [^]u8, n, after, slop: int) -> ([^]u8, [^]u8, [^]u8) #no_bounds_check {
+	fj.out.cursor = int(intrinsics.ptr_sub(p, buf))
 	put_line_long(&fj.out, fj.fill, n)
-	return write.room(&fj.out, after)
+	q := write.room(&fj.out, max(after, slop))
+	out := &fj.out
+	return out.buf, q, out.buf[max(out.size - slop, 0):]
 }
 
 @(private)
-fast_put_string_utf8 :: #force_inline proc(fj: ^Fast_Json, p: [^]u8, s: string) -> bool {
-	return fast_put_string(fj, p, s, false)
+fast_put_string_utf8_sync :: #force_no_inline proc(fj: ^Fast_Json, buf, p: [^]u8, s: string, slop: int) -> ([^]u8, [^]u8, [^]u8, bool) #no_bounds_check {
+	fj.out.cursor = int(intrinsics.ptr_sub(p, buf))
+	if !put_string_long_fast(&fj.out, s, false) {
+		return buf, p, buf, false
+	}
+	out := &fj.out
+	if out.size - out.cursor < slop && out.err == nil {
+		_ = write.room(out, slop)
+	}
+	return out.buf, out.buf[out.cursor:], out.buf[max(out.size - slop, 0):], true
 }
 
 @(private)
-fast_put_string_ascii :: #force_inline proc(fj: ^Fast_Json, p: [^]u8, s: string) -> bool {
-	return fast_put_string(fj, p, s, true)
+fast_put_string_ascii_sync :: #force_no_inline proc(fj: ^Fast_Json, buf, p: [^]u8, s: string, slop: int) -> ([^]u8, [^]u8, [^]u8, bool) #no_bounds_check {
+	fj.out.cursor = int(intrinsics.ptr_sub(p, buf))
+	if !put_string_long_fast(&fj.out, s, true) {
+		return buf, p, buf, false
+	}
+	out := &fj.out
+	if out.size - out.cursor < slop && out.err == nil {
+		_ = write.room(out, slop)
+	}
+	return out.buf, out.buf[out.cursor:], out.buf[max(out.size - slop, 0):], true
 }
 
 @(private)
@@ -194,6 +251,9 @@ JSON_PAD_WORD :: u64(0x6161616161616161)
 JSON_MID_MAX :: write.ROOM_MAX - 18
 
 @(private)
+JSON_SEGMENT :: 512
+
+@(private)
 JSON_SCALAR_WASM :: (ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32) && !intrinsics.has_target_feature("simd128")
 
 // Whether any lane in `v` needs escaping (`< 0x20`, `"`, `\`) or is non-ASCII (`>= 0x80`).
@@ -202,58 +262,142 @@ json_dirty16 :: #force_inline proc "contextless" (v: JSON_V) -> bool {
 	return kernel.any_lane16(kernel.control_or_high16(v, false) | simd.lanes_eq(v, JSON_V('"')) | simd.lanes_eq(v, JSON_V('\\')))
 }
 
-// Writes `s` as a JSON string at `p` (caller guarantees >= 18 bytes of room at `fj.out.cursor`).
-// Returns false without advancing `cursor` when `s` is not valid UTF-8.
+// Writes `s` directly at `p` (caller guarantees >= 64 B free) when clean ASCII <= 32 B; returns bytes written (> 0) or 0 to delegate.
 @(private)
-fast_put_string :: #force_inline proc(fj: ^Fast_Json, p: [^]u8, s: string, $ASCII: bool) -> bool #no_bounds_check {
+fast_put_string_inline :: #force_inline proc "contextless" (p: [^]u8, s: string) -> int #no_bounds_check {
 	when JSON_SCALAR_WASM {
-		return put_string_slow(&fj.out, s, 0, ASCII)
+		return 0
 	} else {
-		if len(s) < 16 {
-			v, live, ok := kernel.head16(raw_data(s), len(s))
+		n := len(s)
+		if n == 0 {
+			p[0], p[1] = '"', '"'
+			return 2
+		}
+		src := raw_data(s)
+		if n < 16 {
+			v, live, ok := kernel.head16(src, n)
 			if ok {
 				v = simd.select(simd.lanes_ne(live, JSON_V(0)), v, JSON_PAD)
 			} else {
-				v = json_short_block(raw_data(s), len(s))
+				v = json_short_block(src, n)
 			}
 			if !json_dirty16(v) {
 				p[0] = '"'
 				kernel.store16(p[1:], v)
-				p[1 + len(s)] = '"'
-				fj.out.cursor += len(s) + 2
-				return true
+				p[1 + n] = '"'
+				return n + 2
+			}
+		} else if n <= 32 {
+			v0 := kernel.load16(src)
+			v1 := kernel.load16(src[n - 16:])
+			d0 := kernel.control_or_high16(v0, false) | simd.lanes_eq(v0, JSON_V('"')) | simd.lanes_eq(v0, JSON_V('\\'))
+			d1 := kernel.control_or_high16(v1, false) | simd.lanes_eq(v1, JSON_V('"')) | simd.lanes_eq(v1, JSON_V('\\'))
+			if !kernel.any_lane16(d0 | d1) {
+				p[0] = '"'
+				kernel.store16(p[1:], v0)
+				kernel.store16(p[1 + n - 16:], v1)
+				p[1 + n] = '"'
+				return n + 2
 			}
 		}
-		return put_string_mid(&fj.out, s, ASCII)
+		return 0
 	}
 }
 
-// Writes strings of 16..JSON_MID_MAX bytes in 16-byte SIMD blocks under one reservation while clean ASCII; falls back
-// to `put_string_slow` on the first escape or non-ASCII byte, keeping the copied clean prefix.
+// Writes strings > 32 B cleanly via 16-byte SIMD copies while pure ASCII; falls back to `put_string_mixed` (UTF-8)
+// or `put_string_slow` (ASCII / scalar WASM / big-endian), reusing any clean prefix already copied.
 @(private)
-put_string_mid :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII: bool) -> bool #no_bounds_check {
-	n := len(s)
-	if n < 16 || n > JSON_MID_MAX {
-		return put_string_slow(out, s, 0, ASCII)
-	}
-	src := raw_data(s)
-	p := write.room(out, n + 18)
+put_string_long_fast :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII: bool) -> bool #no_bounds_check {
 	i := 0
-	for ; i + 16 < n; i += 16 {
-		v := kernel.load16(src[i:])
-		if json_dirty16(v) {
-			return put_string_slow(out, s, i, ASCII)
+	when !JSON_SCALAR_WASM {
+		n := len(s)
+		src := raw_data(s)
+		if n >= 16 && n <= JSON_MID_MAX && src[0] < 0x80 {
+			p := write.room(out, n + 18)
+			clean := true
+			for ; i + 16 < n; i += 16 {
+				v := kernel.load16(src[i:])
+				if json_dirty16(v) {
+					clean = false
+					break
+				}
+				kernel.store16(p[1 + i:], v)
+			}
+			if clean {
+				v := kernel.load16(src[n - 16:])
+				if !json_dirty16(v) {
+					kernel.store16(p[1 + n - 16:], v)
+					p[0], p[1 + n] = '"', '"'
+					out.cursor += n + 2
+					return true
+				}
+			}
 		}
-		kernel.store16(p[1 + i:], v)
 	}
-	v := kernel.load16(src[n - 16:])
-	if json_dirty16(v) {
+	when !ASCII && !JSON_SCALAR_WASM && ODIN_ENDIAN == .Little {
+		return put_string_mixed(out, s, i)
+	} else {
 		return put_string_slow(out, s, i, ASCII)
 	}
-	kernel.store16(p[1 + n - 16:], v)
-	p[0], p[1 + n] = '"', '"'
-	out.cursor += n + 2
-	return true
+}
+
+when !JSON_SCALAR_WASM && ODIN_ENDIAN == .Little {
+	// Writes escaped and/or non-ASCII strings in 16-byte SIMD blocks using `MODEL_ESC_SEQ`, validating UTF-8 inline
+	// via `kernel.utf8_window` on already-loaded vectors with no second scan pass.
+	@(private, enable_target_feature = STATE_FEATURES)
+	put_string_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> bool #no_bounds_check {
+		n := len(s)
+		src := raw_data(s)
+		if i0 > 0 {
+			// Caller (`put_string_long_fast`) already reserved `n + 18` bytes and copied `src[:i0]` at `out.buf[out.cursor + 1:]`.
+			out.buf[out.cursor] = '"'
+			out.cursor += 1 + i0
+		}
+		prev, bad: JSON_V
+		high := false
+		for i := i0; i < n; {
+			if out.err != nil {
+				return true
+			}
+			end := min(i + JSON_SEGMENT, n)
+			base := write.room(out, 6 * (end - i + 16) + 18)
+			o := 0
+			if i == 0 {
+				base[0] = '"'
+				o = 1
+			}
+			for i < end {
+				left := n - i
+				v := kernel.load16(src[i:]) if left >= 16 else json_short_block(src[i:], left)
+				take := min(left, 16)
+				h := !kernel.is_ascii16(v)
+				if h || high {
+					bad |= kernel.utf8_window(prev, v)
+				}
+				prev, high = v, h
+				esc := simd.lanes_lt(v, JSON_V(0x20)) | simd.lanes_eq(v, JSON_V('"')) | simd.lanes_eq(v, JSON_V('\\'))
+				if kernel.any_lane16(esc) {
+					o = model_put_esc16(base[o:], v) + o - (16 - take)
+				} else {
+					kernel.store16(base[o:], v)
+					o += take
+				}
+				i += take
+			}
+			if end == n {
+				if high {
+					bad |= kernel.utf8_window(prev, JSON_PAD)
+				}
+				if !kernel.all_zero(bad) {
+					return false
+				}
+				base[o] = '"'
+				o += 1
+			}
+			out.cursor += o
+		}
+		return true
+	}
 }
 
 // Loads `n` (< 16) bytes from `src` strictly within `[0, n)` and pads remaining lanes with `'a'`.
