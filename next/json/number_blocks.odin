@@ -35,7 +35,7 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64
 	last: [^]u8
 	// The previous block's masks, whose top bits carry into this block's first byte. The byte before `p` is a digit,
 	// whose number the hook was given.
-	pn, pd, pm, pp, pl, po, pc, pk: u64 = 1 << 63, 1 << 63, 0, 0, 0, 0, 0, 0
+	pd, pm, pp, pl, po, pc, pk: u64 = 1 << 63, 0, 0, 0, 0, 0, 0
 	// The carry of the fraction runs' sum out of the previous block.
 	frac_carry: u64
 	when H != hook.No_Hooks {
@@ -55,9 +55,10 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64
 		dg, mi, dot, comma := ms[0], ms[1], ms[2], ms[3]
 		open, close, zero := n[0], n[1], n[2]
 		num := dg | mi | dot
-		after_num := after(num, pn)
+		after_dg := after(dg, pd)
 		after_minus := after(mi, pm)
 		after_dot := after(dot, pp)
+		after_num := after_dg | after_minus | after_dot
 		// The first digit of each integer part that is a 0.
 		lead_zero := (dg & ~after_num | after_minus) & zero
 		// One past each fraction's digits. `after_dot` marks the fraction's first digit, so the sum carries
@@ -67,7 +68,7 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64
 		bad := ~(num | comma | open | close)
 		bad |= mi & after_num                           // a `-` inside a number
 		bad |= after_minus & ~dg                        // a `-` with no digit after it
-		bad |= dot & ~after(dg, pd)                     // a `.` with no digit before it
+		bad |= dot & ~after_dg                          // a `.` with no digit before it
 		bad |= after_dot & ~dg                          // a `.` with no digit after it
 		bad |= after(lead_zero, pl) & dg                // a leading 0 with a digit after it
 		bad |= sum & ~dg & dot                          // a second `.` in a number
@@ -87,7 +88,13 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64
 			zeroed += 1
 		}
 		dep = dep + opens - closes
+		top := 63 - u64(intrinsics.count_leading_zeros(open | comma | close))
+		next_carry := u64(c1 | c2)
+		next_pd, next_pm, next_pl := dg, mi, lead_zero
 		when H != hook.No_Hooks {
+			// If the previous block ended with `]` (`pk >> 63 == 1`), `top` was 63 so `start` points at `q[0:]` and
+			// `dot_at` is nil. When this block starts with `,`, advance `start` past it (`q[1:]`) branchlessly.
+			start = start[(pk >> 63) & comma & 1:]
 			// A number's end is the byte after its last, a comma or a close. The end at `p` is the number the hook was
 			// given before this state.
 			t := Block_Tokens{q, after_num & ~num & ~u64(q == p), dot, open | comma, open, close}
@@ -104,15 +111,17 @@ st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64
 					return stopped(w, hs, stop)
 				}
 			}
-			top := 63 - u64(intrinsics.count_leading_zeros(t.seps))
 			start, dot_at = q[top + 1:], nil
 			if dots := dot & (~u64(0) << top << 1); dots != 0 {
 				dot_at = q[63 - intrinsics.count_leading_zeros(dots):]
 			}
+			pp, po, pc, pk = t.dots, t.opens, t.seps &~ t.opens, close
+		} else {
+			pp, po, pc, pk = dot, open, comma, close
 		}
-		last = q[63 - intrinsics.count_leading_zeros(open | comma | close):]
-		frac_carry = u64(c1 | c2)
-		pn, pd, pm, pp, pl, po, pc, pk = num, dg, mi, dot, lead_zero, open, comma, close
+		last = q[top:]
+		frac_carry = next_carry
+		pd, pm, pl = next_pd, next_pm, next_pl
 		q = q[64:]
 	}
 	// No `,`, `[` or `]` follows the last one judged before the block's end, so the walk is at depth `dep` in an array.

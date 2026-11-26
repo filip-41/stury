@@ -131,19 +131,18 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 @(private = "file", require_results)
 member_plain :: #force_inline proc(r: Reader, at: Node_Index, node: Node, name: string, dups: Duplicates) -> (Node_Index, Presence) #no_bounds_check {
 	doc := r.doc
-	policy := read_dups(doc.format, dups)
-	partial := node.spelling & CONTAINER_PARTIAL != 0
 	if intrinsics.expect(doc.format.expanded != nil && len(name) > 0 && name[0] == '{', false) {
 		return member_expanded(r, at, name, dups)
 	}
-	if !partial && r.index != nil && int(node.spelling & MAX_CHILDREN) > SMALL_OBJECT {
+	if intrinsics.expect(r.index != nil && node.spelling & CONTAINER_PARTIAL == 0 && int(node.spelling & MAX_CHILDREN) > SMALL_OBJECT, false) {
 		return member_indexed(r, at, name, dups)
 	}
+	policy := read_dups(doc.format, dups)
+	partial := node.spelling & CONTAINER_PARTIAL != 0
 	// An object that holds each key once has its only match at the first, and a group's first member is its own.
 	first := policy != .Last || !partial && keys_known_once(r, at)
-	slow_flags := u32(policy) | (u32(partial) << 8) | (u32(first) << 9)
 	if intrinsics.expect(.Held in doc.flags, false) {
-		return member_scan_slow(doc, at, at + 1, NO_NODE, name, slow_flags)
+		return member_scan_slow(doc, at, at + 1, NO_NODE, name, first)
 	}
 	nodes := raw_data(doc.nodes)
 	src := raw_data(doc.src)
@@ -160,7 +159,7 @@ member_plain :: #force_inline proc(r: Reader, at: Node_Index, node: Node, name: 
 			kind_dec := hdr & 0x0001_00FF_0000_0000
 			if intrinsics.expect(kind_dec != (u64(Kind.String) << 32), false) {
 				if kind_dec != (u64(Kind.Plain) << 32) {
-					return member_scan_slow(doc, at, k, found, name, slow_flags)
+					return member_scan_slow(doc, at, k, found, name, first)
 				}
 			}
 			if u32(hdr) == name_u32 {
@@ -174,7 +173,7 @@ member_plain :: #force_inline proc(r: Reader, at: Node_Index, node: Node, name: 
 					}
 				} else if intrinsics.unaligned_load((^u64)(a)) == intrinsics.unaligned_load((^u64)(name_p)) &&
 					intrinsics.unaligned_load((^u64)(a[name_len - 8:])) == intrinsics.unaligned_load((^u64)(name_p[name_len - 8:])) {
-					return member_scan_slow(doc, at, k, found, name, slow_flags)
+					return member_scan_slow(doc, at, k, found, name, first)
 				}
 			}
 			vhdr := (^u64)(uintptr(kp) + 24)^
@@ -193,34 +192,23 @@ member_plain :: #force_inline proc(r: Reader, at: Node_Index, node: Node, name: 
 						}
 					} else if intrinsics.unaligned_load((^u64)(a)) == intrinsics.unaligned_load((^u64)(name_p)) &&
 						intrinsics.unaligned_load((^u64)(a[name_len - 8:])) == intrinsics.unaligned_load((^u64)(name_p[name_len - 8:])) {
-						return member_scan_slow(doc, at, k, found, name, slow_flags)
+						return member_scan_slow(doc, at, k, found, name, first)
 					}
 				}
 			} else {
-				return member_scan_slow(doc, at, k, found, name, slow_flags)
+				return member_scan_slow(doc, at, k, found, name, first)
 			}
 			v := nodes[k + 1]
 			k = k + 1 + (Node_Index(v.n) if v.kind > .Plain else 1)
 		}
 	}
-	if found != NO_NODE {
-		if !partial {
+	if !partial {
+		if found != NO_NODE {
 			return found + 1, .Found
 		}
-		// A read keeps every member of a key it keeps one of, but under `.First` the first only, and none past a stop,
-		// which leaves the count of an object it comes inside not known.
-		if doc.partial != nil && doc.partial.dups != .First {
-			if node.spelling & MAX_CHILDREN < MAX_CHILDREN {
-				return found + 1, .Found
-			}
-			return member_partial_found_saturated(doc, at, found)
-		}
-		return NO_NODE, .Not_Loaded
-	}
-	if !partial {
 		return NO_NODE, .Missing
 	}
-	return member_partial_missing(doc.partial, at, name)
+	return member_partial_finish(doc, at, found, name, first)
 }
 
 // Inline equality check for two raw byte spans of equal length `n <= 16`.
@@ -258,7 +246,7 @@ member_indexed :: #force_no_inline proc(r: Reader, at: Node_Index, name: string,
 		}
 	}
 	first := policy != .Last || keys_known_once(r, at)
-	return member_scan_slow(r.doc, at, at + 1, NO_NODE, name, u32(policy) | (u32(first) << 9))
+	return member_scan_slow(r.doc, at, at + 1, NO_NODE, name, first)
 }
 
 @(private = "file", cold, require_results)
@@ -297,11 +285,9 @@ member_expanded :: #force_no_inline proc "contextless" (r: Reader, at: Node_Inde
 }
 
 @(private = "file", cold, require_results)
-member_scan_slow :: #force_no_inline proc "contextless" (doc: ^Document, at, start_k, init_found: Node_Index, name: string, flags: u32) -> (Node_Index, Presence) #no_bounds_check {
+member_scan_slow :: #force_no_inline proc "contextless" (doc: ^Document, at, start_k, init_found: Node_Index, name: string, first: bool) -> (Node_Index, Presence) #no_bounds_check {
 	node := doc.nodes[at]
-	policy := Duplicates(flags & 0xFF)
-	partial := (flags & (1 << 8)) != 0
-	first := (flags & (1 << 9)) != 0
+	partial := node.spelling & CONTAINER_PARTIAL != 0
 	found := init_found
 	end := at + Node_Index(node.n)
 	for k := start_k; k < end; k = node_after(doc, k + 1) {
@@ -313,28 +299,29 @@ member_scan_slow :: #force_no_inline proc "contextless" (doc: ^Document, at, sta
 		}
 	}
 	if found != NO_NODE {
-		if !partial || policy != .Last || doc.partial != nil && doc.partial.dups != .First && child_count(doc, at, node) >= 0 {
+		// When `partial` holds, `first` equals `policy != .Last`.
+		if !partial {
+			return found + 1, .Found
+		}
+		return member_partial_finish(doc, at, found, name, first)
+	}
+	if !partial {
+		return NO_NODE, .Missing
+	}
+	return member_partial_finish(doc, at, NO_NODE, name, first)
+}
+
+@(private = "file", cold, require_results)
+member_partial_finish :: #force_no_inline proc "contextless" (doc: ^Document, at, found: Node_Index, name: string, first: bool) -> (Node_Index, Presence) #no_bounds_check {
+	node := doc.nodes[at]
+	if found != NO_NODE {
+		// When `partial` holds, `first` equals `policy != .Last`.
+		if first || doc.partial != nil && doc.partial.dups != .First && child_count(doc, at, node) >= 0 {
 			return found + 1, .Found
 		}
 		return NO_NODE, .Not_Loaded
 	}
-	if !partial || named_missing(doc.partial, at, name) {
-		return NO_NODE, .Missing
-	}
-	return NO_NODE, .Not_Loaded
-}
-
-@(private = "file", cold, require_results)
-member_partial_found_saturated :: #force_no_inline proc "contextless" (doc: ^Document, at, found: Node_Index) -> (Node_Index, Presence) #no_bounds_check {
-	if saturated_count(doc, at) >= 0 {
-		return found + 1, .Found
-	}
-	return NO_NODE, .Not_Loaded
-}
-
-@(private = "file", cold, require_results)
-member_partial_missing :: #force_no_inline proc "contextless" (x: ^Partial, at: Node_Index, name: string) -> (Node_Index, Presence) #no_bounds_check {
-	if named_missing(x, at, name) {
+	if named_missing(doc.partial, at, name) {
 		return NO_NODE, .Missing
 	}
 	return NO_NODE, .Not_Loaded
@@ -753,17 +740,32 @@ named :: proc "contextless" (r: Reader, at: Node_Index, name: string) -> (c: Chi
 		return c, p
 	}
 	unknown := false
+	hit := false
 	end := at + Node_Index(node.n)
-	for k := at + 1; k < end; k = node_after(doc, k + 1) {
-		if key_at_names(doc, k, name, c.expanded, &unknown) {
-			// A read keeps every member of a key it keeps one of, but under `.First` the first only, and none past a
-			// stop, which leaves the count of an object it comes inside not known.
-			if node.spelling & CONTAINER_PARTIAL != 0 && (doc.partial.dups == .First || child_count(doc, at, node) < 0) {
-
-				return {}, .Not_Loaded
+	if !c.expanded {
+		for k := at + 1; k < end; k = node_after(doc, k + 1) {
+			if doc_names(doc, doc.nodes[k], name) {
+				hit = true
+				break
 			}
-			return c, .Found
 		}
+	} else {
+		for k := at + 1; k < end; k = node_after(doc, k + 1) {
+			pres := doc.format.expanded(doc, k, name)
+			unknown ||= pres == .Not_Loaded
+			if pres == .Found {
+				hit = true
+				break
+			}
+		}
+	}
+	if hit {
+		// A read keeps every member of a key it keeps one of, but under `.First` the first only, and none past a
+		// stop, which leaves the count of an object it comes inside not known.
+		if node.spelling & CONTAINER_PARTIAL != 0 && (doc.partial.dups == .First || child_count(doc, at, node) < 0) {
+			return {}, .Not_Loaded
+		}
+		return c, .Found
 	}
 	if !unknown && (node.spelling & CONTAINER_PARTIAL == 0 || named_missing(doc.partial, at, name)) {
 		return {}, .Missing

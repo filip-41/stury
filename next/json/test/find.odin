@@ -154,6 +154,25 @@ find_rules_out_escaped_keys_by_their_tail :: proc(t: ^testing.T) {
 	expect_find(t, {`{"k\u0061100000":1,"ka199999":2}`, {tape.Name("ka199999")}, .Default, .Found, "2"})
 	expect_find(t, {`{"k\u0061100000":1,"ka199999":2}`, {tape.Name("ka199999")}, .Last, .Found, "2"})
 	expect_find(t, {`{"ka199999":2,"k\u0061100000":1}`, {tape.Name("ka199999")}, .First, .Found, "2"})
+	// Exact-credit head and 4-byte unescaped-suffix boundaries (`n >= 9 && len(name) >= 4`, `raw[n - 9] == '\\'`).
+	expect_find(t, {`{"k\u0061100009":1,"k\u0061199999":2}`, {tape.Name("ka199999")}, .Default, .Found, "2"})
+	expect_find(t, {`{"k\u0061100009":1,"a\u0061199999":2}`, {tape.Name("za199999")}, .Default, .Missing, ""})
+	// Surrogate pair whose second `\u` puts `\` at exact index `n - 9` (`n = 15`) and `n - 10` (`n = 16`).
+	expect_find(t, {`{"\ud83d\ude00abc":1}`, {tape.Name("\U0001F600abc")}, .Default, .Found, "1"})
+	expect_find(t, {`{"\ud83d\ude00abc":1}`, {tape.Name("\U0001F600abd")}, .Default, .Missing, ""})
+	expect_find(t, {`{"\ud83d\ude00abcd":1}`, {tape.Name("\U0001F600abcd")}, .Default, .Found, "1"})
+	expect_find(t, {`{"\ud83d\ude00abcd":1}`, {tape.Name("\U0001F600abce")}, .Default, .Missing, ""})
+	// Escapes inside the last 8 bytes still fall back cleanly to decoding.
+	expect_find(t, {`{"abcdefg\\hi":1}`, {tape.Name(`abcdefg\hi`)}, .Default, .Found, "1"})
+	expect_find(t, {`{"abcdefg\\hi":1}`, {tape.Name(`abcdefg\hj`)}, .Default, .Missing, ""})
+	expect_find(t, {`{"abcdefgh\\n":1}`, {tape.Name(`abcdefgh\n`)}, .Default, .Found, "1"})
+	expect_find(t, {`{"abcdefgh\\n":1}`, {tape.Name(`abcdefgh\m`)}, .Default, .Missing, ""})
+	expect_find(t, {`{"abcdefgh\n":1}`, {tape.Name("abcdefgh\n")}, .Default, .Found, "1"})
+	expect_find(t, {`{"abcdefgh\n":1}`, {tape.Name("abcdefghn")}, .Default, .Missing, ""})
+	// Multi-byte UTF-8 lead bytes with escapes and short `< 9` escaped keys.
+	expect_find(t, {"{\"\\u00e9\\u0061\\u0062c\":1}", {tape.Name("\u00e9abc")}, .Default, .Found, "1"})
+	expect_find(t, {"{\"\xc3\xa9\\u0061bcd\":1}", {tape.Name("\u00e9abcd")}, .Default, .Found, "1"})
+	expect_find(t, {"{\"\xc3\xa9\\u0061bcd\":1}", {tape.Name("xabcd")}, .Default, .Missing, ""})
 }
 
 // A key longer than the two words a compare loads is read whole, so the bytes between the words still keep a key

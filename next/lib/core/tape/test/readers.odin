@@ -253,3 +253,52 @@ member_fast_path_lengths_escapes_and_duplicates :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// `tape.named` yields repeated members in document order for both plain names and expanded names `{ns}local`.
+@(test)
+named_yields_plain_and_expanded_groups :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	expanded_check :: proc "contextless" (doc: ^tape.Document, k: tape.Node_Index, name: string) -> tape.Presence {
+		kn := doc.nodes[k]
+		if string(doc.src[kn.lo:][:kn.n]) == "ns:a" && name == "{urn:test}a" {
+			return .Found
+		}
+		if string(doc.src[kn.lo:][:kn.n]) == "hold" {
+			return .Not_Loaded
+		}
+		return .Missing
+	}
+	fmt_ns := TWICE
+	fmt_ns.expanded = expanded_check
+	src := transmute([]u8)string("p1ns:a2p3ns:a4")
+	nodes := []tape.Node{
+		container(0, 7, 3, .Object),
+		scalar(0, 1, .String, .Key), scalar(1, 1, .Number),
+		scalar(2, 4, .String, .Key), scalar(6, 1, .Number),
+		scalar(7, 1, .String, .Key), scalar(8, 1, .Number),
+		scalar(9, 4, .String, .Key), scalar(13, 1, .Number),
+	}
+	nodes[0].n = u32(len(nodes))
+	nodes[0].spelling = 4
+	doc := tape.Document{src = src, nodes = nodes, format = &fmt_ns}
+	r := tape.Reader{&doc, nil}
+
+	// Plain name lookup via `named`.
+	g, gp := tape.named(r, tape.ROOT, "p")
+	testing.expect_value(t, gp, tape.Presence.Found)
+	_, v1, p1 := tape.next_child(r, &g)
+	_, v2, p2 := tape.next_child(r, &g)
+	_, _, p3 := tape.next_child(r, &g)
+	testing.expect(t, p1 == .Found && v1 == 2 && p2 == .Found && v2 == 6 && p3 == .Missing)
+
+	// Expanded name lookup via `named`.
+	ge, gep := tape.named(r, tape.ROOT, "{urn:test}a")
+	testing.expect_value(t, gep, tape.Presence.Found)
+	_, e1, ep1 := tape.next_child(r, &ge)
+	_, e2, ep2 := tape.next_child(r, &ge)
+	_, _, ep3 := tape.next_child(r, &ge)
+	testing.expect(t, ep1 == .Found && e1 == 4 && ep2 == .Found && e2 == 8 && ep3 == .Missing)
+
+	_, gm := tape.named(r, tape.ROOT, "{urn:test}missing")
+	testing.expect_value(t, gm, tape.Presence.Missing)
+}

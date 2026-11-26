@@ -411,6 +411,28 @@ builder_fast_loops_open_close_and_number_blocks :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(wdoc.nodes), WIDE + 2)
 	testing.expect_value(t, tape.child_count(&wdoc, 1, wdoc.nodes[1]), WIDE)
 
+	// Close `]` landing at byte 63 of a `st_number_blocks` block followed immediately by `,number` at byte 64.
+	boundary := strings.builder_make(context.temp_allocator)
+	strings.write_string(&boundary, "[[[0,1,2],[") // `st_number_blocks` enters at idx 8 (`]`), block 0 spans [8..<72], byte 63 is idx 71.
+	for _ in 0 ..< 26 {
+		strings.write_string(&boundary, "1,")
+	}
+	strings.write_string(&boundary, "12345.67],9,10,[") // idx 71 == ']', idx 72 == ',', followed by `,9` spanning into block 1.
+	for _ in 0 ..< 1000 {
+		strings.write_string(&boundary, "1,")
+	}
+	strings.write_string(&boundary, "2]]]")
+	bsrc := strings.to_string(boundary)
+	bdoc, berr := json.build(transmute([]u8)bsrc)
+	defer tape.destroy(&bdoc)
+	testing.expect_value(t, berr, nil)
+	if testing.expect(t, len(bdoc.nodes) > 36) {
+		n9 := bdoc.nodes[34]
+		testing.expect_value(t, n9.kind, tape.Kind.Number)
+		testing.expect_value(t, bsrc[n9.lo:n9.lo + u64(n9.n)], "9")
+		testing.expect_value(t, n9.spelling, tape.number_spelling(0, 1, 0))
+	}
+
 	// Multi-block coordinate array comparing tight `st_number_blocks` against spaced fallback that stays out of blocks.
 	tight := strings.builder_make(context.temp_allocator)
 	spaced := strings.builder_make(context.temp_allocator)

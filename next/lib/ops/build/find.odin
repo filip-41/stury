@@ -263,13 +263,16 @@ finder_hook_as :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t:
 				}
 			} else if t.spelling & tape.SPELLING_CREDIT_EXACT != 0 {
 				// An escaped key's source span is longer than its text. One subtract turns it into the decoded
-				// length, so a key of a different length needs no decode.
+				// length, and unescaped prefix/tail bytes rule out mismatches before decoding.
 				if int(t.n) - int(tape.spelling_credit(t.spelling)) != len(h.key) {
+					return s, .Next
+				}
+				if n := int(t.n); n > 0 && len(h.key) > 0 && finder_escaped_mismatch(raw_data(h.key_text)[t.lo:][:n], h.key) {
 					return s, .Next
 				}
 			}
 		}
-	} else if t.kind <= .Plain && t.role == .Value {
+	} else if t.kind <= .Plain {
 		if h.quiet {
 			return s, .Next
 		}
@@ -277,14 +280,25 @@ finder_hook_as :: #force_inline proc "contextless" (h: ^Finder, s: hook.Regs, t:
 			h.count_at^ += 1
 			return s, .Next
 		}
-	} else if t.kind == .End && h.skip_end && !h.pending {
-		h.skip_end = false
-		return s, .Next
-	} else if t.role == .Value && t.kind != .End && h.count_at != nil && h.count_at^ != h.count_to && !h.quiet && !h.replay {
-		// A container before the index the path takes is counted and skipped as a scalar there is counted.
-		h.count_at^ += 1
-		h.skip_end = true
-		return s, .Skip
+	} else if t.kind == .End {
+		if h.skip_end && !h.pending {
+			h.skip_end = false
+			return s, .Next
+		}
+	} else if !h.skip_end {
+		// Inside a quiet or pre-target array region, container values are settled/skipped without calling `finder_token`.
+		if h.quiet {
+			if !h.settled {
+				h.skip_end = true
+				return s, .Skip
+			}
+			return s, .Rest
+		}
+		if h.count_at != nil && h.count_at^ != h.count_to && !h.replay {
+			h.count_at^ += 1
+			h.skip_end = true
+			return s, .Skip
+		}
 	}
 	return s, finder_token(h, t, NAMES)
 }
@@ -353,8 +367,8 @@ finder_names :: #force_inline proc "contextless" (h: ^Finder, lv: ^Find_Level, n
 	return none if h.dups == .Group else tape.name_take(h.dups, lv.chosen) != .Pass
 }
 
-@(private)
-finder_token :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, $NAMES: bool) -> hook.Action {
+@(private, cold)
+finder_token :: #force_no_inline proc "contextless" (h: ^Finder, t: tape.Token, $NAMES: bool) -> hook.Action {
 	a: hook.Action
 	when NAMES {
 		a = finder_keyed(h, t) if h.keyed else finder_step(h, t, true)
@@ -598,22 +612,39 @@ finder_enter :: #force_inline proc "contextless" (h: ^Finder, replaces: bool, t:
 // `#no_bounds_check` invariant, which `tape.key_names` and `same_text` hold too: `t.lo + u64(t.n) <= u64(len(h.key_text))`.
 @(private, require_results)
 finder_names_key :: #force_inline proc "contextless" (h: ^Finder, t: tape.Token, name: string) -> bool #no_bounds_check {
-	if t.spelling & tape.SPELLING_CREDIT_EXACT != 0 {
+	if t.kind != .Number && t.spelling & tape.SPELLING_CREDIT_EXACT != 0 {
 		// An escaped key's source span is longer than its text. One subtract turns it into the decoded length, so a
 		// key of a different length needs no decode.
 		if int(t.n) - int(tape.spelling_credit(t.spelling)) != len(name) {
 			return false
 		}
-		// A key whose last byte is its own and differs there is no key the step names, so it needs no decode:
-		// `same_text` would decode it to find that its last byte differs.
-		if n := int(t.n); n > 0 && len(name) > 0 {
-			raw := raw_data(h.key_text)[t.lo:][:n]
-			if raw[n - 1] != name[len(name) - 1] && finder_tail_own(raw) {
-				return false
-			}
+		// Unescaped prefix/suffix bytes rule out mismatches before decoding.
+		if n := int(t.n); n > 0 && len(name) > 0 && finder_escaped_mismatch(raw_data(h.key_text)[t.lo:][:n], name) {
+			return false
 		}
 	}
 	return tape.key_names(h.format, h.key_text, t, name)
+}
+
+// Whether an escaped key `raw` (whose exact-credit decoded length equals `len(name)`) can be rejected without
+// decoding by its first byte or trailing unescaped bytes. Every escape in an exact-credit key starts with `\`: `\X`
+// (2B), `\uXXXX` (6B), or a surrogate pair `\uHHHH\uLLLL` (12B, whose second half has `\` at +6). If none of the last
+// nine bytes of `raw` is `\`, then no escape reaches `raw[n - 4:]`, so those four bytes are literal bytes of the key.
+@(private, require_results)
+finder_escaped_mismatch :: #force_inline proc "contextless" (raw: []u8, name: string) -> bool #no_bounds_check {
+	n, kn := len(raw), len(name)
+	r, kp := raw_data(raw), raw_data(name)
+	if r[0] != '\\' && r[0] != kp[0] {
+		return true
+	}
+	if n >= 9 && kn >= 4 {
+		w := intrinsics.unaligned_load((^u64)(r[n - 8:]))
+		x := w ~ 0x5c5c5c5c_5c5c5c5c
+		if r[n - 9] != '\\' && ((x - 0x01010101_01010101) & ~x & 0x80808080_80808080) == 0 {
+			return intrinsics.unaligned_load((^u32)(r[n - 4:])) != intrinsics.unaligned_load((^u32)(kp[kn - 4:]))
+		}
+	}
+	return r[n - 1] != kp[kn - 1] && finder_tail_own(raw)
 }
 
 // Whether the last byte of the escaped key text `raw` is a byte of the key's text and not part of an escape. Every
