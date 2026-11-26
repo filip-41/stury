@@ -21,6 +21,10 @@ Dump_Opts :: struct {
 	exclude_none:     bool,
 	exclude_defaults: bool,
 	check:            bool,
+	redact:           bool,
+	redact_mask:      string,
+	redact_paths:     []string,
+	validators:       ^Validator_Registry,
 }
 
 Format_Write_Proc :: proc(doc: ^tape.Document, opts: write.Options, allocator: runtime.Allocator) -> ([]u8, tape.Facts, write.Error)
@@ -47,8 +51,8 @@ dump_tokens :: proc(m: ^Model($T), v: ^T, tt: ^write.Token_Tape, opts := Dump_Op
 	omit_state := Dump_Omit{plan = &m.plan, opts = opts}
 	mem.dynamic_arena_init(&omit_state.defaults, scr, scr); defer mem.dynamic_arena_destroy(&omit_state.defaults)
 	omit_hook := Omit_Hook{fn = dump_field_omitted, ctx = &omit_state}
-	if opts.check { dump_check_with_omit(&m.plan, m.judging, rawptr(v), sink, &omit_hook, allocator, scr) or_return }
-	return emit_node(&m.plan, tt, m.plan.root, rawptr(v), &omit_hook, sink, allocator, scr)
+	if opts.check { dump_check_with_omit(&m.plan, m.judging, rawptr(v), sink, &omit_hook, opts.validators, allocator, scr) or_return }
+	return emit_node(&m.plan, tt, m.plan.root, rawptr(v), &omit_hook, sink, allocator, scr, false, opts.redact, opts.redact_mask, opts.redact_paths)
 }
 
 @(require_results)
@@ -189,8 +193,8 @@ lazy_scratch_get :: proc(ls: ^Lazy_Scratch) -> runtime.Allocator {
 lazy_scratch_end :: proc(ls: ^Lazy_Scratch) { if ls.ready { mem.dynamic_arena_destroy(&ls.arena) } }
 
 @(private)
-dump_check_with_omit :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, sink: ^Sink, omit_hook: ^Omit_Hook, allocator, scratch: runtime.Allocator) -> Error {
-	verr := validate_inner(plan, judging, val_ptr, sink, {scratch = scratch}, omit_hook, allocator)
+dump_check_with_omit :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, sink: ^Sink, omit_hook: ^Omit_Hook, validators: ^Validator_Registry, allocator, scratch: runtime.Allocator) -> Error {
+	verr := validate_inner(plan, judging, val_ptr, sink, {scratch = scratch, validators = validators}, omit_hook, allocator)
 	if verr == nil { return nil }
 	me, is_me := verr.(Model_Error); if !is_me { return verr }
 	code := error_code(me.kind)
@@ -198,9 +202,9 @@ dump_check_with_omit :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawpt
 		delete(me.operand, allocator); delete(me.want.text, allocator)
 		wt, cerr := strings.clone(code, allocator)
 		if cerr != nil { delete(me.pointer, allocator); return cerr }
-		return Model_Error{kind = .Check_Failed, at = me.at, pointer = me.pointer, want = {text = wt}, owned = true}
+		return Model_Error{kind = .Check_Failed, at = me.at, pointer = me.pointer, want = {text = wt}, owned = true, secret = me.secret}
 	}
-	return Model_Error{kind = .Check_Failed, at = me.at, pointer = me.pointer, want = {text = code}}
+	return Model_Error{kind = .Check_Failed, at = me.at, pointer = me.pointer, want = {text = code}, secret = me.secret}
 }
 
 @(private)
@@ -209,10 +213,11 @@ dump_check_value :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, o
 	omit_state := Dump_Omit{plan = plan, opts = opts}
 	mem.dynamic_arena_init(&omit_state.defaults, scr, scr); defer mem.dynamic_arena_destroy(&omit_state.defaults)
 	omit_hook := Omit_Hook{fn = dump_field_omitted, ctx = &omit_state}
-	return dump_check_with_omit(plan, judging, val_ptr, sink, &omit_hook, allocator, scr)
+	return dump_check_with_omit(plan, judging, val_ptr, sink, &omit_hook, opts.validators, allocator, scr)
 }
 
 // Writes `v` directly as JSON into `w` via format callbacks, avoiding `Token_Tape`, `tape.Document`, and per-call arenas.
+// Fast path (`REDACT == false`) compiles with zero redaction branches when `!opts.redact` (or no `secret` fields) and `len(opts.redact_paths) == 0`.
 dump_json :: proc(
 	m: ^Model($T),
 	v: ^T,
@@ -226,10 +231,32 @@ dump_json :: proc(
 	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
 	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
 	allocator := context.allocator,
-) -> Error #no_bounds_check {
+) -> Error {
 	if m == nil || v == nil || len(m.plan.nodes) == 0 {
 		return Model_Error{kind = .Bad_Option, want = {text = "value"}}
 	}
+	if (opts.redact && m.plan.has_secrets) || len(opts.redact_paths) > 0 {
+		return dump_json_core(m, v, opts, sink, w, PRETTY, true, room, cursor_of, has_err, put_string, put_line, allocator)
+	}
+	return dump_json_core(m, v, opts, sink, w, PRETTY, false, room, cursor_of, has_err, put_string, put_line, allocator)
+}
+
+@(private)
+dump_json_core :: proc(
+	m: ^Model($T),
+	v: ^T,
+	opts: Dump_Opts,
+	sink: ^Sink,
+	w: ^$W,
+	$PRETTY: bool,
+	$REDACT: bool,
+	$room: proc(w: ^W, n: int) -> [^]u8,
+	$cursor_of: proc "contextless" (w: ^W) -> ^int,
+	$has_err: proc "contextless" (w: ^W) -> bool,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
+	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
+	allocator := context.allocator,
+) -> Error #no_bounds_check {
 	plan := &m.plan
 	ls := Lazy_Scratch{backing = allocator}
 	defer lazy_scratch_end(&ls)
@@ -247,6 +274,9 @@ dump_json :: proc(
 		omit_ready = true
 	}
 	any_exclude := opts.exclude_unset || opts.exclude_none || opts.exclude_defaults
+	when REDACT {
+		redact_mask := resolve_redact_mask(opts.redact_mask)
+	}
 
 	inline_frames: [DUMP_INLINE_FRAMES]Dump_Frame = ---
 	frames := raw_data(inline_frames[:])
@@ -347,6 +377,12 @@ dump_json :: proc(
 				when PRETTY { p[0], p[1] = ':', ' '; p = p[2:]; cursor^ += 2 } else { p[0] = ':'; p = p[1:]; cursor^ += 1 }
 			}
 			cur.u.sf = intrinsics.ptr_offset(sf, 1)
+			when REDACT {
+				if (opts.redact && .Secret in sf.flags) || (len(opts.redact_paths) > 0 && dump_json_path_redacted(frames, top, &cur, opts.redact_paths, &ls)) {
+					if !put_string(w, p, redact_mask) { return write.Error(write.Refused{0, .No_Spelling}) }
+					continue next
+				}
+			}
 			vkind, vnode, vsidx, va = sf.kind, sf.node, sf.struct_idx, cur.at + uintptr(sf.offset)
 		} else if cur.mode == .List {
 			if cur.left == 0 {
@@ -369,6 +405,13 @@ dump_json :: proc(
 			} else {
 				p = room(w, 1 + JSON_LEAF_ROOM)
 				p[0] = ','; p = p[cur.lead:]; cursor^ += int(cur.lead); cur.lead = 1
+			}
+			when REDACT {
+				if len(opts.redact_paths) > 0 && dump_json_path_redacted(frames, top, &cur, opts.redact_paths, &ls) {
+					cur.at += uintptr(cur.step)
+					if !put_string(w, p, redact_mask) { return write.Error(write.Refused{0, .No_Spelling}) }
+					continue next
+				}
 			}
 			ctn := &plan.nodes[cur.node_idx]
 			vkind, vnode, vsidx, va = ctn.kind, cur.node_idx, ctn.struct_idx, cur.at
@@ -402,6 +445,12 @@ dump_json :: proc(
 			if !put_string(w, p, e.key_text) { return write.Error(write.Refused{0, .No_Spelling}) }
 			p = room(w, 2 + JSON_LEAF_ROOM)
 			when PRETTY { p[0], p[1] = ':', ' '; p = p[2:]; cursor^ += 2 } else { p[0] = ':'; p = p[1:]; cursor^ += 1 }
+			when REDACT {
+				if len(opts.redact_paths) > 0 && dump_json_path_redacted(frames, top, &cur, opts.redact_paths, &ls) {
+					if !put_string(w, p, redact_mask) { return write.Error(write.Refused{0, .No_Spelling}) }
+					continue next
+				}
+			}
 			vtn := &plan.nodes[cur.node_idx]
 			vkind, vnode, vsidx, va = vtn.kind, cur.node_idx, vtn.struct_idx, uintptr(e.val_ptr)
 		} else if cur.mode == .Bits {
@@ -585,6 +634,36 @@ dump_json :: proc(
 			continue next
 		}
 	}
+}
+
+@(private, cold)
+dump_json_path_redacted :: #force_no_inline proc(frames: [^]Dump_Frame, top: int, cur: ^Dump_Frame, patterns: []string, ls: ^Lazy_Scratch) -> bool {
+	if len(patterns) == 0 { return false }
+	buf: [32]tape.Step = ---
+	n := 0
+	dyn: [dynamic]tape.Step
+	owned := false
+	push_fr :: proc(buf: []tape.Step, n: ^int, dyn: ^[dynamic]tape.Step, owned: ^bool, ls: ^Lazy_Scratch, fr: ^Dump_Frame) {
+		st: tape.Step
+		#partial switch fr.mode {
+		case .Struct: sf := intrinsics.ptr_offset(fr.u.sf, -1); st = tape.Name(fr.si.fields[sf.field_idx].name)
+		case .List:   st = tape.Index(fr.u.total - fr.left - 1)
+		case .Map:    st = tape.Name(fr.entries[fr.step - 1].key_text)
+		case: return
+		}
+		if !owned^ {
+			if n^ < len(buf) { buf[n^] = st; n^ += 1; return }
+			scr := lazy_scratch_get(ls)
+			dyn^ = make([dynamic]tape.Step, 0, len(buf) * 2, scr)
+			append(dyn, ..buf[:n^])
+			owned^ = true
+		}
+		_, _ = append(dyn, st)
+	}
+	for i in 1 ..< top { push_fr(buf[:], &n, &dyn, &owned, ls, &frames[i]) }
+	if cur != nil { push_fr(buf[:], &n, &dyn, &owned, ls, cur) }
+	steps := dyn[:] if owned else buf[:n]
+	return redact_steps_match(steps, patterns)
 }
 
 @(private, cold)

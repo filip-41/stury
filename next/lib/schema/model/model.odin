@@ -57,6 +57,7 @@ Registry :: struct {
 	naming: Naming, types: [dynamic]Type_Rule, fields: [dynamic]Field_Rule_Of, loads: Loads,
 	validators: [dynamic]Validator_Of, befores: [dynamic]Before_Of, customs: [dynamic]Custom_Of,
 	enums: [dynamic]Enum_Rule, unions: [dynamic]Union_Rule, schemas: [dynamic]Schema_Of,
+	named_validators: Validator_Registry,
 }
 
 @(private)
@@ -118,18 +119,34 @@ add_hook :: proc(reg: ^Registry, list: ^[dynamic]$X, x: X, replace: bool) -> run
 	entry := x; entry.field = kept(reg, x.field) or_return; _, err := append(list, entry); return err
 }
 
+// Options for `compile_with_opts`.
+Compile_Options :: struct {
+	// Struct tag key for wire names and flags (defaults to `"json"` when empty via `compile`, or `"stury"` if explicitly empty in `compile`).
+	tag:              string,
+	// Optional caller-owned registry of declarative named validators (`validate=...` / `validator=...`).
+	validators:       ^Validator_Registry,
+	// When true, allows named validators not yet registered at compile time (must be supplied in `Load_Opts.validators` at runtime).
+	defer_validators: bool,
+}
+
 Model :: struct($T: typeid) { plan: Type_Plan, tag: string, judging: ^Applied, constants: mem.Dynamic_Arena, const_ready: bool, allocator: runtime.Allocator }
 
 @(require_results)
 compile :: proc(reg: ^Registry, $T: typeid, tag := "json", allocator := context.allocator) -> (m: Model(T), err: Error) {
-	m.allocator, m.tag, m.const_ready = allocator, tag if tag != "" else "stury", true
+	return compile_with_opts(reg, T, Compile_Options{tag = tag if tag != "" else "stury"}, allocator)
+}
+
+@(require_results)
+compile_with_opts :: proc(reg: ^Registry, $T: typeid, opts := Compile_Options{}, allocator := context.allocator) -> (m: Model(T), err: Error) {
+	tag := opts.tag if opts.tag != "" else "json"
+	m.allocator, m.tag, m.const_ready = allocator, tag, true
 	mem.dynamic_arena_init(&m.constants, allocator, allocator)
 	defer if err != nil { model_destroy(&m) }
 	if reg != nil { unknown_member(reg) or_return; if eerr := enum_rules_refused(reg); eerr.kind != .None { return m, eerr } }
 	scratch_arena: mem.Dynamic_Arena; mem.dynamic_arena_init(&scratch_arena, allocator, allocator); defer mem.dynamic_arena_destroy(&scratch_arena)
 	scratch := mem.dynamic_arena_allocator(&scratch_arena)
 	defaults := copied_defaults(reg, mem.dynamic_arena_allocator(&m.constants), scratch) or_return
-	m.plan = build_type_plan(reg, T, m.tag, defaults, allocator, scratch) or_return
+	m.plan = build_type_plan(reg, T, m.tag, defaults, opts.validators, opts.defer_validators, allocator, scratch) or_return
 	m.judging = judging_of(reg, &m.plan, allocator, scratch) or_return
 	if m.judging != nil { m.plan.can_stream = false }
 	return m, nil
@@ -145,13 +162,14 @@ unknown_member :: proc(reg: ^Registry) -> Error {
 	return nil
 }
 
-destroy :: proc { registry_destroy, model_destroy, problem_destroy, sink_destroy, fields_set_destroy, error_destroy }
+destroy :: proc { registry_destroy, model_destroy, problem_destroy, sink_destroy, fields_set_destroy, error_destroy, validator_registry_destroy, schema_validators_destroy, migration_plan_destroy, schema_compat_destroy }
 
 registry_destroy :: proc(reg: ^Registry) {
 	if reg == nil { return }
 	delete(reg.validators); delete(reg.befores); delete(reg.types); delete(reg.fields)
 	delete(reg.loads.defaults); delete(reg.loads.forbids); delete(reg.customs)
 	delete(reg.enums); delete(reg.unions); delete(reg.schemas)
+	validator_registry_destroy(&reg.named_validators)
 	if reg.loads.arena_ready { mem.dynamic_arena_destroy(&reg.loads.memory) }
 	reg^ = {}
 }

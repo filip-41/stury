@@ -112,7 +112,7 @@ dump_to :: proc(
 dump_run :: proc(fj: ^Fast_Json, m: ^model.Model($T), v: ^T, opts: model.Dump_Opts, wopts: Write_Options, sink: ^model.Sink, allocator: runtime.Allocator) -> ([]u8, model.Error) {
 	fj.fill = u64(0x0909_0909_0909_0909) if wopts.tab else u64(0x2020_2020_2020_2020)
 	fj.width = 1 if wopts.tab else int(wopts.indent)
-	if wopts.framing == .Seq { fast_room(fj, 1)[0] = RECORD_SEPARATOR; fj.out.cursor += 1 }
+	if wopts.framing == .Seq { model_fast_room(fj, 1)[0] = RECORD_SEPARATOR; fj.out.cursor += 1 }
 	pretty, err := !write.compact(wopts), model.Error(nil)
 	switch {
 	case !pretty && !wopts.ascii: err = dump_mode(fj, m, v, opts, sink, false, false, allocator)
@@ -122,7 +122,7 @@ dump_run :: proc(fj: ^Fast_Json, m: ^model.Model($T), v: ^T, opts: model.Dump_Op
 	}
 	if fj.out.err != nil { model.error_destroy(err, allocator); write.out_drop(&fj.out); return nil, fj.out.err }
 	if err != nil { write.out_drop(&fj.out); return nil, err }
-	if wopts.framing != .None { fast_room(fj, 1)[0] = '\n'; fj.out.cursor += 1 }
+	if wopts.framing != .None { model_fast_room(fj, 1)[0] = '\n'; fj.out.cursor += 1 }
 	t, ferr := write.out_finish(&fj.out)
 	if ferr != nil { return nil, ferr }
 	return t, fj.out.err if fj.out.err != nil else nil
@@ -131,10 +131,41 @@ dump_run :: proc(fj: ^Fast_Json, m: ^model.Model($T), v: ^T, opts: model.Dump_Op
 @(private)
 dump_mode :: #force_no_inline proc(fj: ^Fast_Json, m: ^model.Model($T), v: ^T, opts: model.Dump_Opts, sink: ^model.Sink, $PRETTY, $ASCII: bool, allocator: runtime.Allocator) -> model.Error {
 	when ASCII {
-		return model.dump_json(m, v, opts, sink, fj, PRETTY, fast_room, fast_cursor, fast_has_err, model_put_string_ascii, fast_put_line, allocator)
+		return model.dump_json(m, v, opts, sink, fj, PRETTY, model_fast_room, model_fast_cursor, fast_has_err, model_put_string_ascii, model_fast_put_line, allocator)
 	} else {
-		return model.dump_json(m, v, opts, sink, fj, PRETTY, fast_room, fast_cursor, fast_has_err, model_put_string_utf8, fast_put_line, allocator)
+		return model.dump_json(m, v, opts, sink, fj, PRETTY, model_fast_room, model_fast_cursor, fast_has_err, model_put_string_utf8, model_fast_put_line, allocator)
 	}
+}
+
+@(private)
+model_fast_room :: #force_inline proc(fj: ^Fast_Json, n: int) -> [^]u8 {
+	return write.room(&fj.out, n)
+}
+
+@(private)
+model_fast_cursor :: #force_inline proc "contextless" (fj: ^Fast_Json) -> ^int {
+	return &fj.out.cursor
+}
+
+@(private)
+model_fast_put_line :: #force_inline proc(fj: ^Fast_Json, p: [^]u8, depth: int, after: int) -> [^]u8 #no_bounds_check {
+	n := depth * fj.width
+	if n > model.JSON_LINE_MAX {
+		return model_fast_put_line_long(fj, n, after)
+	}
+	p[0] = '\n'
+	fill := fj.fill
+	for k := 0; k < n; k += 8 {
+		intrinsics.unaligned_store((^u64)(p[1 + k:]), fill)
+	}
+	fj.out.cursor += n + 1
+	return p[n + 1:]
+}
+
+@(private, cold)
+model_fast_put_line_long :: #force_no_inline proc(fj: ^Fast_Json, n: int, after: int) -> [^]u8 #no_bounds_check {
+	put_line_long(&fj.out, fj.fill, n)
+	return write.room(&fj.out, after)
 }
 
 @(private)

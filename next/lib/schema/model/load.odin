@@ -17,7 +17,7 @@ import "stury:lib/core/tape"
 import "stury:lib/ops/typed"
 import "stury:lib/schema/rules"
 
-Load_Opts :: struct { dups: tape.Duplicates, budget: tape.Budget, scratch: runtime.Allocator }
+Load_Opts :: struct { dups: tape.Duplicates, budget: tape.Budget, scratch: runtime.Allocator, validators: ^Validator_Registry }
 
 @(private)
 resolve_dups :: proc "contextless" (dups: tape.Duplicates, format: ^tape.Format) -> (tape.Duplicates, bool) {
@@ -123,7 +123,7 @@ load_value_scoped :: proc(m: ^Model($T), v: rules.Value, out: ^T, sink: ^Sink, o
 	if m == nil || out == nil || len(m.plan.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "target"}} }
 	mem.zero(out, size_of(T))
 	from := len(sink.entries) if sink != nil else 0
-	l, lerr := loader_make(&m.plan, m.judging, policy, opts.budget, sink, sc.out, sc.scratch)
+	l, lerr := loader_make(&m.plan, m.judging, policy, opts.budget, sink, sc.out, sc.scratch, validators = opts.validators)
 	if lerr != nil { return scratch_oom_error(sc) }
 	defer loader_cleanup(&l)
 
@@ -164,7 +164,7 @@ budget_enter :: #force_inline proc "contextless" (b: ^Budget_Tracker, at: u64) -
 budget_leave :: #force_inline proc "contextless" (b: ^Budget_Tracker) { if b.depth > 0 { b.depth -= 1 } }
 
 @(private)
-emit_leaf_fails :: proc(leaf: ^rules.Leaf, fails: bit_set[rules.Error_Kind; u64], members: bool, at: u64, steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator, scratch: runtime.Allocator, silent: bool) -> bool {
+emit_leaf_fails :: proc(leaf: ^rules.Leaf, fails: bit_set[rules.Error_Kind; u64], members: bool, at: u64, steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator, scratch: runtime.Allocator, silent: bool, secret := false) -> bool {
 	if fails == {} { return true }
 	op_buf: [64]u8 = ---
 	for fk in fails {
@@ -182,7 +182,7 @@ emit_leaf_fails :: proc(leaf: ^rules.Leaf, fails: bit_set[rules.Error_Kind; u64]
 			}
 		case .Wrong_Kind: op = rules.operand_text(leaf, fk, members, scratch); op_heap = true
 		}
-		ok := record_failure(sink, first, oom, allocator, map_rules_kind(fk), at, steps, op, {}, silent)
+		ok := record_failure(sink, first, oom, allocator, map_rules_kind(fk), at, steps, op, {}, silent, secret)
 		if op_heap && len(op) > 0 { delete(op, scratch) }
 		if !ok { return false }
 	}
@@ -199,41 +199,41 @@ fmt_bound :: proc "contextless" (buf: []u8, pfx: string, v: i64, noun: string, u
 }
 
 @(private)
-check_string_leaf :: proc(plan: ^Type_Plan, re_scratch: ^regex.Scratch, rule_idx: i32, s: string, at: u64, steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator, scratch: runtime.Allocator, silent: bool) -> bool {
+check_string_leaf :: proc(plan: ^Type_Plan, re_scratch: ^regex.Scratch, rule_idx: i32, s: string, at: u64, steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator, scratch: runtime.Allocator, silent: bool, secret := false) -> bool {
 	if rule_idx <= 0 { return true }
 	leaf := &plan.leaves[rule_idx - 1]
 	fails, _ := rules.judge_string(leaf, s, re_scratch if leaf.pattern != nil else nil, 0, scratch)
-	return emit_leaf_fails(leaf, fails, false, at, steps, sink, first, oom, allocator, scratch, silent)
+	return emit_leaf_fails(leaf, fails, false, at, steps, sink, first, oom, allocator, scratch, silent, secret)
 }
 
 @(private)
-check_number_leaf :: proc(plan: ^Type_Plan, rule_idx: i32, text: string, small: Maybe(i64), at: u64, steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator, scratch: runtime.Allocator, silent: bool) -> bool {
+check_number_leaf :: proc(plan: ^Type_Plan, rule_idx: i32, text: string, small: Maybe(i64), at: u64, steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator, scratch: runtime.Allocator, silent: bool, secret := false) -> bool {
 	if rule_idx <= 0 { return true }
 	leaf := &plan.leaves[rule_idx - 1]
-	return emit_leaf_fails(leaf, rules.judge_number(leaf, text, small), false, at, steps, sink, first, oom, allocator, scratch, silent)
+	return emit_leaf_fails(leaf, rules.judge_number(leaf, text, small), false, at, steps, sink, first, oom, allocator, scratch, silent, secret)
 }
 
 @(private)
-check_count_leaf :: proc(plan: ^Type_Plan, rule_idx: i32, n: u64, members: bool, at: u64, steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator, scratch: runtime.Allocator, silent: bool) -> bool {
+check_count_leaf :: proc(plan: ^Type_Plan, rule_idx: i32, n: u64, members: bool, at: u64, steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator, scratch: runtime.Allocator, silent: bool, secret := false) -> bool {
 	if rule_idx <= 0 { return true }
 	leaf := &plan.leaves[rule_idx - 1]
-	return emit_leaf_fails(leaf, rules.judge_count(n, leaf.min_members if members else leaf.min_items, leaf.max_members if members else leaf.max_items), members, at, steps, sink, first, oom, allocator, scratch, silent)
+	return emit_leaf_fails(leaf, rules.judge_count(n, leaf.min_members if members else leaf.min_items, leaf.max_members if members else leaf.max_items), members, at, steps, sink, first, oom, allocator, scratch, silent, secret)
 }
 
 // Loader state and cross-format value extractors
 
 @(private)
 Loader :: struct {
-	plan: ^Type_Plan, judging: ^Applied, policy: tape.Duplicates, sink: ^Sink, first: Model_Error,
-	oom, silent: bool, fail_count: u64, budget: Budget_Tracker, steps: [dynamic]tape.Step,
+	plan: ^Type_Plan, judging: ^Applied, validators: ^Validator_Registry, policy: tape.Duplicates, sink: ^Sink, first: Model_Error,
+	oom, silent: bool, secret_depth: int, fail_count: u64, budget: Budget_Tracker, steps: [dynamic]tape.Step,
 	rep: Report, re_scratch: regex.Scratch, allocator, scratch: runtime.Allocator,
 }
 
 @(private)
-loader_make :: proc(plan: ^Type_Plan, judging: ^Applied, policy: tape.Duplicates, budget: tape.Budget, sink: ^Sink, allocator, scratch: runtime.Allocator, silent := false) -> (l: Loader, err: runtime.Allocator_Error) {
+loader_make :: proc(plan: ^Type_Plan, judging: ^Applied, policy: tape.Duplicates, budget: tape.Budget, sink: ^Sink, allocator, scratch: runtime.Allocator, silent := false, validators: ^Validator_Registry = nil) -> (l: Loader, err: runtime.Allocator_Error) {
 	rs, rerr := regex.scratch_make(scratch)
 	if rerr.kind != .None { return {}, .Out_Of_Memory }
-	l = {plan = plan, judging = judging, policy = policy, sink = sink, silent = silent, re_scratch = rs, allocator = allocator, scratch = scratch}
+	l = {plan = plan, judging = judging, validators = validators, policy = policy, sink = sink, silent = silent, re_scratch = rs, allocator = allocator, scratch = scratch}
 	budget_init(&l.budget, budget); l.steps.allocator = scratch; report_init(&l.rep, scratch)
 	return l, nil
 }
@@ -245,7 +245,7 @@ loader_stopped :: #force_inline proc "contextless" (l: ^Loader) -> bool { return
 @(private)
 loader_fail :: proc(l: ^Loader, kind: Error_Kind, at: u64, operand := "", want := Want{}) -> bool {
 	l.fail_count += 1
-	return record_failure(l.sink, &l.first, &l.oom, l.allocator, kind, at, l.steps[:], operand, want, l.silent)
+	return record_failure(l.sink, &l.first, &l.oom, l.allocator, kind, at, l.steps[:], operand, want, l.silent, l.secret_depth > 0)
 }
 @(private)
 value_offset :: proc "contextless" (v: rules.Value) -> u64 {
@@ -443,31 +443,31 @@ extract_number_text :: proc(l: ^Loader, v: rules.Value, buf: []u8) -> (s: string
 
 @(private)
 Load_Frame_Kind :: enum u8 {
-	Node, Struct_Entries, Struct_Finish, Field_After, List_Elems,
+	Node, Struct_Entries, Struct_Finish, Field_After, Node_After, List_Elems,
 	Map_Entries, Map_Insert, Custom_Finish, Union_Tag, Run_Judged, Pop_Step, Leave_Depth,
 }
 
 @(private)
 Load_Frame :: struct {
-	kind:                           Load_Frame_Kind,
-	node_idx, field_rule_idx:       i32,
-	val:                            rules.Value,
-	dest, patch_existing:           rawptr,
-	field_unique, not_null, is_cap: bool,
-	patch_node:                     ^Patch_Node,
-	skip_tag_key, cap_key:          string,
-	si:                             ^Struct_Info,
-	fi, idx, count, tag_size:       int,
-	stride, base, tag_offset:       uintptr,
-	start_fails, at:                u64,
-	tag_value:                      i64,
-	seen:                           ^Fields_Set,
-	entries:                        []Obj_Entry,
-	elems:                          []rules.Value,
-	key_buf, val_buf:               rawptr,
-	saved_alloc:                    runtime.Allocator,
-	m_info:                         ^runtime.Map_Info,
-	key_ti, val_ti:                 ^runtime.Type_Info,
+	kind:                                      Load_Frame_Kind,
+	node_idx, field_rule_idx:                  i32,
+	val:                                       rules.Value,
+	dest, patch_existing:                      rawptr,
+	field_unique, not_null, is_cap, pop_secret: bool,
+	patch_node:                                ^Patch_Node,
+	skip_tag_key, cap_key:                     string,
+	si:                                        ^Struct_Info,
+	fi, idx, count, tag_size:                  int,
+	stride, base, tag_offset:                  uintptr,
+	start_fails, at:                           u64,
+	tag_value:                                 i64,
+	seen:                                      ^Fields_Set,
+	entries:                                   []Obj_Entry,
+	elems:                                     []rules.Value,
+	key_buf, val_buf:                          rawptr,
+	saved_alloc:                               runtime.Allocator,
+	m_info:                                    ^runtime.Map_Info,
+	key_ti, val_ti:                            ^runtime.Type_Info,
 }
 
 @(private)
@@ -480,7 +480,10 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 	for len(stack) > 0 && !loader_stopped(l) {
 		top := &stack[len(stack) - 1]
 		switch top.kind {
-		case .Pop_Step:    pop(&stack); if len(l.steps) > 0 { pop(&l.steps) }
+		case .Pop_Step:
+			f := pop(&stack)
+			if f.pop_secret && l.secret_depth > 0 { l.secret_depth -= 1 }
+			if len(l.steps) > 0 { pop(&l.steps) }
 		case .Leave_Depth: pop(&stack); budget_leave(&l.budget)
 		case .Run_Judged:  f := pop(&stack); if !run_node_judged(l, &l.plan.nodes[f.node_idx], f.field_unique, f.val) { l.fail_count += 1 }
 		case .Union_Tag:   f := pop(&stack); if l.fail_count == f.start_fails && f.tag_size > 0 { tv := f.tag_value; mem.copy(rawptr(uintptr(f.dest) + f.tag_offset), &tv, f.tag_size) }
@@ -492,9 +495,28 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 		case .Field_After:
 			f := pop(&stack)
 			if l.fail_count != f.start_fails { continue }
+			fld := &f.si.fields[f.fi]
 			report_reset(&l.rep)
-			for av in f.si.fields[f.fi].afters { av.call(f.dest, av.fn, &l.rep) }
-			if l.rep.failed || l.rep.oom { l.fail_count += 1; _ = emit_report(&l.rep, l.steps[:], f.at, nil, l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent) }
+			for av in fld.afters { av.call(f.dest, av.fn, &l.rep) }
+			if len(fld.named_validators) > 0 {
+				if missing := run_named_validators(fld.named_validators, f.dest, l.plan.nodes[fld.node].ti, l.validators, &l.rep); missing != "" {
+					_ = loader_fail(l, .Missing_Validator, f.at, "", {text = missing})
+					continue
+				}
+			}
+			if l.rep.failed || l.rep.oom { l.fail_count += 1; _ = emit_report(&l.rep, l.steps[:], f.at, nil, l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent, l.secret_depth > 0) }
+		case .Node_After:
+			f := pop(&stack)
+			if l.fail_count != f.start_fails { continue }
+			tn := &l.plan.nodes[f.node_idx]
+			if len(tn.named_validators) > 0 {
+				report_reset(&l.rep)
+				if missing := run_named_validators(tn.named_validators, f.dest, tn.ti, l.validators, &l.rep); missing != "" {
+					_ = loader_fail(l, .Missing_Validator, f.at, "", {text = missing})
+					continue
+				}
+				if l.rep.failed || l.rep.oom { l.fail_count += 1; _ = emit_report(&l.rep, l.steps[:], f.at, nil, l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent, l.secret_depth > 0) }
+			}
 		case .Struct_Finish:
 			f := pop(&stack); si, tn, partial := f.si, &l.plan.nodes[f.node_idx], f.patch_node != nil
 			if !partial {
@@ -511,7 +533,10 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 						if fld.make_default(rawptr(uintptr(f.dest) + fld.offset), fld.default_data, l.allocator) != nil { l.oom = true; return }
 					} else if .Required in fld.flags {
 						if !push_oom(&l.oom, &l.steps, tape.Step(tape.Name(fld.name))) { return }
-						cont := loader_fail(l, .Missing_Field, close_at); pop(&l.steps)
+						if .Secret in fld.flags { l.secret_depth += 1 }
+						cont := loader_fail(l, .Missing_Field, close_at)
+						if .Secret in fld.flags && l.secret_depth > 0 { l.secret_depth -= 1 }
+						pop(&l.steps)
 						if !cont { break }
 					}
 				}
@@ -522,7 +547,7 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 			if !partial && l.fail_count == f.start_fails && len(si.validators) > 0 {
 				report_reset(&l.rep)
 				for sv in si.validators { sv.call(f.dest, sv.fn, &l.rep) }
-				if l.rep.failed || l.rep.oom { l.fail_count += 1; _ = emit_report(&l.rep, l.steps[:], f.at, si, l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent) }
+				if l.rep.failed || l.rep.oom { l.fail_count += 1; _ = emit_report(&l.rep, l.steps[:], f.at, si, l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent, l.secret_depth > 0) }
 			}
 			budget_leave(&l.budget)
 		case .Struct_Entries:
@@ -558,12 +583,13 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 			if partial && fields_set_set(&top.patch_node.present, fi, total, l.scratch) != nil { l.oom = true; return }
 			if !push_oom(&l.oom, &l.steps, tape.Step(tape.Name(fld.name))) { return }
 
+			field_secret := .Secret in fld.flags
 			field_val := e.val
 			if .Has_Before in fld.flags {
 				mat, merr := clone_rules_value(e.val, l.scratch, l.scratch)
 				if merr != nil { l.oom = true; pop(&l.steps); return }
 				report_reset(&l.rep); field_val = fld.before.call(mat, fld.before.fn, &l.rep)
-				if l.rep.failed || l.rep.oom { l.fail_count += 1; _ = emit_report(&l.rep, l.steps[:], value_offset(e.val), nil, l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent); pop(&l.steps); continue }
+				if l.rep.failed || l.rep.oom { l.fail_count += 1; _ = emit_report(&l.rep, l.steps[:], value_offset(e.val), nil, l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent, field_secret || l.secret_depth > 0); pop(&l.steps); continue }
 			}
 			child_existing: rawptr; child_patch: ^Patch_Node
 			if partial && top.patch_existing != nil {
@@ -575,8 +601,9 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 				}
 			}
 			field_dest := rawptr(uintptr(top.dest) + fld.offset)
-			if !push_oom(&l.oom, &stack, Load_Frame{kind = .Pop_Step}) { return }
-			if len(fld.afters) > 0 && (!partial || .Write_Only in fld.flags) {
+			if field_secret { l.secret_depth += 1 }
+			if !push_oom(&l.oom, &stack, Load_Frame{kind = .Pop_Step, pop_secret = field_secret}) { return }
+			if (len(fld.afters) > 0 || len(fld.named_validators) > 0) && (!partial || .Write_Only in fld.flags) {
 				if !push_oom(&l.oom, &stack, Load_Frame{kind = .Field_After, si = si, fi = fi, dest = field_dest, at = value_offset(e.val), start_fails = l.fail_count}) { return }
 			}
 			if !push_oom(&l.oom, &stack, Load_Frame{kind = .Node, node_idx = fld.node, val = field_val, dest = field_dest, field_rule_idx = fld.rule_idx, field_unique = .Has_Unique in fld.flags, not_null = .Not_Null in fld.flags, patch_existing = child_existing, patch_node = child_patch}) { return }
@@ -615,6 +642,9 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 			if !budget_node(&l.budget, at) { return }
 			tn, vk := &l.plan.nodes[f.node_idx], rules.value_kind(f.val)
 			rule_idx, has_unique := f.field_rule_idx if f.field_rule_idx > 0 else tn.rule_idx, f.field_unique || tn.has_unique
+			if len(tn.named_validators) > 0 && f.patch_node == nil && tn.kind != .Maybe && tn.kind != .Ptr {
+				if !push_oom(&l.oom, &stack, Load_Frame{kind = .Node_After, node_idx = f.node_idx, dest = f.dest, at = at, start_fails = l.fail_count}) { return }
+			}
 			#partial switch tn.kind {
 			case .Maybe, .Ptr:
 				if vk == .Null || is_empty_dsv_cell(f.val) {
@@ -672,7 +702,7 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 				n := len(elems)
 				if (tn.kind == .Array && n < tn.count) || ((tn.kind == .Array || tn.kind == .Fixed_List) && n > tn.count) {
 					if !loader_fail(l, .Too_Few if n < tn.count else .Too_Many, at) { budget_leave(&l.budget); continue }
-				} else if !check_count_leaf(l.plan, rule_idx, u64(n), false, at, l.steps[:], l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent) {
+				} else if !check_count_leaf(l.plan, rule_idx, u64(n), false, at, l.steps[:], l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent, l.secret_depth > 0) {
 					l.fail_count += 1; if loader_stopped(l) { budget_leave(&l.budget); return }
 				}
 				ctn := &l.plan.nodes[tn.child]
@@ -695,7 +725,7 @@ decode_loop :: proc(l: ^Loader, root_idx: i32, root_val: rules.Value, root_dest,
 				if vk != .Object && !has_xml_attributes(f.val) { _ = loader_fail(l, .Wrong_Kind, at, "", {type = tn.type, text = "object"}); continue }
 				entries, ok := extract_object(l, f.val); if !ok { continue }
 				if !budget_enter(&l.budget, at) || !budget_step(&l.budget, at) { return }
-				if !check_count_leaf(l.plan, rule_idx, u64(len(entries)), true, at, l.steps[:], l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent) {
+				if !check_count_leaf(l.plan, rule_idx, u64(len(entries)), true, at, l.steps[:], l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent, l.secret_depth > 0) {
 					l.fail_count += 1; if loader_stopped(l) { budget_leave(&l.budget); return }
 				}
 				(^runtime.Raw_Map)(f.dest).allocator = l.allocator
@@ -733,7 +763,7 @@ Scalar_Kind :: enum u8 { Wrong, Null, String, Number, True, False, Non_Finite }
 Scalar_Env :: struct {
 	plan: ^Type_Plan, re_scratch: ^regex.Scratch, stream: ^Stream_Loader, stream_sf: ^Stream_Field,
 	steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, fail_count: ^u64,
-	allocator, scratch: runtime.Allocator, silent, has_val, opt_sec, wrote: bool,
+	allocator, scratch: runtime.Allocator, silent, secret, has_val, opt_sec, wrote: bool,
 }
 
 @(private)
@@ -757,14 +787,14 @@ scalar_emit_fails :: proc(e: ^Scalar_Env, leaf: ^rules.Leaf, fails: bit_set[rule
 	if fails == {} { return true }
 	if e.stream != nil { return stream_emit_leaf_fails(e.stream, e.stream.sp, leaf, fails, false, at, e.stream_sf) }
 	e.fail_count^ += 1
-	return emit_leaf_fails(leaf, fails, false, at, e.steps, e.sink, e.first, e.oom, e.allocator, e.scratch, e.silent)
+	return emit_leaf_fails(leaf, fails, false, at, e.steps, e.sink, e.first, e.oom, e.allocator, e.scratch, e.silent, e.secret)
 }
 
 @(private)
 scalar_fail :: proc(e: ^Scalar_Env, kind: Error_Kind, at: u64, want := Want{}) -> bool {
 	if e.stream != nil { return stream_fail(e.stream, kind, at, "", want, sf = e.stream_sf) }
 	e.fail_count^ += 1
-	return record_failure(e.sink, e.first, e.oom, e.allocator, kind, at, e.steps, "", want, e.silent)
+	return record_failure(e.sink, e.first, e.oom, e.allocator, kind, at, e.steps, "", want, e.silent, e.secret)
 }
 
 @(private)
@@ -913,7 +943,7 @@ decode_scalar :: proc(l: ^Loader, tn: ^Type_Node, v: rules.Value, dest: rawptr, 
 	env := Scalar_Env{
 		plan = l.plan, re_scratch = &l.re_scratch, steps = l.steps[:], sink = l.sink,
 		first = &l.first, oom = &l.oom, fail_count = &l.fail_count, allocator = l.allocator,
-		scratch = l.scratch, silent = l.silent, has_val = l.sink != nil && !l.silent,
+		scratch = l.scratch, silent = l.silent, secret = l.secret_depth > 0, has_val = l.sink != nil && !l.silent,
 	}
 	buf: [256]u8 = ---
 	#partial switch tn.kind {
@@ -1053,7 +1083,7 @@ store_enum_value :: proc(dest: rawptr, size: int, val: i64) { v := val; mem.copy
 decode_bit_set :: proc(l: ^Loader, tn: ^Type_Node, v: rules.Value, dest: rawptr, rule_idx: i32, at: u64) {
 	if rules.value_kind(v) != .Array { _ = loader_fail(l, .Wrong_Kind, at, "", {type = tn.type, text = "array"}); return }
 	elems, ok := extract_array(v, l.scratch); if !ok { l.oom = true; return }
-	if !check_count_leaf(l.plan, rule_idx, u64(len(elems)), false, at, l.steps[:], l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent) {
+	if !check_count_leaf(l.plan, rule_idx, u64(len(elems)), false, at, l.steps[:], l.sink, &l.first, &l.oom, l.allocator, l.scratch, l.silent, l.secret_depth > 0) {
 		l.fail_count += 1; if loader_stopped(l) { return }
 	}
 	bytes := ([^]u8)(dest)[:tn.size]
@@ -1091,7 +1121,7 @@ decode_bit_set :: proc(l: ^Loader, tn: ^Type_Node, v: rules.Value, dest: rawptr,
 @(private)
 probe_union_arm :: proc(l: ^Loader, arm_node: i32, v: rules.Value, probe_buf: []u8, rule_idx: i32) -> bool {
 	mem.zero(raw_data(probe_buf), len(probe_buf))
-	probe, mk_err := loader_make(l.plan, l.judging, l.policy, l.budget.limit, nil, l.scratch, l.scratch, true)
+	probe, mk_err := loader_make(l.plan, l.judging, l.policy, l.budget.limit, nil, l.scratch, l.scratch, true, l.validators)
 	if mk_err != nil { l.oom = true; return false }
 	probe.budget.depth = l.budget.depth
 	decode_loop(&probe, arm_node, v, raw_data(probe_buf), nil, nil, rule_idx)
@@ -1170,5 +1200,5 @@ run_node_judged :: proc(l: ^Loader, tn: ^Type_Node, unique: bool, v: rules.Value
 	if l.judging == nil { return true }
 	j := judged_of(l.judging, tn.type, unique); if j == nil && unique { j = judged_of(l.judging, tn.type, false) }
 	if j == nil { return true }
-	return run_judged_on_value(j, v, l.policy, l.budget.limit, l.steps[:], l.sink, &l.first, &l.oom, &l.budget.exceeded, l.allocator, l.scratch, l.silent)
+	return run_judged_on_value(j, v, l.policy, l.budget.limit, l.steps[:], l.sink, &l.first, &l.oom, &l.budget.exceeded, l.allocator, l.scratch, l.silent, l.secret_depth > 0)
 }

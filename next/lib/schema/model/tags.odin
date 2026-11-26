@@ -26,42 +26,66 @@ Subject :: struct {
 // Parsed rules for one struct member or standalone type.
 @(private)
 Member_Rule :: struct {
-	rules:    rules.Rules,
-	optional: bool,
-	not_null: bool,
-	access:   Access,
-	refused:  string,
+	rules:      rules.Rules,
+	optional:   bool,
+	not_null:   bool,
+	secret:     bool,
+	access:     Access,
+	validators: [dynamic]string,
+	refused:    string,
 }
 
 // Parsed format struct tag (`json:"..."`, `toml:"..."`, `stury:"..."`, etc.).
 @(private)
 Format_Tag :: struct {
-	name:                                                string,
-	has_name, skip, omit_empty, omit_unset, required, unknown: bool,
+	name:                                                       string,
+	has_name, skip, omit_empty, omit_unset, required, unknown:  bool,
+	secret:                                                     bool,
 }
 
 // Parses format tag `tag_key` (falling back to `"stury"`) from Odin struct tag string `raw_tag`.
 @(private)
 parse_format_tag :: proc(raw_tag, tag_key: string) -> (ft: Format_Tag) {
 	val, found := tag_lookup(raw_tag, tag_key)
-	if !found && tag_key != "stury" { val, found = tag_lookup(raw_tag, "stury") }
-	if !found || len(val) == 0 { return }
-	if val == "-" { ft.skip = true; return }
-	first := true
-	for rest := val; len(rest) > 0; {
-		comma := strings.index_byte(rest, ',')
-		part := rest[:comma] if comma >= 0 else rest
-		rest = rest[comma + 1:] if comma >= 0 else ""
-		if first {
-			first = false
-			if len(part) > 0 { ft.name, ft.has_name = part, true }
-			continue
+	from_stury := tag_key == "stury"
+	if !found && tag_key != "stury" {
+		val, found = tag_lookup(raw_tag, "stury")
+		from_stury = found
+	}
+	if found && len(val) > 0 {
+		if val == "-" { ft.skip = true; return }
+		first := true
+		for rest := val; len(rest) > 0; {
+			comma := strings.index_byte(rest, ',')
+			part := rest[:comma] if comma >= 0 else rest
+			rest = rest[comma + 1:] if comma >= 0 else ""
+			if first {
+				first = false
+				if from_stury && strings.trim_space(part) == "secret" {
+					ft.secret = true
+				} else if len(part) > 0 {
+					ft.name, ft.has_name = part, true
+				}
+				continue
+			}
+			switch strings.trim_space(part) {
+			case "omitempty": ft.omit_empty = true
+			case "omitunset": ft.omit_unset = true
+			case "required":  ft.required = true
+			case "unknown":   ft.unknown = true
+			case "secret":    ft.secret = true
+			}
 		}
-		switch strings.trim_space(part) {
-		case "omitempty": ft.omit_empty = true
-		case "omitunset": ft.omit_unset = true
-		case "required":  ft.required = true
-		case "unknown":   ft.unknown = true
+	}
+	// Also honor `stury:"secret"` / `stury:"secret,omitempty"` / `stury:",secret"` when paired alongside a format tag.
+	if !from_stury && !ft.secret {
+		if sval, sfound := tag_lookup(raw_tag, "stury"); sfound && len(sval) > 0 {
+			for rest := sval; len(rest) > 0; {
+				comma := strings.index_byte(rest, ',')
+				part := rest[:comma] if comma >= 0 else rest
+				rest = rest[comma + 1:] if comma >= 0 else ""
+				if strings.trim_space(part) == "secret" { ft.secret = true; break }
+			}
 		}
 	}
 	return
@@ -166,15 +190,40 @@ keyed :: proc(item, key: string) -> (value: string, ok: bool) {
 }
 
 @(private)
+valid_validator_name :: proc "contextless" (name: string) -> bool {
+	if len(name) == 0 { return false }
+	for c in transmute([]u8)name {
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == ':' || c == '/'
+		if !ok { return false }
+	}
+	return true
+}
+
+@(private)
 read_item :: proc(item: string, subject: Subject, member: bool, r: ^Member_Rule, scratch: runtime.Allocator) -> bool {
 	kinds := subject.kinds
 	switch {
 	case item == "optional" && member: r.optional = true; return true
 	case item == "not_null" && member: r.not_null = true; return subject.nilable
+	case item == "secret" && member:   r.secret = true; return true
 	case (item == "read_only" || item == "write_only") && member:
 		role := Access.Read_Only if item == "read_only" else .Write_Only
 		if r.access != .Read_Write && r.access != role { return false }
 		r.access = role; return true
+	}
+	if vname, is_v := keyed(item, "validate"); is_v {
+		if !valid_validator_name(vname) { return false }
+		if r.validators.allocator.procedure == nil { r.validators.allocator = scratch }
+		for existing in r.validators { if existing == vname { return true } }
+		_, err := append(&r.validators, vname)
+		return err == nil
+	}
+	if vname, is_v := keyed(item, "validator"); is_v {
+		if !valid_validator_name(vname) { return false }
+		if r.validators.allocator.procedure == nil { r.validators.allocator = scratch }
+		for existing in r.validators { if existing == vname { return true } }
+		_, err := append(&r.validators, vname)
+		return err == nil
 	}
 	one: rules.Rules
 	format, is_format := keyed(item, "format")

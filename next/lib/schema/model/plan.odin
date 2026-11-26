@@ -21,7 +21,7 @@ KEY_MASK :: u64(0xFFFF_FFFF) | u64(0xFFFF) << 32 | u64(tape.SPELLING_DECODE) << 
 Stream_Field_Flag :: enum u8 {
 	Read_Only, Write_Only, Optional, Required, Not_Null,
 	Has_Default, Nonzero_Default, Has_After, Has_Unique, Has_Before,
-	Omit_Empty, Omit_Unset, Is_Root, Is_Elem,
+	Omit_Empty, Omit_Unset, Is_Root, Is_Elem, Secret,
 }
 
 @(private)
@@ -62,18 +62,20 @@ Type_Node :: struct {
 	tag_offset, len_offset:                               uintptr,
 	bit_lower:                                            i64,
 	no_nil, pure_maybe, has_unique, judged:               bool,
+	named_validators:                                     []Named_Validator_Ref,
 }
 
 @(private)
 Field_Info :: struct {
-	odin_name, name: string,
-	offset:          uintptr,
-	node, rule_idx:  i32,
-	flags:           Stream_Field_Flags,
-	make_default:    Make_Default,
-	default_data:    rawptr,
-	before:          Before,
-	afters:          []Validator,
+	odin_name, name:  string,
+	offset:           uintptr,
+	node, rule_idx:   i32,
+	flags:            Stream_Field_Flags,
+	make_default:     Make_Default,
+	default_data:     rawptr,
+	before:           Before,
+	afters:           []Validator,
+	named_validators: []Named_Validator_Ref,
 }
 
 @(private)
@@ -86,6 +88,7 @@ Struct_Info :: struct {
 	req_mask0, def_mask0:                               u64,
 	has_req_hi, has_def_hi, has_omit_tag, has_optional: bool,
 	has_field_afters, has_fields_set, forbid_extra:     bool,
+	has_secret:                                         bool,
 	fields_set_offset, capture_offset:                  uintptr,
 	capture_idx, capture_node:                          i32,
 	validators:                                         []Validator,
@@ -136,6 +139,8 @@ Type_Plan :: struct {
 	json_keys:                  []u8,
 	dump_hint:                  int,
 	can_stream, has_validators: bool,
+	has_secrets:                bool,
+	has_named_validators:       bool,
 	arena:                      mem.Dynamic_Arena,
 	arena_ready:                bool,
 	allocator:                  runtime.Allocator,
@@ -150,20 +155,22 @@ type_plan_destroy :: proc(p: ^Type_Plan) {
 
 @(private)
 Plan_Builder :: struct {
-	reg:            ^Registry,
-	tag:            string,
-	defaults:       []Default_Of,
-	arena, scratch: runtime.Allocator,
-	nodes:          [dynamic]Type_Node,
-	structs:        [dynamic]Struct_Info,
-	enums:          [dynamic]Enum_Info,
-	unions:         [dynamic]Union_Info,
-	customs:        [dynamic]Custom_Of,
-	rule_sets:      [dynamic]rules.Rules,
-	leaves:         [dynamic]rules.Leaf,
-	programs:       rules.Programs,
-	type_cache:     map[typeid]i32,
-	err:            Error,
+	reg:              ^Registry,
+	validators:       ^Validator_Registry,
+	defer_validators: bool,
+	tag:              string,
+	defaults:         []Default_Of,
+	arena, scratch:   runtime.Allocator,
+	nodes:            [dynamic]Type_Node,
+	structs:          [dynamic]Struct_Info,
+	enums:            [dynamic]Enum_Info,
+	unions:           [dynamic]Union_Info,
+	customs:          [dynamic]Custom_Of,
+	rule_sets:        [dynamic]rules.Rules,
+	leaves:           [dynamic]rules.Leaf,
+	programs:         rules.Programs,
+	type_cache:       map[typeid]i32,
+	err:              Error,
 }
 
 @(private)
@@ -173,13 +180,13 @@ b_push :: #force_inline proc(b: ^Plan_Builder, list: ^[dynamic]$T, x: T) -> bool
 }
 
 @(private)
-build_type_plan :: proc(reg: ^Registry, T: typeid, tag: string, defaults: []Default_Of, allocator, scratch: runtime.Allocator) -> (p: Type_Plan, err: Error) {
+build_type_plan :: proc(reg: ^Registry, T: typeid, tag: string, defaults: []Default_Of, validators: ^Validator_Registry, defer_validators: bool, allocator, scratch: runtime.Allocator) -> (p: Type_Plan, err: Error) {
 	p = {type = T, tag = tag, allocator = allocator, arena_ready = true}
 	mem.dynamic_arena_init(&p.arena, allocator, allocator)
 	arena := mem.dynamic_arena_allocator(&p.arena)
 	defer if err != nil { type_plan_destroy(&p) }
 
-	b := Plan_Builder{reg = reg, tag = tag, defaults = defaults, arena = arena, scratch = scratch}
+	b := Plan_Builder{reg = reg, validators = validators, defer_validators = defer_validators, tag = tag, defaults = defaults, arena = arena, scratch = scratch}
 	b.nodes.allocator, b.structs.allocator, b.enums.allocator = arena, arena, arena
 	b.unions.allocator, b.customs.allocator, b.rule_sets.allocator, b.leaves.allocator = arena, arena, arena, arena
 	b.programs = make(rules.Programs, 16, scratch) or_return
@@ -231,6 +238,26 @@ collect_type_rules :: proc(b: ^Plan_Builder, ti: ^runtime.Type_Info, mr: ^Member
 }
 
 @(private)
+compile_named_validators :: proc(b: ^Plan_Builder, names: []string, owner: typeid, ptr: string) -> []Named_Validator_Ref {
+	if len(names) == 0 { return nil }
+	refs, aerr := make([]Named_Validator_Ref, len(names), b.arena)
+	if aerr != nil { b.err = aerr; return nil }
+	reg_vr := &b.reg.named_validators if b.reg != nil else nil
+	for name, i in names {
+		nv, found := resolve_named_validator(b.validators, reg_vr, name)
+		if !found && !b.defer_validators {
+			b.err = Model_Error{kind = .Missing_Validator, pointer = ptr, want = {owner, name}}
+			return nil
+		}
+		cloned, cerr := strings.clone(name, b.arena)
+		if cerr != nil { b.err = cerr; return nil }
+		if found { nv.name = cloned }
+		refs[i] = Named_Validator_Ref{name = cloned, v = nv, has_v = found}
+	}
+	return refs
+}
+
+@(private)
 compile_type_node :: proc(b: ^Plan_Builder, ti: ^runtime.Type_Info) -> i32 {
 	if b.err != nil || ti == nil { return -1 }
 	if existing, ok := b.type_cache[ti.id]; ok { return existing }
@@ -245,6 +272,11 @@ compile_type_node :: proc(b: ^Plan_Builder, ti: ^runtime.Type_Info) -> i32 {
 		ridx := compile_rule_leaf(b, type_mr.rules, ti)
 		if b.err != nil { return idx }
 		b.nodes[idx].rule_idx, b.nodes[idx].has_unique = ridx, type_mr.rules.unique
+	}
+	if len(type_mr.validators) > 0 {
+		refs := compile_named_validators(b, type_mr.validators[:], ti.id, "")
+		if b.err != nil { return idx }
+		b.nodes[idx].named_validators = refs
 	}
 
 	for &c, ci in b.customs {
@@ -438,6 +470,8 @@ collect_struct_fields :: proc(b: ^Plan_Builder, owner_ti, ti: ^runtime.Type_Info
 		mr: Member_Rule
 		subject := subject_of(fti, b.reg)
 		if !collect_type_rules(b, fti, &mr) { bad_tag(b, owner_ti.id, fname, mr.refused); return }
+		// Type-level named validators live on `Type_Node.named_validators` so they run once per value (not duplicated on fields).
+		clear(&mr.validators)
 		if b.reg != nil {
 			for x in b.reg.fields {
 				if (x.type == owner_ti.id || x.type == ti.id) && x.field == fname && !read_tag(x.tag, subject, true, &mr, b.scratch) { bad_tag(b, owner_ti.id, fname, mr.refused); return }
@@ -457,19 +491,22 @@ collect_struct_fields :: proc(b: ^Plan_Builder, owner_ti, ti: ^runtime.Type_Info
 		}
 		ridx := compile_rule_leaf(b, mr.rules, fti)
 		if b.err != nil { return }
+		named_vals := compile_named_validators(b, mr.validators[:], owner_ti.id, fname)
+		if b.err != nil { return }
 
 		is_optional := (mr.optional || has_def) && !fmt_tag.required
 		flags: Stream_Field_Flags
-		if mr.access == .Read_Only  { flags += {.Read_Only} }
-		if mr.access == .Write_Only { flags += {.Write_Only} }
-		if is_optional              { flags += {.Optional} }
+		if mr.access == .Read_Only    { flags += {.Read_Only} }
+		if mr.access == .Write_Only   { flags += {.Write_Only} }
+		if is_optional                { flags += {.Optional} }
 		if (fmt_tag.required || !is_optional) && mr.access != .Read_Only { flags += {.Required} }
-		if mr.not_null              { flags += {.Not_Null} }
-		if fmt_tag.omit_empty       { flags += {.Omit_Empty} }
-		if fmt_tag.omit_unset       { flags += {.Omit_Unset} }
-		if mr.rules.unique          { flags += {.Has_Unique} }
-		if has_bf                   { flags += {.Has_Before} }
-		if len(afters_dyn) > 0      { flags += {.Has_After} }
+		if mr.not_null                { flags += {.Not_Null} }
+		if fmt_tag.omit_empty         { flags += {.Omit_Empty} }
+		if fmt_tag.omit_unset         { flags += {.Omit_Unset} }
+		if mr.rules.unique            { flags += {.Has_Unique} }
+		if has_bf                     { flags += {.Has_Before} }
+		if len(afters_dyn) > 0 || len(named_vals) > 0 { flags += {.Has_After} }
+		if mr.secret || fmt_tag.secret { flags += {.Secret} }
 		if has_def {
 			flags += {.Has_Default}
 			if !default_is_zero(var_make, var_data) { flags += {.Nonzero_Default} }
@@ -477,6 +514,7 @@ collect_struct_fields :: proc(b: ^Plan_Builder, owner_ti, ti: ^runtime.Type_Info
 		if !b_push(b, fields_list, Field_Info{
 			odin_name = fname, name = wire_name, offset = foff, node = fnode, rule_idx = ridx,
 			flags = flags, make_default = var_make, default_data = var_data, before = bf, afters = afters_dyn[:],
+			named_validators = named_vals,
 		}) { return }
 	}
 }
@@ -525,6 +563,11 @@ finalize_stream_plan :: proc(p: ^Type_Plan, arena: runtime.Allocator) -> runtime
 		if tn.kind == .Union || tn.kind == .Value || tn.kind == .Custom || tn.kind == .Bit_Set || tn.kind == .Raw || tn.has_unique || tn.judged {
 			p.can_stream = false
 		}
+		if len(tn.named_validators) > 0 {
+			p.has_named_validators = true
+			p.has_validators = true
+			p.can_stream = false
+		}
 		if tn.child >= 0 {
 			ctn := &p.nodes[tn.child]
 			tn.elem_field_idx = i32(len(elem_buf))
@@ -540,6 +583,8 @@ finalize_stream_plan :: proc(p: ^Type_Plan, arena: runtime.Allocator) -> runtime
 			ftn := &p.nodes[f.node]
 			if (.Has_Before in f.flags) || (.Has_Unique in f.flags) { p.can_stream = false }
 			if .Has_After in f.flags { si.has_field_afters = true; p.has_validators = true }
+			if len(f.named_validators) > 0 { p.has_named_validators = true }
+			if .Secret in f.flags { si.has_secret = true; p.has_secrets = true }
 			if f.flags & {.Write_Only, .Omit_Empty, .Omit_Unset} != {} { si.has_omit_tag = true }
 			if .Optional in f.flags { si.has_optional = true }
 

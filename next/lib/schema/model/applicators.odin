@@ -343,7 +343,7 @@ judging_destroy :: proc(j: ^Applied) {
 }
 
 @(private)
-run_judged_on_doc :: proc(j: ^Judged, doc: ^tape.Document, node: tape.Node_Index, dups: tape.Duplicates, budget: tape.Budget, prefix_steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, exceeded: ^tape.Exceeded, allocator, scratch: runtime.Allocator, silent := false) -> bool {
+run_judged_on_doc :: proc(j: ^Judged, doc: ^tape.Document, node: tape.Node_Index, dups: tape.Duplicates, budget: tape.Budget, prefix_steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, exceeded: ^tape.Exceeded, allocator, scratch: runtime.Allocator, silent := false, secret := false) -> bool {
 	if j == nil || doc == nil || int(node) >= len(doc.nodes) { return true }
 	sub_doc: tape.Document; tt: write.Token_Tape; used_tape := false
 	defer if used_tape { write.token_tape_drop(&tt) }
@@ -358,29 +358,29 @@ run_judged_on_doc :: proc(j: ^Judged, doc: ^tape.Document, node: tape.Node_Index
 		if terr != nil { oom^ = true; return false }
 		sub_doc = td
 	}
-	return run_judged_on_subdoc(j, &sub_doc, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent)
+	return run_judged_on_subdoc(j, &sub_doc, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent, secret)
 }
 
 @(private)
-run_judged_on_value :: proc(j: ^Judged, v: rules.Value, dups: tape.Duplicates, budget: tape.Budget, prefix_steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, exceeded: ^tape.Exceeded, allocator, scratch: runtime.Allocator, silent := false) -> bool {
+run_judged_on_value :: proc(j: ^Judged, v: rules.Value, dups: tape.Duplicates, budget: tape.Budget, prefix_steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, exceeded: ^tape.Exceeded, allocator, scratch: runtime.Allocator, silent := false, secret := false) -> bool {
 	if j == nil { return true }
 	if ref, is_ref := v.(rules.Node_Ref); is_ref && ref.doc != nil {
-		return run_judged_on_doc(j, ref.doc, ref.node, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent)
+		return run_judged_on_doc(j, ref.doc, ref.node, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent, secret)
 	}
 	tt: write.Token_Tape
 	if write.token_tape_start(&tt, false, 0, scratch) != nil { oom^ = true; return false }
 	defer write.token_tape_drop(&tt)
 	if eerr := emit_rules_value_tokens(&tt, v, scratch); eerr != nil {
-		if me, is_me := eerr.(Model_Error); is_me { return record_failure(sink, first, oom, allocator, me.kind, 0, prefix_steps, "", me.want, silent) }
+		if me, is_me := eerr.(Model_Error); is_me { return record_failure(sink, first, oom, allocator, me.kind, 0, prefix_steps, "", me.want, silent, secret) }
 		oom^ = true; return false
 	}
 	sub_doc, terr := write.token_tape_document(&tt)
 	if terr != nil { oom^ = true; return false }
-	return run_judged_on_subdoc(j, &sub_doc, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent)
+	return run_judged_on_subdoc(j, &sub_doc, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent, secret)
 }
 
 @(private)
-run_judged_on_subdoc :: proc(j: ^Judged, sub_doc: ^tape.Document, dups: tape.Duplicates, budget: tape.Budget, prefix_steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, exceeded: ^tape.Exceeded, allocator, scratch: runtime.Allocator, silent := false) -> bool {
+run_judged_on_subdoc :: proc(j: ^Judged, sub_doc: ^tape.Document, dups: tape.Duplicates, budget: tape.Budget, prefix_steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, exceeded: ^tape.Exceeded, allocator, scratch: runtime.Allocator, silent := false, secret := false) -> bool {
 	chk_sink: check.Sink
 	use_sink := sink != nil && !silent
 	if use_sink { check.sink_init(&chk_sink, scratch) }
@@ -407,7 +407,7 @@ run_judged_on_subdoc :: proc(j: ^Judged, sub_doc: ^tape.Document, dups: tape.Dup
 		clear(&steps)
 		if _, aerr := append(&steps, ..prefix_steps); aerr != nil { oom^ = true; return false }
 		if _, aerr := append(&steps, ..e.path); aerr != nil { oom^ = true; return false }
-		if !record_failure(sink, first, oom, allocator, k, e.at, steps[:], e.expected, {text = e.keyword}, silent) { break }
+		if !record_failure(sink, first, oom, allocator, k, e.at, steps[:], e.expected, {text = e.keyword}, silent, secret) { break }
 	}
 	return false
 }

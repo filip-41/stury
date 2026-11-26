@@ -149,6 +149,7 @@ Stream_Loader :: struct {
 	home:        [^]Stream_Frame,
 	format:      ^tape.Format,
 	sink:        ^Sink,
+	validators:  ^Validator_Registry,
 	first:       Model_Error,
 	policy:      tape.Duplicates,
 	oom:         bool,
@@ -271,7 +272,7 @@ load_stream :: proc(
 	h.base, h.src_len = raw_data(src), u64(len(src))
 	h.frames, h.home = raw_data(frames[:]), raw_data(frames[:])
 	h.sp, h.room = 1, STREAM_INLINE_FRAMES
-	h.plan, h.format, h.sink, h.policy = &m.plan, format, sink, policy
+	h.plan, h.format, h.sink, h.validators, h.policy = &m.plan, format, sink, opts.validators, policy
 	h.first.kind, h.first.owned = .None, false
 	h.oom, h.fallback, h.wrote_alloc, h.re_ready, h.rep_ready, h.has_val = false, false, false, false, false, m.plan.has_validators
 	h.fail_count = 0
@@ -1387,8 +1388,16 @@ stream_close :: #force_no_inline proc "contextless" (h: ^Stream_Loader, f: ^Stre
 		pf := &h.frames[h.sp - 1]
 		if pf.kind == .Struct {
 			if !stream_ensure_report(h) { return ret, .Stop }
-			field_ptr := rawptr(uintptr(pf.target) + pf.si.fields[f.parent_fi].offset)
-			for av in pf.si.fields[f.parent_fi].afters { av.call(field_ptr, av.fn, &h.rep) }
+			fld := &pf.si.fields[f.parent_fi]
+			field_ptr := rawptr(uintptr(pf.target) + fld.offset)
+			for av in fld.afters { av.call(field_ptr, av.fn, &h.rep) }
+			if len(fld.named_validators) > 0 {
+				if missing := run_named_validators(fld.named_validators, field_ptr, h.plan.nodes[fld.node].ti, h.validators, &h.rep); missing != "" {
+					if !stream_fail_at_depth(h, h.sp + 1, .Missing_Validator, f.open_at, "", {text = missing}) { return ret, .Stop }
+					if h.frames[h.sp - 1].kind == .Map { return stream_map_finish_entry(h, ret) }
+					return ret, .Next
+				}
+			}
 			if !stream_emit_report(h, h.sp + 1, f.open_at, nil) { return ret, .Stop }
 		}
 	}
@@ -1408,13 +1417,24 @@ stream_ensure_report :: proc(h: ^Stream_Loader) -> bool {
 }
 
 @(private, cold)
+stream_is_secret :: proc "contextless" (h: ^Stream_Loader, sp: int, sf: ^Stream_Field = nil) -> bool {
+	if !h.plan.has_secrets { return false }
+	if sf != nil && .Secret in sf.flags { return true }
+	for i in 1 ..< sp {
+		parent, child := &h.frames[i - 1], &h.frames[i]
+		if parent.kind == .Struct && .Secret in parent.si.fields[child.parent_fi].flags { return true }
+	}
+	return false
+}
+
+@(private, cold)
 stream_emit_report :: proc(h: ^Stream_Loader, sp: int, at: u64, si: ^Struct_Info, sf: ^Stream_Field = nil) -> bool {
 	if !h.rep.failed && !h.rep.oom { return true }
 	h.fail_count += 1
 	steps_buf: [32]tape.Step = ---
 	steps, owned := stream_build_steps(h, sp, steps_buf[:], sf)
 	defer if owned { delete(steps, h.scratch) }
-	_ = emit_report(&h.rep, steps, at, si, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false)
+	_ = emit_report(&h.rep, steps, at, si, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false, stream_is_secret(h, sp, sf))
 	return !stream_stopped(h)
 }
 
@@ -1424,7 +1444,7 @@ stream_emit_leaf_fails :: proc(h: ^Stream_Loader, sp: int, leaf: ^rules.Leaf, fa
 	steps_buf: [32]tape.Step = ---
 	steps, owned := stream_build_steps(h, sp, steps_buf[:], sf)
 	defer if owned { delete(steps, h.scratch) }
-	_ = emit_leaf_fails(leaf, fails, members, at, steps, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false)
+	_ = emit_leaf_fails(leaf, fails, members, at, steps, h.sink, &h.first, &h.oom, h.allocator, h.scratch, false, stream_is_secret(h, sp, sf))
 	return false
 }
 
@@ -1450,7 +1470,13 @@ stream_run_field_after :: #force_no_inline proc "contextless" (h: ^Stream_Loader
 	pf := &h.frames[h.sp - 1]
 	if pf.kind != .Struct { return true }
 	if !stream_ensure_report(h) { return false }
-	for av in pf.si.fields[sf.field_idx].afters { av.call(rawptr(dest), av.fn, &h.rep) }
+	fld := &pf.si.fields[sf.field_idx]
+	for av in fld.afters { av.call(rawptr(dest), av.fn, &h.rep) }
+	if len(fld.named_validators) > 0 {
+		if missing := run_named_validators(fld.named_validators, rawptr(dest), h.plan.nodes[fld.node].ti, h.validators, &h.rep); missing != "" {
+			return stream_fail(h, .Missing_Validator, at, "", {text = missing}, sf = sf)
+		}
+	}
 	return stream_emit_report(h, h.sp, at, nil, sf)
 }
 
@@ -1504,7 +1530,17 @@ stream_fail_at_depth :: proc(h: ^Stream_Loader, sp: int, kind: Error_Kind, at: u
 	buf: [32]tape.Step = ---
 	steps, owned := stream_build_steps(h, sp, buf[:], sf, extra_step)
 	defer if owned { delete(steps, h.scratch) }
-	return record_failure(h.sink, &h.first, &h.oom, h.allocator, kind, at, steps, operand, want, false)
+	sec := stream_is_secret(h, sp, sf)
+	if !sec && h.plan.has_secrets {
+		if ex, has_ex := extra_step.?; has_ex {
+			if nm, is_nm := ex.(tape.Name); is_nm && sp > 0 && h.frames[sp - 1].kind == .Struct {
+				if fi := struct_find_field(h.frames[sp - 1].si, string(nm)); fi >= 0 {
+					sec = .Secret in h.frames[sp - 1].si.fields[fi].flags
+				}
+			}
+		}
+	}
+	return record_failure(h.sink, &h.first, &h.oom, h.allocator, kind, at, steps, operand, want, false, sec)
 }
 
 @(private, cold)

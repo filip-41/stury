@@ -50,7 +50,7 @@ patch_value :: proc(m: ^Model($T), existing: ^T, v: rules.Value, sink: ^Sink = n
 	sc: Scratch_Scope; sp := (^Scratch_Scope)(rawptr(&sc))
 	scratch_begin(sp, opts, allocator); defer scratch_end(sp)
 	from := len(sink.entries) if sink != nil else 0
-	l, lerr := loader_make(&m.plan, m.judging, policy, opts.budget, sink, sp.out, sp.scratch)
+	l, lerr := loader_make(&m.plan, m.judging, policy, opts.budget, sink, sp.out, sp.scratch, validators = opts.validators)
 	if lerr != nil { return scratch_oom_error(sp) }
 	defer loader_cleanup(&l)
 

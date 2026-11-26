@@ -40,7 +40,7 @@ validate_inner :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, sin
 	if rerr.kind != .None { return scratch_oom_error(&sc) }
 	defer regex.scratch_destroy(&rs)
 
-	w := Walk_State{mode = .Validate, plan = plan, judging = judging, policy = policy, sink = sink, omit = omit, re_scratch = rs, allocator = sc.out, scratch = sc.scratch}
+	w := Walk_State{mode = .Validate, plan = plan, judging = judging, validators = opts.validators, policy = policy, sink = sink, omit = omit, re_scratch = rs, allocator = sc.out, scratch = sc.scratch}
 	budget_init(&w.budget, opts.budget)
 	w.steps.allocator = sc.scratch
 	report_init(&w.rep, sc.scratch)
@@ -54,8 +54,15 @@ validate_inner :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, sin
 }
 
 @(private)
-emit_node :: proc(plan: ^Type_Plan, tt: ^write.Token_Tape, root_idx: i32, root_ptr: rawptr, omit: ^Omit_Hook, sink: ^Sink, allocator, scratch: runtime.Allocator, silent := false) -> Error {
-	w := Walk_State{mode = .Emit, plan = plan, tt = tt, sink = sink, omit = omit, silent = silent, allocator = allocator, scratch = scratch}
+emit_node :: proc(
+	plan: ^Type_Plan, tt: ^write.Token_Tape, root_idx: i32, root_ptr: rawptr, omit: ^Omit_Hook, sink: ^Sink,
+	allocator, scratch: runtime.Allocator, silent := false, redact := false, redact_mask := "", redact_paths: []string = nil,
+) -> Error {
+	w := Walk_State{
+		mode = .Emit, plan = plan, tt = tt, sink = sink, omit = omit, silent = silent,
+		redact = redact, redact_mask = resolve_redact_mask(redact_mask), redact_paths = redact_paths,
+		allocator = allocator, scratch = scratch,
+	}
 	budget_init(&w.budget, {})
 	w.steps.allocator = scratch
 	walk_loop(&w, root_idx, root_ptr)
@@ -73,12 +80,17 @@ Walk_State :: struct {
 	mode:               Walk_Mode,
 	plan:               ^Type_Plan,
 	judging:            ^Applied,
+	validators:         ^Validator_Registry,
 	tt:                 ^write.Token_Tape,
 	policy:             tape.Duplicates,
 	sink:               ^Sink,
 	omit:               ^Omit_Hook,
 	first:              Model_Error,
 	oom, silent:        bool,
+	redact:             bool,
+	redact_mask:        string,
+	redact_paths:       []string,
+	secret_depth:       int,
 	write_err:          write.Error,
 	fail_count:         u64,
 	budget:             Budget_Tracker,
@@ -95,7 +107,7 @@ walk_fail :: proc(w: ^Walk_State, kind: Error_Kind, operand := "", want := Want{
 		if w.first.kind == .None { w.first = {kind = kind, want = want} }
 		return false
 	}
-	return record_failure(w.sink, &w.first, &w.oom, w.allocator, kind, 0, w.steps[:], operand, want, w.silent)
+	return record_failure(w.sink, &w.first, &w.oom, w.allocator, kind, 0, w.steps[:], operand, want, w.silent, w.secret_depth > 0)
 }
 
 @(private)
@@ -112,21 +124,21 @@ walk_stopped :: #force_inline proc "contextless" (w: ^Walk_State) -> bool {
 }
 
 @(private)
-Walk_Frame_Kind :: enum u8 { Node, Struct_Fields, Struct_Finish, Close, Field_After, List_Elems, Map_Entries, Run_Judged, Pop_Step, Leave_Depth }
+Walk_Frame_Kind :: enum u8 { Node, Struct_Fields, Struct_Finish, Close, Field_After, Node_After, List_Elems, Map_Entries, Run_Judged, Pop_Step, Leave_Depth }
 
 @(private)
 Walk_Frame :: struct {
-	kind:                     Walk_Frame_Kind,
-	node_idx, field_rule_idx: i32,
-	ptr:                      rawptr,
-	field_unique, not_null:   bool,
-	tag_key, tag_val:         string,
-	si:                       ^Struct_Info,
-	fi, idx, count:           int,
-	stride, base:             uintptr,
-	start_fails:              u64,
-	entries:                  []Sorted_Map_Entry,
-	is_cap:                   bool,
+	kind:                                 Walk_Frame_Kind,
+	node_idx, field_rule_idx:             i32,
+	ptr:                                  rawptr,
+	field_unique, not_null, pop_secret:   bool,
+	tag_key, tag_val:                     string,
+	si:                                   ^Struct_Info,
+	fi, idx, count:                       int,
+	stride, base:                         uintptr,
+	start_fails:                          u64,
+	entries:                              []Sorted_Map_Entry,
+	is_cap:                               bool,
 }
 
 @(private)
@@ -140,7 +152,8 @@ walk_loop :: proc(w: ^Walk_State, root_idx: i32, root_ptr: rawptr) {
 		top := &stack[len(stack) - 1]
 		switch top.kind {
 		case .Pop_Step:
-			pop(&stack)
+			f := pop(&stack)
+			if f.pop_secret && w.secret_depth > 0 { w.secret_depth -= 1 }
 			if len(w.steps) > 0 { pop(&w.steps) }
 		case .Leave_Depth:
 			pop(&stack); budget_leave(&w.budget)
@@ -152,11 +165,33 @@ walk_loop :: proc(w: ^Walk_State, root_idx: i32, root_ptr: rawptr) {
 		case .Field_After:
 			f := pop(&stack)
 			if w.fail_count != f.start_fails { continue }
+			fld := &f.si.fields[f.fi]
 			report_reset(&w.rep)
-			for av in f.si.fields[f.fi].afters { av.call(f.ptr, av.fn, &w.rep) }
+			for av in fld.afters { av.call(f.ptr, av.fn, &w.rep) }
+			if len(fld.named_validators) > 0 {
+				if missing := run_named_validators(fld.named_validators, f.ptr, w.plan.nodes[fld.node].ti, w.validators, &w.rep); missing != "" {
+					_ = walk_fail(w, .Missing_Validator, "", {text = missing})
+					continue
+				}
+			}
 			if w.rep.failed || w.rep.oom {
 				w.fail_count += 1
-				_ = emit_report(&w.rep, w.steps[:], 0, nil, w.sink, &w.first, &w.oom, w.allocator, w.scratch)
+				_ = emit_report(&w.rep, w.steps[:], 0, nil, w.sink, &w.first, &w.oom, w.allocator, w.scratch, false, w.secret_depth > 0)
+			}
+		case .Node_After:
+			f := pop(&stack)
+			if w.fail_count != f.start_fails { continue }
+			tn := &w.plan.nodes[f.node_idx]
+			if len(tn.named_validators) > 0 {
+				report_reset(&w.rep)
+				if missing := run_named_validators(tn.named_validators, f.ptr, tn.ti, w.validators, &w.rep); missing != "" {
+					_ = walk_fail(w, .Missing_Validator, "", {text = missing})
+					continue
+				}
+				if w.rep.failed || w.rep.oom {
+					w.fail_count += 1
+					_ = emit_report(&w.rep, w.steps[:], 0, nil, w.sink, &w.first, &w.oom, w.allocator, w.scratch, false, w.secret_depth > 0)
+				}
 			}
 		case .Struct_Finish:
 			f := pop(&stack)
@@ -168,7 +203,7 @@ walk_loop :: proc(w: ^Walk_State, root_idx: i32, root_ptr: rawptr) {
 				for sv in f.si.validators { sv.call(f.ptr, sv.fn, &w.rep) }
 				if w.rep.failed || w.rep.oom {
 					w.fail_count += 1
-					_ = emit_report(&w.rep, w.steps[:], 0, f.si, w.sink, &w.first, &w.oom, w.allocator, w.scratch)
+					_ = emit_report(&w.rep, w.steps[:], 0, f.si, w.sink, &w.first, &w.oom, w.allocator, w.scratch, false, w.secret_depth > 0)
 				}
 			}
 			budget_leave(&w.budget)
@@ -180,9 +215,16 @@ walk_loop :: proc(w: ^Walk_State, root_idx: i32, root_ptr: rawptr) {
 				if .Write_Only in fld.flags || (w.omit != nil && w.omit.fn(w.omit.ctx, si, fi, top.ptr)) { continue }
 				if w.mode == .Emit && !walk_emit_tok(w, .Key, fld.name) { return }
 				if !push_oom(&w.oom, &w.steps, tape.Step(tape.Name(fld.name))) { return }
+				if w.mode == .Emit && ((w.redact && .Secret in fld.flags) || redact_steps_match(w.steps[:], w.redact_paths)) {
+					_ = walk_emit_tok(w, .String, w.redact_mask)
+					pop(&w.steps)
+					continue
+				}
 				fdest := rawptr(uintptr(top.ptr) + fld.offset)
-				if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Pop_Step}) { return }
-				if w.mode == .Validate && len(fld.afters) > 0 && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Field_After, si = si, fi = fi, ptr = fdest, start_fails = w.fail_count}) { return }
+				field_secret := w.mode == .Validate && .Secret in fld.flags
+				if field_secret { w.secret_depth += 1 }
+				if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Pop_Step, pop_secret = field_secret}) { return }
+				if w.mode == .Validate && (len(fld.afters) > 0 || len(fld.named_validators) > 0) && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Field_After, si = si, fi = fi, ptr = fdest, start_fails = w.fail_count}) { return }
 				if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = fld.node, ptr = fdest, field_rule_idx = fld.rule_idx, field_unique = .Has_Unique in fld.flags, not_null = .Not_Null in fld.flags}) { return }
 				continue
 			}
@@ -197,6 +239,11 @@ walk_loop :: proc(w: ^Walk_State, root_idx: i32, root_ptr: rawptr) {
 			if top.idx >= top.count { pop(&stack); continue }
 			i := top.idx; top.idx += 1
 			if !push_oom(&w.oom, &w.steps, tape.Step(tape.Index(i))) { return }
+			if w.mode == .Emit && redact_steps_match(w.steps[:], w.redact_paths) {
+				_ = walk_emit_tok(w, .String, w.redact_mask)
+				pop(&w.steps)
+				continue
+			}
 			if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Pop_Step}) || !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = top.node_idx, ptr = rawptr(top.base + uintptr(i) * top.stride)}) { return }
 		case .Map_Entries:
 			if top.idx >= len(top.entries) { pop(&stack); continue }
@@ -206,11 +253,19 @@ walk_loop :: proc(w: ^Walk_State, root_idx: i32, root_ptr: rawptr) {
 				_ = walk_fail(w, .Duplicate_Key); pop(&w.steps); continue
 			}
 			if w.mode == .Emit && !walk_emit_tok(w, .Key, e.key_text) { pop(&w.steps); return }
+			if w.mode == .Emit && redact_steps_match(w.steps[:], w.redact_paths) {
+				_ = walk_emit_tok(w, .String, w.redact_mask)
+				pop(&w.steps)
+				continue
+			}
 			if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Pop_Step}) || !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node, node_idx = top.node_idx, ptr = e.val_ptr}) { return }
 		case .Node:
 			f := pop(&stack)
 			if !budget_node(&w.budget, 0) { return }
 			tn := &w.plan.nodes[f.node_idx]; rule_idx := f.field_rule_idx if f.field_rule_idx > 0 else tn.rule_idx; has_unique := f.field_unique || tn.has_unique; ptr := f.ptr
+			if w.mode == .Validate && len(tn.named_validators) > 0 && tn.kind != .Maybe && tn.kind != .Ptr {
+				if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Node_After, node_idx = f.node_idx, ptr = ptr, start_fails = w.fail_count}) { return }
+			}
 			#partial switch tn.kind {
 			case .Maybe, .Ptr:
 				inner := ptr if tn.kind == .Maybe else (^rawptr)(ptr)^
@@ -231,7 +286,7 @@ walk_loop :: proc(w: ^Walk_State, root_idx: i32, root_ptr: rawptr) {
 				if !budget_enter(&w.budget, 0) || !budget_step(&w.budget, 0) { return }
 				base, n := list_span(tn, ptr)
 				if w.mode == .Validate {
-					if !check_count_leaf(w.plan, rule_idx, u64(n), false, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false) { w.fail_count += 1; if walk_stopped(w) { budget_leave(&w.budget); return } }
+					if !check_count_leaf(w.plan, rule_idx, u64(n), false, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false, w.secret_depth > 0) { w.fail_count += 1; if walk_stopped(w) { budget_leave(&w.budget); return } }
 					if !push_oom(&w.oom, &stack, Walk_Frame{kind = .Leave_Depth}) { return }
 					if (has_unique || tn.judged) && !push_oom(&w.oom, &stack, Walk_Frame{kind = .Run_Judged, node_idx = f.node_idx, ptr = ptr, field_unique = has_unique}) { return }
 				} else {
@@ -242,7 +297,7 @@ walk_loop :: proc(w: ^Walk_State, root_idx: i32, root_ptr: rawptr) {
 			case .Map:
 				if !budget_enter(&w.budget, 0) || !budget_step(&w.budget, 0) { return }
 				rm := (^runtime.Raw_Map)(ptr)
-				if w.mode == .Validate && !check_count_leaf(w.plan, rule_idx, u64(rm.len), true, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false) { w.fail_count += 1; if walk_stopped(w) { budget_leave(&w.budget); return } }
+				if w.mode == .Validate && !check_count_leaf(w.plan, rule_idx, u64(rm.len), true, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false, w.secret_depth > 0) { w.fail_count += 1; if walk_stopped(w) { budget_leave(&w.budget); return } }
 				entries: []Sorted_Map_Entry
 				if rm.len > 0 { merr: runtime.Allocator_Error; entries, merr = collect_sorted_map_entries(tn.ti, ptr, w.scratch); if merr != nil { budget_leave(&w.budget); w.oom = true; return } }
 				if w.mode == .Validate {
@@ -300,7 +355,7 @@ walk_bit_set :: proc(w: ^Walk_State, node_idx: i32, tn: ^Type_Node, ptr: rawptr,
 		if !ok && walk_stopped(w) { return }
 	}
 	if w.mode == .Emit { _ = walk_emit_tok(w, .Close, ""); return }
-	if !check_count_leaf(w.plan, rule_idx, cnt, false, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false) { w.fail_count += 1 }
+	if !check_count_leaf(w.plan, rule_idx, cnt, false, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false, w.secret_depth > 0) { w.fail_count += 1 }
 	if !walk_stopped(w) && tn.judged && !val_run_judged(w, tn, node_idx, false, ptr) { w.fail_count += 1 }
 }
 
@@ -309,11 +364,11 @@ walk_scalar :: proc(w: ^Walk_State, node_idx: i32, tn: ^Type_Node, ptr: rawptr, 
 	leaf_ok := true
 	check_s :: proc(w: ^Walk_State, rule_idx: i32, s: string) -> bool {
 		if w.mode == .Emit { return walk_emit_tok(w, .String, s) }
-		return check_string_leaf(w.plan, &w.re_scratch, rule_idx, s, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false)
+		return check_string_leaf(w.plan, &w.re_scratch, rule_idx, s, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false, w.secret_depth > 0)
 	}
 	check_n :: proc(w: ^Walk_State, rule_idx: i32, s: string, small: Maybe(i64)) -> bool {
 		if w.mode == .Emit { return walk_emit_tok(w, .Number, s) }
-		return check_number_leaf(w.plan, rule_idx, s, small, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false)
+		return check_number_leaf(w.plan, rule_idx, s, small, 0, w.steps[:], w.sink, &w.first, &w.oom, w.allocator, w.scratch, false, w.secret_depth > 0)
 	}
 	buf: [64]u8 = ---
 	#partial switch tn.kind {
@@ -396,7 +451,7 @@ val_run_judged :: proc(w: ^Walk_State, tn: ^Type_Node, node_idx: i32, unique: bo
 	}
 	sub_doc, terr := write.token_tape_document(&tt)
 	if terr != nil { w.oom = true; return false }
-	return run_judged_on_subdoc(j, &sub_doc, w.policy, w.budget.limit, w.steps[:], w.sink, &w.first, &w.oom, &w.budget.exceeded, w.allocator, w.scratch)
+	return run_judged_on_subdoc(j, &sub_doc, w.policy, w.budget.limit, w.steps[:], w.sink, &w.first, &w.oom, &w.budget.exceeded, w.allocator, w.scratch, false, w.secret_depth > 0)
 }
 
 // ============================================================================
