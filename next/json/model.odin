@@ -12,6 +12,11 @@ import "stury:lib/ops/write"
 import "stury:lib/schema/model"
 
 @(private)
+model_has_high16 :: #force_inline proc "contextless" (v: #simd[16]u8) -> bool {
+	return kernel.any_lane16(simd.lanes_ge(v, JSON_V(0x80)))
+}
+
+@(private)
 model_probe_stack :: #force_inline proc "contextless" () {
 	hook.probe_stack(READ_STACK)
 }
@@ -284,12 +289,11 @@ model_put_string_long :: #force_no_inline proc(fj: ^Fast_Json, s: string, $ASCII
 			pos := 0
 			for ; i + 16 <= n; i += 16 {
 				v := kernel.load16(src[i:])
-				if !utf8_ok && kernel.any_lane16(simd.lanes_ge(v, JSON_V(0x80))) {
+				if !utf8_ok && model_has_high16(v) {
 					if !kernel.utf8_valid(b[i:]) { return false }
 					utf8_ok = true
 				}
-				esc := simd.lanes_lt(v, JSON_V(0x20)) | simd.lanes_eq(v, JSON_V('"')) | simd.lanes_eq(v, JSON_V('\\'))
-				if !kernel.any_lane16(esc) { kernel.store16(p[pos:], v); pos += 16 } else { pos += model_put_esc16(p[pos:], v) }
+				if !json_dirty16(v) { kernel.store16(p[pos:], v); pos += 16 } else { pos += model_put_esc16(p[pos:], v) }
 			}
 			tail, ok := model_put_tail(p[pos:], src, b, i, n, &utf8_ok)
 			if !ok { return false }

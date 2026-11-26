@@ -2417,6 +2417,11 @@ cbor_short_block :: #force_inline proc "contextless" (src: [^]u8, n: int) -> CBO
 }
 
 @(private)
+cbor_pad_live :: #force_inline proc "contextless" (live, v: CBOR_V) -> CBOR_V {
+	return simd.select(simd.lanes_ne(live, CBOR_V(0)), v, CBOR_PAD)
+}
+
+@(private)
 cbor_put_text_inline :: #force_inline proc "contextless" (p: [^]u8, s: string) -> int #no_bounds_check {
 	when (ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32) && !intrinsics.has_target_feature("simd128") {
 		if len(s) == 0 {
@@ -2434,7 +2439,7 @@ cbor_put_text_inline :: #force_inline proc "contextless" (p: [^]u8, s: string) -
 		if n < 16 {
 			v, live, ok := kernel.head16(src, n)
 			if ok {
-				v = simd.select(simd.lanes_ne(live, CBOR_V(0)), v, CBOR_PAD)
+				v = cbor_pad_live(live, v)
 			} else {
 				v = cbor_short_block(src, n)
 			}

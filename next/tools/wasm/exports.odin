@@ -2,15 +2,26 @@
 package wasm_exports
 
 import "base:runtime"
+import "core:c"
 import "core:mem"
+import "stury:capi"
 import "stury:cbor"
 import "stury:dsv"
+import "stury:engine"
 import "stury:jq"
 import "stury:json"
+import "stury:jsonpath"
 import "stury:lib/base/regex"
 import "stury:lib/core/tape"
 import "stury:lib/ops/css"
+import "stury:lib/ops/diff"
+import "stury:lib/ops/edit"
+import "stury:lib/ops/write"
 import "stury:lib/query"
+import schema_check "stury:lib/schema/check"
+import "stury:lib/schema/model"
+import "stury:lib/schema/rules"
+import schema_pkg "stury:lib/schema/schema"
 import "stury:stury"
 import "stury:toml"
 import "stury:xml"
@@ -310,14 +321,15 @@ jq_eval_count :: proc "c" (prog_p: [^]u8, prog_n: int, in_p: [^]u8, in_n: int) -
 	if len(errors) > 0 {
 		return -1
 	}
-	h: query.Heap
-	query.heap_init(&h, context.allocator)
-	defer query.heap_destroy(&h)
 	doc, derr := json.build(in_p[:in_n], .Json, {}, context.allocator)
 	if derr != nil {
 		return -1
 	}
-	input, s := query.document_value(&h, doc, true)
+	defer tape.destroy(&doc)
+	h: query.Heap
+	query.heap_init(&h, context.allocator)
+	defer query.heap_destroy(&h)
+	input, s := query.document_value(&h, doc, false)
 	if s != .Ok {
 		return -1
 	}
@@ -372,4 +384,293 @@ format_json_to_cbor :: proc "c" (p: [^]u8, n: int) -> int {
 	out, _, err := stury.format(p[:n], json.Spec.Json, cbor.Spec.Cbor)
 	defer delete(out)
 	return len(out) if err == nil else -1
+}
+
+// Phase 2: overlay editing (`stury:lib/ops/edit`), commit, and incremental `commit_document`.
+@(export)
+edit_commit_json :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	doc, derr := json.build(p[:n], .Json)
+	if derr != nil {
+		return -1
+	}
+	defer tape.destroy(&doc)
+
+	ov: edit.Overlay
+	if ierr := edit.init(&ov, &doc); ierr != nil {
+		return -1
+	}
+	defer edit.destroy(&ov)
+
+	steps := [?]tape.Step{tape.Name("a")}
+	if _, serr := edit.set_path(&ov, steps[:], edit.val_int(42)); serr != nil {
+		return -1
+	}
+	cres, cerr := json.commit(&ov, .Json)
+	if cerr != nil {
+		return -1
+	}
+	defer edit.destroy_commit_result(&cres)
+
+	spliced, cres2, cerr2 := json.commit_document(&ov, .Json)
+	if cerr2 != nil {
+		return -1
+	}
+	defer tape.destroy(&spliced)
+	defer edit.destroy_commit_result(&cres2)
+	return len(cres.bytes) + len(spliced.nodes)
+}
+
+// Phase 2: structural diff (`stury:lib/ops/diff`).
+@(export)
+diff_json_docs :: proc "c" (ap: [^]u8, an: int, bp: [^]u8, bn: int) -> int {
+	context = runtime.default_context()
+	a, aerr := json.build(ap[:an], .Json)
+	if aerr != nil {
+		return -1
+	}
+	defer tape.destroy(&a)
+	b, berr := json.build(bp[:bn], .Json)
+	if berr != nil {
+		return -1
+	}
+	defer tape.destroy(&b)
+	res, derr := diff.diff_documents(&a, &b)
+	if derr != nil {
+		return -1
+	}
+	defer diff.destroy_result(&res)
+	return len(res.changes)
+}
+
+// Phase 2: schema rules (`stury:lib/schema/rules`).
+@(export)
+rules_format_valid :: proc "c" (fmt_p: [^]u8, fmt_n: int, val_p: [^]u8, val_n: int) -> bool {
+	context = runtime.default_context()
+	f := rules.format_of(string(fmt_p[:fmt_n]))
+	return rules.format_valid(f, string(val_p[:val_n]))
+}
+
+// Phase 2: schema compile, infer, sample, and check (`stury:lib/schema/{schema,check}`).
+@(export)
+schema_compile_check_infer_sample :: proc "c" (sc_p: [^]u8, sc_n: int, doc_p: [^]u8, doc_n: int) -> int {
+	context = runtime.default_context()
+	compiled, serr := schema_pkg.compile_json(sc_p[:sc_n])
+	if serr.kind != .None {
+		schema_pkg.error_destroy(&serr)
+		return -1
+	}
+	defer schema_pkg.destroy(compiled)
+
+	doc, derr := json.build(doc_p[:doc_n], .Json)
+	if derr != nil {
+		return -1
+	}
+	defer tape.destroy(&doc)
+
+	chk := schema_check.check_document(&doc, &compiled.plan)
+	defer schema_check.result_destroy(&chk)
+
+	inf: schema_pkg.Inferred
+	defer schema_pkg.inferred_destroy(&inf)
+	if ierr := schema_pkg.infer_document(&inf, &doc); ierr != nil {
+		return -1
+	}
+	desc, desc_err := schema_pkg.inferred(&inf)
+	if desc_err != nil {
+		return -1
+	}
+	defer rules.description_destroy(&desc)
+
+	samples, samp_err := schema_pkg.sample(&desc, {count = 1})
+	if samp_err.kind != .None {
+		schema_pkg.error_destroy(&samp_err)
+		return -1
+	}
+	total := len(samples)
+	for s in samples {
+		delete(s)
+	}
+	delete(samples)
+	return total + (1 if chk.valid else 0)
+}
+
+// Phase 2: typed data model load + dump (`stury:lib/schema/model`).
+Wasm_Model_Record :: struct {
+	name: string `json:"name"`,
+	age:  int    `json:"age"`,
+}
+
+@(private = "file")
+wasm_json_write_proc :: proc(doc: ^tape.Document, opts: write.Options, allocator: runtime.Allocator) -> ([]u8, tape.Facts, write.Error) {
+	return json.write(doc, .Json, opts, allocator)
+}
+
+@(export)
+model_load_dump_json :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	m, cerr := model.compile(nil, Wasm_Model_Record)
+	if cerr != nil {
+		model.error_destroy(cerr)
+		return -1
+	}
+	defer model.destroy(&m)
+
+	entry, ok := engine.entry_of_id(.Json)
+	if !ok {
+		return -1
+	}
+	rec: Wasm_Model_Record
+	if lerr := model.load(&m, p[:n], entry.format, entry.reads, &rec); lerr != nil {
+		model.error_destroy(lerr)
+		return -1
+	}
+	defer delete(rec.name)
+
+	dumped, derr := model.dump(&m, &rec, wasm_json_write_proc)
+	if derr != nil {
+		model.error_destroy(derr)
+		return -1
+	}
+	defer delete(dumped)
+	return len(dumped)
+}
+
+// Phase 3: RFC 9535 JSONPath (`stury:jsonpath`).
+@(export)
+jsonpath_eval_count :: proc "c" (qp: [^]u8, qn: int, doc_p: [^]u8, doc_n: int) -> int {
+	context = runtime.default_context()
+	prog, cerr := jsonpath.compile(string(qp[:qn]))
+	if cerr.kind != .None {
+		return -1
+	}
+	defer jsonpath.destroy_program(prog)
+
+	doc, derr := json.build(doc_p[:doc_n], .Json)
+	if derr != nil {
+		return -1
+	}
+	defer tape.destroy(&doc)
+	h: query.Heap
+	query.heap_init(&h, context.allocator)
+	defer query.heap_destroy(&h)
+	root, status := query.document_value(&h, doc, false)
+	if status != .Ok {
+		return -1
+	}
+	defer query.release(&h, root)
+
+	Ctx :: struct {
+		h:     ^query.Heap,
+		count: int,
+	}
+	ctx := Ctx{h = &h}
+	emit :: proc(data: rawptr, v: query.Value, _: string) -> bool {
+		c := (^Ctx)(data)
+		c.count += 1
+		query.release(c.h, v)
+		return true
+	}
+	end := jsonpath.eval(prog, &h, root, emit, &ctx, {want_paths = true})
+	return ctx.count if end == .Done else -1
+}
+
+// Phase 3: universal engine routing, execution, validate, build, write, and format (`stury:engine`).
+@(export)
+engine_surface :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	src := p[:n]
+	if verr := engine.validate(src, json.Spec.Json); verr != nil {
+		return -1
+	}
+	doc, berr := engine.build(src, json.Spec.Json)
+	if berr != nil {
+		return -1
+	}
+	defer tape.destroy(&doc)
+
+	written, _, werr := engine.write(&doc, toml.Spec.Toml_1_0)
+	if werr != nil {
+		return -1
+	}
+	defer delete(written)
+
+	formatted, _, ferr := engine.format(src, json.Spec.Json, cbor.Spec.Cbor)
+	if ferr != nil {
+		return -1
+	}
+	defer delete(formatted)
+
+	plan := query.Plan{}
+	dec := engine.decide(&plan, json.Spec.Json, .Single, {input_bytes = len(src)})
+	eval_cb :: proc(_: rawptr, d: ^tape.Document, _: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
+		_ = engine.emit_bytes(emit, d.src)
+		return .None
+	}
+	eres := engine.execute(&plan, &dec, src, {eval = eval_cb})
+	if eres.err != .None {
+		return -1
+	}
+	return len(written) + len(formatted) + int(eres.emitted)
+}
+
+// Phase 3: universal facade (`stury:stury`) — jq_run, jsonpath_eval, check_schema, edit_init.
+@(export)
+stury_facade_surface :: proc "c" (p: [^]u8, n: int) -> int {
+	context = runtime.default_context()
+	src := p[:n]
+
+	jqp, jq_errs := stury.jq_compile(".")
+	defer stury.jq_destroy(jqp)
+	if len(jq_errs) > 0 {
+		return -1
+	}
+	jq_res := stury.jq_run(jqp, src, json.Spec.Json, nil)
+	defer stury.jq_run_result_destroy(&jq_res)
+
+	jpp, jp_err := stury.jsonpath_compile("$")
+	defer stury.jsonpath_destroy(jpp)
+	if jp_err.kind != .None {
+		return -1
+	}
+	jp_res := stury.jsonpath_eval(jpp, src, json.Spec.Json, nil)
+
+	sc_bytes := transmute([]u8)string(`{"type":"object"}`)
+	sc, sc_err := stury.schema_compile(sc_bytes)
+	if sc_err.kind != .None {
+		stury.schema_error_destroy(&sc_err)
+		return -1
+	}
+	defer stury.schema_destroy(sc)
+	chk := stury.check_schema(src, json.Spec.Json, sc)
+	defer stury.destroy_check_result(&chk)
+
+	doc, berr := stury.build(src, json.Spec.Json)
+	if berr != nil {
+		return -1
+	}
+	defer stury.destroy(&doc)
+
+	ov: stury.Overlay
+	if ierr := stury.edit_init(&ov, &doc); ierr != nil {
+		return -1
+	}
+	defer stury.edit_destroy(&ov)
+	cres, cerr := stury.commit(&ov)
+	if cerr != nil {
+		return -1
+	}
+	defer stury.destroy_commit_result(&cres)
+
+	return int(jq_res.emitted) + int(jp_res.emitted) + len(cres.bytes) + (1 if chk.valid else 0)
+}
+
+// Phase 3: C ABI (`stury:capi`) compiled into the WASM object alongside `stury`.
+@(export)
+capi_validate_wasm :: proc "c" (p: [^]u8, n: int) -> u32 {
+	context = runtime.default_context()
+	a := capi.stury_arena_new()
+	defer capi.stury_arena_free(a)
+	err := capi.stury_validate(a, p, c.size_t(n), u32(engine.Format_Id.Json), nil)
+	return u32(err.code)
 }
