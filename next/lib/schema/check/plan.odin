@@ -1,6 +1,7 @@
 // Immutable, thread-safe compiled schema check plan (`Plan`) and its compiler (`compile`).
 package check
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:mem"
 import "core:strings"
@@ -29,6 +30,20 @@ Record_Flag :: enum u8 {
 
 Record_Flags :: bit_set[Record_Flag; u8]
 
+// Hot per-record fast-path flags packed into `Record` alongside `leaf_kinds`, `members_u16`, and `req_end_u16`
+// so scalar, object, and array hot paths never touch cold `Plan.leaves`, `Plan.meta`, or `Plan.uses`!
+Record_Fast_Flag :: enum u8 {
+	Pure_String,    // string check needs only `.String in leaf_kinds` (no min/max length, pattern, format, enum)
+	Pure_Number,    // number check needs only `.Number`/`.Integer` in `leaf_kinds` (no min/max, multipleOf, enum, integer_spelled)
+	Pure_Scalar,    // null/bool check needs only `.Null`/`.Bool` in `leaf_kinds` (no enum)
+	Pure_Array,     // array check needs only `.Array in leaf_kinds` (no min/max items, enum)
+	Trivial_Object, // object can `.Skip` immediately (no members, additional, pattern, keys, counts, required)
+	Trivial_Array,  // array can `.Skip` immediately (no items/prefixItems, no min/max items)
+	Has_Deps,       // object has `dependentRequired`
+}
+
+Record_Fast_Flags :: bit_set[Record_Fast_Flag; u8]
+
 // One record in a compiled check plan. Exactly `hook.EXPECTED_STRIDE` (48) bytes so `.Expects` walks
 // match member keys in schema order directly against `expected` without calling the hook!
 Record :: struct {
@@ -38,7 +53,10 @@ Record :: struct {
 	rule_set:       i32, // 1 + index in `Plan.leaves`, 0 for none
 	kind:           Record_Kind,
 	flags:          Record_Flags,
-	_pad:           [6]u8,
+	leaf_kinds:     rules.Kinds,
+	fast_flags:     Record_Fast_Flags,
+	members_u16:    u16,
+	req_end_u16:    u16,
 }
 
 #assert(size_of(Record) == hook.EXPECTED_STRIDE)
@@ -49,32 +67,38 @@ NO_KEY :: max(u64)
 
 // Cold metadata for each record, indexed by `Record.meta`.
 Meta :: struct {
-	name:         string,
-	block:        i32,   // first member record of an object's block, -1 for none
-	members:      i32,   // count of named members in the object's block
-	slots:        u32,   // offset in `Plan.slots` of this block's hash table
-	slots_n:      u32,   // power-of-two capacity of this block's hash table (0 if no named members)
-	required:     []i32, // on the block's `End` record: member indices that are required
-	required_end: i32,   // 1 + max required member index (sequential cursor >= required_end => all seen)
-	rule_set:     i32,   // 1 + index in `Plan.leaves`, 0 for none
-	counted:      bool,  // object leaf has minProperties / maxProperties
+	name:          string,
+	block:         i32,   // first member record of an object's block, -1 for none
+	members:       i32,   // count of named members in the object's block
+	slots:         u32,   // offset in `Plan.slots` of this block's hash table
+	slots_n:       u32,   // power-of-two capacity of this block's hash table (0 if no named members)
+	name_bits:     u64,   // 64-bit bloom mask over named member keys for O(1) unknown-key rejection
+	required:      []i32, // on the block's `End` record: member indices that are required
+	required_mask: u64,   // bitmask of required members when `members <= 64` (copied onto owning record's Meta)
+	required_end:  i32,   // 1 + max required member index (sequential cursor >= required_end => all seen)
+	rule_set:      i32,   // 1 + index in `Plan.leaves`, 0 for none
+	counted:       bool,  // object leaf has minProperties / maxProperties
 }
 
 // A `Checked` record's detailed check data, indexed by `Record.meta`.
 Use :: struct {
-	items:      i32, // `b` offset (1 past first record) for array elements, 0 for none
-	additional: i32, // `b` offset (1 past record) for `additionalProperties`, 0 for none
-	keys:       i32, // 1 + leaf index for `propertyNames`, 0 for none
-	pattern:    i32, // `b` offset (1 past record) for inlined single `patternProperties`, 0 for none
-	regex:      ^regex.Regex,
-	site:       []tape.Step,
-	step:       bool,
-	inside:     bool,
-	applies:    []Apply,
-	verdict:    []Apply,
-	requires:   []Requires,
-	factor:     ^Factor,
-	member:     ^Factor_Member,
+	items:       i32, // `b` offset (1 past first record) for array elements, 0 for none
+	additional:  i32, // `b` offset (1 past record) for `additionalProperties`, 0 for none
+	keys:        i32, // 1 + leaf index for `propertyNames`, 0 for none
+	pattern:     i32, // `b` offset (1 past record) for inlined single `patternProperties`, 0 for none
+	verdict_rec: i32, // single conjoined record index (`1 + idx`) for verdict-only streaming (`0` for none)
+	obj_arm:     i32, // for single `.One`/`.Any`: `1 + idx` if unique arm accepts `.Object`, `-1` if none, `0` if 2+
+	arr_arm:     i32, // for single `.One`/`.Any`: `1 + idx` if unique arm accepts `.Array`, `-1` if none, `0` if 2+
+	regex:       ^regex.Regex,
+	site:        []tape.Step,
+	step:        bool,
+	inside:      bool,
+	add_false:   bool, // true when `additional` is `false` (`kinds == {}`)
+	applies:     []Apply,
+	verdict:     []Apply,
+	requires:    []Requires,
+	factor:      ^Factor,
+	member:      ^Factor_Member,
 }
 
 // A `dependentRequired` (or Draft 4/7 array `dependencies`) constraint on an object block.
@@ -540,6 +564,7 @@ known_struct :: proc(b: ^Builder, key: Block_Key, m: ^Meta) -> bool {
 	m.block = at
 	m.members = end - at
 	m.required_end = b.meta[end].required_end
+	m.required_mask = b.meta[end].required_mask
 	return true
 }
 
@@ -556,15 +581,21 @@ struct_block :: proc(b: ^Builder, key: Block_Key, m: ^Meta, members: []rules.Mem
 	m.members = i32(n)
 	never(b, end)
 	req := make([dynamic]i32, b.arena)
+	req_mask := u64(0)
 	for x, i in members {
 		if x.required {
 			if _, err := append(&req, i32(i)); err != nil {
 				refuse_plan(b, .No_Memory)
 				return -1
 			}
+			if i < 64 {
+				req_mask |= u64(1) << uint(i)
+			}
 		}
 	}
 	b.meta[end].required = req[:]
+	b.meta[end].required_mask = req_mask
+	m.required_mask = req_mask
 	if len(req) > 0 {
 		m.required_end = req[len(req) - 1] + 1
 		b.meta[end].required_end = m.required_end
@@ -657,6 +688,9 @@ fill_one :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, x
 
 	if node != rules.NONE && !bare && holds(b, d, node, edge) {
 		u.applies, u.verdict = checked_applies(b, d, arena, node, edge)
+		if len(u.verdict) == 1 && u.verdict[0].kind == .Own && u.verdict[0].record != i32(at) {
+			u.verdict_rec = u.verdict[0].record + 1
+		}
 		u.factor = factor_of(b, d, arena, node, edge)
 		if len(u.applies) > 0 {
 			f.flags += {.Held}
@@ -698,6 +732,8 @@ fill_one :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, x
 			if o.additional != rules.NONE {
 				other := UNEVALUATED_PROPERTIES[:] if b.unevaluated[{0, n.object}] else ADDITIONAL[:]
 				u.additional = checked_block(b, d, arena, block_key(typeid_of(Maybe(rules.Object)), n.object, b.scope), nil, o.additional, other)
+				add_end, _ := rules.ref_end(d, o.additional)
+				u.add_false = add_end != rules.NONE && d.nodes[add_end].kinds == {}
 				f.flags += {.Has_Additional}
 			}
 			if p, inline := b.inline[n.object]; inline {
@@ -908,9 +944,13 @@ plan_finish :: proc(b: ^Builder) {
 			return
 		}
 		table := b.slots[off:][:cap_n]
+		bits := u64(0)
 		for k in 0 ..< count {
 			name := b.meta[int(block) + k].name
-			at := tape.text_hash(transmute([]u8)name) & (cap_n - 1)
+			if len(name) > 0 {
+				bits |= name_bit(name)
+			}
+			at := member_hash(name) & (cap_n - 1)
 			for table[at] != 0 {
 				at = (at + 1) & (cap_n - 1)
 			}
@@ -918,6 +958,7 @@ plan_finish :: proc(b: ^Builder) {
 		}
 		b.meta[end].slots = off
 		b.meta[end].slots_n = cap_n
+		b.meta[end].name_bits = bits
 	}
 	// Copy hash table descriptors onto every record referencing a struct block.
 	for &m in b.meta {
@@ -925,6 +966,7 @@ plan_finish :: proc(b: ^Builder) {
 			if end, ok := b.ends[m.block]; ok {
 				m.slots = b.meta[end].slots
 				m.slots_n = b.meta[end].slots_n
+				m.name_bits = b.meta[end].name_bits
 			}
 		}
 	}
@@ -945,17 +987,127 @@ plan_finish :: proc(b: ^Builder) {
 	p.uses = b.uses[:]
 	p.leaves = b.leaves[:]
 	p.slots = b.slots[:]
-	// Set `first` pointers to the object block start (or nil).
+	// Set `first` pointers, hot fast-path flags, and build `solo`.
 	for &r, i in p.records {
 		m := &p.meta[i]
-		if r.kind == .Checked && m.block >= 0 {
-			r.first = &p.records[m.block]
+		u := &p.uses[i]
+		if r.kind == .Checked {
+			if m.block >= 0 {
+				r.first = &p.records[m.block]
+			}
+			r.members_u16 = u16(min(m.members, 65535)) if m.members > 0 else 0
+			r.req_end_u16 = u16(min(m.required_end, 65535)) if m.required_end > 0 else 0
+			ff: Record_Fast_Flags
+			if r.rule_set == 0 {
+				r.leaf_kinds = rules.EVERY_KIND
+				ff += {.Pure_String, .Pure_Number, .Pure_Scalar, .Pure_Array}
+			} else {
+				l := &p.leaves[r.rule_set - 1]
+				r.leaf_kinds = l.kinds
+				if !l.has_enum {
+					ff += {.Pure_Scalar}
+					if l.min_length == 0 && l.max_length == max(u64) && l.pattern == nil && l.formats == {} {
+						ff += {.Pure_String}
+					}
+					if !l.minimum.set && !l.maximum.set && l.multiple_of == nil && !l.integer_spelled {
+						ff += {.Pure_Number}
+					}
+					if l.min_items == 0 && l.max_items == max(u64) {
+						ff += {.Pure_Array}
+					}
+				}
+			}
+			if len(u.requires) > 0 {
+				ff += {.Has_Deps}
+			}
+			if m.members == 0 && u.additional == 0 && u.pattern == 0 && u.keys == 0 && !m.counted && len(u.requires) == 0 {
+				ff += {.Trivial_Object}
+			}
+			if !u.inside && .Pure_Array in ff {
+				ff += {.Trivial_Array}
+			}
+			r.fast_flags = ff
 		}
 		solo[2 * i] = r
 		solo[2 * i].word = NO_KEY
 		solo[2 * i + 1] = Record{word = NO_KEY, meta = u32(i), kind = .End}
 	}
+	// Precompute disjoint-kind single-arm streaming redirects (`obj_arm`/`arr_arm`) for single `.One`/`.Any` held records.
+	for &r, i in p.records {
+		if .Held not_in r.flags {
+			continue
+		}
+		u := &p.uses[i]
+		aps := u.verdict if len(u.verdict) > 0 else u.applies
+		if len(aps) == 1 && (aps[0].kind == .One || aps[0].kind == .Any) {
+			u.obj_arm = unique_kind_arm(p, aps[0].arms, .Object)
+			u.arr_arm = unique_kind_arm(p, aps[0].arms, .Array)
+		}
+	}
 	p.root = &p.records[1]
+}
+
+// Returns `-1` if no arm in `arms` can accept `kind`, `1 + arm` if exactly one arm can accept `kind`,
+// or `0` if two or more arms can accept `kind`.
+@(private = "file")
+unique_kind_arm :: proc(p: ^Plan, arms: []i32, kind: rules.Kind) -> i32 {
+	hits := 0
+	which := i32(-1)
+	for arm in arms {
+		if record_accepts_kind(p, arm, kind, 0) {
+			hits += 1
+			which = arm
+			if hits > 1 {
+				return 0
+			}
+		}
+	}
+	if hits == 0 {
+		return -1
+	}
+	return which + 1
+}
+
+// Conservative static check of whether `p.records[rec_idx]` can ever accept a value of `kind`.
+@(private)
+record_accepts_kind :: proc(p: ^Plan, rec_idx: i32, kind: rules.Kind, depth: int) -> bool {
+	if depth >= 8 || rec_idx < 0 || int(rec_idx) >= len(p.records) {
+		return true
+	}
+	r := &p.records[rec_idx]
+	if .Held not_in r.flags {
+		return kind in r.leaf_kinds
+	}
+	u := &p.uses[rec_idx]
+	if u.verdict_rec > 0 {
+		return record_accepts_kind(p, u.verdict_rec - 1, kind, depth + 1)
+	}
+	for &ap in u.applies {
+		#partial switch ap.kind {
+		case .Own, .Ref:
+			if !record_accepts_kind(p, ap.record, kind, depth + 1) {
+				return false
+			}
+		case .All:
+			for arm in ap.arms {
+				if !record_accepts_kind(p, arm, kind, depth + 1) {
+					return false
+				}
+			}
+		case .Any, .One:
+			any_ok := false
+			for arm in ap.arms {
+				if record_accepts_kind(p, arm, kind, depth + 1) {
+					any_ok = true
+					break
+				}
+			}
+			if !any_ok {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Encodes `name` into `r.expected` (`word, head, tail`) matching `next/json/members.odin` and `next/cbor/walk.odin`.
@@ -983,6 +1135,51 @@ key_of :: proc "contextless" (r: ^Record, name: string) {
 	}
 }
 
+// 1-bit bloom hash over a non-empty key name (matching v1 `name_bit`).
+@(private)
+name_bit :: #force_inline proc "contextless" (name: string) -> u64 #no_bounds_check {
+	return u64(1) << ((u32(name[0]) * 31 + u32(name[len(name) - 1]) * 5 + u32(len(name))) & 63)
+}
+
+// Fast inlined hash for object member lookup (zero function-call overhead on the hot key path!).
+@(private)
+member_hash :: #force_inline proc "contextless" (name: string) -> u32 #no_bounds_check {
+	p, n := raw_data(name), len(name)
+	h := u64(0x9E3779B97F4A7C15) ~ u64(n)
+	if n >= 8 {
+		// Unrolled fast path for 8..16 byte keys (the majority of JSON keys).
+		if n <= 16 {
+			a := intrinsics.unaligned_load((^u64)(p))
+			b := intrinsics.unaligned_load((^u64)(p[n - 8:]))
+			h = (h ~ a) * 0xBF58476D1CE4E5B9
+			h = (h ~ b) * 0x94D049BB133111EB
+			return u32(h ~ (h >> 32))
+		}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			w := intrinsics.unaligned_load((^u64)(p[i:]))
+			h = (h ~ w) * 0xBF58476D1CE4E5B9
+		}
+		if i < n {
+			w := intrinsics.unaligned_load((^u64)(p[n - 8:]))
+			h = (h ~ w) * 0x94D049BB133111EB
+		}
+		return u32(h ~ (h >> 32))
+	}
+	if n >= 4 {
+		a := u64(intrinsics.unaligned_load((^u32)(p)))
+		b := u64(intrinsics.unaligned_load((^u32)(p[n - 4:])))
+		h = (h ~ a ~ (b << 32)) * 0xBF58476D1CE4E5B9
+		return u32(h ~ (h >> 32))
+	}
+	tail := u64(0)
+	for j in 0 ..< n {
+		tail |= u64(p[j]) << (8 * uint(j))
+	}
+	h = (h ~ tail) * 0xBF58476D1CE4E5B9
+	return u32(h ~ (h >> 32))
+}
+
 // Looks up member `name` in object block `m` using its open-addressed hash table (O(1)).
 // Returns the member index `0 ..< m.members`, or -1 if not found.
 @(private)
@@ -990,9 +1187,12 @@ member_find :: #force_inline proc "contextless" (p: ^Plan, m: ^Meta, name: strin
 	if m.slots_n == 0 {
 		return -1
 	}
+	if len(name) > 0 && (m.name_bits & name_bit(name)) == 0 {
+		return -1
+	}
 	mask := m.slots_n - 1
 	table := p.slots[m.slots:]
-	at := tape.text_hash(transmute([]u8)name) & mask
+	at := member_hash(name) & mask
 	for {
 		slot := table[at]
 		if slot == 0 {

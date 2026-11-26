@@ -443,19 +443,16 @@ has_own_keywords :: proc(b: ^Builder, d: ^rules.Description, n: ^rules.Node, edg
 
 @(private)
 Pool :: struct {
-	allocator:   runtime.Allocator,
-	arena:       mem.Dynamic_Arena,
-	arena_ready: bool,
-	factored:    [dynamic]Factored_Open,
-	re_scratch:  regex.Scratch,
-	re_ready:    bool,
+	allocator:      runtime.Allocator,
+	arena:          mem.Dynamic_Arena,
+	arena_ready:    bool,
+	factored:       [dynamic]Factored_Open,
+	captures:       [MAX_HELD_CAPTURES]^Held_Capture,
 }
 
 @(private)
 pool_init :: proc(p: ^Pool, allocator: runtime.Allocator) {
 	p^ = {allocator = allocator}
-	mem.dynamic_arena_init(&p.arena, allocator, allocator)
-	p.arena_ready = true
 	p.factored.allocator = allocator
 }
 
@@ -464,8 +461,10 @@ pool_destroy :: proc(p: ^Pool) {
 	if p == nil {
 		return
 	}
-	if p.re_ready {
-		regex.scratch_destroy(&p.re_scratch)
+	for c in p.captures {
+		if c != nil {
+			free(c, p.allocator)
+		}
 	}
 	delete(p.factored)
 	if p.arena_ready {
@@ -476,7 +475,28 @@ pool_destroy :: proc(p: ^Pool) {
 
 @(private)
 pool_allocator :: proc(p: ^Pool) -> runtime.Allocator {
+	if !p.arena_ready {
+		mem.dynamic_arena_init(&p.arena, p.allocator, p.allocator, block_size = 4096)
+		p.arena_ready = true
+	}
 	return mem.dynamic_arena_allocator(&p.arena)
+}
+
+@(private)
+pool_capture_slot :: proc(h: ^Checker, idx: int) -> ^Held_Capture {
+	pool := pool_ensure(h)
+	if pool == nil {
+		return nil
+	}
+	if pool.captures[idx] == nil {
+		c, err := new(Held_Capture, pool.allocator)
+		if err != nil {
+			h.fatal = .No_Memory
+			return nil
+		}
+		pool.captures[idx] = c
+	}
+	return pool.captures[idx]
 }
 
 @(private)
@@ -501,32 +521,35 @@ pool_ensure :: proc(h: ^Checker) -> ^Pool {
 Held_Capture :: struct {
 	builder:        build.Builder,
 	regs:           hook.Regs,
-	stack_buf:      [64]u64,
+	stack_buf:      [16]u64,
 	counts_buf:     [8]tape.Child_Count,
 	owner:          ^Record,
 	open_at:        u64,
+	saved_b:        u64,
 	depth:          int,
 	for_factor:     bool,           // true if capturing a multi-choice factored member!
 	factor_member:  ^Factor_Member, // active factored member when `for_factor == true`
 	active:         bool,
-	saved_sp:       int,
 }
 
 @(private)
-capture_start :: proc(h: ^Checker, owner: ^Record, at: u64, for_factor := false, fm: ^Factor_Member = nil) -> bool {
+capture_start :: proc(h: ^Checker, owner: ^Record, at: u64, saved_b: u64, for_factor := false, fm: ^Factor_Member = nil) -> bool {
 	if h.capture_depth >= MAX_HELD_CAPTURES {
 		h.fatal = .Exceeded
 		return false
 	}
-	cap_slot := &h.captures[h.capture_depth]
+	cap_slot := pool_capture_slot(h, h.capture_depth)
+	if cap_slot == nil {
+		return false
+	}
 	cap_slot^ = {
 		owner = owner,
 		open_at = at,
+		saved_b = saved_b,
 		depth = 0,
 		for_factor = for_factor,
 		factor_member = fm,
 		active = true,
-		saved_sp = h.sp,
 	}
 	most := int(max(u32) / 4)
 	if h.budget.nodes > 0 {
@@ -540,7 +563,7 @@ capture_start :: proc(h: ^Checker, owner: ^Record, at: u64, for_factor := false,
 		&cap_slot.builder,
 		h.src,
 		h.format,
-		nodes = 64,
+		nodes = 16,
 		most = most,
 		frames = cap_slot.stack_buf[:],
 		allocator = h.scratch,
@@ -559,7 +582,7 @@ capture_start :: proc(h: ^Checker, owner: ^Record, at: u64, for_factor := false,
 
 @(private)
 capture_feed :: proc(h: ^Checker, t: tape.Token) -> (done: bool, ok: bool) {
-	c := &h.captures[h.capture_depth - 1]
+	c := h.pool.captures[h.capture_depth - 1]
 	// Track container nesting depth inside the captured value.
 	if t.role == .Value {
 		if t.kind == .Object || t.kind == .Array {
@@ -608,7 +631,7 @@ capture_abort :: proc(h: ^Checker) {
 		return
 	}
 	h.capture_depth -= 1
-	c := &h.captures[h.capture_depth]
+	c := h.pool.captures[h.capture_depth]
 	doc, _ := build.builder_end(&c.builder, c.regs, 0, nil)
 	tape.destroy(&doc)
 	c.active = false
@@ -619,7 +642,7 @@ capture_abort :: proc(h: ^Checker) {
 @(private)
 capture_finish :: proc(h: ^Checker) -> bool {
 	h.capture_depth -= 1
-	c := &h.captures[h.capture_depth]
+	c := h.pool.captures[h.capture_depth]
 	doc, berr := build.builder_end(&c.builder, c.regs, 0, nil)
 	// Preserve DTD/entity extension temporarily for XML decoding, clearing before destroy so we don't double-free `h.xml_ext`!
 	saved_ext := doc.ext
@@ -643,7 +666,9 @@ capture_finish :: proc(h: ^Checker) -> bool {
 	}
 	if c.for_factor {
 		// Multi-choice member inside an open factored object!
-		fo := &h.pool.factored[h.nf - 1]
+		// Re-fetch `fo` via `fo_idx` after `subcheck_node` because nested factored objects can grow `h.pool.factored`!
+		fo_idx := h.nf - 1
+		fo := factored_at(h, fo_idx)
 		fm := c.factor_member
 		fo.active_member = nil
 		fo.active_choice = -1
@@ -664,10 +689,13 @@ capture_finish :: proc(h: ^Checker) -> bool {
 				}
 			}
 			for ch in fm.choices {
+				fo = factored_at(h, fo_idx)
 				if fo.factor.monotone && (ch.parts & ~fo.failed) == 0 {
 					continue
 				}
-				if !subcheck_node(h, &doc, 0, ch.record, nil, nil, quiet = true) {
+				passed := subcheck_node(h, &doc, 0, ch.record, nil, nil, quiet = true)
+				fo = factored_at(h, fo_idx)
+				if !passed {
 					fo.failed |= ch.parts
 				}
 				if h.fatal != .None {
@@ -675,6 +703,7 @@ capture_finish :: proc(h: ^Checker) -> bool {
 				}
 			}
 		}
+		fo = factored_at(h, fo_idx)
 		if can_doom_factored(h, fo.factor, fo.failed) {
 			return false
 		}
@@ -794,7 +823,11 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 		}
 		return false
 	case .Not:
-		if subcheck_node(h, doc, node, ap.record, nil, owner, quiet = true) {
+		passed := subcheck_node(h, doc, node, ap.record, nil, owner, quiet = true)
+		if h.fatal != .None {
+			return false
+		}
+		if passed {
 			if emit {
 				record_failure(h, .Not_Allowed, at, "not", "", owner)
 			} else {
@@ -802,7 +835,7 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 			}
 			return false
 		}
-		return h.fatal == .None
+		return true
 	case .If:
 		cond_ok := subcheck_node(h, doc, node, ap.test, nil, owner, quiet = true)
 		if h.fatal != .None {
@@ -839,10 +872,6 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 			return true
 		}
 		ok := true
-		re_scratch := checker_regex_scratch(h)
-		if re_scratch == nil {
-			return false
-		}
 		it, p, cerr := tape.children(r, node, h.scratch)
 		if cerr != nil {
 			h.fatal = .No_Memory
@@ -868,14 +897,11 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 			}
 			matched := slice.contains(ap.named, key_str)
 			for pat in ap.patterns {
-				steps := remaining_steps(h)
-				found, serr := regex.search(pat.regex, key_str, 0, nil, re_scratch, steps)
-				charge_steps(h, re_scratch.spent)
-				if serr.kind != .None {
+				found, rok := run_regex_search(h, pat.regex, key_str)
+				if !rok {
 					if key_owned {
 						delete(key_str, h.scratch)
 					}
-					h.fatal = .Exceeded if serr.kind == .Steps else .No_Memory
 					return false
 				}
 				if found {
@@ -937,7 +963,7 @@ eval_apply :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owne
 				h.fatal = .No_Memory
 				return false
 			}
-			res := subcheck_key_string(h, key_str, kt.lo, doc, ap.record, owner, quiet = !emit)
+			res := subcheck_key_string(h, key_str, doc, ap.record, owner, quiet = !emit)
 			if key_owned {
 				delete(key_str, h.scratch)
 			}
@@ -1054,10 +1080,64 @@ object_has_key :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, 
 	return p == .Found
 }
 
-// Checks `uniqueItems` on array `node` using `rules.value_hash` + `rules.value_equal` in a scratch hash map.
+// Checks `uniqueItems` on array `node`: zero-alloc stack hash table fast path for `<= 32` unescaped strings,
+// falling back to exact `rules.value_hash` + `rules.value_equal` for general / larger arrays.
 @(private = "file")
-check_unique_items :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owner: ^Record, at: u64, emit: bool) -> bool {
+check_unique_items :: proc(h: ^Checker, doc: ^tape.Document, node: tape.Node_Index, owner: ^Record, at: u64, emit: bool) -> bool #no_bounds_check {
 	r := tape.Reader{doc = doc}
+	// Fast zero-alloc path for small plain-string arrays (e.g. `deno` `lint`/`fmt`, `draft-04` `required`/`enum`)!
+	if h.budget.steps == 0 && doc.format != nil && .Binary not_in doc.format.caps {
+		it0, p0, cerr0 := tape.children(r, node, h.scratch)
+		if cerr0 != nil {
+			h.fatal = .No_Memory
+			return false
+		}
+		if p0 != .Found {
+			tape.destroy_children(&it0)
+			return true
+		}
+		slots: [64]u32 // zero-initialized: 0 = empty, 1 + i = index into `items`
+		items: [32]string = ---
+		n := 0
+		fast_ok := true
+		for {
+			_, ch, cp := tape.next_child(r, &it0)
+			if cp != .Found {
+				break
+			}
+			tok := doc.nodes[ch]
+			if tok.kind != .String || (tok.spelling & tape.SPELLING_DECODE != 0) || n >= 32 {
+				fast_ok = false
+				break
+			}
+			s := string(doc.src[tok.lo:][:tok.n])
+			hv := member_hash(s) & 63
+			for {
+				slot := slots[hv]
+				if slot == 0 {
+					slots[hv] = u32(n + 1)
+					items[n] = s
+					n += 1
+					break
+				}
+				if items[slot - 1] == s {
+					tape.destroy_children(&it0)
+					if emit {
+						record_failure(h, .Not_Unique, at, "uniqueItems", "", owner)
+					} else {
+						record_first_failure(h, .Not_Unique, at, "uniqueItems", "", owner)
+					}
+					return false
+				}
+				hv = (hv + 1) & 63
+			}
+		}
+		tape.destroy_children(&it0)
+		if fast_ok {
+			return true
+		}
+	}
+
 	cnt, _, lerr := tape.length(r, node, h.scratch)
 	if lerr != nil {
 		h.fatal = .No_Memory
@@ -1168,13 +1248,6 @@ eval_unevaluated_properties :: proc(h: ^Checker, doc: ^tape.Document, node: tape
 		return true
 	}
 	ok := true
-	re_scratch: ^regex.Scratch
-	if len(ev_pats) > 0 {
-		re_scratch = checker_regex_scratch(h)
-		if re_scratch == nil {
-			return false
-		}
-	}
 	r := tape.Reader{doc = doc}
 	it, p, cerr := tape.children(r, node, h.scratch)
 	if cerr != nil {
@@ -1202,14 +1275,11 @@ eval_unevaluated_properties :: proc(h: ^Checker, doc: ^tape.Document, node: tape
 		evaluated := ev_names[key_str]
 		if !evaluated {
 			for re in ev_pats {
-				steps := remaining_steps(h)
-				found, serr := regex.search(re, key_str, 0, nil, re_scratch, steps)
-				charge_steps(h, re_scratch.spent)
-				if serr.kind != .None {
+				found, rok := run_regex_search(h, re, key_str)
+				if !rok {
 					if key_owned {
 						delete(key_str, h.scratch)
 					}
-					h.fatal = .Exceeded if serr.kind == .Steps else .No_Memory
 					return false
 				}
 				if found {

@@ -1235,3 +1235,755 @@ test_review_regressions_part_b :: proc(t: ^testing.T) {
 		expect_json(t, &plan, `{"x": 1}`, false)
 	}
 }
+
+@(test)
+test_phase2_regressions :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// 1. Container `.Skip` + `.End` lockstep (`twitter` / `citm`): trivial array & trivial object before required siblings!
+	{
+		b := db_init()
+		arr_n := db_node(&b, make_node({.Array}))
+		obj_n := db_node(&b, make_node({.Object}))
+		str_n := db_node(&b, make_node({.String}))
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {
+				{name = "areas", node = arr_n, required = true},
+				{name = "meta", node = obj_n, required = true},
+				{name = "urls", node = arr_n, required = true},
+				{name = "title", node = str_n, required = true},
+			},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		expect_json(t, &plan, `{"areas": [1, 2], "meta": {"a": 1}, "urls": [], "title": "ok"}`, true)
+		expect_json(t, &plan, `{"title": "ok", "urls": ["x"], "meta": {}, "areas": []}`, true)
+		expect_json(t, &plan, `{"areas": [1], "meta": {}, "title": "missing urls"}`, false)
+	}
+
+	// 2. `Held_Capture` inside `.Expects` object whose inner keys match outer expected key (`ui5-manifest` crash)!
+	{
+		b := db_init()
+		str_n := db_node(&b, make_node({.String}))
+		int_n := db_node(&b, make_node({.Integer}))
+		// Held member `"a"` has `anyOf` over two array/object branches (non-factored capture) while outer expects `"b"` next!
+		inner_arr := make_node({.Array})
+		inner_arr.array = db_arr(&b, rules.Array{items = str_n})
+		inner_obj := make_node({.Object})
+		inner_obj.object = db_obj(&b, rules.Object{
+			members = {{name = "b", node = int_n, required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		held_a := make_node()
+		held_a.any_of = db_ids(&b, db_node(&b, inner_arr), db_node(&b, inner_obj))
+		held_a.not = db_node(&b, make_node({.Null}))
+		a_idx := db_node(&b, held_a)
+
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {
+				{name = "a", node = a_idx, required = true},
+				{name = "b", node = str_n, required = true},
+			},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		// Inner object contains `"b": 42` while outer expects `"b"` next — must NOT swallow `"b"` during capture!
+		expect_json(t, &plan, `{"a": {"b": 42}, "b": "outer"}`, true)
+		expect_json(t, &plan, `{"a": {"b": "bad"}, "b": "outer"}`, false)
+	}
+
+	// 3. Speculative `is_choice` container inside a factored object failing must NOT abort sibling arms!
+	{
+		b := db_init()
+		str_n := db_node(&b, make_node({.String}))
+		int_n := db_node(&b, make_node({.Integer}))
+		sub_int := make_node({.Object})
+		sub_int.object = db_obj(&b, rules.Object{
+			members = {{name = "v", node = int_n, required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		arm0 := make_node({.Object})
+		arm0.object = db_obj(&b, rules.Object{
+			members = {{name = "cfg", node = db_node(&b, sub_int), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		arm1 := make_node({.Object})
+		arm1.object = db_obj(&b, rules.Object{
+			members = {{name = "alt", node = str_n, required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		root := make_node({.Object})
+		root.any_of = db_ids(&b, db_node(&b, arm0), db_node(&b, arm1))
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		// `"cfg": {"v": "not-an-int"}` fails arm0's choice container, but `"alt": "ok"` satisfies arm1!
+		expect_json(t, &plan, `{"cfg": {"v": "not-an-int"}, "alt": "ok"}`, true)
+		expect_json(t, &plan, `{"cfg": {"v": 7}}`, true)
+		expect_json(t, &plan, `{"cfg": {"v": "bad"}}`, false)
+	}
+
+	// 4. Nested factored object inside `subcheck_node` must NOT clobber outer `factored[0]` (`cmake-presets` / `openapi`)!
+	{
+		b := db_init()
+		str_n := db_node(&b, make_node({.String}))
+		int_n := db_node(&b, make_node({.Integer}))
+		// Inner factored object
+		ia0 := make_node({.Object})
+		ia0.object = db_obj(&b, rules.Object{members = {{name = "x", node = int_n, required = true}}, additional = rules.NONE, keys = rules.NONE})
+		ia1 := make_node({.Object})
+		ia1.object = db_obj(&b, rules.Object{members = {{name = "y", node = str_n, required = true}}, additional = rules.NONE, keys = rules.NONE})
+		inner_fac := make_node({.Object})
+		inner_fac.any_of = db_ids(&b, db_node(&b, ia0), db_node(&b, ia1))
+		inner_idx := db_node(&b, inner_fac)
+
+		// Outer factored object with two multi-choice arms referencing `inner_fac` (forces `capture` + `subcheck_node`)
+		oa0 := make_node({.Object})
+		oa0.object = db_obj(&b, rules.Object{members = {{name = "nest", node = inner_idx, required = true}, {name = "tag", node = str_n, required = true}}, additional = rules.NONE, keys = rules.NONE})
+		oa1 := make_node({.Object})
+		oa1.object = db_obj(&b, rules.Object{members = {{name = "nest", node = db_node(&b, make_node({.Object})), required = true}, {name = "num", node = int_n, required = true}}, additional = rules.NONE, keys = rules.NONE})
+		root := make_node({.Object})
+		root.any_of = db_ids(&b, db_node(&b, oa0), db_node(&b, oa1))
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		expect_json(t, &plan, `{"nest": {"x": 1}, "tag": "ok"}`, true)
+		expect_json(t, &plan, `{"nest": {"y": "hi"}, "tag": "ok"}`, true)
+		expect_json(t, &plan, `{"nest": {"z": true}, "num": 5}`, true)
+		expect_json(t, &plan, `{"nest": {"z": true}, "tag": "fail"}`, false)
+	}
+
+	// 5. Inner `unevaluatedProperties: false` closing part must preserve `max_members = max(u64)` (`openapi` verdict)!
+	{
+		b := db_init()
+		false_n := db_node(&b, make_node({}))
+		str_n := db_node(&b, make_node({.String}))
+		p1 := make_node({.Object})
+		p1.object = db_obj(&b, rules.Object{members = {{name = "a", node = str_n}}, additional = rules.NONE, keys = rules.NONE})
+		p2 := make_node({.Object})
+		p2.object = db_obj(&b, rules.Object{members = {{name = "b", node = str_n}}, additional = rules.NONE, keys = rules.NONE})
+		inner := make_node({.Object})
+		inner.all_of = db_ids(&b, db_node(&b, p1), db_node(&b, p2))
+		inner.unevaluated_properties = false_n
+
+		alt := make_node({.Object})
+		alt.object = db_obj(&b, rules.Object{members = {{name = "c", node = str_n, required = true}}, additional = rules.NONE, keys = rules.NONE})
+
+		root := make_node({.Object})
+		root.any_of = db_ids(&b, db_node(&b, inner), db_node(&b, alt))
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		// Non-empty object matching `inner` (both `"a"` and `"b"` evaluated) MUST pass!
+		expect_json(t, &plan, `{"a": "x", "b": "y"}`, true)
+		// Extra unevaluated property `"extra"` must fail `inner` and fail `alt`!
+		expect_json(t, &plan, `{"a": "x", "extra": "z"}`, false)
+	}
+
+	// 6. XML `.Group` sibling array grouping (both contiguous and non-contiguous repeated tags, stream + doc, verdict + errors)!
+	{
+		b := db_init()
+		digit_str := db_node(&b, make_node({.String}, {pattern = "^[0-9]+$"}))
+		str_n := db_node(&b, make_node({.String}))
+		item_arr := make_node({.Array}, {min_items = 2})
+		item_arr.array = db_arr(&b, rules.Array{items = digit_str})
+		inner_obj := make_node({.Object})
+		inner_obj.object = db_obj(&b, rules.Object{
+			members = {
+				{name = "a", node = db_node(&b, item_arr), required = true},
+				{name = "b", node = str_n},
+			},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {{name = "r", node = db_node(&b, inner_obj), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		check_xml_case :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want: bool, loc := #caller_location) {
+			src := transmute([]u8)input
+			r1 := xml.check(src, plan)
+			defer check.result_destroy(&r1)
+			testing.expectf(t, r1.valid == want, "xml stream verdict mismatch on %q: got %v (%v), want %v", input, r1.valid, r1.err.kind, want, loc = loc)
+
+			sink: check.Sink
+			check.sink_init(&sink)
+			defer check.sink_destroy(&sink)
+			r2 := xml.check(src, plan, .Xml, {}, &sink)
+			defer check.result_destroy(&r2)
+			testing.expectf(t, r2.valid == want, "xml stream errors mismatch on %q: got %v, want %v", input, r2.valid, want, loc = loc)
+
+			doc, derr := xml.build(src)
+			testing.expect(t, derr == nil, loc = loc)
+			defer tape.destroy(&doc)
+			r3 := check.check_document(&doc, plan)
+			defer check.result_destroy(&r3)
+			testing.expectf(t, r3.valid == want, "xml doc verdict mismatch on %q: got %v, want %v", input, r3.valid, want, loc = loc)
+		}
+
+		// Contiguous repeated `<a>` elements
+		check_xml_case(t, &plan, `<r><a>1</a><a>2</a><b>hi</b></r>`, true)
+		// Non-contiguous repeated `<a>` elements interleaved with `<b>`
+		check_xml_case(t, &plan, `<r><a>1</a><b>hi</b><a>2</a></r>`, true)
+		// Only 1 `<a>` fails `minItems: 2`
+		check_xml_case(t, &plan, `<r><a>1</a><b>hi</b></r>`, false)
+		// Invalid element type in second `<a>`
+		check_xml_case(t, &plan, `<r><a>1</a><b>hi</b><a>bad</a></r>`, false)
+	}
+
+	// 7. Disjoint-kind `oneOf` container/scalar redirect parity (`pulumi` `runtime`/`config`)!
+	{
+		b := db_init()
+		str_n := db_node(&b, make_node({.String}, {min_length = 1}))
+		int_n := db_node(&b, make_node({.Integer}))
+		obj_arm := make_node({.Object})
+		obj_arm.object = db_obj(&b, rules.Object{
+			members = {{name = "name", node = str_n, required = true}},
+			additional = db_node(&b, make_node({})),
+			keys = rules.NONE,
+		})
+		arr_arm := make_node({.Array})
+		arr_arm.array = db_arr(&b, rules.Array{items = int_n})
+		one := make_node()
+		one.one_of = db_ids(&b, str_n, db_node(&b, obj_arm), db_node(&b, arr_arm))
+		b.d.root = db_node(&b, one)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		expect_json(t, &plan, `"go"`, true)
+		expect_json(t, &plan, `""`, false)
+		expect_json(t, &plan, `{"name": "nodejs"}`, true)
+		expect_json(t, &plan, `{"name": "nodejs", "extra": 1}`, false)
+		expect_json(t, &plan, `[1, 2, 3]`, true)
+		expect_json(t, &plan, `[1, "bad"]`, false)
+		expect_json(t, &plan, `true`, false)
+	}
+}
+
+@(test)
+test_audit_regressions :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	check_xml_all :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want: bool, loc := #caller_location) {
+		src := transmute([]u8)input
+		r1 := xml.check(src, plan)
+		defer check.result_destroy(&r1)
+		testing.expectf(t, r1.valid == want, "xml stream verdict mismatch on %q: got %v (%v), want %v", input, r1.valid, r1.err.kind, want, loc = loc)
+
+		sink: check.Sink
+		check.sink_init(&sink)
+		defer check.sink_destroy(&sink)
+		r2 := xml.check(src, plan, .Xml, {}, &sink)
+		defer check.result_destroy(&r2)
+		testing.expectf(t, r2.valid == want, "xml stream errors mismatch on %q: got %v, want %v", input, r2.valid, want, loc = loc)
+
+		doc, derr := xml.build(src)
+		testing.expect(t, derr == nil, loc = loc)
+		defer tape.destroy(&doc)
+		r3 := check.check_document(&doc, plan)
+		defer check.result_destroy(&r3)
+		testing.expectf(t, r3.valid == want, "xml doc verdict mismatch on %q: got %v (%v), want %v", input, r3.valid, r3.err.kind, want, loc = loc)
+
+		sink2: check.Sink
+		check.sink_init(&sink2)
+		defer check.sink_destroy(&sink2)
+		r4 := check.check_document(&doc, plan, {}, &sink2)
+		defer check.result_destroy(&r4)
+		testing.expectf(t, r4.valid == want, "xml doc errors mismatch on %q: got %v, want %v", input, r4.valid, want, loc = loc)
+	}
+
+	// Audit #1: Repeated unnamed XML elements under `.Group` must NEVER silently return `valid = true`!
+	{
+		b := db_init()
+		digit_str := db_node(&b, make_node({.String}, {pattern = "^[0-9]+$"}))
+		inner := make_node({.Object})
+		inner.object = db_obj(&b, rules.Object{
+			additional = digit_str,
+			keys = rules.NONE,
+		})
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {{name = "r", node = db_node(&b, inner), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		check_xml_all(t, &plan, `<r><x>123</x></r>`, true)
+		check_xml_all(t, &plan, `<r><x>bad</x></r>`, false)
+		// Repeated `<x>` forms an array -> must FAIL `{type: "string", pattern: "^[0-9]+$"}`!
+		check_xml_all(t, &plan, `<r><x>1</x><x>bad</x></r>`, false)
+		check_xml_all(t, &plan, `<r><x>1</x><x>2</x></r>`, false)
+	}
+	{
+		// Missing `required` field after repeated unnamed `<x>` must FAIL!
+		b := db_init()
+		str_n := db_node(&b, make_node({.String}))
+		inner := make_node({.Object})
+		inner.object = db_obj(&b, rules.Object{
+			members = {{name = "req", node = str_n, required = true}},
+			additional = str_n,
+			keys = rules.NONE,
+		})
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {{name = "r", node = db_node(&b, inner), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		check_xml_all(t, &plan, `<r><x>1</x><x>2</x></r>`, false)
+	}
+
+	// Audit #2: Deep nested factored objects (`h.nf > INLINE_FACTORED == 4`) growing `h.pool.factored` across `subcheck_node` (ASan UAF test)!
+	{
+		b := db_init()
+		int_n := db_node(&b, make_node({.Integer}))
+		str_n := db_node(&b, make_node({.String}))
+
+		// Build 7 nested factored levels (0 = innermost .. 6 = outermost).
+		// At level 2 (depth 5 from root -> `h.nf == 5 > INLINE_FACTORED`), use a multi-choice container member
+		// so `capture_finish` / `walk_document_node` invokes `subcheck_node` while holding `fo` in heap `pool.factored`,
+		// and the choice arm opens levels 1 & 0 which grow `pool.factored` via `resize`!
+		l0_ma := [1]rules.Member{{name = "x", node = int_n, required = true}}
+		l0_mb := [1]rules.Member{{name = "y", node = str_n, required = true}}
+		l0_a := make_node({.Object})
+		l0_a.object = db_obj(&b, rules.Object{members = l0_ma[:], additional = rules.NONE, keys = rules.NONE})
+		l0_b := make_node({.Object})
+		l0_b.object = db_obj(&b, rules.Object{members = l0_mb[:], additional = rules.NONE, keys = rules.NONE})
+		l0 := make_node({.Object})
+		l0.any_of = db_ids(&b, db_node(&b, l0_a), db_node(&b, l0_b))
+		cur := db_node(&b, l0)
+
+		// Wrap 6 more factored levels around `cur` (total depth = 7 > INLINE_FACTORED == 4).
+		for _ in 1 ..= 6 {
+			alt_m := [1]rules.Member{{name = "z", node = int_n, required = true}}
+			alt_obj := make_node({.Object})
+			alt_obj.object = db_obj(&b, rules.Object{members = alt_m[:], additional = rules.NONE, keys = rules.NONE})
+			m0 := [2]rules.Member{{name = "n", node = cur, required = true}, {name = "k", node = int_n, required = true}}
+			m1 := [2]rules.Member{{name = "n", node = db_node(&b, alt_obj), required = true}, {name = "m", node = int_n, required = true}}
+			a0 := make_node({.Object})
+			a0.object = db_obj(&b, rules.Object{members = m0[:], additional = rules.NONE, keys = rules.NONE})
+			a1 := make_node({.Object})
+			a1.object = db_obj(&b, rules.Object{members = m1[:], additional = rules.NONE, keys = rules.NONE})
+			fac := make_node({.Object})
+			fac.any_of = db_ids(&b, db_node(&b, a0), db_node(&b, a1))
+			cur = db_node(&b, fac)
+		}
+		b.d.root = cur
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		valid_in := `{"k":1,"n":{"k":1,"n":{"k":1,"n":{"k":1,"n":{"k":1,"n":{"k":1,"n":{"x":42}}}}}}}`
+		invalid_in := `{"k":1,"n":{"k":1,"n":{"k":1,"n":{"k":1,"n":{"k":1,"n":{"k":1,"n":{"x":"bad"}}}}}}}`
+		expect_json(t, &plan, valid_in, true)
+		expect_json(t, &plan, invalid_in, false)
+	}
+
+	// Audit #3: `verdict_rec` and `obj_arm`/`arr_arm` must preserve `Result.err` locations when `sink == nil`!
+	{
+		b := db_init()
+		str_n := db_node(&b, make_node({.String}))
+		age_n := db_node(&b, make_node({.Integer}, {minimum = "18"}))
+		port_n := db_node(&b, make_node({.Integer}, {minimum = "1"}))
+
+		// `user`: conjoined `allOf` (`verdict_rec`)
+		u_p1 := make_node({.Object})
+		u_p1.object = db_obj(&b, rules.Object{
+			members = {{name = "name", node = str_n, required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		u_p2 := make_node({.Object})
+		u_p2.object = db_obj(&b, rules.Object{
+			members = {{name = "age", node = age_n}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		user_n := make_node({.Object})
+		user_n.all_of = db_ids(&b, db_node(&b, u_p1), db_node(&b, u_p2))
+
+		// `cfg`: disjoint `oneOf` (`obj_arm`)
+		cfg_obj := make_node({.Object})
+		cfg_obj.object = db_obj(&b, rules.Object{
+			members = {
+				{name = "host", node = str_n, required = true},
+				{name = "port", node = port_n},
+			},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		cfg_n := make_node()
+		cfg_n.one_of = db_ids(&b, str_n, db_node(&b, cfg_obj))
+
+		// `tags`: disjoint `oneOf` (`arr_arm`)
+		tags_arr := make_node({.Array}, {min_items = 1})
+		tags_arr.array = db_arr(&b, rules.Array{items = port_n})
+		tags_n := make_node()
+		tags_n.one_of = db_ids(&b, str_n, db_node(&b, tags_arr))
+
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {
+				{name = "user", node = db_node(&b, user_n)},
+				{name = "cfg", node = db_node(&b, cfg_n)},
+				{name = "tags", node = db_node(&b, tags_n)},
+			},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		// Direct required failure on conjoined `user`
+		r1 := json.check(transmute([]u8)string(`{"user": {}}`), &plan)
+		defer check.result_destroy(&r1)
+		testing.expect(t, !r1.valid)
+		testing.expect_value(t, r1.err.instance_location, "/user")
+		testing.expect(t, strings.has_prefix(r1.err.keyword_location, "/properties/user/"))
+
+		// Nested scalar failure inside conjoined `user`
+		r2 := json.check(transmute([]u8)string(`{"user": {"name": "Ada", "age": 5}}`), &plan)
+		defer check.result_destroy(&r2)
+		testing.expect(t, !r2.valid)
+		testing.expect_value(t, r2.err.instance_location, "/user/age")
+		testing.expect(t, strings.has_prefix(r2.err.keyword_location, "/properties/user/"))
+
+		// Direct required failure on disjoint `oneOf` `cfg` (`obj_arm`)
+		r3 := json.check(transmute([]u8)string(`{"cfg": {}}`), &plan)
+		defer check.result_destroy(&r3)
+		testing.expect(t, !r3.valid)
+		testing.expect_value(t, r3.err.instance_location, "/cfg")
+		testing.expect(t, strings.has_prefix(r3.err.keyword_location, "/properties/cfg/"))
+
+		// Nested scalar failure inside disjoint `oneOf` `cfg` (`obj_arm`)
+		r4 := json.check(transmute([]u8)string(`{"cfg": {"host": "localhost", "port": 0}}`), &plan)
+		defer check.result_destroy(&r4)
+		testing.expect(t, !r4.valid)
+		testing.expect_value(t, r4.err.instance_location, "/cfg/port")
+		testing.expect(t, strings.has_prefix(r4.err.keyword_location, "/properties/cfg/"))
+
+		// Direct minItems failure on disjoint `oneOf` `tags` (`arr_arm`)
+		r5 := json.check(transmute([]u8)string(`{"tags": []}`), &plan)
+		defer check.result_destroy(&r5)
+		testing.expect(t, !r5.valid)
+		testing.expect_value(t, r5.err.instance_location, "/tags")
+		testing.expect(t, strings.has_prefix(r5.err.keyword_location, "/properties/tags/"))
+
+		// Nested item failure inside disjoint `oneOf` `tags` (`arr_arm`)
+		r6 := json.check(transmute([]u8)string(`{"tags": [0]}`), &plan)
+		defer check.result_destroy(&r6)
+		testing.expect(t, !r6.valid)
+		testing.expect_value(t, r6.err.instance_location, "/tags/0")
+		testing.expect(t, strings.has_prefix(r6.err.keyword_location, "/properties/tags/"))
+	}
+	{
+		// Audit #3b: `obj_arm` pointing to a STILL-`.Held` arm (`not: {required: ["b"]}`) and to a `.Factored` arm!
+		b := db_init()
+		str_n := db_node(&b, make_node({.String}))
+		int_n := db_node(&b, make_node({.Integer}))
+
+		// `user`: `oneOf: [{type: "string"}, {type: "object", properties: {a: {type: "integer"}}, not: {required: ["b"]}}]`
+		not_b := make_node({.Object})
+		not_b.object = db_obj(&b, rules.Object{
+			members = {{name = "b", node = db_node(&b, make_node()), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		user_obj := make_node({.Object})
+		user_obj.object = db_obj(&b, rules.Object{
+			members = {{name = "a", node = int_n}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		user_obj.not = db_node(&b, not_b)
+		user_n := make_node()
+		user_n.one_of = db_ids(&b, str_n, db_node(&b, user_obj))
+
+		// `fac`: `oneOf: [{type: "string"}, {type: "object", anyOf: [{required: ["x"], properties: {x: {type: "integer"}}}, {required: ["y"], properties: {y: {type: "string"}}}]}]`
+		fx := make_node({.Object})
+		fx.object = db_obj(&b, rules.Object{members = {{name = "x", node = int_n, required = true}}, additional = rules.NONE, keys = rules.NONE})
+		fy := make_node({.Object})
+		fy.object = db_obj(&b, rules.Object{members = {{name = "y", node = str_n, required = true}}, additional = rules.NONE, keys = rules.NONE})
+		fac_obj := make_node({.Object})
+		fac_obj.any_of = db_ids(&b, db_node(&b, fx), db_node(&b, fy))
+		fac_n := make_node()
+		fac_n.one_of = db_ids(&b, str_n, db_node(&b, fac_obj))
+
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {
+				{name = "user", node = db_node(&b, user_n)},
+				{name = "fac", node = db_node(&b, fac_n)},
+			},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		// Failing `not` on still-`.Held` redirected `obj_arm`:
+		r1 := json.check(transmute([]u8)string(`{"user": {"a": 1, "b": 2}}`), &plan)
+		defer check.result_destroy(&r1)
+		testing.expect(t, !r1.valid)
+		testing.expect(t, strings.has_prefix(r1.err.instance_location, "/user"))
+		testing.expect(t, strings.has_prefix(r1.err.keyword_location, "/properties/user"))
+
+		// Failing nested property on still-`.Held` redirected `obj_arm`:
+		r2 := json.check(transmute([]u8)string(`{"user": {"a": "bad"}}`), &plan)
+		defer check.result_destroy(&r2)
+		testing.expect(t, !r2.valid)
+		testing.expect(t, strings.has_prefix(r2.err.instance_location, "/user"))
+		testing.expect(t, strings.has_prefix(r2.err.keyword_location, "/properties/user"))
+
+		// Failing redirected `.Factored` arm (`on_end` missing required):
+		r3 := json.check(transmute([]u8)string(`{"fac": {}}`), &plan)
+		defer check.result_destroy(&r3)
+		testing.expect(t, !r3.valid)
+		testing.expect_value(t, r3.err.instance_location, "/fac")
+		testing.expect(t, strings.has_prefix(r3.err.keyword_location, "/properties/fac"))
+
+		// Failing redirected `.Factored` arm (early doomed via wrong scalar):
+		r4 := json.check(transmute([]u8)string(`{"fac": {"x": "bad", "y": 99}}`), &plan)
+		defer check.result_destroy(&r4)
+		testing.expect(t, !r4.valid)
+		testing.expect_value(t, r4.err.instance_location, "/fac")
+		testing.expect(t, strings.has_prefix(r4.err.keyword_location, "/properties/fac"))
+	}
+
+	// Audit #4: XML `.Group` with `.Held` array schemas, multi-kind `{type: ["array", "string"]}`, `.Factored` objects, and `minProperties`/`maxProperties`!
+	{
+		// 4a. `.Held` array schema (`allOf: [{type: "array", minItems: 2}, {items: {type: "string", pattern: "^[0-9]+$"}}]`)
+		b := db_init()
+		digit_str := db_node(&b, make_node({.String}, {pattern = "^[0-9]+$"}))
+		str_n := db_node(&b, make_node({.String}))
+		p1 := db_node(&b, make_node({.Array}, {min_items = 2}))
+		p2 := make_node({.Array})
+		p2.array = db_arr(&b, rules.Array{items = digit_str})
+		held_arr := make_node({.Array})
+		held_arr.all_of = db_ids(&b, p1, db_node(&b, p2))
+
+		inner := make_node({.Object})
+		inner.object = db_obj(&b, rules.Object{
+			members = {
+				{name = "a", node = db_node(&b, held_arr), required = true},
+				{name = "b", node = str_n},
+			},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {{name = "r", node = db_node(&b, inner), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		check_xml_all(t, &plan, `<r><a>1</a><a>2</a></r>`, true)
+		check_xml_all(t, &plan, `<r><a>1</a><b>ok</b><a>2</a></r>`, true)
+		check_xml_all(t, &plan, `<r><a>1</a></r>`, false)
+		check_xml_all(t, &plan, `<r><a>1</a><a>bad</a></r>`, false)
+	}
+	{
+		// 4b. Multi-kind `{type: ["array", "string"]}` + `items: {pattern: "^[0-9]+$"}`
+		b := db_init()
+		digit_str := db_node(&b, make_node({.String}, {pattern = "^[0-9]+$"}))
+		multi := make_node({.Array, .String})
+		multi.array = db_arr(&b, rules.Array{items = digit_str})
+		inner := make_node({.Object})
+		inner.object = db_obj(&b, rules.Object{
+			members = {{name = "a", node = db_node(&b, multi), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {{name = "r", node = db_node(&b, inner), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		check_xml_all(t, &plan, `<r><a>hello</a></r>`, true)
+		check_xml_all(t, &plan, `<r><a>1</a><a>2</a></r>`, true)
+		check_xml_all(t, &plan, `<r><a>1</a><a>bad</a></r>`, false)
+	}
+	{
+		// 4c. `.Factored` object under XML `.Group` with repeated sibling array member!
+		b := db_init()
+		digit_str := db_node(&b, make_node({.String}, {pattern = "^[0-9]+$"}))
+		str_n := db_node(&b, make_node({.String}))
+		arr_n := make_node({.Array}, {min_items = 2})
+		arr_n.array = db_arr(&b, rules.Array{items = digit_str})
+		arm0 := make_node({.Object})
+		arm0.object = db_obj(&b, rules.Object{
+			members = {{name = "a", node = db_node(&b, arr_n), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		arm1 := make_node({.Object})
+		arm1.object = db_obj(&b, rules.Object{
+			members = {{name = "b", node = str_n, required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		fac := make_node({.Object})
+		fac.any_of = db_ids(&b, db_node(&b, arm0), db_node(&b, arm1))
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {{name = "r", node = db_node(&b, fac), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		check_xml_all(t, &plan, `<r><a>1</a><a>2</a></r>`, true)
+		check_xml_all(t, &plan, `<r><a>1</a><a>bad</a></r>`, false)
+		check_xml_all(t, &plan, `<r><b>hi</b></r>`, true)
+	}
+	{
+		// 4d. `minProperties`/`maxProperties` counts distinct XML tag names (NOT repeated sibling count)!
+		b := db_init()
+		str_n := db_node(&b, make_node({.String}))
+		arr_n := make_node({.Array})
+		arr_n.array = db_arr(&b, rules.Array{items = str_n})
+		inner := make_node({.Object}, {min_members = 1, max_members = u64(1)})
+		inner.object = db_obj(&b, rules.Object{
+			additional = db_node(&b, arr_n),
+			keys = rules.NONE,
+		})
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {{name = "r", node = db_node(&b, inner), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		// Two `<x>` siblings group into 1 member `"x"` -> passes `maxProperties: 1`!
+		check_xml_all(t, &plan, `<r><x>1</x><x>2</x></r>`, true)
+		// Two distinct tags `<x>` and `<y>` -> 2 members -> fails `maxProperties: 1`!
+		check_xml_all(t, &plan, `<r><x>1</x><y>2</y></r>`, false)
+	}
+	{
+		// 4e. Named unconstrained member (`collects_markup == false`) with `minProperties: 2`:
+		// repeated `<x>` must NOT inflate `f.count` to 2!
+		b := db_init()
+		any_n := db_node(&b, make_node())
+		inner := make_node({.Object}, {min_members = 2})
+		inner.object = db_obj(&b, rules.Object{
+			members = {{name = "x", node = any_n}, {name = "y", node = any_n}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		root := make_node({.Object})
+		root.object = db_obj(&b, rules.Object{
+			members = {{name = "r", node = db_node(&b, inner), required = true}},
+			additional = rules.NONE,
+			keys = rules.NONE,
+		})
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		check_xml_all(t, &plan, `<r><x>1</x><x>2</x></r>`, false)
+		check_xml_all(t, &plan, `<r><x>1</x><y>2</y></r>`, true)
+	}
+
+	// Audit #5: `scalar_passes_leaf` must return `false` when `h.fatal != .None` (no bogus `.Not_Allowed` in `sink.entries`)!
+	{
+		b := db_init()
+		// Backreference pattern forces backtracker (bypasses DFA), tripping step budget inside `not`!
+		pat_n := db_node(&b, make_node({.String}, {pattern = "^(a+)\\1+b$"}))
+		root := make_node()
+		root.not = pat_n
+		b.d.root = db_node(&b, root)
+		plan, err := check.compile(&b.d)
+		rules.description_destroy(&b.d)
+		testing.expect_value(t, err.kind, check.Error_Kind.None)
+		defer check.plan_destroy(&plan)
+
+		sink: check.Sink
+		check.sink_init(&sink)
+		defer check.sink_destroy(&sink)
+		opts := check.Options{budget = {steps = 5}}
+		res := json.check(transmute([]u8)string(`"aaaaaaaaaaaaaaaaaaaaaaaa!"`), &plan, .Json, opts, &sink)
+		defer check.result_destroy(&res)
+		testing.expect(t, !res.valid)
+		testing.expect_value(t, res.err.kind, check.Error_Kind.Exceeded)
+		testing.expect_value(t, len(sink.entries), 0)
+	}
+}

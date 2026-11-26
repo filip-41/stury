@@ -141,13 +141,11 @@ Factored_Open :: struct {
 	unknown_classes: u16,             // bitmask of pattern classes `0..15` seen among unnamed members
 	active_member:   ^Factor_Member,  // current member being read
 	active_choice:   int,             // -1 if no single choice open, else choice index
-	choice_depth:    int,             // container depth inside an active single choice
 	parent_sp:       int,             // `h.sp` where this factored object opened
 	saved_quiet:     bool,            // previous `h.quiet` state
 	saved_no_factor: bool,
-	key_at:          u64,             // byte offset of current key
+	saved_failed:    bool,            // previous `h.failed` state
 	open_at:         u64,             // byte offset of `{`
-	dup_seen:        bool,            // a duplicate key was seen in this factored object
 	unk_tracker:     int,             // tracker index for unnamed keys under `.First`/`.Last`, -1 if none
 }
 
@@ -693,7 +691,7 @@ gather :: proc(fb: ^Factor_Build, node: rules.Node_Index, edge: rules.Rules, dep
 			return -1
 		}
 		c_bit := u8(len(fb.parts))
-		append(&fb.parts, Part_Info{node = rules.NONE, obj = -1})
+		append(&fb.parts, Part_Info{node = rules.NONE, obj = -1, max_members = max(u64)})
 		append(&fb.closings, Factor_Closing{part = c_bit, root_op = res})
 		c_op := i16(len(fb.ops))
 		append(&fb.ops, Factor_Op{kind = .Part, bit = c_bit})
@@ -1269,36 +1267,53 @@ op_can_pass :: proc "contextless" (f: ^Factor, failed: u64, op_idx: i16) -> bool
 // Records an early-doomed factored-object failure properly even though `h.quiet` is true inside factored objects (B-C2).
 @(private)
 fail_doomed_factored :: proc(h: ^Checker, fo: ^Factored_Open) {
-	if h.pool != nil && h.nf > 0 {
-		h.quiet = h.pool.factored[0].saved_quiet
+	if h.nf > 0 {
+		h.quiet = factored_at(h, 0).saved_quiet
 	}
 	h.failed = true
 	record_first_failure(h, .No_Arm, fo.open_at, "anyOf", "", fo.owner)
 }
 
-// Under `.Last`, do not early-doom a factored object before close so a later duplicate key can override!
+// Under `.Last`/`.Group` or inside a nested factored object / choice / subcheck, do not early-doom the whole walk!
 @(private)
 can_doom_factored :: #force_inline proc "contextless" (h: ^Checker, f: ^Factor, failed: u64) -> bool {
-	return h.sink == nil && h.dups != .Last && factor_doomed(f, failed)
+	return h.sink == nil && h.dups != .Last && h.dups != .Group && h.nest_depth == 0 && h.nf == 1 && h.choice_depth == 0 && factor_doomed(f, failed)
 }
 
-// Opens a factored object on `h.pool.factored` (zero forks!). Returns false if nested past `MAX_FACTOR_DEPTH`.
+@(private)
+INLINE_FACTORED :: 4
+
+@(private)
+factored_at :: #force_inline proc "contextless" (h: ^Checker, idx: int) -> ^Factored_Open #no_bounds_check {
+	if idx < INLINE_FACTORED {
+		return &h.factored_buf[idx]
+	}
+	return &h.pool.factored[idx - INLINE_FACTORED]
+}
+
+// Opens a factored object on `h.factored_buf` (zero allocs for depth <= 4!) or `h.pool.factored`.
 @(private)
 factored_open :: proc(h: ^Checker, owner: ^Record, f: ^Factor, at: u64) -> bool {
 	if h.nf >= MAX_FACTOR_DEPTH {
 		return false
 	}
-	pool := pool_ensure(h)
-	if pool == nil {
-		return false
-	}
-	if h.nf >= len(pool.factored) {
-		if _, err := append(&pool.factored, Factored_Open{}); err != nil {
-			h.fatal = .No_Memory
+	fo: ^Factored_Open
+	if h.nf < INLINE_FACTORED {
+		fo = &h.factored_buf[h.nf]
+	} else {
+		pool := pool_ensure(h)
+		if pool == nil {
 			return false
 		}
+		pidx := h.nf - INLINE_FACTORED
+		if pidx >= len(pool.factored) {
+			if resize(&pool.factored, pidx + 1) != nil {
+				h.fatal = .No_Memory
+				return false
+			}
+		}
+		fo = &pool.factored[pidx]
 	}
-	fo := &pool.factored[h.nf]
 	fo^ = {
 		factor = f,
 		owner = owner,
@@ -1306,10 +1321,15 @@ factored_open :: proc(h: ^Checker, owner: ^Record, f: ^Factor, at: u64) -> bool 
 		parent_sp = h.sp,
 		saved_quiet = h.quiet,
 		saved_no_factor = h.no_factor,
+		saved_failed = h.failed,
 		open_at = at,
 		unk_tracker = -1,
 	}
 	if f.members > 64 {
+		pool := pool_ensure(h)
+		if pool == nil {
+			return false
+		}
 		words := (int(f.members) + 63) / 64
 		buf, err := make([]u64, words, pool_allocator(pool))
 		if err != nil {
@@ -1319,8 +1339,9 @@ factored_open :: proc(h: ^Checker, owner: ^Record, f: ^Factor, at: u64) -> bool 
 		fo.seen_wide = buf
 	}
 	h.nf += 1
-	// Mute sink while inside a factored object (Stage 1/4: on failure with a sink, we reread via runs).
+	// Mute sink and isolate failure flag while inside a factored object (Stage 1/4: on failure with a sink, we reread via runs).
 	h.quiet = true
+	h.failed = false
 	return true
 }
 
@@ -1356,41 +1377,38 @@ factored_is_seen :: #force_inline proc "contextless" (fo: ^Factored_Open, idx: i
 // Looks up the key in the factored member block (or dispatches via Stage 2 `pattern_class` for unnamed keys),
 // applies unconditional `refuse`, and returns whether the member's value can be skipped!
 @(private)
-factored_key :: proc(h: ^Checker, fo: ^Factored_Open, key: string, at: u64) -> (skip: bool, doomed: bool) {
+factored_key :: proc(h: ^Checker, fo: ^Factored_Open, key: string, key_owned: bool, at: u64) -> (skip: bool, doomed: bool) {
 	f := fo.factor
-	fo.key_at = at
 	fo.seen_count += 1
 
 	// Look up in the factored block's hash table (O(1)).
 	m := &h.plan.meta[f.block + f.members]
-	idx := member_find_block(h.plan, f.block, m.slots, m.slots_n, key)
+	idx := member_find_block(h.plan, f.block, m.slots, m.slots_n, m.name_bits, key)
 	fm: ^Factor_Member
 	if idx >= 0 {
 		if factored_mark_seen(fo, idx) {
-			fo.dup_seen = true
-			if h.dups == .First || h.dups == .Last {
+			if h.dups == .First || h.dups == .Last || (h.dups == .Group && !h.in_doc_group) {
 				h.need_reread = true
 				return false, true
 			}
 		}
 		fm = h.plan.uses[f.block + idx].member
 	} else {
-		// Track duplicate unnamed keys under `.First`/`.Last` (B-H2)!
-		if h.dups == .First || h.dups == .Last {
+		// Track duplicate unnamed keys under `.First`/`.Last`/streaming `.Group` (B-H2)!
+		if h.dups == .First || h.dups == .Last || (h.dups == .Group && !h.in_doc_group) {
 			if fo.unk_tracker < 0 {
-				fo.unk_tracker = open_tracker(h, fo.parent_sp)
+				fo.unk_tracker = open_tracker(h)
 				if fo.unk_tracker < 0 {
 					h.fatal = .No_Memory
 					return false, true
 				}
 			}
-			tr := &h.trackers[fo.unk_tracker]
+			tr := tracker_at(h, fo.unk_tracker)
 			if tracker_has(tr, key) {
-				fo.dup_seen = true
 				h.need_reread = true
 				return false, true
 			}
-			if !tracker_add(h, tr, key) {
+			if !tracker_add(h, tr, key, key_owned) {
 				h.fatal = .No_Memory
 				return false, true
 			}
@@ -1449,21 +1467,10 @@ pattern_class :: proc(h: ^Checker, f: ^Factor, key: string) -> u8 {
 	if len(f.patterns) == 0 {
 		return 0
 	}
-	re_scratch := checker_regex_scratch(h)
-	if re_scratch == nil {
-		return 0
-	}
 	cls := u8(0)
 	for re, i in f.patterns {
-		steps := remaining_steps(h)
-		found, err := regex.search(re, key, 0, nil, re_scratch, steps)
-		charge_steps(h, re_scratch.spent)
-		if err.kind != .None {
-			if err.kind == .Steps {
-				h.fatal = .Exceeded
-			} else if err.kind == .Memory {
-				h.fatal = .No_Memory
-			}
+		found, ok := run_regex_search(h, re, key)
+		if !ok {
 			return 0
 		}
 		if found {
@@ -1654,9 +1661,8 @@ factored_container :: proc(h: ^Checker, fo: ^Factored_Open, t: tape.Token) -> (c
 // per-part & spine property counts, inner `unevaluatedProperties: false` closings, and outer `unevaluatedProperties: false`.
 @(private)
 factored_close :: proc(h: ^Checker) -> (passed: bool, owner: ^Record, open_at: u64) {
-	pool := h.pool
 	h.nf -= 1
-	fo := &pool.factored[h.nf]
+	fo := factored_at(h, h.nf)
 	if fo.unk_tracker >= 0 {
 		close_tracker(h)
 		fo.unk_tracker = -1
@@ -1666,6 +1672,7 @@ factored_close :: proc(h: ^Checker) -> (passed: bool, owner: ^Record, open_at: u
 	open_at = fo.open_at
 	h.quiet = fo.saved_quiet
 	h.no_factor = fo.saved_no_factor
+	h.failed = fo.saved_failed
 
 	failed := fo.failed
 
@@ -1765,13 +1772,16 @@ all_members_evaluated :: proc "contextless" (p: ^Plan, fo: ^Factored_Open, activ
 }
 
 @(private = "file")
-member_find_block :: #force_inline proc "contextless" (p: ^Plan, block: i32, slots, slots_n: u32, name: string) -> i32 #no_bounds_check {
+member_find_block :: #force_inline proc "contextless" (p: ^Plan, block: i32, slots, slots_n: u32, name_bits: u64, name: string) -> i32 #no_bounds_check {
 	if slots_n == 0 {
+		return -1
+	}
+	if len(name) > 0 && (name_bits & name_bit(name)) == 0 {
 		return -1
 	}
 	mask := slots_n - 1
 	table := p.slots[slots:]
-	at := tape.text_hash(transmute([]u8)name) & mask
+	at := member_hash(name) & mask
 	for {
 		slot := table[at]
 		if slot == 0 {
