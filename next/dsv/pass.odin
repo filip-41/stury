@@ -98,13 +98,18 @@ ONE_RECORD :: transmute(hook.Capabilities)u32(1 << 31)
 @(private)
 MASK_COLUMNS :: transmute(hook.Capabilities)u32(1 << 30)
 
+// The bit of the pass's capabilities of a validate's floor pass over a window of a text in pieces: it bounds its block
+// loop once per window at `stop` and counts whole-window validate records without keeping the `LAX` pass live.
+@(private)
+PIECE_WINDOW :: transmute(hook.Capabilities)u32(1 << 29)
+
 // The pass's own bits lie past the hook's capabilities, and no field of `Pass` depends on its capabilities, so a walk
-// reads one pass as another of the same walk with other bits (`walk_text`, `values_masked`).
-#assert(int(max(hook.Capability)) < 30)
-#assert(size_of(Pass(.Csv, hook.No_Hooks, false, {})) == size_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS)))
-#assert(offset_of(Pass(.Csv, hook.No_Hooks, false, {}), steps) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS), steps))
-#assert(offset_of(Pass(.Csv, hook.No_Hooks, false, {}), piece) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS), piece))
-#assert(offset_of(Pass(.Csv, hook.No_Hooks, false, {}), tolerated) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS), tolerated))
+// reads one pass as another of the same walk with other bits (`walk_text`, `values_masked`, piece window validate).
+#assert(int(max(hook.Capability)) < 29)
+#assert(size_of(Pass(.Csv, hook.No_Hooks, false, {})) == size_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS + PIECE_WINDOW)))
+#assert(offset_of(Pass(.Csv, hook.No_Hooks, false, {}), steps) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS + PIECE_WINDOW), steps))
+#assert(offset_of(Pass(.Csv, hook.No_Hooks, false, {}), piece) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS + PIECE_WINDOW), piece))
+#assert(offset_of(Pass(.Csv, hook.No_Hooks, false, {}), tolerated) == offset_of(Pass(.Csv, hook.No_Hooks, true, ONE_RECORD + MASK_COLUMNS + PIECE_WINDOW), tolerated))
 
 // Strips `MASK_COLUMNS` for `values_masked` while keeping `LAX`.
 @(private)
@@ -112,11 +117,11 @@ unmasked :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) -> ^Pa
 	return (^Pass(S, H, LAX, C - MASK_COLUMNS))(w)
 }
 
-// Views `w` as `LAX=true` without `MASK_COLUMNS` so `pass_with` and cold out-of-line helpers share one instance across
-// `LAX` and `MASK_COLUMNS` without changing `pass_default`'s specialized hot path.
+// Views `w` as `LAX=true` without `MASK_COLUMNS` or `PIECE_WINDOW` so `pass_with` and cold out-of-line helpers share
+// one instance across `LAX`, `MASK_COLUMNS`, and `PIECE_WINDOW` without changing `pass_default`'s specialized hot path.
 @(private)
-as_lax :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) -> ^Pass(S, H, true, C - MASK_COLUMNS) {
-	return (^Pass(S, H, true, C - MASK_COLUMNS))(w)
+as_lax :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) -> ^Pass(S, H, true, C - MASK_COLUMNS - PIECE_WINDOW) {
+	return (^Pass(S, H, true, C - MASK_COLUMNS - PIECE_WINDOW))(w)
 }
 
 // How a hook keeps a record or the text, from its answer at the opening token.
@@ -179,6 +184,7 @@ comment_span :: #force_inline proc "contextless" (nl, starts: u64, in_comment: b
 // instance is built for. `w.keys` and `w.width` are read as `Pass` says.
 @(private)
 pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, opts: Pass_Options, hs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), $EMIT: bool, $COMMENTS: bool, $T: kernel.Tier) -> hook.Walk_Result {
+	PIECE :: PIECE_WINDOW <= C
 	base := raw_data(src)
 	n := len(src)
 	delim := w.delim
@@ -189,7 +195,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 	comment_on := u64(0) - u64(comment != 0)
 	_ = comment_on
 
-	pos, resumed := piece_resumes(w)
+	pos, resumed := piece_resumes(w, PIECE)
 	if !resumed {
 		pos = int(text_start(src, lo))
 		w.rec_lo, w.field_lo = pos, pos
@@ -213,12 +219,26 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 		}
 	}
 
-	// With tokens, each block's tokens are read as soon as its masks are made. The masks a block leaves for the next
-	// are read from `w` and written back before its tokens, which read `w.quoted`, so they hold no register across the
-	// token code. The token reader's state, and without tokens the masks, are locals across the whole pass, written
-	// back to `w` when the block loop ends. The block loop sits in an outer one that each of its exits leaves, a shape
-	// whose code layout keeps the validate's block loop free of mispredicted branches.
-	for pos < n {
+	// With tokens, each block's tokens are read as soon as its masks are made. The masks a block leaves for the next are
+	// read from `w` and written back before its tokens, which read `w.quoted`, so they hold no register across the token
+	// code. The token reader's state, and without tokens the masks, are locals across the whole pass, written back to `w`
+	// when the block loop ends. With `PIECE`, the loop stops at `stop` (`n - (PIECE_AHEAD - 1)`) so the block loop
+	// runs without per-block piece-window branches.
+	stop := n
+	when PIECE {
+		more_piece := false
+		piece := w.piece[0]
+		if piece != nil && piece.more {
+			more_piece = true
+			stop = max(pos, n - (PIECE_AHEAD - 1))
+		}
+		when H == hook.No_Hooks {
+			piece_open := w.open
+			piece_hdr := w.in_header
+			piece_recs := u64(0)
+		}
+	}
+	for pos < stop {
 		fault := -1
 		kind := tape.Fault_Kind.Bad_Char
 		detail := Detail.None
@@ -231,7 +251,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 			in_quote, start, close, last_cr, quoted, prev_high := w.in_quote, w.start, w.close, w.cr, w.quoted, w.prev_high
 			rs := cells_start(w)
 		}
-		for pos < n {
+		for pos < stop {
 			when EMIT {
 				in_quote, start, close, last_cr, quoted, prev_high := w.in_quote, w.start, w.close, w.cr, w.quoted, w.prev_high
 			}
@@ -258,6 +278,9 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 			bs: u64
 			cb: u64
 			_ = cb
+			when PIECE && H == hook.No_Hooks {
+				blk_cr, blk_prev_cr := u64(0), last_cr
+			}
 			when S == .Csv {
 				m := kernel.pack_n([4]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, delim), kernel.eq(b, '\n'), kernel.eq(b, '\r')})
 				q, d, nl, crm := m[0], m[1], m[2], m[3]
@@ -308,6 +331,9 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 				if !quoted && q == 0 {
 					seps = d | nl
 					lfs = nl
+					when PIECE && H == hook.No_Hooks {
+						blk_cr = crm
+					}
 					bad, carried := cr_fault(last_cr, crm, nl)
 					if carried {
 						fault = pos - 1
@@ -363,6 +389,9 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 					start = seps >> 63
 					close = closing >> 63
 					last_cr = cr >> 63
+					when PIECE && H == hook.No_Hooks {
+						blk_cr = cr
+					}
 				}
 			} else {
 				m := kernel.pack_n([3]kernel.Block{kernel.eq(b, delim), kernel.eq(b, '\n'), kernel.eq(b, '\r')})
@@ -386,6 +415,9 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 					bs &= ~cb
 					seps = d | nl
 					w.in_comment = cb >> 63
+				}
+				when PIECE && H == hook.No_Hooks {
+					blk_cr = crm
 				}
 				bad, carried := cr_fault(last_cr, crm, nl)
 				if carried {
@@ -431,8 +463,7 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 			// fault, as it is in a JSONC comment.
 			ill: u64
 			ill_back := -1
-			check := kernel.utf8_next(T, b, kernel.is_ascii(b), &w.utf8, &prev_high)
-			if check && !kernel.utf8_clean(T, w.utf8) {
+			if kernel.utf8_next(T, b, kernel.is_ascii(b), &w.utf8, &prev_high) && !kernel.utf8_clean(T, w.utf8) {
 				if .Invalid_Utf8 not_in opts.tolerate {
 					// A sequence the text cuts short is reported at the text's end, after a quoted cell the text leaves
 					// open, so a block padded past the end does not report it first.
@@ -485,10 +516,38 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 					return r
 				}
 			} else {
+				when PIECE && H == hook.No_Hooks {
+					pre_rec_lo := w.rec_lo
+				}
 				if r, done := read_cells(COMMENTS, w, &rs, base, pos, seps, lfs, clfs); done {
 					w.in_quote, w.start, w.close, w.cr, w.quoted, w.prev_high = in_quote, start, close, last_cr, quoted, prev_high
 					cells_end(w, &rs)
 					return r
+				}
+				when PIECE && H == hook.No_Hooks {
+					if more_piece {
+						if lfs != 0 {
+							start_mask := u64(1) << u64(pre_rec_lo - pos) if pre_rec_lo >= pos && pre_rec_lo < pos + 64 else 0
+							start_or_nl := (lfs << 1) | start_mask
+							cr_before := (blk_cr << 1) | (blk_prev_cr & 1)
+							empty := start_or_nl | ((start_or_nl << 1) & cr_before)
+							if pre_rec_lo == pos - 1 && blk_prev_cr != 0 {
+								empty |= 1
+							}
+							recs := u64(intrinsics.count_ones(lfs & ~empty))
+							if recs != 0 {
+								piece_recs += recs - u64(piece_open || piece_hdr)
+								piece_hdr = false
+							}
+							piece_open = false
+						}
+						if w.cells > 0 {
+							if !piece_open && !piece_hdr {
+								piece_recs += 1
+							}
+							piece_open = true
+						}
+					}
 				}
 			}
 			if fault >= 0 {
@@ -529,6 +588,14 @@ pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8,
 	}
 	when LAX {
 		if piece_holds(w, pos, n) {
+			return piece_stop(w, pos)
+		}
+	} else when PIECE {
+		if more_piece && n - pos < PIECE_AHEAD {
+			when H == hook.No_Hooks {
+				w.open, w.in_header = piece_open, piece_hdr
+				piece.records += piece_recs
+			}
 			return piece_stop(w, pos)
 		}
 	}

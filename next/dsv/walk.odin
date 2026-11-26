@@ -165,7 +165,16 @@ counts_cells :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) ->
 
 @(private)
 run_pass :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), src: []u8, lo: u64, p: Pass_Options, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), $EMIT: bool) -> hook.Walk_Result {
-	when !LAX {
+	when !EMIT {
+		if w.steps[0] == max(u64) && is_default(S, p) {
+			when LAX {
+				if w.piece[0] != nil {
+					return pass_default_floor((^Pass(S, H, false, (C - MASK_COLUMNS) + PIECE_WINDOW))(w), src, lo, regs, on, false)
+				}
+			}
+			return pass_default((^Pass(S, H, false, C - MASK_COLUMNS))(w), src, lo, regs, on, false)
+		}
+	} else when !LAX {
 		if is_default(S, p) {
 			return pass_default(w, src, lo, regs, on, EMIT)
 		}

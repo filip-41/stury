@@ -50,6 +50,7 @@ Walk :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	limit:     u64, // `Budget.depth`
 	room:      u64, // levels `stack` holds
 	grow:      u64, // where the token that found the hook's room full starts
+	skip_len:  u64, // speculative byte length of the last short string skipped by `st_skip_value`
 	gaps:      Gaps,
 	owned:     bool, // `stack` is the allocator's
 	tier:      kernel.Tier,
@@ -59,13 +60,40 @@ Walk :: struct($S: Spec, $H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	refused:   u8, // with JSON5, strings the block reader refused, less those it read, see `BLOCK_RETIRE`
 	// Leaves no gap, as Odin zeroes a struct with one that is declared `---`. Pointer runs before `u64` fields are
 	// multiples of four pointers, so alignment stays gap-free on both 64-bit and `wasm32`.
-	_:         [2]u8,
+	_:         u8,
 	// With `LAX`, one more than the containers the walk may still open, 0 once it opened one past `Budget.steps`.
 	steps:     [int(LAX)]u64,
 	ctx:       ^runtime.Context, // the caller's, for the calls of `allocator`, nil only when the frame's levels suffice
 	// With `LAX`, the text in pieces the walk reads a window of, nil for a whole text.
 	piece:     [int(LAX)]^Piece_Walk,
+	// Keeps `!LAX` gap-free on 32-bit targets where a single trailing pointer leaves 4 bytes of padding.
+	_tail:     [int(!LAX && size_of(rawptr) == 4)]u32,
 }
+
+// `Walk`, `Gaps`, and `Gap` must stay free of implicit padding (internal or trailing) on both 32- and 64-bit targets:
+// any implicit padding causes `w: Walk = ---` to emit `__bzero` over the entire struct on every JSON read.
+#assert(size_of(Gap) == size_of(u32) + 4)
+#assert(size_of(Gaps) == GAP_ROWS * GAP_MEMBERS * (size_of(Gap) + 1) + 3 * size_of(u64))
+@(private)
+WALK_TAIL_BYTES :: 3 * size_of(bool) + size_of(kernel.Tier) + size_of(tape.Tolerances) + 2
+#assert(WALK_TAIL_BYTES == 8)
+#assert(
+	offset_of(Walk(.Json, hook.No_Hooks, false, hook.NO_HOOKS_CAPS), tolerate) ==
+	offset_of(Walk(.Json, hook.No_Hooks, false, hook.NO_HOOKS_CAPS), gaps) + size_of(Gaps) + size_of(bool) + size_of(kernel.Tier),
+)
+#assert(
+	offset_of(Walk(.Json, hook.No_Hooks, false, hook.NO_HOOKS_CAPS), ctx) ==
+	offset_of(Walk(.Json, hook.No_Hooks, false, hook.NO_HOOKS_CAPS), gaps) + size_of(Gaps) + WALK_TAIL_BYTES,
+)
+#assert(
+	size_of(Walk(.Json, hook.No_Hooks, false, hook.NO_HOOKS_CAPS)) ==
+	7 * size_of(rawptr) + 7 * size_of(u64) + size_of(runtime.Allocator) + size_of(Gaps) + WALK_TAIL_BYTES +
+	int(size_of(rawptr) == 4) * size_of(u32),
+)
+#assert(
+	size_of(Walk(.Json, hook.No_Hooks, true, hook.NO_HOOKS_CAPS)) ==
+	8 * size_of(rawptr) + 8 * size_of(u64) + size_of(runtime.Allocator) + size_of(Gaps) + WALK_TAIL_BYTES,
+)
 
 // On AMD64, `ind` lives in `Walk.ind` so `preserve/none` states take 8 register arguments instead of 9, avoiding
 // register exhaustion and red-zone spills. On ARM64 and WASM32, registers/locals are plentiful so `ind` stays a live
@@ -170,7 +198,7 @@ walk_init :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: 
 @(private)
 walk_start :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, stack: [^]u32, h: ^H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, limit: u64, tolerate: tape.Tolerances, steps: u64) {
 	w.base, w.hooks, w.stack, w.regs, w.allocator, w.ctx = raw_data(src), h, stack, regs, allocator, ctx
-	w.ind, w.limit, w.room, w.owned = INDENT_START, min(limit, MAX_LEVELS), WALK_LEVELS, false
+	w.ind, w.limit, w.room, w.grow, w.skip_len, w.owned = INDENT_START, min(limit, MAX_LEVELS), WALK_LEVELS, 0, 0, false
 	when S == .Json5 {
 		w.refused = 0
 	}
@@ -258,12 +286,12 @@ walk_again :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, lo: u64
 	#assert(.Rooms not_in C)
 	levels: [REWALK_LEVELS]u32 = ---
 	saved := hook.levels_scope(w, 0)
-	wregs, resume, ind, gap_lo, grow := w.regs, w.resume, w.ind, w.gap_lo, w.grow
-	w.stack, w.regs, w.limit, w.room = raw_data(levels[:]), regs, MAX_LEVELS, REWALK_LEVELS
+	wregs, resume, ind, gap_lo, grow, skip_len := w.regs, w.resume, w.ind, w.gap_lo, w.grow, w.skip_len
+	w.stack, w.regs, w.limit, w.room, w.skip_len = raw_data(levels[:]), regs, MAX_LEVELS, REWALK_LEVELS, 0
 	w.depth = hook.held_depth(w.hooks, regs, REWALK_LEVELS)
 	r := enter(raw_data(src)[lo:], raw_data(src)[len(src):], indent_start(w), w, regs^, GAP_OFF, on)
 	hook.levels_leave(w, saved)
-	w.regs, w.resume, w.ind, w.gap_lo, w.grow = wregs, resume, ind, gap_lo, grow
+	w.regs, w.resume, w.ind, w.gap_lo, w.grow, w.skip_len = wregs, resume, ind, gap_lo, grow, skip_len
 	return r
 }
 

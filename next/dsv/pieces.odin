@@ -276,8 +276,8 @@ piece_put_key :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)
 
 // Whether the pass reads on from the block where the last window's walk stopped, and that block.
 @(private)
-piece_resumes :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C)) -> (pos: int, ok: bool) {
-	when LAX {
+piece_resumes :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), $PIECE: bool) -> (pos: int, ok: bool) {
+	when LAX || PIECE {
 		if w.piece[0] != nil && w.piece[0].started {
 			return int(w.piece[0].pos), true
 		}
@@ -298,9 +298,7 @@ piece_holds :: #force_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), pos
 // Ends the walk of a window before the block at `pos`, which the next window's walk reads.
 @(private, cold)
 piece_stop :: #force_no_inline proc "contextless" (w: ^Pass($S, $H, $LAX, $C), pos: int) -> hook.Walk_Result {
-	when LAX {
-		w.piece[0].pos = u64(pos)
-	}
+	w.piece[0].pos = u64(pos)
 	return hook.walk_result(u64(pos), hook.WALK_MORE)
 }
 

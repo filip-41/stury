@@ -697,32 +697,40 @@ st_skip_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, in
 }
 
 // The state at the value of a member whose key the hook answered `Skip`, past white space. Judges it with no token: a
-// short string, a number or a literal here, any other value as `pass_over` judges it. Comments before it are given,
-// and a byte that starts no value faults as `st_value` faults it.
+// short string, a number or a literal here, a longer, escaped or UTF-8 string in `st_skip_string*`, and any other value
+// via `st_skip_pass` (`pass_over`). Kept free of non-tail calls so every fast path runs with a zero-byte stack frame.
 @(private, enable_target_feature = STATE_FEATURES)
 st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	hs := hook.Regs{s0, s1, s2}
 	if p >= end {
 		return fault(w, hs, end, .Truncated)
 	}
-	p := p
 	when S != .Json {
 		if opens_run(p, end, S) {
-			q, done, result := comments_before(w, on, &hs, p, end, 0, RUN_VALUE)
-			if done {
-				return result
-			}
-			p = q
-			if p >= end {
-				return fault(w, hs, end, .Truncated)
-			}
+			return #must_tail st_skip_comments(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 	}
 	#partial switch VALUE_CLASS[p[0]] {
 	case .String:
-		if q, _, ok, _ := string_short(p, end, '"'); ok {
-			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		q, stop, ok, escaped := string_short(p, end, '"')
+		if !ok {
+			if escaped {
+				w.resume = stop
+				return #must_tail st_skip_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+			// A byte past ASCII or a control byte, which `st_skip_string` would only find again.
+			if stop != nil {
+				return #must_tail st_skip_string_utf8(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+			return #must_tail st_skip_string(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
+		// While values repeat a length this branch is predicted, so the next state starts on `guess` without waiting on the load.
+		guess := p[w.skip_len:]
+		if q == guess {
+			return #must_tail st_after(guess, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+		w.skip_len = u64(intrinsics.ptr_sub(q, p))
+		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	case .Number:
 		if q, _, kind := tape.number_scan(p, end, false, S == .Json5); kind == .None && !too_wide(p, q) {
 			if gaps_on(m) {
@@ -735,6 +743,7 @@ st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, i
 			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 	case .Map, .Array:
+		return #must_tail st_skip_pass(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 	case:
 		// The bytes past JSON's that open a value of JSON5 or of `.Non_Finite`.
 		switch p[0] {
@@ -743,12 +752,118 @@ st_skip_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, i
 			return #must_tail st_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 		}
 	}
+	return #must_tail st_skip_pass(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// Reads the comment and white-space run before a skipped value out of line so `st_skip_value` keeps a zero-byte frame.
+@(private = "file", cold, enable_target_feature = STATE_FEATURES)
+st_skip_comments :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q, done, result := comments_before(w, on, &hs, p, end, 0, RUN_VALUE)
+	if done {
+		return result
+	}
+	return #must_tail st_skip_value(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// Passes a skipped container or unrecognized scalar to `pass_over` out of line so `st_skip_value` keeps a zero-byte frame.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_skip_pass :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
 	r := pass_over(w, p, end, d, ind, hs, m, false)
 	if u8(r) != 0 {
 		w.regs^ = hs
 		return r
 	}
 	return #must_tail st_after(w.base[u64(r) >> 16:], end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// The skipped-string counterpart of `st_string`, judging the string without emitting a token or storing a stack frame.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_skip_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q, escape, ok, escaped := string_lean(p[32:] if intrinsics.ptr_sub(end, p) > 32 else p, end, '"')
+	if !ok {
+		if escaped {
+			w.resume = escape
+			return #must_tail st_skip_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+		return #must_tail st_skip_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// The skipped-string counterpart of `st_string_escaped`, judging escapes from `w.resume` with no stack frame.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_skip_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q: [^]u8
+	ok, utf8_tail: bool
+	when S == .Json5 {
+		if w.refused < BLOCK_RETIRE {
+			q, ok, utf8_tail = string_escaped_scan(w.resume, end, '"', true)
+		}
+	} else {
+		q, ok, utf8_tail = string_escaped_scan(w.resume, end, '"', true)
+	}
+	if !ok {
+		when !SCALAR_WASM {
+			if utf8_tail {
+				return #must_tail st_skip_string_escaped_utf8(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+			}
+		}
+		return #must_tail st_skip_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// The skipped-string counterpart of `st_string_escaped_utf8`.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_skip_string_escaped_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	when !SCALAR_WASM {
+		q, ok := string_escaped_utf8(w.resume)
+		if !ok {
+			return #must_tail st_skip_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+		}
+		if too_wide(p, q) {
+			return fault(w, hs, p, .Too_Wide)
+		}
+		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	} else {
+		return #must_tail st_skip_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+}
+
+// The skipped-string counterpart of `st_string_utf8`.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_skip_string_utf8 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q, ok := string_utf8(p)
+	if !ok {
+		return #must_tail st_skip_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
+}
+
+// The skipped-string counterpart of `st_string_long`.
+@(private = "file", enable_target_feature = STATE_FEATURES)
+st_skip_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d: u64, ind: Indent_Arg, w: ^Walk($S, $H, $LAX, $C), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	hs := hook.Regs{s0, s1, s2}
+	q, _, kind := string_long(w, p, end)
+	if kind != .None {
+		return fault(w, hs, q, kind)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, on)
 }
 
 // The state at the open bracket `p` of a container a scan keeps whole. The scanner's builder stores the container,
