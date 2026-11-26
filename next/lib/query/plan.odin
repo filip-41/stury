@@ -136,11 +136,19 @@ Hints :: struct {
 	conditional: Conditional_Whole,
 }
 
+// What a program reads of one named auxiliary input source (e.g. `--with name=file` / `$name`).
+Named_Demand :: struct {
+	name:   string,
+	demand: Source_Demand,
+}
+
 Plan :: struct {
-	sources:   [Source_Kind]Source_Demand,
-	serial:    Serial_Flags,
-	hints:     Hints,
-	allocator: runtime.Allocator,
+	sources:         [Source_Kind]Source_Demand,
+	aux:             []Named_Demand, // external named sources; nil for single-source queries
+	serial:          Serial_Flags,
+	hints:           Hints,
+	allocator:       runtime.Allocator,
+	aux_names_owned: bool, // when true, `destroy_plan` frees each `aux[i].name` via `allocator`
 }
 
 // Returns the broader of grains `a` and `b` (`.Whole` > `.Keys` > `.Exists`).
@@ -168,7 +176,10 @@ finalize_source_demand :: proc(paths: []Demand_Path, facts: bool, allocator := c
 		return {mode = .None, facts = facts, allocator = allocator}
 	}
 	// Deduplicate identical paths and drop any path subsumed by an unlimited `.Whole` prefix.
-	kept := make([dynamic]Demand_Path, 0, len(paths), allocator)
+	kept, kerr := make([dynamic]Demand_Path, 0, len(paths), allocator)
+	if kerr != nil {
+		return whole_demand(facts, .Too_Wide)
+	}
 	defer delete(kept)
 	for p in paths {
 		if len(p.steps) == 0 && p.grain == .Whole && p.limit == 0 {
@@ -184,7 +195,9 @@ finalize_source_demand :: proc(paths: []Demand_Path, facts: bool, allocator := c
 			}
 		}
 		if !merged {
-			append(&kept, p)
+			if _, aerr := append(&kept, p); aerr != nil {
+				return whole_demand(facts, .Too_Wide)
+			}
 		}
 	}
 	// Subsumption pass: drop paths whose strict prefix is already kept `.Whole` with no limit.
@@ -219,17 +232,28 @@ finalize_source_demand :: proc(paths: []Demand_Path, facts: bool, allocator := c
 	if shallow_all_too_wide(norm) {
 		return whole_demand(facts, .Too_Wide)
 	}
-	out_paths := make([]Demand_Path, len(norm), allocator)
-	raw_steps := make([][]tape.Step, len(norm), allocator)
-	grains := make([]tape.Grain, len(norm), allocator)
-	limits := make([]int, len(norm), allocator)
+	out_paths, err1 := make([]Demand_Path, len(norm), allocator)
+	raw_steps, err2 := make([][]tape.Step, len(norm), allocator)
+	grains, err3 := make([]tape.Grain, len(norm), allocator)
+	limits, err4 := make([]int, len(norm), allocator)
 	defer {
 		delete(raw_steps, allocator)
 		delete(grains, allocator)
 		delete(limits, allocator)
 	}
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		delete(out_paths, allocator)
+		return whole_demand(facts, .Too_Wide)
+	}
 	for p, i in norm {
-		cloned := slice.clone(p.steps, allocator)
+		cloned, cerr := slice.clone(p.steps, allocator)
+		if cerr != nil {
+			for j in 0 ..< i {
+				delete(out_paths[j].steps, allocator)
+			}
+			delete(out_paths, allocator)
+			return whole_demand(facts, .Too_Wide)
+		}
 		out_paths[i] = {steps = cloned, grain = p.grain, limit = p.limit}
 		raw_steps[i] = cloned
 		grains[i] = p.grain
@@ -265,9 +289,19 @@ destroy_source_demand :: proc(s: ^Source_Demand) {
 }
 
 destroy_plan :: proc(p: ^Plan) {
+	if p == nil {
+		return
+	}
 	for &s in p.sources {
 		destroy_source_demand(&s)
 	}
+	for &a in p.aux {
+		if p.aux_names_owned {
+			delete(a.name, p.allocator)
+		}
+		destroy_source_demand(&a.demand)
+	}
+	delete(p.aux, p.allocator)
 	delete(p.hints.split.prefix, p.allocator)
 	destroy_source_demand(&p.hints.split.each_demand)
 	for f in p.hints.projection.fields {
@@ -277,6 +311,63 @@ destroy_plan :: proc(p: ^Plan) {
 	destroy_source_demand(&p.hints.conditional.pred_demand)
 	delete(p.hints.conditional.cmp.path, p.allocator)
 	p^ = {}
+}
+
+// Alias for `destroy_plan`.
+plan_destroy :: destroy_plan
+
+// Looks up the `Source_Demand` recorded for auxiliary source `name`, returning `(nil, false)` if absent.
+aux_demand_for :: proc "contextless" (p: ^Plan, name: string) -> (^Source_Demand, bool) {
+	if p == nil || name == "" {
+		return nil, false
+	}
+	for &a in p.aux {
+		if a.name == name {
+			return &a.demand, true
+		}
+	}
+	return nil, false
+}
+
+// Installs a deep-owned copy of `entries` into `p.aux` using `p.allocator`, freeing any previous `p.aux`.
+set_aux_demands :: proc(p: ^Plan, entries: []Named_Demand) -> runtime.Allocator_Error {
+	if p == nil {
+		return nil
+	}
+	alloc := p.allocator if p.allocator.procedure != nil else context.allocator
+	p.allocator = alloc
+	for &a in p.aux {
+		if p.aux_names_owned {
+			delete(a.name, alloc)
+		}
+		destroy_source_demand(&a.demand)
+	}
+	delete(p.aux, alloc)
+	p.aux = nil
+	p.aux_names_owned = false
+	if len(entries) == 0 {
+		return nil
+	}
+	out, err := make([]Named_Demand, len(entries), alloc)
+	if err != nil {
+		return err
+	}
+	cloned_n := 0
+	for e, i in entries {
+		name_copy, nerr := strings.clone(e.name, alloc)
+		if nerr != nil {
+			for j in 0 ..< cloned_n {
+				delete(out[j].name, alloc)
+			}
+			delete(out, alloc)
+			return nerr
+		}
+		out[i] = {name = name_copy, demand = e.demand}
+		cloned_n += 1
+	}
+	p.aux = out
+	p.aux_names_owned = true
+	return nil
 }
 
 // Whether two step slices are identical.
@@ -428,6 +519,11 @@ format_plan :: proc(b: ^strings.Builder, p: ^Plan) {
 		}
 		fmt.sbprintf(b, "source %s: ", SOURCE_NAMES[kind])
 		format_source_demand(b, s)
+		strings.write_byte(b, '\n')
+	}
+	for &aux in p.aux {
+		fmt.sbprintf(b, "aux %s: ", aux.name)
+		format_source_demand(b, &aux.demand)
 		strings.write_byte(b, '\n')
 	}
 	if p.serial != {} {

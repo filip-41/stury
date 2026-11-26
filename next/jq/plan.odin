@@ -73,18 +73,59 @@ Memo_Entry :: struct {
 
 @(private = "file")
 Analyzer :: struct {
-	prog:        ^Program,
-	arena:       mem.Dynamic_Arena,
-	scratch:     runtime.Allocator,
-	serial:      query.Serial_Flags,
-	inputs_need: Need,
-	active_fns:  [dynamic]^Func,
-	memo:        [dynamic]Memo_Entry,
-	call_depth:  int,
+	prog:              ^Program,
+	arena:             mem.Dynamic_Arena,
+	scratch:           runtime.Allocator,
+	serial:            query.Serial_Flags,
+	inputs_need:       Need,
+	ext_names:         []string,
+	global_to_ext:     []int,
+	ext_needs:         []Need,
+	ext_reachable:     []bool,
+	has_reachable_ext: bool,
+	active_fns:        [dynamic]^Func,
+	memo:              [dynamic]Memo_Entry,
+	call_depth:        int,
 }
 
 // Analyzes `prog` under `opts`, allocating the returned `Plan` in `allocator`. Free with `destroy_plan`.
 analyze :: proc(prog: ^Program, opts := Analyze_Options{}, allocator := context.allocator) -> Plan {
+	plan, _ := analyze_plan_with_vars(prog, nil, opts, allocator)
+	return plan
+}
+
+// Analyzes `prog` with named external `$var` bindings `ext_vars`, returning the shared `query.Plan` contract.
+// Each variable in `ext_vars` is recorded in `plan.aux` with its pruned `Source_Demand`.
+// Free the returned plan with `query.destroy_plan`.
+analyze_with_vars :: proc(
+	prog: ^Program,
+	ext_vars: []string,
+	allocator := context.allocator,
+	opts := Analyze_Options{},
+) -> (
+	plan: query.Plan,
+	ok: bool,
+) {
+	jq_plan, valid := analyze_plan_with_vars(prog, ext_vars, opts, allocator)
+	if !valid {
+		return {}, false
+	}
+	return jq_plan.contract, true
+}
+
+// Analyzes `prog` with named external `$var` bindings `ext_vars`, returning the full `jq.Plan` (with hints + `aux`).
+analyze_plan_with_vars :: proc(
+	prog: ^Program,
+	ext_vars: []string,
+	opts := Analyze_Options{},
+	allocator := context.allocator,
+) -> (
+	plan: Plan,
+	ok: bool,
+) {
+	if prog == nil {
+		return {}, false
+	}
 	a: Analyzer
 	mem.dynamic_arena_init(&a.arena, allocator, allocator)
 	defer mem.dynamic_arena_destroy(&a.arena)
@@ -93,15 +134,27 @@ analyze :: proc(prog: ^Program, opts := Analyze_Options{}, allocator := context.
 	a.active_fns = make([dynamic]^Func, 0, 16, a.scratch)
 	a.memo = make([dynamic]Memo_Entry, 0, 32, a.scratch)
 
+	init_ext_vars(&a, ext_vars)
+
 	// Always collect serial flags across the entire reachable program (even dead branches).
 	a.serial = collect_serial(prog, a.scratch)
+	if len(a.ext_names) > 0 {
+		collect_ext_reachable(&a)
+	}
 
-	plan := Plan{contract = {allocator = allocator}}
+	plan = Plan{contract = {allocator = allocator}}
 	plan.serial = a.serial
 
 	if opts.stream {
-		plan.sources[.Main] = query.whole_demand(needs_facts(prog, a.scratch), .Stream_Mode)
-		return plan
+		stream_facts := needs_facts(prog, a.scratch)
+		plan.sources[.Main] = query.whole_demand(stream_facts, .Stream_Mode)
+		for ext_i in 0 ..< len(a.ext_names) {
+			if a.ext_reachable[ext_i] {
+				a.ext_needs[ext_i] = whole_need(.Stream_Mode, stream_facts)
+			}
+		}
+		finalize_ext_aux(&a, &plan.contract, allocator)
+		return plan, true
 	}
 
 	root_need := demand_node(&a, prog.body, whole_need(.Identity), nil)
@@ -123,11 +176,73 @@ analyze :: proc(prog: ^Program, opts := Analyze_Options{}, allocator := context.
 		plan.sources[.Inputs] = finalize_need(&a, a.inputs_need, allocator)
 	}
 
+	finalize_ext_aux(&a, &plan.contract, allocator)
+
 	// Extract optional execution hints (only for standard non-slurp, non-null-input, non-raw runs).
 	if !opts.null_input && !opts.slurp && !opts.raw_input {
 		extract_hints(&a, prog.body, &plan, allocator)
 	}
-	return plan
+	return plan, true
+}
+
+@(private = "file")
+init_ext_vars :: proc(a: ^Analyzer, ext_vars: []string) {
+	if len(ext_vars) == 0 {
+		return
+	}
+	names := make([dynamic]string, 0, len(ext_vars), a.scratch)
+	for name in ext_vars {
+		if name == "" {
+			continue
+		}
+		dup := false
+		for prev in names {
+			if prev == name {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			append(&names, name)
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+	a.ext_names = names[:]
+	a.ext_needs = make([]Need, len(names), a.scratch)
+	a.ext_reachable = make([]bool, len(names), a.scratch)
+	a.global_to_ext = make([]int, len(a.prog.globals), a.scratch)
+	for &m in a.global_to_ext {
+		m = -1
+	}
+	for g, gi in a.prog.globals {
+		for name, ei in names {
+			if g == name {
+				a.global_to_ext[gi] = ei
+				break
+			}
+		}
+	}
+}
+
+@(private = "file")
+finalize_ext_aux :: proc(a: ^Analyzer, contract: ^query.Plan, allocator: runtime.Allocator) {
+	if len(a.ext_names) == 0 {
+		return
+	}
+	entries := make([]query.Named_Demand, len(a.ext_names), a.scratch)
+	for name, i in a.ext_names {
+		entries[i] = {
+			name   = name,
+			demand = finalize_need(a, a.ext_needs[i], allocator),
+		}
+	}
+	if query.set_aux_demands(contract, entries) != nil {
+		for &e in entries {
+			query.destroy_source_demand(&e.demand)
+		}
+	}
 }
 
 destroy_plan :: proc(p: ^Plan) {
@@ -327,6 +442,11 @@ taint_outer_env :: proc(a: ^Analyzer, env: ^Var_Frame, reason: query.Whole_Reaso
 	if .Inputs in a.serial {
 		a.inputs_need = whole_need(reason, a.inputs_need.facts || facts)
 	}
+	for &en, i in a.ext_needs {
+		if a.ext_reachable[i] {
+			en = whole_need(reason, en.facts || facts)
+		}
+	}
 }
 
 // Applies a path-level `limit` to every path in `n` (used for `first(f)` and `limit(k; f)`).
@@ -472,6 +592,11 @@ demand_node :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need 
 			if f != nil && int(n.ref.slot) < len(f.slots) {
 				f.slots[n.ref.slot] = need_join(a, f.slots[n.ref.slot], out)
 			}
+		} else if n.ref.kind == .Global && int(n.ref.slot) < len(a.global_to_ext) {
+			ext_i := a.global_to_ext[n.ref.slot]
+			if ext_i >= 0 {
+				a.ext_needs[ext_i] = need_join(a, a.ext_needs[ext_i], out)
+			}
 		}
 		return empty_need()
 	case .Field:
@@ -616,8 +741,32 @@ demand_index :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need
 		return need_join(a, dk, da)
 	}
 	dk := demand_node(a, b, whole_need(.Whole_Op), env)
-	da := demand_node(a, n.a, whole_need(.Dynamic_Step, out.facts), env)
+	elem_need: Need
+	if !out.whole && len(out.paths) > 0 && all_paths_start_with_name(out) && b.kind != .Array && b.kind != .Object {
+		// Dynamic lookup `$src[expr].field` only accesses `.field` (and siblings in `out`) on matched entries,
+		// so keep `[].field` rather than upgrading the entire indexed source to `.Whole`.
+		elem_need = need_prepend(a, tape.All{}, out)
+	} else {
+		elem_need = whole_need(.Dynamic_Step, out.facts)
+	}
+	da := demand_node(a, n.a, elem_need, env)
 	return need_join(a, dk, da)
+}
+
+@(private = "file")
+all_paths_start_with_name :: proc "contextless" (n: Need) -> bool {
+	if n.whole || len(n.paths) == 0 {
+		return false
+	}
+	for p in n.paths {
+		if len(p.steps) == 0 {
+			return false
+		}
+		if _, ok := p.steps[0].(tape.Name); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 @(private = "file")
@@ -801,9 +950,9 @@ demand_call :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need 
 			taint_outer_env(a, env, .Dynamic_Call, out.facts || arg_need.facts)
 			return whole_need(.Dynamic_Call, out.facts || arg_need.facts)
 		}
-		// Memoize zero-arg functions by `(fn, out)`.
+		// Memoize zero-arg functions by `(fn, out)` unless tracked external `$var`s may accumulate per-callsite demands.
 		memo_key: Memo_Key
-		can_memo := len(fn.params) == 0 && len(n.args) == 0 && env == nil
+		can_memo := len(fn.params) == 0 && len(n.args) == 0 && env == nil && !a.has_reachable_ext
 		if can_memo {
 			memo_key = {fn, need_hash(out)}
 			for e in a.memo {
@@ -1092,6 +1241,35 @@ collect_serial :: proc(prog: ^Program, alloc: runtime.Allocator) -> query.Serial
 	}
 	walk(prog.body, &on, &done, &why)
 	return why
+}
+
+@(private = "file")
+collect_ext_reachable :: proc(a: ^Analyzer) {
+	on := make([dynamic]^Func, 0, 16, a.scratch)
+	done := make([dynamic]^Func, 0, 16, a.scratch)
+	walk_ext :: proc(an: ^Analyzer, node: ^Node, on_fns, done_fns: ^[dynamic]^Func) {
+		if node == nil {
+			return
+		}
+		if node.kind == .Var && node.ref.kind == .Global && int(node.ref.slot) < len(an.global_to_ext) {
+			if ext_i := an.global_to_ext[node.ref.slot]; ext_i >= 0 {
+				an.ext_reachable[ext_i] = true
+				an.has_reachable_ext = true
+			}
+		} else if node.kind == .Call && node.ref.kind == .Def && node.callee != nil {
+			fn := node.callee
+			if !slice.contains(on_fns[:], fn) && !slice.contains(done_fns[:], fn) {
+				append(on_fns, fn)
+				walk_ext(an, fn.body, on_fns, done_fns)
+				pop(on_fns)
+				append(done_fns, fn)
+			}
+		}
+		for i in 0 ..< child_count(node) {
+			walk_ext(an, child(node, i), on_fns, done_fns)
+		}
+	}
+	walk_ext(a, a.prog.body, &on, &done)
 }
 
 @(private = "file")
