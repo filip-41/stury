@@ -57,14 +57,15 @@ commit_document :: proc(
 	res: Commit_Result,
 	err: Edit_Error,
 ) {
-	res = commit(ov, opts, allocator) or_return
-	defer if err != nil {
-		edit.destroy_commit_result(&res)
-	}
+	r := commit(ov, opts, allocator) or_return
 	eff_opts := opts
 	eff_opts.target = as(.Xml)
-	doc = edit.splice_document(ov.base, &res, eff_opts, xml_walk_fragment_cb, nil, xml_full_build_cb, nil, allocator) or_return
-	return doc, res, nil
+	d, serr := edit.splice_document(ov.base, &r, eff_opts, xml_walk_fragment_cb, nil, xml_full_build_cb, nil, allocator)
+	if serr != nil {
+		edit.destroy_commit_result(&r)
+		return {}, {}, serr
+	}
+	return d, r, nil
 }
 
 // Walks ONLY `src[range.lo:range.hi]` (element content) inside a minimal `<_>...</_>` wrapper, rebases
@@ -79,12 +80,16 @@ walk_fragment :: proc(
 	ft: edit.Fragment_Tape,
 	err: tape.Error,
 ) {
+	eff_depth := ctx.budget.depth if ctx.budget.depth > 0 else u32(tape.DEFAULT_DEPTH)
+	if ctx.base_depth > eff_depth {
+		return {}, tape.Exceeded{kind = .Depth, at = range.lo}
+	}
 	// If the edited bytes themselves declare a namespace (`xmlns`), fall back so `Markup_Ext.scopes` updates cleanly.
 	sub := src[range.lo:range.hi]
 	if len(sub) >= 5 {
 		for i := 0; i + 5 <= len(sub); i += 1 {
 			if sub[i] == 'x' && string(sub[i : i + 5]) == "xmlns" {
-				full := build(src, .Xml, {}, allocator) or_return
+				full := build(src, .Xml, {budget = ctx.budget}, allocator) or_return
 				return edit.Fragment_Tape{full_doc = full, allocator = allocator}, nil
 			}
 		}
@@ -99,7 +104,8 @@ walk_fragment :: proc(
 	copy(buf[3 : 3 + len(sub)], sub)
 	copy(buf[3 + len(sub):], "</_>")
 
-	d := build(buf, .Xml, {}, allocator) or_return
+	avail := max(u32(1), eff_depth - ctx.base_depth)
+	d := build(buf, .Xml, {budget = {depth = avail + 2}}, allocator) or_return
 	// `d.nodes`: `[0]=doc Object, [1]=Key("_"), [2..]=value of <_>`.
 	ft, aerr = edit.shift_fragment_tape(&d, range.lo, 2, 3, allocator)
 	if aerr != nil {

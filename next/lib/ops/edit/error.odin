@@ -105,6 +105,8 @@ Options :: struct {
 	// When true, `commit_document` marks the returned document `.Owns_Src` and takes ownership of `Commit_Result.bytes`
 	// so `tape.destroy_document` frees it (and `Commit_Result.bytes` borrows `doc.src`).
 	own_src: bool,
+	// Resource budget applied to spliced fragment parsing and full rebuilds in `commit_document` / `splice_document`.
+	budget:  tape.Budget,
 }
 
 // One spliced region produced by a composer, mapping a replaced base node/range to its new byte range in `bytes`.
@@ -150,8 +152,10 @@ destroy_commit_result :: proc(res: ^Commit_Result) {
 
 // Context passed to a format's `walk_fragment` callback so it can re-walk a single spliced byte range in place.
 Fragment_Context :: struct {
-	base:      ^tape.Document, // original immutable document (for DTD, scopes, header keys, format options)
-	base_node: tape.Node_Index, // node being replaced (or enclosing container)
+	base:       ^tape.Document, // original immutable document (for DTD, scopes, header keys, format options)
+	base_node:  tape.Node_Index, // node being replaced (or enclosing container)
+	base_depth: u32,             // open container depth strictly above `base_node`
+	budget:     tape.Budget,     // effective budget propagated from `Options.budget`
 }
 
 // The mini-tape produced by a format's `walk_fragment` callback for one edited byte range.

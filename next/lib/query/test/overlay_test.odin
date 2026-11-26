@@ -232,3 +232,112 @@ overlay_big_int_escaped_strings_patch_cow_and_lifetime :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(buf[:]), `{"a":7,"b":[10,15,20]}`)
 	}
 }
+
+@(test)
+overlay_same_ov_assign_cow_facts_decode_and_provenance :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	alloc := runtime.heap_allocator()
+	th: Test_Heap
+	heap_start(&th)
+	defer heap_done(t, &th)
+	h := &th.h
+
+	// 1. Bug #1: Same-overlay assignments (`.b = .a`, `.a = 42 | .b = .a`, `.[1] = .[0]`, `.a = .a.b`, `.a = .`)
+	//    must NOT silently drop as no-ops!
+	{
+		src := transmute([]u8)string(`{"a": {"x": 1}, "b": 0, "arr": [10, 20]}`)
+		doc, err := json.build(src, .Json, {}, alloc)
+		testing.expect(t, err == nil)
+
+		root, ov, st := query.overlay_from_doc(h, doc, doc_owned = true)
+		testing.expect_value(t, st, query.Status.Ok)
+		defer query.release(h, root)
+
+		// .b = .a (base subtree -> .Base_Ref)
+		av, _ := query.member(h, root, "a")
+		kb, _ := query.text_value(h, "b")
+		defer query.release(h, kb)
+		root, st = query.set_one(h, root, kb, av)
+		testing.expect_value(t, st, query.Status.Ok)
+
+		// .[1] = .[0] on array
+		arr_v, _ := query.member(h, root, "arr")
+		e0, _ := query.element(h, arr_v, 0)
+		p_arr1, _ := query.make_array(h, 2)
+		k_arr, _ := query.text_value(h, "arr")
+		_ = query.append_owned(h, &p_arr1, k_arr)
+		_ = query.append_owned(h, &p_arr1, query.int_value(1))
+		defer query.release(h, p_arr1)
+		query.release(h, arr_v)
+		root, st = query.set_path(h, root, p_arr1, e0)
+		testing.expect_value(t, st, query.Status.Ok)
+
+		// Commit and verify both copied cleanly, while unedited `a.x` stays untouched!
+		res, cerr := json.commit(ov, .Json, {}, alloc)
+		testing.expect(t, cerr == nil)
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, string(res.bytes), `{"a": {"x": 1}, "b": {"x": 1}, "arr": [10, 10]}`)
+	}
+
+	// 2. Bug #2 + Bug #5: Scalar fact write COW isolation + `text_of` on `SPELLING_DECODE` `.Overlay`!
+	{
+		src := transmute([]u8)string("{\n  \"s\": \"a\\nb\"\n}\n")
+		doc, err := json.build(src, .Jsonc, {}, alloc)
+		testing.expect(t, err == nil)
+
+		root, ov, st := query.overlay_from_doc(h, doc, doc_owned = true)
+		testing.expect_value(t, st, query.Status.Ok)
+		alias := query.retain(root)
+		defer query.release(h, alias)
+
+		// Write comment onto aliased root -> must COW-clone without mutating `alias` or `ov`!
+		p_cmt, _ := query.make_array(h, 2)
+		ks, _ := query.text_value(h, "s")
+		kf, _ := query.fact_key(h, .Comment)
+		_ = query.append_owned(h, &p_cmt, ks)
+		_ = query.append_owned(h, &p_cmt, kf)
+		defer query.release(h, p_cmt)
+		cval, _ := query.text_value(h, "note")
+		mutated, ms := query.set_path(h, root, p_cmt, cval)
+		testing.expect_value(t, ms, query.Status.Ok)
+		defer query.release(h, mutated)
+
+		// Unedited `alias.s` comment must STILL be null (`!ov.dirty`)!
+		testing.expect(t, !ov.dirty)
+		a_s, _ := query.member(h, alias, "s")
+		defer query.release(h, a_s)
+		a_fc, _ := query.fact_read(h, a_s, .Comment)
+		defer query.release(h, a_fc)
+		testing.expect_value(t, query.type_of(a_fc), query.Type.Null)
+
+		// `mutated.s` is an `.Overlay` wrapping `"a\nb"` with fact `"note"`: `text_of` MUST decode `\n`!
+		m_s, _ := query.member(h, mutated, "s")
+		defer query.release(h, m_s)
+		testing.expect_value(t, m_s.kind, query.Kind.Overlay)
+		if m_s.kind == .Overlay {
+			testing.expect_value(t, query.text_of(m_s), "a\nb")
+		}
+
+		// Scalar root `.Overlay` wrapping `"a\nb"` directly must also decode `\n`!
+		root_str_doc, _ := json.build(transmute([]u8)string(`"a\nb"`), .Json, {}, alloc)
+		rs_v, _, _ := query.overlay_from_doc(h, root_str_doc, doc_owned = true)
+		defer query.release(h, rs_v)
+		testing.expect_value(t, query.text_of(rs_v), "a\nb")
+	}
+
+	// 3. Bug #9: `overlay_wrap_child` preserves `unlinked_parents == false` when traversing `.Overlay`!
+	{
+		src := transmute([]u8)string(`{"a": {"b": {"c": 1}}}`)
+		doc, err := json.build(src, .Json, {}, alloc)
+		testing.expect(t, err == nil)
+		root, ov, st := query.overlay_from_doc(h, doc, doc_owned = true)
+		testing.expect_value(t, st, query.Status.Ok)
+		defer query.release(h, root)
+
+		a_v, _ := query.member(h, root, "a")
+		defer query.release(h, a_v)
+		b_v, _ := query.member(h, a_v, "b")
+		defer query.release(h, b_v)
+		testing.expect(t, !ov.unlinked_parents)
+	}
+}

@@ -2,6 +2,7 @@ package edit
 
 import "base:runtime"
 import "core:bytes"
+import "core:container/xar"
 import "core:math"
 import "core:slice"
 import "stury:lib/base/spell"
@@ -629,6 +630,172 @@ is_simple_xml_text :: proc "contextless" (frag: []u8) -> bool {
 		}
 	}
 	return true
+}
+
+// Common commit runner shared by all 4 text-family composers (bracket, markup, section, tabular).
+// Preserves direct loops inside `fast_emit`, `struct_emit`, and `frag_check` so fast-path performance is untouched.
+@(private)
+Text_Composer :: struct {
+	target:        ^tape.Format,
+	extra_clean:   bool,
+	req_root:      tape.Kind, // `.End` to accept any root kind
+	root_msg:      string,
+	validate:      proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> tape.Error,
+	validate_data: rawptr,
+	fast_emit:     proc(user: rawptr, ov: ^Overlay, doc: ^tape.Document, splices: ^[dynamic]Splice, scratch: runtime.Allocator) -> (ok: bool, err: Error),
+	struct_emit:   proc(user: rawptr, ov: ^Overlay, doc: ^tape.Document, eol: string, splices: ^[dynamic]Splice, dropped: ^tape.Facts, scratch: runtime.Allocator) -> Error,
+	frag_check:    proc(user: rawptr, out: []u8, recs: []Splice_Record, scratch: runtime.Allocator) -> (need_full: bool, err: Error),
+	user:          rawptr,
+}
+
+@(private)
+run_text_commit :: proc(
+	ov: ^Overlay,
+	tc: ^Text_Composer,
+	opts: Options,
+	allocator: runtime.Allocator,
+) -> (
+	res: Commit_Result,
+	err: Error,
+) {
+	fast, target, fast_res, gerr := commit_guard(ov, tc.target, opts, tc.extra_clean, tc.validate, tc.validate_data, allocator)
+	if gerr != nil {
+		return {}, gerr
+	}
+	if fast {
+		return fast_res, nil
+	}
+	doc := ov.base
+	if tc.req_root != .End && ov.root != NO_HANDLE && node_kind(ov, ov.root) != tc.req_root {
+		return {}, refuse(.Root_Shape, tc.root_msg, tape.ROOT)
+	}
+
+	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 4096}
+	defer runtime.arena_destroy(&arena)
+	scratch := runtime.arena_allocator(&arena)
+
+	splices := make([dynamic]Splice, 0, max(8, xar.len(ov.nodes.items)), scratch)
+	dropped: tape.Facts
+	used_fast := false
+	if tc.fast_emit != nil && !ov.has_structural {
+		used_fast = tc.fast_emit(tc.user, ov, doc, &splices, scratch) or_return
+	}
+	if !used_fast {
+		if ov.unlinked_parents {
+			ensure_linked(ov) or_return
+		}
+		eol := detect_eol(doc.src)
+		if tc.struct_emit != nil {
+			tc.struct_emit(tc.user, ov, doc, eol, &splices, &dropped, scratch) or_return
+		}
+	}
+
+	out, recs, rew, serr := apply_splices(doc.src, splices[:], allocator)
+	if serr != nil {
+		return {}, serr
+	}
+	if tc.validate != nil {
+		need_full := target != doc.format || len(recs) == 0
+		if !need_full && tc.frag_check != nil {
+			nf, ferr := tc.frag_check(tc.user, out, recs, scratch)
+			if ferr != nil {
+				delete(out, allocator)
+				delete(recs, allocator)
+				delete(rew, allocator)
+				return {}, ferr
+			}
+			need_full = nf
+		}
+		if need_full {
+			if verr := tc.validate(tc.validate_data, out, allocator); verr != nil {
+				return fail_commit_validation(out, recs, rew, verr, allocator)
+			}
+		}
+	}
+	return Commit_Result {
+		bytes     = out,
+		dropped   = dropped,
+		rewritten = rew,
+		splices   = recs,
+		allocator = allocator,
+	}, nil
+}
+
+// Drops any already-emitted splices inside `[lo, hi)` (optionally keeping `keep_at_hi_node`'s zero-length
+// splice at `hi`, e.g. an XML element's `.Comment_Foot`), freeing their temporary buffers.
+@(private)
+drop_splices_in_range :: proc(
+	splices: ^[dynamic]Splice,
+	lo, hi: u64,
+	allocator: runtime.Allocator,
+	keep_at_hi_node := tape.NO_NODE,
+) {
+	w := 0
+	for s in splices^ {
+		inside := s.lo >= lo && s.hi <= hi
+		if inside && keep_at_hi_node != tape.NO_NODE && s.base_node == keep_at_hi_node && s.lo == hi {
+			inside = false
+		}
+		if inside {
+			delete(s.text, allocator)
+			for mv in s.moves {
+				if mv.written {
+					delete(mv.text, allocator)
+				}
+			}
+			delete(s.moves, allocator)
+			continue
+		}
+		splices[w] = s
+		w += 1
+	}
+	resize(splices, w)
+}
+
+@(private)
+make_deleted_flags :: proc(items: []$T, allocator: runtime.Allocator) -> (flags: []bool, err: runtime.Allocator_Error) {
+	flags = make([]bool, len(items), allocator) or_return
+	for it, i in items {
+		flags[i] = it.deleted
+	}
+	return flags, nil
+}
+
+@(private)
+collect_base_facts :: proc(doc: ^tape.Document, node: tape.Node_Index, kind: tape.Fact_Kind, allocator: runtime.Allocator) -> [dynamic]tape.Fact {
+	existing := make([dynamic]tape.Fact, 0, 4, allocator)
+	for bf in tape.facts_of(doc, node) {
+		if bf.kind == kind {
+			append(&existing, bf)
+		}
+	}
+	return existing
+}
+
+// Appends a quoted escaped string (JSON or TOML basic string) to `out`.
+append_quoted_escaped :: proc(out: ^[dynamic]u8, s: string, quote: u8, escape_del := false) {
+	hex := "0123456789abcdef"
+	append(out, quote)
+	for c in transmute([]u8)s {
+		switch c {
+		case '\\': append(out, `\\`)
+		case '\b': append(out, `\b`)
+		case '\f': append(out, `\f`)
+		case '\n': append(out, `\n`)
+		case '\r': append(out, `\r`)
+		case '\t': append(out, `\t`)
+		case:
+			if c == quote {
+				append(out, '\\', quote)
+			} else if c < 0x20 || (escape_del && c == 0x7F) {
+				append(out, `\u00`)
+				append(out, hex[c >> 4], hex[c & 0xF])
+			} else {
+				append(out, c)
+			}
+		}
+	}
+	append(out, quote)
 }
 
 // Sound O(len) fast-path check for a single plain ASCII DSV cell containing no delimiter, quote, escape, line break,

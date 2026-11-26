@@ -37,6 +37,9 @@ text_of :: #force_inline proc "contextless" (v: Value) -> string {
 		}
 		return ""
 	}
+	if v.kind != .Node || v.p == nil {
+		return ""
+	}
 	return string(node_bytes(v))
 }
 

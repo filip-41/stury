@@ -58,15 +58,16 @@ commit_document :: proc(
 	err: Edit_Error,
 ) {
 	resolved := resolve_edit_spec(ov, spec, opts)
-	res = commit(ov, resolved, opts, allocator) or_return
-	defer if err != nil {
-		edit.destroy_commit_result(&res)
-	}
+	r := commit(ov, resolved, opts, allocator) or_return
 	ctx := Toml_Edit_Ctx{spec = resolved}
 	eff_opts := opts
 	eff_opts.target = as(resolved)
-	doc = edit.splice_document(ov.base, &res, eff_opts, toml_walk_fragment_cb, &ctx, toml_full_build_cb, &ctx, allocator) or_return
-	return doc, res, nil
+	d, serr := edit.splice_document(ov.base, &r, eff_opts, toml_walk_fragment_cb, &ctx, toml_full_build_cb, &ctx, allocator)
+	if serr != nil {
+		edit.destroy_commit_result(&r)
+		return {}, {}, serr
+	}
+	return d, r, nil
 }
 
 // Walks ONLY `src[range.lo:range.hi]` as a single TOML value via a 2-byte `v=` wrapper and shifts
@@ -81,7 +82,11 @@ walk_fragment :: proc(
 	ft: edit.Fragment_Tape,
 	err: tape.Error,
 ) {
-	_ = ctx
+	eff_depth := ctx.budget.depth if ctx.budget.depth > 0 else u32(tape.DEFAULT_DEPTH)
+	if ctx.base_depth > eff_depth {
+		return {}, tape.Exceeded{kind = .Depth, at = range.lo}
+	}
+	avail := max(u32(1), eff_depth - ctx.base_depth)
 	sub := src[range.lo:range.hi]
 	buf, aerr := make([]u8, 2 + len(sub), allocator)
 	if aerr != nil {
@@ -92,9 +97,13 @@ walk_fragment :: proc(
 	buf[1] = '='
 	copy(buf[2:], sub)
 
-	d := build(buf, spec, {}, allocator) or_return
+	d := build(buf, spec, {budget = {depth = avail + 1}}, allocator) or_return
 	// `d.nodes`: `[0]=root Object, [1]=Key("v"), [2..]=value subtree`.
-	return edit.shift_fragment_tape(&d, range.lo, 2, 2, allocator)
+	sft, serr := edit.shift_fragment_tape(&d, range.lo, 2, 2, allocator)
+	if serr != nil {
+		return {}, serr
+	}
+	return sft, nil
 }
 
 @(private = "file")
@@ -104,22 +113,17 @@ Toml_Edit_Ctx :: struct {
 
 @(private = "file")
 resolve_edit_spec :: proc "contextless" (ov: ^Overlay, spec: Maybe(Spec), opts: Edit_Options) -> Spec {
+	toml_spec_of :: #force_inline proc "contextless" (f: ^tape.Format) -> Spec {
+		return .Toml_1_1 if (f != nil && f.id == ID + 1) else .Toml_1_0
+	}
 	if opts.target != nil {
-		return toml_spec_from_format(opts.target)
+		return toml_spec_of(opts.target)
 	}
 	if s, ok := spec.?; ok {
 		return s
 	}
-	if ov != nil && ov.base != nil && ov.base.format != nil {
-		return toml_spec_from_format(ov.base.format)
-	}
-	return .Toml_1_0
-}
-
-@(private = "file")
-toml_spec_from_format :: proc "contextless" (f: ^tape.Format) -> Spec {
-	if f != nil && f.id == ID + 1 {
-		return .Toml_1_1
+	if ov != nil && ov.base != nil {
+		return toml_spec_of(ov.base.format)
 	}
 	return .Toml_1_0
 }
@@ -172,33 +176,8 @@ toml_spell_key :: proc(data: rawptr, key: string, out: ^[dynamic]u8) -> edit.Err
 		append(out, key)
 		return nil
 	}
-	toml_append_basic_string(out, key)
+	edit.append_quoted_escaped(out, key, '"', escape_del = true)
 	return nil
-}
-
-@(private = "file")
-toml_append_basic_string :: proc(out: ^[dynamic]u8, s: string) {
-	hex := "0123456789abcdef"
-	append(out, '"')
-	for c in transmute([]u8)s {
-		switch c {
-		case '"':  append(out, `\"`)
-		case '\\': append(out, `\\`)
-		case '\b': append(out, `\b`)
-		case '\f': append(out, `\f`)
-		case '\n': append(out, `\n`)
-		case '\r': append(out, `\r`)
-		case '\t': append(out, `\t`)
-		case:
-			if c < 0x20 || c == 0x7F {
-				append(out, `\u00`)
-				append(out, hex[c >> 4], hex[c & 0xF])
-			} else {
-				append(out, c)
-			}
-		}
-	}
-	append(out, '"')
 }
 
 @(private = "file")

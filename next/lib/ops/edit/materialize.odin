@@ -107,6 +107,13 @@ Materialize_Options :: struct {
 	skip_root_tags:        bool,
 	// When true, emits `.Comment`/`.Comment_Inline`/`.Comment_Foot` on the root node too (e.g. full-doc reflow).
 	include_root_comments: bool,
+	// When true, emits `.Comment_Foot` on the root container too (used when rewriting/reflowing a bracket container).
+	include_root_foot:     bool,
+	// When true, flattens XML `.Array` member replacements into repeated sibling element entries and skips extra base siblings.
+	flatten_xml_arrays:    bool,
+	// Optional handle to locate inside the materialized `tape.Document` (writes matching `Node_Index` into `tracked_node`).
+	track_handle:          Handle,
+	tracked_node:          ^tape.Node_Index,
 	// Optional `doc.format` to attach (nil uses generic `MATERIALIZED_FORMAT`, which every writer accepts!).
 	target_format:         ^tape.Format,
 	// Optional style override applied to the root node (e.g., `"single"` for JSON5 or `"literal"` for TOML).
@@ -266,11 +273,37 @@ materialize_subtree :: proc(
 					append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Tag}) or_return
 					present^ += {.Tag}
 				} else if bf.kind == .Attribute && opts.xml_attrs && !(is_root_val && opts.skip_root_attrs) {
+					if ov.base.ext != nil && ov.base.format != nil && ov.base.format.attribute != nil {
+						kt, vt := ov.base.format.attribute(ov.base, bf)
+						aname := string(tape.span_bytes(ov.base, kt.lo, kt.n))
+						vroom := tape.text_room(ov.base, vt)
+						if vroom > 0 {
+							vtmp, verr := make([]u8, vroom, allocator)
+							if verr != nil {
+								return verr
+							}
+							vtxt, vok := tape.node_text(ov.base, vt, vtmp)
+							flo := u64(len(src))
+							append(src, aname) or_return
+							append(src, `="`) or_return
+							if vok {
+								append_xml_escaped_bytes(src, transmute([]u8)vtxt) or_return
+							} else {
+								append_xml_escaped_bytes(src, tape.span_bytes(ov.base, vt.lo, vt.n)) or_return
+							}
+							delete(vtmp, allocator)
+							append(src, '"') or_return
+							sp := markup.attribute_spelling(len(aname) + 2, true)
+							append(facts, tape.Fact{node = out_node, lo = flo, n = u32(u64(len(src)) - flo), kind = .Attribute, spelling = sp}) or_return
+							present^ += {.Attribute}
+							continue
+						}
+					}
 					span := tape.span_bytes(ov.base, bf.lo, bf.n)
 					flo, fn := append_bytes(src, span) or_return
 					append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Attribute, spelling = bf.spelling}) or_return
 					present^ += {.Attribute}
-				} else if (bf.kind == .Comment || bf.kind == .Comment_Inline || bf.kind == .Comment_Foot) && (!is_root_val || opts.include_root_comments) {
+				} else if (bf.kind == .Comment || bf.kind == .Comment_Inline || bf.kind == .Comment_Foot) && (!is_root_val || opts.include_root_comments || (opts.include_root_foot && bf.kind == .Comment_Foot)) {
 					raw := tape.span_bytes(ov.base, bf.lo, bf.n)
 					lead := min(int(tape.fact_lead(bf.spelling)), len(raw))
 					tail := min(int(tape.fact_tail(bf.spelling)), len(raw) - lead)
@@ -315,36 +348,36 @@ materialize_subtree :: proc(
 						flo := u64(len(src))
 						append(src, fo.attr) or_return
 						append(src, `="`) or_return
-						for c in transmute([]u8)fo.values[0] {
-							switch c {
-							case '&':
-								append(src, "&amp;") or_return
-							case '<':
-								append(src, "&lt;") or_return
-							case '>':
-								append(src, "&gt;") or_return
-							case '"':
-								append(src, "&quot;") or_return
-							case '\t':
-								append(src, "&#9;") or_return
-							case '\n':
-								append(src, "&#10;") or_return
-							case '\r':
-								append(src, "&#13;") or_return
-							case:
-								append(src, c) or_return
-							}
-						}
+						append_xml_escaped_bytes(src, transmute([]u8)fo.values[0]) or_return
 						append(src, '"') or_return
 						sp := markup.attribute_spelling(len(fo.attr) + 2, true)
 						append(facts, tape.Fact{node = out_node, lo = flo, n = u32(u64(len(src)) - flo), kind = .Attribute, spelling = sp}) or_return
 						present^ += {.Attribute}
 					}
 				case .Comment, .Comment_Inline, .Comment_Foot:
-					if !is_root_val || opts.include_root_comments {
+					if !is_root_val || opts.include_root_comments || (opts.include_root_foot && fo.kind == .Comment_Foot) {
 						for line in fo.values {
-							flo, fn := append_str(src, line) or_return
-							append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = fo.kind}) or_return
+							flo := u64(len(src))
+							pad := fo.padded && len(line) > 0
+							if pad && line[0] != ' ' && line[0] != '\t' {
+								append(src, ' ') or_return
+							}
+							append(src, line) or_return
+							if pad && line[len(line) - 1] != ' ' && line[len(line) - 1] != '\t' {
+								has_nl := false
+								if !opts.xml_attrs {
+									for b in transmute([]u8)line {
+										if b == '\n' || b == '\r' {
+											has_nl = true
+											break
+										}
+									}
+								}
+								if opts.xml_attrs || (opts.target_format == nil && has_nl) {
+									append(src, ' ') or_return
+								}
+							}
+							append(facts, tape.Fact{node = out_node, lo = flo, n = u32(u64(len(src)) - flo), kind = fo.kind}) or_return
 							present^ += {fo.kind}
 						}
 					}
@@ -382,6 +415,9 @@ materialize_subtree :: proc(
 		allocator: runtime.Allocator,
 	) -> Error {
 		out_idx := tape.Node_Index(len(nodes))
+		if opts.tracked_node != nil && opts.track_handle != NO_HANDLE && h == opts.track_handle {
+			opts.tracked_node^ = out_idx
+		}
 
 		// Resolve handle vs untouched base node.
 		eff_h := h
@@ -466,12 +502,9 @@ materialize_subtree :: proc(
 					is_obj := n.val.kind == .Object
 					append(nodes, tape.Node{kind = .Object if is_obj else .Array, role = role}) or_return
 					if is_obj {
-						ms, oks, merr := effective_members(ov, eff_h, allocator)
+						ms, oks, merr := materialize_obj_members(ov, eff_h, opts, allocator)
 						if merr != nil {
 							return merr
-						}
-						if opts.dedup_keys && len(ms) > 1 {
-							ms = dedup_effective_members(ms)
 						}
 						append(stack, Mat_Frame{node_idx = int(out_idx), is_obj = true, members = ms, owned_keys = oks, base_c = tape.NO_NODE}) or_return
 					} else {
@@ -490,12 +523,9 @@ materialize_subtree :: proc(
 				is_obj := k == .Object
 				append(nodes, tape.Node{kind = k, role = role}) or_return
 				if is_obj {
-					ms, oks, merr := effective_members(ov, eff_h, allocator)
+					ms, oks, merr := materialize_obj_members(ov, eff_h, opts, allocator)
 					if merr != nil {
 						return merr
-					}
-					if opts.dedup_keys && len(ms) > 1 {
-						ms = dedup_effective_members(ms)
 					}
 					append(stack, Mat_Frame{node_idx = int(out_idx), is_obj = true, members = ms, owned_keys = oks, base_c = tape.NO_NODE}) or_return
 				} else {
@@ -582,6 +612,9 @@ materialize_subtree :: proc(
 		klo, kn := append_str(&src, opts.wrap_key) or_return
 		append(&nodes, tape.Node{lo = klo, n = kn, kind = .String, role = .Key}) or_return
 	}
+	if opts.tracked_node != nil {
+		opts.tracked_node^ = tape.NO_NODE
+	}
 
 	emit_one(ov, root_h, base_node, .Value, &src, &nodes, &facts, &present, &stack, opts, opts.root_style, true, allocator) or_return
 
@@ -602,7 +635,8 @@ materialize_subtree :: proc(
 				kt := decode_node_text_tmp(ov.base, kn, allocator)
 				klo, klen := append_str(&src, kt.text) or_return
 				free_tmp_text(kt, allocator)
-				append(&nodes, tape.Node{lo = klo, n = klen, kind = .String, role = .Key}) or_return
+				ksp := markup.SPELLING_TEXT_KEY if (opts.xml_attrs && markup.is_text_key(ov.base.nodes[kn])) else u16(0)
+				append(&nodes, tape.Node{lo = klo, n = klen, kind = .String, role = .Key, spelling = ksp}) or_return
 				emit_one(ov, NO_HANDLE, vn, .Value, &src, &nodes, &facts, &present, &stack, opts, "", false, allocator) or_return
 			} else {
 				vn := fr.base_cur
@@ -624,7 +658,8 @@ materialize_subtree :: proc(
 			fr.idx += 1
 			fr.child_n += 1
 			klo, klen := append_str(&src, m.key) or_return
-			append(&nodes, tape.Node{lo = klo, n = klen, kind = .String, role = .Key}) or_return
+			ksp := markup.SPELLING_TEXT_KEY if (opts.xml_attrs && m.key == markup.TEXT_KEY) else u16(0)
+			append(&nodes, tape.Node{lo = klo, n = klen, kind = .String, role = .Key, spelling = ksp}) or_return
 			emit_one(ov, m.handle, m.base_val, .Value, &src, &nodes, &facts, &present, &stack, opts, "", false, allocator) or_return
 		} else {
 			if fr.idx >= len(fr.elems) {
@@ -643,6 +678,12 @@ materialize_subtree :: proc(
 	if wrapped {
 		nodes[0].n = u32(len(nodes))
 		nodes[0].spelling = 1
+	}
+	if opts.tracked_node != nil && opts.tracked_node^ == tape.NO_NODE && opts.track_handle != NO_HANDLE {
+		// Track handle if it was unwrapped directly as root or base_node was reached via `handle_for_base`.
+		if rn, rok := get_node(ov, opts.track_handle); rok && rn.handle == ov.root {
+			opts.tracked_node^ = 0
+		}
 	}
 
 	// Copy into exact-sized slices matching `tape.destroy_document` (`free(raw_data(...), doc.allocator)`).
@@ -735,7 +776,99 @@ dedup_effective_members :: proc "contextless" (members: []Effective_Member) -> [
 	return members[:w]
 }
 
-@(private)
+@(private = "file")
+append_xml_escaped_bytes :: proc(src: ^[dynamic]u8, raw: []u8) -> runtime.Allocator_Error {
+	for c in raw {
+		switch c {
+		case '&':  append(src, "&amp;") or_return
+		case '<':  append(src, "&lt;") or_return
+		case '>':  append(src, "&gt;") or_return
+		case '"':  append(src, "&quot;") or_return
+		case '\t': append(src, "&#9;") or_return
+		case '\n': append(src, "&#10;") or_return
+		case '\r': append(src, "&#13;") or_return
+		case:      append(src, c) or_return
+		}
+	}
+	return nil
+}
+
+@(private = "file")
+materialize_obj_members :: proc(
+	ov: ^Overlay,
+	obj_h: Handle,
+	opts: Materialize_Options,
+	allocator: runtime.Allocator,
+) -> (
+	members: []Effective_Member,
+	owned_keys: []string,
+	err: runtime.Allocator_Error,
+) {
+	ms, oks, merr := effective_members(ov, obj_h, allocator)
+	if merr != nil {
+		return nil, nil, merr
+	}
+	if opts.dedup_keys && len(ms) > 1 {
+		ms = dedup_effective_members(ms)
+	}
+	if !opts.flatten_xml_arrays || len(ms) == 0 {
+		return ms, oks, nil
+	}
+	has_arr := false
+	for m in ms {
+		if m.handle != NO_HANDLE {
+			if cn, ok := get_node(ov, m.handle); ok && cn.state == .Replaced && cn.val.kind == .Array {
+				has_arr = true
+				break
+			}
+		}
+	}
+	if !has_arr {
+		return ms, oks, nil
+	}
+	defer {
+		delete(ms, allocator)
+	}
+	flat := make([dynamic]Effective_Member, 0, len(ms) + 4, allocator)
+	defer if err != nil {
+		delete(flat)
+	}
+	replaced_keys := make([dynamic]string, 0, 2, allocator)
+	defer delete(replaced_keys)
+	for m in ms {
+		skip_base := false
+		for rk in replaced_keys {
+			if rk == m.key {
+				skip_base = true
+				break
+			}
+		}
+		if skip_base && m.base_val != tape.NO_NODE && !m.is_inserted {
+			continue
+		}
+		if m.handle != NO_HANDLE {
+			if cn, ok := get_node(ov, m.handle); ok && cn.state == .Replaced && cn.val.kind == .Array {
+				append(&replaced_keys, m.key) or_return
+				for eh in cn.elems {
+					em := Effective_Member {
+						key         = m.key,
+						handle      = eh,
+						base_key    = tape.NO_NODE,
+						base_val    = tape.NO_NODE,
+						base_idx    = -1,
+						insert_idx  = -1,
+						is_inserted = true,
+					}
+					append(&flat, em) or_return
+				}
+				continue
+			}
+		}
+		append(&flat, m) or_return
+	}
+	return flat[:], oks, nil
+}
+
 cbor_parse_tag_override :: proc "contextless" (f: Fact_Override) -> (tag: u64, ok: bool) {
 	if n, has := f.num_tag.?; has {
 		return n, true

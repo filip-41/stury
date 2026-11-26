@@ -61,15 +61,16 @@ commit_document :: proc(
 	err: Edit_Error,
 ) {
 	resolved := resolve_edit_spec(ov, spec, opts)
-	res = commit(ov, resolved, opts, allocator) or_return
-	defer if err != nil {
-		edit.destroy_commit_result(&res)
-	}
+	r := commit(ov, resolved, opts, allocator) or_return
 	ctx := Cbor_Edit_Ctx{spec = resolved}
 	eff_opts := opts
 	eff_opts.target = as(resolved)
-	doc = edit.splice_document(ov.base, &res, eff_opts, cbor_walk_fragment_cb, &ctx, cbor_full_build_cb, &ctx, allocator) or_return
-	return doc, res, nil
+	d, serr := edit.splice_document(ov.base, &r, eff_opts, cbor_walk_fragment_cb, &ctx, cbor_full_build_cb, &ctx, allocator)
+	if serr != nil {
+		edit.destroy_commit_result(&r)
+		return {}, {}, serr
+	}
+	return d, r, nil
 }
 
 // Walks ONLY `src[range.lo:range.hi]` as one CBOR item and shifts every token/fact/count offset by `range.lo`.
@@ -83,9 +84,17 @@ walk_fragment :: proc(
 	ft: edit.Fragment_Tape,
 	err: tape.Error,
 ) {
-	_ = ctx
-	d := build(src[range.lo:range.hi], spec, {}, allocator) or_return
-	return edit.shift_fragment_tape(&d, range.lo, 0, 0, allocator)
+	eff_depth := ctx.budget.depth if ctx.budget.depth > 0 else u32(tape.DEFAULT_DEPTH)
+	if ctx.base_depth > eff_depth {
+		return {}, tape.Exceeded{kind = .Depth, at = range.lo}
+	}
+	avail := max(u32(1), eff_depth - ctx.base_depth)
+	d := build(src[range.lo:range.hi], spec, {budget = {depth = avail}}, allocator) or_return
+	sft, aerr := edit.shift_fragment_tape(&d, range.lo, 0, 0, allocator)
+	if aerr != nil {
+		return {}, aerr
+	}
+	return sft, nil
 }
 
 @(private = "file")
@@ -95,22 +104,20 @@ Cbor_Edit_Ctx :: struct {
 
 @(private = "file")
 resolve_edit_spec :: proc "contextless" (ov: ^Overlay, spec: Maybe(Spec), opts: Edit_Options) -> Spec {
+	cbor_spec_of :: #force_inline proc "contextless" (f: ^tape.Format) -> Spec {
+		if f != nil && f.id >= ID && f.id <= ID + 3 {
+			return Spec(f.id - ID)
+		}
+		return .Cbor
+	}
 	if opts.target != nil {
-		return cbor_spec_from_format(opts.target)
+		return cbor_spec_of(opts.target)
 	}
 	if s, ok := spec.?; ok {
 		return s
 	}
-	if ov != nil && ov.base != nil && ov.base.format != nil {
-		return cbor_spec_from_format(ov.base.format)
-	}
-	return .Cbor
-}
-
-@(private = "file")
-cbor_spec_from_format :: proc "contextless" (f: ^tape.Format) -> Spec {
-	if f != nil && f.id >= ID && f.id <= ID + 3 {
-		return Spec(f.id - ID)
+	if ov != nil && ov.base != nil {
+		return cbor_spec_of(ov.base.format)
 	}
 	return .Cbor
 }
@@ -202,7 +209,7 @@ cbor_spell_value :: proc(data: rawptr, ov: ^Overlay, h: Handle, base_node: tape.
 			}
 			if has_tag_override {
 				if !tag_fo.deleted {
-					tag_num, tok := cbor_parse_tag_fact(tag_fo)
+					tag_num, tok := edit.cbor_parse_tag_override(tag_fo)
 					if !tok {
 						return edit.refuse(.Fact_No_Place, "CBOR tag must be an unsigned 64-bit integer", n.base)
 					}
@@ -231,28 +238,6 @@ cbor_spell_value :: proc(data: rawptr, ov: ^Overlay, h: Handle, base_node: tape.
 	defer delete(encoded, ov.allocator)
 	append(out, ..encoded)
 	return nil
-}
-
-@(private = "file")
-cbor_parse_tag_fact :: proc "contextless" (f: edit.Fact_Override) -> (u64, bool) {
-	if u, ok := f.num_tag.?; ok {
-		return u, true
-	}
-	if len(f.values) == 0 || len(f.values[0]) == 0 {
-		return 0, false
-	}
-	v := u64(0)
-	for c in transmute([]u8)f.values[0] {
-		if c < '0' || c > '9' {
-			return 0, false
-		}
-		d := u64(c - '0')
-		if v > (max(u64) - d) / 10 {
-			return 0, false
-		}
-		v = v * 10 + d
-	}
-	return v, true
 }
 
 @(private = "file")

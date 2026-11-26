@@ -58,16 +58,17 @@ commit_document :: proc(
 	err: Edit_Error,
 ) {
 	resolved := resolve_edit_spec(ov, spec, opts)
-	res = commit(ov, resolved, opts, allocator) or_return
-	defer if err != nil {
-		edit.destroy_commit_result(&res)
-	}
+	r := commit(ov, resolved, opts, allocator) or_return
 	dopts := dsv_options_of(ov.base, resolved)
 	ctx := Dsv_Edit_Ctx{spec = resolved, dopts = dopts}
 	eff_opts := opts
 	eff_opts.target = as(resolved)
-	doc = edit.splice_document(ov.base, &res, eff_opts, dsv_walk_fragment_cb, &ctx, dsv_full_build_cb, &ctx, allocator) or_return
-	return doc, res, nil
+	d, serr := edit.splice_document(ov.base, &r, eff_opts, dsv_walk_fragment_cb, &ctx, dsv_full_build_cb, &ctx, allocator)
+	if serr != nil {
+		edit.destroy_commit_result(&r)
+		return {}, {}, serr
+	}
+	return d, r, nil
 }
 
 // Walks ONLY `src[range.lo:range.hi]` as a single DSV cell (including empty cell `""` without full rebuild!).
@@ -98,7 +99,11 @@ walk_fragment :: proc(
 	cell_opts.no_header = true
 	d := build(sub, spec, {format = cell_opts}, allocator) or_return
 	// `d.nodes`: `[0]=Array(table), [1]=Array(row), [2]=cell`.
-	return edit.shift_fragment_tape(&d, range.lo, 2, 0, allocator)
+	sft, serr := edit.shift_fragment_tape(&d, range.lo, 2, 0, allocator)
+	if serr != nil {
+		return {}, serr
+	}
+	return sft, nil
 }
 
 @(private = "file")
@@ -109,22 +114,20 @@ Dsv_Edit_Ctx :: struct {
 
 @(private = "file")
 resolve_edit_spec :: proc "contextless" (ov: ^Overlay, spec: Maybe(Spec), opts: Edit_Options) -> Spec {
+	dsv_spec_of :: #force_inline proc "contextless" (f: ^tape.Format) -> Spec {
+		if f != nil && f.id >= FIRST_ID && f.id <= FIRST_ID + 2 {
+			return Spec(f.id - FIRST_ID)
+		}
+		return .Csv
+	}
 	if opts.target != nil {
-		return dsv_spec_from_format(opts.target)
+		return dsv_spec_of(opts.target)
 	}
 	if s, ok := spec.?; ok {
 		return s
 	}
-	if ov != nil && ov.base != nil && ov.base.format != nil {
-		return dsv_spec_from_format(ov.base.format)
-	}
-	return .Csv
-}
-
-@(private = "file")
-dsv_spec_from_format :: proc "contextless" (f: ^tape.Format) -> Spec {
-	if f != nil && f.id >= FIRST_ID && f.id <= FIRST_ID + 2 {
-		return Spec(f.id - FIRST_ID)
+	if ov != nil && ov.base != nil {
+		return dsv_spec_of(ov.base.format)
 	}
 	return .Csv
 }

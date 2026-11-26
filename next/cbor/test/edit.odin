@@ -168,4 +168,41 @@ cbor_edit_f16_subnormal_nested_sorted_upgrade_and_order :: proc(t: ^testing.T) {
 		ref, is_ref := cerr.(edit.Refusal)
 		testing.expect(t, is_ref && ref.kind == .Bad_Order)
 	}
+
+	// 4. Multi-edit incremental `commit_document` (zero leak, exact parity) + `walk_fragment` explicit depth limit!
+	{
+		src := []u8{0xa2, 0x61, 'a', 0x01, 0x61, 'b', 0x02}
+		doc, err := cbor.build(src, .Cbor, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: cbor.Overlay
+		testing.expect(t, cbor.edit_init(&ov, &doc, alloc) == nil)
+		defer cbor.edit_destroy(&ov)
+		_, _ = edit.set_path(&ov, {tape.Name("a")}, edit.val_int(99))
+		_, _ = edit.set_path(&ov, {tape.Name("b")}, edit.val_string("ok"))
+
+		spliced, res, cerr := cbor.commit_document(&ov, .Cbor, {}, alloc)
+		testing.expect(t, cerr == nil)
+		defer tape.destroy_document(&spliced)
+		defer edit.destroy_commit_result(&res)
+
+		fresh, ferr := cbor.build(res.bytes, .Cbor, {}, alloc)
+		testing.expect(t, ferr == nil)
+		defer tape.destroy_document(&fresh)
+		testing.expect_value(t, len(spliced.nodes), len(fresh.nodes))
+
+		// Explicit `budget.depth` exceeded in CBOR `commit_document`: root depth 1 + nested raw array depth 3 = 4 > 3.
+		ov2: cbor.Overlay
+		testing.expect(t, cbor.edit_init(&ov2, &doc, alloc) == nil)
+		defer cbor.edit_destroy(&ov2)
+		a2, _ := edit.new_node(&ov2, edit.val_int(1))
+		inner1, _ := edit.new_node(&ov2, edit.val_array({a2}))
+		inner2, _ := edit.new_node(&ov2, edit.val_array({inner1}))
+		_, _ = edit.set_path(&ov2, {tape.Name("a")}, edit.val_array({inner2}))
+		_, res2, derr := cbor.commit_document(&ov2, .Cbor, {budget = {depth = 3}}, alloc)
+		edit.destroy_commit_result(&res2)
+		ex, is_ex := derr.(tape.Exceeded)
+		testing.expectf(t, is_ex && ex.kind == .Depth, "CBOR commit_document depth exceed expected, got %v", derr)
+	}
 }

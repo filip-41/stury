@@ -55,7 +55,81 @@ overlay_value :: proc(h: ^Heap, ov: ^edit.Overlay, doc_block: ^Doc_Block = nil, 
 	ob.ov = ov
 	ob.doc_block = db
 	ob.owned = owned
-	return Value{p = ob, n = root_h.idx, kind = .Overlay, held = true}, .Ok
+	refresh_overlay_writer(h, ob)
+	res = Value{p = ob, n = root_h.idx, kind = .Overlay, held = true}
+	if es := ensure_overlay_decoded_scalar(h, ob, root_h); es != .Ok {
+		release(h, res)
+		return NULL, es
+	}
+	return res, .Ok
+}
+
+// Ensures any `.Overlay` referencing an undecoded `SPELLING_DECODE`/`.Bytes` base scalar has its decoded UTF-8
+// cached in `Edit_Node.val` so `text_of` always returns decoded text cleanly!
+@(private)
+ensure_overlay_decoded_scalar :: proc(h: ^Heap, ob: ^Overlay_Block, eh: edit.Handle) -> Status {
+	if ob == nil || ob.ov == nil || ob.ov.base == nil || eh == edit.NO_HANDLE {
+		return .Ok
+	}
+	n, ok := edit.get_node(ob.ov, eh)
+	if !ok {
+		return .Ok
+	}
+	if n.state == .Ancestor && n.val.kind == .None && n.base != tape.NO_NODE && int(n.base) < len(ob.ov.base.nodes) {
+		bt := ob.ov.base.nodes[n.base]
+		if (bt.kind == .String || bt.kind == .Plain || bt.kind == .Bytes) && (bt.kind == .Bytes || bt.spelling & tape.SPELLING_DECODE != 0) {
+			alloc := heap_allocator(h)
+			tk := edit.decode_node_text_tmp(ob.ov.base, n.base, alloc)
+			defer edit.free_tmp_text(tk, alloc)
+			if cerr := edit.cache_ancestor_text(ob.ov, eh, tk.text); cerr != nil {
+				return overlay_fail_edit(h, cerr)
+			}
+		}
+	}
+	return .Ok
+}
+
+// Deep-clones `v`'s `edit.Overlay` into a fresh unique `Overlay_Block` (`rc == 1`) sharing `v.doc_block` cleanly
+// so aliases (`$orig`, `[., ...]`, `try`) remain untouched.
+@(private, require_results)
+cow_clone_overlay :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
+	ob, eh, _, ok := resolve_overlay(v)
+	if !ok {
+		release(h, v)
+		return NULL, fail_fact_msg(h, "invalid overlay handle for COW")
+	}
+	alloc := heap_allocator(h)
+	handles := [1]edit.Handle{eh}
+	cloned_ov, cerr := edit.clone_overlay(ob.ov, handles[:], alloc)
+	if cerr != nil {
+		release(h, v)
+		return NULL, overlay_fail_edit(h, cerr)
+	}
+	ov_ptr, aerr := new(edit.Overlay, alloc)
+	if aerr != nil {
+		edit.destroy(&cloned_ov)
+		release(h, v)
+		return NULL, fail_memory(h)
+	}
+	ov_ptr^ = cloned_ov
+	ob_raw, s := alloc_block(h, size_of(Overlay_Block))
+	if s != .Ok {
+		edit.destroy(ov_ptr)
+		free(ov_ptr, alloc)
+		release(h, v)
+		return NULL, s
+	}
+	ob.doc_block.rc += 1
+	new_ob := (^Overlay_Block)(ob_raw)
+	new_ob.ov = ov_ptr
+	new_ob.doc_block = ob.doc_block
+	new_ob.owned = true
+	if h.write_fact_data == ob {
+		attach_overlay_writer(h, new_ob)
+	}
+	res = Value{p = new_ob, n = handles[0].idx, kind = .Overlay, held = true}
+	release(h, v)
+	return res, .Ok
 }
 
 // Creates a new `edit.Overlay` over `doc` (using `heap_allocator(h)` so `Heap.limit` is enforced) and returns
@@ -94,8 +168,33 @@ overlay_from_doc :: proc(h: ^Heap, doc: tape.Document, doc_owned: bool) -> (val:
 
 // Wires `Heap.write_fact` to route fact writes onto `ob.ov`.
 attach_overlay_writer :: proc(h: ^Heap, ob: ^Overlay_Block) {
-	h.write_fact = overlay_write_fact
+	h.write_fact = overlay_write_fact_hook
 	h.write_fact_data = ob
+}
+
+// Re-arms `Heap.write_fact` onto live overlay `ob` when unset or still wired to an overlay writer hook.
+@(private)
+refresh_overlay_writer :: #force_inline proc "contextless" (h: ^Heap, ob: ^Overlay_Block) {
+	if ob != nil && (h.write_fact == nil || h.write_fact == overlay_write_fact_hook) {
+		h.write_fact = overlay_write_fact_hook
+		h.write_fact_data = ob
+	}
+}
+
+@(private = "file")
+overlay_write_fact_hook :: proc(
+	data: rawptr,
+	h: ^Heap,
+	v: Value,
+	kind: tape.Fact_Kind,
+	attr: string,
+	is_attr: bool,
+	nv: Value,
+) -> (
+	res: Value,
+	status: Status,
+) {
+	return overlay_write_fact(data, h, v, kind, attr, is_attr, nv, 0)
 }
 
 // Maps an `edit.Error` into a catchable `query.Status` (only `Allocator_Error` becomes `.Memory`).
@@ -140,17 +239,53 @@ overlay_handle :: proc "contextless" (v: Value) -> (ov: ^edit.Overlay, h: edit.H
 	return ob.ov, eh, true
 }
 
-// Returns the underlying `Doc_Block` and base `Node_Index` of an `.Overlay` (for `jq/css` and `where`).
-overlay_doc_origin :: proc "contextless" (v: Value) -> (d: ^Doc_Block, at: tape.Node_Index, ok: bool) {
-	ob, _, n, valid := resolve_overlay(v)
+// Returns the `Doc_Block` and `Node_Index` to pass to `css.select` for `.Overlay` `v`.
+// Fast path (`!ov.dirty`): returns base `ob.doc_block` and `bn` with zero allocations.
+// Edited path (`ov.dirty`): materializes a fresh XML view via `edit.materialize_subtree` so edited classes/attrs,
+// deleted elements, and newly inserted elements are queried accurately.
+overlay_css_origin :: proc(h: ^Heap, v: Value) -> (mat: Value, d: ^Doc_Block, at: tape.Node_Index, need_release: bool, status: Status) {
+	ob, eh, n, valid := resolve_overlay(v)
 	if !valid || ob.doc_block == nil {
-		return nil, tape.NO_NODE, false
+		return ABSENT, nil, tape.NO_NODE, false, .Ok
 	}
-	bn := edit.node_base_container(n)
-	if bn == tape.NO_NODE {
-		return nil, tape.NO_NODE, false
+	refresh_overlay_writer(h, ob)
+	if !ob.ov.dirty {
+		bn := edit.node_base_container(n)
+		if bn == tape.NO_NODE {
+			return ABSENT, nil, tape.NO_NODE, false, .Ok
+		}
+		return ABSENT, ob.doc_block, bn, false, .Ok
 	}
-	return ob.doc_block, bn, true
+	root_h, rerr := edit.ensure_root(ob.ov)
+	if rerr != nil {
+		return ABSENT, nil, tape.NO_NODE, false, overlay_fail_edit(h, rerr)
+	}
+	alloc := heap_allocator(h)
+	mat_node := tape.NO_NODE
+	mat_doc, merr := edit.materialize_subtree(ob.ov, root_h, tape.ROOT, {
+		xml_attrs             = true,
+		include_root_comments = true,
+		flatten_xml_arrays    = true,
+		target_format         = ob.doc_block.doc.format,
+		track_handle          = eh,
+		tracked_node          = &mat_node,
+	}, alloc)
+	if merr != nil {
+		return ABSENT, nil, tape.NO_NODE, false, overlay_fail_edit(h, merr)
+	}
+	dv, ds := document_value(h, mat_doc, owned = true)
+	if ds != .Ok {
+		tape.destroy_document(&mat_doc)
+		return ABSENT, nil, tape.NO_NODE, false, ds
+	}
+	if dv.kind != .Node {
+		release(h, dv)
+		return ABSENT, nil, tape.NO_NODE, false, .Ok
+	}
+	if mat_node == tape.NO_NODE {
+		mat_node = tape.ROOT if eh == root_h else tape.NO_NODE
+	}
+	return dv, (^Doc_Block)(dv.p), mat_node, true, .Ok
 }
 
 // Whether `.Overlay` `v` has no external aliases beyond the current single-chain update stack of `depth` ancestors.
@@ -232,10 +367,21 @@ overlay_unwrap_scalar :: #force_no_inline proc "contextless" (v: Value) -> Value
 			return v
 		}
 	}
+	if n.state == .Ancestor && n.val.kind == .String {
+		return Value{s = raw_data(n.val.text), n = u32(len(n.val.text)), kind = .String}
+	}
 	if bn := edit.node_base_container(n); bn != tape.NO_NODE {
 		return Value{p = ob.doc_block, n = u32(bn), kind = .Node}
 	}
 	return NULL
+}
+
+@(private = "file")
+overlay_base_node :: #force_inline proc "contextless" (ob: ^Overlay_Block, n: ^edit.Edit_Node) -> (Value, bool) {
+	if bn := edit.node_base_container(n); bn != tape.NO_NODE {
+		return Value{p = ob.doc_block, n = u32(bn), kind = .Node}, true
+	}
+	return {}, false
 }
 
 // Returns the raw decimal literal bytes of an `.Overlay` number if it can be emitted verbatim as JSON.
@@ -245,22 +391,13 @@ overlay_number_literal :: proc "contextless" (v: Value) -> ([]u8, bool) {
 	if !ok {
 		return nil, false
 	}
-	if n.state == .Replaced {
-		if n.val.kind == .Number_Text {
-			return transmute([]u8)n.val.text, true
-		}
-		if n.val.kind == .Base_Ref && n.val.base_ref != tape.NO_NODE {
-			d := ob.doc_block
-			if d.doc.format == nil || .Binary not_in d.doc.format.caps {
-				return node_bytes(Value{p = d, n = u32(n.val.base_ref), kind = .Node}), true
-			}
-		}
-		return nil, false
+	if n.state == .Replaced && n.val.kind == .Number_Text {
+		return transmute([]u8)n.val.text, true
 	}
-	if bn := edit.node_base_container(n); bn != tape.NO_NODE {
+	if bv, has_base := overlay_base_node(ob, n); has_base {
 		d := ob.doc_block
 		if d.doc.format == nil || .Binary not_in d.doc.format.caps {
-			return node_bytes(Value{p = d, n = u32(bn), kind = .Node}), true
+			return node_bytes(bv), true
 		}
 	}
 	return nil, false
@@ -288,15 +425,10 @@ overlay_big_int :: proc(v: Value) -> (u: u64, is_uint: bool, dec: string, ok: bo
 				return 0, false, n.val.text, true
 			}
 			return
-		case .Base_Ref:
-			if n.val.base_ref != tape.NO_NODE {
-				return node_big_int(Value{p = ob.doc_block, n = u32(n.val.base_ref), kind = .Node})
-			}
 		}
-		return
 	}
-	if bn := edit.node_base_container(n); bn != tape.NO_NODE {
-		return node_big_int(Value{p = ob.doc_block, n = u32(bn), kind = .Node})
+	if bv, has_base := overlay_base_node(ob, n); has_base {
+		return node_big_int(bv)
 	}
 	return
 }
@@ -324,19 +456,11 @@ overlay_number_of :: #force_no_inline proc(h: ^Heap, v: Value) -> (res: Value, s
 			if ps != .Ok {
 				return NULL, ps
 			}
-			if pok {
-				return parsed, .Ok
-			}
-			return double_value(math.nan_f64()), .Ok
-		case .Base_Ref:
-			if n.val.base_ref != tape.NO_NODE {
-				return number_of(h, Value{p = ob.doc_block, n = u32(n.val.base_ref), kind = .Node})
-			}
+			return parsed if pok else double_value(math.nan_f64()), .Ok
 		}
-		return NULL, .Ok
 	}
-	if bn := edit.node_base_container(n); bn != tape.NO_NODE {
-		return number_of(h, Value{p = ob.doc_block, n = u32(bn), kind = .Node})
+	if bv, has_base := overlay_base_node(ob, n); has_base {
+		return number_of(h, bv)
 	}
 	return NULL, .Ok
 }
@@ -370,15 +494,10 @@ overlay_as_f64 :: #force_no_inline proc(v: Value) -> f64 {
 				}
 			}
 			return wide_double(b)
-		case .Base_Ref:
-			if n.val.base_ref != tape.NO_NODE {
-				return as_f64(Value{p = ob.doc_block, n = u32(n.val.base_ref), kind = .Node})
-			}
 		}
-		return 0
 	}
-	if bn := edit.node_base_container(n); bn != tape.NO_NODE {
-		return as_f64(Value{p = ob.doc_block, n = u32(bn), kind = .Node})
+	if bv, has_base := overlay_base_node(ob, n); has_base {
+		return as_f64(bv)
 	}
 	return 0
 }
@@ -411,15 +530,10 @@ overlay_as_i64 :: #force_no_inline proc(v: Value) -> (i64, bool) {
 				}
 			}
 			return 0, false
-		case .Base_Ref:
-			if n.val.base_ref != tape.NO_NODE {
-				return as_i64(Value{p = ob.doc_block, n = u32(n.val.base_ref), kind = .Node})
-			}
 		}
-		return 0, false
 	}
-	if bn := edit.node_base_container(n); bn != tape.NO_NODE {
-		return as_i64(Value{p = ob.doc_block, n = u32(bn), kind = .Node})
+	if bv, has_base := overlay_base_node(ob, n); has_base {
+		return as_i64(bv)
 	}
 	return 0, false
 }
@@ -451,15 +565,10 @@ overlay_is_integer :: #force_no_inline proc(v: Value) -> bool {
 				}
 			}
 			return false
-		case .Base_Ref:
-			if n.val.base_ref != tape.NO_NODE {
-				return is_integer(Value{p = ob.doc_block, n = u32(n.val.base_ref), kind = .Node})
-			}
 		}
-		return false
 	}
-	if bn := edit.node_base_container(n); bn != tape.NO_NODE {
-		return is_integer(Value{p = ob.doc_block, n = u32(bn), kind = .Node})
+	if bv, has_base := overlay_base_node(ob, n); has_base {
+		return is_integer(bv)
 	}
 	return false
 }
@@ -470,6 +579,7 @@ overlay_length :: #force_no_inline proc(h: ^Heap, v: Value) -> int {
 	if !ok {
 		return 0
 	}
+	refresh_overlay_writer(h, ob)
 	if n.state == .Ancestor && n.base != tape.NO_NODE {
 		cnt, p, _ := tape.length(reader(ob.doc_block), n.base, heap_allocator(h))
 		note_presence(h, p)
@@ -484,24 +594,26 @@ overlay_element :: #force_no_inline proc(h: ^Heap, v: Value, i: int) -> (res: Va
 	if !ok {
 		return ABSENT, .Ok
 	}
+	refresh_overlay_writer(h, ob)
 	ch, cb, found := edit.lookup_element(ob.ov, eh, i)
 	if !found {
 		return ABSENT, .Ok
 	}
-	return overlay_wrap_child(h, ob, ch, cb)
+	return overlay_wrap_child(h, ob, ch, cb, eh)
 }
 
-// Member `key` of an `.Overlay` object (supporting XML repeated-name grouping in BOTH `.Ancestor` and `.Container_Delta`!).
+// Member `key` of an `.Overlay` object (supporting XML repeated-name grouping across `.Ancestor`, `.Base_Ref`, and `.Container_Delta`).
 @(private, cold, require_results)
 overlay_member :: #force_no_inline proc(h: ^Heap, v: Value, key: string) -> (res: Value, status: Status) {
 	ob, eh, n, ok := resolve_overlay(v)
 	if !ok {
 		return ABSENT, .Ok
 	}
+	refresh_overlay_writer(h, ob)
 	bn := edit.node_base_container(n)
 	if bn != tape.NO_NODE && groups_names(ob.doc_block, u32(bn)) {
-		if n.state == .Ancestor {
-			return overlay_group_member(h, ob, bn, key)
+		if n.state == .Ancestor || (n.state == .Replaced && n.val.kind == .Base_Ref) {
+			return overlay_group_member(h, ob, bn, eh, edit.is_live_base_node(n), key)
 		}
 		if n.state == .Container_Delta {
 			return overlay_group_member_delta(h, ob, eh, key)
@@ -511,11 +623,49 @@ overlay_member :: #force_no_inline proc(h: ^Heap, v: Value, key: string) -> (res
 	if !found {
 		return ABSENT, .Ok
 	}
-	return overlay_wrap_child(h, ob, ch, cb)
+	return overlay_wrap_child(h, ob, ch, cb, eh)
+}
+
+// Flattens a `.Array`-replaced XML element's `elems` into a grouped `.Array` `Value` (preserving 0- and 1-element arrays).
+@(private = "file", require_results)
+append_overlay_array_elems :: proc(
+	h: ^Heap,
+	ob: ^Overlay_Block,
+	parent_h: edit.Handle,
+	elems: []edit.Handle,
+	out: Value,
+) -> (Value, Status) {
+	res := out
+	if res.kind == .Absent {
+		a, as := make_array(h, len(elems))
+		if as != .Ok {
+			return ABSENT, as
+		}
+		res = a
+	}
+	for elem_h in elems {
+		ex, es := overlay_wrap_child(h, ob, elem_h, tape.NO_NODE, parent_h)
+		if es != .Ok {
+			release(h, res)
+			return ABSENT, es
+		}
+		res, es = append_grouped(h, res, ex)
+		if es != .Ok {
+			return ABSENT, es
+		}
+	}
+	return res, .Ok
 }
 
 @(private = "file", require_results)
-overlay_group_member :: proc(h: ^Heap, ob: ^Overlay_Block, at: tape.Node_Index, key: string) -> (res: Value, status: Status) {
+overlay_group_member :: proc(
+	h: ^Heap,
+	ob: ^Overlay_Block,
+	at: tape.Node_Index,
+	parent_h: edit.Handle,
+	use_by_base: bool,
+	key: string,
+) -> (res: Value, status: Status) {
 	c, p := tape.named(reader(ob.doc_block), at, key)
 	if p != .Found {
 		note_presence(h, p)
@@ -528,8 +678,13 @@ overlay_group_member :: proc(h: ^Heap, ob: ^Overlay_Block, at: tape.Node_Index, 
 			note_presence(h, q)
 			return out, .Ok
 		}
-		ch := ob.ov.by_base[node] or_else edit.NO_HANDLE
-		x, s := overlay_wrap_child(h, ob, ch, node)
+		ch := (ob.ov.by_base[node] or_else edit.NO_HANDLE) if use_by_base else edit.NO_HANDLE
+		if use_by_base && ch != edit.NO_HANDLE {
+			if cn, cok := edit.get_node(ob.ov, ch); cok && cn.state == .Replaced && cn.val.kind == .Array {
+				return append_overlay_array_elems(h, ob, ch, cn.elems[:], out)
+			}
+		}
+		x, s := overlay_wrap_child(h, ob, ch, node, parent_h)
 		if s != .Ok {
 			release(h, out)
 			return ABSENT, s
@@ -550,11 +705,22 @@ overlay_group_member_delta :: proc(h: ^Heap, ob: ^Overlay_Block, eh: edit.Handle
 	}
 	defer edit.destroy_effective_members(members, owned, alloc)
 	out := ABSENT
+	replaced_array := false
 	for m in members {
 		if m.key != key {
 			continue
 		}
-		x, s := overlay_wrap_child(h, ob, m.handle, m.base_val)
+		if replaced_array && m.base_val != tape.NO_NODE && !m.is_inserted {
+			continue
+		}
+		if m.handle != edit.NO_HANDLE {
+			if cn, ok := edit.get_node(ob.ov, m.handle); ok && cn.state == .Replaced && cn.val.kind == .Array {
+				replaced_array = true
+				out = append_overlay_array_elems(h, ob, m.handle, cn.elems[:], out) or_return
+				continue
+			}
+		}
+		x, s := overlay_wrap_child(h, ob, m.handle, m.base_val, eh)
 		if s != .Ok {
 			release(h, out)
 			return ABSENT, s
@@ -595,11 +761,18 @@ append_grouped :: proc(h: ^Heap, out, x: Value) -> (Value, Status) {
 	return res, .Ok
 }
 
-// Wraps child `(ch, cb)` of `ob` into a `Value`.
-// Containers stay `.Overlay` so nested updates remain O(1); base scalars with `SPELLING_DECODE`/`.Bytes`
-// are ALWAYS decoded via `node_value(..., force_origin = true)` so `text_of` never sees raw escaped bytes!
+// Wraps child `(ch, cb)` of `ob` (under `parent_h`) into a `Value`.
+// Containers stay `.Overlay` (linked directly to `parent_h` without setting `unlinked_parents`) unless `parent_h` is
+// a detached `.Base_Ref` copy. Scalars with facts or decoded `SPELLING_DECODE` base scalars preserve `.Overlay` + decoded UTF-8.
 @(private, require_results)
-overlay_wrap_child :: proc(h: ^Heap, ob: ^Overlay_Block, ch: edit.Handle, cb: tape.Node_Index) -> (res: Value, status: Status) {
+overlay_wrap_child :: proc(
+	h: ^Heap,
+	ob: ^Overlay_Block,
+	ch: edit.Handle,
+	cb: tape.Node_Index,
+	parent_h: edit.Handle,
+) -> (res: Value, status: Status) {
+	refresh_overlay_writer(h, ob)
 	if ch != edit.NO_HANDLE {
 		cn, ok := edit.get_node(ob.ov, ch)
 		if !ok {
@@ -610,31 +783,44 @@ overlay_wrap_child :: proc(h: ^Heap, ob: ^Overlay_Block, ch: edit.Handle, cb: ta
 			return overlay_child_ref(ob, ch), .Ok
 		}
 		if cn.state == .Replaced {
-			if cn.val.kind == .Base_Ref && cn.val.base_ref != tape.NO_NODE {
+			if cn.val.kind == .Base_Ref && cn.val.base_ref != tape.NO_NODE && len(cn.facts) == 0 && cn.base == cn.val.base_ref {
 				return node_value(h, ob.doc_block, cn.val.base_ref, force_origin = true)
 			}
-			// Keep `.Overlay` on replaced scalars (already decoded in `cn.val`) so subsequent fact writes
-			// like `.a = 42 | .a.@comment = "note"` retain their exact `Overlay` handle!
+			// Decode if needed and keep `.Overlay` so subsequent fact writes preserve handle identity!
+			if cn.val.kind == .Base_Ref && cn.val.base_ref != tape.NO_NODE {
+				bt := ob.doc_block.doc.nodes[cn.val.base_ref]
+				if (bt.kind == .String || bt.kind == .Plain || bt.kind == .Bytes) && (bt.kind == .Bytes || bt.spelling & tape.SPELLING_DECODE != 0) {
+					alloc := heap_allocator(h)
+					tk := edit.decode_node_text_tmp(ob.ov.base, cn.val.base_ref, alloc)
+					defer edit.free_tmp_text(tk, alloc)
+					br := cn.val.base_ref
+					if serr := edit.set(ob.ov, ch, edit.val_bytes(transmute([]u8)tk.text) if bt.kind == .Bytes else edit.val_string(tk.text)); serr != nil {
+						return NULL, overlay_fail_edit(h, serr)
+					}
+					if cn2, ok2 := edit.get_node(ob.ov, ch); ok2 {
+						cn2.base_ref = br
+					}
+				}
+			}
 			return overlay_child_ref(ob, ch), .Ok
 		}
-		// `.Ancestor` scalar with fact overrides: if base node requires decoding (`.Bytes` or `SPELLING_DECODE`),
-		// return decoded `node_value(..., force_origin = true)` so `text_of` gets decoded UTF-8 AND `fact_read`
-		// still reads the overlay overrides via `h.write_fact_data`!
+		if len(cn.facts) > 0 {
+			ensure_overlay_decoded_scalar(h, ob, ch) or_return
+			return overlay_child_ref(ob, ch), .Ok
+		}
 		if cn.base != tape.NO_NODE {
-			bt := ob.doc_block.doc.nodes[cn.base]
-			if bt.kind == .Bytes || bt.spelling & tape.SPELLING_DECODE != 0 {
-				return node_value(h, ob.doc_block, cn.base, force_origin = true)
-			}
-			if len(cn.facts) > 0 {
-				return overlay_child_ref(ob, ch), .Ok
-			}
 			return node_value(h, ob.doc_block, cn.base, force_origin = true)
 		}
 		return overlay_child_ref(ob, ch), .Ok
 	}
 	if cb != tape.NO_NODE {
 		if ob.doc_block.doc.nodes[cb].kind >= .Array {
-			nh, herr := edit.handle_for_base(ob.ov, cb)
+			// If `parent_h` is a detached `.Base_Ref` container copy (not a live `by_base` node), return a `.Node`
+			// so reading/updating children NEVER aliases `ov.by_base` back onto `.a` or causes `.a = .` cycles!
+			if pn, pok := edit.get_node(ob.ov, parent_h); pok && !edit.is_live_base_node(pn) {
+				return node_value(h, ob.doc_block, cb, force_origin = true)
+			}
+			nh, herr := edit.handle_for_base(ob.ov, cb, parent_h)
 			if herr != nil {
 				return NULL, overlay_fail_edit(h, herr)
 			}
@@ -645,14 +831,69 @@ overlay_wrap_child :: proc(h: ^Heap, ob: ^Overlay_Block, ch: edit.Handle, cb: ta
 	return ABSENT, .Ok
 }
 
+// Promotes a `.Node` or detached scalar inside `parent_v` (`^Overlay_Block`) into an `.Overlay` child handle owned by
+// `parent_ob.ov` before a fact write, avoiding `ov.by_base` aliasing on `.Base_Ref` copies and stale COW writers.
+@(private, require_results)
+overlay_promote_fact_target :: proc(h: ^Heap, parent_v, step, cur: Value) -> (res: Value, status: Status) {
+	ob, ph, pn, ok := resolve_overlay(parent_v)
+	if !ok {
+		return cur, .Ok
+	}
+	refresh_overlay_writer(h, ob)
+	if cur.kind == .Overlay && cur.p == parent_v.p {
+		return cur, .Ok
+	}
+	ch, cb, found := edit.NO_HANDLE, tape.NO_NODE, false
+	if type_of(step) == .String {
+		ch, cb, found = edit.lookup_member(ob.ov, ph, text_of(step))
+	} else if type_of(step) == .Number {
+		if idx, iok := element_index(step); iok {
+			if idx < 0 {
+				idx += edit.container_len(ob.ov, ph)
+			}
+			ch, cb, found = edit.lookup_element(ob.ov, ph, idx)
+		}
+	}
+	if !found {
+		return cur, .Ok
+	}
+	target_h := ch
+	if target_h == edit.NO_HANDLE && cb != tape.NO_NODE {
+		herr: edit.Error
+		if edit.is_live_base_node(pn) {
+			target_h, herr = edit.handle_for_base(ob.ov, cb, ph)
+		} else if type_of(step) == .String {
+			target_h, herr = edit.set_member(ob.ov, ph, text_of(step), edit.val_base_ref(cb))
+		} else if idx, iok := element_index(step); iok {
+			if idx < 0 {
+				idx += edit.container_len(ob.ov, ph)
+			}
+			target_h, herr = edit.set_element(ob.ov, ph, idx, edit.val_base_ref(cb))
+		}
+		if herr != nil {
+			release(h, cur)
+			return NULL, overlay_fail_edit(h, herr)
+		}
+	}
+	if target_h == edit.NO_HANDLE {
+		return cur, .Ok
+	}
+	if es := ensure_overlay_decoded_scalar(h, ob, target_h); es != .Ok {
+		release(h, cur)
+		return NULL, es
+	}
+	release(h, cur)
+	return overlay_child_ref(ob, target_h), .Ok
+}
+
 @(private, cold)
 overlay_has_member :: #force_no_inline proc(h: ^Heap, v: Value, key: string) -> bool {
 	ob, eh, _, ok := resolve_overlay(v)
 	if !ok {
 		return false
 	}
+	refresh_overlay_writer(h, ob)
 	_, _, found := edit.lookup_member(ob.ov, eh, key)
-	_ = h
 	return found
 }
 
@@ -663,6 +904,7 @@ overlay_built :: #force_no_inline proc(h: ^Heap, v: Value) -> (res: Value, statu
 	if !ok {
 		return NULL, .Ok
 	}
+	refresh_overlay_writer(h, ob)
 	alloc := heap_allocator(h)
 	k := edit.node_kind(ob.ov, eh)
 	if k == .Array {
@@ -676,7 +918,7 @@ overlay_built :: #force_no_inline proc(h: ^Heap, v: Value) -> (res: Value, statu
 			release(h, out)
 		}
 		for e in elems {
-			cv := overlay_wrap_child(h, ob, e.handle, e.base) or_return
+			cv := overlay_wrap_child(h, ob, e.handle, e.base, eh) or_return
 			append_owned(h, &out, cv) or_return
 		}
 		return out, .Ok
@@ -693,8 +935,46 @@ overlay_built :: #force_no_inline proc(h: ^Heap, v: Value) -> (res: Value, statu
 		defer if status != .Ok {
 			release(h, out)
 		}
+		replaced_keys := make([dynamic]string, 0, 2, alloc)
+		defer delete(replaced_keys)
 		for m in members {
-			cv := overlay_wrap_child(h, ob, m.handle, m.base_val) or_return
+			if grouped && m.base_val != tape.NO_NODE && !m.is_inserted {
+				skip := false
+				for rk in replaced_keys {
+					if rk == m.key {
+						skip = true
+						break
+					}
+				}
+				if skip {
+					continue
+				}
+			}
+			if grouped && m.handle != edit.NO_HANDLE {
+				if cn, cok := edit.get_node(ob.ov, m.handle); cok && cn.state == .Replaced && cn.val.kind == .Array {
+					append(&replaced_keys, m.key)
+					arr := make_array(h, len(cn.elems)) or_return
+					for elem_h in cn.elems {
+						ev, es := overlay_wrap_child(h, ob, elem_h, tape.NO_NODE, m.handle)
+						if es != .Ok {
+							release(h, arr)
+							return NULL, es
+						}
+						if as := append_owned(h, &arr, ev); as != .Ok {
+							release(h, arr)
+							return NULL, as
+						}
+					}
+					kv, ks := text_value(h, m.key)
+					if ks != .Ok {
+						release(h, arr)
+						return NULL, ks
+					}
+					object_put(h, &out, kv, arr) or_return
+					continue
+				}
+			}
+			cv := overlay_wrap_child(h, ob, m.handle, m.base_val, eh) or_return
 			if grouped {
 				if prev, ps := member(h, out, m.key); ps == .Ok && prev.kind != .Absent {
 					merged, ms := append_grouped(h, prev, cv)
@@ -738,6 +1018,7 @@ overlay_fact_read :: #force_no_inline proc(
 	if !ok {
 		return NULL, .Ok
 	}
+	refresh_overlay_writer(h, ob)
 	bn := edit.node_base_container(n)
 
 	if is_attr {
@@ -837,7 +1118,7 @@ overlay_fact_read :: #force_no_inline proc(
 	}
 
 	if bn != tape.NO_NODE {
-		return fact_read(h, Value{p = ob.doc_block, n = u32(bn), kind = .Node}, kind, attr, is_attr)
+		return read_base_node_fact(h, ob.doc_block, bn, kind, attr, is_attr)
 	}
 	return NULL, .Ok
 }
@@ -886,7 +1167,7 @@ extract_u64_tag :: proc(nv: Value) -> (u: u64, ok: bool) {
 	return 0, false
 }
 
-// `Heap.write_fact` implementation backed by `edit.Overlay`.
+// `Heap.write_fact` implementation backed by `edit.Overlay` (enforces COW uniqueness before mutating!).
 overlay_write_fact :: proc(
 	data: rawptr,
 	h: ^Heap,
@@ -895,38 +1176,95 @@ overlay_write_fact :: proc(
 	attr: string,
 	is_attr: bool,
 	nv: Value,
+	overlay_depth := 0,
 ) -> (
 	res: Value,
 	status: Status,
 ) {
 	ob: ^Overlay_Block
 	eh: edit.Handle
+	cur_v := v
 
-	if v.kind == .Overlay {
-		ov_ob, ov_eh, _, ok := resolve_overlay(v)
+	if cur_v.kind == .Overlay {
+		if !overlay_is_unique(cur_v, overlay_depth) {
+			cloned, cs := cow_clone_overlay(h, cur_v)
+			if cs != .Ok {
+				release(h, nv)
+				return NULL, cs
+			}
+			cur_v = cloned
+		}
+		ov_ob, ov_eh, _, ok := resolve_overlay(cur_v)
 		if !ok {
-			release(h, v)
+			release(h, cur_v)
 			release(h, nv)
 			return NULL, fail_fact_msg(h, "invalid overlay handle for fact write")
 		}
 		ob, eh = ov_ob, ov_eh
+		refresh_overlay_writer(h, ob)
 	} else {
 		ob = (^Overlay_Block)(data)
 		if ob == nil || ob.ov == nil {
-			release(h, v)
+			release(h, cur_v)
 			release(h, nv)
 			return NULL, fail_fact_msg(h, "fact writes require an overlay")
 		}
-		if d, at, from_doc := value_doc_origin(v, true); from_doc && &d.doc == ob.ov.base {
-			herr: edit.Error
-			eh, herr = edit.handle_for_base(ob.ov, at)
-			if herr != nil {
-				release(h, v)
-				release(h, nv)
-				return NULL, overlay_fail_edit(h, herr)
+		if d, at, from_doc := value_doc_origin(cur_v, true); from_doc && &d.doc == ob.ov.base {
+			if ob.rc > 0 {
+				// `cur_v` is not `.Overlay` (e.g. piped scalar `.Node` / `Str_Block`), while any live `Overlay_Block`
+				// ref (`$orig`, `[., ...]`, `Update_Frame.state`) exists -> COW-clone safely before mutating!
+				root_h, rerr := edit.ensure_root(ob.ov)
+				if rerr != nil {
+					release(h, cur_v)
+					release(h, nv)
+					return NULL, overlay_fail_edit(h, rerr)
+				}
+				tmp_ref := overlay_child_ref(ob, root_h)
+				ov_val, os := cow_clone_overlay(h, tmp_ref)
+				if os != .Ok {
+					release(h, cur_v)
+					release(h, nv)
+					return NULL, os
+				}
+				ob = (^Overlay_Block)(ov_val.p)
+				herr: edit.Error
+				eh, herr = edit.handle_for_base(ob.ov, at)
+				if herr != nil {
+					release(h, ov_val)
+					release(h, cur_v)
+					release(h, nv)
+					return NULL, overlay_fail_edit(h, herr)
+				}
+				// Restore text if `take_container` cleared `ob`'s node to `.Null` right before `|=`.
+				if en, eok := edit.get_node(ob.ov, eh); eok && en.state == .Replaced && en.val.kind == .Null && cur_v.kind == .String {
+					if serr := edit.set(ob.ov, eh, edit.val_string(text_of(cur_v))); serr != nil {
+						release(h, ov_val)
+						release(h, cur_v)
+						release(h, nv)
+						return NULL, overlay_fail_edit(h, serr)
+					}
+				}
+				release(h, cur_v)
+				cur_v = ov_val
+				cur_v.n = eh.idx
+			} else {
+				herr: edit.Error
+				eh, herr = edit.handle_for_base(ob.ov, at)
+				if herr != nil {
+					release(h, cur_v)
+					release(h, nv)
+					return NULL, overlay_fail_edit(h, herr)
+				}
+				if en, eok := edit.get_node(ob.ov, eh); eok && en.state == .Replaced && en.val.kind == .Null && cur_v.kind == .String {
+					if serr := edit.set(ob.ov, eh, edit.val_string(text_of(cur_v))); serr != nil {
+						release(h, cur_v)
+						release(h, nv)
+						return NULL, overlay_fail_edit(h, serr)
+					}
+				}
 			}
 		} else {
-			release(h, v)
+			release(h, cur_v)
 			release(h, nv)
 			return NULL, fail_fact_msg(h, "cannot write fact on a value with no overlay node")
 		}
@@ -938,7 +1276,7 @@ overlay_write_fact :: proc(
 		edit_err = edit.del_fact(ob.ov, eh, kind, attr if is_attr else "")
 	} else if is_attr {
 		if msg, bad := validate_fact_write_group1(ob.ov, .Attribute, nil, attr); bad {
-			release(h, v)
+			release(h, cur_v)
 			release(h, nv)
 			return NULL, fail_fact_msg(h, msg)
 		}
@@ -948,7 +1286,7 @@ overlay_write_fact :: proc(
 		if nt == .String {
 			vals := [1]string{text_of(nv)}
 			if msg, bad := validate_fact_write_group1(ob.ov, kind, vals[:], ""); bad {
-				release(h, v)
+				release(h, cur_v)
 				release(h, nv)
 				return NULL, fail_fact_msg(h, msg)
 			}
@@ -966,7 +1304,7 @@ overlay_write_fact :: proc(
 			}
 			c, cs := cursor_open(h, nv)
 			if cs != .Ok {
-				release(h, v)
+				release(h, cur_v)
 				release(h, nv)
 				return NULL, cs
 			}
@@ -974,7 +1312,7 @@ overlay_write_fact :: proc(
 			for {
 				_, elem, more, ns := cursor_next(h, &c)
 				if ns != .Ok {
-					release(h, v)
+					release(h, cur_v)
 					release(h, nv)
 					return NULL, ns
 				}
@@ -983,12 +1321,12 @@ overlay_write_fact :: proc(
 				}
 				if _, aerr := append(&owned_vals, elem); aerr != nil {
 					release(h, elem)
-					release(h, v)
+					release(h, cur_v)
 					release(h, nv)
 					return NULL, fail_memory(h)
 				}
 				if _, aerr := append(&lines, text_of(elem)); aerr != nil {
-					release(h, v)
+					release(h, cur_v)
 					release(h, nv)
 					return NULL, fail_memory(h)
 				}
@@ -996,7 +1334,7 @@ overlay_write_fact :: proc(
 			if len(lines) == 0 {
 				edit_err = edit.del_fact(ob.ov, eh, kind)
 			} else if msg, bad := validate_fact_write_group1(ob.ov, kind, lines[:], ""); bad {
-				release(h, v)
+				release(h, cur_v)
 				release(h, nv)
 				return NULL, fail_fact_msg(h, msg)
 			} else {
@@ -1007,7 +1345,7 @@ overlay_write_fact :: proc(
 		if u, uok := extract_u64_tag(nv); uok {
 			edit_err = edit.set_fact(ob.ov, eh, .Tag, nil, num_tag = u)
 		} else {
-			release(h, v)
+			release(h, cur_v)
 			release(h, nv)
 			return NULL, fail_fact_msg(h, "numeric tag must be an unsigned 64-bit integer")
 		}
@@ -1018,13 +1356,17 @@ overlay_write_fact :: proc(
 
 	release(h, nv)
 	if edit_err != nil {
-		release(h, v)
+		release(h, cur_v)
 		return NULL, overlay_fail_edit(h, edit_err)
 	}
-	if v.kind == .Overlay {
-		return v, .Ok
+	if es := ensure_overlay_decoded_scalar(h, ob, eh); es != .Ok {
+		release(h, cur_v)
+		return NULL, es
 	}
-	release(h, v)
+	if cur_v.kind == .Overlay {
+		return cur_v, .Ok
+	}
+	release(h, cur_v)
 	return overlay_child_ref(ob, eh), .Ok
 }
 
@@ -1091,11 +1433,11 @@ is_leaf_or_provenance :: proc "contextless" (ov: ^edit.Overlay, v: Value) -> boo
 	}
 	if v.kind == .Overlay {
 		ob, _, n, ok := resolve_overlay(v)
-		if ok && ob.ov == ov {
-			if !ov.unlinked_parents && n.state == .Ancestor && !n.has_edits && n.base != tape.NO_NODE && len(n.facts) == 0 {
+		if ok && ob.ov.base == ov.base {
+			if len(n.facts) == 0 && n.state == .Ancestor && n.base != tape.NO_NODE && !edit.base_subtree_has_edits(ob.ov, n.base) {
 				return true
 			}
-			if n.state == .Replaced && n.val.kind == .Base_Ref && len(n.facts) == 0 {
+			if len(n.facts) == 0 && n.state == .Replaced && n.val.kind == .Base_Ref {
 				return true
 			}
 		}
@@ -1104,54 +1446,76 @@ is_leaf_or_provenance :: proc "contextless" (ov: ^edit.Overlay, v: Value) -> boo
 	return t != .Array && t != .Object
 }
 
+// Copies any `Fact_Override` entries from `src_n` onto `dst` in `ov`.
+@(private)
+copy_overlay_node_facts :: proc(ov: ^edit.Overlay, dst: edit.Handle, src_n: ^edit.Edit_Node) -> edit.Error {
+	for f in src_n.facts {
+		if f.deleted {
+			edit.del_fact(ov, dst, f.kind, f.attr) or_return
+		} else {
+			edit.set_fact(ov, dst, f.kind, f.values, f.attr, f.num_tag, f.padded) or_return
+		}
+	}
+	return nil
+}
+
 // Sets `target` directly if `v` is a scalar or a zero-copy `.Base_Ref` provenance match (returns `done = true`).
-// Never returns a dangling pointer to a temporary buffer (clones directly via `edit.set` before freeing!).
+// Preserves `.Overlay` scalar/ref facts (`len(n.facts) > 0`) when copying across overlay nodes!
 @(private)
 try_set_leaf_or_ref :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, v: Value) -> (done: bool, err: edit.Error) {
 	// Zero-copy provenance: untouched `.Node` from `ov.base` -> `.Base_Ref`!
 	if v.kind == .Node && &(^Doc_Block)(v.p).doc == ov.base {
 		return true, edit.set(ov, target, edit.val_base_ref(tape.Node_Index(v.n)))
 	}
-	// Zero-copy provenance: unedited `.Overlay` `.Ancestor` (or `.Base_Ref`) belonging to `ov` -> `.Base_Ref`!
+	// Provenance / scalar copy from an `.Overlay` over the same base doc (preserving any facts on `n`!):
 	if v.kind == .Overlay {
 		ob, _, n, ok := resolve_overlay(v)
-		if ok && ob.ov == ov {
-			if !ov.unlinked_parents && n.state == .Ancestor && !n.has_edits && n.base != tape.NO_NODE && len(n.facts) == 0 {
-				return true, edit.set(ov, target, edit.val_base_ref(n.base))
+		if ok && ob.ov.base == ov.base {
+			if n.state == .Ancestor && n.base != tape.NO_NODE && !edit.base_subtree_has_edits(ob.ov, n.base) {
+				edit.set(ov, target, edit.val_base_ref(n.base)) or_return
+				copy_overlay_node_facts(ov, target, n) or_return
+				return true, nil
 			}
-			if n.state == .Replaced && n.val.kind == .Base_Ref && len(n.facts) == 0 {
-				return true, edit.set(ov, target, edit.val_base_ref(n.val.base_ref))
+			if n.state == .Replaced && n.val.kind == .Base_Ref {
+				edit.set(ov, target, edit.val_base_ref(n.val.base_ref)) or_return
+				copy_overlay_node_facts(ov, target, n) or_return
+				return true, nil
 			}
 		}
 	}
 	switch type_of(v) {
 	case .Absent, .Null:
-		return true, edit.set(ov, target, edit.val_null())
+		edit.set(ov, target, edit.val_null()) or_return
 	case .False:
-		return true, edit.set(ov, target, edit.val_bool(false))
+		edit.set(ov, target, edit.val_bool(false)) or_return
 	case .True:
-		return true, edit.set(ov, target, edit.val_bool(true))
+		edit.set(ov, target, edit.val_bool(true)) or_return
 	case .Number:
 		if i, iok := as_i64(v); iok {
-			return true, edit.set(ov, target, edit.val_int(i))
-		}
-		if v.kind == .Big || is_integer(v) {
+			edit.set(ov, target, edit.val_int(i)) or_return
+		} else if v.kind == .Big || is_integer(v) {
 			alloc := heap_allocator(h)
 			buf := make([dynamic]u8, 0, 32, alloc)
 			defer delete(buf)
 			if s := write_json(h, &buf, v); s == .Ok {
-				// `edit.set` clones `string(buf[:])` into `ov.allocator` BEFORE `defer delete(buf)`!
-				return true, edit.set(ov, target, edit.val_number_text(string(buf[:])))
+				edit.set(ov, target, edit.val_number_text(string(buf[:]))) or_return
+			} else {
+				return true, runtime.Allocator_Error.Out_Of_Memory
 			}
-			return true, runtime.Allocator_Error.Out_Of_Memory
+		} else {
+			edit.set(ov, target, edit.val_float(as_f64(v))) or_return
 		}
-		return true, edit.set(ov, target, edit.val_float(as_f64(v)))
 	case .String:
-		return true, edit.set(ov, target, edit.val_string(text_of(v)))
+		edit.set(ov, target, edit.val_string(text_of(v))) or_return
 	case .Array, .Object:
 		return false, nil
 	}
-	return true, edit.set(ov, target, edit.val_null())
+	if v.kind == .Overlay {
+		if _, _, sn, sok := resolve_overlay(v); sok && len(sn.facts) > 0 {
+			copy_overlay_node_facts(ov, target, sn) or_return
+		}
+	}
+	return true, nil
 }
 
 // Iteratively writes a built or edited `.Array`/`.Object` `root_v` into `target` in `ov` (zero recursion, zero orphan leaks!).
@@ -1331,6 +1695,9 @@ reconcile_overlay :: proc(h: ^Heap, ov: ^edit.Overlay, result: Value) -> edit.Er
 	if ov == nil || ov.base == nil {
 		return edit.refuse(.No_Document, "reconcile_overlay requires a built overlay")
 	}
+	if ov.unlinked_parents {
+		edit.ensure_linked(ov) or_return
+	}
 	root_h := edit.ensure_root(ov) or_return
 	return reconcile_node(h, ov, root_h, tape.ROOT, result)
 }
@@ -1338,7 +1705,7 @@ reconcile_overlay :: proc(h: ^Heap, ov: ^edit.Overlay, result: Value) -> edit.Er
 @(private = "file")
 is_same_provenance :: proc "contextless" (ov: ^edit.Overlay, xv: Value, target_h: edit.Handle, base_node: tape.Node_Index) -> bool {
 	if xv.kind == .Node && base_node != tape.NO_NODE && &(^Doc_Block)(xv.p).doc == ov.base && tape.Node_Index(xv.n) == base_node {
-		return true
+		return !edit.base_subtree_has_edits(ov, base_node)
 	}
 	if xv.kind == .Overlay {
 		ob, _, en, ok := resolve_overlay(xv)
@@ -1346,8 +1713,13 @@ is_same_provenance :: proc "contextless" (ov: ^edit.Overlay, xv: Value, target_h
 			if target_h != edit.NO_HANDLE && xv.n == target_h.idx {
 				return true
 			}
-			if base_node != tape.NO_NODE && en.base == base_node {
-				return true
+			if target_h != edit.NO_HANDLE {
+				if tn, tok := edit.get_node(ov, target_h); tok && (tn.state != .Ancestor || tn.has_edits || len(tn.facts) > 0) {
+					return false
+				}
+			}
+			if base_node != tape.NO_NODE && en.base == base_node && en.state == .Ancestor && !en.has_edits && len(en.facts) == 0 {
+				return !edit.base_subtree_has_edits(ov, base_node)
 			}
 		}
 	}
@@ -1396,13 +1768,66 @@ reconcile_node :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, base_no
 				handle:   edit.Handle,
 				base_val: tape.Node_Index,
 			}
-			eff_map := make(map[string]Eff_Info, len(eff), alloc)
-			defer delete(eff_map)
+			Eff_Group :: struct {
+				array_h:        edit.Handle,
+				has_base:       bool,
+				first_base_idx: int,
+				items:          [dynamic]Eff_Info,
+			}
+			eff_groups := make(map[string]Eff_Group, len(eff), alloc)
+			defer {
+				for _, g in eff_groups {
+					delete(g.items)
+				}
+				delete(eff_groups)
+			}
+			grouped := ov.base.format != nil && ov.base.format.dups == .Group
+			replaced_arr := make(map[string]bool, 4, alloc)
+			defer delete(replaced_arr)
 			for m in eff {
-				eff_map[m.key] = {handle = m.handle, base_val = m.base_val}
+				if grouped && m.base_val != tape.NO_NODE && !m.is_inserted && replaced_arr[m.key] {
+					if g, ok_g := eff_groups[m.key]; ok_g {
+						if !g.has_base {
+							g.has_base = true
+							g.first_base_idx = m.base_idx
+							eff_groups[m.key] = g
+						}
+					}
+					continue
+				}
+				g, g_exists := eff_groups[m.key]
+				if !g_exists {
+					g.array_h = edit.NO_HANDLE
+					g.first_base_idx = -1
+				}
+				if m.base_val != tape.NO_NODE && !m.is_inserted && !g.has_base {
+					g.has_base = true
+					g.first_base_idx = m.base_idx
+				}
+				if grouped && m.handle != edit.NO_HANDLE {
+					if cn, cok := edit.get_node(ov, m.handle); cok && cn.state == .Replaced && cn.val.kind == .Array {
+						replaced_arr[m.key] = true
+						g.array_h = m.handle
+						if g.items.allocator.procedure == nil {
+							g.items = make([dynamic]Eff_Info, 0, len(cn.elems), alloc)
+						} else {
+							clear(&g.items)
+						}
+						for eh in cn.elems {
+							append(&g.items, Eff_Info{handle = eh, base_val = tape.NO_NODE}) or_return
+						}
+						eff_groups[m.key] = g
+						continue
+					}
+				}
+				if g.items.allocator.procedure == nil {
+					g.items = make([dynamic]Eff_Info, 0, 1, alloc)
+				}
+				append(&g.items, Eff_Info{handle = m.handle, base_val = m.base_val}) or_return
+				eff_groups[m.key] = g
 			}
 
-			kept := make(map[string]bool, len(eff), alloc)
+			kept := make(map[string]bool, len(eff_groups), alloc)
 			defer delete(kept)
 
 			vc, vs := cursor_open(h, cur.val)
@@ -1420,8 +1845,79 @@ reconcile_node :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, base_no
 					break
 				}
 				kname := text_of(kv)
-				if info, exists := eff_map[kname]; exists {
+				if g, exists := eff_groups[kname]; exists {
+					infos := g.items[:]
 					kept[kname] = true
+					if grouped && (g.array_h != edit.NO_HANDLE || len(infos) > 1 || (type_of(xv) == .Array && len(infos) == 1 && edit.node_kind(ov, infos[0].handle) != .Array)) {
+						// Repeated XML element group: match elements 1:1 or update length cleanly.
+						new_arr := type_of(xv) == .Array
+						if !new_arr && (g.array_h != edit.NO_HANDLE || len(infos) > 1) {
+							werr := collapse_grouped_xml_member(h, ov, cur.target, kname, g.first_base_idx, g.has_base, g.array_h, xv)
+							release(h, kv)
+							release(h, xv)
+							if werr != nil {
+								return werr
+							}
+							continue
+						}
+						new_n := length_of(h, xv) if new_arr else 1
+						if new_n == len(infos) {
+							for i in 0 ..< new_n {
+								ev := retain(xv)
+								if new_arr {
+									es: Status
+									ev, es = element(h, xv, i)
+									if es != .Ok {
+										release(h, kv)
+										release(h, xv)
+										return runtime.Allocator_Error.Out_Of_Memory
+									}
+								}
+								info := infos[i]
+								if is_same_provenance(ov, ev, info.handle, info.base_val) {
+									release(h, ev)
+									continue
+								}
+								ch := info.handle
+								if ch == edit.NO_HANDLE {
+									herr: edit.Error
+									ch, herr = edit.handle_for_base(ov, info.base_val, cur.target)
+									if herr != nil {
+										release(h, ev)
+										release(h, kv)
+										release(h, xv)
+										return herr
+									}
+								}
+								if _, aerr := append(&stack, Pair{target = ch, base_node = info.base_val, val = ev}); aerr != nil {
+									release(h, ev)
+									release(h, kv)
+									release(h, xv)
+									return aerr
+								}
+							}
+							release(h, kv)
+							release(h, xv)
+							continue
+						}
+						// Length changed: write onto the enclosing array-replaced handle `g.array_h` if present, else first member.
+						ch := g.array_h
+						if ch == edit.NO_HANDLE {
+							first := infos[0]
+							ch = first.handle
+							if ch == edit.NO_HANDLE && first.base_val != tape.NO_NODE {
+								ch = edit.handle_for_base(ov, first.base_val, cur.target) or_return
+							}
+						}
+						werr := write_value_to_handle(h, ov, ch, xv)
+						release(h, kv)
+						release(h, xv)
+						if werr != nil {
+							return werr
+						}
+						continue
+					}
+					info := infos[0]
 					if is_same_provenance(ov, xv, info.handle, info.base_val) {
 						release(h, kv)
 						release(h, xv)
@@ -1430,7 +1926,7 @@ reconcile_node :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, base_no
 					ch := info.handle
 					if ch == edit.NO_HANDLE {
 						herr: edit.Error
-						ch, herr = edit.handle_for_base(ov, info.base_val)
+						ch, herr = edit.handle_for_base(ov, info.base_val, cur.target)
 						if herr != nil {
 							release(h, kv)
 							release(h, xv)
@@ -1458,7 +1954,7 @@ reconcile_node :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, base_no
 					}
 				}
 			}
-			for bk in eff_map {
+			for bk in eff_groups {
 				if !kept[bk] {
 					edit.del_member(ov, cur.target, bk) or_return
 				}
@@ -1488,7 +1984,7 @@ reconcile_node :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, base_no
 				ch := e.handle
 				if ch == edit.NO_HANDLE {
 					herr: edit.Error
-					ch, herr = edit.handle_for_base(ov, e.base)
+					ch, herr = edit.handle_for_base(ov, e.base, cur.target)
 					if herr != nil {
 						release(h, xv)
 						return herr
@@ -1526,58 +2022,205 @@ reconcile_node :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, base_no
 	return nil
 }
 
+// Writes arbitrary `Value` `x` (without releasing `x`) safely into existing overlay handle `target` via temp snapshot
+// so same-overlay reads/writes (`.b = .a`, `.a = .`) never alias/clobber during overwrite!
+@(private = "file")
+write_handle_via_tmp :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, x: Value) -> edit.Error {
+	tmp_h := edit.new_node(ov, edit.val_null()) or_return
+	if werr := write_value_to_handle(h, ov, tmp_h, x); werr != nil {
+		edit.discard_node(ov, tmp_h)
+		return werr
+	}
+	if merr := edit.move_node_payload(ov, target, tmp_h); merr != nil {
+		edit.discard_node(ov, tmp_h)
+		return merr
+	}
+	return nil
+}
+
+// Collapses a multi-element or array-replaced XML group onto a single replacement value `xv` cleanly.
+@(private = "file")
+collapse_grouped_xml_member :: proc(
+	h: ^Heap,
+	ov: ^edit.Overlay,
+	parent_h: edit.Handle,
+	key: string,
+	first_base_idx: int,
+	has_base: bool,
+	target_h: edit.Handle,
+	xv: Value,
+) -> edit.Error {
+	if !has_base {
+		return write_handle_via_tmp(h, ov, target_h, xv)
+	}
+	tmp_h := edit.new_node(ov, edit.val_null()) or_return
+	if werr := write_value_to_handle(h, ov, tmp_h, xv); werr != nil {
+		edit.discard_node(ov, tmp_h)
+		return werr
+	}
+	for {
+		_, _, found := edit.lookup_member(ov, parent_h, key)
+		if !found {
+			break
+		}
+		if derr := edit.del_member(ov, parent_h, key); derr != nil {
+			edit.discard_node(ov, tmp_h)
+			return derr
+		}
+	}
+	ih, ierr := edit.insert_member(ov, parent_h, first_base_idx, key, edit.val_null())
+	if ierr != nil {
+		edit.discard_node(ov, tmp_h)
+		return ierr
+	}
+	if merr := edit.move_node_payload(ov, ih, tmp_h); merr != nil {
+		edit.discard_node(ov, tmp_h)
+		return merr
+	}
+	return nil
+}
+
+// Unified setter for `overlay_set_member` (`is_member = true`) and `overlay_set_element` (`is_member = false`).
+// Only skips when `x` IS the exact same target node (`cur_h.idx == x.n`); cross-slot same-overlay assignments
+// (`.b = .a`, `.[1] = .[0]`, `.a = .`, `.a = .a.b`) snapshot `x` cleanly first before moving payload into target!
 @(private, cold, require_results)
-overlay_set_member :: #force_no_inline proc(h: ^Heap, t: Value, key: string, x: Value) -> (res: Value, status: Status) {
-	ob, eh, _, ok := resolve_overlay(t)
+overlay_set_at :: proc(h: ^Heap, t: Value, key: string, idx: int, is_member: bool, x: Value) -> (res: Value, status: Status) {
+	ob, eh, tn, ok := resolve_overlay(t)
 	if !ok {
 		release(h, t)
 		release(h, x)
 		return NULL, fail_fact_msg(h, "invalid overlay handle")
 	}
-	if x.kind == .Overlay && (^Overlay_Block)(x.p).ov == ob.ov {
+	refresh_overlay_writer(h, ob)
+	cur_h: edit.Handle
+	cur_b: tape.Node_Index
+	found: bool
+	if is_member {
+		cur_h, cur_b, found = edit.lookup_member(ob.ov, eh, key)
+		// Grouped XML repeated-name writes: update surviving base elements 1:1 on match or collapse scalar cleanly!
+		bn := edit.node_base_container(tn)
+		if bn != tape.NO_NODE && groups_names(ob.doc_block, u32(bn)) {
+			alloc := heap_allocator(h)
+			members, owned_keys, merr := edit.effective_members(ob.ov, eh, alloc)
+			if merr == nil {
+				defer edit.destroy_effective_members(members, owned_keys, alloc)
+				sibs := make([dynamic]edit.Effective_Member, 0, 4, alloc)
+				defer delete(sibs)
+				has_base := false
+				first_base_idx := -1
+				rep_arr_h := edit.NO_HANDLE
+				for m in members {
+					if m.key == key {
+						append(&sibs, m)
+						if m.base_val != tape.NO_NODE && !m.is_inserted && !has_base {
+							has_base = true
+							first_base_idx = m.base_idx
+						}
+						if rep_arr_h == edit.NO_HANDLE && m.handle != edit.NO_HANDLE {
+							if cn, cok := edit.get_node(ob.ov, m.handle); cok && cn.state == .Replaced && cn.val.kind == .Array {
+								rep_arr_h = m.handle
+							}
+						}
+					}
+				}
+				has_rep_arr := rep_arr_h != edit.NO_HANDLE
+				if type_of(x) != .Array && (has_rep_arr || len(sibs) > 1) {
+					werr := collapse_grouped_xml_member(h, ob.ov, eh, key, first_base_idx, has_base, rep_arr_h, x)
+					release(h, x)
+					if werr != nil {
+						release(h, t)
+						return NULL, overlay_fail_edit(h, werr)
+					}
+					return t, .Ok
+				}
+				if type_of(x) == .Array && !has_rep_arr && len(sibs) > 1 {
+					xlen := length_of(h, x)
+					if xlen == len(sibs) {
+						for i in 0 ..< xlen {
+							ev, es := element(h, x, i)
+							if es != .Ok {
+								release(h, t)
+								release(h, x)
+								return NULL, es
+							}
+							defer release(h, ev)
+							sm := sibs[i]
+							if (sm.handle != edit.NO_HANDLE && ev.kind == .Overlay && (^Overlay_Block)(ev.p).ov == ob.ov && ev.n == sm.handle.idx) ||
+								is_same_provenance(ob.ov, ev, sm.handle, sm.base_val) {
+								continue
+							}
+							sh := sm.handle
+							if sh == edit.NO_HANDLE {
+								herr: edit.Error
+								sh, herr = edit.handle_for_base(ob.ov, sm.base_val, eh)
+								if herr != nil {
+									release(h, t)
+									release(h, x)
+									return NULL, overlay_fail_edit(h, herr)
+								}
+							}
+							if werr := write_handle_via_tmp(h, ob.ov, sh, ev); werr != nil {
+								release(h, t)
+								release(h, x)
+								return NULL, overlay_fail_edit(h, werr)
+							}
+						}
+						release(h, x)
+						return t, .Ok
+					}
+				}
+			}
+		}
+	} else {
+		cur_h, cur_b, found = edit.lookup_element(ob.ov, eh, idx)
+	}
+	_ = cur_b
+	// Self-assignment (`cur == x`) is a genuine no-op; any other handle (e.g. `.b = .a`, `.[1] = .[0]`) must write!
+	if x.kind == .Overlay && (^Overlay_Block)(x.p).ov == ob.ov && found && cur_h != edit.NO_HANDLE && cur_h.idx == x.n {
 		release(h, x)
 		return t, .Ok
 	}
-	ch, serr := edit.set_member(ob.ov, eh, key, edit.val_null())
-	if serr != nil {
+	tmp_h, terr := edit.new_node(ob.ov, edit.val_null())
+	if terr != nil {
 		release(h, t)
 		release(h, x)
-		return NULL, overlay_fail_edit(h, serr)
+		return NULL, overlay_fail_edit(h, terr)
 	}
-	werr := write_value_to_handle(h, ob.ov, ch, x)
+	werr := write_value_to_handle(h, ob.ov, tmp_h, x)
 	release(h, x)
 	if werr != nil {
+		edit.discard_node(ob.ov, tmp_h)
 		release(h, t)
 		return NULL, overlay_fail_edit(h, werr)
+	}
+	ch: edit.Handle
+	serr: edit.Error
+	if is_member {
+		ch, serr = edit.set_member(ob.ov, eh, key, edit.val_null())
+	} else {
+		ch, serr = edit.set_element(ob.ov, eh, idx, edit.val_null())
+	}
+	if serr != nil {
+		edit.discard_node(ob.ov, tmp_h)
+		release(h, t)
+		return NULL, overlay_fail_edit(h, serr)
+	}
+	if merr := edit.move_node_payload(ob.ov, ch, tmp_h); merr != nil {
+		edit.discard_node(ob.ov, tmp_h)
+		release(h, t)
+		return NULL, overlay_fail_edit(h, merr)
 	}
 	return t, .Ok
 }
 
 @(private, cold, require_results)
+overlay_set_member :: #force_no_inline proc(h: ^Heap, t: Value, key: string, x: Value) -> (res: Value, status: Status) {
+	return overlay_set_at(h, t, key, 0, true, x)
+}
+
+@(private, cold, require_results)
 overlay_set_element :: #force_no_inline proc(h: ^Heap, t: Value, i: int, x: Value) -> (res: Value, status: Status) {
-	ob, eh, _, ok := resolve_overlay(t)
-	if !ok {
-		release(h, t)
-		release(h, x)
-		return NULL, fail_fact_msg(h, "invalid overlay handle")
-	}
-	if x.kind == .Overlay && (^Overlay_Block)(x.p).ov == ob.ov {
-		release(h, x)
-		return t, .Ok
-	}
-	ch, serr := edit.set_element(ob.ov, eh, i, edit.val_null())
-	if serr != nil {
-		release(h, t)
-		release(h, x)
-		return NULL, overlay_fail_edit(h, serr)
-	}
-	werr := write_value_to_handle(h, ob.ov, ch, x)
-	release(h, x)
-	if werr != nil {
-		release(h, t)
-		return NULL, overlay_fail_edit(h, werr)
-	}
-	return t, .Ok
+	return overlay_set_at(h, t, "", i, false, x)
 }
 
 @(private, cold, require_results)
@@ -1587,6 +2230,7 @@ overlay_del_members :: #force_no_inline proc(h: ^Heap, t: Value, keys: []Value) 
 		release(h, t)
 		return NULL, fail_fact_msg(h, "invalid overlay handle")
 	}
+	refresh_overlay_writer(h, ob)
 	for k in keys {
 		if type_of(k) != .String {
 			s := fail(h, .Types, .Delete_Paths, t, k, "field of object")
@@ -1610,6 +2254,7 @@ overlay_del_elements :: #force_no_inline proc(h: ^Heap, t: Value, gone: []bool) 
 		release(h, t)
 		return NULL, fail_fact_msg(h, "invalid overlay handle")
 	}
+	refresh_overlay_writer(h, ob)
 	for i := len(gone) - 1; i >= 0; i -= 1 {
 		if gone[i] {
 			if derr := edit.del_element(ob.ov, eh, i); derr != nil {

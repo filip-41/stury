@@ -2,7 +2,6 @@ package edit
 
 import "base:runtime"
 import "core:container/handle_map"
-import "core:container/xar"
 import "core:slice"
 import "stury:lib/core/tape"
 
@@ -33,28 +32,43 @@ commit_tabular :: proc(
 	res: Commit_Result,
 	err: Error,
 ) {
-	fast, target, fast_res, gerr := commit_guard(ov, spec.target, opts, true, spec.validate, spec.data, allocator)
-	if gerr != nil {
-		return {}, gerr
+	cx := Tabular_Cx {
+		ov   = ov,
+		doc  = ov.base if ov != nil else nil,
+		src  = ov.base.src if ov != nil && ov.base != nil else nil,
+		spec = spec,
+		opts = opts,
 	}
-	if fast {
-		return fast_res, nil
+	if ov != nil && ov.base != nil {
+		cx.delim, cx.comment, cx.no_header = resolve_tabular_opts(ov.base, spec)
 	}
-	doc := ov.base
-	if ov.root != NO_HANDLE && node_kind(ov, ov.root) != .Array {
-		return {}, refuse(.Root_Shape, "delimited document root must be an array of rows", tape.ROOT)
+	tc := Text_Composer {
+		target        = spec.target,
+		extra_clean   = true,
+		req_root      = .Array,
+		root_msg      = "delimited document root must be an array of rows",
+		validate      = spec.validate,
+		validate_data = spec.data,
+		fast_emit     = tabular_fast_emit,
+		struct_emit   = tabular_struct_emit,
+		frag_check    = tabular_frag_check,
+		user          = &cx,
 	}
+	return run_text_commit(ov, &tc, opts, allocator)
+}
 
-	delim := spec.delimiter
-	comment_byte := spec.comment
-	no_header := spec.no_header
+@(private = "file")
+resolve_tabular_opts :: proc "contextless" (doc: ^tape.Document, spec: ^Tabular_Spec) -> (delim, comment: u8, no_header: bool) {
+	delim = spec.delimiter
+	comment = spec.comment
+	no_header = spec.no_header
 	if doc.ext != nil {
 		if ext, ok := doc.ext.format.(tape.Tabular_Ext); ok {
 			if delim == 0 {
 				delim = ext.options.delimiter
 			}
-			if comment_byte == 0 {
-				comment_byte = ext.options.comment
+			if comment == 0 {
+				comment = ext.options.comment
 			}
 			no_header = ext.options.no_header
 		}
@@ -62,89 +76,80 @@ commit_tabular :: proc(
 	if delim == 0 {
 		delim = ','
 	}
+	return delim, comment, no_header
+}
 
-	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 4096}
-	defer runtime.arena_destroy(&arena)
-	scratch := runtime.arena_allocator(&arena)
-
-	cx := Tabular_Cx {
-		ov        = ov,
-		doc       = doc,
-		src       = doc.src,
-		spec      = spec,
-		opts      = opts,
-		delim     = delim,
-		comment   = comment_byte,
-		no_header = no_header,
-		allocator = scratch,
-	}
-	cx.splices = make([dynamic]Splice, 0, max(8, xar.len(ov.nodes.items)), scratch)
-
-	if !ov.has_structural {
-		it := handle_map.dynamic_iterator_make(&ov.nodes)
-		for n in dynamic_iter_next(&it) {
-			if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
-				clo, chi, clok := node_byte_span(doc, n.base)
-				if !clok {
-					return {}, refuse(.Bad_Handle, "cannot locate cell span", n.base)
-				}
-				text: []u8
-				if n.val.kind == .Raw {
-					text = transmute([]u8)n.val.text
-				} else {
-					buf := make([dynamic]u8, 0, 32, scratch)
-					spec.spell_cell(spec.data, ov, n.handle, &buf) or_return
-					text = buf[:]
-				}
-				append(&cx.splices, Splice {
-					lo           = clo,
-					hi           = chi,
-					text         = text,
-					seq          = len(cx.splices),
-					base_node    = n.base,
-					subtree_only = true,
-				}) or_return
+@(private = "file")
+tabular_fast_emit :: proc(
+	user: rawptr,
+	ov: ^Overlay,
+	doc: ^tape.Document,
+	splices: ^[dynamic]Splice,
+	scratch: runtime.Allocator,
+) -> (ok: bool, err: Error) {
+	cx := (^Tabular_Cx)(user)
+	cx.allocator = scratch
+	cx.splices = splices
+	it := handle_map.dynamic_iterator_make(&ov.nodes)
+	for n in dynamic_iter_next(&it) {
+		if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
+			clo, chi, clok := node_byte_span(doc, n.base)
+			if !clok {
+				return false, refuse(.Bad_Handle, "cannot locate cell span", n.base)
 			}
-		}
-	} else {
-		if ov.unlinked_parents {
-			ensure_linked(ov) or_return
-		}
-		cx.eol = detect_eol(doc.src)
-		if ov.root != NO_HANDLE {
-			if err = compose_tabular_root(&cx, ov.root); err != nil {
-				return {}, err
+			text: []u8
+			if n.val.kind == .Raw {
+				text = transmute([]u8)n.val.text
+			} else {
+				buf := make([dynamic]u8, 0, 32, scratch)
+				cx.spec.spell_cell(cx.spec.data, ov, n.handle, &buf) or_return
+				text = buf[:]
 			}
+			append(cx.splices, Splice {
+				lo           = clo,
+				hi           = chi,
+				text         = text,
+				seq          = len(cx.splices),
+				base_node    = n.base,
+				subtree_only = true,
+			}) or_return
 		}
 	}
+	return true, nil
+}
 
-	out, recs, rew, serr := apply_splices(doc.src, cx.splices[:], allocator)
-	if serr != nil {
-		return {}, serr
+@(private = "file")
+tabular_struct_emit :: proc(
+	user: rawptr,
+	ov: ^Overlay,
+	doc: ^tape.Document,
+	eol: string,
+	splices: ^[dynamic]Splice,
+	dropped: ^tape.Facts,
+	scratch: runtime.Allocator,
+) -> Error {
+	_ = doc
+	cx := (^Tabular_Cx)(user)
+	cx.allocator = scratch
+	cx.splices = splices
+	cx.eol = eol
+	if ov.root != NO_HANDLE {
+		compose_tabular_root(cx, ov.root) or_return
 	}
-	if spec.validate != nil {
-		need_full := target != doc.format || len(recs) == 0
-		if !need_full {
-			for rec in recs {
-				if !rec.subtree_only || rec.full_rewalk || !is_simple_dsv_cell(out[rec.dst_lo:rec.dst_hi], cx.delim, cx.comment, rec.dst_lo == 0) {
-					need_full = true
-					break
-				}
-			}
-		}
-		if need_full {
-			if verr := spec.validate(spec.data, out, allocator); verr != nil {
-				return fail_commit_validation(out, recs, rew, verr, allocator)
-			}
+	dropped^ = cx.dropped
+	return nil
+}
+
+@(private = "file")
+tabular_frag_check :: proc(user: rawptr, out: []u8, recs: []Splice_Record, scratch: runtime.Allocator) -> (bool, Error) {
+	_ = scratch
+	cx := (^Tabular_Cx)(user)
+	for rec in recs {
+		if !rec.subtree_only || rec.full_rewalk || !is_simple_dsv_cell(out[rec.dst_lo:rec.dst_hi], cx.delim, cx.comment, rec.dst_lo == 0) {
+			return true, nil
 		}
 	}
-	return Commit_Result {
-		bytes     = out,
-		dropped   = cx.dropped,
-		rewritten = rew,
-		splices   = recs,
-		allocator = allocator,
-	}, nil
+	return false, nil
 }
 
 @(private = "file")
@@ -158,7 +163,7 @@ Tabular_Cx :: struct {
 	comment:   u8,
 	no_header: bool,
 	eol:       string,
-	splices:   [dynamic]Splice,
+	splices:   ^[dynamic]Splice,
 	dropped:   tape.Facts,
 	allocator: runtime.Allocator,
 }
@@ -274,7 +279,7 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 					row_end -= 1
 				}
 			}
-			append(&cx.splices, Splice{lo = row.lo, hi = row_end, text = buf[:], seq = len(cx.splices), base_node = row.node, subtree_only = true})
+			append(cx.splices, Splice{lo = row.lo, hi = row_end, text = buf[:], seq = len(cx.splices), base_node = row.node, subtree_only = true})
 			continue
 		}
 		// Refuse unknown newly added column keys inside a base object row unless header matches!
@@ -310,7 +315,7 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 					}
 					buf := make([dynamic]u8, 0, 32, cx.allocator)
 					cx.spec.spell_cell(cx.spec.data, cx.ov, ch, &buf) or_return
-					append(&cx.splices, Splice{lo = clo, hi = chi, text = buf[:], seq = len(cx.splices), base_node = cell_node, subtree_only = true})
+					append(cx.splices, Splice{lo = clo, hi = chi, text = buf[:], seq = len(cx.splices), base_node = cell_node, subtree_only = true})
 				}
 			}
 		}
@@ -322,11 +327,8 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 	}
 
 	if len(d.order) > 0 {
-		deleted_flags := make([]bool, len(rows), cx.allocator)
+		deleted_flags := make_deleted_flags(rows[:], cx.allocator) or_return
 		defer delete(deleted_flags, cx.allocator)
-		for r, i in rows {
-			deleted_flags[i] = r.deleted
-		}
 		validate_order(d.order, deleted_flags, len(d.inserted_elems), cx.allocator) or_return
 		if len(rows) > 0 {
 			moves := make([dynamic]Move, 0, len(d.order) * 2, cx.allocator)
@@ -349,14 +351,14 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 					append(&moves, Move{text = b[:], written = true})
 				}
 			}
-			append(&cx.splices, Splice{lo = rows[0].lo, hi = rows[len(rows) - 1].hi, moves = moves[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
+			append(cx.splices, Splice{lo = rows[0].lo, hi = rows[len(rows) - 1].hi, moves = moves[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
 			return nil
 		}
 	}
 
 	for r in rows {
 		if r.deleted {
-			append(&cx.splices, Splice{lo = r.lo, hi = r.hi, seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
+			append(cx.splices, Splice{lo = r.lo, hi = r.hi, seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
 		}
 	}
 
@@ -369,7 +371,7 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 			b := make([dynamic]u8, 0, 64, cx.allocator)
 			spell_tabular_row(cx, ins.value, hdr_keys, &b) or_return
 			append(&b, cx.eol)
-			append(&cx.splices, Splice{lo = pos, hi = pos, text = b[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
+			append(cx.splices, Splice{lo = pos, hi = pos, text = b[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
 		} else {
 			if !eof_started {
 				eof_buf = make([dynamic]u8, 0, 64, cx.allocator)
@@ -384,7 +386,7 @@ compose_tabular_root :: proc(cx: ^Tabular_Cx, root_h: Handle) -> Error {
 	}
 	if eof_started {
 		pos := u64(len(cx.src))
-		append(&cx.splices, Splice{lo = pos, hi = pos, text = eof_buf[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
+		append(cx.splices, Splice{lo = pos, hi = pos, text = eof_buf[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true})
 	}
 	return nil
 }
@@ -401,16 +403,11 @@ emit_tabular_facts :: proc(cx: ^Tabular_Cx, node: tape.Node_Index, n: ^Edit_Node
 				}
 				continue
 			}
-			existing := make([dynamic]tape.Fact, 0, 4, cx.allocator)
+			existing := collect_base_facts(cx.doc, node, f.kind, cx.allocator)
 			defer delete(existing)
-			for bf in tape.facts_of(cx.doc, node) {
-				if bf.kind == f.kind {
-					append(&existing, bf)
-				}
-			}
 			if f.deleted || len(f.values) == 0 {
 				for bf in existing {
-					append(&cx.splices, Splice{lo = line_start(cx.src, bf.lo), hi = next_line(cx.src, bf.lo + u64(bf.n)), seq = len(cx.splices), base_node = node, full_rewalk = true})
+					append(cx.splices, Splice{lo = line_start(cx.src, bf.lo), hi = next_line(cx.src, bf.lo + u64(bf.n)), seq = len(cx.splices), base_node = node, full_rewalk = true})
 				}
 				continue
 			}
@@ -429,15 +426,28 @@ emit_tabular_facts :: proc(cx: ^Tabular_Cx, node: tape.Node_Index, n: ^Edit_Node
 			if len(existing) > 0 {
 				lo := line_start(cx.src, existing[0].lo)
 				hi := next_line(cx.src, existing[len(existing) - 1].lo + u64(existing[len(existing) - 1].n))
-				append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true})
+				append(cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true})
 			} else {
 				pos := row_lo if f.kind == .Comment else u64(len(cx.src))
-				append(&cx.splices, Splice{lo = pos, hi = pos, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true})
+				append(cx.splices, Splice{lo = pos, hi = pos, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true})
 			}
 		case:
 			if !f.deleted {
 				cx.dropped += {f.kind}
 			}
+		}
+	}
+	return nil
+}
+
+@(private = "file")
+append_tabular_cell :: proc(cx: ^Tabular_Cx, h: Handle, base_node: tape.Node_Index, out: ^[dynamic]u8) -> Error {
+	if h != NO_HANDLE {
+		return cx.spec.spell_cell(cx.spec.data, cx.ov, h, out)
+	}
+	if base_node != tape.NO_NODE {
+		if clo, chi, ok := node_byte_span(cx.doc, base_node); ok {
+			append(out, ..cx.src[clo:chi])
 		}
 	}
 	return nil
@@ -456,27 +466,19 @@ spell_tabular_row :: proc(cx: ^Tabular_Cx, row_h: Handle, hdr_keys: []string, ou
 			if i > 0 {
 				append(out, cx.delim)
 			}
-			if e.handle != NO_HANDLE {
-				cx.spec.spell_cell(cx.spec.data, cx.ov, e.handle, out) or_return
-			} else if e.base != tape.NO_NODE {
-				clo, chi, ok := node_byte_span(cx.doc, e.base)
-				if ok {
-					append(out, ..cx.src[clo:chi])
-				}
-			}
+			append_tabular_cell(cx, e.handle, e.base, out) or_return
 		}
 		return nil
 	}
 	if rk != .Object {
 		return refuse(.Unspellable_Value, "table row must be an object or array")
 	}
+	members, owned, merr := effective_members(cx.ov, row_h, cx.allocator)
+	if merr != nil {
+		return merr
+	}
+	defer destroy_effective_members(members, owned, cx.allocator)
 	if len(hdr_keys) > 0 {
-		// Verify no unknown keys in inserted/replaced object row are silently dropped!
-		members, owned, merr := effective_members(cx.ov, row_h, cx.allocator)
-		if merr != nil {
-			return merr
-		}
-		defer destroy_effective_members(members, owned, cx.allocator)
 		for m in members {
 			if !slice.contains(hdr_keys, m.key) {
 				return refuse(.Bad_Name, "object row contains column key absent from DSV header")
@@ -487,37 +489,17 @@ spell_tabular_row :: proc(cx: ^Tabular_Cx, row_h: Handle, hdr_keys: []string, ou
 				append(out, cx.delim)
 			}
 			ch, cb, found := lookup_member(cx.ov, row_h, k)
-			if !found {
-				continue
-			}
-			if ch != NO_HANDLE {
-				cx.spec.spell_cell(cx.spec.data, cx.ov, ch, out) or_return
-			} else if cb != tape.NO_NODE {
-				clo, chi, ok := node_byte_span(cx.doc, cb)
-				if ok {
-					append(out, ..cx.src[clo:chi])
-				}
+			if found {
+				append_tabular_cell(cx, ch, cb, out) or_return
 			}
 		}
 		return nil
 	}
-	members, owned, merr := effective_members(cx.ov, row_h, cx.allocator)
-	if merr != nil {
-		return merr
-	}
-	defer destroy_effective_members(members, owned, cx.allocator)
 	for m, i in members {
 		if i > 0 {
 			append(out, cx.delim)
 		}
-		if m.handle != NO_HANDLE {
-			cx.spec.spell_cell(cx.spec.data, cx.ov, m.handle, out) or_return
-		} else if m.base_val != tape.NO_NODE {
-			clo, chi, ok := node_byte_span(cx.doc, m.base_val)
-			if ok {
-				append(out, ..cx.src[clo:chi])
-			}
-		}
+		append_tabular_cell(cx, m.handle, m.base_val, out) or_return
 	}
 	return nil
 }

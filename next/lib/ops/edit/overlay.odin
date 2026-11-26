@@ -303,6 +303,21 @@ clone_value :: proc(ov: ^Overlay, v: Edit_Value) -> (out: Edit_Value, err: runti
 	return out, nil
 }
 
+// Sets `parent` on every direct child handle of `n` (`elems` and `members`).
+@(private)
+link_children_parent :: proc "contextless" (ov: ^Overlay, parent: Handle, n: ^Edit_Node) {
+	for eh in n.elems {
+		if cn, cok := get_node(ov, eh); cok {
+			cn.parent = parent
+		}
+	}
+	for entry in n.members {
+		if cn, cok := get_node(ov, entry.value); cok {
+			cn.parent = parent
+		}
+	}
+}
+
 // Populates `n.elems` or `n.members` from `val` and links children's `parent` to `owner` (if non-NO_HANDLE).
 @(private)
 assign_children :: proc(ov: ^Overlay, n: ^Edit_Node, owner: Handle, val: Edit_Value) -> runtime.Allocator_Error {
@@ -310,14 +325,7 @@ assign_children :: proc(ov: ^Overlay, n: ^Edit_Node, owner: Handle, val: Edit_Va
 		if n.elems.allocator.procedure == nil {
 			n.elems = make([dynamic]Handle, 0, len(val.elems), ov.allocator)
 		}
-		for eh in val.elems {
-			append(&n.elems, eh) or_return
-			if owner != NO_HANDLE {
-				if cn, cok := get_node(ov, eh); cok {
-					cn.parent = owner
-				}
-			}
-		}
+		append(&n.elems, ..val.elems) or_return
 	} else if val.kind == .Object {
 		if n.members.allocator.procedure == nil {
 			n.members = make([dynamic]Object_Entry, 0, len(val.entries), ov.allocator)
@@ -328,25 +336,29 @@ assign_children :: proc(ov: ^Overlay, n: ^Edit_Node, owner: Handle, val: Edit_Va
 				delete(k, ov.allocator)
 				return aerr
 			}
-			if owner != NO_HANDLE {
-				if cn, cok := get_node(ov, entry.value); cok {
-					cn.parent = owner
-				}
-			}
 		}
+	}
+	if owner != NO_HANDLE {
+		link_children_parent(ov, owner, n)
 	}
 	return nil
 }
 
-// Effective base container index of `n` (`n.base`, or `n.base_ref` if originally a `.Base_Ref`).
+// Returns true only when `n` directly proxies its own `n.base` subtree in `ov.by_base`
+// (false for detached `.Base_Ref` copies even when `n` previously sat at some `n.base`!).
+is_live_base_node :: #force_inline proc "contextless" (n: ^Edit_Node) -> bool {
+	return n.base != tape.NO_NODE && n.base_ref == tape.NO_NODE && !(n.state == .Replaced && n.val.kind == .Base_Ref)
+}
+
+// Effective base container index of `n` (prioritizing `.Base_Ref` over any overwritten old `n.base`!).
 node_base_container :: proc "contextless" (n: ^Edit_Node) -> tape.Node_Index {
-	if n.base != tape.NO_NODE {
-		return n.base
+	if n.state == .Replaced {
+		return n.val.base_ref if n.val.kind == .Base_Ref else tape.NO_NODE
 	}
-	if n.state == .Replaced && n.val.kind == .Base_Ref {
-		return n.val.base_ref
+	if n.base_ref != tape.NO_NODE {
+		return n.base_ref
 	}
-	return n.base_ref
+	return n.base
 }
 
 // Transitions an `.Ancestor` or `.Base_Ref` node into `.Container_Delta`, preserving its base reference!
@@ -377,13 +389,6 @@ get_node_by_idx :: proc "contextless" (ov: ^Overlay, idx: u32) -> (^Edit_Node, b
 		return nil, false
 	}
 	return p, true
-}
-
-handle_of_idx :: proc "contextless" (ov: ^Overlay, idx: u32) -> Handle {
-	if n, ok := get_node_by_idx(ov, idx); ok {
-		return n.handle
-	}
-	return NO_HANDLE
 }
 
 ensure_root :: proc(ov: ^Overlay) -> (Handle, Error) {
@@ -435,8 +440,8 @@ ensure_parents :: proc(ov: ^Overlay) -> runtime.Allocator_Error {
 
 // Returns a stable `Handle` for `base_node` in O(1) without scanning `ov.base.nodes` for parent links.
 // Parent links are materialized lazily by `ensure_linked` only when a tree-walk commit or `materialize_subtree` needs them.
-handle_for_base :: proc(ov: ^Overlay, base_node: tape.Node_Index) -> (Handle, Error) {
-	return handle_for_base_with_parent(ov, base_node, NO_HANDLE)
+handle_for_base :: proc(ov: ^Overlay, base_node: tape.Node_Index, parent := NO_HANDLE) -> (Handle, Error) {
+	return handle_for_base_with_parent(ov, base_node, parent)
 }
 
 // Fast base handle creation; attaches `parent_h` when known (e.g. `set_path`, `set_member`, `set_element`),
@@ -621,16 +626,7 @@ new_node :: proc(ov: ^Overlay, val: Edit_Value) -> (Handle, Error) {
 		if can_inline {
 			store_inline_bytes(created, val.kind, inline_src)
 		}
-		for eh in created.elems {
-			if cn, cok := get_node(ov, eh); cok {
-				cn.parent = h
-			}
-		}
-		for entry in created.members {
-			if cn, cok := get_node(ov, entry.value); cok {
-				cn.parent = h
-			}
-		}
+		link_children_parent(ov, h, created)
 	}
 	return h, nil
 }
@@ -639,7 +635,6 @@ new_node :: proc(ov: ^Overlay, val: Edit_Value) -> (Handle, Error) {
 val_null :: proc "contextless" () -> Edit_Value { return {kind = .Null} }
 val_bool :: proc "contextless" (b: bool) -> Edit_Value { return {kind = .True if b else .False} }
 val_int :: proc "contextless" (i: i64) -> Edit_Value { return {kind = .Int, i = i} }
-val_uint :: proc "contextless" (u: u64) -> Edit_Value { return {kind = .Uint, u = u} }
 val_float :: proc "contextless" (f: f64) -> Edit_Value { return {kind = .Float, f = f} }
 val_number_text :: proc "contextless" (s: string) -> Edit_Value { return {kind = .Number_Text, text = s} }
 val_string :: proc "contextless" (s: string) -> Edit_Value { return {kind = .String, text = s} }
@@ -712,6 +707,9 @@ set :: proc(ov: ^Overlay, target: Handle, val: Edit_Value) -> Error {
 		}
 		if n.state != .Ancestor {
 			reset_node_deltas(ov, n)
+		} else if n.val.kind != .None {
+			free_edit_value(ov, &n.val, n.val_inline)
+			n.val_inline = false
 		}
 		n.state = .Replaced
 		if can_inline {
@@ -754,20 +752,11 @@ set :: proc(ov: ^Overlay, target: Handle, val: Edit_Value) -> Error {
 	if val.kind == .Array {
 		delete(n.elems)
 		n.elems = new_elems
-		for eh in n.elems {
-			if cn, cok := get_node(ov, eh); cok {
-				cn.parent = target
-			}
-		}
 	} else {
 		delete(n.members)
 		n.members = new_members
-		for entry in n.members {
-			if cn, cok := get_node(ov, entry.value); cok {
-				cn.parent = target
-			}
-		}
 	}
+	link_children_parent(ov, target, n)
 	mark_edited(ov, target)
 	return nil
 }
@@ -918,23 +907,41 @@ set_member :: proc(ov: ^Overlay, obj: Handle, key: string, val: Edit_Value) -> (
 			}
 		}
 		// 2. Check renamed base members matching `key` as `new_key`.
-		for r in d.renamed_members {
+		live_base := is_live_base_node(n)
+		for r, ri in d.renamed_members {
 			if r.new_key == key {
-				if child_base, p := tape.member(tape.Reader{doc = ov.base}, base_obj, r.old_key); p == .Found {
-					ch := handle_for_base_with_parent(ov, child_base, obj) or_return
-					set(ov, ch, val) or_return
-					return ch, nil
+				if live_base {
+					if child_base, p := tape.member(tape.Reader{doc = ov.base}, base_obj, r.old_key); p == .Found {
+						ch := handle_for_base_with_parent(ov, child_base, obj) or_return
+						set(ov, ch, val) or_return
+						return ch, nil
+					}
+				} else {
+					orig := r.old_key
+					bidx := r.base_idx
+					delete(r.new_key, ov.allocator)
+					ordered_remove(&d.renamed_members, ri)
+					if d.deleted_keys.allocator.procedure == nil {
+						d.deleted_keys = make([dynamic]string, 0, 4, ov.allocator)
+					}
+					if _, aerr := append(&d.deleted_keys, orig); aerr != nil {
+						delete(orig, ov.allocator)
+						return NO_HANDLE, aerr
+					}
+					if len(d.order) > 0 && bidx >= 0 {
+						order_on_delete(ov, d, u32(bidx), false)
+					}
+					return insert_member(ov, obj, bidx if len(d.order) == 0 else -1, key, val)
 				}
 			}
 		}
 		// 3. If `key` was previously deleted from `base_obj`, restore it in-place rather than duplicating in `inserted_members`!
 		for dk, di in d.deleted_keys {
 			if dk == key {
-				// Only un-delete if no other member was renamed onto `key` (already checked above).
-				if child_base, p := tape.member(tape.Reader{doc = ov.base}, base_obj, key); p == .Found {
-					bidx, _, _ := find_base_member_idx(ov, base_obj, key)
-					delete(dk, ov.allocator)
-					ordered_remove(&d.deleted_keys, di)
+				bidx, child_base, found_base := find_base_member_idx(ov, base_obj, key)
+				delete(dk, ov.allocator)
+				ordered_remove(&d.deleted_keys, di)
+				if live_base && found_base {
 					if len(d.order) > 0 && bidx >= 0 {
 						order_on_insert(ov, d, u32(bidx), -1) or_return
 					}
@@ -942,8 +949,9 @@ set_member :: proc(ov: ^Overlay, obj: Handle, key: string, val: Edit_Value) -> (
 					set(ov, ch, val) or_return
 					return ch, nil
 				}
-				delete(dk, ov.allocator)
-				ordered_remove(&d.deleted_keys, di)
+				if found_base && len(d.order) == 0 {
+					return insert_member(ov, obj, bidx, key, val)
+				}
 				break
 			}
 		}
@@ -960,16 +968,19 @@ set_member :: proc(ov: ^Overlay, obj: Handle, key: string, val: Edit_Value) -> (
 		}
 	}
 	// 5. Base member exists directly in `base_obj` -> update its stable base handle in place (O(1) + parent link)!
-	if base_obj != tape.NO_NODE && n.base != tape.NO_NODE {
+	if base_obj != tape.NO_NODE && is_live_base_node(n) {
 		if child_base, p := tape.member(tape.Reader{doc = ov.base}, base_obj, key); p == .Found {
 			ch := handle_for_base_with_parent(ov, child_base, obj) or_return
 			set(ov, ch, val) or_return
 			return ch, nil
 		}
 	} else if base_obj != tape.NO_NODE {
-		// `.Base_Ref` object: do not alias `ov.by_base`; replace via delete + insert on this ref's delta!
-		if _, p := tape.member(tape.Reader{doc = ov.base}, base_obj, key); p == .Found {
+		// `.Base_Ref` object: do not alias `ov.by_base`; replace via delete + positional insert on this ref's delta!
+		if bidx, _, exists := find_base_member_idx(ov, base_obj, key); exists {
 			del_member(ov, obj, key) or_return
+			n_cur, _ := get_node(ov, obj)
+			ins_at := bidx if (n_cur.delta == nil || len(n_cur.delta.order) == 0) else -1
+			return insert_member(ov, obj, ins_at, key, val)
 		}
 	}
 	return insert_member(ov, obj, -1, key, val)
@@ -1280,7 +1291,7 @@ set_element :: proc(ov: ^Overlay, arr: Handle, index: int, val: Edit_Value) -> (
 		e := eff[idx]
 		ch := e.handle
 		if ch == NO_HANDLE {
-			if n.base != tape.NO_NODE {
+			if is_live_base_node(n) {
 				ch = handle_for_base_with_parent(ov, e.base, arr) or_return
 				set(ov, ch, val) or_return
 				return ch, nil
@@ -1538,6 +1549,31 @@ find_fact_override :: proc "contextless" (ov: ^Overlay, target: Handle, kind: ta
 	return nil, false
 }
 
+@(private)
+child_handle_for_edit :: proc(
+	ov: ^Overlay,
+	parent: Handle,
+	step: tape.Step,
+	ch: Handle,
+	cb: tape.Node_Index,
+) -> (Handle, Error) {
+	if ch != NO_HANDLE {
+		return ch, nil
+	}
+	pn, pok := get_node(ov, parent)
+	if pok && is_live_base_node(pn) {
+		return handle_for_base_with_parent(ov, cb, parent)
+	}
+	switch s in step {
+	case tape.Name:
+		return set_member(ov, parent, string(s), val_base_ref(cb))
+	case tape.Index:
+		return set_element(ov, parent, int(s), val_base_ref(cb))
+	case tape.All, tape.Slice, tape.Descend:
+	}
+	return NO_HANDLE, refuse(.Bad_Handle, "cannot materialize non-live child handle", cb)
+}
+
 set_path :: proc(ov: ^Overlay, steps: []tape.Step, val: Edit_Value) -> (res: Handle, err: Error) {
 	cur := ensure_root(ov) or_return
 	if len(steps) == 0 {
@@ -1553,7 +1589,7 @@ set_path :: proc(ov: ^Overlay, steps: []tape.Step, val: Edit_Value) -> (res: Han
 			}
 			ch, cb, found := lookup_member(ov, cur, string(s))
 			if found {
-				cur = ch if ch != NO_HANDLE else (handle_for_base_with_parent(ov, cb, cur) or_return)
+				cur = child_handle_for_edit(ov, cur, step, ch, cb) or_return
 			} else {
 				_, next_idx := steps[i + 1].(tape.Index)
 				cur = set_member(ov, cur, string(s), val_array() if next_idx else val_object()) or_return
@@ -1564,7 +1600,7 @@ set_path :: proc(ov: ^Overlay, steps: []tape.Step, val: Edit_Value) -> (res: Han
 			}
 			ch, cb, found := lookup_element(ov, cur, int(s))
 			if found {
-				cur = ch if ch != NO_HANDLE else (handle_for_base_with_parent(ov, cb, cur) or_return)
+				cur = child_handle_for_edit(ov, cur, step, ch, cb) or_return
 			} else {
 				_, next_idx := steps[i + 1].(tape.Index)
 				cur = set_element(ov, cur, int(s), val_array() if next_idx else val_object()) or_return
@@ -1588,13 +1624,13 @@ del_path :: proc(ov: ^Overlay, steps: []tape.Step) -> Error {
 			if !found {
 				return nil
 			}
-			cur = ch if ch != NO_HANDLE else (handle_for_base_with_parent(ov, cb, cur) or_return)
+			cur = child_handle_for_edit(ov, cur, step, ch, cb) or_return
 		case tape.Index:
 			ch, cb, found := lookup_element(ov, cur, int(s))
 			if !found {
 				return nil
 			}
-			cur = ch if ch != NO_HANDLE else (handle_for_base_with_parent(ov, cb, cur) or_return)
+			cur = child_handle_for_edit(ov, cur, step, ch, cb) or_return
 		case tape.All, tape.Slice, tape.Descend:
 			return refuse(.Bad_Path, "path delete requires concrete Name/Index steps")
 		}
@@ -1644,11 +1680,12 @@ lookup_member :: proc(ov: ^Overlay, obj: Handle, key: string) -> (child_h: Handl
 			return NO_HANDLE, tape.NO_NODE, false
 		}
 		if n.val.kind == .Base_Ref {
-			return lookup_base_member(ov, n.val.base_ref, key, n.base != tape.NO_NODE)
+			return lookup_base_member(ov, n.val.base_ref, key, false)
 		}
 		return NO_HANDLE, tape.NO_NODE, false
 	}
 	base_obj := node_base_container(n)
+	live_base := is_live_base_node(n)
 	if d := n.delta; n.state == .Container_Delta && d != nil {
 		for ins in d.inserted_members {
 			if ins.key == key {
@@ -1658,7 +1695,7 @@ lookup_member :: proc(ov: ^Overlay, obj: Handle, key: string) -> (child_h: Handl
 		// Check renamed members FIRST (handles swaps like `a->b; b->a` and `del(b); rename(a, b)`!).
 		for r in d.renamed_members {
 			if r.new_key == key {
-				return lookup_base_member(ov, base_obj, r.old_key, n.base != tape.NO_NODE)
+				return lookup_base_member(ov, base_obj, r.old_key, live_base)
 			}
 		}
 		// If original `key` was renamed away to something else, it's no longer present under `key`.
@@ -1673,7 +1710,7 @@ lookup_member :: proc(ov: ^Overlay, obj: Handle, key: string) -> (child_h: Handl
 			}
 		}
 	}
-	return lookup_base_member(ov, base_obj, key, n.base != tape.NO_NODE)
+	return lookup_base_member(ov, base_obj, key, live_base)
 }
 
 @(private)
@@ -1707,7 +1744,7 @@ lookup_element :: proc(ov: ^Overlay, arr: Handle, index: int) -> (child_h: Handl
 			return n.elems[idx], tape.NO_NODE, true
 		}
 		if n.val.kind == .Base_Ref {
-			return lookup_base_element(ov, n.val.base_ref, index, n.base != tape.NO_NODE)
+			return lookup_base_element(ov, n.val.base_ref, index, false)
 		}
 		return NO_HANDLE, tape.NO_NODE, false
 	}
@@ -1821,7 +1858,7 @@ effective_elements :: proc(ov: ^Overlay, arr: Handle, allocator: runtime.Allocat
 	deleted := make([]bool, len(base_nodes), allocator) or_return
 	defer delete(deleted, allocator)
 	d := n.delta
-	use_by_base := n.base != tape.NO_NODE
+	use_by_base := is_live_base_node(n)
 	ins_elems: []Array_Insert
 	ord: []u32
 	if d != nil {
@@ -1901,7 +1938,7 @@ effective_members :: proc(ov: ^Overlay, obj: Handle, allocator: runtime.Allocato
 		delete(dec_keys)
 	}
 	d := n.delta
-	use_by_base := n.base != tape.NO_NODE
+	use_by_base := is_live_base_node(n)
 	c, p, cerr := tape.children(tape.Reader{doc = ov.base}, base_obj, allocator)
 	if cerr != nil {
 		return nil, nil, cerr
@@ -2013,4 +2050,286 @@ destroy_effective_members :: proc(members: []Effective_Member, owned_keys: []str
 		delete(k, allocator)
 	}
 	delete(owned_keys, allocator)
+}
+
+// Caches decoded UTF-8 bytes of a `SPELLING_DECODE`/`.Bytes` base scalar inside an `.Ancestor` node's `val`
+// without changing `n.state`, `n.has_edits`, or `ov.dirty`.
+cache_ancestor_text :: proc(ov: ^Overlay, h: Handle, s: string) -> Error {
+	n, ok := get_node(ov, h)
+	if !ok || n.state != .Ancestor || n.val.kind != .None {
+		return nil
+	}
+	if len(s) <= 16 {
+		store_inline_bytes(n, .String, transmute([]u8)s)
+		return nil
+	}
+	cloned, err := strings.clone(s, ov.allocator)
+	if err != nil {
+		return err
+	}
+	n.val = {kind = .String, text = cloned}
+	n.val_inline = false
+	return nil
+}
+
+// Reports whether `base_node` (or any descendant registered in `ov.by_base` when `ov.unlinked_parents`) has local edits.
+base_subtree_has_edits :: proc "contextless" (ov: ^Overlay, base_node: tape.Node_Index) -> bool {
+	if ov == nil || ov.base == nil || base_node == tape.NO_NODE || int(base_node) >= len(ov.base.nodes) {
+		return false
+	}
+	if ch, has := ov.by_base[base_node]; has {
+		if cn, ok := get_node(ov, ch); ok && (cn.has_edits || cn.state != .Ancestor || len(cn.facts) > 0) {
+			return true
+		}
+	}
+	if !ov.unlinked_parents {
+		return false
+	}
+	bt := ov.base.nodes[base_node]
+	if bt.kind < .Array || bt.n <= 1 {
+		return false
+	}
+	end := base_node + tape.Node_Index(bt.n)
+	for bn, h in ov.by_base {
+		if bn >= base_node && bn < end {
+			if cn, ok := get_node(ov, h); ok && (cn.has_edits || cn.state != .Ancestor || len(cn.facts) > 0) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Frees a temporary unattached `Edit_Node` handle (e.g. cleanup on error before linking into a container).
+discard_node :: proc(ov: ^Overlay, h: Handle) {
+	if n, ok := get_node(ov, h); ok {
+		if n.base != tape.NO_NODE && n.base != tape.ROOT {
+			delete_key(&ov.by_base, n.base)
+		}
+		free_edit_node(ov, n)
+		handle_map.dynamic_remove(&ov.nodes, h)
+	}
+}
+
+// Transfers the value/children payload (plus any facts set on `src`) from detached temporary handle `src`
+// into `dst`, keeping `dst`'s `base` and `parent` intact, and freeing `src` cleanly without double-freeing buffers.
+move_node_payload :: proc(ov: ^Overlay, dst, src: Handle) -> Error {
+	dn, dok := get_node(ov, dst)
+	sn, sok := get_node(ov, src)
+	if !dok || !sok {
+		return refuse(.Bad_Handle, "invalid overlay handle")
+	}
+	if dst == src {
+		return nil
+	}
+	ov.has_structural = true
+	if dn.base != tape.NO_NODE && dn.state != .Replaced {
+		prune_base_descendants(ov, dn.base)
+	}
+	reset_node_deltas(ov, dn)
+	dn.state = sn.state
+	dn.base_ref = sn.base_ref
+	dn.delta = sn.delta
+	dn.elems = sn.elems
+	dn.members = sn.members
+	if sn.val_inline {
+		src_bytes := sn.val.raw if sn.val.kind == .Bytes else transmute([]u8)sn.val.text
+		store_inline_bytes(dn, sn.val.kind, src_bytes)
+	} else {
+		dn.val = sn.val
+		dn.val_inline = false
+	}
+	link_children_parent(ov, dst, dn)
+	if d := dn.delta; d != nil {
+		for ins in d.inserted_members {
+			if cn, cok := get_node(ov, ins.value); cok {
+				cn.parent = dst
+			}
+		}
+		for ins in d.inserted_elems {
+			if cn, cok := get_node(ov, ins.value); cok {
+				cn.parent = dst
+			}
+		}
+	}
+	if len(sn.facts) > 0 {
+		for &f in dn.facts {
+			free_fact_override(ov, &f)
+		}
+		delete(dn.facts)
+		dn.facts = sn.facts
+		sn.facts = {}
+		recompute_present(ov)
+	} else {
+		for &f in sn.facts {
+			free_fact_override(ov, &f)
+		}
+		delete(sn.facts)
+		sn.facts = {}
+	}
+	sn.state = .Ancestor
+	sn.val = {}
+	sn.val_inline = false
+	sn.elems = {}
+	sn.members = {}
+	sn.delta = nil
+	sn.base_ref = tape.NO_NODE
+	sn.has_edits = false
+	handle_map.dynamic_remove(&ov.nodes, src)
+	mark_edited(ov, dst)
+	return nil
+}
+
+// Clones `src` (preserving all pending edits, deltas, facts, and cached scalars) into `allocator`,
+// remapping any handles listed in `remap_handles` in place. Used by `lib/query` for COW branching.
+clone_overlay :: proc(
+	src: ^Overlay,
+	remap_handles: []Handle,
+	allocator: runtime.Allocator,
+) -> (
+	dst: Overlay,
+	err: Error,
+) {
+	if src == nil || src.base == nil {
+		return {}, refuse(.No_Document, "overlay has no document")
+	}
+	out: Overlay
+	init(&out, src.base, allocator) or_return
+	defer if err != nil {
+		destroy(&out)
+	}
+	remap := make(map[Handle]Handle, max(8, xar.len(src.nodes.items)), allocator)
+	defer delete(remap)
+
+	it1 := handle_map.dynamic_iterator_make(&src.nodes)
+	for sn in dynamic_iter_next(&it1) {
+		nh, aerr := handle_map.dynamic_add(&out.nodes, Edit_Node {
+			base      = sn.base,
+			base_ref  = sn.base_ref,
+			state     = sn.state,
+			has_edits = sn.has_edits,
+		})
+		if aerr != nil {
+			return {}, aerr
+		}
+		remap[sn.handle] = nh
+	}
+
+	it2 := handle_map.dynamic_iterator_make(&src.nodes)
+	for sn in dynamic_iter_next(&it2) {
+		dh := remap[sn.handle]
+		dn, _ := get_node(&out, dh)
+		if sn.parent != NO_HANDLE {
+			dn.parent = remap[sn.parent] or_else NO_HANDLE
+		}
+		if sn.val_inline {
+			src_bytes := sn.val.raw if sn.val.kind == .Bytes else transmute([]u8)sn.val.text
+			store_inline_bytes(dn, sn.val.kind, src_bytes)
+		} else if sn.val.kind != .None {
+			dn.val = clone_value(&out, sn.val) or_return
+		}
+		if len(sn.elems) > 0 {
+			dn.elems = make([dynamic]Handle, 0, len(sn.elems), allocator)
+			for eh in sn.elems {
+				append(&dn.elems, remap[eh] or_else NO_HANDLE) or_return
+			}
+		}
+		if len(sn.members) > 0 {
+			dn.members = make([dynamic]Object_Entry, 0, len(sn.members), allocator)
+			for m in sn.members {
+				mk := clone_str(&out, m.key) or_return
+				if _, aerr := append(&dn.members, Object_Entry{key = mk, value = remap[m.value] or_else NO_HANDLE}); aerr != nil {
+					delete(mk, allocator)
+					return {}, aerr
+				}
+			}
+		}
+		if sd := sn.delta; sd != nil {
+			dd := ensure_delta(&out, dn) or_return
+			if len(sd.deleted_keys) > 0 {
+				dd.deleted_keys = make([dynamic]string, 0, len(sd.deleted_keys), allocator)
+				for dk in sd.deleted_keys {
+					ck := clone_str(&out, dk) or_return
+					if _, aerr := append(&dd.deleted_keys, ck); aerr != nil {
+						delete(ck, allocator)
+						return {}, aerr
+					}
+				}
+			}
+			if len(sd.inserted_members) > 0 {
+				dd.inserted_members = make([dynamic]Member_Insert, 0, len(sd.inserted_members), allocator)
+				for ins in sd.inserted_members {
+					ik := clone_str(&out, ins.key) or_return
+					if _, aerr := append(&dd.inserted_members, Member_Insert{at = ins.at, key = ik, value = remap[ins.value] or_else NO_HANDLE}); aerr != nil {
+						delete(ik, allocator)
+						return {}, aerr
+					}
+				}
+			}
+			if len(sd.renamed_members) > 0 {
+				dd.renamed_members = make([dynamic]Member_Rename, 0, len(sd.renamed_members), allocator)
+				for r in sd.renamed_members {
+					ok_s := clone_str(&out, r.old_key) or_return
+					nk_s, nk_err := clone_str(&out, r.new_key)
+					if nk_err != nil {
+						delete(ok_s, allocator)
+						return {}, nk_err
+					}
+					if _, aerr := append(&dd.renamed_members, Member_Rename{old_key = ok_s, new_key = nk_s, base_idx = r.base_idx}); aerr != nil {
+						delete(ok_s, allocator)
+						delete(nk_s, allocator)
+						return {}, aerr
+					}
+				}
+			}
+			if len(sd.deleted_indices) > 0 {
+				dd.deleted_indices = make([dynamic]u32, 0, len(sd.deleted_indices), allocator)
+				for di in sd.deleted_indices {
+					append(&dd.deleted_indices, di) or_return
+				}
+			}
+			if len(sd.inserted_elems) > 0 {
+				dd.inserted_elems = make([dynamic]Array_Insert, 0, len(sd.inserted_elems), allocator)
+				for ie in sd.inserted_elems {
+					append(&dd.inserted_elems, Array_Insert{at = ie.at, value = remap[ie.value] or_else NO_HANDLE}) or_return
+				}
+			}
+			if sd.order != nil {
+				dd.order = slice.clone(sd.order, allocator) or_return
+			}
+		}
+		if len(sn.facts) > 0 {
+			dn.facts = make([dynamic]Fact_Override, 0, len(sn.facts), allocator)
+			for f in sn.facts {
+				fo := make_fact_override(&out, f.kind, f.values, f.attr, f.num_tag, f.padded, f.deleted) or_return
+				if _, aerr := append(&dn.facts, fo); aerr != nil {
+					free_fact_override(&out, &fo)
+					return {}, aerr
+				}
+			}
+		}
+	}
+
+	if src.root != NO_HANDLE {
+		out.root = remap[src.root] or_else NO_HANDLE
+	}
+	for bn, h in src.by_base {
+		if nh, ok := remap[h]; ok {
+			out.by_base[bn] = nh
+		}
+	}
+	if src.parents != nil {
+		out.parents = slice.clone(src.parents, allocator) or_return
+	}
+	out.present = src.present
+	out.dirty = src.dirty
+	out.unlinked_parents = src.unlinked_parents
+	out.has_structural = src.has_structural
+
+	for &rh in remap_handles {
+		if nh, ok := remap[rh]; ok {
+			rh = nh
+		}
+	}
+	return out, nil
 }

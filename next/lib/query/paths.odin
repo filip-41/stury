@@ -240,15 +240,28 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 		release(h, v)
 		return x, .Ok
 	}
+	// If root `v` is an aliased `.Overlay`, COW-clone upfront so aliases (`$orig`, `[., ...]`, `try`) are untouched!
+	cur_root := v
+	if cur_root.kind == .Overlay {
+		same_ov := 1 if (x.kind == .Overlay && x.p == cur_root.p) else 0
+		if !overlay_is_unique(cur_root, same_ov) {
+			cloned, cs := cow_clone_overlay(h, cur_root)
+			if cs != .Ok {
+				release(h, x)
+				return NULL, cs
+			}
+			cur_root = cloned
+		}
+	}
 	if len(keys) == 1 {
-		return set(h, v, keys[0], x)
+		return set(h, cur_root, keys[0], x)
 	}
 	// Each container on the way down has its child taken out, so the child is held once and changes in place.
 	chain_buf: [16]Value
 	chain_n := 0
 	chain_dyn: [dynamic]Value
 	defer delete(chain_dyn)
-	cur := v
+	cur := cur_root
 	s := Status.Ok
 	_, _, last_is_fact := fact_step(h, keys[len(keys) - 1])
 	for k in keys[:len(keys) - 1] {
@@ -260,8 +273,19 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 				break
 			}
 		}
+		if cur.kind == .Overlay {
+			chain_so_far := chain_dyn[:] if len(chain_dyn) > 0 else chain_buf[:chain_n]
+			if !overlay_is_unique(cur, overlay_chain_refs(chain_so_far, cur.p)) {
+				cloned, cs := cow_clone_overlay(h, cur)
+				if cs != .Ok {
+					s = cs
+					break
+				}
+				cur = cloned
+			}
+		}
 		child, s = get(h, cur, k)
-		if s == .Ok && !last_is_fact && cur.kind != .Overlay && type_of(k) != .Object && type_of(cur) != .Null && type_of(cur) != .Absent {
+		if s == .Ok && (!last_is_fact || child.kind == .Overlay) && cur.kind != .Overlay && type_of(k) != .Object && type_of(cur) != .Null && type_of(cur) != .Absent {
 			cur, s = set(h, cur, k, NULL)
 		}
 		if s != .Ok {
@@ -292,8 +316,12 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 		cur = child
 	}
 	chain := chain_dyn[:] if len(chain_dyn) > 0 else chain_buf[:chain_n]
+	if s == .Ok && last_is_fact && cur.kind != .Overlay && len(chain) > 0 && chain[len(chain) - 1].kind == .Overlay {
+		cur, s = overlay_promote_fact_target(h, chain[len(chain) - 1], keys[len(keys) - 2], cur)
+	}
 	if s == .Ok {
-		cur, s = set(h, cur, keys[len(keys) - 1], x, len(chain))
+		ov_refs := overlay_chain_refs(chain, cur.p) if cur.kind == .Overlay else 0
+		cur, s = set(h, cur, keys[len(keys) - 1], x, ov_refs)
 	} else {
 		release(h, cur)
 		release(h, x)
@@ -303,12 +331,34 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 			release(h, parent)
 			continue
 		}
-		cur, s = set(h, parent, keys[i], cur, i)
+		ov_refs := overlay_chain_refs(chain[:i], parent.p) if parent.kind == .Overlay else 0
+		cur, s = set(h, parent, keys[i], cur, ov_refs)
 	}
 	if s != .Ok {
 		return NULL, s
 	}
 	return cur, .Ok
+}
+
+// Counts references to `target_p` held in ancestor `chain` (including any synthetic XML array in `chain` holding child `.Overlay` refs).
+@(private)
+overlay_chain_refs :: proc(chain: []Value, target_p: rawptr) -> int {
+	if target_p == nil {
+		return 0
+	}
+	count := 0
+	for item in chain {
+		if item.kind == .Overlay && item.p == target_p {
+			count += 1
+		} else if item.kind == .Array {
+			for el in items_of(item) {
+				if el.kind == .Overlay && el.p == target_p {
+					count += 1
+				}
+			}
+		}
+	}
+	return count
 }
 
 // `t`, taken, with `t[key]` set to `x`, taken (single-step `set_path` without allocating a path array).
@@ -334,12 +384,16 @@ set :: proc(h: ^Heap, t, key, x: Value, overlay_depth := 0) -> (res: Value, stat
 	case (tt == .Object || tt == .Null || tt == .Absent) && kt == .String:
 		if t.kind == .Overlay && tt == .Object {
 			same_ov := 1 if (x.kind == .Overlay && x.p == t.p) else 0
-			if overlay_is_unique(t, overlay_depth + same_ov) {
-				return overlay_set_member(h, t, text_of(key), x)
+			out_ov := t
+			if !overlay_is_unique(t, overlay_depth + same_ov) {
+				cloned, cs := cow_clone_overlay(h, t)
+				if cs != .Ok {
+					release(h, x)
+					return NULL, cs
+				}
+				out_ov = cloned
 			}
-			// Shared/aliased `.Overlay`: COW-materialize before mutating so aliases stay untouched!
-			out, s = overlay_built(h, t)
-			release(h, t)
+			return overlay_set_member(h, out_ov, text_of(key), x)
 		} else if tt != .Object {
 			release(h, t)
 			out, s = make_object(h, 1)
@@ -371,11 +425,16 @@ set :: proc(h: ^Heap, t, key, x: Value, overlay_depth := 0) -> (res: Value, stat
 		}
 		if s == .Ok && t.kind == .Overlay && tt == .Array {
 			same_ov := 1 if (x.kind == .Overlay && x.p == t.p) else 0
-			if overlay_is_unique(t, overlay_depth + same_ov) {
-				return overlay_set_element(h, t, i, x)
+			out_ov := t
+			if !overlay_is_unique(t, overlay_depth + same_ov) {
+				cloned, cs := cow_clone_overlay(h, t)
+				if cs != .Ok {
+					release(h, x)
+					return NULL, cs
+				}
+				out_ov = cloned
 			}
-			out, s = overlay_built(h, t)
-			release(h, t)
+			return overlay_set_element(h, out_ov, i, x)
 		} else if s == .Ok {
 			if tt != .Array {
 				release(h, t)
@@ -402,10 +461,10 @@ set :: proc(h: ^Heap, t, key, x: Value, overlay_depth := 0) -> (res: Value, stat
 					release(h, x)
 					return NULL, as
 				}
-				defer release(h, an)
-				return fact_write(h, out, .Attribute, text_of(an), true, x)
-			}
-			return fact_write(h, out, kind, "", false, x)
+					defer release(h, an)
+					return fact_write(h, out, .Attribute, text_of(an), true, x, overlay_depth)
+				}
+				return fact_write(h, out, kind, "", false, x, overlay_depth)
 		}
 		if unk, is_unk := unknown_fact_step(h, key); is_unk {
 			defer release(h, unk)
@@ -556,14 +615,41 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 		}
 		delete(stack)
 	}
-	if _, err := append(&stack, Del_Frame{out = v, paths = paths, keys = make([dynamic]Value, alloc)}); err != nil {
-		release(h, v)
+	root_v := v
+	if root_v.kind == .Overlay && !overlay_is_unique(root_v) {
+		cloned, cs := cow_clone_overlay(h, root_v)
+		if cs != .Ok {
+			return NULL, cs
+		}
+		root_v = cloned
+	}
+	if _, err := append(&stack, Del_Frame{out = root_v, paths = paths, keys = make([dynamic]Value, alloc)}); err != nil {
+		release(h, root_v)
 		return NULL, fail_memory(h)
+	}
+	del_stack_ov_refs :: proc(frames: []Del_Frame, target_p: rawptr) -> int {
+		if target_p == nil {
+			return 0
+		}
+		count := 0
+		for fr in frames {
+			if fr.out.kind == .Overlay && fr.out.p == target_p {
+				count += 1
+			} else if fr.out.kind == .Array {
+				for el in items_of(fr.out) {
+					if el.kind == .Overlay && el.p == target_p {
+						count += 1
+					}
+				}
+			}
+		}
+		return count
 	}
 	for {
 		f := &stack[len(stack) - 1]
 		if f.i >= len(f.paths) {
-			done, s := del_keys(h, f.out, f.keys[:], len(stack) - 1)
+			ov_refs := del_stack_ov_refs(stack[:len(stack) - 1], f.out.p) if f.out.kind == .Overlay else 0
+			done, s := del_keys(h, f.out, f.keys[:], ov_refs)
 			delete(f.keys)
 			pop(&stack)
 			if s != .Ok {
@@ -573,7 +659,8 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 				return done, .Ok
 			}
 			up := &stack[len(stack) - 1]
-			up.out, s = set(h, up.out, up.key, done, len(stack) - 1)
+			up_refs := del_stack_ov_refs(stack[:len(stack) - 1], up.out.p) if up.out.kind == .Overlay else 0
+			up.out, s = set(h, up.out, up.key, done, up_refs)
 			if s != .Ok {
 				up.out = NULL
 				return NULL, s
@@ -603,6 +690,24 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 			release(h, sub)
 			f.i = j
 			continue
+		}
+		if sub.kind != .Overlay && f.out.kind == .Overlay && len(items_of(f.paths[f.i])) == f.depth + 2 {
+			if _, _, is_fact := fact_step(h, items_of(f.paths[f.i])[f.depth + 1]); is_fact {
+				ps: Status
+				sub, ps = overlay_promote_fact_target(h, f.out, key, sub)
+				if ps != .Ok {
+					return NULL, ps
+				}
+			}
+		} else if sub.kind == .Overlay {
+			ov_refs := del_stack_ov_refs(stack[:], sub.p)
+			if !overlay_is_unique(sub, ov_refs) {
+				cloned, cs := cow_clone_overlay(h, sub)
+				if cs != .Ok {
+					return NULL, cs
+				}
+				sub = cloned
+			}
 		}
 		f.key, f.j = key, j
 		below := Del_Frame{out = sub, paths = f.paths[f.i:j], depth = f.depth + 1, keys = make([dynamic]Value, alloc)}
@@ -659,9 +764,9 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 					return NULL, as
 				}
 				defer release(h, an)
-				cur = fact_write(h, cur, .Attribute, text_of(an), true, NULL) or_return
+				cur = fact_write(h, cur, .Attribute, text_of(an), true, NULL, overlay_depth) or_return
 			} else {
-				cur = fact_write(h, cur, kind, "", false, NULL) or_return
+				cur = fact_write(h, cur, kind, "", false, NULL, overlay_depth) or_return
 			}
 		}
 		return cur, .Ok
@@ -670,11 +775,15 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 	case .Null, .Absent:
 		return t, .Ok
 	case .Object:
-		if t.kind == .Overlay && overlay_is_unique(t, overlay_depth) {
-			return overlay_del_members(h, t, keys)
+		if t.kind == .Overlay {
+			out_ov := t
+			if !overlay_is_unique(t, overlay_depth) {
+				out_ov = cow_clone_overlay(h, t) or_return
+			}
+			return overlay_del_members(h, out_ov, keys)
 		}
 		out := t
-		if t.kind == .Node || t.kind == .Overlay {
+		if t.kind == .Node {
 			bs: Status
 			out, bs = built(h, t)
 			release(h, t)
@@ -729,8 +838,12 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 				return NULL, s
 			}
 		}
-		if t.kind == .Overlay && overlay_is_unique(t, overlay_depth) {
-			return overlay_del_elements(h, t, gone)
+		if t.kind == .Overlay {
+			out_ov := t
+			if !overlay_is_unique(t, overlay_depth) {
+				out_ov = cow_clone_overlay(h, t) or_return
+			}
+			return overlay_del_elements(h, out_ov, gone)
 		}
 		out, s := make_array(h, n)
 		for i in 0 ..< n {

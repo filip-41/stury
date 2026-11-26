@@ -751,4 +751,44 @@ review_fixes_regressions :: proc(t: ^testing.T) {
 		defer edit.destroy_commit_result(&res)
 		testing.expect_value(t, string(res.bytes), `{"a": 1}`)
 	}
+
+	// 7. Bug #10: `Options.budget.depth` enforced during `commit_document` / `splice_document` / `walk_fragment`
+	//    for JSON, TOML, XML, and CBOR (`DEFAULT_DEPTH` and explicit small `budget.depth`).
+	{
+		// JSON: explicit depth=3 fails when inserting nested container of depth 3 under depth 1 (`1 + 3 > 3`).
+		jdoc, _ := json.build(transmute([]u8)string(`{"a": 1}`), .Json, {}, alloc)
+		defer tape.destroy_document(&jdoc)
+		jov: json.Overlay
+		_ = json.edit_init(&jov, &jdoc, alloc)
+		defer json.edit_destroy(&jov)
+		_, _ = edit.set_path(&jov, {tape.Name("a")}, edit.val_raw(`[[[1]]]`))
+		_, jres, jerr := json.commit_document(&jov, .Json, {budget = {depth = 3}}, alloc)
+		edit.destroy_commit_result(&jres)
+		jex, is_jex := jerr.(tape.Exceeded)
+		testing.expectf(t, is_jex && jex.kind == .Depth, "JSON splice_document depth exceed expected, got %v", jerr)
+
+		// TOML: explicit depth=3 fails under `commit_document`.
+		tdoc, _ := toml.build(transmute([]u8)string("a = 1\n"), .Toml_1_0, {}, alloc)
+		defer tape.destroy_document(&tdoc)
+		tov: toml.Overlay
+		_ = toml.edit_init(&tov, &tdoc, alloc)
+		defer toml.edit_destroy(&tov)
+		_, _ = edit.set_path(&tov, {tape.Name("a")}, edit.val_raw(`{x={y={z=1}}}`))
+		_, tres, terr := toml.commit_document(&tov, .Toml_1_0, {budget = {depth = 3}}, alloc)
+		edit.destroy_commit_result(&tres)
+		tex, is_tex := terr.(tape.Exceeded)
+		testing.expectf(t, is_tex && tex.kind == .Depth, "TOML splice_document depth exceed expected, got %v", terr)
+
+		// XML: explicit depth=4 fails under `commit_document`.
+		xdoc, _ := xml.build(transmute([]u8)string(`<r><a>1</a></r>`), .Xml, {}, alloc)
+		defer tape.destroy_document(&xdoc)
+		xov: xml.Overlay
+		_ = xml.edit_init(&xov, &xdoc, alloc)
+		defer xml.edit_destroy(&xov)
+		_, _ = edit.set_path(&xov, {tape.Name("r"), tape.Name("a")}, edit.val_raw(`<b><c><d>1</d></c></b>`))
+		_, xres, xerr := xml.commit_document(&xov, {budget = {depth = 4}}, alloc)
+		edit.destroy_commit_result(&xres)
+		xex, is_xex := xerr.(tape.Exceeded)
+		testing.expectf(t, is_xex && xex.kind == .Depth, "XML splice_document depth exceed expected, got %v", xerr)
+	}
 }

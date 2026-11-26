@@ -143,6 +143,7 @@ splice_document :: proc(
 	can_incremental := walker != nil && .Held not_in base.flags && len(res.splices) > 0 && (opts.target == nil || opts.target == base.format)
 	if can_incremental {
 		prev_end := tape.Node_Index(0)
+		prev_src_hi := u64(0)
 		for sp in res.splices {
 			if sp.full_rewalk || !sp.subtree_only || sp.base_node == tape.NO_NODE || int(sp.base_node) >= len(base.nodes) {
 				can_incremental = false
@@ -152,13 +153,14 @@ splice_document :: proc(
 				can_incremental = false
 				break
 			}
-			if sp.base_node < prev_end {
+			if sp.base_node < prev_end || sp.src_lo < prev_src_hi {
 				can_incremental = false
 				break
 			}
 			bn := base.nodes[sp.base_node]
 			sub_n := tape.Node_Index(bn.n) if bn.kind >= .Array else 1
 			prev_end = sp.base_node + sub_n
+			prev_src_hi = sp.src_hi
 		}
 	}
 
@@ -166,7 +168,15 @@ splice_document :: proc(
 		return fallback_full_build(new_src, opts, full_build, full_data, allocator)
 	}
 
+	eff_budget := opts.budget
+	eff_max_depth := eff_budget.depth if eff_budget.depth > 0 else u32(tape.DEFAULT_DEPTH)
 	n_splices := len(res.splices)
+	base_depths := make([]u32, n_splices, allocator)
+	defer delete(base_depths, allocator)
+	if derr := compute_splice_base_depths(base, res.splices, base_depths, eff_max_depth, allocator); derr != nil {
+		return {}, derr
+	}
+
 	frags := make([]Fragment_Tape, n_splices, allocator)
 	defer {
 		for &ft in frags {
@@ -177,16 +187,33 @@ splice_document :: proc(
 
 	for sp, i in res.splices {
 		ctx := Fragment_Context {
-			base      = base,
-			base_node = sp.base_node,
+			base       = base,
+			base_node  = sp.base_node,
+			base_depth = base_depths[i],
+			budget     = eff_budget,
 		}
 		ft, ferr := walker(walker_data, new_src, Byte_Range{sp.dst_lo, sp.dst_hi}, ctx, allocator)
 		if ferr != nil {
+			#partial switch e in ferr {
+			case tape.Exceeded, runtime.Allocator_Error:
+				return {}, convert_tape_error(ferr)
+			}
 			return fallback_full_build(new_src, opts, full_build, full_data, allocator)
 		}
 		if full, has_full := ft.full_doc.?; has_full {
 			ft.full_doc = nil
 			destroy_fragment_tape(&ft)
+			if opts.budget.depth > 0 {
+				fd, merr := frag_max_depth(full.nodes, allocator)
+				if merr != nil {
+					tape.destroy_document(&full)
+					return {}, merr
+				}
+				if fd > opts.budget.depth {
+					tape.destroy_document(&full)
+					return {}, tape.Exceeded{kind = .Depth, at = sp.dst_lo}
+				}
+			}
 			out_doc := full
 			if opts.own_src {
 				out_doc.flags += {.Owns_Src}
@@ -197,6 +224,15 @@ splice_document :: proc(
 			destroy_fragment_tape(&ft)
 			return fallback_full_build(new_src, opts, full_build, full_data, allocator)
 		}
+		fd, merr := frag_max_depth(ft.nodes, allocator)
+		if merr != nil {
+			destroy_fragment_tape(&ft)
+			return {}, merr
+		}
+		if base_depths[i] + fd > eff_max_depth {
+			destroy_fragment_tape(&ft)
+			return {}, tape.Exceeded{kind = .Depth, at = sp.dst_lo}
+		}
 		frags[i] = ft
 	}
 
@@ -205,6 +241,66 @@ splice_document :: proc(
 		return fallback_full_build(new_src, opts, full_build, full_data, allocator)
 	}
 	return spliced, serr
+}
+
+@(private = "file")
+compute_splice_base_depths :: proc(
+	base: ^tape.Document,
+	splices: []Splice_Record,
+	depths: []u32,
+	max_depth: u32,
+	allocator: runtime.Allocator,
+) -> Error {
+	ends := make([dynamic]tape.Node_Index, 0, 32, allocator) or_return
+	defer delete(ends)
+	nodes := base.nodes
+	cur := tape.Node_Index(0)
+	for sp, i in splices {
+		target := sp.base_node
+		for cur < target {
+			for len(ends) > 0 && cur >= ends[len(ends) - 1] {
+				pop(&ends)
+			}
+			cn := nodes[cur]
+			if cn.kind >= .Array && cn.n > 1 && cur + tape.Node_Index(cn.n) > target {
+				append(&ends, cur + tape.Node_Index(cn.n)) or_return
+				cur += 1
+			} else {
+				cur += tape.Node_Index(cn.n) if cn.kind >= .Array else 1
+			}
+		}
+		for len(ends) > 0 && cur >= ends[len(ends) - 1] {
+			pop(&ends)
+		}
+		d := u32(len(ends))
+		if d > max_depth {
+			return tape.Exceeded{kind = .Depth, at = nodes[target].lo}
+		}
+		depths[i] = d
+	}
+	return nil
+}
+
+@(private = "file")
+frag_max_depth :: proc(nodes: []tape.Node, allocator: runtime.Allocator) -> (max_d: u32, err: runtime.Allocator_Error) {
+	ends := make([dynamic]tape.Node_Index, 0, 16, allocator) or_return
+	defer delete(ends)
+	for n, i in nodes {
+		idx := tape.Node_Index(i)
+		for len(ends) > 0 && idx >= ends[len(ends) - 1] {
+			pop(&ends)
+		}
+		if n.kind >= .Array {
+			d := u32(len(ends) + 1)
+			if d > max_d {
+				max_d = d
+			}
+			if n.n > 1 {
+				append(&ends, idx + tape.Node_Index(n.n)) or_return
+			}
+		}
+	}
+	return max_d, nil
 }
 
 @(private = "file")
@@ -224,6 +320,17 @@ fallback_full_build :: proc(
 	built, berr := full_build(full_data, new_src, allocator)
 	if berr != nil {
 		return {}, convert_tape_error(berr)
+	}
+	if opts.budget.depth > 0 {
+		fd, merr := frag_max_depth(built.nodes, allocator)
+		if merr != nil {
+			tape.destroy_document(&built)
+			return {}, merr
+		}
+		if fd > opts.budget.depth {
+			tape.destroy_document(&built)
+			return {}, tape.Exceeded{kind = .Depth, at = tape.NO_BYTE}
+		}
 	}
 	if opts.own_src {
 		built.flags += {.Owns_Src}
@@ -300,7 +407,7 @@ assemble_spliced_document :: proc(
 		if prefix_len > 0 {
 			copy(new_nodes[new_pos : new_pos + prefix_len], old_nodes[old_pos:start])
 			if running_byte_delta != 0 {
-				shift_node_offsets(new_nodes[new_pos : new_pos + prefix_len], running_byte_delta)
+				shift_node_offsets(new_nodes[new_pos : new_pos + prefix_len], metas[:i], running_byte_delta)
 			}
 			new_pos += prefix_len
 		}
@@ -326,7 +433,7 @@ assemble_spliced_document :: proc(
 	if tail_len > 0 {
 		copy(new_nodes[new_pos : new_pos + tail_len], old_nodes[old_pos:])
 		if running_byte_delta != 0 {
-			shift_node_offsets(new_nodes[new_pos : new_pos + tail_len], running_byte_delta)
+			shift_node_offsets(new_nodes[new_pos : new_pos + tail_len], metas, running_byte_delta)
 		}
 		new_pos += tail_len
 	}
@@ -335,7 +442,7 @@ assemble_spliced_document :: proc(
 		patch_ancestor_counts(new_nodes, metas)
 	}
 
-	new_facts, present, ferr := assemble_spliced_facts(base.facts, frags, metas, allocator)
+	new_facts, present, facts_spliced, ferr := assemble_spliced_facts(base.facts, frags, metas, allocator)
 	if ferr != nil {
 		return {}, false, ferr
 	}
@@ -359,7 +466,7 @@ assemble_spliced_document :: proc(
 	if base.ext != nil {
 		eerr: runtime.Allocator_Error
 		ext_ok: bool
-		new_ext, ext_ok, eerr = clone_shifted_ext(base.ext, metas, base.facts, new_facts, allocator)
+		new_ext, ext_ok, eerr = clone_shifted_ext(base.ext, metas, facts_spliced, allocator)
 		if eerr != nil {
 			return {}, false, eerr
 		}
@@ -398,11 +505,35 @@ any_nonzero_node_delta :: proc "contextless" (metas: []Splice_Meta) -> bool {
 	return false
 }
 
+// Shifts `old_lo` ONLY by splices whose `src_hi <= old_lo` so DTD `<!ATTLIST>` defaults and `In_Place` entity
+// nodes sitting before a splice never shift or underflow `u64`.
 @(private = "file")
-shift_node_offsets :: proc "contextless" (nodes: []tape.Node, delta: i64) #no_bounds_check {
-	d := u64(delta)
+shift_byte_offset :: #force_inline proc "contextless" (old_lo: u64, prev_metas: []Splice_Meta) -> u64 #no_bounds_check {
+	delta := i64(0)
+	for m in prev_metas {
+		if m.src_hi <= old_lo {
+			delta += m.byte_delta
+		} else {
+			break
+		}
+	}
+	return u64(i64(old_lo) + delta)
+}
+
+@(private = "file")
+shift_node_offsets :: proc "contextless" (nodes: []tape.Node, prev_metas: []Splice_Meta, total_delta: i64) #no_bounds_check {
+	if len(prev_metas) == 0 {
+		return
+	}
+	last_hi := prev_metas[len(prev_metas) - 1].src_hi
+	d := u64(total_delta)
 	for i := 0; i < len(nodes); i += 1 {
-		nodes[i].lo += d
+		lo := nodes[i].lo
+		if lo >= last_hi {
+			nodes[i].lo = lo + d
+		} else {
+			nodes[i].lo = shift_byte_offset(lo, prev_metas)
+		}
 	}
 }
 
@@ -448,6 +579,7 @@ assemble_spliced_facts :: proc(
 ) -> (
 	out: []tape.Fact,
 	present: tape.Facts,
+	facts_spliced: bool,
 	err: runtime.Allocator_Error,
 ) {
 	est := len(old_facts)
@@ -455,7 +587,7 @@ assemble_spliced_facts :: proc(
 		est += len(ft.facts)
 	}
 	if est == 0 {
-		return nil, {}, nil
+		return nil, {}, false, nil
 	}
 	buf := make([dynamic]tape.Fact, 0, est, allocator)
 	defer delete(buf)
@@ -467,27 +599,31 @@ assemble_spliced_facts :: proc(
 	running_byte_delta := i64(0)
 
 	for m, si in metas {
+		prev_hi := metas[si - 1].src_hi if si > 0 else u64(0)
 		for fi < len(old_facts) && old_facts[fi].node < m.old_start {
 			f := old_facts[fi]
 			f.node = tape.Node_Index(i64(f.node) + running_node_delta)
-			f.lo = u64(i64(f.lo) + running_byte_delta)
+			if si > 0 {
+				if f.lo >= prev_hi {
+					f.lo = u64(i64(f.lo) + running_byte_delta)
+				} else {
+					f.lo = shift_byte_offset(f.lo, metas[:si])
+				}
+			}
 			append(&buf, f) or_return
 			present += {f.kind}
 			fi += 1
 		}
-		// Classify facts on `[m.old_start, m.old_end)`:
-		// - facts on inner replaced nodes (`f.node > m.old_start`) are replaced by `frags[si].facts`.
-		// - facts on `m.old_start` strictly inside `[m.src_lo, m.src_hi)` were overwritten (drop them — e.g. deleted CBOR `.Tag`!).
-		// - facts on `m.old_start` strictly BEFORE `m.src_lo` (head comments, XML start-tag attributes) stay BEFORE fragment facts with `running_byte_delta`.
-		// - facts on `m.old_start` AT OR AFTER `m.src_hi` (inline comments after replaced value) stay AFTER fragment facts with `running_byte_delta + m.byte_delta`!
 		clear(&after_buf)
 		for fi < len(old_facts) && old_facts[fi].node < m.old_end {
 			f := old_facts[fi]
 			fi += 1
 			if f.node != m.old_start {
+				facts_spliced = true
 				continue
 			}
 			if f.lo >= m.src_lo && f.lo < m.src_hi {
+				facts_spliced = true
 				continue
 			}
 			dup := false
@@ -498,18 +634,25 @@ assemble_spliced_facts :: proc(
 				}
 			}
 			if dup {
+				facts_spliced = true
 				continue
 			}
 			if f.lo < m.src_lo {
 				f.node = m.new_start
-				f.lo = u64(i64(f.lo) + running_byte_delta)
+				if si > 0 {
+					f.lo = shift_byte_offset(f.lo, metas[:si])
+				}
 				append(&buf, f) or_return
 				present += {f.kind}
 			} else {
 				f.node = m.new_start
-				f.lo = u64(i64(f.lo) + running_byte_delta + m.byte_delta)
+				f.lo = shift_byte_offset(f.lo, metas[:si])
+				f.lo = u64(i64(f.lo) + m.byte_delta)
 				append(&after_buf, f) or_return
 			}
+		}
+		if len(frags[si].facts) > 0 {
+			facts_spliced = true
 		}
 		for ff in frags[si].facts {
 			f := ff
@@ -525,21 +668,28 @@ assemble_spliced_facts :: proc(
 		running_node_delta += m.node_delta
 		running_byte_delta += m.byte_delta
 	}
+	last_hi := metas[len(metas) - 1].src_hi if len(metas) > 0 else u64(0)
 	for fi < len(old_facts) {
 		f := old_facts[fi]
 		f.node = tape.Node_Index(i64(f.node) + running_node_delta)
-		f.lo = u64(i64(f.lo) + running_byte_delta)
+		if len(metas) > 0 {
+			if f.lo >= last_hi {
+				f.lo = u64(i64(f.lo) + running_byte_delta)
+			} else {
+				f.lo = shift_byte_offset(f.lo, metas)
+			}
+		}
 		append(&buf, f) or_return
 		present += {f.kind}
 		fi += 1
 	}
 	if len(buf) == 0 {
-		return nil, present, nil
+		return nil, present, facts_spliced, nil
 	}
 	raw := runtime.mem_alloc_non_zeroed(len(buf) * size_of(tape.Fact), align_of(tape.Fact), allocator) or_return
 	out = ([^]tape.Fact)(raw_data(raw))[:len(buf)]
 	copy(out, buf[:])
-	return out, present, nil
+	return out, present, facts_spliced, nil
 }
 
 @(private = "file")
@@ -600,18 +750,21 @@ assemble_spliced_counts :: proc(
 clone_shifted_ext :: proc(
 	old_ext: ^tape.Doc_Ext,
 	metas: []Splice_Meta,
-	old_facts, new_facts: []tape.Fact,
+	facts_spliced: bool,
 	allocator: runtime.Allocator,
 ) -> (
 	ext: ^tape.Doc_Ext,
 	ok: bool,
 	err: runtime.Allocator_Error,
 ) {
-	// If XML namespace scopes or URIs could have shifted fact indices or been replaced inside a splice,
-	// request transparent full rebuild so `Markup_Ext.uris` / `scopes` stay 100% exact!
+	// If XML namespace scopes or URIs could have shifted fact indices (including equal-count delete+insert!)
+	// or been replaced inside a splice, request full rebuild so `Markup_Ext.uris` / `scopes` stay 100% exact!
 	#partial switch f in old_ext.format {
 	case tape.Markup_Ext:
-		if len(f.uris) > 0 && len(old_facts) != len(new_facts) {
+		if len(f.uris) > 0 && facts_spliced {
+			return nil, false, nil
+		}
+		if .In_Place in f.dtd.flags {
 			return nil, false, nil
 		}
 		for sc in f.scopes {

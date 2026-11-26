@@ -197,3 +197,117 @@ xml_edit_qnames_dtd_attlist_root_foot_multi_insert_and_escapes :: proc(t: ^testi
 		testing.expect_value(t, string(res.bytes), `<root><p><a>1</a><b>2</b></p></root>`)
 	}
 }
+
+@(test)
+xml_edit_dtd_underflow_uris_delete_insert_and_text_reflow :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	alloc := runtime.heap_allocator()
+
+	// 1. DTD `<!ATTLIST>` default attribute + `In_Place` entity before/after shrinking element via `commit_document`:
+	//    must NOT underflow `u64` offsets on nodes/facts sitting BEFORE a shrinking splice!
+	{
+		src := transmute([]u8)string(`<!DOCTYPE root [<!ATTLIST b role CDATA "def"><!ENTITY e "long-expanded">]><root><a id="1">hi</a><b>&e;</b><c>after</c></root>`)
+		doc, err := xml.build(src, .Xml, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: xml.Overlay
+		testing.expect(t, xml.edit_init(&ov, &doc, alloc) == nil)
+		defer xml.edit_destroy(&ov)
+		_, _ = edit.set_path(&ov, {tape.Name("root"), tape.Name("a")}, edit.val_string("x"))
+		_, _ = edit.set_path(&ov, {tape.Name("root"), tape.Name("c")}, edit.val_string("much-longer-after"))
+
+		spliced, res, cerr := xml.commit_document(&ov, {}, alloc)
+		testing.expect(t, cerr == nil)
+		defer tape.destroy_document(&spliced)
+		defer edit.destroy_commit_result(&res)
+
+		fresh, ferr := xml.build(res.bytes, .Xml, {}, alloc)
+		testing.expect(t, ferr == nil)
+		defer tape.destroy_document(&fresh)
+		testing.expect_value(t, len(spliced.nodes), len(fresh.nodes))
+		for i in 0 ..< len(fresh.nodes) {
+			testing.expect_value(t, spliced.nodes[i].lo, fresh.nodes[i].lo)
+		}
+	}
+
+	// 2. Equal-count delete + insert attribute edit on element with `Markup_Ext.uris` (`xmlns:ns="urn:&amp;1"`):
+	//    `xml.namespace(&spliced, ...)` must stay accurate!
+	{
+		src := transmute([]u8)string(`<root xmlns:ns="urn:&amp;1"><ns:a old="drop" keep="yes">hi</ns:a></root>`)
+		doc, err := xml.build(src, .Xml, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: xml.Overlay
+		testing.expect(t, xml.edit_init(&ov, &doc, alloc) == nil)
+		defer xml.edit_destroy(&ov)
+		rn, _ := tape.member(tape.Reader{doc = &doc}, tape.ROOT, "root")
+		an, _ := tape.member(tape.Reader{doc = &doc}, rn, "ns:a")
+		ah, _ := edit.handle_for_base(&ov, an)
+		testing.expect(t, edit.del_fact(&ov, ah, .Attribute, "old") == nil)
+		testing.expect(t, edit.set_fact(&ov, ah, .Attribute, {"x1"}, "id") == nil)
+
+		spliced, res, cerr := xml.commit_document(&ov, {}, alloc)
+		testing.expect(t, cerr == nil)
+		defer tape.destroy_document(&spliced)
+		defer edit.destroy_commit_result(&res)
+
+		srn, _ := tape.member(tape.Reader{doc = &spliced}, tape.ROOT, "root")
+		san, _ := tape.member(tape.Reader{doc = &spliced}, srn, "ns:a")
+		uri, pres := xml.namespace(&spliced, san)
+		testing.expect_value(t, pres, tape.Presence.Found)
+		testing.expect_value(t, uri, "urn:&1")
+	}
+
+	// 3. Delete + insert at index 0 with leading whitespace (`[lead, hi)` merged with `[lo, lo)`) -> no overlap!
+	{
+		src := transmute([]u8)string("<root>\n  <a>1</a>\n  <b>2</b>\n</root>")
+		doc, err := xml.build(src, .Xml, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: xml.Overlay
+		testing.expect(t, xml.edit_init(&ov, &doc, alloc) == nil)
+		defer xml.edit_destroy(&ov)
+		rn, _ := tape.member(tape.Reader{doc = &doc}, tape.ROOT, "root")
+		rh, _ := edit.handle_for_base(&ov, rn)
+		testing.expect(t, edit.del_member(&ov, rh, "a") == nil)
+		_, _ = edit.insert_member(&ov, rh, 0, "c", edit.val_string("3"))
+
+		res, cerr := xml.commit(&ov, {}, alloc)
+		testing.expectf(t, cerr == nil, "XML del+ins at 0 failed: %v", cerr)
+		defer edit.destroy_commit_result(&res)
+		testing.expect(t, strings.contains(string(res.bytes), "<c>3</c>"))
+		testing.expect(t, !strings.contains(string(res.bytes), "<a>1</a>"))
+		chk, berr := xml.build(res.bytes, .Xml, {}, alloc)
+		testing.expect(t, berr == nil)
+		tape.destroy_document(&chk)
+	}
+
+	// 4. XML element with `#text` runs reordered: refuses with `reflow = false`, succeeds and sets `rewritten` with `reflow = true`!
+	{
+		src := transmute([]u8)string(`<r>hello<a>1</a>world<b>2</b></r>`)
+		doc, err := xml.build(src, .Xml, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: xml.Overlay
+		testing.expect(t, xml.edit_init(&ov, &doc, alloc) == nil)
+		defer xml.edit_destroy(&ov)
+		rn, _ := tape.member(tape.Reader{doc = &doc}, tape.ROOT, "r")
+		rh, _ := edit.handle_for_base(&ov, rn)
+		testing.expect(t, edit.reorder(&ov, rh, {1, 0, 3, 2}) == nil)
+
+		res0, cerr0 := xml.commit(&ov, {reflow = false}, alloc)
+		edit.destroy_commit_result(&res0)
+		ref, is_ref := cerr0.(edit.Refusal)
+		testing.expect(t, is_ref && ref.kind == .Layout_Reflow_Needed)
+
+		res1, cerr1 := xml.commit(&ov, {reflow = true}, alloc)
+		testing.expectf(t, cerr1 == nil, "XML reflow reorder failed: %v", cerr1)
+		defer edit.destroy_commit_result(&res1)
+		testing.expect_value(t, string(res1.bytes), `<r><a>1</a>hello<b>2</b>world</r>`)
+		testing.expect(t, len(res1.rewritten) > 0)
+	}
+}

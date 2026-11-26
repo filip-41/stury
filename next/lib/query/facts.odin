@@ -281,6 +281,12 @@ fact_read :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr := "", is_attr 
 			}
 		}
 	}
+	return read_base_node_fact(h, d, at, kind, attr, is_attr)
+}
+
+// Reads a fact directly from base document `d` at node `at` without re-entering `ob.ov.by_base` / `overlay_fact_read`.
+@(private, require_results)
+read_base_node_fact :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, kind: tape.Fact_Kind, attr := "", is_attr := false) -> (res: Value, status: Status) {
 	doc := &d.doc
 	if doc.partial != nil && !doc.partial.facts {
 		h.tainted = true
@@ -330,9 +336,9 @@ fact_read :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr := "", is_attr 
 // Hook signature for Phase 2A (`Overlay`) to back fact writes on values.
 Fact_Writer :: #type proc(data: rawptr, h: ^Heap, v: Value, kind: tape.Fact_Kind, attr: string, is_attr: bool, nv: Value) -> (res: Value, status: Status)
 
-// Validates a fact write (`set_path` / `del_paths` on a fact step) and dispatches to `Heap.write_fact` when set.
+// Validates a fact write (`set_path` / `del_paths` on a fact step) and dispatches to `overlay_write_fact` / `Heap.write_fact`.
 @(require_results)
-fact_write :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr: string, is_attr: bool, nv: Value) -> (res: Value, status: Status) {
+fact_write :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr: string, is_attr: bool, nv: Value, overlay_depth := 0) -> (res: Value, status: Status) {
 	info, ok := fact_info(kind)
 	if !ok {
 		release(h, v)
@@ -363,11 +369,11 @@ fact_write :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr: string, is_at
 			return NULL, fail_fact_msg(h, "a tag, an anchor, an alias or a style is a string or null, and a tag may be a number")
 		}
 	}
+	if v.kind == .Overlay {
+		return overlay_write_fact(v.p, h, v, kind, attr, is_attr, nv, overlay_depth)
+	}
 	if h.write_fact != nil {
 		return h.write_fact(h.write_fact_data, h, v, kind, attr, is_attr, nv)
-	}
-	if v.kind == .Overlay {
-		return overlay_write_fact(v.p, h, v, kind, attr, is_attr, nv)
 	}
 	release(h, v)
 	release(h, nv)

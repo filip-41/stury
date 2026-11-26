@@ -112,7 +112,8 @@ markup_options :: proc(m: ^Machine, doc: ^tape.Document) -> (opts: css.Options, 
 @(private)
 Css_Frame :: struct {
 	using frame: Frame,
-	doc:         query.Value, // held (keeps Doc_Block alive)
+	doc:         query.Value, // held (keeps Doc_Block or Overlay_Block alive)
+	mat:         query.Value, // held (materialized Doc_Block when querying an edited XML Overlay)
 	path:        query.Value, // held (parent path when tracking)
 	found:       css.Found,
 	i:           int,
@@ -130,29 +131,41 @@ start_css :: proc(m: ^Machine, r: ^Regs, sel_val: query.Value) {
 	d: ^query.Doc_Block
 	start_node: tape.Node_Index
 	markup := false
+	mat_val := query.ABSENT
 	if r.input.kind == .Node {
 		d = (^query.Doc_Block)(r.input.p)
 		start_node = tape.Node_Index(r.input.n)
 		opts, markup = markup_options(m, &d.doc)
 	} else if r.input.kind == .Overlay {
-		if bd, bn, ok := query.overlay_doc_origin(r.input); ok {
+		mv, bd, bn, has_mat, oms := query.overlay_css_origin(h, r.input)
+		if oms != .Ok {
+			finish(m, r, .Fail)
+			return
+		}
+		if has_mat {
+			mat_val = mv
+		}
+		if bd != nil && bn != tape.NO_NODE {
 			d = bd
 			start_node = bn
 			opts, markup = markup_options(m, &d.doc)
 		}
 	}
 	if !markup {
+		query.release(h, mat_val)
 		_ = raise_typed(m, r.input, " cannot be selected from, as it is not an element of an xml or html input")
 		finish(m, r, .Fail)
 		return
 	}
 	sel, ss := compiled_selector(m, sel_val)
 	if ss != .Ok {
+		query.release(h, mat_val)
 		finish(m, r, .Fail)
 		return
 	}
 	found, err := css.select(&d.doc, start_node, sel, opts, query.heap_allocator(h))
 	if err != nil {
+		query.release(h, mat_val)
 		_ = query.fail(h, .Memory, .None)
 		finish(m, r, .Fail)
 		return
@@ -160,16 +173,19 @@ start_css :: proc(m: ^Machine, r: ^Regs, sel_val: query.Value) {
 	if found.partial {
 		h.tainted = true
 		css.destroy_found(&found)
+		query.release(h, mat_val)
 		finish(m, r, .Go)
 		return
 	}
 	if len(found.matches) == 0 {
 		css.destroy_found(&found)
+		query.release(h, mat_val)
 		finish(m, r, .Go)
 		return
 	}
 	if r.track && !is_path(r.path) {
 		css.destroy_found(&found)
+		query.release(h, mat_val)
 		_ = raise_taken(h, path_error(m, "Invalid path expression with result ", r.path))
 		finish(m, r, .Fail)
 		return
@@ -183,12 +199,13 @@ start_css :: proc(m: ^Machine, r: ^Regs, sel_val: query.Value) {
 	f, ps := push(m, Css_Frame, .Css, k)
 	if ps != .Ok {
 		css.destroy_found(&found)
+		query.release(h, mat_val)
 		query.release(h, doc)
 		query.release(h, parent_path)
 		r.sig, r.mode = .Fail, .Ret
 		return
 	}
-	f.track, f.doc, f.path, f.found, f.i = track, doc, parent_path, found, 0
+	f.track, f.doc, f.mat, f.path, f.found, f.i = track, doc, mat_val, parent_path, found, 0
 	r.sig = .Go
 	resume_css(m, r, f)
 }
@@ -204,8 +221,11 @@ resume_css :: proc(m: ^Machine, r: ^Regs, f: ^Css_Frame) {
 	match := f.found.matches[f.i]
 	f.i += 1
 	d: ^query.Doc_Block
-	if f.doc.kind == .Overlay {
-		d, _, _ = query.overlay_doc_origin(f.doc)
+	if f.mat.kind == .Node {
+		d = (^query.Doc_Block)(f.mat.p)
+	} else if f.doc.kind == .Overlay {
+		_, bd, _, _, _ := query.overlay_css_origin(h, f.doc)
+		d = bd
 	} else {
 		d = (^query.Doc_Block)(f.doc.p)
 	}
@@ -233,6 +253,7 @@ resume_css :: proc(m: ^Machine, r: ^Regs, f: ^Css_Frame) {
 @(private)
 drop_css :: proc(m: ^Machine, f: ^Css_Frame) {
 	css.destroy_found(&f.found)
+	query.release(m.h, f.mat)
 	query.release(m.h, f.doc)
 	query.release(m.h, f.path)
 }

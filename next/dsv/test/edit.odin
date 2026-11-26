@@ -212,4 +212,24 @@ dsv_edit_infer_double_eof_unknown_col_comments_and_empty_cell :: proc(t: ^testin
 		defer tape.destroy_document(&fresh)
 		testing.expect_value(t, len(spliced.nodes), len(fresh.nodes))
 	}
+
+	// 4. Multi-cell `commit_document` splice (zero leak under Tracking_Allocator + exact node/byte parity).
+	{
+		src := transmute([]u8)string("a,b,c\n1,2,3\n4,5,6\n")
+		doc, err := dsv.build(src, .Csv, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: dsv.Overlay
+		testing.expect(t, dsv.edit_init(&ov, &doc, alloc) == nil)
+		defer dsv.edit_destroy(&ov)
+		_, _ = edit.set_path(&ov, {tape.Index(0), tape.Name("a")}, edit.val_string("ten"))
+		_, _ = edit.set_path(&ov, {tape.Index(1), tape.Name("c")}, edit.val_string("sixty"))
+
+		spliced, res, cerr := dsv.commit_document(&ov, .Csv, {}, alloc)
+		testing.expect(t, cerr == nil)
+		defer tape.destroy_document(&spliced)
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, string(res.bytes), "a,b,c\nten,2,3\n4,5,sixty\n")
+	}
 }

@@ -259,3 +259,145 @@ json_edit_dup_keys_multi_insert_comments_and_target_override :: proc(t: ^testing
 		testing.expect(t, .Comment in res.dropped)
 	}
 }
+
+@(test)
+json_edit_foot_comment_replace_dup_reflow_and_splice_doc :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	alloc := runtime.heap_allocator()
+
+	// 1. JSONC container replace (`val_object` and `val_raw`) + `.Comment_Foot` emits valid non-overlapping JSONC.
+	{
+		src := transmute([]u8)string("{\n  \"a\": {\n    \"old\": 1\n    // old foot\n  }\n}\n")
+		doc, err := json.build(src, .Jsonc, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: json.Overlay
+		testing.expect(t, json.edit_init(&ov, &doc, alloc) == nil)
+		defer json.edit_destroy(&ov)
+		vy, _ := edit.new_node(&ov, edit.val_int(2))
+		ents := [1]edit.Object_Entry{{key = "y", value = vy}}
+		ha, _ := edit.set_path(&ov, {tape.Name("a")}, edit.val_object(ents[:]))
+		testing.expect(t, edit.set_fact(&ov, ha, .Comment_Foot, {"new foot"}, padded = true) == nil)
+
+		spliced, res, cerr := json.commit_document(&ov, .Jsonc, {}, alloc)
+		testing.expectf(t, cerr == nil, "val_object + Comment_Foot failed: %v", cerr)
+		defer tape.destroy_document(&spliced)
+		defer edit.destroy_commit_result(&res)
+		got := string(res.bytes)
+		testing.expect(t, strings.contains(got, "\"y\": 2"))
+		testing.expect(t, strings.contains(got, "// new foot"))
+		testing.expect(t, !strings.contains(got, "// old foot"))
+
+		// Also with `.Raw` replacement + `.Comment_Foot`.
+		ov2: json.Overlay
+		testing.expect(t, json.edit_init(&ov2, &doc, alloc) == nil)
+		defer json.edit_destroy(&ov2)
+		ha2, _ := edit.set_path(&ov2, {tape.Name("a")}, edit.val_raw("{\n    \"z\": 3\n  }"))
+		testing.expect(t, edit.set_fact(&ov2, ha2, .Comment_Foot, {"raw foot"}, padded = true) == nil)
+		res2, cerr2 := json.commit(&ov2, .Jsonc, {}, alloc)
+		testing.expectf(t, cerr2 == nil, "val_raw + Comment_Foot failed: %v", cerr2)
+		defer edit.destroy_commit_result(&res2)
+		testing.expect(t, strings.contains(string(res2.bytes), "// raw foot"))
+		chk, ck_err := json.build(res2.bytes, .Jsonc, {}, alloc)
+		testing.expect(t, ck_err == nil)
+		tape.destroy_document(&chk)
+	}
+
+	// 2. JSONC duplicate-key reflow + `.Comment_Foot` does NOT produce overlapping splices.
+	{
+		src := transmute([]u8)string("{\n  \"x\": 1,\n  \"x\": 2\n  // old foot\n}\n")
+		doc, err := json.build(src, .Jsonc, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: json.Overlay
+		testing.expect(t, json.edit_init(&ov, &doc, alloc) == nil)
+		defer json.edit_destroy(&ov)
+		_, _ = edit.set_path(&ov, {tape.Name("x")}, edit.val_int(99))
+		root_h, _ := edit.ensure_root(&ov)
+		testing.expect(t, edit.set_fact(&ov, root_h, .Comment_Foot, {"new foot"}, padded = true) == nil)
+
+		res, cerr := json.commit(&ov, .Jsonc, {reflow = true}, alloc)
+		testing.expectf(t, cerr == nil, "dup-key + Comment_Foot reflow failed: %v", cerr)
+		defer edit.destroy_commit_result(&res)
+		got := string(res.bytes)
+		testing.expect(t, strings.contains(got, "\"x\": 99"))
+		testing.expect(t, strings.contains(got, "// new foot"))
+		testing.expect(t, len(res.rewritten) > 0)
+		chk, ck_err := json.build(res.bytes, .Jsonc, {}, alloc)
+		testing.expect(t, ck_err == nil)
+		tape.destroy_document(&chk)
+	}
+
+	// 3. Multi-splice incremental `commit_document` (zero leak, non-fallback incremental splice parity).
+	{
+		src := transmute([]u8)string(`{"a": 1, "b": "hi", "c": [1, 2]}`)
+		doc, err := json.build(src, .Json, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: json.Overlay
+		testing.expect(t, json.edit_init(&ov, &doc, alloc) == nil)
+		defer json.edit_destroy(&ov)
+		_, _ = edit.set_path(&ov, {tape.Name("a")}, edit.val_int(100))
+		_, _ = edit.set_path(&ov, {tape.Name("b")}, edit.val_string("world"))
+
+		spliced, res, cerr := json.commit_document(&ov, .Json, {}, alloc)
+		testing.expect(t, cerr == nil)
+		defer tape.destroy_document(&spliced)
+		defer edit.destroy_commit_result(&res)
+		fresh, ferr := json.build(res.bytes, .Json, {}, alloc)
+		testing.expect(t, ferr == nil)
+		defer tape.destroy_document(&fresh)
+		testing.expect_value(t, len(spliced.nodes), len(fresh.nodes))
+		testing.expect_value(t, string(res.bytes), `{"a": 100, "b": "world", "c": [1, 2]}`)
+	}
+
+	// 4. JSONC reorder fallback to `emit_bracket_reflow` MUST NOT duplicate head/inline `.Comment` splices.
+	{
+		src := transmute([]u8)string("{\n  // old head\n  \"a\": {} // old inline\n}\n")
+		doc, err := json.build(src, .Jsonc, {}, alloc)
+		testing.expect(t, err == nil)
+		defer tape.destroy_document(&doc)
+
+		ov: json.Overlay
+		testing.expect(t, json.edit_init(&ov, &doc, alloc) == nil)
+		defer json.edit_destroy(&ov)
+		an, ap := tape.member(tape.Reader{doc = &doc}, tape.ROOT, "a")
+		testing.expect_value(t, ap, tape.Presence.Found)
+		ha, herr := edit.handle_for_base(&ov, an)
+		testing.expect(t, herr == nil)
+		testing.expect(t, edit.set_fact(&ov, ha, .Comment, {"new head"}, padded = true) == nil)
+		testing.expect(t, edit.set_fact(&ov, ha, .Comment_Inline, {"new inline"}, padded = true) == nil)
+		testing.expect(t, edit.set_fact(&ov, ha, .Comment_Foot, {"foot note"}, padded = true) == nil)
+		_, _ = edit.set_member(&ov, ha, "x", edit.val_int(1))
+		_, _ = edit.set_member(&ov, ha, "y", edit.val_int(2))
+		testing.expect(t, edit.reorder(&ov, ha, {1, 0}) == nil)
+
+		res, cerr := json.commit(&ov, .Jsonc, {reflow = true}, alloc)
+		testing.expectf(t, cerr == nil, "reorder reflow with comments failed: %v", cerr)
+		defer edit.destroy_commit_result(&res)
+		got := string(res.bytes)
+		testing.expect_value(t, strings.count(got, "// new head"), 1)
+		testing.expect_value(t, strings.count(got, "// new inline"), 1)
+		testing.expect_value(t, strings.count(got, "// foot note"), 1)
+		testing.expect(t, strings.contains(got, "\"y\":2"))
+		testing.expect(t, strings.contains(got, "\"x\":1"))
+		chk, ck_err := json.build(res.bytes, .Jsonc, {}, alloc)
+		testing.expect(t, ck_err == nil)
+		defer tape.destroy_document(&chk)
+		ca, pa := tape.member(tape.Reader{doc = &chk}, tape.ROOT, "a")
+		testing.expect_value(t, pa, tape.Presence.Found)
+		c, cp, cerr2 := tape.children(tape.Reader{doc = &chk}, ca, alloc)
+		testing.expect(t, cerr2 == nil && cp == .Found)
+		defer tape.destroy_children(&c)
+		k0, v0, p0 := tape.next_child(tape.Reader{doc = &chk}, &c)
+		k1, v1, p1 := tape.next_child(tape.Reader{doc = &chk}, &c)
+		testing.expect(t, p0 == .Found && p1 == .Found)
+		testing.expect_value(t, string(tape.span_bytes(&chk, chk.nodes[k0].lo, chk.nodes[k0].n)), "y")
+		testing.expect_value(t, string(tape.span_bytes(&chk, chk.nodes[v0].lo, chk.nodes[v0].n)), "2")
+		testing.expect_value(t, string(tape.span_bytes(&chk, chk.nodes[k1].lo, chk.nodes[k1].n)), "x")
+		testing.expect_value(t, string(tape.span_bytes(&chk, chk.nodes[v1].lo, chk.nodes[v1].n)), "1")
+	}
+}

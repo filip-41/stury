@@ -3,7 +3,6 @@ package edit
 import "base:runtime"
 import "core:bytes"
 import "core:container/handle_map"
-import "core:container/xar"
 import "core:slice"
 import "core:unicode/utf8"
 import "stury:lib/core/tape"
@@ -62,118 +61,117 @@ commit_section :: proc(
 	res: Commit_Result,
 	err: Error,
 ) {
-	fast, target, fast_res, gerr := commit_guard(ov, spec.target, opts, true, spec.validate, spec.data, allocator)
-	if gerr != nil {
-		return {}, gerr
-	}
-	if fast {
-		return fast_res, nil
-	}
-	doc := ov.base
-	// Group 1 check: root must remain an object.
-	if ov.root != NO_HANDLE && node_kind(ov, ov.root) != .Object {
-		return {}, refuse(.Root_Shape, "TOML document root must be a table (object)", tape.ROOT)
-	}
-
-	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 4096}
-	defer runtime.arena_destroy(&arena)
-	scratch := runtime.arena_allocator(&arena)
-
 	cx := Section_Cx {
-		ov        = ov,
-		doc       = doc,
-		src       = doc.src,
-		spec      = spec,
-		opts      = opts,
-		allocator = scratch,
+		ov   = ov,
+		doc  = ov.base if ov != nil else nil,
+		src  = ov.base.src if ov != nil && ov.base != nil else nil,
+		spec = spec,
+		opts = opts,
 	}
-	cx.splices = make([dynamic]Splice, 0, max(8, xar.len(ov.nodes.items)), scratch)
+	tc := Text_Composer {
+		target        = spec.target,
+		extra_clean   = true,
+		req_root      = .Object,
+		root_msg      = "TOML document root must be a table (object)",
+		validate      = spec.validate,
+		validate_data = spec.data,
+		fast_emit     = section_fast_emit,
+		struct_emit   = section_struct_emit,
+		frag_check    = section_frag_check,
+		user          = &cx,
+	}
+	return run_text_commit(ov, &tc, opts, allocator)
+}
 
-	if !ov.has_structural {
-		it := handle_map.dynamic_iterator_make(&ov.nodes)
-		for n in dynamic_iter_next(&it) {
-			if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
-				if n.val.kind == .Null || n.val.kind == .None {
-					return {}, refuse(.Unspellable_Value, "TOML has no null value", n.base)
-				}
-				if n.val.kind == .Raw {
-					lo, hi, ok := node_byte_span(doc, n.base)
-					if !ok {
-						return {}, refuse(.Bad_Handle, "cannot locate base value span", n.base)
-					}
-					append(&cx.splices, Splice {
-						lo           = lo,
-						hi           = hi,
-						text         = transmute([]u8)n.val.text,
-						seq          = len(cx.splices),
-						base_node    = n.base,
-						subtree_only = true,
-					}) or_return
-				} else {
-					emit_section_replace(&cx, n.handle, n) or_return
-				}
+@(private = "file")
+section_fast_emit :: proc(
+	user: rawptr,
+	ov: ^Overlay,
+	doc: ^tape.Document,
+	splices: ^[dynamic]Splice,
+	scratch: runtime.Allocator,
+) -> (ok: bool, err: Error) {
+	cx := (^Section_Cx)(user)
+	cx.allocator = scratch
+	cx.splices = splices
+	it := handle_map.dynamic_iterator_make(&ov.nodes)
+	for n in dynamic_iter_next(&it) {
+		if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
+			if n.val.kind == .Null || n.val.kind == .None {
+				return false, refuse(.Unspellable_Value, "TOML has no null value", n.base)
 			}
-		}
-	} else {
-		if ov.unlinked_parents {
-			ensure_linked(ov) or_return
-		}
-		cx.eol = detect_eol(doc.src)
-		cx.sections = make([dynamic]Toml_Section, 0, 8, scratch)
-		scan_toml_sections(&cx) or_return
-		if ov.root != NO_HANDLE {
-			if err = compose_section_walk(&cx, ov.root); err != nil {
-				return {}, err
+			if n.val.kind == .Raw {
+				lo, hi, lok := node_byte_span(doc, n.base)
+				if !lok {
+					return false, refuse(.Bad_Handle, "cannot locate base value span", n.base)
+				}
+				append(cx.splices, Splice {
+					lo           = lo,
+					hi           = hi,
+					text         = transmute([]u8)n.val.text,
+					seq          = len(cx.splices),
+					base_node    = n.base,
+					subtree_only = true,
+				}) or_return
+			} else {
+				emit_section_replace(cx, n.handle, n) or_return
 			}
 		}
 	}
+	return true, nil
+}
 
-	out, recs, rew, serr := apply_splices(doc.src, cx.splices[:], allocator)
-	if serr != nil {
-		return {}, serr
+@(private = "file")
+section_struct_emit :: proc(
+	user: rawptr,
+	ov: ^Overlay,
+	doc: ^tape.Document,
+	eol: string,
+	splices: ^[dynamic]Splice,
+	dropped: ^tape.Facts,
+	scratch: runtime.Allocator,
+) -> Error {
+	_ = doc
+	cx := (^Section_Cx)(user)
+	cx.allocator = scratch
+	cx.splices = splices
+	cx.eol = eol
+	cx.sections = make([dynamic]Toml_Section, 0, 8, scratch)
+	scan_toml_sections(cx) or_return
+	if ov.root != NO_HANDLE {
+		compose_section_walk(cx, ov.root) or_return
 	}
-	if spec.validate != nil {
-		need_full := target != doc.format || len(recs) == 0
-		if !need_full {
-			chk: [256]u8
-			chk[0], chk[1], chk[2], chk[3] = 'v', ' ', '=', ' '
-			for rec in recs {
-				if !rec.subtree_only || rec.full_rewalk {
-					need_full = true
-					break
-				}
-				frag := out[rec.dst_lo:rec.dst_hi]
-				if is_simple_toml_scalar(frag) {
-					continue
-				}
-				if len(frag) > len(chk) - 4 ||
-					bytes.index_byte(frag, '#') >= 0 ||
-					bytes.index_byte(frag, '\n') >= 0 ||
-					bytes.index_byte(frag, '\r') >= 0 ||
-					bytes.index_byte(frag, '[') >= 0 ||
-					bytes.index_byte(frag, '{') >= 0 {
-					need_full = true
-					break
-				}
-				copy(chk[4:], frag)
-				if verr := spec.validate(spec.data, chk[:4 + len(frag)], scratch); verr != nil {
-					return fail_commit_validation(out, recs, rew, verr, allocator)
-				}
-			}
+	dropped^ = cx.dropped
+	return nil
+}
+
+@(private = "file")
+section_frag_check :: proc(user: rawptr, out: []u8, recs: []Splice_Record, scratch: runtime.Allocator) -> (bool, Error) {
+	cx := (^Section_Cx)(user)
+	chk: [256]u8
+	chk[0], chk[1], chk[2], chk[3] = 'v', ' ', '=', ' '
+	for rec in recs {
+		if !rec.subtree_only || rec.full_rewalk {
+			return true, nil
 		}
-		if need_full {
-			if verr := spec.validate(spec.data, out, allocator); verr != nil {
-				return fail_commit_validation(out, recs, rew, verr, allocator)
-			}
+		frag := out[rec.dst_lo:rec.dst_hi]
+		if is_simple_toml_scalar(frag) {
+			continue
+		}
+		if len(frag) > len(chk) - 4 ||
+			bytes.index_byte(frag, '#') >= 0 ||
+			bytes.index_byte(frag, '\n') >= 0 ||
+			bytes.index_byte(frag, '\r') >= 0 ||
+			bytes.index_byte(frag, '[') >= 0 ||
+			bytes.index_byte(frag, '{') >= 0 {
+			return true, nil
+		}
+		copy(chk[4:], frag)
+		if verr := cx.spec.validate(cx.spec.data, chk[:4 + len(frag)], scratch); verr != nil {
+			return false, convert_tape_error(verr)
 		}
 	}
-	return Commit_Result {
-		bytes     = out,
-		dropped   = cx.dropped,
-		rewritten = rew,
-		splices   = recs,
-		allocator = allocator,
-	}, nil
+	return false, nil
 }
 
 @(private = "file")
@@ -185,7 +183,7 @@ Section_Cx :: struct {
 	opts:      Options,
 	eol:       string,
 	sections:  [dynamic]Toml_Section,
-	splices:   [dynamic]Splice,
+	splices:   ^[dynamic]Splice,
 	dropped:   tape.Facts,
 	reflowed:  bool,
 	allocator: runtime.Allocator,
@@ -453,14 +451,36 @@ toml_comment_valid :: proc "contextless" (s: string) -> bool {
 	return true
 }
 
+// Appends formatted TOML `#` comment line(s) into `out`, enforcing the Group 1 control-byte constraint.
 @(private = "file")
-toml_style_of :: proc "contextless" (doc: ^tape.Document, node: tape.Node_Index) -> string {
-	if doc.format != nil && doc.format.fact_name != nil {
-		if name, ok := doc.format.fact_name(doc, node, .Style); ok {
-			return name
+append_toml_comments :: proc(cx: ^Section_Cx, values: []string, padded, inline: bool, out: ^[dynamic]u8, node: tape.Node_Index, lo: u64 = 0) -> Error {
+	if inline && len(values) > 1 {
+		return refuse(.Fact_No_Place, "a TOML line holds at most one inline comment", node, lo)
+	}
+	for line in values {
+		if !toml_comment_valid(line) {
+			return refuse(.Fact_No_Place, "TOML comment contains disallowed control byte", node, lo)
+		}
+		if inline {
+			append(out, " #")
+		} else {
+			append(out, '#')
+		}
+		if padded && len(line) > 0 {
+			append(out, ' ')
+		}
+		append(out, line)
+		if !inline {
+			append(out, cx.eol)
 		}
 	}
-	return ""
+	return nil
+}
+
+@(private = "file")
+toml_style_of :: #force_inline proc "contextless" (doc: ^tape.Document, node: tape.Node_Index) -> string {
+	name, _ := tape.fact_name(doc, node, .Style)
+	return name
 }
 
 @(private = "file")
@@ -482,17 +502,16 @@ node_style_and_tag :: proc(ov: ^Overlay, h: Handle) -> (style: string, tag: stri
 	return style, tag
 }
 
-// Emits a whole-document reflow rewrite via `cx.spec.spell_document` (discarding any partial splices).
+// Emits a whole-document reflow rewrite via `cx.spec.spell_document` (discarding and freeing any prior partial splices).
 @(private = "file")
 emit_section_full_reflow :: proc(cx: ^Section_Cx) -> Error {
 	if cx.spec.spell_document == nil {
 		return refuse(.Layout_Reflow_Needed, "TOML document reflow requires spell_document", tape.ROOT)
 	}
-	// Clear prior partial splices so whole-document splice is the sole splice!
-	clear(&cx.splices)
+	drop_splices_in_range(cx.splices, 0, u64(len(cx.src)) + 1, cx.allocator)
 	buf := make([dynamic]u8, 0, 128, cx.allocator)
 	cx.spec.spell_document(cx.spec.data, cx.ov, &buf) or_return
-	append(&cx.splices, Splice{lo = 0, hi = u64(len(cx.src)), text = buf[:], seq = 0, base_node = tape.ROOT, full_rewalk = true, rewritten = true}) or_return
+	append(cx.splices, Splice{lo = 0, hi = u64(len(cx.src)), text = buf[:], seq = 0, base_node = tape.ROOT, full_rewalk = true, rewritten = true}) or_return
 	cx.reflowed = true
 	return nil
 }
@@ -501,13 +520,73 @@ emit_section_full_reflow :: proc(cx: ^Section_Cx) -> Error {
 Section_Frame :: struct {
 	h:         Handle,
 	path_pref: string,
+	owner_sec: string, // enclosing header/AOT section path (or "" at root) for dotted tables
+	dot_pref:  string, // dotted key prefix relative to `owner_sec` when inside a dotted table
+	span_lo:   u64,    // enclosing byte span bound (non-whole-doc only inside `[[arr]]` elements)
+	span_hi:   u64,
+}
+
+@(private = "file")
+Aot_Item :: struct {
+	lo, hi:  u64,
+	deleted: bool,
+}
+
+// Collects every `[[path_pref]]` item span (including its immediately following subtables) bounded within `[span_lo, span_hi)`.
+@(private = "file")
+collect_aot_items :: proc(
+	cx: ^Section_Cx,
+	path_pref: string,
+	span_lo, span_hi: u64,
+	deleted_indices: []u32,
+) -> [dynamic]Aot_Item {
+	aot_items := make([dynamic]Aot_Item, 0, 4, cx.allocator)
+	for sec, si in cx.sections {
+		if sec.head_lo < span_lo || sec.body_hi > span_hi {
+			continue
+		}
+		if sec.is_array && sec.path == path_pref {
+			hi := sec.body_hi
+			for sj := si + 1; sj < len(cx.sections); sj += 1 {
+				sub := cx.sections[sj]
+				if sub.body_hi > span_hi || sub.path == path_pref {
+					break
+				}
+				if path_matches_or_child(sub.path, path_pref) {
+					hi = sub.body_hi
+				} else {
+					break
+				}
+			}
+			append(&aot_items, Aot_Item{lo = sec.head_lo, hi = hi})
+		}
+	}
+	for di in deleted_indices {
+		if int(di) < len(aot_items) {
+			aot_items[di].deleted = true
+		}
+	}
+	return aot_items
+}
+
+@(private = "file")
+join_dotted_path :: proc(cx: ^Section_Cx, pref, raw_key: string) -> (string, Error) {
+	kb := make([dynamic]u8, 0, len(pref) + len(raw_key) + 4, cx.allocator)
+	if len(pref) > 0 {
+		append(&kb, pref)
+		append(&kb, '.')
+	}
+	if serr := cx.spec.spell_key(cx.spec.data, raw_key, &kb); serr != nil {
+		delete(kb)
+		return "", serr
+	}
+	return string(kb[:]), nil
 }
 
 @(private = "file")
 compose_section_walk :: proc(cx: ^Section_Cx, root: Handle) -> Error {
 	stack := make([dynamic]Section_Frame, 0, 32, cx.allocator)
-	owned_paths := make([dynamic]string, 0, 8, cx.allocator)
-	append(&stack, Section_Frame{h = root}) or_return
+	append(&stack, Section_Frame{h = root, span_lo = 0, span_hi = u64(len(cx.src))}) or_return
 
 	for len(stack) > 0 && !cx.reflowed {
 		fr := pop(&stack)
@@ -530,13 +609,57 @@ compose_section_walk :: proc(cx: ^Section_Cx, root: Handle) -> Error {
 			emit_section_facts(cx, fr.h, n) or_return
 		}
 		if n.state == .Container_Delta {
-			emit_section_container_delta(cx, fr.h, n, fr.path_pref, &stack, &owned_paths) or_return
+			emit_section_container_delta(cx, fr.h, n, fr, &stack) or_return
 			continue
 		}
 		if n.base != tape.NO_NODE {
-			push_section_children(cx, n.base, fr.path_pref, &stack, &owned_paths) or_return
+			push_section_children(cx, n.base, fr, &stack) or_return
 		}
 	}
+	return nil
+}
+
+@(private = "file")
+push_section_child_frame :: proc(
+	cx: ^Section_Cx,
+	fr: Section_Frame,
+	ch: Handle,
+	kn, vn: tape.Node_Index,
+	is_obj_parent: bool,
+	idx: int,
+	aot_items: []Aot_Item,
+	stack: ^[dynamic]Section_Frame,
+) -> Error {
+	child_path := fr.path_pref
+	child_owner := fr.owner_sec
+	child_dot := fr.dot_pref
+	child_lo := fr.span_lo
+	child_hi := fr.span_hi
+	if is_obj_parent && kn != tape.NO_NODE {
+		k := decode_node_text_tmp(cx.doc, kn, cx.allocator)
+		child_path = join_dotted_path(cx, fr.path_pref, k.text) or_return
+		if toml_style_of(cx.doc, vn) == "dotted" {
+			child_dot = join_dotted_path(cx, fr.dot_pref, k.text) or_return
+		} else {
+			child_owner = child_path
+			child_dot = ""
+		}
+		free_tmp_text(k, cx.allocator)
+	} else if !is_obj_parent && idx >= 0 && idx < len(aot_items) {
+		// Isolate each `[[items]]` element frame to its exact byte span `[aot[i].lo, aot[i].hi)`.
+		child_lo = aot_items[idx].lo
+		child_hi = aot_items[idx].hi
+		child_owner = fr.path_pref
+		child_dot = ""
+	}
+	append(stack, Section_Frame {
+		h         = ch,
+		path_pref = child_path,
+		owner_sec = child_owner,
+		dot_pref  = child_dot,
+		span_lo   = child_lo,
+		span_hi   = child_hi,
+	}) or_return
 	return nil
 }
 
@@ -544,13 +667,17 @@ compose_section_walk :: proc(cx: ^Section_Cx, root: Handle) -> Error {
 push_section_children :: proc(
 	cx: ^Section_Cx,
 	base_c: tape.Node_Index,
-	path_pref: string,
+	fr: Section_Frame,
 	stack: ^[dynamic]Section_Frame,
-	owned_paths: ^[dynamic]string,
 ) -> Error {
 	node := cx.doc.nodes[base_c]
 	if node.kind < .Array {
 		return nil
+	}
+	aot_items: [dynamic]Aot_Item
+	defer delete(aot_items)
+	if node.kind == .Array && toml_style_of(cx.doc, base_c) != "inline" {
+		aot_items = collect_aot_items(cx, fr.path_pref, fr.span_lo, fr.span_hi, nil)
 	}
 	c, p, cerr := tape.children(tape.Reader{doc = cx.doc}, base_c, cx.allocator)
 	if cerr != nil {
@@ -560,7 +687,7 @@ push_section_children :: proc(
 	if p != .Found {
 		return nil
 	}
-	for {
+	for idx := 0; ; idx += 1 {
 		kn, vn, np := tape.next_child(tape.Reader{doc = cx.doc}, &c)
 		if np != .Found {
 			break
@@ -573,29 +700,7 @@ push_section_children :: proc(
 		if !ok || !cn.has_edits {
 			continue
 		}
-		child_path := path_pref
-		if node.kind == .Object && kn != tape.NO_NODE {
-			k := decode_node_text_tmp(cx.doc, kn, cx.allocator)
-			kb := make([dynamic]u8, 0, len(path_pref) + len(k.text) + 4, cx.allocator)
-			if len(path_pref) > 0 {
-				append(&kb, path_pref)
-				append(&kb, '.')
-			}
-			if serr := cx.spec.spell_key(cx.spec.data, k.text, &kb); serr != nil {
-				delete(kb)
-				free_tmp_text(k, cx.allocator)
-				return serr
-			}
-			free_tmp_text(k, cx.allocator)
-			child_path = string(kb[:])
-			if _, aerr := append(owned_paths, child_path); aerr != nil {
-				delete(kb)
-				return aerr
-			}
-		}
-		if _, aerr := append(stack, Section_Frame{h = ch, path_pref = child_path}); aerr != nil {
-			return aerr
-		}
+		push_section_child_frame(cx, fr, ch, kn, vn, node.kind == .Object, idx, aot_items[:], stack) or_return
 	}
 	return nil
 }
@@ -622,7 +727,7 @@ emit_section_replace :: proc(cx: ^Section_Cx, h: Handle, n: ^Edit_Node) -> Error
 	style_override, tag_override := node_style_and_tag(cx.ov, h)
 	buf := make([dynamic]u8, 0, 64, cx.allocator)
 	cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, style_override, tag_override) or_return
-	append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = n.base, subtree_only = true}) or_return
+	append(cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = n.base, subtree_only = true}) or_return
 	if len(n.facts) > 0 {
 		emit_section_facts(cx, h, n) or_return
 	}
@@ -692,19 +797,15 @@ emit_section_facts :: proc(cx: ^Section_Cx, h: Handle, n: ^Edit_Node) -> Error {
 	if need_respell {
 		buf := make([dynamic]u8, 0, 32, cx.allocator)
 		cx.spec.spell_value(cx.spec.data, cx.ov, h, &buf, style_override, tag_override) or_return
-		append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = n.base, subtree_only = true}) or_return
+		append(cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = n.base, subtree_only = true}) or_return
 	}
 	return nil
 }
 
 @(private = "file")
 emit_toml_comment :: proc(cx: ^Section_Cx, node: tape.Node_Index, f: Fact_Override, stmt_ls, val_hi: u64) -> Error {
-	existing := make([dynamic]tape.Fact, 0, 4, cx.allocator)
-	for bf in tape.facts_of(cx.doc, node) {
-		if bf.kind == f.kind {
-			append(&existing, bf)
-		}
-	}
+	existing := collect_base_facts(cx.doc, node, f.kind, cx.allocator)
+	defer delete(existing)
 	if f.deleted || len(f.values) == 0 {
 		for bf in existing {
 			lo := bf.lo
@@ -717,45 +818,31 @@ emit_toml_comment :: proc(cx: ^Section_Cx, node: tape.Node_Index, f: Fact_Overri
 					lo -= 1
 				}
 			}
-			append(&cx.splices, Splice{lo = lo, hi = hi, seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
+			append(cx.splices, Splice{lo = lo, hi = hi, seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		}
 		return nil
 	}
 	buf := make([dynamic]u8, 0, 64, cx.allocator)
 	if f.kind == .Comment {
-		for line in f.values {
-			append(&buf, '#')
-			if f.padded && len(line) > 0 {
-				append(&buf, ' ')
-			}
-			append(&buf, line)
-			append(&buf, cx.eol)
-		}
+		append_toml_comments(cx, f.values, f.padded, false, &buf, node, stmt_ls) or_return
 		if len(existing) > 0 {
 			lo := line_start(cx.src, existing[0].lo)
 			hi := next_line(cx.src, existing[len(existing) - 1].lo + u64(existing[len(existing) - 1].n))
-			append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
+			append(cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		} else {
-			append(&cx.splices, Splice{lo = stmt_ls, hi = stmt_ls, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
+			append(cx.splices, Splice{lo = stmt_ls, hi = stmt_ls, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		}
 	} else {
-		if len(f.values) > 1 {
-			return refuse(.Fact_No_Place, "a TOML line holds at most one inline comment", node, val_hi)
-		}
-		append(&buf, " #")
-		if f.padded && len(f.values[0]) > 0 {
-			append(&buf, ' ')
-		}
-		append(&buf, f.values[0])
+		append_toml_comments(cx, f.values, f.padded, true, &buf, node, val_hi) or_return
 		if len(existing) > 0 {
 			lo := existing[0].lo
 			for lo > 0 && (cx.src[lo - 1] == ' ' || cx.src[lo - 1] == '\t') {
 				lo -= 1
 			}
 			hi := existing[len(existing) - 1].lo + u64(existing[len(existing) - 1].n)
-			append(&cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
+			append(cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		} else {
-			append(&cx.splices, Splice{lo = val_hi, hi = val_hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
+			append(cx.splices, Splice{lo = val_hi, hi = val_hi, text = buf[:], seq = len(cx.splices), base_node = node, full_rewalk = true}) or_return
 		}
 	}
 	return nil
@@ -763,22 +850,13 @@ emit_toml_comment :: proc(cx: ^Section_Cx, node: tape.Node_Index, f: Fact_Overri
 
 @(private = "file")
 emit_toml_foot_comment :: proc(cx: ^Section_Cx, f: Fact_Override) -> Error {
-	if !f.deleted {
-		for line in f.values {
-			if !toml_comment_valid(line) {
-				return refuse(.Fact_No_Place, "TOML comment contains disallowed control byte", tape.ROOT)
-			}
-		}
-	}
 	eof := u64(len(cx.src))
 	if f.deleted || len(f.values) == 0 {
 		for bf in tape.facts_of(cx.doc, tape.ROOT) {
 			if bf.kind == .Comment_Foot {
 				lo := line_start(cx.src, bf.lo)
 				hi := next_line(cx.src, bf.lo + u64(bf.n))
-				if _, aerr := append(&cx.splices, Splice{lo = lo, hi = hi, seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true}); aerr != nil {
-					return aerr
-				}
+				append(cx.splices, Splice{lo = lo, hi = hi, seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true}) or_return
 			}
 		}
 		return nil
@@ -787,15 +865,8 @@ emit_toml_foot_comment :: proc(cx: ^Section_Cx, f: Fact_Override) -> Error {
 	if eof > 0 && cx.src[eof - 1] != '\n' {
 		append(&buf, cx.eol)
 	}
-	for line in f.values {
-		append(&buf, '#')
-		if f.padded && len(line) > 0 {
-			append(&buf, ' ')
-		}
-		append(&buf, line)
-		append(&buf, cx.eol)
-	}
-	append(&cx.splices, Splice{lo = eof, hi = eof, text = buf[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true}) or_return
+	append_toml_comments(cx, f.values, f.padded, false, &buf, tape.ROOT) or_return
+	append(cx.splices, Splice{lo = eof, hi = eof, text = buf[:], seq = len(cx.splices), base_node = tape.ROOT, full_rewalk = true}) or_return
 	return nil
 }
 
@@ -804,22 +875,21 @@ emit_section_container_delta :: proc(
 	cx: ^Section_Cx,
 	h: Handle,
 	n: ^Edit_Node,
-	path_pref: string,
+	fr: Section_Frame,
 	stack: ^[dynamic]Section_Frame,
-	owned_paths: ^[dynamic]string,
 ) -> Error {
 	base_c := n.base
 	node := cx.doc.nodes[base_c]
 	st := toml_style_of(cx.doc, base_c)
 
 	if (node.kind == .Array || node.kind == .Object) && st == "inline" {
-		return emit_toml_inline_delta(cx, h, n, stack, owned_paths)
+		return emit_toml_inline_delta(cx, h, n, fr, stack)
 	}
 	if node.kind == .Object {
-		return emit_toml_table_delta(cx, h, n, path_pref, stack, owned_paths)
+		return emit_toml_table_delta(cx, h, n, fr, stack)
 	}
 	if node.kind == .Array {
-		return emit_toml_aot_delta(cx, h, n, path_pref, stack, owned_paths)
+		return emit_toml_aot_delta(cx, h, n, fr, stack)
 	}
 	return nil
 }
@@ -830,9 +900,10 @@ emit_toml_inline_delta :: proc(
 	cx: ^Section_Cx,
 	h: Handle,
 	n: ^Edit_Node,
+	fr: Section_Frame,
 	stack: ^[dynamic]Section_Frame,
-	owned_paths: ^[dynamic]string,
 ) -> Error {
+	_ = h
 	d := n.delta
 	if d == nil {
 		return nil
@@ -915,7 +986,7 @@ emit_toml_inline_delta :: proc(
 		}
 		if ch, has := cx.ov.by_base[it.vn]; has {
 			if cn, ok := get_node(cx.ov, ch); ok && cn.has_edits {
-				append(stack, Section_Frame{h = ch})
+				append(stack, Section_Frame{h = ch, span_lo = fr.span_lo, span_hi = fr.span_hi})
 			}
 		}
 	}
@@ -923,6 +994,7 @@ emit_toml_inline_delta :: proc(
 	// Spell inserted items (honoring child `.Style` and `.Tag` overrides).
 	ins_count := len(d.inserted_members) if is_obj else len(d.inserted_elems)
 	ins_texts := make([][]u8, ins_count, cx.allocator)
+	defer delete(ins_texts, cx.allocator)
 	if is_obj {
 		for ins, i in d.inserted_members {
 			b := make([dynamic]u8, 0, 32, cx.allocator)
@@ -941,11 +1013,8 @@ emit_toml_inline_delta :: proc(
 		}
 	}
 
-	deleted_flags := make([]bool, len(items), cx.allocator)
+	deleted_flags := make_deleted_flags(items[:], cx.allocator) or_return
 	defer delete(deleted_flags, cx.allocator)
-	for it, i in items {
-		deleted_flags[i] = it.deleted
-	}
 	order := make([dynamic]int, 0, len(items) + ins_count, cx.allocator)
 	defer delete(order)
 	if len(d.order) > 0 {
@@ -1049,43 +1118,197 @@ emit_toml_inline_delta :: proc(
 		append(&tail, line_indent(cx.src, c_hi - 1))
 		append(&moves, Move{text = tail[:], written = true})
 	}
-	if _, aerr := append(&cx.splices, Splice {
+	append(cx.splices, Splice {
 		lo          = c_lo + 1,
 		hi          = c_hi - 1,
 		moves       = moves[:],
 		seq         = len(cx.splices),
 		base_node   = base_c,
 		full_rewalk = false,
-	}); aerr != nil {
-		return aerr
-	}
+	}) or_return
 	return nil
 }
 
-// Finds all source byte ranges belonging to member `vn` (a key-value line, or one/several `[section]` blocks!).
+// Collects every leaf line range of a `"dotted"` TOML table `base_d` (plus any header/implicit subtables inside `[span_lo, span_hi)`).
+@(private = "file")
+collect_dotted_member_ranges :: proc(
+	cx: ^Section_Cx,
+	base_d: tape.Node_Index,
+	base_path: string,
+	span_lo, span_hi: u64,
+	ranges: ^[dynamic]Byte_Range,
+) {
+	Frame :: struct {
+		node: tape.Node_Index,
+		path: string,
+	}
+	stack := make([dynamic]Frame, 0, 4, cx.allocator)
+	defer delete(stack)
+	append(&stack, Frame{node = base_d, path = base_path})
+	for len(stack) > 0 {
+		fr := pop(&stack)
+		c, p, cerr := tape.children(tape.Reader{doc = cx.doc}, fr.node, cx.allocator)
+		if cerr != nil {
+			continue
+		}
+		if p == .Found {
+			for {
+				kn, vn, np := tape.next_child(tape.Reader{doc = cx.doc}, &c)
+				if np != .Found {
+					break
+				}
+				st := toml_style_of(cx.doc, vn)
+				vnode := cx.doc.nodes[vn]
+				if (vnode.kind == .Object || vnode.kind == .Array) && (st == "header" || st == "implicit") {
+					tk := decode_node_text_tmp(cx.doc, kn, cx.allocator)
+					cp, jerr := join_dotted_path(cx, fr.path, tk.text)
+					free_tmp_text(tk, cx.allocator)
+					if jerr == nil {
+						for sec in cx.sections {
+							if sec.head_lo >= span_lo && sec.body_hi <= span_hi && path_matches_or_child(sec.path, cp) {
+								append(ranges, Byte_Range{sec.head_lo, sec.body_hi})
+							}
+						}
+					}
+					continue
+				}
+				if vnode.kind == .Object && st == "dotted" {
+					tk := decode_node_text_tmp(cx.doc, kn, cx.allocator)
+					cp, jerr := join_dotted_path(cx, fr.path, tk.text)
+					free_tmp_text(tk, cx.allocator)
+					if jerr == nil {
+						append(&stack, Frame{node = vn, path = cp})
+					}
+					continue
+				}
+				if kn == tape.NO_NODE {
+					continue
+				}
+				klo, _, kok := node_byte_span(cx.doc, kn)
+				_, vhi, vok := node_byte_span(cx.doc, vn)
+				if kok && vok {
+					ls := line_start(cx.src, klo)
+					hi := next_line(cx.src, vhi)
+					for f in tape.facts_of(cx.doc, vn) {
+						if f.kind == .Comment && line_start(cx.src, f.lo) < ls {
+							ls = line_start(cx.src, f.lo)
+						}
+					}
+					append(ranges, Byte_Range{ls, hi})
+				}
+			}
+		}
+		tape.destroy_children(&c)
+	}
+}
+
+// Finds byte offsets `(lo, hi)` of the `seg_idx`-th dot-separated TOML key segment starting on the line containing `key_token_lo`.
+@(private = "file")
+toml_dotted_segment_span :: proc "contextless" (src: []u8, key_token_lo: u64, seg_idx: int) -> (lo, hi: u64, ok: bool) {
+	p := line_start(src, key_token_lo)
+	n := u64(len(src))
+	for s := 0; s <= seg_idx; s += 1 {
+		for p < n && (src[p] == ' ' || src[p] == '\t') {
+			p += 1
+		}
+		if p >= n || src[p] == '=' || src[p] == '\n' || src[p] == '\r' {
+			return 0, 0, false
+		}
+		seg_lo := p
+		if src[p] == '\'' {
+			p += 1
+			for p < n && src[p] != '\'' && src[p] != '\n' {
+				p += 1
+			}
+			if p < n && src[p] == '\'' {
+				p += 1
+			}
+		} else if src[p] == '"' {
+			p += 1
+			for p < n && src[p] != '"' && src[p] != '\n' {
+				if src[p] == '\\' && p + 1 < n {
+					p += 2
+					continue
+				}
+				p += 1
+			}
+			if p < n && src[p] == '"' {
+				p += 1
+			}
+		} else {
+			for p < n && src[p] != '.' && src[p] != '=' && src[p] != ' ' && src[p] != '\t' && src[p] != '\n' && src[p] != '\r' {
+				p += 1
+			}
+		}
+		if s == seg_idx {
+			return seg_lo, p, p > seg_lo
+		}
+		for p < n && (src[p] == ' ' || src[p] == '\t') {
+			p += 1
+		}
+		if p >= n || src[p] != '.' {
+			return 0, 0, false
+		}
+		p += 1
+	}
+	return 0, 0, false
+}
+
+// Counts dot-separated segments in canonical spelled `dot_pref` (respecting quotes!).
+@(private = "file")
+toml_dotted_depth :: proc "contextless" (dot_pref: string) -> int {
+	if len(dot_pref) == 0 {
+		return 0
+	}
+	count := 1
+	in_q: u8 = 0
+	b := transmute([]u8)dot_pref
+	for i := 0; i < len(b); i += 1 {
+		c := b[i]
+		if in_q != 0 {
+			if c == '\\' && in_q == '"' {
+				i += 1
+			} else if c == in_q {
+				in_q = 0
+			}
+		} else if c == '"' || c == '\'' {
+			in_q = c
+		} else if c == '.' {
+			count += 1
+		}
+	}
+	return count
+}
+
+// Finds all source byte ranges belonging to member `vn` inside `[span_lo, span_hi)`.
 @(private = "file")
 toml_member_ranges :: proc(
 	cx: ^Section_Cx,
 	kn, vn: tape.Node_Index,
 	full_path: string,
+	span_lo, span_hi: u64,
 	allocator: runtime.Allocator,
 ) -> (
 	ranges: [dynamic]Byte_Range,
 	is_section: bool,
+	is_dotted: bool,
 ) {
 	ranges = make([dynamic]Byte_Range, 0, 2, allocator)
 	vnode := cx.doc.nodes[vn]
 	st := toml_style_of(cx.doc, vn)
 	if (vnode.kind == .Object || vnode.kind == .Array) && (st == "header" || st == "implicit") {
-		is_section = true
 		for sec in cx.sections {
-			if path_matches_or_child(sec.path, full_path) {
+			if sec.head_lo >= span_lo && sec.body_hi <= span_hi && path_matches_or_child(sec.path, full_path) {
 				append(&ranges, Byte_Range{sec.head_lo, sec.body_hi})
 			}
 		}
 		if len(ranges) > 0 {
-			return ranges, true
+			return ranges, true, false
 		}
+	}
+	if vnode.kind == .Object && st == "dotted" {
+		collect_dotted_member_ranges(cx, vn, full_path, span_lo, span_hi, &ranges)
+		return ranges, false, true
 	}
 	klo, _, kok := node_byte_span(cx.doc, kn)
 	_, vhi, vok := node_byte_span(cx.doc, vn)
@@ -1099,23 +1322,43 @@ toml_member_ranges :: proc(
 		}
 		append(&ranges, Byte_Range{ls, hi})
 	}
-	return ranges, false
+	return ranges, false, false
 }
 
+// Resolves insertion offset within `[span_lo, span_hi)` for section `sec_path` (explicit header or `[[aot]]` when `allow_array`).
 @(private = "file")
-toml_table_insert_pos :: proc(cx: ^Section_Cx, path_pref: string) -> u64 {
-	if len(path_pref) == 0 {
-		if len(cx.sections) > 0 {
-			return cx.sections[0].head_lo
+toml_table_insert_pos_ex :: proc(cx: ^Section_Cx, sec_path: string, span_lo, span_hi: u64, allow_array := false) -> (pos: u64, found_sec: bool) {
+	if len(sec_path) == 0 {
+		for sec in cx.sections {
+			if sec.head_lo >= span_lo && sec.body_hi <= span_hi {
+				return sec.head_lo, true
+			}
 		}
-		return u64(len(cx.src))
+		return span_hi, true
 	}
 	for sec in cx.sections {
-		if sec.path == path_pref && !sec.is_array {
-			return sec.body_hi
+		if sec.head_lo < span_lo || sec.body_hi > span_hi {
+			continue
+		}
+		if sec.path == sec_path && (!sec.is_array || allow_array) {
+			return sec.body_hi, true
 		}
 	}
-	return u64(len(cx.src))
+	return span_hi, false
+}
+
+// Finds the last section end in `[span_lo, span_hi)` owned by `path_pref` or a child of `path_pref`.
+@(private = "file")
+toml_implicit_insert_pos :: proc(cx: ^Section_Cx, path_pref: string, span_lo, span_hi: u64) -> u64 {
+	best := span_hi
+	has_best := false
+	for sec in cx.sections {
+		if sec.head_lo >= span_lo && sec.body_hi <= span_hi && path_matches_or_child(sec.path, path_pref) {
+			best = sec.body_hi
+			has_best = true
+		}
+	}
+	return best if has_best else span_hi
 }
 
 @(private = "file")
@@ -1123,25 +1366,33 @@ emit_toml_table_delta :: proc(
 	cx: ^Section_Cx,
 	h: Handle,
 	n: ^Edit_Node,
-	path_pref: string,
+	fr: Section_Frame,
 	stack: ^[dynamic]Section_Frame,
-	owned_paths: ^[dynamic]string,
 ) -> Error {
+	_ = h
 	d := n.delta
 	if d == nil {
 		return nil
 	}
 	base_c := n.base
+	path_pref := fr.path_pref
 	T_Member :: struct {
 		kn, vn:     tape.Node_Index,
 		key:        string,
 		full_path:  string,
 		ranges:     [dynamic]Byte_Range,
 		is_section: bool,
+		is_dotted:  bool,
 		deleted:    bool,
 		renamed_to: string,
 	}
 	members := make([dynamic]T_Member, 0, 8, cx.allocator)
+	defer {
+		for m in members {
+			delete(m.ranges)
+		}
+		delete(members)
+	}
 	c, p, cerr := tape.children(tape.Reader{doc = cx.doc}, base_c, cx.allocator)
 	if cerr != nil {
 		return cerr
@@ -1156,17 +1407,11 @@ emit_toml_table_delta :: proc(
 			k := decode_node_text_tmp(cx.doc, kn, cx.allocator)
 			k_owned := string(slice.clone(transmute([]u8)k.text, cx.allocator))
 			free_tmp_text(k, cx.allocator)
-			fpb := make([dynamic]u8, 0, len(path_pref) + len(k_owned) + 4, cx.allocator)
-			if len(path_pref) > 0 {
-				append(&fpb, path_pref)
-				append(&fpb, '.')
-			}
-			if serr := cx.spec.spell_key(cx.spec.data, k_owned, &fpb); serr != nil {
-				delete(fpb)
+			fp, jerr := join_dotted_path(cx, path_pref, k_owned)
+			if jerr != nil {
 				delete(k_owned, cx.allocator)
-				return serr
+				return jerr
 			}
-			fp := string(fpb[:])
 			is_del := false
 			for dk in d.deleted_keys {
 				if dk == k_owned {
@@ -1183,70 +1428,88 @@ emit_toml_table_delta :: proc(
 					}
 				}
 			}
-			ranges, is_sec := toml_member_ranges(cx, kn, vn, fp, cx.allocator)
-			append(&members, T_Member{kn = kn, vn = vn, key = k_owned, full_path = fp, ranges = ranges, is_section = is_sec, deleted = is_del, renamed_to = ren_to})
+			ranges, is_sec, is_dot := toml_member_ranges(cx, kn, vn, fp, fr.span_lo, fr.span_hi, cx.allocator)
+			append(&members, T_Member{kn = kn, vn = vn, key = k_owned, full_path = fp, ranges = ranges, is_section = is_sec, is_dotted = is_dot, deleted = is_del, renamed_to = ren_to})
 		}
 	}
 
-	// Push surviving edited child subtrees.
+	// Push surviving edited child subtrees with full owner/dotted/span isolation.
 	for m in members {
 		if m.deleted {
 			continue
 		}
 		if ch, has := cx.ov.by_base[m.vn]; has {
 			if cn, ok := get_node(cx.ov, ch); ok && cn.has_edits {
-				fp_copy := string(slice.clone(transmute([]u8)m.full_path, cx.allocator))
-				append(owned_paths, fp_copy)
-				append(stack, Section_Frame{h = ch, path_pref = fp_copy})
+				push_section_child_frame(cx, fr, ch, m.kn, m.vn, true, -1, nil, stack) or_return
 			}
 		}
 	}
 
 	// Apply key renames for surviving members!
+	emit_toml_header_renames :: proc(cx: ^Section_Cx, path_pref, old_full, renamed_to: string, base_c: tape.Node_Index, span_lo, span_hi: u64) -> Error {
+		new_pref := join_dotted_path(cx, path_pref, renamed_to) or_return
+		defer delete(new_pref, cx.allocator)
+		for sec in cx.sections {
+			if sec.head_lo < span_lo || sec.body_hi > span_hi || !path_matches_or_child(sec.path, old_full) {
+				continue
+			}
+			nb := make([dynamic]u8, 0, len(new_pref) + len(sec.path), cx.allocator)
+			append(&nb, new_pref)
+			if len(sec.path) > len(old_full) {
+				append(&nb, sec.path[len(old_full):])
+			}
+			append(cx.splices, Splice{lo = sec.header_key_lo, hi = sec.header_key_hi, text = nb[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
+		}
+		return nil
+	}
 	for m in members {
 		if m.deleted || len(m.renamed_to) == 0 {
 			continue
 		}
 		if m.is_section {
-			// Rewrite every section header whose path equals `m.full_path` or starts with `m.full_path.`!
-			new_pref := make([dynamic]u8, 0, len(path_pref) + len(m.renamed_to) + 4, cx.allocator)
-			defer delete(new_pref)
-			if len(path_pref) > 0 {
-				append(&new_pref, path_pref)
-				append(&new_pref, '.')
-			}
-			cx.spec.spell_key(cx.spec.data, m.renamed_to, &new_pref) or_return
-			for sec in cx.sections {
-				if !path_matches_or_child(sec.path, m.full_path) {
+			emit_toml_header_renames(cx, path_pref, m.full_path, m.renamed_to, base_c, fr.span_lo, fr.span_hi) or_return
+		} else if m.is_dotted {
+			// Rename every dotted line segment belonging to this dotted table (and any subtable headers).
+			seg_idx := toml_dotted_depth(fr.dot_pref)
+			new_seg := make([dynamic]u8, 0, len(m.renamed_to) + 2, cx.allocator)
+			cx.spec.spell_key(cx.spec.data, m.renamed_to, &new_seg) or_return
+			for r in m.ranges {
+				trimmed := r.lo
+				for trimmed < r.hi && (cx.src[trimmed] == ' ' || cx.src[trimmed] == '\t') {
+					trimmed += 1
+				}
+				if trimmed < r.hi && cx.src[trimmed] == '[' {
 					continue
 				}
-				nb := make([dynamic]u8, 0, len(new_pref) + len(sec.path), cx.allocator)
-				append(&nb, ..new_pref[:])
-				if len(sec.path) > len(m.full_path) {
-					append(&nb, sec.path[len(m.full_path):])
+				if slo, shi, sok := toml_dotted_segment_span(cx.src, r.lo, seg_idx); sok {
+					append(cx.splices, Splice{lo = slo, hi = shi, text = slice.clone(new_seg[:], cx.allocator), seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
 				}
-				append(&cx.splices, Splice{lo = sec.header_key_lo, hi = sec.header_key_hi, text = nb[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
 			}
+			delete(new_seg)
+			emit_toml_header_renames(cx, path_pref, m.full_path, m.renamed_to, base_c, fr.span_lo, fr.span_hi) or_return
 		} else {
 			if klo, khi, kok := node_byte_span(cx.doc, m.kn); kok {
 				kb := make([dynamic]u8, 0, len(m.renamed_to) + 2, cx.allocator)
 				cx.spec.spell_key(cx.spec.data, m.renamed_to, &kb) or_return
-				append(&cx.splices, Splice{lo = klo, hi = khi, text = kb[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
+				append(cx.splices, Splice{lo = klo, hi = khi, text = kb[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
 			}
 		}
 	}
 
 	// Handle explicit reorder (including Group 2: moving a section before a top-level line!).
+	allow_arr_owner := len(fr.owner_sec) > 0 && n.base != tape.NO_NODE && n.base != tape.ROOT
 	if len(d.order) > 0 {
-		deleted_flags := make([]bool, len(members), cx.allocator)
-		defer delete(deleted_flags, cx.allocator)
-		for m, i in members {
-			deleted_flags[i] = m.deleted
+		for ins in d.inserted_members {
+			if node_kind(cx.ov, ins.value) == .Null {
+				return refuse(.Unspellable_Value, "TOML has no null value", base_c)
+			}
 		}
+		deleted_flags := make_deleted_flags(members[:], cx.allocator) or_return
+		defer delete(deleted_flags, cx.allocator)
 		validate_order(d.order, deleted_flags, len(d.inserted_members), cx.allocator) or_return
 
-		span_lo := u64(len(cx.src))
-		span_hi := u64(0)
+		span_lo := fr.span_hi
+		span_hi := fr.span_lo
 		for m in members {
 			for r in m.ranges {
 				span_lo = min(span_lo, r.lo)
@@ -1283,7 +1546,34 @@ emit_toml_table_delta :: proc(
 				return refuse(.Layout_Reflow_Needed, "TOML table reorder spans a foreign section; pass reflow=true", base_c)
 			}
 
-			moves := make([dynamic]Move, 0, len(d.order) * 2, cx.allocator)
+			_, found_sec := toml_table_insert_pos_ex(cx, path_pref, fr.span_lo, fr.span_hi, allow_array = allow_arr_owner)
+			need_implicit_hdr := len(fr.dot_pref) == 0 && len(path_pref) > 0 && !found_sec
+			if need_implicit_hdr {
+				has_base_nonsec := false
+				has_pass1_ins_scalar := false
+				for raw in d.order {
+					k := int(raw)
+					if k < len(members) {
+						if !members[k].is_section {
+							has_base_nonsec = true
+						}
+					} else {
+						ins := d.inserted_members[k - len(members)]
+						if node_kind(cx.ov, ins.value) != .Object {
+							has_pass1_ins_scalar = true
+						}
+					}
+				}
+				if has_base_nonsec && has_pass1_ins_scalar {
+					if cx.opts.reflow {
+						return emit_section_full_reflow(cx)
+					}
+					return refuse(.Layout_Reflow_Needed, "TOML table reorder with dotted keys and implicit header requires reflow=true", base_c)
+				}
+			}
+
+			moves := make([dynamic]Move, 0, len(d.order) * 2 + 1, cx.allocator)
+			emitted_implicit_hdr := false
 			// Pass 1: key-value lines (and inserted scalar/inline members) stay before any `[section]` header.
 			for raw in d.order {
 				k := int(raw)
@@ -1296,33 +1586,42 @@ emit_toml_table_delta :: proc(
 					}
 				} else {
 					ins := d.inserted_members[k - len(members)]
-					if node_kind(cx.ov, ins.value) != .Object {
-						line := spell_toml_member_line(cx, ins.key, ins.value, path_pref) or_return
+					if len(fr.dot_pref) > 0 || node_kind(cx.ov, ins.value) != .Object {
+						if need_implicit_hdr && !emitted_implicit_hdr {
+							emitted_implicit_hdr = true
+							hb := make([dynamic]u8, 0, len(path_pref) + 4, cx.allocator)
+							append(&hb, '[')
+							append(&hb, path_pref)
+							append(&hb, ']')
+							append(&hb, cx.eol)
+							append(&moves, Move{text = hb[:], written = true})
+						}
+						line := spell_toml_member_line(cx, ins.key, ins.value, path_pref, fr.dot_pref) or_return
 						append(&moves, Move{text = line, written = true})
 					}
 				}
 			}
 			// Pass 2: `[section]` members in requested order!
-			for raw in d.order {
-				k := int(raw)
-				if k < len(members) {
-					m := members[k]
-					if m.is_section {
-						for r in m.ranges {
-							append(&moves, Move{lo = r.lo, hi = r.hi})
+			if len(fr.dot_pref) == 0 {
+				for raw in d.order {
+					k := int(raw)
+					if k < len(members) {
+						m := members[k]
+						if m.is_section {
+							for r in m.ranges {
+								append(&moves, Move{lo = r.lo, hi = r.hi})
+							}
 						}
-					}
-				} else {
-					ins := d.inserted_members[k - len(members)]
-					if node_kind(cx.ov, ins.value) == .Object {
-						sec_txt := spell_toml_member_line(cx, ins.key, ins.value, path_pref) or_return
-						append(&moves, Move{text = sec_txt, written = true})
+					} else {
+						ins := d.inserted_members[k - len(members)]
+						if node_kind(cx.ov, ins.value) == .Object {
+							sec_txt := spell_toml_member_line(cx, ins.key, ins.value, path_pref, "") or_return
+							append(&moves, Move{text = sec_txt, written = true})
+						}
 					}
 				}
 			}
-			if _, aerr := append(&cx.splices, Splice{lo = span_lo, hi = span_hi, moves = moves[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}); aerr != nil {
-				return aerr
-			}
+			append(cx.splices, Splice{lo = span_lo, hi = span_hi, moves = moves[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
 			return nil
 		}
 	}
@@ -1333,34 +1632,104 @@ emit_toml_table_delta :: proc(
 			continue
 		}
 		for r in m.ranges {
-			if _, aerr := append(&cx.splices, Splice{lo = r.lo, hi = r.hi, seq = len(cx.splices), base_node = base_c, full_rewalk = true}); aerr != nil {
-				return aerr
-			}
+			append(cx.splices, Splice{lo = r.lo, hi = r.hi, seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
 		}
 	}
 
-	// Non-reorder insertions (honoring `ins.at` when specified!).
-	ins_pos := toml_table_insert_pos(cx, path_pref)
+	if len(d.inserted_members) == 0 {
+		return nil
+	}
+
+	// Non-reorder insertions (handling dotted tables, implicit super-tables, bounded `[[arr]]` elements, and explicit headers!):
 	for ins in d.inserted_members {
 		if node_kind(cx.ov, ins.value) == .Null {
 			return refuse(.Unspellable_Value, "TOML has no null value", base_c)
 		}
-		txt := spell_toml_member_line(cx, ins.key, ins.value, path_pref) or_return
+	}
+	if len(fr.dot_pref) > 0 {
+		// Inside a dotted-key table (`a.b = 1`): NEVER emit `[a]` (forbidden in TOML!), emit `a.k = v` lines inside owning section/root!
+		dot_ins_pos := u64(0)
+		has_non_sec := false
+		for m in members {
+			if !m.is_section {
+				for r in m.ranges {
+					if !has_non_sec || r.hi > dot_ins_pos {
+						dot_ins_pos = r.hi
+						has_non_sec = true
+					}
+				}
+			}
+		}
+		if !has_non_sec {
+			dot_ins_pos, _ = toml_table_insert_pos_ex(cx, fr.owner_sec, fr.span_lo, fr.span_hi, allow_array = allow_arr_owner)
+		}
+		for ins in d.inserted_members {
+			txt := spell_toml_member_line(cx, ins.key, ins.value, path_pref, fr.dot_pref) or_return
+			pos := dot_ins_pos
+			if ins.at >= 0 && ins.at < len(members) && !members[ins.at].is_section && len(members[ins.at].ranges) > 0 {
+				pos = members[ins.at].ranges[0].lo
+			}
+			append_toml_line_splice(cx, pos, txt, base_c) or_return
+		}
+		return nil
+	}
+
+	ins_pos, found_sec := toml_table_insert_pos_ex(cx, path_pref, fr.span_lo, fr.span_hi, allow_array = allow_arr_owner)
+	impl_pos := toml_implicit_insert_pos(cx, path_pref, fr.span_lo, fr.span_hi) if !found_sec && len(path_pref) > 0 else fr.span_hi
+	if !found_sec && len(path_pref) > 0 {
+		// Implicit super-table (`[a.b]` present, `[a]` absent): batch all non-Object inserts under ONE `[a]` header at `impl_pos`!
+		scalar_batch := make([dynamic]u8, 0, 64, cx.allocator)
+		has_scalar_batch := false
+		for ins in d.inserted_members {
+			if node_kind(cx.ov, ins.value) == .Object {
+				txt := spell_toml_member_line(cx, ins.key, ins.value, path_pref, "") or_return
+				append_toml_line_splice(cx, impl_pos, txt, base_c) or_return
+				continue
+			}
+			if !has_scalar_batch {
+				has_scalar_batch = true
+				append(&scalar_batch, '[')
+				append(&scalar_batch, path_pref)
+				append(&scalar_batch, ']')
+				append(&scalar_batch, cx.eol)
+			}
+			line := spell_toml_member_line(cx, ins.key, ins.value, path_pref, "") or_return
+			append(&scalar_batch, ..line)
+			delete(line, cx.allocator)
+		}
+		if has_scalar_batch {
+			append_toml_line_splice(cx, impl_pos, scalar_batch[:], base_c) or_return
+		} else {
+			delete(scalar_batch)
+		}
+		return nil
+	}
+
+	for ins in d.inserted_members {
+		txt := spell_toml_member_line(cx, ins.key, ins.value, path_pref, "") or_return
 		is_obj_val := node_kind(cx.ov, ins.value) == .Object
-		pos := u64(len(cx.src)) if is_obj_val else ins_pos
+		pos := fr.span_hi if is_obj_val else ins_pos
 		if ins.at >= 0 && ins.at < len(members) && len(members[ins.at].ranges) > 0 {
 			if is_obj_val == members[ins.at].is_section {
 				pos = members[ins.at].ranges[0].lo
 			}
 		}
-		if pos > 0 && pos <= u64(len(cx.src)) && cx.src[pos - 1] != '\n' {
-			prefixed := make([dynamic]u8, 0, len(cx.eol) + len(txt), cx.allocator)
-			append(&prefixed, cx.eol)
-			append(&prefixed, ..txt)
-			txt = prefixed[:]
-		}
-		append(&cx.splices, Splice{lo = pos, hi = pos, text = txt, seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
+		append_toml_line_splice(cx, pos, txt, base_c) or_return
 	}
+	return nil
+}
+
+@(private = "file")
+append_toml_line_splice :: proc(cx: ^Section_Cx, pos: u64, txt: []u8, base_node: tape.Node_Index) -> Error {
+	out_txt := txt
+	if pos > 0 && pos <= u64(len(cx.src)) && cx.src[pos - 1] != '\n' {
+		prefixed := make([dynamic]u8, 0, len(cx.eol) + len(txt), cx.allocator)
+		append(&prefixed, cx.eol)
+		append(&prefixed, ..txt)
+		delete(txt, cx.allocator)
+		out_txt = prefixed[:]
+	}
+	append(cx.splices, Splice{lo = pos, hi = pos, text = out_txt, seq = len(cx.splices), base_node = base_node, full_rewalk = true}) or_return
 	return nil
 }
 
@@ -1386,9 +1755,9 @@ spell_toml_table_body :: proc(cx: ^Section_Cx, obj_h: Handle, out: ^[dynamic]u8)
 }
 
 @(private = "file")
-spell_toml_member_line :: proc(cx: ^Section_Cx, key: string, val_h: Handle, path_pref: string) -> (out: []u8, err: Error) {
+spell_toml_member_line :: proc(cx: ^Section_Cx, key: string, val_h: Handle, path_pref: string, dot_pref: string) -> (out: []u8, err: Error) {
 	b := make([dynamic]u8, 0, 64, cx.allocator)
-	if node_kind(cx.ov, val_h) == .Object {
+	if node_kind(cx.ov, val_h) == .Object && len(dot_pref) == 0 {
 		append(&b, cx.eol)
 		append(&b, '[')
 		if len(path_pref) > 0 {
@@ -1401,10 +1770,28 @@ spell_toml_member_line :: proc(cx: ^Section_Cx, key: string, val_h: Handle, path
 		spell_toml_table_body(cx, val_h, &b) or_return
 		return b[:], nil
 	}
+	if vn, vok := get_node(cx.ov, val_h); vok {
+		for f in vn.facts {
+			if f.kind == .Comment && !f.deleted {
+				append_toml_comments(cx, f.values, f.padded, false, &b, tape.NO_NODE) or_return
+			}
+		}
+	}
+	if len(dot_pref) > 0 {
+		append(&b, dot_pref)
+		append(&b, '.')
+	}
 	cx.spec.spell_key(cx.spec.data, key, &b) or_return
 	append(&b, " = ")
 	st_o, tg_o := node_style_and_tag(cx.ov, val_h)
 	cx.spec.spell_value(cx.spec.data, cx.ov, val_h, &b, st_o, tg_o) or_return
+	if vn, vok := get_node(cx.ov, val_h); vok {
+		for f in vn.facts {
+			if f.kind == .Comment_Inline && !f.deleted && len(f.values) > 0 {
+				append_toml_comments(cx, f.values, f.padded, true, &b, tape.NO_NODE) or_return
+			}
+		}
+	}
 	append(&b, cx.eol)
 	return b[:], nil
 }
@@ -1414,50 +1801,44 @@ emit_toml_aot_delta :: proc(
 	cx: ^Section_Cx,
 	h: Handle,
 	n: ^Edit_Node,
-	path_pref: string,
+	fr: Section_Frame,
 	stack: ^[dynamic]Section_Frame,
-	owned_paths: ^[dynamic]string,
 ) -> Error {
+	_ = h
 	d := n.delta
 	if d == nil {
 		return nil
 	}
-	// Collect each `[[path_pref]]` element's full byte range including any immediately following `[path_pref.sub]` / `[[path_pref.sub]]` subtables!
-	Aot_Item :: struct {
-		lo, hi:  u64,
-		deleted: bool,
-	}
-	aot_items := make([dynamic]Aot_Item, 0, 4, cx.allocator)
+	path_pref := fr.path_pref
+	aot_items := collect_aot_items(cx, path_pref, fr.span_lo, fr.span_hi, d.deleted_indices[:])
 	defer delete(aot_items)
-	for sec, si in cx.sections {
-		if sec.is_array && sec.path == path_pref {
-			hi := sec.body_hi
-			// Extend `hi` across any immediately following subtables of this AOT entry!
-			for sj := si + 1; sj < len(cx.sections); sj += 1 {
-				sub := cx.sections[sj]
-				if sub.path == path_pref {
-					break
-				}
-				if path_matches_or_child(sub.path, path_pref) {
-					hi = sub.body_hi
-				} else {
-					break
+
+	// Push ONLY surviving edited child tables, bounded strictly to their own `[aot[i].lo, aot[i].hi)` span!
+	c, p, cerr := tape.children(tape.Reader{doc = cx.doc}, n.base, cx.allocator)
+	if cerr != nil {
+		return cerr
+	}
+	defer tape.destroy_children(&c)
+	if p == .Found {
+		for idx := 0; ; idx += 1 {
+			kn, vn, np := tape.next_child(tape.Reader{doc = cx.doc}, &c)
+			if np != .Found {
+				break
+			}
+			if idx < len(aot_items) && aot_items[idx].deleted {
+				continue
+			}
+			if ch, has := cx.ov.by_base[vn]; has {
+				if cn, ok := get_node(cx.ov, ch); ok && cn.has_edits {
+					push_section_child_frame(cx, fr, ch, kn, vn, false, idx, aot_items[:], stack) or_return
 				}
 			}
-			append(&aot_items, Aot_Item{lo = sec.head_lo, hi = hi})
 		}
 	}
-	for di in d.deleted_indices {
-		if int(di) < len(aot_items) {
-			aot_items[di].deleted = true
-		}
-	}
-
-	// Push surviving edited child tables.
-	push_section_children(cx, n.base, path_pref, stack, owned_paths) or_return
 
 	// Spell inserted AOT elements.
 	ins_texts := make([][]u8, len(d.inserted_elems), cx.allocator)
+	defer delete(ins_texts, cx.allocator)
 	for ins, i in d.inserted_elems {
 		if node_kind(cx.ov, ins.value) != .Object {
 			return refuse(.Unspellable_Value, "TOML array of tables requires table elements", n.base)
@@ -1473,11 +1854,8 @@ emit_toml_aot_delta :: proc(
 
 	// Handle explicit reorder on `[[arr]]`!
 	if len(d.order) > 0 {
-		deleted_flags := make([]bool, len(aot_items), cx.allocator)
+		deleted_flags := make_deleted_flags(aot_items[:], cx.allocator) or_return
 		defer delete(deleted_flags, cx.allocator)
-		for it, i in aot_items {
-			deleted_flags[i] = it.deleted
-		}
 		validate_order(d.order, deleted_flags, len(d.inserted_elems), cx.allocator) or_return
 		if len(aot_items) > 0 {
 			span_lo := aot_items[0].lo
@@ -1501,9 +1879,7 @@ emit_toml_aot_delta :: proc(
 					append(&moves, Move{text = t, written = true})
 				}
 			}
-			if _, aerr := append(&cx.splices, Splice{lo = span_lo, hi = span_hi, moves = moves[:], seq = len(cx.splices), base_node = n.base, full_rewalk = true}); aerr != nil {
-				return aerr
-			}
+			append(cx.splices, Splice{lo = span_lo, hi = span_hi, moves = moves[:], seq = len(cx.splices), base_node = n.base, full_rewalk = true}) or_return
 			return nil
 		}
 	}
@@ -1511,15 +1887,13 @@ emit_toml_aot_delta :: proc(
 	// Non-reorder deletions.
 	for it in aot_items {
 		if it.deleted {
-			if _, aerr := append(&cx.splices, Splice{lo = it.lo, hi = it.hi, seq = len(cx.splices), base_node = n.base, full_rewalk = true}); aerr != nil {
-				return aerr
-			}
+			append(cx.splices, Splice{lo = it.lo, hi = it.hi, seq = len(cx.splices), base_node = n.base, full_rewalk = true}) or_return
 		}
 	}
 
 	// Non-reorder insertions (honoring `ins.at`!).
 	for ins, i in d.inserted_elems {
-		pos := u64(len(cx.src))
+		pos := fr.span_hi
 		if ins.at >= 0 && ins.at < len(aot_items) {
 			pos = aot_items[ins.at].lo
 		} else if len(aot_items) > 0 {
@@ -1530,7 +1904,8 @@ emit_toml_aot_delta :: proc(
 			append(&b, cx.eol)
 		}
 		append(&b, ..ins_texts[i])
-		if _, aerr := append(&cx.splices, Splice{lo = pos, hi = pos, text = b[:], seq = len(cx.splices), base_node = n.base, full_rewalk = true}); aerr != nil {
+		delete(ins_texts[i], cx.allocator)
+		if _, aerr := append(cx.splices, Splice{lo = pos, hi = pos, text = b[:], seq = len(cx.splices), base_node = n.base, full_rewalk = true}); aerr != nil {
 			delete(b)
 			return aerr
 		}
