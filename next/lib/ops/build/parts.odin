@@ -152,6 +152,9 @@ parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: 
 	containers := 0
 	for p, k in parts {
 		s := &segs[k]
+		if s.b.err != nil || p.astray {
+			return {}, nil, false
+		}
 		if opts.budget.steps != 0 && u64(containers + s.containers) > opts.budget.steps {
 			for n in segment_nodes(s) {
 				containers += int(n.kind == .Array || n.kind == .Object)
@@ -159,9 +162,6 @@ parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: 
 					return {}, tape.Exceeded{at = n.lo + opened, kind = .Steps}, true
 				}
 			}
-		}
-		if s.b.err != nil || p.astray {
-			return {}, nil, false
 		}
 		if p.err == nil {
 			containers += s.containers
@@ -186,7 +186,7 @@ parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: 
 			doc.flags += {.Tolerated}
 		}
 	}
-	e := finish(&doc, segs, opts, data) if finish != nil else segments_dups(&doc, segs, opts.dups, rules, opts.runner)
+	e := finish(&doc, segs, opts, data) if finish != nil else segments_dups_fast(&doc, segs, opts.dups, rules, opts.runner)
 	if e != nil {
 		if _, refused := e.(runtime.Allocator_Error); refused {
 			return {}, nil, false

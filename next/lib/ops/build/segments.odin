@@ -114,7 +114,7 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 		if at != s.first {
 			intrinsics.mem_copy(raw_data(room[at:]), raw_data(own), len(own) * size_of(tape.Node))
 		}
-		if fact != int(uintptr(raw_data(s.b.facts)) - uintptr(raw_data(facts))) / size_of(tape.Fact) {
+		if len(s.b.doc.facts) > 0 && fact != int(uintptr(raw_data(s.b.facts)) - uintptr(raw_data(facts))) / size_of(tape.Fact) {
 			intrinsics.mem_copy(raw_data(facts[fact:]), raw_data(s.b.doc.facts), len(s.b.doc.facts) * size_of(tape.Fact))
 		}
 		s.at, s.fact = at, fact
@@ -275,4 +275,302 @@ segment_facts :: proc(arg: rawptr, k: int) {
 	}
 	present += builder_place_comments(c.doc, facts, len(c.doc.nodes))
 	intrinsics.atomic_or((^u32)(&c.present[k % len(c.present)]), transmute(u32)present)
+}
+
+@(private)
+DUP_BUCKETS :: 128
+
+// Hash-bucketed parallel duplicate-key check for `parts_build`: whole inner objects are checked in each segment with a
+// stack scratch buffer (no heap allocs for <= 32 keys), while crossing keys scatter into `DUP_BUCKETS` node-ordered
+// buckets and probe L2-resident open-addressed hash tables in parallel with no sorting.
+@(private, require_results)
+segments_dups_fast :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicates, rules: ^tape.Rules, runner: ^tape.Runner) -> tape.Error {
+	if !dups_apply(doc, dups) {
+		return nil
+	}
+	allocator := doc.allocator
+	locked := Locked_Allocator{backing = allocator}
+	worker_alloc := locked_allocator(&locked)
+	r := Repeats{at = tape.NO_NODE}
+	defer delete(r.drops, allocator)
+	err: runtime.Allocator_Error
+	parts: []Dup_Part
+	parts, err = make([]Dup_Part, len(segs), allocator)
+	if err != nil {
+		return dups_end(doc, &r, err, rules)
+	}
+	defer {
+		for p in parts {
+			delete(p.keys)
+			delete(p.scratch)
+		}
+		delete(parts, allocator)
+	}
+	if dups != .Refuse {
+		if r.drops, err = make([]u64, (len(doc.nodes) + 63) / 64, allocator); err != nil {
+			return dups_end(doc, &r, err, rules)
+		}
+	}
+	for &p in parts {
+		p.r = {at = tape.NO_NODE, drops = r.drops}
+		p.keys.allocator = worker_alloc
+		p.scratch.allocator = worker_alloc
+	}
+	j := Dup_Job {
+		doc          = doc,
+		segs         = segs,
+		dups         = dups,
+		parts        = parts,
+		drops        = r.drops,
+		worker_alloc = worker_alloc,
+		refuse_limit = tape.NO_NODE,
+	}
+	hook.fan_each(runner, len(segs), dup_scan_part, &j)
+	crossing := 0
+	for p in parts {
+		r.at = min(r.at, p.r.at)
+		r.dropped ||= p.r.dropped
+		crossing += p.crossing
+		if p.err != nil {
+			err = p.err
+		}
+	}
+	if crossing > 0 && err == nil {
+		if crossing <= FEW_KEYS {
+			small: [FEW_KEYS]Hashed_Key = ---
+			at := 0
+			for p in parts {
+				copy(small[at:], p.keys[:p.crossing])
+				at += p.crossing
+			}
+			err = repeats_in(doc, small[:crossing], dups, &r)
+			return dups_end(doc, &r, err, rules)
+		}
+		j.keys, err = non_zero_make([]Hashed_Key, crossing, allocator)
+		if err != nil {
+			return dups_end(doc, &r, err, rules)
+		}
+		defer delete(j.keys, allocator)
+		cur := u32(0)
+		for b in 0 ..< DUP_BUCKETS {
+			j.b_ends[b] = int(cur)
+			for &p in parts {
+				p.offsets[b] = cur
+				cur += p.counts[b]
+			}
+		}
+		j.b_ends[DUP_BUCKETS] = int(cur)
+		hook.fan_each(runner, len(segs), dup_scatter_part, &j)
+		// Release per-segment key lists before workers allocate probe hash tables.
+		for &p in parts {
+			delete(p.keys)
+			p.keys = {}
+			delete(p.scratch)
+			p.scratch = {}
+		}
+		j.refuse_limit = r.at
+		for &a in j.bucket_at {
+			a = tape.NO_NODE
+		}
+		hook.fan(runner, dup_check_buckets, &j)
+		for b in 0 ..< DUP_BUCKETS {
+			r.at = min(r.at, j.bucket_at[b])
+			r.dropped ||= j.bucket_dropped[b]
+			if j.bucket_err[b] != nil {
+				err = j.bucket_err[b]
+			}
+		}
+	}
+	return dups_end(doc, &r, err, rules)
+}
+
+@(private)
+Dup_Part :: struct {
+	r:        Repeats,
+	keys:     [dynamic]Hashed_Key,
+	scratch:  [dynamic]Hashed_Key,
+	counts:   [DUP_BUCKETS]u32,
+	offsets:  [DUP_BUCKETS]u32,
+	crossing: int,
+	err:      runtime.Allocator_Error,
+}
+
+@(private)
+Dup_Job :: struct {
+	doc:            ^tape.Document,
+	segs:           []Segment,
+	dups:           tape.Duplicates,
+	parts:          []Dup_Part,
+	keys:           []Hashed_Key,
+	drops:          []u64,
+	worker_alloc:   runtime.Allocator,
+	refuse_limit:   tape.Node_Index,
+	b_ends:         [DUP_BUCKETS + 1]int,
+	next_bucket:    int,
+	bucket_at:      [DUP_BUCKETS]tape.Node_Index,
+	bucket_dropped: [DUP_BUCKETS]bool,
+	bucket_err:     [DUP_BUCKETS]runtime.Allocator_Error,
+}
+
+@(private)
+dup_scan_part :: proc(arg: rawptr, k: int) #no_bounds_check {
+	j := (^Dup_Job)(arg)
+	doc := j.doc
+	s, p := &j.segs[k], &j.parts[k]
+	lo, hi := s.at, j.segs[k + 1].at if k + 1 < len(j.segs) else len(doc.nodes)
+	stack := s.b.stack
+	top := 0
+	for node in s.seam {
+		stack[top] = u64(node) << 1 | 1
+		top += 1
+	}
+	inline_scratch: [32]Hashed_Key = ---
+	for i in lo ..< hi {
+		for top > 0 && int(stack[top - 1] >> 1) + int(doc.nodes[stack[top - 1] >> 1].n) <= i {
+			top -= 1
+		}
+		node := doc.nodes[i]
+		if node.role == .Key && top > 0 && stack[top - 1] & 1 != 0 {
+			object := tape.Node_Index(stack[top - 1] >> 1)
+			h := doc.format.key_hash(doc.src, node)
+			if _, p.err = append(&p.keys, Hashed_Key{h, object, tape.Node_Index(i)}); p.err != nil {
+				return
+			}
+			p.counts[h >> 25] += 1
+			p.crossing += 1
+		}
+		if node.kind <= .Plain {
+			continue
+		}
+		whole := i + int(node.n) <= hi
+		if node.kind == .Object && whole && p.err == nil {
+			inline_n := 0
+			overflow := false
+			for m := tape.Node_Index(i) + 1; int(m) < i + int(node.n); m = tape.node_after(doc, tape.node_after(doc, m)) {
+				hk := Hashed_Key{doc.format.key_hash(doc.src, doc.nodes[m]), 0, m}
+				if !overflow {
+					if inline_n < len(inline_scratch) {
+						inline_scratch[inline_n] = hk
+						inline_n += 1
+					} else {
+						clear(&p.scratch)
+						if _, p.err = append(&p.scratch, ..inline_scratch[:]); p.err != nil {
+							return
+						}
+						if _, p.err = append(&p.scratch, hk); p.err != nil {
+							return
+						}
+						overflow = true
+					}
+				} else {
+					if _, p.err = append(&p.scratch, hk); p.err != nil {
+						return
+					}
+				}
+			}
+			obj_keys := p.scratch[:] if overflow else inline_scratch[:inline_n]
+			if p.err = repeats_in(doc, obj_keys, j.dups, &p.r); p.err != nil {
+				return
+			}
+		}
+		stack[top] = u64(i) << 1 | u64(!whole)
+		top += 1
+	}
+}
+
+@(private)
+dup_scatter_part :: proc(arg: rawptr, k: int) #no_bounds_check {
+	j := (^Dup_Job)(arg)
+	p := &j.parts[k]
+	offs := p.offsets
+	for hk in p.keys[:p.crossing] {
+		b := hk.hash >> 25
+		pos := offs[b]
+		offs[b] = pos + 1
+		j.keys[pos] = hk
+	}
+}
+
+@(private)
+dup_check_buckets :: proc(arg: rawptr) #no_bounds_check {
+	j := (^Dup_Job)(arg)
+	doc := j.doc
+	slots: [dynamic]u32
+	slots.allocator = j.worker_alloc
+	defer delete(slots)
+	for {
+		b := intrinsics.atomic_add(&j.next_bucket, 1)
+		if b >= DUP_BUCKETS {
+			return
+		}
+		lo, hi := j.b_ends[b], j.b_ends[b + 1]
+		m := hi - lo
+		if m <= 1 {
+			continue
+		}
+		sl := j.keys[lo:hi]
+		if j.dups == .Refuse && sl[0].node >= j.refuse_limit {
+			continue
+		}
+		if m <= FEW_KEYS {
+			br := Repeats{at = j.refuse_limit, drops = j.drops}
+			if berr := repeats_in(doc, sl, j.dups, &br); berr != nil {
+				j.bucket_err[b] = berr
+				return
+			}
+			j.bucket_at[b] = br.at
+			j.bucket_dropped[b] = br.dropped
+			continue
+		}
+		cap_u64 := u64(32)
+		for cap_u64 < u64(m) * 2 {
+			cap_u64 *= 2
+		}
+		if cap_u64 > min(u64(max(int) / size_of(u32)), u64(max(u32))) {
+			j.bucket_err[b] = .Out_Of_Memory
+			return
+		}
+		table_cap := int(cap_u64)
+		if rerr := non_zero_reserve(&slots, table_cap); rerr != nil || cap(slots) < table_cap {
+			j.bucket_err[b] = rerr if rerr != nil else .Out_Of_Memory
+			return
+		}
+		tbl := ([^]u32)(raw_data(slots))[:table_cap]
+		runtime.mem_zero(raw_data(tbl), table_cap * size_of(u32))
+		mask := u32(table_cap - 1)
+		local_at := j.refuse_limit
+		local_dropped := false
+		for hk, i in sl {
+			if j.dups == .Refuse && hk.node >= local_at {
+				break
+			}
+			slot := (hk.hash ~ (u32(hk.object) * 0x9E3779B9)) & mask
+			for {
+				entry := tbl[slot]
+				if entry == 0 {
+					tbl[slot] = u32(i + 1)
+					break
+				}
+				prev := &sl[entry - 1]
+				if prev.hash == hk.hash && prev.object == hk.object && tape.same_keys(doc.format, doc.src, doc.nodes[prev.node], doc.src, doc.nodes[hk.node]) {
+					switch j.dups {
+					case .Refuse:
+						local_at = min(local_at, hk.node)
+					case .First:
+						intrinsics.atomic_or(&j.drops[hk.node / 64], 1 << uint(hk.node % 64))
+						local_dropped = true
+					case .Last:
+						intrinsics.atomic_or(&j.drops[prev.node / 64], 1 << uint(prev.node % 64))
+						local_dropped = true
+						tbl[slot] = u32(i + 1)
+					case .Default, .All, .Group:
+					}
+					break
+				}
+				slot = (slot + 1) & mask
+			}
+		}
+		j.bucket_at[b] = local_at
+		j.bucket_dropped[b] = local_dropped
+	}
 }

@@ -504,6 +504,9 @@ lex_comments :: #force_inline proc "contextless" (run: ^Lex_Run, src: []u8, hi, 
 			from, pos = j, j + 2
 		}
 	}
+	if run.end == .Line || run.end == .Block {
+		comments |= max(u64) << uint(from)
+	}
 	return
 }
 
@@ -660,14 +663,17 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 		delete(list)
 		delete(held)
 	}
-	apply :: proc(open: ^[dynamic]u8, p: ^Lex_Profile, limit: u64, part: ^build.Part) -> bool {
+	apply :: proc(src: []u8, lo, hi: int, from: Lex, open: ^[dynamic]u8, p: ^Lex_Profile, limit: u64, part: ^build.Part) -> bool {
 		levels := min(len(open) + p.peak, int(limit))
-		if p.pops > len(open) || p.n > SEAM_OPENS || levels > SEAM_LEVELS {
+		if p.pops > len(open) || levels > SEAM_LEVELS || len(open) - p.pops + p.n > SEAM_LEVELS {
 			return false
 		}
 		part.levels = max(part.levels, levels)
 		part.comments += p.comments
 		part.nodes += p.nodes
+		if p.n > SEAM_OPENS {
+			return lex_stretch_opens(src, lo, hi, from, S, open, p.pops, p.n)
+		}
 		resize(open, len(open) - p.pops)
 		_, err := append(open, ..p.opens[:p.n])
 		return err == nil
@@ -683,7 +689,8 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 		if !r.read {
 			r^ = lex_run(src, c.lo, c.hi, state, S)
 		}
-		if !apply(&open, &r.pre, limit, &list[len(list) - 1]) {
+		pre_hi := r.seam if r.seam >= 0 else c.hi
+		if !apply(src, c.lo, pre_hi, state, &open, &r.pre, limit, &list[len(list) - 1]) {
 			return
 		}
 		list[len(list) - 1].nodes -= int(r.lead_close && tail_open)
@@ -704,7 +711,7 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 					}
 				}
 			}
-			if !apply(&open, &r.post, limit, &list[len(list) - 1]) {
+			if !apply(src, r.seam, c.hi, .Out, &open, &r.post, limit, &list[len(list) - 1]) {
 				return
 			}
 		}
@@ -716,6 +723,60 @@ seam_plan :: proc(src: []u8, chunks: []Lex_Chunk, $S: Spec, limit: u64, allocato
 	shrink(&held)
 	build.parts_opens(list[:], held[:])
 	return list[:], held[:], true
+}
+
+// Reconstructs the `want_n` net open brackets left at the end of `src[lo:hi]` from place `from` after `pops` closes,
+// when a stretch opens more than `SEAM_OPENS` brackets without exceeding `SEAM_LEVELS`.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+lex_stretch_opens :: proc(src: []u8, lo, hi: int, from: Lex, $S: Spec, open: ^[dynamic]u8, pops, want_n: int) -> bool #no_bounds_check {
+	local: [dynamic]u8
+	local.allocator = open.allocator
+	defer delete(local)
+	if err := non_zero_reserve(&local, want_n); err != nil || cap(local) < want_n {
+		return false
+	}
+	run := Lex_Run{seam = -1, end = from, read = true, at = lo, comment_end = -1, comment_from = lo}
+	text := src[:hi]
+	odd: u64
+	for base := lo; base < hi; base += 64 {
+		b := kernel.load_block(text, base)
+		escaped := kernel.escaped(kernel.pack(kernel.eq(b, '\\')), &odd)
+		q := kernel.pack(kernel.eq(b, '"')) &~ escaped
+		m := lex_brackets(b)
+		outside: u64
+		if run.end <= .Double && run.at <= base {
+			inside := kernel.prefix_xor(STATE_TIER, q) ~ (max(u64) if run.end == .Double else 0)
+			if lex_marks(b, S) &~ inside == 0 {
+				outside = ~inside
+				run.end = .Double if inside >> 63 != 0 else .Out
+				run.comment_bytes = 0
+			} else {
+				str_m, com_m, _ := lex_comments(&run, src, hi, base, b, q, escaped, S)
+				outside = ~(str_m | com_m)
+			}
+		} else {
+			str_m, com_m, _ := lex_comments(&run, src, hi, base, b, q, escaped, S)
+			outside = ~(str_m | com_m)
+		}
+		opens, closes := m[0] & outside, m[1] & outside
+		for bits := opens | closes; bits != 0; bits &= bits - 1 {
+			k := base + int(intrinsics.count_trailing_zeros(bits))
+			bit := bits & -bits
+			if opens & bit != 0 {
+				if _, err := append(&local, src[k]); err != nil {
+					return false
+				}
+			} else if len(local) > 0 {
+				pop(&local)
+			}
+		}
+	}
+	if len(local) != want_n {
+		return false
+	}
+	resize(open, len(open) - pops)
+	_, err := append(open, ..local[:])
+	return err == nil
 }
 
 // Walks `src` from `from`, one past a comma inside the containers of `opens`, outermost first.
@@ -742,12 +803,11 @@ walk_seam :: proc "contextless" (src: []u8, from: int, opens: []tape.Kind, $S: S
 	}
 	w.gap_lo = GAP_UNLEARNABLE
 	d := u64(len(opens)) << 1 | u64(opens[len(opens) - 1] == .Object)
-	// An object matches its members against its own row, live from its first member, because the seam's members
-	// continue the shape the part before it read. An array gives each of its objects a row, as the root does.
+	// An object seam uses the dormant tail slot so dynamic parent keys do not miss and trip `stop_gaps`, while child
+	// objects share one row that turns live on repeat. An array seam gives each of its objects a row, as the root does.
 	m := u64(GAP_START)
 	if gaps_rows(m) && d & 1 != 0 {
-		gap_new_row(&w.gaps, m)
-		m = gap_row_live(&w.gaps, m)
+		m += GAP_MEMBERS - 1
 	}
 	end := raw_data(src)[len(src):]
 	r := enter_member(raw_data(src)[from:], end, d, indent_start(&w), &w, regs^, m, on)
