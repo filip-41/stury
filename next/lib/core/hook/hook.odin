@@ -154,7 +154,7 @@ Levels :: struct($Held: proc "contextless" (h: rawptr) -> int, $Grow: proc "cont
 // The levels the stack of `h`, a hook with `.Levels`, holds.
 levels_held :: #force_inline proc "contextless" (h: ^$H) -> int {
 	L :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, PROTOCOL_FIELD), 1)
-	return levels_held_by(intrinsics.type_polymorphic_record_parameter_value(L, 0), h)
+	return call_ptr(intrinsics.type_polymorphic_record_parameter_value(L, 0), h)
 }
 
 // Makes the stack of `h`, a hook with `.Levels`, hold `want` levels, or returns false.
@@ -163,12 +163,14 @@ levels_grow :: #force_inline proc "contextless" (h: ^$H, want: int, s: ^Regs, at
 	return levels_grow_by(intrinsics.type_polymorphic_record_parameter_value(L, 1), h, want, s, at)
 }
 
-@(private)
-levels_held_by :: #force_inline proc "contextless" ($Held: proc "contextless" (h: rawptr) -> int, h: rawptr) -> int {
-	return Held(h)
+// Trampoline for a polymorphic record proc parameter; calling `type_polymorphic_record_parameter_value` directly
+// crashes Odin's LLVM backend.
+@(private = "file")
+call_ptr :: #force_inline proc "contextless" ($F: proc "contextless" (h: rawptr) -> $R, h: rawptr) -> R {
+	return F(h)
 }
 
-@(private)
+@(private = "file")
 levels_grow_by :: #force_inline proc "contextless" ($Grow: proc "contextless" (h: rawptr, want: int, s: ^Regs, at: u64) -> bool, h: rawptr, want: int, s: ^Regs, at: u64) -> bool {
 	return Grow(h, want, s, at)
 }
@@ -182,7 +184,7 @@ Rooms :: struct($End: proc "contextless" (h: rawptr) -> uintptr, $Grow: proc "co
 // The address one past the room of `h`, a hook with `.Rooms`.
 rooms_end :: #force_inline proc "contextless" (h: ^$H) -> uintptr {
 	R :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, PROTOCOL_FIELD), 2)
-	return rooms_end_by(intrinsics.type_polymorphic_record_parameter_value(R, 0), h)
+	return call_ptr(intrinsics.type_polymorphic_record_parameter_value(R, 0), h)
 }
 
 // Grows the room of `h`, a hook with `.Rooms`, for the token at `at`, or returns false.
@@ -191,12 +193,7 @@ rooms_grow :: #force_inline proc "contextless" (h: ^$H, s: ^Regs, at: u64) -> bo
 	return rooms_grow_by(intrinsics.type_polymorphic_record_parameter_value(R, 1), h, s, at)
 }
 
-@(private)
-rooms_end_by :: #force_inline proc "contextless" ($End: proc "contextless" (h: rawptr) -> uintptr, h: rawptr) -> uintptr {
-	return End(h)
-}
-
-@(private)
+@(private = "file")
 rooms_grow_by :: #force_inline proc "contextless" ($Grow: proc "contextless" (h: rawptr, s: ^Regs, at: u64) -> bool, h: rawptr, s: ^Regs, at: u64) -> bool {
 	return Grow(h, s, at)
 }
@@ -211,27 +208,19 @@ Keeps :: struct($Inner: typeid, $Of: proc "contextless" (h: rawptr) -> rawptr, $
 // `Keep_Stubs` for with `STUBS` and else `Keep`.
 keeps_give :: #force_inline proc "contextless" (h: ^$H, s: Regs, t: tape.Token, $STUBS: bool) -> (Regs, Action) {
 	K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, PROTOCOL_FIELD), 3)
-	when STUBS {
-		return keeps_give_by(intrinsics.type_polymorphic_record_parameter_value(K, 1), intrinsics.type_polymorphic_record_parameter_value(K, 3), h, s, t)
-	} else {
-		return keeps_give_by(intrinsics.type_polymorphic_record_parameter_value(K, 1), intrinsics.type_polymorphic_record_parameter_value(K, 2), h, s, t)
-	}
+	IDX :: 3 when STUBS else 2
+	return keeps_give_by(intrinsics.type_polymorphic_record_parameter_value(K, IDX), keeps_inner(h), s, t)
 }
 
 // The inner hook of `h`, a hook with `.Keeps`, which the protocol's `Keeps` names the type of.
 keeps_inner :: #force_inline proc "contextless" (h: ^$H) -> rawptr {
 	K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, PROTOCOL_FIELD), 3)
-	return keeps_inner_by(intrinsics.type_polymorphic_record_parameter_value(K, 1), h)
+	return call_ptr(intrinsics.type_polymorphic_record_parameter_value(K, 1), h)
 }
 
-@(private)
-keeps_inner_by :: #force_inline proc "contextless" ($Of: proc "contextless" (h: rawptr) -> rawptr, h: rawptr) -> rawptr {
-	return Of(h)
-}
-
-@(private)
-keeps_give_by :: #force_inline proc "contextless" ($Of: proc "contextless" (h: rawptr) -> rawptr, $Give: proc "contextless" (h: rawptr, s: Regs, t: tape.Token) -> (Regs, Action), h: rawptr, s: Regs, t: tape.Token) -> (Regs, Action) {
-	return Give(Of(h), s, t)
+@(private = "file")
+keeps_give_by :: #force_inline proc "contextless" ($Give: proc "contextless" (h: rawptr, s: Regs, t: tape.Token) -> (Regs, Action), inner: rawptr, s: Regs, t: tape.Token) -> (Regs, Action) {
+	return Give(inner, s, t)
 }
 
 // Three words of a hook's state, passed in the walk's argument registers from token to token. They suit what changes
@@ -279,7 +268,7 @@ steps_result :: #force_inline proc "contextless" (r: Walk_Result, steps: u64) ->
 }
 
 // Where the walk ended or failed, and its error, nil for a walk that read its text or its window, or was stopped.
-walk_error :: #force_inline proc "contextless" (r: Walk_Result, rules: ^tape.Rules) -> (at: u64, err: tape.Error, stopped: bool) {
+walk_error :: proc "contextless" (r: Walk_Result, rules: ^tape.Rules) -> (at: u64, err: tape.Error, stopped: bool) {
 	at = u64(r) >> 16
 	switch u8(r) {
 	case 0, WALK_MORE:
@@ -297,36 +286,4 @@ walk_error :: #force_inline proc "contextless" (r: Walk_Result, rules: ^tape.Rul
 		err = tape.Fault{at = at, rules = rules, kind = tape.Fault_Kind(u8(r)), detail = u8(u64(r) >> 8)}
 	}
 	return
-}
-
-// What `fan_each` shares: the next index to claim, the count of them and the argument given to each task.
-@(private)
-Fan_Each :: struct {
-	next, count: int,
-	arg:         rawptr,
-}
-
-// Runs `task(arg, k)` once for each `k` below `count`, on the calling thread and on the threads of `runner`, each thread
-// claiming the next index while any is left. The calls share the work through `arg`. Specializing on `$task` gives each
-// workload a distinct trampoline address so `host.Pool` tracks per-task adaptive widths independently.
-fan_each :: proc(runner: ^tape.Runner, count: int, $task: proc(arg: rawptr, k: int), arg: rawptr) {
-	each := Fan_Each{count = count, arg = arg}
-	fan(runner, proc(arg: rawptr) {
-			e := (^Fan_Each)(arg)
-			for {
-				k := intrinsics.atomic_add(&e.next, 1)
-				if k >= e.count {
-					return
-				}
-				task(e.arg, k)
-			}
-		}, &each)
-}
-
-// Runs `task(arg)` on the calling thread and on the threads of `runner`, and returns once every call has. The calls
-// share the work through `arg`, as only the caller's call is certain to run.
-fan :: proc(runner: ^tape.Runner, task: proc(arg: rawptr), arg: rawptr) {
-	runner.start(runner.data, runner.threads, task, arg)
-	task(arg)
-	runner.finish(runner.data)
 }

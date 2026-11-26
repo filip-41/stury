@@ -28,7 +28,7 @@ deepen :: #force_no_inline proc "contextless" (w: ^$W, hs: ^Regs, held: int, at:
 		return WALK_TOO_DEEP
 	}
 	want := min(w.limit, 2 * w.depth + 1)
-	if !levels_need(w, held + int(want), hs, at) || want > w.room && !levels_room(w, want) {
+	if want > u64(max(int) - max(held, 0)) || !levels_need(w, held + int(want), hs, at) || want > w.room && !levels_room(w, want) {
 		return WALK_NO_MEMORY
 	}
 	w.depth = want
@@ -52,6 +52,7 @@ levels_need :: #force_inline proc "contextless" (w: ^$W, want: int, hs: ^Regs, a
 }
 
 // The levels of a walk `W` as `levels_scope` found them.
+@(private = "file")
 Levels_Saved :: struct($Stack: typeid) {
 	stack:              Stack,
 	depth, limit, room: u64,
@@ -77,10 +78,10 @@ levels_leave :: #force_inline proc "contextless" (w: ^$W, saved: Levels_Saved($S
 // Moves the levels of walk `w` to a block of its allocator that holds `want` of them, or returns false.
 @(cold)
 levels_room :: #force_no_inline proc "contextless" (w: ^$W, want: u64) -> bool {
-	if w.ctx == nil {
+	Level :: type_of(w.stack[0])
+	if w.ctx == nil || want > u64(max(int) / size_of(Level)) {
 		return false
 	}
-	Level :: type_of(w.stack[0])
 	block := levels_block(w.stack, w.owned, int(w.room) * size_of(Level), int(want) * size_of(Level), align_of(Level), int(w.depth) * size_of(Level), w.allocator, w.ctx)
 	if block == nil {
 		return false
@@ -95,10 +96,11 @@ levels_free :: #force_no_inline proc "contextless" (w: ^$W) {
 	levels_release(w.stack, int(w.room) * size_of(type_of(w.stack[0])), w.allocator, w.ctx)
 }
 
+// Non-generic cold helpers so allocator resize/copy/free code is emitted once across walk specializations.
 // The block of `size` bytes in `allocator` that takes the levels of a walk: `old`, a block of `old_size` bytes from the
 // allocator, resized when the walk `owned` it, else the `copy` bytes of its frame's levels copied in. Nil when memory
 // is refused, and for a nil allocator, which gives no memory and no error.
-@(private)
+@(private = "file")
 levels_block :: proc "contextless" (old: rawptr, owned: bool, old_size, size, align, copy: int, allocator: runtime.Allocator, ctx: ^runtime.Context) -> rawptr {
 	context = ctx^
 	block: []u8
@@ -117,8 +119,26 @@ levels_block :: proc "contextless" (old: rawptr, owned: bool, old_size, size, al
 	return raw_data(block)
 }
 
-@(private)
+@(private = "file")
 levels_release :: proc "contextless" (stack: rawptr, size: int, allocator: runtime.Allocator, ctx: ^runtime.Context) {
 	context = ctx^
 	runtime.mem_free_with_size(stack, size, allocator)
+}
+
+// The distance between the stack probe's reads, a guard page at the least: a page of 16 KiB on arm64 macOS, else 4 KiB.
+@(private = "file")
+STACK_PAGE :: 16 * 1024 when ODIN_OS == .Darwin && ODIN_ARCH == .arm64 else 4 * 1024
+
+// Reads the `BYTES` below the stack pointer a page at a time from the top, so that on a thread with less stack a read
+// faults on its guard page before its frames are written past it. WebAssembly's shadow stack has no guard page and
+// traps at its base, which the frame alone reaches, so the probe reads nothing there.
+@(no_sanitize_address)
+probe_stack :: #force_no_inline proc "contextless" ($BYTES: uintptr) {
+	#assert(BYTES % STACK_PAGE == 0)
+	when ODIN_ARCH != .wasm32 && ODIN_ARCH != .wasm64p32 {
+		sp := uintptr(intrinsics.stack_pointer())
+		for k := uintptr(STACK_PAGE); k <= BYTES; k += STACK_PAGE {
+			_ = intrinsics.volatile_load((^u8)(sp - k))
+		}
+	}
 }

@@ -340,7 +340,7 @@ first_lane16_every_lane :: proc(t: ^testing.T) {
 	}
 }
 
-// Checks `last_lane16` on each lane alone and under random lanes below it.
+// Checks `last_index_byte` over 16-byte inputs (exercising `last_lane16`) on each lane alone and under random lanes below it.
 @(test, enable_target_feature = FEATURES)
 last_lane16_every_lane :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -355,8 +355,8 @@ last_lane16_every_lane :: proc(t: ^testing.T) {
 					m[below] = 0xff
 				}
 			}
-			got := k.last_lane16(transmute(#simd[16]u8)m)
-			testing.expectf(t, got == u64(lane), "% x: %d, want %d", m, got, lane)
+			got := k.last_index_byte(m[:], 0xff)
+			testing.expectf(t, got == lane, "% x: %d, want %d", m, got, lane)
 		}
 	}
 }
@@ -613,56 +613,6 @@ byte_set_boundaries :: proc(t: ^testing.T) {
 	}
 }
 
-// Checks `quote_run` and `quote_cut` against a scan a byte at a time, on every stretch of random texts of quotes,
-// escapes, brackets and separators, from both starts and both escape carries.
-@(test)
-quote_scan_every_stretch :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	state: rand.Default_Random_State
-	context.random_generator = testkit.seeded(t, &state, 9)
-	alphabet := "\"\\[]{},\nab"
-	buf: [160]u8
-	for round in 0 ..< testkit.rounds(24) {
-		for &b in buf {
-			b = alphabet[rand.int_max(len(alphabet) if round % 2 == 0 else 4)]
-		}
-		for lo := 0; lo < len(buf); lo += 1 + rand.int_max(9) {
-			for hi := lo; hi <= len(buf); hi += 1 + rand.int_max(9) {
-				text := buf[lo:hi]
-				for odd in ([2]bool{false, true}) {
-					s := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, odd = odd}
-					k.quote_run(text, &s)
-					for g in 0 ..< 2 {
-						quoted, want := g == 1, rand.int_max(3)
-						esc, depth, low, cut := odd, 0, 0, -1
-						// An escape hides only a quote.
-						for c, i in text {
-							was := esc
-							esc = !esc && c == '\\'
-							switch {
-							case c == '"' && !was: quoted = !quoted
-							case quoted:
-							case c == '[' || c == '{': depth += 1
-							case c == ']' || c == '}':
-								depth -= 1
-								low = min(low, depth)
-								cut = -2 if cut == -1 && depth < 0 else cut
-							case c == ',' && cut == -1 && depth == 0: cut = i
-							}
-						}
-						testing.expectf(t, s.depth[g] == depth && s.low[g] == low && s.quoted == (quoted != (g == 1)) && s.odd == esc, "%q from %d: %v", text, g, s)
-						from := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, odd = odd, quoted = g == 1, want = want}
-						from.depth[0] = want
-						testing.expectf(t, k.quote_cut(text, from) == max(cut, -1), "%q from %d: cut %d, want %d", text, g, k.quote_cut(text, from), cut)
-						from.depth[0] = min(int)
-						testing.expectf(t, k.quote_cut(text, from) == -1, "%q from %d below `want`: cut %d", text, g, k.quote_cut(text, from))
-					}
-				}
-			}
-		}
-	}
-}
-
 // Checks `count_byte` and `count_chars` on texts past the 255 blocks a counter holds: all hits, all misses, and random
 // bytes, at lengths around the block and round sizes.
 @(test)
@@ -745,91 +695,6 @@ skip_ws_stops_at_every_byte :: proc(t: ^testing.T) {
 	}
 }
 
-// Checks `quote_cut` without `nest` against a scan a byte at a time, from inside and outside a quoted run and after an
-// odd run of escapes.
-@(test)
-quote_cut_flat_matches_bytewise :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	state: rand.Default_Random_State
-	context.random_generator = testkit.seeded(t, &state, 11)
-	alphabet := "\"\\[]{},\nab"
-	buf: [200]u8
-	for round in 0 ..< testkit.rounds(40) {
-		for &b in buf {
-			b = alphabet[rand.int_max(len(alphabet) if round % 2 == 0 else 7)]
-		}
-		for lo := 0; lo < len(buf); lo += 1 + rand.int_max(7) {
-			for hi := lo; hi <= len(buf); hi += 1 + rand.int_max(11) {
-				text := buf[lo:hi]
-				for odd in ([2]bool{false, true}) {
-					for g in 0 ..< 2 {
-						quoted, esc, cut := g == 1, odd, -1
-						for c, i in text {
-							was := esc
-							esc = !esc && c == '\\'
-							if c == '"' && !was {
-								quoted = !quoted
-							} else if !quoted && c == ',' {
-								cut = i
-								break
-							}
-						}
-						from := k.Quotes{quote = '"', escape = '\\', sep = ',', odd = odd, quoted = g == 1}
-						testing.expectf(t, k.quote_cut(text, from) == cut, "%q from %d", text, g)
-					}
-				}
-			}
-		}
-	}
-}
-
-// Checks `quote_cut` with `nest` from a level at or above `want` against a scan a byte at a time.
-@(test)
-quote_cut_from_above_want :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	state: rand.Default_Random_State
-	context.random_generator = testkit.seeded(t, &state, 13)
-	alphabet := "\"\\[]{},\nab[[{"
-	buf: [260]u8
-	for _ in 0 ..< testkit.rounds(60) {
-		for &b in buf {
-			b = alphabet[rand.int_max(len(alphabet))]
-		}
-		for lo := 0; lo < len(buf); lo += 1 + rand.int_max(13) {
-			for hi := lo; hi <= len(buf); hi += 1 + rand.int_max(17) {
-				text := buf[lo:hi]
-				for g in 0 ..< 2 {
-					want := rand.int_max(3) - 1
-					start := want + rand.int_max(6)
-					quoted, esc, depth, cut := g == 1, false, start, -1
-					scan: for c, i in text {
-						was := esc
-						esc = !esc && c == '\\'
-						switch {
-						case c == '"' && !was:
-							quoted = !quoted
-						case quoted:
-						case c == '[' || c == '{':
-							depth += 1
-						case c == ']' || c == '}':
-							if depth <= want {
-								break scan
-							}
-							depth -= 1
-						case c == ',' && depth == want:
-							cut = i
-							break scan
-						}
-					}
-					from := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, quoted = g == 1, want = want}
-					from.depth[0] = start
-					testing.expectf(t, k.quote_cut(text, from) == cut, "%q from %d at %d want %d", text, g, start, want)
-				}
-			}
-		}
-	}
-}
-
 // Checks the searches and counts on texts in memory filled with the byte they look for, so a lane read past either
 // end shows.
 @(test)
@@ -899,14 +764,6 @@ scans_stop_at_unmapped_memory :: proc(t: ^testing.T) {
 		testing.expect(t, !general.buckets)
 		testing.expectf(t, k.index_set(edge, general) == k.index_set(mid, general), "index_set general %d", n)
 		testing.expectf(t, k.utf8_valid(edge) == k.utf8_valid(mid), "utf8_valid %d", n)
-		for nest in ([2]bool{false, true}) {
-			cut := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = nest}
-			testing.expectf(t, k.quote_cut(edge, cut) == k.quote_cut(mid, cut), "quote_cut %d nest %v", n, nest)
-			a, b := k.Quotes{quote = '"', escape = '\\', nest = nest}, k.Quotes{quote = '"', escape = '\\', nest = nest}
-			k.quote_run(edge, &a)
-			k.quote_run(mid, &b)
-			testing.expectf(t, a == b, "quote_run %d nest %v", n, nest)
-		}
 		p, q := raw_data(edge), raw_data(mid)
 		testing.expectf(t, intrinsics.ptr_sub(k.skip_ws(p, p[n:]), p) == intrinsics.ptr_sub(k.skip_ws(q, q[n:]), q), "skip_ws %d", n)
 	}
@@ -1178,63 +1035,6 @@ ws_predicates_every_byte :: proc(t: ^testing.T) {
 		testing.expectf(t, k.is_ws(c) == want_ws, "is_ws(0x%02x)", c)
 		testing.expectf(t, k.is_markup_ws(c) == want_markup, "is_markup_ws(0x%02x)", c)
 	}
-}
-
-// Checks `quote_cut` and `quote_run` edge cases: starting below `want`, `min(int)`/`max(int)` levels, stale
-// `s.quoted == true`, `quote == 0`, and `escape == 0`.
-@(test)
-quote_edge_cases :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	// Starting below `want` returns -1 even when opening brackets would climb back to `want`.
-	below := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, want = 1, depth = {0, 0}}
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[,"), below), -1)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[[,"), below), -1)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string(""), below), -1)
-
-	// `min(int)` and `max(int)` levels without signed subtraction wraparound.
-	at_min := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, want = min(int), depth = {min(int), 0}}
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string(","), at_min), 0)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[,"), at_min), -1)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[],"), at_min), 2)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("],"), at_min), -1)
-
-	near_min := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, want = min(int), depth = {min(int) + 1, 0}}
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("],"), near_min), 1)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("]],"), near_min), -1)
-
-	at_max := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, want = max(int), depth = {max(int), 0}}
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[,"), at_max), -1)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("[],"), at_max), 2)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string("],"), at_max), -1)
-
-	// `quote == 0` takes the direct `.Forward` scan path for the first `sep`.
-	no_quote := k.Quotes{quote = 0, escape = '\\', sep = ',', nest = true, want = 5}
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`","`), no_quote), 1)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`[[,`), no_quote), 2)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`abc`), no_quote), -1)
-
-	// `escape == 0` treats backslashes as ordinary bytes and leaves `odd` untouched.
-	no_esc_cut := k.Quotes{quote = '"', escape = 0, sep = ',', odd = true}
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`\"a",`), no_esc_cut), 4)
-	testing.expect_value(t, k.quote_cut(transmute([]u8)string(`",\"`), no_esc_cut), -1)
-
-	no_esc_run := k.Quotes{quote = '"', escape = 0, nest = true, odd = true}
-	k.quote_run(transmute([]u8)string(`\"["\`), &no_esc_run)
-	testing.expect_value(t, no_esc_run.odd, true)
-	testing.expect_value(t, no_esc_run.quoted, false)
-	testing.expect_value(t, no_esc_run.depth, [2]int{0, 1})
-
-	// `quote_run` ignores any stale `s.quoted == true` on entry.
-	sample := transmute([]u8)string(`[,"["]`)
-	stale := k.Quotes{quote = '"', escape = '\\', nest = true, quoted = true}
-	fresh := k.Quotes{quote = '"', escape = '\\', nest = true, quoted = false}
-	k.quote_run(sample, &stale)
-	k.quote_run(sample, &fresh)
-	testing.expect_value(t, stale, fresh)
-
-	empty_stale := k.Quotes{quote = '"', escape = '\\', nest = true, quoted = true}
-	k.quote_run(nil, &empty_stale)
-	testing.expect_value(t, empty_stale.quoted, false)
 }
 
 // Checks `count_byte`, `count_chars`, and `skip_ws` across short (< 16 B) and block-boundary lengths.

@@ -115,24 +115,24 @@ clmul_prefix_xor :: proc "contextless" (x: u64) -> u64 {
 // no tier's loop runs, inlines the floor tier into the caller, relying on the x86-64-v2 target floor so `lookup_v2`
 // inlines without a call.
 @(private, require_results)
-scan :: #force_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
+scan :: #force_inline proc "contextless" (src: []u8, c: u8, $OP: Scan_Op) -> int {
 	if len(src) < 64 {
-		return scan_op(.V2, src, c, s, OP)
+		return scan_op(.V2, src, c, OP)
 	}
 	if tier() == .V3 {
-		return scan_v3(src, c, s, OP)
+		return scan_v3(src, c, OP)
 	}
-	return scan_v2(src, c, s, OP)
+	return scan_v2(src, c, OP)
 }
 
 @(private = "file", enable_target_feature = FEATURES[.V2])
-scan_v2 :: #force_no_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
-	return scan_op(.V2, src, c, s, OP)
+scan_v2 :: #force_no_inline proc "contextless" (src: []u8, c: u8, $OP: Scan_Op) -> int {
+	return scan_op(.V2, src, c, OP)
 }
 
 @(private = "file", enable_target_feature = FEATURES[.V3])
-scan_v3 :: #force_no_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
-	return scan_op(.V3, src, c, s, OP)
+scan_v3 :: #force_no_inline proc "contextless" (src: []u8, c: u8, $OP: Scan_Op) -> int {
+	return scan_op(.V3, src, c, OP)
 }
 
 // `set_loop` built for the CPU's tier, as `scan` is (including the x86-64-v2 floor assumption on the `< 64`-byte path).

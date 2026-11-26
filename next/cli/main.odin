@@ -72,7 +72,7 @@ run_with_options :: proc(
 	defer if pool_ready {
 		host.pool_destroy(&pool)
 	}
-	pool_ptr := &pool if pool_ready else nil
+	runner := &pool.runner if pool_ready else nil
 
 	exe_dir, e1 := os.get_executable_directory(alloc)
 	defer if e1 == nil {
@@ -96,17 +96,17 @@ run_with_options :: proc(
 
 	switch opts.command {
 	case .Check:
-		return run_check(opts, stdin_override, stdout_w, stderr_w, pool_ptr, alloc)
+		return run_check(opts, stdin_override, stdout_w, stderr_w, runner, alloc)
 	case .Fmt:
-		return run_fmt(opts, stdin_override, stdout_w, stderr_w, pool_ptr, alloc)
+		return run_fmt(opts, stdin_override, stdout_w, stderr_w, runner, alloc)
 	case .Edit:
-		return run_edit(opts, stdin_override, stdout_w, stderr_w, pool_ptr, ed, cd, hd, alloc)
+		return run_edit(opts, stdin_override, stdout_w, stderr_w, runner, ed, cd, hd, alloc)
 	case .Diff:
-		return run_diff(opts, stdin_override, stdout_w, stderr_w, pool_ptr, alloc)
+		return run_diff(opts, stdin_override, stdout_w, stderr_w, runner, alloc)
 	case .Schema:
-		return run_schema(opts, stdin_override, stdout_w, stderr_w, pool_ptr, alloc)
+		return run_schema(opts, stdin_override, stdout_w, stderr_w, runner, alloc)
 	case .Run:
-		return run_query(opts, stdin_override, stdout_w, stderr_w, pool_ptr, ed, cd, hd, alloc)
+		return run_query(opts, stdin_override, stdout_w, stderr_w, runner, ed, cd, hd, alloc)
 	}
 	return EXIT_USAGE
 }

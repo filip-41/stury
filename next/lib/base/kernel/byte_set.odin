@@ -1,4 +1,4 @@
-// `simd` is used only in generic procedures skipped on WebAssembly without `simd128`, which unused-import checking does not read.
+// `intrinsics` and `simd` are used only in SIMD helpers skipped on scalar WebAssembly (`SCALAR_WASM`).
 #+vet !unused-imports
 package kernel
 
@@ -72,55 +72,14 @@ index_set :: #force_inline proc "contextless" (src: []u8, t: Byte_Set) -> int {
 	return find_set(src, t)
 }
 
-// Bit k of lane j is set for k = j mod 8: the bit a low nibble stands for within its half row.
-@(private = "file", rodata)
-NIBBLE_BITS := V{1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128}
-
-// Nonzero in each lane of `w` that is in `t`.
-@(private = "file")
-in_set_reg :: #force_inline proc "contextless" (
-	$T: Tier,
-	w: #simd[VECTOR_BYTES[T]]u8,
-	t: Byte_Set,
-	$BUCKETS: bool,
-) -> #simd[VECTOR_BYTES[T]]u8 {
-	U :: #simd[VECTOR_BYTES[T]]u8
-	when BUCKETS {
-		return simd.bit_and(lookup(T, t.lo_tbl, simd.bit_and(w, U(0x0f))), lookup(T, t.hi_tbl, simd.shr(w, U(4))))
-	} else {
-		low := simd.bit_and(w, U(0x0f))
-		high := simd.shr(w, U(4))
-		first_half := simd.lanes_lt(low, U(8))
-		from_low := simd.bit_and(lookup(T, t.low, high), first_half)
-		row := simd.bit_or(from_low, simd.bit_and_not(lookup(T, t.high, high), first_half))
-		return simd.bit_and(row, lookup(T, NIBBLE_BITS, low))
-	}
-}
-
-// Nonzero in each lane of `b` that is in `t`, looked up one register of the tier at a time.
-@(private = "file")
-in_set :: #force_inline proc "contextless" (
-	$T: Tier,
-	b: Block,
-	t: Byte_Set,
-	$BUCKETS: bool,
-) -> [64 / VECTOR_BYTES[T]]#simd[VECTOR_BYTES[T]]u8 {
-	N :: VECTOR_BYTES[T]
-	w := transmute([64 / N]#simd[N]u8)b
-	m: [64 / N]#simd[N]u8
-	#unroll for i in 0 ..< 64 / N {
-		m[i] = in_set_reg(T, w[i], t, BUCKETS)
-	}
-	return m
-}
-
 // The first index of `src` whose byte is in `t`, or -1. The bucket form is chosen once, outside the loop.
 @(private)
 set_loop :: #force_inline proc "contextless" ($T: Tier, src: []u8, t: Byte_Set) -> int {
-	when IS_WASM && !intrinsics.has_target_feature("simd128") {
+	when SCALAR_WASM {
+		// Both `#raw_union` forms occupy the same two 16-byte tables (`low`/`lo_tbl` and `high`/`hi_tbl`).
+		lo := transmute([16]u8)t.low
+		hi := transmute([16]u8)t.high
 		if t.buckets {
-			lo := transmute([16]u8)t.lo_tbl
-			hi := transmute([16]u8)t.hi_tbl
 			for b, i in src {
 				if lo[b & 0x0f] & hi[b >> 4] != 0 {
 					return i
@@ -128,11 +87,9 @@ set_loop :: #force_inline proc "contextless" ($T: Tier, src: []u8, t: Byte_Set) 
 			}
 			return -1
 		}
-		low := transmute([16]u8)t.low
-		high := transmute([16]u8)t.high
 		for b, i in src {
 			l := b & 0x0f
-			row := low[b >> 4] if l < 8 else high[b >> 4]
+			row := lo[b >> 4] if l < 8 else hi[b >> 4]
 			if row >> (l & 7) & 1 != 0 {
 				return i
 			}
@@ -146,63 +103,98 @@ set_loop :: #force_inline proc "contextless" ($T: Tier, src: []u8, t: Byte_Set) 
 	}
 }
 
-// Whole blocks of 64 bytes, then a short tail in one register or a padded block whose zero bytes are not counted.
-@(private = "file")
-set_blocks :: #force_inline proc "contextless" ($T: Tier, src: []u8, t: Byte_Set, $BUCKETS: bool) -> int {
-	N :: VECTOR_BYTES[T]
-	U :: #simd[N]u8
-	full := len(src) &~ 63
-	for lo := 0; lo < full; lo += 64 {
-		m := in_set(T, load(raw_data(src)[lo:]), t, BUCKETS)
-		acc: U
+when !SCALAR_WASM {
+	// Bit k of lane j is set for k = j mod 8: the bit a low nibble stands for within its half row.
+	@(private = "file", rodata)
+	NIBBLE_BITS := V{1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128}
+
+	// Nonzero in each lane of `w` that is in `t`.
+	@(private = "file")
+	in_set_reg :: #force_inline proc "contextless" (
+		$T: Tier,
+		w: #simd[VECTOR_BYTES[T]]u8,
+		t: Byte_Set,
+		$BUCKETS: bool,
+	) -> #simd[VECTOR_BYTES[T]]u8 {
+		U :: #simd[VECTOR_BYTES[T]]u8
+		when BUCKETS {
+			return simd.bit_and(lookup(T, t.lo_tbl, simd.bit_and(w, U(0x0f))), lookup(T, t.hi_tbl, simd.shr(w, U(4))))
+		} else {
+			low := simd.bit_and(w, U(0x0f))
+			high := simd.shr(w, U(4))
+			first_half := simd.lanes_lt(low, U(8))
+			from_low := simd.bit_and(lookup(T, t.low, high), first_half)
+			row := simd.bit_or(from_low, simd.bit_and_not(lookup(T, t.high, high), first_half))
+			return simd.bit_and(row, lookup(T, NIBBLE_BITS, low))
+		}
+	}
+
+	// Nonzero in each lane of `b` that is in `t`, looked up one register of the tier at a time.
+	@(private = "file")
+	in_set :: #force_inline proc "contextless" (
+		$T: Tier,
+		b: Block,
+		t: Byte_Set,
+		$BUCKETS: bool,
+	) -> [64 / VECTOR_BYTES[T]]#simd[VECTOR_BYTES[T]]u8 {
+		N :: VECTOR_BYTES[T]
+		w := transmute([64 / N]#simd[N]u8)b
+		m: [64 / N]#simd[N]u8
 		#unroll for i in 0 ..< 64 / N {
-			acc = simd.bit_or(acc, m[i])
+			m[i] = in_set_reg(T, w[i], t, BUCKETS)
 		}
-		if !all_zero(acc) {
-			return lo + first_member(T, m)
-		}
+		return m
 	}
-	left := len(src) & 63
-	if 0 < left && left < 16 {
-		// A short tail is one register, not a block of four.
-		if v, live, ok := head16(raw_data(src)[full:], left); ok {
-			hit := simd.bit_and(simd.lanes_ne(in_set_reg(Tier(0), v, t, BUCKETS), V(0)), live)
-			if any_lane16(hit) {
-				return full + int(first_lane16(hit))
+
+	// Whole blocks of 64 bytes, then a short tail in one register or a padded block whose zero bytes are not counted.
+	@(private = "file")
+	set_blocks :: #force_inline proc "contextless" ($T: Tier, src: []u8, t: Byte_Set, $BUCKETS: bool) -> int {
+		N :: VECTOR_BYTES[T]
+		U :: #simd[N]u8
+		full := len(src) &~ 63
+		for lo := 0; lo < full; lo += 64 {
+			m := in_set(T, load(raw_data(src)[lo:]), t, BUCKETS)
+			acc: U
+			#unroll for i in 0 ..< 64 / N {
+				acc = simd.bit_or(acc, m[i])
 			}
-			return -1
+			if !all_zero(acc) {
+				return lo + int(intrinsics.count_trailing_zeros(member_bits(T, m)))
+			}
 		}
-	}
-	if left > 0 {
-		m := in_set(T, load_padded(src, full), t, BUCKETS)
-		bits := member_bits(T, m) & (u64(1) << uint(left) - 1) // a padded block's zero bytes may be members
-		if bits != 0 {
-			return full + int(intrinsics.count_trailing_zeros(bits))
+		left := len(src) & 63
+		if 0 < left && left < 16 {
+			// A short tail is one register, not a block of four.
+			if v, live, ok := head16(raw_data(src)[full:], left); ok {
+				hit := simd.bit_and(simd.lanes_ne(in_set_reg(Tier(0), v, t, BUCKETS), V(0)), live)
+				if any_lane16(hit) {
+					return full + int(first_lane16(hit))
+				}
+				return -1
+			}
 		}
+		if left > 0 {
+			m := in_set(T, load_padded(src, full), t, BUCKETS)
+			bits := member_bits(T, m) & (u64(1) << uint(left) - 1) // a padded block's zero bytes may be members
+			if bits != 0 {
+				return full + int(intrinsics.count_trailing_zeros(bits))
+			}
+		}
+		return -1
 	}
-	return -1
-}
 
-// A bit for each byte of a block that `in_set` found in the set.
-@(private = "file")
-member_bits :: #force_inline proc "contextless" (
-	$T: Tier,
-	m: [64 / VECTOR_BYTES[T]]#simd[VECTOR_BYTES[T]]u8,
-) -> u64 {
-	N :: VECTOR_BYTES[T]
-	U :: #simd[N]u8
-	r: [64 / N]U
-	#unroll for i in 0 ..< 64 / N {
-		r[i] = simd.lanes_ne(m[i], U(0))
+	// A bit for each byte of a block that `in_set` found in the set.
+	@(private = "file")
+	member_bits :: #force_inline proc "contextless" (
+		$T: Tier,
+		m: [64 / VECTOR_BYTES[T]]#simd[VECTOR_BYTES[T]]u8,
+	) -> u64 {
+		N :: VECTOR_BYTES[T]
+		U :: #simd[N]u8
+		r: [64 / N]U
+		#unroll for i in 0 ..< 64 / N {
+			r[i] = simd.lanes_ne(m[i], U(0))
+		}
+		return pack(transmute(Block)r)
 	}
-	return pack(transmute(Block)r)
-}
-
-// The index of the first nonzero lane in `m`, which must have at least one.
-@(private = "file")
-first_member :: #force_inline proc "contextless" (
-	$T: Tier,
-	m: [64 / VECTOR_BYTES[T]]#simd[VECTOR_BYTES[T]]u8,
-) -> int {
-	return int(intrinsics.count_trailing_zeros(member_bits(T, m)))
 }

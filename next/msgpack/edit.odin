@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:encoding/endian"
 import "core:strconv"
 import "core:unicode/utf8"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 import "stury:lib/ops/edit"
 import ops_write "stury:lib/ops/write"
@@ -437,7 +438,7 @@ emit_scalar_node :: proc(cx: ^Edit_Cx, n: ^edit.Edit_Node, dst: ^[dynamic]u8) ->
 		put_compact_number_bytes(dst, num) or_return
 	case .String:
 		if tag_mode == .Datetime || (tag_mode == .Ext_Int && ext_type == -1) {
-			sec, nsec, tok := rfc3339_to_timestamp(n.val.text)
+			sec, nsec, tok := spell.date_time_utc(n.val.text)
 			if !tok {
 				return edit.refuse(.Fact_No_Place, "MessagePack datetime tag requires RFC 3339 date-time string", n.base)
 			}
@@ -873,7 +874,7 @@ apply_tag_on_base_leaf :: proc(cx: ^Edit_Cx, base_idx: tape.Node_Index, mode: Ta
 		if bnode.kind == .String || bnode.kind == .Plain {
 			tk := edit.decode_node_text_tmp(cx.doc, base_idx, cx.allocator)
 			defer edit.free_tmp_text(tk, cx.allocator)
-			sec, nsec, ok := rfc3339_to_timestamp(tk.text)
+			sec, nsec, ok := spell.date_time_utc(tk.text)
 			if !ok {
 				return edit.refuse(.Fact_No_Place, "MessagePack datetime tag requires RFC 3339 date-time string", base_idx)
 			}
@@ -894,7 +895,7 @@ apply_tag_on_base_leaf :: proc(cx: ^Edit_Cx, base_idx: tape.Node_Index, mode: Ta
 			if bnode.kind == .String || bnode.kind == .Plain {
 				tk := edit.decode_node_text_tmp(cx.doc, base_idx, cx.allocator)
 				defer edit.free_tmp_text(tk, cx.allocator)
-				sec, nsec, ok := rfc3339_to_timestamp(tk.text)
+				sec, nsec, ok := spell.date_time_utc(tk.text)
 				if !ok {
 					return edit.refuse(.Fact_No_Place, "MessagePack timestamp tag requires RFC 3339 date-time string", base_idx)
 				}

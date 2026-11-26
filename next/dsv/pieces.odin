@@ -21,10 +21,11 @@ import "stury:lib/ops/build"
 @(private)
 PIECE_AHEAD :: 64 + 3
 
-// What a delimited walk keeps from one piece to the next, besides the pass, which `Piece_State.memo` holds.
+// What a delimited walk keeps from one piece to the next.
 @(private)
 Piece :: struct {
 	using state: hook.Piece_State,
+	memo:        []u8, // the pass kept across pieces
 	pos:         u64, // the first byte of the block the next window's walk reads
 	records:     u64, // the records opened so far
 	more:        bool, // bytes may follow the window being walked
@@ -69,6 +70,7 @@ piece_free :: proc(p: ^tape.Pieces) {
 	s := (^Piece)(p.state)
 	delete(s.keys)
 	delete(s.head)
+	delete(s.memo, hook.piece_lists(p))
 	hook.piece_release(p)
 }
 
@@ -93,7 +95,7 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 		return 0, gap, false
 	}
 	po := options_resolved(S, opts)
-	text := hook.piece_src(src, p.from)
+	text := tape.piece_src(src, p.from)
 	more := !p.last
 	// A build judges the header's repeats when it has built it. Another read judges them when a window first holds it.
 	refuse := opts.dups == .Refuse && H != build.Rows_Builder
@@ -241,7 +243,7 @@ piece_keys :: proc "contextless" (p: ^tape.Pieces, text: []u8) -> []u8 {
 	if len(s.head) == 0 {
 		return text
 	}
-	return hook.piece_src(s.head[:], s.head_lo)
+	return tape.piece_src(s.head[:], s.head_lo)
 }
 
 // Sets `p.open` from the walk's place: inside the root array, and once a record has opened, at its index and, under a

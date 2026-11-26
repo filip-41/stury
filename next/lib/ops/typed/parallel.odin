@@ -734,7 +734,7 @@ parallel_list_workers :: proc(
 		pool    = pool,
 		data    = data,
 	}
-	hook.fan_each(opts.runner, n_parts, worker, &job)
+	tape.fan_each(opts.runner, n_parts, worker, &job)
 	ok := !pool.refused
 	total := 0
 	for k in 0 ..< n_parts {
@@ -813,7 +813,7 @@ parallel_list_workers :: proc(
 				}
 			}
 			gj := Gather_Job{dst = ([^]u8)(final_data), outs = outs[:n_parts], elem_size = elem_size}
-			hook.fan_each(opts.runner, n_parts, gather, &gj)
+			tape.fan_each(opts.runner, n_parts, gather, &gj)
 		} else {
 			dst := ([^]u8)(final_data)
 			for k in 0 ..< n_parts {

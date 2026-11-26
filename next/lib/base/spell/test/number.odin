@@ -487,55 +487,6 @@ loose_leading_zeros_and_json5_edges :: proc(t: ^testing.T) {
 	}
 }
 
-// `number_hex` returns exact integers while they fit `i64`/`u64`, rounds larger values to nearest-even binary64 with
-// sticky tie-breaking across trailing digits, and returns `Wide` past binary64's range.
-@(test)
-number_hex_rounding_and_overflow :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	defer free_all(context.temp_allocator)
-	Hex_Case :: struct {
-		digits: string,
-		neg:    bool,
-		kind:   spell.Number_Kind,
-		bits:   u64,
-	}
-	cases := []Hex_Case {
-		{"0", false, .Int, 0},
-		{"0", true, .Int, 0},
-		{"00000000000000000000", false, .Int, 0},
-		{"000000000000000000ff", false, .Int, 0xFF},
-		{"deadBEEF", true, .Int, int_bits(-0xDEADBEEF)},
-		{"7fffffffffffffff", false, .Int, u64(max(i64))},
-		{"8000000000000000", false, .Uint, u64(1) << 63},
-		{"8000000000000000", true, .Int, u64(1) << 63},
-		{"ffffffffffffffff", false, .Uint, max(u64)},
-		{"ffffffffffffffff", true, .Float, 0xC3F0_0000_0000_0000},
-		// 16-digit negative round-to-even + sticky boundaries.
-		{"8000000000000001", true, .Float, 0xC3E0_0000_0000_0000},
-		{"8000000000000400", true, .Float, 0xC3E0_0000_0000_0000},
-		{"8000000000000401", true, .Float, 0xC3E0_0000_0000_0001},
-		{"8000000000000c00", true, .Float, 0xC3E0_0000_0000_0002},
-		// 17-digit and 18-digit round-to-even + sticky tie-breaking.
-		{"10000000000000800", false, .Float, 0x43F0_0000_0000_0000},
-		{"10000000000000801", false, .Float, 0x43F0_0000_0000_0001},
-		{"10000000000001800", false, .Float, 0x43F0_0000_0000_0002},
-		{"100000000000008000", false, .Float, 0x4430_0000_0000_0000},
-		{"100000000000008001", false, .Float, 0x4430_0000_0000_0001},
-		{"100000000000018000", false, .Float, 0x4430_0000_0000_0002},
-		// 256-digit max finite vs midpoint overflow, and 257-digit overflow (with and without leading zeros).
-		{strings.concatenate({"fffffffffffffb", strings.repeat("f", 242, context.temp_allocator)}, context.temp_allocator), false, .Float, 0x7FEF_FFFF_FFFF_FFFF},
-		{strings.concatenate({"FFFFFFFFFFFFFC", strings.repeat("0", 242, context.temp_allocator)}, context.temp_allocator), false, .Wide, 0},
-		{strings.concatenate({"1", strings.repeat("0", 255, context.temp_allocator)}, context.temp_allocator), false, .Float, 0x7FB0_0000_0000_0000},
-		{strings.concatenate({"00001", strings.repeat("0", 255, context.temp_allocator)}, context.temp_allocator), false, .Float, 0x7FB0_0000_0000_0000},
-		{strings.concatenate({"1", strings.repeat("0", 256, context.temp_allocator)}, context.temp_allocator), false, .Wide, 0},
-		{strings.concatenate({"1", strings.repeat("0", 256, context.temp_allocator)}, context.temp_allocator), true, .Wide, 0},
-	}
-	for c in cases {
-		got := spell.number_hex(transmute([]u8)c.digits, c.neg)
-		testing.expectf(t, got.kind == c.kind && got.bits == c.bits, "hex(neg=%v, len=%d): %v %x, want %v %x", c.neg, len(c.digits), got.kind, got.bits, c.kind, c.bits)
-	}
-}
-
 // All span readers reject empty/nil slices and out-of-bounds `(lo, hi)` safely without reading past `len(src)`,
 // `number_fraction` rejects `frac_digits == 0` on its fast path, and `float_short` accepts exact `p + 16 == len(src)`.
 @(test)

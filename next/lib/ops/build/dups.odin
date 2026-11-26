@@ -239,7 +239,7 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 		p.keys.allocator = worker_alloc
 		p.scratch.allocator = worker_alloc
 	}
-	hook.fan_each(runner, len(j.segs), dups_parts, &j)
+	tape.fan_each(runner, len(j.segs), dups_parts, &j)
 	crossing := 0
 	for p in j.parts {
 		r.at, r.dropped = min(r.at, p.r.at), r.dropped || p.r.dropped
@@ -268,7 +268,7 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 			}
 			g.r = {at = tape.NO_NODE, drops = r.drops}
 		}
-		hook.fan_each(runner, len(j.ranges), dups_ranges, &j)
+		tape.fan_each(runner, len(j.ranges), dups_ranges, &j)
 		for g in j.ranges {
 			r.at, r.dropped = min(r.at, g.r.at), r.dropped || g.r.dropped
 			if g.err != nil {

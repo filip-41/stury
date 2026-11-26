@@ -228,7 +228,7 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 	doc.facts = facts[:fact]
 	if fact > 0 {
 		c := Segment_Facts{segs = segs, doc = &doc}
-		hook.fan_each(runner, len(c.segs), segment_facts, &c)
+		tape.fan_each(runner, len(c.segs), segment_facts, &c)
 		for p in c.present {
 			doc.present += p
 		}
@@ -325,7 +325,7 @@ segments_dups_fast :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Dupl
 		worker_alloc = worker_alloc,
 		refuse_limit = tape.NO_NODE,
 	}
-	hook.fan_each(runner, len(segs), dup_scan_part, &j)
+	tape.fan_each(runner, len(segs), dup_scan_part, &j)
 	crossing := 0
 	for p in parts {
 		r.at = min(r.at, p.r.at)
@@ -360,7 +360,7 @@ segments_dups_fast :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Dupl
 			}
 		}
 		j.b_ends[DUP_BUCKETS] = int(cur)
-		hook.fan_each(runner, len(segs), dup_scatter_part, &j)
+		tape.fan_each(runner, len(segs), dup_scatter_part, &j)
 		// Release per-segment key lists before workers allocate probe hash tables.
 		for &p in parts {
 			delete(p.keys)
@@ -372,7 +372,7 @@ segments_dups_fast :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Dupl
 		for &a in j.bucket_at {
 			a = tape.NO_NODE
 		}
-		hook.fan(runner, dup_check_buckets, &j)
+		tape.fan(runner, dup_check_buckets, &j)
 		for b in 0 ..< DUP_BUCKETS {
 			r.at = min(r.at, j.bucket_at[b])
 			r.dropped ||= j.bucket_dropped[b]

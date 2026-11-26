@@ -1,6 +1,7 @@
 package host_test
 
 import "base:intrinsics"
+import "core:os"
 import "core:sync"
 import "core:testing"
 import "core:time"
@@ -8,7 +9,7 @@ import "stury:lib/core/tape"
 import "stury:host"
 import "stury:testkit"
 
-// Runs `task(arg)` on the caller and on up to `n` of the runner's threads, as `hook.fan` does on all of them.
+// Runs `task(arg)` on the caller and on up to `n` of the runner's threads, as `tape.fan` does on all of them.
 run :: proc(runner: ^tape.Runner, n: int, task: proc(arg: rawptr), arg: rawptr) {
 	runner.start(runner.data, n, task, arg)
 	task(arg)
@@ -67,7 +68,7 @@ threads_start_at_the_first_call :: proc(t: ^testing.T) {
 	testing.expect(t, pool.spawned)
 }
 
-// More tasks than the pool remembers widths for, alternating, each still runs.
+// Alternating tasks share the pool cleanly.
 @(test)
 many_tasks_share_the_pool :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -109,7 +110,7 @@ nil_task_runs_nowhere :: proc(t: ^testing.T) {
 	pool: host.Pool
 	host.pool_init(&pool, 3)
 	defer host.pool_destroy(&pool)
-	// These four tasks fill the pool's four-entry width table, so nil has no width entry yet.
+	// Fill all 4 width slots before handing a nil task so a bug in `width_of` would evict a live task.
 	count: int
 	for task in ([]proc(arg: rawptr){bump, bump_twice, meet, proc(arg: rawptr) {}}) {
 		run(&pool.runner, pool.runner.threads, task, &count)
@@ -117,6 +118,7 @@ nil_task_runs_nowhere :: proc(t: ^testing.T) {
 	pool.runner.start(pool.runner.data, pool.runner.threads, nil, nil)
 	time.sleep(10 * time.Millisecond)
 	pool.runner.finish(pool.runner.data)
+	testing.expect(t, pool.widths[0].task != nil)
 	started: int
 	run(&pool.runner, pool.runner.threads, meet, &started)
 	testing.expect(t, started >= 2)
@@ -137,4 +139,63 @@ no_call_runs_after_finish :: proc(t: ^testing.T) {
 		time.sleep(50 * time.Microsecond)
 		testing.expect_value(t, sync.atomic_load(&count), seen)
 	}
+}
+
+// `workers <= 0` defaults to one worker per processor core (counting the caller).
+@(test)
+non_positive_workers_uses_core_count :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	want := max(os.get_processor_core_count() - 1, 0)
+	for workers in ([]int{0, -3}) {
+		pool: host.Pool
+		err := host.pool_init(&pool, workers)
+		defer host.pool_destroy(&pool)
+		testing.expect_value(t, err, nil)
+		testing.expect_value(t, pool.runner.threads, want)
+		count: int
+		run(&pool.runner, pool.runner.threads, bump, &count)
+		testing.expect(t, count >= 1)
+	}
+}
+
+// Destroying a zero-initialized pool is safe and leaves it zeroed.
+@(test)
+destroy_zero_pool_is_safe :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	pool: host.Pool
+	host.pool_destroy(&pool)
+	testing.expect_value(t, pool.runner.threads, 0)
+	testing.expect(t, !pool.spawned)
+}
+
+// Calls with `n <= 0` or `task == nil` do not spawn helper threads; the first real parallel call spawns them and
+// keeps helpers warm (`spin == true`) on call #1.
+@(test)
+empty_or_nil_first_calls_do_not_spawn_threads :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	pool: host.Pool
+	host.pool_init(&pool, 3)
+	defer host.pool_destroy(&pool)
+
+	count: int
+	pool.runner.start(pool.runner.data, 0, bump, &count)
+	pool.runner.finish(pool.runner.data)
+	testing.expect(t, !pool.spawned)
+	testing.expect_value(t, pool.settled, 0)
+	testing.expect(t, pool.spin)
+
+	pool.runner.start(pool.runner.data, -1, bump, &count)
+	pool.runner.finish(pool.runner.data)
+	testing.expect(t, !pool.spawned)
+	testing.expect_value(t, pool.settled, 0)
+
+	pool.runner.start(pool.runner.data, pool.runner.threads, nil, nil)
+	pool.runner.finish(pool.runner.data)
+	testing.expect(t, !pool.spawned)
+	testing.expect_value(t, pool.settled, 0)
+
+	started: int
+	run(&pool.runner, pool.runner.threads, meet, &started)
+	testing.expect(t, pool.spawned)
+	testing.expect(t, started >= 2)
 }

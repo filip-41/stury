@@ -3,6 +3,19 @@ package spell
 import "base:intrinsics"
 import "stury:lib/base/kernel"
 
+// Why a text failed to parse. Exceeded budget limits and failed allocations are not faults.
+Fault_Kind :: enum u8 {
+	None,
+	Truncated, // the text ends inside a construct, or a quoted cell never closes
+	Bad_Char, // a byte that cannot continue the text, or invalid UTF-8
+	Bad_Escape, // an undefined escape, or a lone surrogate half
+	Bad_Number, // the byte that breaks a number
+	Too_Wide, // a token wider than 32 bits, or a record past its size limit
+	Bad_Width, // a record wider or narrower than the first
+	Duplicate_Key, // a repeated key under a refusing duplicate policy
+	Refused, // a value a typed read's type does not take, which its detail names
+}
+
 // Scans one UTF-8 character or maximal ill-formed subpart starting at `p`, where `p < end` and `p[0] >= 0x80`.
 // Returns one past the character with `.None`, `end` with `.Truncated` when the text ends inside a valid prefix, or
 // one past the maximal subpart with `.Bad_Char`.

@@ -87,6 +87,15 @@ fold_digits_end_words :: #force_inline proc "contextless" (base: [^]u8, end, k: 
 	return (digits8_nibbles(kernel.load8(base[end - 24:]) & KEEP_DIGITS[k - 16]) * 100_000_000 + mid) * 100_000_000 + low
 }
 
+// Powers of ten exact in `u64`, indexed by exponent `0..=19`.
+@(private, rodata)
+POW10_U64: [20]u64 = {
+	1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000,
+	10_000_000_000, 100_000_000_000, 1_000_000_000_000, 10_000_000_000_000, 100_000_000_000_000,
+	1_000_000_000_000_000, 10_000_000_000_000_000, 100_000_000_000_000_000, 1_000_000_000_000_000_000,
+	10_000_000_000_000_000_000,
+}
+
 // Masks keeping the digit nibbles of a word's last `c` bytes, by `c`.
 @(private = "file", rodata)
 KEEP_DIGITS: [9]u64 = {

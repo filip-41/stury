@@ -160,7 +160,7 @@ validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 		}
 	}
 	vj := Validate_Job{src = src, parts = parts, opts = opts}
-	hook.fan_each(opts.runner, len(parts), task, &vj)
+	tape.fan_each(opts.runner, len(parts), task, &vj)
 	for p in parts {
 		if p.astray {
 			return nil, false
@@ -201,7 +201,7 @@ plan_parts :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Alloca
 		}
 	}
 	lj := Lex_Job{src = src, chunks = chunks}
-	hook.fan_each(opts.runner, len(chunks), lex, &lj)
+	tape.fan_each(opts.runner, len(chunks), lex, &lj)
 	return seam_plan(src, chunks, S, build.read_depth(opts), allocator)
 }
 
@@ -934,7 +934,7 @@ split_json_list :: proc(src: []u8, open: int, $S: Spec, opts: Options, parts: []
 		}
 	}
 	lj := Lex_Job{src = src, chunks = chunks}
-	hook.fan_each(opts.runner, len(chunks), lex, &lj)
+	tape.fan_each(opts.runner, len(chunks), lex, &lj)
 	// Chain lex state and relative bracket depth (0 = inside target array) in text order until the array closes.
 	Chunk_Seam :: struct {
 		start_state: Lex,
@@ -988,7 +988,7 @@ split_json_list :: proc(src: []u8, open: int, $S: Spec, opts: Options, parts: []
 		s.seam, s.close = scan_depth0_seam(j.src, c.lo, c.hi, s.start_state, s.start_depth, k > 0, s.find_close, S)
 	}
 	sj := Seam_Job{src = src, chunks = chunks[:last_chunk + 1], seams = seams[:last_chunk + 1]}
-	hook.fan_each(opts.runner, last_chunk + 1, find_task, &sj)
+	tape.fan_each(opts.runner, last_chunk + 1, find_task, &sj)
 	list_close = seams[last_chunk].close
 	if list_close < open || src[list_close] != ']' {
 		return 0, 0, false

@@ -2,7 +2,6 @@ package build
 
 import "base:intrinsics"
 import "base:runtime"
-import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // A build of a text in parts on the threads of a `tape.Runner`. A format reads its text for seams, positions where a
@@ -146,7 +145,7 @@ parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: 
 	}
 	j := Parts_Job{src = src, parts = parts, segs = segs, opts = opts, walk = walk, data = data, counting = opts.budget.steps != 0}
 	j.opts.budget.steps = 0
-	hook.fan_each(opts.runner, len(parts), task, &j)
+	tape.fan_each(opts.runner, len(parts), task, &j)
 	// The first part in text order whose walk does not reach its end gives the build's error, unless a container past
 	// `Budget.steps` comes first.
 	containers := 0

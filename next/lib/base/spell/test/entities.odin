@@ -1,5 +1,6 @@
 package spell_tests
 
+import "base:intrinsics"
 import "core:testing"
 import "stury:lib/base/spell"
 import "stury:testkit"
@@ -174,5 +175,47 @@ entity_named_rejects_malformed_and_non_ascii :: proc(t: ^testing.T) {
 			testing.expectf(t, false, "tail 0x%02x: got (%q, %v), want (nil, false)", b, string(t2), ok2)
 			return
 		}
+	}
+}
+
+// `entity_prefix` returns the longest HTML5 named reference starting at `p` (with or without `;`), backtracking past
+// non-terminal prefixes, and returns `(nil, p)` on no match, empty range, or non-ASCII lead bytes.
+@(test)
+entity_prefix_longest_and_non_matches :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Match :: struct {
+		input: string,
+		want:  string,
+		used:  int,
+	}
+	matches := []Match{
+		{"amp;rest", "&", 4},
+		{"amprest", "&", 3},
+		{"amp", "&", 3},
+		{"AMP;", "&", 4},
+		{"copy=1", "\xc2\xa9", 4},
+		{"copy;1", "\xc2\xa9", 5},
+		{"notin;", "\xe2\x88\x89", 6},
+		// `not` is a legacy semicolon-less entity while `noti` is a non-terminal prefix of `notin;`.
+		{"noti", "\xc2\xac", 3},
+		{"notin", "\xc2\xac", 3},
+		{"notit;", "\xc2\xac", 3},
+		{"NotEqualTilde;x", "\xe2\x89\x82\xcc\xb8", 14},
+		{"amp\xc3\xa9", "&", 3},
+	}
+	for c in matches {
+		b := transmute([]u8)c.input
+		p := raw_data(b)
+		text, q := spell.entity_prefix(p, p[len(b):])
+		used := int(intrinsics.ptr_sub(q, p))
+		testing.expectf(t, string(text) == c.want && used == c.used, "%q: got (%q, %d), want (%q, %d)", c.input, string(text), used, c.want, c.used)
+	}
+
+	misses := []string{"", ";", "am", "apos", "NotEqualTilde", "bogus;", "\x80amp;", "\xff"}
+	for s in misses {
+		b := transmute([]u8)s
+		p := raw_data(b)
+		text, q := spell.entity_prefix(p, p[len(b):])
+		testing.expectf(t, text == nil && q == p, "%q: got (%q, +%d), want (nil, +0)", s, string(text), int(intrinsics.ptr_sub(q, p)))
 	}
 }

@@ -48,6 +48,33 @@ entity_value :: #force_inline proc "contextless" (node: u32) -> (text: []u8, ok:
 	return ENTITY_TEXT[ENTITY_OFFSETS[v - 1]:ENTITY_OFFSETS[v]], true
 }
 
+// The UTF-8 text and end of the longest HTML5 named character reference starting at `p` (past `&`), trailing `;`
+// included when present, or `(nil, p)` when none matches. Caller guarantees `p <= end` with `[p, end)` readable.
+@(require_results)
+entity_prefix :: proc "contextless" (p, end: [^]u8) -> (text: []u8, best_q: [^]u8) #no_bounds_check {
+	node, best: u32
+	q := p
+	best_q = p
+	for q < end {
+		c := q[0]
+		if c >= 0x80 {
+			break
+		}
+		if node = entity_child(node, c); node == 0 {
+			break
+		}
+		q = q[1:]
+		if ENTITY_TERMINALS[node] != 0 {
+			best, best_q = node, q
+		}
+	}
+	if best == 0 {
+		return nil, p
+	}
+	text, _ = entity_value(best)
+	return text, best_q
+}
+
 // The UTF-8 text of the reference `name;`, the name written with its semicolon left off, and false for a name the
 // standard does not list.
 @(require_results)

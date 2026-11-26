@@ -147,7 +147,7 @@ validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 		part.close, part.err, _ = hook.walk_error(r, &RULES)
 	}
 	vj := Validate_Job{src = src, parts = parts, p = p, width = head.cells}
-	hook.fan_each(opts.runner, len(parts), task, &vj)
+	tape.fan_each(opts.runner, len(parts), task, &vj)
 	for part in parts {
 		if part.astray {
 			return nil, false
@@ -178,7 +178,7 @@ scan_csv_chunks :: proc(src: []u8, start: int, $S: Spec, p: Pass_Options, runner
 		read_chunk(j.src, &j.chunks[k], S, j.p, S == .Csv && k > 0)
 	}
 	cj := Chunk_Job{src = src, chunks = chunks, p = p}
-	hook.fan_each(runner, len(chunks), read, &cj)
+	tape.fan_each(runner, len(chunks), read, &cj)
 	return chunks, true
 }
 

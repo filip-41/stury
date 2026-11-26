@@ -5,9 +5,6 @@ package kernel
 import "base:intrinsics"
 import "core:simd"
 
-@(private = "file")
-SCALAR_WASM :: IS_WASM && !intrinsics.has_target_feature("simd128")
-
 // The bytes after an odd run of `escape` bytes. Subtracting each unescaped escape from its own bit moved up one, with
 // every odd bit set, borrows through each run, so past a run the result differs from the odd pattern exactly at the
 // escapes that open an escape and the bytes they escape. `odd^` must be 0 or 1 and carries an odd run across blocks:
@@ -47,25 +44,25 @@ prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
 // The index of the first byte `c` in `src`, or -1.
 @(require_results)
 index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int {
-	return scan(src, c, nil, .Forward)
+	return scan(src, c, .Forward)
 }
 
 // The index of the last byte `c` in `src`, or -1.
 @(require_results)
 last_index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int {
-	return scan(src, c, nil, .Back)
+	return scan(src, c, .Back)
 }
 
 // The number of bytes in `src` equal to `c`.
 @(require_results)
 count_byte :: proc "contextless" (src: []u8, c: u8) -> int {
-	return scan(src, c, nil, .Count)
+	return scan(src, c, .Count)
 }
 
 // The bytes of `src` that are not continuation bytes (10xxxxxx): its code point count when it is UTF-8.
 @(require_results)
 count_chars :: proc "contextless" (src: []u8) -> int {
-	return len(src) - scan(src, 0, nil, .Continuations)
+	return len(src) - scan(src, 0, .Continuations)
 }
 
 // The bytes of `src` equal to `c`, or with `CONT` the continuation bytes, counted into byte lanes. A lane overflows
@@ -220,45 +217,6 @@ when !SCALAR_WASM {
 	}
 }
 
-// Settings and state of a scan for quoted runs and brackets. A quoted run goes from `quote` to the next `quote` no
-// `escape` escapes (0 for none). `sep` is never 0, `quote` is 0 only for `quote_cut` (since a padded tail's zero bytes
-// would match them), `escape != quote`, and `sep` differs from `quote` (and from `[`, `{`, `]`, `}` when `nest` is
-// true). With `nest`, `[` and `{` outside quoted runs open a level and `]` and `}` close one.
-//
-// After `quote_run`, index 0 of `depth` and `low` is for a stretch that starts outside a quoted run and 1 for one that
-// starts inside: `depth` is the change in level, `low` the lowest level reached from 0. `quoted` says a stretch
-// started outside ends inside a quoted run, so one started inside ends outside.
-Quotes :: struct {
-	quote, escape, sep: u8,
-	nest:               bool,
-	quoted:             bool, // inside a quoted run
-	odd:                bool, // an odd run of escapes ends just before
-	want:               int, // `quote_cut`'s level
-	depth, low:         [2]int,
-}
-#assert(size_of(Quotes) == (48 when size_of(int) == 8 else 28))
-
-// Reads `src` as a stretch of text into `s`, reading `quote`, `escape`, `nest`, `odd`, `depth`, and `low` and updating
-// `odd`, `quoted`, `depth`, and `low` (any incoming `quoted` is ignored).
-@(enable_target_feature = FEATURES[Tier(0)])
-quote_run :: proc "contextless" (src: []u8, s: ^Quotes) {
-	_ = scan(src, 0, s, .Run)
-}
-
-// The index of the first `sep` outside quoted runs at level `want`, from state `s` at `src[0]`, or -1 when there is
-// none or the level falls below `want` first. With `quote` 0 it is the first `sep`.
-@(require_results, enable_target_feature = FEATURES[Tier(0)])
-quote_cut :: proc "contextless" (src: []u8, s: Quotes) -> int {
-	s := s
-	if s.quote == 0 {
-		return scan(src, s.sep, nil, .Forward)
-	}
-	if s.nest && s.depth[0] < s.want {
-		return -1
-	}
-	return scan(src, s.sep, &s, .Cut)
-}
-
 // The lower of `low` and the lowest level a block's closes bring `depth` to, counting the opens before each close.
 // Precondition: `open & close == 0`.
 @(require_results)
@@ -284,198 +242,18 @@ Scan_Op :: enum u8 {
 	Count,
 	Continuations,
 	Utf8,
-	Run,
-	Cut,
 }
 
-when !SCALAR_WASM {
-	// Advances `odd` and `inq` across one block and returns the mask of bytes inside a quoted run.
-	@(private = "file")
-	quote_step :: #force_inline proc "contextless" (
-		$T: Tier,
-		b: Block,
-		quote, escape: u8,
-		odd, inq: ^u64,
-		$TAIL: bool,
-		rem: int,
-	) -> u64 {
-		q := pack(eq(b, quote))
-		if escape != 0 {
-			e := escaped(pack(eq(b, escape)), odd)
-			when TAIL {
-				// A run that ends before a padded block's end escapes the first pad byte.
-				odd^ = e >> uint(rem) & 1
-			}
-			q &~= e
-		}
-		inside := prefix_xor(T, q) ~ inq^
-		inq^ = u64(i64(inside) >> 63)
-		return inside
-	}
-
-	@(private = "file")
-	quote_run_block :: #force_inline proc "contextless" (
-		$T: Tier,
-		b: Block,
-		quote, escape: u8,
-		nest: bool,
-		odd, inq: ^u64,
-		depth, low: ^[2]int,
-		$TAIL: bool,
-		rem: int,
-	) {
-		inside := quote_step(T, b, quote, escape, odd, inq, TAIL, rem)
-		if nest {
-			m := pack_n([2]Block{either(eq(b, '['), eq(b, '{')), either(eq(b, ']'), eq(b, '}'))})
-			#unroll for g in 0 ..< 2 {
-				out := inside if g == 1 else ~inside
-				low[g] = depth_low(low[g], depth[g], m[0] & out, m[1] & out)
-				depth[g] += int(intrinsics.count_ones(m[0] & out)) - int(intrinsics.count_ones(m[1] & out))
-			}
-		}
-	}
-
-	@(private = "file")
-	quote_cut_block :: #force_inline proc "contextless" (
-		$T: Tier,
-		b: Block,
-		lo: int,
-		quote, escape, sep_byte: u8,
-		nest: bool,
-		want: int,
-		odd, inq: ^u64,
-		depth: ^int,
-	) -> (cut: int, stop: bool) {
-		inside := quote_step(T, b, quote, escape, odd, inq, false, 0)
-		if !nest {
-			if sep := pack(eq(b, sep_byte)) &~ inside; sep != 0 {
-				return lo + int(intrinsics.count_trailing_zeros(sep)), true
-			}
-			return -1, false
-		}
-		m := pack_n([3]Block{eq(b, sep_byte), either(eq(b, '['), eq(b, '{')), either(eq(b, ']'), eq(b, '}'))})
-		sep, open, close := m[0] &~ inside, m[1] &~ inside, m[2] &~ inside
-		// A block whose closes cannot bring the level to `want` holds no cut. `closes` counts the closes before
-		// `r`'s lowest bit, as they come in order. `depth >= want` holds on entry to every block.
-		if dist := uint(depth^) - uint(want); dist <= uint(intrinsics.count_ones(close)) {
-			above := int(dist)
-			closes := 0
-			for r := sep | close; r != 0; r &= r - 1 {
-				first := r & -r
-				d := above + int(intrinsics.count_ones(open & (first - 1))) - closes
-				if close & first != 0 {
-					if d <= 0 {
-						return -1, true
-					}
-					closes += 1
-				} else if d == 0 {
-					return lo + int(intrinsics.count_trailing_zeros(r)), true
-				}
-			}
-		}
-		depth^ += int(intrinsics.count_ones(open)) - int(intrinsics.count_ones(close))
-		return -1, false
-	}
-}
-
-// A padded last block's zeros are no quote, escape, separator or bracket.
 @(private)
-scan_op :: #force_inline proc "contextless" ($T: Tier, src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
+scan_op :: #force_inline proc "contextless" ($T: Tier, src: []u8, c: u8, $OP: Scan_Op) -> int {
 	when OP <= .Back {
 		return scan_loop(src, c, OP == .Back)
 	} else when OP == .Count {
 		return count_lanes(T, src, false, c)
 	} else when OP == .Continuations {
 		return count_lanes(T, src, true, 0)
-	} else when OP == .Utf8 {
-		return int(utf8_blocks(T, src))
-	} else when SCALAR_WASM {
-		quote, escape, nest := s.quote, s.escape, s.nest
-		esc := s.odd && escape != 0
-		when OP == .Run {
-			quoted := false
-			depth, low := s.depth, s.low
-			for b in src {
-				was := esc
-				esc = !esc && escape != 0 && b == escape
-				if b == quote && !was {
-					quoted = !quoted
-				} else if nest {
-					g := 1 if quoted else 0
-					if b == '[' || b == '{' {
-						depth[g] += 1
-					} else if b == ']' || b == '}' {
-						depth[g] -= 1
-						low[g] = min(low[g], depth[g])
-					}
-				}
-			}
-			if escape != 0 {
-				s.odd = esc
-			}
-			s.quoted = quoted
-			s.depth, s.low = depth, low
-			return -1
-		} else {
-			sep := s.sep
-			quoted := s.quoted
-			above := uint(s.depth[0]) - uint(s.want)
-			for b, i in src {
-				was := esc
-				esc = !esc && escape != 0 && b == escape
-				if b == quote && !was {
-					quoted = !quoted
-				} else if !quoted {
-					if !nest {
-						if b == sep {
-							return i
-						}
-					} else if b == '[' || b == '{' {
-						above += 1
-					} else if b == ']' || b == '}' {
-						if above == 0 {
-							return -1
-						}
-						above -= 1
-					} else if b == sep && above == 0 {
-						return i
-					}
-				}
-			}
-			return -1
-		}
 	} else {
-		inq := (~u64(0) if s.quoted else 0) when OP == .Cut else u64(0)
-		odd := u64(s.odd)
-		quote, escape, nest := s.quote, s.escape, s.nest
-		p := raw_data(src)
-		lo := 0
-		when OP == .Run {
-			depth, low := s.depth, s.low
-			for ; lo + 64 <= len(src); lo += 64 {
-				quote_run_block(T, load(p[lo:]), quote, escape, nest, &odd, &inq, &depth, &low, false, 0)
-			}
-			if rem := len(src) - lo; rem > 0 {
-				quote_run_block(T, load_padded(src, lo), quote, escape, nest, &odd, &inq, &depth, &low, true, rem)
-			}
-			s.odd = odd != 0
-			s.quoted = inq != 0
-			s.depth, s.low = depth, low
-			return -1
-		} else {
-			sep, want, depth := s.sep, s.want, s.depth[0]
-			for ; lo + 64 <= len(src); lo += 64 {
-				if cut, stop := quote_cut_block(T, load(p[lo:]), lo, quote, escape, sep, nest, want, &odd, &inq, &depth); stop {
-					return cut
-				}
-			}
-			if lo < len(src) {
-				if cut, stop := quote_cut_block(T, load_padded(src, lo), lo, quote, escape, sep, nest, want, &odd, &inq, &depth); stop {
-					return cut
-				}
-			}
-			return -1
-		}
+		return int(utf8_blocks(T, src))
 	}
 }
 

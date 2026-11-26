@@ -3,7 +3,6 @@ package build
 import "base:runtime"
 import "core:sync"
 import "stury:lib/base/kernel"
-import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
 // Parallel batch runner for independent-record framings (`.Lines`, `.Seq`, DSV rows) over `Options.runner`.
@@ -135,7 +134,7 @@ records_validate_chunks :: proc(r: ^tape.Records, out: []tape.Record, chunks: []
 		j.run_chunk(j.data, &j.chunks[k], k, j.max_bad, &j.bads[k], j.alloc, j.scratch)
 	}
 	job := Job{data = data, chunks = chunks, bads = bads[:nc], max_bad = len(out), alloc = alloc, scratch = scratch, run_chunk = run_chunk}
-	hook.fan_each(r.opts.runner, nc, task, &job)
+	tape.fan_each(r.opts.runner, nc, task, &job)
 	for &c, k in chunks {
 		if c.astray {
 			r.pos = c.lo
@@ -194,7 +193,7 @@ count_and_plan :: proc(runner: ^tape.Runner, chunks: []Record_Chunk, cap: int, d
 		j.count_chunk(j.data, &j.chunks[k], k)
 	}
 	cj := Count_Job{data = data, chunks = chunks, count_chunk = count_chunk}
-	hook.fan_each(runner, len(chunks), count_task, &cj)
+	tape.fan_each(runner, len(chunks), count_task, &cj)
 	return plan_chunk_slots(chunks, cap)
 }
 
@@ -228,7 +227,7 @@ records_find_chunks :: proc(r: ^tape.Records, format: ^tape.Format, path: []tape
 		j.run_chunk(j.data, &j.chunks[k], k, j.alloc, j.scratch)
 	}
 	rj := Run_Job{data = data, chunks = chunks[:active], alloc = alloc, scratch = scratch, run_chunk = run_chunk}
-	hook.fan_each(r.opts.runner, active, run_task, &rj)
+	tape.fan_each(r.opts.runner, active, run_task, &rj)
 	return settle_chunk_slots(r, chunks[:active], active == nc)
 }
 
@@ -270,7 +269,7 @@ records_scan_chunks :: proc(r: ^tape.Records, format: ^tape.Format, demand: ^tap
 		j.run_chunk(j.data, &j.chunks[k], k, &j.blocks[k], j.batch_alloc, j.scratch)
 	}
 	rj := Run_Job{data = data, chunks = chunks[:active], blocks = blocks[:active], batch_alloc = batch_alloc, scratch = scratch, run_chunk = run_chunk}
-	hook.fan_each(r.opts.runner, active, run_task, &rj)
+	tape.fan_each(r.opts.runner, active, run_task, &rj)
 	// Pre-reserve `r.block.outgrown` before adopting any chunk so an OOM never frees memory a returned Document points into.
 	need_chunks := 0
 	for k in 0 ..< active {

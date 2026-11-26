@@ -100,7 +100,7 @@ token :: proc(w: ^Writer, kind: Token_Kind, text := "") -> Write_Error {
 			return ops_write.Refused{index, .No_Spelling}
 		}
 		if dt && kind == .String {
-			sec, nsec, ok := rfc3339_to_timestamp(text)
+			sec, nsec, ok := spell.date_time_utc(text)
 			if !ok {
 				return ops_write.Refused{index, .No_Spelling}
 			}

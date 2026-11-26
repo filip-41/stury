@@ -485,7 +485,7 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 @(private)
 dtd_bind_hook_src :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), t: ^Dtd, in_subset: bool) {
 	when H == build.Finder || H == build.Scanner {
-		src := hook.piece_src(w.subset[:t.subset_hi - t.subset_lo], t.subset_lo) if in_subset else t.src
+		src := tape.piece_src(w.subset[:t.subset_hi - t.subset_lo], t.subset_lo) if in_subset else t.src
 		when H == build.Finder {
 			w.hooks.src = src
 			w.hooks.key_text = src

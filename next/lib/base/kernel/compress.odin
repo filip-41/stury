@@ -9,9 +9,6 @@ when ODIN_ENDIAN != .Little {
 	#panic("kernel compress requires little-endian")
 }
 
-@(private = "file")
-SCALAR_WASM :: IS_WASM && !intrinsics.has_target_feature("simd128")
-
 when !SCALAR_WASM {
 	// For each 8-bit mask, the positions of its set bits, lowest first, one per byte: shuffle indices that gather the kept
 	// lanes to the front of a register.

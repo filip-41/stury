@@ -12,7 +12,6 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import "stury:engine"
-import "stury:host"
 import "stury:jq"
 import "stury:jsonpath"
 import "stury:lib/core/tape"
@@ -1718,7 +1717,7 @@ run_query :: proc(
 	o: ^Options,
 	stdin_override: Maybe([]u8),
 	stdout_w, stderr_w: io.Writer,
-	pool: ^host.Pool,
+	runner: ^tape.Runner,
 	exe_dir, cwd, home_dir: string,
 	alloc: runtime.Allocator,
 ) -> int {
@@ -1756,9 +1755,9 @@ run_query :: proc(
 	defer render_config_destroy(&cfg, alloc)
 
 	if o.jsonpath {
-		return run_jsonpath_query(o, &cfg, stdin_override, stdout_w, stderr_w, pool, alloc)
+		return run_jsonpath_query(o, &cfg, stdin_override, stdout_w, stderr_w, runner, alloc)
 	}
-	return run_jq_query(o, &cfg, stdin_override, stdout_w, stderr_w, pool, exe_dir, cwd, home_dir, alloc)
+	return run_jq_query(o, &cfg, stdin_override, stdout_w, stderr_w, runner, exe_dir, cwd, home_dir, alloc)
 }
 
 compile_jq_cmd :: proc(
@@ -2493,7 +2492,7 @@ run_jq_query :: proc(
 	cfg: ^Render_Config,
 	stdin_override: Maybe([]u8),
 	stdout_w, stderr_w: io.Writer,
-	pool: ^host.Pool,
+	base_runner: ^tape.Runner,
 	exe_dir, origin_dir, home_dir: string,
 	alloc: runtime.Allocator,
 ) -> int {
@@ -2556,7 +2555,7 @@ run_jq_query :: proc(
 	fb := [1]string{"-"}
 	paths := o.files[:] if len(o.files) > 0 else fb[:]
 	has_in_files := len(o.files) > 0 || !o.null_input || (.Inputs in plan.serial) || (.Position in plan.serial)
-	runner := &pool.runner if (pool != nil && (!cfg.to_tabular || can_direct_tabular(o, cfg, o.to_spec)) && !cfg.one_doc && !o.unbuffered) else nil
+	runner := base_runner if ((!cfg.to_tabular || can_direct_tabular(o, cfg, o.to_spec)) && !cfg.one_doc && !o.unbuffered) else nil
 
 	emit := engine.Emitter{fn = out_sink_emit, data = &osink}
 	exit_code := EXIT_OK
@@ -3766,7 +3765,7 @@ run_jsonpath_query :: proc(
 	cfg: ^Render_Config,
 	stdin_override: Maybe([]u8),
 	stdout_w, stderr_w: io.Writer,
-	pool: ^host.Pool,
+	base_runner: ^tape.Runner,
 	alloc: runtime.Allocator,
 ) -> int {
 	jp_src := o.filter.? or_else "$"
@@ -3866,7 +3865,7 @@ run_jsonpath_query :: proc(
 
 	fb := [1]string{"-"}
 	paths := o.files[:] if len(o.files) > 0 else fb[:]
-	runner := &pool.runner if (pool != nil && (!cfg.to_tabular || can_direct_tabular(o, cfg, o.to_spec)) && !cfg.one_doc && !o.unbuffered) else nil
+	runner := base_runner if ((!cfg.to_tabular || can_direct_tabular(o, cfg, o.to_spec)) && !cfg.one_doc && !o.unbuffered) else nil
 	emit := engine.Emitter{fn = out_sink_emit, data = &osink}
 	has_open_err := false
 

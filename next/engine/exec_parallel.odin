@@ -2,7 +2,6 @@ package engine
 
 import "base:runtime"
 import "core:sync"
-import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 import "stury:lib/query"
@@ -170,7 +169,7 @@ execute_files_parallel :: proc(
 		sb.res = f_res
 	}
 
-	hook.fan_each(runner, len(files), run_file, &job)
+	tape.fan_each(runner, len(files), run_file, &job)
 
 	total: Exec_Result
 	for &sb in slots {
@@ -284,7 +283,7 @@ eval_record_batch_parallel :: proc(
 		}
 	}
 
-	hook.fan_each(opts.runner, n, worker_fn, &job)
+	tape.fan_each(opts.runner, n, worker_fn, &job)
 
 	dsv_row_buf := make([dynamic]u8, opts.allocator)
 	defer delete(dsv_row_buf)
@@ -448,7 +447,7 @@ eval_record_batch_whole_parallel :: proc(
 		}
 	}
 
-	hook.fan_each(opts.runner, n, worker_fn, &job)
+	tape.fan_each(opts.runner, n, worker_fn, &job)
 
 	res: Exec_Result
 	for i in 0 ..< n {

@@ -189,3 +189,68 @@ scratch_counts_without_mutating_caller_budget :: proc(t: ^testing.T) {
 	testing.expect_value(t, runtime.mem_free_with_size(raw_data(mblock), 40, main_a), nil)
 	testing.expect_value(t, runtime.mem_free_with_size(raw_data(sblock), 60, scratch_a), nil)
 }
+
+// `memory_budget_error` walks the same 2-hop peer chain as `budget_held` (such as `scratch` chained over a symmetric
+// pair) and maps only `.Out_Of_Memory` to `Exceeded`, never other `Allocator_Error` variants under a sticky `refused`.
+@(test)
+memory_budget_error_two_hops_and_exact_oom :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	blocks, lists: hook.Memory_Budget
+	lists = {backing = context.allocator, limit = 100, peer = &blocks}
+	blocks = {backing = context.allocator, limit = 100, peer = &lists}
+	lists_a := hook.memory_budget(&lists)
+	blocks_a := hook.memory_budget(&blocks)
+
+	// Chain a local scratch budget over `lists` (which has peer `blocks` with a different backing).
+	arena: mem.Arena
+	buf: [256]u8
+	mem.arena_init(&arena, buf[:])
+	tree: hook.Memory_Budget
+	_ = hook.scratch({budget = {memory = 100}, scratch = mem.arena_allocator(&arena)}, lists_a, &tree)
+	testing.expect(t, tree.peer == &lists && lists.peer == &blocks)
+
+	// Trigger a refusal two hops away on `blocks` (neither `tree` nor `lists` is refused).
+	held, herr := runtime.mem_alloc(60, 8, lists_a)
+	testing.expect_value(t, herr, nil)
+	defer runtime.mem_free_with_size(raw_data(held), 60, lists_a)
+	_, berr := runtime.mem_alloc(41, 8, blocks_a)
+	testing.expect_value(t, berr, runtime.Allocator_Error.Out_Of_Memory)
+	testing.expect(t, !tree.refused && !lists.refused && blocks.refused)
+	testing.expect_value(t, hook.memory_budget_error(&tree, berr), tape.Error(tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}))
+
+	// Sticky `refused` must not misclassify non-OOM allocator errors as memory budget exhaustion.
+	testing.expect_value(t, hook.memory_budget_error(&blocks, runtime.Allocator_Error.Mode_Not_Implemented), tape.Error(runtime.Allocator_Error.Mode_Not_Implemented))
+	testing.expect_value(t, hook.memory_budget_error(&tree, runtime.Allocator_Error.Invalid_Pointer), tape.Error(runtime.Allocator_Error.Invalid_Pointer))
+}
+
+// `hook.scratch` reuses `m.peer` only when its limit is at most `opts.budget.memory`; a tighter nested limit wraps
+// `local` so the inner scratch enforces the tighter cap while still counting outer held bytes.
+@(test)
+scratch_enforces_tighter_nested_budget :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	rb: hook.Read_Budget
+	outer_opts := tape.Options{budget = {memory = 1000}, scratch = context.allocator}
+	main_a := hook.read_budget(&rb, outer_opts, context.allocator)
+
+	// Equal or looser budget reuses `rb.scratch`.
+	local: hook.Memory_Budget
+	reused := hook.scratch({budget = {memory = 1000}, scratch = context.allocator}, main_a, &local)
+	testing.expect(t, reused.data == &rb.scratch)
+
+	// Tighter budget must not reuse `rb.scratch` (limit 1000); it enforces 200 in `local` and counts `rb.main.held`.
+	held, herr := runtime.mem_alloc(60, 8, main_a)
+	testing.expect_value(t, herr, nil)
+	defer runtime.mem_free_with_size(raw_data(held), 60, main_a)
+
+	local = {}
+	tight := hook.scratch({budget = {memory = 200}, scratch = context.allocator}, main_a, &local)
+	testing.expect(t, tight.data == &local)
+	_, err := runtime.mem_alloc(141, 8, tight)
+	testing.expect_value(t, err, runtime.Allocator_Error.Out_Of_Memory)
+	testing.expect(t, local.refused)
+	testing.expect_value(t, hook.memory_budget_error(&local, err), tape.Error(tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}))
+
+	ok_block, ok_err := runtime.mem_alloc(140, 8, tight)
+	testing.expect_value(t, ok_err, nil)
+	testing.expect_value(t, runtime.mem_free_with_size(raw_data(ok_block), 140, tight), nil)
+}

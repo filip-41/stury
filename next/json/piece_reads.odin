@@ -15,7 +15,7 @@ import "stury:lib/ops/build"
 @(private)
 piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	p := opts.pieces
-	s, text, to, berr := hook.piece_begin(p, Piece, nil, src)
+	s, text, to, berr := hook.piece_begin(p, Piece, piece_free, src)
 	if berr != nil {
 		return 0, berr, false
 	}

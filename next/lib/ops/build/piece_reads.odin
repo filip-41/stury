@@ -65,7 +65,7 @@ read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, o
 		}
 		s.hook, s.hook_free, s.regs = blk, build_piece_free, builder_regs(&blk.b)
 	}
-	blk.b.doc.src = hook.piece_src(src, p.from)
+	blk.b.doc.src = tape.piece_src(src, p.from)
 	regs := s.regs
 	root_close, werr, tolerated := walk(src, opts, &blk.b, &regs, blk.b.doc.allocator, &blk.b.ctx)
 	if werr == nil && p.more {
@@ -128,7 +128,7 @@ read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, rea
 		}
 		s.hook, s.hook_free = blk, find_piece_free
 	}
-	text := hook.piece_src(src, p.from)
+	text := tape.piece_src(src, p.from)
 	blk.f.src, blk.f.key_text = text, text
 	regs := s.regs
 	_, werr, tolerated := walk(src, opts, &blk.f, &regs, blk.f.allocator, &blk.f.ctx)
@@ -146,7 +146,7 @@ read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, rea
 		s.hook = nil
 	}
 	if a := blk.f.answer; a.outcome != .Not_Loaded && a.hi > a.lo {
-		blk.f.src = hook.piece_src(p.text, a.lo)
+		blk.f.src = tape.piece_src(p.text, a.lo)
 	}
 	answer, err = finder_result(&blk.f, werr, tolerated)
 	return answer, hook.memory_budget_error(&s.blocks, err)
@@ -205,7 +205,7 @@ read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, 
 		blk.h.key_skips = false
 		s.hook, s.hook_free, s.regs = blk, scan_piece_free, builder_regs(&blk.h.b)
 	}
-	text := hook.piece_src(src, p.from)
+	text := tape.piece_src(src, p.from)
 	blk.h.b.doc.src, blk.h.key_text = text, text
 	regs := s.regs
 	root_close, werr, tolerated := walk(src, opts, &blk.h, &regs, blk.h.b.doc.allocator, &blk.h.b.ctx)

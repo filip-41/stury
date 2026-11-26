@@ -117,7 +117,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 		j := (^Part_Plan)(arg)
 		j.seams[k] = 0 if k == 0 else seam_after(j.src, len(j.src) * k / (len(j.seams) - 1))
 	}
-	hook.fan_each(opts.runner, want, guess, &plan)
+	tape.fan_each(opts.runner, want, guess, &plan)
 	// A guess past the next cut's leaves one part for both.
 	n := 1
 	for k in 1 ..= want {
@@ -141,7 +141,7 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 		j := (^Part_Plan)(arg)
 		j.scans[k] = part_scan(j.src, j.seams[k], j.seams[k + 1], k == len(j.scans) - 1, j.locals[k * PART_LEVELS:][:PART_LEVELS])
 	}
-	hook.fan_each(opts.runner, parts_n, scan, &plan)
+	tape.fan_each(opts.runner, parts_n, scan, &plan)
 	parts := make([]build.Part, parts_n, allocator)
 	defer delete(parts, allocator)
 	if raw_data(parts) == nil || !plan_opens(&plan, parts) {

@@ -105,34 +105,6 @@ hex4_decoders_match_and_reject_bad_digits :: proc(t: ^testing.T) {
 	}
 }
 
-// `rune_len` returns the UTF-8 byte length across every code-point width boundary in `0..0x10FFFF`.
-@(test)
-rune_len_boundaries :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	cases := []struct {
-		r:    rune,
-		want: u32,
-	}{
-		{0x0000, 1},
-		{0x0041, 1},
-		{0x007F, 1},
-		{0x0080, 2},
-		{0x00E9, 2},
-		{0x07FF, 2},
-		{0x0800, 3},
-		{0x20AC, 3},
-		{0xD7FF, 3},
-		{0xE000, 3},
-		{0xFFFF, 3},
-		{0x10000, 4},
-		{0x1F600, 4},
-		{0x10FFFF, 4},
-	}
-	for c in cases {
-		testing.expectf(t, spell.rune_len(c.r) == c.want, "U+%04X: got %d, want %d", u32(c.r), spell.rune_len(c.r), c.want)
-	}
-}
-
 // `high_surrogate`, `low_surrogate`, and `surrogate_pair` enforce exact UTF-16 surrogate bounds and combine halves to
 // `U+10000..U+10FFFF`.
 @(test)

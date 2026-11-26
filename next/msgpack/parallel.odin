@@ -79,7 +79,7 @@ validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 		}
 	}
 	vj := Validate_Job{src = src, plan = &plan, opts = opts}
-	hook.fan_each(opts.runner, len(plan.parts), task, &vj)
+	tape.fan_each(opts.runner, len(plan.parts), task, &vj)
 	for p in plan.parts {
 		if p.astray {
 			return nil, false

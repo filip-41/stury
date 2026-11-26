@@ -37,8 +37,26 @@ PLACE_TAIL :: u8(6) // past the root value, whose foot only the last window judg
 @(private)
 Piece :: struct {
 	using state: hook.Piece_State,
+	place:       u8, // the format's place in its grammar past the last token, 0 at the text's start
+	last:        u64, // one past the last token the walk gave, or past the run of comments `run` held back before it
+	nest_open:   u64, // with `nest`, the containers open inside the one the hook passed
+	levels:      [dynamic]u32,
+	// The comments of a run of white space and comments the window ended inside, which wait for the token past the run
+	// to decide their roles, and are given to the hook in the window the run ends in, which may no longer hold their
+	// bytes: a hook that reads a comment's bytes holds them itself.
+	comments:    [dynamic]tape.Token,
+	gaps:        ^Gaps, // with `GAPS`, the walk's learned gap table across pieces
 	cut:         Cut_Token,
 	run:         Cut_Run,
+}
+
+@(private)
+piece_free :: proc(p: ^tape.Pieces) {
+	s := (^Piece)(p.state)
+	delete(s.levels)
+	delete(s.comments)
+	free(s.gaps, hook.piece_lists(p))
+	hook.piece_release(p)
 }
 
 // A token the window ended inside, read up to `on`, which the next window reads on from rather than from its first
@@ -53,7 +71,7 @@ Cut_Token :: struct {
 }
 
 // A run of white space and comments the window ended inside, read up to `on`, which the next window reads on from. Its
-// comments wait in `Piece_State.comments`.
+// comments wait in `Piece.comments`.
 @(private)
 Cut_Run :: struct {
 	state:   u8, // the state the run is read in, 0 for none
@@ -386,8 +404,8 @@ piece_walk :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk, p
 		w.rested = s.rested
 	}
 	w.tolerated, w.steps[0] = s.tolerated, s.steps
-	if len(s.memo) == size_of(Gaps) {
-		intrinsics.mem_copy_non_overlapping(&w.gaps, raw_data(s.memo), size_of(Gaps))
+	if s.gaps != nil {
+		w.gaps = s.gaps^
 		gaps_drop(&w.gaps, pw.from)
 	}
 	open := u64(len(s.opened))
@@ -967,14 +985,14 @@ piece_end :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw
 	}
 	intrinsics.mem_copy_non_overlapping(raw_data(s.levels), w.stack, open * size_of(u32))
 	if GAPS {
-		if s.memo == nil {
-			memo, err := make([]u8, size_of(Gaps), s.opened.allocator)
-			if err != nil {
+		if s.gaps == nil {
+			gaps, err := new(Gaps, s.opened.allocator)
+			if err != nil || gaps == nil {
 				return hook.walk_result(s.last, hook.WALK_NO_MEMORY)
 			}
-			s.memo = memo
+			s.gaps = gaps
 		}
-		intrinsics.mem_copy_non_overlapping(raw_data(s.memo), &w.gaps, size_of(Gaps))
+		s.gaps^ = w.gaps
 	}
 	s.regs, s.steps, s.tolerated = w.regs^, w.steps[0], w.tolerated
 	when .Skips in C {

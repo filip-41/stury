@@ -45,21 +45,6 @@ hex4_value :: #force_inline proc "contextless" (h: [^]u8) -> u32 {
 	return ((p >> 8) | p) & 0xFFFF
 }
 
-// The number of UTF-8 bytes the code point `r` (`0 <= r <= 0x10FFFF`) encodes to.
-@(require_results)
-rune_len :: #force_inline proc "contextless" (r: rune) -> u32 {
-	if r < 0x80 {
-		return 1
-	}
-	if r < 0x800 {
-		return 2
-	}
-	if r < 0x10000 {
-		return 3
-	}
-	return 4
-}
-
 // The code point and length of the escape whose backslash is at `e`, `room` bytes before the end. The length is 0 for
 // a bad escape.
 @(require_results)

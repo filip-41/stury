@@ -9,7 +9,7 @@ Memory_Budget :: struct {
 	backing: runtime.Allocator,
 	limit:   u64,
 	held:    u64,
-	refused: bool, // the last block refused was refused for the budget, not by `backing`
+	refused: bool, // the last block refused was refused for the budget, not by `backing`; kept across `.Free` so unwinding preserves it
 	peer:    ^Memory_Budget, // a budget whose blocks count against the same `limit`, as one count over two backings
 }
 
@@ -53,8 +53,8 @@ scratch :: proc "contextless" (opts: tape.Options, allocator: runtime.Allocator,
 	if opts.budget.memory == 0 {
 		return backing
 	}
-	m := budget_of(allocator)
-	if m != nil && m.peer != nil && m.peer.backing == backing {
+	m := (^Memory_Budget)(allocator.data) if allocator.procedure == memory_budget_proc else nil
+	if m != nil && m.peer != nil && m.peer.backing == backing && m.peer.limit <= opts.budget.memory {
 		return memory_budget(m.peer)
 	}
 	local^ = {backing = backing, limit = opts.budget.memory, peer = m}
@@ -63,7 +63,7 @@ scratch :: proc "contextless" (opts: tape.Options, allocator: runtime.Allocator,
 
 // Where a read's scratch comes from: `opts.scratch` when set, else the runtime's default heap. False on a build whose
 // default allocator is the nil or panic one (a freestanding target), where scratch stays in the read's allocator.
-@(private)
+@(private = "file")
 scratch_backing :: #force_inline proc "contextless" (opts: tape.Options) -> (runtime.Allocator, bool) {
 	if opts.scratch.procedure != nil {
 		return opts.scratch, true
@@ -75,11 +75,6 @@ scratch_backing :: #force_inline proc "contextless" (opts: tape.Options) -> (run
 	}
 }
 
-@(private)
-budget_of :: proc "contextless" (allocator: runtime.Allocator) -> ^Memory_Budget {
-	return (^Memory_Budget)(allocator.data) if allocator.procedure == memory_budget_proc else nil
-}
-
 // The bytes `m` still lets its blocks grow by, counting a peer's.
 memory_budget_left :: proc "contextless" (m: ^Memory_Budget) -> u64 {
 	held := budget_held(m)
@@ -87,7 +82,7 @@ memory_budget_left :: proc "contextless" (m: ^Memory_Budget) -> u64 {
 }
 
 // The bytes held by `m` and its peer chain (up to two hops, avoiding a symmetric cycle).
-@(private)
+@(private = "file")
 budget_held :: #force_inline proc "contextless" (m: ^Memory_Budget) -> u64 {
 	held := m.held
 	if p := m.peer; p != nil {
@@ -99,15 +94,19 @@ budget_held :: #force_inline proc "contextless" (m: ^Memory_Budget) -> u64 {
 	return held
 }
 
-// The error a read that ended with `err` gives under `m`: `Exceeded` for a refusal the budget made.
+// The error a read that ended with `err` gives under `m`: `Exceeded` for a refusal the budget or its peer chain (up to
+// two hops, matching `budget_held`) made.
 memory_budget_error :: proc "contextless" (m: ^Memory_Budget, err: tape.Error) -> tape.Error {
-	if _, refused := err.(runtime.Allocator_Error); refused && (m.refused || m.peer != nil && m.peer.refused) {
-		return tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}
+	if ae, ok := err.(runtime.Allocator_Error); ok && ae == .Out_Of_Memory {
+		p := m.peer
+		if m.refused || p != nil && (p.refused || p.peer != nil && p.peer.refused) {
+			return tape.Exceeded{at = tape.NO_BYTE, kind = .Memory}
+		}
 	}
 	return err
 }
 
-@(private)
+@(private = "file")
 memory_budget_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
 	m := (^Memory_Budget)(data)
 	if m.backing.procedure == nil {
@@ -120,8 +119,7 @@ memory_budget_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, ali
 	case .Resize, .Resize_Non_Zeroed:
 		grows = size - old_size
 	}
-	held := budget_held(m)
-	if grows > 0 && u64(grows) > m.limit - min(held, m.limit) {
+	if grows > 0 && u64(grows) > memory_budget_left(m) {
 		m.refused = true
 		return nil, .Out_Of_Memory
 	}

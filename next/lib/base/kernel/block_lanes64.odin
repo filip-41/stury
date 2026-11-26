@@ -21,17 +21,6 @@ load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
 	return transmute(Block)v
 }
 
-// 0xFF in each lane where `b`'s byte equals `c`.
-eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
-	// Per register on WebAssembly so LLVM folds `i8x16.eq` straight into `pack`'s `i8x16.bitmask` without `i8x16.lt_s`.
-	when IS_WASM {
-		k := V(c)
-		return {simd.lanes_eq(b[0], k), simd.lanes_eq(b[1], k), simd.lanes_eq(b[2], k), simd.lanes_eq(b[3], k)}
-	} else {
-		return transmute(Block)simd.lanes_eq(transmute(W)b, W(c))
-	}
-}
-
 // One bit per lane of `m` (each lane 0x00 or 0xFF), by `pmovmskb` per register on x86.
 pack :: #force_inline proc "contextless" (m: Block) -> u64 {
 	// LLVM's WebAssembly backend cannot widen a 64-lane compare joined to an `i64` mask, so each register packs alone.
@@ -49,18 +38,6 @@ pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2
 		r[i] = pack(m[i])
 	}
 	return
-}
-
-// Whether every byte of `b` is below 0x80. On x86, one `pmovmskb` of the halves ORed together (a 64-lane
-// `extract_msbs` would emit one per register and join them in general registers). On WebAssembly, LLVM miscompiles a
-// 32-lane `extract_msbs`, so all four registers OR into one 16-byte check (`v128.any_true`).
-is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
-	when ODIN_ARCH == .amd64 {
-		h := transmute([2]#simd[32]u8)b
-		return transmute(u32)simd.extract_msbs(simd.bit_or(h[0], h[1])) == 0
-	} else {
-		return is_ascii16(simd.bit_or(simd.bit_or(b[0], b[1]), simd.bit_or(b[2], b[3])))
-	}
 }
 
 // Compiles to `ptest` on x86 (a max reduction is a shuffle tree there). On WebAssembly, `reduce_or` is a shuffle tree,
@@ -93,6 +70,7 @@ first_lane16 :: #force_inline proc "contextless" (m: V) -> u64 {
 }
 
 // The last set lane of `m` (each lane 0x00 or 0xFF), which has one.
+@(private)
 last_lane16 :: #force_inline proc "contextless" (m: V) -> u64 {
 	return 31 - u64(intrinsics.count_leading_zeros(u32(transmute(u16)simd.extract_msbs(m))))
 }

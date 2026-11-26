@@ -1,7 +1,6 @@
 package msgpack
 
 import "base:intrinsics"
-import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
@@ -314,7 +313,7 @@ plan_chunks :: proc(src: []u8, want: int, plan: ^Part_Plan, runner: ^tape.Runner
 		pass_start(sm, j.starts[k])
 		j.ends[k] = plan_run(j.src, true, sm, stop, nil)
 	}
-	hook.fan_each(runner, want, read_chunk, &job)
+	tape.fan_each(runner, want, read_chunk, &job)
 	st: Pass(false) = ---
 	pass_start(&st, 0)
 	chunks: for k := 0; k < want; k += 1 {

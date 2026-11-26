@@ -1,6 +1,5 @@
 package kernel
 
-import "base:intrinsics"
 import "core:simd"
 
 // UTF-8 validation between blocks. `prev` is the last block read, zeros after an ASCII block, and every error is in
@@ -122,7 +121,7 @@ utf8_ok :: proc "contextless" (s: Utf8_State) -> bool {
 // Whether `text` is valid UTF-8.
 @(require_results)
 utf8_valid :: #force_inline proc "contextless" (text: []u8) -> bool {
-	return scan(text, 0, nil, .Utf8) != 0
+	return scan(text, 0, .Utf8) != 0
 }
 
 // Byte-at-a-time RFC 3629 UTF-8 validator for scalar WebAssembly, where emulating 16-lane shuffles explodes code size.
@@ -185,7 +184,7 @@ utf8_valid_scalar :: proc "contextless" (text: []u8) -> bool #no_bounds_check {
 // `N == 16` loop keeping `p[j:]`, `p[j + i * N - 3:]`, `p[j - 64:]`, and `p[j - N - 1:]` in bounds.
 @(private)
 utf8_blocks :: #force_inline proc "contextless" ($T: Tier, text: []u8) -> bool #no_bounds_check {
-	when IS_WASM && !intrinsics.has_target_feature("simd128") {
+	when SCALAR_WASM {
 		return utf8_valid_scalar(text)
 	} else {
 		N :: VECTOR_BYTES[T]

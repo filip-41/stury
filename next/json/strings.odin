@@ -575,7 +575,13 @@ escape_credit :: #force_inline proc "contextless" (e, end: [^]u8) -> (n: u64, cr
 	if m == 0 {
 		return 0, 0
 	}
-	return u64(m), u32(m) - spell.rune_len(r)
+	return u64(m), u32(m) - rune_len(r)
+}
+
+// The number of UTF-8 bytes the code point `r` (`0 <= r <= 0x10FFFF`) encodes to.
+@(private = "file", require_results)
+rune_len :: #force_inline proc "contextless" (r: rune) -> u32 {
+	return 1 + u32(r >= 0x80) + u32(r >= 0x800) + u32(r >= 0x10000)
 }
 
 // One past the closing quote of the string at `p` and its spelling, or the fault at the first byte that breaks it, read

@@ -277,7 +277,7 @@ try_put_tagged_scalar :: proc(out: ^write.Out, w: ^write.Tree, s: write.Step, st
 	}
 	if is_dt && (t.kind == .String || t.kind == .Plain) {
 		if text, tok := write.text_of(w, s.node); tok {
-			if sec, nsec, ts_ok := rfc3339_to_timestamp(text); ts_ok {
+			if sec, nsec, ts_ok := spell.date_time_utc(text); ts_ok {
 				if has_unknown {
 					lost^ = true
 				}
@@ -664,104 +664,4 @@ epoch_to_timestamp :: proc "contextless" (n: spell.Number) -> (sec: i64, nsec: u
 		return s, u32(ns), true
 	}
 	return 0, 0, false
-}
-
-// Parses RFC 3339 date-time (with optional space for `T`) into MessagePack Timestamp `(sec, nsec)`.
-@(private)
-rfc3339_to_timestamp :: proc "contextless" (s: string) -> (sec: i64, nsec: u32, ok: bool) {
-	ns, spelled, in_range := spell.date_time_nsec(s, false)
-	if !spelled {
-		return 0, 0, false
-	}
-	if in_range {
-		rem := ns % 1_000_000_000
-		q := ns / 1_000_000_000
-		if rem < 0 {
-			q -= 1
-			rem += 1_000_000_000
-		}
-		return q, u32(rem), true
-	}
-	// Outside `i64` nanoseconds (years outside 1677..2262, still within 0000..9999): compute UTC seconds in `i64`.
-	return parse_rfc3339_seconds(s)
-}
-
-@(private)
-parse_rfc3339_seconds :: proc "contextless" (s: string) -> (sec: i64, nsec: u32, ok: bool) {
-	if len(s) < 20 || s[4] != '-' || s[7] != '-' {
-		return 0, 0, false
-	}
-	if s[10] != 'T' && s[10] != 't' && s[10] != ' ' {
-		return 0, 0, false
-	}
-	if s[13] != ':' || s[16] != ':' {
-		return 0, 0, false
-	}
-	parse2 :: #force_inline proc "contextless" (a, b: u8) -> (int, bool) {
-		if a < '0' || a > '9' || b < '0' || b > '9' {
-			return 0, false
-		}
-		return int(a - '0') * 10 + int(b - '0'), true
-	}
-	yh, ok0 := parse2(s[0], s[1])
-	yl, ok1 := parse2(s[2], s[3])
-	mon, ok2 := parse2(s[5], s[6])
-	day, ok3 := parse2(s[8], s[9])
-	hr, ok4 := parse2(s[11], s[12])
-	min_v, ok5 := parse2(s[14], s[15])
-	sec_v, ok6 := parse2(s[17], s[18])
-	if !(ok0 && ok1 && ok2 && ok3 && ok4 && ok5 && ok6) {
-		return 0, 0, false
-	}
-	year := yh * 100 + yl
-	if !spell.is_full_date(s[:10]) || hr > 23 || min_v > 59 || sec_v > 60 {
-		return 0, 0, false
-	}
-	at := 19
-	ns: u32
-	if s[at] == '.' {
-		at += 1
-		if at >= len(s) || s[at] < '0' || s[at] > '9' {
-			return 0, 0, false
-		}
-		weight := u32(100_000_000)
-		for at < len(s) && s[at] >= '0' && s[at] <= '9' {
-			if weight > 0 {
-				ns += u32(s[at] - '0') * weight
-				weight /= 10
-			}
-			at += 1
-		}
-	}
-	if at >= len(s) {
-		return 0, 0, false
-	}
-	offset_min := 0
-	if s[at] == 'Z' || s[at] == 'z' {
-		if at + 1 != len(s) {
-			return 0, 0, false
-		}
-	} else if (s[at] == '+' || s[at] == '-') && at + 6 == len(s) && s[at + 3] == ':' {
-		oh, ok7 := parse2(s[at + 1], s[at + 2])
-		om, ok8 := parse2(s[at + 4], s[at + 5])
-		if !ok7 || !ok8 || oh > 23 || om > 59 {
-			return 0, 0, false
-		}
-		offset_min = oh * 60 + om
-		if s[at] == '-' {
-			offset_min = -offset_min
-		}
-	} else {
-		return 0, 0, false
-	}
-	// Days from civil epoch 1970-01-01 (Hinnant algorithm).
-	y := i64(year) - i64(mon <= 2)
-	era := (y if y >= 0 else y - 399) / 400
-	yoe := y - era * 400
-	m := i64(mon) + (-3 if mon > 2 else 9)
-	doy := (153 * m + 2) / 5 + i64(day) - 1
-	doe := yoe * 365 + yoe / 4 - yoe / 100 + doy
-	days := era * 146097 + doe - 719468
-	total_sec := days * 86400 + i64(hr * 3600 + min_v * 60 + sec_v - offset_min * 60)
-	return total_sec, ns, true
 }

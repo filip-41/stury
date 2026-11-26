@@ -18,7 +18,7 @@ LAYERS = ["lib/base", "lib/core", "lib/ops", "lib/schema", "lib/query"]
 QUERY_FRONTENDS = {"jq", "jsonpath"}
 TOP_EDGES = {
     "stury": {"engine", "jq", "jsonpath"},
-    "engine": {"host"},
+    "engine": set(),
     "cli": {"engine", "host", "jq", "jsonpath"},
     "capi": {"stury", "engine"},
 }

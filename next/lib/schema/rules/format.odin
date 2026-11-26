@@ -83,14 +83,11 @@ format_valid :: proc(f: String_Format, s: string, scratch := context.allocator) 
 	case .None:
 		return true
 	case .Date_Time:
-		_, ok := date_time_of(s)
-		return ok
+		return spell.is_date_time(s)
 	case .Date:
-		_, ok := date_of(s)
-		return ok
+		return spell.is_full_date(s)
 	case .Time:
-		_, ok := time_of(s)
-		return ok
+		return spell.is_full_time(s)
 	case .Duration:
 		return duration_valid(s)
 	case .Email:
@@ -173,83 +170,6 @@ all_hex :: proc "contextless" (s: string) -> bool {
 		}
 	}
 	return s != ""
-}
-
-@(private)
-is_leap :: proc "contextless" (y: int) -> bool {
-	return y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
-}
-
-// The fields of an RFC 3339 date and time. `offset` is in minutes east of UTC, `nanosecond` the fraction cut at nine digits.
-Date_Time_Parts :: struct {
-	year, month, day, hour, minute, second, nanosecond, offset: int,
-}
-
-// RFC 3339 `full-date`.
-date_of :: proc "contextless" (s: string) -> (p: Date_Time_Parts, ok: bool) {
-	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
-		return
-	}
-	y, y_ok := decimal_u64(s[:4])
-	m, m_ok := decimal_u64(s[5:7])
-	d, d_ok := decimal_u64(s[8:])
-	if !y_ok || !m_ok || !d_ok || m < 1 || m > 12 || d < 1 {
-		return
-	}
-	days := [?]int{31, 29 if is_leap(y) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
-	return {year = y, month = m, day = d}, d <= days[m - 1]
-}
-
-// RFC 3339 `full-time`: `HH:MM:SS`, a fraction of one digit or more, and a `Z` or `+HH:MM` offset. A leap second is
-// the last second of a minute that is 23:59 in UTC.
-time_of :: proc "contextless" (s: string) -> (p: Date_Time_Parts, ok: bool) {
-	if len(s) < 9 || s[2] != ':' || s[5] != ':' {
-		return
-	}
-	h, h_ok := decimal_u64(s[:2])
-	m, m_ok := decimal_u64(s[3:5])
-	sec, s_ok := decimal_u64(s[6:8])
-	if !h_ok || !m_ok || !s_ok || h > 23 || m > 59 || sec > 60 {
-		return
-	}
-	p = {hour = h, minute = m, second = sec}
-	rest := s[8:]
-	if rest[0] == '.' {
-		n := digits(rest[1:])
-		if n == 0 {
-			return
-		}
-		scale := 100_000_000
-		for c in transmute([]u8)rest[1:1 + min(n, 9)] {
-			p.nanosecond += int(c - '0') * scale
-			scale /= 10
-		}
-		rest = rest[n + 1:]
-	}
-	switch {
-	case rest == "Z" || rest == "z":
-	case len(rest) == 6 && (rest[0] == '+' || rest[0] == '-') && rest[3] == ':':
-		oh, oh_ok := decimal_u64(rest[1:3])
-		om, om_ok := decimal_u64(rest[4:])
-		if !oh_ok || !om_ok || oh > 23 || om > 59 {
-			return
-		}
-		p.offset = (oh * 60 + om) * (1 if rest[0] == '+' else -1)
-	case:
-		return
-	}
-	return p, sec < 60 || ((h * 60 + m - p.offset) % 1440 + 1440) % 1440 == 23 * 60 + 59
-}
-
-// RFC 3339 `date-time`: a date, `T` or `t`, and a time.
-date_time_of :: proc "contextless" (s: string) -> (p: Date_Time_Parts, ok: bool) {
-	if len(s) <= 11 || s[10] != 'T' && s[10] != 't' {
-		return
-	}
-	d, d_ok := date_of(s[:10])
-	t, t_ok := time_of(s[11:])
-	t.year, t.month, t.day = d.year, d.month, d.day
-	return t, d_ok && t_ok
 }
 
 // RFC 3339 appendix A `duration`: weeks alone, or date units that follow in order from the first one given (`Y` then

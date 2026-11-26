@@ -235,3 +235,87 @@ date_time_nsec_optional_seconds :: proc(t: ^testing.T) {
 		testing.expectf(t, nsec == 0 && !spelled && !in_range, "%q: got (%d, %v, %v)", bad, nsec, spelled, in_range)
 	}
 }
+
+// RFC 3339 full-times enforce `HH:MM:SS`, optional fractional digits, `Z`/`z` or `±HH:MM` offset, and UTC 23:59 leap seconds.
+@(test)
+full_times_follow_rfc_3339 :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	good := []string{
+		"00:00:00Z",
+		"00:00:00z",
+		"23:59:59+00:00",
+		"23:59:59-00:00",
+		"12:34:56.789+23:59",
+		"12:34:56.000000000123-23:59",
+		"23:59:60Z",
+		"23:59:60.5+00:00",
+		"15:59:60-08:00",
+		"00:00:60+00:01",
+		"23:58:60+23:59",
+		"00:00:60-23:59",
+	}
+	bad := []string{
+		"",
+		"00:00Z",
+		"00:00:00",
+		"24:00:00Z",
+		"23:60:00Z",
+		"23:59:61Z",
+		"23:59:00.",
+		"23:59:00.Z",
+		"23:59:00.5",
+		"20:04:60Z",
+		"23:59:60+00:01",
+		"23:59:60-23:59",
+		"12:00:00+24:00",
+		"12:00:00-24:00",
+		"12:00:00+00:60",
+		"12:00:00+0100",
+		"12:00:00Z ",
+		" 12:00:00Z",
+		"12:00:00+01:000",
+	}
+	for s in good {
+		ok := spell.is_full_time(s)
+		testing.expectf(t, ok, "%q", s)
+	}
+	for s in bad {
+		ok := spell.is_full_time(s)
+		testing.expectf(t, !ok, "%q", s)
+	}
+}
+
+// `date_time_utc` covers the full 0000..9999 year range, sub-second pre-epoch timestamps, offsets, leap seconds, and
+// optional seconds without overflowing `i64` nanoseconds.
+@(test)
+date_time_utc_covers_full_range :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Case :: struct {
+		text: string,
+		sec:  i64,
+		nsec: u32,
+	}
+	cases := []Case{
+		{"1970-01-01T00:00:00Z", 0, 0},
+		{"1969-12-31T23:59:59.5Z", -1, 500_000_000},
+		{"1969-12-31T23:59:59.000000001Z", -1, 1},
+		{"1990-12-31T23:59:60.25Z", 662_688_000, 250_000_000},
+		{"0000-01-01T00:00:00Z", -62_167_219_200, 0},
+		{"0000-01-01T00:00:00.1234567899Z", -62_167_219_200, 123_456_789},
+		{"1677-09-21T00:12:43.145224191Z", -9_223_372_037, 145_224_191},
+		{"2262-04-11T23:47:16.854775808Z", 9_223_372_036, 854_775_808},
+		{"9999-12-31T23:59:59.999999999Z", 253_402_300_799, 999_999_999},
+		{"9999-12-31 23:59:59-01:00", 253_402_304_399, 0},
+	}
+	for c in cases {
+		sec, nsec, ok := spell.date_time_utc(c.text)
+		testing.expectf(t, ok && sec == c.sec && nsec == c.nsec, "%q: got (%d, %d, %v), want (%d, %d, true)", c.text, sec, nsec, ok, c.sec, c.nsec)
+	}
+	sec, nsec, ok := spell.date_time_utc("0000-01-01 00:00Z", optional_seconds = true)
+	testing.expectf(t, ok && sec == -62_167_219_200 && nsec == 0, "optional_seconds: got (%d, %d, %v)", sec, nsec, ok)
+
+	for bad in ([]string{"", "2024-01-01", "2024-01-01T00:00Z", "2024-01-01T00:00:60Z", "0000-01-01T00:00:00."}) {
+		s, ns, bok := spell.date_time_utc(bad)
+		testing.expectf(t, !bok && s == 0 && ns == 0, "%q: got (%d, %d, %v)", bad, s, ns, bok)
+	}
+}

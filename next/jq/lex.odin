@@ -405,7 +405,7 @@ decode_string :: proc(out: ^strings.Builder, in_: string, lone_low_surrogate_at:
 		if i + 1 == len(s) {
 			return "Expected escape character at end of string"
 		}
-		if b := escaped_byte(s[i + 1]); b != 0 {
+		if b := spell.ESCAPED[s[i + 1]]; b != 0 {
 			strings.write_byte(out, b)
 			i += 2
 			continue
@@ -496,25 +496,4 @@ utf8_next :: proc(s: string) -> (n: int, ok: bool) {
 	}
 	first := [5]rune{0, 0, 0x80, 0x800, 0x10000}
 	return n, cp >= first[n] && !(0xd800 <= cp && cp <= 0xdfff) && cp <= 0x10ffff
-}
-
-
-// The byte a JSON escape `\c` stands for, 0 for none but `\u`.
-@(private = "file")
-escaped_byte :: proc(c: u8) -> u8 {
-	switch c {
-	case '"', '\\', '/':
-		return c
-	case 'b':
-		return '\b'
-	case 'f':
-		return '\f'
-	case 'n':
-		return '\n'
-	case 'r':
-		return '\r'
-	case 't':
-		return '\t'
-	}
-	return 0
 }

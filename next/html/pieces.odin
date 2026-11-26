@@ -84,7 +84,7 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, fopts: Fragment_Options
 		return {}, tape.Bad_Option{"pieces"}
 	}
 	if p.last {
-		text := hook.piece_src(src, p.from)
+		text := tape.piece_src(src, p.from)
 		_ = hook.piece_state(p, Piece) or_return
 		s := (^Piece)(p.state)
 		alloc := hook.piece_blocks(p, opts.budget.memory, caller)
@@ -162,7 +162,7 @@ scan_pieces :: proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_O
 		return {}, nil
 	}
 	// On the final window (`p.from == 0`), scan with `h.scattered = true` and retain `.Held` bytes in the result document.
-	text := hook.piece_src(src, p.from)
+	text := tape.piece_src(src, p.from)
 	p.more, p.open = false, nil
 	alloc := hook.piece_blocks(p, opts.budget.memory, caller)
 	k: Kept

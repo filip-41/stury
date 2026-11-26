@@ -275,10 +275,59 @@ number5_value :: #force_no_inline proc "contextless" (src: []u8, lo, hi: u64, sp
 		// A quiet NaN with the sign it is written with.
 		return {0x7ff8_0000_0000_0000 | u64(neg) << 63, .Float}
 	case .Hex:
-		return spell.number_hex(src[p + 2:hi], neg)
+		return number_hex(src[p + 2:hi], neg)
 	}
 	num, _ := spell.number_loose(src, lo, hi)
 	return num
+}
+
+// The value of the hex digits `digits`, negated when `neg`: an integer while one holds it, else the correctly rounded
+// binary64, `Wide` past its range.
+// Caller guarantees every byte of `digits` is an ASCII hex digit (`0-9`, `a-f`, `A-F`), so `spell.HEX_NIBBLE[b] < 16`.
+@(private = "file", require_results)
+number_hex :: proc "contextless" (digits: []u8, neg: bool) -> spell.Number #no_bounds_check {
+	i := 0
+	for i < len(digits) && digits[i] == '0' {
+		i += 1
+	}
+	mant: u64
+	n := 0
+	for ; i < len(digits) && n < 16; i += 1 {
+		mant = mant << 4 | u64(spell.HEX_NIBBLE[digits[i]])
+		n += 1
+	}
+	if i == len(digits) {
+		if !neg {
+			return {mant, .Int if mant <= u64(max(i64)) else .Uint}
+		}
+		if mant <= u64(1) << 63 {
+			return {u64(0) - mant, .Int}
+		}
+	}
+	// The digits past the first sixteen scale the value and only break a tie in its rounding. Past 240 of them the
+	// value is at least `2^1024`.
+	rest := len(digits) - i
+	if rest > 240 {
+		return {0, .Wide}
+	}
+	sticky := false
+	for ; i < len(digits); i += 1 {
+		sticky ||= digits[i] != '0'
+	}
+	lz := intrinsics.count_leading_zeros(mant)
+	mant <<= lz
+	top, low := mant >> 11, mant & 0x7FF
+	if low > 0x400 || low == 0x400 && (sticky || top & 1 != 0) {
+		top += 1
+	}
+	exp := 63 + 4 * rest - int(lz)
+	if top == 1 << 53 {
+		exp += 1
+	}
+	if exp > 1023 {
+		return {0, .Wide}
+	}
+	return {u64(neg) << 63 | u64(exp + 1023) << 52 | (top & ((1 << 52) - 1)), .Float}
 }
 
 // Decodes the JSON5 text `src[p:end]` into `dst` from `dst[0]` and returns the end offset in `dst`.

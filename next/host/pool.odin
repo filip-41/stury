@@ -16,58 +16,45 @@ import "stury:lib/core/tape"
 //	  `pool_destroy` joins them. The pool must not move between `pool_init` and `pool_destroy`, and runs one call at a
 //	  time.
 Pool :: struct {
-	runner:      tape.Runner,
-	helpers:     []Helper,
-	// Whether the first call started the helpers' threads, and how many have been started or refused.
-	spawned:     bool,
-	settled:     int,
+	runner:  tape.Runner,
+	helpers: []Helper,
+	// How many helpers have been started or refused.
+	settled: int,
 	// The current call, and how many helpers it was handed to.
-	task:        proc(arg: rawptr),
-	arg:         rawptr,
-	handed:      int,
+	task:    proc(arg: rawptr),
+	arg:     rawptr,
+	handed:  int,
 	// Handed helpers that have not returned or been taken back.
-	pending:     int,
+	pending: int,
 	// How many helpers each recent task gets, and when the current call started.
-	widths:      [4]Width,
-	current:     ^Width,
-	began:       time.Tick,
-	// When the last call finished, and whether idle helpers spin before they sleep: true until the first call, and
-	// after a call that began within `SPIN` of the end of the one before.
-	ended:       time.Tick,
-	spin:        bool,
-	// True between `start` and `finish`, guarding the single-flight contract.
-	active:      bool,
+	widths:  [4]Width,
+	current: ^Width,
+	began:   time.Tick,
+	// When the last call finished, and flags: whether the first non-empty call started helpers, whether idle helpers
+	// spin before they sleep (true on the first call and when a call starts within `SPIN` of the previous end), and
+	// single-flight active guard.
+	ended:   time.Tick,
+	spawned: bool,
+	spin:    bool,
+	active:  bool,
 }
 
 // A helper that has taken a task can lose its core to another process, and the caller then waits for it. On a loaded
 // host that wait can exceed what the extra helpers save. Each task's width shrinks by a quarter when the wait is over
-// a quarter of the call, and grows by one after `CALM` calls in a row where the wait is under an eighth.
-@(private)
+// a quarter of the call, and grows by one after `CALM` calm calls (reset on shrink).
+@(private = "file")
 Width :: struct {
 	task:  proc(arg: rawptr),
 	width: int,
 	calm:  int,
 }
 
-@(private)
-CALM :: 16
-@(private)
-WAIT_HIGH :: 4
-@(private)
-WAIT_LOW :: 8
-@(private)
-SHRINK :: 4
-
-// The number of spins `wait_done` makes for the helpers before it yields.
-@(private)
-FINISH_SPINS :: 64
-
 // How long an idle helper spins before it sleeps: a sleeping thread takes longer to wake than a small call takes
 // to run.
-@(private)
+@(private = "file")
 SPIN :: 200 * time.Microsecond
 
-@(private)
+@(private = "file")
 Helper :: struct {
 	thread: ^thread.Thread,
 	pool:   ^Pool,
@@ -77,11 +64,11 @@ Helper :: struct {
 
 // The states of a helper's `ready`: parked, handed the pool's task, or running it. `finish` sets a helper it takes a
 // task back from to `IDLE`.
-@(private)
+@(private = "file")
 IDLE :: 0
-@(private)
+@(private = "file")
 HANDED :: 1
-@(private)
+@(private = "file")
 TAKEN :: 2
 
 // Makes a pool of `workers - 1` helpers (for `workers <= 0`, one worker per core, counting the caller), whose threads
@@ -93,7 +80,7 @@ TAKEN :: 2
 //	- A helper the system refuses never runs: a call handed to it is taken back by `finish`.
 //	- A pool with none still runs calls, on the caller alone.
 pool_init :: proc(pool: ^Pool, workers := 0) -> runtime.Allocator_Error {
-	pool^ = {runner = {data = pool, start = start, finish = finish}, spin = true}
+	pool^ = {runner = {data = pool, start = start, finish = finish}}
 	w := workers > 0 ? workers : os.get_processor_core_count()
 	pool.helpers = make([]Helper, max(w - 1, 0), runtime.heap_allocator()) or_return
 	pool.runner.threads = len(pool.helpers)
@@ -105,7 +92,7 @@ pool_init :: proc(pool: ^Pool, workers := 0) -> runtime.Allocator_Error {
 
 // Starts the two children of helper `index` in the tree that also wakes them (`index` -1 is the caller), and the
 // children of any child the system refuses to start.
-@(private)
+@(private = "file")
 spawn_children :: proc(pool: ^Pool, index: int) {
 	// The pool allocates from the heap, never from the caller's arena.
 	context.allocator = runtime.heap_allocator()
@@ -130,12 +117,6 @@ pool_destroy :: proc(pool: ^Pool) {
 		thread.yield()
 	}
 	pool.task = nil
-	// Each helper counts itself out as it stops.
-	live := 0
-	for h in pool.helpers {
-		live += int(h.thread != nil)
-	}
-	sync.atomic_store(&pool.pending, live)
 	for &h in pool.helpers {
 		if h.thread != nil {
 			sync.atomic_store(&h.ready, HANDED)
@@ -147,23 +128,27 @@ pool_destroy :: proc(pool: ^Pool) {
 			thread.destroy(h.thread)
 		}
 	}
-	assert(pool.pending == 0)
 	delete(pool.helpers, runtime.heap_allocator())
 	pool^ = {}
 }
 
 // Hands the task to the first `n` helpers, none for a negative `n` or a nil task, then wakes two. Each helper wakes
 // two more once it starts, so the caller makes two wakes, not one per helper.
-@(private)
+@(private = "file")
 start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 	pool := (^Pool)(data)
 	assert(!sync.atomic_exchange(&pool.active, true), "host.Pool runs one call at a time")
 	pool.began = time.tick_now()
-	sync.atomic_store(&pool.spin, pool.ended != {} && time.tick_diff(pool.ended, pool.began) < SPIN)
+	sync.atomic_store(&pool.spin, pool.ended == {} || time.tick_diff(pool.ended, pool.began) < SPIN)
 	pool.task, pool.arg = task, arg
-	pool.current = width_of(pool, task)
 	// A helper that takes a nil task stops, which is how `pool_destroy` ends them.
-	pool.handed = clamp(n, 0, pool.current.width) if task != nil else 0
+	if task != nil {
+		pool.current = width_of(pool, task)
+		pool.handed = clamp(n, 0, pool.current.width)
+	} else {
+		pool.current = nil
+		pool.handed = 0
+	}
 	sync.atomic_store(&pool.pending, pool.handed)
 	for &h in pool.helpers[:pool.handed] {
 		sync.atomic_store(&h.ready, HANDED)
@@ -171,7 +156,7 @@ start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 	for &h in pool.helpers[:min(2, pool.handed)] {
 		sync.futex_signal(&h.ready)
 	}
-	if !pool.spawned {
+	if !pool.spawned && pool.handed > 0 {
 		pool.spawned = true
 		spawn_children(pool, -1)
 	}
@@ -179,8 +164,9 @@ start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 
 // Takes back every handed task whose helper has not started, because waiting for it to wake would cost more than the
 // call, then waits for the rest and adapts the width to how long that took.
-@(private)
+@(private = "file")
 finish :: proc(data: rawptr) {
+	FINISH_SPINS :: 64
 	pool := (^Pool)(data)
 	for &h in pool.helpers[:pool.handed] {
 		if _, took := sync.atomic_compare_exchange_strong(&h.ready, HANDED, IDLE); took {
@@ -188,15 +174,6 @@ finish :: proc(data: rawptr) {
 		}
 	}
 	waited := time.tick_now()
-	wait_done(pool)
-	adapt_width(pool, time.tick_since(pool.began), time.tick_since(waited))
-	pool.ended = time.tick_now()
-	sync.atomic_store(&pool.active, false)
-}
-
-// Waits until no handed task is pending: spins first, then yields.
-@(private)
-wait_done :: proc(pool: ^Pool) {
 	for spins := 0; sync.atomic_load(&pool.pending) > 0; spins += 1 {
 		if spins < FINISH_SPINS {
 			intrinsics.cpu_relax()
@@ -204,12 +181,21 @@ wait_done :: proc(pool: ^Pool) {
 			thread.yield()
 		}
 	}
+	if pool.current != nil {
+		adapt_width(pool, time.tick_since(pool.began), time.tick_since(waited))
+	}
+	pool.ended = time.tick_now()
+	sync.atomic_store(&pool.active, false)
 }
 
 // Shrinks the current task's width when the call spent too long in `wait` of its `span`, and grows it after `CALM`
-// calm calls in a row.
-@(private)
+// calm calls (reset on shrink).
+@(private = "file")
 adapt_width :: proc(pool: ^Pool, span, wait: time.Duration) {
+	CALM :: 16
+	WAIT_HIGH :: 4
+	WAIT_LOW :: 8
+	SHRINK :: 4
 	// A call that handed fewer helpers than the width says nothing about the width. A width of 0 is not shrunk, since
 	// below 0 the next call would hand out a negative count of helpers.
 	w := &pool.current.width
@@ -229,7 +215,7 @@ adapt_width :: proc(pool: ^Pool, span, wait: time.Duration) {
 }
 
 // The width record of `task`, or a new one, all helpers wide, in place of the oldest of the four.
-@(private)
+@(private = "file")
 width_of :: proc(pool: ^Pool, task: proc(arg: rawptr)) -> ^Width {
 	for &w in pool.widths {
 		if w.task == task {
@@ -241,7 +227,7 @@ width_of :: proc(pool: ^Pool, task: proc(arg: rawptr)) -> ^Width {
 	return &pool.widths[0]
 }
 
-@(private)
+@(private = "file")
 helper_main :: proc(t: ^thread.Thread) {
 	h := (^Helper)(t.data)
 	pool := h.pool
@@ -249,13 +235,11 @@ helper_main :: proc(t: ^thread.Thread) {
 	for {
 		if sync.atomic_load(&h.ready) == IDLE {
 			park(&h.ready, sync.atomic_load(&pool.spin))
-			continue
 		}
 		if _, took := sync.atomic_compare_exchange_strong(&h.ready, HANDED, TAKEN); !took {
 			continue
 		}
 		if pool.task == nil {
-			sync.atomic_sub(&pool.pending, 1)
 			return
 		}
 		for j in 2 * h.index + 2 ..< min(2 * h.index + 4, pool.handed) {
@@ -273,7 +257,7 @@ helper_main :: proc(t: ^thread.Thread) {
 }
 
 // Waits for `ready` to leave `IDLE`: spins for `SPIN` first when `spin` is set, then sleeps.
-@(private)
+@(private = "file")
 park :: proc(ready: ^sync.Futex, spin: bool) {
 	began := time.tick_now()
 	for spins := 0; sync.atomic_load(ready) == IDLE; spins += 1 {

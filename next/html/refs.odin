@@ -5,44 +5,6 @@ import "stury:lib/base/spell"
 
 // Character references, read once by the tokenizer (reporting errors) and again by `decode` (writing values).
 
-@(private = "file", rodata)
-ENTITY_NODES := #load("../lib/base/spell/entities/nodes.bin", []u32le)
-@(private = "file", rodata)
-ENTITY_TERMINALS := #load("../lib/base/spell/entities/terminals.bin", []u16le)
-@(private = "file", rodata)
-ENTITY_OFFSETS := #load("../lib/base/spell/entities/offsets.bin", []u16le)
-@(private = "file", rodata)
-ENTITY_TEXT := #load("../lib/base/spell/entities/text.bin")
-
-@(private = "file", require_results)
-entity_child :: #force_inline proc "contextless" (node: u32, c: u8) -> u32 #no_bounds_check {
-	w := u32(ENTITY_NODES[node])
-	lo := w >> 13
-	hi := lo + ((w >> 7) & 63)
-	for lo < hi {
-		mid := (lo + hi) >> 1
-		ch := u8(u32(ENTITY_NODES[mid]) & 127)
-		if ch == c {
-			return mid
-		}
-		if ch < c {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	return 0
-}
-
-@(private = "file", require_results)
-entity_value :: #force_inline proc "contextless" (node: u32) -> (text: []u8, ok: bool) #no_bounds_check {
-	v := u32(ENTITY_TERMINALS[node])
-	if v == 0 {
-		return nil, false
-	}
-	return ENTITY_TEXT[ENTITY_OFFSETS[v - 1]:ENTITY_OFFSETS[v]], true
-}
-
 @(private = "file")
 utf8_encode_rune :: proc "contextless" (dst: []u8, r: rune) -> int #no_bounds_check {
 	c := u32(r)
@@ -91,25 +53,8 @@ read_ref :: proc "contextless" (p, end: [^]u8, attr: bool) -> (r: Ref) #no_bound
 	if CLASS[q[0]] & C_ALNUM == 0 {
 		return
 	}
-	node, best: u32
-	best_q := q
-	last: u8
-	for q < end {
-		c := q[0]
-		if c >= 0x80 {
-			break
-		}
-		node = entity_child(node, c)
-		if node == 0 {
-			break
-		}
-		q = q[1:]
-		if _, named := entity_value(node); named {
-			best, best_q, last = node, q, c
-		}
-	}
-	if best == 0 {
-		q = p[1:]
+	text, best_q := spell.entity_prefix(q, end)
+	if len(text) == 0 {
 		for q < end && CLASS[q[0]] & C_ALNUM != 0 {
 			q = q[1:]
 		}
@@ -120,13 +65,12 @@ read_ref :: proc "contextless" (p, end: [^]u8, attr: bool) -> (r: Ref) #no_bound
 		return
 	}
 	r.q = best_q
-	if last != ';' {
+	if q[intrinsics.ptr_sub(best_q, q) - 1] != ';' {
 		if attr && best_q < end && (best_q[0] == '=' || CLASS[best_q[0]] & C_ALNUM != 0) {
 			return
 		}
 		r.errors[0], r.err_at[0] = .Missing_Semicolon_After_Character_Reference, best_q
 	}
-	text, _ := entity_value(best)
 	copy(r.value[:], text)
 	r.n = len(text)
 	return
@@ -239,17 +183,9 @@ decode :: proc "contextless" (src: []u8, s: Span, buf: []u8) -> (text: string, o
 			p = r.q
 			continue
 		case c >= 0x80:
-			q, kind := spell.utf8_char(p, end)
-			if kind != .None {
-				out[w], out[w + 1], out[w + 2] = 0xEF, 0xBF, 0xBD
-				w += 3
-				p = spell.utf8_subpart(p, end)
-			} else {
-				n := int(intrinsics.ptr_sub(q, p))
-				intrinsics.mem_copy_non_overlapping(out[w:], p, n)
-				w += n
-				p = q
-			}
+			n, next := spell.utf8_lax(p, end, out[w:])
+			w += n
+			p = next
 			continue
 		case s.mode == .Name && CLASS[c] & C_UPPER != 0:
 			c |= 0x20

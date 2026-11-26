@@ -19,13 +19,6 @@ load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
 	}
 }
 
-// 0xFF in each lane where `b`'s byte equals `c`. Written per register: the 64-lane form changes how LLVM inlines the
-// walks that call it.
-eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
-	k := V(c)
-	return {simd.lanes_eq(b[0], k), simd.lanes_eq(b[1], k), simd.lanes_eq(b[2], k), simd.lanes_eq(b[3], k)}
-}
-
 // One bit per lane of `m` (each lane 0x00 or 0xFF). NEON has no lane-bit gather, so each lane is weighted 1 to 128
 // within its byte and three rounds of pairwise adds fold 64 lanes into 8 bytes. The bits do not overlap, so the adds
 // act as ORs.
@@ -58,10 +51,6 @@ fold :: #force_inline proc "contextless" (m: Block) -> V {
 	)
 }
 
-is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
-	return simd.reduce_max(simd.bit_or(simd.bit_or(b[0], b[1]), simd.bit_or(b[2], b[3]))) < 0x80
-}
-
 all_zero :: #force_inline proc "contextless" (v: #simd[$N]u8) -> bool {
 	return simd.reduce_max(v) == 0
 }
@@ -83,6 +72,7 @@ first_lane16 :: #force_inline proc "contextless" (m: V) -> u64 {
 }
 
 // The last set lane of `m` (each lane 0x00 or 0xFF), which has one.
+@(private)
 last_lane16 :: #force_inline proc "contextless" (m: V) -> u64 {
 	return (63 - u64(intrinsics.count_leading_zeros(narrow16(m)))) >> 2
 }

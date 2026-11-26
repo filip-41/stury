@@ -8,27 +8,18 @@ import "stury:lib/core/tape"
 // what its grammar needs past it in a block whose first field is this.
 Piece_State :: struct {
 	started:   bool,
-	place:     u8, // the format's place in its grammar past the last token, 0 at the text's start
 	nest:      Nest,
 	rested:    bool,
 	tolerated: bool,
 	regs:      Regs,
-	last:      u64, // one past the last token the walk gave, or past the run of comments `run` held back before it
-	nest_open: u64, // with `nest`, the containers open inside the one the hook passed
 	steps:     u64, // with `Budget.steps`, one more than the containers the walk may still open
-	// The open containers, the root's first, and per container a format's level.
+	// The open containers, the root's first.
 	opened:    [dynamic]Open_Level,
-	levels:    [dynamic]u32,
 	names:     [dynamic]u8, // the open path's names
 	steps_buf: [dynamic]tape.Step,
-	memo:      []u8, // what the format's walk keeps across pieces
 	hook:      rawptr, // the read's hook, in its own block
 	hook_free: proc(hook: rawptr, allocator: runtime.Allocator),
 	answer:    [2]u64, // with `find`, the span `text` holds
-	// The comments of a run of white space and comments the window ended inside, which wait for the token past the run
-	// to decide their roles, and are given to the hook in the window the run ends in, which may no longer hold their
-	// bytes: a hook that reads a comment's bytes holds them itself.
-	comments:  [dynamic]tape.Token,
 	// With `Budget.memory`, the count of the lists above and `Pieces.text` (`lists`) and of the read's own blocks
 	// (`blocks`), one count from the first window to the last.
 	lists:     Memory_Budget,
@@ -48,14 +39,12 @@ Nest :: enum u8 {
 
 // An open container of a text in pieces, and the member or element being read in it.
 Open_Level :: struct {
-	key:      tape.Token, // in an object, the key of the member being read, `n` 0 and `kind` `.End` for none
-	count:    u64, // the values it has given
-	object:   bool,
-	name:     i32, // where `key`'s text is in the open path's names once copied out of its window, -1 before
-	name_n:   u32,
+	key:    tape.Token, // in an object, the key of the member being read, `n` 0 and `kind` `.End` for none
+	count:  u64, // the values it has given
+	name:   int, // where `key`'s text is in the open path's names once copied out of its window, -1 before
+	name_n: u32,
+	object: bool,
 }
-
-piece_src :: tape.piece_src
 
 // The state of `p`, a block of the format's type `P` whose first field is a `Piece_State`, which its first read makes.
 // Every read of `p` names the same `P`.
@@ -95,11 +84,8 @@ piece_release :: proc(p: ^tape.Pieces) {
 		s.hook_free(s.hook, p.allocator)
 	}
 	delete(s.opened)
-	delete(s.levels)
 	delete(s.names)
 	delete(s.steps_buf)
-	delete(s.comments)
-	delete(s.memo, p.allocator)
 	free(s, p.allocator)
 }
 
@@ -132,20 +118,22 @@ piece_blocks :: proc "contextless" (p: ^tape.Pieces, memory: u64, allocator: run
 // out of the window the first time a read ends past it, as a later window may not hold it.
 piece_path :: proc(p: ^tape.Pieces, src: []u8, f: ^tape.Format) -> runtime.Allocator_Error {
 	s := (^Piece_State)(p.state)
-	names := make([dynamic]u8, 0, len(s.names), s.names.allocator) or_return
+	lists := piece_lists(p)
+	names := make([dynamic]u8, 0, len(s.names), lists) or_return
 	// Where each open level's key name lies in `names`, which the levels take once the whole path is built.
-	places, perr := make([][2]int, len(s.opened), s.names.allocator)
+	places, perr := make([][2]int, len(s.opened), lists)
 	if perr != nil {
 		delete(names)
 		return perr
 	}
 	placed := false
 	defer {
-		delete(places, s.names.allocator)
+		delete(places, lists)
 		if !placed {
 			delete(names)
 		}
 	}
+	p.open = nil
 	clear(&s.steps_buf)
 	for lv, i in s.opened {
 		if !lv.object || lv.key.kind == .End {
@@ -179,7 +167,7 @@ piece_path :: proc(p: ^tape.Pieces, src: []u8, f: ^tape.Format) -> runtime.Alloc
 	}
 	for &lv, i in s.opened {
 		if lv.object && lv.key.kind != .End {
-			lv.name, lv.name_n = i32(places[i][0]), u32(places[i][1])
+			lv.name, lv.name_n = places[i][0], u32(places[i][1])
 		}
 	}
 	delete(s.names)

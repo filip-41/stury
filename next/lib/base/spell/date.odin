@@ -43,31 +43,52 @@ is_full_date :: proc "contextless" (s: string) -> bool {
 	return ok
 }
 
+// Whether `s` is an RFC 3339 `full-time`: `HH:MM:SS`, an optional fraction of one or more digits, and a `Z`/`z` or
+// `±HH:MM` offset. A leap second is the last second of a minute that is 23:59 in UTC.
+@(require_results)
+is_full_time :: proc "contextless" (s: string) -> bool {
+	_, _, _, _, _, ok := parse_full_time(s, false, false)
+	return ok
+}
+
+// The UTC seconds since the Unix epoch and nanoseconds (`0..=999_999_999`) of the RFC 3339 date-time `text`, covering
+// all years `0000..=9999`. A space is also accepted for `T`, `:SS` is optional when `optional_seconds` is true (with no
+// fraction allowed when seconds are omitted), fractional seconds beyond 9 digits are truncated, and a leap second maps
+// to the next second.
+@(require_results)
+date_time_utc :: proc "contextless" (text: string, optional_seconds := false) -> (sec: i64, nsec: u32, ok: bool) {
+	dt, valid := parse_date_time(text, true, optional_seconds, true)
+	if !valid {
+		return 0, 0, false
+	}
+	days := days_from_civil(dt.year, dt.month, dt.day)
+	return days * 86400 + i64(dt.hour * 3600 + dt.minute * 60 + dt.second - dt.offset * 60), u32(dt.frac), true
+}
+
 // The nanoseconds since the Unix epoch in UTC of the RFC 3339 date-time `text`, a space also accepted for its `T`, and
 // `:SS` optional when `optional_seconds` is true (with no fraction allowed when seconds are omitted). Fractional
 // seconds beyond 9 digits are truncated to nanoseconds, and a leap second maps to the next second. `spelled` is false
 // for invalid syntax or calendar dates, and `in_range` is false when the UTC instant falls outside `[min(i64), max(i64)]`.
 @(require_results)
 date_time_nsec :: proc "contextless" (text: string, optional_seconds := false) -> (nsec: i64, spelled, in_range: bool) {
-	dt, ok := parse_date_time(text, true, optional_seconds, true)
+	utc_sec, frac_u32, ok := date_time_utc(text, optional_seconds)
 	if !ok {
 		return 0, false, false
 	}
-	days := days_from_civil(dt.year, dt.month, dt.day)
-	utc_sec := days * 86400 + i64(dt.hour * 3600 + dt.minute * 60 + dt.second - dt.offset * 60)
+	frac := i64(frac_u32)
 	if utc_sec < MIN_UTC_SEC || utc_sec > MAX_UTC_SEC {
 		return 0, true, false
 	}
 	if utc_sec == MIN_UTC_SEC {
-		if dt.frac < MIN_UTC_FRAC {
+		if frac < MIN_UTC_FRAC {
 			return 0, true, false
 		}
-		return min(i64) + (dt.frac - MIN_UTC_FRAC), true, true
+		return min(i64) + (frac - MIN_UTC_FRAC), true, true
 	}
-	if utc_sec == MAX_UTC_SEC && dt.frac > MAX_UTC_FRAC {
+	if utc_sec == MAX_UTC_SEC && frac > MAX_UTC_FRAC {
 		return 0, true, false
 	}
-	return utc_sec * SECOND_NS + dt.frac, true, true
+	return utc_sec * SECOND_NS + frac, true, true
 }
 
 // Parses an RFC 3339 `full-date` from `s[:10]`. Caller proves `len(s) >= 10`.
@@ -85,49 +106,34 @@ parse_full_date :: #force_inline proc "contextless" (s: string) -> (y, m, d: int
 	return yv, mv, dv, true
 }
 
-// Parses an RFC 3339 `date-time`: `full-date`, `T`/`t` (or `' '` when `ALLOW_SPACE`), `HH:MM:SS` (or `HH:MM` when
-// `optional_seconds`), an optional fraction of one or more digits (only when seconds are present), and a `Z`/`z` or
-// `±HH:MM` offset. A leap second `60` is accepted only at UTC 23:59.
+// Parses an RFC 3339 `full-time`: `HH:MM:SS` (or `HH:MM` when `optional_seconds`), an optional fraction of one or more
+// digits (only when seconds are present), and a `Z`/`z` or `±HH:MM` offset. A leap second `60` is accepted only at
+// UTC 23:59.
 @(private = "file", require_results)
-parse_date_time :: #force_inline proc "contextless" (s: string, $ALLOW_SPACE: bool, optional_seconds: bool, $COMPUTE_FRAC: bool) -> (dt: Date_Time, ok: bool) #no_bounds_check {
-	min_len := 17 if optional_seconds else 20
-	if len(s) < min_len {
-		return {}, false
+parse_full_time :: #force_inline proc "contextless" (s: string, optional_seconds: bool, $COMPUTE_FRAC: bool) -> (h, mi, sec, offset: int, frac: i64, ok: bool) #no_bounds_check {
+	min_len := 6 if optional_seconds else 9
+	if len(s) < min_len || s[2] != ':' {
+		return 0, 0, 0, 0, 0, false
 	}
-	// `len(s) >= 17` proves all indices up to `s[16]` are in bounds.
-	sep := s[10]
-	when ALLOW_SPACE {
-		if sep != 'T' && sep != 't' && sep != ' ' {
-			return {}, false
-		}
-	} else {
-		if sep != 'T' && sep != 't' {
-			return {}, false
-		}
-	}
-	y, mo, d, date_ok := parse_full_date(s)
-	if !date_ok || s[13] != ':' {
-		return {}, false
-	}
-	h, h_ok := digits2(s[11], s[12])
-	mi, mi_ok := digits2(s[14], s[15])
+	// `len(s) >= 6` proves `s[0..5]` are in bounds.
+	h_ok, mi_ok: bool
+	h, h_ok = digits2(s[0], s[1])
+	mi, mi_ok = digits2(s[3], s[4])
 	if !h_ok || !mi_ok || h > 23 || mi > 59 {
-		return {}, false
+		return 0, 0, 0, 0, 0, false
 	}
-	sec := 0
-	frac: i64
-	pos := 16
-	if s[16] == ':' {
-		// `:SS` plus at least a 1-byte offset requires `len(s) >= 20`, proving `s[17..19]` are in bounds.
-		if len(s) < 20 {
-			return {}, false
+	pos := 5
+	if s[5] == ':' {
+		// `:SS` plus at least a 1-byte offset requires `len(s) >= 9`, proving `s[6..8]` are in bounds.
+		if len(s) < 9 {
+			return 0, 0, 0, 0, 0, false
 		}
-		sv, s_ok := digits2(s[17], s[18])
+		sv, s_ok := digits2(s[6], s[7])
 		if !s_ok || sv > 60 {
-			return {}, false
+			return 0, 0, 0, 0, 0, false
 		}
 		sec = sv
-		pos = 19
+		pos = 8
 		if s[pos] == '.' {
 			pos += 1
 			start := pos
@@ -141,7 +147,7 @@ parse_date_time :: #force_inline proc "contextless" (s: string, $ALLOW_SPACE: bo
 			}
 			ndigits := pos - start
 			if ndigits == 0 {
-				return {}, false
+				return 0, 0, 0, 0, 0, false
 			}
 			when COMPUTE_FRAC {
 				if ndigits < 9 {
@@ -151,32 +157,59 @@ parse_date_time :: #force_inline proc "contextless" (s: string, $ALLOW_SPACE: bo
 			}
 		}
 	} else if !optional_seconds {
-		return {}, false
+		return 0, 0, 0, 0, 0, false
 	}
 	rem := len(s) - pos
-	offset := 0
 	switch {
 	case rem == 1 && (s[pos] == 'Z' || s[pos] == 'z'):
 	case rem == 6 && (s[pos] == '+' || s[pos] == '-') && s[pos + 3] == ':':
 		oh, oh_ok := digits2(s[pos + 1], s[pos + 2])
 		om, om_ok := digits2(s[pos + 4], s[pos + 5])
 		if !oh_ok || !om_ok || oh > 23 || om > 59 {
-			return {}, false
+			return 0, 0, 0, 0, 0, false
 		}
 		offset = oh * 60 + om
 		if s[pos] == '-' {
 			offset = -offset
 		}
 	case:
-		return {}, false
+		return 0, 0, 0, 0, 0, false
 	}
 	if sec == 60 {
 		// `h*60 + mi` is in `[0, 1439]` and `offset` in `[-1439, 1439]`, so `utc` is in `[-1439, 2878]`;
 		// the only values congruent to `1439 (mod 1440)` in that interval are `1439` and `-1`.
 		utc := h * 60 + mi - offset
 		if utc != 1439 && utc != -1 {
+			return 0, 0, 0, 0, 0, false
+		}
+	}
+	return h, mi, sec, offset, frac, true
+}
+
+// Parses an RFC 3339 `date-time`: `full-date`, `T`/`t` (or `' '` when `ALLOW_SPACE`), and `full-time`.
+@(private = "file", require_results)
+parse_date_time :: #force_inline proc "contextless" (s: string, $ALLOW_SPACE: bool, optional_seconds: bool, $COMPUTE_FRAC: bool) -> (dt: Date_Time, ok: bool) #no_bounds_check {
+	min_len := 17 if optional_seconds else 20
+	if len(s) < min_len {
+		return {}, false
+	}
+	sep := s[10]
+	when ALLOW_SPACE {
+		if sep != 'T' && sep != 't' && sep != ' ' {
 			return {}, false
 		}
+	} else {
+		if sep != 'T' && sep != 't' {
+			return {}, false
+		}
+	}
+	y, mo, d, date_ok := parse_full_date(s)
+	if !date_ok {
+		return {}, false
+	}
+	h, mi, sec, offset, frac, time_ok := parse_full_time(s[11:], optional_seconds, COMPUTE_FRAC)
+	if !time_ok {
+		return {}, false
 	}
 	return {year = y, month = mo, day = d, hour = h, minute = mi, second = sec, offset = offset, frac = frac}, true
 }

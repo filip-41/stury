@@ -9,7 +9,6 @@ import "core:path/filepath"
 import "core:slice"
 import "core:strings"
 import "stury:engine"
-import "stury:host"
 import "stury:jq"
 import "stury:lib/core/tape"
 import "stury:lib/ops/diff"
@@ -466,7 +465,7 @@ run_check :: proc(
 	o: ^Options,
 	stdin_override: Maybe([]u8),
 	stdout_w, stderr_w: io.Writer,
-	pool: ^host.Pool,
+	runner: ^tape.Runner,
 	alloc: runtime.Allocator,
 ) -> int {
 	sc: ^schema.Compiled
@@ -492,7 +491,6 @@ run_check :: proc(
 
 	fb := [1]string{"-"}
 	paths := o.files[:] if len(o.files) > 0 else fb[:]
-	runner := &pool.runner if pool != nil else nil
 	has_open_err := false
 	worst := EXIT_OK
 
@@ -777,7 +775,7 @@ run_fmt :: proc(
 	o: ^Options,
 	stdin_override: Maybe([]u8),
 	stdout_w, stderr_w: io.Writer,
-	pool: ^host.Pool,
+	runner: ^tape.Runner,
 	alloc: runtime.Allocator,
 ) -> int {
 	if !preflight_in_place(o, true, stderr_w, alloc) {
@@ -798,7 +796,6 @@ run_fmt :: proc(
 
 	fb := [1]string{"-"}
 	paths := o.files[:] if len(o.files) > 0 else fb[:]
-	runner := &pool.runner if pool != nil else nil
 	has_open_err := false
 	worst := EXIT_OK
 
@@ -1312,7 +1309,7 @@ run_edit :: proc(
 	o: ^Options,
 	stdin_override: Maybe([]u8),
 	stdout_w, stderr_w: io.Writer,
-	pool: ^host.Pool,
+	runner: ^tape.Runner,
 	exe_dir, cwd, home_dir: string,
 	alloc: runtime.Allocator,
 ) -> int {
@@ -1367,7 +1364,7 @@ run_edit :: proc(
 		disp := "<stdin>" if p == "-" else p
 		sp, fr := verb_file_spec(o, p)
 		e, _ := engine.entry_of_spec(sp)
-		ro := verb_read_opts(o, sp, &pool.runner if pool != nil else nil)
+		ro := verb_read_opts(o, sp, runner)
 
 		edited: []u8
 		edited_owned := false
@@ -1635,12 +1632,11 @@ run_diff :: proc(
 	o: ^Options,
 	stdin_override: Maybe([]u8),
 	stdout_w, stderr_w: io.Writer,
-	pool: ^host.Pool,
+	runner: ^tape.Runner,
 	alloc: runtime.Allocator,
 ) -> int {
 	osink: Out_Stream
 	out_stream_init(&osink, stdout_w, o.unbuffered, false)
-	runner := &pool.runner if pool != nil else nil
 
 	two_named := o.old_schema != "" && o.new_schema != ""
 	schema_two := (o.schema_file != "" || o.schema_flag_set) && len(o.files) == 2 && o.old_schema == "" && o.new_schema == ""
@@ -2152,7 +2148,7 @@ run_schema :: proc(
 	o: ^Options,
 	stdin_override: Maybe([]u8),
 	stdout_w, stderr_w: io.Writer,
-	pool: ^host.Pool,
+	runner: ^tape.Runner,
 	alloc: runtime.Allocator,
 ) -> int {
 	osink: Out_Stream
@@ -2163,15 +2159,14 @@ run_schema :: proc(
 		fmt.wprintln(stderr_w, "stury: schema takes infer, sample, odin, check, or diff")
 		return EXIT_USAGE
 	case .Check:
-		return run_check(o, stdin_override, stdout_w, stderr_w, pool, alloc)
+		return run_check(o, stdin_override, stdout_w, stderr_w, runner, alloc)
 	case .Diff:
-		return run_diff(o, stdin_override, stdout_w, stderr_w, pool, alloc)
+		return run_diff(o, stdin_override, stdout_w, stderr_w, runner, alloc)
 	case .Infer:
 		inf := schema.Inferred{ranges = o.ranges}
 		defer schema.inferred_destroy(&inf)
 		fb := [1]string{"-"}
 		paths := o.files[:] if len(o.files) > 0 else fb[:]
-		runner := &pool.runner if pool != nil else nil
 		for p in paths {
 			if code := infer_file_into(&inf, o, p, stdin_override, runner, stderr_w, alloc); code != EXIT_OK {
 				return code

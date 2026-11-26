@@ -3,7 +3,6 @@
 #+vet !unused-imports
 package kernel
 
-import "base:intrinsics"
 import "core:simd"
 
 // The only tier of a target with no x86 tiers: NEON on arm64, LLVM's lowering elsewhere.
@@ -32,7 +31,7 @@ tier :: #force_inline proc "contextless" () -> Tier {
 // `runtime_swizzle` to, so its lanes are read one at a time.
 @(private, require_results)
 lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
-	when IS_WASM && !intrinsics.has_target_feature("simd128") {
+	when SCALAR_WASM {
 		table := transmute([16]u8)t
 		index := transmute([16]u8)i
 		r: [16]u8
@@ -46,8 +45,8 @@ lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
 }
 
 @(private, require_results)
-scan :: #force_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
-	return scan_op(.Base, src, c, s, OP)
+scan :: #force_inline proc "contextless" (src: []u8, c: u8, $OP: Scan_Op) -> int {
+	return scan_op(.Base, src, c, OP)
 }
 
 @(private, require_results)
