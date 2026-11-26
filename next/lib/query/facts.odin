@@ -578,11 +578,32 @@ read_element_name :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res:
 	if doc.format == nil || doc.format.attribute == nil || at == tape.ROOT {
 		return NULL, .Ok
 	}
-	prev := doc.nodes[at - 1]
-	if prev.role != .Key || markup.is_text_key(prev) {
+	if doc.nodes[at].kind == .Array {
 		return NULL, .Ok
 	}
-	return key_value(h, d, at - 1)
+	key_idx := tape.NO_NODE
+	if prev := doc.nodes[at - 1]; prev.role == .Key {
+		if !markup.is_text_key(prev) {
+			key_idx = at - 1
+		}
+	} else if doc.format.options == .Xml {
+		for i := int(at) - 1; i >= 0; i -= 1 {
+			cand := doc.nodes[i]
+			if cand.kind > .Plain && i + int(cand.n) > int(at) {
+				if cand.kind == .Array && i > 0 {
+					k := doc.nodes[i - 1]
+					if k.role == .Key && !markup.is_text_key(k) {
+						key_idx = tape.Node_Index(i - 1)
+					}
+				}
+				break
+			}
+		}
+	}
+	if key_idx == tape.NO_NODE {
+		return NULL, .Ok
+	}
+	return key_value(h, d, key_idx)
 }
 
 @(private = "file")

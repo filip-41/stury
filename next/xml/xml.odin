@@ -71,16 +71,29 @@ build :: #force_inline proc(src: []u8, spec := Spec.Xml, opts := Options{}, allo
 	hook.probe_stack(READ_STACK)
 	switch spec {
 	case .Xml:
+		if xo, ok := opts.format.(tape.Xml_Options); ok && xo.arrays == .Schema {
+			return {}, tape.Bad_Option{"format"}
+		}
+		doc: tape.Document
+		err: tape.Error
 		if opts.pieces != nil {
-			return build_pieces(src, .Xml, opts, allocator)
+			doc, err = build_pieces(src, .Xml, opts, allocator)
+		} else if opts.runner != nil && opts.runner.threads > 0 && len(src) >= build.PARALLEL_FROM && tape.options_refused(&FORMATS[spec], opts) == nil {
+			doc, err = build_parallel(src, .Xml, opts, allocator)
+		} else if build.read_lax(opts) {
+			doc, err = build_as(src, .Xml, true, opts, allocator)
+		} else {
+			doc, err = build_as(src, .Xml, false, opts, allocator)
 		}
-		if opts.runner != nil && opts.runner.threads > 0 && len(src) >= build.PARALLEL_FROM && tape.options_refused(&FORMATS[spec], opts) == nil {
-			return build_parallel(src, .Xml, opts, allocator)
+		if err == nil {
+			if xo, ok := opts.format.(tape.Xml_Options); ok && xo.arrays == .Always {
+				if nerr := normalize_arrays(&doc, .Always, nil, nil, allocator, opts.budget); nerr != nil {
+					tape.destroy(&doc)
+					return {}, nerr
+				}
+			}
 		}
-		if build.read_lax(opts) {
-			return build_as(src, .Xml, true, opts, allocator)
-		}
-		return build_as(src, .Xml, false, opts, allocator)
+		return doc, err
 	}
 	panic("xml: spec out of range")
 }
@@ -94,6 +107,9 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Xml, read 
 	hook.probe_stack(READ_STACK)
 	if expanded_step(path) {
 		return {}, tape.Bad_Option{"path"}
+	}
+	if xo, ok := opts.format.(tape.Xml_Options); ok && xo.arrays != .Auto {
+		return {}, tape.Bad_Option{"format"}
 	}
 	switch spec {
 	case .Xml:
@@ -115,6 +131,9 @@ scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Xml, re
 	hook.probe_stack(READ_STACK)
 	if expanded_demand(demand) {
 		return {}, tape.Bad_Option{"path"}
+	}
+	if xo, ok := opts.format.(tape.Xml_Options); ok && xo.arrays != .Auto {
+		return {}, tape.Bad_Option{"format"}
 	}
 	switch spec {
 	case .Xml:

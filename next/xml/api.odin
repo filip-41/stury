@@ -33,6 +33,7 @@ Pieces :: tape.Pieces
 Runner :: tape.Runner
 Read_Options :: tape.Read_Options
 Duplicates :: tape.Duplicates
+Xml_Arrays :: tape.Xml_Arrays
 Xml_Options :: tape.Xml_Options
 
 // Paths and the demand of a scan.

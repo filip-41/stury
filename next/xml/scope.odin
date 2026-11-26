@@ -142,6 +142,38 @@ keep_scopes :: proc(doc: ^tape.Document, whole: bool) -> (err: tape.Error) {
 	return nil
 }
 
+// Resolves the element key node for element value `at`, handling both direct `[Key, Value]` members and normalized
+// `[Key, Array, elem_0, ...]` elements iteratively without recursion.
+@(private)
+element_key_of :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (key_idx: tape.Node_Index, ok: bool) #no_bounds_check {
+	if at == tape.ROOT || at == tape.NO_NODE || int(at) >= len(doc.nodes) {
+		return tape.NO_NODE, false
+	}
+	if doc.nodes[at].kind == .Array {
+		return tape.NO_NODE, false
+	}
+	if prev := doc.nodes[at - 1]; prev.role == .Key {
+		if markup.is_text_key(prev) {
+			return tape.NO_NODE, false
+		}
+		return at - 1, true
+	}
+	// Walk backwards to find `at`'s immediate enclosing container: the first earlier container whose subtree covers `at`.
+	for i := int(at) - 1; i >= 0; i -= 1 {
+		cand := doc.nodes[i]
+		if cand.kind > .Plain && i + int(cand.n) > int(at) {
+			if cand.kind == .Array && i > 0 {
+				k := doc.nodes[i - 1]
+				if k.role == .Key && !markup.is_text_key(k) {
+					return tape.Node_Index(i - 1), true
+				}
+			}
+			return tape.NO_NODE, false
+		}
+	}
+	return tape.NO_NODE, false
+}
+
 // The namespace URI of the element whose value is node `at` of `doc`, bound to its prefix or the default one.
 // `.Missing` for an element in no namespace, and `.Not_Loaded` when `doc` is partial and its facts do not hold the
 // declarations around the element: a scan's document kept no facts, or a record's under `.Members` holds those of its
@@ -155,10 +187,16 @@ namespace :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u
 	if at == tape.ROOT {
 		return "", unbound
 	}
-	if at == tape.NO_NODE || doc.nodes[at - 1].role != .Key || markup.is_text_key(doc.nodes[at - 1]) {
+	key_idx, has_key := element_key_of(doc, at)
+	if !has_key {
 		return "", .Missing
 	}
-	key := doc.nodes[at - 1]
+	return namespace_for_key(doc, &ext, key_idx, at, unbound)
+}
+
+@(private)
+namespace_for_key :: proc "contextless" (doc: ^tape.Document, ext: ^tape.Markup_Ext, key_idx, at: tape.Node_Index, unbound: tape.Presence) -> (uri: string, p: tape.Presence) {
+	key := doc.nodes[key_idx]
 	written := tape.span_bytes(doc, key.lo, key.n)
 	prefix := written[:max(colon_of(written), 0)]
 	if string(prefix) == "xml" {
@@ -187,7 +225,7 @@ namespace :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u
 			}
 			name, _ := markup.attribute_parts(tape.span_bytes(doc, f.lo, f.n), f.spelling)
 			if len(prefix) == 0 && string(name) == "xmlns" || len(prefix) > 0 && len(name) == len(prefix) + 6 && string(name[:6]) == "xmlns:" && string(name[6:]) == string(prefix) {
-				uri = declared_uri(doc, &ext, f, u32(intrinsics.ptr_sub(raw_data(facts), raw_data(doc.facts)) + i))
+				uri = declared_uri(doc, ext, f, u32(intrinsics.ptr_sub(raw_data(facts), raw_data(doc.facts)) + i))
 				// An empty default declaration undeclares the default namespace.
 				return uri, .Found if len(uri) > 0 else .Missing
 			}
@@ -256,44 +294,91 @@ expanded_names :: proc "contextless" (doc: ^tape.Document, key: tape.Node_Index,
 	if string(written[colon_of(written) + 1:]) != name[close + 1:] {
 		return .Missing
 	}
-	uri, p := namespace(doc, key + 1)
+	want_uri := name[1:close]
+	val_idx := key + 1
+	if val_idx < tape.Node_Index(len(doc.nodes)) && doc.nodes[val_idx].kind == .Array {
+		ext: tape.Markup_Ext
+		if doc.ext != nil {
+			ext, _ = doc.ext.format.(tape.Markup_Ext)
+		}
+		unbound := tape.Presence.Missing if doc.partial == nil || ext.whole else .Not_Loaded
+		arr_end := val_idx + tape.Node_Index(doc.nodes[val_idx].n)
+		unknown := false
+		for elem := val_idx + 1; elem < arr_end; {
+			uri, p := namespace_for_key(doc, &ext, key, elem, unbound)
+			if p == .Not_Loaded {
+				unknown = true
+			} else if uri == want_uri {
+				return .Found
+			}
+			ch := doc.nodes[elem]
+			elem += tape.Node_Index(ch.n) if ch.kind > .Plain else 1
+		}
+		return .Not_Loaded if unknown else .Missing
+	}
+	uri, p := namespace(doc, val_idx)
 	if p == .Not_Loaded {
 		return .Not_Loaded
 	}
-	return .Found if uri == name[1:close] else .Missing
+	return .Found if uri == want_uri else .Missing
 }
 
 // The byte just past the end of the element at container node `at`, or of the text for the document's node. The close
 // of an element is found from its last descendant: a leaf element ends with its own end tag, and each container around
-// it with the end tag after its comments and instructions.
+// it with the end tag after its comments and instructions. For normalized `.Array` wrappers or containers holding
+// `.Array` children (whose siblings may be reordered by non-adjacent grouping), resolves the true byte-last end.
 @(private)
 close_end :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u64, bool) {
 	if at == tape.ROOT {
 		return doc.root_close, true
 	}
+	if .Held in doc.flags {
+		return 0, false
+	}
 	src := doc.src
+	if doc.nodes[at].kind == .Array {
+		is_text_arr := at > tape.ROOT && markup.is_text_key(doc.nodes[at - 1])
+		end_idx := at + tape.Node_Index(doc.nodes[at].n)
+		max_end := u64(0)
+		for j := at + 1; j < end_idx; {
+			ch := doc.nodes[j]
+			elem_end: u64
+			if ch.kind == .Object {
+				elem_end = balanced_end(src, ch.lo)
+			} else if ch.kind <= .Plain {
+				if is_text_arr {
+					elem_end = ch.lo + u64(ch.n)
+				} else if ch.n == 0 && ch.lo < u64(len(src)) && src[ch.lo] == '/' {
+					elem_end = ch.lo + 2
+				} else {
+					elem_end = end_tag_end(src, ch.lo + u64(ch.n))
+				}
+			}
+			if elem_end > max_end {
+				max_end = elem_end
+			}
+			j += tape.Node_Index(ch.n) if ch.kind > .Plain else 1
+		}
+		return max_end, true
+	}
 	// A reference walked over its literal puts nodes in the internal subset, past the bytes of the element they are in.
 	if dtd, ok := dtd_of(&doc.ext.format if doc.ext != nil else nil); ok && .In_Place in dtd.flags {
 		return balanced_end(src, doc.nodes[at].lo), true
 	}
 	last := at + tape.Node_Index(doc.nodes[at].n) - 1
-	t := doc.nodes[last]
-	p := t.lo + u64(t.n)
-	if k := doc.nodes[last - 1]; k.role == .Key && !markup.is_text_key(k) {
-		if t.n == 0 && src[t.lo] == '/' {
-			p = t.lo + 2
-		} else {
-			p = end_tag_end(src, p)
-		}
-	}
-	// The containers from `at` down to the one that holds `last`.
+	// Walk from `at` down to the container holding `last`; if any container along the path holds a normalized `.Array`
+	// child, sibling byte offsets may be non-monotonic, so match the true closing tag iteratively via `balanced_end`.
 	count := 0
 	c := at
 	for {
 		count += 1
 		next := c
-		for j := c + 1; j < c + tape.Node_Index(doc.nodes[c].n); {
+		c_end := c + tape.Node_Index(doc.nodes[c].n)
+		for j := c + 1; j < c_end; {
 			child := doc.nodes[j]
+			if child.kind == .Array {
+				return balanced_end(src, doc.nodes[at].lo), true
+			}
 			size := tape.Node_Index(child.n) if child.kind == .Object else 1
 			if last < j + size {
 				if j != last {
@@ -307,6 +392,15 @@ close_end :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u
 			break
 		}
 		c = next
+	}
+	t := doc.nodes[last]
+	p := t.lo + u64(t.n)
+	if k := doc.nodes[last - 1]; k.role == .Key && !markup.is_text_key(k) {
+		if t.n == 0 && src[t.lo] == '/' {
+			p = t.lo + 2
+		} else {
+			p = end_tag_end(src, p)
+		}
 	}
 	for _ in 0 ..< count {
 		p = end_tag_end(src, skip_misc(src, p))

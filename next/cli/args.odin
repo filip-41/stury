@@ -154,6 +154,8 @@ Options :: struct {
 	dsv_out:           tape.Dsv_Options,
 	dsv_tolerate:      tape.Tolerances,
 	xml_tolerate:      tape.Tolerances,
+	xml_arrays:        tape.Xml_Arrays,
+	xml_arrays_set:    bool,
 	diff_arrays:       diff.Arrays,
 	diff_keys_raw:     [dynamic]string,
 	diff_keys:         [dynamic]diff.Key_Rule,
@@ -235,7 +237,7 @@ opt_arity :: proc(flag: string, cmd := Command.Run) -> int {
 	     "--from", "--in", "--to", "--out", "--dups", "--quarantine", "--plan-out", "--plan-file", "-L", "--library-path",
 	     "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--package",
 	     "--seed", "--count", "--old-schema", "--new-schema", "--compat", "--key",
-	     "--delimiter", "--comment", "--out-delimiter", "--out-comment":
+	     "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--xml-arrays":
 		return 1
 	case "--arg", "--argjson", "--rawfile", "--slurpfile":
 		return 2
@@ -496,6 +498,13 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 		o.dsv_in_set = true
 	case "unread-entities":
 		o.xml_tolerate += {.Unread_Entity}
+	case "xml-arrays":
+		if idx, ok := choice_idx(val, {"auto", "always", "schema"}); ok {
+			o.xml_arrays = tape.Xml_Arrays(idx)
+			o.xml_arrays_set = true
+		} else {
+			return fmt.aprintf("invalid --xml-arrays %s (expected auto, always, or schema)", val, allocator = a)
+		}
 	case "out-no-header":
 		o.dsv_out.no_header, o.dsv_out_set = true, true
 	case "crlf":
@@ -807,6 +816,31 @@ validate_options :: proc(o: ^Options) -> string {
 			return fmt.aprintf("--seq applies to JSON text sequences, not --from %s", fe.name, allocator = a)
 		}
 	}
+	if o.xml_arrays_set {
+		#partial switch o.command {
+		case .Diff, .Edit, .Schema:
+			return strings.clone("--xml-arrays cannot be used with diff, edit, or schema", a)
+		}
+		if o.xml_arrays == .Schema && o.schema_file == "" {
+			return strings.clone("--xml-arrays=schema requires --schema <file>", a)
+		}
+		if o.has_from {
+			if fe, ok := engine.entry_of_spec(o.from_spec); ok && fe.family != .Xml {
+				return fmt.aprintf("--xml-arrays applies to XML input, not --from %s", fe.name, allocator = a)
+			}
+		} else if len(o.files) == 0 {
+			if !o.null_input {
+				return strings.clone("--xml-arrays applies to XML input; pass --from xml for stdin", a)
+			}
+		} else {
+			for p in o.files {
+				sp, _ := detect_file_spec(o, p)
+				if fe, ok := engine.entry_of_spec(sp); ok && fe.family != .Xml {
+					return fmt.aprintf("--xml-arrays applies to XML input, not %s (%s)", p, fe.name, allocator = a)
+				}
+			}
+		}
+	}
 	if o.comments {
 		if o.command != .Schema || o.schema_verb != .Sample {
 			return strings.clone("--comments only applies to schema sample", a)
@@ -871,9 +905,9 @@ write_help :: proc(w: io.Writer, cmd: Command, short := false) -> bool {
 	}
 	switch cmd {
 	case .Check:
-		_, err = io.write_string(w, "Usage: stury check [--from fmt|--seq] [--schema file] [--schema-ref dir] [--schema-draft d] [--format-assert] [--max-errors n] [--report lines|basic|problem] [--dups policy] [--skip-bad] [--quarantine file] [file...]\n")
+		_, err = io.write_string(w, "Usage: stury check [--from fmt|--seq] [--xml-arrays auto|always|schema] [--schema file] [--schema-ref dir] [--schema-draft d] [--format-assert] [--max-errors n] [--report lines|basic|problem] [--dups policy] [--skip-bad] [--quarantine file] [file...]\n")
 	case .Fmt:
-		_, err = io.write_string(w, "Usage: stury fmt [--from fmt] [--to fmt] [--indent n|--tab|-c|-S|-a] [-i|--in-place|--check] [--schema file] [file...]\n")
+		_, err = io.write_string(w, "Usage: stury fmt [--from fmt] [--to fmt] [--xml-arrays auto|always|schema] [--indent n|--tab|-c|-S|-a] [-i|--in-place|--check] [--schema file] [file...]\n")
 	case .Edit:
 		_, err = io.write_string(w, "Usage: stury edit [--from fmt|--seq|-R] [--reflow] [-i|--in-place|--check|--diff] <jq filter> [file...]\n")
 	case .Diff:
@@ -894,6 +928,7 @@ Usage:  stury [options] <jq filter> [file...] | stury --jsonpath [options] <json
 Options: -n -R -s -c -r -j --raw-output0 -a -S -C -M --tab --indent N -e -f -L dir
          --arg k v --argjson k v --rawfile k f --slurpfile k f --args --jsonargs
          --jsonpath/--path --seq --stream --stream-errors --from fmt --to fmt
+         --xml-arrays auto|always|schema --schema file
          --explain --plan-out f --plan-file f --where --threads N --dups policy
          --skip-bad --quarantine f -V -h --
 `

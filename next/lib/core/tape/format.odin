@@ -90,6 +90,9 @@ options_refused :: #force_inline proc "contextless" (f: ^Format, opts: Options) 
 	case Dsv_Options:
 		family = .Dsv
 	case Xml_Options:
+		if o.arrays > max(Xml_Arrays) {
+			return Bad_Option{"format"}
+		}
 		family = .Xml
 	case Yaml_Options:
 		if o.dialect > max(Yaml_Dialect) {
@@ -112,11 +115,20 @@ Dsv_Options :: struct {
 	crlf:      bool, // a write ends each line with CR LF, where a read takes either line end
 }
 
+// How child elements of an XML document are represented as arrays.
+Xml_Arrays :: enum u8 {
+	Auto,   // default: single element as value, 2+ siblings as grouped array
+	Always, // every child element (depth >= 1) as an array, even when single
+	Schema, // child elements whose schema expects an array become arrays even when single
+}
+
 // The options of an XML text. They change what the reads give, so a document records none of them.
 Xml_Options :: struct {
 	// An element's text that is `true`, `false` or a JSON number, with no reference or markup in it, reads as that
 	// value, where any other text is a string.
-	infer: bool,
+	infer:  bool,
+	// How child elements are represented as arrays. Zero value `.Auto` preserves default XML semantics.
+	arrays: Xml_Arrays,
 }
 
 // Which YAML 1.2 standard schema resolves untagged plain scalars and validates explicit schema tags:

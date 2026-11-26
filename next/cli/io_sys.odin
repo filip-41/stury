@@ -310,8 +310,12 @@ read_opts_of :: proc(o: ^Options, sp: engine.Spec, runner: ^tape.Runner) -> tape
 		}
 		ro.tolerate = o.dsv_tolerate
 	case .Xml:
-		if o.infer {
-			ro.format = tape.Xml_Options{infer = true}
+		xo := tape.Xml_Options {
+			infer  = o.infer,
+			arrays = .Always if o.xml_arrays == .Always else .Auto,
+		}
+		if xo.infer || xo.arrays != .Auto {
+			ro.format = xo
 		}
 		ro.tolerate = o.xml_tolerate
 	}

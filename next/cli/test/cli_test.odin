@@ -1137,3 +1137,163 @@ universal_fault_caret_snippets_across_commands :: proc(t: ^testing.T) {
 		testing.expect(t, !strings.contains(rcb.stderr, "\n  "), rcb.stderr)
 	}
 }
+
+@(test)
+cli_xml_arrays_always_and_schema_end_to_end :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	schema_src := `{
+		"type": "object",
+		"properties": {
+			"root": {
+				"type": "object",
+				"properties": {
+					"title": { "type": "string" },
+					"item": { "type": "array", "items": { "type": "string" } }
+				},
+				"required": ["title", "item"]
+			}
+		},
+		"required": ["root"]
+	}`
+	schema_path := write_tmp_file(t, dir, "xml_arr.schema.json", transmute([]u8)schema_src); defer delete(schema_path)
+	xml_one :: `<root><title>hello</title><item>only</item></root>`
+	xml_two :: `<root><title>hello</title><item>a</item><item>b</item></root>`
+	xml_file := write_tmp_file(t, dir, "one.xml", transmute([]u8)string(xml_one)); defer delete(xml_file)
+
+	// 1. Query with `--xml-arrays=always` (both `=` and space forms) + jq indexing & JSONPath.
+	{
+		r := invoke_str({"--from", "xml", "--xml-arrays=always", "-c", ".root.item[0]"}, xml_one); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\"only\"\n")
+
+		r2 := invoke_str({"--from", "xml", "--xml-arrays", "always", "-c", "."}, xml_one); defer run_out_destroy(&r2)
+		testing.expect_value(t, r2.code, 0)
+		testing.expect_value(t, r2.stdout, "{\"root\":{\"title\":[\"hello\"],\"item\":[\"only\"]}}\n")
+
+		rjp := invoke_str({"--from", "xml", "--xml-arrays=always", "--jsonpath", "-c", "$.root.item[0]"}, xml_one); defer run_out_destroy(&rjp)
+		testing.expect_value(t, rjp.code, 0)
+		testing.expect_value(t, rjp.stdout, "\"only\"\n")
+
+		// Auto-detected `.xml` file without `--from`.
+		rf := invoke({"--xml-arrays=always", "-c", ".root.item[0]", xml_file}); defer run_out_destroy(&rf)
+		testing.expect_value(t, rf.code, 0)
+		testing.expect_value(t, rf.stdout, "\"only\"\n")
+	}
+
+	// 2. Query with `--xml-arrays=schema --schema ...` (jq + JSONPath + slurp).
+	{
+		r := invoke_str({"--from", "xml", "--xml-arrays=schema", "--schema", schema_path, "-c", "."}, xml_one); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "{\"root\":{\"title\":\"hello\",\"item\":[\"only\"]}}\n")
+
+		r0 := invoke_str({"--from", "xml", "--xml-arrays=schema", "--schema", schema_path, "-r", ".root.item[0]"}, xml_one); defer run_out_destroy(&r0)
+		testing.expect_value(t, r0.code, 0)
+		testing.expect_value(t, r0.stdout, "only\n")
+
+		rjp := invoke_str({"--from", "xml", "--xml-arrays=schema", "--schema", schema_path, "--jsonpath", "-c", "$.root.item[0]"}, xml_one); defer run_out_destroy(&rjp)
+		testing.expect_value(t, rjp.code, 0)
+		testing.expect_value(t, rjp.stdout, "\"only\"\n")
+
+		rs := invoke_str({"--from", "xml", "--xml-arrays=schema", "--schema", schema_path, "-s", "-c", ".[0].root.item[0]"}, xml_one); defer run_out_destroy(&rs)
+		testing.expect_value(t, rs.code, 0)
+		testing.expect_value(t, rs.stdout, "\"only\"\n")
+	}
+
+	// 3. `fmt --from xml --to json` under `always` and `schema` (direct stream & buffered `--check` path), plus XML roundtrip.
+	{
+		ra := invoke_str({"fmt", "--from", "xml", "--to", "json", "--xml-arrays=always", "-c"}, xml_one); defer run_out_destroy(&ra)
+		testing.expect_value(t, ra.code, 0)
+		testing.expect_value(t, ra.stdout, "{\"root\":{\"title\":[\"hello\"],\"item\":[\"only\"]}}\n")
+
+		rs := invoke_str({"fmt", "--from", "xml", "--to", "json", "--xml-arrays=schema", "--schema", schema_path, "-c"}, xml_one); defer run_out_destroy(&rs)
+		testing.expect_value(t, rs.code, 0)
+		testing.expect_value(t, rs.stdout, "{\"root\":{\"title\":\"hello\",\"item\":[\"only\"]}}\n")
+
+		rx := invoke_str({"fmt", "--from", "xml", "--to", "xml", "--xml-arrays=always", "-c"}, xml_one); defer run_out_destroy(&rx)
+		testing.expect_value(t, rx.code, 0)
+		testing.expect_value(t, rx.stdout, xml_one+"\n")
+
+		// Buffered `fmt --check` with `--xml-arrays=schema --to xml` confirms identical formatting.
+		rchk := invoke({"fmt", "--from", "xml", "--to", "xml", "--xml-arrays=schema", "--schema", schema_path, "-c", "--check", xml_file}); defer run_out_destroy(&rchk)
+		testing.expect_value(t, rchk.code, 1) // `one.xml` has no trailing newline, so `--check` reports unformatted (exercises buffered path!)
+	}
+
+	// 4. `check` and `validate` with `--xml-arrays=schema` and `--xml-arrays=always`.
+	{
+		// Single `<item>` passes schema expecting `"type": "array"` when `--xml-arrays=schema` is set.
+		rc1 := invoke_str({"check", "--from", "xml", "--xml-arrays=schema", "--schema", schema_path}, xml_one); defer run_out_destroy(&rc1)
+		testing.expect_value(t, rc1.code, 0)
+
+		// Multiple `<item>` also passes.
+		rc2 := invoke_str({"check", "--from", "xml", "--xml-arrays=schema", "--schema", schema_path}, xml_two); defer run_out_destroy(&rc2)
+		testing.expect_value(t, rc2.code, 0)
+
+		// Under `--xml-arrays=always`, `title` is wrapped as `["hello"]`, which fails `"title": {"type": "string"}` (`EXIT_FALSY` = 1).
+		rc_always_fail := invoke_str({"check", "--from", "xml", "--xml-arrays=always", "--schema", schema_path}, xml_one); defer run_out_destroy(&rc_always_fail)
+		testing.expect_value(t, rc_always_fail.code, 1)
+
+		// Missing required `item` fails under `--xml-arrays=schema` (`EXIT_FALSY` = 1).
+		rc_miss := invoke_str({"check", "--from", "xml", "--xml-arrays=schema", "--schema", schema_path}, `<root><title>hello</title></root>`); defer run_out_destroy(&rc_miss)
+		testing.expect_value(t, rc_miss.code, 1)
+
+		// `validate --from xml --xml-arrays=always` validates syntax cleanly.
+		rv := invoke_str({"validate", "--from", "xml", "--xml-arrays=always"}, xml_one); defer run_out_destroy(&rv)
+		testing.expect_value(t, rv.code, 0)
+	}
+
+	// 5. Usage errors (exit code 2): invalid value, missing `--schema`, non-XML `--from` / resolved format, disallowed verbs.
+	{
+		json_file := write_tmp_file(t, dir, "foo.json", transmute([]u8)string(`{"a":1}`)); defer delete(json_file)
+		bad_cases := [][]string {
+			{"--from", "xml", "--xml-arrays=bogus", "."},
+			{"--from", "xml", "--xml-arrays=schema", "."},
+			{"fmt", "--from", "xml", "--to", "json", "--xml-arrays=schema"},
+			{"check", "--from", "xml", "--xml-arrays=schema"},
+			{"validate", "--from", "xml", "--xml-arrays=schema"},
+			{"--from", "json", "--xml-arrays=always", "."},
+			{"fmt", "--from", "json", "--xml-arrays=always"},
+			// Resolved non-XML input without explicit `--from` (stdin defaults to JSON; `.json` file auto-detects JSON).
+			{"--xml-arrays=always", "."},
+			{"--xml-arrays=always", ".", json_file},
+			{"fmt", "--xml-arrays=always", json_file},
+			{"check", "--xml-arrays=always", json_file},
+			{"validate", "--xml-arrays=always", json_file},
+			// Disallowed verbs (`diff`, `edit`, `schema`).
+			{"diff", "--xml-arrays=always", xml_file, xml_file},
+			{"edit", "--xml-arrays=always", ".", xml_file},
+			{"schema", "infer", "--xml-arrays=always", xml_file},
+		}
+		for bc in bad_cases {
+			r := invoke_str(bc, `{}`); defer run_out_destroy(&r)
+			testing.expectf(t, r.code == 2, "expected exit 2 for %v, got %d (stderr=%q)", bc, r.code, r.stderr)
+		}
+	}
+
+	// 6. B2: jq `.@namespace` and `.@name` on wrapped XML `.Array` elements (including non-adjacent grouped siblings).
+	{
+		ns_xml := `<root xmlns:p="http://example.com/ns"><p:item id="1">a</p:item><other/><p:item id="2">b</p:item></root>`
+		rns := invoke_str({"--from", "xml", "--xml-arrays=always", "-c", `.root["p:item"][0] | .@namespace`}, ns_xml); defer run_out_destroy(&rns)
+		testing.expect_value(t, rns.code, 0)
+		testing.expect_value(t, rns.stdout, "\"http://example.com/ns\"\n")
+
+		rname := invoke_str({"--from", "xml", "--xml-arrays=always", "-c", `.root["p:item"][] | .@name`}, ns_xml); defer run_out_destroy(&rname)
+		testing.expect_value(t, rname.code, 0)
+		testing.expect_value(t, rname.stdout, "\"p:item\"\n\"p:item\"\n")
+	}
+
+	// 7. B5: `--explain` & `--plan-out` under `--xml-arrays=always` accurately report `.Whole` + `force_whole`.
+	{
+		pin_path := join_path(t, dir, "xml_arr_plan.json"); defer delete(pin_path)
+		rexp := invoke_str({"--from", "xml", "--xml-arrays=always", "--explain", "--plan-out", pin_path, "-c", ".root.item[0]"}, xml_one); defer run_out_destroy(&rexp)
+		testing.expect_value(t, rexp.code, 0)
+		testing.expect_value(t, rexp.stdout, "\"only\"\n")
+		testing.expect(t, strings.contains(rexp.stderr, "route: whole (hint=none"), rexp.stderr)
+		testing.expect(t, strings.contains(rexp.stderr, "caller forced whole document build"), rexp.stderr)
+		pin_raw, perr := os.read_entire_file_from_path(pin_path, context.allocator); testing.expect(t, perr == nil)
+		defer delete(pin_raw)
+		testing.expect(t, strings.contains(string(pin_raw), `"route":"whole"`), string(pin_raw))
+		testing.expect(t, strings.contains(string(pin_raw), `"hint":"none"`), string(pin_raw))
+	}
+}

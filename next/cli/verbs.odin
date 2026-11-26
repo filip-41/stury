@@ -267,7 +267,7 @@ quarantine_write_invalid :: proc(
 
 // ---- Schema Compilation & Path-Contained Ref Loader ----
 
-@(private = "file")
+@(private)
 Ref_Ctx :: struct {
 	dir:   string,
 	alloc: runtime.Allocator,
@@ -319,7 +319,7 @@ schema_vfs_load_bytes :: proc(data: rawptr, uri: string, alloc: runtime.Allocato
 	return nil, false, false
 }
 
-@(private = "file")
+@(private)
 compile_schema_file :: proc(o: ^Options, path: string, stderr_w: io.Writer, alloc: runtime.Allocator) -> (^schema.Compiled, Ref_Ctx, bool) {
 	if o.schema_ref != "" && !os.is_dir(o.schema_ref) {
 		fmt.wprintf(stderr_w, "stury: error: --schema-ref %s is not a directory\n", o.schema_ref)
@@ -570,7 +570,7 @@ check_bytes_schema :: proc(
 
 	psrc := place_src if len(place_src) > 0 else src
 	e, _ := engine.entry_of_spec(sp)
-	use_doc := (e.family == .Dsv && o.dsv_tolerate != {}) || (e.family == .Xml && o.xml_tolerate != {})
+	use_doc := (e.family == .Dsv && o.dsv_tolerate != {}) || (e.family == .Xml && (o.xml_tolerate != {} || o.xml_arrays != .Auto))
 	res: check.Result
 	if use_doc {
 		ro := read_opts_of(o, sp, nil)
@@ -583,7 +583,22 @@ check_bytes_schema :: proc(
 			return EXIT_RUNTIME
 		}
 		defer tape.destroy_document(&doc)
-		res = engine.check_document(&doc, &sc.plan, {dups = o.dups, budget = o.budget}, &sink, alloc)
+		if e.family == .Xml && o.xml_arrays == .Schema {
+			if nerr := engine.apply_xml_arrays(&doc, .Schema, sc.description, alloc); nerr != nil {
+				_ = print_tape_error(stderr_w, display, nerr, src, sp, false, place_src, place_off)
+				if qw != nil && qw.active {
+					_ = quarantine_write_bad(qw, rec_no, display, nerr, src, sp, alloc, place_src, place_off)
+				}
+				return EXIT_RUNTIME
+			}
+		}
+		// Normalized XML documents have already grouped siblings and wrapped schema/always arrays, so avoid
+		// `check_document`'s `.Group` re-wrapping pass (which would double-wrap existing `.Array` nodes).
+		check_dups := o.dups
+		if e.family == .Xml && o.xml_arrays != .Auto && (check_dups == .Default || check_dups == .Group) {
+			check_dups = .All
+		}
+		res = engine.check_document(&doc, &sc.plan, {dups = check_dups, budget = o.budget}, &sink, alloc)
 	} else {
 		dopts, has_dsv := dsv_opts_for(o, sp)
 		res = engine.check_schema(src, sp, &sc.plan, {dups = o.dups, budget = o.budget}, &sink, alloc, dopts if has_dsv else {})
@@ -680,6 +695,25 @@ write_doc_line :: proc(osink: ^Out_Stream, doc: ^tape.Document, sp: engine.Spec,
 	return out_stream_write(osink, nl[:])
 }
 
+@(private = "file")
+build_xml_schema_doc :: proc(
+	src: []u8,
+	sp: engine.Spec,
+	ro: tape.Options,
+	desc: ^rules.Description,
+	alloc: runtime.Allocator,
+) -> (doc: tape.Document, err: engine.Format_Error) {
+	built, berr := engine.build(src, sp, ro, alloc)
+	if berr != nil {
+		return {}, berr
+	}
+	if nerr := engine.apply_xml_arrays(&built, .Schema, desc, alloc); nerr != nil {
+		tape.destroy_document(&built)
+		return {}, nerr
+	}
+	return built, nil
+}
+
 // ---- `stury fmt` ----
 
 run_fmt :: proc(
@@ -740,7 +774,23 @@ run_fmt :: proc(
 		direct_stream := !o.check && !o.in_place && (e.tabular || (fr != .Lines && fr != .Seq))
 		if direct_stream {
 			before_bytes := osink.total_written
-			dropped, ferr := engine.format_to(out_stream_writer(&osink), src, sp, to_sp, ro, wopts, alloc)
+			dropped: tape.Facts
+			ferr: engine.Format_Error
+			if e.family == .Xml && o.xml_arrays == .Schema && sc != nil {
+				doc, derr := build_xml_schema_doc(src, sp, ro, sc.description, alloc)
+				if derr != nil {
+					ferr = derr
+				} else {
+					defer tape.destroy_document(&doc)
+					wdr, werr := engine.write_to(out_stream_writer(&osink), &doc, to_sp, wopts, alloc)
+					dropped = wdr
+					if werr != nil {
+						ferr = werr
+					}
+				}
+			} else {
+				dropped, ferr = engine.format_to(out_stream_writer(&osink), src, sp, to_sp, ro, wopts, alloc)
+			}
 			if ferr != nil {
 				fcode := report_format_error(ferr, disp, src, sp, &osink, stderr_w, alloc)
 				if fcode == EXIT_USAGE {
@@ -825,7 +875,24 @@ run_fmt :: proc(
 			}
 			formatted = fb_out[:]
 		} else {
-			ftxt, dr, ferr := engine.format(src, sp, to_sp, ro, wopts, alloc)
+			ftxt: []u8
+			dr: tape.Facts
+			ferr: engine.Format_Error
+			if e.family == .Xml && o.xml_arrays == .Schema && sc != nil {
+				doc, derr := build_xml_schema_doc(src, sp, ro, sc.description, alloc)
+				if derr != nil {
+					ferr = derr
+				} else {
+					defer tape.destroy_document(&doc)
+					wtxt, wdr, werr := engine.write(&doc, to_sp, wopts, alloc)
+					ftxt, dr = wtxt, wdr
+					if werr != nil {
+						ferr = werr
+					}
+				}
+			} else {
+				ftxt, dr, ferr = engine.format(src, sp, to_sp, ro, wopts, alloc)
+			}
 			if ferr != nil {
 				fcode := report_format_error(ferr, disp, src, sp, &osink, stderr_w, alloc)
 				if owned {

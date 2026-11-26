@@ -19,6 +19,8 @@ import "stury:lib/core/tape"
 import "stury:lib/ops/css"
 import "stury:lib/ops/write"
 import "stury:lib/query"
+import "stury:lib/schema/rules"
+import "stury:lib/schema/schema"
 
 MAX_FILES_PARALLEL_BYTES :: 128 * 1024 * 1024
 
@@ -102,6 +104,7 @@ Shared_Jq_State :: struct {
 	free_workers:      [dynamic]^Jq_Worker,
 	merge_lock:        sync.Mutex,
 	merge:             Merge_State,
+	xml_schema_desc:   ^rules.Description,
 }
 
 // Per-worker/serial input cursor supporting multi-file streaming and persistent record iteration.
@@ -130,9 +133,10 @@ Hook_Ctx :: struct {
 	stream_heap:    ^query.Heap,
 	stream_events:  [dynamic]query.Value,
 	stream_idx:     int,
-	runner:         ^tape.Runner,
-	stderr_w:       io.Writer,
-	alloc:          runtime.Allocator,
+	runner:          ^tape.Runner,
+	xml_schema_desc: ^rules.Description,
+	stderr_w:        io.Writer,
+	alloc:           runtime.Allocator,
 }
 
 Jq_Worker :: struct {
@@ -250,10 +254,27 @@ key_ge :: proc "contextless" (a, b: Order_Key) -> bool {
 	return !key_lt(a, b)
 }
 
-build_doc_val :: proc(h: ^query.Heap, bytes: []u8, sp: engine.Spec, ro: tape.Options, alloc: runtime.Allocator, owns_src := false) -> (val: query.Value, berr: tape.Error, mem_ok: bool) {
+build_doc_val :: proc(
+	h: ^query.Heap,
+	bytes: []u8,
+	sp: engine.Spec,
+	ro: tape.Options,
+	alloc: runtime.Allocator,
+	owns_src := false,
+	xml_arrays := tape.Xml_Arrays.Auto,
+	xml_desc: ^rules.Description = nil,
+) -> (val: query.Value, berr: tape.Error, mem_ok: bool) {
 	doc, err := engine.build(bytes, sp, ro, alloc)
 	if err != nil {
 		return query.NULL, err, true
+	}
+	if xml_arrays == .Schema && xml_desc != nil {
+		if e, ok := engine.entry_of_spec(sp); ok && e.family == .Xml {
+			if nerr := engine.apply_xml_arrays(&doc, .Schema, xml_desc, alloc); nerr != nil {
+				tape.destroy_document(&doc)
+				return query.NULL, nerr, true
+			}
+		}
 	}
 	if owns_src {
 		doc.flags += {.Owns_Src}
@@ -1145,6 +1166,14 @@ eval_jq_with :: proc(
 	allow_tab := !(use_each && sh.collect_each)
 	count_e := !(use_each && sh.collect_each)
 
+	if len(doc.nodes) > 0 && sh.o.xml_arrays == .Schema && sh.xml_schema_desc != nil && doc.format != nil && doc.format.options == .Xml {
+		if nerr := engine.apply_xml_arrays(doc, .Schema, sh.xml_schema_desc, cur_w.alloc); nerr != nil {
+			cur_w.err_msg = strings.clone("XML array normalization failed", cur_w.alloc)
+			merge_worker_outcome(sh, cur_w, {file_idx = meta.file_index, rec_idx = meta.record_index}, .Failed, count_e)
+			return .Failed
+		}
+	}
+
 	ee: engine.Exec_Error
 	was_unwritten := sh.direct_tab_active && cur_w == sh.serial_worker && sh.osink.total_written == sh.direct_tab_bytes
 	if len(doc.nodes) == 0 {
@@ -1222,6 +1251,14 @@ eval_jq_pred :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta)
 	if w.halt_msg != "" {
 		delete(w.halt_msg, w.alloc)
 		w.halt_msg = ""
+	}
+
+	if len(doc.nodes) > 0 && sh.o.xml_arrays == .Schema && sh.xml_schema_desc != nil && doc.format != nil && doc.format.options == .Xml {
+		if nerr := engine.apply_xml_arrays(doc, .Schema, sh.xml_schema_desc, w.alloc); nerr != nil {
+			w.err_msg = strings.clone("XML array normalization failed", w.alloc)
+			merge_worker_outcome(sh, w, {file_idx = meta.file_index, rec_idx = meta.record_index}, .Failed, false)
+			return false, .Failed
+		}
 	}
 
 	inp, st := query.document_value(&w.h, doc^, owned = false)
@@ -1623,7 +1660,7 @@ hook_next_input :: proc(hc: ^Hook_Ctx, h: ^query.Heap) -> (query.Value, bool, qu
 				return elem, true, .Ok
 			}
 			rec_copy := slice.clone(rec, hc.alloc)
-			dv, berr, mem_ok := build_doc_val(h, rec_copy, hc.cur_spec, ro, hc.alloc, owns_src = true)
+			dv, berr, mem_ok := build_doc_val(h, rec_copy, hc.cur_spec, ro, hc.alloc, owns_src = true, xml_arrays = hc.o.xml_arrays, xml_desc = hc.xml_schema_desc)
 			if berr != nil || !mem_ok {
 				delete(rec_copy, hc.alloc)
 				if berr != nil && serr_mode {
@@ -1649,7 +1686,7 @@ hook_next_input :: proc(hc: ^Hook_Ctx, h: ^query.Heap) -> (query.Value, bool, qu
 		}
 		ro := read_opts_of(hc.o, hc.cur_spec, hc.runner)
 		src_copy := slice.clone(hc.file_buf, hc.alloc)
-		dv, berr, mem_ok := build_doc_val(h, src_copy, hc.cur_spec, ro, hc.alloc, owns_src = true)
+		dv, berr, mem_ok := build_doc_val(h, src_copy, hc.cur_spec, ro, hc.alloc, owns_src = true, xml_arrays = hc.o.xml_arrays, xml_desc = hc.xml_schema_desc)
 		hc.single_done = true
 		if berr != nil || !mem_ok {
 			delete(src_copy, hc.alloc)
@@ -1859,9 +1896,16 @@ decide_file_route :: proc(
 	total_files := 1,
 ) -> (dec: engine.Decision, eff_fr: engine.Framing) {
 	eff_fr = fr
+	xml_force_whole := false
+	if o.xml_arrays != .Auto {
+		if fe, ok := engine.entry_of_spec(sp); ok && fe.family == .Xml {
+			xml_force_whole = true
+		}
+	}
 	ropts := engine.Route_Options{
 		runner            = runner,
 		where_mode        = o.where_mode,
+		force_whole       = xml_force_whole,
 		dups              = o.dups,
 		file_count        = file_count,
 		input_bytes       = input_bytes,
@@ -2032,11 +2076,12 @@ exec_jq_on_bytes :: proc(
 	ro := read_opts_of(o, sp, runner)
 	worker.file_name = disp
 	worker.hook_ctx = {
-		o         = o,
-		paths     = nil,
-		file_path = disp,
-		stderr_w  = stderr_w,
-		alloc     = sh.locked_alloc,
+		o               = o,
+		paths           = nil,
+		file_path       = disp,
+		xml_schema_desc = sh.xml_schema_desc,
+		stderr_w        = stderr_w,
+		alloc           = sh.locked_alloc,
 	}
 	dec, eff_fr := decide_file_route(
 		o,
@@ -2465,6 +2510,16 @@ run_jq_query :: proc(
 	osink: Out_Stream
 	out_stream_init(&osink, stdout_w, o.unbuffered, cfg.color)
 
+	xml_sc: ^schema.Compiled
+	if o.xml_arrays == .Schema && o.schema_file != "" {
+		sc_ok: bool
+		xml_sc, _, sc_ok = compile_schema_file(o, o.schema_file, stderr_w, alloc)
+		if !sc_ok {
+			return EXIT_USAGE
+		}
+	}
+	defer schema.destroy(xml_sc)
+
 	sh, serr := shared_jq_init(o, cfg, prog, &plan, &osink, stderr_w, alloc)
 	if serr != "" {
 		fmt.wprintf(stderr_w, "stury: error: %s\n", serr)
@@ -2472,6 +2527,9 @@ run_jq_query :: proc(
 		return EXIT_USAGE
 	}
 	defer shared_jq_destroy(sh)
+	if xml_sc != nil {
+		sh.xml_schema_desc = xml_sc.description
+	}
 
 	worker, wok := new_jq_worker(sh, sh.locked_alloc, true)
 	if !wok {
@@ -2522,15 +2580,16 @@ run_jq_query :: proc(
 			return EXIT_RUNTIME
 		}
 		worker.hook_ctx = {
-			o              = o,
-			paths          = paths if has_in_files && len(o.files) > 0 else (fb[:] if (.Inputs in plan.serial) else nil),
-			stdin_override = stdin_override,
-			raw_lines      = o.raw_input,
-			stream_prog    = sh.stream_prog,
-			stream_heap    = &worker.h,
-			runner         = runner,
-			stderr_w       = stderr_w,
-			alloc          = sh.locked_alloc,
+			o               = o,
+			paths           = paths if has_in_files && len(o.files) > 0 else (fb[:] if (.Inputs in plan.serial) else nil),
+			stdin_override  = stdin_override,
+			raw_lines       = o.raw_input,
+			stream_prog     = sh.stream_prog,
+			stream_heap     = &worker.h,
+			runner          = runner,
+			xml_schema_desc = sh.xml_schema_desc,
+			stderr_w        = stderr_w,
+			alloc           = sh.locked_alloc,
 		}
 		defer {
 			hook_ctx_close(&worker.hook_ctx)
@@ -2633,6 +2692,7 @@ run_jq_query :: proc(
 		!o.seq &&
 		!o.where_mode &&
 		!o.each &&
+		o.xml_arrays == .Auto &&
 		total_regular_bytes_small(o, paths, alloc)
 
 	if can_files_par {
@@ -2896,15 +2956,16 @@ run_jq_each_files :: proc(
 				return EXIT_RUNTIME
 			}
 			worker.hook_ctx = {
-				o              = o,
-				paths          = single_path[:],
-				stdin_override = stdin_override,
-				raw_lines      = o.raw_input,
-				stream_prog    = sh.stream_prog,
-				stream_heap    = &worker.h,
-				runner         = runner,
-				stderr_w       = stderr_w,
-				alloc          = sh.locked_alloc,
+				o               = o,
+				paths           = single_path[:],
+				stdin_override  = stdin_override,
+				raw_lines       = o.raw_input,
+				stream_prog     = sh.stream_prog,
+				stream_heap     = &worker.h,
+				runner          = runner,
+				xml_schema_desc = sh.xml_schema_desc,
+				stderr_w        = stderr_w,
+				alloc           = sh.locked_alloc,
 			}
 			if o.explain || o.plan_out != "" || o.plan_file != "" {
 				dec := engine.decide(plan, o.from_spec, .Single, {null_input = true, runner = runner, dups = o.dups, where_mode = o.where_mode})
@@ -3175,7 +3236,7 @@ run_jq_special :: proc(
 
 		if !o.stream && (e.tabular || (fr == .Single && e.id != .Json)) {
 			// For `-s` transfer `b` directly when owned so parse error printing never hits a freed buffer.
-			dv, berr, dok := build_doc_val(&w.h, b, sp, ro, alloc, owns_src = owned)
+			dv, berr, dok := build_doc_val(&w.h, b, sp, ro, alloc, owns_src = owned, xml_arrays = o.xml_arrays, xml_desc = sh.xml_schema_desc)
 			if berr != nil || !dok {
 				code := print_tape_error(stderr_w, disp, berr, b, sp) if berr != nil else EXIT_RUNTIME
 				if owned {
@@ -3245,7 +3306,7 @@ run_jq_special :: proc(
 				return print_tape_error(stderr_w, disp, rerr, b, sp)
 			}
 			rec_copy := slice.clone(rec, alloc)
-			dv, berr, bok := build_doc_val(&w.h, rec_copy, sp, ro, alloc, owns_src = true)
+			dv, berr, bok := build_doc_val(&w.h, rec_copy, sp, ro, alloc, owns_src = true, xml_arrays = o.xml_arrays, xml_desc = sh.xml_schema_desc)
 			if berr != nil || !bok {
 				delete(rec_copy, alloc)
 				rec_loop_close(&it)
@@ -3426,6 +3487,7 @@ Shared_Jp_State :: struct {
 	free_workers:      [dynamic]^Jp_Worker,
 	merge_lock:        sync.Mutex,
 	merge:             Merge_State,
+	xml_schema_desc:   ^rules.Description,
 }
 
 @(private = "file")
@@ -3539,6 +3601,13 @@ eval_jp_doc :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, 
 	if cur_w.err_msg != "" {
 		delete(cur_w.err_msg, cur_w.alloc)
 		cur_w.err_msg = ""
+	}
+
+	if len(doc.nodes) > 0 && sh.o.xml_arrays == .Schema && sh.xml_schema_desc != nil && doc.format != nil && doc.format.options == .Xml {
+		if nerr := engine.apply_xml_arrays(doc, .Schema, sh.xml_schema_desc, cur_w.alloc); nerr != nil {
+			cur_w.err_msg = strings.clone("XML array normalization failed", cur_w.alloc)
+			return .Failed
+		}
 	}
 
 	inp, st := query.document_value(&cur_w.h, doc^, owned = false)
@@ -3725,15 +3794,26 @@ run_jsonpath_query :: proc(
 	osink: Out_Stream
 	out_stream_init(&osink, stdout_w, o.unbuffered, cfg.color)
 
+	xml_sc: ^schema.Compiled
+	if o.xml_arrays == .Schema && o.schema_file != "" {
+		sc_ok: bool
+		xml_sc, _, sc_ok = compile_schema_file(o, o.schema_file, stderr_w, alloc)
+		if !sc_ok {
+			return EXIT_USAGE
+		}
+	}
+	defer schema.destroy(xml_sc)
+
 	sh := Shared_Jp_State {
-		o          = o,
-		cfg        = cfg,
-		prog       = prog,
-		where_mode = o.where_mode,
-		budget     = o.budget,
-		osink      = &osink,
-		stderr_w   = stderr_w,
-		alloc      = alloc,
+		o               = o,
+		cfg             = cfg,
+		prog            = prog,
+		where_mode      = o.where_mode,
+		budget          = o.budget,
+		osink           = &osink,
+		stderr_w        = stderr_w,
+		alloc           = alloc,
+		xml_schema_desc = xml_sc.description if xml_sc != nil else nil,
 	}
 	sh.locked_alloc = runtime.Allocator{procedure = jp_locked_alloc_fn, data = &sh}
 	sh.free_workers = make([dynamic]^Jp_Worker, sh.locked_alloc)
