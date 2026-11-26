@@ -146,20 +146,16 @@ $(LINT_TIER_PKGS:%=lint-tiers/%): lint-tiers/%:
 		rm -rf $$o-none && mkdir -p $$o-none && \
 		$(ODIN) test $$p -build-mode:obj -use-separate-modules -target:linux_amd64 -o:none $(LINT_FLAGS) -out:$$o-none/m.o || exit 1; \
 		python3 tools/tier_check.py $(OBJDUMP) $$o-none $$req || exit 1; \
-		if [ "$$p" = "lib/base/kernel/test" ]; then \
+		if [ "$$p" != "dsv/test" ]; then \
 			$(ODIN) test $$p -build-mode:obj -use-single-module -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:$$o-speed.o || exit 1; \
 			python3 tools/tier_check.py $(OBJDUMP) $$o-speed.o --inlined $$req || exit 1; \
 		else \
 			rm -rf $$o-speed && mkdir -p $$o-speed && \
 			$(ODIN) test $$p -build-mode:obj -use-separate-modules -target:linux_amd64 -o:speed $(LINT_FLAGS) -out:$$o-speed/m.o || exit 1; \
-			if [ "$$p" = "dsv/test" ]; then \
-				python3 tools/tier_check.py $(OBJDUMP) $$o-speed --inlined \
-					--inlined-skip 'dsv::line_end_v3:proc"contextless"(src:[]u8,start:int,S:$$$$1,' \
-					--inlined-skip 'dsv::line_end_v3:proc"contextless"(src:[]u8,start:int,S:$$$$2,' \
-					$$req || exit 1; \
-			else \
-				python3 tools/tier_check.py $(OBJDUMP) $$o-speed --inlined $$req || exit 1; \
-			fi; \
+			python3 tools/tier_check.py $(OBJDUMP) $$o-speed --inlined \
+				--inlined-skip 'dsv::line_end_v3:proc"contextless"(src:[]u8,start:int,S:$$$$1,' \
+				--inlined-skip 'dsv::line_end_v3:proc"contextless"(src:[]u8,start:int,S:$$$$2,' \
+				$$req || exit 1; \
 		fi
 
 test:
