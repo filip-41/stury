@@ -19,7 +19,7 @@ QUERY_FRONTENDS = {"jq", "jsonpath"}
 TOP_EDGES = {
     "stury": {"engine", "jq", "jsonpath"},
     "engine": {"host"},
-    "cli": {"engine", "host"},
+    "cli": {"engine", "host", "jq", "jsonpath"},
     "capi": {"stury", "engine"},
 }
 HOST = "host"
