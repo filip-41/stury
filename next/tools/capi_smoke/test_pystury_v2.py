@@ -3,9 +3,10 @@
 
 Loads a freshly compiled libstury shared library and exercises the complete C ABI:
 format lookup/detection/capabilities, validation, build/inspect/write, cross-format
-conversion (JSON, JSONC, TOML, XML, CSV, CBOR), lossless overlay editing across arena
-resets, JSON Schema 2020-12 streaming validation, jq callback queries (including early
-stop, halt, and budgets), and RFC 9535 JSONPath queries with normalized paths.
+conversion (JSON, JSONC, TOML, XML, CSV, CBOR, YAML, HTML, MessagePack), lossless
+overlay editing across arena resets, JSON Schema 2020-12 streaming validation, jq
+callback queries (including early stop, halt, and budgets), and RFC 9535 JSONPath
+queries with normalized paths.
 """
 
 import argparse
@@ -28,6 +29,12 @@ STURY_FORMAT_CBOR = 9
 STURY_FORMAT_CBOR_PREFERRED = 10
 STURY_FORMAT_CBOR_DETERMINISTIC = 11
 STURY_FORMAT_CBOR_LENGTH_FIRST = 12
+STURY_FORMAT_YAML = 13
+STURY_FORMAT_YAML_MERGE = 14
+STURY_FORMAT_HTML = 15
+STURY_FORMAT_HTML_FRAGMENT = 16
+STURY_FORMAT_MSGPACK = 17
+STURY_FORMAT_MSGPACK_COMPACT = 18
 STURY_FORMAT_UNKNOWN = 255
 
 STURY_CAP_REWALK = 1 << 0
@@ -35,6 +42,9 @@ STURY_CAP_NAMES_AHEAD = 1 << 1
 STURY_CAP_BINARY = 1 << 2
 
 STURY_FACT_COMMENT = 1 << 0
+STURY_FACT_TAG = 1 << 3
+STURY_FACT_ANCHOR = 1 << 4
+STURY_FACT_DOCTYPE = 1 << 8
 STURY_FACT_ATTRIBUTE = 1 << 10
 
 STURY_OK = 0
@@ -190,20 +200,35 @@ def run_smoke(lib_path: str) -> None:
     arena = lib.stury_arena_new()
     assert arena, "stury_arena_new returned NULL"
     try:
-        # 2. Format lookup, path, detection, caps, facts
+        # 2. Format lookup, path, detection, caps, facts (all 8 formats)
         assert lib.stury_format_by_name(b"json", 4) == STURY_FORMAT_JSON
         assert lib.stury_format_by_name(b"toml", 4) == STURY_FORMAT_TOML_1_0
         assert lib.stury_format_by_name(b"xml", 3) == STURY_FORMAT_XML
         assert lib.stury_format_by_name(b"csv", 3) == STURY_FORMAT_CSV
         assert lib.stury_format_by_name(b"cbor", 4) == STURY_FORMAT_CBOR
+        assert lib.stury_format_by_name(b"yaml", 4) == STURY_FORMAT_YAML
+        assert lib.stury_format_by_name(b"yaml:merge", 10) == STURY_FORMAT_YAML_MERGE
+        assert lib.stury_format_by_name(b"html", 4) == STURY_FORMAT_HTML
+        assert lib.stury_format_by_name(b"html:fragment", 13) == STURY_FORMAT_HTML_FRAGMENT
+        assert lib.stury_format_by_name(b"msgpack", 7) == STURY_FORMAT_MSGPACK
+        assert lib.stury_format_by_name(b"msgpack:compact", 15) == STURY_FORMAT_MSGPACK_COMPACT
         assert lib.stury_format_by_name(b"nope", 4) == STURY_FORMAT_UNKNOWN
 
         assert lib.stury_format_of_path(b"data.json.gz", 12) == STURY_FORMAT_JSON
         assert lib.stury_format_of_path(b"config.toml", 11) == STURY_FORMAT_TOML_1_0
+        assert lib.stury_format_of_path(b"compose.yml", 11) == STURY_FORMAT_YAML
+        assert lib.stury_format_of_path(b"index.html", 10) == STURY_FORMAT_HTML
+        assert lib.stury_format_of_path(b"payload.msgpack", 15) == STURY_FORMAT_MSGPACK
         assert lib.stury_format_detect(b'{"k":1}', 7) == STURY_FORMAT_JSON
         assert lib.stury_format_detect(b"<r><a/></r>", 11) == STURY_FORMAT_XML
+        assert lib.stury_format_detect(b"---\na: 1\n", 9) == STURY_FORMAT_YAML
+        assert lib.stury_format_detect(b"<!DOCTYPE html><html><body></body></html>", 41) == STURY_FORMAT_HTML
         assert (lib.stury_format_caps(STURY_FORMAT_CBOR) & STURY_CAP_BINARY) != 0
+        assert (lib.stury_format_caps(STURY_FORMAT_MSGPACK) & STURY_CAP_BINARY) != 0
         assert (lib.stury_format_facts(STURY_FORMAT_XML) & STURY_FACT_ATTRIBUTE) != 0
+        assert (lib.stury_format_facts(STURY_FORMAT_YAML) & STURY_FACT_COMMENT) != 0
+        assert (lib.stury_format_facts(STURY_FORMAT_HTML) & STURY_FACT_DOCTYPE) != 0
+        assert (lib.stury_format_facts(STURY_FORMAT_MSGPACK) & STURY_FACT_TAG) != 0
 
         # 3. Validate (valid, syntax error, NULL arena, depth budget)
         src = b'// keep\n{"user":{"name":"old","age":30},"items":[1,2,3]}\n'
@@ -434,7 +459,205 @@ def run_smoke(lib_path: str) -> None:
         finally:
             lib.stury_jsonpath_free(jp_prog)
 
-        # 10. NULL arena rejection on output-allocating call
+        # 10. YAML, HTML, and MessagePack: validate, build/inspect/write, round-trip, edit, schema, jq & JSONPath
+        lib.stury_arena_reset(arena)
+        yaml_in = b"# svc\nhost: db\nport: 5432\n"
+        assert lib.stury_validate(arena, yaml_in, len(yaml_in), STURY_FORMAT_YAML, None).code == STURY_OK
+        assert lib.stury_validate(arena, b"a: [1, 2\n", 9, STURY_FORMAT_YAML, None).code == STURY_ERR_SYNTAX
+
+        yaml_buf = ctypes.create_string_buffer(yaml_in, len(yaml_in))
+        ydoc = ctypes.c_void_p()
+        assert lib.stury_build(arena, yaml_buf, len(yaml_in), STURY_FORMAT_YAML, None, ctypes.byref(ydoc)).code == STURY_OK
+        assert ydoc.value and lib.stury_doc_node_count(ydoc) > 0
+        assert (lib.stury_doc_facts(ydoc) & STURY_FACT_COMMENT) != 0
+        try:
+            err = lib.stury_write(
+                arena, ydoc, STURY_FORMAT_MSGPACK_COMPACT, ctypes.byref(out_p), ctypes.byref(out_len), ctypes.byref(dropped)
+            )
+            assert err.code == STURY_OK and out_len.value > 0
+            mp_bytes = ctypes.string_at(out_p, out_len.value)
+            assert (dropped.value & STURY_FACT_COMMENT) != 0
+
+            # YAML overlay edit preserves comment
+            yov = ctypes.c_void_p()
+            assert lib.stury_overlay_new(arena, ydoc, ctypes.byref(yov)).code == STURY_OK
+            try:
+                assert lib.stury_overlay_set_int(arena, yov, b"/port", 5, 5433).code == STURY_OK
+                assert (
+                    lib.stury_overlay_commit(
+                        arena, yov, STURY_FORMAT_UNKNOWN, False, ctypes.byref(out_p), ctypes.byref(out_len), None
+                    ).code
+                    == STURY_OK
+                )
+                y_committed = ctypes.string_at(out_p, out_len.value)
+                assert b"# svc" in y_committed and b"5433" in y_committed
+            finally:
+                lib.stury_overlay_free(yov)
+        finally:
+            lib.stury_doc_free(ydoc)
+
+        # YAML merge key dialect
+        yaml_merge_in = b"base: &b\n  x: 1\nchild:\n  <<: *b\n  y: 2\n"
+        assert (
+            lib.stury_convert(
+                arena,
+                yaml_merge_in,
+                len(yaml_merge_in),
+                STURY_FORMAT_YAML_MERGE,
+                STURY_FORMAT_JSON,
+                None,
+                ctypes.byref(out_p),
+                ctypes.byref(out_len),
+                None,
+            ).code
+            == STURY_OK
+        )
+        assert b'"x":1' in ctypes.string_at(out_p, out_len.value)
+
+        # MessagePack validate, build/inspect/write, round-trip to JSON & YAML, overlay edit
+        assert lib.stury_validate(arena, mp_bytes, len(mp_bytes), STURY_FORMAT_MSGPACK, None).code == STURY_OK
+        assert lib.stury_validate(arena, mp_bytes, len(mp_bytes), STURY_FORMAT_MSGPACK_COMPACT, None).code == STURY_OK
+        assert lib.stury_validate(arena, b"\xc1", 1, STURY_FORMAT_MSGPACK, None).code == STURY_ERR_SYNTAX
+
+        mp_buf = ctypes.create_string_buffer(mp_bytes, len(mp_bytes))
+        mdoc = ctypes.c_void_p()
+        assert lib.stury_build(arena, mp_buf, len(mp_bytes), STURY_FORMAT_MSGPACK, None, ctypes.byref(mdoc)).code == STURY_OK
+        assert mdoc.value and lib.stury_doc_node_count(mdoc) > 0
+        try:
+            assert (
+                lib.stury_write(
+                    arena, mdoc, STURY_FORMAT_JSON, ctypes.byref(out_p), ctypes.byref(out_len), None
+                ).code
+                == STURY_OK
+            )
+            assert ctypes.string_at(out_p, out_len.value) == b'{"host":"db","port":5432}'
+
+            mov = ctypes.c_void_p()
+            assert lib.stury_overlay_new(arena, mdoc, ctypes.byref(mov)).code == STURY_OK
+            try:
+                assert lib.stury_overlay_set_int(arena, mov, b"/port", 5, 6432).code == STURY_OK
+                assert (
+                    lib.stury_overlay_commit(
+                        arena, mov, STURY_FORMAT_MSGPACK_COMPACT, False, ctypes.byref(out_p), ctypes.byref(out_len), None
+                    ).code
+                    == STURY_OK
+                )
+                mp_edited = ctypes.string_at(out_p, out_len.value)
+                assert lib.stury_validate(arena, mp_edited, len(mp_edited), STURY_FORMAT_MSGPACK_COMPACT, None).code == STURY_OK
+                assert (
+                    lib.stury_convert(
+                        arena,
+                        mp_edited,
+                        len(mp_edited),
+                        STURY_FORMAT_MSGPACK,
+                        STURY_FORMAT_JSON,
+                        None,
+                        ctypes.byref(out_p),
+                        ctypes.byref(out_len),
+                        None,
+                    ).code
+                    == STURY_OK
+                )
+                assert ctypes.string_at(out_p, out_len.value) == b'{"host":"db","port":6432}'
+            finally:
+                lib.stury_overlay_free(mov)
+        finally:
+            lib.stury_doc_free(mdoc)
+
+        # HTML (document & fragment): validate, build/inspect/write, round-trip, overlay edit
+        html_in = b'<!DOCTYPE html><html><head><title>t</title></head><body><div id="a"><p>ada</p></div></body></html>'
+        assert lib.stury_validate(arena, html_in, len(html_in), STURY_FORMAT_HTML, None).code == STURY_OK
+        assert lib.stury_validate(arena, b"<p>no doctype</p>", 17, STURY_FORMAT_HTML, None).code == STURY_ERR_SYNTAX
+
+        html_buf = ctypes.create_string_buffer(html_in, len(html_in))
+        hdoc = ctypes.c_void_p()
+        assert lib.stury_build(arena, html_buf, len(html_in), STURY_FORMAT_HTML, None, ctypes.byref(hdoc)).code == STURY_OK
+        assert hdoc.value and lib.stury_doc_node_count(hdoc) > 0
+        assert (lib.stury_doc_facts(hdoc) & STURY_FACT_DOCTYPE) != 0
+        assert (lib.stury_doc_facts(hdoc) & STURY_FACT_ATTRIBUTE) != 0
+        try:
+            assert (
+                lib.stury_write(
+                    arena, hdoc, STURY_FORMAT_HTML, ctypes.byref(out_p), ctypes.byref(out_len), None
+                ).code
+                == STURY_OK
+            )
+            assert ctypes.string_at(out_p, out_len.value) == html_in
+            assert (
+                lib.stury_write(
+                    arena, hdoc, STURY_FORMAT_JSON, ctypes.byref(out_p), ctypes.byref(out_len), None
+                ).code
+                == STURY_OK
+            )
+            assert b'"ada"' in ctypes.string_at(out_p, out_len.value)
+        finally:
+            lib.stury_doc_free(hdoc)
+
+        frag_in = b'<div id="x"><p>old</p></div>'
+        assert lib.stury_validate(arena, frag_in, len(frag_in), STURY_FORMAT_HTML_FRAGMENT, None).code == STURY_OK
+        frag_buf = ctypes.create_string_buffer(frag_in, len(frag_in))
+        fdoc = ctypes.c_void_p()
+        assert (
+            lib.stury_build(arena, frag_buf, len(frag_in), STURY_FORMAT_HTML_FRAGMENT, None, ctypes.byref(fdoc)).code
+            == STURY_OK
+        )
+        try:
+            fov = ctypes.c_void_p()
+            assert lib.stury_overlay_new(arena, fdoc, ctypes.byref(fov)).code == STURY_OK
+            try:
+                assert lib.stury_overlay_set_string(arena, fov, b"/div/p", 6, b"grace", 5).code == STURY_OK
+                assert (
+                    lib.stury_overlay_commit(
+                        arena, fov, STURY_FORMAT_HTML_FRAGMENT, False, ctypes.byref(out_p), ctypes.byref(out_len), None
+                    ).code
+                    == STURY_OK
+                )
+                assert ctypes.string_at(out_p, out_len.value) == b'<div id="x"><p>grace</p></div>'
+            finally:
+                lib.stury_overlay_free(fov)
+        finally:
+            lib.stury_doc_free(fdoc)
+
+        # jq & JSONPath queries across YAML, MessagePack, and HTML
+        q_jq = ctypes.c_void_p()
+        assert lib.stury_jq_compile(arena, b".host", 5, ctypes.byref(q_jq)).code == STURY_OK
+        try:
+            q_hits: list[bytes] = []
+
+            @EMIT_FN
+            def on_extra_jq(_ctx, ptr, length):
+                q_hits.append(ctypes.string_at(ptr, length))
+                return True
+
+            assert lib.stury_jq_eval(arena, q_jq, yaml_in, len(yaml_in), STURY_FORMAT_YAML, None, on_extra_jq, None).code == STURY_OK
+            assert lib.stury_jq_eval(arena, q_jq, mp_bytes, len(mp_bytes), STURY_FORMAT_MSGPACK, None, on_extra_jq, None).code == STURY_OK
+            assert q_hits == [b'"db"', b'"db"']
+        finally:
+            lib.stury_jq_free(q_jq)
+
+        q_jp = ctypes.c_void_p()
+        assert lib.stury_jsonpath_compile(arena, b"$..p", 4, ctypes.byref(q_jp)).code == STURY_OK
+        try:
+            html_hits: list[tuple[bytes, bytes]] = []
+
+            @JSONPATH_EMIT_FN
+            def on_extra_jp(_ctx, ptr, length, path_ptr, path_len):
+                val = ctypes.string_at(ptr, length)
+                path = ctypes.string_at(path_ptr, path_len) if path_ptr and path_len else b""
+                html_hits.append((val, path))
+                return True
+
+            assert (
+                lib.stury_jsonpath_eval(
+                    arena, q_jp, html_in, len(html_in), STURY_FORMAT_HTML, None, True, on_extra_jp, None
+                ).code
+                == STURY_OK
+            )
+            assert html_hits == [(b'"ada"', b"$['html']['body']['div']['p']")]
+        finally:
+            lib.stury_jsonpath_free(q_jp)
+
+        # 11. NULL arena rejection on output-allocating call
         err = lib.stury_convert(
             None,
             json_bytes,

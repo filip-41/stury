@@ -90,9 +90,13 @@ DEEP_YAML_TEST := yaml_tests.reads_nest_100000_levels_in_one_mib
 DEEP_HTML_TEST := html_tests.reads_nest_100000_levels_in_one_mib
 DEEP_MSGPACK_TEST := msgpack_tests.reads_nest_100000_levels_in_one_mib
 DEEP_JQ_TEST := jq_tests.programs_nest_100000_levels_in_one_mib,jq_tests.runs_go_100000_levels_deep_in_one_mib
+DEEP_JSONPATH_TEST := jsonpath_tests.deep_parse_and_eval_in_one_mib
 DEEP_OPTS := none speed
 
-.PHONY: check check-all lint lint-check lint-wasm lint-tiers $(LINT_TIER_PKGS:%=lint-tiers/%) test test-deep test-asan test-tsan
+# Bounded-RSS gate tests, run single-threaded (`ODIN_TEST_THREADS=1`) so the POSIX OS `ru_maxrss` assertion executes.
+RSS_TESTS := gates_tests.gate_bounded_rss_records_stream_64mb,gates_tests.gate_bounded_rss_jq_reduce_inputs_64mb,gates_tests.gate_bounded_rss_jq_foreach_inputs_64mb
+
+.PHONY: check check-all lint lint-check lint-wasm lint-tiers $(LINT_TIER_PKGS:%=lint-tiers/%) test test-deep test-asan test-tsan build-cli build-cli-speed build-cli-minimal test-capi test-rss test-oracles test-gates
 
 check: lint test
 
@@ -120,6 +124,10 @@ lint-check:
 		for t in $(TEST_LINT_TARGETS); do \
 			echo "== $$p ($$t)"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) -target:$$t || exit 1; \
 		done; \
+	done
+	@echo "== cli"; $(ODIN) check cli $(LINT_FLAGS) || exit 1
+	@for t in $(TEST_LINT_TARGETS); do \
+		echo "== cli ($$t)"; $(ODIN) check cli $(LINT_FLAGS) -target:$$t || exit 1; \
 	done
 
 lint-wasm:
@@ -172,8 +180,8 @@ test:
 	@for p in $(GAP_PKGS); do \
 		echo "== $$p (no gaps, no rewalk)"; $(ODIN) test $$p -o:minimal $(TEST_FLAGS) -define:JSON_GAPS=false -define:JSON_REWALK=false -out:build/test-$$(echo $$p | tr / -)-nogaps || exit 1; \
 	done
-	@for pkg in json cbor toml xml yaml html msgpack jq; do \
-		case $$pkg in json) names="$(DEEP_TEST)";; cbor) names="$(DEEP_CBOR_TEST)";; toml) names="$(DEEP_TOML_TEST)";; xml) names="$(DEEP_XML_TEST)";; yaml) names="$(DEEP_YAML_TEST)";; html) names="$(DEEP_HTML_TEST)";; msgpack) names="$(DEEP_MSGPACK_TEST)";; *) names="$(DEEP_JQ_TEST)";; esac; \
+	@for pkg in json cbor toml xml yaml html msgpack jq jsonpath; do \
+		case $$pkg in json) names="$(DEEP_TEST)";; cbor) names="$(DEEP_CBOR_TEST)";; toml) names="$(DEEP_TOML_TEST)";; xml) names="$(DEEP_XML_TEST)";; yaml) names="$(DEEP_YAML_TEST)";; html) names="$(DEEP_HTML_TEST)";; msgpack) names="$(DEEP_MSGPACK_TEST)";; jq) names="$(DEEP_JQ_TEST)";; *) names="$(DEEP_JSONPATH_TEST)";; esac; \
 		for o in $(DEEP_OPTS); do \
 			echo "== $$pkg/test (100,000 levels in one MiB, -o:$$o)"; \
 			$(ODIN) test $$pkg/test -o:$$o $(TEST_FLAGS) -define:ODIN_TEST_NAMES=$$names -out:build/test-deep-$$pkg-$$o || exit 1; \
@@ -222,3 +230,36 @@ test-tsan:
 		echo "== $$p (thread, no gaps)"; \
 		$(SAN_RUN) $(ODIN) test $$p -o:speed -debug -sanitize:thread $(SAN_FLAGS) -define:JSON_GAPS=false -out:build/tsan-$$(echo $$p | tr / -)-nogaps || exit 1; \
 	done
+
+build-cli: build-cli-speed build-cli-minimal
+
+build-cli-speed:
+	@mkdir -p build
+	@echo "== cli (-o:speed -> build/stury)"
+	@$(ODIN) build cli $(COLLECTION) -o:speed -out:build/stury
+
+build-cli-minimal:
+	@mkdir -p build
+	@echo "== cli (-o:minimal -> build/stury-minimal)"
+	@$(ODIN) build cli $(COLLECTION) -o:minimal -out:build/stury-minimal
+
+test-capi:
+	@echo "== capi (shared-lib C99/C11/C++11/ASan + Python ctypes)"
+	@python3 tools/test_capi.py --odin $(ODIN)
+
+test-rss:
+	@mkdir -p build
+	@echo "== tools/gates/test (bounded RSS, ODIN_TEST_THREADS=1)"
+	@$(ODIN) test tools/gates/test -o:minimal $(TEST_FLAGS) -define:ODIN_TEST_THREADS=1 -define:ODIN_TEST_NAMES=$(RSS_TESTS) -out:build/test-rss
+
+test-oracles:
+	@echo "== jq_oracle"
+	@ODIN=$(ODIN) python3 tools/jq_oracle.py
+	@echo "== diff_oracle"
+	@python3 tools/diff_oracle.py --odin $(ODIN)
+
+test-gates:
+	@mkdir -p build
+	@echo "== tools/gates/test"
+	@$(ODIN) test tools/gates/test -o:minimal $(TEST_FLAGS) -out:build/test-gates
+	@$(MAKE) --no-print-directory test-rss ODIN=$(ODIN)

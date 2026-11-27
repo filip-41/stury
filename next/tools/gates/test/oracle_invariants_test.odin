@@ -7,15 +7,18 @@ import "core:strings"
 import "core:testing"
 import "stury:cbor"
 import "stury:dsv"
+import "stury:html"
 import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 import "stury:lib/ops/diff"
 import "stury:lib/ops/edit"
+import "stury:msgpack"
 import "stury:stury"
 import "stury:testkit"
 import "stury:toml"
 import "stury:xml"
+import "stury:yaml"
 
 @(private = "file")
 ORACLE_KEYS := [?]string{"alpha", "beta", "gamma", "delta", "id", "name", "flag", "score"}
@@ -177,6 +180,49 @@ gen_dsv_doc :: proc(tsv: bool) -> []u8 {
 	return transmute([]u8)strings.to_string(b)
 }
 
+@(private = "file")
+gen_yaml_doc :: proc() -> []u8 {
+	b := strings.builder_make()
+	fmt.sbprintf(&b, "# seed header\nid: %d\nname: \"%s\"\nok: %v\n",
+		rand.int_max(1000),
+		ORACLE_STRS[rand.int_max(len(ORACLE_STRS))],
+		rand.int_max(2) == 1,
+	)
+	strings.write_string(&b, "nums:\n")
+	n := 1 + rand.int_max(4)
+	for _ in 0 ..< n {
+		fmt.sbprintf(&b, "  - %d\n", rand.int_max(500) - 250)
+	}
+	fmt.sbprintf(&b, "nested:\n  score: %d\n  label: \"%s\"\n",
+		rand.int_max(100),
+		ORACLE_STRS[rand.int_max(len(ORACLE_STRS))],
+	)
+	return transmute([]u8)strings.to_string(b)
+}
+
+@(private = "file")
+gen_html_doc :: proc() -> []u8 {
+	b := strings.builder_make()
+	fmt.sbprintf(&b, `<!DOCTYPE html><html><head><title>t%d</title></head><body><div id="r%d"><p>%s</p><span>%d</span></div></body></html>`,
+		rand.int_max(100),
+		rand.int_max(100),
+		ORACLE_STRS[rand.int_max(len(ORACLE_STRS))],
+		rand.int_max(1000),
+	)
+	return transmute([]u8)strings.to_string(b)
+}
+
+@(private = "file")
+gen_html_fragment :: proc() -> []u8 {
+	b := strings.builder_make()
+	fmt.sbprintf(&b, `<div id="r%d"><p>%s</p><span>%d</span></div>`,
+		rand.int_max(100),
+		ORACLE_STRS[rand.int_max(len(ORACLE_STRS))],
+		rand.int_max(1000),
+	)
+	return transmute([]u8)strings.to_string(b)
+}
+
 // Decodes a scalar node's text representation from `doc` into `buf` (or returns empty/false for containers).
 @(private = "file")
 decode_scalar_text :: proc(doc: ^tape.Document, idx: tape.Node_Index, buf: []u8) -> (string, bool) {
@@ -277,6 +323,18 @@ verify_format_invariants :: proc(t: ^testing.T, src: []u8, spec: stury.Spec, pat
 	testing.expectf(t, len(dres.changes) == 0, "%s: round-trip diff had %d changes", label, len(dres.changes))
 }
 
+// YAML `validate` accepts valid 0-document (comment-only), multi-document, and complex-key streams,
+// whereas single-document `build`/`find`/`scan` refuse them with `no_document`, `extra_document`, or `complex_key`.
+@(private = "file")
+is_yaml_single_doc_refusal :: proc(err: tape.Error) -> bool {
+	f, ok := err.(tape.Fault)
+	if !ok || f.rules == nil || f.rules.format != "yaml" || int(f.detail) >= len(f.rules.details) {
+		return false
+	}
+	code := f.rules.details[f.detail].code
+	return code == "no_document" || code == "extra_document" || code == "complex_key"
+}
+
 // Verifies `validate == build` agreement on intentionally corrupted bytes across formats.
 @(private = "file")
 verify_corrupted_agreement :: proc(t: ^testing.T, base: []u8, spec: stury.Spec, label: string) {
@@ -289,7 +347,12 @@ verify_corrupted_agreement :: proc(t: ^testing.T, base: []u8, spec: stury.Spec, 
 	v1 := stury.validate(trunc, spec)
 	d1, b1 := stury.build(trunc, spec)
 	stury.destroy(&d1)
-	testing.expectf(t, (v1 == nil) == (b1 == nil), "%s trunc: validate=%v build=%v", label, v1, b1)
+	if v1 == nil && is_yaml_single_doc_refusal(b1) {
+		_, f1 := stury.find(trunc, nil, spec)
+		testing.expectf(t, is_yaml_single_doc_refusal(f1), "%s trunc: find=%v disagreed with yaml single-doc refusal build=%v", label, f1, b1)
+	} else {
+		testing.expectf(t, (v1 == nil) == (b1 == nil), "%s trunc: validate=%v build=%v", label, v1, b1)
+	}
 
 	mut := make([]u8, len(base))
 	defer delete(mut)
@@ -299,7 +362,62 @@ verify_corrupted_agreement :: proc(t: ^testing.T, base: []u8, spec: stury.Spec, 
 	v2 := stury.validate(mut, spec)
 	d2, b2 := stury.build(mut, spec)
 	stury.destroy(&d2)
-	testing.expectf(t, (v2 == nil) == (b2 == nil), "%s flip: validate=%v build=%v", label, v2, b2)
+	if v2 == nil && is_yaml_single_doc_refusal(b2) {
+		_, f2 := stury.find(mut, nil, spec)
+		testing.expectf(t, is_yaml_single_doc_refusal(f2), "%s flip: find=%v disagreed with yaml single-doc refusal build=%v", label, f2, b2)
+	} else {
+		testing.expectf(t, (v2 == nil) == (b2 == nil), "%s flip: validate=%v build=%v", label, v2, b2)
+	}
+}
+
+// HTML5 `build` recovers syntax mutations by specification while `validate` reports HTML5 parse errors;
+// verify that valid inputs always build cleanly, recovered builds agree with `scan`, and hard depth budgets agree.
+@(private = "file")
+verify_html_corrupted_agreement :: proc(t: ^testing.T, base: []u8, spec: stury.Spec, path: []tape.Step, label: string) {
+	if len(base) < 2 {
+		return
+	}
+	cut := 1 + rand.int_max(len(base) - 1)
+	trunc := base[:cut]
+	vt := stury.validate(trunc, spec)
+	dt, bt := stury.build(trunc, spec)
+	defer stury.destroy(&dt)
+	if vt == nil {
+		testing.expectf(t, bt == nil, "%s trunc: validate ok but build failed: %v", label, bt)
+	}
+	if bt == nil {
+		dem, derr := tape.demand_of({path})
+		testing.expect_value(t, derr, nil)
+		defer tape.destroy(&dem)
+		qd, qe := build.query({&dt, nil}, &dem)
+		defer tape.destroy(&qd)
+		sd, se := stury.scan(trunc, &dem, spec)
+		defer stury.destroy(&sd)
+		testing.expectf(t, qe == nil && se == nil, "%s trunc: query=%v scan=%v", label, qe, se)
+		if qe == nil && se == nil {
+			_, qp, qh := tape.answer({&qd, nil}, 0, 0)
+			_, sp, sh := tape.answer({&sd, nil}, 0, 0)
+			testing.expectf(t, qh == sh && qp == sp, "%s trunc: scan/query presence mismatch", label)
+		}
+	}
+
+	mut := make([]u8, len(base))
+	defer delete(mut)
+	copy(mut, base)
+	pos := rand.int_max(len(mut))
+	mut[pos] ~= 0x5A
+	vm := stury.validate(mut, spec)
+	dm, bm := stury.build(mut, spec)
+	stury.destroy(&dm)
+	if vm == nil {
+		testing.expectf(t, bm == nil, "%s flip: validate ok but build failed: %v", label, bm)
+	}
+
+	tight := tape.Options{budget = {depth = 1}}
+	vb := stury.validate(base, spec, tight)
+	db, bb := stury.build(base, spec, tight)
+	stury.destroy(&db)
+	testing.expectf(t, (vb == nil) == (bb == nil), "%s budget: validate=%v build=%v", label, vb, bb)
 }
 
 @(test)
@@ -313,6 +431,8 @@ oracle_validate_build_scan_find_and_roundtrip :: proc(t: ^testing.T) {
 	p_id := [1]tape.Step{tape.Name("id")}
 	p_xml := [2]tape.Step{tape.Name("root"), tape.Name("alpha")}
 	p_dsv := [2]tape.Step{tape.Index(0), tape.Name("name")}
+	p_html_doc := [4]tape.Step{tape.Name("html"), tape.Name("body"), tape.Name("div"), tape.Name("p")}
+	p_html_frag := [2]tape.Step{tape.Name("div"), tape.Name("p")}
 
 	for _ in 0 ..< rounds {
 		// JSON
@@ -320,7 +440,7 @@ oracle_validate_build_scan_find_and_roundtrip :: proc(t: ^testing.T) {
 		verify_format_invariants(t, j, json.Spec.Json, p_alpha[:], "json")
 		verify_corrupted_agreement(t, j, json.Spec.Json, "json")
 
-		// CBOR (encoded from valid JSON)
+		// CBOR & MessagePack (encoded from valid JSON)
 		jdoc, jerr := stury.build(j, json.Spec.Json)
 		testing.expect_value(t, jerr, stury.Error(nil))
 		if jerr == nil {
@@ -340,6 +460,25 @@ oracle_validate_build_scan_find_and_roundtrip :: proc(t: ^testing.T) {
 					delete(back_j)
 				}
 				delete(cb)
+			}
+
+			mp, _, mperr := stury.write(&jdoc, msgpack.Spec.Compact)
+			testing.expect_value(t, mperr, stury.Write_Error(nil))
+			if mperr == nil {
+				verify_format_invariants(t, mp, msgpack.Spec.Msgpack, p_alpha[:], "msgpack")
+				verify_format_invariants(t, mp, msgpack.Spec.Compact, p_alpha[:], "msgpack:compact")
+				verify_corrupted_agreement(t, mp, msgpack.Spec.Msgpack, "msgpack")
+				// Cross-format MessagePack -> JSON -> diff == 0
+				back_mj, _, bmjerr := stury.format(mp, msgpack.Spec.Msgpack, json.Spec.Json)
+				testing.expect_value(t, bmjerr, stury.Format_Error(nil))
+				if bmjerr == nil {
+					dres, derr := stury.diff(j, json.Spec.Json, back_mj, json.Spec.Json)
+					testing.expect_value(t, derr, stury.Diff_Error(nil))
+					testing.expect_value(t, len(dres.changes), 0)
+					stury.destroy_diff(&dres)
+					delete(back_mj)
+				}
+				delete(mp)
 			}
 			stury.destroy(&jdoc)
 		}
@@ -379,6 +518,23 @@ oracle_validate_build_scan_find_and_roundtrip :: proc(t: ^testing.T) {
 		verify_format_invariants(t, tsv_src, dsv.Spec.Tsv, p_dsv[:], "tsv")
 		verify_corrupted_agreement(t, tsv_src, dsv.Spec.Tsv, "tsv")
 		delete(tsv_src)
+
+		// YAML
+		ym := gen_yaml_doc()
+		verify_format_invariants(t, ym, yaml.Spec.Yaml_1_2, p_id[:], "yaml")
+		verify_corrupted_agreement(t, ym, yaml.Spec.Yaml_1_2, "yaml")
+		delete(ym)
+
+		// HTML (document & fragment)
+		hm := gen_html_doc()
+		verify_format_invariants(t, hm, html.Spec.Html, p_html_doc[:], "html")
+		verify_html_corrupted_agreement(t, hm, html.Spec.Html, p_html_doc[:], "html")
+		delete(hm)
+
+		hf := gen_html_fragment()
+		verify_format_invariants(t, hf, html.Spec.Fragment, p_html_frag[:], "html:fragment")
+		verify_html_corrupted_agreement(t, hf, html.Spec.Fragment, p_html_frag[:], "html:fragment")
+		delete(hf)
 	}
 }
 
@@ -442,6 +598,8 @@ oracle_edit_noop_and_random_mutations :: proc(t: ^testing.T) {
 	p_id := [1]tape.Step{tape.Name("id")}
 	p_xml := [2]tape.Step{tape.Name("root"), tape.Name("beta")}
 	p_dsv := [2]tape.Step{tape.Index(0), tape.Name("score")}
+	p_html_doc := [4]tape.Step{tape.Name("html"), tape.Name("body"), tape.Name("div"), tape.Name("span")}
+	p_html_frag := [2]tape.Step{tape.Name("div"), tape.Name("span")}
 
 	for _ in 0 ..< rounds {
 		v_int := stury.val_int(i64(rand.int_max(10_000)))
@@ -457,6 +615,15 @@ oracle_edit_noop_and_random_mutations :: proc(t: ^testing.T) {
 		if cerr == nil {
 			verify_edit_noop_and_mutate(t, cb, cbor.Spec.Cbor, p_alpha[:], v_int, "cbor")
 			delete(cb)
+		}
+
+		// MessagePack (encoded from JSON)
+		mp, _, mperr := stury.format(j, json.Spec.Json, msgpack.Spec.Compact)
+		testing.expect_value(t, mperr, stury.Format_Error(nil))
+		if mperr == nil {
+			verify_edit_noop_and_mutate(t, mp, msgpack.Spec.Msgpack, p_alpha[:], v_int, "msgpack")
+			verify_edit_noop_and_mutate(t, mp, msgpack.Spec.Compact, p_alpha[:], v_int, "msgpack:compact")
+			delete(mp)
 		}
 		delete(j)
 
@@ -484,6 +651,20 @@ oracle_edit_noop_and_random_mutations :: proc(t: ^testing.T) {
 		csv_src := gen_dsv_doc(false)
 		verify_edit_noop_and_mutate(t, csv_src, dsv.Spec.Csv, p_dsv[:], v_str, "csv")
 		delete(csv_src)
+
+		// YAML
+		ym := gen_yaml_doc()
+		verify_edit_noop_and_mutate(t, ym, yaml.Spec.Yaml_1_2, p_id[:], v_int, "yaml")
+		delete(ym)
+
+		// HTML (document & fragment)
+		hm := gen_html_doc()
+		verify_edit_noop_and_mutate(t, hm, html.Spec.Html, p_html_doc[:], v_str, "html")
+		delete(hm)
+
+		hf := gen_html_fragment()
+		verify_edit_noop_and_mutate(t, hf, html.Spec.Fragment, p_html_frag[:], v_str, "html:fragment")
+		delete(hf)
 	}
 }
 
@@ -558,8 +739,16 @@ oracle_jq_vs_jsonpath_shared_queries :: proc(t: ^testing.T) {
 		testing.expect_value(t, cerr, stury.Format_Error(nil))
 		defer delete(cbor_bytes)
 
-		specs := [2]stury.Spec{json.Spec.Json, cbor.Spec.Cbor}
-		inputs := [2][]u8{json_bytes, cbor_bytes}
+		yaml_bytes, _, yerr := stury.format(json_bytes, json.Spec.Json, yaml.Spec.Yaml_1_2)
+		testing.expect_value(t, yerr, stury.Format_Error(nil))
+		defer delete(yaml_bytes)
+
+		mp_bytes, _, mperr := stury.format(json_bytes, json.Spec.Json, msgpack.Spec.Compact)
+		testing.expect_value(t, mperr, stury.Format_Error(nil))
+		defer delete(mp_bytes)
+
+		specs := [4]stury.Spec{json.Spec.Json, cbor.Spec.Cbor, yaml.Spec.Yaml_1_2, msgpack.Spec.Compact}
+		inputs := [4][]u8{json_bytes, cbor_bytes, yaml_bytes, mp_bytes}
 
 		for pair in pairs {
 			jq_prog, jq_errs := stury.jq_compile(pair.jq_src)

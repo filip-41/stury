@@ -7,7 +7,8 @@ Builds a self-contained v2 probe in a temporary directory and compares:
   3. `jq` query outputs
 
 against v1 (`build/stury`, `build/stury-minimal`, or an on-the-fly `-o:minimal` build of `cmd/stury`)
-across deterministic randomized + corpus inputs for JSON, TOML, XML, CSV, and CBOR.
+across deterministic randomized + corpus inputs for JSON, TOML, XML, CSV, CBOR, YAML, and HTML,
+plus self-check + round-trip + jq parity for MessagePack (which v1 does not implement).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any
 
 NEXT_DIR = pathlib.Path(__file__).resolve().parent.parent
 REPO_DIR = NEXT_DIR.parent
@@ -33,6 +34,7 @@ V2_PROBE_SOURCE = r'''package main
 import "core:fmt"
 import "core:os"
 import "stury:json"
+import "stury:msgpack"
 import "stury:stury"
 
 emit_jq :: proc(_: rawptr, b: []u8) -> bool {
@@ -43,7 +45,7 @@ emit_jq :: proc(_: rawptr, b: []u8) -> bool {
 
 run :: proc() -> int {
 	if len(os.args) < 3 {
-		fmt.eprintln("usage: v2probe <validate|canon|jq> <format> [filter]")
+		fmt.eprintln("usage: v2probe <validate|canon|roundtrip|jq> <format> [filter]")
 		return 2
 	}
 	mode := os.args[1]
@@ -69,6 +71,35 @@ run :: proc() -> int {
 	case "canon":
 		out, _, err := stury.format(src, entry.spec, json.Spec.Json)
 		if err != nil {
+			return 5
+		}
+		defer delete(out)
+		_, _ = os.write(os.stdout, out)
+		_, _ = os.write_string(os.stdout, "\n")
+		return 0
+	case "roundtrip":
+		doc, berr := stury.build(src, entry.spec)
+		if berr != nil {
+			return 5
+		}
+		defer stury.destroy(&doc)
+		rt, _, werr := stury.write(&doc, entry.spec)
+		if werr != nil {
+			return 5
+		}
+		defer delete(rt)
+		if entry.family == .Msgpack {
+			compact, _, cwerr := stury.write(&doc, msgpack.Spec.Compact)
+			if cwerr != nil {
+				return 5
+			}
+			defer delete(compact)
+			if verr := stury.validate(compact, msgpack.Spec.Compact); verr != nil {
+				return 5
+			}
+		}
+		out, _, ferr := stury.format(rt, entry.spec, json.Spec.Json)
+		if ferr != nil {
 			return 5
 		}
 		defer delete(out)
@@ -135,6 +166,46 @@ def encode_cbor(obj) -> bytes:
     raise TypeError(type(obj))
 
 
+def encode_msgpack(obj) -> bytes:
+    if obj is None:
+        return b"\xc0"
+    if isinstance(obj, bool):
+        return b"\xc3" if obj else b"\xc2"
+    if isinstance(obj, int):
+        if 0 <= obj <= 0x7F:
+            return bytes([obj])
+        if -32 <= obj < 0:
+            return bytes([obj & 0xFF])
+        if 0 <= obj <= 0xFF:
+            return b"\xcc" + bytes([obj])
+        if 0 <= obj <= 0xFFFF:
+            return b"\xcd" + struct.pack(">H", obj)
+        if 0 <= obj <= 0xFFFFFFFF:
+            return b"\xce" + struct.pack(">I", obj)
+        if -128 <= obj < 0:
+            return b"\xd0" + struct.pack(">b", obj)
+        if -32768 <= obj < 0:
+            return b"\xd1" + struct.pack(">h", obj)
+        return b"\xd2" + struct.pack(">i", obj)
+    if isinstance(obj, str):
+        raw = obj.encode("utf-8")
+        n = len(raw)
+        if n < 32:
+            return bytes([0xA0 | n]) + raw
+        if n < 256:
+            return b"\xd9" + bytes([n]) + raw
+        return b"\xda" + struct.pack(">H", n) + raw
+    if isinstance(obj, list):
+        n = len(obj)
+        head = bytes([0x90 | n]) if n < 16 else b"\xdc" + struct.pack(">H", n)
+        return head + b"".join(encode_msgpack(x) for x in obj)
+    if isinstance(obj, dict):
+        n = len(obj)
+        head = bytes([0x80 | n]) if n < 16 else b"\xde" + struct.pack(">H", n)
+        return head + b"".join(encode_msgpack(k) + encode_msgpack(v) for k, v in obj.items())
+    raise TypeError(type(obj))
+
+
 @dataclass
 class Case:
     fmt: str
@@ -142,6 +213,8 @@ class Case:
     data: bytes
     expect_valid: bool | None = None
     jq_filters: tuple[str, ...] = ()
+    self_check: bool = False
+    expect_obj: Any = None
 
 
 def build_v2_probe(odin: str, tmpdir: pathlib.Path) -> pathlib.Path:
@@ -247,9 +320,18 @@ def generate_cases(seed: int, rounds: int) -> list[Case]:
         Case("csv", "corpus_invalid_quote", b'id,note\n1,"unterminated\n', False),
         Case("cbor", "corpus_map", encode_cbor({"a": 1, "b": ["x", True, None]}), True, (".a", ".b[0]", ".b | length")),
         Case("cbor", "corpus_invalid_trunc", b"\xa2\x61a\x01\x61b", False),
+        Case("yaml", "corpus_map", b"user:\n  name: ada\n  nums:\n    - 1\n    - 2\n    - 3\nok: true\n", True, (".user.name", ".user.nums | add", ".ok")),
+        Case("yaml", "corpus_flow", b'{a: [1, 2], b: "hello"}\n', True, (".a | length", ".b")),
+        Case("yaml", "corpus_invalid_flow", b"a: [1, 2\n", False),
+        Case("html", "corpus_doc", b"<!DOCTYPE html><html><head><title>t</title></head><body><div><p>hello</p><span>42</span></div></body></html>", True, (".html.head.title", ".html.body.div.p", ".html.body.div.span")),
+        Case("html", "corpus_invalid_no_doctype", b"<div><p>hello</p></div>", False),
+        Case("html", "corpus_invalid_eof_tag", b'<!DOCTYPE html><html><body><div id="a"', False),
+        Case("msgpack", "corpus_map", encode_msgpack({"a": 1, "b": ["x", True, None]}), True, (".a", ".b[0]", ".b | length"), True, {"a": 1, "b": ["x", True, None]}),
+        Case("msgpack", "corpus_invalid_never_used", b"\xc1", False, (), True),
+        Case("msgpack", "corpus_invalid_trunc", b"\x82\xa1a\x01\xa1b", False, (), True),
     ])
 
-    # Randomized cases across all 5 formats
+    # Randomized cases across all 8 formats
     for i in range(rounds):
         obj = {
             "id": rng.randint(1, 9999),
@@ -269,6 +351,13 @@ def generate_cases(seed: int, rounds: int) -> list[Case]:
         # CBOR from same random object
         cbytes = encode_cbor(obj)
         cases.append(Case("cbor", f"rand_cbor_{i}", cbytes, True, (".id", ".nested.x", ".items | length")))
+
+        # MessagePack from same random object (v2 self-check + round-trip + jq parity)
+        mpbytes = encode_msgpack(obj)
+        cases.append(Case("msgpack", f"rand_msgpack_{i}", mpbytes, True, (".id", ".nested.x", ".items | length", "keys | sort"), True, obj))
+        if len(mpbytes) > 3:
+            mp_cut = rng.randint(1, len(mpbytes) - 1)
+            cases.append(Case("msgpack", f"rand_msgpack_trunc_{i}", mpbytes[:mp_cut], False, (), True))
 
         # TOML
         toml_str = (
@@ -298,6 +387,28 @@ def generate_cases(seed: int, rounds: int) -> list[Case]:
             rows.append(f"{r + 1},{rng.choice(['ada', 'grace', 'alan'])},{rng.randint(0, 100)}")
         csv_bytes = ("\n".join(rows) + "\n").encode("utf-8")
         cases.append(Case("csv", f"rand_csv_{i}", csv_bytes, True, (".[0].name", "length", "map(.score)")))
+
+        # YAML
+        yaml_str = (
+            f"id: {rng.randint(0, 999)}\n"
+            f'name: "{rng.choice(strs)}"\n'
+            f'ok: {"true" if rng.choice([True, False]) else "false"}\n'
+            f"nums:\n"
+            f"  - {rng.randint(-50, 50)}\n"
+            f"  - {rng.randint(-50, 50)}\n"
+            f"nested:\n"
+            f"  score: {rng.randint(0, 500)}\n"
+        )
+        cases.append(Case("yaml", f"rand_yaml_{i}", yaml_str.encode("utf-8"), True, (".id", ".nested.score", ".nums | add")))
+
+        # HTML
+        html_str = (
+            f"<!DOCTYPE html><html><head><title>t{i}</title></head><body>"
+            f"<div><p>{rng.choice(['ada', 'grace', 'alan', 'barbara'])}</p>"
+            f"<span>{rng.randint(0, 500)}</span></div>"
+            f"</body></html>"
+        )
+        cases.append(Case("html", f"rand_html_{i}", html_str.encode("utf-8"), True, (".html.head.title", ".html.body.div.p", ".html.body.div.span")))
 
     return cases
 
@@ -347,6 +458,49 @@ def main() -> int:
                 failures.append(f"[{cat}] {fmt}: {detail}")
 
         for c in cases:
+            if c.self_check:
+                # Self-check + round-trip + jq-vs-JSON parity for formats not in v1 (e.g. MessagePack).
+                rc2, _, err2 = run_cmd([str(v2_bin), "validate", c.fmt], c.data)
+                v2_ok = rc2 == 0
+                valid_rc = rc2 in (0, 5)
+                agree = valid_rc and (c.expect_valid is None or v2_ok == c.expect_valid)
+                record(
+                    "validate",
+                    c.fmt,
+                    agree,
+                    f"{c.name}: rc2={rc2} expect={c.expect_valid} err2={err2!r}",
+                )
+                if not (valid_rc and v2_ok):
+                    continue
+
+                rc2, out2, err2 = run_cmd([str(v2_bin), "canon", c.fmt], c.data)
+                rc_rt, out_rt, err_rt = run_cmd([str(v2_bin), "roundtrip", c.fmt], c.data)
+                if rc2 != 0 or rc_rt != 0:
+                    record("canon", c.fmt, False, f"{c.name}: canon rc={rc2} rt rc={rc_rt} err2={err2!r} err_rt={err_rt!r}")
+                else:
+                    try:
+                        j2 = normalize_json_lines(out2)
+                        jrt = normalize_json_lines(out_rt)
+                        ok = j2 == [c.expect_obj] and jrt == [c.expect_obj]
+                        record("canon", c.fmt, ok, f"{c.name}: expect={[c.expect_obj]!r} canon={j2!r} rt={jrt!r}")
+                    except Exception as exc:
+                        record("canon", c.fmt, False, f"{c.name}: parse error {exc}")
+
+                ref_json = json.dumps(c.expect_obj, separators=(",", ":")).encode("utf-8")
+                for flt in c.jq_filters:
+                    rc1, out1, err1 = run_cmd([str(v2_bin), "jq", "json", flt], ref_json)
+                    rc2, out2, err2 = run_cmd([str(v2_bin), "jq", c.fmt, flt], c.data)
+                    if rc1 != 0 or rc2 != 0:
+                        record("jq", c.fmt, False, f"{c.name} ({flt}): rc_json={rc1} rc_fmt={rc2} err1={err1!r} err2={err2!r}")
+                    else:
+                        try:
+                            j1 = normalize_json_lines(out1)
+                            j2 = normalize_json_lines(out2)
+                            record("jq", c.fmt, j1 == j2, f"{c.name} ({flt}): json={j1!r} != {c.fmt}={j2!r}")
+                        except Exception as exc:
+                            record("jq", c.fmt, False, f"{c.name} ({flt}): parse error {exc}")
+                continue
+
             # 1. Validate agreement (strict exit codes: 0 = valid, 5 = parse/input error; reject CLI/crash codes like 2)
             rc1, _, err1 = run_cmd([str(v1_bin), "check", "--from", c.fmt], c.data)
             rc2, _, err2 = run_cmd([str(v2_bin), "validate", c.fmt], c.data)
