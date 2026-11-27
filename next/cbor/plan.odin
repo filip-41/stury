@@ -1,36 +1,19 @@
 package cbor
 
-import "base:intrinsics"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
-// The plan of a build on threads: the parts a text is cut into and the frames each starts with, read as the heads of
-// the text by relative passes on the runner's threads and one absolute pass over the heads between them. `parallel.odin`
-// builds the parts.
-// The levels the pass and a part's walk hold in their frames, so a part's walk allocates nothing, one fewer than the
-// walk's frame, whose last level a part's walk opens in. A text that nests deeper is built on one thread.
+// Parallel work-partition planning over CBOR headers (`plan_parts`) for multi-threaded `validate`, `build`, and `unmarshal`.
+
 @(private)
 SEAM_LEVELS :: WALK_LEVELS - 1
 
-// Where a part starts: the walk's `d` levels there, from `Part_Plan.levels[at:]`, and its innermost frame `top`.
-@(private)
-Seam :: build.Binary_Seam
-
-// The parts of a text, where each starts, and the kinds of the containers open at each seam.
 @(private)
 Part_Plan :: build.Binary_Plan(Level(.Length_First))
 
-// What a pass over the heads ended at: its stop, a head the walk refuses or the end of the item, or memory or a nest
-// the plan is refused.
 @(private)
 Pass_End :: build.Binary_Pass_End
 
-// A pass over the heads of a text, its state between calls of `plan_run`: the position, the open levels as the walk
-// holds them, and the count of open containers. A pass of the text from its start is absolute and is the plan's. A
-// relative pass starts anywhere a head may start, inside a virtual indefinite array that stands for the levels open
-// before it, and keeps what it reads of them: the items it completes in the virtual level in `runs`, one for each break
-// that ends it, and the counts of the part it would make. The levels it holds past the virtual one are the containers
-// it leaves open.
 @(private)
 Pass :: struct($S: Spec, $RELATIVE: bool) {
 	i, d, top: u64,
@@ -39,29 +22,14 @@ Pass :: struct($S: Spec, $RELATIVE: bool) {
 	counts:    [int(RELATIVE)]build.Part,
 	runs:      [int(RELATIVE) * (SEAM_LEVELS + 1)]u64,
 	breaks:    [int(RELATIVE)]int,
-	// In a spec that orders keys, the spans of the last two items completed in the virtual level since its last break,
-	// the older first, a span of 0 for an item that is no scalar. The last key of the level that takes them is one of
-	// them.
+	// In a spec that orders keys, the spans of the last two items completed in the virtual level since its last break.
 	tail:      [int(RELATIVE && S >= .Deterministic)][2][2]u64,
 }
 
-// The absolute pass is a local of the read that plans, which takes the place of a walk's frame and so stays within its
-// bound.
 #assert(size_of(Pass(.Length_First, false)) <= 32 * 1024)
 
-// The frame that stands for the levels open before a relative pass.
 @(private)
 VIRTUAL :: FLAG_INDEF | INDEF_COUNT
-
-// Bytes a relative pass reads before the items it keeps, for its heads to meet the text's own.
-@(private)
-WARM_BYTES :: 256
-// The starts a guess tries when a head the walk refuses ends the warm-up.
-@(private)
-WARM_TRIES :: 8
-// The bytes from a chunk's cut a guess looks through for a byte that opens an array or a map.
-@(private)
-GUESS_BYTES :: 4096
 
 @(private)
 pass_start :: proc "contextless" (st: ^Pass($S, $RELATIVE), i: u64) {
@@ -78,16 +46,6 @@ pass_start :: proc "contextless" (st: ^Pass($S, $RELATIVE), i: u64) {
 	}
 }
 
-// The next cut of an absolute pass: where the next seam may be, past which the plan has its parts.
-@(private)
-seam_cut :: #force_inline proc "contextless" (plan: ^Part_Plan, n: u64) -> u64 {
-	return max(u64) if len(plan.parts) == plan.want else n / u64(plan.want) * u64(len(plan.parts))
-}
-
-// Reads the heads of `src` from the pass's position until a head starts at `stop` or past it, as the walk of `S`
-// reads them, counting the nodes, facts and levels the walk stores into the pass's counts or, for an absolute pass,
-// into the last part of `plan`, which it cuts into parts at its seams. The pass has read a head the walk refuses,
-// or the end of the item, when it ends.
 @(private)
 plan_run :: proc(src: []u8, $S: Spec, $RELATIVE: bool, st: ^Pass(S, RELATIVE), stop: u64, plan: ^Part_Plan) -> Pass_End #no_bounds_check {
 	STRICT :: S != .Cbor
@@ -100,17 +58,17 @@ plan_run :: proc(src: []u8, $S: Spec, $RELATIVE: bool, st: ^Pass(S, RELATIVE), s
 		part = &st.counts[0]
 	} else {
 		part = &plan.parts[len(plan.parts) - 1]
-		cut := seam_cut(plan, n)
+		cut := build.binary_seam_cut(plan, n)
 	}
 	for i < stop {
 		when !RELATIVE {
 			if i >= cut && d > 0 && top & FLAG_TAG == 0 && top & (FLAG_OBJECT | 1) != FLAG_OBJECT | 1 && src[i] != 0xff {
 				part.to = int(i)
-				if !plan_seam(plan, i, top, c, stack[:d]) {
+				if !build.binary_plan_seam(plan, i, top, c, stack[:d], FLAG_OBJECT, FLAG_TAG) {
 					return .Failed
 				}
 				part = &plan.parts[len(plan.parts) - 1]
-				cut = seam_cut(plan, n)
+				cut = build.binary_seam_cut(plan, n)
 			}
 		}
 		when S >= .Deterministic {
@@ -265,55 +223,13 @@ plan_run :: proc(src: []u8, $S: Spec, $RELATIVE: bool, st: ^Pass(S, RELATIVE), s
 	return .Stopped
 }
 
-// What the innermost level of a pass took of the items given to it: how many it waited for before the first it took,
-// how many of the items given it took, and whether the first it took was the level that closed in it.
-@(private)
-Receipt :: struct {
-	closed: bool, // the item closed
-	wait0:  u64,
-	items:  u64,
-	child:  bool,
-}
-
-// Gives `m` completed items to the innermost level of `st`, which closes each level that waited for no more.
-@(private)
-complete :: proc "contextless" ($S: Spec, st: ^Pass(S, false), m: u64) -> (r: Receipt) {
-	m := m
-	for m > 0 {
-		if st.d == 0 {
-			r.closed = true
-			return
-		}
-		waits := st.top & COUNT_MASK
-		if m < waits {
-			st.top -= m
-			r.wait0, r.items = waits, m - u64(r.child)
-			return
-		}
-		m -= waits
-		st.c -= int(st.top & FLAG_TAG == 0)
-		st.d -= 1
-		st.top = st.stack[st.d].frame
-		m += 1
-		r.child = true
-	}
-	return
-}
-
-// Carries the absolute pass `st` over what the relative pass `sm` read, which starts at its position, as a pass of the
-// same heads would: the items it completed in the levels before it, one run between breaks at a time, then the
-// containers it left open. The counts of `sm` go to the last part of `plan`. Returns false for a text that nests past
-// `SEAM_LEVELS`, and `ended` for one whose item closed or whose break no level may take.
 @(private)
 plan_carry :: proc(plan: ^Part_Plan, $S: Spec, st: ^Pass(S, false), sm: ^Pass(S, true)) -> (ok, ended: bool) {
-	part := &plan.parts[len(plan.parts) - 1]
-	part.nodes += sm.counts[0].nodes
-	part.comments += sm.counts[0].comments
-	part.levels = max(part.levels, st.c + sm.counts[0].levels)
+	build.binary_plan_add_counts(plan, st.c, sm.counts[0])
 	virtual := sm.top if sm.d == 0 else sm.stack[0].frame
 	breaks := sm.breaks[0]
 	for k in 0 ..= breaks {
-		got := complete(S, st, sm.runs[k] if k < breaks else INDEF_COUNT - (virtual & COUNT_MASK))
+		got := build.binary_pass_complete(st, sm.runs[k] if k < breaks else INDEF_COUNT - (virtual & COUNT_MASK), COUNT_MASK, FLAG_TAG)
 		if got.closed {
 			return true, true
 		}
@@ -322,13 +238,11 @@ plan_carry :: proc(plan: ^Part_Plan, $S: Spec, st: ^Pass(S, false), sm: ^Pass(S,
 				return true, true
 			}
 			st.top = st.top & ~COUNT_MASK | 1
-			if complete(S, st, 1).closed {
+			if build.binary_pass_complete(st, 1, COUNT_MASK, FLAG_TAG).closed {
 				return true, true
 			}
 		} else {
 			when S >= .Deterministic {
-				// The last key the level that took the last items has is one of the last two of them, the later when
-				// its place among what the level took is a key's.
 				if st.d > 0 && st.top & FLAG_OBJECT != 0 {
 					for j := got.items; j > 0 && j + 2 > got.items; j -= 1 {
 						at := j + u64(got.child)
@@ -344,80 +258,22 @@ plan_carry :: proc(plan: ^Part_Plan, $S: Spec, st: ^Pass(S, false), sm: ^Pass(S,
 			}
 		}
 	}
-	for j in 0 ..< sm.d {
-		if st.d == SEAM_LEVELS {
-			return false, false
-		}
-		frame := sm.stack[j + 1].frame if j + 1 < sm.d else sm.top
-		st.stack[st.d] = {frame = st.top, prev = sm.stack[j].prev}
-		st.d += 1
-		st.top = frame
-		st.c += int(frame & FLAG_TAG == 0)
-	}
-	st.i = sm.i
-	return true, false
+	return build.binary_plan_carry_open(st, sm, SEAM_LEVELS, FLAG_TAG), false
 }
 
-// A start for the relative pass `sm` of the chunk of `src` from `cut` to `stop`, or 0 for none: the first byte within
-// `GUESS_BYTES` of `cut` that opens an array or a map and from which the heads read on without a refusal for
-// `WARM_BYTES`, at most `WARM_TRIES` such bytes tried, as a byte inside a string may open one by chance and the
-// warm-up weeds that start out. Else the first of the `WARM_TRIES` bytes from `cut` from which the heads read on so.
-@(private)
-guess_start :: proc(src: []u8, $S: Spec, sm: ^Pass(S, true), cut, stop: u64) -> u64 {
-	end := min(cut + GUESS_BYTES, stop)
-	tries := 0
-	for at in cut ..< end {
-		if src[at] >> 5 | 1 == 5 {
-			pass_start(sm, at)
-			if plan_run(src, S, true, sm, min(at + WARM_BYTES, u64(len(src))), nil) == .Stopped {
-				return sm.i
-			}
-			tries += 1
-			if tries == WARM_TRIES {
-				break
-			}
-		}
-	}
-	for t in 0 ..< u64(WARM_TRIES) {
-		pass_start(sm, cut + t)
-		if plan_run(src, S, true, sm, min(cut + t + WARM_BYTES, u64(len(src))), nil) == .Stopped {
-			return sm.i
-		}
-	}
-	return 0
-}
-
-// Reads the heads of `src` for parts of `plan`. The text is cut into `want` chunks. A relative pass reads each chunk
-// but the first from a start `guess_start` gives, until the next chunk's cut, on the threads of `runner`. One absolute
-// pass then reads from the text's start the heads between a chunk's end and the next chunk's guessed start, cutting
-// parts at its seams, and carries its state over the relative pass of each chunk whose guess it reaches exactly, which
-// reads the same heads from there, as the heads in a text do not depend on the items that hold them. A guess it does
-// not reach, in a text where its heads do not meet the text's own, has the chunk read by the absolute pass. False when
-// memory is refused or the text nests past `SEAM_LEVELS`.
-@(private)
-plan_chunks :: proc(src: []u8, $S: Spec, want: int, plan: ^Part_Plan, runner: ^tape.Runner) -> bool {
-	start_rel :: proc "contextless" (st: ^Pass(S, true), i: u64) { pass_start(st, i) }
-	start_abs :: proc "contextless" (st: ^Pass(S, false), i: u64) { pass_start(st, i) }
-	guess :: proc(src: []u8, st: ^Pass(S, true), cut, stop: u64) -> u64 { return guess_start(src, S, st, cut, stop) }
-	run_rel :: proc(src: []u8, st: ^Pass(S, true), stop: u64) -> Pass_End { return plan_run(src, S, true, st, stop, nil) }
-	run_abs :: proc(src: []u8, st: ^Pass(S, false), stop: u64, plan: ^Part_Plan) -> Pass_End { return plan_run(src, S, false, st, stop, plan) }
-	carry :: proc(plan: ^Part_Plan, st: ^Pass(S, false), sm: ^Pass(S, true)) -> (bool, bool) { return plan_carry(plan, S, st, sm) }
-	return build.binary_plan_chunks(src, want, plan, runner, Pass(S, true), Pass(S, false), start_rel, start_abs, guess, run_rel, run_abs, carry)
-}
-
-// Plans up to `want` parts of `src` into `plan`, each counted for the nodes, facts and levels its walk stores. False
-// when memory is refused or the text nests past `SEAM_LEVELS`.
 @(private)
 plan_parts :: proc(src: []u8, $S: Spec, want: int, plan: ^Part_Plan, runner: ^tape.Runner) -> bool {
 	chunks :: proc(src: []u8, want: int, plan: ^Part_Plan, runner: ^tape.Runner) -> bool {
-		return plan_chunks(src, S, want, plan, runner)
+		start_rel :: proc "contextless" (st: ^Pass(S, true), i: u64) { pass_start(st, i) }
+		start_abs :: proc "contextless" (st: ^Pass(S, false), i: u64) { pass_start(st, i) }
+		run_rel :: proc(src: []u8, st: ^Pass(S, true), stop: u64) -> Pass_End { return plan_run(src, S, true, st, stop, nil) }
+		run_abs :: proc(src: []u8, st: ^Pass(S, false), stop: u64, plan: ^Part_Plan) -> Pass_End { return plan_run(src, S, false, st, stop, plan) }
+		is_container :: proc "contextless" (b: u8) -> bool { return b >> 5 | 1 == 5 }
+		guess :: proc(src: []u8, st: ^Pass(S, true), cut, stop: u64) -> u64 {
+			return build.binary_guess_start(src, st, cut, stop, is_container, start_rel, run_rel)
+		}
+		carry :: proc(plan: ^Part_Plan, st: ^Pass(S, false), sm: ^Pass(S, true)) -> (bool, bool) { return plan_carry(plan, S, st, sm) }
+		return build.binary_plan_chunks(src, want, plan, runner, Pass(S, true), Pass(S, false), start_rel, start_abs, guess, run_rel, run_abs, carry)
 	}
 	return build.binary_plan_parts(src, want, plan, runner, chunks)
-}
-
-// Ends the last part of `plan` at `i` and starts the next one there, in the walk's levels `stack` whose innermost frame
-// is `top` and in which `c` containers are open.
-@(private)
-plan_seam :: proc(plan: ^Part_Plan, i, top: u64, c: int, stack: []Level($S)) -> bool {
-	return build.binary_plan_seam(plan, i, top, c, stack, FLAG_OBJECT, FLAG_TAG)
 }

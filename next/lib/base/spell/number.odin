@@ -497,40 +497,16 @@ float64_text :: proc "contextless" (f: f64, buf: []u8) -> (string, bool) #no_bou
 	if f - f != 0 {
 		return "", true
 	}
-	// A contextless proc needs a context for `strconv`, whose allocator it does not use.
-	context = runtime.default_context()
-	scratch: [32]u8
-	shortest := strconv.write_float(scratch[:], f, 'e', -1, 64, {})
-	at := 0
-	negative := shortest[0] == '-'
-	if negative {
-		at = 1
-	}
-	digits: [20]u8
-	k := 0
-	for ; at < len(shortest) && shortest[at] != 'e'; at += 1 {
-		if shortest[at] != '.' {
-			digits[k] = shortest[at]
-			k += 1
-		}
-	}
-	e := 0
-	for c in shortest[at + 2:] {
-		e = e * 10 + int(c - '0')
-	}
-	if shortest[at + 1] == '-' {
-		e = -e
-	}
-	for k > 0 && digits[k - 1] == '0' {
-		k -= 1
-	}
-	n := e + 1
+	bits := transmute(u64)f
+	tmp: [24]u8 = ---
+	k, n := f64_digits(&tmp[0], bits)
+	digits := tmp[1:1 + k]
 	w := 0
-	put :: proc "contextless" (buf: []u8, w: ^int, c: u8) {
+	put :: #force_inline proc "contextless" (buf: []u8, w: ^int, c: u8) #no_bounds_check {
 		buf[w^] = c
 		w^ += 1
 	}
-	if negative {
+	if bits >> 63 != 0 {
 		put(buf, &w, '-')
 	}
 	switch {
@@ -544,7 +520,7 @@ float64_text :: proc "contextless" (f: f64, buf: []u8) -> (string, bool) #no_bou
 				put(buf, &w, '0')
 			}
 		}
-		for c, j in digits[:k] {
+		for c, j in digits {
 			if j == n && n > 0 {
 				put(buf, &w, '.')
 			}
@@ -557,7 +533,7 @@ float64_text :: proc "contextless" (f: f64, buf: []u8) -> (string, bool) #no_bou
 		put(buf, &w, digits[0])
 		if k > 1 {
 			put(buf, &w, '.')
-			for c in digits[1:k] {
+			for c in digits[1:] {
 				put(buf, &w, c)
 			}
 		}

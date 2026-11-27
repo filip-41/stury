@@ -8,7 +8,6 @@ import "core:strconv"
 import "core:strings"
 import "stury:engine"
 import "stury:lib/core/tape"
-import "stury:lib/ops/diff"
 import "stury:lib/schema/schema"
 
 VERSION_DEFINE :: #config(STURY_VERSION, "dev")
@@ -18,61 +17,14 @@ BUILD_CONFIG :: "odin " + ODIN_VERSION + " -target:" + ODIN_OS_STRING + "_" + OD
 @(private = "file")
 OPT_MODE :: "-o:speed" when ODIN_OPTIMIZATION_MODE == .Speed else "-o:aggressive" when ODIN_OPTIMIZATION_MODE == .Aggressive else "-o:size" when ODIN_OPTIMIZATION_MODE == .Size else "-o:minimal" when ODIN_OPTIMIZATION_MODE == .Minimal else "-o:none"
 
-Command :: enum u8 {
-	Run,
-	Check,
-	Fmt,
-	Edit,
-	Schema,
-	Diff,
-}
-
-Schema_Verb :: enum u8 {
-	None,
-	Infer,
-	Sample,
-	Odin,
-	Check,
-	Diff,
-}
-
-Compat :: enum u8 {
-	None,
-	Backward,
-	Forward,
-	Full,
-}
-
-Report_Kind :: enum u8 {
-	Lines,
-	Basic,
-	Problem,
-}
-
-Color_Mode :: enum u8 {
-	Auto,
-	Always,
-	Never,
-}
-
-Output_Render :: enum u8 {
-	None,
-	Table,
-	Markdown,
-}
-
-Var_Kind :: enum u8 {
-	Arg,
-	Arg_Json,
-	Raw_File,
-	Slurp_File,
-}
-
-Rest_Mode :: enum u8 {
-	Files,
-	Args,
-	Json_Args,
-}
+Command :: enum u8 { Run, Check, Fmt, Edit, Schema, Diff }
+Schema_Verb :: enum u8 { None, Infer, Sample, Odin, Check, Diff }
+Compat :: enum u8 { None, Backward, Forward, Full }
+Report_Kind :: enum u8 { Lines, Basic, Problem }
+Color_Mode :: enum u8 { Auto, Always, Never }
+Output_Render :: enum u8 { None, Table, Markdown }
+Var_Kind :: enum u8 { Arg, Arg_Json, Raw_File, Slurp_File }
+Rest_Mode :: enum u8 { Files, Args, Json_Args }
 
 Var_Spec :: struct {
 	name: string,
@@ -177,9 +129,9 @@ Options :: struct {
 	merge_keys:        bool,
 	alias_limit_set:   bool,
 	redact_paths:      [dynamic]string,
-	diff_arrays:       diff.Arrays,
+	diff_arrays:       engine.Diff_Arrays,
 	diff_keys_raw:     [dynamic]string,
-	diff_keys:         [dynamic]diff.Key_Rule,
+	diff_keys:         [dynamic]engine.Diff_Key_Rule,
 	filter:            Maybe(string),
 	files:             [dynamic]string,
 	vars:              [dynamic]Var_Spec,
@@ -193,9 +145,8 @@ options_destroy :: proc(o: ^Options) {
 	if o == nil || o.allocator.procedure == nil {
 		return
 	}
-	a := o.allocator
 	for kr in o.diff_keys {
-		delete(kr.at, a)
+		delete(kr.at, o.allocator)
 	}
 	delete(o.diff_keys)
 	delete(o.diff_keys_raw)
@@ -214,21 +165,15 @@ parse_format :: proc(raw: string) -> (spec: engine.Spec, framing: engine.Framing
 }
 
 parse_output_render :: proc(raw: string) -> (Output_Render, bool) {
-	if strings.equal_fold(raw, "table") {
-		return .Table, true
-	}
-	if strings.equal_fold(raw, "markdown") || strings.equal_fold(raw, "md") {
-		return .Markdown, true
-	}
+	if strings.equal_fold(raw, "table") { return .Table, true }
+	if strings.equal_fold(raw, "markdown") || strings.equal_fold(raw, "md") { return .Markdown, true }
 	return .None, false
 }
 
 @(private = "file")
 choice_idx :: proc(val: string, choices: []string) -> (int, bool) {
 	for c, i in choices {
-		if val == c {
-			return i, true
-		}
+		if val == c { return i, true }
 	}
 	return -1, false
 }
@@ -236,22 +181,16 @@ choice_idx :: proc(val: string, choices: []string) -> (int, bool) {
 @(private = "file")
 parse_char_arg :: proc(s: string) -> (u8, bool) {
 	switch s {
-	case `\t`:
-		return '\t', true
-	case `\r`:
-		return '\r', true
-	case `\n`:
-		return '\n', true
+	case `\t`: return '\t', true
+	case `\r`: return '\r', true
+	case `\n`: return '\n', true
 	}
-	if len(s) == 1 && s[0] < 0x80 {
-		return s[0], true
-	}
+	if len(s) == 1 && s[0] < 0x80 { return s[0], true }
 	return 0, false
 }
 
-// As in jq: only `--...` or `-` followed by an ASCII letter is an option; negative numbers like `-1` are filters.
 @(private = "file")
-is_option :: proc(a: string) -> bool {
+is_option :: proc "contextless" (a: string) -> bool {
 	return len(a) >= 2 && a[0] == '-' && (a[1] == '-' || ('a' <= a[1] && a[1] <= 'z') || ('A' <= a[1] && a[1] <= 'Z'))
 }
 
@@ -284,22 +223,6 @@ split_long_eq :: proc(a: string, cmd := Command.Run) -> (flag, val: string, has_
 }
 
 @(private = "file")
-short_has_from_file :: proc(a: string) -> bool {
-	if !is_option(a) || a[1] == '-' {
-		return false
-	}
-	for k := 1; k < len(a); k += 1 {
-		if a[k] == 'L' {
-			return false
-		}
-		if a[k] == 'f' {
-			return true
-		}
-	}
-	return false
-}
-
-@(private = "file")
 detect_subcommand :: proc(args: []string) -> (Command, int) {
 	seen_from_file := false
 	for i := 0; i < len(args); i += 1 {
@@ -307,42 +230,33 @@ detect_subcommand :: proc(args: []string) -> (Command, int) {
 		if a == "--" {
 			return .Run, -1
 		}
-		if a == "--from-file" || short_has_from_file(a) {
+		if a == "--from-file" {
 			seen_from_file = true
 		}
 		if is_option(a) {
 			if a[1] != '-' {
-				// Account for standalone `-L dir` or `-Ldir`.
 				for k := 1; k < len(a); k += 1 {
 					if a[k] == 'L' {
-						if k + 1 == len(a) {
-							i += 1
-						}
+						if k + 1 == len(a) { i += 1 }
 						break
 					}
+					if a[k] == 'f' { seen_from_file = true }
 				}
 				continue
 			}
 			f, _, has_eq := split_long_eq(a)
-			if !has_eq {
-				i += opt_arity(f)
-			}
+			if !has_eq { i += opt_arity(f) }
 			continue
 		}
 		if seen_from_file {
 			return .Run, -1
 		}
 		switch a {
-		case "check", "validate":
-			return .Check, i
-		case "fmt":
-			return .Fmt, i
-		case "edit":
-			return .Edit, i
-		case "schema":
-			return .Schema, i
-		case "diff":
-			return .Diff, i
+		case "check", "validate": return .Check, i
+		case "fmt":               return .Fmt, i
+		case "edit":              return .Edit, i
+		case "schema":            return .Schema, i
+		case "diff":              return .Diff, i
 		}
 		return .Run, -1
 	}
@@ -357,15 +271,15 @@ parse_args :: proc(args: []string, allocator := context.allocator) -> (o: Option
 		from_framing  = .Single,
 		to_framing    = .Single,
 		to_name       = "json",
-		files        = make([dynamic]string, allocator),
-		vars         = make([dynamic]Var_Spec, allocator),
-		with_sources = make([dynamic]With_Spec, allocator),
-		positional   = make([dynamic]Pos_Spec, allocator),
-		lib_dirs     = make([dynamic]string, allocator),
+		files         = make([dynamic]string, allocator),
+		vars          = make([dynamic]Var_Spec, allocator),
+		with_sources  = make([dynamic]With_Spec, allocator),
+		positional    = make([dynamic]Pos_Spec, allocator),
+		lib_dirs      = make([dynamic]string, allocator),
 		diff_keys_raw = make([dynamic]string, allocator),
-		diff_keys    = make([dynamic]diff.Key_Rule, allocator),
-		redact_paths = make([dynamic]string, allocator),
-		allocator    = allocator,
+		diff_keys     = make([dynamic]engine.Diff_Key_Rule, allocator),
+		redact_paths  = make([dynamic]string, allocator),
+		allocator     = allocator,
 	}
 	sub_cmd, sub_idx := detect_subcommand(args)
 	o.command = sub_cmd
@@ -434,116 +348,78 @@ parse_args :: proc(args: []string, allocator := context.allocator) -> (o: Option
 apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_Mode) -> string {
 	a := o.allocator
 	switch flag[2:] {
-	case "help":
-		o.show_help = true
-	case "version":
-		o.show_version = true
-	case "build-configuration":
-		o.show_build_config = true
-	case "jsonpath", "path":
-		o.jsonpath = true
-	case "compact-output":
-		o.compact = true
-	case "tab":
-		o.compact, o.tab, o.indent, o.indent_set = false, true, -1, true
-	case "raw-output":
-		o.raw = true
-	case "join-output":
-		o.raw, o.join = true, true
-	case "raw-output0":
-		o.raw, o.join, o.raw0 = true, true, true
-	case "ascii-output":
-		o.ascii = true
-	case "sort-keys":
-		o.sort_keys = true
-	case "color-output":
-		o.color_mode = .Always
-	case "monochrome-output":
-		o.color_mode = .Never
-	case "unbuffered":
-		o.unbuffered = true
+	case "help":                o.show_help = true
+	case "version":             o.show_version = true
+	case "build-configuration": o.show_build_config = true
+	case "jsonpath", "path":    o.jsonpath = true
+	case "compact-output":      o.compact = true
+	case "tab":                 o.compact, o.tab, o.indent, o.indent_set = false, true, -1, true
+	case "raw-output":          o.raw = true
+	case "join-output":         o.raw, o.join = true, true
+	case "raw-output0":         o.raw, o.join, o.raw0 = true, true, true
+	case "ascii-output":        o.ascii = true
+	case "sort-keys":           o.sort_keys = true
+	case "color-output":        o.color_mode = .Always
+	case "monochrome-output":   o.color_mode = .Never
+	case "unbuffered":          o.unbuffered = true
 	case "binary":
-	case "null-input":
-		o.null_input = true
-	case "slurp":
-		o.slurp = true
-	case "raw-input":
-		o.raw_input = true
-	case "from-file":
-		o.from_file = true
-	case "seq":
-		o.seq = true
-	case "stream":
-		o.stream = true
-	case "stream-errors":
-		o.stream, o.stream_errors = true, true
-	case "exit-status":
-		o.exit_status = true
-	case "where":
-		o.where_mode = true
-	case "explain":
-		o.explain = true
-	case "plan-out":
+	case "null-input":          o.null_input = true
+	case "slurp":               o.slurp = true
+	case "raw-input":           o.raw_input = true
+	case "from-file":           o.from_file = true
+	case "seq":                 o.seq = true
+	case "stream":              o.stream = true
+	case "stream-errors":       o.stream, o.stream_errors = true, true
+	case "exit-status":         o.exit_status = true
+	case "where":               o.where_mode = true
+	case "explain":             o.explain = true
+	case "in-place":            o.in_place = true
+	case "check":               o.check = true
+	case "reflow":              o.reflow = true
+	case "diff":                o.diff_preview = true
+	case "each":                o.each = true
+	case "no-filename":         o.no_filename = true
+	case "skip-bad":            o.skip_bad = true
+	case "quarantine":          o.quarantine, o.skip_bad = val, true
+	case "library-path":        append(&o.lib_dirs, val)
+	case "args":                rest_mode^ = .Args
+	case "jsonargs":            rest_mode^ = .Json_Args
+	case "no-header":           o.dsv_in.no_header, o.dsv_in_set = true, true
+	case "infer":               o.infer, o.dsv_in.infer = true, true
+	case "ragged":              o.dsv_tolerate += {.Ragged}; o.dsv_in_set = true
+	case "lazy-quotes":         o.dsv_tolerate += {.Bare_Quote}; o.dsv_in_set = true
+	case "unread-entities":     o.xml_tolerate += {.Unread_Entity}
+	case "merge-keys":          o.merge_keys = true
+	case "out-no-header":       o.dsv_out.no_header, o.dsv_out_set = true, true
+	case "crlf":                o.dsv_out.crlf, o.dsv_out_set = true, true
+	case "grow-header":         o.grow_header = true
+	case "schema":              o.schema_file, o.schema_flag_set = val, true
+	case "schema-ref":          o.schema_ref, o.schema_flag_set = val, true
+	case "format-assert":       o.format_assert = true
+	case "package":             o.schema_package = val
+	case "ranges":              o.ranges = true
+	case "invalid":             o.invalid = true
+	case "comments":            o.comments = true
+	case "patch":               o.diff_patch = true
+	case "json":                o.diff_json = true
+	case "facts":               o.diff_facts = true
+	case "shape":               o.diff_shape = true
+	case "old-schema":          o.old_schema = val
+	case "new-schema":          o.new_schema = val
+	case "key":                 append(&o.diff_keys_raw, val)
+	case "plan-out", "plan-file":
 		if val == "" {
-			return strings.clone("--plan-out takes a file path", a)
+			return fmt.aprintf("%s takes a file path", flag, allocator = a)
 		}
-		o.plan_out = val
-	case "plan-file":
-		if val == "" {
-			return strings.clone("--plan-file takes a file path", a)
-		}
-		o.plan_file = val
-	case "in-place":
-		o.in_place = true
-	case "check":
-		o.check = true
-	case "reflow":
-		o.reflow = true
-	case "diff":
-		o.diff_preview = true
-	case "each":
-		o.each = true
-	case "no-filename":
-		o.no_filename = true
-	case "skip-bad":
-		o.skip_bad = true
-	case "quarantine":
-		o.quarantine, o.skip_bad = val, true
-	case "library-path":
-		append(&o.lib_dirs, val)
-	case "args":
-		rest_mode^ = .Args
-	case "jsonargs":
-		rest_mode^ = .Json_Args
-	case "no-header":
-		o.dsv_in.no_header, o.dsv_in_set = true, true
-	case "infer":
-		o.infer = true
-		o.dsv_in.infer = true
-	case "ragged":
-		o.dsv_tolerate += {.Ragged}
-		o.dsv_in_set = true
-	case "lazy-quotes":
-		o.dsv_tolerate += {.Bare_Quote}
-		o.dsv_in_set = true
-	case "unread-entities":
-		o.xml_tolerate += {.Unread_Entity}
+		if flag == "--plan-out" { o.plan_out = val } else { o.plan_file = val }
 	case "xml-arrays":
-		if idx, ok := choice_idx(val, {"auto", "always", "schema"}); ok {
-			o.xml_arrays = tape.Xml_Arrays(idx)
-			o.xml_arrays_set = true
-		} else {
-			return fmt.aprintf("invalid --xml-arrays %s (expected auto, always, or schema)", val, allocator = a)
-		}
+		idx, ok := choice_idx(val, {"auto", "always", "schema"})
+		if !ok { return fmt.aprintf("invalid --xml-arrays %s (expected auto, always, or schema)", val, allocator = a) }
+		o.xml_arrays, o.xml_arrays_set = tape.Xml_Arrays(idx), true
 	case "yaml-schema":
-		if idx, ok := choice_idx(val, {"core", "json", "failsafe"}); ok {
-			o.yaml_schema = tape.Yaml_Dialect(idx)
-			o.yaml_schema_set = true
-		} else {
-			return fmt.aprintf("invalid --yaml-schema %s (expected core, json, or failsafe)", val, allocator = a)
-		}
-	case "merge-keys":
-		o.merge_keys = true
+		idx, ok := choice_idx(val, {"core", "json", "failsafe"})
+		if !ok { return fmt.aprintf("invalid --yaml-schema %s (expected core, json, or failsafe)", val, allocator = a) }
+		o.yaml_schema, o.yaml_schema_set = tape.Yaml_Dialect(idx), true
 	case "redact":
 		if val == "" || val[0] != '/' {
 			return strings.clone("--redact takes an RFC 6901 JSON Pointer starting with /", a)
@@ -557,173 +433,93 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 			}
 		}
 		append(&o.redact_paths, val)
-	case "out-no-header":
-		o.dsv_out.no_header, o.dsv_out_set = true, true
-	case "crlf":
-		o.dsv_out.crlf, o.dsv_out_set = true, true
-	case "grow-header":
-		o.grow_header = true
-	case "schema":
-		o.schema_file, o.schema_flag_set = val, true
-	case "schema-ref":
-		o.schema_ref, o.schema_flag_set = val, true
-	case "format-assert":
-		o.format_assert = true
-	case "package":
-		o.schema_package = val
-	case "ranges":
-		o.ranges = true
-	case "invalid":
-		o.invalid = true
-	case "comments":
-		o.comments = true
-	case "patch":
-		o.diff_patch = true
-	case "json":
-		o.diff_json = true
-	case "facts":
-		o.diff_facts = true
-	case "shape":
-		o.diff_shape = true
-	case "old-schema":
-		o.old_schema = val
-	case "new-schema":
-		o.new_schema = val
-	case "key":
-		append(&o.diff_keys_raw, val)
 	case "with":
 		ws, werr := parse_with_spec(val, a)
-		if werr != "" {
-			return werr
-		}
+		if werr != "" { return werr }
 		if has_with_source(o.with_sources[:], ws.name) {
 			return fmt.aprintf("duplicate --with source %q", ws.name, allocator = a)
 		}
 		append(&o.with_sources, ws)
 	case "arg", "argjson", "rawfile", "slurpfile":
 		k, _ := choice_idx(flag, {"--arg", "--argjson", "--rawfile", "--slurpfile"})
-		// jq's first-wins variable binding rule: ignore later bindings of the same name.
 		if !has_var_spec(o.vars[:], val) {
 			append(&o.vars, Var_Spec{name = val, raw = val2, kind = Var_Kind(k)})
 		}
 	case "indent":
 		n, ok := strconv.parse_int(val, 10)
-		if !ok || n < -1 || n > 7 {
-			return strings.clone("--indent takes -1..7", a)
-		}
+		if !ok || n < -1 || n > 7 { return strings.clone("--indent takes -1..7", a) }
 		o.compact, o.indent, o.indent_set, o.tab = false, i8(n), true, n < 0
 	case "from", "in", "to", "out":
-		if flag == "--to" || flag == "--out" {
-			if r, is_r := parse_output_render(val); is_r {
-				o.has_to = true
-				o.to_spec = nil
-				o.to_framing = .Single
-				o.to_name = "table" if r == .Table else "markdown"
-				o.to_render = r
-				return ""
-			}
-		} else {
-			if _, is_r := parse_output_render(val); is_r {
-				return fmt.aprintf("--from %s is not supported (%s is output-only)", val, val, allocator = a)
-			}
+		is_to := flag == "--to" || flag == "--out"
+		if r, is_r := parse_output_render(val); is_r {
+			if !is_to { return fmt.aprintf("--from %s is not supported (%s is output-only)", val, val, allocator = a) }
+			o.has_to, o.to_spec, o.to_framing, o.to_render = true, nil, .Single, r
+			o.to_name = "table" if r == .Table else "markdown"
+			return ""
 		}
 		sp, fr, ok := parse_format(val)
-		if !ok {
-			return fmt.aprintf("unknown format %q", val, allocator = a)
-		}
-		if flag == "--from" || flag == "--in" {
-			o.has_from, o.from_spec, o.from_framing = true, sp, fr
-		} else {
+		if !ok { return fmt.aprintf("unknown format %q", val, allocator = a) }
+		if is_to {
 			o.has_to, o.to_spec, o.to_framing, o.to_name, o.to_render = true, sp, fr, val, .None
+		} else {
+			o.has_from, o.from_spec, o.from_framing = true, sp, fr
 		}
 	case "dups":
-		if idx, ok := choice_idx(val, {"default", "last", "first", "all", "refuse"}); ok {
-			o.dups = tape.Duplicates(idx)
-		} else {
-			return fmt.aprintf("invalid --dups %s", val, allocator = a)
-		}
-	case "threads":
+		idx, ok := choice_idx(val, {"default", "last", "first", "all", "refuse"})
+		if !ok { return fmt.aprintf("invalid --dups %s", val, allocator = a) }
+		o.dups = tape.Duplicates(idx)
+	case "threads", "max-errors", "count":
 		n, ok := strconv.parse_int(val, 10)
-		if !ok || n < 1 {
-			return strings.clone("--threads takes a positive integer", a)
+		if !ok || n < 1 { return fmt.aprintf("%s takes a positive integer", flag, allocator = a) }
+		switch flag {
+		case "--threads":    o.threads = n
+		case "--max-errors": o.max_errors = n
+		case "--count":      o.count = n
 		}
-		o.threads = n
 	case "max-depth", "max-memory", "max-steps", "max-nodes", "expansion-limit", "alias-limit":
 		n, ok := strconv.parse_u64_of_base(val, 10)
 		if !ok || n == 0 || ((flag == "--max-depth" || flag == "--max-nodes") && n > u64(max(u32))) {
 			return fmt.aprintf("%s takes a positive integer", flag, allocator = a)
 		}
 		switch flag {
-		case "--max-depth":
-			o.budget.depth = u32(n)
-		case "--max-memory":
-			o.budget.memory = n
-		case "--max-steps":
-			o.budget.steps = n
-		case "--max-nodes":
-			o.budget.nodes = u32(n)
-		case "--expansion-limit":
-			o.budget.expansion = n
-		case "--alias-limit":
-			o.budget.expansion = n
-			o.alias_limit_set = true
+		case "--max-depth":       o.budget.depth = u32(n)
+		case "--max-memory":      o.budget.memory = n
+		case "--max-steps":       o.budget.steps = n
+		case "--max-nodes":       o.budget.nodes = u32(n)
+		case "--expansion-limit": o.budget.expansion = n
+		case "--alias-limit":     o.budget.expansion, o.alias_limit_set = n, true
 		}
 	case "delimiter", "comment", "out-delimiter", "out-comment":
 		b, ok := parse_char_arg(val)
-		if !ok {
-			return fmt.aprintf("%s takes a single ASCII byte", flag, allocator = a)
-		}
+		if !ok { return fmt.aprintf("%s takes a single ASCII byte", flag, allocator = a) }
 		switch flag {
-		case "--delimiter":
-			o.dsv_in.delimiter, o.dsv_in_set = b, true
-		case "--comment":
-			o.dsv_in.comment, o.dsv_in_set = b, true
-		case "--out-delimiter":
-			o.dsv_out.delimiter, o.dsv_out_set = b, true
-		case "--out-comment":
-			o.dsv_out.comment, o.dsv_out_set = b, true
+		case "--delimiter":     o.dsv_in.delimiter, o.dsv_in_set = b, true
+		case "--comment":       o.dsv_in.comment, o.dsv_in_set = b, true
+		case "--out-delimiter": o.dsv_out.delimiter, o.dsv_out_set = b, true
+		case "--out-comment":   o.dsv_out.comment, o.dsv_out_set = b, true
 		}
 	case "schema-draft":
-		if idx, ok := choice_idx(val, {"4", "6", "7", "2019-09", "2020-12"}); ok {
-			o.schema_draft = schema.Draft(idx)
-			o.schema_flag_set = true
-		} else {
-			return fmt.aprintf("invalid --schema-draft %s", val, allocator = a)
-		}
-	case "max-errors", "count":
-		n, ok := strconv.parse_int(val, 10)
-		if !ok || n < 1 {
-			return fmt.aprintf("%s takes a positive integer", flag, allocator = a)
-		}
-		if flag == "--max-errors" {
-			o.max_errors = n
-		} else {
-			o.count = n
-		}
+		idx, ok := choice_idx(val, {"4", "6", "7", "2019-09", "2020-12"})
+		if !ok { return fmt.aprintf("invalid --schema-draft %s", val, allocator = a) }
+		o.schema_draft, o.schema_flag_set = schema.Draft(idx), true
 	case "seed":
 		n, ok := strconv.parse_u64_of_base(val, 10)
-		if !ok {
-			return strings.clone("--seed takes a non-negative integer", a)
-		}
+		if !ok { return strings.clone("--seed takes a non-negative integer", a) }
 		o.seed = n
 	case "report":
-		if idx, ok := choice_idx(val, {"lines", "basic", "problem"}); ok {
-			o.report = Report_Kind(idx)
-		} else {
-			return fmt.aprintf("invalid --report %s", val, allocator = a)
-		}
+		idx, ok := choice_idx(val, {"lines", "basic", "problem"})
+		if !ok { return fmt.aprintf("invalid --report %s", val, allocator = a) }
+		o.report = Report_Kind(idx)
 	case "set", "position":
-		want := diff.Arrays.Set if flag == "--set" else .Position
+		want := engine.Diff_Arrays.Set if flag == "--set" else .Position
 		if o.diff_arrays != .Sequence && o.diff_arrays != want {
 			return strings.clone("--set and --position are mutually exclusive", a)
 		}
 		o.diff_arrays = want
 	case "compat":
-		if idx, ok := choice_idx(val, {"backward", "forward", "full"}); ok {
-			o.compat = Compat(idx + 1)
-		} else {
-			return fmt.aprintf("invalid --compat %s", val, allocator = a)
-		}
+		idx, ok := choice_idx(val, {"backward", "forward", "full"})
+		if !ok { return fmt.aprintf("invalid --compat %s", val, allocator = a) }
+		o.compat = Compat(idx + 1)
 	case:
 		return fmt.aprintf("Unknown option %s", flag, allocator = a)
 	}
@@ -733,9 +529,7 @@ apply_long_flag :: proc(o: ^Options, flag, val, val2: string, rest_mode: ^Rest_M
 @(private = "file")
 has_var_spec :: proc(vars: []Var_Spec, name: string) -> bool {
 	for vs in vars {
-		if vs.name == name {
-			return true
-		}
+		if vs.name == name { return true }
 	}
 	return false
 }
@@ -743,29 +537,28 @@ has_var_spec :: proc(vars: []Var_Spec, name: string) -> bool {
 @(private = "file")
 has_with_source :: proc(sources: []With_Spec, name: string) -> bool {
 	for ws in sources {
-		if ws.name == name {
-			return true
-		}
+		if ws.name == name { return true }
 	}
 	return false
 }
 
 @(private = "file")
 is_jq_ident :: proc "contextless" (s: string) -> bool {
-	if len(s) == 0 {
-		return false
-	}
+	if len(s) == 0 { return false }
 	c0 := s[0]
-	if !((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || c0 == '_') {
-		return false
-	}
-	for i := 1; i < len(s); i += 1 {
-		c := s[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
-			return false
-		}
+	if !((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || c0 == '_') { return false }
+	for c in transmute([]u8)s[1:] {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') { return false }
 	}
 	return true
+}
+
+@(private = "file")
+has_path_sep :: proc "contextless" (s: string) -> bool {
+	for c in transmute([]u8)s {
+		if c == '/' || c == '\\' { return true }
+	}
+	return false
 }
 
 @(private = "file")
@@ -774,8 +567,7 @@ parse_with_spec :: proc(raw: string, a: runtime.Allocator) -> (ws: With_Spec, er
 	if eq <= 0 || eq + 1 >= len(raw) {
 		return {}, fmt.aprintf("invalid --with %q (expected NAME=[FORMAT:]PATH)", raw, allocator = a)
 	}
-	name := raw[:eq]
-	rhs := raw[eq + 1:]
+	name, rhs := raw[:eq], raw[eq + 1:]
 	if !is_jq_ident(name) {
 		return {}, fmt.aprintf("invalid --with variable name %q (must be a valid jq identifier)", name, allocator = a)
 	}
@@ -783,63 +575,34 @@ parse_with_spec :: proc(raw: string, a: runtime.Allocator) -> (ws: With_Spec, er
 		return {}, fmt.aprintf("--with variable name %q conflicts with built-in jq variable", name, allocator = a)
 	}
 
-	// Detect optional `format:path` prefix (while keeping Windows drive paths like `C:\...` or `C:/...` intact).
 	colon1 := strings.index_byte(rhs, ':')
 	is_win_drive := colon1 == 1 && len(rhs) >= 2 && ((rhs[0] >= 'a' && rhs[0] <= 'z') || (rhs[0] >= 'A' && rhs[0] <= 'Z'))
-	has_sep_before_colon := false
-	if colon1 > 0 {
-		for k in 0 ..< colon1 {
-			if rhs[k] == '/' || rhs[k] == '\\' {
-				has_sep_before_colon = true
-				break
-			}
-		}
-	}
 	if colon1 == 0 {
-		if os.exists(rhs) {
-			return {name = name, path = rhs}, ""
-		}
+		if os.exists(rhs) { return {name = name, path = rhs}, "" }
 		return {}, fmt.aprintf("invalid --with %q: empty format prefix", raw, allocator = a)
 	}
-	if colon1 > 0 && !is_win_drive && !has_sep_before_colon {
+	if colon1 > 0 && !is_win_drive && !has_path_sep(rhs[:colon1]) {
 		// Check multi-colon format specifiers first (e.g. `yaml:merge:file.yaml`, `cbor:preferred:file.cbor`).
-		after1 := rhs[colon1 + 1:]
-		if colon2_rel := strings.index_byte(after1, ':'); colon2_rel > 0 {
+		if colon2_rel := strings.index_byte(rhs[colon1 + 1:], ':'); colon2_rel > 0 {
 			colon2 := colon1 + 1 + colon2_rel
-			sep_between := false
-			for k in colon1 + 1 ..< colon2 {
-				if rhs[k] == '/' || rhs[k] == '\\' {
-					sep_between = true
-					break
-				}
-			}
-			if !sep_between {
-				fmt2 := rhs[:colon2]
-				if sp2, fr2, ok2 := parse_format(fmt2); ok2 {
+			if !has_path_sep(rhs[colon1 + 1:colon2]) {
+				if sp2, fr2, ok2 := parse_format(rhs[:colon2]); ok2 {
 					p2 := rhs[colon2 + 1:]
-					if p2 == "" {
-						return {}, fmt.aprintf("invalid --with %q: missing file path", raw, allocator = a)
-					}
+					if p2 == "" { return {}, fmt.aprintf("invalid --with %q: missing file path", raw, allocator = a) }
 					return {name = name, path = p2, has_fmt = true, spec = sp2, framing = fr2}, ""
 				}
 			}
 		}
-		fmt1 := rhs[:colon1]
-		p1 := rhs[colon1 + 1:]
+		fmt1, p1 := rhs[:colon1], rhs[colon1 + 1:]
 		if p1 == "" {
-			if os.exists(rhs) {
-				return {name = name, path = rhs}, ""
-			}
+			if os.exists(rhs) { return {name = name, path = rhs}, "" }
 			return {}, fmt.aprintf("invalid --with %q: missing file path", raw, allocator = a)
 		}
-		sp1, fr1, ok1 := parse_format(fmt1)
-		if !ok1 {
-			if os.exists(rhs) {
-				return {name = name, path = rhs}, ""
-			}
-			return {}, fmt.aprintf("invalid --with %q: unknown format %q", raw, fmt1, allocator = a)
+		if sp1, fr1, ok1 := parse_format(fmt1); ok1 {
+			return {name = name, path = p1, has_fmt = true, spec = sp1, framing = fr1}, ""
 		}
-		return {name = name, path = p1, has_fmt = true, spec = sp1, framing = fr1}, ""
+		if os.exists(rhs) { return {name = name, path = rhs}, "" }
+		return {}, fmt.aprintf("invalid --with %q: unknown format %q", raw, fmt1, allocator = a)
 	}
 	return {name = name, path = rhs}, ""
 }
@@ -849,39 +612,23 @@ parse_short :: proc(o: ^Options, args: []string, idx: ^int) -> string {
 	a := args[idx^]
 	for k := 1; k < len(a); k += 1 {
 		switch a[k] {
-		case 'h':
-			o.show_help = true
-		case 'V':
-			o.show_version = true
-		case 'r':
-			o.raw = true
-		case 'j':
-			o.raw, o.join = true, true
-		case '0':
-			o.raw, o.join, o.raw0 = true, true, true
-		case 'c':
-			o.compact = true
-		case 'S':
-			o.sort_keys = true
-		case 'a':
-			o.ascii = true
-		case 'n':
-			o.null_input = true
-		case 's':
-			o.slurp = true
-		case 'R':
-			o.raw_input = true
-		case 'e':
-			o.exit_status = true
-		case 'f':
-			o.from_file = true
-		case 'C':
-			o.color_mode = .Always
-		case 'M':
-			o.color_mode = .Never
+		case 'h': o.show_help = true
+		case 'V': o.show_version = true
+		case 'r': o.raw = true
+		case 'j': o.raw, o.join = true, true
+		case '0': o.raw, o.join, o.raw0 = true, true, true
+		case 'c': o.compact = true
+		case 'S': o.sort_keys = true
+		case 'a': o.ascii = true
+		case 'n': o.null_input = true
+		case 's': o.slurp = true
+		case 'R': o.raw_input = true
+		case 'e': o.exit_status = true
+		case 'f': o.from_file = true
+		case 'C': o.color_mode = .Always
+		case 'M': o.color_mode = .Never
 		case 'b':
-		case 'i':
-			o.in_place = true
+		case 'i': o.in_place = true
 		case 'L':
 			if k + 1 < len(a) {
 				append(&o.lib_dirs, a[k + 1:])
@@ -910,7 +657,7 @@ compile_key_rules :: proc(o: ^Options) -> string {
 		if member == "" {
 			return fmt.aprintf("--key %s names no member", spec, allocator = o.allocator)
 		}
-		rule := diff.Key_Rule{member = member}
+		rule := engine.Diff_Key_Rule{member = member}
 		if at != "" {
 			steps, ok := parse_key_path(at, o.allocator)
 			if !ok {
@@ -930,10 +677,7 @@ parse_key_path :: proc(at: string, alloc: runtime.Allocator) -> ([]tape.Step, bo
 	for len(s) > 0 {
 		if s[0] == '[' {
 			c := strings.index_byte(s, ']')
-			if c < 0 {
-				delete(steps)
-				return nil, false
-			}
+			if c < 0 { delete(steps); return nil, false }
 			in_s := s[1:c]
 			if in_s == "" {
 				append(&steps, tape.Step(tape.All{}))
@@ -944,22 +688,39 @@ parse_key_path :: proc(at: string, alloc: runtime.Allocator) -> ([]tape.Step, bo
 			}
 			s = s[c + 1:]
 		} else {
-			if s[0] == '.' {
-				s = s[1:]
-			}
-			if len(s) == 0 {
-				delete(steps)
-				return nil, false
-			}
+			if s[0] == '.' { s = s[1:] }
+			if len(s) == 0 { delete(steps); return nil, false }
 			e := 0
-			for e < len(s) && s[e] != '.' && s[e] != '[' {
-				e += 1
-			}
+			for e < len(s) && s[e] != '.' && s[e] != '[' { e += 1 }
 			append(&steps, tape.Step(tape.Name(s[:e])))
 			s = s[e:]
 		}
 	}
 	return steps[:], true
+}
+
+@(private = "file")
+validate_input_family :: proc(o: ^Options, flag: string, fam: engine.Family, label, from_hint: string, allow_null: bool) -> string {
+	a := o.allocator
+	if o.null_input {
+		return "" if allow_null else fmt.aprintf("%s cannot be used with --null-input", flag, allocator = a)
+	}
+	if o.has_from {
+		if fe, ok := engine.entry_of_spec(o.from_spec); ok && fe.family != fam {
+			return fmt.aprintf("%s applies to %s input, not --from %s", flag, label, fe.name, allocator = a)
+		}
+		return ""
+	}
+	if len(o.files) == 0 {
+		return fmt.aprintf("%s applies to %s input; pass --from %s for stdin", flag, label, from_hint, allocator = a)
+	}
+	for p in o.files {
+		sp, _ := detect_file_spec(o, p)
+		if fe, ok := engine.entry_of_spec(sp); ok && fe.family != fam {
+			return fmt.aprintf("%s applies to %s input, not %s (%s)", flag, label, p, fe.name, allocator = a)
+		}
+	}
+	return ""
 }
 
 @(private = "file")
@@ -969,15 +730,9 @@ validate_options :: proc(o: ^Options) -> string {
 		return strings.clone("--jsonpath can only be used with query execution", a)
 	}
 	if len(o.with_sources) > 0 {
-		if o.command != .Run {
-			return strings.clone("--with can only be used with query execution", a)
-		}
-		if o.jsonpath {
-			return strings.clone("--with cannot be combined with --jsonpath", a)
-		}
-		if o.stream || o.stream_errors {
-			return strings.clone("--with cannot be combined with --stream", a)
-		}
+		if o.command != .Run { return strings.clone("--with can only be used with query execution", a) }
+		if o.jsonpath { return strings.clone("--with cannot be combined with --jsonpath", a) }
+		if o.stream || o.stream_errors { return strings.clone("--with cannot be combined with --stream", a) }
 		for ws in o.with_sources {
 			if has_var_spec(o.vars[:], ws.name) {
 				return fmt.aprintf("--with variable %q conflicts with --arg/--argjson/--rawfile/--slurpfile", ws.name, allocator = a)
@@ -1022,44 +777,17 @@ validate_options :: proc(o: ^Options) -> string {
 		if o.xml_arrays == .Schema && o.schema_file == "" {
 			return strings.clone("--xml-arrays=schema requires --schema <file>", a)
 		}
-		if o.has_from {
-			if fe, ok := engine.entry_of_spec(o.from_spec); ok && fe.family != .Xml {
-				return fmt.aprintf("--xml-arrays applies to XML input, not --from %s", fe.name, allocator = a)
-			}
-		} else if len(o.files) == 0 {
-			if !o.null_input {
-				return strings.clone("--xml-arrays applies to XML input; pass --from xml for stdin", a)
-			}
-		} else {
-			for p in o.files {
-				sp, _ := detect_file_spec(o, p)
-				if fe, ok := engine.entry_of_spec(sp); ok && fe.family != .Xml {
-					return fmt.aprintf("--xml-arrays applies to XML input, not %s (%s)", p, fe.name, allocator = a)
-				}
-			}
+		if e := validate_input_family(o, "--xml-arrays", .Xml, "XML", "xml", allow_null = true); e != "" {
+			return e
 		}
 	}
 	if o.yaml_schema_set || o.merge_keys || o.alias_limit_set {
 		yflag := "--yaml-schema" if o.yaml_schema_set else "--merge-keys" if o.merge_keys else "--alias-limit"
-		if o.null_input {
-			return fmt.aprintf("%s cannot be used with --null-input", yflag, allocator = a)
+		if e := validate_input_family(o, yflag, .Yaml, "YAML", "yaml", allow_null = false); e != "" {
+			return e
 		}
-		if o.has_from {
-			if fe, ok := engine.entry_of_spec(o.from_spec); ok && fe.family != .Yaml {
-				return fmt.aprintf("%s applies to YAML input, not --from %s", yflag, fe.name, allocator = a)
-			}
-			if o.merge_keys && o.from_spec == engine.spec_of_id(.Yaml) {
-				o.from_spec = engine.spec_of_id(.Yaml_Merge)
-			}
-		} else if len(o.files) == 0 {
-			return fmt.aprintf("%s applies to YAML input; pass --from yaml for stdin", yflag, allocator = a)
-		} else {
-			for p in o.files {
-				sp, _ := detect_file_spec(o, p)
-				if fe, ok := engine.entry_of_spec(sp); ok && fe.family != .Yaml {
-					return fmt.aprintf("%s applies to YAML input, not %s (%s)", yflag, p, fe.name, allocator = a)
-				}
-			}
+		if o.has_from && o.merge_keys && o.from_spec == engine.spec_of_id(.Yaml) {
+			o.from_spec = engine.spec_of_id(.Yaml_Merge)
 		}
 	}
 	if o.comments {
@@ -1092,18 +820,14 @@ validate_options :: proc(o: ^Options) -> string {
 	}
 	if o.has_to {
 		if o.to_render != .None {
-			if o.raw0 {
-				return fmt.aprintf("--raw-output0 cannot be combined with --to %s", o.to_name, allocator = a)
-			}
+			if o.raw0 { return fmt.aprintf("--raw-output0 cannot be combined with --to %s", o.to_name, allocator = a) }
 		} else if te, tok := engine.entry_of_spec(o.to_spec); tok {
 			if o.raw0 && te.family != .Json {
 				return fmt.aprintf("--raw-output0 cannot be combined with --to %s", o.to_name, allocator = a)
 			}
 			if te.tabular {
 				bad := "-r" if (o.raw && !o.join && !o.raw0) else "-j" if (o.join && !o.raw0) else "--raw-output0" if o.raw0 else "-a" if o.ascii else "-C" if o.color_mode == .Always else "--tab" if o.tab else "--indent" if o.indent_set else "-c" if o.compact else "--seq" if o.seq else ""
-				if bad != "" {
-					return fmt.aprintf("%s cannot be combined with --to %s", bad, o.to_name, allocator = a)
-				}
+				if bad != "" { return fmt.aprintf("%s cannot be combined with --to %s", bad, o.to_name, allocator = a) }
 			} else if te.binary {
 				if o.raw || o.join || o.raw0 || o.ascii || o.color_mode == .Always || o.tab || o.indent_set || o.compact || o.seq {
 					return fmt.aprintf("text formatting options cannot be combined with --to %s", o.to_name, allocator = a)
@@ -1118,8 +842,7 @@ validate_options :: proc(o: ^Options) -> string {
 
 write_version :: proc(w: io.Writer) -> bool {
 	buf: [128]u8
-	msg := fmt.bprintf(buf[:], "stury-%s\n", VERSION)
-	_, err := io.write_string(w, msg)
+	_, err := io.write_string(w, fmt.bprintf(buf[:], "stury-%s\n", VERSION))
 	return err == .None
 }
 
@@ -1127,24 +850,16 @@ write_help :: proc(w: io.Writer, cmd: Command, short := false) -> bool {
 	err: io.Error
 	buf: [1024]u8
 	if short {
-		msg := fmt.bprintf(buf[:], "stury - v2 processor [%s]\nUsage: stury [options] <jq filter> [file...]\nUse stury --help.\n", VERSION)
-		_, err = io.write_string(w, msg)
+		_, err = io.write_string(w, fmt.bprintf(buf[:], "stury - v2 processor [%s]\nUsage: stury [options] <jq filter> [file...]\nUse stury --help.\n", VERSION))
 		return err == .None
 	}
 	switch cmd {
-	case .Check:
-		_, err = io.write_string(w, "Usage: stury check [--from fmt|--seq] [--xml-arrays auto|always|schema] [--schema file] [--schema-ref dir] [--schema-draft d] [--format-assert] [--max-errors n] [--report lines|basic|problem] [--dups policy] [--skip-bad] [--quarantine file] [file...]\n")
-	case .Fmt:
-		_, err = io.write_string(w, "Usage: stury fmt [--from fmt] [--to fmt] [--xml-arrays auto|always|schema] [--indent n|--tab|-c|-S|-a] [-i|--in-place|--check] [--schema file] [file...]\n")
-	case .Edit:
-		_, err = io.write_string(w, "Usage: stury edit [--from fmt|--seq|-R] [--reflow] [-i|--in-place|--check|--diff] <jq filter> [file...]\n")
-	case .Diff:
-		_, err = io.write_string(w, "Usage: stury diff [--patch] [--json] [--facts] [--set|--position|--key K] [--from fmt] <old> <new>\n       stury diff --schema [--compat backward|forward|full] <old> <new> | --old-schema s --new-schema s\n")
-	case .Schema:
-		_, err = io.write_string(w, "Usage: stury schema <infer|sample|odin|check|diff> [options] ...\n")
-	case .Run:
-		msg := fmt.bprintf(buf[:], HELP_MAIN, VERSION)
-		_, err = io.write_string(w, msg)
+	case .Check:  _, err = io.write_string(w, "Usage: stury check [--from fmt|--seq] [--xml-arrays auto|always|schema] [--schema file] [--schema-ref dir] [--schema-draft d] [--format-assert] [--max-errors n] [--report lines|basic|problem] [--dups policy] [--skip-bad] [--quarantine file] [file...]\n")
+	case .Fmt:    _, err = io.write_string(w, "Usage: stury fmt [--from fmt] [--to fmt] [--xml-arrays auto|always|schema] [--indent n|--tab|-c|-S|-a] [-i|--in-place|--check] [--schema file] [file...]\n")
+	case .Edit:   _, err = io.write_string(w, "Usage: stury edit [--from fmt|--seq|-R] [--reflow] [-i|--in-place|--check|--diff] <jq filter> [file...]\n")
+	case .Diff:   _, err = io.write_string(w, "Usage: stury diff [--patch] [--json] [--facts] [--set|--position|--key K] [--from fmt] <old> <new>\n       stury diff --schema [--compat backward|forward|full] <old> <new> | --old-schema s --new-schema s\n")
+	case .Schema: _, err = io.write_string(w, "Usage: stury schema <infer|sample|odin|check|diff> [options] ...\n")
+	case .Run:    _, err = io.write_string(w, fmt.bprintf(buf[:], HELP_MAIN, VERSION))
 	}
 	return err == .None
 }

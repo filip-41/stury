@@ -268,20 +268,13 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string) {
 	m.type, m.size, m.align, m.frees = ti.id, u32(ti.size), u32(ti.align), holds_block(ti)
 	kind := Read_Kind.End
 	if ti.id == time.Time || ti.id == Raw {
-		set_kind(b, at, .Time if ti.id == time.Time else .Raw)
+		b.records[at].kind = .Time if ti.id == time.Time else .Raw
 		return
 	}
 	base := runtime.type_info_base(ti)
 	#partial switch v in base.variant {
 	case ^runtime.Type_Info_Integer:
-		if v.endianness == .Platform || v.endianness == (.Little if ODIN_ENDIAN == .Little else .Big) {
-			switch base.size {
-			case 1: kind = .I8 if v.signed else .U8
-			case 2: kind = .I16 if v.signed else .U16
-			case 4: kind = .I32 if v.signed else .U32
-			case 8: kind = .I64 if v.signed else .U64
-			}
-		}
+		kind = int_kind(base)
 	case ^runtime.Type_Info_Float:
 		if v.endianness == .Platform {
 			kind = .F32 if base.size == 4 else .F64 if base.size == 8 else .End
@@ -332,10 +325,10 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string) {
 		return
 	}
 	if kind == .End {
-		refuse_type(b, name, ti)
+		refuse_type(b, name)
 		return
 	}
-	set_kind(b, at, kind)
+	b.records[at].kind = kind
 }
 
 // Whether a value of `ti` may hold a block a read allocates, in it or in what it holds in place, which is no cycle.
@@ -379,14 +372,9 @@ int_kind :: proc(ti: ^runtime.Type_Info) -> Read_Kind {
 	return .End
 }
 
+// Refuses the plan for a type no read takes, naming the member `name` that holds it, or the type.
 @(private)
-set_kind :: #force_inline proc(b: ^Builder, at: int, kind: Read_Kind) {
-	b.records[at].kind = kind
-}
-
-// Refuses the plan for `ti`, which no read takes, naming the member `name` that holds it, or the type.
-@(private)
-refuse_type :: proc(b: ^Builder, name: string, ti: ^runtime.Type_Info) {
+refuse_type :: proc(b: ^Builder, name: string) {
 	if b.err == nil {
 		b.err = tape.Bad_Option{name if name != "" else "type"}
 	}
@@ -396,10 +384,10 @@ refuse_type :: proc(b: ^Builder, name: string, ti: ^runtime.Type_Info) {
 @(private)
 fill_list :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, kind: Read_Kind, elem: ^runtime.Type_Info, count: int) {
 	if elem.size == 0 {
-		refuse_type(b, "", ti)
+		refuse_type(b, "")
 		return
 	}
-	set_kind(b, at, kind)
+	b.records[at].kind = kind
 	m := &b.meta[b.records[at].meta]
 	m.size, m.align, m.count = u32(elem.size), u32(elem.align), u32(count)
 	m.zeroed = !written_whole(elem)
@@ -425,7 +413,7 @@ written_whole :: proc(ti: ^runtime.Type_Info) -> bool {
 // Fills record `at` as a wrapper `kind` of `elem`: a pointer, or a `Maybe` whose tag follows its element.
 @(private)
 fill_wrapper :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, kind: Read_Kind, elem: ^runtime.Type_Info) {
-	set_kind(b, at, kind)
+	b.records[at].kind = kind
 	m := &b.meta[b.records[at].meta]
 	m.size, m.align = u32(elem.size), u32(elem.align)
 	block, made := b.blocks[ti.id]
@@ -448,10 +436,10 @@ fill_union :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, v: ^runtime.Typ
 		return
 	}
 	if len(v.variants) == 0 || v.tag_type == nil {
-		refuse_type(b, "", ti)
+		refuse_type(b, "")
 		return
 	}
-	set_kind(b, at, .Union)
+	b.records[at].kind = .Union
 	m.tag, m.tag_size, m.count = u32(v.tag_offset), u8(v.tag_type.size), u32(len(v.variants))
 	// The arms are placed before the variants are filled, as a variant may hold a union whose arms come first.
 	first := len(b.arms)
@@ -466,7 +454,7 @@ fill_union :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, v: ^runtime.Typ
 		fill(b, block, variant, "")
 		classes := classes_of(b, variant)
 		if classes & taken != {} || classes == {} {
-			refuse_type(b, "", ti)
+			refuse_type(b, "")
 			return
 		}
 		taken += classes
@@ -532,10 +520,10 @@ fill_map :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, v: ^runtime.Type_
 		}
 	}
 	if m.key_kind == .End {
-		refuse_type(b, "", ti)
+		refuse_type(b, "")
 		return
 	}
-	set_kind(b, at, .Map)
+	b.records[at].kind = .Map
 	m.size, m.align = u32(v.value.size), u32(v.value.align)
 	block, made := b.blocks[ti.id]
 	if !made {
@@ -560,16 +548,16 @@ fill_bit_set :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, v: ^runtime.T
 	case ^runtime.Type_Info_Rune:
 		m.signed = true
 	case:
-		refuse_type(b, "", ti)
+		refuse_type(b, "")
 		return
 	}
-	set_kind(b, at, .Bit_Set)
+	b.records[at].kind = .Bit_Set
 	m.lower, m.count = v.lower, u32(v.upper - v.lower + 1)
 	elem_meta := m^
 	block, made := b.blocks[ti.id]
 	if !made {
 		block = plan_block(b, 1, ti.id)
-		set_kind(b, block, .Bit_Elem)
+		b.records[block].kind = .Bit_Elem
 		b.meta[b.records[block].meta] = elem_meta
 	}
 	b.records[at].first = (^Record)(uintptr(block + 1))

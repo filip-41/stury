@@ -13,22 +13,9 @@ TIMESTAMP_TEXT_ROOM :: 48
 @(private)
 integer_text :: proc "contextless" (span: []u8, buf: []u8) -> string {
 	n := integer_value(span)
+	neg := n.kind == .Int && i64(n.bits) < 0
+	v := u64(~i64(n.bits)) + 1 if neg else n.bits
 	at := len(buf)
-	if n.kind == .Int && i64(n.bits) < 0 {
-		v := u64(~i64(n.bits)) + 1
-		for {
-			at -= 1
-			buf[at] = '0' + u8(v % 10)
-			v /= 10
-			if v == 0 {
-				break
-			}
-		}
-		at -= 1
-		buf[at] = '-'
-		return string(buf[at:])
-	}
-	v := n.bits
 	for {
 		at -= 1
 		buf[at] = '0' + u8(v % 10)
@@ -36,6 +23,10 @@ integer_text :: proc "contextless" (span: []u8, buf: []u8) -> string {
 		if v == 0 {
 			break
 		}
+	}
+	if neg {
+		at -= 1
+		buf[at] = '-'
 	}
 	return string(buf[at:])
 }

@@ -2,7 +2,6 @@ package engine
 
 import "base:runtime"
 import "core:strconv"
-import "core:sync"
 import "stury:json"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
@@ -43,26 +42,13 @@ exec_projection_direct :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opt
 
 	tf, framed := to_tape_framing(dec.framing)
 	if !framed {
-		ro := build_tape_opts(opts, allow_parallel = false)
-		doc, serr := scan(src, &dem, dec.spec, {}, ro, opts.allocator)
+		doc, serr := scan(src, &dem, dec.spec, {}, build_tape_opts(opts, allow_parallel = false), opts.allocator)
 		if serr != nil {
 			return {err = .No_Memory if is_alloc_err(serr) else .Read_Error, read_err = serr}
 		}
 		defer tape.destroy(&doc)
 
-		ok, wrong, werr := emit_projected_doc(
-			&doc,
-			pr,
-			opts.direct_out,
-			need_header,
-			&header_emitted,
-			&hdr_buf,
-			&row_buf,
-			opts.emit,
-			&res.emitted,
-			opts.allocator,
-			opts.direct_append_nl,
-		)
+		ok, wrong, werr := emit_projected_doc(&doc, pr, opts.direct_out, need_header, &header_emitted, &hdr_buf, &row_buf, opts.emit, &res.emitted, opts.allocator, opts.direct_append_nl)
 		if !ok {
 			if wrong && opts.eval != nil {
 				return exec_whole(dec, src, opts)
@@ -75,13 +61,7 @@ exec_projection_direct :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opt
 	}
 
 	ro := build_tape_opts(opts, allow_parallel = dec.parallel && opts.runner != nil && opts.runner.threads > 0)
-	if dec.parallel &&
-		ro.runner != nil &&
-		ro.runner.threads > 0 &&
-		dec.entry.family == .Json &&
-		(tf == .Lines || tf == .Seq) &&
-		ro.pieces == nil &&
-		len(src) >= max(RECORDS_PARALLEL_FROM, 4096) {
+	if dec.parallel && ro.runner != nil && ro.runner.threads > 0 && dec.entry.family == .Json && (tf == .Lines || tf == .Seq) && ro.pieces == nil && len(src) >= max(RECORDS_PARALLEL_FROM, 4096) {
 		if cres, handled := exec_direct_coarse_parallel(dec, src, tf, ro, pr, &dem, need_header, opts); handled {
 			return cres
 		}
@@ -110,27 +90,12 @@ exec_projection_direct :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opt
 			}
 			raw := record_slice(src, r_info)
 			res.records += 1
-			ok, wrong, werr := emit_projected_doc(
-				&docs[i],
-				pr,
-				opts.direct_out,
-				need_header,
-				&header_emitted,
-				&hdr_buf,
-				&row_buf,
-				opts.emit,
-				&res.emitted,
-				opts.allocator,
-				opts.direct_append_nl,
-			)
+			ok, wrong, werr := emit_projected_doc(&docs[i], pr, opts.direct_out, need_header, &header_emitted, &hdr_buf, &row_buf, opts.emit, &res.emitted, opts.allocator, opts.direct_append_nl)
 			if !ok {
 				if wrong && opts.eval != nil && can_build_single_record(dec, raw) {
-					meta := make_record_meta(opts, res.records - 1, r_info, raw)
-					sub := exec_single_record_whole(dec, raw, meta, opts)
-					res.emitted += sub.emitted
+					sub := exec_single_record_whole(dec, raw, make_record_meta(opts, res.records - 1, r_info, raw), opts)
+					merge_result(&res, sub)
 					if sub.err != .None {
-						res.err = sub.err
-						res.read_err = sub.read_err
 						return res
 					}
 					continue
@@ -157,32 +122,50 @@ finish_projected_error :: proc "contextless" (res: ^Exec_Result, werr: write.Err
 			res.err = .Write_Error
 			res.write_err = werr
 		}
-	} else if wrong {
-		res.err = .Failed
 	} else {
-		res.err = .Stopped
+		res.err = .Failed if wrong else .Stopped
 	}
 }
 
 @(private = "file")
-write_direct_header :: proc(buf: ^[dynamic]u8, pr: ^query.Projection_Template, delim: u8) {
-	clear(buf)
+emit_direct_header :: proc(
+	need_header: bool,
+	header_emitted: ^bool,
+	hdr_buf: ^[dynamic]u8,
+	pr: ^query.Projection_Template,
+	mode: Direct_Output,
+	append_nl: bool,
+	emit: Emitter,
+	emitted: ^u64,
+) -> bool {
+	if !need_header || header_emitted^ {
+		return true
+	}
+	delim := u8('\t') if mode == .Tsv else u8(',')
+	clear(hdr_buf)
 	idx_buf: [24]u8
 	for f, i in pr.fields {
 		if i > 0 {
-			append(buf, delim)
+			append(hdr_buf, delim)
 		}
 		name := f.key
 		if len(name) == 0 && len(f.path) > 0 {
 			#partial switch step in f.path[len(f.path) - 1] {
-			case tape.Name:
-				name = string(step)
-			case tape.Index:
-				name = strconv.write_int(idx_buf[:], i64(step), 10)
+			case tape.Name:  name = string(step)
+			case tape.Index: name = strconv.write_int(idx_buf[:], i64(step), 10)
 			}
 		}
-		append_dsv_escaped(buf, name, delim)
+		append_dsv_escaped(hdr_buf, name, delim)
 	}
+	if append_nl {
+		append(hdr_buf, '\n')
+	}
+	if !emit_bytes(emit, hdr_buf[:]) {
+		return false
+	}
+	emitted^ += 1
+	header_emitted^ = true
+	return true
 }
 
 @(private = "file")
@@ -222,22 +205,17 @@ exec_direct_coarse_parallel :: proc(
 	dem: ^tape.Demand,
 	need_header: bool,
 	opts: ^Exec_Options,
-) -> (
-	res: Exec_Result,
-	handled: bool,
-) {
-	delim := u8('\n') if tf == .Lines else 0x1e
-	bom := u64(spell.bom_length(src))
-	chunks: [ops_build.MAX_RECORD_CHUNKS]ops_build.Record_Chunk = ---
-	nc := ops_build.cut_delim_chunks(src, bom, delim, ro.runner, chunks[:])
-	if nc < 2 {
-		return {}, false
-	}
+) -> (res: Exec_Result, handled: bool) {
 	jspec, is_json := dec.spec.(json.Spec)
 	if !is_json {
 		return {}, false
 	}
-
+	delim := u8('\n') if tf == .Lines else 0x1e
+	chunks: [ops_build.MAX_RECORD_CHUNKS]ops_build.Record_Chunk = ---
+	nc := ops_build.cut_delim_chunks(src, u64(spell.bom_length(src)), delim, ro.runner, chunks[:])
+	if nc < 2 {
+		return {}, false
+	}
 	slots, serr := make([]Direct_Chunk_Slot, nc, opts.allocator)
 	if serr != nil {
 		return {err = .No_Memory, read_err = serr}, true
@@ -251,30 +229,18 @@ exec_direct_coarse_parallel :: proc(
 	}
 
 	Direct_Job :: struct {
-		src:         []u8,
-		tf:          tape.Framing,
-		jspec:       json.Spec,
-		ro:          tape.Options,
-		pr:          ^query.Projection_Template,
-		dem:         ^tape.Demand,
-		opts:        ^Exec_Options,
-		chunks:      []ops_build.Record_Chunk,
-		slots:       []Direct_Chunk_Slot,
-		use_lock:    bool,
+		src:          []u8,
+		tf:           tape.Framing,
+		jspec:        json.Spec,
+		ro:           tape.Options,
+		pr:           ^query.Projection_Template,
+		dem:          ^tape.Demand,
+		opts:         ^Exec_Options,
+		chunks:       []ops_build.Record_Chunk,
+		slots:        []Direct_Chunk_Slot,
+		alloc_wrap:   Locked_Allocator,
+		scratch_wrap: Locked_Allocator,
 		lock_scratch: bool,
-		alloc_lock:  sync.Mutex,
-	}
-
-	locked_alloc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_ptr: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
-		j := (^Direct_Job)(data)
-		sync.mutex_guard(&j.alloc_lock)
-		return j.opts.allocator.procedure(j.opts.allocator.data, mode, size, alignment, old_ptr, old_size, loc)
-	}
-
-	locked_scratch :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_ptr: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
-		j := (^Direct_Job)(data)
-		sync.mutex_guard(&j.alloc_lock)
-		return j.ro.scratch.procedure(j.ro.scratch.data, mode, size, alignment, old_ptr, old_size, loc)
 	}
 
 	job := Direct_Job{
@@ -287,68 +253,46 @@ exec_direct_coarse_parallel :: proc(
 		opts         = opts,
 		chunks       = chunks[:nc],
 		slots        = slots,
-		use_lock     = !is_thread_safe_heap(opts.allocator),
 		lock_scratch = has_custom_scratch(ro.scratch),
+	}
+	locked_alloc_init(&job.alloc_wrap, opts.allocator)
+	if job.lock_scratch {
+		locked_alloc_init(&job.scratch_wrap, ro.scratch, force_lock = true)
 	}
 
 	run_chunk :: proc(arg: rawptr, k: int) {
 		j := (^Direct_Job)(arg)
-		lalloc := runtime.Allocator{procedure = locked_alloc, data = j} if j.use_lock else j.opts.allocator
+		lalloc := locked_allocator(&j.alloc_wrap)
 		slot := &j.slots[k]
 		c := j.chunks[k]
-		chunk_len := int(c.hi - c.lo)
-		slot.buf = make([dynamic]u8, 0, max(chunk_len / 2, 256), lalloc)
+		slot.buf = make([dynamic]u8, 0, max(int(c.hi - c.lo) / 2, 256), lalloc)
 		slot.events.allocator = lalloc
 
 		chunk_ro := j.ro
 		chunk_ro.runner = nil
 		if j.lock_scratch {
-			chunk_ro.scratch = runtime.Allocator{procedure = locked_scratch, data = j}
+			chunk_ro.scratch = locked_allocator(&j.scratch_wrap)
 		}
-		base_off := u64(0)
-		chunk_src := j.src[:c.hi]
-		if j.tf == .Seq && k > 0 {
-			base_off = c.lo - 1
-			chunk_src = j.src[base_off:c.hi]
-		}
-		lr := json.records_open(chunk_src, j.tf, j.jspec, chunk_ro)
-		defer tape.destroy_records(&lr)
-		lr.skip_bad = j.opts.skip_bad
-		lr.max_bytes = j.opts.max_bytes
-		if j.tf == .Lines && k > 0 {
-			lr.pos = c.lo
-			lr.at = .Open
-		}
-		if lr.err != nil {
-			err_v := adjust_err_offset(lr.err, base_off)
-			slot.err = .No_Memory if is_alloc_err(err_v) else .Read_Error
-			slot.read_err = err_v
+		lr, base_off, oerr_k, oerr_v := open_json_chunk_records(j.src, c, k, j.tf, j.jspec, chunk_ro, j.opts)
+		if oerr_k != .None {
+			slot.err, slot.read_err = oerr_k, oerr_v
 			return
 		}
+		defer tape.destroy_records(&lr)
 
 		flushed := 0
+		pending_rows, pending_recs := u64(0), u64(0)
 		flush_pending :: proc(slot: ^Direct_Chunk_Slot, flushed: ^int, rows, recs: ^u64) -> bool {
 			if len(slot.buf) > flushed^ || recs^ > 0 {
-				if _, aerr := append(&slot.events, Direct_Event{
-					kind  = .Emit_Slice,
-					off   = flushed^,
-					sz    = len(slot.buf) - flushed^,
-					count = rows^,
-					recs  = recs^,
-				}); aerr != nil {
-					slot.err = .No_Memory
-					slot.read_err = aerr
+				if _, aerr := append(&slot.events, Direct_Event{kind = .Emit_Slice, off = flushed^, sz = len(slot.buf) - flushed^, count = rows^, recs = recs^}); aerr != nil {
+					slot.err, slot.read_err = .No_Memory, aerr
 					return false
 				}
-				flushed^ = len(slot.buf)
-				rows^ = 0
-				recs^ = 0
+				flushed^, rows^, recs^ = len(slot.buf), 0, 0
 			}
 			return true
 		}
 
-		pending_rows := u64(0)
-		pending_recs := u64(0)
 		out_recs: [RECORD_BATCH_SIZE]tape.Record = ---
 		docs: [RECORD_BATCH_SIZE]tape.Document = ---
 		for {
@@ -363,8 +307,7 @@ exec_direct_coarse_parallel :: proc(
 						return
 					}
 					if _, aerr := append(&slot.events, Direct_Event{kind = .Bad_Record, rec = r_info}); aerr != nil {
-						slot.err = .No_Memory
-						slot.read_err = aerr
+						slot.err, slot.read_err = .No_Memory, aerr
 						return
 					}
 					continue
@@ -378,8 +321,7 @@ exec_direct_coarse_parallel :: proc(
 						return
 					}
 					if _, aerr := append(&slot.events, Direct_Event{kind = .Wrong_Kind, rec = r_info}); aerr != nil {
-						slot.err = .No_Memory
-						slot.read_err = aerr
+						slot.err, slot.read_err = .No_Memory, aerr
 						return
 					}
 					continue
@@ -392,27 +334,21 @@ exec_direct_coarse_parallel :: proc(
 						_ = flush_pending(slot, &flushed, &pending_rows, &pending_recs)
 					}
 					if aerr, is_a := werr.(runtime.Allocator_Error); is_a {
-						slot.err = .No_Memory
-						slot.read_err = aerr
+						slot.err, slot.read_err = .No_Memory, aerr
 					} else {
-						slot.err = .Write_Error
-						slot.write_err = werr
+						slot.err, slot.write_err = .Write_Error, werr
 					}
 					return
 				}
 				slot.emitted_rows += row_count
 				pending_rows += row_count
-				if !j.opts.coalesce_emit {
-					if !flush_pending(slot, &flushed, &pending_rows, &pending_recs) {
-						return
-					}
+				if !j.opts.coalesce_emit && !flush_pending(slot, &flushed, &pending_rows, &pending_recs) {
+					return
 				}
 			}
 		}
-		if len(slot.events) > 0 {
-			if !flush_pending(slot, &flushed, &pending_rows, &pending_recs) {
-				return
-			}
+		if len(slot.events) > 0 && !flush_pending(slot, &flushed, &pending_rows, &pending_recs) {
+			return
 		}
 		if lr.err != nil {
 			err_v := adjust_err_offset(lr.err, base_off)
@@ -426,31 +362,12 @@ exec_direct_coarse_parallel :: proc(
 	hdr_buf := make([dynamic]u8, 0, 128, opts.allocator)
 	defer delete(hdr_buf)
 	header_emitted := false
-	emit_hdr_if_needed :: proc(need_header: bool, header_emitted: ^bool, hdr_buf: ^[dynamic]u8, pr: ^query.Projection_Template, mode: Direct_Output, append_nl: bool, emit: Emitter, emitted: ^u64) -> bool {
-		if !need_header || header_emitted^ {
-			return true
-		}
-		delim := u8('\t') if mode == .Tsv else u8(',')
-		write_direct_header(hdr_buf, pr, delim)
-		if append_nl {
-			append(hdr_buf, '\n')
-		}
-		if !emit_bytes(emit, hdr_buf[:]) {
-			return false
-		}
-		emitted^ += 1
-		header_emitted^ = true
-		return true
-	}
 
 	for &slot in slots {
 		if len(slot.events) == 0 {
 			if len(slot.buf) > 0 {
-				if !emit_hdr_if_needed(need_header, &header_emitted, &hdr_buf, pr, opts.direct_out, opts.direct_append_nl, opts.emit, &res.emitted) {
-					res.err = .Stopped
-					return res, true
-				}
-				if !emit_bytes(opts.emit, slot.buf[:]) {
+				if !emit_direct_header(need_header, &header_emitted, &hdr_buf, pr, opts.direct_out, opts.direct_append_nl, opts.emit, &res.emitted) ||
+				   !emit_bytes(opts.emit, slot.buf[:]) {
 					res.err = .Stopped
 					return res, true
 				}
@@ -463,11 +380,8 @@ exec_direct_coarse_parallel :: proc(
 				case .Emit_Slice:
 					res.records += ev.recs
 					if ev.sz > 0 {
-						if !emit_hdr_if_needed(need_header, &header_emitted, &hdr_buf, pr, opts.direct_out, opts.direct_append_nl, opts.emit, &res.emitted) {
-							res.err = .Stopped
-							return res, true
-						}
-						if !emit_bytes(opts.emit, slot.buf[ev.off:][:ev.sz]) {
+						if !emit_direct_header(need_header, &header_emitted, &hdr_buf, pr, opts.direct_out, opts.direct_append_nl, opts.emit, &res.emitted) ||
+						   !emit_bytes(opts.emit, slot.buf[ev.off:][:ev.sz]) {
 							res.err = .Stopped
 							return res, true
 						}
@@ -482,16 +396,13 @@ exec_direct_coarse_parallel :: proc(
 					rec_idx := res.records
 					res.records += 1
 					if opts.eval != nil && can_build_single_record(dec, raw) {
-						if !emit_hdr_if_needed(need_header, &header_emitted, &hdr_buf, pr, opts.direct_out, opts.direct_append_nl, opts.emit, &res.emitted) {
+						if !emit_direct_header(need_header, &header_emitted, &hdr_buf, pr, opts.direct_out, opts.direct_append_nl, opts.emit, &res.emitted) {
 							res.err = .Stopped
 							return res, true
 						}
-						meta := make_record_meta(opts, rec_idx, ev.rec, raw)
-						sub := exec_single_record_whole(dec, raw, meta, opts)
-						res.emitted += sub.emitted
+						sub := exec_single_record_whole(dec, raw, make_record_meta(opts, rec_idx, ev.rec, raw), opts)
+						merge_result(&res, sub)
 						if sub.err != .None {
-							res.err = sub.err
-							res.read_err = sub.read_err
 							return res, true
 						}
 						continue
@@ -502,9 +413,7 @@ exec_direct_coarse_parallel :: proc(
 			}
 		}
 		if slot.err != .None {
-			res.err = slot.err
-			res.read_err = slot.read_err
-			res.write_err = slot.write_err
+			res.err, res.read_err, res.write_err = slot.err, slot.read_err, slot.write_err
 			return res, true
 		}
 	}
@@ -512,35 +421,26 @@ exec_direct_coarse_parallel :: proc(
 }
 
 @(private = "file")
-adjust_err_offset :: proc "contextless" (err: tape.Error, base_off: u64) -> tape.Error {
-	if err == nil || base_off == 0 {
-		return err
+has_wrong_projected_field :: proc "contextless" (r: tape.Reader, n_fields: int) -> bool {
+	for i in 0 ..< n_fields {
+		if _, p, has := tape.answer(r, i, 0); has && (p == .Wrong_Kind || p == .Not_Loaded) {
+			return true
+		}
 	}
-	if f, ok := err.(tape.Fault); ok && f.at != tape.NO_BYTE {
-		f.at += base_off
-		return f
-	}
-	if ex, ok := err.(tape.Exceeded); ok && ex.at != tape.NO_BYTE {
-		ex.at += base_off
-		return ex
-	}
-	return err
+	return false
 }
 
 @(private = "file")
-adjust_rec_offset :: proc "contextless" (r: tape.Record, base_off: u64) -> tape.Record {
-	if base_off == 0 {
-		return r
+append_answer_json :: proc(buf: ^[dynamic]u8, doc: ^tape.Document, r: tape.Reader, idx: int, alloc: runtime.Allocator) -> write.Error {
+	node, p, has := tape.answer(r, idx, 0)
+	if !has || p != .Found {
+		append(buf, "null")
+		return nil
 	}
-	out := r
-	out.lo += base_off
-	out.hi += base_off
-	out.err = adjust_err_offset(out.err, base_off)
-	return out
+	return append_node_compact_json(buf, doc, node, alloc)
 }
 
 // Appends one formatted row (or `.Stream` sequence of rows) directly into `buf` without calling `emit`.
-// When `append_nl` is true on JSON shapes (or CSV/TSV), appends `\n` after each logical output line.
 @(private = "file")
 format_projected_row :: proc(
 	doc: ^tape.Document,
@@ -550,33 +450,21 @@ format_projected_row :: proc(
 	alloc: runtime.Allocator,
 	append_nl: bool,
 	row_count: ^u64,
-) -> (
-	wrong_kind: bool,
-	werr: write.Error,
-) {
+) -> (wrong_kind: bool, werr: write.Error) {
 	r := tape.Reader{doc = doc}
 	n_fields := len(pr.fields)
-	for i in 0 ..< n_fields {
-		_, p, has := tape.answer(r, i, 0)
-		if !has {
-			continue
-		}
-		if p == .Wrong_Kind || p == .Not_Loaded {
-			return true, nil
-		}
+	if has_wrong_projected_field(r, n_fields) {
+		return true, nil
 	}
-
 	if mode == .Csv || mode == .Tsv {
 		delim := u8('\t') if mode == .Tsv else u8(',')
 		for i in 0 ..< n_fields {
 			if i > 0 {
 				append(buf, delim)
 			}
-			node, p, has := tape.answer(r, i, 0)
-			if !has || p != .Found {
-				continue
+			if node, p, has := tape.answer(r, i, 0); has && p == .Found {
+				append_node_dsv_cell(buf, doc, node, delim, alloc) or_return
 			}
-			append_node_dsv_cell(buf, doc, node, delim, alloc) or_return
 		}
 		if append_nl {
 			append(buf, '\n')
@@ -587,63 +475,33 @@ format_projected_row :: proc(
 
 	switch pr.shape {
 	case .Single:
-		node, p, has := tape.answer(r, 0, 0)
-		if !has || p != .Found {
-			append(buf, "null")
-		} else {
-			append_node_compact_json(buf, doc, node, alloc) or_return
-		}
+		append_answer_json(buf, doc, r, 0, alloc) or_return
 		if append_nl {
 			append(buf, '\n')
 		}
 		row_count^ = 1
 	case .Stream:
 		for i in 0 ..< n_fields {
-			node, p, has := tape.answer(r, i, 0)
-			if !has || p != .Found {
-				append(buf, "null")
-			} else {
-				append_node_compact_json(buf, doc, node, alloc) or_return
-			}
+			append_answer_json(buf, doc, r, i, alloc) or_return
 			if append_nl {
 				append(buf, '\n')
 			}
 		}
 		row_count^ = u64(n_fields)
-	case .Array:
-		append(buf, '[')
-		for i in 0 ..< n_fields {
-			if i > 0 {
-				append(buf, ',')
-			}
-			node, p, has := tape.answer(r, i, 0)
-			if !has || p != .Found {
-				append(buf, "null")
-			} else {
-				append_node_compact_json(buf, doc, node, alloc) or_return
-			}
-		}
-		append(buf, ']')
-		if append_nl {
-			append(buf, '\n')
-		}
-		row_count^ = 1
-	case .Object:
-		append(buf, '{')
+	case .Array, .Object:
+		is_obj := pr.shape == .Object
+		append(buf, '{' if is_obj else '[')
 		for f, i in pr.fields {
 			if i > 0 {
 				append(buf, ',')
 			}
-			append_json_string(buf, f.key)
-			append(buf, ':')
-			node, p, has := tape.answer(r, i, 0)
-			if !has || p != .Found {
-				append(buf, "null")
-			} else {
-				append_node_compact_json(buf, doc, node, alloc) or_return
+			if is_obj {
+				append_json_string(buf, f.key)
+				append(buf, ':')
 			}
+			append_answer_json(buf, doc, r, i, alloc) or_return
 		}
-		append(buf, '}')
+		append(buf, '}' if is_obj else ']')
 		if append_nl {
 			append(buf, '\n')
 		}
@@ -667,62 +525,16 @@ emit_projected_doc :: proc(
 	emitted: ^u64,
 	alloc: runtime.Allocator,
 	append_nl := false,
-) -> (
-	ok: bool,
-	wrong_kind: bool,
-	werr: write.Error,
-) {
-	if mode == .Csv || mode == .Tsv {
+) -> (ok: bool, wrong_kind: bool, werr: write.Error) {
+	if mode == .Json && pr.shape == .Stream {
 		r := tape.Reader{doc = doc}
 		n_fields := len(pr.fields)
-		for i in 0 ..< n_fields {
-			_, p, has := tape.answer(r, i, 0)
-			if has && (p == .Wrong_Kind || p == .Not_Loaded) {
-				return false, true, nil
-			}
-		}
-		clear(buf)
-		delim := u8('\t') if mode == .Tsv else u8(',')
-		row_cnt: u64
-		wrong, rerr := format_projected_row(doc, pr, mode, buf, alloc, append_nl, &row_cnt)
-		if wrong || rerr != nil {
-			return false, wrong, rerr
-		}
-		if need_header && !header_emitted^ {
-			write_direct_header(hdr_buf, pr, delim)
-			if append_nl {
-				append(hdr_buf, '\n')
-			}
-			if !emit_bytes(emit, hdr_buf[:]) {
-				return false, false, nil
-			}
-			emitted^ += 1
-			header_emitted^ = true
-		}
-		if !emit_bytes(emit, buf[:]) {
-			return false, false, nil
-		}
-		emitted^ += 1
-		return true, false, nil
-	}
-
-	if pr.shape == .Stream {
-		r := tape.Reader{doc = doc}
-		n_fields := len(pr.fields)
-		for i in 0 ..< n_fields {
-			_, p, has := tape.answer(r, i, 0)
-			if has && (p == .Wrong_Kind || p == .Not_Loaded) {
-				return false, true, nil
-			}
+		if has_wrong_projected_field(r, n_fields) {
+			return false, true, nil
 		}
 		for i in 0 ..< n_fields {
 			clear(buf)
-			node, p, has := tape.answer(r, i, 0)
-			if !has || p != .Found {
-				append(buf, "null")
-			} else {
-				append_node_compact_json(buf, doc, node, alloc) or_return
-			}
+			append_answer_json(buf, doc, r, i, alloc) or_return
 			if append_nl {
 				append(buf, '\n')
 			}
@@ -740,6 +552,9 @@ emit_projected_doc :: proc(
 	if wrong || rerr != nil {
 		return false, wrong, rerr
 	}
+	if mode != .Json && !emit_direct_header(need_header, header_emitted, hdr_buf, pr, mode, append_nl, emit, emitted) {
+		return false, false, nil
+	}
 	if !emit_bytes(emit, buf[:]) {
 		return false, false, nil
 	}
@@ -747,7 +562,6 @@ emit_projected_doc :: proc(
 	return true, false, nil
 }
 
-// Appends node `node` of `doc` formatted as compact JSON into `buf` without extra copies where possible.
 @(private = "file")
 append_node_compact_json :: proc(buf: ^[dynamic]u8, doc: ^tape.Document, node: tape.Node_Index, alloc: runtime.Allocator) -> write.Error {
 	if node == tape.NO_NODE || int(node) >= len(doc.nodes) {
@@ -757,28 +571,19 @@ append_node_compact_json :: proc(buf: ^[dynamic]u8, doc: ^tape.Document, node: t
 	t := doc.nodes[node]
 	if doc.format == nil || .Binary not_in doc.format.caps {
 		#partial switch t.kind {
-		case .Null:
-			append(buf, "null")
-			return nil
-		case .False:
-			append(buf, "false")
-			return nil
-		case .True:
-			append(buf, "true")
-			return nil
+		case .Null:  append(buf, "null"); return nil
+		case .False: append(buf, "false"); return nil
+		case .True:  append(buf, "true"); return nil
 		case .String:
 			if t.spelling & tape.SPELLING_DECODE == 0 && doc.format != nil && doc.format.name == "json" {
-				raw := tape.span_bytes(doc, t.lo, t.n)
 				append(buf, '"')
-				append(buf, ..raw)
+				append(buf, ..tape.span_bytes(doc, t.lo, t.n))
 				append(buf, '"')
 				return nil
 			}
 		case .Number:
-			// Guard `NUMBER_KIND == 0` so tolerant `.Non_Finite` (`NaN`/`Infinity`) and JSON5 forms delegate to `json.write`.
 			if doc.format != nil && doc.format.name == "json" && (t.spelling & (tape.SPELLING_DECODE | tape.NUMBER_KIND)) == 0 {
-				raw := tape.span_bytes(doc, t.lo, t.n)
-				append(buf, ..raw)
+				append(buf, ..tape.span_bytes(doc, t.lo, t.n))
 				return nil
 			}
 		}
@@ -799,19 +604,13 @@ append_node_dsv_cell :: proc(buf: ^[dynamic]u8, doc: ^tape.Document, node: tape.
 	}
 	t := doc.nodes[node]
 	#partial switch t.kind {
-	case .Null:
-		return nil
-	case .True:
-		append(buf, "true")
-		return nil
-	case .False:
-		append(buf, "false")
-		return nil
+	case .Null:  return nil
+	case .True:  append(buf, "true"); return nil
+	case .False: append(buf, "false"); return nil
 	case .Number:
 		is_binary := doc.format != nil && .Binary in doc.format.caps
 		if !is_binary && (t.spelling & tape.NUMBER_KIND) == 0 && doc.format != nil && doc.format.name != "toml" && doc.format.name != "toml-1.1" {
-			s := string(tape.span_bytes(doc, t.lo, t.n))
-			append_dsv_escaped(buf, s, delim)
+			append_dsv_escaped(buf, string(tape.span_bytes(doc, t.lo, t.n)), delim)
 			return nil
 		}
 		text, _, err := json.write(doc, .Json, {node = node}, alloc)
@@ -824,8 +623,7 @@ append_node_dsv_cell :: proc(buf: ^[dynamic]u8, doc: ^tape.Document, node: tape.
 	case .String, .Plain, .Bytes:
 		room := tape.text_room(doc, node)
 		if room == 0 && doc.format != nil && .Binary not_in doc.format.caps {
-			s := string(tape.span_bytes(doc, t.lo, t.n))
-			append_dsv_escaped(buf, s, delim)
+			append_dsv_escaped(buf, string(tape.span_bytes(doc, t.lo, t.n)), delim)
 			return nil
 		}
 		tmp, merr := make([]u8, max(room, int(t.n), 64), alloc)

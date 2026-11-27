@@ -1302,4 +1302,44 @@ wave_b3_neon_regressions_test :: proc(t: ^testing.T) {
 		testing.expect(t, !r_over_nodes.valid)
 		testing.expect_value(t, r_over_nodes.err.kind, check.Error_Kind.Exceeded)
 	}
+
+	// Step budget on factored objects and factored arrays (`charge_step_one` / `charge_steps`).
+	{
+		obj_sch := `{
+			"$schema": "https://json-schema.org/draft/2020-12/schema",
+			"type": "object",
+			"oneOf": [
+				{ "properties": { "k": { "const": "a" }, "a": { "type": "integer" }, "b": { "type": "integer" }, "c": { "type": "integer" } }, "required": ["k"] },
+				{ "properties": { "k": { "const": "b" }, "a": { "type": "string" } }, "required": ["k"] }
+			]
+		}`
+		co := compile_b3_json(t, obj_sch)
+		defer schema.destroy(co)
+		in_obj := transmute([]u8)string(`{"k":"a","a":1,"b":2,"c":3}`)
+		r_tight := json.check(in_obj, &co.plan, .Json, {budget = {steps = 4}})
+		defer check.result_destroy(&r_tight)
+		testing.expect(t, !r_tight.valid)
+		testing.expect_value(t, r_tight.err.kind, check.Error_Kind.Exceeded)
+		r_generous := json.check(in_obj, &co.plan, .Json, {budget = {steps = 500}})
+		defer check.result_destroy(&r_generous)
+		testing.expect(t, r_generous.valid)
+
+		arr_sch := `{
+			"$schema": "https://json-schema.org/draft/2020-12/schema",
+			"type": "array",
+			"uniqueItems": true,
+			"contains": { "type": "integer" },
+			"items": { "type": "integer" }
+		}`
+		ca := compile_b3_json(t, arr_sch)
+		defer schema.destroy(ca)
+		in_arr := transmute([]u8)string(`[1,2,3,4,5,6]`)
+		r_arr_tight := json.check(in_arr, &ca.plan, .Json, {budget = {steps = 4}})
+		defer check.result_destroy(&r_arr_tight)
+		testing.expect(t, !r_arr_tight.valid)
+		testing.expect_value(t, r_arr_tight.err.kind, check.Error_Kind.Exceeded)
+		r_arr_ok := json.check(in_arr, &ca.plan, .Json, {budget = {steps = 500}})
+		defer check.result_destroy(&r_arr_ok)
+		testing.expect(t, r_arr_ok.valid)
+	}
 }

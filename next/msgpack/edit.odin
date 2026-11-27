@@ -1,7 +1,6 @@
 package msgpack
 
 import "base:runtime"
-import "core:encoding/endian"
 import "core:strconv"
 import "core:unicode/utf8"
 import "stury:lib/base/spell"
@@ -9,10 +8,9 @@ import "stury:lib/core/tape"
 import "stury:lib/ops/edit"
 import ops_write "stury:lib/ops/write"
 
-// Byte-preserving MessagePack overlay editing (`edit_init`, `edit_destroy`, `commit`, `commit_document`, `walk_fragment`).
-// Untouched compatible subtrees copy verbatim; edited, `.Base_Ref`, and cross-spec upgraded subtrees
-// encode iteratively (zero recursion), supporting MessagePack `.Tag` overrides (`-128..127` / `"datetime"`),
-// `.Bytes`, `.Raw`, structural deltas, reorder validation, and incremental document splicing.
+// Byte-preserving MessagePack overlay editing over `edit.commit_binary` (`edit_init`, `edit_destroy`, `commit`,
+// `commit_document`, `walk_fragment`), supporting `.Tag` overrides (`-128..127` / `"datetime"`), `.Bytes`, `.Raw`,
+// `.Base_Ref`, structural deltas, reorder validation, cross-spec `.Compact` upgrades, and incremental splicing.
 
 Overlay :: edit.Overlay
 Handle :: edit.Handle
@@ -39,62 +37,28 @@ commit :: proc(
 	err: Edit_Error,
 ) {
 	resolved := resolve_edit_spec(ov, spec, opts)
-	target := as(resolved)
-	same_family := ov != nil && ov.base != nil && ov.base.format != nil && (ov.base.format == as(.Msgpack) || ov.base.format == as(.Compact))
-	same_format := same_family && (target == ov.base.format || resolved != .Compact)
-	val_ctx := Edit_Ctx{spec = resolved, budget = opts.budget}
-	fast, _, fast_res, gerr := edit.commit_guard(ov, target, opts, same_format, edit_validate_cb, &val_ctx, allocator)
-	if gerr != nil {
-		return {}, gerr
-	}
-	if fast {
-		return fast_res, nil
-	}
-	if ov.unlinked_parents {
-		edit.ensure_linked(ov) or_return
-	}
-	doc := ov.base
-	cx := Edit_Cx {
-		ov          = ov,
-		doc         = doc,
-		src         = doc.src,
+	same_family := ov != nil && ov.base != nil && read_as_msgpack(ov.base)
+	ctx := Edit_Ctx {
 		spec        = resolved,
-		verbatim_ok = same_family && (resolved != .Compact || doc.format == as(.Compact)),
+		budget      = opts.budget,
+		verbatim_ok = same_family && (resolved != .Compact || ov.base.format == as(.Compact)),
 		allocator   = allocator,
 	}
-	out := make([dynamic]u8, 0, len(doc.src), allocator)
-	defer if err != nil {
-		delete(out)
+	bspec := edit.Binary_Spec {
+		target         = as(resolved),
+		same_family    = same_family,
+		strict         = resolved == .Compact,
+		no_prefix_tags = true,
+		head_len       = msgpack_head_len,
+		put_head       = msgpack_put_head,
+		put_key        = msgpack_put_key,
+		put_base_key   = msgpack_put_base_key,
+		emit_tags      = msgpack_check_container_tags,
+		spell_value    = msgpack_spell_value,
+		validate       = edit_validate_cb,
+		data           = &ctx,
 	}
-	recs := make([dynamic]edit.Splice_Record, 0, 8, allocator)
-	defer if err != nil {
-		delete(recs)
-	}
-	emit_msgpack_iterative(&cx, &out, &recs) or_return
-	if verr := validate(out[:], resolved, {budget = opts.budget}, allocator); verr != nil {
-		return {}, to_edit_error(verr)
-	}
-	return Commit_Result {
-		bytes     = out[:],
-		dropped   = cx.dropped,
-		splices   = recs[:],
-		allocator = allocator,
-	}, nil
-}
-
-@(private = "file")
-to_edit_error :: proc "contextless" (err: tape.Error) -> Edit_Error {
-	#partial switch e in err {
-	case tape.Fault:
-		return e
-	case tape.Exceeded:
-		return e
-	case tape.Bad_Option:
-		return e
-	case runtime.Allocator_Error:
-		return e
-	}
-	return edit.refuse(.Invalid_Result, "edited MessagePack invalid")
+	return edit.commit_binary(ov, &bspec, opts, allocator)
 }
 
 commit_document :: proc(
@@ -146,19 +110,18 @@ walk_fragment :: proc(
 
 @(private = "file")
 Edit_Ctx :: struct {
-	spec:   Spec,
-	budget: tape.Budget,
+	spec:        Spec,
+	budget:      tape.Budget,
+	verbatim_ok: bool,
+	allocator:   runtime.Allocator,
 }
 
 @(private = "file")
-Edit_Cx :: struct {
-	ov:          ^Overlay,
-	doc:         ^tape.Document,
-	src:         []u8,
-	spec:        Spec,
-	verbatim_ok: bool,
-	dropped:     tape.Facts,
-	allocator:   runtime.Allocator,
+Tag_Edit :: enum u8 {
+	Keep,
+	Delete,
+	Ext_Int,
+	Datetime,
 }
 
 @(private = "file")
@@ -189,8 +152,7 @@ walk_fragment_cb :: proc(
 	ctx: edit.Fragment_Context,
 	allocator: runtime.Allocator,
 ) -> (edit.Fragment_Tape, tape.Error) {
-	cc := (^Edit_Ctx)(data)
-	return walk_fragment(src, range, ctx, cc.spec, allocator)
+	return walk_fragment(src, range, ctx, (^Edit_Ctx)(data).spec, allocator)
 }
 
 @(private = "file")
@@ -206,27 +168,163 @@ edit_validate_cb :: proc(data: rawptr, src: []u8, allocator: runtime.Allocator) 
 }
 
 @(private = "file")
-item_span :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (tags_lo, item_lo, item_hi: u64) {
-	item_lo, item_hi, _ = edit.node_byte_span(doc, at)
-	tags_lo = item_lo
-	for f in tape.facts_of(doc, at) {
-		if f.kind == .Tag && f.lo < tags_lo {
-			tags_lo = f.lo
+msgpack_head_len :: proc "contextless" (src: []u8, at: u64) -> u64 {
+	return u64(container_head_len(src[at]))
+}
+
+@(private = "file")
+msgpack_put_head :: proc(data: rawptr, major: u8, count: u64, dst: ^[dynamic]u8) -> Edit_Error {
+	_ = data
+	if count > u64(max(u32)) {
+		return edit.refuse(.Unspellable_Value, "container exceeds MessagePack max count")
+	}
+	buf: [5]u8 = ---
+	k := encode_container_head(&buf[0], major == 5, u32(count))
+	append(dst, ..buf[:k]) or_return
+	return nil
+}
+
+@(private = "file")
+msgpack_put_key :: proc(data: rawptr, key: string, node: tape.Node_Index, dst: ^[dynamic]u8) -> Edit_Error {
+	_ = data
+	return append_msgpack_str(dst, key, node)
+}
+
+@(private = "file")
+msgpack_check_container_tags :: proc(
+	data: rawptr,
+	doc: ^tape.Document,
+	n: ^edit.Edit_Node,
+	base_c: tape.Node_Index,
+	tags_lo, item_lo: u64,
+	dropped: ^tape.Facts,
+	dst: ^[dynamic]u8,
+) -> Edit_Error {
+	_ = data
+	_ = tags_lo
+	_ = item_lo
+	_ = dst
+	err_node := n.base if n.base != tape.NO_NODE else base_c
+	tag_mode, _ := parse_tag_override(dropped, n) or_return
+	if tag_mode == .Ext_Int || tag_mode == .Datetime {
+		return edit.refuse(.Fact_No_Place, "MessagePack ext tag cannot wrap containers", err_node)
+	}
+	if base_c != tape.NO_NODE && !read_as_msgpack(doc) {
+		for f in tape.facts_of(doc, base_c) {
+			if f.kind != .Tag || tag_mode != .Delete {
+				dropped^ += {f.kind}
+			}
 		}
 	}
-	return tags_lo, item_lo, item_hi
+	return nil
 }
 
 @(private = "file")
-Tag_Edit :: enum u8 {
-	Keep,
-	Delete,
-	Ext_Int,
-	Datetime,
+msgpack_put_base_key :: proc(data: rawptr, doc: ^tape.Document, base_key: tape.Node_Index, dropped: ^tape.Facts, dst: ^[dynamic]u8) -> Edit_Error {
+	cc := (^Edit_Ctx)(data)
+	bnode := doc.nodes[base_key]
+	is_mp := read_as_msgpack(doc)
+	if !is_mp {
+		for f in tape.facts_of(doc, base_key) {
+			dropped^ += {f.kind}
+		}
+		if doc.format != nil && doc.format.fact_name != nil {
+			if _, has := doc.format.fact_name(doc, base_key, .Tag); has {
+				dropped^ += {.Tag}
+			}
+		}
+	}
+	#partial switch bnode.kind {
+	case .Number:
+		if is_mp {
+			put_compact_number_bytes(dst, number_value(doc.src, bnode)) or_return
+			return nil
+		}
+		num, ok := tape.node_number(doc, base_key)
+		if !ok || (num.kind != .Int && num.kind != .Uint) {
+			return edit.refuse(.Unspellable_Value, "unsupported MessagePack map key number", base_key)
+		}
+		put_compact_number_bytes(dst, num) or_return
+		return nil
+	case .Bytes:
+		return append_msgpack_bin(dst, tape.span_bytes(doc, bnode.lo, bnode.n), base_key)
+	case .String, .Plain:
+		if is_mp && bnode.spelling & STR_TIMESTAMP != 0 {
+			sec, nsec, tok := timestamp_decode(tape.span_bytes(doc, bnode.lo, bnode.n))
+			if !tok {
+				return edit.refuse(.Unspellable_Value, "invalid MessagePack timestamp key", base_key)
+			}
+			append_msgpack_timestamp(dst, sec, nsec) or_return
+			return nil
+		}
+		tk := edit.decode_node_text_tmp(doc, base_key, cc.allocator)
+		defer edit.free_tmp_text(tk, cc.allocator)
+		return append_msgpack_str(dst, tk.text, base_key)
+	}
+	return edit.refuse(.Unspellable_Value, "unsupported MessagePack map key kind", base_key)
 }
 
 @(private = "file")
-parse_tag_override :: proc(cx: ^Edit_Cx, n: ^edit.Edit_Node) -> (mode: Tag_Edit, ext_type: i8, err: Edit_Error) {
+msgpack_spell_value :: proc(
+	data: rawptr,
+	ov: ^Overlay,
+	h: Handle,
+	base_node: tape.Node_Index,
+	dropped: ^tape.Facts,
+	dst: ^[dynamic]u8,
+) -> Edit_Error {
+	cc := (^Edit_Ctx)(data)
+	doc := ov.base
+	if h == edit.NO_HANDLE {
+		return write_base_subtree(doc, cc.spec, base_node, dropped, cc.allocator, dst)
+	}
+	n, ok := edit.get_node(ov, h)
+	if !ok {
+		return edit.refuse(.Bad_Handle, "invalid overlay handle")
+	}
+	if !n.has_edits && n.base != tape.NO_NODE && n.base_ref == tape.NO_NODE {
+		return write_base_subtree(doc, cc.spec, n.base, dropped, cc.allocator, dst)
+	}
+	if base_node != tape.NO_NODE && n.state != .Replaced {
+		// Fact-only edit on a base leaf.
+		tag_mode, ext_type := parse_tag_override(dropped, n) or_return
+		if tag_mode == .Keep {
+			if cc.verbatim_ok && n.base != tape.NO_NODE {
+				tlo, _, ihi := edit.binary_item_span(doc, n.base)
+				append(dst, ..doc.src[tlo:ihi]) or_return
+				return nil
+			}
+			return write_base_subtree(doc, cc.spec, base_node, dropped, cc.allocator, dst)
+		}
+		if !read_as_msgpack(doc) {
+			for f in tape.facts_of(doc, base_node) {
+				if f.kind != .Tag {
+					dropped^ += {f.kind}
+				}
+			}
+		}
+		return apply_tag_on_base_leaf(doc, cc.spec, base_node, tag_mode, ext_type, dropped, cc.allocator, dst)
+	}
+	if n.val.kind == .Base_Ref {
+		tag_mode, ext_type := parse_tag_override(dropped, n) or_return
+		if tag_mode == .Keep {
+			if cc.verbatim_ok {
+				rlo, _, rhi := edit.binary_item_span(doc, n.val.base_ref)
+				append(dst, ..doc.src[rlo:rhi]) or_return
+				return nil
+			}
+			return write_base_subtree(doc, cc.spec, n.val.base_ref, dropped, cc.allocator, dst)
+		}
+		if doc.nodes[n.val.base_ref].kind >= .Array {
+			return edit.refuse(.Fact_No_Place, "MessagePack ext tag cannot wrap containers", n.base)
+		}
+		return apply_tag_on_base_leaf(doc, cc.spec, n.val.base_ref, tag_mode, ext_type, dropped, cc.allocator, dst)
+	}
+	return emit_scalar_node(n, dropped, dst)
+}
+
+@(private = "file")
+parse_tag_override :: proc(dropped: ^tape.Facts, n: ^edit.Edit_Node) -> (mode: Tag_Edit, ext_type: i8, err: Edit_Error) {
 	has_tag := false
 	tag_fo: edit.Fact_Override
 	for f in n.facts {
@@ -234,7 +332,7 @@ parse_tag_override :: proc(cx: ^Edit_Cx, n: ^edit.Edit_Node) -> (mode: Tag_Edit,
 			has_tag = true
 			tag_fo = f
 		} else if !f.deleted {
-			cx.dropped += {f.kind}
+			dropped^ += {f.kind}
 		}
 	}
 	if !has_tag {
@@ -265,13 +363,13 @@ parse_tag_override :: proc(cx: ^Edit_Cx, n: ^edit.Edit_Node) -> (mode: Tag_Edit,
 }
 
 @(private = "file")
-write_base_subtree :: proc(cx: ^Edit_Cx, at: tape.Node_Index, dst: ^[dynamic]u8) -> Edit_Error {
-	encoded, dropped, werr := write(cx.doc, cx.spec, {node = at}, cx.allocator)
+write_base_subtree :: proc(doc: ^tape.Document, spec: Spec, at: tape.Node_Index, dropped: ^tape.Facts, allocator: runtime.Allocator, dst: ^[dynamic]u8) -> Edit_Error {
+	encoded, wdrop, werr := write(doc, spec, {node = at}, allocator)
 	if werr != nil {
 		return map_write_err(werr)
 	}
-	defer delete(encoded, cx.allocator)
-	cx.dropped += dropped
+	defer delete(encoded, allocator)
+	dropped^ += wdrop
 	append(dst, ..encoded) or_return
 	return nil
 }
@@ -295,21 +393,9 @@ append_msgpack_str :: proc(dst: ^[dynamic]u8, s: string, node: tape.Node_Index) 
 	if !utf8.valid_string(s) || u64(len(s)) > u64(max(u32)) {
 		return edit.refuse(.Unspellable_Value, "invalid UTF-8 or oversized string", node)
 	}
-	n := u32(len(s))
-	switch {
-	case n <= 31:
-		append(dst, 0xa0 | u8(n)) or_return
-	case n <= 0xff:
-		append(dst, 0xd9, u8(n)) or_return
-	case n <= 0xffff:
-		b: [3]u8 = {0xda, 0, 0}
-		endian.unchecked_put_u16be(b[1:], u16(n))
-		append(dst, ..b[:]) or_return
-	case:
-		b: [5]u8 = {0xdb, 0, 0, 0, 0}
-		endian.unchecked_put_u32be(b[1:], n)
-		append(dst, ..b[:]) or_return
-	}
+	buf: [5]u8 = ---
+	k := encode_str_head(&buf[0], u32(len(s)))
+	append(dst, ..buf[:k]) or_return
 	append(dst, s) or_return
 	return nil
 }
@@ -319,19 +405,9 @@ append_msgpack_bin :: proc(dst: ^[dynamic]u8, raw: []u8, node: tape.Node_Index) 
 	if u64(len(raw)) > u64(max(u32)) {
 		return edit.refuse(.Unspellable_Value, "oversized binary payload", node)
 	}
-	n := u32(len(raw))
-	switch {
-	case n <= 0xff:
-		append(dst, 0xc4, u8(n)) or_return
-	case n <= 0xffff:
-		b: [3]u8 = {0xc5, 0, 0}
-		endian.unchecked_put_u16be(b[1:], u16(n))
-		append(dst, ..b[:]) or_return
-	case:
-		b: [5]u8 = {0xc6, 0, 0, 0, 0}
-		endian.unchecked_put_u32be(b[1:], n)
-		append(dst, ..b[:]) or_return
-	}
+	buf: [5]u8 = ---
+	k := encode_bin_head(&buf[0], u32(len(raw)))
+	append(dst, ..buf[:k]) or_return
 	append(dst, ..raw) or_return
 	return nil
 }
@@ -353,87 +429,38 @@ append_msgpack_ext :: proc(dst: ^[dynamic]u8, ext_type: i8, raw: []u8, node: tap
 
 @(private = "file")
 append_msgpack_timestamp :: proc(dst: ^[dynamic]u8, sec: i64, nsec: u32) -> runtime.Allocator_Error {
-	if nsec == 0 && sec >= 0 && sec <= 0xFFFF_FFFF {
-		b: [6]u8 = {0xd6, 0xff, 0, 0, 0, 0}
-		endian.unchecked_put_u32be(b[2:], u32(sec))
-		_, err := append(dst, ..b[:])
-		return err
-	}
-	if sec >= 0 && sec <= 0x3_FFFF_FFFF {
-		b: [10]u8 = {0xd7, 0xff, 0, 0, 0, 0, 0, 0, 0, 0}
-		endian.unchecked_put_u64be(b[2:], (u64(nsec) << 34) | u64(sec))
-		_, err := append(dst, ..b[:])
-		return err
-	}
-	b: [15]u8 = {0xc7, 12, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	endian.unchecked_put_u32be(b[3:7], nsec)
-	endian.unchecked_put_u64be(b[7:15], u64(sec))
-	_, err := append(dst, ..b[:])
+	buf: [15]u8 = ---
+	total, _ := encode_timestamp(&buf[0], sec, nsec)
+	_, err := append(dst, ..buf[:total])
 	return err
 }
 
 @(private = "file")
-append_container_head_bytes :: proc(dst: ^[dynamic]u8, object: bool, count: int) -> Edit_Error {
-	if u64(count) > u64(max(u32)) {
-		return edit.refuse(.Unspellable_Value, "container exceeds MessagePack max count")
-	}
-	c := u32(count)
-	switch {
-	case c <= 15:
-		append(dst, (0x80 if object else 0x90) | u8(c)) or_return
-	case c <= 0xffff:
-		b: [3]u8 = {0xde if object else 0xdc, 0, 0}
-		endian.unchecked_put_u16be(b[1:], u16(c))
-		append(dst, ..b[:]) or_return
-	case:
-		b: [5]u8 = {0xdf if object else 0xdd, 0, 0, 0, 0}
-		endian.unchecked_put_u32be(b[1:], c)
-		append(dst, ..b[:]) or_return
-	}
-	return nil
-}
-
-@(private = "file")
-emit_scalar_node :: proc(cx: ^Edit_Cx, n: ^edit.Edit_Node, dst: ^[dynamic]u8) -> Edit_Error {
-	tag_mode, ext_type := parse_tag_override(cx, n) or_return
+emit_scalar_node :: proc(n: ^edit.Edit_Node, dropped: ^tape.Facts, dst: ^[dynamic]u8) -> Edit_Error {
+	tag_mode, ext_type := parse_tag_override(dropped, n) or_return
+	tagged := tag_mode == .Ext_Int || tag_mode == .Datetime
 	#partial switch n.val.kind {
-	case .Null:
-		if tag_mode == .Ext_Int || tag_mode == .Datetime {
-			return edit.refuse(.Fact_No_Place, "cannot apply MessagePack ext tag to null", n.base)
+	case .Null, .False, .True:
+		if tagged {
+			return edit.refuse(.Fact_No_Place, "cannot apply MessagePack ext tag to null/boolean", n.base)
 		}
-		append(dst, 0xc0) or_return
-	case .False:
-		if tag_mode == .Ext_Int || tag_mode == .Datetime {
-			return edit.refuse(.Fact_No_Place, "cannot apply MessagePack ext tag to boolean", n.base)
-		}
-		append(dst, 0xc2) or_return
-	case .True:
-		if tag_mode == .Ext_Int || tag_mode == .Datetime {
-			return edit.refuse(.Fact_No_Place, "cannot apply MessagePack ext tag to boolean", n.base)
-		}
-		append(dst, 0xc3) or_return
-	case .Int:
-		if tag_mode == .Ext_Int || tag_mode == .Datetime {
-			return edit.refuse(.Fact_No_Place, "cannot apply MessagePack ext tag to integer", n.base)
-		}
-		put_compact_number_bytes(dst, {u64(n.val.i), .Int}) or_return
-	case .Uint:
-		if tag_mode == .Ext_Int || tag_mode == .Datetime {
-			return edit.refuse(.Fact_No_Place, "cannot apply MessagePack ext tag to unsigned integer", n.base)
-		}
-		put_compact_number_bytes(dst, {n.val.u, .Uint}) or_return
-	case .Float:
-		if tag_mode == .Ext_Int || tag_mode == .Datetime {
-			return edit.refuse(.Fact_No_Place, "cannot apply MessagePack ext tag to float", n.base)
-		}
-		put_compact_number_bytes(dst, {transmute(u64)n.val.f, .Float}) or_return
-	case .Number_Text:
-		if tag_mode == .Ext_Int || tag_mode == .Datetime {
+		b := u8(0xc0) if n.val.kind == .Null else (u8(0xc2) if n.val.kind == .False else u8(0xc3))
+		append(dst, b) or_return
+	case .Int, .Uint, .Float, .Number_Text:
+		if tagged {
 			return edit.refuse(.Fact_No_Place, "cannot apply MessagePack ext tag to number", n.base)
 		}
-		num, ok := parse_token_number(n.val.text)
-		if !ok {
-			return edit.refuse(.Unspellable_Value, "number cannot be represented in MessagePack", n.base)
+		num: spell.Number
+		#partial switch n.val.kind {
+		case .Int:   num = {u64(n.val.i), .Int}
+		case .Uint:  num = {n.val.u, .Uint}
+		case .Float: num = {transmute(u64)n.val.f, .Float}
+		case .Number_Text:
+			ok: bool
+			num, ok = parse_token_number(n.val.text)
+			if !ok {
+				return edit.refuse(.Unspellable_Value, "number cannot be represented in MessagePack", n.base)
+			}
 		}
 		put_compact_number_bytes(dst, num) or_return
 	case .String:
@@ -459,10 +486,9 @@ emit_scalar_node :: proc(cx: ^Edit_Cx, n: ^edit.Edit_Node, dst: ^[dynamic]u8) ->
 			return nil
 		}
 		if tag_mode == .Ext_Int {
-			append_msgpack_ext(dst, ext_type, n.val.raw, n.base) or_return
-			return nil
+			return append_msgpack_ext(dst, ext_type, n.val.raw, n.base)
 		}
-		append_msgpack_bin(dst, n.val.raw, n.base) or_return
+		return append_msgpack_bin(dst, n.val.raw, n.base)
 	case .Raw:
 		append(dst, n.val.text) or_return
 	case:
@@ -472,420 +498,34 @@ emit_scalar_node :: proc(cx: ^Edit_Cx, n: ^edit.Edit_Node, dst: ^[dynamic]u8) ->
 }
 
 @(private = "file")
-emit_msgpack_iterative :: proc(cx: ^Edit_Cx, out: ^[dynamic]u8, recs: ^[dynamic]edit.Splice_Record) -> Edit_Error {
-	Item_Ref :: struct {
-		handle:      Handle,
-		base_key:    tape.Node_Index,
-		base_val:    tape.Node_Index,
-		key_text:    string,
-		use_key_str: bool,
-	}
-	Frame :: struct {
-		is_obj:     bool,
-		items:      []Item_Ref,
-		owned_keys: []string,
-		idx:        int,
-	}
-	stack := make([dynamic]Frame, 0, 32, cx.allocator)
-	defer {
-		for &fr in stack {
-			delete(fr.items, cx.allocator)
-			for s in fr.owned_keys {
-				delete(s, cx.allocator)
-			}
-			delete(fr.owned_keys, cx.allocator)
-		}
-		delete(stack)
-	}
-
-	emit_or_push :: proc(
-		cx: ^Edit_Cx,
-		dst: ^[dynamic]u8,
-		recs: ^[dynamic]edit.Splice_Record,
-		stack: ^[dynamic]Frame,
-		h: Handle,
-		base_node: tape.Node_Index,
-	) -> Edit_Error {
-		if h == edit.NO_HANDLE {
-			if cx.verbatim_ok {
-				tags_lo, _, item_hi := item_span(cx.doc, base_node)
-				append(dst, ..cx.src[tags_lo:item_hi]) or_return
-				return nil
-			}
-			return write_base_subtree(cx, base_node, dst)
-		}
-		n, ok := edit.get_node(cx.ov, h)
-		if !ok {
-			return edit.refuse(.Bad_Handle, "invalid overlay handle")
-		}
-		if !n.has_edits && n.base != tape.NO_NODE && n.base_ref == tape.NO_NODE {
-			if cx.verbatim_ok {
-				tags_lo, _, item_hi := item_span(cx.doc, n.base)
-				append(dst, ..cx.src[tags_lo:item_hi]) or_return
-				return nil
-			}
-			return write_base_subtree(cx, n.base, dst)
-		}
-		tags_lo, item_lo, item_hi: u64
-		if n.base != tape.NO_NODE {
-			tags_lo, item_lo, item_hi = item_span(cx.doc, n.base)
-		}
-		dst_start := u64(len(dst))
-
-		if n.state == .Replaced || (n.base == tape.NO_NODE && n.base_ref == tape.NO_NODE) {
-			if n.val.kind == .Base_Ref {
-				tag_mode, ext_type := parse_tag_override(cx, n) or_return
-				if tag_mode == .Keep {
-					if cx.verbatim_ok {
-						rlo, _, rhi := item_span(cx.doc, n.val.base_ref)
-						append(dst, ..cx.src[rlo:rhi]) or_return
-					} else {
-						write_base_subtree(cx, n.val.base_ref, dst) or_return
-					}
-				} else {
-					ref_node := cx.doc.nodes[n.val.base_ref]
-					if ref_node.kind >= .Array {
-						return edit.refuse(.Fact_No_Place, "MessagePack ext tag cannot wrap containers", n.base)
-					}
-					apply_tag_on_base_leaf(cx, n.val.base_ref, tag_mode, ext_type, dst) or_return
-				}
-			} else if n.val.kind == .Array || n.val.kind == .Object {
-				tag_mode, _ := parse_tag_override(cx, n) or_return
-				if tag_mode == .Ext_Int || tag_mode == .Datetime {
-					return edit.refuse(.Fact_No_Place, "MessagePack ext tag cannot wrap containers", n.base)
-				}
-				is_obj := n.val.kind == .Object
-				items: []Item_Ref
-				ok_push := false
-				defer if !ok_push {
-					delete(items, cx.allocator)
-				}
-				if is_obj {
-					items = make([]Item_Ref, len(n.members), cx.allocator) or_return
-					for m, i in n.members {
-						items[i] = {handle = m.value, base_val = tape.NO_NODE, base_key = tape.NO_NODE, key_text = m.key, use_key_str = true}
-					}
-				} else {
-					items = make([]Item_Ref, len(n.elems), cx.allocator) or_return
-					for e, i in n.elems {
-						items[i] = {handle = e, base_val = tape.NO_NODE, base_key = tape.NO_NODE}
-					}
-				}
-				append_container_head_bytes(dst, is_obj, len(items)) or_return
-				append(stack, Frame{is_obj = is_obj, items = items}) or_return
-				ok_push = true
-				if n.base != tape.NO_NODE {
-					append(recs, edit.Splice_Record{
-						base_node   = n.base,
-						src_lo      = tags_lo,
-						src_hi      = item_hi,
-						dst_lo      = dst_start,
-						dst_hi      = dst_start,
-						full_rewalk = true,
-					}) or_return
-				}
-				return nil
-			} else {
-				emit_scalar_node(cx, n, dst) or_return
-			}
-			if n.base != tape.NO_NODE {
-				append(recs, edit.Splice_Record{
-					base_node    = n.base,
-					src_lo       = tags_lo,
-					src_hi       = item_hi,
-					dst_lo       = dst_start,
-					dst_hi       = u64(len(dst)),
-					subtree_only = true,
-				}) or_return
-			}
-			return nil
-		}
-
-		// Base node in `.Ancestor` or `.Container_Delta` (including `.Base_Ref` containers with structural edits):
-		base_c := edit.node_base_container(n)
-		if base_c == tape.NO_NODE {
-			return edit.refuse(.Bad_Handle, "missing base container for overlay edit")
-		}
-		bnode := cx.doc.nodes[base_c]
-		err_node := n.base if n.base != tape.NO_NODE else base_c
-		if bnode.kind < .Array {
-			tag_mode, ext_type := parse_tag_override(cx, n) or_return
-			if tag_mode == .Keep {
-				if cx.verbatim_ok {
-					append(dst, ..cx.src[tags_lo:item_hi]) or_return
-				} else {
-					write_base_subtree(cx, base_c, dst) or_return
-				}
-			} else {
-				if !read_as_msgpack(cx.doc) {
-					for f in tape.facts_of(cx.doc, base_c) {
-						if f.kind != .Tag {
-							cx.dropped += {f.kind}
-						}
-					}
-				}
-				apply_tag_on_base_leaf(cx, base_c, tag_mode, ext_type, dst) or_return
-			}
-			if n.base != tape.NO_NODE {
-				append(recs, edit.Splice_Record{
-					base_node    = n.base,
-					src_lo       = tags_lo,
-					src_hi       = item_hi,
-					dst_lo       = dst_start,
-					dst_hi       = u64(len(dst)),
-					subtree_only = true,
-				}) or_return
-			}
-			return nil
-		}
-
-		tag_mode, _ := parse_tag_override(cx, n) or_return
-		if tag_mode == .Ext_Int || tag_mode == .Datetime {
-			return edit.refuse(.Fact_No_Place, "MessagePack ext tag cannot wrap containers", err_node)
-		}
-		if !read_as_msgpack(cx.doc) {
-			for f in tape.facts_of(cx.doc, base_c) {
-				if f.kind != .Tag || tag_mode != .Delete {
-					cx.dropped += {f.kind}
-				}
-			}
-		}
-		is_obj := bnode.kind == .Object
-		if d := n.delta; n.state == .Container_Delta && d != nil && len(d.order) > 0 {
-			bc := max(0, tape.child_count(cx.doc, base_c, bnode))
-			deleted_flags := make([]bool, bc, cx.allocator) or_return
-			defer delete(deleted_flags, cx.allocator)
-			if is_obj {
-				c, _, cerr := tape.children(tape.Reader{doc = cx.doc}, base_c, cx.allocator)
-				if cerr != nil {
-					return cerr
-				}
-				bi := 0
-				for {
-					kn, _, np := tape.next_child(tape.Reader{doc = cx.doc}, &c)
-					if np != .Found || bi >= bc {
-						break
-					}
-					if kn != tape.NO_NODE {
-						tk := edit.decode_node_text_tmp(cx.doc, kn, cx.allocator)
-						for dk in d.deleted_keys {
-							if dk == tk.text {
-								deleted_flags[bi] = true
-								break
-							}
-						}
-						edit.free_tmp_text(tk, cx.allocator)
-					} else if c.keys_n != 0 {
-						kt := tape.cell_key(tape.Reader{doc = cx.doc}, c)
-						kroom := tape.text_room(cx.doc, kt)
-						if kroom == 0 {
-							ktext := string(tape.span_bytes(cx.doc, kt.lo, kt.n))
-							for dk in d.deleted_keys {
-								if dk == ktext {
-									deleted_flags[bi] = true
-									break
-								}
-							}
-						} else {
-							kbuf := make([]u8, kroom, cx.allocator) or_return
-							if ktext, kok := tape.node_text(cx.doc, kt, kbuf); kok {
-								for dk in d.deleted_keys {
-									if dk == ktext {
-										deleted_flags[bi] = true
-										break
-									}
-								}
-							}
-							delete(kbuf, cx.allocator)
-						}
-					}
-					bi += 1
-				}
-				tape.destroy_children(&c)
-				edit.validate_order(d.order, deleted_flags[:bi], len(d.inserted_members), cx.allocator) or_return
-			} else {
-				for di in d.deleted_indices {
-					if int(di) < bc {
-						deleted_flags[di] = true
-					}
-				}
-				edit.validate_order(d.order, deleted_flags, len(d.inserted_elems), cx.allocator) or_return
-			}
-		}
-
-		items: []Item_Ref
-		owned_keys: []string
-		ok_push := false
-		defer if !ok_push {
-			delete(items, cx.allocator)
-			for s in owned_keys {
-				delete(s, cx.allocator)
-			}
-			delete(owned_keys, cx.allocator)
-		}
-		if is_obj {
-			eff, ok_keys, merr := edit.effective_members(cx.ov, h, cx.allocator)
-			if merr != nil {
-				return merr
-			}
-			owned_keys = ok_keys
-			defer delete(eff, cx.allocator)
-			items = make([]Item_Ref, len(eff), cx.allocator) or_return
-			for m, i in eff {
-				items[i] = {
-					handle      = m.handle,
-					base_key    = m.base_key,
-					base_val    = m.base_val,
-					key_text    = m.key,
-					use_key_str = m.is_inserted || m.renamed || m.base_key == tape.NO_NODE,
-				}
-			}
-		} else {
-			eff, eerr := edit.effective_elements(cx.ov, h, cx.allocator)
-			if eerr != nil {
-				return eerr
-			}
-			defer delete(eff, cx.allocator)
-			items = make([]Item_Ref, len(eff), cx.allocator) or_return
-			for e, i in eff {
-				items[i] = {handle = e.handle, base_key = tape.NO_NODE, base_val = e.base}
-			}
-		}
-
-		head_start := len(dst)
-		append_container_head_bytes(dst, is_obj, len(items)) or_return
-		if n.base != tape.NO_NODE {
-			orig_head_len := u64(container_head_len(cx.src[item_lo])) if read_as_msgpack(cx.doc) && n.base_ref == tape.NO_NODE else u64(0)
-			head_changed := u64(len(dst) - head_start) != orig_head_len
-			if n.state == .Container_Delta || n.base_ref != tape.NO_NODE || head_changed || !cx.verbatim_ok {
-				append(recs, edit.Splice_Record{
-					base_node   = n.base,
-					src_lo      = tags_lo,
-					src_hi      = item_hi,
-					dst_lo      = dst_start,
-					dst_hi      = dst_start,
-					full_rewalk = true,
-				}) or_return
-			}
-		}
-		append(stack, Frame{is_obj = is_obj, items = items, owned_keys = owned_keys}) or_return
-		ok_push = true
-		return nil
-	}
-
-	emit_or_push(cx, out, recs, &stack, cx.ov.root, tape.ROOT) or_return
-	for len(stack) > 0 {
-		fr := &stack[len(stack) - 1]
-		if fr.idx >= len(fr.items) {
-			delete(fr.items, cx.allocator)
-			for s in fr.owned_keys {
-				delete(s, cx.allocator)
-			}
-			delete(fr.owned_keys, cx.allocator)
-			pop(&stack)
-			continue
-		}
-		item := fr.items[fr.idx]
-		fr.idx += 1
-		if fr.is_obj {
-			if item.use_key_str {
-				append_msgpack_str(out, item.key_text, item.base_key) or_return
-			} else if cx.verbatim_ok {
-				ktlo, _, khi := item_span(cx.doc, item.base_key)
-				append(out, ..cx.src[ktlo:khi]) or_return
-			} else {
-				append_compact_base_key(cx, item.base_key, out) or_return
-			}
-		}
-		emit_or_push(cx, out, recs, &stack, item.handle, item.base_val) or_return
-	}
-	return nil
-}
-
-@(private = "file")
-append_compact_base_key :: proc(cx: ^Edit_Cx, base_key: tape.Node_Index, dst: ^[dynamic]u8) -> Edit_Error {
-	bnode := cx.doc.nodes[base_key]
-	is_mp := read_as_msgpack(cx.doc)
-	if !is_mp {
-		for f in tape.facts_of(cx.doc, base_key) {
-			cx.dropped += {f.kind}
-		}
-		if cx.doc.format != nil && cx.doc.format.fact_name != nil {
-			if _, has := cx.doc.format.fact_name(cx.doc, base_key, .Tag); has {
-				cx.dropped += {.Tag}
-			}
-		}
-	}
-	#partial switch bnode.kind {
-	case .Number:
-		if is_mp {
-			put_compact_number_bytes(dst, number_value(cx.src, bnode)) or_return
-			return nil
-		}
-		num, ok := tape.node_number(cx.doc, base_key)
-		if !ok || (num.kind != .Int && num.kind != .Uint) {
-			return edit.refuse(.Unspellable_Value, "unsupported MessagePack map key number", base_key)
-		}
-		put_compact_number_bytes(dst, num) or_return
-		return nil
-	case .Bytes:
-		return append_msgpack_bin(dst, tape.span_bytes(cx.doc, bnode.lo, bnode.n), base_key)
-	case .String, .Plain:
-		if is_mp && bnode.spelling & STR_TIMESTAMP != 0 {
-			sec, nsec, tok := timestamp_decode(tape.span_bytes(cx.doc, bnode.lo, bnode.n))
-			if !tok {
-				return edit.refuse(.Unspellable_Value, "invalid MessagePack timestamp key", base_key)
-			}
-			append_msgpack_timestamp(dst, sec, nsec) or_return
-			return nil
-		}
-		tk := edit.decode_node_text_tmp(cx.doc, base_key, cx.allocator)
-		defer edit.free_tmp_text(tk, cx.allocator)
-		return append_msgpack_str(dst, tk.text, base_key)
-	}
-	return edit.refuse(.Unspellable_Value, "unsupported MessagePack map key kind", base_key)
-}
-
-@(private = "file")
-apply_tag_on_base_leaf :: proc(cx: ^Edit_Cx, base_idx: tape.Node_Index, mode: Tag_Edit, ext_type: i8, dst: ^[dynamic]u8) -> Edit_Error {
-	bnode := cx.doc.nodes[base_idx]
+apply_tag_on_base_leaf :: proc(
+	doc: ^tape.Document,
+	spec: Spec,
+	base_idx: tape.Node_Index,
+	mode: Tag_Edit,
+	ext_type: i8,
+	dropped: ^tape.Facts,
+	allocator: runtime.Allocator,
+	dst: ^[dynamic]u8,
+) -> Edit_Error {
+	bnode := doc.nodes[base_idx]
 	switch mode {
 	case .Keep:
-		return write_base_subtree(cx, base_idx, dst)
+		return write_base_subtree(doc, spec, base_idx, dropped, allocator, dst)
 	case .Delete:
 		if bnode.kind == .Bytes {
-			return append_msgpack_bin(dst, tape.span_bytes(cx.doc, bnode.lo, bnode.n), base_idx)
+			return append_msgpack_bin(dst, tape.span_bytes(doc, bnode.lo, bnode.n), base_idx)
 		}
 		if bnode.kind == .String || bnode.kind == .Plain {
-			tk := edit.decode_node_text_tmp(cx.doc, base_idx, cx.allocator)
-			defer edit.free_tmp_text(tk, cx.allocator)
+			tk := edit.decode_node_text_tmp(doc, base_idx, allocator)
+			defer edit.free_tmp_text(tk, allocator)
 			return append_msgpack_str(dst, tk.text, base_idx)
 		}
-		return write_base_subtree(cx, base_idx, dst)
-	case .Datetime:
-		if bnode.kind == .Bytes {
-			sec, nsec, ok := timestamp_decode(tape.span_bytes(cx.doc, bnode.lo, bnode.n))
-			if !ok {
-				return edit.refuse(.Fact_No_Place, "MessagePack timestamp requires 4/8/12-byte payload", base_idx)
-			}
-			append_msgpack_timestamp(dst, sec, nsec) or_return
-			return nil
-		}
-		if bnode.kind == .String || bnode.kind == .Plain {
-			tk := edit.decode_node_text_tmp(cx.doc, base_idx, cx.allocator)
-			defer edit.free_tmp_text(tk, cx.allocator)
-			sec, nsec, ok := spell.date_time_utc(tk.text)
-			if !ok {
-				return edit.refuse(.Fact_No_Place, "MessagePack datetime tag requires RFC 3339 date-time string", base_idx)
-			}
-			append_msgpack_timestamp(dst, sec, nsec) or_return
-			return nil
-		}
-		return edit.refuse(.Fact_No_Place, "cannot apply MessagePack datetime tag to this value", base_idx)
-	case .Ext_Int:
-		if ext_type == -1 {
+		return write_base_subtree(doc, spec, base_idx, dropped, allocator, dst)
+	case .Datetime, .Ext_Int:
+		if mode == .Datetime || ext_type == -1 {
 			if bnode.kind == .Bytes {
-				sec, nsec, ok := timestamp_decode(tape.span_bytes(cx.doc, bnode.lo, bnode.n))
+				sec, nsec, ok := timestamp_decode(tape.span_bytes(doc, bnode.lo, bnode.n))
 				if !ok {
 					return edit.refuse(.Fact_No_Place, "MessagePack timestamp requires 4/8/12-byte payload", base_idx)
 				}
@@ -893,8 +533,8 @@ apply_tag_on_base_leaf :: proc(cx: ^Edit_Cx, base_idx: tape.Node_Index, mode: Ta
 				return nil
 			}
 			if bnode.kind == .String || bnode.kind == .Plain {
-				tk := edit.decode_node_text_tmp(cx.doc, base_idx, cx.allocator)
-				defer edit.free_tmp_text(tk, cx.allocator)
+				tk := edit.decode_node_text_tmp(doc, base_idx, allocator)
+				defer edit.free_tmp_text(tk, allocator)
 				sec, nsec, ok := spell.date_time_utc(tk.text)
 				if !ok {
 					return edit.refuse(.Fact_No_Place, "MessagePack timestamp tag requires RFC 3339 date-time string", base_idx)
@@ -907,7 +547,7 @@ apply_tag_on_base_leaf :: proc(cx: ^Edit_Cx, base_idx: tape.Node_Index, mode: Ta
 		if bnode.kind != .Bytes {
 			return edit.refuse(.Fact_No_Place, "MessagePack ext tag applies to Bytes values", base_idx)
 		}
-		return append_msgpack_ext(dst, ext_type, tape.span_bytes(cx.doc, bnode.lo, bnode.n), base_idx)
+		return append_msgpack_ext(dst, ext_type, tape.span_bytes(doc, bnode.lo, bnode.n), base_idx)
 	}
 	return nil
 }

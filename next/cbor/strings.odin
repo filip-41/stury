@@ -112,16 +112,10 @@ one_chunk :: #force_no_inline proc "contextless" (src: []u8, i: u64, major: u8) 
 }
 
 @(private)
-ascii_16 :: #force_inline proc "contextless" (src: []u8, q, n: u64) -> bool {
-	return spell.ascii_16(src, q, n)
-}
+ascii_16 :: #force_inline proc "contextless" (src: []u8, q, n: u64) -> bool { return spell.ascii_16(src, q, n) }
 
 @(private)
-text_scan :: #force_inline proc "contextless" (src: []u8, q, n: u64, tolerate: bool) -> (bad: int, lax: bool) {
-	return spell.text_scan(src, q, n, tolerate)
-}
+text_scan :: #force_inline proc "contextless" (src: []u8, q, n: u64, tolerate: bool) -> (int, bool) { return spell.text_scan(src, q, n, tolerate) }
 
 @(private)
-text_fault :: #force_inline proc "contextless" (src: []u8, q, n: u64, tolerate: bool) -> (bad: int, lax: bool) {
-	return spell.text_fault(src, q, n, tolerate)
-}
+text_fault :: #force_inline proc "contextless" (src: []u8, q, n: u64, tolerate: bool) -> (int, bool) { return spell.text_fault(src, q, n, tolerate) }

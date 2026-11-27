@@ -5,29 +5,17 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
-// The records of a CBOR text: the items of a sequence (RFC 8742) under `.Concatenated`, and the elements of an array
-// or the members of a map under `.Elements` and `.Members`. Each record is judged as a read of its bytes alone judges
-// them, in place in the text.
+// Record-stream reads over CBOR sequences (RFC 8742 `.Concatenated`), array elements (`.Elements`), and map members (`.Members`).
 
-// The records of a text of a CBOR spec, which `records_open` makes and each call of `records_validate`, `records_find`
-// or `records_scan` reads in batches, as `tape.Records` says.
 Records :: struct {
 	using records: tape.Records,
 	spec:          Spec,
-	// Under `.Elements` and `.Members`, the walk's count of `Budget.steps`, which counts the containers of the whole
-	// text.
 	steps:         u64,
-	took:          bool, // under `.Members`, the key read for the next record took a tolerance, which that record reports
+	took:          bool,
 	frame:         build.Frame(Path_Level),
-	// The records' container once the record `record_frame` gave is read, which its walk keeps.
 	next:          Path_Level,
 }
 
-// A container the framing is in: the children it has left, `INDEF_COUNT` for an indefinite one, the tags that mark it
-// and the containers around it, and in a spec that orders keys the span of the last key read in it. In a text in
-// pieces that span is in `held_bytes`, past `base`, where the keys of the containers around it end, and a container
-// passed whose count the windows read so far cannot hold claims the text up to `need`, as its head at `head` faults
-// unless the text reaches it.
 @(private)
 Path_Level :: struct {
 	using level: build.Frame_Level,
@@ -38,127 +26,67 @@ Path_Level :: struct {
 	head, need:  u64,
 }
 
-// Opens the records of `src`, a text of `spec` framed as `framing`, each read under `opts`. The budget's limits hold
-// for each record, but `Budget.steps` under `.Elements` and `.Members`, which counts the containers of the whole text.
-// Another format's options, `.Lines`, which CBOR has no reading of, and a `path` the framing or the policy for repeated
-// keys does not take end the records with `tape.Bad_Option` before any is read. A path of more than seven steps, and in a
-// text in pieces a value off the path that a window cuts more than seven levels deep, take memory from the context's
-// allocator, which `tape.destroy_records` frees. In a text in pieces under `.Elements` and
-// `.Members` the framing holds the last key read in each map it is in, in a spec that orders keys. `opts.runner` has no
-// effect on records. A text in pieces opens with its first window, as `tape.Records` says.
 records_open :: proc(src: []u8, framing := tape.Framing.Concatenated, spec := Spec.Cbor, opts := Options{}, path: []tape.Step = nil) -> (r: Records) {
 	if spec > max(Spec) {
 		panic("cbor: spec out of range")
 	}
-	r.spec, r.steps = spec, steps_of(opts)
+	r.spec, r.steps = spec, build.binary_steps_of(opts)
 	build.binary_records_init(&r.records, &r.frame, src, framing, &FORMATS[spec], opts, path, records_release)
 	return
 }
 
-// Frees the levels of the records `r` at a long path.
 @(private)
 records_release :: proc(r: ^tape.Records) {
 	build.frame_free(&container_of(r, Records, "records").frame)
 }
 
-// Reads the next records of `r` and judges each, as `validate` judges its bytes alone, keeping in `out` those that do
-// not read. Returns how many it filled, and fewer than `len(out)` once the records have ended, when `err` says why, nil
-// at the text's end. Needs
-// `READ_STACK` bytes of stack and faults on a thread with less.
 @(require_results)
 records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.allocator) -> (n: int) {
 	hook.probe_stack(READ_STACK)
-	// A record's walk reads a whole item, in a text in pieces too, so the count of steps alone makes it lax.
 	lax := r.opts.budget.steps != 0
 	switch r.spec {
 	case .Cbor:
-		if lax {
-			return records_validate_as(r, out, .Cbor, true, allocator)
-		}
-		return records_validate_as(r, out, .Cbor, false, allocator)
+		return records_validate_as(r, out, .Cbor, true, allocator) if lax else records_validate_as(r, out, .Cbor, false, allocator)
 	case .Preferred:
-		if lax {
-			return records_validate_as(r, out, .Preferred, true, allocator)
-		}
-		return records_validate_as(r, out, .Preferred, false, allocator)
+		return records_validate_as(r, out, .Preferred, true, allocator) if lax else records_validate_as(r, out, .Preferred, false, allocator)
 	case .Deterministic:
-		if lax {
-			return records_validate_as(r, out, .Deterministic, true, allocator)
-		}
-		return records_validate_as(r, out, .Deterministic, false, allocator)
+		return records_validate_as(r, out, .Deterministic, true, allocator) if lax else records_validate_as(r, out, .Deterministic, false, allocator)
 	case .Length_First:
-		if lax {
-			return records_validate_as(r, out, .Length_First, true, allocator)
-		}
-		return records_validate_as(r, out, .Length_First, false, allocator)
+		return records_validate_as(r, out, .Length_First, true, allocator) if lax else records_validate_as(r, out, .Length_First, false, allocator)
 	}
 	panic("cbor: spec out of range")
 }
 
-// Reads the next records of `r` into `out`, and for each the first value `path` reaches in it into the same place of
-// `answers`, as `find` reads its bytes alone, with every offset from the text's first byte. The walk reads each record
-// to its end whatever `read.stop_early` says, as the next starts there. Needs `READ_STACK` bytes of stack and faults on
-// a thread with less.
 @(require_results)
 records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	hook.probe_stack(READ_STACK)
-	// A record's walk reads a whole item, in a text in pieces too, so the count of steps alone makes it lax.
 	lax := r.opts.budget.steps != 0
 	switch r.spec {
 	case .Cbor:
-		if lax {
-			return records_find_as(r, path, out, answers, .Cbor, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Cbor, false, read, allocator)
+		return records_find_as(r, path, out, answers, .Cbor, true, read, allocator) if lax else records_find_as(r, path, out, answers, .Cbor, false, read, allocator)
 	case .Preferred:
-		if lax {
-			return records_find_as(r, path, out, answers, .Preferred, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Preferred, false, read, allocator)
+		return records_find_as(r, path, out, answers, .Preferred, true, read, allocator) if lax else records_find_as(r, path, out, answers, .Preferred, false, read, allocator)
 	case .Deterministic:
-		if lax {
-			return records_find_as(r, path, out, answers, .Deterministic, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Deterministic, false, read, allocator)
+		return records_find_as(r, path, out, answers, .Deterministic, true, read, allocator) if lax else records_find_as(r, path, out, answers, .Deterministic, false, read, allocator)
 	case .Length_First:
-		if lax {
-			return records_find_as(r, path, out, answers, .Length_First, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Length_First, false, read, allocator)
+		return records_find_as(r, path, out, answers, .Length_First, true, read, allocator) if lax else records_find_as(r, path, out, answers, .Length_First, false, read, allocator)
 	}
 	panic("cbor: spec out of range")
 }
 
-// Reads the next records of `r` into `out`, and for each the document of its nodes the paths of `demand` reach into the
-// same place of `docs`, as `scan` reads its bytes alone. The documents are in the records' block, valid until the next
-// call or `tape.destroy_records`, as `tape.Record_Block` says. Needs `READ_STACK` bytes of stack and faults on a thread
-// with less.
 @(require_results)
 records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	hook.probe_stack(READ_STACK)
-	// A record's walk reads a whole item, in a text in pieces too, so the count of steps alone makes it lax.
 	lax := r.opts.budget.steps != 0
 	switch r.spec {
 	case .Cbor:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Cbor, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Cbor, false, read, allocator)
+		return records_scan_as(r, demand, out, docs, .Cbor, true, read, allocator) if lax else records_scan_as(r, demand, out, docs, .Cbor, false, read, allocator)
 	case .Preferred:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Preferred, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Preferred, false, read, allocator)
+		return records_scan_as(r, demand, out, docs, .Preferred, true, read, allocator) if lax else records_scan_as(r, demand, out, docs, .Preferred, false, read, allocator)
 	case .Deterministic:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Deterministic, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Deterministic, false, read, allocator)
+		return records_scan_as(r, demand, out, docs, .Deterministic, true, read, allocator) if lax else records_scan_as(r, demand, out, docs, .Deterministic, false, read, allocator)
 	case .Length_First:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Length_First, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Length_First, false, read, allocator)
+		return records_scan_as(r, demand, out, docs, .Length_First, true, read, allocator) if lax else records_scan_as(r, demand, out, docs, .Length_First, false, read, allocator)
 	}
 	panic("cbor: spec out of range")
 }
@@ -203,27 +131,11 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 	return build.records_scan(r, demand, out, docs, &FORMATS[S], &RULES, read, caller, rewalk, node_bound, frame, walk)
 }
 
-// The next record's first byte and the text's end, which its walk may read to. Under `.Members` the key is read into
-// `r.key` and the first byte is the value's. False once the records have ended, and in a text in pieces once the
-// window holds no more. The items of a sequence take no call.
 @(private)
 record_frame :: #force_inline proc(r: ^Records, $S: Spec, allocator: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
 	if r.framing == .Concatenated && r.at != .Done {
-		n := u64(len(r.src))
-		if r.pos >= n {
-			if !window_more(r) {
-				r.at = .Done
-			}
-			return
-		}
-		return r.pos, n, true
+		return build.binary_record_frame_concat(&r.records)
 	}
-	return record_frame_other(r, S, allocator)
-}
-
-// `record_frame` under `.Elements` and `.Members`: the shared framing over CBOR's grammar.
-@(private)
-record_frame_other :: #force_inline proc(r: ^Records, $S: Spec, allocator: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
 	open :: proc(r: ^Records, outer, lv: ^Path_Level, object: bool, depth: u64) -> build.Frame_Step {
 		return frame_open(r, outer, lv, object, depth, S)
 	}
@@ -231,16 +143,19 @@ record_frame_other :: #force_inline proc(r: ^Records, $S: Spec, allocator: runti
 		return frame_child(r, lv, object, S)
 	}
 	pass :: proc(r: ^Records, outer: ^Path_Level, depth: u64, allocator: runtime.Allocator) -> build.Frame_Step {
-		return frame_pass(r, outer, depth, allocator, S)
+		walk_fn :: proc(src: []u8, lo: u64, lax: bool, opts: Options, limit, steps: u64, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (hook.Walk_Result, bool, u64) {
+			if lax { return walk_item(src, lo, S, true, opts, limit, steps, h, regs, a, ctx, hook.no_hook) }
+			return walk_item(src, lo, S, false, opts, limit, steps, h, regs, a, ctx, hook.no_hook)
+		}
+		return build.binary_frame_pass(&r.records, &r.frame, &r.steps, depth, outer.tagged, allocator, &RULES, u8(Detail.No_Item), u8(Detail.Count_Too_Large), walk_fn)
 	}
-	lo, ok = build.frame_path(r, &r.frame, &FORMATS[S], &RULES, allocator, open, child, pass, frame_tail)
+	tail :: proc(r: ^Records) -> build.Frame_Step {
+		return build.binary_frame_tail(&r.records, &r.frame, &RULES, u8(Detail.Trailing), u8(Detail.Count_Too_Large))
+	}
+	lo, ok = build.frame_path(r, &r.frame, &FORMATS[S], &RULES, allocator, open, child, pass, tail)
 	return lo, u64(len(r.src)), ok
 }
 
-// CBOR's `open` of the framing: the head of a map for `object`, else of an array, at `pos` past the tags that mark it,
-// which takes a step of `Budget.steps` and with its tags levels of the depth the read takes, and whose count the bytes
-// left hold. Any other head, a tag that folds the number it marks (2 to 5) and one whose content may not be the
-// container are `pass`'s to judge.
 @(private)
 frame_open :: proc "contextless" (r: ^Records, outer, lv: ^Path_Level, object: bool, depth: u64, $S: Spec) -> build.Frame_Step {
 	n := u64(len(r.src))
@@ -248,7 +163,6 @@ frame_open :: proc "contextless" (r: ^Records, outer, lv: ^Path_Level, object: b
 	tags: u64
 	for at < n && r.src[at] >> 5 == 6 {
 		tags += 1
-		// A head of additional information 28 to 31 is no tag head, and has no length to step by.
 		if r.src[at] & 31 > 27 {
 			return .Other
 		}
@@ -274,8 +188,7 @@ frame_open :: proc "contextless" (r: ^Records, outer, lv: ^Path_Level, object: b
 			return .Other
 		}
 		if arg > (n - at - hl) >> (major - 4) {
-			// A record cannot be taken back once given, so only a passed container goes on before its count is held.
-			if !lv.passing || !window_more(r) {
+			if !lv.passing || !build.binary_window_more(&r.records) {
 				return .Other
 			}
 			lv.head, lv.need = at, max(u64) if arg > max(u64) >> 2 else at + hl + arg << (major - 4)
@@ -289,8 +202,6 @@ frame_open :: proc "contextless" (r: ^Records, outer, lv: ^Path_Level, object: b
 	return .Done
 }
 
-// CBOR's `child` of the framing: the next item of container `lv`, past its key in a map, or the container's end, past
-// the break of an indefinite one. The records' container is left as it is until the record is read, in `r.next`.
 @(private)
 frame_child :: #force_inline proc(r: ^Records, lv: ^Path_Level, object: bool, $S: Spec) -> (u64, build.Frame_Step) {
 	n := u64(len(r.src))
@@ -324,8 +235,6 @@ frame_child :: #force_inline proc(r: ^Records, lv: ^Path_Level, object: bool, $S
 	return at, .Done
 }
 
-// Takes `next` as the container `lv` once its child is read, with the key read last at the container's base in a text
-// in pieces.
 @(private)
 level_take :: #force_inline proc(r: ^Records, lv: ^Path_Level, next: ^Path_Level, $S: Spec) {
 	lv.left, lv.key = next.left, next.key
@@ -337,57 +246,11 @@ level_take :: #force_inline proc(r: ^Records, lv: ^Path_Level, next: ^Path_Level
 	}
 }
 
-// CBOR's `pass` of the framing: judges the item at `pos` in container `outer`, `depth` containers deep, as the walk
-// of the whole text judges it, and moves `pos` past it.
-@(private)
-frame_pass :: proc(r: ^Records, outer: ^Path_Level, depth: u64, allocator: runtime.Allocator, $S: Spec) -> build.Frame_Step {
-	if depth == 0 && len(r.src) == 0 {
-		// An empty text holds no item, which `validate` says before it walks one.
-		return item_refused(r, fault(0, .Truncated, .No_Item))
-	}
-	none: hook.No_Hooks
-	regs: hook.Regs
-	ctx := context
-	res: hook.Walk_Result
-	left: u64
-	limit := build.read_depth(r.opts) - depth - outer.tagged
-	if build.read_lax(r.opts) {
-		res, _, left = walk_item(r.src, r.pos, S, true, r.opts, limit, r.steps, &none, &regs, allocator, &ctx, hook.no_hook)
-	} else {
-		res, _, left = walk_item(r.src, r.pos, S, false, r.opts, limit, r.steps, &none, &regs, allocator, &ctx, hook.no_hook)
-	}
-	if u8(res) != 0 {
-		return item_refused(r, res)
-	}
-	r.steps, r.pos = left, u64(res) >> 16
-	return .Done
-}
-
-// CBOR's `tail` of the framing: no byte follows the root.
-@(private)
-frame_tail :: proc(r: ^Records) -> build.Frame_Step {
-	if r.pos < u64(len(r.src)) {
-		return item_refused(r, fault(r.pos, .Bad_Char, .Trailing))
-	}
-	return .Wait if window_more(r) else .Done
-}
-
-// The verdict on a step whose walk gave the fault `res`: `.Wait` in a window that more bytes follow for a `.Truncated`,
-// which they may lift, or while a container passed claims bytes past the window, else `.Fault` with the records ended
-// at it, or at the head of the outermost container whose claim the text does not reach, which comes first.
 @(private, cold)
 item_refused :: proc "contextless" (r: ^Records, res: hook.Walk_Result) -> build.Frame_Step {
 	return build.binary_item_refused(&r.records, &r.frame, res, &RULES, u8(Detail.Count_Too_Large))
 }
 
-// Whether more bytes follow the window of a text in pieces.
-@(private)
-window_more :: #force_inline proc "contextless" (r: ^Records) -> bool {
-	return r.opts.pieces != nil && !r.opts.pieces.last
-}
-
-// The bytes the framing of a text in pieces holds, in the pieces' state: the last key read in each map it is in. Nil
-// when memory for them is refused.
 @(private)
 held_bytes :: proc(r: ^Records) -> ^[dynamic]u8 {
 	p := r.opts.pieces
@@ -401,9 +264,6 @@ held_bytes :: proc(r: ^Records) -> ^[dynamic]u8 {
 	return &s.names
 }
 
-// Holds the key `src[lo:hi]` read in container `lv` of a text in pieces as its last key, past the one before it, which
-// a key that does not follow it is the fault the walk gives for, and returns that fault, 0 for none. `level_take`
-// moves it to the container's base.
 @(private)
 key_hold :: proc(r: ^Records, lv: ^Path_Level, lo, hi: u64, $S: Spec) -> hook.Walk_Result {
 	held := held_bytes(r)
@@ -421,31 +281,15 @@ key_hold :: proc(r: ^Records, lv: ^Path_Level, lo, hi: u64, $S: Spec) -> hook.Wa
 	return 0
 }
 
-// The hook of the walk that reads a member's key, which keeps the key and stops the walk.
-@(private)
-Member_Key :: struct {
-	protocol: hook.Protocol(hook.NO_HOOKS_CAPS, hook.Unused, hook.Unused, hook.Unused),
-	key:      tape.Token,
-}
-
-@(private)
-member_key_hook :: proc "contextless" (h: ^Member_Key, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-	h.key = t
-	return s, .Stop
-}
-
-// Reads the key of the member at `pos` of map `lv` into `r.key`, as the walk reads a key in a map, and returns where
-// its value starts. In a spec that orders keys a key that does not follow the last one read in `lv` is the fault the
-// walk gives for it.
 @(private)
 frame_key :: proc(r: ^Records, lv: ^Path_Level, $S: Spec) -> (u64, build.Frame_Step) {
-	h: Member_Key
+	h: build.Binary_Member_Key
 	regs: hook.Regs
 	levels: [2]Level(S)
-	w: Walk(S, Member_Key, false, hook.NO_HOOKS_CAPS)
+	w: Walk(S, build.Binary_Member_Key, false, hook.NO_HOOKS_CAPS)
 	walk_init(&w, r.src, &h, raw_data(levels[:]), 2, 2, r.opts)
 	w.depth = 2
-	res := run(&w, r.pos, 1, FLAG_OBJECT | 2, &regs, member_key_hook)
+	res := run(&w, r.pos, 1, FLAG_OBJECT | 2, &regs, build.binary_member_key_hook)
 	if u8(res) != hook.WALK_STOPPED {
 		return 0, item_refused(r, res if u8(res) != 0 else fault(u64(res) >> 16, .Truncated))
 	}
@@ -463,37 +307,17 @@ frame_key :: proc(r: ^Records, lv: ^Path_Level, $S: Spec) -> (u64, build.Frame_S
 	return end, .Done
 }
 
-// Walks the record at `lo` for hook `h` from registers `regs`. Returns the walk's result `res` and whether it took a
-// tolerance, the record's end as `hi`, and `ok` false once the records have ended, as a fault in a record ends them,
-// or in a text in pieces when the window ends inside the record.
 @(private)
-record_walk :: proc(r: ^Records, $S: Spec, $LAX: bool, lo: u64, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (walked: build.Record_Walk) {
-	concatenated := r.framing == .Concatenated
-	limit := build.read_depth(r.opts)
-	if !concatenated {
-		limit -= 1 + u64(len(r.path)) + build.frame_level(&r.frame, len(r.path)).tagged
+record_walk :: proc(r: ^Records, $S: Spec, $LAX: bool, lo: u64, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> build.Record_Walk {
+	tagged := u64(0) if r.framing == .Concatenated else build.frame_level(&r.frame, len(r.path)).tagged
+	walk_h :: proc "contextless" (src: []u8, lo: u64, opts: Options, limit, steps: u64, h: ^H, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (hook.Walk_Result, bool, u64) {
+		return walk_item(src, lo, S, LAX, opts, limit, steps, h, regs, a, ctx, on)
 	}
-	steps := steps_of(r.opts) if concatenated else r.steps
-	res, tolerated, left := walk_item(r.src, lo, S, LAX, r.opts, limit, steps, h, regs, allocator, ctx, on)
-	walked.res, walked.tolerated = res, tolerated || r.took
-	end := res
-	if u8(res) == hook.WALK_STOPPED {
-		// The hook stopped the walk before the record's end. A walk with no hook finds the end, and `res` keeps the
-		// stop for the caller.
-		none: hook.No_Hooks
-		none_regs: hook.Regs
-		end, _, left = walk_item(r.src, lo, S, LAX, r.opts, limit, steps, &none, &none_regs, allocator, ctx, hook.no_hook)
+	walk_none :: proc "contextless" (src: []u8, lo: u64, opts: Options, limit, steps: u64, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (hook.Walk_Result, bool, u64) {
+		return walk_item(src, lo, S, LAX, opts, limit, steps, h, regs, a, ctx, hook.no_hook)
 	}
-	if u8(end) != 0 {
-		_ = item_refused(r, end)
-		return
-	}
-	if !concatenated {
-		r.steps = left
+	take :: proc(r: ^Records) {
 		level_take(r, build.frame_level(&r.frame, len(r.path)), &r.next, S)
 	}
-	r.took = false
-	walked.hi, walked.ok = u64(end) >> 16, true
-	r.pos, r.at = walked.hi, .After
-	return
+	return build.binary_record_walk(r, lo, tagged, h, regs, allocator, ctx, &RULES, u8(Detail.Count_Too_Large), walk_h, walk_none, take)
 }

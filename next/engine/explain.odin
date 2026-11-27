@@ -7,7 +7,7 @@ import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/query"
 
-// Human-readable `--explain` formatting for `Decision` and its `query.Plan`.
+// Human-readable `--explain` formatting and `--plan-out`/`--plan-file` pin serialization.
 
 @(private = "file", rodata)
 FRAMING_NAMES := [Framing]string {
@@ -40,6 +40,13 @@ HINT_NAMES := [Active_Hint]string {
 }
 
 @(private = "file", rodata)
+DEMAND_KIND_NAMES := [query.Demand_Mode]string {
+	.None    = "none",
+	.Partial = "partial",
+	.Whole   = "whole",
+}
+
+@(private = "file", rodata)
 WHY_TEXT := [Route_Why]string {
 	.Edit_Needs_Layout     = "edit/fmt/in-place requires full document layout",
 	.Format_No_Scan        = "input format does not support partial scan (built whole)",
@@ -66,18 +73,10 @@ WHY_TEXT := [Route_Why]string {
 	.Many_Files            = "multiple files dispatched across worker pool",
 }
 
-// Returns canonical string label for `Route_Kind`.
-route_kind_name :: proc "contextless" (kind: Route_Kind) -> string {
-	return ROUTE_NAMES[kind]
-}
+route_kind_name :: proc "contextless" (kind: Route_Kind) -> string { return ROUTE_NAMES[kind] }
+route_why_text :: proc "contextless" (why: Route_Why) -> string { return WHY_TEXT[why] }
+demand_mode_name :: proc "contextless" (mode: query.Demand_Mode) -> string { return DEMAND_KIND_NAMES[mode] }
 
-// Returns human-readable reason string for `Route_Why`.
-route_why_text :: proc "contextless" (why: Route_Why) -> string {
-	return WHY_TEXT[why]
-}
-
-// Formats a complete `--explain` report into `b` covering format, framing,
-// contract demand/serial/hints (`query.format_plan`), chosen route, and reasons.
 explain_to :: proc(b: ^strings.Builder, plan: ^query.Plan, decision: ^Decision) {
 	if decision == nil {
 		return
@@ -97,14 +96,12 @@ explain_to :: proc(b: ^strings.Builder, plan: ^query.Plan, decision: ^Decision) 
 	)
 	fmt.sbprintf(b, "why: %s\n", WHY_TEXT[decision.primary_why])
 	for w in Route_Why {
-		if w == decision.primary_why || w not_in decision.whys {
-			continue
+		if w != decision.primary_why && w in decision.whys {
+			fmt.sbprintf(b, "because: %s\n", WHY_TEXT[w])
 		}
-		fmt.sbprintf(b, "because: %s\n", WHY_TEXT[w])
 	}
 }
 
-// Renders `--explain` output as a newly allocated string owned by the caller.
 @(require_results)
 explain :: proc(plan: ^query.Plan, decision: ^Decision, allocator := context.allocator) -> string {
 	b := strings.builder_make(allocator)
@@ -112,14 +109,6 @@ explain :: proc(plan: ^query.Plan, decision: ^Decision, allocator := context.all
 	return strings.to_string(b)
 }
 
-@(private = "file", rodata)
-DEMAND_KIND_NAMES := [query.Demand_Mode]string {
-	.None    = "none",
-	.Partial = "partial",
-	.Whole   = "whole",
-}
-
-// Canonical, deterministic machine-readable plan pin for `--plan-out` and `--plan-file`.
 Plan_Pin :: struct {
 	route:       string,
 	framing:     string,
@@ -129,12 +118,6 @@ Plan_Pin :: struct {
 	format:      string,
 }
 
-// Returns canonical string label for `query.Demand_Mode`.
-demand_mode_name :: proc "contextless" (mode: query.Demand_Mode) -> string {
-	return DEMAND_KIND_NAMES[mode]
-}
-
-// Extracts the canonical `Plan_Pin` from `decision` (zero allocations; borrows static rodata strings).
 @(require_results)
 plan_pin_of :: proc "contextless" (decision: ^Decision) -> Plan_Pin {
 	if decision == nil {
@@ -150,7 +133,6 @@ plan_pin_of :: proc "contextless" (decision: ^Decision) -> Plan_Pin {
 	}
 }
 
-// Releases heap-owned string fields produced by `parse_plan_pin_json`.
 destroy_plan_pin :: proc(pin: ^Plan_Pin, allocator := context.allocator) {
 	if pin == nil {
 		return
@@ -163,7 +145,6 @@ destroy_plan_pin :: proc(pin: ^Plan_Pin, allocator := context.allocator) {
 	pin^ = {}
 }
 
-// Writes the canonical deterministic JSON representation of `pin` into `b` (WASM-clean, no `core:os`).
 explain_pin_json_to :: proc(b: ^strings.Builder, decision: ^Decision) {
 	pin := plan_pin_of(decision)
 	alloc := b.buf.allocator if b.buf.allocator.procedure != nil else context.allocator
@@ -171,7 +152,6 @@ explain_pin_json_to :: proc(b: ^strings.Builder, decision: ^Decision) {
 	strings.write_byte(b, '\n')
 }
 
-// Renders the canonical deterministic JSON plan pin as a newly allocated string owned by the caller.
 @(require_results)
 explain_pin_json :: proc(decision: ^Decision, allocator := context.allocator) -> string {
 	b := strings.builder_make(allocator)
@@ -179,9 +159,6 @@ explain_pin_json :: proc(decision: ^Decision, allocator := context.allocator) ->
 	return strings.to_string(b)
 }
 
-// Parses a canonical plan pin JSON document produced by `explain_pin_json` (in any key order/whitespace).
-// All 6 canonical fields (`route`, `framing`, `parallel`, `hint`, `demand_kind`, `format`) are required.
-// Free the returned `Plan_Pin` with `destroy_plan_pin(pin, allocator)` when `ok` is true.
 @(require_results)
 parse_plan_pin_json :: proc(src: string, allocator := context.allocator) -> (pin: Plan_Pin, ok: bool) {
 	doc, berr := json.build(transmute([]u8)src, .Json, {dups = .Refuse}, allocator)
@@ -193,14 +170,7 @@ parse_plan_pin_json :: proc(src: string, allocator := context.allocator) -> (pin
 		return {}, false
 	}
 
-	Field_Bit :: enum u8 {
-		Route,
-		Framing,
-		Parallel,
-		Hint,
-		Demand_Kind,
-		Format,
-	}
+	Field_Bit :: enum u8 { Route, Framing, Parallel, Hint, Demand_Kind, Format }
 	res: Plan_Pin
 	seen: bit_set[Field_Bit; u8]
 	ok_parse := false
@@ -208,54 +178,37 @@ parse_plan_pin_json :: proc(src: string, allocator := context.allocator) -> (pin
 		destroy_plan_pin(&res, allocator)
 	}
 
-	read_str :: proc(doc: ^tape.Document, v: tape.Node_Index, allocator: runtime.Allocator) -> (string, bool) {
-		node := doc.nodes[v]
-		if node.kind != .String {
-			return "", false
+	read_pin_str :: proc(doc: ^tape.Document, v: tape.Node_Index, seen: ^bit_set[Field_Bit; u8], bit: Field_Bit, dst: ^string, alloc: runtime.Allocator) -> bool {
+		if bit in seen^ || doc.nodes[v].kind != .String {
+			return false
 		}
-		return tape.node_text_read(doc.format, doc.src, node, allocator)
+		dst^ = tape.node_text_read(doc.format, doc.src, doc.nodes[v], alloc) or_return
+		seen^ += {bit}
+		return true
 	}
 
 	end := tape.node_after(&doc, tape.ROOT)
 	kbuf: [32]u8
 	for k := tape.ROOT + 1; k < end; k = tape.node_after(&doc, k + 1) {
 		v := k + 1
-		key, kok := tape.node_text(&doc, k, kbuf[:])
-		if !kok {
-			return {}, false
-		}
+		key := tape.node_text(&doc, k, kbuf[:]) or_return
 		switch key {
-		case "route":
-			if .Route in seen { return {}, false }
-			res.route = read_str(&doc, v, allocator) or_return
-			seen += {.Route}
-		case "framing":
-			if .Framing in seen { return {}, false }
-			res.framing = read_str(&doc, v, allocator) or_return
-			seen += {.Framing}
+		case "route":       if !read_pin_str(&doc, v, &seen, .Route, &res.route, allocator) { return {}, false }
+		case "framing":     if !read_pin_str(&doc, v, &seen, .Framing, &res.framing, allocator) { return {}, false }
+		case "hint":        if !read_pin_str(&doc, v, &seen, .Hint, &res.hint, allocator) { return {}, false }
+		case "demand_kind": if !read_pin_str(&doc, v, &seen, .Demand_Kind, &res.demand_kind, allocator) { return {}, false }
+		case "format":      if !read_pin_str(&doc, v, &seen, .Format, &res.format, allocator) { return {}, false }
 		case "parallel":
-			if .Parallel in seen { return {}, false }
 			vk := doc.nodes[v].kind
-			if vk != .True && vk != .False { return {}, false }
+			if .Parallel in seen || (vk != .True && vk != .False) {
+				return {}, false
+			}
 			res.parallel = vk == .True
 			seen += {.Parallel}
-		case "hint":
-			if .Hint in seen { return {}, false }
-			res.hint = read_str(&doc, v, allocator) or_return
-			seen += {.Hint}
-		case "demand_kind":
-			if .Demand_Kind in seen { return {}, false }
-			res.demand_kind = read_str(&doc, v, allocator) or_return
-			seen += {.Demand_Kind}
-		case "format":
-			if .Format in seen { return {}, false }
-			res.format = read_str(&doc, v, allocator) or_return
-			seen += {.Format}
 		case:
 			return {}, false
 		}
 	}
-
 	if seen != {.Route, .Framing, .Parallel, .Hint, .Demand_Kind, .Format} {
 		return {}, false
 	}
@@ -263,8 +216,6 @@ parse_plan_pin_json :: proc(src: string, allocator := context.allocator) -> (pin
 	return res, true
 }
 
-// Compares `expected` against `actual`. Returns `true` when every pinned field matches; otherwise writes a
-// concise human-readable diff (`expected route ..., got ...`) into `diff_out` (when non-nil) and returns `false`.
 @(require_results)
 compare_plan_pin :: proc(expected, actual: Plan_Pin, diff_out: ^strings.Builder = nil) -> bool {
 	matched := true
@@ -280,21 +231,9 @@ compare_plan_pin :: proc(expected, actual: Plan_Pin, diff_out: ^strings.Builder 
 		}
 		matched^ = false
 	}
-	check_bool :: proc(b: ^strings.Builder, matched: ^bool, field: string, exp, got: bool) {
-		if exp == got {
-			return
-		}
-		if b != nil {
-			if !matched^ {
-				strings.write_string(b, "; ")
-			}
-			fmt.sbprintf(b, "expected %s %s, got %s", field, "true" if exp else "false", "true" if got else "false")
-		}
-		matched^ = false
-	}
 	check_str(diff_out, &matched, "route", expected.route, actual.route)
 	check_str(diff_out, &matched, "framing", expected.framing, actual.framing)
-	check_bool(diff_out, &matched, "parallel", expected.parallel, actual.parallel)
+	check_str(diff_out, &matched, "parallel", "true" if expected.parallel else "false", "true" if actual.parallel else "false")
 	check_str(diff_out, &matched, "hint", expected.hint, actual.hint)
 	check_str(diff_out, &matched, "demand_kind", expected.demand_kind, actual.demand_kind)
 	check_str(diff_out, &matched, "format", expected.format, actual.format)

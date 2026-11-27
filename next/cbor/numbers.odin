@@ -15,6 +15,7 @@ import "stury:lib/core/tape"
 // says so by giving 0. They bound the work a hostile item asks for, as the digits of a bignum take time quadratic in
 // its size.
 BIGNUM_BYTES_MAX :: 8192
+@(private)
 EXPONENT_MAX :: 5000
 
 // The value of number node `t` of `src`. A tag fact's is its tag number.

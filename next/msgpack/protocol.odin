@@ -3,6 +3,7 @@ package msgpack
 import "base:intrinsics"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 
 // Walk hook protocol: container skip, keep, keep-stubs, rest, rewalk, and stack deepening.
 
@@ -34,11 +35,7 @@ opened :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), hs: ^hook.Regs, a: hoo
 						s.skip_open, s.skip_end = true, true
 					}
 				}
-				if a == .Keep {
-					r = keep_over(w, start, d, hs, false)
-				} else {
-					r = keep_over(w, start, d, hs, true)
-				}
+				r = keep_over(w, start, d, hs, false) if a == .Keep else keep_over(w, start, d, hs, true)
 			} else {
 				return hook.walk_result(at, hook.WALK_STOPPED), true
 			}
@@ -67,12 +64,10 @@ pass_over :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), st
 
 @(private)
 judge_item :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), lo, d, d0, top0: u64, hs: hook.Regs) -> hook.Walk_Result {
-	#assert(size_of(Walk(S, H, LAX, C)) == size_of(Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS | C & WINDOWS)))
-	saved := hook.levels_scope(w, d)
-	regs := hs
-	r := run((^Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS | C & WINDOWS))(w), lo, d0, top0, &regs, hook.no_hook)
-	hook.levels_leave(w, saved)
-	return r
+	NW :: Walk(S, hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS | C & WINDOWS)
+	#assert(size_of(Walk(S, H, LAX, C)) == size_of(NW))
+	go :: #force_inline proc "contextless" (w: ^NW, i, d, top: u64, hs: ^hook.Regs) -> hook.Walk_Result { return run(w, i, d, top, hs, hook.no_hook) }
+	return build.binary_judge_item(w, (^NW)(w), lo, d, d0, top0, hs, go)
 }
 
 @(private)
@@ -89,27 +84,11 @@ keep_over :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), start
 @(private)
 keep_through :: #force_no_inline proc "contextless" ($Inner: typeid, $of: proc "contextless" (h: rawptr) -> rawptr, $keep: proc "contextless" (h: rawptr, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), w: ^Walk($S, $H, $LAX, $C), start, d: u64, hs: ^hook.Regs, d0, top0: u64, again: bool) -> hook.Walk_Result {
 	IC :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(Inner, hook.PROTOCOL_FIELD), 0)
-	#assert(size_of(Walk(S, H, LAX, C)) == size_of(Walk(S, Inner, LAX, IC | C & WINDOWS)))
-	on :: #force_inline proc "contextless" (h: ^Inner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-		return keep(h, s, t)
-	}
-	inner := (^Walk(S, Inner, LAX, IC | C & WINDOWS))(w)
-	hooks := w.hooks
-	saved := hook.levels_scope(w, d)
-	inner.hooks = (^Inner)(of(hooks))
-	if again {
-		step_again(w)
-	}
-	when .Rooms in IC {
-		inner.rooms = hook.rooms_end(inner.hooks)
-	}
-	r := run(inner, start, d0, top0, hs, on)
-	hook.levels_leave(w, saved)
-	w.hooks = hooks
-	when .Rooms in C {
-		w.rooms = hook.rooms_end(hooks)
-	}
-	return r
+	IW :: Walk(S, Inner, LAX, IC | C & WINDOWS)
+	#assert(size_of(Walk(S, H, LAX, C)) == size_of(IW))
+	on :: #force_inline proc "contextless" (h: ^Inner, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) { return keep(h, s, t) }
+	go :: #force_inline proc "contextless" (w: ^IW, i, d, top: u64, hs: ^hook.Regs) -> hook.Walk_Result { return run(w, i, d, top, hs, on) }
+	return build.binary_keep_through(w, (^IW)(w), Inner, LAX, C, IC, of, go, start, d, hs, d0, top0, again)
 }
 
 @(private)
@@ -123,13 +102,8 @@ step_again :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) {
 walk_again :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), src: []u8, lo: u64, regs: ^hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	_ = src
 	#assert(.Rooms not_in C)
-	levels: [REWALK_LEVELS]Level = ---
-	saved := hook.levels_scope(w, 0)
-	w.stack, w.limit, w.room = raw_data(levels[:]), MAX_LEVELS, REWALK_LEVELS
-	w.depth = hook.held_depth(w.hooks, regs, REWALK_LEVELS)
-	r := run(w, lo, 0, 0, regs, on)
-	hook.levels_leave(w, saved)
-	return r
+	go :: #force_inline proc "contextless" (w: ^Walk(S, H, LAX, C), i, d, top: u64, hs: ^hook.Regs) -> hook.Walk_Result { return run(w, i, d, top, hs, on) }
+	return build.binary_walk_again(w, Level, REWALK_LEVELS, MAX_LEVELS, lo, regs, go)
 }
 
 @(private)

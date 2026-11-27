@@ -114,13 +114,9 @@ replay_cell :: #force_inline proc "contextless" (h: ^Cells_Reader, s: hook.Regs,
 				return next, .Next
 			}
 		case .Bool:
-			if t.lo + 8 <= u64(len(src)) {
-				// `true` and `false` read in one load, which the eight bytes of text from the cell hold.
-				w := load8(raw_data(src)[t.lo:])
-				if t.n == 4 && u32(w) == 0x6575_7274 || t.n == 5 && w & 0xFF_FFFF_FFFF == 0x65_736C_6166 {
-					(^bool)(dest)^ = t.n == 4
-					return next, .Next
-				}
+			if bval, bok := match_bool_word(raw_data(src), t.lo, u64(len(src)), t.n); bok {
+				(^bool)(dest)^ = bval
+				return next, .Next
 			}
 		}
 	}

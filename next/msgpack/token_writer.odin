@@ -1,7 +1,6 @@
 package msgpack
 
 import "base:runtime"
-import "core:encoding/endian"
 import "core:io"
 import "core:math"
 import "core:unicode/utf8"
@@ -300,71 +299,28 @@ count_child :: #force_inline proc "contextless" (w: ^Writer, is_key: bool) {
 @(private)
 push_timestamp_bytes :: proc(w: ^Writer, node_idx: tape.Node_Index, sec: i64, nsec: u32) -> runtime.Allocator_Error {
 	head_lo := u64(len(w.data))
-	pay_lo, pay_len: u64
-	if nsec == 0 && sec >= 0 && sec <= 0xFFFF_FFFF {
-		b: [6]u8 = {0xd6, 0xff, 0, 0, 0, 0}
-		endian.unchecked_put_u32be(b[2:], u32(sec))
-		append(&w.data, ..b[:]) or_return
-		pay_lo, pay_len = head_lo + 2, 4
-	} else if sec >= 0 && sec <= 0x3_FFFF_FFFF {
-		b: [10]u8 = {0xd7, 0xff, 0, 0, 0, 0, 0, 0, 0, 0}
-		endian.unchecked_put_u64be(b[2:], (u64(nsec) << 34) | u64(sec))
-		append(&w.data, ..b[:]) or_return
-		pay_lo, pay_len = head_lo + 2, 8
-	} else {
-		b: [15]u8 = {0xc7, 12, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-		endian.unchecked_put_u32be(b[3:7], nsec)
-		endian.unchecked_put_u64be(b[7:15], u64(sec))
-		append(&w.data, ..b[:]) or_return
-		pay_lo, pay_len = head_lo + 3, 12
-	}
-	head_len := pay_lo - head_lo
+	buf: [15]u8 = ---
+	total, head_len := encode_timestamp(&buf[0], sec, nsec)
+	append(&w.data, ..buf[:total]) or_return
+	pay_lo := head_lo + u64(head_len)
+	pay_len := u64(total - head_len)
 	append(&w.facts, tape.Fact{lo = head_lo, n = u32(head_len), node = node_idx, kind = .Tag}) or_return
 	append(&w.nodes, tape.Node {
 		lo       = pay_lo,
 		n        = u32(pay_len),
 		kind     = .String,
 		role     = .Value,
-		spelling = head_spelling(head_len) | tape.SPELLING_DECODE | tape.SPELLING_LAX | STR_EXT | STR_TIMESTAMP,
+		spelling = head_spelling(u64(head_len)) | tape.SPELLING_DECODE | tape.SPELLING_LAX | STR_EXT | STR_TIMESTAMP,
 	}) or_return
 	return nil
 }
 
 @(private)
 append_ext_head_bytes :: proc(dst: ^[dynamic]u8, ext_type: i8, n: u32) -> runtime.Allocator_Error {
-	switch n {
-	case 1:
-		_, err := append(dst, 0xd4, u8(ext_type))
-		return err
-	case 2:
-		_, err := append(dst, 0xd5, u8(ext_type))
-		return err
-	case 4:
-		_, err := append(dst, 0xd6, u8(ext_type))
-		return err
-	case 8:
-		_, err := append(dst, 0xd7, u8(ext_type))
-		return err
-	case 16:
-		_, err := append(dst, 0xd8, u8(ext_type))
-		return err
-	case:
-		switch {
-		case n <= 0xff:
-			_, err := append(dst, 0xc7, u8(n), u8(ext_type))
-			return err
-		case n <= 0xffff:
-			b: [4]u8 = {0xc8, 0, 0, u8(ext_type)}
-			endian.unchecked_put_u16be(b[1:3], u16(n))
-			_, err := append(dst, ..b[:])
-			return err
-		case:
-			b: [6]u8 = {0xc9, 0, 0, 0, 0, u8(ext_type)}
-			endian.unchecked_put_u32be(b[1:5], n)
-			_, err := append(dst, ..b[:])
-			return err
-		}
-	}
+	buf: [6]u8 = ---
+	k := encode_ext_head(&buf[0], ext_type, n)
+	_, err := append(dst, ..buf[:k])
+	return err
 }
 
 // Parses a token `.Number` string into a `spell.Number`, allowing `"NaN"`, `"Inf"`, `"+Inf"`, `"-Inf"`
@@ -397,87 +353,18 @@ parse_token_number :: proc "contextless" (text: string) -> (spell.Number, bool) 
 
 @(private)
 put_compact_number_bytes :: proc(dst: ^[dynamic]u8, n: spell.Number) -> runtime.Allocator_Error {
+	buf: [9]u8 = ---
+	k: int
 	#partial switch n.kind {
 	case .Int:
-		v := i64(n.bits)
-		if v >= 0 {
-			return put_compact_u64_bytes(dst, u64(v))
-		}
-		switch {
-		case v >= -32:
-			_, err := append(dst, u8(i8(v)))
-			return err
-		case v >= -128:
-			_, err := append(dst, 0xd0, u8(i8(v)))
-			return err
-		case v >= -32768:
-			b: [3]u8 = {0xd1, 0, 0}
-			endian.unchecked_put_u16be(b[1:], u16(i16(v)))
-			_, err := append(dst, ..b[:])
-			return err
-		case v >= -2_147_483_648:
-			b: [5]u8 = {0xd2, 0, 0, 0, 0}
-			endian.unchecked_put_u32be(b[1:], u32(i32(v)))
-			_, err := append(dst, ..b[:])
-			return err
-		case:
-			b: [9]u8 = {0xd3, 0, 0, 0, 0, 0, 0, 0, 0}
-			endian.unchecked_put_u64be(b[1:], n.bits)
-			_, err := append(dst, ..b[:])
-			return err
-		}
+		k = encode_i64(&buf[0], i64(n.bits))
 	case .Uint:
-		return put_compact_u64_bytes(dst, n.bits)
+		k = encode_u64(&buf[0], n.bits)
 	case .Float:
-		bits := n.bits
-		if double_fits_single(bits) {
-			b: [5]u8 = {0xca, 0, 0, 0, 0}
-			sbits: u32
-			if bits >> 52 & 0x7ff == 0x7ff {
-				sign := u32(bits >> 32) & 0x8000_0000
-				if bits & 0xf_ffff_ffff_ffff == 0 {
-					sbits = sign | 0x7f80_0000
-				} else {
-					sbits = sign | 0x7f80_0000 | u32((bits & 0xf_ffff_ffff_ffff) >> 29)
-				}
-			} else {
-				sbits = transmute(u32)f32(transmute(f64)bits)
-			}
-			endian.unchecked_put_u32be(b[1:], sbits)
-			_, err := append(dst, ..b[:])
-			return err
-		}
-		b: [9]u8 = {0xcb, 0, 0, 0, 0, 0, 0, 0, 0}
-		endian.unchecked_put_u64be(b[1:], bits)
-		_, err := append(dst, ..b[:])
-		return err
-	}
-	return nil
-}
-
-@(private)
-put_compact_u64_bytes :: proc(dst: ^[dynamic]u8, v: u64) -> runtime.Allocator_Error {
-	switch {
-	case v <= 0x7f:
-		_, err := append(dst, u8(v))
-		return err
-	case v <= 0xff:
-		_, err := append(dst, 0xcc, u8(v))
-		return err
-	case v <= 0xffff:
-		b: [3]u8 = {0xcd, 0, 0}
-		endian.unchecked_put_u16be(b[1:], u16(v))
-		_, err := append(dst, ..b[:])
-		return err
-	case v <= 0xffff_ffff:
-		b: [5]u8 = {0xce, 0, 0, 0, 0}
-		endian.unchecked_put_u32be(b[1:], u32(v))
-		_, err := append(dst, ..b[:])
-		return err
+		k = encode_float_bits(&buf[0], n.bits)
 	case:
-		b: [9]u8 = {0xcf, 0, 0, 0, 0, 0, 0, 0, 0}
-		endian.unchecked_put_u64be(b[1:], v)
-		_, err := append(dst, ..b[:])
-		return err
+		return nil
 	}
+	_, err := append(dst, ..buf[:k])
+	return err
 }

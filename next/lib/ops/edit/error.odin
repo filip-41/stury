@@ -66,23 +66,15 @@ Error :: union {
 // Returns the refusal group of `kind`.
 refusal_group :: proc "contextless" (kind: Refusal_Kind) -> Refusal_Group {
 	#partial switch kind {
-	case .Layout_Reflow_Needed:
-		return .Layout_Conflict
-	case .Alias_Edit_Requires_Reflow:
-		return .Alias_Unshare
+	case .Layout_Reflow_Needed: return .Layout_Conflict
+	case .Alias_Edit_Requires_Reflow: return .Alias_Unshare
 	}
 	return .Format_Impossible
 }
 
 // Constructs a `Refusal` error with its canonical group.
 refuse :: proc "contextless" (kind: Refusal_Kind, detail := "", node := tape.NO_NODE, at := tape.NO_BYTE) -> Error {
-	return Refusal {
-		kind   = kind,
-		group  = refusal_group(kind),
-		at     = at,
-		node   = node,
-		detail = detail,
-	}
+	return Refusal{kind = kind, group = refusal_group(kind), at = at, node = node, detail = detail}
 }
 
 // A half-open byte range `[lo, hi)` in source or output bytes.
@@ -138,15 +130,9 @@ Commit_Result :: struct {
 
 // Frees all buffers owned by `res` and zeroes it.
 destroy_commit_result :: proc(res: ^Commit_Result) {
-	if res.bytes != nil {
-		delete(res.bytes, res.allocator)
-	}
-	if res.rewritten != nil {
-		delete(res.rewritten, res.allocator)
-	}
-	if res.splices != nil {
-		delete(res.splices, res.allocator)
-	}
+	delete(res.bytes, res.allocator)
+	delete(res.rewritten, res.allocator)
+	delete(res.splices, res.allocator)
 	res^ = {}
 }
 
@@ -173,15 +159,9 @@ Fragment_Tape :: struct {
 }
 
 destroy_fragment_tape :: proc(ft: ^Fragment_Tape) {
-	if ft.nodes != nil {
-		delete(ft.nodes, ft.allocator)
-	}
-	if ft.facts != nil {
-		delete(ft.facts, ft.allocator)
-	}
-	if ft.counts != nil {
-		delete(ft.counts, ft.allocator)
-	}
+	delete(ft.nodes, ft.allocator)
+	delete(ft.facts, ft.allocator)
+	delete(ft.counts, ft.allocator)
 	if doc, ok := &ft.full_doc.?; ok {
 		tape.destroy_document(doc)
 	}

@@ -30,12 +30,14 @@ Spec :: enum u8 {
 // a runner counts the blocks of its parts.
 Options :: tape.Options
 
+CAPS :: tape.Caps{.Rewalk, .Binary}
+
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Cbor          = {name = "cbor", id = ID, facts = {.Tag}, caps = {.Rewalk, .Binary}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
-	.Preferred     = {name = "cbor-preferred", id = ID + 1, facts = {.Tag}, caps = {.Rewalk, .Binary}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
-	.Deterministic = {name = "cbor-deterministic", id = ID + 2, facts = {.Tag}, caps = {.Rewalk, .Binary}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
-	.Length_First  = {name = "cbor-length-first", id = ID + 3, facts = {.Tag}, caps = {.Rewalk, .Binary}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Cbor          = {name = "cbor", id = ID, facts = {.Tag}, caps = CAPS, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Preferred     = {name = "cbor-preferred", id = ID + 1, facts = {.Tag}, caps = CAPS, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Deterministic = {name = "cbor-deterministic", id = ID + 2, facts = {.Tag}, caps = CAPS, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
+	.Length_First  = {name = "cbor-length-first", id = ID + 3, facts = {.Tag}, caps = CAPS, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end},
 }
 
 // The format id of `.Cbor`, the others following it in `Spec` order.
@@ -70,25 +72,13 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Cbor, opts := Options{}, 
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Cbor:
-		if lax {
-			return validate_as(src, .Cbor, true, opts, allocator)
-		}
-		return validate_as(src, .Cbor, false, opts, allocator)
+		return validate_as(src, .Cbor, true, opts, allocator) if lax else validate_as(src, .Cbor, false, opts, allocator)
 	case .Preferred:
-		if lax {
-			return validate_as(src, .Preferred, true, opts, allocator)
-		}
-		return validate_as(src, .Preferred, false, opts, allocator)
+		return validate_as(src, .Preferred, true, opts, allocator) if lax else validate_as(src, .Preferred, false, opts, allocator)
 	case .Deterministic:
-		if lax {
-			return validate_as(src, .Deterministic, true, opts, allocator)
-		}
-		return validate_as(src, .Deterministic, false, opts, allocator)
+		return validate_as(src, .Deterministic, true, opts, allocator) if lax else validate_as(src, .Deterministic, false, opts, allocator)
 	case .Length_First:
-		if lax {
-			return validate_as(src, .Length_First, true, opts, allocator)
-		}
-		return validate_as(src, .Length_First, false, opts, allocator)
+		return validate_as(src, .Length_First, true, opts, allocator) if lax else validate_as(src, .Length_First, false, opts, allocator)
 	}
 	runtime.panic_contextless("cbor: spec out of range")
 }
@@ -121,24 +111,16 @@ build :: #force_inline proc(src: []u8, spec := Spec.Cbor, opts := Options{}, all
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Cbor:
-		if lax {
-			return build_as(src, .Cbor, true, opts, allocator)
-		}
+		if lax { return build_as(src, .Cbor, true, opts, allocator) }
 		return build_as(src, .Cbor, false, opts, allocator)
 	case .Preferred:
-		if lax {
-			return build_as(src, .Preferred, true, opts, allocator)
-		}
+		if lax { return build_as(src, .Preferred, true, opts, allocator) }
 		return build_as(src, .Preferred, false, opts, allocator)
 	case .Deterministic:
-		if lax {
-			return build_as(src, .Deterministic, true, opts, allocator)
-		}
+		if lax { return build_as(src, .Deterministic, true, opts, allocator) }
 		return build_as(src, .Deterministic, false, opts, allocator)
 	case .Length_First:
-		if lax {
-			return build_as(src, .Length_First, true, opts, allocator)
-		}
+		if lax { return build_as(src, .Length_First, true, opts, allocator) }
 		return build_as(src, .Length_First, false, opts, allocator)
 	}
 	panic("cbor: spec out of range")
@@ -153,24 +135,16 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Cbor, read
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Cbor:
-		if lax {
-			return find_as(src, path, .Cbor, true, read, opts, allocator)
-		}
+		if lax { return find_as(src, path, .Cbor, true, read, opts, allocator) }
 		return find_as(src, path, .Cbor, false, read, opts, allocator)
 	case .Preferred:
-		if lax {
-			return find_as(src, path, .Preferred, true, read, opts, allocator)
-		}
+		if lax { return find_as(src, path, .Preferred, true, read, opts, allocator) }
 		return find_as(src, path, .Preferred, false, read, opts, allocator)
 	case .Deterministic:
-		if lax {
-			return find_as(src, path, .Deterministic, true, read, opts, allocator)
-		}
+		if lax { return find_as(src, path, .Deterministic, true, read, opts, allocator) }
 		return find_as(src, path, .Deterministic, false, read, opts, allocator)
 	case .Length_First:
-		if lax {
-			return find_as(src, path, .Length_First, true, read, opts, allocator)
-		}
+		if lax { return find_as(src, path, .Length_First, true, read, opts, allocator) }
 		return find_as(src, path, .Length_First, false, read, opts, allocator)
 	}
 	panic("cbor: spec out of range")
@@ -185,24 +159,16 @@ scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Cbor, r
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Cbor:
-		if lax {
-			return scan_as(src, demand, .Cbor, true, read, opts, allocator)
-		}
+		if lax { return scan_as(src, demand, .Cbor, true, read, opts, allocator) }
 		return scan_as(src, demand, .Cbor, false, read, opts, allocator)
 	case .Preferred:
-		if lax {
-			return scan_as(src, demand, .Preferred, true, read, opts, allocator)
-		}
+		if lax { return scan_as(src, demand, .Preferred, true, read, opts, allocator) }
 		return scan_as(src, demand, .Preferred, false, read, opts, allocator)
 	case .Deterministic:
-		if lax {
-			return scan_as(src, demand, .Deterministic, true, read, opts, allocator)
-		}
+		if lax { return scan_as(src, demand, .Deterministic, true, read, opts, allocator) }
 		return scan_as(src, demand, .Deterministic, false, read, opts, allocator)
 	case .Length_First:
-		if lax {
-			return scan_as(src, demand, .Length_First, true, read, opts, allocator)
-		}
+		if lax { return scan_as(src, demand, .Length_First, true, read, opts, allocator) }
 		return scan_as(src, demand, .Length_First, false, read, opts, allocator)
 	}
 	panic("cbor: spec out of range")

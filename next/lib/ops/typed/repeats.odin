@@ -286,10 +286,9 @@ release_value :: proc(h: ^Reader, steps: ^[dynamic]Release, r: Release) -> runti
 			append(steps, Release{rec = elem, at = at + k, was = was + k if was != 0 else 0}) or_return
 		}
 	case .Maybe:
-		present := (^rawptr)(at)^ != nil if m.tag_size == 0 else read_size(at + uintptr(m.tag), int(m.tag_size)) != 0
-		if present {
+		if !maybe_is_nil(m, at) {
 			// An element the target did not hold was zeroed when the read gave it its tag.
-			held := was != 0 && ((^rawptr)(was)^ != nil if m.tag_size == 0 else read_size(was + uintptr(m.tag), int(m.tag_size)) != 0)
+			held := was != 0 && !maybe_is_nil(m, was)
 			append(steps, Release{rec = &([^]Record)(rec.first)[-1], at = at, was = was if held else 0}) or_return
 		}
 	case .Union:

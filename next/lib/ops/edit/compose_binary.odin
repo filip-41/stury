@@ -4,29 +4,49 @@ import "base:runtime"
 import "core:bytes"
 import "stury:lib/core/tape"
 
-// Binary-family composer (CBOR: Cbor, Preferred, Deterministic, Length_First).
+// Binary-family composer (CBOR & MessagePack).
 //
-// Preserves untouched sub-item byte spans verbatim when target compatibility allows it, re-encodes
-// modified/upgraded subtrees via the format's real `cbor.write` (getting binary16 subnormals, canonical
-// heads, bignums, and child tags for free), supports `.@tag` edits, sorts modified map keys under
-// Deterministic / Length_First, validates reorder permutations, and uses an explicit heap stack.
+// Preserves untouched sub-item byte spans verbatim when target compatibility allows it, delegates modified/upgraded
+// subtrees to format callbacks, supports tag overrides/checks, sorts modified CBOR maps under Deterministic /
+// Length_First, validates reorder permutations, handles `.Base_Ref` containers, and uses an explicit heap stack.
 
 Binary_Spec :: struct {
-	target:       ^tape.Format,
-	strict:       bool, // Preferred / Deterministic / Length_First: shortest heads, definite containers
-	sorted_maps:  bool, // Deterministic / Length_First: sort modified maps by encoded key
-	length_first: bool, // Length_First: shorter encoded key first, then lexicographic
-	// Returns `(tags_lo, item_lo, item_hi)` of base node `at` in `doc.src`.
-	item_span:    proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (tags_lo, item_lo, item_hi: u64),
-	// Encodes a CBOR major-type head `(major, val)` into `out`.
-	put_head:     proc(data: rawptr, major: u8, val: u64, out: ^[dynamic]u8),
-	// Encodes a UTF-8 map key string as a CBOR text string into `out`.
-	put_key:      proc(data: rawptr, key: string, out: ^[dynamic]u8),
-	// Encodes an `Edit_Node` `h` (or untouched `base_node` when `h == NO_HANDLE`) via `cbor.write` into `out`.
-	spell_value:  proc(data: rawptr, ov: ^Overlay, h: Handle, base_node: tape.Node_Index, out: ^[dynamic]u8) -> Error,
-	// Validates final CBOR output.
-	validate:     proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> tape.Error,
-	data:         rawptr,
+	target:           ^tape.Format,
+	same_family:      bool, // true when `ov.base.format` belongs to this binary format family
+	strict:           bool, // Preferred / Deterministic / Length_First / Compact: shortest heads, definite containers
+	sorted_maps:      bool, // Deterministic / Length_First: sort modified maps by encoded key
+	length_first:     bool, // Length_First: shorter encoded key first, then lexicographic
+	has_indefinite:   bool, // CBOR: preserve indefinite container encoding when `!strict`
+	no_prefix_tags:   bool, // MessagePack: tags alter leaf encoding (fact-edited leaves delegate to `spell_value`)
+	spell_containers: bool, // CBOR: replaced `.Array`/`.Object` delegate to `spell_value`
+	// Optional: returns `(tags_lo, item_lo, item_hi)` of base node `at` in `doc.src` (defaults to `binary_item_span`).
+	item_span:        proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (tags_lo, item_lo, item_hi: u64),
+	// Optional: returns original container head byte length at `src[at]` for head-shrink detection.
+	head_len:         proc "contextless" (src: []u8, at: u64) -> u64,
+	// Encodes a container or CBOR tag head `(major, val)` into `out` (`major`: 4=array, 5=map, 6=CBOR tag).
+	put_head:         proc(data: rawptr, major: u8, val: u64, out: ^[dynamic]u8) -> Error,
+	// Encodes a UTF-8 map key string into `out`.
+	put_key:          proc(data: rawptr, key: string, node: tape.Node_Index, out: ^[dynamic]u8) -> Error,
+	// Optional: encodes an untouched non-verbatim base map key (preserving integer/bytes/timestamp keys).
+	put_base_key:     proc(data: rawptr, doc: ^tape.Document, base_key: tape.Node_Index, dropped: ^tape.Facts, out: ^[dynamic]u8) -> Error,
+	// Optional: validates/emits tags on a container (nil uses CBOR prefix-tag handling).
+	emit_tags:        proc(data: rawptr, doc: ^tape.Document, n: ^Edit_Node, base_c: tape.Node_Index, tags_lo, item_lo: u64, dropped: ^tape.Facts, out: ^[dynamic]u8) -> Error,
+	// Encodes an `Edit_Node` `h` (or untouched `base_node` when `h == NO_HANDLE`) into `out`.
+	spell_value:      proc(data: rawptr, ov: ^Overlay, h: Handle, base_node: tape.Node_Index, dropped: ^tape.Facts, out: ^[dynamic]u8) -> Error,
+	// Validates final binary output.
+	validate:         proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> tape.Error,
+	data:             rawptr,
+}
+
+binary_item_span :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (tags_lo, item_lo, item_hi: u64) {
+	item_lo, item_hi, _ = node_byte_span(doc, at)
+	tags_lo = item_lo
+	for f in tape.facts_of(doc, at) {
+		if f.kind == .Tag && f.lo < tags_lo {
+			tags_lo = f.lo
+		}
+	}
+	return tags_lo, item_lo, item_hi
 }
 
 commit_binary :: proc(
@@ -38,9 +58,9 @@ commit_binary :: proc(
 	res: Commit_Result,
 	err: Error,
 ) {
-	// Cross-spec upgrade to a strict CBOR spec (e.g. `.Cbor` -> `.Preferred`/`.Deterministic`/`.Length_First`)
-	// cannot blindly verbatim-copy non-preferred bytes even when `!ov.dirty`!
-	same_format := ov != nil && ov.base != nil && ((opts.target if opts.target != nil else spec.target) == ov.base.format || !spec.strict)
+	// Cross-spec upgrade to a strict spec or cross-family edit cannot verbatim-copy base bytes even when `!ov.dirty`.
+	target_fmt := opts.target if opts.target != nil else spec.target
+	same_format := ov != nil && ov.base != nil && spec.same_family && (target_fmt == ov.base.format || !spec.strict)
 	fast, target, fast_res, gerr := commit_guard(ov, spec.target, opts, same_format, spec.validate, spec.data, allocator)
 	if gerr != nil {
 		return {}, gerr
@@ -54,19 +74,19 @@ commit_binary :: proc(
 
 	doc := ov.base
 	cx := Binary_Cx {
-		ov            = ov,
-		doc           = doc,
-		src           = doc.src,
-		spec          = spec,
-		opts          = opts,
-		verbatim_ok   = !spec.strict || doc.format == target,
-		allocator     = allocator,
+		ov          = ov,
+		doc         = doc,
+		src         = doc.src,
+		spec        = spec,
+		opts        = opts,
+		verbatim_ok = spec.same_family && (!spec.strict || doc.format == target),
+		allocator   = allocator,
 	}
-	out := make([dynamic]u8, 0, len(doc.src), allocator)
+	out := make([dynamic]u8, 0, len(doc.src), allocator) or_return
 	defer if err != nil {
 		delete(out)
 	}
-	recs := make([dynamic]Splice_Record, 0, 8, allocator)
+	recs := make([dynamic]Splice_Record, 0, 8, allocator) or_return
 	defer if err != nil {
 		delete(recs)
 	}
@@ -98,9 +118,20 @@ Binary_Cx :: struct {
 	allocator:   runtime.Allocator,
 }
 
-// Emits CBOR tag header(s) for node `n` (or copies original stacked tags if untouched), recording any dropped non-tag facts.
 @(private = "file")
-emit_binary_tags :: proc(cx: ^Binary_Cx, n: ^Edit_Node, tags_lo, item_lo: u64, out: ^[dynamic]u8) -> Error {
+span_of :: #force_inline proc "contextless" (cx: ^Binary_Cx, at: tape.Node_Index) -> (tags_lo, item_lo, item_hi: u64) {
+	if cx.spec.item_span != nil {
+		return cx.spec.item_span(cx.doc, at)
+	}
+	return binary_item_span(cx.doc, at)
+}
+
+// Emits tag header(s) or runs the format's container-tag check for node `n`, recording any dropped non-tag facts.
+@(private = "file")
+emit_binary_tags :: proc(cx: ^Binary_Cx, n: ^Edit_Node, base_c: tape.Node_Index, tags_lo, item_lo: u64, out: ^[dynamic]u8) -> Error {
+	if cx.spec.emit_tags != nil {
+		return cx.spec.emit_tags(cx.spec.data, cx.doc, n, base_c, tags_lo, item_lo, &cx.dropped, out)
+	}
 	has_tag_override := false
 	tag_fo: Fact_Override
 	for f in n.facts {
@@ -113,7 +144,7 @@ emit_binary_tags :: proc(cx: ^Binary_Cx, n: ^Edit_Node, tags_lo, item_lo: u64, o
 	}
 	if !has_tag_override {
 		if tags_lo < item_lo {
-			append(out, ..cx.src[tags_lo:item_lo])
+			append(out, ..cx.src[tags_lo:item_lo]) or_return
 		}
 		return nil
 	}
@@ -124,8 +155,7 @@ emit_binary_tags :: proc(cx: ^Binary_Cx, n: ^Edit_Node, tags_lo, item_lo: u64, o
 	if !tok {
 		return refuse(.Fact_No_Place, "CBOR tag must be an unsigned 64-bit integer", n.base, tags_lo)
 	}
-	cx.spec.put_head(cx.spec.data, 6, tag_num, out)
-	return nil
+	return cx.spec.put_head(cx.spec.data, 6, tag_num, out)
 }
 
 @(private = "file")
@@ -133,8 +163,8 @@ Sorted_Pair :: struct {
 	lo, mid, hi: int,
 }
 
-// Iterative CBOR serializer over `cx.ov`: copies every untouched compatible subtree verbatim and encodes edited/upgraded
-// subtrees via `cbor.write` without native recursion.
+// Iterative binary serializer over `cx.ov`: copies untouched compatible subtrees verbatim and delegates edited/upgraded
+// subtrees to `cx.spec` callbacks without native recursion.
 @(private = "file")
 emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic]Splice_Record) -> Error {
 	Item_Ref :: struct {
@@ -159,7 +189,7 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 		in_val:       bool,
 	}
 
-	stack := make([dynamic]Frame, 0, 32, cx.allocator)
+	stack := make([dynamic]Frame, 0, 32, cx.allocator) or_return
 	defer {
 		for &fr in stack {
 			delete(fr.items, cx.allocator)
@@ -173,8 +203,7 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 		delete(stack)
 	}
 
-	// Resolves the innermost active buffer: nearest enclosing sorting frame's `sort_buf`, or `out`!
-	// Ensures nested non-sorting containers (e.g. arrays inside a sorted map) write into the map's `sort_buf`.
+	// Resolves the innermost active buffer: nearest enclosing sorting frame's `sort_buf`, or `out`.
 	active_buf :: proc "contextless" (out: ^[dynamic]u8, s: []Frame) -> (^[dynamic]u8, bool) {
 		for i := len(s) - 1; i >= 0; i -= 1 {
 			if s[i].sorting {
@@ -193,37 +222,70 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 		h: Handle,
 		base_node: tape.Node_Index,
 	) -> Error {
-		// Untouched base subtree -> verbatim byte copy ONLY when target format is compatible!
+		// Untouched base subtree -> verbatim byte copy ONLY when target format is compatible.
 		if h == NO_HANDLE {
 			if cx.verbatim_ok {
-				tags_lo, _, item_hi := cx.spec.item_span(cx.doc, base_node)
-				append(dst, ..cx.src[tags_lo:item_hi])
+				tags_lo, _, item_hi := span_of(cx, base_node)
+				append(dst, ..cx.src[tags_lo:item_hi]) or_return
 				return nil
 			}
-			// Cross-spec upgrade (e.g. `.Cbor` -> `.Preferred`/`.Deterministic`/`.Length_First`): re-encode via `cbor.write`!
-			return cx.spec.spell_value(cx.spec.data, cx.ov, NO_HANDLE, base_node, dst)
+			return cx.spec.spell_value(cx.spec.data, cx.ov, NO_HANDLE, base_node, &cx.dropped, dst)
 		}
 		n, ok := get_node(cx.ov, h)
 		if !ok {
 			return refuse(.Bad_Handle, "invalid overlay handle")
 		}
-		if !n.has_edits && n.base != tape.NO_NODE {
+		if !n.has_edits && n.base != tape.NO_NODE && n.base_ref == tape.NO_NODE {
 			if cx.verbatim_ok {
-				tags_lo, _, item_hi := cx.spec.item_span(cx.doc, n.base)
-				append(dst, ..cx.src[tags_lo:item_hi])
+				tags_lo, _, item_hi := span_of(cx, n.base)
+				append(dst, ..cx.src[tags_lo:item_hi]) or_return
 				return nil
 			}
-			return cx.spec.spell_value(cx.spec.data, cx.ov, h, n.base, dst)
+			return cx.spec.spell_value(cx.spec.data, cx.ov, h, n.base, &cx.dropped, dst)
 		}
 		tags_lo, item_lo, item_hi: u64
 		if n.base != tape.NO_NODE {
-			tags_lo, item_lo, item_hi = cx.spec.item_span(cx.doc, n.base)
+			tags_lo, item_lo, item_hi = span_of(cx, n.base)
 		}
 		dst_start := u64(len(dst))
 
-		// Replaced or newly built value -> `cbor.write` emits both tags and value cleanly!
-		if n.state == .Replaced || n.base == tape.NO_NODE {
-			cx.spec.spell_value(cx.spec.data, cx.ov, h, tape.NO_NODE, dst) or_return
+		// Replaced or newly built node:
+		if n.state == .Replaced || (n.base == tape.NO_NODE && n.base_ref == tape.NO_NODE) {
+			if !cx.spec.spell_containers && (n.val.kind == .Array || n.val.kind == .Object) {
+				emit_binary_tags(cx, n, tape.NO_NODE, tags_lo, item_lo, dst) or_return
+				is_obj := n.val.kind == .Object
+				items: []Item_Ref
+				ok_push := false
+				defer if !ok_push {
+					delete(items, cx.allocator)
+				}
+				if is_obj {
+					items = make([]Item_Ref, len(n.members), cx.allocator) or_return
+					for m, i in n.members {
+						items[i] = {handle = m.value, base_val = tape.NO_NODE, base_key = tape.NO_NODE, key_text = m.key, use_key_str = true}
+					}
+				} else {
+					items = make([]Item_Ref, len(n.elems), cx.allocator) or_return
+					for e, i in n.elems {
+						items[i] = {handle = e, base_val = tape.NO_NODE, base_key = tape.NO_NODE}
+					}
+				}
+				cx.spec.put_head(cx.spec.data, 5 if is_obj else 4, u64(len(items)), dst) or_return
+				append(stack, Frame{is_obj = is_obj, items = items}) or_return
+				ok_push = true
+				if n.base != tape.NO_NODE && !in_sorted {
+					append(recs, Splice_Record {
+						base_node   = n.base,
+						src_lo      = tags_lo,
+						src_hi      = item_hi,
+						dst_lo      = dst_start,
+						dst_hi      = dst_start,
+						full_rewalk = true,
+					}) or_return
+				}
+				return nil
+			}
+			cx.spec.spell_value(cx.spec.data, cx.ov, h, tape.NO_NODE, &cx.dropped, dst) or_return
 			if n.base != tape.NO_NODE && !in_sorted {
 				append(recs, Splice_Record {
 					base_node    = n.base,
@@ -232,21 +294,25 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 					dst_lo       = dst_start,
 					dst_hi       = u64(len(dst)),
 					subtree_only = true,
-				})
+				}) or_return
 			}
 			return nil
 		}
 
-		// Fact-only edit on a base leaf: emit tag override + item bytes (re-encoding under strict cross-spec upgrade).
-		bnode := cx.doc.nodes[n.base]
+		// Base node in `.Ancestor` or `.Container_Delta` (including `.Base_Ref` containers with structural edits):
+		base_c := node_base_container(n)
+		if base_c == tape.NO_NODE {
+			return refuse(.Bad_Handle, "missing base container for overlay edit")
+		}
+		bnode := cx.doc.nodes[base_c]
 		if bnode.kind < .Array {
-			if !cx.verbatim_ok {
-				cx.spec.spell_value(cx.spec.data, cx.ov, h, n.base, dst) or_return
+			if !cx.verbatim_ok || cx.spec.no_prefix_tags {
+				cx.spec.spell_value(cx.spec.data, cx.ov, h, base_c, &cx.dropped, dst) or_return
 			} else {
-				emit_binary_tags(cx, n, tags_lo, item_lo, dst) or_return
-				append(dst, ..cx.src[item_lo:item_hi])
+				emit_binary_tags(cx, n, base_c, tags_lo, item_lo, dst) or_return
+				append(dst, ..cx.src[item_lo:item_hi]) or_return
 			}
-			if !in_sorted {
+			if n.base != tape.NO_NODE && !in_sorted {
 				append(recs, Splice_Record {
 					base_node    = n.base,
 					src_lo       = tags_lo,
@@ -254,24 +320,24 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 					dst_lo       = dst_start,
 					dst_hi       = u64(len(dst)),
 					subtree_only = true,
-				})
+				}) or_return
 			}
 			return nil
 		}
 
 		// Base container with structural, tag, or descendant edits:
-		emit_binary_tags(cx, n, tags_lo, item_lo, dst) or_return
+		emit_binary_tags(cx, n, base_c, tags_lo, item_lo, dst) or_return
 		is_obj := bnode.kind == .Object
-		was_indef := (cx.src[item_lo] & 31) == 31
+		was_indef := cx.spec.has_indefinite && cx.spec.same_family && n.base != tape.NO_NODE && n.base_ref == tape.NO_NODE && (cx.src[item_lo] & 31) == 31
 		use_indef := was_indef && !cx.spec.strict
 
-		// Validate explicit reorder permutation if present on this container!
+		// Validate explicit reorder permutation if present on this container.
 		if d := n.delta; n.state == .Container_Delta && d != nil && len(d.order) > 0 {
-			bc := max(0, tape.child_count(cx.doc, n.base, bnode))
-			deleted_flags := make([]bool, bc, cx.allocator)
+			bc := max(0, tape.child_count(cx.doc, base_c, bnode))
+			deleted_flags := make([]bool, bc, cx.allocator) or_return
 			defer delete(deleted_flags, cx.allocator)
 			if is_obj {
-				c, _, cerr := tape.children(tape.Reader{doc = cx.doc}, n.base, cx.allocator)
+				c, _, cerr := tape.children(tape.Reader{doc = cx.doc}, base_c, cx.allocator)
 				if cerr != nil {
 					return cerr
 				}
@@ -281,14 +347,39 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 					if np != .Found || bi >= bc {
 						break
 					}
-					tk := decode_node_text_tmp(cx.doc, kn, cx.allocator)
-					for dk in d.deleted_keys {
-						if dk == tk.text {
-							deleted_flags[bi] = true
-							break
+					if kn != tape.NO_NODE {
+						tk := decode_node_text_tmp(cx.doc, kn, cx.allocator)
+						for dk in d.deleted_keys {
+							if dk == tk.text {
+								deleted_flags[bi] = true
+								break
+							}
+						}
+						free_tmp_text(tk, cx.allocator)
+					} else if c.keys_n != 0 {
+						kt := tape.cell_key(tape.Reader{doc = cx.doc}, c)
+						kroom := tape.text_room(cx.doc, kt)
+						if kroom == 0 {
+							ktext := string(tape.span_bytes(cx.doc, kt.lo, kt.n))
+							for dk in d.deleted_keys {
+								if dk == ktext {
+									deleted_flags[bi] = true
+									break
+								}
+							}
+						} else {
+							kbuf := make([]u8, kroom, cx.allocator) or_return
+							if ktext, kok := tape.node_text(cx.doc, kt, kbuf); kok {
+								for dk in d.deleted_keys {
+									if dk == ktext {
+										deleted_flags[bi] = true
+										break
+									}
+								}
+							}
+							delete(kbuf, cx.allocator)
 						}
 					}
-					free_tmp_text(tk, cx.allocator)
 					bi += 1
 				}
 				tape.destroy_children(&c)
@@ -305,21 +396,29 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 
 		items: []Item_Ref
 		owned_keys: []string
+		ok_push := false
+		defer if !ok_push {
+			delete(items, cx.allocator)
+			for s in owned_keys {
+				delete(s, cx.allocator)
+			}
+			delete(owned_keys, cx.allocator)
+		}
 		if is_obj {
 			eff, ok_keys, merr := effective_members(cx.ov, h, cx.allocator)
 			if merr != nil {
 				return merr
 			}
-			defer delete(eff, cx.allocator)
-			items = make([]Item_Ref, len(eff), cx.allocator)
 			owned_keys = ok_keys
+			defer delete(eff, cx.allocator)
+			items = make([]Item_Ref, len(eff), cx.allocator) or_return
 			for m, i in eff {
 				items[i] = {
 					handle      = m.handle,
 					base_key    = m.base_key,
 					base_val    = m.base_val,
 					key_text    = m.key,
-					use_key_str = !cx.verbatim_ok || m.is_inserted || m.renamed || m.base_key == tape.NO_NODE,
+					use_key_str = m.is_inserted || m.renamed || m.base_key == tape.NO_NODE || (!cx.verbatim_ok && cx.spec.put_base_key == nil),
 				}
 			}
 		} else {
@@ -328,7 +427,7 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 				return eerr
 			}
 			defer delete(eff, cx.allocator)
-			items = make([]Item_Ref, len(eff), cx.allocator)
+			items = make([]Item_Ref, len(eff), cx.allocator) or_return
 			for e, i in eff {
 				items[i] = {handle = e.handle, base_key = tape.NO_NODE, base_val = e.base}
 			}
@@ -337,15 +436,20 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 		major := u8(5) if is_obj else u8(4)
 		head_start := len(dst)
 		if use_indef {
-			append(dst, (major << 5) | 31)
+			append(dst, (major << 5) | 31) or_return
 		} else {
-			cx.spec.put_head(cx.spec.data, major, u64(len(items)), dst)
+			cx.spec.put_head(cx.spec.data, major, u64(len(items)), dst) or_return
 		}
-		head_changed := u64(len(dst) - head_start) != (item_lo - tags_lo + 1) && (was_indef != use_indef || n.state == .Container_Delta)
+		head_changed: bool
+		if cx.spec.head_len != nil {
+			orig_head_len := cx.spec.head_len(cx.src, item_lo) if (cx.spec.same_family && n.base != tape.NO_NODE && n.base_ref == tape.NO_NODE) else u64(0)
+			head_changed = u64(len(dst) - head_start) != orig_head_len
+		} else {
+			head_changed = u64(len(dst) - head_start) != (item_lo - tags_lo + 1) && (was_indef != use_indef || n.state == .Container_Delta)
+		}
 		sorting := is_obj && cx.spec.sorted_maps && len(items) > 1
-		// Any structural container edit, tag edit on container, sorting, or cross-spec upgrade forces `full_rewalk`
-		// so `splice_document` never keeps stale child counts/order!
-		if !in_sorted && (n.state == .Container_Delta || sorting || len(n.facts) > 0 || head_changed || !cx.verbatim_ok) {
+		// Any structural container edit, tag edit on container, sorting, head size change, or cross-spec upgrade forces `full_rewalk`.
+		if n.base != tape.NO_NODE && !in_sorted && (n.state == .Container_Delta || n.base_ref != tape.NO_NODE || sorting || len(n.facts) > 0 || head_changed || !cx.verbatim_ok) {
 			append(recs, Splice_Record {
 				base_node   = n.base,
 				src_lo      = tags_lo,
@@ -353,11 +457,11 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 				dst_lo      = dst_start,
 				dst_hi      = dst_start,
 				full_rewalk = true,
-			})
+			}) or_return
 		}
 
 		fr := Frame {
-			base_c     = n.base,
+			base_c     = base_c,
 			is_obj     = is_obj,
 			indefinite = use_indef,
 			items      = items,
@@ -365,10 +469,24 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 			sorting    = sorting,
 		}
 		if sorting {
-			fr.sort_buf = make([dynamic]u8, 0, 128, cx.allocator)
-			fr.sort_entries = make([dynamic]Sorted_Pair, 0, len(items), cx.allocator)
+			sbuf, sberr := make([dynamic]u8, 0, 128, cx.allocator)
+			if sberr != nil {
+				return sberr
+			}
+			sent, seerr := make([dynamic]Sorted_Pair, 0, len(items), cx.allocator)
+			if seerr != nil {
+				delete(sbuf)
+				return seerr
+			}
+			fr.sort_buf = sbuf
+			fr.sort_entries = sent
 		}
-		append(stack, fr)
+		if _, perr := append(stack, fr); perr != nil {
+			delete(fr.sort_buf)
+			delete(fr.sort_entries)
+			return perr
+		}
+		ok_push = true
 		return nil
 	}
 
@@ -379,7 +497,7 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 		fr := &stack[len(stack) - 1]
 		target_buf, in_sorted := active_buf(out, stack[:])
 		if fr.sorting && fr.in_val {
-			append(&fr.sort_entries, Sorted_Pair{lo = fr.cur_lo, mid = fr.cur_mid, hi = len(fr.sort_buf)})
+			append(&fr.sort_entries, Sorted_Pair{lo = fr.cur_lo, mid = fr.cur_mid, hi = len(fr.sort_buf)}) or_return
 			fr.in_val = false
 		}
 
@@ -388,11 +506,11 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 			if fr.sorting {
 				sort_cbor_pairs(fr.sort_entries[:], fr.sort_buf[:], cx.spec.length_first)
 				for e in fr.sort_entries {
-					append(parent_buf, ..fr.sort_buf[e.lo:e.hi])
+					append(parent_buf, ..fr.sort_buf[e.lo:e.hi]) or_return
 				}
 			}
 			if fr.indefinite {
-				append(parent_buf, 0xFF)
+				append(parent_buf, 0xFF) or_return
 			}
 			delete(fr.items, cx.allocator)
 			for s in fr.owned_keys {
@@ -412,10 +530,12 @@ emit_binary_iterative :: proc(cx: ^Binary_Cx, out: ^[dynamic]u8, recs: ^[dynamic
 		}
 		if fr.is_obj {
 			if item.use_key_str {
-				cx.spec.put_key(cx.spec.data, item.key_text, target_buf)
+				cx.spec.put_key(cx.spec.data, item.key_text, item.base_key, target_buf) or_return
+			} else if cx.verbatim_ok {
+				ktlo, _, khi := span_of(cx, item.base_key)
+				append(target_buf, ..cx.src[ktlo:khi]) or_return
 			} else {
-				ktlo, _, khi := cx.spec.item_span(cx.doc, item.base_key)
-				append(target_buf, ..cx.src[ktlo:khi])
+				cx.spec.put_base_key(cx.spec.data, cx.doc, item.base_key, &cx.dropped, target_buf) or_return
 			}
 		}
 		if fr.sorting {

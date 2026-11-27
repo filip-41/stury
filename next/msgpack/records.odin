@@ -29,7 +29,7 @@ records_open :: proc(src: []u8, framing := tape.Framing.Concatenated, spec := Sp
 	if spec > max(Spec) {
 		panic("msgpack: spec out of range")
 	}
-	r.spec, r.steps = spec, steps_of(opts)
+	r.spec, r.steps = spec, build.binary_steps_of(opts)
 	build.binary_records_init(&r.records, &r.frame, src, framing, &FORMATS[spec], opts, path, records_release)
 	return
 }
@@ -45,15 +45,9 @@ records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.a
 	lax := r.opts.budget.steps != 0
 	switch r.spec {
 	case .Msgpack:
-		if lax {
-			return records_validate_as(r, out, .Msgpack, true, allocator)
-		}
-		return records_validate_as(r, out, .Msgpack, false, allocator)
+		return records_validate_as(r, out, .Msgpack, true, allocator) if lax else records_validate_as(r, out, .Msgpack, false, allocator)
 	case .Compact:
-		if lax {
-			return records_validate_as(r, out, .Compact, true, allocator)
-		}
-		return records_validate_as(r, out, .Compact, false, allocator)
+		return records_validate_as(r, out, .Compact, true, allocator) if lax else records_validate_as(r, out, .Compact, false, allocator)
 	}
 	panic("msgpack: spec out of range")
 }
@@ -64,15 +58,9 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 	lax := r.opts.budget.steps != 0
 	switch r.spec {
 	case .Msgpack:
-		if lax {
-			return records_find_as(r, path, out, answers, .Msgpack, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Msgpack, false, read, allocator)
+		return records_find_as(r, path, out, answers, .Msgpack, true, read, allocator) if lax else records_find_as(r, path, out, answers, .Msgpack, false, read, allocator)
 	case .Compact:
-		if lax {
-			return records_find_as(r, path, out, answers, .Compact, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Compact, false, read, allocator)
+		return records_find_as(r, path, out, answers, .Compact, true, read, allocator) if lax else records_find_as(r, path, out, answers, .Compact, false, read, allocator)
 	}
 	panic("msgpack: spec out of range")
 }
@@ -83,15 +71,9 @@ records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs
 	lax := r.opts.budget.steps != 0
 	switch r.spec {
 	case .Msgpack:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Msgpack, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Msgpack, false, read, allocator)
+		return records_scan_as(r, demand, out, docs, .Msgpack, true, read, allocator) if lax else records_scan_as(r, demand, out, docs, .Msgpack, false, read, allocator)
 	case .Compact:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Compact, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Compact, false, read, allocator)
+		return records_scan_as(r, demand, out, docs, .Compact, true, read, allocator) if lax else records_scan_as(r, demand, out, docs, .Compact, false, read, allocator)
 	}
 	panic("msgpack: spec out of range")
 }
@@ -139,20 +121,8 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 @(private)
 record_frame :: #force_inline proc(r: ^Records, $S: Spec, allocator: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
 	if r.framing == .Concatenated && r.at != .Done {
-		n := u64(len(r.src))
-		if r.pos >= n {
-			if !window_more(r) {
-				r.at = .Done
-			}
-			return
-		}
-		return r.pos, n, true
+		return build.binary_record_frame_concat(&r.records)
 	}
-	return record_frame_other(r, S, allocator)
-}
-
-@(private)
-record_frame_other :: #force_inline proc(r: ^Records, $S: Spec, allocator: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
 	open :: proc(r: ^Records, outer, lv: ^Path_Level, object: bool, depth: u64) -> build.Frame_Step {
 		_ = outer
 		return frame_open(r, lv, object, depth, S)
@@ -162,9 +132,16 @@ record_frame_other :: #force_inline proc(r: ^Records, $S: Spec, allocator: runti
 	}
 	pass :: proc(r: ^Records, outer: ^Path_Level, depth: u64, allocator: runtime.Allocator) -> build.Frame_Step {
 		_ = outer
-		return frame_pass(r, depth, allocator, S)
+		walk_fn :: proc(src: []u8, lo: u64, lax: bool, opts: Options, limit, steps: u64, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (hook.Walk_Result, bool, u64) {
+			if lax { return walk_item(src, lo, S, true, opts, limit, steps, h, regs, a, ctx, hook.no_hook) }
+			return walk_item(src, lo, S, false, opts, limit, steps, h, regs, a, ctx, hook.no_hook)
+		}
+		return build.binary_frame_pass(&r.records, &r.frame, &r.steps, depth, 0, allocator, &RULES, u8(Detail.No_Item), u8(Detail.Count_Too_Large), walk_fn)
 	}
-	lo, ok = build.frame_path(r, &r.frame, &FORMATS[S], &RULES, allocator, open, child, pass, frame_tail)
+	tail :: proc(r: ^Records) -> build.Frame_Step {
+		return build.binary_frame_tail(&r.records, &r.frame, &RULES, u8(Detail.Trailing), u8(Detail.Count_Too_Large))
+	}
+	lo, ok = build.frame_path(r, &r.frame, &FORMATS[S], &RULES, allocator, open, child, pass, tail)
 	return lo, u64(len(r.src)), ok
 }
 
@@ -195,7 +172,7 @@ frame_open :: proc "contextless" (r: ^Records, lv: ^Path_Level, object: bool, de
 	}
 	pair := u64(object)
 	if arg > (n - at - hl) >> pair {
-		if !lv.passing || !window_more(r) {
+		if !lv.passing || !build.binary_window_more(&r.records) {
 			return .Other
 		}
 		lv.head, lv.need = at, max(u64) if arg > max(u64) >> 2 else at + hl + (arg << pair)
@@ -228,57 +205,9 @@ frame_child :: #force_inline proc(r: ^Records, lv: ^Path_Level, object: bool, $S
 	return at, .Done
 }
 
-@(private)
-frame_pass :: proc(r: ^Records, depth: u64, allocator: runtime.Allocator, $S: Spec) -> build.Frame_Step {
-	if depth == 0 && len(r.src) == 0 {
-		return item_refused(r, fault(0, .Truncated, .No_Item))
-	}
-	none: hook.No_Hooks
-	regs: hook.Regs
-	ctx := context
-	res: hook.Walk_Result
-	left: u64
-	limit := build.read_depth(r.opts) - depth
-	if build.read_lax(r.opts) {
-		res, _, left = walk_item(r.src, r.pos, S, true, r.opts, limit, r.steps, &none, &regs, allocator, &ctx, hook.no_hook)
-	} else {
-		res, _, left = walk_item(r.src, r.pos, S, false, r.opts, limit, r.steps, &none, &regs, allocator, &ctx, hook.no_hook)
-	}
-	if u8(res) != 0 {
-		return item_refused(r, res)
-	}
-	r.steps, r.pos = left, u64(res) >> 16
-	return .Done
-}
-
-@(private)
-frame_tail :: proc(r: ^Records) -> build.Frame_Step {
-	if r.pos < u64(len(r.src)) {
-		return item_refused(r, fault(r.pos, .Bad_Char, .Trailing))
-	}
-	return .Wait if window_more(r) else .Done
-}
-
 @(private, cold)
 item_refused :: proc "contextless" (r: ^Records, res: hook.Walk_Result) -> build.Frame_Step {
 	return build.binary_item_refused(&r.records, &r.frame, res, &RULES, u8(Detail.Count_Too_Large))
-}
-
-@(private)
-window_more :: #force_inline proc "contextless" (r: ^Records) -> bool {
-	return r.opts.pieces != nil && !r.opts.pieces.last
-}
-
-@(private)
-Member_Key :: struct {
-	protocol: hook.Protocol(hook.NO_HOOKS_CAPS, hook.Unused, hook.Unused, hook.Unused),
-	key:      tape.Token,
-}
-
-@(private)
-member_key_hook :: proc "contextless" (h: ^Member_Key, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-	h.key = t
-	return s, .Stop
 }
 
 @(private)
@@ -286,13 +215,13 @@ frame_key :: proc(r: ^Records, $S: Spec) -> (u64, build.Frame_Step) {
 	if r.steps == 0 {
 		return 0, item_refused(r, hook.walk_result(r.pos, hook.WALK_STEPS))
 	}
-	h: Member_Key
+	h: build.Binary_Member_Key
 	regs: hook.Regs
 	levels: [2]Level
-	w: Walk(S, Member_Key, false, hook.NO_HOOKS_CAPS)
+	w: Walk(S, build.Binary_Member_Key, false, hook.NO_HOOKS_CAPS)
 	walk_init(&w, r.src, &h, raw_data(levels[:]), 2, 2, r.opts)
 	w.depth = 2
-	res := run(&w, r.pos, 1, FLAG_OBJECT | 2, &regs, member_key_hook)
+	res := run(&w, r.pos, 1, FLAG_OBJECT | 2, &regs, build.binary_member_key_hook)
 	if u8(res) != hook.WALK_STOPPED {
 		return 0, item_refused(r, res if u8(res) != 0 else fault(u64(res) >> 16, .Truncated))
 	}
@@ -302,31 +231,15 @@ frame_key :: proc(r: ^Records, $S: Spec) -> (u64, build.Frame_Step) {
 }
 
 @(private)
-record_walk :: proc(r: ^Records, $S: Spec, $LAX: bool, lo: u64, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (walked: build.Record_Walk) {
-	concatenated := r.framing == .Concatenated
-	limit := build.read_depth(r.opts)
-	if !concatenated {
-		limit -= 1 + u64(len(r.path))
+record_walk :: proc(r: ^Records, $S: Spec, $LAX: bool, lo: u64, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> build.Record_Walk {
+	walk_h :: proc "contextless" (src: []u8, lo: u64, opts: Options, limit, steps: u64, h: ^H, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (hook.Walk_Result, bool, u64) {
+		return walk_item(src, lo, S, LAX, opts, limit, steps, h, regs, a, ctx, on)
 	}
-	steps := steps_of(r.opts) if concatenated else r.steps
-	res, tolerated, left := walk_item(r.src, lo, S, LAX, r.opts, limit, steps, h, regs, allocator, ctx, on)
-	walked.res, walked.tolerated = res, tolerated || r.took
-	end := res
-	if u8(res) == hook.WALK_STOPPED {
-		none: hook.No_Hooks
-		none_regs: hook.Regs
-		end, _, left = walk_item(r.src, lo, S, LAX, r.opts, limit, steps, &none, &none_regs, allocator, ctx, hook.no_hook)
+	walk_none :: proc "contextless" (src: []u8, lo: u64, opts: Options, limit, steps: u64, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (hook.Walk_Result, bool, u64) {
+		return walk_item(src, lo, S, LAX, opts, limit, steps, h, regs, a, ctx, hook.no_hook)
 	}
-	if u8(end) != 0 {
-		_ = item_refused(r, end)
-		return
-	}
-	if !concatenated {
-		r.steps = left
+	take :: proc(r: ^Records) {
 		build.frame_level(&r.frame, len(r.path)).left = r.next.left
 	}
-	r.took = false
-	walked.hi, walked.ok = u64(end) >> 16, true
-	r.pos, r.at = walked.hi, .After
-	return
+	return build.binary_record_walk(r, lo, 0, h, regs, allocator, ctx, &RULES, u8(Detail.Count_Too_Large), walk_h, walk_none, take)
 }

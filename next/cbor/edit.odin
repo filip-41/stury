@@ -35,17 +35,20 @@ commit :: proc(
 ) {
 	resolved := resolve_edit_spec(ov, spec, opts)
 	ctx := Cbor_Edit_Ctx{spec = resolved}
+	same_family := ov != nil && ov.base != nil && ov.base.format != nil && ov.base.format.id >= ID && ov.base.format.id <= ID + 3
 	bspec := edit.Binary_Spec {
-		target       = as(resolved),
-		strict       = resolved != .Cbor,
-		sorted_maps  = resolved == .Deterministic || resolved == .Length_First,
-		length_first = resolved == .Length_First,
-		item_span    = cbor_item_span,
-		put_head     = cbor_put_head_dyn,
-		put_key      = cbor_put_key_dyn,
-		spell_value  = cbor_spell_value,
-		validate     = cbor_edit_validate,
-		data         = &ctx,
+		target           = as(resolved),
+		same_family      = same_family,
+		strict           = resolved != .Cbor,
+		sorted_maps      = resolved == .Deterministic || resolved == .Length_First,
+		length_first     = resolved == .Length_First,
+		has_indefinite   = true,
+		spell_containers = true,
+		put_head         = cbor_put_head_dyn,
+		put_key          = cbor_put_key_dyn,
+		spell_value      = cbor_spell_value,
+		validate         = cbor_edit_validate,
+		data             = &ctx,
 	}
 	return edit.commit_binary(ov, &bspec, opts, allocator)
 }
@@ -147,55 +150,46 @@ cbor_edit_validate :: proc(data: rawptr, src: []u8, allocator: runtime.Allocator
 }
 
 @(private = "file")
-cbor_item_span :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (tags_lo, item_lo, item_hi: u64) {
-	item_lo, item_hi, _ = edit.node_byte_span(doc, at)
-	tags_lo = item_lo
-	for f in tape.facts_of(doc, at) {
-		if f.kind == .Tag && f.lo < tags_lo {
-			tags_lo = f.lo
-		}
-	}
-	return tags_lo, item_lo, item_hi
-}
-
-@(private = "file")
-cbor_put_head_dyn :: proc(data: rawptr, major: u8, arg: u64, out: ^[dynamic]u8) {
+cbor_put_head_dyn :: proc(data: rawptr, major: u8, arg: u64, out: ^[dynamic]u8) -> edit.Error {
 	_ = data
 	m := major << 5
 	switch {
 	case arg < 24:
-		append(out, m | u8(arg))
+		append(out, m | u8(arg)) or_return
 	case arg <= 0xFF:
-		append(out, m | 24, u8(arg))
+		append(out, m | 24, u8(arg)) or_return
 	case arg <= 0xFFFF:
 		b := [3]u8{m | 25, u8(arg >> 8), u8(arg)}
-		append(out, ..b[:])
+		append(out, ..b[:]) or_return
 	case arg <= 0xFFFF_FFFF:
 		b := [5]u8{m | 26, u8(arg >> 24), u8(arg >> 16), u8(arg >> 8), u8(arg)}
-		append(out, ..b[:])
+		append(out, ..b[:]) or_return
 	case:
 		b: [9]u8
 		b[0] = m | 27
 		endian.unchecked_put_u64be(b[1:], arg)
-		append(out, ..b[:])
+		append(out, ..b[:]) or_return
 	}
+	return nil
 }
 
 @(private = "file")
-cbor_put_key_dyn :: proc(data: rawptr, key: string, out: ^[dynamic]u8) {
-	cbor_put_head_dyn(data, 3, u64(len(key)), out)
-	append(out, key)
+cbor_put_key_dyn :: proc(data: rawptr, key: string, node: tape.Node_Index, out: ^[dynamic]u8) -> edit.Error {
+	_ = node
+	cbor_put_head_dyn(data, 3, u64(len(key)), out) or_return
+	append(out, key) or_return
+	return nil
 }
 
 // Reuses `cbor.write` via `edit.materialize_subtree` — zero duplicate CBOR serializer!
 @(private = "file")
-cbor_spell_value :: proc(data: rawptr, ov: ^Overlay, h: Handle, base_node: tape.Node_Index, out: ^[dynamic]u8) -> edit.Error {
+cbor_spell_value :: proc(data: rawptr, ov: ^Overlay, h: Handle, base_node: tape.Node_Index, dropped: ^tape.Facts, out: ^[dynamic]u8) -> edit.Error {
 	cc := (^Cbor_Edit_Ctx)(data)
 	// Support `.Raw` directly if explicitly provided.
 	if h != edit.NO_HANDLE {
 		if n, ok := edit.get_node(ov, h); ok {
 			if n.state == .Replaced && n.val.kind == .Raw {
-				append(out, n.val.text)
+				append(out, n.val.text) or_return
 				return nil
 			}
 			// Emit outer numeric CBOR tag override (or base tag(s)) before delegating to `cbor.write`!
@@ -213,30 +207,31 @@ cbor_spell_value :: proc(data: rawptr, ov: ^Overlay, h: Handle, base_node: tape.
 					if !tok {
 						return edit.refuse(.Fact_No_Place, "CBOR tag must be an unsigned 64-bit integer", n.base)
 					}
-					cbor_put_head_dyn(data, 6, tag_num, out)
+					cbor_put_head_dyn(data, 6, tag_num, out) or_return
 				}
 			} else if n.base != tape.NO_NODE {
-				tlo, ilo, _ := cbor_item_span(ov.base, n.base)
+				tlo, ilo, _ := edit.binary_item_span(ov.base, n.base)
 				if tlo < ilo {
-					append(out, ..ov.base.src[tlo:ilo])
+					append(out, ..ov.base.src[tlo:ilo]) or_return
 				}
 			}
 		}
 	} else if base_node != tape.NO_NODE {
-		tlo, ilo, _ := cbor_item_span(ov.base, base_node)
+		tlo, ilo, _ := edit.binary_item_span(ov.base, base_node)
 		if tlo < ilo {
-			append(out, ..ov.base.src[tlo:ilo])
+			append(out, ..ov.base.src[tlo:ilo]) or_return
 		}
 	}
 	tmp_doc := edit.materialize_subtree(ov, h, base_node, {skip_root_tags = true}, ov.allocator) or_return
 	defer tape.destroy_document(&tmp_doc)
 
-	encoded, _, werr := write(&tmp_doc, cc.spec, {}, ov.allocator)
+	encoded, wdrop, werr := write(&tmp_doc, cc.spec, {}, ov.allocator)
 	if werr != nil {
 		return cbor_write_err(werr)
 	}
 	defer delete(encoded, ov.allocator)
-	append(out, ..encoded)
+	dropped^ += wdrop
+	append(out, ..encoded) or_return
 	return nil
 }
 

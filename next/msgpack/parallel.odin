@@ -10,54 +10,31 @@ import "stury:lib/ops/typed"
 // Multi-threaded `validate`, `build`, and root-array `unmarshal` over `Part_Plan`.
 
 @(private)
-validate_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> tape.Error {
-	err, done := validate_parts(src, S, opts, caller)
-	if done {
-		return err
-	}
-	one := opts
-	one.runner = nil
-	return validate_as(src, S, false, one, caller)
-}
-
-@(private)
 plan_parallel :: proc(src: []u8, want: int, opts: Options, backing: runtime.Allocator, plan: ^Part_Plan, m: ^hook.Memory_Budget) -> (allocator: runtime.Allocator, ok: bool) {
 	return build.binary_plan_parallel(src, want, opts, backing, plan, m, plan_parts)
 }
 
 @(private)
-destroy_plan :: #force_inline proc(plan: ^Part_Plan) {
-	build.binary_plan_destroy(plan)
-}
-
-@(private)
-validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (err: tape.Error, done: bool) {
+validate_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> tape.Error {
 	walk_fn :: proc "contextless" (src: []u8, from, to: int, opts: Options, plan: ^Part_Plan, k: int, h: ^hook.No_Hooks, regs: ^hook.Regs) -> (hook.Walk_Result, bool) {
 		return walk_part(src, from, to, S, opts, plan, k, h, regs, hook.no_hook)
 	}
-	return build.binary_validate_parts(src, opts, &RULES, caller, Level, plan_parallel, walk_fn, u8(Detail.Trailing))
+	fallback_fn :: proc(src: []u8, opts: Options, caller: runtime.Allocator) -> tape.Error {
+		return validate_as(src, S, false, opts, caller)
+	}
+	return build.binary_validate_parallel(src, opts, &RULES, caller, Level, plan_parallel, walk_fn, fallback_fn, u8(Detail.Trailing))
 }
 
 @(private)
 build_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
-	doc, err, built := build_parts(src, S, opts, caller)
-	if built {
-		return doc, err
-	}
-	one := opts
-	one.runner = nil
-	if one.budget.steps != 0 {
-		return build_as(src, S, true, one, caller)
-	}
-	return build_as(src, S, false, one, caller)
-}
-
-@(private)
-build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error, built: bool) {
 	walk_fn :: proc "contextless" (src: []u8, from, to: int, opts: Options, plan: ^Part_Plan, k: int, h: ^build.Builder, regs: ^hook.Regs) -> (hook.Walk_Result, bool) {
 		return walk_part(src, from, to, S, opts, plan, k, h, regs, build.builder_hook_facts)
 	}
-	return build.binary_build_parts(src, &FORMATS[S], &RULES, opts, caller, Level, plan_parallel, walk_fn, u8(Detail.Trailing))
+	fallback_fn :: proc(src: []u8, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
+		if opts.budget.steps != 0 { return build_as(src, S, true, opts, caller) }
+		return build_as(src, S, false, opts, caller)
+	}
+	return build.binary_build_parallel(src, &FORMATS[S], &RULES, opts, caller, Level, plan_parallel, walk_fn, fallback_fn, u8(Detail.Trailing))
 }
 
 @(private)
@@ -114,45 +91,21 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 	if _, pok := plan_parallel(src, want, opts, scratch, &plan, &m); !pok {
 		return nil, false
 	}
-	defer destroy_plan(&plan)
-
-	parts: [typed.MAX_PARALLEL_PARTS]typed.Parallel_Part
-	last_top: u64
-	cur := int(head_len)
-	n_parts := 0
-	for k in 1 ..< len(plan.parts) {
-		s := plan.seams[k]
-		pos := u64(plan.parts[k].from)
-		top := s.top
-		if s.d > 1 {
-			st: Pass(false)
-			st.i, st.d, st.top = pos, s.d, s.top
-			held := ([^]Level)(raw_data(plan.levels[s.at:]))
-			intrinsics.mem_copy_non_overlapping(&st.stack[0], held, int(s.d) * size_of(Level))
-			ok := false
-			pos, top, ok = advance_to_depth1(src, &st)
-			if !ok {
-				continue
-			}
+	advance :: proc(src: []u8, pos, d, top: u64, held: [^]Level) -> (u64, u64, bool) {
+		st: Pass(false)
+		st.i, st.d, st.top = pos, d, top
+		intrinsics.mem_copy_non_overlapping(&st.stack[0], held, int(d) * size_of(Level))
+		run_abs :: proc(src: []u8, st: ^Pass(false), stop: u64, plan: ^Part_Plan) -> Pass_End {
+			return plan_run(src, false, st, stop, plan)
 		}
-		if s.d == 0 || top & FLAG_OBJECT != 0 {
-			continue
-		}
-		if int(pos) > cur && int(pos) < len(src) && n_parts + 1 < len(parts) {
-			parts[n_parts] = {from = cur, to = int(pos)}
-			n_parts += 1
-			cur = int(pos)
-			last_top = top
-		}
+		return build.binary_advance_to_depth1(src, &st, Level, run_abs)
 	}
-	if n_parts < 1 || cur >= len(src) {
+	parts: [typed.MAX_PARALLEL_PARTS]typed.Parallel_Part
+	n_parts, last_top, dok := build.binary_depth1_parts(src, &plan, head_len, parts[:], Level, FLAG_OBJECT, advance)
+	build.binary_plan_destroy(&plan)
+	if !dok {
 		return nil, false
 	}
-	parts[n_parts] = {from = cur, to = len(src)}
-	n_parts += 1
-	destroy_plan(&plan)
-	plan = {}
-
 	H :: typed.Refusing_Reader when REFUSE else typed.Text_Reader
 	Typed_Data :: struct {
 		src:      []u8,
@@ -179,40 +132,9 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 		end := k == d.n_parts - 1
 		top := d.last_top if end else frame_of(1 << 50, 0)
 		r := run(&w, u64(p.from), 1, top, regs, on)
-		if end && u8(r) == 0 && u64(r) >> 16 < u64(len(d.src)) {
-			r = fault(u64(r) >> 16, .Bad_Char, .Trailing)
-		}
-		_, err, _ := hook.walk_error(r, &RULES)
-		if !end {
-			if f, is_fault := err.(tape.Fault); is_fault && f.kind == .Truncated && f.at == u64(p.to) {
-				err = nil
-			} else if err == nil {
-				return {astray = true}
-			}
-		} else if err == nil && (u64(r) >> 16 != u64(p.to) || hk.sp != 1) {
-			return {astray = true}
-		}
-		return {err = err}
+		err, astray := build.binary_typed_part_verdict(r, u64(len(d.src)), p.to, end, hk.sp, &RULES, u8(Detail.Trailing))
+		return {err = err, astray = astray}
 	}
 	td := Typed_Data{src = src, opts = opts, n_parts = n_parts, last_top = last_top}
 	return typed.read_parallel_list(src, target, T, &FORMATS[S], &RULES, TAG, opts, read, caller, parts[:n_parts], H, walk_part_typed, &td)
-}
-
-@(private)
-advance_to_depth1 :: proc(src: []u8, st: ^Pass(false)) -> (pos, top: u64, ok: bool) {
-	dummy: Part_Plan
-	dummy_part: [1]build.Part
-	dummy.parts = slice_as_dyn(dummy_part[:])
-	dummy.want = 1
-	for st.d > 1 && st.i < u64(len(src)) {
-		if plan_run(src, false, st, st.i + 1, &dummy) != .Stopped {
-			return 0, 0, false
-		}
-	}
-	return st.i, st.top, st.d == 1 && st.i < u64(len(src))
-}
-
-@(private)
-slice_as_dyn :: #force_inline proc "contextless" (s: []build.Part) -> [dynamic]build.Part {
-	return transmute([dynamic]build.Part)runtime.Raw_Dynamic_Array{data = raw_data(s), len = len(s), cap = len(s)}
 }

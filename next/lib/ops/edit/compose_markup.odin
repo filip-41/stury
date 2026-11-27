@@ -8,138 +8,23 @@ import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
 
 // Markup-family composer (XML 1.0 + Namespaces).
-//
-// Preserves untargeted tags, attribute bytes/order/quoting/case, CDATA sections, PIs (`<?...?>`),
-// `<!DOCTYPE ...>`, and comments verbatim.
-//
-// Group 1 refusals (always refused, even under `Options.reflow = true`):
-// - XML comment containing `--` or ending with `-` (`Bad_Xml_Comment`)
-// - Invalid XML element or attribute name (`Bad_Name`)
-// - Content placed inside a void element (`Void_Content`)
-// - Array or non-single-element root (`Root_Shape`)
-// - Empty array for an element (`Empty_Markup_Array`)
-// - Nested array inside an array (`Nested_Markup_Array`)
-// - Markup/array placed into a `#text` run (`Text_Markup`)
-// - Fact with no place (`Fact_No_Place`)
+// Preserves untargeted tags, attributes, CDATA, PIs, DOCTYPE, and comments verbatim.
 
-// Element tag offsets in `src`:
-// `lo` at `<`, `name` one past tag name, `open` one past start tag `>` (or at `/` of `<a/>`),
-// `close` at `</` (or end of content), `hi` one past `>`.
 Markup_Element :: struct {
 	lo, name, open, close, hi: u64,
 	empty, end_tag:            bool,
 }
 
 Markup_Spec :: struct {
-	target:       ^tape.Format,
-	self_closing: bool,
-	element:      proc "contextless" (doc: ^tape.Document, v: tape.Node_Index) -> Markup_Element,
-	is_name:      proc "contextless" (name: []u8) -> bool,
-	is_void:      proc "contextless" (name: string) -> bool,
-	// Spells `ov`'s node `h` as XML element content (escaped text for scalar, child elements for object, empty for null).
-	// Refuses arrays inside non-top positions (`Nested_Markup_Array`) and empty arrays (`Empty_Markup_Array`).
-	spell_content: proc(data: rawptr, ov: ^Overlay, h: Handle, out: ^[dynamic]u8) -> Error,
-	// Escapes an XML attribute value `val` for quote character `quote` (`"` or `'`).
+	target:         ^tape.Format,
+	self_closing:   bool,
+	element:        proc "contextless" (doc: ^tape.Document, v: tape.Node_Index) -> Markup_Element,
+	is_name:        proc "contextless" (name: []u8) -> bool,
+	is_void:        proc "contextless" (name: string) -> bool,
+	spell_content:  proc(data: rawptr, ov: ^Overlay, h: Handle, out: ^[dynamic]u8) -> Error,
 	spell_attr_val: proc(data: rawptr, val: string, quote: u8, out: ^[dynamic]u8) -> Error,
-	// Validates final XML output.
-	validate:     proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> tape.Error,
-	data:         rawptr,
-}
-
-commit_markup :: proc(
-	ov: ^Overlay,
-	spec: ^Markup_Spec,
-	opts := Options{},
-	allocator := context.allocator,
-) -> (
-	res: Commit_Result,
-	err: Error,
-) {
-	cx := Markup_Cx {
-		ov   = ov,
-		doc  = ov.base if ov != nil else nil,
-		src  = ov.base.src if ov != nil && ov.base != nil else nil,
-		spec = spec,
-		opts = opts,
-	}
-	tc := Text_Composer {
-		target        = spec.target,
-		extra_clean   = true,
-		req_root      = .Object,
-		root_msg      = "XML document root must be an object with one root element",
-		validate      = spec.validate,
-		validate_data = spec.data,
-		fast_emit     = markup_fast_emit,
-		struct_emit   = markup_struct_emit,
-		frag_check    = markup_frag_check,
-		user          = &cx,
-	}
-	return run_text_commit(ov, &tc, opts, allocator)
-}
-
-@(private = "file")
-markup_fast_emit :: proc(
-	user: rawptr,
-	ov: ^Overlay,
-	doc: ^tape.Document,
-	splices: ^[dynamic]Splice,
-	scratch: runtime.Allocator,
-) -> (ok: bool, err: Error) {
-	cx := (^Markup_Cx)(user)
-	cx.allocator = scratch
-	cx.splices = splices
-	it := handle_map.dynamic_iterator_make(&ov.nodes)
-	for n in dynamic_iter_next(&it) {
-		if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
-			bn := doc.nodes[n.base]
-			if cx.spec.is_void == nil && n.val.kind == .Raw && !(bn.n == 0 && bn.lo < u64(len(doc.src)) && doc.src[bn.lo] == '/') {
-				append(cx.splices, Splice {
-					lo           = bn.lo,
-					hi           = bn.lo + u64(bn.n),
-					text         = transmute([]u8)n.val.text,
-					seq          = len(cx.splices),
-					base_node    = n.base,
-					subtree_only = true,
-				}) or_return
-			} else {
-				emit_markup_replace(cx, n.handle, n) or_return
-			}
-		}
-	}
-	return true, nil
-}
-
-@(private = "file")
-markup_struct_emit :: proc(
-	user: rawptr,
-	ov: ^Overlay,
-	doc: ^tape.Document,
-	eol: string,
-	splices: ^[dynamic]Splice,
-	dropped: ^tape.Facts,
-	scratch: runtime.Allocator,
-) -> Error {
-	cx := (^Markup_Cx)(user)
-	cx.allocator = scratch
-	cx.splices = splices
-	cx.eol = eol
-	if ov.root != NO_HANDLE {
-		compose_markup_walk(cx, ov.root) or_return
-	}
-	dropped^ = cx.dropped
-	return nil
-}
-
-@(private = "file")
-markup_frag_check :: proc(user: rawptr, out: []u8, recs: []Splice_Record, scratch: runtime.Allocator) -> (bool, Error) {
-	_ = user
-	_ = scratch
-	for rec in recs {
-		if !rec.subtree_only || rec.full_rewalk || !is_simple_xml_text(out[rec.dst_lo:rec.dst_hi]) {
-			return true, nil
-		}
-	}
-	return false, nil
+	validate:       proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> tape.Error,
+	data:           rawptr,
 }
 
 @(private = "file")
@@ -155,15 +40,58 @@ Markup_Cx :: struct {
 	allocator: runtime.Allocator,
 }
 
+commit_markup :: proc(ov: ^Overlay, spec: ^Markup_Spec, opts := Options{}, allocator := context.allocator) -> (Commit_Result, Error) {
+	cx := Markup_Cx{ov = ov, doc = ov.base if ov != nil else nil, src = ov.base.src if ov != nil && ov.base != nil else nil, spec = spec, opts = opts}
+	tc := Text_Composer {
+		target = spec.target, extra_clean = true, req_root = .Object, root_msg = "XML document root must be an object with one root element",
+		validate = spec.validate, validate_data = spec.data, fast_emit = markup_fast_emit, struct_emit = markup_struct_emit, frag_check = markup_frag_check, user = &cx,
+	}
+	return run_text_commit(ov, &tc, opts, allocator)
+}
+
+@(private = "file")
+markup_fast_emit :: proc(user: rawptr, ov: ^Overlay, doc: ^tape.Document, splices: ^[dynamic]Splice, scratch: runtime.Allocator) -> (ok: bool, err: Error) {
+	cx := (^Markup_Cx)(user)
+	cx.allocator, cx.splices = scratch, splices
+	it := handle_map.dynamic_iterator_make(&ov.nodes)
+	for n in dynamic_iter_next(&it) {
+		if n.state == .Replaced && n.has_edits && n.base != tape.NO_NODE && doc.nodes[n.base].role == .Value {
+			bn := doc.nodes[n.base]
+			if cx.spec.is_void == nil && n.val.kind == .Raw && !(bn.n == 0 && bn.lo < u64(len(doc.src)) && doc.src[bn.lo] == '/') {
+				push_splice(cx.splices, bn.lo, bn.lo + u64(bn.n), transmute([]u8)n.val.text, n.base, subtree_only = true) or_return
+			} else {
+				emit_markup_replace(cx, n.handle, n) or_return
+			}
+		}
+	}
+	return true, nil
+}
+
+@(private = "file")
+markup_struct_emit :: proc(user: rawptr, ov: ^Overlay, doc: ^tape.Document, eol: string, splices: ^[dynamic]Splice, dropped: ^tape.Facts, scratch: runtime.Allocator) -> Error {
+	_ = doc
+	cx := (^Markup_Cx)(user)
+	cx.allocator, cx.splices, cx.eol = scratch, splices, eol
+	if ov.root != NO_HANDLE { compose_markup_walk(cx, ov.root) or_return }
+	dropped^ = cx.dropped
+	return nil
+}
+
+@(private = "file")
+markup_frag_check :: proc(user: rawptr, out: []u8, recs: []Splice_Record, scratch: runtime.Allocator) -> (bool, Error) {
+	_ = user
+	_ = scratch
+	for rec in recs {
+		if !rec.subtree_only || rec.full_rewalk || !is_simple_xml_text(out[rec.dst_lo:rec.dst_hi]) { return true, nil }
+	}
+	return false, nil
+}
+
 @(private = "file")
 xml_comment_valid :: proc "contextless" (body: string) -> bool {
-	if len(body) > 0 && body[len(body) - 1] == '-' {
-		return false
-	}
+	if len(body) > 0 && body[len(body) - 1] == '-' { return false }
 	for i := 0; i + 1 < len(body); i += 1 {
-		if body[i] == '-' && body[i + 1] == '-' {
-			return false
-		}
+		if body[i] == '-' && body[i + 1] == '-' { return false }
 	}
 	return true
 }
@@ -174,96 +102,76 @@ is_text_run :: proc "contextless" (doc: ^tape.Document, v: tape.Node_Index) -> b
 }
 
 @(private = "file")
-ws_before_markup :: proc "contextless" (src: []u8, at: u64) -> u64 {
-	lo := at
-	for lo > 0 && kernel.is_markup_ws(src[lo - 1]) {
-		lo -= 1
-	}
-	return lo
-}
-
-@(private = "file")
 markup_extent :: proc(cx: ^Markup_Cx, v: tape.Node_Index) -> (lead, lo, hi: u64) {
 	if is_text_run(cx.doc, v) {
 		n := cx.doc.nodes[v]
 		return n.lo, n.lo, n.lo + u64(n.n)
 	}
 	el := cx.spec.element(cx.doc, v)
-	lead = ws_before_markup(cx.src, el.lo)
-	if lead == 0 || cx.src[lead - 1] != '>' {
-		lead = el.lo
-	}
+	lead = el.lo
+	for lead > 0 && kernel.is_markup_ws(cx.src[lead - 1]) { lead -= 1 }
+	if lead == 0 || cx.src[lead - 1] != '>' { lead = el.lo }
 	return lead, el.lo, el.hi
+}
+
+@(private = "file")
+append_xml_close_tag :: proc(out: ^[dynamic]u8, name: string) {
+	append(out, "</")
+	append(out, name)
+	append(out, '>')
+}
+
+@(private = "file")
+append_xml_attr :: proc(cx: ^Markup_Cx, name, val: string, out: ^[dynamic]u8, v := tape.NO_NODE, at := tape.NO_BYTE) -> Error {
+	if len(name) == 0 || !cx.spec.is_name(transmute([]u8)name) {
+		return refuse(.Bad_Name, "invalid XML attribute name", v, at)
+	}
+	append(out, ' ')
+	append(out, name)
+	append(out, `="`)
+	cx.spec.spell_attr_val(cx.spec.data, val, '"', out) or_return
+	append(out, '"')
+	return nil
 }
 
 @(private = "file")
 compose_markup_walk :: proc(cx: ^Markup_Cx, root: Handle) -> Error {
 	stack := make([dynamic]Handle, 0, 32, cx.allocator)
 	defer delete(stack)
-	if _, aerr := append(&stack, root); aerr != nil {
-		return aerr
-	}
+	append(&stack, root) or_return
 	for len(stack) > 0 {
 		h := pop(&stack)
 		n, ok := get_node(cx.ov, h)
-		if !ok || !n.has_edits {
-			continue
-		}
+		if !ok || !n.has_edits { continue }
 		if n.state == .Replaced {
 			emit_markup_replace(cx, h, n) or_return
 			continue
 		}
-		if len(n.facts) > 0 {
-			emit_markup_facts(cx, n) or_return
-		}
+		if len(n.facts) > 0 { emit_markup_facts(cx, n) or_return }
 		if n.state == .Container_Delta {
 			emit_markup_container_delta(cx, h, n, &stack) or_return
 			continue
 		}
-		// `.Ancestor`: push edited direct children, handling repeated-name array replacement on a child element.
 		if n.base != tape.NO_NODE && cx.doc.nodes[n.base].kind == .Object {
 			c, p, cerr := tape.children(tape.Reader{doc = cx.doc}, n.base, cx.allocator)
-			if cerr != nil {
-				return cerr
-			}
+			if cerr != nil { return cerr }
 			defer tape.destroy_children(&c)
 			if p == .Found {
-				// Track element names replaced with `.Array` so extra unedited siblings of the same name are dropped!
 				array_replaced := make([dynamic]string, 0, 2, cx.allocator)
 				defer delete(array_replaced)
 				for {
 					kn, vn, np := tape.next_child(tape.Reader{doc = cx.doc}, &c, .Group)
-					if np != .Found {
-						break
-					}
+					if np != .Found { break }
 					is_txt := is_text_run(cx.doc, vn)
 					ename := tape.TEXT_KEY if is_txt else string(tape.span_bytes(cx.doc, cx.doc.nodes[kn].lo, cx.doc.nodes[kn].n))
-					suppressed := false
-					if !is_txt {
-						for rep_name in array_replaced {
-							if rep_name == ename {
-								lead, _, hi := markup_extent(cx, vn)
-								if _, aerr := append(cx.splices, Splice{lo = lead, hi = hi, seq = len(cx.splices), base_node = n.base, full_rewalk = true}); aerr != nil {
-									return aerr
-								}
-								suppressed = true
-								break
-							}
-						}
-					}
-					if suppressed {
+					if !is_txt && slice.contains(array_replaced[:], ename) {
+						lead, _, hi := markup_extent(cx, vn)
+						push_splice(cx.splices, lead, hi, base_node = n.base, full_rewalk = true) or_return
 						continue
 					}
-					if ch, has := cx.ov.by_base[vn]; has {
-						if cn, cok := get_node(cx.ov, ch); cok && cn.has_edits {
-							if cn.state == .Replaced && cn.val.kind == .Array && !is_txt {
-								append(&array_replaced, ename)
-							}
-							if _, aerr := append(&stack, ch); aerr != nil {
-								return aerr
-							}
-							continue
-						}
+					if ch, cn, ed := find_edited_child(cx.ov, vn); ed {
+						if cn.state == .Replaced && cn.val.kind == .Array && !is_txt { append(&array_replaced, ename) }
+						append(&stack, ch) or_return
 					}
 				}
 			}
@@ -274,53 +182,35 @@ compose_markup_walk :: proc(cx: ^Markup_Cx, root: Handle) -> Error {
 
 @(private = "file")
 emit_markup_replace :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node) -> Error {
-	if n.base == tape.NO_NODE {
-		return nil
-	}
+	if n.base == tape.NO_NODE { return nil }
 	v := n.base
 	if v == tape.ROOT {
-		if n.val.kind != .Object || len(n.members) != 1 {
+		if n.val.kind != .Object || len(n.members) != 1 || node_kind(cx.ov, n.members[0].value) == .Array {
 			return refuse(.Root_Shape, "XML document root must have exactly one root element", v)
 		}
-		el := cx.spec.element(cx.doc, v)
 		m := n.members[0]
-		if node_kind(cx.ov, m.value) == .Array {
-			return refuse(.Root_Shape, "XML document root must have exactly one root element", v)
-		}
-		if !cx.spec.is_name(transmute([]u8)m.key) {
-			return refuse(.Bad_Name, "invalid XML root element name", v)
-		}
+		if !cx.spec.is_name(transmute([]u8)m.key) { return refuse(.Bad_Name, "invalid XML root element name", v) }
+		el := cx.spec.element(cx.doc, v)
 		buf := make([dynamic]u8, 0, 64, cx.allocator)
 		spell_xml_element(cx, m.key, m.value, &buf) or_return
-		append(cx.splices, Splice{lo = el.lo, hi = el.hi, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
+		push_splice(cx.splices, el.lo, el.hi, buf[:], v, full_rewalk = true) or_return
 		return nil
 	}
-
-	// `#text` run replacement.
 	if is_text_run(cx.doc, v) {
-		if n.val.kind == .Array || n.val.kind == .Object {
-			return refuse(.Text_Markup, "cannot replace #text run with element or array", v)
-		}
+		if n.val.kind == .Array || n.val.kind == .Object { return refuse(.Text_Markup, "cannot replace #text run with element or array", v) }
 		node := cx.doc.nodes[v]
 		buf := make([dynamic]u8, 0, 32, cx.allocator)
 		cx.spec.spell_content(cx.spec.data, cx.ov, h, &buf) or_return
-		append(cx.splices, Splice{lo = node.lo, hi = node.lo + u64(node.n), text = buf[:], seq = len(cx.splices), base_node = v, subtree_only = true}) or_return
+		push_splice(cx.splices, node.lo, node.lo + u64(node.n), buf[:], v, subtree_only = true) or_return
 		return nil
 	}
 
 	el := cx.spec.element(cx.doc, v)
 	tag_name := string(cx.src[el.lo + 1:el.name])
-
-	// Repeated-name array replacement on element `v`:
-	// Updates `v` with item 0 and appends items 1..k as sibling `<tag_name>` elements!
 	if n.val.kind == .Array {
-		if len(n.elems) == 0 {
-			return refuse(.Empty_Markup_Array, "XML element cannot be replaced by an empty array", v)
-		}
+		if len(n.elems) == 0 { return refuse(.Empty_Markup_Array, "XML element cannot be replaced by an empty array", v) }
 		for eh in n.elems {
-			if node_kind(cx.ov, eh) == .Array {
-				return refuse(.Nested_Markup_Array, "XML does not support nested arrays", v)
-			}
+			if node_kind(cx.ov, eh) == .Array { return refuse(.Nested_Markup_Array, "XML does not support nested arrays", v) }
 		}
 		emit_element_content_splice(cx, v, el, tag_name, n.elems[0]) or_return
 		if len(n.elems) > 1 {
@@ -331,18 +221,12 @@ emit_markup_replace :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node) -> Error {
 				append(&more, sep)
 				spell_xml_element(cx, tag_name, eh, &more) or_return
 			}
-			append(cx.splices, Splice{lo = hi, hi = hi, text = more[:], seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
+			push_splice(cx.splices, hi, hi, more[:], v, full_rewalk = true) or_return
 		}
-		if len(n.facts) > 0 {
-			emit_markup_facts(cx, n) or_return
-		}
-		return nil
+	} else {
+		emit_element_content_splice(cx, v, el, tag_name, h) or_return
 	}
-
-	emit_element_content_splice(cx, v, el, tag_name, h) or_return
-	if len(n.facts) > 0 {
-		emit_markup_facts(cx, n) or_return
-	}
+	if len(n.facts) > 0 { emit_markup_facts(cx, n) or_return }
 	return nil
 }
 
@@ -354,105 +238,76 @@ emit_element_content_splice :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Mark
 		return refuse(.Void_Content, "void element cannot hold content", v, el.lo)
 	}
 	if !el.empty {
-		append(cx.splices, Splice{lo = el.open, hi = el.close, text = buf[:], seq = len(cx.splices), base_node = v, subtree_only = true}) or_return
+		push_splice(cx.splices, el.open, el.close, buf[:], v, subtree_only = true) or_return
 	} else if len(buf) > 0 {
 		expanded := make([dynamic]u8, 0, len(buf) + len(tag_name) + 5, cx.allocator)
 		append(&expanded, '>')
 		append(&expanded, ..buf[:])
-		append(&expanded, "</")
-		append(&expanded, tag_name)
-		append(&expanded, '>')
-		append(cx.splices, Splice{lo = el.open, hi = el.hi, text = expanded[:], seq = len(cx.splices), base_node = v, subtree_only = true}) or_return
+		append_xml_close_tag(&expanded, tag_name)
+		push_splice(cx.splices, el.open, el.hi, expanded[:], v, subtree_only = true) or_return
 	}
 	return nil
 }
 
 @(private = "file")
-spell_xml_comment_runs :: proc(cx: ^Markup_Cx, f: Fact_Override, out: ^[dynamic]u8) -> Error {
+spell_xml_comment_runs :: proc(cx: ^Markup_Cx, f: Fact_Override, out: ^[dynamic]u8, v := tape.NO_NODE, at := tape.NO_BYTE) -> Error {
 	for body, i in f.values {
-		if !xml_comment_valid(body) {
-			return refuse(.Bad_Xml_Comment, "XML comment cannot contain '--' or end with '-'")
-		}
-		if i > 0 {
-			append(out, cx.eol)
-		}
+		if !xml_comment_valid(body) { return refuse(.Bad_Xml_Comment, "XML comment cannot contain '--' or end with '-'", v, at) }
+		if i > 0 { append(out, cx.eol) }
 		append(out, "<!--")
-		if f.padded {
-			append(out, ' ')
-		}
+		if f.padded { append(out, ' ') }
 		append(out, body)
-		if f.padded {
-			append(out, ' ')
-		}
+		if f.padded { append(out, ' ') }
 		append(out, "-->")
 	}
 	return nil
 }
 
 @(private = "file")
-spell_xml_element :: proc(cx: ^Markup_Cx, name: string, val_h: Handle, out: ^[dynamic]u8) -> Error {
-	if !cx.spec.is_name(transmute([]u8)name) {
-		return refuse(.Bad_Name, "invalid XML element name")
+spell_node_xml_comments :: proc(cx: ^Markup_Cx, vn: ^Edit_Node, kind: tape.Fact_Kind, out: ^[dynamic]u8) -> Error {
+	if vn == nil { return nil }
+	for f in vn.facts {
+		if !f.deleted && f.kind == kind && len(f.values) > 0 { spell_xml_comment_runs(cx, f, out) or_return }
 	}
+	return nil
+}
+
+@(private = "file")
+spell_xml_element :: proc(cx: ^Markup_Cx, name: string, val_h: Handle, out: ^[dynamic]u8) -> Error {
+	if !cx.spec.is_name(transmute([]u8)name) { return refuse(.Bad_Name, "invalid XML element name") }
 	if node_kind(cx.ov, val_h) == .Array {
 		elems := effective_elements(cx.ov, val_h, cx.allocator) or_return
 		defer delete(elems, cx.allocator)
-		if len(elems) == 0 {
-			return refuse(.Empty_Markup_Array, "XML element cannot be replaced by an empty array")
-		}
+		if len(elems) == 0 { return refuse(.Empty_Markup_Array, "XML element cannot be replaced by an empty array") }
 		for e in elems {
 			eh := e.handle
-			if eh == NO_HANDLE && e.base != tape.NO_NODE {
-				eh = handle_for_base(cx.ov, e.base, val_h) or_return
-			}
-			if node_kind(cx.ov, eh) == .Array {
-				return refuse(.Nested_Markup_Array, "XML does not support nested arrays")
-			}
+			if eh == NO_HANDLE && e.base != tape.NO_NODE { eh = handle_for_base(cx.ov, e.base, val_h) or_return }
+			if node_kind(cx.ov, eh) == .Array { return refuse(.Nested_Markup_Array, "XML does not support nested arrays") }
 			spell_xml_element(cx, name, eh, out) or_return
 		}
 		return nil
 	}
 	content := make([dynamic]u8, 0, 64, cx.allocator)
 	defer delete(content)
-	if err := cx.spec.spell_content(cx.spec.data, cx.ov, val_h, &content); err != nil {
-		return err
-	}
+	cx.spec.spell_content(cx.spec.data, cx.ov, val_h, &content) or_return
 	void_el := cx.spec.is_void != nil && cx.spec.is_void(name)
-	if len(content) > 0 && void_el {
-		return refuse(.Void_Content, "void element cannot hold content")
-	}
-	vn, has_vn := get_node(cx.ov, val_h)
+	if len(content) > 0 && void_el { return refuse(.Void_Content, "void element cannot hold content") }
+	vn, _ := get_node(cx.ov, val_h)
 	has_foot := false
-	if has_vn {
+	if vn != nil {
 		for f in vn.facts {
-			if f.deleted {
-				continue
-			}
-			if f.kind == .Comment && len(f.values) > 0 {
-				spell_xml_comment_runs(cx, f, out) or_return
-			} else if f.kind == .Comment_Foot && len(f.values) > 0 {
-				if void_el {
-					return refuse(.Fact_No_Place, "void element cannot hold a foot comment")
-				}
+			if !f.deleted && f.kind == .Comment_Foot && len(f.values) > 0 {
+				if void_el { return refuse(.Fact_No_Place, "void element cannot hold a foot comment") }
 				has_foot = true
 			}
 		}
 	}
+	spell_node_xml_comments(cx, vn, .Comment, out) or_return
 	append(out, '<')
 	append(out, name)
-	// Emit any attributes attached to the newly created node!
-	if has_vn {
+	if vn != nil {
 		for f in vn.facts {
-			if f.kind == .Attribute && !f.deleted && len(f.values) > 0 {
-				if !cx.spec.is_name(transmute([]u8)f.attr) {
-					return refuse(.Bad_Name, "invalid XML attribute name")
-				}
-				append(out, ' ')
-				append(out, f.attr)
-				append(out, `="`)
-				cx.spec.spell_attr_val(cx.spec.data, f.values[0], '"', out) or_return
-				append(out, '"')
-			}
+			if f.kind == .Attribute && !f.deleted && len(f.values) > 0 { append_xml_attr(cx, f.attr, f.values[0], out) or_return }
 		}
 	}
 	if len(content) == 0 && !has_foot && (void_el || cx.spec.self_closing) {
@@ -460,63 +315,30 @@ spell_xml_element :: proc(cx: ^Markup_Cx, name: string, val_h: Handle, out: ^[dy
 	} else {
 		append(out, '>')
 		append(out, ..content[:])
-		if has_vn && has_foot {
-			for f in vn.facts {
-				if !f.deleted && f.kind == .Comment_Foot && len(f.values) > 0 {
-					spell_xml_comment_runs(cx, f, out) or_return
-				}
-			}
-		}
-		append(out, "</")
-		append(out, name)
-		append(out, '>')
+		if has_foot { spell_node_xml_comments(cx, vn, .Comment_Foot, out) or_return }
+		append_xml_close_tag(out, name)
 	}
-	if has_vn {
-		for f in vn.facts {
-			if !f.deleted && f.kind == .Comment_Inline && len(f.values) > 0 {
-				spell_xml_comment_runs(cx, f, out) or_return
-			}
-		}
-	}
-	return nil
+	return spell_node_xml_comments(cx, vn, .Comment_Inline, out)
 }
 
 @(private = "file")
 emit_markup_facts :: proc(cx: ^Markup_Cx, n: ^Edit_Node) -> Error {
-	if n.base == tape.NO_NODE {
-		return nil
-	}
+	if n.base == tape.NO_NODE { return nil }
 	v := n.base
 	if is_text_run(cx.doc, v) {
-		// `#text` run has no tag for attributes or element comments.
-		for f in n.facts {
-			if !f.deleted {
-				return refuse(.Fact_No_Place, "cannot attach fact to #text run", v)
-			}
-		}
+		for f in n.facts { if !f.deleted { return refuse(.Fact_No_Place, "cannot attach fact to #text run", v) } }
 		return nil
 	}
 	el := cx.spec.element(cx.doc, v)
 	for f in n.facts {
 		#partial switch f.kind {
 		case .Attribute:
-			if v == tape.ROOT {
-				return refuse(.Fact_No_Place, "document root has no attributes (target the root element instead)", v)
-			}
+			if v == tape.ROOT { return refuse(.Fact_No_Place, "document root has no attributes (target the root element instead)", v) }
 			emit_xml_attribute_fact(cx, v, el, f) or_return
 		case .Comment, .Comment_Inline, .Comment_Foot:
-			if !f.deleted {
-				for body in f.values {
-					if !xml_comment_valid(body) {
-						return refuse(.Bad_Xml_Comment, "XML comment cannot contain '--' or end with '-'", v, el.lo)
-					}
-				}
-			}
 			emit_xml_comment_fact(cx, v, el, f) or_return
 		case:
-			if !f.deleted {
-				cx.dropped += {f.kind}
-			}
+			if !f.deleted { cx.dropped += {f.kind} }
 		}
 	}
 	return nil
@@ -527,66 +349,36 @@ emit_xml_attribute_fact :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Markup_E
 	if len(f.attr) == 0 || !cx.spec.is_name(transmute([]u8)f.attr) {
 		return refuse(.Bad_Name, "invalid XML attribute name", v, el.lo)
 	}
-	// Check if this attribute modifies an `xmlns` declaration (forces full_rewalk for namespace scopes).
 	touches_xmlns := f.attr == "xmlns" || strings.has_prefix(f.attr, "xmlns:")
-
-	// Search existing attributes on `v` in `doc.facts`.
 	found_fact: tape.Fact
 	has_existing := false
 	for bf in tape.facts_of(cx.doc, v) {
-		if bf.kind != .Attribute {
-			continue
-		}
-		// Skip DTD `<!ATTLIST>` defaulted attributes (their spans lie outside this element's start tag!).
-		if bf.lo < el.lo || bf.lo >= el.open {
-			continue
-		}
+		if bf.kind != .Attribute || bf.lo < el.lo || bf.lo >= el.open { continue }
 		kt, _ := cx.doc.format.attribute(cx.doc, bf)
 		if string(tape.span_bytes(cx.doc, kt.lo, kt.n)) == f.attr {
-			found_fact = bf
-			has_existing = true
+			found_fact, has_existing = bf, true
 			break
 		}
 	}
-
 	if f.deleted || len(f.values) == 0 {
-		if !has_existing {
-			return nil
-		}
-		// Remove attribute and its preceding whitespace inside the start tag!
+		if !has_existing { return nil }
 		lo := found_fact.lo
-		hi := found_fact.lo + u64(found_fact.n)
-		for lo > el.name && kernel.is_markup_ws(cx.src[lo - 1]) {
-			lo -= 1
-		}
-		if _, aerr := append(cx.splices, Splice{lo = lo, hi = hi, seq = len(cx.splices), base_node = v, full_rewalk = touches_xmlns}); aerr != nil {
-			return aerr
-		}
+		for lo > el.name && kernel.is_markup_ws(cx.src[lo - 1]) { lo -= 1 }
+		push_splice(cx.splices, lo, found_fact.lo + u64(found_fact.n), base_node = v, full_rewalk = touches_xmlns) or_return
 		return nil
 	}
-
 	if has_existing {
-		// Replace value in place, preserving original quote character (`"` or `'`) and attribute order!
 		_, vt := cx.doc.format.attribute(cx.doc, found_fact)
-		quote := u8('"')
-		if vt.lo > 0 && (cx.src[vt.lo - 1] == '"' || cx.src[vt.lo - 1] == '\'') {
-			quote = cx.src[vt.lo - 1]
-		}
+		quote := cx.src[vt.lo - 1] if (vt.lo > 0 && (cx.src[vt.lo - 1] == '"' || cx.src[vt.lo - 1] == '\'')) else u8('"')
 		buf := make([dynamic]u8, 0, len(f.values[0]) + 4, cx.allocator)
 		cx.spec.spell_attr_val(cx.spec.data, f.values[0], quote, &buf) or_return
-		append(cx.splices, Splice{lo = vt.lo, hi = vt.lo + u64(vt.n), text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = touches_xmlns}) or_return
+		push_splice(cx.splices, vt.lo, vt.lo + u64(vt.n), buf[:], v, full_rewalk = touches_xmlns) or_return
 		return nil
 	}
-
-	// Append new attribute just before `>` (or `/>`).
 	ins_at := el.open if el.empty else el.open - 1
 	buf := make([dynamic]u8, 0, len(f.attr) + len(f.values[0]) + 6, cx.allocator)
-	append(&buf, ' ')
-	append(&buf, f.attr)
-	append(&buf, `="`)
-	cx.spec.spell_attr_val(cx.spec.data, f.values[0], '"', &buf) or_return
-	append(&buf, '"')
-	append(cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = touches_xmlns}) or_return
+	append_xml_attr(cx, f.attr, f.values[0], &buf, v, el.lo) or_return
+	push_splice(cx.splices, ins_at, ins_at, buf[:], v, full_rewalk = touches_xmlns) or_return
 	return nil
 }
 
@@ -595,124 +387,90 @@ emit_xml_comment_fact :: proc(cx: ^Markup_Cx, v: tape.Node_Index, el: Markup_Ele
 	existing := collect_base_facts(cx.doc, v, f.kind, cx.allocator)
 	defer delete(existing)
 	if f.deleted || len(f.values) == 0 {
-		for bf in existing {
-			append(cx.splices, Splice{lo = bf.lo, hi = bf.lo + u64(bf.n), seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
-		}
+		for bf in existing { push_splice(cx.splices, bf.lo, bf.lo + u64(bf.n), base_node = v, full_rewalk = true) or_return }
 		return nil
 	}
 	buf := make([dynamic]u8, 0, 64, cx.allocator)
-	spell_xml_comment_runs(cx, f, &buf) or_return
+	spell_xml_comment_runs(cx, f, &buf, v, el.lo) or_return
 	if len(existing) > 0 {
-		lo := existing[0].lo
-		hi := existing[len(existing) - 1].lo + u64(existing[len(existing) - 1].n)
-		append(cx.splices, Splice{lo = lo, hi = hi, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
+		last := existing[len(existing) - 1]
+		push_splice(cx.splices, existing[0].lo, last.lo + u64(last.n), buf[:], v, full_rewalk = true) or_return
 		return nil
 	}
 	ins_at: u64
 	#partial switch f.kind {
-	case .Comment:
-		ins_at = el.lo
-	case .Comment_Inline:
-		ins_at = el.hi
+	case .Comment: ins_at = el.lo
+	case .Comment_Inline: ins_at = el.hi
 	case .Comment_Foot:
 		if v == tape.ROOT {
 			ins_at = el.hi
 		} else {
-			if el.empty {
-				return refuse(.Fact_No_Place, "self-closing XML element cannot hold a foot comment", v, el.lo)
-			}
+			if el.empty { return refuse(.Fact_No_Place, "self-closing XML element cannot hold a foot comment", v, el.lo) }
 			ins_at = el.close
 		}
 	}
-	append(cx.splices, Splice{lo = ins_at, hi = ins_at, text = buf[:], seq = len(cx.splices), base_node = v, full_rewalk = true}) or_return
+	push_splice(cx.splices, ins_at, ins_at, buf[:], v, full_rewalk = true) or_return
 	return nil
+}
+
+@(private = "file")
+spell_markup_slot_inserts :: proc(cx: ^Markup_Cx, base_c: tape.Node_Index, d: ^Container_Delta, slot_ins: []int, sep: string, sep_before: bool) -> (out: []u8, err: Error) {
+	b := make([dynamic]u8, 0, 64, cx.allocator)
+	for ins_i in slot_ins {
+		ins := d.inserted_members[ins_i]
+		use_sep := ins.key != tape.TEXT_KEY && len(sep) > 0
+		if use_sep && sep_before { append(&b, sep) }
+		spell_markup_insert(cx, base_c, ins, &b) or_return
+		if use_sep && !sep_before { append(&b, sep) }
+	}
+	return b[:], nil
 }
 
 @(private = "file")
 emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, stack: ^[dynamic]Handle) -> Error {
 	d := n.delta
-	if d == nil {
-		return nil
-	}
+	if d == nil { return nil }
 	base_c := n.base
 	Child_Item :: struct {
-		kn, vn:     tape.Node_Index,
-		name:       string,
-		lead, lo, hi: u64,
-		head_lo:    u64,
-		inline_hi:  u64,
-		deleted:    bool,
-		is_text:    bool,
+		kn, vn:                           tape.Node_Index,
+		name:                             string,
+		lead, lo, hi, head_lo, inline_hi: u64,
+		deleted, is_text:                 bool,
 	}
 	items := make([dynamic]Child_Item, 0, 8, cx.allocator)
-
 	c, p, cerr := tape.children(tape.Reader{doc = cx.doc}, base_c, cx.allocator)
-	if cerr != nil {
-		return cerr
-	}
+	if cerr != nil { return cerr }
 	defer tape.destroy_children(&c)
+	has_text := false
 	if p == .Found {
 		for {
 			kn, vn, np := tape.next_child(tape.Reader{doc = cx.doc}, &c, .Group)
-			if np != .Found {
-				break
-			}
+			if np != .Found { break }
 			is_txt := is_text_run(cx.doc, vn)
+			if is_txt { has_text = true }
 			name := tape.TEXT_KEY if is_txt else string(tape.span_bytes(cx.doc, cx.doc.nodes[kn].lo, cx.doc.nodes[kn].n))
 			lead, lo, hi := markup_extent(cx, vn)
-			head_lo, inline_hi := lo, hi
-			for f in tape.facts_of(cx.doc, vn) {
-				if f.kind == .Comment && f.lo < head_lo {
-					head_lo = f.lo
-				} else if f.kind == .Comment_Inline && f.lo + u64(f.n) > inline_hi {
-					inline_hi = f.lo + u64(f.n)
+			head_lo, inline_hi := base_item_comment_bounds(cx.doc, vn, lo, hi)
+			is_del, ren_to := base_delta_status(d, name, 0, true)
+			if !is_del && len(ren_to) > 0 {
+				if is_txt || !cx.spec.is_name(transmute([]u8)ren_to) { return refuse(.Bad_Name, "cannot rename #text or use invalid XML name", kn) }
+				el := cx.spec.element(cx.doc, vn)
+				push_splice(cx.splices, el.lo + 1, el.name, slice.clone(transmute([]u8)ren_to, cx.allocator), base_c, full_rewalk = true) or_return
+				if el.end_tag {
+					push_splice(cx.splices, el.close + 2, el.close + 1 + el.name - el.lo, slice.clone(transmute([]u8)ren_to, cx.allocator), base_c, full_rewalk = true) or_return
 				}
 			}
-			is_del := false
-			for dk in d.deleted_keys {
-				if dk == name {
-					is_del = true
-					break
-				}
-			}
-			if !is_del {
-				for r in d.renamed_members {
-					if r.old_key == name {
-						if is_txt || !cx.spec.is_name(transmute([]u8)r.new_key) {
-							return refuse(.Bad_Name, "cannot rename #text or use invalid XML name", kn)
-						}
-						el := cx.spec.element(cx.doc, vn)
-						n1 := slice.clone(transmute([]u8)r.new_key, cx.allocator)
-						append(cx.splices, Splice{lo = el.lo + 1, hi = el.name, text = n1, seq = len(cx.splices), base_node = base_c, full_rewalk = true})
-						if el.end_tag {
-							n2 := slice.clone(transmute([]u8)r.new_key, cx.allocator)
-							append(cx.splices, Splice{lo = el.close + 2, hi = el.close + 1 + el.name - el.lo, text = n2, seq = len(cx.splices), base_node = base_c, full_rewalk = true})
-						}
-						break
-					}
-				}
-			}
-			append(&items, Child_Item{kn = kn, vn = vn, name = name, lead = lead, lo = lo, hi = hi, head_lo = head_lo, inline_hi = inline_hi, deleted = is_del, is_text = is_txt})
+			append(&items, Child_Item{kn, vn, name, lead, lo, hi, head_lo, inline_hi, is_del, is_txt})
 		}
 	}
 
-	// Push surviving edited child subtrees (unless a #text reorder with reflow=true will rewrite `base_c` whole).
 	if len(d.order) > 0 {
-		has_text := false
-		for it in items {
-			if it.is_text {
-				has_text = true
-				break
-			}
-		}
 		deleted_flags := make_deleted_flags(items[:], cx.allocator) or_return
 		defer delete(deleted_flags, cx.allocator)
 		validate_order(d.order, deleted_flags, len(d.inserted_members), cx.allocator) or_return
-
 		if has_text {
 			if !cx.opts.reflow {
-				el := cx.spec.element(cx.doc, base_c)
-				return refuse(.Layout_Reflow_Needed, "cannot reorder XML element containing #text runs", base_c, el.lo)
+				return refuse(.Layout_Reflow_Needed, "cannot reorder XML element containing #text runs", base_c, cx.spec.element(cx.doc, base_c).lo)
 			}
 			return emit_markup_reflow(cx, h, base_c)
 		}
@@ -720,39 +478,20 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 
 	array_replaced := make([dynamic]string, 0, 2, cx.allocator)
 	for &it in items {
-		if it.deleted {
+		if it.deleted { continue }
+		if !it.is_text && slice.contains(array_replaced[:], it.name) {
+			it.deleted = true
 			continue
 		}
-		if !it.is_text {
-			for rep_name in array_replaced {
-				if rep_name == it.name {
-					it.deleted = true
-					break
-				}
-			}
-			if it.deleted {
-				continue
-			}
-		}
-		if ch, has := cx.ov.by_base[it.vn]; has {
-			if cn, ok := get_node(cx.ov, ch); ok && cn.has_edits {
-				if cn.state == .Replaced && cn.val.kind == .Array && !it.is_text {
-					append(&array_replaced, it.name)
-				}
-				append(stack, ch)
-				continue
-			}
+		if ch, cn, ed := find_edited_child(cx.ov, it.vn); ed {
+			if cn.state == .Replaced && cn.val.kind == .Array && !it.is_text { append(&array_replaced, it.name) }
+			append(stack, ch)
 		}
 	}
 
-	// Reorder children via `Move` splices (when free of #text runs).
 	if len(d.order) > 0 {
 		places := make([dynamic]int, 0, len(items), cx.allocator)
-		for it, i in items {
-			if !it.deleted {
-				append(&places, i)
-			}
-		}
+		for it, i in items { if !it.deleted { append(&places, i) } }
 		if len(places) > 0 {
 			last := items[places[len(places) - 1]]
 			sep := string(cx.src[last.lead:last.lo])
@@ -763,7 +502,7 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 					if pos < len(places) {
 						append(&moves, Move{lo = items[places[pos - 1]].inline_hi, hi = items[places[pos]].head_lo})
 					} else if len(sep) > 0 {
-						append(&moves, Move{text = slice.clone(transmute([]u8)sep, cx.allocator), written = true})
+						push_move_str(&moves, sep, cx.allocator) or_return
 					}
 				}
 				if k < len(items) {
@@ -775,42 +514,25 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 					append(&moves, Move{text = b[:], written = true})
 				}
 			}
-			append(cx.splices, Splice {
-				lo          = items[places[0]].head_lo,
-				hi          = last.inline_hi,
-				moves       = moves[:],
-				seq         = len(cx.splices),
-				base_node   = base_c,
-				full_rewalk = true,
-			})
+			push_splice(cx.splices, items[places[0]].head_lo, last.inline_hi, base_node = base_c, full_rewalk = true, moves = moves[:]) or_return
 			return nil
 		}
 	}
 
 	parent_el := cx.spec.element(cx.doc, base_c)
-	// Self-closing parent `<p/>` with zero base children: expand `<p/>` ONCE for all inserted children!
 	if len(items) == 0 && len(d.inserted_members) > 0 && parent_el.empty {
-		p_name := string(cx.src[parent_el.lo + 1:parent_el.name])
 		b := make([dynamic]u8, 0, 64, cx.allocator)
 		append(&b, '>')
-		for ins in d.inserted_members {
-			spell_markup_insert(cx, base_c, ins, &b) or_return
-		}
-		append(&b, "</")
-		append(&b, p_name)
-		append(&b, '>')
-		append(cx.splices, Splice{lo = parent_el.open, hi = parent_el.hi, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
+		for ins in d.inserted_members { spell_markup_insert(cx, base_c, ins, &b) or_return }
+		append_xml_close_tag(&b, string(cx.src[parent_el.lo + 1:parent_el.name]))
+		push_splice(cx.splices, parent_el.open, parent_el.hi, b[:], base_c, full_rewalk = true) or_return
 		return nil
 	}
 
-	// Group inserts by exact target slot (`0..len(items)-1` or tail `len(items)`) so delete+insert on the same index
-	// merges cleanly into ONE splice without `[lead, hi)` vs `[lo, lo)` overlap!
 	slots := make([][dynamic]int, len(items) + 1, cx.allocator)
 	for ins, i in d.inserted_members {
 		slot := ins.at if (ins.at >= 0 && ins.at < len(items)) else len(items)
-		if slots[slot].allocator.procedure == nil {
-			slots[slot] = make([dynamic]int, 0, 2, cx.allocator)
-		}
+		if slots[slot].allocator.procedure == nil { slots[slot] = make([dynamic]int, 0, 2, cx.allocator) }
 		append(&slots[slot], i)
 	}
 
@@ -819,32 +541,14 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 	for it, k in items {
 		slot_ins := slots[k]
 		if it.deleted {
-			if len(slot_ins) > 0 {
-				b := make([dynamic]u8, 0, 64, cx.allocator)
-				lead_sep := string(cx.src[it.lead:it.lo])
-				for ins_i in slot_ins {
-					ins := d.inserted_members[ins_i]
-					if ins.key != tape.TEXT_KEY && len(lead_sep) > 0 {
-						append(&b, lead_sep)
-					}
-					spell_markup_insert(cx, base_c, ins, &b) or_return
-				}
-				append(cx.splices, Splice{lo = it.lead, hi = it.hi, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
-			} else {
-				append(cx.splices, Splice{lo = it.lead, hi = it.hi, seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
-			}
+			txt: []u8
+			if len(slot_ins) > 0 { txt = spell_markup_slot_inserts(cx, base_c, d, slot_ins[:], string(cx.src[it.lead:it.lo]), true) or_return }
+			push_splice(cx.splices, it.lead, it.hi, txt, base_c, full_rewalk = true) or_return
 		} else {
 			surviving += 1
 			if len(slot_ins) > 0 {
-				b := make([dynamic]u8, 0, 64, cx.allocator)
-				for ins_i in slot_ins {
-					ins := d.inserted_members[ins_i]
-					spell_markup_insert(cx, base_c, ins, &b) or_return
-					if ins.key != tape.TEXT_KEY && len(sep) > 0 {
-						append(&b, sep)
-					}
-				}
-				append(cx.splices, Splice{lo = it.lo, hi = it.lo, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
+				txt := spell_markup_slot_inserts(cx, base_c, d, slot_ins[:], sep, false) or_return
+				push_splice(cx.splices, it.lo, it.lo, txt, base_c, full_rewalk = true) or_return
 			}
 		}
 	}
@@ -859,24 +563,14 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 					break
 				}
 			}
-			if all_ws {
-				append(cx.splices, Splice{lo = last_hi, hi = parent_el.close, seq = len(cx.splices), base_node = base_c, full_rewalk = true})
-			}
+			if all_ws { push_splice(cx.splices, last_hi, parent_el.close, base_node = base_c, full_rewalk = true) or_return }
 		}
 	}
 
-	tail_ins := slots[len(items)]
-	if len(tail_ins) > 0 {
-		b := make([dynamic]u8, 0, 64, cx.allocator)
+	if tail_ins := slots[len(items)]; len(tail_ins) > 0 {
 		pos := items[len(items) - 1].hi if len(items) > 0 else parent_el.close
-		for ins_i in tail_ins {
-			ins := d.inserted_members[ins_i]
-			if ins.key != tape.TEXT_KEY && len(items) > 0 && len(sep) > 0 {
-				append(&b, sep)
-			}
-			spell_markup_insert(cx, base_c, ins, &b) or_return
-		}
-		append(cx.splices, Splice{lo = pos, hi = pos, text = b[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true}) or_return
+		txt := spell_markup_slot_inserts(cx, base_c, d, tail_ins[:], sep if len(items) > 0 else "", true) or_return
+		push_splice(cx.splices, pos, pos, txt, base_c, full_rewalk = true) or_return
 	}
 	return nil
 }
@@ -892,13 +586,12 @@ spell_markup_insert :: proc(cx: ^Markup_Cx, base_c: tape.Node_Index, ins: Member
 	return spell_xml_element(cx, ins.key, ins.value, out)
 }
 
-// Rewrites the smallest enclosing element content when `Options.reflow = true` bypasses a mixed-content reorder conflict.
 @(private = "file")
 emit_markup_reflow :: proc(cx: ^Markup_Cx, h: Handle, base_c: tape.Node_Index) -> Error {
 	el := cx.spec.element(cx.doc, base_c)
 	drop_splices_in_range(cx.splices, el.open, el.close, cx.allocator, keep_at_hi_node = base_c)
 	buf := make([dynamic]u8, 0, 64, cx.allocator)
 	cx.spec.spell_content(cx.spec.data, cx.ov, h, &buf) or_return
-	append(cx.splices, Splice{lo = el.open, hi = el.close, text = buf[:], seq = len(cx.splices), base_node = base_c, full_rewalk = true, rewritten = true}) or_return
+	push_splice(cx.splices, el.open, el.close, buf[:], base_c, full_rewalk = true, rewritten = true) or_return
 	return nil
 }

@@ -430,66 +430,62 @@ put_number :: proc(out: ^write.Out, w: ^write.Tree, at: tape.Node_Index, t: tape
 	return false
 }
 
-// Writes `i64` in canonical shortest MessagePack encoding.
+// Encodes `i64` in canonical shortest MessagePack encoding into `p` (at least 9 bytes) and returns bytes written.
 @(private)
-put_i64 :: proc(out: ^write.Out, v: i64) #no_bounds_check {
+encode_i64 :: #force_inline proc "contextless" (p: [^]u8, v: i64) -> int #no_bounds_check {
 	if v >= 0 {
-		put_u64(out, u64(v))
-		return
+		return encode_u64(p, u64(v))
 	}
-	p := write.room(out, 9)
 	switch {
 	case v >= -32:
 		p[0] = u8(i8(v))
-		out.cursor += 1
+		return 1
 	case v >= -128:
 		p[0], p[1] = 0xd0, u8(i8(v))
-		out.cursor += 2
+		return 2
 	case v >= -32768:
 		p[0] = 0xd1
 		endian.unchecked_put_u16be(p[1:3], u16(i16(v)))
-		out.cursor += 3
+		return 3
 	case v >= -2_147_483_648:
 		p[0] = 0xd2
 		endian.unchecked_put_u32be(p[1:5], u32(i32(v)))
-		out.cursor += 5
+		return 5
 	case:
 		p[0] = 0xd3
 		endian.unchecked_put_u64be(p[1:9], u64(v))
-		out.cursor += 9
+		return 9
 	}
 }
 
-// Writes `u64` in canonical shortest MessagePack encoding.
+// Encodes `u64` in canonical shortest MessagePack encoding into `p` (at least 9 bytes) and returns bytes written.
 @(private)
-put_u64 :: proc(out: ^write.Out, v: u64) #no_bounds_check {
-	p := write.room(out, 9)
+encode_u64 :: #force_inline proc "contextless" (p: [^]u8, v: u64) -> int #no_bounds_check {
 	switch {
 	case v <= 0x7f:
 		p[0] = u8(v)
-		out.cursor += 1
+		return 1
 	case v <= 0xff:
 		p[0], p[1] = 0xcc, u8(v)
-		out.cursor += 2
+		return 2
 	case v <= 0xffff:
 		p[0] = 0xcd
 		endian.unchecked_put_u16be(p[1:3], u16(v))
-		out.cursor += 3
+		return 3
 	case v <= 0xffff_ffff:
 		p[0] = 0xce
 		endian.unchecked_put_u32be(p[1:5], u32(v))
-		out.cursor += 5
+		return 5
 	case:
 		p[0] = 0xcf
 		endian.unchecked_put_u64be(p[1:9], v)
-		out.cursor += 9
+		return 9
 	}
 }
 
-// Writes IEEE binary64 bits in canonical shortest float32 (`0xca`) or float64 (`0xcb`), preserving `-0.0` and NaN/Inf.
+// Encodes IEEE binary64 bits in canonical shortest float32 (`0xca`) or float64 (`0xcb`) into `p` (at least 9 bytes).
 @(private)
-put_float_bits :: proc(out: ^write.Out, bits: u64) #no_bounds_check {
-	p := write.room(out, 9)
+encode_float_bits :: #force_inline proc "contextless" (p: [^]u8, bits: u64) -> int #no_bounds_check {
 	if double_fits_single(bits) {
 		p[0] = 0xca
 		sbits: u32
@@ -504,108 +500,142 @@ put_float_bits :: proc(out: ^write.Out, bits: u64) #no_bounds_check {
 			sbits = transmute(u32)f32(transmute(f64)bits)
 		}
 		endian.unchecked_put_u32be(p[1:5], sbits)
-		out.cursor += 5
-		return
+		return 5
 	}
 	p[0] = 0xcb
 	endian.unchecked_put_u64be(p[1:9], bits)
-	out.cursor += 9
+	return 9
 }
 
 @(private)
-put_str_head :: proc(out: ^write.Out, n: u32) #no_bounds_check {
-	p := write.room(out, 5)
+encode_str_head :: #force_inline proc "contextless" (p: [^]u8, n: u32) -> int #no_bounds_check {
 	switch {
 	case n <= 31:
 		p[0] = 0xa0 | u8(n)
-		out.cursor += 1
+		return 1
 	case n <= 0xff:
 		p[0], p[1] = 0xd9, u8(n)
-		out.cursor += 2
+		return 2
 	case n <= 0xffff:
 		p[0] = 0xda
 		endian.unchecked_put_u16be(p[1:3], u16(n))
-		out.cursor += 3
+		return 3
 	case:
 		p[0] = 0xdb
 		endian.unchecked_put_u32be(p[1:5], n)
-		out.cursor += 5
+		return 5
 	}
 }
 
 @(private)
-put_bin_head :: proc(out: ^write.Out, n: u32) #no_bounds_check {
-	p := write.room(out, 5)
+encode_bin_head :: #force_inline proc "contextless" (p: [^]u8, n: u32) -> int #no_bounds_check {
 	switch {
 	case n <= 0xff:
 		p[0], p[1] = 0xc4, u8(n)
-		out.cursor += 2
+		return 2
 	case n <= 0xffff:
 		p[0] = 0xc5
 		endian.unchecked_put_u16be(p[1:3], u16(n))
-		out.cursor += 3
+		return 3
 	case:
 		p[0] = 0xc6
 		endian.unchecked_put_u32be(p[1:5], n)
-		out.cursor += 5
+		return 5
 	}
 }
 
 @(private)
-put_container_head :: proc(out: ^write.Out, object: bool, count: u32) #no_bounds_check {
-	p := write.room(out, 5)
+encode_container_head :: #force_inline proc "contextless" (p: [^]u8, object: bool, count: u32) -> int #no_bounds_check {
 	switch {
 	case count <= 15:
 		p[0] = (0x80 if object else 0x90) | u8(count)
-		out.cursor += 1
+		return 1
 	case count <= 0xffff:
 		p[0] = 0xde if object else 0xdc
 		endian.unchecked_put_u16be(p[1:3], u16(count))
-		out.cursor += 3
+		return 3
 	case:
 		p[0] = 0xdf if object else 0xdd
 		endian.unchecked_put_u32be(p[1:5], count)
-		out.cursor += 5
+		return 5
 	}
 }
 
 @(private)
-put_ext_head :: proc(out: ^write.Out, ext_type: i8, n: u32) #no_bounds_check {
-	p := write.room(out, 6)
+encode_ext_head :: #force_inline proc "contextless" (p: [^]u8, ext_type: i8, n: u32) -> int #no_bounds_check {
 	switch n {
 	case 1:
 		p[0], p[1] = 0xd4, u8(ext_type)
-		out.cursor += 2
+		return 2
 	case 2:
 		p[0], p[1] = 0xd5, u8(ext_type)
-		out.cursor += 2
+		return 2
 	case 4:
 		p[0], p[1] = 0xd6, u8(ext_type)
-		out.cursor += 2
+		return 2
 	case 8:
 		p[0], p[1] = 0xd7, u8(ext_type)
-		out.cursor += 2
+		return 2
 	case 16:
 		p[0], p[1] = 0xd8, u8(ext_type)
-		out.cursor += 2
+		return 2
 	case:
 		switch {
 		case n <= 0xff:
 			p[0], p[1], p[2] = 0xc7, u8(n), u8(ext_type)
-			out.cursor += 3
+			return 3
 		case n <= 0xffff:
 			p[0] = 0xc8
 			endian.unchecked_put_u16be(p[1:3], u16(n))
 			p[3] = u8(ext_type)
-			out.cursor += 4
+			return 4
 		case:
 			p[0] = 0xc9
 			endian.unchecked_put_u32be(p[1:5], n)
 			p[5] = u8(ext_type)
-			out.cursor += 6
+			return 6
 		}
 	}
 }
+
+@(private)
+encode_timestamp :: #force_inline proc "contextless" (p: [^]u8, sec: i64, nsec: u32) -> (total, head_len: int) #no_bounds_check {
+	if nsec == 0 && sec >= 0 && sec <= 0xFFFF_FFFF {
+		p[0], p[1] = 0xd6, 0xff
+		endian.unchecked_put_u32be(p[2:6], u32(sec))
+		return 6, 2
+	}
+	if sec >= 0 && sec <= 0x3_FFFF_FFFF {
+		p[0], p[1] = 0xd7, 0xff
+		endian.unchecked_put_u64be(p[2:10], (u64(nsec) << 34) | u64(sec))
+		return 10, 2
+	}
+	p[0], p[1], p[2] = 0xc7, 12, 0xff
+	endian.unchecked_put_u32be(p[3:7], nsec)
+	endian.unchecked_put_u64be(p[7:15], u64(sec))
+	return 15, 3
+}
+
+@(private)
+put_i64 :: #force_inline proc(out: ^write.Out, v: i64) { out.cursor += encode_i64(write.room(out, 9), v) }
+
+@(private)
+put_u64 :: #force_inline proc(out: ^write.Out, v: u64) { out.cursor += encode_u64(write.room(out, 9), v) }
+
+@(private)
+put_float_bits :: #force_inline proc(out: ^write.Out, bits: u64) { out.cursor += encode_float_bits(write.room(out, 9), bits) }
+
+@(private)
+put_str_head :: #force_inline proc(out: ^write.Out, n: u32) { out.cursor += encode_str_head(write.room(out, 5), n) }
+
+@(private)
+put_bin_head :: #force_inline proc(out: ^write.Out, n: u32) { out.cursor += encode_bin_head(write.room(out, 5), n) }
+
+@(private)
+put_container_head :: #force_inline proc(out: ^write.Out, object: bool, count: u32) { out.cursor += encode_container_head(write.room(out, 5), object, count) }
+
+@(private)
+put_ext_head :: #force_inline proc(out: ^write.Out, ext_type: i8, n: u32) { out.cursor += encode_ext_head(write.room(out, 6), ext_type, n) }
 
 @(private)
 put_ext :: proc(out: ^write.Out, ext_type: i8, payload: []u8) {
@@ -614,25 +644,9 @@ put_ext :: proc(out: ^write.Out, ext_type: i8, payload: []u8) {
 }
 
 @(private)
-put_timestamp :: proc(out: ^write.Out, sec: i64, nsec: u32) #no_bounds_check {
-	p := write.room(out, 15)
-	if nsec == 0 && sec >= 0 && sec <= 0xFFFF_FFFF {
-		p[0], p[1] = 0xd6, 0xff
-		endian.unchecked_put_u32be(p[2:6], u32(sec))
-		out.cursor += 6
-		return
-	}
-	if sec >= 0 && sec <= 0x3_FFFF_FFFF {
-		p[0], p[1] = 0xd7, 0xff
-		val := (u64(nsec) << 34) | u64(sec)
-		endian.unchecked_put_u64be(p[2:10], val)
-		out.cursor += 10
-		return
-	}
-	p[0], p[1], p[2] = 0xc7, 12, 0xff
-	endian.unchecked_put_u32be(p[3:7], nsec)
-	endian.unchecked_put_u64be(p[7:15], u64(sec))
-	out.cursor += 15
+put_timestamp :: #force_inline proc(out: ^write.Out, sec: i64, nsec: u32) {
+	total, _ := encode_timestamp(write.room(out, 15), sec, nsec)
+	out.cursor += total
 }
 
 @(private)

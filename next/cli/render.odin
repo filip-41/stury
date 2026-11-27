@@ -9,8 +9,6 @@ import "core:strconv"
 import "core:strings"
 import "stury:engine"
 import "stury:lib/core/tape"
-import "stury:lib/ops/edit"
-import "stury:lib/ops/write"
 import "stury:lib/query"
 
 DEFAULT_COLORS :: [8]string{"\e[0;90m", "\e[0;39m", "\e[0;39m", "\e[0;39m", "\e[0;32m", "\e[1;39m", "\e[1;39m", "\e[1;34m"}
@@ -39,7 +37,7 @@ Render_Config :: struct {
 	to_spec:      engine.Spec,
 	to_framing:   engine.Framing,
 	to_name:      string,
-	write_opts:   write.Options,
+	write_opts:   engine.Write_Options,
 	dsv_out:      tape.Dsv_Options,
 	docs_emitted: u64,
 }
@@ -49,174 +47,95 @@ RENDER_TAG_TABLE := [1]string{"table"}
 @(private = "file", rodata)
 RENDER_TAG_MARKDOWN := [1]string{"markdown"}
 
-make_write_opts :: proc(o: ^Options, sp: engine.Spec, indent_val: i8) -> write.Options {
+make_write_opts :: proc(o: ^Options, sp: engine.Spec, indent_val: i8) -> engine.Write_Options {
 	if sp == nil {
 		if o.to_render == .Table {
-			return {
-				indent      = 0 if o.compact else 1,
-				sort_keys   = o.sort_keys,
-				grow_header = o.dsv_out.no_header,
-				header      = RENDER_TAG_TABLE[:],
-			}
+			return {indent = 0 if o.compact else 1, sort_keys = o.sort_keys, grow_header = o.dsv_out.no_header, header = RENDER_TAG_TABLE[:]}
 		}
 		if o.to_render == .Markdown {
-			return {
-				indent    = 0 if o.compact else 1,
-				sort_keys = o.sort_keys,
-				header    = RENDER_TAG_MARKDOWN[:],
-			}
+			return {indent = 0 if o.compact else 1, sort_keys = o.sort_keys, header = RENDER_TAG_MARKDOWN[:]}
 		}
 		return {}
 	}
 	e, ok := engine.entry_of_spec(sp)
-	if !ok {
-		return {}
-	}
+	if !ok { return {} }
 	ind := u8(0) if o.compact else u8(max(indent_val, 0))
 	tab := o.tab && !o.compact
 	switch e.family {
 	case .Json:
-		fr := write.Record_Framing.None
-		if o.seq || o.to_framing == .Seq {
-			fr = .Seq
-		} else if o.to_framing == .Lines && (o.compact || o.to_name == "ndjson") {
-			fr = .Lines
-		}
+		fr := engine.Write_Record_Framing.Seq if (o.seq || o.to_framing == .Seq) else (.Lines if (o.to_framing == .Lines && (o.compact || o.to_name == "ndjson")) else .None)
 		return {indent = ind, tab = tab, sort_keys = o.sort_keys, ascii = o.ascii, framing = fr}
-	case .Toml:
-		return {indent = ind, tab = tab, sort_keys = o.sort_keys}
-	case .Xml:
-		return {indent = ind, tab = tab}
-	case .Dsv:
-		return {
-			sort_keys   = o.sort_keys,
-			grow_header = o.grow_header,
-			format      = o.dsv_out if o.dsv_out_set else nil,
-		}
-	case .Cbor:
-		return {sort_keys = o.sort_keys}
-	case .Yaml:
-		return {
-			indent    = ind,
-			tab       = tab,
-			sort_keys = o.sort_keys,
-			format    = tape.Yaml_Options{dialect = o.yaml_schema} if o.yaml_schema_set else nil,
-		}
-	case .Html:
-		return {indent = ind, tab = tab, ascii = o.ascii}
-	case .Msgpack:
-		return {sort_keys = o.sort_keys}
+	case .Toml:    return {indent = ind, tab = tab, sort_keys = o.sort_keys}
+	case .Xml:     return {indent = ind, tab = tab}
+	case .Dsv:     return {sort_keys = o.sort_keys, grow_header = o.grow_header, format = o.dsv_out if o.dsv_out_set else nil}
+	case .Cbor, .Msgpack: return {sort_keys = o.sort_keys}
+	case .Yaml:    return {indent = ind, tab = tab, sort_keys = o.sort_keys, format = tape.Yaml_Options{dialect = o.yaml_schema} if o.yaml_schema_set else nil}
+	case .Html:    return {indent = ind, tab = tab, ascii = o.ascii}
 	}
 	return {}
 }
 
-write_doc_render_to :: proc(sink_w: io.Writer, doc: ^tape.Document, kind: Output_Render, sort_keys, compact, no_header: bool, node: tape.Node_Index, alloc: runtime.Allocator) -> write.Error {
+write_doc_render_to :: proc(sink_w: io.Writer, doc: ^tape.Document, kind: Output_Render, sort_keys, compact, no_header: bool, node: tape.Node_Index, alloc: runtime.Allocator) -> engine.Write_Error {
 	switch kind {
-	case .Table:
-		topts := write.Table_Render_Options{
-			node      = node,
-			style     = .Compact if compact else .Plain,
-			sort_keys = sort_keys,
-			no_header = no_header,
-		}
-		return write.write_table_to(sink_w, doc, topts, alloc)
-	case .Markdown:
-		mopts := write.Markdown_Options{
-			node      = node,
-			sort_keys = sort_keys,
-			compact   = compact,
-		}
-		return write.write_markdown_to(sink_w, doc, mopts, alloc)
+	case .Table:    return engine.write_table_to(sink_w, doc, {node = node, style = .Compact if compact else .Plain, sort_keys = sort_keys, no_header = no_header}, alloc)
+	case .Markdown: return engine.write_markdown_to(sink_w, doc, {node = node, sort_keys = sort_keys, compact = compact}, alloc)
 	case .None:
 	}
 	return tape.Bad_Option{"to"}
 }
 
-write_doc_render :: proc(doc: ^tape.Document, kind: Output_Render, sort_keys, compact, no_header: bool, node: tape.Node_Index, alloc: runtime.Allocator) -> ([]u8, write.Error) {
+write_doc_render :: proc(doc: ^tape.Document, kind: Output_Render, sort_keys, compact, no_header: bool, node: tape.Node_Index, alloc: runtime.Allocator) -> ([]u8, engine.Write_Error) {
 	switch kind {
-	case .Table:
-		topts := write.Table_Render_Options{
-			node      = node,
-			style     = .Compact if compact else .Plain,
-			sort_keys = sort_keys,
-			no_header = no_header,
-		}
-		return write.write_table(doc, topts, alloc)
-	case .Markdown:
-		mopts := write.Markdown_Options{
-			node      = node,
-			sort_keys = sort_keys,
-			compact   = compact,
-		}
-		return write.write_markdown(doc, mopts, alloc)
+	case .Table:    return engine.write_table(doc, {node = node, style = .Compact if compact else .Plain, sort_keys = sort_keys, no_header = no_header}, alloc)
+	case .Markdown: return engine.write_markdown(doc, {node = node, sort_keys = sort_keys, compact = compact}, alloc)
 	case .None:
 	}
 	return nil, tape.Bad_Option{"to"}
 }
 
-// Parses `$JQ_COLORS` as jq's `jq_set_colors`: up to 8 colon-separated codes, empty trailing slot kept default (`cli.tsv:708`).
+// Parses `$JQ_COLORS` as jq's `jq_set_colors`.
 parse_jq_colors :: proc(spec: string, alloc: runtime.Allocator) -> (colors: [8]string, owned: [8]bool, ok: bool) {
 	colors = DEFAULT_COLORS
-	if spec == "" {
-		return colors, owned, true
-	}
+	if spec == "" { return colors, owned, true }
 	codes: [8]string
 	n, rest := 0, spec
 	for {
 		span := 0
-		for span < len(rest) && (rest[span] == ';' || ('0' <= rest[span] && rest[span] <= '9')) {
-			span += 1
-		}
+		for span < len(rest) && (rest[span] == ';' || ('0' <= rest[span] && rest[span] <= '9')) { span += 1 }
 		codes[n], rest = rest[:span], rest[span:]
-		if len(rest) == 0 || n + 1 == len(codes) {
-			break
-		}
-		if rest[0] != ':' {
-			return DEFAULT_COLORS, {}, false
-		}
+		if len(rest) == 0 || n + 1 == len(codes) { break }
+		if rest[0] != ':' { return DEFAULT_COLORS, {}, false }
 		rest = rest[1:]
 		n += 1
 	}
-	if codes[n] != "" {
-		n += 1
-	}
+	if codes[n] != "" { n += 1 }
 	for k in 0 ..< n {
-		colors[k] = fmt.aprintf("\e[%sm", codes[k], allocator = alloc)
-		owned[k] = true
+		colors[k], owned[k] = fmt.aprintf("\e[%sm", codes[k], allocator = alloc), true
 	}
 	return colors, owned, true
 }
 
 render_config_destroy :: proc(cfg: ^Render_Config, alloc: runtime.Allocator) {
 	for owned, i in cfg.colors_owned {
-		if owned {
-			delete(cfg.colors[i], alloc)
-		}
+		if owned { delete(cfg.colors[i], alloc) }
 	}
 	cfg.colors_owned = {}
 }
 
 where_prefix :: proc(b: ^strings.Builder, file: string, p: tape.Place) {
-	if p.line == 0 {
-		if file != "" {
-			fmt.sbprintf(b, "%s:byte %d: ", file, p.byte)
-		} else {
-			fmt.sbprintf(b, "byte %d: ", p.byte)
-		}
-		return
-	}
 	if file != "" {
-		fmt.sbprintf(b, "%s:%d:%d: ", file, p.line, p.col)
+		strings.write_string(b, file)
+		strings.write_byte(b, ':')
+	}
+	if p.line == 0 {
+		fmt.sbprintf(b, "byte %d: ", p.byte)
 	} else {
 		fmt.sbprintf(b, "%d:%d: ", p.line, p.col)
 	}
 }
 
 @(private = "file")
-Key_Val :: struct {
-	k: query.Value,
-	v: query.Value,
-}
+Key_Val :: struct { k, v: query.Value }
 
 @(private = "file")
 Render_Frame :: struct {
@@ -230,22 +149,22 @@ Render_Frame :: struct {
 
 @(private = "file")
 color_wrap :: proc(out: ^[dynamic]u8, cfg: ^Render_Config, slot: int, open: bool) {
-	if cfg.color {
-		append(out, cfg.colors[slot] if open else ANSI_RESET)
-	}
+	if cfg.color { append(out, cfg.colors[slot] if open else ANSI_RESET) }
+}
+
+@(private = "file")
+append_colored :: proc(out: ^[dynamic]u8, cfg: ^Render_Config, slot: int, text: string) {
+	color_wrap(out, cfg, slot, true)
+	append(out, text)
+	color_wrap(out, cfg, slot, false)
 }
 
 jq_double :: proc(buf: []u8, f: f64) -> string {
-	if math.is_nan(f) {
-		return "null"
-	}
+	if math.is_nan(f) { return "null" }
 	x := clamp(f, -max(f64), max(f64))
 	n := 0
 	if x < 0 || (x == 0 && (transmute(u64)x >> 63) != 0) {
-		if x != 0 {
-			buf[0] = '-'
-			n = 1
-		}
+		if x != 0 { buf[0] = '-'; n = 1 }
 		x = -x
 	}
 	if x == 0 {
@@ -263,14 +182,10 @@ jq_double :: proc(buf: []u8, f: f64) -> string {
 			n += count
 		}
 		e := point - 1
-		buf[n] = 'e'
-		buf[n + 1] = '-' if e < 0 else '+'
+		buf[n], buf[n + 1] = 'e', '-' if e < 0 else '+'
 		n += 2
 		ea := abs(e)
-		if ea < 10 {
-			buf[n] = '0'
-			n += 1
-		}
+		if ea < 10 { buf[n] = '0'; n += 1 }
 		tmp: [8]u8
 		es := strconv.write_int(tmp[:], i64(ea), 10)
 		copy(buf[n:], es)
@@ -279,20 +194,14 @@ jq_double :: proc(buf: []u8, f: f64) -> string {
 	if point <= 0 {
 		buf[n], buf[n + 1] = '0', '.'
 		n += 2
-		for _ in 0 ..< -point {
-			buf[n] = '0'
-			n += 1
-		}
+		for _ in 0 ..< -point { buf[n] = '0'; n += 1 }
 		copy(buf[n:], digits[:count])
 		return string(buf[:n + count])
 	}
 	if point >= count {
 		copy(buf[n:], digits[:count])
 		n += count
-		for _ in 0 ..< point - count {
-			buf[n] = '0'
-			n += 1
-		}
+		for _ in 0 ..< point - count { buf[n] = '0'; n += 1 }
 		return string(buf[:n])
 	}
 	copy(buf[n:], digits[:point])
@@ -304,48 +213,21 @@ jq_double :: proc(buf: []u8, f: f64) -> string {
 
 @(private = "file")
 append_indent_nl :: proc(out: ^[dynamic]u8, cfg: ^Render_Config, depth: int) {
-	if cfg.compact {
-		return
-	}
+	if cfg.compact { return }
 	append(out, '\n')
 	if cfg.tab {
-		for _ in 0 ..< depth {
-			append(out, '\t')
-		}
+		for _ in 0 ..< depth { append(out, '\t') }
 		return
 	}
-	for _ in 0 ..< depth * int(max(cfg.indent, 0)) {
-		append(out, ' ')
-	}
-}
-
-@(private = "file")
-flush_render_chunk :: proc(out: ^[dynamic]u8, sink: engine.Emitter) -> bool {
-	if sink.fn == nil || len(out) < STREAM_CHUNK_FLUSH {
-		return true
-	}
-	if !engine.emit_bytes(sink, out[:]) {
-		return false
-	}
-	clear(out)
-	return true
+	for _ in 0 ..< depth * int(max(cfg.indent, 0)) { append(out, ' ') }
 }
 
 @(private = "file")
 write_json_scalar :: proc(h: ^query.Heap, out: ^[dynamic]u8, v: query.Value, cfg: ^Render_Config) -> query.Status {
 	#partial switch query.type_of(v) {
-	case .Absent, .Null:
-		color_wrap(out, cfg, 0, true)
-		append(out, "null")
-		color_wrap(out, cfg, 0, false)
-	case .False:
-		color_wrap(out, cfg, 1, true)
-		append(out, "false")
-		color_wrap(out, cfg, 1, false)
-	case .True:
-		color_wrap(out, cfg, 2, true)
-		append(out, "true")
-		color_wrap(out, cfg, 2, false)
+	case .Absent, .Null: append_colored(out, cfg, 0, "null")
+	case .False:         append_colored(out, cfg, 1, "false")
+	case .True:          append_colored(out, cfg, 2, "true")
 	case .String:
 		color_wrap(out, cfg, 4, true)
 		st := query.write_text(h, out, query.text_of(v), cfg.ascii)
@@ -353,9 +235,7 @@ write_json_scalar :: proc(h: ^query.Heap, out: ^[dynamic]u8, v: query.Value, cfg
 		return st
 	case .Number:
 		if v.kind == .Double && math.is_nan(v.f) {
-			color_wrap(out, cfg, 0, true)
-			append(out, "null")
-			color_wrap(out, cfg, 0, false)
+			append_colored(out, cfg, 0, "null")
 			return .Ok
 		}
 		color_wrap(out, cfg, 3, true)
@@ -366,8 +246,6 @@ write_json_scalar :: proc(h: ^query.Heap, out: ^[dynamic]u8, v: query.Value, cfg
 	return .Ok
 }
 
-// Renders `v` into `scratch`, streaming large values incrementally in `STREAM_CHUNK_FLUSH` chunks
-// when `stream_chunks` is true, and emits the trailing chunk/terminator cleanly through `emit`.
 render_value_to_emitter :: proc(
 	h: ^query.Heap,
 	v: query.Value,
@@ -379,16 +257,11 @@ render_value_to_emitter :: proc(
 	nul_err: ^bool,
 ) -> (st: query.Status, stopped: bool) {
 	clear(scratch)
-	if len(prefix) > 0 {
-		append(scratch, ..prefix)
-	}
-	is_raw_str := cfg.raw && query.type_of(v) == .String
-	if is_raw_str {
+	if len(prefix) > 0 { append(scratch, ..prefix) }
+	if cfg.raw && query.type_of(v) == .String {
 		txt := query.text_of(v)
 		if cfg.ascii {
-			if st = query.write_text(h, scratch, txt, true); st != .Ok {
-				return st, false
-			}
+			if st = query.write_text(h, scratch, txt, true); st != .Ok { return st, false }
 		} else {
 			if cfg.raw0 && strings.index_byte(txt, 0) >= 0 {
 				nul_err^ = true
@@ -397,28 +270,21 @@ render_value_to_emitter :: proc(
 			append(scratch, txt)
 		}
 	} else {
-		if cfg.seq {
-			append(scratch, 0x1e)
-		}
+		if cfg.seq { append(scratch, 0x1e) }
 		if t := query.type_of(v); t != .Array && t != .Object {
-			if st = write_json_scalar(h, scratch, v, cfg); st != .Ok {
-				return st, false
-			}
+			if st = write_json_scalar(h, scratch, v, cfg); st != .Ok { return st, false }
 		} else {
 			stack := make([dynamic]Render_Frame, 0, 8, h.allocator)
 			defer {
-				for &f in stack {
-					drop_render_frame(h, &f)
-				}
+				for &f in stack { drop_render_frame(h, &f) }
 				delete(stack)
 			}
-			if st = open_render_container(h, scratch, &stack, query.retain(v), cfg); st != .Ok {
-				return st, false
-			}
+			if st = open_render_container(h, scratch, &stack, query.retain(v), cfg); st != .Ok { return st, false }
 			depth_cap := query.depth_limit(h)
 			for len(stack) > 0 {
-				if stream_chunks && !flush_render_chunk(scratch, emit) {
-					return .Ok, true
+				if stream_chunks && emit.fn != nil && len(scratch) >= STREAM_CHUNK_FLUSH {
+					if !engine.emit_bytes(emit, scratch[:]) { return .Ok, true }
+					clear(scratch)
 				}
 				f := &stack[len(stack) - 1]
 				k, x: query.Value
@@ -432,27 +298,17 @@ render_value_to_emitter :: proc(
 				} else {
 					ns: query.Status
 					k, x, more, ns = query.cursor_next(h, &f.c)
-					if ns != .Ok {
-						return ns, false
-					}
+					if ns != .Ok { return ns, false }
 				}
 				cslot := 6 if f.object else 5
 				if !more {
-					if !f.first {
-						append_indent_nl(scratch, cfg, len(stack) - 1)
-					}
-					color_wrap(scratch, cfg, cslot, true)
-					append(scratch, '}' if f.object else ']')
-					color_wrap(scratch, cfg, cslot, false)
+					if !f.first { append_indent_nl(scratch, cfg, len(stack) - 1) }
+					append_colored(scratch, cfg, cslot, "}" if f.object else "]")
 					drop_render_frame(h, f)
 					pop(&stack)
 					continue
 				}
-				if !f.first {
-					color_wrap(scratch, cfg, cslot, true)
-					append(scratch, ',')
-					color_wrap(scratch, cfg, cslot, false)
-				}
+				if !f.first { append_colored(scratch, cfg, cslot, ",") }
 				f.first = false
 				append_indent_nl(scratch, cfg, len(stack))
 				if f.object {
@@ -464,12 +320,8 @@ render_value_to_emitter :: proc(
 						query.release(h, x)
 						return st, false
 					}
-					color_wrap(scratch, cfg, 6, true)
-					append(scratch, ':')
-					color_wrap(scratch, cfg, 6, false)
-					if !cfg.compact {
-						append(scratch, ' ')
-					}
+					append_colored(scratch, cfg, 6, ":")
+					if !cfg.compact { append(scratch, ' ') }
 				}
 				if xt := query.type_of(x); xt == .Array || xt == .Object {
 					if len(stack) > depth_cap {
@@ -477,16 +329,12 @@ render_value_to_emitter :: proc(
 						append(scratch, TOO_DEEP_TEXT)
 						continue
 					}
-					if st = open_render_container(h, scratch, &stack, x, cfg); st != .Ok {
-						return st, false
-					}
+					if st = open_render_container(h, scratch, &stack, x, cfg); st != .Ok { return st, false }
 					continue
 				}
 				st = write_json_scalar(h, scratch, x, cfg)
 				query.release(h, x)
-				if st != .Ok {
-					return st, false
-				}
+				if st != .Ok { return st, false }
 			}
 		}
 	}
@@ -519,14 +367,10 @@ open_render_container :: proc(h: ^query.Heap, out: ^[dynamic]u8, stack: ^[dynami
 	cslot := 6 if object else 5
 	if query.length_of(h, v) == 0 {
 		query.release(h, v)
-		color_wrap(out, cfg, cslot, true)
-		append(out, "{}" if object else "[]")
-		color_wrap(out, cfg, cslot, false)
+		append_colored(out, cfg, cslot, "{}" if object else "[]")
 		return .Ok
 	}
-	color_wrap(out, cfg, cslot, true)
-	append(out, '{' if object else '[')
-	color_wrap(out, cfg, cslot, false)
+	append_colored(out, cfg, cslot, "{" if object else "[")
 	f := Render_Frame{v = v, first = true, object = object}
 	if object && cfg.sort_keys {
 		c := query.cursor_open(h, v) or_return
@@ -538,14 +382,10 @@ open_render_container :: proc(h: ^query.Heap, out: ^[dynamic]u8, stack: ^[dynami
 				drop_render_frame(h, &f)
 				return ns
 			}
-			if !more {
-				break
-			}
+			if !more { break }
 			append(&f.sorted, Key_Val{k, x})
 		}
-		slice.sort_by(f.sorted[:], proc(a, b: Key_Val) -> bool {
-			return query.text_of(a.k) < query.text_of(b.k)
-		})
+		slice.sort_by(f.sorted[:], proc(a, b: Key_Val) -> bool { return query.text_of(a.k) < query.text_of(b.k) })
 	} else {
 		f.c = query.cursor_open(h, v) or_return
 	}
@@ -553,24 +393,20 @@ open_render_container :: proc(h: ^query.Heap, out: ^[dynamic]u8, stack: ^[dynami
 	return .Ok
 }
 
-// Unified iterative walker emitting tokens from `root` to `sink` (`write.Token_Tape` or `write.Table_Writer`).
+// Unified iterative walker emitting tokens from `root` to `sink`.
 value_emit_tokens :: proc(
 	h: ^query.Heap,
 	root: query.Value,
 	sink: rawptr,
-	take: proc(sink: rawptr, kind: write.Token_Kind, text: string) -> write.Error,
+	take: proc(sink: rawptr, kind: engine.Write_Token_Kind, text: string) -> engine.Write_Error,
 ) -> bool {
 	Task :: struct {
 		close: bool,
-		k:     query.Value,
-		v:     query.Value,
+		k, v:  query.Value,
 	}
 	stack := make([dynamic]Task, 0, 16, h.allocator)
 	defer {
-		for item in stack {
-			query.release(h, item.k)
-			query.release(h, item.v)
-		}
+		for item in stack { query.release(h, item.k); query.release(h, item.v) }
 		delete(stack)
 	}
 	num_buf := make([dynamic]u8, 0, 32, h.allocator)
@@ -579,38 +415,21 @@ value_emit_tokens :: proc(
 	for len(stack) > 0 {
 		t := pop(&stack)
 		if t.close {
-			if take(sink, .Close, "") != nil {
-				return false
-			}
+			if take(sink, .Close, "") != nil { return false }
 			continue
 		}
 		if t.k.kind != .Absent {
 			ok := take(sink, .Key, query.text_of(t.k)) == nil
 			query.release(h, t.k)
-			if !ok {
-				query.release(h, t.v)
-				return false
-			}
+			if !ok { query.release(h, t.v); return false }
 		}
 		v := t.v
 		defer query.release(h, v)
 		#partial switch query.type_of(v) {
-		case .Absent, .Null:
-			if take(sink, .Null, "") != nil {
-				return false
-			}
-		case .False:
-			if take(sink, .False, "") != nil {
-				return false
-			}
-		case .True:
-			if take(sink, .True, "") != nil {
-				return false
-			}
-		case .String:
-			if take(sink, .String, query.text_of(v)) != nil {
-				return false
-			}
+		case .Absent, .Null: if take(sink, .Null, "") != nil { return false }
+		case .False:         if take(sink, .False, "") != nil { return false }
+		case .True:          if take(sink, .True, "") != nil { return false }
+		case .String:        if take(sink, .String, query.text_of(v)) != nil { return false }
 		case .Number:
 			clear(&num_buf)
 			if query.write_json(h, &num_buf, v, {double = jq_double}) != .Ok || take(sink, .Number, string(num_buf[:])) != nil {
@@ -618,106 +437,79 @@ value_emit_tokens :: proc(
 			}
 		case .Array, .Object:
 			is_obj := query.type_of(v) == .Object
-			if take(sink, .Object if is_obj else .Array, "") != nil {
-				return false
-			}
+			if take(sink, .Object if is_obj else .Array, "") != nil { return false }
 			c, cs := query.cursor_open(h, v)
-			if cs != .Ok {
-				return false
-			}
+			if cs != .Ok { return false }
 			defer query.cursor_close(&c)
 			ch := make([dynamic]Task, 0, 8, h.allocator)
 			defer delete(ch)
 			for {
 				ck, cx, more, ns := query.cursor_next(h, &c)
 				if ns != .Ok {
-					for item in ch {
-						query.release(h, item.k)
-						query.release(h, item.v)
-					}
+					for item in ch { query.release(h, item.k); query.release(h, item.v) }
 					return false
 				}
-				if !more {
-					break
-				}
+				if !more { break }
 				append(&ch, Task{k = ck if is_obj else query.ABSENT, v = cx})
-				if !is_obj {
-					query.release(h, ck)
-				}
+				if !is_obj { query.release(h, ck) }
 			}
 			append(&stack, Task{close = true})
-			#reverse for item in ch {
-				append(&stack, item)
-			}
+			#reverse for item in ch { append(&stack, item) }
 		}
 	}
 	return true
 }
 
 @(private = "file")
-token_tape_sink :: proc(sink: rawptr, kind: write.Token_Kind, text: string) -> write.Error {
-	return write.token_tape_take((^write.Token_Tape)(sink), kind, text)
+token_tape_sink :: proc(sink: rawptr, kind: engine.Write_Token_Kind, text: string) -> engine.Write_Error {
+	return engine.token_tape_take((^engine.Write_Token_Tape)(sink), kind, text)
 }
 
 @(private = "file")
-table_writer_sink :: proc(sink: rawptr, kind: write.Token_Kind, text: string) -> write.Error {
-	return write.table_writer_token((^write.Table_Writer)(sink), kind, text)
+table_writer_sink :: proc(sink: rawptr, kind: engine.Write_Token_Kind, text: string) -> engine.Write_Error {
+	return engine.table_writer_token((^engine.Write_Table_Writer)(sink), kind, text)
 }
 
-write_table_row :: proc(h: ^query.Heap, v: query.Value, tw: ^write.Table_Writer) -> bool {
+write_table_row :: proc(h: ^query.Heap, v: query.Value, tw: ^engine.Write_Table_Writer) -> bool {
 	return value_emit_tokens(h, v, tw, table_writer_sink)
 }
 
-// Unified streaming collector for `--to table` and `--to markdown` across single- or multi-value outputs.
+// Unified streaming collector for `--to table` and `--to markdown`.
 Render_Table_Writer :: struct {
 	kind:      Output_Render,
 	sort_keys: bool,
 	compact:   bool,
 	no_header: bool,
-	tokens:    write.Token_Tape,
+	tokens:    engine.Write_Token_Tape,
 	count:     u64,
 	failed:    bool,
-	err:       write.Error,
+	err:       engine.Write_Error,
 	sink:      io.Writer,
 	allocator: runtime.Allocator,
 }
 
-@(private = "file")
-render_table_writer_sink :: proc(sink: rawptr, kind: write.Token_Kind, text: string) -> write.Error {
-	rtw := (^Render_Table_Writer)(sink)
-	err := write.token_tape_take(&rtw.tokens, kind, text)
-	if err != nil {
-		rtw.err = err
-	}
-	return err
-}
-
 render_table_writer_start :: proc(rtw: ^Render_Table_Writer, kind: Output_Render, o: ^Options, sink_w: io.Writer, alloc: runtime.Allocator) -> bool {
-	rtw^ = {
-		kind      = kind,
-		sort_keys = o.sort_keys,
-		compact   = o.compact,
-		no_header = o.dsv_out.no_header,
-		sink      = sink_w,
-		allocator = alloc,
-	}
+	rtw^ = {kind = kind, sort_keys = o.sort_keys, compact = o.compact, no_header = o.dsv_out.no_header, sink = sink_w, allocator = alloc}
 	if kind != .Table && kind != .Markdown {
 		rtw.err = tape.Bad_Option{"to"}
 		return false
 	}
-	if err := write.token_tape_start(&rtw.tokens, true, 0, alloc); err != nil {
-		rtw.err = err
-		rtw.kind = .None
+	if err := engine.token_tape_start(&rtw.tokens, true, 0, alloc); err != nil {
+		rtw.err, rtw.kind = err, .None
 		return false
 	}
 	return true
 }
 
 render_table_writer_value :: proc(rtw: ^Render_Table_Writer, h: ^query.Heap, v: query.Value) -> bool {
-	if rtw.failed {
-		return false
+	if rtw.failed { return false }
+	sink :: proc(s: rawptr, kind: engine.Write_Token_Kind, text: string) -> engine.Write_Error {
+		r := (^Render_Table_Writer)(s)
+		err := engine.token_tape_take(&r.tokens, kind, text)
+		if err != nil { r.err = err }
+		return err
 	}
-	if !value_emit_tokens(h, v, rtw, render_table_writer_sink) {
+	if !value_emit_tokens(h, v, rtw, sink) {
 		rtw.failed = true
 		return false
 	}
@@ -726,173 +518,143 @@ render_table_writer_value :: proc(rtw: ^Render_Table_Writer, h: ^query.Heap, v: 
 }
 
 render_table_writer_drop :: proc(rtw: ^Render_Table_Writer) {
-	if rtw == nil {
-		return
-	}
-	write.token_tape_drop(&rtw.tokens)
+	if rtw == nil { return }
+	engine.token_tape_drop(&rtw.tokens)
 	rtw^ = {}
 }
 
-render_table_writer_end :: proc(rtw: ^Render_Table_Writer) -> write.Error {
-	if rtw == nil {
-		return nil
-	}
+render_table_writer_end :: proc(rtw: ^Render_Table_Writer) -> engine.Write_Error {
+	if rtw == nil { return nil }
 	defer render_table_writer_drop(rtw)
-	if rtw.failed || rtw.count == 0 {
-		return nil
+	if rtw.failed || rtw.count == 0 { return nil }
+	if !engine.token_tape_done(&rtw.tokens) {
+		return engine.Write_Refused{tape.Node_Index(rtw.tokens.seq.taken), .Malformed}
 	}
-	if !write.token_tape_done(&rtw.tokens) {
-		return write.Refused{tape.Node_Index(rtw.tokens.seq.taken), .Malformed}
+	doc := engine.token_tape_document(&rtw.tokens) or_return
+	return write_doc_render_to(rtw.sink, &doc, rtw.kind, rtw.sort_keys, rtw.compact, rtw.no_header, tape.Node_Index(1) if rtw.count == 1 else tape.ROOT, rtw.allocator)
+}
+
+@(private = "file")
+emit_doc_direct :: proc(doc: ^tape.Document, to: engine.Spec, wopts: engine.Write_Options, out: ^[dynamic]u8, sink_w: io.Writer, alloc: runtime.Allocator) -> (ok, refused: bool, msg: string) {
+	if sink_w.procedure != nil {
+		_, werr := engine.write_to(sink_w, doc, to, wopts, alloc)
+		if werr == nil { return true, false, "" }
+		if _, is_r := werr.(engine.Write_Refused); is_r { return false, true, "" }
+		return false, false, write_error_string(werr, alloc)
 	}
-	doc, derr := write.token_tape_document(&rtw.tokens)
-	if derr != nil {
-		return derr
+	text, _, werr := engine.write(doc, to, wopts, alloc)
+	if werr == nil {
+		defer delete(text, alloc)
+		append(out, ..text)
+		return true, false, ""
 	}
-	root := tape.Node_Index(1) if rtw.count == 1 else tape.ROOT
-	return write_doc_render_to(rtw.sink, &doc, rtw.kind, rtw.sort_keys, rtw.compact, rtw.no_header, root, rtw.allocator)
+	if _, is_r := werr.(engine.Write_Refused); is_r { return false, true, "" }
+	return false, false, write_error_string(werr, alloc)
 }
 
 write_value_as_format :: proc(
 	h: ^query.Heap,
 	v: query.Value,
 	to: engine.Spec,
-	wopts: write.Options,
+	wopts: engine.Write_Options,
 	out: ^[dynamic]u8,
 	sink_w: io.Writer,
 	max_depth: int,
 	alloc: runtime.Allocator,
 ) -> (bool, string) {
+	rkind := Output_Render.None
 	if to == nil && len(wopts.header) == 1 {
-		rkind := Output_Render.Table if wopts.header[0] == "table" else .Markdown if wopts.header[0] == "markdown" else .None
-		if rkind != .None {
-			tt: write.Token_Tape
-			if write.token_tape_start(&tt, false, max_depth, alloc) != nil {
-				return false, strings.clone("out of memory", alloc)
-			}
-			defer write.token_tape_drop(&tt)
-			if !value_emit_tokens(h, v, &tt, token_tape_sink) {
-				return false, strings.clone("cannot serialize value", alloc)
-			}
-			doc, derr := write.token_tape_document(&tt)
-			if derr != nil {
-				return false, strings.clone("out of memory", alloc)
-			}
-			if sink_w.procedure != nil {
-				if werr := write_doc_render_to(sink_w, &doc, rkind, wopts.sort_keys, wopts.indent == 0, wopts.grow_header, tape.ROOT, alloc); werr != nil {
-					return false, write_error_string(werr, alloc)
-				}
-				return true, ""
-			}
-			text, werr := write_doc_render(&doc, rkind, wopts.sort_keys, wopts.indent == 0, wopts.grow_header, tape.ROOT, alloc)
-			if werr != nil {
-				return false, write_error_string(werr, alloc)
-			}
-			defer delete(text, alloc)
-			append(out, ..text)
-			return true, ""
-		}
+		rkind = .Table if wopts.header[0] == "table" else .Markdown if wopts.header[0] == "markdown" else .None
 	}
-	entry, found := engine.entry_of_spec(to)
-	if !wopts.sort_keys && !wopts.ascii && found && !entry.tabular {
-		ov_ob := (^query.Overlay_Block)(v.p) if v.kind == .Overlay else (^query.Overlay_Block)(h.write_fact_data)
-		if ov_ob != nil && ov_ob.ov != nil && ov_ob.ov.base != nil && entry.format == ov_ob.ov.base.format {
-			if v.kind == .Overlay && !ov_ob.ov.dirty && ov_ob.doc_block != nil {
-				if en, ok := edit.get_node_by_idx(ov_ob.ov, v.n); ok && en.base != tape.NO_NODE {
-					lo := wopts
-					lo.node = en.base
-					if sink_w.procedure != nil {
-						_, werr := engine.write_to(sink_w, &ov_ob.doc_block.doc, to, lo, alloc)
-						if werr == nil {
-							return true, ""
+	if rkind == .None {
+		entry, found := engine.entry_of_spec(to)
+		if !wopts.sort_keys && !wopts.ascii && found && !entry.tabular {
+			ov_ob := (^query.Overlay_Block)(v.p) if v.kind == .Overlay else (^query.Overlay_Block)(h.write_fact_data)
+			if ov_ob != nil && ov_ob.ov != nil && ov_ob.ov.base != nil && entry.format == ov_ob.ov.base.format {
+				if v.kind == .Overlay && !ov_ob.ov.dirty && ov_ob.doc_block != nil {
+					if en, ok := engine.edit_get_node_by_idx(ov_ob.ov, v.n); ok && en.base != tape.NO_NODE {
+						lo := wopts
+						lo.node = en.base
+						if dok, ref, dmsg := emit_doc_direct(&ov_ob.doc_block.doc, to, lo, out, sink_w, alloc); dok || !ref {
+							return dok, dmsg
 						}
-						if _, is_refused := werr.(write.Refused); !is_refused {
-							return false, write_error_string(werr, alloc)
-						}
-					} else if text, _, werr := engine.write(&ov_ob.doc_block.doc, to, lo, alloc); werr == nil {
-						defer delete(text, alloc)
-						append(out, ..text)
-						return true, ""
 					}
-				}
-			} else if ov_ob.ov.dirty || v.kind == .Overlay {
-				yopts, _ := wopts.format.(tape.Yaml_Options)
-				if cres, cerr := engine.reconcile_edit(h, ov_ob.ov, v, to, {indent = wopts.indent, tab = wopts.tab}, alloc, yopts); cerr == nil {
-					defer edit.destroy_commit_result(&cres)
-					if sink_w.procedure != nil {
-						if !write_all_to(sink_w, cres.bytes) {
+				} else if ov_ob.ov.dirty || v.kind == .Overlay {
+					yopts, _ := wopts.format.(tape.Yaml_Options)
+					if cres, cerr := engine.reconcile_edit(h, ov_ob.ov, v, to, {indent = wopts.indent, tab = wopts.tab}, alloc, yopts); cerr == nil {
+						defer engine.destroy_commit_result(&cres)
+						if sink_w.procedure != nil {
+							if write_all_to(sink_w, cres.bytes) { return true, "" }
 							return false, strings.clone("writing output failed", alloc)
 						}
+						append(out, ..cres.bytes)
 						return true, ""
 					}
-					append(out, ..cres.bytes)
-					return true, ""
 				}
 			}
-		}
-		if v.kind == .Node {
-			if db := (^query.Doc_Block)(v.p); db != nil {
-				lo := wopts
-				lo.node = tape.Node_Index(v.n)
-				if sink_w.procedure != nil {
-					_, werr := engine.write_to(sink_w, &db.doc, to, lo, alloc)
-					if werr == nil {
-						return true, ""
+			if v.kind == .Node {
+				if db := (^query.Doc_Block)(v.p); db != nil {
+					lo := wopts
+					lo.node = tape.Node_Index(v.n)
+					if dok, ref, dmsg := emit_doc_direct(&db.doc, to, lo, out, sink_w, alloc); dok || !ref {
+						return dok, dmsg
 					}
-					if _, is_refused := werr.(write.Refused); !is_refused {
-						return false, write_error_string(werr, alloc)
-					}
-				} else if text, _, werr := engine.write(&db.doc, to, lo, alloc); werr == nil {
-					defer delete(text, alloc)
-					append(out, ..text)
-					return true, ""
 				}
 			}
 		}
 	}
-	tt: write.Token_Tape
-	if write.token_tape_start(&tt, false, max_depth, alloc) != nil {
+
+	tt: engine.Write_Token_Tape
+	if engine.token_tape_start(&tt, false, max_depth, alloc) != nil {
 		return false, strings.clone("out of memory", alloc)
 	}
-	defer write.token_tape_drop(&tt)
+	defer engine.token_tape_drop(&tt)
 	if !value_emit_tokens(h, v, &tt, token_tape_sink) {
 		return false, strings.clone("cannot serialize value", alloc)
 	}
-	doc, derr := write.token_tape_document(&tt)
+	doc, derr := engine.token_tape_document(&tt)
 	if derr != nil {
 		return false, strings.clone("out of memory", alloc)
 	}
+	if rkind != .None {
+		if sink_w.procedure != nil {
+			if werr := write_doc_render_to(sink_w, &doc, rkind, wopts.sort_keys, wopts.indent == 0, wopts.grow_header, tape.ROOT, alloc); werr != nil {
+				return false, write_error_string(werr, alloc)
+			}
+			return true, ""
+		}
+		text, werr := write_doc_render(&doc, rkind, wopts.sort_keys, wopts.indent == 0, wopts.grow_header, tape.ROOT, alloc)
+		if werr != nil { return false, write_error_string(werr, alloc) }
+		defer delete(text, alloc)
+		append(out, ..text)
+		return true, ""
+	}
 	if sink_w.procedure != nil {
-		_, werr := engine.write_to(sink_w, &doc, to, wopts, alloc)
-		if werr != nil {
+		if _, werr := engine.write_to(sink_w, &doc, to, wopts, alloc); werr != nil {
 			return false, write_error_string(werr, alloc)
 		}
 		return true, ""
 	}
 	text, _, werr := engine.write(&doc, to, wopts, alloc)
-	if werr != nil {
-		return false, write_error_string(werr, alloc)
-	}
+	if werr != nil { return false, write_error_string(werr, alloc) }
 	defer delete(text, alloc)
 	append(out, ..text)
 	return true, ""
 }
 
 write_all_to :: proc(w: io.Writer, b: []u8) -> bool {
-	left := b
-	for len(left) > 0 {
+	for left := b; len(left) > 0; {
 		wrote, err := io.write(w, left)
-		if err != .None || wrote <= 0 {
-			return false
-		}
+		if err != .None || wrote <= 0 { return false }
 		left = left[wrote:]
 	}
 	return true
 }
 
-write_error_string :: proc(werr: write.Error, alloc: runtime.Allocator) -> string {
+write_error_string :: proc(werr: engine.Write_Error, alloc: runtime.Allocator) -> string {
 	#partial switch e in werr {
-	case write.Refused:
-		msgs := [write.Refusal]string{
+	case engine.Write_Refused:
+		msgs := [engine.Write_Refusal]string{
 			.No_Spelling = "value cannot be spelled in target format",
 			.Not_A_Table = "target format requires an array of table rows",
 			.Row_Keys    = "row keys do not match table header",

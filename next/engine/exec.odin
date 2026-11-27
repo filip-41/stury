@@ -1,10 +1,12 @@
 package engine
 
 import "base:runtime"
+import "core:sync"
 import "stury:dsv"
 import "stury:json"
 import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
+import ops_build "stury:lib/ops/build"
 import "stury:lib/ops/write"
 import "stury:lib/query"
 
@@ -45,39 +47,22 @@ Emitter :: struct {
 }
 
 emit_bytes :: #force_inline proc(e: Emitter, bytes: []u8) -> bool {
-	if e.fn == nil {
-		return true
-	}
-	return e.fn(e.data, bytes)
+	return true if e.fn == nil else e.fn(e.data, bytes)
 }
 
-// Evaluates a prepared document (`Whole` or partial `Scan`) and emits formatted outputs via `emit`.
 Eval_Doc_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta, emit: Emitter) -> Exec_Error
-
-// Evaluates only a predicate over a partial document built from `pred_demand` (`Conditional_Whole`).
 Pred_Doc_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta) -> (matched: bool, err: Exec_Error)
-
-// Counts items emitted for one element sub-document in Hint 1 `.Length` (`[.prefix[] | each] | length`) without formatting outputs.
 Count_Doc_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta) -> (count: u64, err: Exec_Error)
-
-// Emits final integer count in Hint 1 `.Length` (`[.prefix[] | each] | length`) via caller's output configuration.
 Emit_Total_Proc :: #type proc(ctx: rawptr, total: u64, emit: Emitter) -> Exec_Error
-
-// Optional combiner callback for Hint 1 `.Collect` (`[.prefix[] | each] | tail`).
-// `doc` is nil unless `Exec_Options.spine_collect_needs_doc` is set.
 Spine_Collect_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, item_outputs: [][]u8, emit: Emitter) -> Exec_Error
+Bad_Record_Proc :: #type proc(ctx: rawptr, bad: tape.Bad_Record) -> bool
 
-// Direct strict-JSON formatting fast path when caller outputs plain compact or 2-space pretty JSON for identity filters.
 Fast_Json_Mode :: enum u8 {
 	None,
 	Compact,
 	Pretty2,
 }
 
-// Bad-record notification callback during record iteration; return false to abort.
-Bad_Record_Proc :: #type proc(ctx: rawptr, bad: tape.Bad_Record) -> bool
-
-// Per-worker frontend state lifecycle hooks for parallel routes.
 Worker_Hooks :: struct {
 	init: proc(parent_ctx: rawptr, worker_idx: int, alloc: runtime.Allocator) -> rawptr,
 	fini: proc(parent_ctx: rawptr, worker_idx: int, worker_ctx: rawptr),
@@ -97,15 +82,15 @@ File_Input :: struct {
 }
 
 Exec_Options :: struct {
-	eval:                    Eval_Doc_Proc, // required for fallback from Hint 1 / Hint 3 when sub-route cannot handle
+	eval:                    Eval_Doc_Proc,
 	eval_ctx:                rawptr,
-	eval_each:               Eval_Doc_Proc,      // element evaluator for Hint 1 (nil falls back to whole-doc `eval`)
+	eval_each:               Eval_Doc_Proc,
 	eval_each_ctx:           rawptr,
-	eval_each_count:         Count_Doc_Proc,     // optional element counter for Hint 1 `.Length` with `has_each`
-	emit_spine_length:       Emit_Total_Proc,    // optional total count formatter for Hint 1 `.Length` with `has_each`
-	pred_eval:               Pred_Doc_Proc,      // optional predicate evaluator when `Simple_Compare` not used
+	eval_each_count:         Count_Doc_Proc,
+	emit_spine_length:       Emit_Total_Proc,
+	pred_eval:               Pred_Doc_Proc,
 	pred_ctx:                rawptr,
-	spine_collect:           Spine_Collect_Proc, // optional tail combiner for Hint 1 `.Collect`
+	spine_collect:           Spine_Collect_Proc,
 	on_bad_record:           Bad_Record_Proc,
 	bad_ctx:                 rawptr,
 	workers:                 Worker_Hooks,
@@ -116,14 +101,14 @@ Exec_Options :: struct {
 	direct_csv_header:       bool,
 	skip_bad:                bool,
 	max_bytes:               u64,
-	fast_json:               Fast_Json_Mode, // fast strict-JSON serializer bypass for whole/record identity `.` outputs
-	fast_json_each:          Fast_Json_Mode, // fast strict-JSON serializer bypass for Hint 1 identity element streams
-	coalesce_emit:           bool,           // coalesce parallel chunk bytes into 1 emit call per chunk when safe
-	direct_append_nl:        bool,           // append `\n` inside `.Projection_Direct` JSON row buffer
-	spine_collect_compact:   bool,           // emit compact `[` + chunk items + `]\n` directly when `!sp.has_tail`
-	rerun_whole_on_taint:    bool,           // opt-in caller rerun ONLY when `emitted == 0`
-	eval_ctx_thread_safe:    bool,           // set true only when non-nil `eval_ctx` is safe without `workers.init`
-	spine_collect_needs_doc: bool,           // when true, `.Collect` parses root document to pass to `spine_collect`
+	fast_json:               Fast_Json_Mode,
+	fast_json_each:          Fast_Json_Mode,
+	coalesce_emit:           bool,
+	direct_append_nl:        bool,
+	spine_collect_compact:   bool,
+	rerun_whole_on_taint:    bool,
+	eval_ctx_thread_safe:    bool,
+	spine_collect_needs_doc: bool,
 	file_index:              int,
 	file_path:               string,
 	allocator:               runtime.Allocator,
@@ -147,27 +132,17 @@ execute :: proc(
 	src: []u8,
 	opts := Exec_Options{},
 ) -> Exec_Result {
-	alloc := opts.allocator if opts.allocator.procedure != nil else context.allocator
 	eff := opts
-	eff.allocator = alloc
-
+	eff.allocator = opts.allocator if opts.allocator.procedure != nil else context.allocator
 	switch decision.kind {
-	case .Whole:
-		return exec_whole(decision, src, &eff)
-	case .Scan:
-		return exec_scan(plan, decision, src, &eff)
-	case .Records_Serial:
-		return exec_records(plan, decision, src, &eff, parallel = false)
-	case .Records_Parallel:
-		return exec_records(plan, decision, src, &eff, parallel = true)
-	case .Spine_Parallel:
-		return exec_spine_parallel(plan, decision, src, &eff)
-	case .Projection_Direct:
-		return exec_projection_direct(plan, decision, src, &eff)
-	case .Conditional_Whole:
-		return exec_conditional_whole(plan, decision, src, &eff)
-	case .Files_Parallel:
-		return {err = .Unsupported}
+	case .Whole:             return exec_whole(decision, src, &eff)
+	case .Scan:              return exec_scan(plan, decision, src, &eff)
+	case .Records_Serial:    return exec_records(plan, decision, src, &eff, parallel = false)
+	case .Records_Parallel:  return exec_records(plan, decision, src, &eff, parallel = true)
+	case .Spine_Parallel:    return exec_spine_parallel(plan, decision, src, &eff)
+	case .Projection_Direct: return exec_projection_direct(plan, decision, src, &eff)
+	case .Conditional_Whole: return exec_conditional_whole(plan, decision, src, &eff)
+	case .Files_Parallel:    return {err = .Unsupported}
 	}
 	return {err = .Unsupported}
 }
@@ -187,62 +162,73 @@ execute_files :: proc(
 		can_parallel_eval(false, opts.pred_ctx, opts.pred_eval != nil, opts.eval_ctx_thread_safe) &&
 		can_parallel_eval(false, opts.eval_each_ctx, opts.eval_each != nil, opts.eval_ctx_thread_safe)
 
-	if len(files) == 1 {
-		r_opts := route_opts
-		r_opts.file_count = 1
-		r_opts.input_bytes = len(files[0].src)
-		r_opts.serial_eval_ctx = r_opts.serial_eval_ctx || !parallel_eval_ok
-		d := decide(plan, files[0].spec, files[0].framing, r_opts)
-		f_opts := opts
-		f_opts.file_index = 0
-		f_opts.file_path = files[0].path
-		f_opts.allocator = alloc
-		if f_opts.runner == nil {
-			f_opts.runner = r_opts.runner
-		}
-		return execute(plan, &d, files[0].src, f_opts)
-	}
-
 	r_opts := route_opts
 	r_opts.file_count = len(files)
 	r_opts.serial_eval_ctx = r_opts.serial_eval_ctx || !parallel_eval_ok
 	if r_opts.runner == nil {
 		r_opts.runner = opts.runner
 	}
-	first_dec := decide(plan, files[0].spec, files[0].framing, r_opts)
-
 	runner := r_opts.runner
-	if !first_dec.file_parallel || !parallel_eval_ok || runner == nil || runner.threads <= 0 {
-		total: Exec_Result
-		for f, idx in files {
-			f_route := r_opts
-			f_route.file_count = 1
-			f_route.runner = runner
-			f_route.input_bytes = len(f.src)
-			dec := decide(plan, f.spec, f.framing, f_route)
-			f_opts := opts
-			f_opts.file_index = idx
-			f_opts.file_path = f.path
-			f_opts.allocator = alloc
-			f_opts.runner = runner
-			sub := execute(plan, &dec, f.src, f_opts)
-			merge_result(&total, sub)
-			if sub.err != .None {
-				return total
-			}
+	if len(files) > 1 && parallel_eval_ok && runner != nil && runner.threads > 0 {
+		if first_dec := decide(plan, files[0].spec, files[0].framing, r_opts); first_dec.file_parallel {
+			return execute_files_parallel(plan, files, r_opts, opts, runner, alloc)
 		}
-		return total
 	}
 
-	return execute_files_parallel(plan, files, r_opts, opts, runner, alloc)
+	total: Exec_Result
+	for f, idx in files {
+		f_route := r_opts
+		f_route.file_count = 1
+		f_route.runner = runner
+		f_route.input_bytes = len(f.src)
+		dec := decide(plan, f.spec, f.framing, f_route)
+		f_opts := opts
+		f_opts.file_index = idx
+		f_opts.file_path = f.path
+		f_opts.allocator = alloc
+		if f_opts.runner == nil {
+			f_opts.runner = runner
+		}
+		sub := execute(plan, &dec, f.src, f_opts)
+		merge_result(&total, sub)
+		if sub.err != .None {
+			return total
+		}
+	}
+	return total
+}
+
+// Shared mutex-backed allocator wrapper used by all parallel execution jobs.
+@(private)
+Locked_Allocator :: struct {
+	inner:    runtime.Allocator,
+	lock:     sync.Mutex,
+	use_lock: bool,
+}
+
+@(private)
+locked_alloc_init :: proc(la: ^Locked_Allocator, inner: runtime.Allocator, force_lock := false) {
+	la^ = {
+		inner    = inner,
+		use_lock = force_lock || !is_thread_safe_heap(inner),
+	}
+}
+
+@(private = "file")
+locked_alloc_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_ptr: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
+	la := (^Locked_Allocator)(data)
+	sync.mutex_guard(&la.lock)
+	return la.inner.procedure(la.inner.data, mode, size, alignment, old_ptr, old_size, loc)
+}
+
+@(private)
+locked_allocator :: proc(la: ^Locked_Allocator) -> runtime.Allocator {
+	return runtime.Allocator{procedure = locked_alloc_proc, data = la} if la.use_lock else la.inner
 }
 
 @(private)
 can_parallel_eval :: proc "contextless" (has_worker_hooks: bool, ctx: rawptr, has_eval, eval_ctx_thread_safe: bool) -> bool {
-	if !has_eval {
-		return true
-	}
-	return has_worker_hooks || ctx == nil || eval_ctx_thread_safe
+	return !has_eval || has_worker_hooks || ctx == nil || eval_ctx_thread_safe
 }
 
 @(private)
@@ -262,11 +248,7 @@ merge_result :: proc "contextless" (dst: ^Exec_Result, src: Exec_Result) {
 @(private)
 build_tape_opts :: proc "contextless" (opts: ^Exec_Options, allow_parallel: bool) -> tape.Options {
 	ro := opts.read
-	if allow_parallel && opts.runner != nil && opts.runner.threads > 0 {
-		ro.runner = opts.runner
-	} else {
-		ro.runner = nil
-	}
+	ro.runner = opts.runner if (allow_parallel && opts.runner != nil && opts.runner.threads > 0) else nil
 	return ro
 }
 
@@ -289,6 +271,82 @@ guard_emit_fn :: proc(data: rawptr, bytes: []u8) -> bool {
 	return ok
 }
 
+@(private)
+eval_or_emit_doc :: proc(doc: ^tape.Document, meta: Record_Meta, opts: ^Exec_Options) -> Exec_Result {
+	if opts.eval == nil {
+		return exec_emit_default_doc(doc, opts.emit, opts.allocator)
+	}
+	g := Guard_Emit{inner = opts.emit}
+	e := opts.eval(opts.eval_ctx, doc, meta, Emitter{fn = guard_emit_fn, data = &g})
+	if g.stopped && e == .None {
+		e = .Stopped
+	}
+	return {err = e, emitted = g.emitted}
+}
+
+@(private)
+adjust_err_offset :: proc "contextless" (err: tape.Error, base_off: u64) -> tape.Error {
+	if err == nil || base_off == 0 {
+		return err
+	}
+	if f, ok := err.(tape.Fault); ok && f.at != tape.NO_BYTE {
+		f.at += base_off
+		return f
+	}
+	if ex, ok := err.(tape.Exceeded); ok && ex.at != tape.NO_BYTE {
+		ex.at += base_off
+		return ex
+	}
+	return err
+}
+
+@(private)
+adjust_rec_offset :: proc "contextless" (r: tape.Record, base_off: u64) -> tape.Record {
+	if base_off == 0 {
+		return r
+	}
+	out := r
+	out.lo += base_off
+	out.hi += base_off
+	out.err = adjust_err_offset(out.err, base_off)
+	return out
+}
+
+@(private)
+open_json_chunk_records :: proc(
+	src: []u8,
+	c: ops_build.Record_Chunk,
+	k: int,
+	tf: tape.Framing,
+	jspec: json.Spec,
+	ro: tape.Options,
+	opts: ^Exec_Options,
+) -> (
+	lr: json.Records,
+	base_off: u64,
+	err_kind: Exec_Error,
+	err_val: tape.Error,
+) {
+	chunk_src := src[:c.hi]
+	if tf == .Seq && k > 0 {
+		base_off = c.lo - 1
+		chunk_src = src[base_off:c.hi]
+	}
+	lr = json.records_open(chunk_src, tf, jspec, ro)
+	lr.skip_bad = opts.skip_bad
+	lr.max_bytes = opts.max_bytes
+	if tf == .Lines && k > 0 {
+		lr.pos = c.lo
+		lr.at = .Open
+	}
+	if lr.err != nil {
+		err_val = adjust_err_offset(lr.err, base_off)
+		err_kind = .No_Memory if is_alloc_err(err_val) else .Read_Error
+		tape.destroy_records(&lr)
+	}
+	return
+}
+
 // Opens framed records cleanly with `skip_bad`, `max_bytes`, and initial `r.err` validation.
 @(private)
 open_framed_records :: proc(
@@ -305,8 +363,7 @@ open_framed_records :: proc(
 ) {
 	r, oerr := records_open(src, spec, tf, ro, path, opts.allocator)
 	if oerr != nil {
-		err := Exec_Error.No_Memory if is_alloc_err(oerr) else .Read_Error
-		return nil, {err = err, read_err = oerr}, false
+		return nil, {err = .No_Memory if is_alloc_err(oerr) else .Read_Error, read_err = oerr}, false
 	}
 	if r == nil {
 		return nil, {err = .Unsupported}, false
@@ -347,20 +404,14 @@ handle_bad_record :: proc(opts: ^Exec_Options, src: []u8, r_info: tape.Record, r
 	return true
 }
 
-// Builds a `tape.Demand` with desired `facts` setting if the source demand differs (or returns borrowed `&s.demand`).
+// Builds a `tape.Demand` with desired `facts` setting if the source demand differs (or returns borrowed `s.demand`).
 @(private)
 prepare_demand :: proc(s: ^query.Source_Demand, keep_facts: bool, alloc: runtime.Allocator) -> (dem: tape.Demand, owned: bool, err: runtime.Allocator_Error) {
-	if s == nil {
-		whole_paths := [1][]tape.Step{{}}
-		whole_grains := [1]tape.Grain{.Whole}
-		d := tape.demand_of(whole_paths[:], whole_grains[:], nil, keep_facts, alloc) or_return
-		return d, true, nil
-	}
-	if s.mode == .None {
+	if s != nil && s.mode == .None {
 		d := tape.demand_of(nil, nil, nil, keep_facts, alloc) or_return
 		return d, true, nil
 	}
-	if s.mode == .Partial {
+	if s != nil && s.mode == .Partial {
 		if !keep_facts || s.demand.facts {
 			return s.demand, false, nil
 		}
@@ -373,16 +424,14 @@ prepare_demand :: proc(s: ^query.Source_Demand, keep_facts: bool, alloc: runtime
 			delete(limits, alloc)
 		}
 		for p, i in s.paths {
-			raw_steps[i] = p.steps
-			grains[i] = p.grain
-			limits[i] = p.limit
+			raw_steps[i], grains[i], limits[i] = p.steps, p.grain, p.limit
 		}
 		d := tape.demand_of(raw_steps, grains, limits, true, alloc) or_return
 		return d, true, nil
 	}
 	whole_paths := [1][]tape.Step{{}}
 	whole_grains := [1]tape.Grain{.Whole}
-	d := tape.demand_of(whole_paths[:], whole_grains[:], nil, true, alloc) or_return
+	d := tape.demand_of(whole_paths[:], whole_grains[:], nil, true if s != nil else keep_facts, alloc) or_return
 	return d, true, nil
 }
 
@@ -404,8 +453,7 @@ dsv_header_end_of :: proc "contextless" (dec: ^Decision, ro: tape.Options, recs:
 	if dec.entry.family != .Dsv {
 		return 0
 	}
-	dopts, has_dsv := ro.format.(tape.Dsv_Options)
-	if has_dsv && dopts.no_header {
+	if dopts, has_dsv := ro.format.(tape.Dsv_Options); has_dsv && dopts.no_header {
 		return 0
 	}
 	return recs.pos
@@ -441,18 +489,13 @@ has_noncanonical_json_bytes :: proc "contextless" (b: []u8) -> bool {
 	if kernel.index_byte(b, 0x7f) >= 0 {
 		return true
 	}
-	pos := 0
-	for pos < len(b) {
+	for pos := 0; pos < len(b); {
 		rel := kernel.index_byte(b[pos:], '\\')
 		if rel < 0 {
 			return false
 		}
 		esc := pos + rel + 1
-		if esc >= len(b) {
-			return true
-		}
-		c := b[esc]
-		if c == 'u' || c == '/' {
+		if esc >= len(b) || b[esc] == 'u' || b[esc] == '/' {
 			return true
 		}
 		pos = esc + 1
@@ -462,30 +505,18 @@ has_noncanonical_json_bytes :: proc "contextless" (b: []u8) -> bool {
 
 @(private)
 can_fast_json_doc :: proc "contextless" (dec: ^Decision, doc: ^tape.Document, mode: Fast_Json_Mode, opts: ^Exec_Options) -> bool {
-	if mode == .None || dec.entry.id != .Json {
+	if mode == .None || dec.entry.id != .Json || opts.read.tolerate != {} || opts.read.budget != {} || opts.max_bytes != 0 || opts.read.dups == .All {
 		return false
 	}
-	if opts.read.tolerate != {} || opts.read.budget != {} || opts.max_bytes != 0 || opts.read.dups == .All {
-		return false
-	}
-	if dec.keep_facts || dec.keep_origins || doc.format == nil {
-		return false
-	}
-	if doc.flags & {.Tolerated, .Held, .Stopped, .Cut} != {} || len(doc.nodes) == 0 {
+	if dec.keep_facts || dec.keep_origins || doc.format == nil || doc.flags & {.Tolerated, .Held, .Stopped, .Cut} != {} || len(doc.nodes) == 0 {
 		return false
 	}
 	root := doc.nodes[0]
 	if root.role != .Value || int(root.n) != len(doc.nodes) {
 		return false
 	}
-	lo := root.lo
-	if root.kind == .String && lo > 0 {
-		lo -= 1
-	}
-	if doc.root_close > u64(len(doc.src)) || lo > doc.root_close {
-		return false
-	}
-	return !has_noncanonical_json_bytes(doc.src[lo:doc.root_close])
+	lo := root.lo - (1 if root.kind == .String && root.lo > 0 else 0)
+	return doc.root_close <= u64(len(doc.src)) && lo <= doc.root_close && !has_noncanonical_json_bytes(doc.src[lo:doc.root_close])
 }
 
 // Directly serializes a strict canonical JSON document (`Compact` or `Pretty2`) into `buf`
@@ -508,16 +539,12 @@ append_fast_json_doc :: proc(buf: ^[dynamic]u8, doc: ^tape.Document, mode: Fast_
 	key_count := 0
 
 	append_spaces :: #force_inline proc(out: ^[dynamic]u8, n: int) {
-		if n <= 0 {
-			return
-		}
 		spaces := "                                                                "
-		rem := n
-		for rem > len(spaces) {
-			append(out, spaces)
-			rem -= len(spaces)
+		for rem := n; rem > 0; {
+			take := min(rem, len(spaces))
+			append(out, spaces[:take])
+			rem -= take
 		}
-		append(out, spaces[:rem])
 	}
 
 	nodes := doc.nodes
@@ -619,11 +646,7 @@ append_fast_json_doc :: proc(buf: ^[dynamic]u8, doc: ^tape.Document, mode: Fast_
 					return false
 				}
 				append(buf, '{' if is_obj else '[')
-				frames[depth] = {
-					end_idx   = idx + int(t.n),
-					key_start = key_count,
-					is_obj    = is_obj,
-				}
+				frames[depth] = {end_idx = idx + int(t.n), key_start = key_count, is_obj = is_obj}
 				depth += 1
 			}
 		case:
@@ -669,30 +692,18 @@ exec_whole :: proc(dec: ^Decision, src: []u8, opts: ^Exec_Options) -> Exec_Resul
 	defer tape.destroy(&doc)
 
 	meta := Record_Meta{file_index = opts.file_index, file_path = opts.file_path, lo = 0, hi = u64(len(src)), raw_bytes = src}
-	if opts.eval == nil {
-		return exec_emit_default_doc(&doc, opts.emit, opts.allocator)
-	}
-	if can_fast_json_doc(dec, &doc, opts.fast_json, opts) {
+	if opts.eval != nil && can_fast_json_doc(dec, &doc, opts.fast_json, opts) {
 		if fres, ok := emit_fast_json_doc(&doc, opts.fast_json, opts.emit, opts.allocator); ok {
 			return fres
 		}
 	}
-	g := Guard_Emit{inner = opts.emit}
-	e := opts.eval(opts.eval_ctx, &doc, meta, Emitter{fn = guard_emit_fn, data = &g})
-	if g.stopped && e == .None {
-		e = .Stopped
-	}
-	return {err = e, emitted = g.emitted}
+	return eval_or_emit_doc(&doc, meta, opts)
 }
 
 @(private)
 exec_scan :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: ^Exec_Options) -> Exec_Result {
 	main := &plan.sources[.Main] if plan != nil else nil
-	if !dec.entry.supports_scan || (main != nil && main.mode == .Whole) {
-		return exec_whole(dec, src, opts)
-	}
-	ro := build_tape_opts(opts, allow_parallel = false)
-	if dups_needs_build(dec.entry, ro.dups) {
+	if !dec.entry.supports_scan || (main != nil && main.mode == .Whole) || dups_needs_build(dec.entry, opts.read.dups) {
 		return exec_whole(dec, src, opts)
 	}
 	dem, dem_owned, derr := prepare_demand(main, dec.keep_facts, opts.allocator)
@@ -703,34 +714,98 @@ exec_scan :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: ^Exec_Opti
 		tape.destroy_demand(&dem)
 	}
 
-	doc, err := scan(src, &dem, dec.spec, {}, ro, opts.allocator)
+	doc, err := scan(src, &dem, dec.spec, {}, build_tape_opts(opts, allow_parallel = false), opts.allocator)
 	if err != nil {
 		return {err = .No_Memory if is_alloc_err(err) else .Read_Error, read_err = err}
 	}
-
 	if opts.eval == nil {
 		tape.destroy(&doc)
 		return {err = .Unsupported}
 	}
-
 	meta := Record_Meta{file_index = opts.file_index, file_path = opts.file_path, lo = 0, hi = u64(len(src)), raw_bytes = src}
-	g := Guard_Emit{inner = opts.emit}
-	eval_err := opts.eval(opts.eval_ctx, &doc, meta, Emitter{fn = guard_emit_fn, data = &g})
+	r := eval_or_emit_doc(&doc, meta, opts)
 	tape.destroy(&doc)
 
-	if eval_err == .Tainted {
-		// Guard contract (`analysis.md` §3): NEVER replay mid-stream once any output has been emitted!
-		if g.emitted == 0 && (opts.rerun_whole_on_taint || dec.rerun_safe) {
+	if r.err == .Tainted {
+		if r.emitted == 0 && (opts.rerun_whole_on_taint || dec.rerun_safe) {
 			wres := exec_whole(dec, src, opts)
 			wres.reran_whole = true
 			return wres
 		}
-		return {err = .Tainted, emitted = g.emitted, tainted = true}
+		r.tainted = true
 	}
-	if g.stopped && eval_err == .None {
-		eval_err = .Stopped
+	return r
+}
+
+@(private)
+eval_serial_batch :: proc(
+	dec: ^Decision,
+	src: []u8,
+	out_recs: []tape.Record,
+	docs: []tape.Document,
+	clear_partial: bool,
+	base_off: u64,
+	dsv_header_end: u64,
+	allow_fast_json: bool,
+	dsv_row_buf: ^[dynamic]u8,
+	fast_buf: ^[dynamic]u8,
+	opts: ^Exec_Options,
+	res: ^Exec_Result,
+) -> bool {
+	for i in 0 ..< len(out_recs) {
+		r_info := adjust_rec_offset(out_recs[i], base_off)
+		if r_info.err != nil {
+			if !handle_bad_record(opts, src, r_info, res) {
+				return false
+			}
+			continue
+		}
+		raw := record_slice(src, r_info)
+		meta := make_record_meta(opts, res.records, r_info, raw)
+		res.records += 1
+		doc_ptr := &docs[i]
+		whole_rec_doc: tape.Document
+		if clear_partial && doc_ptr.partial != nil {
+			whole_rec_doc = doc_ptr^
+			whole_rec_doc.partial = nil
+			doc_ptr = &whole_rec_doc
+		}
+		if opts.eval != nil && allow_fast_json && fast_buf != nil && can_fast_json_doc(dec, doc_ptr, opts.fast_json, opts) {
+			clear(fast_buf)
+			if append_fast_json_doc(fast_buf, doc_ptr, opts.fast_json, true) {
+				if !emit_bytes(opts.emit, fast_buf[:]) {
+					res.err = .Stopped
+					return false
+				}
+				res.emitted += 1
+				continue
+			}
+		}
+		r := eval_or_emit_doc(doc_ptr, meta, opts)
+		res.emitted += r.emitted
+		if r.err == .Tainted {
+			if res.emitted == 0 && (opts.rerun_whole_on_taint || dec.rerun_safe) {
+				if sub, ok := rerun_record_whole(dec, src, dsv_header_end, raw, dsv_row_buf, meta, opts); ok {
+					merge_result(res, sub)
+					res.reran_whole = true
+					if sub.err != .None {
+						return false
+					}
+					continue
+				}
+			}
+			res.err = .Tainted
+			res.tainted = true
+			return false
+		}
+		if r.err != .None {
+			res.err = r.err
+			res.read_err = r.read_err
+			res.write_err = r.write_err
+			return false
+		}
 	}
-	return {err = eval_err, emitted = g.emitted}
+	return true
 }
 
 @(private)
@@ -763,16 +838,14 @@ exec_records :: proc(
 		tape.destroy_demand(&dem)
 	}
 
-	if parallel &&
+	can_eval_par := parallel &&
 		ro.runner != nil &&
 		ro.runner.threads > 0 &&
-		dec.entry.family == .Json &&
-		(tf == .Lines || tf == .Seq) &&
-		ro.pieces == nil &&
-		(plan == nil || plan.serial == {}) &&
 		opts.eval != nil &&
-		can_parallel_eval(opts.workers.init != nil, opts.eval_ctx, true, opts.eval_ctx_thread_safe) &&
-		len(src) >= max(RECORDS_PARALLEL_FROM, 4096) {
+		(plan == nil || plan.serial == {}) &&
+		can_parallel_eval(opts.workers.init != nil, opts.eval_ctx, true, opts.eval_ctx_thread_safe)
+
+	if can_eval_par && dec.entry.family == .Json && (tf == .Lines || tf == .Seq) && ro.pieces == nil && len(src) >= max(RECORDS_PARALLEL_FROM, 4096) {
 		if cres, handled := exec_records_coarse_parallel(dec, src, tf, ro, &dem, !use_partial, opts); handled {
 			return cres
 		}
@@ -793,13 +866,6 @@ exec_records :: proc(
 	out_recs: [RECORD_BATCH_SIZE]tape.Record
 	docs: [RECORD_BATCH_SIZE]tape.Document
 	res: Exec_Result
-	can_eval_par := parallel &&
-		ro.runner != nil &&
-		ro.runner.threads > 0 &&
-		opts.eval != nil &&
-		(plan == nil || plan.serial == {}) &&
-		can_parallel_eval(opts.workers.init != nil, opts.eval_ctx, true, opts.eval_ctx_thread_safe)
-
 	for {
 		n := tape.records_scan(recs, &dem, out_recs[:], docs[:], {}, opts.allocator)
 		if n == 0 {
@@ -813,85 +879,8 @@ exec_records :: proc(
 			}
 			continue
 		}
-		for i in 0 ..< n {
-			r_info := out_recs[i]
-			if r_info.err != nil {
-				if !handle_bad_record(opts, src, r_info, &res) {
-					return res
-				}
-				continue
-			}
-			raw := record_slice(src, r_info)
-			meta := make_record_meta(opts, res.records, r_info, raw)
-			res.records += 1
-			doc_ptr := &docs[i]
-			whole_rec_doc: tape.Document
-			if !use_partial && doc_ptr.partial != nil {
-				whole_rec_doc = doc_ptr^
-				whole_rec_doc.partial = nil
-				doc_ptr = &whole_rec_doc
-			}
-			if opts.eval == nil {
-				sub := exec_emit_default_doc(doc_ptr, opts.emit, opts.allocator)
-				res.emitted += sub.emitted
-				if sub.err != .None {
-					res.err = sub.err
-					res.write_err = sub.write_err
-					return res
-				}
-				continue
-			}
-			if can_fast_json_doc(dec, doc_ptr, opts.fast_json, opts) {
-				clear(&fast_buf)
-				if append_fast_json_doc(&fast_buf, doc_ptr, opts.fast_json, true) {
-					if !emit_bytes(opts.emit, fast_buf[:]) {
-						res.err = .Stopped
-						return res
-					}
-					res.emitted += 1
-					continue
-				}
-			}
-			g := Guard_Emit{inner = opts.emit}
-			eval_err := opts.eval(opts.eval_ctx, doc_ptr, meta, Emitter{fn = guard_emit_fn, data = &g})
-			res.emitted += g.emitted
-			if eval_err == .Tainted {
-				if res.emitted == 0 && (opts.rerun_whole_on_taint || dec.rerun_safe) {
-					if can_build_single_record(dec, raw) {
-						sub := exec_single_record_whole(dec, raw, meta, opts)
-						res.emitted += sub.emitted
-						res.reran_whole = true
-						if sub.err != .None {
-							res.err = sub.err
-							res.read_err = sub.read_err
-							return res
-						}
-						continue
-					}
-					if dec.entry.family == .Dsv && len(raw) > 0 {
-						sub := exec_single_dsv_row_from_raw(dec, src, dsv_header_end, raw, &dsv_row_buf, meta, opts)
-						res.emitted += sub.emitted
-						res.reran_whole = true
-						if sub.err != .None {
-							res.err = sub.err
-							res.read_err = sub.read_err
-							res.write_err = sub.write_err
-							return res
-						}
-						continue
-					}
-				}
-				res.err = .Tainted
-				res.tainted = true
-				return res
-			}
-			if g.stopped && eval_err == .None {
-				eval_err = .Stopped
-			}
-			if eval_err != .None {
-				res.err = eval_err
-				return res
-			}
+		if !eval_serial_batch(dec, src, out_recs[:n], docs[:n], !use_partial, 0, dsv_header_end, true, &dsv_row_buf, &fast_buf, opts, &res) {
+			return res
 		}
 	}
 	if recs.err != nil {
@@ -932,7 +921,6 @@ exec_records_find_whole :: proc(
 
 	rec_ro := ro
 	rec_ro.runner = nil
-
 	for {
 		n := tape.records_find(recs, nil, out_recs[:], answers[:], {}, opts.allocator)
 		if n == 0 {
@@ -966,26 +954,10 @@ exec_records_find_whole :: proc(
 			}
 			meta := make_record_meta(opts, res.records, r_info, raw)
 			res.records += 1
-			if opts.eval == nil {
-				sub := exec_emit_default_doc(&doc, opts.emit, opts.allocator)
-				tape.destroy(&doc)
-				res.emitted += sub.emitted
-				if sub.err != .None {
-					res.err = sub.err
-					res.write_err = sub.write_err
-					return res
-				}
-				continue
-			}
-			g := Guard_Emit{inner = opts.emit}
-			eval_err := opts.eval(opts.eval_ctx, &doc, meta, Emitter{fn = guard_emit_fn, data = &g})
+			r := eval_or_emit_doc(&doc, meta, opts)
 			tape.destroy(&doc)
-			res.emitted += g.emitted
-			if g.stopped && eval_err == .None {
-				eval_err = .Stopped
-			}
-			if eval_err != .None {
-				res.err = eval_err
+			merge_result(&res, r)
+			if r.err != .None {
 				return res
 			}
 		}
@@ -1004,21 +976,12 @@ can_build_single_record :: proc "contextless" (dec: ^Decision, raw: []u8) -> boo
 
 @(private)
 exec_single_record_whole :: proc(dec: ^Decision, raw: []u8, meta: Record_Meta, opts: ^Exec_Options) -> Exec_Result {
-	ro := build_tape_opts(opts, allow_parallel = false)
-	doc, err := build(raw, dec.spec, ro, opts.allocator)
+	doc, err := build(raw, dec.spec, build_tape_opts(opts, allow_parallel = false), opts.allocator)
 	if err != nil {
 		return {err = .No_Memory if is_alloc_err(err) else .Read_Error, read_err = err}
 	}
 	defer tape.destroy(&doc)
-	if opts.eval == nil {
-		return exec_emit_default_doc(&doc, opts.emit, opts.allocator)
-	}
-	g := Guard_Emit{inner = opts.emit}
-	e := opts.eval(opts.eval_ctx, &doc, meta, Emitter{fn = guard_emit_fn, data = &g})
-	if g.stopped && e == .None {
-		e = .Stopped
-	}
-	return {err = e, emitted = g.emitted}
+	return eval_or_emit_doc(&doc, meta, opts)
 }
 
 @(private)
@@ -1030,12 +993,21 @@ exec_single_dsv_row_from_raw :: proc(
 	buf: ^[dynamic]u8,
 	meta: Record_Meta,
 	opts: ^Exec_Options,
+	cached_dem: ^tape.Demand = nil,
 ) -> Exec_Result {
-	wd, _, werr := prepare_demand(nil, dec.keep_facts, opts.allocator)
-	if werr != nil {
-		return {err = .No_Memory, read_err = werr}
+	dem_ptr := cached_dem
+	local_dem: tape.Demand
+	if dem_ptr == nil {
+		wd, _, werr := prepare_demand(nil, dec.keep_facts, opts.allocator)
+		if werr != nil {
+			return {err = .No_Memory, read_err = werr}
+		}
+		local_dem = wd
+		dem_ptr = &local_dem
 	}
-	defer tape.destroy_demand(&wd)
+	defer if cached_dem == nil {
+		tape.destroy_demand(&local_dem)
+	}
 
 	clear(buf)
 	if dsv_header_end > 0 {
@@ -1046,52 +1018,45 @@ exec_single_dsv_row_from_raw :: proc(
 	if _, aerr := append(buf, ..raw); aerr != nil {
 		return {err = .No_Memory, read_err = aerr}
 	}
-	return exec_single_dsv_row_whole(dec.spec.(dsv.Spec), buf[:], &wd, build_tape_opts(opts, false), meta, opts)
-}
-
-@(private)
-exec_single_dsv_row_whole :: proc(
-	spec: dsv.Spec,
-	combined: []u8,
-	whole_dem: ^tape.Demand,
-	ro: tape.Options,
-	meta: Record_Meta,
-	opts: ^Exec_Options,
-) -> Exec_Result {
-	r := dsv.records_open(combined, .Lines, spec, ro)
+	r := dsv.records_open(buf[:], .Lines, dec.spec.(dsv.Spec), build_tape_opts(opts, false))
 	defer tape.destroy_records(&r)
 	if r.err != nil {
 		return {err = .No_Memory if is_alloc_err(r.err) else .Read_Error, read_err = r.err}
 	}
 	rec: [1]tape.Record
 	doc: [1]tape.Document
-	n := dsv.records_scan(&r, whole_dem, rec[:], doc[:], {}, opts.allocator)
+	n := dsv.records_scan(&r, dem_ptr, rec[:], doc[:], {}, opts.allocator)
 	if n == 0 || rec[0].err != nil {
 		rerr := rec[0].err if n > 0 else r.err
 		return {err = .No_Memory if is_alloc_err(rerr) else .Read_Error, read_err = rerr}
 	}
 	row_doc := doc[0]
 	row_doc.partial = nil
-	if opts.eval == nil {
-		return exec_emit_default_doc(&row_doc, opts.emit, opts.allocator)
-	}
-	g := Guard_Emit{inner = opts.emit}
-	e := opts.eval(opts.eval_ctx, &row_doc, meta, Emitter{fn = guard_emit_fn, data = &g})
-	if g.stopped && e == .None {
-		e = .Stopped
-	}
-	return {err = e, emitted = g.emitted}
+	return eval_or_emit_doc(&row_doc, meta, opts)
 }
 
+// Re-builds and evaluates one record whole (handles single non-DSV records and DSV rows with header).
 @(private)
-emit_raw_or_compact :: proc(dec: ^Decision, raw: []u8, opts: ^Exec_Options) -> Exec_Result {
-	ro := build_tape_opts(opts, allow_parallel = false)
-	doc, err := build(raw, dec.spec, ro, opts.allocator)
-	if err != nil {
-		return {err = .No_Memory if is_alloc_err(err) else .Read_Error, read_err = err}
+rerun_record_whole :: proc(
+	dec: ^Decision,
+	src: []u8,
+	dsv_header_end: u64,
+	raw: []u8,
+	dsv_row_buf: ^[dynamic]u8,
+	meta: Record_Meta,
+	opts: ^Exec_Options,
+	cached_dem: ^tape.Demand = nil,
+) -> (
+	Exec_Result,
+	bool,
+) {
+	if can_build_single_record(dec, raw) {
+		return exec_single_record_whole(dec, raw, meta, opts), true
 	}
-	defer tape.destroy(&doc)
-	return exec_emit_default_doc(&doc, opts.emit, opts.allocator)
+	if dec.entry.family == .Dsv && len(raw) > 0 && dsv_row_buf != nil {
+		return exec_single_dsv_row_from_raw(dec, src, dsv_header_end, raw, dsv_row_buf, meta, opts, cached_dem), true
+	}
+	return {}, false
 }
 
 @(private)
@@ -1109,8 +1074,5 @@ exec_emit_default_doc :: proc(doc: ^tape.Document, emit: Emitter, alloc: runtime
 
 @(private)
 record_slice :: proc "contextless" (src: []u8, r: tape.Record) -> []u8 {
-	if r.hi > r.lo && int(r.hi) <= len(src) {
-		return src[r.lo:r.hi]
-	}
-	return nil
+	return src[r.lo:r.hi] if (r.hi > r.lo && int(r.hi) <= len(src)) else nil
 }

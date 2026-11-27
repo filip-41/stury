@@ -1,7 +1,6 @@
 package engine
 
 import "base:runtime"
-import "stury:dsv"
 import "stury:lib/core/tape"
 import "stury:lib/query"
 
@@ -23,8 +22,7 @@ exec_conditional_whole :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opt
 
 	tf, framed := to_tape_framing(dec.framing)
 	if !framed {
-		ro := build_tape_opts(opts, allow_parallel = false)
-		pdoc, serr := scan(src, &dem, dec.spec, {}, ro, opts.allocator)
+		pdoc, serr := scan(src, &dem, dec.spec, {}, build_tape_opts(opts, allow_parallel = false), opts.allocator)
 		if serr != nil {
 			return {err = .No_Memory if is_alloc_err(serr) else .Read_Error, read_err = serr}
 		}
@@ -32,29 +30,20 @@ exec_conditional_whole :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opt
 		matched, wrong, perr := eval_predicate_doc(&pdoc, cw, meta, opts)
 		tape.destroy(&pdoc)
 		if wrong || perr == .Tainted {
-			if perr == .Tainted {
-				if !opts.rerun_whole_on_taint && !dec.rerun_safe {
-					return {err = .Tainted, tainted = true}
-				}
-				if opts.eval == nil {
-					return {err = .Failed}
-				}
-				wres := exec_whole(dec, src, opts)
-				wres.reran_whole = true
-				return wres
+			if perr == .Tainted && !opts.rerun_whole_on_taint && !dec.rerun_safe {
+				return {err = .Tainted, tainted = true}
 			}
 			if opts.eval == nil {
 				return {err = .Failed}
 			}
-			return exec_whole(dec, src, opts)
+			wres := exec_whole(dec, src, opts)
+			wres.reran_whole ||= perr == .Tainted
+			return wres
 		}
 		if perr != .None {
 			return {err = perr}
 		}
-		if !matched {
-			return {}
-		}
-		return exec_whole(dec, src, opts)
+		return exec_whole(dec, src, opts) if matched else {}
 	}
 
 	ro := build_tape_opts(opts, allow_parallel = opts.runner != nil && opts.runner.threads > 0)
@@ -93,8 +82,8 @@ exec_conditional_whole :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opt
 			meta := make_record_meta(opts, res.records, r_info, raw)
 			res.records += 1
 			matched, wrong, perr := eval_predicate_doc(&docs[i], cw, meta, opts)
-			if wrong || perr == .Tainted {
-				is_tainted := perr == .Tainted
+			is_tainted := perr == .Tainted
+			if wrong || is_tainted {
 				if is_tainted && (res.emitted > 0 || (!opts.rerun_whole_on_taint && !dec.rerun_safe)) {
 					res.err = .Tainted
 					res.tainted = true
@@ -104,93 +93,33 @@ exec_conditional_whole :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opt
 					res.err = .Failed
 					return res
 				}
-				if can_build_single_record(dec, raw) {
-					sub := exec_single_record_whole(dec, raw, meta, opts)
-					res.emitted += sub.emitted
-					if is_tainted {
-						res.reran_whole = true
-					}
-					if sub.err != .None {
-						res.err = sub.err
-						res.read_err = sub.read_err
-						return res
-					}
-					continue
-				}
-				if dec.entry.family == .Dsv && len(raw) > 0 {
-					if !has_whole_dem {
-						wd, _, werr := prepare_demand(nil, dec.keep_facts, opts.allocator)
-						if werr != nil {
-							res.err = .No_Memory
-							res.read_err = werr
-							return res
-						}
-						whole_dem = wd
-						has_whole_dem = true
-					}
-					sub := run_dsv_row_whole(dec.spec.(dsv.Spec), src, dsv_header_end, raw, &dsv_row_buf, &whole_dem, meta, opts)
-					res.emitted += sub.emitted
-					if is_tainted {
-						res.reran_whole = true
-					}
-					if sub.err != .None {
-						res.err = sub.err
-						res.read_err = sub.read_err
-						res.write_err = sub.write_err
-						return res
-					}
-					continue
-				}
-				res.err = .Failed
-				return res
-			}
-			if perr != .None {
+			} else if perr != .None {
 				res.err = perr
 				return res
-			}
-			if !matched {
+			} else if !matched {
 				continue
 			}
-			if can_build_single_record(dec, raw) {
-				if opts.eval != nil {
-					sub := exec_single_record_whole(dec, raw, meta, opts)
-					res.emitted += sub.emitted
-					if sub.err != .None {
-						res.err = sub.err
-						res.read_err = sub.read_err
-						return res
-					}
-				} else {
-					sub := emit_raw_or_compact(dec, raw, opts)
-					res.emitted += sub.emitted
-					if sub.err != .None {
-						res.err = sub.err
-						res.read_err = sub.read_err
-						res.write_err = sub.write_err
-						return res
-					}
-				}
-			} else if dec.entry.family == .Dsv && len(raw) > 0 {
-				if !has_whole_dem {
-					wd, _, werr := prepare_demand(nil, dec.keep_facts, opts.allocator)
-					if werr != nil {
-						res.err = .No_Memory
-						res.read_err = werr
-						return res
-					}
-					whole_dem = wd
-					has_whole_dem = true
-				}
-				sub := run_dsv_row_whole(dec.spec.(dsv.Spec), src, dsv_header_end, raw, &dsv_row_buf, &whole_dem, meta, opts)
-				res.emitted += sub.emitted
-				if sub.err != .None {
-					res.err = sub.err
-					res.read_err = sub.read_err
-					res.write_err = sub.write_err
+
+			if dec.entry.family == .Dsv && !has_whole_dem {
+				wd, _, werr := prepare_demand(nil, dec.keep_facts, opts.allocator)
+				if werr != nil {
+					res.err = .No_Memory
+					res.read_err = werr
 					return res
 				}
-			} else {
-				res.err = .Unsupported
+				whole_dem = wd
+				has_whole_dem = true
+			}
+			sub, ok := rerun_record_whole(dec, src, dsv_header_end, raw, &dsv_row_buf, meta, opts, &whole_dem if has_whole_dem else nil)
+			if !ok {
+				res.err = .Failed if (wrong || is_tainted) else .Unsupported
+				return res
+			}
+			merge_result(&res, sub)
+			if is_tainted {
+				res.reran_whole = true
+			}
+			if sub.err != .None {
 				return res
 			}
 		}
@@ -203,39 +132,12 @@ exec_conditional_whole :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opt
 }
 
 @(private = "file")
-run_dsv_row_whole :: proc(
-	spec: dsv.Spec,
-	src: []u8,
-	dsv_header_end: u64,
-	raw: []u8,
-	buf: ^[dynamic]u8,
-	whole_dem: ^tape.Demand,
-	meta: Record_Meta,
-	opts: ^Exec_Options,
-) -> Exec_Result {
-	clear(buf)
-	if dsv_header_end > 0 {
-		if _, aerr := append(buf, ..src[:dsv_header_end]); aerr != nil {
-			return {err = .No_Memory, read_err = aerr}
-		}
-	}
-	if _, aerr := append(buf, ..raw); aerr != nil {
-		return {err = .No_Memory, read_err = aerr}
-	}
-	return exec_single_dsv_row_whole(spec, buf[:], whole_dem, build_tape_opts(opts, false), meta, opts)
-}
-
-@(private = "file")
 eval_predicate_doc :: proc(
 	doc: ^tape.Document,
 	cw: ^query.Conditional_Whole,
 	meta: Record_Meta,
 	opts: ^Exec_Options,
-) -> (
-	matched: bool,
-	wrong_kind: bool,
-	err: Exec_Error,
-) {
+) -> (matched: bool, wrong_kind: bool, err: Exec_Error) {
 	if cw.cmp.op == .None {
 		if opts.pred_eval == nil {
 			return false, false, .Unsupported
@@ -251,11 +153,7 @@ eval_simple_compare :: proc(
 	doc: ^tape.Document,
 	cmp: query.Simple_Compare,
 	alloc: runtime.Allocator,
-) -> (
-	matched: bool,
-	wrong_kind: bool,
-	err: Exec_Error,
-) {
+) -> (matched: bool, wrong_kind: bool, err: Exec_Error) {
 	h: query.Heap
 	query.heap_init(&h, alloc)
 	defer query.heap_destroy(&h)
@@ -265,59 +163,40 @@ eval_simple_compare :: proc(
 		return false, false, .Failed
 	}
 	defer query.release(&h, cur)
-
 	if h.tainted {
 		return false, false, .Tainted
 	}
 
 	for step in cmp.path {
 		tt := query.type_of(cur)
+		if tt == .Null || tt == .Absent {
+			query.release(&h, cur)
+			cur = query.NULL
+			break
+		}
 		next: query.Value
 		nst: query.Status
 		switch s in step {
 		case tape.Name:
-			if tt == .Null || tt == .Absent {
-				query.release(&h, cur)
-				cur = query.NULL
-				break
-			}
 			if tt != .Object {
-				query.release(&h, cur)
-				cur = query.ABSENT
 				return false, true, .None
 			}
 			next, nst = query.member(&h, cur, string(s))
 		case tape.Index:
-			if tt == .Null || tt == .Absent {
-				query.release(&h, cur)
-				cur = query.NULL
-				break
-			}
 			if tt != .Array {
-				query.release(&h, cur)
-				cur = query.ABSENT
 				return false, true, .None
 			}
 			next, nst = query.element(&h, cur, int(s))
 		case tape.All, tape.Slice, tape.Descend:
-			query.release(&h, cur)
-			cur = query.ABSENT
 			return false, true, .None
-		}
-		if cur.kind == .Null {
-			break
 		}
 		query.release(&h, cur)
 		cur = next
 		if h.tainted {
-			query.release(&h, cur)
-			cur = query.ABSENT
 			return false, false, .Tainted
 		}
 		if nst != .Ok {
 			query.clear_error(&h)
-			query.release(&h, cur)
-			cur = query.ABSENT
 			return false, true, .None
 		}
 		if cur.kind == .Absent {
@@ -328,7 +207,7 @@ eval_simple_compare :: proc(
 	}
 
 	switch cmp.op {
-	case .Eq:
+	case .Eq, .Ne:
 		eq, est := query.equal(&h, cur, cmp.literal)
 		if h.tainted {
 			return false, false, .Tainted
@@ -337,17 +216,7 @@ eval_simple_compare :: proc(
 			query.clear_error(&h)
 			return false, false, .Failed
 		}
-		return eq, false, .None
-	case .Ne:
-		eq, est := query.equal(&h, cur, cmp.literal)
-		if h.tainted {
-			return false, false, .Tainted
-		}
-		if est != .Ok {
-			query.clear_error(&h)
-			return false, false, .Failed
-		}
-		return !eq, false, .None
+		return eq if cmp.op == .Eq else !eq, false, .None
 	case .Lt, .Le, .Gt, .Ge:
 		c, cst := query.compare(&h, cur, cmp.literal, query.JSON_ORDER)
 		if h.tainted {

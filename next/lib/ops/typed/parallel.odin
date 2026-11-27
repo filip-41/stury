@@ -272,6 +272,25 @@ Part_Result :: struct {
 	astray: bool,
 }
 
+@(private)
+plan_matches :: #force_inline proc "contextless" (plan: ^Plan, T: typeid, tag: string) -> bool {
+	return plan.type == T && len(plan.tag) == len(tag) && (raw_data(plan.tag) == raw_data(tag) || plan.tag == tag)
+}
+
+@(private)
+parallel_common_ready :: proc(target: rawptr, format: ^tape.Format, opts: tape.Options, caller: runtime.Allocator) -> (dups: tape.Duplicates, class: Alloc_Class, ok: bool) {
+	if target == nil || opts.runner == nil || opts.runner.threads <= 0 || opts.pieces != nil || opts.budget.steps != 0 || tape.options_refused(format, opts) != nil {
+		return
+	}
+	dups = format.dups if opts.dups == .Default else opts.dups
+	if dups == .All || dups == .Group {
+		return
+	}
+	class = parallel_alloc_class(caller, opts)
+	ok = class != .Serial
+	return
+}
+
 // Shared precondition checks and plan resolution for `read_parallel_list` and `read_parallel_spine`.
 @(private)
 parallel_prepare :: proc(
@@ -284,17 +303,10 @@ parallel_prepare :: proc(
 	caller: runtime.Allocator,
 	made_buf: ^Plan,
 ) -> (plan: ^Plan, dups: tape.Duplicates, class: Alloc_Class, made, ok: bool) {
-	if target == nil || opts.runner == nil || opts.runner.threads <= 0 || opts.pieces != nil || opts.budget.steps != 0 || tape.options_refused(format, opts) != nil {
+	if dups, class, ok = parallel_common_ready(target, format, opts, caller); !ok {
 		return
 	}
-	dups = format.dups if opts.dups == .Default else opts.dups
-	if dups == .All || dups == .Group {
-		return
-	}
-	class = parallel_alloc_class(caller, opts)
-	if class == .Serial {
-		return
-	}
+	ok = false
 	plan = uopts.plan
 	if plan == nil {
 		if perr := make_temp_plan(T, tag, caller, made_buf); perr != nil {
@@ -302,7 +314,7 @@ parallel_prepare :: proc(
 		}
 		plan = made_buf
 		made = true
-	} else if plan.type != T || !(len(plan.tag) == len(tag) && (raw_data(plan.tag) == raw_data(tag) || plan.tag == tag)) {
+	} else if !plan_matches(plan, T, tag) {
 		return
 	}
 	if uopts.path != nil {
@@ -322,15 +334,11 @@ parallel_list_ready :: proc(
 	uopts: Unmarshal_Options,
 	caller: runtime.Allocator,
 ) -> bool {
-	if target == nil || opts.runner == nil || opts.runner.threads <= 0 || opts.pieces != nil || opts.budget.steps != 0 || tape.options_refused(format, opts) != nil {
-		return false
-	}
-	dups := format.dups if opts.dups == .Default else opts.dups
-	if dups == .All || dups == .Group || parallel_alloc_class(caller, opts) == .Serial {
+	if _, _, ok := parallel_common_ready(target, format, opts, caller); !ok {
 		return false
 	}
 	if uopts.plan != nil {
-		if uopts.plan.type != T || !(len(uopts.plan.tag) == len(tag) && (raw_data(uopts.plan.tag) == raw_data(tag) || uopts.plan.tag == tag)) {
+		if !plan_matches(uopts.plan, T, tag) {
 			return false
 		}
 		root_rec := (^Record)(uintptr(uopts.plan.root) - size_of(Record))
@@ -438,22 +446,19 @@ read_parallel_spine :: proc(
 	frames[0] = {b = u64(uintptr(&DEAD_BLOCK[1])), seen = SEEN_TARGET}
 	// Always snapshot `target` before the prefix walk so any parallel or suffix abort restores caller-filled targets cleanly.
 	before_buf: [128]u8 = ---
-	size := uint(plan.size)
-	if size <= len(before_buf) {
-		probe.before = before_buf[:size]
-	} else {
-		block, berr := runtime.mem_alloc_non_zeroed(int(size), 1, scratch)
-		if berr != nil || len(block) < int(size) {
-			return nil, false
-		}
-		probe.before = block[:size]
-	}
-	if size > 0 {
-		intrinsics.mem_copy_non_overlapping(raw_data(probe.before), target, int(size))
+	if !snapshot_before(&probe.inner.reader, target, before_buf[:]) {
+		return nil, false
 	}
 	defer cleanup_reader(&probe.inner, len(before_buf))
 	when H == Refusing_Reader {
 		defer refusing_free(&probe.inner)
+	}
+	abort :: proc(h: ^Reader, regs: hook.Regs, target: rawptr, undo_scratch: runtime.Allocator, settle: bool) -> (tape.Error, bool) {
+		if settle && .Dead not_in h.flags {
+			settle_open(h, regs, h.sp)
+		}
+		undo_target(h, target, undo_scratch)
+		return nil, false
 	}
 	regs := hook.Regs{NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}
 	_, perr, _ := walk_prefix(src, opts, &probe, &regs, scratch, &probe.ctx)
@@ -467,30 +472,18 @@ read_parallel_spine :: proc(
 		} else if .Dead not_in probe.flags {
 			settle_open(&probe.inner, regs, probe.sp)
 		}
-		if pool.refused {
-			undo_target(&probe.inner, target, scratch_backing)
-			return nil, false
-		}
-		if perr != nil {
-			// If anything failed (e.g. refusal/syntax error), restore target and let serial report exact error/budget.
-			undo_target(&probe.inner, target, scratch_backing)
-			return nil, false
+		if pool.refused || perr != nil {
+			return abort(&probe.inner, regs, target, scratch_backing, false)
 		}
 		return nil, true
 	}
 	if perr != nil || probe.err != nil || .Dead in probe.flags {
-		if .Dead not_in probe.flags {
-			settle_open(&probe.inner, regs, probe.sp)
-		}
-		undo_target(&probe.inner, target, scratch_backing)
-		return nil, false
+		return abort(&probe.inner, regs, target, scratch_backing, true)
 	}
 	parts: [MAX_PARALLEL_PARTS]Parallel_Part
 	n_parts, list_close, split_ok := split_list(src, probe.found, opts, parts[:], scratch, data)
 	if !split_ok || n_parts < 2 {
-		settle_open(&probe.inner, regs, probe.sp)
-		undo_target(&probe.inner, target, scratch_backing)
-		return nil, false
+		return abort(&probe.inner, regs, target, scratch_backing, true)
 	}
 	Spine_Part_Wrap :: struct {
 		found: Parallel_List,
@@ -502,9 +495,7 @@ read_parallel_spine :: proc(
 	}
 	wrap := Spine_Part_Wrap{found = probe.found, data = data}
 	if !parallel_list_workers(src, format, rules, plan, probe.found, parts[:n_parts], dups, uopts, opts, caller, class, &pool, made, H, wrap_walk, &wrap) {
-		settle_open(&probe.inner, regs, probe.sp)
-		undo_target(&probe.inner, target, scratch_backing)
-		return nil, false
+		return abort(&probe.inner, regs, target, scratch_backing, true)
 	}
 	// Close the list frame on the prefix reader and walk the suffix serially.
 	probe.sp -= 1
@@ -520,9 +511,7 @@ read_parallel_spine :: proc(
 	opens_buf: [64]tape.Kind
 	n_opens := probe.sp - 1
 	if n_opens > len(opens_buf) {
-		settle_open(&probe.inner, regs, probe.sp)
-		undo_target(&probe.inner, target, scratch_backing)
-		return nil, false
+		return abort(&probe.inner, regs, target, scratch_backing, true)
 	}
 	for i in 0 ..< n_opens {
 		owner := frame_owner(&probe.frames[i + 1])
@@ -536,11 +525,7 @@ read_parallel_spine :: proc(
 		serr = probe.err
 	}
 	if serr != nil || pool.refused {
-		if .Dead not_in probe.flags {
-			settle_open(&probe.inner, regs, probe.sp)
-		}
-		undo_target(&probe.inner, target, scratch_backing)
-		return nil, false
+		return abort(&probe.inner, regs, target, scratch_backing, true)
 	}
 	return nil, true
 }
@@ -663,6 +648,12 @@ parallel_list_workers :: proc(
 		data    = data,
 	}
 	tape.fan_each(opts.runner, n_parts, worker, &job)
+	defer for k in 0 ..< n_parts {
+		l := outs[k].list
+		if l.data != nil {
+			runtime.mem_free_with_size(l.data, l.cap * elem_size, scratch)
+		}
+	}
 	ok := !pool.refused
 	total := 0
 	for k in 0 ..< n_parts {
@@ -716,52 +707,53 @@ parallel_list_workers :: proc(
 				}
 			}
 		}
-		for k in 0 ..< n_parts {
-			l := outs[k].list
-			if l.data != nil {
-				runtime.mem_free_with_size(l.data, l.cap * elem_size, scratch)
-			}
-		}
 		return false
 	}
 	// Gather worker slices into the exact final buffer.
 	if total > 0 && elem_size > 0 {
-		total_bytes := total * elem_size
-		if total_bytes >= 1 << 18 && n_parts >= 2 {
-			Gather_Job :: struct {
-				dst:       [^]u8,
-				outs:      []Worker_Out,
-				elem_size: int,
-			}
-			gather :: proc(arg: rawptr, k: int) {
-				g := (^Gather_Job)(arg)
-				l := g.outs[k].list
-				if l.len > 0 {
-					intrinsics.mem_copy_non_overlapping(g.dst[g.outs[k].offset * g.elem_size:], l.data, l.len * g.elem_size)
-				}
-			}
-			gj := Gather_Job{dst = ([^]u8)(final_data), outs = outs[:n_parts], elem_size = elem_size}
-			tape.fan_each(opts.runner, n_parts, gather, &gj)
-		} else {
-			dst := ([^]u8)(final_data)
-			for k in 0 ..< n_parts {
-				l := outs[k].list
-				if l.len > 0 {
-					intrinsics.mem_copy_non_overlapping(dst[outs[k].offset * elem_size:], l.data, l.len * elem_size)
-				}
+		Gather_Job :: struct {
+			dst:       [^]u8,
+			outs:      []Worker_Out,
+			elem_size: int,
+		}
+		gather :: proc(arg: rawptr, k: int) {
+			g := (^Gather_Job)(arg)
+			l := g.outs[k].list
+			if l.len > 0 {
+				intrinsics.mem_copy_non_overlapping(g.dst[g.outs[k].offset * g.elem_size:], l.data, l.len * g.elem_size)
 			}
 		}
-	}
-	for k in 0 ..< n_parts {
-		l := outs[k].list
-		if l.data != nil {
-			runtime.mem_free_with_size(l.data, l.cap * elem_size, scratch)
+		gj := Gather_Job{dst = ([^]u8)(final_data), outs = outs[:n_parts], elem_size = elem_size}
+		if total * elem_size >= 1 << 18 && n_parts >= 2 {
+			tape.fan_each(opts.runner, n_parts, gather, &gj)
+		} else {
+			for k in 0 ..< n_parts {
+				gather(&gj, k)
+			}
 		}
 	}
 	if list.owner.kind == .Slice {
 		(^runtime.Raw_Slice)(list.dest)^ = {final_data, total}
 	} else {
 		(^runtime.Raw_Dynamic_Array)(list.dest)^ = {final_data, total, total, caller}
+	}
+	return true
+}
+
+@(private)
+snapshot_before :: #force_inline proc(h: ^Reader, target: rawptr, before_buf: []u8) -> bool {
+	size := uint(h.plan.size)
+	if size <= uint(len(before_buf)) {
+		#no_bounds_check h.before = before_buf[:size]
+	} else {
+		block, berr := runtime.mem_alloc_non_zeroed(int(size), 1, h.scratch)
+		if berr != nil || len(block) < int(size) {
+			return false
+		}
+		#no_bounds_check h.before = block[:size]
+	}
+	if size > 0 {
+		intrinsics.mem_copy_non_overlapping(raw_data(h.before), target, int(size))
 	}
 	return true
 }

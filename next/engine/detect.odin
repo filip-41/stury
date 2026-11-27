@@ -17,7 +17,6 @@ import "stury:yaml"
 // Format detection by file path (extension with optional trailing compression suffix)
 // and by content inspection (magic bytes / leading grammar heuristics).
 
-// Recognized trailing compression suffixes stripped by `strip_compression_suffix`.
 Compression_Kind :: enum u8 {
 	None,
 	Gzip,
@@ -36,73 +35,48 @@ Comp_Suffix :: struct {
 
 @(private = "file", rodata)
 COMP_SUFFIXES := [?]Comp_Suffix {
-	{"gz", .Gzip},
-	{"gzip", .Gzip},
-	{"zst", .Zstd},
-	{"zstd", .Zstd},
-	{"bz2", .Bzip2},
-	{"xz", .Xz},
-	{"lz4", .Lz4},
-	{"br", .Brotli},
+	{"gz", .Gzip}, {"gzip", .Gzip}, {"zst", .Zstd}, {"zstd", .Zstd},
+	{"bz2", .Bzip2}, {"xz", .Xz}, {"lz4", .Lz4}, {"br", .Brotli},
 }
 
-// Strips a trailing compression suffix (case-insensitive) when preceded by another extension.
-strip_compression_suffix :: proc "contextless" (path: string) -> (stripped: string, comp: Compression_Kind) {
-	base_start := 0
+@(private = "file")
+path_ext_bounds :: proc "contextless" (path: string) -> (base_start, last_dot: int) {
 	for i := len(path) - 1; i >= 0; i -= 1 {
 		if path[i] == '/' || path[i] == '\\' {
 			base_start = i + 1
 			break
 		}
 	}
-	last_dot := -1
+	last_dot = -1
 	for i := len(path) - 1; i > base_start; i -= 1 {
 		if path[i] == '.' {
 			last_dot = i
 			break
 		}
 	}
+	return
+}
+
+// Strips a trailing compression suffix (case-insensitive) when preceded by another extension.
+strip_compression_suffix :: proc "contextless" (path: string) -> (stripped: string, comp: Compression_Kind) {
+	base_start, last_dot := path_ext_bounds(path)
 	if last_dot <= base_start {
 		return path, .None
 	}
 	ext := path[last_dot + 1:]
 	for s in COMP_SUFFIXES {
 		if ascii_eq_fold(ext, s.ext) {
-			// Require an inner extension before stripping so standalone `archive.gz` isn't stripped to `archive`.
-			inner_dot := -1
-			for i := last_dot - 1; i > base_start; i -= 1 {
-				if path[i] == '.' {
-					inner_dot = i
-					break
-				}
-			}
-			if inner_dot > base_start {
-				return path[:last_dot], s.kind
-			}
-			return path, s.kind
+			_, inner_dot := path_ext_bounds(path[:last_dot])
+			return path[:last_dot] if inner_dot > base_start else path, s.kind
 		}
 	}
 	return path, .None
 }
 
-// Maps a file path (stripping known compression suffixes like `.gz`, `.zst`, `.bz2`, `.xz`, `.lz4`)
-// to its `Format_Entry` and default `Framing`. Case-insensitive extension lookup.
+// Maps a file path (stripping known compression suffixes) to its `Format_Entry` and default `Framing`.
 format_of_path :: proc "contextless" (path: string) -> (entry: Format_Entry, framing: Framing, ok: bool) {
 	clean, _ := strip_compression_suffix(path)
-	base_start := 0
-	for i := len(clean) - 1; i >= 0; i -= 1 {
-		if clean[i] == '/' || clean[i] == '\\' {
-			base_start = i + 1
-			break
-		}
-	}
-	dot := -1
-	for i := len(clean) - 1; i > base_start; i -= 1 {
-		if clean[i] == '.' {
-			dot = i
-			break
-		}
-	}
+	base_start, dot := path_ext_bounds(clean)
 	if dot <= base_start || dot + 1 >= len(clean) {
 		return {}, .Single, false
 	}
@@ -114,15 +88,7 @@ format_of_path :: proc "contextless" (path: string) -> (entry: Format_Entry, fra
 				if !found {
 					return {}, .Single, false
 				}
-				f := e.default_framing
-				if m.id == .Json {
-					switch {
-					case ascii_eq_fold(ext, "ndjson"), ascii_eq_fold(ext, "jsonl"), ascii_eq_fold(ext, "ldjson"), ascii_eq_fold(ext, "jsonlines"):
-						f = .Lines
-					case ascii_eq_fold(ext, "jsonseq"):
-						f = .Seq
-					}
-				}
+				f := json_framing_for_tag(ext, e.default_framing) if m.id == .Json else e.default_framing
 				return e, f, true
 			}
 		}
@@ -136,17 +102,15 @@ detect_format :: proc(src: []u8, allocator := context.allocator) -> (entry: Form
 		return {}, .Single, false
 	}
 	bom := spell.bom_length(src)
-	// Binary / non-UTF-8 / high-major CBOR & MessagePack check before text heuristics.
 	if bom == 0 && looks_binary_cbor(src) {
-		if is_valid_cbor(src, allocator) {
-			return entry_of_detect(.Cbor, cbor_framing(src, allocator))
+		if fr, cok := detect_cbor(src, allocator); cok {
+			return entry_of_detect(.Cbor, fr)
 		}
-		if is_valid_msgpack(src, allocator) {
-			return entry_of_detect(.Msgpack, msgpack_framing(src, allocator))
+		if fr, mok := detect_msgpack(src, allocator); mok {
+			return entry_of_detect(.Msgpack, fr)
 		}
 	}
 
-	// Skip UTF-8 BOM and leading ASCII whitespace.
 	p := bom
 	for p < len(src) && is_ascii_ws(src[p]) {
 		p += 1
@@ -156,20 +120,14 @@ detect_format :: proc(src: []u8, allocator := context.allocator) -> (entry: Form
 	}
 
 	first := src[p]
-	// RFC 7464 Record Separator leading a JSON text sequence.
 	if first == 0x1E {
-		if valid_json_records(src, .Seq, .Json, allocator) {
-			return entry_of_detect(.Json, .Seq)
-		}
-		if valid_json_records(src, .Seq, .Jsonc, allocator) {
-			return entry_of_detect(.Jsonc, .Seq)
-		}
-		if valid_json_records(src, .Seq, .Json5, allocator) {
-			return entry_of_detect(.Json5, .Seq)
+		for sp in ([3]struct{id: Format_Id, js: json.Spec}{{.Json, .Json}, {.Jsonc, .Jsonc}, {.Json5, .Json5}}) {
+			if valid_json_records(src, .Seq, sp.js, allocator) {
+				return entry_of_detect(sp.id, .Seq)
+			}
 		}
 	}
 
-	// Explicit HTML5 document signatures (`<!DOCTYPE html` / `<html`) vs XML.
 	if first == '<' {
 		if looks_like_html(src[p:]) && html.validate(src, .Html, {}, allocator) == nil {
 			return entry_of_detect(.Html, .Single)
@@ -179,90 +137,70 @@ detect_format :: proc(src: []u8, allocator := context.allocator) -> (entry: Form
 		}
 	}
 
-	// Explicit YAML document markers (`%YAML ...` or `---` line).
 	if (first == '%' || first == '-') && looks_like_yaml_marker(src[p:]) {
 		if yaml.validate(src, .Yaml_1_2, {}, allocator) == nil {
 			return entry_of_detect(.Yaml, yaml_framing(src, allocator))
 		}
 	}
 
-	// Leading `{`: JSON family (Single -> JSON/JSONC/JSON5, else Lines / Seq / Concatenated).
-	if first == '{' {
+	if first == '{' || (first == '/' && p + 1 < len(src) && (src[p + 1] == '/' || src[p + 1] == '*')) {
 		if e, fr, hit := detect_json_family(src, allocator); hit {
 			return e, fr, true
 		}
 	}
 
-	// Leading `[`: JSON array vs TOML table header `[section]` / `[[array]]`.
 	if first == '[' {
 		if e, fr, hit := detect_json_family(src, allocator); hit {
 			return e, fr, true
 		}
-		if toml.validate(src, .Toml_1_0, {}, allocator) == nil {
-			return entry_of_detect(.Toml_1_0, .Single)
-		}
-		if toml.validate(src, .Toml_1_1, {}, allocator) == nil {
-			return entry_of_detect(.Toml_1_1, .Single)
-		}
-	}
-
-	// Leading `//` or `/*`: JSONC / JSON5.
-	if first == '/' && p + 1 < len(src) && (src[p + 1] == '/' || src[p + 1] == '*') {
-		if e, fr, hit := detect_json_family(src, allocator); hit {
+		if e, fr, hit := detect_toml(src, allocator); hit {
 			return e, fr, true
 		}
 	}
 
-	// Leading `#`: TOML comment (or `#` DSV comment).
 	if first == '#' {
-		if toml.validate(src, .Toml_1_0, {}, allocator) == nil {
-			return entry_of_detect(.Toml_1_0, .Single)
-		}
-		if toml.validate(src, .Toml_1_1, {}, allocator) == nil {
-			return entry_of_detect(.Toml_1_1, .Single)
-		}
-	}
-
-	// Check JSON scalar / multi-record text before TOML/DSV (e.g. `123`, `"abc"`, `true`).
-	if first == '"' || first == '\'' || (first >= '0' && first <= '9') || first == '-' || first == '+' || first == '.' {
-		if e, fr, hit := detect_json_family(src, allocator); hit {
+		if e, fr, hit := detect_toml(src, allocator); hit {
 			return e, fr, true
 		}
 	}
-	if first == 't' || first == 'f' || first == 'n' || first == 'I' || first == 'N' {
+
+	if first == '"' || first == '\'' || (first >= '0' && first <= '9') || first == '-' || first == '+' || first == '.' ||
+	   first == 't' || first == 'f' || first == 'n' || first == 'I' || first == 'N' {
 		if e, fr, hit := detect_json_family(src, allocator); hit {
 			return e, fr, true
 		}
 	}
 
-	// Check TOML (key = value assignments or section headers past leading ws).
 	if looks_like_toml(src[p:]) {
-		if toml.validate(src, .Toml_1_0, {}, allocator) == nil {
-			return entry_of_detect(.Toml_1_0, .Single)
-		}
-		if toml.validate(src, .Toml_1_1, {}, allocator) == nil {
-			return entry_of_detect(.Toml_1_1, .Single)
+		if e, fr, hit := detect_toml(src, allocator); hit {
+			return e, fr, true
 		}
 	}
 
-	// Check TSV / CSV by unquoted delimiter presence on the header / lines.
 	if dsv_id, hit := detect_dsv_spec(src[p:]); hit {
 		if e, fr, ok_d := entry_of_detect(dsv_id, .Lines); ok_d && dsv.validate(src, e.spec.(dsv.Spec), {}, allocator) == nil {
 			return e, fr, true
 		}
 	}
 
-	// Fallback loose JSON5 check (e.g. bare identifier keys on line 2+).
-	if e, fr, hit := detect_json_family(src, allocator); hit {
-		return e, fr, true
-	}
-	return {}, .Single, false
+	return detect_json_family(src, allocator)
 }
 
 @(private = "file")
 entry_of_detect :: proc "contextless" (id: Format_Id, f: Framing) -> (Format_Entry, Framing, bool) {
 	e, ok := entry_of_id(id)
 	return e, f, ok
+}
+
+@(private = "file")
+detect_toml :: proc(src: []u8, allocator: runtime.Allocator) -> (Format_Entry, Framing, bool) {
+	if toml.validate(src, .Toml_1_0, {}, allocator) == nil {
+		return entry_of_detect(.Toml_1_0, .Single)
+	}
+	if toml.validate(src, .Toml_1_1, {}, allocator) == nil {
+		return entry_of_detect(.Toml_1_1, .Single)
+	}
+	return {}, .Single, false
 }
 
 @(private = "file")
@@ -275,21 +213,13 @@ looks_binary_cbor :: proc "contextless" (src: []u8) -> bool #no_bounds_check {
 	if len(src) == 0 {
 		return false
 	}
-	// Non-UTF-8 bytes or non-whitespace ASCII control bytes strongly signal binary data;
-	// printable UTF-8 ASCII text and JSON5 whitespace (`\t`, `\n`, `\v`, `\f`, `\r`) must go through text detectors.
-	has_ctrl := false
 	for b in src[:min(len(src), 256)] {
 		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' && b != 0x0B && b != 0x0C && b != 0x1E {
-			has_ctrl = true
-			break
+			return true
 		}
-	}
-	if has_ctrl {
-		return true
 	}
 	utf_len := min(len(src), 512)
 	if utf_len < len(src) && (src[utf_len] & 0xC0) == 0x80 {
-		// Rewind at most 3 continuation bytes to trim only a valid multi-byte UTF-8 rune split at byte 512.
 		for step in 1 ..= min(utf_len, 3) {
 			b := src[utf_len - step]
 			if b >= 0xC2 && b <= 0xF4 {
@@ -304,42 +234,29 @@ looks_binary_cbor :: proc "contextless" (src: []u8) -> bool #no_bounds_check {
 			}
 		}
 	}
-	if utf_len == 0 {
-		return true
-	}
-	return !utf8.valid_string(string(src[:utf_len]))
+	return utf_len == 0 || !utf8.valid_string(string(src[:utf_len]))
 }
 
 @(private = "file")
-is_valid_cbor :: proc(src: []u8, allocator: runtime.Allocator) -> bool {
+detect_cbor :: proc(src: []u8, allocator: runtime.Allocator) -> (Framing, bool) {
 	if cbor.validate(src, .Cbor, {}, allocator) == nil {
-		return true
+		return .Single, true
 	}
 	r := cbor.records_open(src, .Concatenated, .Cbor)
 	defer tape.destroy_records(&r)
 	if r.err != nil {
-		return false
+		return .Single, false
 	}
 	rec: [8]tape.Record
 	n := cbor.records_validate(&r, rec[:], allocator)
-	return n == 0 && r.err == nil && r.index > 0
+	return .Concatenated, n == 0 && r.err == nil && r.index > 0
 }
 
 @(private = "file")
-cbor_framing :: proc(src: []u8, allocator: runtime.Allocator) -> Framing {
-	if cbor.validate(src, .Cbor, {}, allocator) == nil {
-		return .Single
-	}
-	return .Concatenated
-}
-
-@(private = "file")
-is_valid_msgpack :: proc(src: []u8, allocator: runtime.Allocator) -> bool {
+detect_msgpack :: proc(src: []u8, allocator: runtime.Allocator) -> (Framing, bool) {
 	if msgpack.validate(src, .Msgpack, {}, allocator) == nil {
-		return true
+		return .Single, true
 	}
-	// Require at least one high-bit MessagePack header byte (`>= 0x80`) before accepting a concatenated stream,
-	// so pure ASCII bytes (`0x00..0x7f`) cannot masquerade as a stream of 1-byte positive fixints.
 	has_high := false
 	for b in src[:min(len(src), 256)] {
 		if b >= 0x80 {
@@ -348,41 +265,25 @@ is_valid_msgpack :: proc(src: []u8, allocator: runtime.Allocator) -> bool {
 		}
 	}
 	if !has_high {
-		return false
+		return .Single, false
 	}
 	r := msgpack.records_open(src, .Concatenated, .Msgpack)
 	defer tape.destroy_records(&r)
 	if r.err != nil {
-		return false
+		return .Single, false
 	}
 	rec: [8]tape.Record
 	n := msgpack.records_validate(&r, rec[:], allocator)
-	return n == 0 && r.err == nil && r.index > 0
-}
-
-@(private = "file")
-msgpack_framing :: proc(src: []u8, allocator: runtime.Allocator) -> Framing {
-	if msgpack.validate(src, .Msgpack, {}, allocator) == nil {
-		return .Single
-	}
-	return .Concatenated
+	return .Concatenated, n == 0 && r.err == nil && r.index > 0
 }
 
 @(private = "file")
 looks_like_html :: proc "contextless" (s: []u8) -> bool {
 	if len(s) >= 14 && ascii_eq_fold(string(s[:14]), "<!doctype html") {
-		if len(s) == 14 {
-			return true
-		}
-		next := s[14]
-		return is_ascii_ws(next) || next == '>'
+		return len(s) == 14 || is_ascii_ws(s[14]) || s[14] == '>'
 	}
 	if len(s) >= 5 && ascii_eq_fold(string(s[:5]), "<html") {
-		if len(s) == 5 {
-			return true
-		}
-		next := s[5]
-		return is_ascii_ws(next) || next == '>' || next == '/'
+		return len(s) == 5 || is_ascii_ws(s[5]) || s[5] == '>' || s[5] == '/'
 	}
 	return false
 }
@@ -401,11 +302,7 @@ looks_like_yaml_marker :: proc "contextless" (s: []u8) -> bool {
 			for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 				i += 1
 			}
-			// Avoid misclassifying TOML bare-key assignments like `--- = 1`.
-			if i < len(s) && s[i] == '=' {
-				return false
-			}
-			return true
+			return i >= len(s) || s[i] != '='
 		}
 	}
 	return false
@@ -420,48 +317,28 @@ yaml_framing :: proc(src: []u8, allocator: runtime.Allocator) -> Framing {
 	}
 	rec: [4]tape.Record
 	_ = yaml.records_validate(&r, rec[:], allocator)
-	if r.index > 1 {
-		return .Concatenated
-	}
-	return .Single
+	return .Concatenated if r.index > 1 else .Single
 }
 
 @(private = "file")
 detect_json_family :: proc(src: []u8, allocator: runtime.Allocator) -> (entry: Format_Entry, framing: Framing, ok: bool) {
-	// Fast scan for RFC 7464 RS separator anywhere early.
-	for i in 0 ..< min(len(src), 64) {
-		if src[i] == 0x1E {
-			if valid_json_records(src, .Seq, .Json, allocator) {
-				return entry_of_detect(.Json, .Seq)
-			}
+	for b in src[:min(len(src), 64)] {
+		if b == 0x1E && valid_json_records(src, .Seq, .Json, allocator) {
+			return entry_of_detect(.Json, .Seq)
 		}
 	}
-	if json.validate(src, .Json, {}, allocator) == nil {
-		return entry_of_detect(.Json, .Single)
+	specs := [3]struct{id: Format_Id, js: json.Spec}{{.Json, .Json}, {.Jsonc, .Jsonc}, {.Json5, .Json5}}
+	for sp in specs {
+		if json.validate(src, sp.js, {}, allocator) == nil {
+			return entry_of_detect(sp.id, .Single)
+		}
 	}
-	if json.validate(src, .Jsonc, {}, allocator) == nil {
-		return entry_of_detect(.Jsonc, .Single)
-	}
-	if json.validate(src, .Json5, {}, allocator) == nil {
-		return entry_of_detect(.Json5, .Single)
-	}
-	if valid_json_records(src, .Lines, .Json, allocator) {
-		return entry_of_detect(.Json, .Lines)
-	}
-	if valid_json_records(src, .Lines, .Jsonc, allocator) {
-		return entry_of_detect(.Jsonc, .Lines)
-	}
-	if valid_json_records(src, .Lines, .Json5, allocator) {
-		return entry_of_detect(.Json5, .Lines)
-	}
-	if valid_json_records(src, .Concatenated, .Json, allocator) {
-		return entry_of_detect(.Json, .Concatenated)
-	}
-	if valid_json_records(src, .Concatenated, .Jsonc, allocator) {
-		return entry_of_detect(.Jsonc, .Concatenated)
-	}
-	if valid_json_records(src, .Concatenated, .Json5, allocator) {
-		return entry_of_detect(.Json5, .Concatenated)
+	for fr in ([2]struct{tf: tape.Framing, f: Framing}{{.Lines, .Lines}, {.Concatenated, .Concatenated}}) {
+		for sp in specs {
+			if valid_json_records(src, fr.tf, sp.js, allocator) {
+				return entry_of_detect(sp.id, fr.f)
+			}
+		}
 	}
 	return {}, .Single, false
 }
@@ -480,7 +357,6 @@ valid_json_records :: proc(src: []u8, framing: tape.Framing, spec: json.Spec, al
 
 @(private = "file")
 looks_like_toml :: proc "contextless" (s: []u8) -> bool {
-	// Look on first few non-empty lines for `=` outside quotes or `[section]`.
 	line := string(s[:min(len(s), 1024)])
 	in_q: u8
 	for idx := 0; idx < len(line); idx += 1 {
@@ -504,20 +380,15 @@ looks_like_toml :: proc "contextless" (s: []u8) -> bool {
 detect_dsv_spec :: proc "contextless" (s: []u8) -> (id: Format_Id, ok: bool) {
 	tabs, commas := 0, 0
 	in_quote := false
-	limit := min(len(s), 4096)
-	for i := 0; i < limit; i += 1 {
-		c := s[i]
+	for c in s[:min(len(s), 4096)] {
 		if c == '"' {
 			in_quote = !in_quote
-			continue
-		}
-		if in_quote {
-			continue
-		}
-		if c == '\t' {
-			tabs += 1
-		} else if c == ',' {
-			commas += 1
+		} else if !in_quote {
+			if c == '\t' {
+				tabs += 1
+			} else if c == ',' {
+				commas += 1
+			}
 		}
 	}
 	if tabs > 0 && tabs >= commas {

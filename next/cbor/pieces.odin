@@ -6,60 +6,23 @@ import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/build"
 
-// Walks a text in pieces. A window's walk reads the items the window holds whole and stops before the first it does
-// not: an item whose head, string payload, float, or tag 0 date text runs past the window's end. The next window's walk
-// goes on at that item with the levels the last one left, so every token and fault is the whole walk's, and no byte of
-// an item is read in two windows but the head of the item a window cut. A container the hook answered `Skip`, `Keep`,
-// `Keep_Stubs` or `Rest` for, or the value of a key it skipped, goes on in the next window inside its own walk, with
-// the walk around it waiting past its head.
-//
-// A head whose count the window's bytes cannot hold is judged once the text holds them or ends, as the whole walk
-// judges it against the bytes left. Until then the walk goes on, and a fault or a stop past such a head waits for the
-// verdict on the head, which comes first in the text.
+// Streaming piece-by-piece CBOR walks across arbitrarily cut input windows.
 
-// Where a walk of a text in pieces goes on: at the item at `i`, in the levels `d` deep whose innermost frame is `top`,
-// and with `passing` the value of a key the hook skipped.
-@(private)
-Cut :: hook.Piece_Cut
-
-// What a CBOR walk keeps from one piece to the next.
 @(private)
 Piece :: struct {
-	using state:  hook.Piece_State,
-	cut:          Cut,
-	frames:       [dynamic]u8, // the bytes of the `cut.d` frames of `Level(S)`, copied by `piece_levels`
-	// Where the chunks of the indefinite string at `chunks.at` were read to, so that the next window goes on there: the
-	// head of the chunk the last window cut, and whether the chunks before it took a tolerance.
-	chunks:       struct {
+	using base: build.Binary_Piece,
+	chunks:     struct {
 		at, read: u64,
 		lax:      bool,
 	},
-	// With `nest`, the walk around the container the hook answered for, or the value of the key it skipped, which goes
-	// on past it once the inner walk at `cut` ends it. `indefinite` says that container ends at a break.
-	outer:        Cut,
-	outer_frames: [dynamic]u8,
-	indefinite:   bool,
-	// The heads whose count needs bytes past the windows read so far: each head's offset and the offset the text must
-	// reach for it.
-	claims:       [dynamic][2]u64,
-	held:         u64, // with `holding`, the walk's end, a `hook.Walk_Result`, which waits for `claims` to settle
-	holding:      bool,
-	ended:        bool, // the root item ended at `cut.i`, and the next window says whether bytes follow it
-	more:         bool, // bytes may follow the window being walked
-	refused:      bool, // memory for the open path was refused
+	indefinite: bool,
 }
 
 @(private)
 piece_free :: proc(p: ^tape.Pieces) {
-	s := (^Piece)(p.state)
-	delete(s.frames)
-	delete(s.outer_frames)
-	delete(s.claims)
-	hook.piece_release(p)
+	build.binary_piece_free(p, Piece)
 }
 
-// The truncation at the item at `at`, in the levels `d` deep whose innermost frame is `top`: in a window that more
-// bytes follow, the walk ends before the item, which the next window's walk reads.
 @(private)
 short :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), at, d, top: u64, passing: bool) -> hook.Walk_Result {
 	when .Windows in C {
@@ -70,7 +33,6 @@ short :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), at, d, to
 	return fault(u64(len(w.src)), .Truncated)
 }
 
-// `short` for fault `f` of a reader of the item at `at`, which truncates at the window's end.
 @(private)
 short_fault :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), f: hook.Walk_Result, at, d, top: u64, passing: bool) -> hook.Walk_Result {
 	when .Windows in C {
@@ -81,30 +43,17 @@ short_fault :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), f: 
 	return f
 }
 
-// The verdict on the head at `i` of `hl` bytes whose count `arg`, of pairs with `pair`, the bytes left cannot hold: a
-// fault, or in a window that more bytes follow, 0 with the head's claim kept for a later window, or in a part of a text
-// whose bytes hold the count, 0.
 @(private, cold)
 count_short :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), i, hl, arg, pair: u64) -> hook.Walk_Result {
+	piece: ^build.Binary_Piece
 	when .Windows in C {
-		if s := w.piece[0]; s != nil && s.more {
-			need := max(u64) if arg > max(u64) >> 2 else i + hl + arg << pair
-			// A contextless proc needs a context for `append`, whose allocator is the array's own.
-			context = runtime.default_context()
-			if _, e := append(&s.claims, [2]u64{i, need}); e != nil {
-				return hook.walk_result(i, hook.WALK_NO_MEMORY)
-			}
-			return 0
+		if w.piece[0] != nil {
+			piece = &w.piece[0].base
 		}
 	}
-	if w.whole > i + hl && arg <= (w.whole - i - hl) >> pair {
-		return 0
-	}
-	return fault(i, .Truncated, .Count_Too_Large)
+	return build.binary_count_short(piece, w.whole, i, hl, arg, pair, u8(Detail.Count_Too_Large))
 }
 
-// Whether the date text at `q`, the content of a tag 0, runs past a window that more bytes follow, so that the tag is
-// read in the next window with its content whole.
 @(private)
 date_short :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), q: u64) -> bool {
 	when .Windows in C {
@@ -124,33 +73,17 @@ date_short :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), q: u
 	return false
 }
 
-// Ends the walk of a window before the item at `i`, in the levels `d` deep whose innermost frame is `top`, which the
-// next window's walk reads.
 @(private, cold)
 piece_cut :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), i, d, top: u64, passing: bool) -> hook.Walk_Result {
 	when .Windows in C {
-		s := w.piece[0]
-		s.cut = {i, d, top, passing}
-		if !piece_levels(&s.frames, w.stack, d) {
-			return hook.walk_result(i, hook.WALK_NO_MEMORY)
-		}
+		return build.binary_piece_cut(&w.piece[0].base, w.stack, i, d, top, passing)
 	}
 	return hook.walk_result(i, hook.WALK_MORE)
 }
 
 @(private)
-piece_levels :: #force_inline proc "contextless" (frames: ^[dynamic]u8, stack: [^]Level($S), d: u64) -> bool {
-	return hook.piece_levels(frames, stack, d)
-}
+nest_of :: #force_inline proc "contextless" (a: hook.Action) -> hook.Nest { return hook.nest_of(a) }
 
-@(private)
-nest_of :: #force_inline proc "contextless" (a: hook.Action) -> hook.Nest {
-	return hook.nest_of(a)
-}
-
-// The result `r` of the inner walk of the container at `start` that the hook answered for with `nest`, or of the value
-// a key skip passes, in the levels `d` deep whose innermost frame is `top`. When the window ended it, the walk around
-// it is kept to go on past it, but under `.Rest`, whose walk reads the rest of the text in the same levels.
 @(private)
 nested :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), r: hook.Walk_Result, nest: hook.Nest, start, d, top: u64) -> hook.Walk_Result {
 	when .Windows in C {
@@ -165,20 +98,14 @@ nested :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), r: hook.
 piece_nest :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), r: hook.Walk_Result, nest: hook.Nest, start, d, top: u64) -> hook.Walk_Result {
 	when .Windows in C {
 		s := w.piece[0]
-		s.nest = nest
-		if nest == .Rest {
-			return r
+		if nest != .Rest {
+			s.indefinite = nest != .Pass && w.src[start] & 31 == 31
 		}
-		s.outer, s.indefinite = {start, d, top, false}, nest != .Pass && w.src[start] & 31 == 31
-		if !piece_levels(&s.outer_frames, w.stack, d) {
-			return hook.walk_result(start, hook.WALK_NO_MEMORY)
-		}
+		return build.binary_piece_nest(&s.base, w.stack, r, nest, start, d, top)
 	}
 	return r
 }
 
-// Records token `t` in the open containers of a walk in pieces, for `Pieces.open`. The scalar a container holds, the
-// most tokens, takes no call. False when memory for one more is refused.
 @(private)
 piece_track :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), s: ^Piece, t: tape.Token) -> bool #no_bounds_check {
 	if t.role > .Key {
@@ -187,55 +114,21 @@ piece_track :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), s: 
 	if t.kind > .Plain || t.kind == .End {
 		return hook.piece_track_container(w.ctx, &s.state, &s.refused, t)
 	}
-	n := len(s.opened)
-	if t.role == .Key {
-		s.opened[n - 1].key, s.opened[n - 1].name = t, -1
-		return true
-	}
-	if n > 0 {
-		s.opened[n - 1].count += 1
-		s.opened[n - 1].key.kind = .End
-	}
-	return true
+	return build.binary_piece_track_scalar(&s.state, t)
 }
 
-// Walks the window `src` of the text in pieces `opts.pieces` for hook `h` from its registers `regs`, and updates
-// `opts.pieces` (`more`, `at`, `keep`, `open`) for the next window. A window must start at or before `keep` and end at
-// or after `at`, and the first window must start the text.
 @(private)
 piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	context = ctx^
-	p := opts.pieces
-	s, text, to, berr := hook.piece_begin(p, Piece, piece_free, src)
-	if berr != nil {
-		return 0, berr, false
-	}
-	s.more = !p.last
-	if !s.started {
-		s.started, s.steps = true, steps_of(opts)
-		lists := hook.piece_lists(p)
-		s.frames.allocator, s.outer_frames.allocator, s.claims.allocator = lists, lists, lists
-		s.opened.allocator, s.names.allocator, s.steps_buf.allocator = lists, lists, lists
-	}
-	r: hook.Walk_Result
-	switch {
-	case s.holding:
-		r = hook.Walk_Result(s.held)
-	case s.ended:
-		r = hook.walk_result(s.cut.i, 0)
-	case to == 0 && !s.more:
-		p.more, p.open = false, nil
-		return 0, tape.Fault{rules = &RULES, kind = .Truncated, detail = u8(Detail.No_Item)}, false
-	case:
-		r = piece_walk(text, S, opts, h, regs, allocator, ctx, on, s)
+	walk_fn :: proc "contextless" (text: []u8, opts: Options, h: ^H, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context, s: ^Piece) -> hook.Walk_Result {
+		return piece_walk(text, S, opts, h, regs, a, ctx, on, s)
 	}
 	keep_fn :: proc "contextless" (s: ^Piece, to: u64) -> u64 {
 		return piece_keep(s, S, to)
 	}
-	return build.binary_piece_finish(p, s, text, to, r, regs, &FORMATS[S], &RULES, u8(Detail.Count_Too_Large), u8(Detail.Trailing), keep_fn)
+	return build.binary_piece_read(src, opts, h, regs, allocator, ctx, &FORMATS[S], &RULES, u8(Detail.No_Item), u8(Detail.Count_Too_Large), u8(Detail.Trailing), Piece, piece_free, walk_fn, keep_fn)
 }
 
-// The walk of a window from where the last one stopped, which leaves in `s` where the next goes on.
 @(private)
 piece_walk :: proc "contextless" (src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), s: ^Piece) -> (r: hook.Walk_Result) {
 	hook.check(H)
@@ -244,19 +137,10 @@ piece_walk :: proc "contextless" (src: []u8, $S: Spec, opts: Options, h: ^$H, re
 	w: Walk(S, H, true, C | WINDOWS)
 	walk_init(&w, src, h, raw_data(stack[:]), min(build.read_depth(opts), MAX_LEVELS), WALK_LEVELS, opts)
 	w.allocator, w.ctx, w.steps, w.piece = allocator, ctx, {s.steps}, {s}
-	inner := s.nest != .None && s.nest != .Rest
-	base := s.outer.d if inner else 0
-	held := base + s.cut.d
-	if held > w.room && !hook.levels_room(&w, held) {
+	inner, ok := build.binary_piece_load_frames(&w, &s.base)
+	if !ok {
 		return hook.walk_result(s.cut.i, hook.WALK_NO_MEMORY)
 	}
-	if inner {
-		intrinsics.mem_copy_non_overlapping(w.stack, raw_data(s.outer_frames), len(s.outer_frames))
-	}
-	intrinsics.mem_copy_non_overlapping(w.stack[base:], raw_data(s.frames), len(s.frames))
-	// `w.depth` is the levels held, so the next container opened past them calls `deepen`, which grows the hook's levels
-	// with the walk's.
-	w.depth = held
 	when .Rooms in C {
 		w.rooms = hook.rooms_end(h)
 	}
@@ -296,8 +180,6 @@ piece_walk :: proc "contextless" (src: []u8, $S: Spec, opts: Options, h: ^$H, re
 	return
 }
 
-// Goes on past the container or the skipped value that the inner walk of a window ended at `end`: gives the container's
-// `End`, counts down the frames it completes, and walks on.
 @(private)
 piece_past :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), regs: ^hook.Regs, end: u64, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	s := w.piece[0]
@@ -315,8 +197,6 @@ piece_past :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), regs: ^hook.Regs, 
 	return run(w, end, d, top, regs, on)
 }
 
-// The lowest offset the next window's walk reads: the item it goes on at, and in a spec that orders keys, the last key
-// of each open map, which the next key is compared with.
 @(private)
 piece_keep :: proc "contextless" (s: ^Piece, $S: Spec, to: u64) -> u64 {
 	if s.holding || s.ended {
@@ -335,4 +215,3 @@ piece_keep :: proc "contextless" (s: ^Piece, $S: Spec, to: u64) -> u64 {
 	}
 	return keep
 }
-

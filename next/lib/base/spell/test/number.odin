@@ -624,3 +624,60 @@ wide_double_long_and_boundary_cases :: proc(t: ^testing.T) {
 	testing.expect_value(t, transmute(u64)spell.wide_double(transmute([]u8)string("4.9e-324")), u64(1))
 	testing.expect_value(t, transmute(u64)spell.wide_double(transmute([]u8)string("-2.4e-324")), u64(1) << 63)
 }
+
+@(test)
+zmij_and_integer_formatting :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	buf: [64]u8
+
+	// Integer formatting across 1..20 digits and signed extremes.
+	u_cases := []struct {v: u64, want: string}{
+		{0, "0"}, {7, "7"}, {99_999_999, "99999999"}, {100_000_000, "100000000"},
+		{9_999_999_999_999_999, "9999999999999999"}, {10_000_000_000_000_000, "10000000000000000"},
+		{max(u64), "18446744073709551615"},
+	}
+	for c in u_cases {
+		n := spell.put_u64(&buf[0], c.v)
+		testing.expect_value(t, string(buf[:n]), c.want)
+	}
+	i_cases := []struct {v: i64, want: string}{
+		{min(i64), "-9223372036854775808"}, {-1, "-1"}, {0, "0"}, {max(i64), "9223372036854775807"},
+	}
+	for c in i_cases {
+		n := spell.put_i64(&buf[0], c.v)
+		testing.expect_value(t, string(buf[:n]), c.want)
+	}
+
+	// `put_f64` and `put_f32` round-trip and layout checks.
+	f64_cases := []struct {v: f64, want: string}{
+		{0.0, "0.0"}, {transmute(f64)(u64(1) << 63), "-0.0"}, {1.5, "1.5"}, {-1.0, "-1.0"},
+		{1e-4, "0.0001"}, {9.999999999999999e-5, "9.999999999999999e-05"}, {999999.0, "999999.0"}, {1e6, "1e+06"},
+		{transmute(f64)u64(1), "5e-324"}, {transmute(f64)u64(0x7FEF_FFFF_FFFF_FFFF), "1.7976931348623157e+308"},
+	}
+	for c in f64_cases {
+		n, ok := spell.put_f64(&buf[0], c.v)
+		testing.expectf(t, ok && string(buf[:n]) == c.want, "put_f64(%v): got %q, want %q", c.v, string(buf[:n]), c.want)
+	}
+	_, nan_ok := spell.put_f64(&buf[0], math.nan_f64())
+	_, inf_ok := spell.put_f64(&buf[0], math.inf_f64(1))
+	testing.expect(t, !nan_ok && !inf_ok)
+
+	f32_cases := []struct {v: f32, want: string}{
+		{0.0, "0.0"}, {transmute(f32)(u32(1) << 31), "-0.0"}, {1.5, "1.5"}, {1e-4, "0.0001"}, {1e6, "1e+06"},
+		{transmute(f32)u32(1), "1e-45"}, {transmute(f32)u32(0x7F7F_FFFF), "3.4028235e+38"},
+	}
+	for c in f32_cases {
+		n, ok := spell.put_f32(&buf[0], c.v)
+		testing.expectf(t, ok && string(buf[:n]) == c.want, "put_f32(%v): got %q, want %q", c.v, string(buf[:n]), c.want)
+	}
+
+	// `float64_text` jq layout agreement (plain up to 1e15, `.0` on whole, empty on non-finite).
+	jq_cases := []struct {v: f64, want: string}{
+		{0.0, "0.0"}, {transmute(f64)(u64(1) << 63), "-0.0"}, {1e6, "1000000.0"}, {1e15, "1000000000000000.0"},
+		{1e16, "1e+16"}, {1e-4, "0.0001"}, {1e-5, "1e-05"}, {math.nan_f64(), ""}, {math.inf_f64(-1), ""},
+	}
+	for c in jq_cases {
+		s, ok := spell.float64_text(c.v, buf[:32])
+		testing.expectf(t, ok && s == c.want, "float64_text(%v): got %q, want %q", c.v, s, c.want)
+	}
+}

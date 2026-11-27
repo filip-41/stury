@@ -18,13 +18,15 @@ Spec :: enum u8 {
 
 Options :: tape.Options
 
+CAPS :: tape.Caps{.Rewalk, .Binary}
+
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
 	.Msgpack = {
 		name      = "msgpack",
 		id        = ID,
 		facts     = {.Tag},
-		caps      = {.Rewalk, .Binary},
+		caps      = CAPS,
 		dups      = .Last,
 		bounds    = bounds,
 		decode    = text_decoded,
@@ -39,7 +41,7 @@ FORMATS := [Spec]tape.Format {
 		name      = "msgpack-compact",
 		id        = ID + 1,
 		facts     = {.Tag},
-		caps      = {.Rewalk, .Binary},
+		caps      = CAPS,
 		dups      = .Last,
 		bounds    = bounds,
 		decode    = text_decoded,
@@ -76,15 +78,9 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Msgpack, opts := Options{
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Msgpack:
-		if lax {
-			return validate_as(src, .Msgpack, true, opts, allocator)
-		}
-		return validate_as(src, .Msgpack, false, opts, allocator)
+		return validate_as(src, .Msgpack, true, opts, allocator) if lax else validate_as(src, .Msgpack, false, opts, allocator)
 	case .Compact:
-		if lax {
-			return validate_as(src, .Compact, true, opts, allocator)
-		}
-		return validate_as(src, .Compact, false, opts, allocator)
+		return validate_as(src, .Compact, true, opts, allocator) if lax else validate_as(src, .Compact, false, opts, allocator)
 	}
 	runtime.panic_contextless("msgpack: spec out of range")
 }
@@ -104,14 +100,10 @@ build :: #force_inline proc(src: []u8, spec := Spec.Msgpack, opts := Options{}, 
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Msgpack:
-		if lax {
-			return build_as(src, .Msgpack, true, opts, allocator)
-		}
+		if lax { return build_as(src, .Msgpack, true, opts, allocator) }
 		return build_as(src, .Msgpack, false, opts, allocator)
 	case .Compact:
-		if lax {
-			return build_as(src, .Compact, true, opts, allocator)
-		}
+		if lax { return build_as(src, .Compact, true, opts, allocator) }
 		return build_as(src, .Compact, false, opts, allocator)
 	}
 	panic("msgpack: spec out of range")
@@ -124,14 +116,10 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Msgpack, r
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Msgpack:
-		if lax {
-			return find_as(src, path, .Msgpack, true, read, opts, allocator)
-		}
+		if lax { return find_as(src, path, .Msgpack, true, read, opts, allocator) }
 		return find_as(src, path, .Msgpack, false, read, opts, allocator)
 	case .Compact:
-		if lax {
-			return find_as(src, path, .Compact, true, read, opts, allocator)
-		}
+		if lax { return find_as(src, path, .Compact, true, read, opts, allocator) }
 		return find_as(src, path, .Compact, false, read, opts, allocator)
 	}
 	panic("msgpack: spec out of range")
@@ -144,14 +132,10 @@ scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Msgpack
 	lax := build.read_lax(opts)
 	switch spec {
 	case .Msgpack:
-		if lax {
-			return scan_as(src, demand, .Msgpack, true, read, opts, allocator)
-		}
+		if lax { return scan_as(src, demand, .Msgpack, true, read, opts, allocator) }
 		return scan_as(src, demand, .Msgpack, false, read, opts, allocator)
 	case .Compact:
-		if lax {
-			return scan_as(src, demand, .Compact, true, read, opts, allocator)
-		}
+		if lax { return scan_as(src, demand, .Compact, true, read, opts, allocator) }
 		return scan_as(src, demand, .Compact, false, read, opts, allocator)
 	}
 	panic("msgpack: spec out of range")

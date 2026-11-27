@@ -280,7 +280,7 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 		}
 		plan = p
 		made = true
-	} else if plan.type != T || !(len(plan.tag) == len(tag) && (raw_data(plan.tag) == raw_data(tag) || plan.tag == tag)) {
+	} else if !plan_matches(plan, T, tag) {
 		return tape.Bad_Option{"plan"}
 	}
 	defer if made {
@@ -289,37 +289,20 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	m_buf: [size_of(hook.Read_Budget) / size_of(u64)]u64 = ---
 	#assert(size_of(m_buf) == size_of(hook.Read_Budget))
 	#assert(align_of(hook.Read_Budget) <= align_of(u64))
-	m := (^hook.Read_Budget)(&m_buf[0])
+	m := (^hook.Read_Budget)(rawptr(&m_buf[0]))
 	scratch_buf: [size_of(hook.Memory_Budget) / size_of(u64)]u64 = ---
 	#assert(size_of(scratch_buf) == size_of(hook.Memory_Budget))
 	#assert(align_of(hook.Memory_Budget) <= align_of(u64))
 	allocator := caller
 	scratch: runtime.Allocator
 	if opts.budget.memory == 0 {
-		if opts.scratch.procedure != nil {
-			scratch = opts.scratch
-		} else {
-			when ODIN_DEFAULT_TO_NIL_ALLOCATOR || ODIN_DEFAULT_TO_PANIC_ALLOCATOR {
-				scratch = allocator
-			} else {
-				scratch = {runtime.default_allocator_proc, nil}
-			}
-		}
+		scratch = parallel_scratch_backing(opts, allocator)
 	} else {
 		allocator = hook.read_budget(m, opts, caller)
-		scratch = hook.scratch(opts, allocator, (^hook.Memory_Budget)(&scratch_buf[0]))
+		scratch = hook.scratch(opts, allocator, (^hook.Memory_Budget)(rawptr(&scratch_buf[0])))
 	}
 	frames: [FRAME_ROOM]Frame = ---
-	flags: Reader_Flags
-	if dups == .First {
-		flags += {.First}
-	}
-	if uopts.refuse_unknown {
-		flags += {.Unknown}
-	}
-	if made {
-		flags += {.Made}
-	}
+	flags := reader_flags(dups, uopts, made)
 	ctx := context
 	ctx.allocator = allocator
 	// Unzeroed backing for `H` so `Cells_Reader.columns`/`row` (1,104 B) are not zeroed on every call, while every live
@@ -328,68 +311,21 @@ read :: proc(src: []u8, target: rawptr, T: typeid, format: ^tape.Format, tag: st
 	#assert(size_of(hk_buf) == size_of(H))
 	#assert(align_of(H) <= align_of(u64))
 	hk := (^H)(&hk_buf[0])
-	h := &hk.reader
-	h^ = {
-		base      = raw_data(src),
-		len       = u64(len(src)),
-		frames    = raw_data(frames[:]),
-		sp        = 1,
-		room      = FRAME_ROOM,
-		borrow    = uopts.borrow_strings,
-		flags     = flags,
-		plan      = plan,
-		home      = raw_data(frames[:]),
-		format    = format,
-		path      = uopts.path,
-		target    = uintptr(target),
-		allocator = allocator,
-		caller    = caller,
-		scratch   = scratch,
-		ctx       = ctx,
-	}
-	when H == Cells_Reader {
-		hk.replay = {}
-		hk.dropped = 0
-		hk.taken = 0
-		hk.alike = true
-		hk.learn = .Before
-	} else when H == Refusing_Reader {
-		hk.keys = {}
-		hk.opens = {}
-		hk.hashed = {}
-		hk.keys.allocator = scratch
-		hk.opens.allocator = scratch
-		hk.hashed.allocator = scratch
-		hk.repeat = max(u64)
-		hk.passing = 0
-		hk.ends = false
-		hk.value = false
-		hk.done = false
-		hk.refused = nil
-	} else {
+	init_reader(hk, src, format, plan, flags, uopts.borrow_strings, uopts.path, target, allocator, caller, scratch, &ctx, frames[:])
+	when H == Text_Reader {
 		// Left unzeroed, as a walk reads only the entries it wrote. A `when` opens no scope, so it lives as `hk` does.
 		memo: hook.Expected_Memo = ---
 		hk.expected = &memo
 	}
+	h := &hk.reader
 	frames[0] = {b = u64(uintptr(&DEAD_BLOCK[1])), seen = SEEN_TARGET}
 	before: [BEFORE_ROOM]u8 = ---
 	// Only `.Last` (and refusing walks that still overwrite during the walk) can call `reset` on a repeated key.
 	// `.First` skips repeats, and DSV `.Refuse` rejects duplicate headers before entering `read`.
 	if dups != .First && !(H == Cells_Reader && dups == .Refuse) {
-		size := uint(plan.size)
-		if size <= BEFORE_ROOM {
-			// Dominated by `size <= BEFORE_ROOM` (`uint` rules out negative lengths).
-			#no_bounds_check h.before = before[:size]
-		} else {
-			block, berr := runtime.mem_alloc_non_zeroed(int(size), 1, h.scratch)
-			if berr != nil || len(block) < int(size) {
-				err := tape.Error(runtime.Allocator_Error.Out_Of_Memory)
-				return hook.memory_budget_error(&m.main, err) if opts.budget.memory != 0 else err
-			}
-			#no_bounds_check h.before = block[:size]
-		}
-		if size > 0 {
-			intrinsics.mem_copy_non_overlapping(raw_data(h.before), target, int(size))
+		if !snapshot_before(h, target, before[:]) {
+			err := tape.Error(runtime.Allocator_Error.Out_Of_Memory)
+			return hook.memory_budget_error(&m.main, err) if opts.budget.memory != 0 else err
 		}
 	}
 	regs := hook.Regs{NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}
@@ -471,11 +407,9 @@ reader_hook :: #force_inline proc "contextless" (h: ^Reader, s: hook.Regs, t: ta
 						if n, ok := spell.number_strict(h.base[:h.len], t.lo, t.lo + u64(t.n)); ok && store_number(rec.kind, n, dest, t.n) {
 							break value
 						}
-					} else if rec.kind == .Bool && t.lo + 8 <= h.len {
-						// `true` and `false` read in one load, which the eight bytes of text from the cell hold.
-						w := load8(h.base[t.lo:])
-						if t.n == 4 && u32(w) == 0x6575_7274 || t.n == 5 && w & 0xFF_FFFF_FFFF == 0x65_736C_6166 {
-							(^bool)(dest)^ = t.n == 4
+					} else if rec.kind == .Bool {
+						if bval, bok := match_bool_word(h.base, t.lo, h.len, t.n); bok {
+							(^bool)(dest)^ = bval
 							break value
 						}
 					}
@@ -663,6 +597,18 @@ frame_owner :: #force_inline proc "contextless" (f: ^Frame) -> ^Record {
 @(private)
 wrapper :: #force_inline proc "contextless" (kind: Read_Kind) -> bool {
 	return kind == .Maybe || kind == .Ptr || kind == .Union || kind == .Position
+}
+
+// `true` and `false` read in one 8-byte load when at least 8 bytes remain in `src`.
+@(private)
+match_bool_word :: #force_inline proc "contextless" (base: [^]u8, lo, hi_len: u64, n: u32) -> (val, ok: bool) #no_bounds_check {
+	if lo + 8 <= hi_len {
+		w := load8(base[lo:])
+		if n == 4 && u32(w) == 0x6575_7274 || n == 5 && w & 0xFF_FFFF_FFFF == 0x65_736C_6166 {
+			return n == 4, true
+		}
+	}
+	return false, false
 }
 
 // The index of record `r` in its block, the block's first record being `first`.

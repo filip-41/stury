@@ -1,750 +1,425 @@
 package edit
 
 import "base:runtime"
+import "core:bytes"
 import "core:encoding/endian"
 import "core:math"
+import "core:slice"
 import "core:strconv"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
 // Generic rodata `tape.Format` attached to materialized documents when no format-specific `target_format` is passed.
-// Every format writer accepts it as a decoded foreign document, never taking raw-source shortcuts, while still reading
-// decimal numbers (including NaN/Inf) and `.Style` / `.Tag` fact names cleanly.
 @(private = "file", rodata)
 MATERIALIZED_FORMAT := tape.Format {
 	name      = "materialized",
-	id        = 0,
 	facts     = tape.COMMENTS + {.Tag, .Style, .Attribute},
 	dups      = .All,
-	bounds    = mat_bounds,
-	room      = mat_room,
+	bounds    = proc "contextless" (_: []u8, _: tape.Token) -> (u8, u8) { return 0, 0 },
+	room      = proc "contextless" (_: []u8, t: tape.Node, _: ^tape.Format_Ext) -> int { return int(t.n) },
 	number    = mat_number,
-	same_text = mat_same_text,
-	key_hash  = mat_key_hash,
+	same_text = proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {
+		return t.n == o.n && string(src[t.lo : t.lo + u64(t.n)]) == string(other[o.lo : o.lo + u64(o.n)])
+	},
+	key_hash  = proc "contextless" (src: []u8, t: tape.Token) -> u32 { return tape.text_hash(src[t.lo : t.lo + u64(t.n)]) },
 	fact_name = mat_fact_name,
-}
-
-@(private = "file")
-mat_bounds :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) {
-	_ = src
-	_ = t
-	return 0, 0
-}
-
-@(private = "file")
-mat_room :: proc "contextless" (src: []u8, t: tape.Node, ext: ^tape.Format_Ext) -> int {
-	_ = src
-	_ = ext
-	return int(t.n)
 }
 
 @(private = "file")
 mat_number :: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number {
 	hi := t.lo + u64(t.n)
-	if n, ok := spell.number_strict(src, t.lo, hi); ok {
-		return n
-	}
-	s := string(src[t.lo:hi])
-	if s == "NaN" {
-		return {bits = transmute(u64)math.nan_f64(), kind = .Float}
-	}
-	if s == "Infinity" || s == "+Infinity" {
-		return {bits = transmute(u64)math.inf_f64(1), kind = .Float}
-	}
-	if s == "-Infinity" {
-		return {bits = transmute(u64)math.inf_f64(-1), kind = .Float}
+	if n, ok := spell.number_strict(src, t.lo, hi); ok { return n }
+	switch string(src[t.lo:hi]) {
+	case "NaN": return {bits = transmute(u64)math.nan_f64(), kind = .Float}
+	case "Infinity", "+Infinity": return {bits = transmute(u64)math.inf_f64(1), kind = .Float}
+	case "-Infinity": return {bits = transmute(u64)math.inf_f64(-1), kind = .Float}
 	}
 	return {kind = .Wide}
 }
 
 @(private = "file")
-mat_same_text :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {
-	if t.n != o.n {
-		return false
-	}
-	a := src[t.lo : t.lo + u64(t.n)]
-	b := other[o.lo : o.lo + u64(o.n)]
-	for i in 0 ..< len(a) {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-@(private = "file")
-mat_key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {
-	return tape.text_hash(src[t.lo : t.lo + u64(t.n)])
-}
-
-@(private = "file")
-mat_fact_name :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index, kind: tape.Fact_Kind) -> (name: string, ok: bool) {
+mat_fact_name :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index, kind: tape.Fact_Kind) -> (string, bool) {
 	for f in tape.facts_of(doc, at) {
-		if f.kind == kind && f.n > 0 {
-			return string(tape.span_bytes(doc, f.lo, f.n)), true
-		}
+		if f.kind == kind && f.n > 0 { return string(tape.span_bytes(doc, f.lo, f.n)), true }
 	}
 	return "", false
 }
 
-// Iterative zero-recursion `materialize_subtree`: builds a self-contained `tape.Document` from an `Overlay`
-// subtree `root_h` so ALL 5 format writers (`json.write`, `toml.write`, `xml.write`, `cbor.write`, `dsv.write`)
-// can serialize edited/reflowed subtrees using their real, battle-tested writers with zero duplicate encoders!
-
 Materialize_Options :: struct {
-	// Optional synthetic wrapper key (e.g. for XML `<tag>...</tag>` or TOML `k = ...`).
-	wrap_key:         string,
-	// When true, deduplicates object keys keeping the last (winning) occurrence (for JSON reflow).
-	dedup_keys:       bool,
-	// When true, encodes numeric `.Tag` facts as CBOR major-6 heads and sets `doc.format = target_format`.
-	cbor_tags:        bool,
-	// When true, formats XML `.Attribute` facts as `name="val"` spans and sets `doc.format = target_format`.
-	xml_attrs:        bool,
-	// When true, skips `.Attribute` facts on the root materialized node (e.g. XML element content-only replacement).
-	skip_root_attrs:       bool,
-	// When true, skips `.Tag` facts on the root materialized node (e.g. when composer already emitted outer CBOR tags).
-	skip_root_tags:        bool,
-	// When true, emits `.Comment`/`.Comment_Inline`/`.Comment_Foot` on the root node too (e.g. full-doc reflow).
-	include_root_comments: bool,
-	// When true, emits `.Comment_Foot` on the root container too (used when rewriting/reflowing a bracket container).
-	include_root_foot:     bool,
-	// When true, flattens XML `.Array` member replacements into repeated sibling element entries and skips extra base siblings.
-	flatten_xml_arrays:    bool,
-	// Optional handle to locate inside the materialized `tape.Document` (writes matching `Node_Index` into `tracked_node`).
-	track_handle:          Handle,
-	tracked_node:          ^tape.Node_Index,
-	// Optional `doc.format` to attach (nil uses generic `MATERIALIZED_FORMAT`, which every writer accepts!).
-	target_format:         ^tape.Format,
-	// Optional style override applied to the root node (e.g., `"single"` for JSON5 or `"literal"` for TOML).
-	root_style:       string,
+	wrap_key:                                                           string,
+	dedup_keys, cbor_tags, xml_attrs, skip_root_attrs, skip_root_tags:  bool,
+	include_root_comments, include_root_foot, flatten_xml_arrays:       bool,
+	track_handle:                                                       Handle,
+	tracked_node:                                                       ^tape.Node_Index,
+	target_format:                                                      ^tape.Format,
+	root_style:                                                         string,
 }
 
-// Materializes `root_h` (or `base_node` if `root_h == NO_HANDLE`) in `ov` into a self-contained `tape.Document`
-// owned by the caller (destroy with `tape.destroy_document`). Zero native recursion!
-materialize_subtree :: proc(
-	ov: ^Overlay,
-	root_h: Handle,
-	base_node := tape.NO_NODE,
-	opts := Materialize_Options{},
-	allocator := context.allocator,
-) -> (
-	doc: tape.Document,
-	err: Error,
-) {
-	if ov == nil || ov.base == nil {
-		return {}, refuse(.No_Document, "materialize_subtree requires an overlay")
-	}
+@(private = "file")
+Mat_Frame :: struct {
+	node_idx, idx, child_n:    int,
+	is_obj:                    bool,
+	elems:                     []Effective_Element,
+	members:                   []Effective_Member,
+	owned_keys:                []string,
+	base_c, base_end, base_cur: tape.Node_Index,
+}
+
+@(private = "file")
+Mat_Cx :: struct {
+	ov:        ^Overlay,
+	opts:      Materialize_Options,
+	src:       [dynamic]u8,
+	nodes:     [dynamic]tape.Node,
+	facts:     [dynamic]tape.Fact,
+	counts:    [dynamic]tape.Child_Count,
+	present:   tape.Facts,
+	stack:     [dynamic]Mat_Frame,
+	allocator: runtime.Allocator,
+}
+
+materialize_subtree :: proc(ov: ^Overlay, root_h: Handle, base_node := tape.NO_NODE, opts := Materialize_Options{}, allocator := context.allocator) -> (doc: tape.Document, err: Error) {
+	if ov == nil || ov.base == nil { return {}, refuse(.No_Document, "materialize_subtree requires an overlay") }
 	if ov.unlinked_parents {
-		need_link := true
-		if root_h != NO_HANDLE {
-			if rn, ok := get_node(ov, root_h); ok && rn.state == .Replaced && rn.val.kind < .Array {
-				need_link = false
-			}
-		}
-		if need_link {
+		if rn, ok := get_node(ov, root_h); !(ok && rn.state == .Replaced && rn.val.kind < .Array) {
 			ensure_linked(ov) or_return
 		}
 	}
 
-	Mat_Frame :: struct {
-		node_idx:   int,
-		is_obj:     bool,
-		elems:      []Effective_Element,
-		members:    []Effective_Member,
-		owned_keys: []string,
-		idx:        int,
-		base_c:     tape.Node_Index, // non-NO_NODE when walking an untouched base container
-		base_end:   tape.Node_Index,
-		base_cur:   tape.Node_Index,
-		child_n:    int,
+	cx := Mat_Cx {
+		ov = ov, opts = opts, allocator = allocator,
+		src = make([dynamic]u8, 0, 256, allocator), nodes = make([dynamic]tape.Node, 0, 32, allocator),
+		facts = make([dynamic]tape.Fact, 0, 8, allocator), counts = make([dynamic]tape.Child_Count, 0, 4, allocator),
+		stack = make([dynamic]Mat_Frame, 0, 16, allocator),
 	}
-
-	src := make([dynamic]u8, 0, 256, allocator)
-	defer if err != nil {
-		delete(src)
-	}
-	nodes := make([dynamic]tape.Node, 0, 32, allocator)
-	defer if err != nil {
-		delete(nodes)
-	}
-	facts := make([dynamic]tape.Fact, 0, 8, allocator)
-	defer if err != nil {
-		delete(facts)
-	}
-	counts := make([dynamic]tape.Child_Count, 0, 4, allocator)
-	defer if err != nil {
-		delete(counts)
-	}
-	present: tape.Facts
-
-	stack := make([dynamic]Mat_Frame, 0, 16, allocator)
 	defer {
-		for &fr in stack {
+		for &fr in cx.stack {
 			delete(fr.elems, allocator)
 			destroy_effective_members(fr.members, fr.owned_keys, allocator)
 		}
-		delete(stack)
+		delete(cx.stack)
+		delete(cx.src)
+		delete(cx.nodes)
+		delete(cx.facts)
+		delete(cx.counts)
 	}
 
-	append_str :: proc(buf: ^[dynamic]u8, s: string) -> (lo: u64, n: u32, aerr: runtime.Allocator_Error) {
-		lo = u64(len(buf))
-		append(buf, s) or_return
-		return lo, u32(len(s)), nil
-	}
-
-	append_bytes :: proc(buf: ^[dynamic]u8, b: []u8) -> (lo: u64, n: u32, aerr: runtime.Allocator_Error) {
-		lo = u64(len(buf))
-		append(buf, ..b) or_return
-		return lo, u32(len(b)), nil
-	}
-
-	emit_cbor_tag_head :: proc(buf: ^[dynamic]u8, arg: u64) -> (lo: u64, n: u32, aerr: runtime.Allocator_Error) {
-		lo = u64(len(buf))
-		m := u8(6 << 5)
-		switch {
-		case arg < 24:
-			append(buf, m | u8(arg)) or_return
-		case arg <= 0xFF:
-			append(buf, m | 24, u8(arg)) or_return
-		case arg <= 0xFFFF:
-			b := [3]u8{m | 25, u8(arg >> 8), u8(arg)}
-			append(buf, ..b[:]) or_return
-		case arg <= 0xFFFF_FFFF:
-			b := [5]u8{m | 26, u8(arg >> 24), u8(arg >> 16), u8(arg >> 8), u8(arg)}
-			append(buf, ..b[:]) or_return
-		case:
-			b: [9]u8
-			b[0] = m | 27
-			endian.unchecked_put_u64be(b[1:], arg)
-			append(buf, ..b[:]) or_return
-		}
-		return lo, u32(u64(len(buf)) - lo), nil
-	}
-
-	emit_facts_for :: proc(
-		ov: ^Overlay,
-		h: Handle,
-		bn: tape.Node_Index,
-		out_node: tape.Node_Index,
-		src: ^[dynamic]u8,
-		facts: ^[dynamic]tape.Fact,
-		present: ^tape.Facts,
-		opts: Materialize_Options,
-		extra_style: string,
-		is_root_val: bool,
-		allocator: runtime.Allocator,
-	) -> Error {
-		n: ^Edit_Node
-		has_n := false
-		if h != NO_HANDLE {
-			n, has_n = get_node(ov, h)
-		}
-		// Copy untouched base facts not overridden by `n.facts`.
-		if bn != tape.NO_NODE && int(bn) < len(ov.base.nodes) {
-			for bf in tape.facts_of(ov.base, bn) {
-				overridden := false
-				if has_n {
-					for fo in n.facts {
-						if fo.kind == bf.kind {
-							if bf.kind != .Attribute {
-								overridden = true
-								break
-							}
-							if ov.base.format != nil && ov.base.format.attribute != nil {
-								kt, _ := ov.base.format.attribute(ov.base, bf)
-								if string(tape.span_bytes(ov.base, kt.lo, kt.n)) == fo.attr {
-									overridden = true
-									break
-								}
-							}
-						}
-					}
-				}
-				if overridden {
-					continue
-				}
-				if bf.kind == .Style && len(extra_style) > 0 {
-					continue
-				}
-				if bf.kind == .Tag && opts.cbor_tags && !(is_root_val && opts.skip_root_tags) {
-					span := tape.span_bytes(ov.base, bf.lo, bf.n)
-					flo, fn := append_bytes(src, span) or_return
-					append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Tag}) or_return
-					present^ += {.Tag}
-				} else if bf.kind == .Attribute && opts.xml_attrs && !(is_root_val && opts.skip_root_attrs) {
-					if ov.base.ext != nil && ov.base.format != nil && ov.base.format.attribute != nil {
-						kt, vt := ov.base.format.attribute(ov.base, bf)
-						aname := string(tape.span_bytes(ov.base, kt.lo, kt.n))
-						vroom := tape.text_room(ov.base, vt)
-						if vroom > 0 {
-							vtmp, verr := make([]u8, vroom, allocator)
-							if verr != nil {
-								return verr
-							}
-							vtxt, vok := tape.node_text(ov.base, vt, vtmp)
-							flo := u64(len(src))
-							append(src, aname) or_return
-							append(src, `="`) or_return
-							if vok {
-								append_xml_escaped_bytes(src, transmute([]u8)vtxt) or_return
-							} else {
-								append_xml_escaped_bytes(src, tape.span_bytes(ov.base, vt.lo, vt.n)) or_return
-							}
-							delete(vtmp, allocator)
-							append(src, '"') or_return
-							sp := tape.attribute_spelling(len(aname) + 2, true)
-							append(facts, tape.Fact{node = out_node, lo = flo, n = u32(u64(len(src)) - flo), kind = .Attribute, spelling = sp}) or_return
-							present^ += {.Attribute}
-							continue
-						}
-					}
-					span := tape.span_bytes(ov.base, bf.lo, bf.n)
-					flo, fn := append_bytes(src, span) or_return
-					append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Attribute, spelling = bf.spelling}) or_return
-					present^ += {.Attribute}
-				} else if (bf.kind == .Comment || bf.kind == .Comment_Inline || bf.kind == .Comment_Foot) && (!is_root_val || opts.include_root_comments || (opts.include_root_foot && bf.kind == .Comment_Foot)) {
-					raw := tape.span_bytes(ov.base, bf.lo, bf.n)
-					lead := min(int(tape.fact_lead(bf.spelling)), len(raw))
-					tail := min(int(tape.fact_tail(bf.spelling)), len(raw) - lead)
-					body := raw[lead : len(raw) - tail]
-					flo, fn := append_bytes(src, body) or_return
-					append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = bf.kind}) or_return
-					present^ += {bf.kind}
-				} else if bf.kind == .Style {
-					if sname, ok := tape.fact_name(ov.base, bn, .Style); ok {
-						flo, fn := append_str(src, sname) or_return
-						append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Style}) or_return
-						present^ += {.Style}
-					}
-				}
-			}
-		}
-		if has_n {
-			for fo in n.facts {
-				if fo.deleted {
-					continue
-				}
-				#partial switch fo.kind {
-				case .Tag:
-					if is_root_val && opts.skip_root_tags {
-						continue
-					}
-					if opts.cbor_tags {
-						tag_num, tok := cbor_parse_tag_override(fo)
-						if !tok {
-							return refuse(.Fact_No_Place, "CBOR tag must be an unsigned 64-bit integer", bn)
-						}
-						flo, fn := emit_cbor_tag_head(src, tag_num) or_return
-						append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Tag}) or_return
-						present^ += {.Tag}
-					} else if len(fo.values) > 0 {
-						flo, fn := append_str(src, fo.values[0]) or_return
-						append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Tag}) or_return
-						present^ += {.Tag}
-					}
-				case .Attribute:
-					if opts.xml_attrs && !(is_root_val && opts.skip_root_attrs) && len(fo.values) > 0 {
-						flo := u64(len(src))
-						append(src, fo.attr) or_return
-						append(src, `="`) or_return
-						append_xml_escaped_bytes(src, transmute([]u8)fo.values[0]) or_return
-						append(src, '"') or_return
-						sp := tape.attribute_spelling(len(fo.attr) + 2, true)
-						append(facts, tape.Fact{node = out_node, lo = flo, n = u32(u64(len(src)) - flo), kind = .Attribute, spelling = sp}) or_return
-						present^ += {.Attribute}
-					}
-				case .Comment, .Comment_Inline, .Comment_Foot:
-					if !is_root_val || opts.include_root_comments || (opts.include_root_foot && fo.kind == .Comment_Foot) {
-						for line in fo.values {
-							flo := u64(len(src))
-							pad := fo.padded && len(line) > 0
-							if pad && line[0] != ' ' && line[0] != '\t' {
-								append(src, ' ') or_return
-							}
-							append(src, line) or_return
-							if pad && line[len(line) - 1] != ' ' && line[len(line) - 1] != '\t' {
-								has_nl := false
-								if !opts.xml_attrs {
-									for b in transmute([]u8)line {
-										if b == '\n' || b == '\r' {
-											has_nl = true
-											break
-										}
-									}
-								}
-								if opts.xml_attrs || (opts.target_format == nil && has_nl) {
-									append(src, ' ') or_return
-								}
-							}
-							append(facts, tape.Fact{node = out_node, lo = flo, n = u32(u64(len(src)) - flo), kind = fo.kind}) or_return
-							present^ += {fo.kind}
-						}
-					}
-				case .Style:
-					if len(fo.values) > 0 && len(extra_style) == 0 {
-						flo, fn := append_str(src, fo.values[0]) or_return
-						append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Style}) or_return
-						present^ += {.Style}
-					}
-				}
-			}
-		}
-		if len(extra_style) > 0 {
-			flo, fn := append_str(src, extra_style) or_return
-			append(facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Style}) or_return
-			present^ += {.Style}
-		}
-		_ = allocator
-		return nil
-	}
-
-	emit_one :: proc(
-		ov: ^Overlay,
-		h: Handle,
-		bn: tape.Node_Index,
-		role: tape.Role,
-		src: ^[dynamic]u8,
-		nodes: ^[dynamic]tape.Node,
-		facts: ^[dynamic]tape.Fact,
-		present: ^tape.Facts,
-		stack: ^[dynamic]Mat_Frame,
-		opts: Materialize_Options,
-		extra_style: string,
-		is_root_val: bool,
-		allocator: runtime.Allocator,
-	) -> Error {
-		out_idx := tape.Node_Index(len(nodes))
-		if opts.tracked_node != nil && opts.track_handle != NO_HANDLE && h == opts.track_handle {
-			opts.tracked_node^ = out_idx
-		}
-
-		// Resolve handle vs untouched base node.
-		eff_h := h
-		eff_bn := bn
-		if eff_h != NO_HANDLE {
-			if n, ok := get_node(ov, eff_h); ok {
-				if n.state == .Replaced && n.val.kind == .Base_Ref {
-					eff_bn = n.val.base_ref
-					eff_h = NO_HANDLE
-					// Emit facts attached to the wrapper `h` on `out_idx` below as well.
-				} else if n.state == .Ancestor && !n.has_edits {
-					eff_bn = n.base
-					eff_h = NO_HANDLE
-				} else if n.base != tape.NO_NODE && eff_bn == tape.NO_NODE {
-					eff_bn = n.base
-				}
-			}
-		}
-
-		emit_facts_for(ov, h, eff_bn, out_idx, src, facts, present, opts, extra_style, is_root_val, allocator) or_return
-
-		if eff_h != NO_HANDLE {
-			n, ok := get_node(ov, eff_h)
-			if !ok {
-				return refuse(.Bad_Handle, "invalid handle in materialize_subtree")
-			}
-			if n.state == .Replaced {
-				switch n.val.kind {
-				case .None, .Null:
-					append(nodes, tape.Node{kind = .Null, role = role}) or_return
-					return nil
-				case .False:
-					append(nodes, tape.Node{kind = .False, role = role}) or_return
-					return nil
-				case .True:
-					append(nodes, tape.Node{kind = .True, role = role}) or_return
-					return nil
-				case .Int:
-					nbuf: [32]u8
-					s := strconv.write_int(nbuf[:], n.val.i, 10)
-					lo, ln := append_str(src, s) or_return
-					append(nodes, tape.Node{lo = lo, n = ln, kind = .Number, role = role}) or_return
-					return nil
-				case .Uint:
-					nbuf: [32]u8
-					s := strconv.write_uint(nbuf[:], n.val.u, 10)
-					lo, ln := append_str(src, s) or_return
-					append(nodes, tape.Node{lo = lo, n = ln, kind = .Number, role = role}) or_return
-					return nil
-				case .Float:
-					s: string
-					nbuf: [64]u8
-					if math.is_nan(n.val.f) {
-						s = "NaN"
-					} else if math.is_inf(n.val.f) {
-						s = "-Infinity" if n.val.f < 0 else "Infinity"
-					} else {
-						s = strconv.write_float(nbuf[:], n.val.f, 'g', -1, 64, {})
-					}
-					lo, ln := append_str(src, s) or_return
-					append(nodes, tape.Node{lo = lo, n = ln, kind = .Number, role = role}) or_return
-					return nil
-				case .Number_Text:
-					lo, ln := append_str(src, n.val.text) or_return
-					append(nodes, tape.Node{lo = lo, n = ln, kind = .Number, role = role}) or_return
-					return nil
-				case .String:
-					lo, ln := append_str(src, n.val.text) or_return
-					append(nodes, tape.Node{lo = lo, n = ln, kind = .String, role = role}) or_return
-					return nil
-				case .Raw:
-					lo, ln := append_str(src, n.val.text) or_return
-					append(nodes, tape.Node{lo = lo, n = ln, kind = .Plain, role = role}) or_return
-					return nil
-				case .Bytes:
-					lo, ln := append_bytes(src, n.val.raw) or_return
-					append(nodes, tape.Node{lo = lo, n = ln, kind = .Bytes, role = role}) or_return
-					return nil
-				case .Base_Ref:
-					// Handled above.
-				case .Array, .Object:
-					is_obj := n.val.kind == .Object
-					append(nodes, tape.Node{kind = .Object if is_obj else .Array, role = role}) or_return
-					if is_obj {
-						ms, oks, merr := materialize_obj_members(ov, eff_h, opts, allocator)
-						if merr != nil {
-							return merr
-						}
-						append(stack, Mat_Frame{node_idx = int(out_idx), is_obj = true, members = ms, owned_keys = oks, base_c = tape.NO_NODE}) or_return
-					} else {
-						es, eerr := effective_elements(ov, eff_h, allocator)
-						if eerr != nil {
-							return eerr
-						}
-						append(stack, Mat_Frame{node_idx = int(out_idx), is_obj = false, elems = es, base_c = tape.NO_NODE}) or_return
-					}
-					return nil
-				}
-			}
-			// `.Ancestor` (with edits) or `.Container_Delta`:
-			k := node_kind(ov, eff_h)
-			if k == .Object || k == .Array {
-				is_obj := k == .Object
-				append(nodes, tape.Node{kind = k, role = role}) or_return
-				if is_obj {
-					ms, oks, merr := materialize_obj_members(ov, eff_h, opts, allocator)
-					if merr != nil {
-						return merr
-					}
-					append(stack, Mat_Frame{node_idx = int(out_idx), is_obj = true, members = ms, owned_keys = oks, base_c = tape.NO_NODE}) or_return
-				} else {
-					es, eerr := effective_elements(ov, eff_h, allocator)
-					if eerr != nil {
-						return eerr
-					}
-					append(stack, Mat_Frame{node_idx = int(out_idx), is_obj = false, elems = es, base_c = tape.NO_NODE}) or_return
-				}
-				return nil
-			}
-			// Fact-only edit on a base scalar -> fall through to emit base scalar!
-		}
-
-		// Untouched base node `eff_bn`:
-		if eff_bn == tape.NO_NODE || int(eff_bn) >= len(ov.base.nodes) {
-			append(nodes, tape.Node{kind = .Null, role = role}) or_return
-			return nil
-		}
-		bt := ov.base.nodes[eff_bn]
-		#partial switch bt.kind {
-		case .Null, .False, .True:
-			append(nodes, tape.Node{kind = bt.kind, role = role}) or_return
-		case .Number:
-			if num, nok := tape.node_number(ov.base, eff_bn); nok {
-				nbuf: [64]u8
-				s: string
-				switch num.kind {
-				case .Int:
-					s = strconv.write_int(nbuf[:], i64(num.bits), 10)
-				case .Uint:
-					s = strconv.write_uint(nbuf[:], num.bits, 10)
-				case .Float:
-					fv := transmute(f64)num.bits
-					if math.is_nan(fv) {
-						s = "NaN"
-					} else if math.is_inf(fv) {
-						s = "-Infinity" if fv < 0 else "Infinity"
-					} else {
-						s = strconv.write_float(nbuf[:], fv, 'g', -1, 64, {})
-					}
-				case .Wide:
-					tk := decode_node_text_tmp(ov.base, eff_bn, allocator)
-					defer free_tmp_text(tk, allocator)
-					lo, ln := append_str(src, tk.text) or_return
-					append(nodes, tape.Node{lo = lo, n = ln, kind = .Number, role = role}) or_return
-					return nil
-				}
-				lo, ln := append_str(src, s) or_return
-				append(nodes, tape.Node{lo = lo, n = ln, kind = .Number, role = role}) or_return
-			} else {
-				tk := decode_node_text_tmp(ov.base, eff_bn, allocator)
-				defer free_tmp_text(tk, allocator)
-				lo, ln := append_str(src, tk.text) or_return
-				append(nodes, tape.Node{lo = lo, n = ln, kind = .Number, role = role}) or_return
-			}
-		case .String, .Plain:
-			tk := decode_node_text_tmp(ov.base, eff_bn, allocator)
-			defer free_tmp_text(tk, allocator)
-			lo, ln := append_str(src, tk.text) or_return
-			append(nodes, tape.Node{lo = lo, n = ln, kind = .String, role = role}) or_return
-		case .Bytes:
-			tk := decode_node_text_tmp(ov.base, eff_bn, allocator)
-			defer free_tmp_text(tk, allocator)
-			lo, ln := append_bytes(src, transmute([]u8)tk.text) or_return
-			append(nodes, tape.Node{lo = lo, n = ln, kind = .Bytes, role = role}) or_return
-		case .Array, .Object:
-			append(nodes, tape.Node{kind = bt.kind, role = role}) or_return
-			append(stack, Mat_Frame {
-				node_idx = int(out_idx),
-				is_obj   = bt.kind == .Object,
-				base_c   = eff_bn,
-				base_cur = eff_bn + 1,
-				base_end = eff_bn + tape.Node_Index(bt.n),
-			}) or_return
-		}
-		return nil
-	}
-
-	// Optional single-member root wrapper (e.g. XML `<tag>...</tag>`).
 	wrapped := len(opts.wrap_key) > 0
 	if wrapped {
-		append(&nodes, tape.Node{kind = .Object, role = .Value}) or_return
-		klo, kn := append_str(&src, opts.wrap_key) or_return
-		append(&nodes, tape.Node{lo = klo, n = kn, kind = .String, role = .Key}) or_return
+		append(&cx.nodes, tape.Node{kind = .Object, role = .Value}) or_return
+		mat_append_node(&cx, opts.wrap_key, .String, .Key) or_return
 	}
-	if opts.tracked_node != nil {
-		opts.tracked_node^ = tape.NO_NODE
-	}
+	if opts.tracked_node != nil { opts.tracked_node^ = tape.NO_NODE }
 
-	emit_one(ov, root_h, base_node, .Value, &src, &nodes, &facts, &present, &stack, opts, opts.root_style, true, allocator) or_return
+	mat_emit_one(&cx, root_h, base_node, .Value, opts.root_style, true) or_return
 
-	for len(stack) > 0 {
-		fr := &stack[len(stack) - 1]
-		if fr.base_c != tape.NO_NODE {
-			// Walking untouched base container iteratively.
-			if fr.base_cur >= fr.base_end {
-				finalize_mat_frame(&nodes, &counts, fr, allocator) or_return
-				pop(&stack)
-				continue
+	for len(cx.stack) > 0 {
+		fr := &cx.stack[len(cx.stack) - 1]
+		done := (fr.base_cur >= fr.base_end) if fr.base_c != tape.NO_NODE else (fr.idx >= (len(fr.members) if fr.is_obj else len(fr.elems)))
+		if done {
+			finalize_mat_frame(&cx.nodes, &cx.counts, fr) or_return
+			if fr.base_c == tape.NO_NODE {
+				if fr.is_obj { destroy_effective_members(fr.members, fr.owned_keys, allocator) } else { delete(fr.elems, allocator) }
 			}
-			if fr.is_obj {
-				kn := fr.base_cur
-				vn := kn + 1
-				fr.base_cur = tape.node_after(ov.base, vn)
-				fr.child_n += 1
-				kt := decode_node_text_tmp(ov.base, kn, allocator)
-				klo, klen := append_str(&src, kt.text) or_return
-				free_tmp_text(kt, allocator)
-				ksp := tape.SPELLING_TEXT_KEY if (opts.xml_attrs && tape.is_text_key(ov.base.nodes[kn])) else u16(0)
-				append(&nodes, tape.Node{lo = klo, n = klen, kind = .String, role = .Key, spelling = ksp}) or_return
-				emit_one(ov, NO_HANDLE, vn, .Value, &src, &nodes, &facts, &present, &stack, opts, "", false, allocator) or_return
-			} else {
-				vn := fr.base_cur
-				fr.base_cur = tape.node_after(ov.base, vn)
-				fr.child_n += 1
-				emit_one(ov, NO_HANDLE, vn, .Value, &src, &nodes, &facts, &present, &stack, opts, "", false, allocator) or_return
-			}
+			pop(&cx.stack)
 			continue
 		}
-
-		if fr.is_obj {
-			if fr.idx >= len(fr.members) {
-				finalize_mat_frame(&nodes, &counts, fr, allocator) or_return
-				destroy_effective_members(fr.members, fr.owned_keys, allocator)
-				pop(&stack)
-				continue
+		fr.child_n += 1
+		if fr.base_c != tape.NO_NODE {
+			kn := fr.base_cur
+			vn := kn + 1 if fr.is_obj else kn
+			fr.base_cur = tape.node_after(ov.base, vn)
+			if fr.is_obj {
+				kt := decode_node_text_tmp(ov.base, kn, allocator)
+				ksp := tape.SPELLING_TEXT_KEY if (opts.xml_attrs && tape.is_text_key(ov.base.nodes[kn])) else u16(0)
+				aerr := mat_append_node(&cx, kt.text, .String, .Key, ksp)
+				free_tmp_text(kt, allocator)
+				if aerr != nil { return {}, aerr }
 			}
+			mat_emit_one(&cx, NO_HANDLE, vn, .Value, "", false) or_return
+		} else if fr.is_obj {
 			m := fr.members[fr.idx]
 			fr.idx += 1
-			fr.child_n += 1
-			klo, klen := append_str(&src, m.key) or_return
 			ksp := tape.SPELLING_TEXT_KEY if (opts.xml_attrs && m.key == tape.TEXT_KEY) else u16(0)
-			append(&nodes, tape.Node{lo = klo, n = klen, kind = .String, role = .Key, spelling = ksp}) or_return
-			emit_one(ov, m.handle, m.base_val, .Value, &src, &nodes, &facts, &present, &stack, opts, "", false, allocator) or_return
+			mat_append_node(&cx, m.key, .String, .Key, ksp) or_return
+			mat_emit_one(&cx, m.handle, m.base_val, .Value, "", false) or_return
 		} else {
-			if fr.idx >= len(fr.elems) {
-				finalize_mat_frame(&nodes, &counts, fr, allocator) or_return
-				delete(fr.elems, allocator)
-				pop(&stack)
-				continue
-			}
 			e := fr.elems[fr.idx]
 			fr.idx += 1
-			fr.child_n += 1
-			emit_one(ov, e.handle, e.base, .Value, &src, &nodes, &facts, &present, &stack, opts, "", false, allocator) or_return
+			mat_emit_one(&cx, e.handle, e.base, .Value, "", false) or_return
 		}
 	}
 
-	if wrapped {
-		nodes[0].n = u32(len(nodes))
-		nodes[0].spelling = 1
-	}
+	if wrapped { cx.nodes[0].n, cx.nodes[0].spelling = u32(len(cx.nodes)), 1 }
 	if opts.tracked_node != nil && opts.tracked_node^ == tape.NO_NODE && opts.track_handle != NO_HANDLE {
-		// Track handle if it was unwrapped directly as root or base_node was reached via `handle_for_base`.
-		if rn, rok := get_node(ov, opts.track_handle); rok && rn.handle == ov.root {
-			opts.tracked_node^ = 0
-		}
+		if rn, rok := get_node(ov, opts.track_handle); rok && rn.handle == ov.root { opts.tracked_node^ = 0 }
 	}
 
-	// Copy into exact-sized slices matching `tape.destroy_document` (`free(raw_data(...), doc.allocator)`).
-	out_src: []u8
-	if len(src) > 0 {
-		out_src = make([]u8, len(src), allocator) or_return
-		copy(out_src, src[:])
-	}
-	delete(src)
-
-	out_nodes := alloc_exact_slice(nodes[:], allocator) or_return
-	delete(nodes)
-
-	out_facts: []tape.Fact
-	if len(facts) > 0 {
-		out_facts = alloc_exact_slice(facts[:], allocator) or_return
-	}
-	delete(facts)
-
-	out_counts: []tape.Child_Count
-	if len(counts) > 0 {
-		out_counts = alloc_exact_slice(counts[:], allocator) or_return
-	}
-	delete(counts)
+	out_src := alloc_exact_slice(cx.src[:], allocator) or_return
+	defer if err != nil { delete(out_src, allocator) }
+	out_nodes := alloc_exact_slice(cx.nodes[:], allocator) or_return
+	defer if err != nil { delete(out_nodes, allocator) }
+	out_facts := alloc_exact_slice(cx.facts[:], allocator) or_return
+	defer if err != nil { delete(out_facts, allocator) }
+	out_counts := alloc_exact_slice(cx.counts[:], allocator) or_return
 
 	flags := tape.Doc_Flags{.Owns_Src}
-	if opts.target_format != nil {
-		// Prevent format writers from taking raw already-escaped copy-through shortcuts (without requiring `.Held` ext!).
-		flags += {.Tolerated}
-	}
+	if opts.target_format != nil { flags += {.Tolerated} }
 	return tape.Document {
-		src        = out_src,
-		nodes      = out_nodes,
-		facts      = out_facts,
-		counts     = out_counts,
-		format     = opts.target_format if opts.target_format != nil else &MATERIALIZED_FORMAT,
-		root_close = u64(len(out_src)),
-		present    = present,
-		flags      = flags,
-		allocator  = allocator,
+		src = out_src, nodes = out_nodes, facts = out_facts, counts = out_counts,
+		format = opts.target_format if opts.target_format != nil else &MATERIALIZED_FORMAT,
+		root_close = u64(len(out_src)), present = cx.present, flags = flags, allocator = allocator,
 	}, nil
 }
 
 @(private = "file")
-alloc_exact_slice :: proc(items: []$T, allocator: runtime.Allocator) -> (out: []T, err: runtime.Allocator_Error) {
-	if len(items) == 0 {
-		return nil, nil
-	}
-	raw := runtime.mem_alloc_non_zeroed(len(items) * size_of(T), align_of(T), allocator) or_return
-	out = ([^]T)(raw_data(raw))[:len(items)]
-	copy(out, items)
-	return out, nil
+mat_append_node :: proc(cx: ^Mat_Cx, s: string, kind: tape.Kind, role: tape.Role, spelling: u16 = 0) -> runtime.Allocator_Error {
+	lo := u64(len(cx.src))
+	append(&cx.src, s) or_return
+	append(&cx.nodes, tape.Node{lo = lo, n = u32(len(s)), kind = kind, role = role, spelling = spelling}) or_return
+	return nil
 }
 
 @(private = "file")
-finalize_mat_frame :: proc(
-	nodes: ^[dynamic]tape.Node,
-	counts: ^[dynamic]tape.Child_Count,
-	fr: ^$F,
-	allocator: runtime.Allocator,
-) -> runtime.Allocator_Error {
-	_ = allocator
+mat_append_fact :: proc(cx: ^Mat_Cx, out_node: tape.Node_Index, kind: tape.Fact_Kind, raw: []u8, spelling: u16 = 0) -> runtime.Allocator_Error {
+	lo := u64(len(cx.src))
+	append(&cx.src, ..raw) or_return
+	append(&cx.facts, tape.Fact{node = out_node, lo = lo, n = u32(len(raw)), kind = kind, spelling = spelling}) or_return
+	cx.present += {kind}
+	return nil
+}
+
+@(private = "file")
+mat_append_xml_attr :: proc(cx: ^Mat_Cx, out_node: tape.Node_Index, name: string, val: []u8) -> runtime.Allocator_Error {
+	lo := u64(len(cx.src))
+	append(&cx.src, name) or_return
+	append(&cx.src, `="`) or_return
+	for c in val {
+		switch c {
+		case '&': append(&cx.src, "&amp;") or_return
+		case '<': append(&cx.src, "&lt;") or_return
+		case '>': append(&cx.src, "&gt;") or_return
+		case '"': append(&cx.src, "&quot;") or_return
+		case '\t': append(&cx.src, "&#9;") or_return
+		case '\n': append(&cx.src, "&#10;") or_return
+		case '\r': append(&cx.src, "&#13;") or_return
+		case: append(&cx.src, c) or_return
+		}
+	}
+	append(&cx.src, '"') or_return
+	append(&cx.facts, tape.Fact{node = out_node, lo = lo, n = u32(u64(len(cx.src)) - lo), kind = .Attribute, spelling = tape.attribute_spelling(len(name) + 2, true)}) or_return
+	cx.present += {.Attribute}
+	return nil
+}
+
+@(private = "file")
+emit_cbor_tag_head :: proc(buf: ^[dynamic]u8, arg: u64) -> (lo: u64, n: u32, aerr: runtime.Allocator_Error) {
+	lo = u64(len(buf))
+	m := u8(6 << 5)
+	switch {
+	case arg < 24: append(buf, m | u8(arg)) or_return
+	case arg <= 0xFF: append(buf, m | 24, u8(arg)) or_return
+	case arg <= 0xFFFF:
+		b := [3]u8{m | 25, u8(arg >> 8), u8(arg)}
+		append(buf, ..b[:]) or_return
+	case arg <= 0xFFFF_FFFF:
+		b := [5]u8{m | 26, u8(arg >> 24), u8(arg >> 16), u8(arg >> 8), u8(arg)}
+		append(buf, ..b[:]) or_return
+	case:
+		b: [9]u8
+		b[0] = m | 27
+		endian.unchecked_put_u64be(b[1:], arg)
+		append(buf, ..b[:]) or_return
+	}
+	return lo, u32(u64(len(buf)) - lo), nil
+}
+
+@(private = "file")
+mat_emit_facts :: proc(cx: ^Mat_Cx, h: Handle, bn, out_node: tape.Node_Index, extra_style: string, is_root_val: bool) -> Error {
+	opts, base := cx.opts, cx.ov.base
+	n, has_n := get_node(cx.ov, h)
+	allow_comment :: proc "contextless" (kind: tape.Fact_Kind, opts: Materialize_Options, is_root: bool) -> bool {
+		return !is_root || opts.include_root_comments || (opts.include_root_foot && kind == .Comment_Foot)
+	}
+	if bn != tape.NO_NODE && int(bn) < len(base.nodes) {
+		for bf in tape.facts_of(base, bn) {
+			overridden := false
+			if has_n {
+				for fo in n.facts {
+					if fo.kind != bf.kind { continue }
+					if bf.kind != .Attribute {
+						overridden = true
+						break
+					}
+					if base.format != nil && base.format.attribute != nil {
+						kt, _ := base.format.attribute(base, bf)
+						if string(tape.span_bytes(base, kt.lo, kt.n)) == fo.attr {
+							overridden = true
+							break
+						}
+					}
+				}
+			}
+			if overridden || (bf.kind == .Style && len(extra_style) > 0) { continue }
+			if bf.kind == .Tag && opts.cbor_tags && !(is_root_val && opts.skip_root_tags) {
+				mat_append_fact(cx, out_node, .Tag, tape.span_bytes(base, bf.lo, bf.n)) or_return
+			} else if bf.kind == .Attribute && opts.xml_attrs && !(is_root_val && opts.skip_root_attrs) {
+				if base.ext != nil && base.format != nil && base.format.attribute != nil {
+					kt, vt := base.format.attribute(base, bf)
+					if tape.text_room(base, vt) > 0 {
+						tk := decode_token_text_tmp(base, vt, cx.allocator)
+						aerr := mat_append_xml_attr(cx, out_node, string(tape.span_bytes(base, kt.lo, kt.n)), transmute([]u8)tk.text if len(tk.text) > 0 else tape.span_bytes(base, vt.lo, vt.n))
+						free_tmp_text(tk, cx.allocator)
+						if aerr != nil { return aerr }
+						continue
+					}
+				}
+				mat_append_fact(cx, out_node, .Attribute, tape.span_bytes(base, bf.lo, bf.n), bf.spelling) or_return
+			} else if bf.kind in tape.COMMENTS && allow_comment(bf.kind, opts, is_root_val) {
+				raw := tape.span_bytes(base, bf.lo, bf.n)
+				lead := min(int(tape.fact_lead(bf.spelling)), len(raw))
+				tail := min(int(tape.fact_tail(bf.spelling)), len(raw) - lead)
+				mat_append_fact(cx, out_node, bf.kind, raw[lead : len(raw) - tail]) or_return
+			} else if bf.kind == .Style {
+				if sname, ok := tape.fact_name(base, bn, .Style); ok { mat_append_fact(cx, out_node, .Style, transmute([]u8)sname) or_return }
+			}
+		}
+	}
+	if has_n {
+		for fo in n.facts {
+			if fo.deleted { continue }
+			#partial switch fo.kind {
+			case .Tag:
+				if is_root_val && opts.skip_root_tags { continue }
+				if opts.cbor_tags {
+					tag_num, tok := cbor_parse_tag_override(fo)
+					if !tok { return refuse(.Fact_No_Place, "CBOR tag must be an unsigned 64-bit integer", bn) }
+					flo, fn := emit_cbor_tag_head(&cx.src, tag_num) or_return
+					append(&cx.facts, tape.Fact{node = out_node, lo = flo, n = fn, kind = .Tag}) or_return
+					cx.present += {.Tag}
+				} else if len(fo.values) > 0 {
+					mat_append_fact(cx, out_node, .Tag, transmute([]u8)fo.values[0]) or_return
+				}
+			case .Attribute:
+				if opts.xml_attrs && !(is_root_val && opts.skip_root_attrs) && len(fo.values) > 0 {
+					mat_append_xml_attr(cx, out_node, fo.attr, transmute([]u8)fo.values[0]) or_return
+				}
+			case .Comment, .Comment_Inline, .Comment_Foot:
+				if !allow_comment(fo.kind, opts, is_root_val) { continue }
+				for line in fo.values {
+					flo, pad := u64(len(cx.src)), fo.padded && len(line) > 0
+					if pad && line[0] != ' ' && line[0] != '\t' { append(&cx.src, ' ') or_return }
+					append(&cx.src, line) or_return
+					if pad && line[len(line) - 1] != ' ' && line[len(line) - 1] != '\t' {
+						has_nl := !opts.xml_attrs && (bytes.index_byte(transmute([]u8)line, '\n') >= 0 || bytes.index_byte(transmute([]u8)line, '\r') >= 0)
+						if opts.xml_attrs || (opts.target_format == nil && has_nl) { append(&cx.src, ' ') or_return }
+					}
+					append(&cx.facts, tape.Fact{node = out_node, lo = flo, n = u32(u64(len(cx.src)) - flo), kind = fo.kind}) or_return
+					cx.present += {fo.kind}
+				}
+			case .Style:
+				if len(fo.values) > 0 && len(extra_style) == 0 { mat_append_fact(cx, out_node, .Style, transmute([]u8)fo.values[0]) or_return }
+			}
+		}
+	}
+	if len(extra_style) > 0 { mat_append_fact(cx, out_node, .Style, transmute([]u8)extra_style) or_return }
+	return nil
+}
+
+@(private = "file")
+mat_push_overlay_container :: proc(cx: ^Mat_Cx, eff_h: Handle, is_obj: bool, out_idx: tape.Node_Index, role: tape.Role) -> Error {
+	append(&cx.nodes, tape.Node{kind = .Object if is_obj else .Array, role = role}) or_return
+	if is_obj {
+		ms, oks := materialize_obj_members(cx.ov, eff_h, cx.opts, cx.allocator) or_return
+		append(&cx.stack, Mat_Frame{node_idx = int(out_idx), is_obj = true, members = ms, owned_keys = oks, base_c = tape.NO_NODE}) or_return
+	} else {
+		es := effective_elements(cx.ov, eff_h, cx.allocator) or_return
+		append(&cx.stack, Mat_Frame{node_idx = int(out_idx), elems = es, base_c = tape.NO_NODE}) or_return
+	}
+	return nil
+}
+
+@(private = "file")
+mat_emit_one :: proc(cx: ^Mat_Cx, h: Handle, bn: tape.Node_Index, role: tape.Role, extra_style: string, is_root_val: bool) -> Error {
+	out_idx := tape.Node_Index(len(cx.nodes))
+	if cx.opts.tracked_node != nil && cx.opts.track_handle != NO_HANDLE && h == cx.opts.track_handle { cx.opts.tracked_node^ = out_idx }
+
+	eff_h, eff_bn := h, bn
+	if n, ok := get_node(cx.ov, eff_h); ok {
+		if n.state == .Replaced && n.val.kind == .Base_Ref {
+			eff_bn, eff_h = n.val.base_ref, NO_HANDLE
+		} else if n.state == .Ancestor && !n.has_edits {
+			eff_bn, eff_h = n.base, NO_HANDLE
+		} else if n.base != tape.NO_NODE && eff_bn == tape.NO_NODE {
+			eff_bn = n.base
+		}
+	}
+
+	mat_emit_facts(cx, h, eff_bn, out_idx, extra_style, is_root_val) or_return
+
+	if eff_h != NO_HANDLE {
+		n, ok := get_node(cx.ov, eff_h)
+		if !ok { return refuse(.Bad_Handle, "invalid handle in materialize_subtree") }
+		if n.state == .Replaced {
+			nbuf: [64]u8
+			switch n.val.kind {
+			case .None, .Null: append(&cx.nodes, tape.Node{kind = .Null, role = role}) or_return
+			case .False: append(&cx.nodes, tape.Node{kind = .False, role = role}) or_return
+			case .True: append(&cx.nodes, tape.Node{kind = .True, role = role}) or_return
+			case .Int: mat_append_node(cx, strconv.write_int(nbuf[:], n.val.i, 10), .Number, role) or_return
+			case .Uint: mat_append_node(cx, strconv.write_uint(nbuf[:], n.val.u, 10), .Number, role) or_return
+			case .Float: mat_append_node(cx, format_float_str(n.val.f, nbuf[:]), .Number, role) or_return
+			case .Number_Text: mat_append_node(cx, n.val.text, .Number, role) or_return
+			case .String: mat_append_node(cx, n.val.text, .String, role) or_return
+			case .Raw: mat_append_node(cx, n.val.text, .Plain, role) or_return
+			case .Bytes: mat_append_node(cx, string(n.val.raw), .Bytes, role) or_return
+			case .Base_Ref:
+			case .Array, .Object: return mat_push_overlay_container(cx, eff_h, n.val.kind == .Object, out_idx, role)
+			}
+			return nil
+		}
+		if k := node_kind(cx.ov, eff_h); k == .Object || k == .Array {
+			return mat_push_overlay_container(cx, eff_h, k == .Object, out_idx, role)
+		}
+	}
+
+	base := cx.ov.base
+	if eff_bn == tape.NO_NODE || int(eff_bn) >= len(base.nodes) {
+		append(&cx.nodes, tape.Node{kind = .Null, role = role}) or_return
+		return nil
+	}
+	bt := base.nodes[eff_bn]
+	#partial switch bt.kind {
+	case .Null, .False, .True:
+		append(&cx.nodes, tape.Node{kind = bt.kind, role = role}) or_return
+	case .Number:
+		if num, nok := tape.node_number(base, eff_bn); nok && num.kind != .Wide {
+			nbuf: [64]u8
+			s: string
+			#partial switch num.kind {
+			case .Int: s = strconv.write_int(nbuf[:], i64(num.bits), 10)
+			case .Uint: s = strconv.write_uint(nbuf[:], num.bits, 10)
+			case .Float: s = format_float_str(transmute(f64)num.bits, nbuf[:])
+			}
+			mat_append_node(cx, s, .Number, role) or_return
+		} else {
+			tk := decode_node_text_tmp(base, eff_bn, cx.allocator)
+			defer free_tmp_text(tk, cx.allocator)
+			mat_append_node(cx, tk.text, .Number, role) or_return
+		}
+	case .String, .Plain, .Bytes:
+		tk := decode_node_text_tmp(base, eff_bn, cx.allocator)
+		defer free_tmp_text(tk, cx.allocator)
+		mat_append_node(cx, tk.text, .Bytes if bt.kind == .Bytes else .String, role) or_return
+	case .Array, .Object:
+		append(&cx.nodes, tape.Node{kind = bt.kind, role = role}) or_return
+		append(&cx.stack, Mat_Frame{node_idx = int(out_idx), is_obj = bt.kind == .Object, base_c = eff_bn, base_cur = eff_bn + 1, base_end = eff_bn + tape.Node_Index(bt.n)}) or_return
+	}
+	return nil
+}
+
+@(private = "file")
+finalize_mat_frame :: proc(nodes: ^[dynamic]tape.Node, counts: ^[dynamic]tape.Child_Count, fr: ^Mat_Frame) -> runtime.Allocator_Error {
 	idx := fr.node_idx
 	nodes[idx].n = u32(len(nodes) - idx)
 	if fr.child_n < int(tape.MAX_CHILDREN) {
@@ -776,92 +451,31 @@ dedup_effective_members :: proc "contextless" (members: []Effective_Member) -> [
 }
 
 @(private = "file")
-append_xml_escaped_bytes :: proc(src: ^[dynamic]u8, raw: []u8) -> runtime.Allocator_Error {
-	for c in raw {
-		switch c {
-		case '&':  append(src, "&amp;") or_return
-		case '<':  append(src, "&lt;") or_return
-		case '>':  append(src, "&gt;") or_return
-		case '"':  append(src, "&quot;") or_return
-		case '\t': append(src, "&#9;") or_return
-		case '\n': append(src, "&#10;") or_return
-		case '\r': append(src, "&#13;") or_return
-		case:      append(src, c) or_return
-		}
-	}
-	return nil
-}
-
-@(private = "file")
-materialize_obj_members :: proc(
-	ov: ^Overlay,
-	obj_h: Handle,
-	opts: Materialize_Options,
-	allocator: runtime.Allocator,
-) -> (
-	members: []Effective_Member,
-	owned_keys: []string,
-	err: runtime.Allocator_Error,
-) {
-	ms, oks, merr := effective_members(ov, obj_h, allocator)
-	if merr != nil {
-		return nil, nil, merr
-	}
-	if opts.dedup_keys && len(ms) > 1 {
-		ms = dedup_effective_members(ms)
-	}
-	if !opts.flatten_xml_arrays || len(ms) == 0 {
-		return ms, oks, nil
-	}
+materialize_obj_members :: proc(ov: ^Overlay, obj_h: Handle, opts: Materialize_Options, allocator: runtime.Allocator) -> (members: []Effective_Member, owned_keys: []string, err: runtime.Allocator_Error) {
+	ms, oks := effective_members(ov, obj_h, allocator) or_return
+	if opts.dedup_keys && len(ms) > 1 { ms = dedup_effective_members(ms) }
+	if !opts.flatten_xml_arrays || len(ms) == 0 { return ms, oks, nil }
 	has_arr := false
 	for m in ms {
-		if m.handle != NO_HANDLE {
-			if cn, ok := get_node(ov, m.handle); ok && cn.state == .Replaced && cn.val.kind == .Array {
-				has_arr = true
-				break
-			}
+		if cn, ok := get_node(ov, m.handle); ok && cn.state == .Replaced && cn.val.kind == .Array {
+			has_arr = true
+			break
 		}
 	}
-	if !has_arr {
-		return ms, oks, nil
-	}
-	defer {
-		delete(ms, allocator)
-	}
+	if !has_arr { return ms, oks, nil }
+	defer delete(ms, allocator)
 	flat := make([dynamic]Effective_Member, 0, len(ms) + 4, allocator)
-	defer if err != nil {
-		delete(flat)
-	}
+	defer if err != nil { delete(flat) }
 	replaced_keys := make([dynamic]string, 0, 2, allocator)
 	defer delete(replaced_keys)
 	for m in ms {
-		skip_base := false
-		for rk in replaced_keys {
-			if rk == m.key {
-				skip_base = true
-				break
+		if m.base_val != tape.NO_NODE && !m.is_inserted && slice.contains(replaced_keys[:], m.key) { continue }
+		if cn, ok := get_node(ov, m.handle); ok && cn.state == .Replaced && cn.val.kind == .Array {
+			append(&replaced_keys, m.key) or_return
+			for eh in cn.elems {
+				append(&flat, Effective_Member{m.key, eh, tape.NO_NODE, tape.NO_NODE, -1, -1, true, false}) or_return
 			}
-		}
-		if skip_base && m.base_val != tape.NO_NODE && !m.is_inserted {
 			continue
-		}
-		if m.handle != NO_HANDLE {
-			if cn, ok := get_node(ov, m.handle); ok && cn.state == .Replaced && cn.val.kind == .Array {
-				append(&replaced_keys, m.key) or_return
-				for eh in cn.elems {
-					em := Effective_Member {
-						key         = m.key,
-						handle      = eh,
-						base_key    = tape.NO_NODE,
-						base_val    = tape.NO_NODE,
-						base_idx    = -1,
-						insert_idx  = -1,
-						is_inserted = true,
-					}
-					append(&flat, em) or_return
-				}
-				continue
-			}
 		}
 		append(&flat, m) or_return
 	}
@@ -869,21 +483,13 @@ materialize_obj_members :: proc(
 }
 
 cbor_parse_tag_override :: proc "contextless" (f: Fact_Override) -> (tag: u64, ok: bool) {
-	if n, has := f.num_tag.?; has {
-		return n, true
-	}
-	if len(f.values) != 1 || len(f.values[0]) == 0 || len(f.values[0]) > 20 {
-		return 0, false
-	}
+	if n, has := f.num_tag.?; has { return n, true }
+	if len(f.values) != 1 || len(f.values[0]) == 0 || len(f.values[0]) > 20 { return 0, false }
 	val: u64
 	for c in transmute([]u8)f.values[0] {
-		if c < '0' || c > '9' {
-			return 0, false
-		}
+		if c < '0' || c > '9' { return 0, false }
 		d := u64(c - '0')
-		if val > (max(u64) - d) / 10 {
-			return 0, false
-		}
+		if val > (max(u64) - d) / 10 { return 0, false }
 		val = val * 10 + d
 	}
 	return val, true

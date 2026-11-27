@@ -87,35 +87,19 @@ copy_span :: #force_no_inline proc "contextless" (h: ^Reader, dest: uintptr, lo:
 	if err != nil || len(buf) < int(n) {
 		return false
 	}
-	copy_short(raw_data(buf), h.base[lo:], int(n))
+	kernel.copy_short(raw_data(buf), h.base[lo:], int(n))
 	text^ = {raw_data(buf), int(n)}
 	return true
-}
-
-// Copies `n` bytes from `src` to `dst`, a short run in overlapping loads of its first and last bytes.
-@(private)
-copy_short :: #force_inline proc "contextless" (dst, src: [^]u8, n: int) {
-	kernel.copy_short(dst, src, n)
 }
 
 // Stores a copy of the text of token `t` at `dest`, false when memory is refused. An empty text allocates nothing.
 @(private)
 store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: tape.Token, dest: uintptr) -> bool {
+	if t.spelling & tape.SPELLING_DECODE == 0 {
+		return copy_span(h, dest, t.lo, t.n)
+	}
 	context = h.ctx
 	src := h.base[:h.len]
-	if t.spelling & tape.SPELLING_DECODE == 0 {
-		if t.n == 0 {
-			(^runtime.Raw_String)(dest)^ = {}
-			return true
-		}
-		buf, err := runtime.mem_alloc_non_zeroed(int(t.n), 1, h.allocator)
-		if err != nil || len(buf) < int(t.n) {
-			return false
-		}
-		copy_short(raw_data(buf), h.base[t.lo:], int(t.n))
-		(^runtime.Raw_String)(dest)^ = {raw_data(buf), int(t.n)}
-		return true
-	}
 	room := h.format.room(src, t, nil)
 	buf, err := runtime.mem_alloc_non_zeroed(room, 1, h.allocator)
 	if err != nil || len(buf) < room {
