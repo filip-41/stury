@@ -83,7 +83,7 @@ verbatim_item :: proc "contextless" (doc: ^tape.Document, opts: Write_Options) -
 	if !read_as_cbor(doc) || opts.node != tape.ROOT || opts.sort_keys || doc.partial != nil || doc.ext != nil || len(doc.nodes) == 0 {
 		return nil, false
 	}
-	if doc.flags - {.Owns_Src} != {} || doc.root_close != u64(len(doc.src)) || doc.nodes[0].role != .Value {
+	if doc.flags - {.Owns_Src, .Mapped_Nodes} != {} || doc.root_close != u64(len(doc.src)) || doc.nodes[0].role != .Value {
 		return nil, false
 	}
 	return doc.src, true

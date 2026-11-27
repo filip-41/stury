@@ -218,9 +218,25 @@ segments_join :: proc(segs: []Segment, room: []tape.Node, facts: []tape.Fact, ro
 	}
 	// The document keeps the room whole, since `destroy` frees it as one block from its start, unless the unused part
 	// exceeds a quarter of what it keeps. Then the room is resized to `total` nodes, which moves them to an exact block
-	// when the allocator cannot shrink in place. A failed resize leaves the room whole.
+	// when the allocator cannot shrink in place. A failed resize leaves the room whole. Large unbudgeted builds on the
+	// default allocator move into a mapped node buffer to match single-threaded builds and release pages back to the OS.
 	doc.nodes = room[:total]
-	if len(room) - total > total / 4 {
+	mapped_ok := false
+	if total >= OS_RESERVE_MIN_NODES && allocator.procedure == runtime.default_allocator().procedure {
+		if mapped, reserved, ok := tape.nodes_reserve(total); ok {
+			committed := 0
+			if tape.nodes_commit(mapped, &committed, total) {
+				copy(mapped, room[:total])
+				delete(room, allocator)
+				doc.nodes = tape.nodes_trim_tail(mapped, total, reserved, committed)
+				doc.flags += {.Mapped_Nodes}
+				mapped_ok = true
+			} else {
+				_ = tape.nodes_trim_tail(mapped, 0, reserved, committed)
+			}
+		}
+	}
+	if !mapped_ok && len(room) - total > total / 4 {
 		if raw, rerr := runtime.non_zero_mem_resize(raw_data(room), len(room) * size_of(tape.Node), total * size_of(tape.Node), align_of(tape.Node), allocator); rerr == nil {
 			doc.nodes = ([^]tape.Node)(raw_data(raw))[:total]
 		}
@@ -288,6 +304,7 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 	if !dups_apply(doc, dups) {
 		return nil
 	}
+	mapped_before := len(doc.nodes) if .Mapped_Nodes in doc.flags else 0
 	allocator := doc.allocator
 	locked := Locked_Allocator{backing = allocator}
 	worker_alloc := locked_allocator(&locked)
@@ -344,11 +361,11 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 				at += p.crossing
 			}
 			err = repeats_in(doc, small[:crossing], dups, &r)
-			return dups_end(doc, &r, err, rules)
+			return dups_end_mapped(doc, &r, err, rules, mapped_before)
 		}
 		j.keys, err = non_zero_make([]Hashed_Key, crossing, allocator)
 		if err != nil {
-			return dups_end(doc, &r, err, rules)
+			return dups_end_mapped(doc, &r, err, rules, mapped_before)
 		}
 		defer delete(j.keys, allocator)
 		cur := u32(0)
@@ -381,7 +398,19 @@ segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicate
 			}
 		}
 	}
-	return dups_end(doc, &r, err, rules)
+	return dups_end_mapped(doc, &r, err, rules, mapped_before)
+}
+
+@(private = "file")
+dups_end_mapped :: proc(doc: ^tape.Document, r: ^Repeats, refused: runtime.Allocator_Error, rules: ^tape.Rules, mapped_before: int) -> tape.Error {
+	e := dups_end(doc, r, refused, rules)
+	if e == nil && mapped_before > 0 && .Mapped_Nodes in doc.flags && len(doc.nodes) < mapped_before {
+		doc.nodes = tape.nodes_trim_tail(doc.nodes, len(doc.nodes), tape.nodes_mapped_bytes(mapped_before))
+		if len(doc.nodes) == 0 {
+			doc.flags -= {.Mapped_Nodes}
+		}
+	}
+	return e
 }
 
 @(private)

@@ -47,7 +47,11 @@ destroy_document :: proc(doc: ^Document) {
 		return
 	}
 	if p := raw_data(doc.nodes); p != nil {
-		free(p, a)
+		if .Mapped_Nodes in doc.flags {
+			nodes_unmap(doc.nodes)
+		} else {
+			free(p, a)
+		}
 	}
 	if p := raw_data(doc.facts); p != nil {
 		free(p, a)
@@ -74,6 +78,7 @@ clone_document :: proc(doc: ^Document, allocator := context.allocator) -> (c: Do
 	c = doc^
 	c.allocator, c.partial = allocator, nil
 	if .Borrowed not_in doc.flags {
+		c.flags -= {.Mapped_Nodes}
 		c.nodes, c.facts, c.counts, c.ext = nil, nil, nil, nil
 		if .Owns_Src in doc.flags {
 			c.src = nil
@@ -239,6 +244,9 @@ Doc_Flag :: enum u8 {
 	// The document of a `query`: its source, nodes, facts, counts and extension are those of the document the query
 	// read, which outlives it, and it holds only its answers.
 	Borrowed,
+	// `nodes` was reserved directly from the OS virtual memory manager (`nodes_reserve`) and is released via
+	// `nodes_unmap` rather than `allocator`.
+	Mapped_Nodes,
 }
 
 Doc_Flags :: bit_set[Doc_Flag; u16]

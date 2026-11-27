@@ -24,7 +24,11 @@ Builder_Flag :: enum u8 {
 	Lent,            // the room of `doc.nodes` is the caller's, which `builder_end` keeps whole and does not free
 	Keep_Facts,      // a scan keeps the facts of the nodes it keeps, which its inner hooks store
 	Counts_Borrowed, // `counts` uses a caller-provided stack buffer, which `builder_end` does not free
+	Mapped,          // `doc.nodes` is backed by an OS virtual reservation (`tape.nodes_reserve`), committed in place
 }
+
+// Minimum node bound (`most`) at which OS virtual reservation activates on the default allocator (1 MiB of nodes).
+OS_RESERVE_MIN_NODES :: 65_536
 
 @(private)
 Builder_Flags :: bit_set[Builder_Flag; u8]
@@ -67,11 +71,13 @@ Builder :: struct {
 	budget:   ^hook.Memory_Budget,
 	// Allocator for short-lived `stack` growth freed in `builder_end`; defaults to `doc.allocator`.
 	scratch:  runtime.Allocator,
-	ctx:      runtime.Context, // the caller's, for the allocations the contextless hook makes
+	ctx:             runtime.Context, // the caller's, for the allocations the contextless hook makes
+	reserved_bytes:  int, // total bytes reserved via `tape.nodes_reserve` when `.Mapped in flags`
+	committed_bytes: int, // bytes committed so far via `tape.nodes_commit` when `.Mapped in flags`
 	// The first node the walk stores: 0, or in a segment its first past the nodes of the segments before it.
-	first:    tape.Node_Index,
-	_pad2:    [4]u8,
-	protocol: hook.Protocol(BUILDER_CAPS, Builder_Levels, Builder_Rooms, hook.Unused),
+	first:           tape.Node_Index,
+	_pad2:           [4]u8,
+	protocol:        hook.Protocol(BUILDER_CAPS, Builder_Levels, Builder_Rooms, hook.Unused),
 }
 
 #assert(size_of(Builder) % size_of(u64) == 0)
@@ -84,7 +90,7 @@ when size_of(rawptr) == 8 {
 	#assert(offset_of(Builder, flags) == 29)
 	#assert(offset_of(Builder, doc) == 32)
 	#assert(offset_of(Builder, doc) + offset_of(tape.Document, nodes) + size_of(tape.Document{}.nodes) == 64)
-	#assert(size_of(Builder) == 384)
+	#assert(size_of(Builder) == 400)
 }
 
 BUILDER_CAPS :: hook.Capabilities{.Levels, .Rooms, .Number_Blocks}
@@ -193,22 +199,23 @@ builder_regs :: #force_inline proc "contextless" (h: ^Builder) -> hook.Regs {
 // reserved for the first room, or with `counts` set for that many nodes ahead of the room on a non-freeing unbudgeted
 // allocator so it can grow the room in place. `counts_buf`, when given, backs `counts` until it overflows or
 // `builder_end` copies non-empty counts out. `scratch`, when set, backs `stack` growth past `frames`.
-builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, allocator: runtime.Allocator, budget: ^hook.Memory_Budget = nil, lent: []tape.Node = nil, counts := 0, counts_buf: []tape.Child_Count = nil, scratch: runtime.Allocator = {}) {
+builder_start :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, allocator: runtime.Allocator, budget: ^hook.Memory_Budget = nil, lent: []tape.Node = nil, counts := 0, counts_buf: []tape.Child_Count = nil, scratch: runtime.Allocator = {}, reserve := false) {
 	b.ctx = context
 	b.doc.allocator = allocator
 	b.scratch = scratch if scratch.procedure != nil else allocator
 	b.first = 0
-	builder_again(b, src, format, nodes, most, frames, budget, lent, counts, counts_buf)
+	builder_again(b, src, format, nodes, most, frames, budget, lent, counts, counts_buf, reserve)
 }
 
 // Starts `b`, which `builder_start` started and `builder_end` ended, reusing `b.doc.allocator`, `b.scratch`, `b.ctx`,
 // and `b.first` (which it does not reset). Resets all other fields, including `b.end` (set to 0 on early failure).
 @(private)
-builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, budget: ^hook.Memory_Budget = nil, lent: []tape.Node = nil, counts := 0, counts_buf: []tape.Child_Count = nil) {
+builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most: int, frames: []u64, budget: ^hook.Memory_Budget = nil, lent: []tape.Node = nil, counts := 0, counts_buf: []tape.Child_Count = nil, reserve := false) {
 	b.doc = {src = src, format = format, allocator = b.doc.allocator}
 	b.stack, b.end, b.closed, b.err = frames, 0, tape.NO_NODE, nil
 	b.flags = {.Borrowed} | ({.Lent} if len(lent) > 0 else {})
 	b.facts, b.most, b.full, b.stubs, b.unstored, b.budget = nil, most, 0, 0, 0, budget
+	b.reserved_bytes, b.committed_bytes = 0, 0
 	b.counts = {}
 	b.counts.allocator = builder_scratch(b)
 	if len(counts_buf) > 0 {
@@ -252,6 +259,20 @@ builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 	}
 	if b.err = builder_reserve_counts(b, room); b.err != nil {
 		return
+	}
+	if reserve && budget == nil && most >= OS_RESERVE_MIN_NODES && b.doc.allocator.procedure == runtime.default_allocator().procedure {
+		if buf, reserved_bytes, ok := tape.nodes_reserve(most); ok {
+			committed := 0
+			if tape.nodes_commit(buf, &committed, room) {
+				b.doc.nodes = buf[:room]
+				b.end = u64(uintptr(raw_data(buf))) + u64(room * size_of(tape.Node))
+				b.reserved_bytes = reserved_bytes
+				b.committed_bytes = committed
+				b.flags += {.Mapped}
+				return
+			}
+			_ = tape.nodes_trim_tail(buf, 0, reserved_bytes, committed)
+		}
 	}
 	raw, err := runtime.mem_alloc_non_zeroed(room * size_of(tape.Node), align_of(tape.Node), b.doc.allocator)
 	if b.err = took(err, raw_data(raw), room); b.err != nil {
@@ -561,6 +582,24 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder, s: hook.Regs, 
 		fit := builder_fit(h, have)
 		want = min(want, have + max((fit - have) / 2, 1))
 	}
+	if .Mapped in h.flags {
+		full_buf := ([^]tape.Node)(raw_data(h.doc.nodes))[:h.most]
+		ok := tape.nodes_commit(full_buf, &h.committed_bytes, want)
+		for !ok && want > have + 1 {
+			want = double if want > double else have + (want - have) / 2
+			ok = tape.nodes_commit(full_buf, &h.committed_bytes, want)
+		}
+		if !ok {
+			h.err = .Out_Of_Memory
+			return s, false
+		}
+		h.doc.nodes = full_buf[:want]
+		h.end = u64(uintptr(raw_data(full_buf))) + u64(want * size_of(tape.Node))
+		if h.err = builder_reserve_counts(h, want); h.err != nil {
+			return s, false
+		}
+		return s, true
+	}
 	old := u64(uintptr(raw_data(h.doc.nodes)))
 	raw, err := runtime.non_zero_mem_resize(raw_data(h.doc.nodes), have * size_of(tape.Node), want * size_of(tape.Node), align_of(tape.Node), h.doc.allocator)
 	for err == .Out_Of_Memory && want > have + 1 {
@@ -590,6 +629,20 @@ builder_room :: proc "contextless" (h: ^Builder, s: hook.Regs, nodes: int) -> ho
 		return s
 	}
 	context = h.ctx
+	if .Mapped in h.flags {
+		full_buf := ([^]tape.Node)(raw_data(h.doc.nodes))[:h.most]
+		if !tape.nodes_commit(full_buf, &h.committed_bytes, want) {
+			return s
+		}
+		h.doc.nodes = full_buf[:want]
+		if cerr := builder_reserve_counts(h, want); cerr != nil {
+			h.err = cerr
+			h.end = s.a
+			return s
+		}
+		h.end = u64(uintptr(raw_data(full_buf))) + u64(want * size_of(tape.Node))
+		return s
+	}
 	// Resize `nodes` before reserving `counts` so a bump arena can grow the node room in place.
 	old := u64(uintptr(raw_data(h.doc.nodes)))
 	raw, err := runtime.non_zero_mem_resize(raw_data(h.doc.nodes), have * size_of(tape.Node), want * size_of(tape.Node), align_of(tape.Node), h.doc.allocator)
@@ -818,7 +871,20 @@ builder_end :: proc(h: ^Builder, regs: hook.Regs, root_close: u64, err: tape.Err
 	}
 	// A lent room is the caller's, kept whole. Trim nodes before copying borrowed counts so a tight budget reclaims
 	// excess node room first.
-	h.doc.nodes = h.doc.nodes[:count] if .Lent in h.flags else builder_trim(h, h.doc.nodes, count)
+	if .Lent in h.flags {
+		h.doc.nodes = h.doc.nodes[:count]
+	} else if intrinsics.expect(.Mapped in h.flags, false) {
+		h.doc.nodes = tape.nodes_trim_tail(h.doc.nodes, count, h.reserved_bytes, h.committed_bytes)
+		h.reserved_bytes, h.committed_bytes = 0, 0
+		h.flags -= {.Mapped}
+		if len(h.doc.nodes) > 0 {
+			h.doc.flags += {.Mapped_Nodes}
+		} else {
+			h.doc.flags -= {.Mapped_Nodes}
+		}
+	} else {
+		h.doc.nodes = builder_trim(h, h.doc.nodes, count)
+	}
 	if intrinsics.expect(len(h.doc.facts) > 0 && raw_data(h.doc.facts) == raw_data(h.facts), false) {
 		h.doc.facts = builder_trim(h, h.facts, len(h.doc.facts))
 	}
@@ -875,6 +941,13 @@ builder_end_fail :: #force_no_inline proc(h: ^Builder, e: tape.Error) -> tape.Er
 		tape.destroy(&h.doc)
 		h.doc.nodes = lent
 	} else {
+		if .Mapped in h.flags {
+			_ = tape.nodes_trim_tail(h.doc.nodes, 0, h.reserved_bytes, h.committed_bytes)
+			h.doc.nodes = nil
+			h.doc.flags -= {.Mapped_Nodes}
+			h.reserved_bytes, h.committed_bytes = 0, 0
+			h.flags -= {.Mapped}
+		}
 		tape.destroy(&h.doc)
 	}
 	return e
@@ -1094,6 +1167,7 @@ builder_so_far :: proc(h: ^Builder, regs: hook.Regs, cut: u64, allocator: runtim
 	doc.ext, doc.partial = nil, nil
 	doc.nodes, doc.facts, doc.counts, doc.allocator, doc.root_close = nodes, facts, counts, allocator, cut
 	doc.present = present
+	doc.flags -= {.Mapped_Nodes}
 	doc.flags += {.Cut}
 	if len(doc.facts) > 0 {
 		builder_place_facts(&doc, count)

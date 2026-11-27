@@ -879,14 +879,12 @@ edit_run_doc :: proc(
 	end := jq.run_value(&jrun, inp, proc(d: rawptr, v: query.Value, _: ^query.Heap) -> bool {
 		append(&(^Outs)(d).vals, v)
 		return true
-	}, rawptr(&outs))
+	}, &outs)
 	if end == .Halted {
 		hs := jq.run_halt(&jrun)
-		format_halt_message(worker, hs)
-		if worker.halt_msg != "" {
-			_, _ = io.write_string(stderr_w, worker.halt_msg)
-			delete(worker.halt_msg, alloc)
-			worker.halt_msg = ""
+		if msg := format_halt_text(&h, hs, alloc); msg != "" {
+			_, _ = io.write_string(stderr_w, msg)
+			delete(msg, alloc)
 		}
 		return parts, false, true, hs.code
 	}

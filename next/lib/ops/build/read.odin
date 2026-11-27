@@ -67,7 +67,11 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 	counts_buf: [COUNTS_STACK]tape.Child_Count = ---
 	b_raw: [size_of(Builder) / size_of(u64)]u64 = ---
 	b := (^Builder)(&b_raw)
-	builder_start(b, src, format, len(src) / bytes_per_node, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m.main if opts.budget.memory != 0 else nil, counts = most, counts_buf = counts_buf[:], scratch = scratch)
+	can_reserve := opts.budget.memory == 0 && most >= OS_RESERVE_MIN_NODES
+	if xo, ok := opts.format.(tape.Xml_Options); ok && xo.arrays != .Auto {
+		can_reserve = false
+	}
+	builder_start(b, src, format, len(src) / bytes_per_node, most, frames[:min(depth, FRAME_DEPTH)], allocator, &m.main if opts.budget.memory != 0 else nil, counts = most, counts_buf = counts_buf[:], scratch = scratch, reserve = can_reserve)
 	if b.err != nil {
 		return {}, hook.memory_budget_error(&m.main, b.err)
 	}
@@ -75,7 +79,14 @@ read_build :: #force_inline proc(src: []u8, format: ^tape.Format, rules: ^tape.R
 	root_close, err, tolerated := walk(src, opts, b, &regs, allocator, &b.ctx)
 	doc, e := builder_end(b, regs, root_close, err, opts.dups == .Refuse, rules)
 	if e == nil {
+		mapped_before := len(doc.nodes) if .Mapped_Nodes in doc.flags else 0
 		e = finish(&doc, opts, rules)
+		if e == nil && mapped_before > 0 && .Mapped_Nodes in doc.flags && len(doc.nodes) < mapped_before {
+			doc.nodes = tape.nodes_trim_tail(doc.nodes, len(doc.nodes), tape.nodes_mapped_bytes(mapped_before))
+			if len(doc.nodes) == 0 {
+				doc.flags -= {.Mapped_Nodes}
+			}
+		}
 	}
 	e = read_end(&doc, e, &m.main, tolerated, caller)
 	return doc, e

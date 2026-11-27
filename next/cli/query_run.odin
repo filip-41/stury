@@ -154,6 +154,24 @@ Hook_Ctx :: struct {
 	alloc:           runtime.Allocator,
 }
 
+@(private = "file")
+Jq_Bridge :: struct {
+	w:             ^Query_Worker,
+	meta:          engine.Record_Meta,
+	emit:          engine.Emitter,
+	cfg:           ^Render_Config,
+	allow_tabular: bool,
+	err:           engine.Exec_Error,
+}
+
+@(private = "file")
+Jp_Bridge :: struct {
+	w:    ^Query_Worker,
+	meta: engine.Record_Meta,
+	emit: engine.Emitter,
+	err:  engine.Exec_Error,
+}
+
 // Unified per-worker state for both jq and JSONPath execution.
 Query_Worker :: struct {
 	shared:       ^Shared_Query_State,
@@ -164,6 +182,8 @@ Query_Worker :: struct {
 	each_run:     jq.Run,
 	pred_run:     jq.Run,
 	jp_run:       jsonpath.Run,
+	jq_bridge:    Jq_Bridge,
+	jp_bridge:    Jp_Bridge,
 	has_each_run: bool,
 	has_pred_run: bool,
 	globals:      []query.Value,
@@ -821,18 +841,24 @@ build_where_prefix :: proc(sb: ^strings.Builder, h: ^query.Heap, v: query.Value,
 	return transmute([]u8)strings.to_string(sb^)
 }
 
-format_halt_message :: proc(w: ^Query_Worker, hs: jq.Halt_State) {
-	if hs.value.kind == .Absent || hs.value.kind == .Null { return }
-	buf := make([dynamic]u8, 0, 64, w.alloc)
+format_halt_text :: proc(h: ^query.Heap, hs: jq.Halt_State, alloc: runtime.Allocator) -> string {
+	if hs.value.kind == .Absent || hs.value.kind == .Null { return "" }
+	buf := make([dynamic]u8, 0, 64, alloc)
 	defer delete(buf)
 	if query.type_of(hs.value) == .String {
 		append(&buf, query.text_of(hs.value))
 	} else {
-		_ = query.write_json(&w.h, &buf, hs.value, {double = jq_double, too_deep = TOO_DEEP_TEXT})
+		_ = query.write_json(h, &buf, hs.value, {double = jq_double, too_deep = TOO_DEEP_TEXT})
 	}
 	append(&buf, '\n')
+	return strings.clone(string(buf[:]), alloc)
+}
+
+format_halt_message :: proc(w: ^Query_Worker, hs: jq.Halt_State) {
+	msg := format_halt_text(&w.h, hs, w.alloc)
+	if msg == "" { return }
 	if w.halt_msg != "" { delete(w.halt_msg, w.alloc) }
-	w.halt_msg = strings.clone(string(buf[:]), w.alloc)
+	w.halt_msg = msg
 }
 
 // Unified value emitter shared by both jq and JSONPath evaluation callbacks.
@@ -961,18 +987,11 @@ finish_jq_end :: proc(w: ^Query_Worker, run_ptr: ^jq.Run, end: jq.Run_End) -> en
 
 @(private = "file")
 run_prog_on_value :: proc(w: ^Query_Worker, run_ptr: ^jq.Run, inp: query.Value, meta: engine.Record_Meta, emit: engine.Emitter, cfg: ^Render_Config, allow_tabular: bool) -> engine.Exec_Error {
-	Bridge :: struct {
-		w:             ^Query_Worker,
-		meta:          engine.Record_Meta,
-		emit:          engine.Emitter,
-		cfg:           ^Render_Config,
-		allow_tabular: bool,
-		err:           engine.Exec_Error,
-	}
 	reset_worker_errs(w)
-	br := Bridge{w = w, meta = meta, emit = emit, cfg = cfg, allow_tabular = allow_tabular}
+	w.jq_bridge = {w = w, meta = meta, emit = emit, cfg = cfg, allow_tabular = allow_tabular}
+	defer w.jq_bridge = {}
 	end := jq.run_value(run_ptr, inp, proc(d: rawptr, v: query.Value, h: ^query.Heap) -> bool {
-		b := (^Bridge)(d)
+		b := (^Jq_Bridge)(d)
 		defer query.release(h, v)
 		vt := query.type_of(v)
 		b.w.out_count += 1
@@ -982,8 +1001,8 @@ run_prog_on_value :: proc(w: ^Query_Worker, run_ptr: ^jq.Run, inp: query.Value, 
 			return false
 		}
 		return true
-	}, rawptr(&br))
-	if br.err != .None { return br.err }
+	}, &w.jq_bridge)
+	if w.jq_bridge.err != .None { return w.jq_bridge.err }
 	return finish_jq_end(w, run_ptr, end)
 }
 
@@ -1091,9 +1110,9 @@ eval_jp_doc :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, 
 	if st != .Ok { return .Failed }
 	defer query.release(&cur_w.h, inp)
 
-	Jp_Bridge :: struct { w: ^Query_Worker, meta: engine.Record_Meta, emit: engine.Emitter, err: engine.Exec_Error }
 	was_unwritten := sh.direct_tab_active && cur_w == sh.serial_worker && sh.osink.total_written == sh.direct_tab_bytes
-	br := Jp_Bridge{w = cur_w, meta = meta, emit = emit}
+	cur_w.jp_bridge = {w = cur_w, meta = meta, emit = emit}
+	defer cur_w.jp_bridge = {}
 	end := jsonpath.run_value(&cur_w.jp_run, inp, proc(d: rawptr, val: query.Value, norm_path: string) -> bool {
 		b := (^Jp_Bridge)(d)
 		defer query.release(&b.w.h, val)
@@ -1105,8 +1124,8 @@ eval_jp_doc :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, 
 			return false
 		}
 		return true
-	}, rawptr(&br))
-	ret := br.err
+	}, &cur_w.jp_bridge)
+	ret := cur_w.jp_bridge.err
 	if ret == .None {
 		switch end {
 		case .Done:

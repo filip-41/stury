@@ -416,3 +416,98 @@ layout_sizes :: proc(t: ^testing.T) {
 		testing.expect_value(t, size_of(tape.Document), 120)
 	}
 }
+
+@(test)
+mapped_nodes_reserve_trim_clone_destroy :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	when size_of(uintptr) == 8 {
+		testing.expect_value(t, size_of(tape.Document), 120)
+	}
+
+	// 1. Direct reserve -> commit -> write -> trim_tail -> clone_document -> destroy_document.
+	buf, reserved, ok := tape.nodes_reserve(262_144)
+	when size_of(uintptr) == 8 && (ODIN_OS == .Linux || ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD || ODIN_OS == .Windows) {
+		testing.expect(t, ok && len(buf) == 262_144 && reserved >= 262_144 * size_of(tape.Node))
+	}
+	if ok {
+		committed := 0
+		testing.expect(t, tape.nodes_commit(buf, &committed, 1024))
+		testing.expect(t, committed >= 1024 * size_of(tape.Node))
+		testing.expect(t, !tape.nodes_commit(buf, &committed, len(buf) + 1))
+
+		used := 512
+		buf[0] = {kind = .Array, role = .Value, n = u32(used), spelling = u16(used - 1)}
+		for i in 1 ..< used {
+			buf[i] = {lo = u64(i), n = 1, kind = .Number, role = .Value}
+		}
+		trimmed := tape.nodes_trim_tail(buf, used, reserved, committed)
+		testing.expect_value(t, len(trimmed), used)
+		testing.expect_value(t, trimmed[0].n, u32(used))
+		testing.expect_value(t, trimmed[used - 1].lo, u64(used - 1))
+
+		mapped_doc := tape.Document {
+			nodes     = trimmed,
+			flags     = {.Mapped_Nodes},
+			allocator = context.allocator,
+		}
+		cloned, cerr := tape.clone_document(&mapped_doc, context.allocator)
+		testing.expect_value(t, cerr, nil)
+		testing.expect(t, .Mapped_Nodes not_in cloned.flags)
+		testing.expect_value(t, len(cloned.nodes), used)
+		testing.expect_value(t, cloned.nodes[used - 1].lo, u64(used - 1))
+
+		tape.destroy_document(&mapped_doc)
+		testing.expect(t, raw_data(mapped_doc.nodes) == nil && mapped_doc.flags == {})
+		tape.destroy_document(&cloned)
+		testing.expect(t, raw_data(cloned.nodes) == nil)
+	}
+
+	// 2. Zero-node trim unmaps the entire reservation and returns nil.
+	zbuf, zres, zok := tape.nodes_reserve(65_536)
+	if zok {
+		zcom := 0
+		testing.expect(t, tape.nodes_commit(zbuf, &zcom, 64))
+		ztrimmed := tape.nodes_trim_tail(zbuf, 0, zres, zcom)
+		testing.expect(t, ztrimmed == nil && raw_data(ztrimmed) == nil)
+	}
+
+	// 3. End-to-end build: Tracking_Allocator never bypasses heap; default_allocator activates OS reservation.
+	count :: 70_000
+	src_buf := make([]u8, 2 + count * 2, context.allocator)
+	defer delete(src_buf, context.allocator)
+	src_buf[0] = '['
+	pos := 1
+	for i in 0 ..< count {
+		if i > 0 {
+			src_buf[pos] = ','
+			pos += 1
+		}
+		src_buf[pos] = '1'
+		pos += 1
+	}
+	src_buf[pos] = ']'
+	pos += 1
+	src := src_buf[:pos]
+
+	tracked, terr := json.build(src, .Json, {}, context.allocator)
+	testing.expect_value(t, terr, nil)
+	defer tape.destroy(&tracked)
+	testing.expect(t, .Mapped_Nodes not_in tracked.flags)
+	testing.expect_value(t, len(tracked.nodes), count + 1)
+
+	mapped, merr := json.build(src, .Json, {}, runtime.default_allocator())
+	testing.expect_value(t, merr, nil)
+	defer tape.destroy(&mapped)
+	when size_of(uintptr) == 8 && (ODIN_OS == .Linux || ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD || ODIN_OS == .Windows) {
+		testing.expect(t, .Mapped_Nodes in mapped.flags)
+	}
+	testing.expect_value(t, len(mapped.nodes), len(tracked.nodes))
+	testing.expect_value(t, mapped.nodes[0], tracked.nodes[0])
+	testing.expect_value(t, mapped.nodes[count], tracked.nodes[count])
+
+	mclone, mcerr := tape.clone_document(&mapped, context.allocator)
+	testing.expect_value(t, mcerr, nil)
+	defer tape.destroy(&mclone)
+	testing.expect(t, .Mapped_Nodes not_in mclone.flags)
+	testing.expect_value(t, len(mclone.nodes), len(tracked.nodes))
+}

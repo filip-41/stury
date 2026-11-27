@@ -419,7 +419,13 @@ read_block :: #force_inline proc "contextless" (r: ^Reading, src: []u8, base: in
 			s := left & -left
 			left &~= s
 			if bare {
-				drop_bare(r, &q, d | nl, s - 1, T)
+				for {
+					_, _, _, b := quote_masks(T, q, d | nl, r.in_quote, r.start, r.close)
+					if b &= s - 1; b == 0 {
+						break
+					}
+					q &~= b & -b
+				}
 			}
 			if s & (kernel.prefix_xor(T, q) ~ r.in_quote) != 0 {
 				continue
@@ -434,7 +440,13 @@ read_block :: #force_inline proc "contextless" (r: ^Reading, src: []u8, base: in
 		r.comment = comments >> 63 != 0
 	}
 	if bare {
-		drop_bare(r, &q, d | nl, max(u64), T)
+		for {
+			_, _, _, b := quote_masks(T, q, d | nl, r.in_quote, r.start, r.close)
+			if b == 0 {
+				break
+			}
+			q &~= b & -b
+		}
 	}
 	outside := ~(kernel.prefix_xor(T, q) ~ r.in_quote)
 	lfs := nl & outside
@@ -445,18 +457,6 @@ read_block :: #force_inline proc "contextless" (r: ^Reading, src: []u8, base: in
 	r.line = nl >> 63
 	// An LF at a line's first byte ends an empty line, no record.
 	tally(r, src, base, lfs, lfs &~ ends &~ ((nl << 1) | line), d & outside, ends, starts)
-}
-
-// Drops from `q` the bare quotes of the block among the bits of `among`, as `.Bare_Quote` has the pass read them.
-@(private)
-drop_bare :: #force_inline proc "contextless" (r: ^Reading, q: ^u64, seps, among: u64, $T: kernel.Tier) {
-	for {
-		_, _, _, b := quote_masks(T, q^, seps, r.in_quote, r.start, r.close)
-		if b &= among; b == 0 {
-			return
-		}
-		q^ &~= b & -b
-	}
 }
 
 // Counts into `r` the nodes and comment lines of the block at `base`, those before the seam into `pre` and those from

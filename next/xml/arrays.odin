@@ -231,8 +231,13 @@ normalize_arrays :: proc(
 		}
 	}
 
-	// Commit atomically: free old slices using `doc_alloc` and install the new ones.
-	free(raw_data(doc.nodes), doc_alloc)
+	// Commit atomically: release old slices using `doc_alloc` (or unmap if OS-reserved) and install the new ones.
+	if .Mapped_Nodes in doc.flags {
+		tape.nodes_unmap(doc.nodes)
+		doc.flags -= {.Mapped_Nodes}
+	} else {
+		free(raw_data(doc.nodes), doc_alloc)
+	}
 	free(raw_data(doc.facts), doc_alloc)
 	free(raw_data(doc.counts), doc_alloc)
 	doc.nodes, doc.facts, doc.counts = st.new_nodes[:], new_facts, new_counts
