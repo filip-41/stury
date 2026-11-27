@@ -20,10 +20,14 @@ raise_joined :: proc(m: ^Machine, parts: ..string) -> query.Status {
 // sha1, sha256, sha512, md5 and crc32.
 @(private)
 v_digest :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
-	if !query.is_text(x) {
+	s: string
+	if query.is_text(x) {
+		s = query.text_of(x)
+	} else if query.is_bytes(x) {
+		s = string(query.bytes_of(x))
+	} else {
 		return query.NULL, raise_joined(m, b.name, " input must be a string")
 	}
-	s := query.text_of(x)
 	switch b.name {
 	case "sha1":
 		return query.digest_hex(m.h, s, .Sha1)
@@ -52,10 +56,15 @@ v_hmac :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) ->
 // hex_encode, hex_decode, base64url_encode and base64url_decode.
 @(private)
 v_text_code :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
-	if !query.is_text(x) {
+	is_encode := b.name == "hex_encode" || b.name == "base64url_encode"
+	s: string
+	if query.is_text(x) {
+		s = query.text_of(x)
+	} else if is_encode && query.is_bytes(x) {
+		s = string(query.bytes_of(x))
+	} else {
 		return query.NULL, raise_joined(m, b.name, " input must be a string")
 	}
-	s := query.text_of(x)
 	switch b.name {
 	case "hex_encode":
 		return query.encode_hex(m.h, s)

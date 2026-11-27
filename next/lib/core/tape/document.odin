@@ -195,6 +195,8 @@ ext_lists :: proc "contextless" (base: [^]u8, held: []Held_Span, format: ^Format
 		f.scopes, f.uris, f.uri_text = ext_list(&size, base, f.scopes), ext_list(&size, base, f.uris), ext_list(&size, base, f.uri_text)
 		f.dtd.entities, f.dtd.attrs = ext_list(&size, base, f.dtd.entities), ext_list(&size, base, f.dtd.attrs)
 		f.dtd.slots, f.dtd.bytes = ext_list(&size, base, f.dtd.slots), ext_list(&size, base, f.dtd.bytes)
+	case Html_Ext:
+		f.ends, f.texts, f.pieces = ext_list(&size, base, f.ends), ext_list(&size, base, f.texts), ext_list(&size, base, f.pieces)
 	case nil:
 	}
 	return size
@@ -255,7 +257,46 @@ Doc_Ext :: struct {
 Format_Ext :: union {
 	Tabular_Ext,
 	Markup_Ext,
+	Html_Ext,
 }
+
+// Per-document state of an HTML5 document: element closing offsets, multi-piece text spans (merged across comments or
+// foster-parented runs), and whether scalar type inference was enabled.
+Html_Ext :: struct {
+	ends:   []Html_End, // sorted by node
+	texts:  []Html_Text, // sorted by lo
+	pieces: []Html_Span,
+	infer:  bool,
+}
+
+// An HTML element container's closing offset in the document's source: `node` is its `.Object` node index, and `end`
+// is the byte offset past its closing tag (or implied close).
+Html_End :: struct {
+	node: Node_Index,
+	end:  u64,
+}
+
+#assert(size_of(Html_End) == 16)
+
+// A multi-piece HTML text value's slice of `Html_Ext.pieces`: `lo` is the text node's start offset, and its spans are
+// `Html_Ext.pieces[first:][:count]`.
+Html_Text :: struct {
+	lo:    u64,
+	first: u32,
+	count: u32,
+}
+
+#assert(size_of(Html_Text) == 16)
+
+// One source span of a multi-piece HTML text value, with its HTML tokenizer mode and decode flags.
+Html_Span :: struct {
+	lo:    u64,
+	n:     u32,
+	mode:  u8,
+	flags: u8,
+}
+
+#assert(size_of(Html_Span) == 16)
 
 // A markup document's elements that declare a namespace, by which its format resolves the prefix of a name, and the
 // DTD its text declares, by which its texts' entity references decode.

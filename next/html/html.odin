@@ -119,20 +119,18 @@ parse_error_fault :: proc "contextless" (first: Parse_Error) -> tape.Fault {
 validate_as :: proc(src: []u8, $S: Spec, lax: bool, opts: Options, fopts: Fragment_Options, allocator: runtime.Allocator) -> tape.Error {
 	if e := tape.options_refused(&FORMATS[S], opts); e != nil { return e }
 	if !build.validate_dups(&FORMATS[S], opts) { return tape.Bad_Option{"dups"} }
-	h: hook.No_Hooks
-	regs: hook.Regs
 	m: hook.Read_Budget
 	a := hook.read_budget(&m, opts, allocator)
 	scratch_local: hook.Memory_Budget
 	tree_alloc := hook.scratch(opts, a, &scratch_local)
 	tree_spec := Tree_Spec.Fragment if S == .Fragment else .Document
-	t, terr := build_tree(src, tree_spec, opts, fopts, 0, tree_alloc)
+	t, terr := build_tree(src, tree_spec, opts, fopts, 0, tree_alloc, .First)
 	if terr != nil { return hook.memory_budget_error(&m.main, hook.memory_budget_error(&scratch_local, terr)) }
 	defer tree_destroy(&t)
-	steps := build.read_steps(opts)
-	r := emit_tree_walk(&t, tree_spec, opts, &h, &regs, steps, nil, true, hook.no_hook) if lax else emit_tree_walk(&t, tree_spec, opts, &h, &regs, steps, nil, false, hook.no_hook)
-	if _, walk_err, _ := hook.walk_error(hook.Walk_Result(r), &RULES); walk_err != nil {
-		return hook.memory_budget_error(&m.main, hook.memory_budget_error(&scratch_local, walk_err))
+	if lax {
+		if at, exceeded := check_tree_steps(&t, tree_spec, build.read_steps(opts)); exceeded {
+			return tape.Exceeded{at = at, kind = .Steps}
+		}
 	}
 	return parse_error_fault(t.errors[0]) if len(t.errors) > 0 else nil
 }
@@ -146,6 +144,15 @@ build_as_inner :: proc(src: []u8, spec: Spec, opts: Options, fopts: Fragment_Opt
 	allocator := hook.read_budget(m, opts, caller)
 	scratch_local: hook.Memory_Budget
 	scratch := hook.scratch(opts, allocator, &scratch_local)
+	tree_spec := Tree_Spec.Fragment if spec == .Fragment else .Document
+	t, terr := build_tree(src, tree_spec, opts, fopts, 0, scratch, .None)
+	if terr != nil { return {}, hook.memory_budget_error(&m.main, hook.memory_budget_error(&scratch_local, terr)) }
+	defer tree_destroy(&t)
+	return build_from_tree(&t, src, spec, opts, allocator, scratch, &m.main, caller)
+}
+
+@(private)
+build_from_tree :: proc(t: ^Html_Tree, src: []u8, spec: Spec, opts: Options, allocator, scratch: runtime.Allocator, budget: ^hook.Memory_Budget, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
 	depth := min(build.read_depth(opts), u64(len(src)) + 16)
 	most := build.node_most(node_bound(src, depth), opts)
 
@@ -153,8 +160,8 @@ build_as_inner :: proc(src: []u8, spec: Spec, opts: Options, fopts: Fragment_Opt
 	counts_buf: [build.COUNTS_STACK]tape.Child_Count = ---
 	b_buf: build.Builder = ---
 	b := &b_buf
-	build.builder_start(b, src, &FORMATS[spec], len(src) / build.BUILD_BYTES_PER_NODE + 16, most, frames[:min(depth, build.FRAME_DEPTH)], allocator, &m.main if opts.budget.memory != 0 else nil, counts = most, counts_buf = counts_buf[:], scratch = scratch)
-	if b.err != nil { return {}, hook.memory_budget_error(&m.main, b.err) }
+	build.builder_start(b, src, &FORMATS[spec], len(src) / build.BUILD_BYTES_PER_NODE + 16, most, frames[:min(depth, build.FRAME_DEPTH)], allocator, budget if opts.budget.memory != 0 else nil, counts = most, counts_buf = counts_buf[:], scratch = scratch)
+	if b.err != nil { return {}, hook.memory_budget_error(budget, b.err) }
 
 	xo, _ := opts.format.(tape.Xml_Options)
 	k := Kept{infer = xo.infer}
@@ -163,23 +170,18 @@ build_as_inner :: proc(src: []u8, spec: Spec, opts: Options, fopts: Fragment_Opt
 
 	regs := build.builder_regs(b)
 	tree_spec := Tree_Spec.Fragment if spec == .Fragment else .Document
-	root_close: u64
-	werr: tape.Error
-	tolerated: bool
-	if build.read_lax(opts) {
-		root_close, werr, tolerated = walk_tree_text(src, tree_spec, opts, fopts, 0, true, b, &regs, allocator, &b.ctx, build.builder_hook_facts, &k)
-	} else {
-		root_close, werr, tolerated = walk_tree_text(src, tree_spec, opts, fopts, 0, false, b, &regs, allocator, &b.ctx, build.builder_hook_facts, &k)
-	}
+	steps := build.read_steps(opts)
+	r := emit_tree_walk(t, tree_spec, opts, b, &regs, steps, &k, true, build.builder_hook_facts) if build.read_lax(opts) else emit_tree_walk(t, tree_spec, opts, b, &regs, steps, &k, false, build.builder_hook_facts)
+	root_close, werr, _ := hook.walk_error(hook.Walk_Result(r), &RULES)
 	doc, e := build.builder_end(b, regs, root_close, werr, opts.dups == .Refuse, &RULES)
 	if e == nil {
 		track_dups := (opts.dups == .First || opts.dups == .Last) && len(k.ends) > 0
 		orig: []Orig_Object
 		defer if orig != nil { delete(orig, scratch) }
 		if track_dups {
-			slice.sort_by(k.ends[:], proc(a, b: End_Entry) -> bool { return a.node < b.node })
+			slice.sort_by(k.ends[:], proc(a, b: tape.Html_End) -> bool { return a.node < b.node })
 			o, oerr := make([]Orig_Object, len(k.ends), scratch)
-			if oerr != nil { tape.destroy(&doc); return {}, hook.memory_budget_error(&m.main, oerr) }
+			if oerr != nil { tape.destroy(&doc); return {}, hook.memory_budget_error(budget, oerr) }
 			orig = o
 			for en, i in k.ends { orig[i] = {doc.nodes[en.node - 1].lo, doc.nodes[en.node].lo, doc.nodes[en.node - 1].spelling, en.end} }
 		}
@@ -187,7 +189,7 @@ build_as_inner :: proc(src: []u8, spec: Spec, opts: Options, fopts: Fragment_Opt
 		if e == nil && track_dups && .Dropped in doc.flags { remap_end_entries(&doc, orig, &k) }
 	}
 	if e == nil && !seal_state(&doc, &k, doc.allocator) { tape.destroy(&doc); e = runtime.Allocator_Error.Out_Of_Memory }
-	return doc, build.read_end(&doc, e, &m.main, tolerated, caller)
+	return doc, build.read_end(&doc, e, budget, false, caller)
 }
 
 @(private, cold)
@@ -198,7 +200,7 @@ remap_end_entries :: proc(doc: ^tape.Document, orig: []Orig_Object, k: ^Kept) {
 		if idx == 0 || node.kind != .Object { continue }
 		kl, ks, ol := doc.nodes[idx - 1].lo, doc.nodes[idx - 1].spelling, node.lo
 		for oi < len(orig) && (orig[oi].key_lo != kl || orig[oi].obj_lo != ol || orig[oi].key_sp != ks) { oi += 1 }
-		if oi < len(orig) { append(&k.ends, End_Entry{u32(idx), orig[oi].end}); oi += 1 }
+		if oi < len(orig) { append(&k.ends, tape.Html_End{node = tape.Node_Index(idx), end = orig[oi].end}); oi += 1 }
 	}
 }
 
@@ -248,12 +250,36 @@ html_scan_refused :: #force_inline proc "contextless" (format: ^tape.Format, opt
 }
 
 @(private)
+find_from_tree :: proc(t: ^Html_Tree, src: []u8, steps: []tape.Step, $S: Spec, lax: bool, read: tape.Read_Options, opts: Options, allocator: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
+	room: build.Find_Room = ---
+	f: build.Finder
+	if err := build.finder_start(&f, src, &FORMATS[S], steps, opts.dups, read, respell, nil, &room, allocator); err != nil {
+		return {}, err
+	}
+	defer build.finder_end(&f)
+	regs: hook.Regs
+	tree_spec := Tree_Spec.Fragment if S == .Fragment else .Document
+	r := emit_tree_walk(t, tree_spec, opts, &f, &regs, build.read_steps(opts), nil, true, build.finder_key_skip_hook) if lax else emit_tree_walk(t, tree_spec, opts, &f, &regs, build.read_steps(opts), nil, false, build.finder_key_skip_hook)
+	_, werr, _ := hook.walk_error(hook.Walk_Result(r), &RULES)
+	return build.finder_result(&f, werr, false)
+}
+
+@(private)
 build_scan_once :: proc(src: []u8, demand: ^tape.Demand, spec: Spec, read: tape.Read_Options, opts: Options, fopts: Fragment_Options, caller: runtime.Allocator, ext_keep: ^Kept) -> (tape.Document, tape.Error) {
 	if e := html_scan_refused(&FORMATS[spec], opts, demand); e != nil { return {}, e }
 	m: hook.Read_Budget
 	allocator := hook.read_budget(&m, opts, caller)
 	scratch_local: hook.Memory_Budget
 	scratch := hook.scratch(opts, allocator, &scratch_local)
+	tree_spec := Tree_Spec.Fragment if spec == .Fragment else .Document
+	t, terr := build_tree(src, tree_spec, opts, fopts, 0, scratch, .None)
+	if terr != nil { return {}, hook.memory_budget_error(&m.main, hook.memory_budget_error(&scratch_local, terr)) }
+	defer tree_destroy(&t)
+	return scan_from_tree(&t, src, demand, spec, read, opts, allocator, scratch, &m.main, caller, ext_keep)
+}
+
+@(private)
+scan_from_tree :: proc(t: ^Html_Tree, src: []u8, demand: ^tape.Demand, spec: Spec, read: tape.Read_Options, opts: Options, allocator, scratch: runtime.Allocator, budget: ^hook.Memory_Budget, caller: runtime.Allocator, ext_keep: ^Kept) -> (tape.Document, tape.Error) {
 	depth := min(build.read_depth(opts), u64(len(src)) + 16)
 	most := build.node_most(node_bound(src, depth), opts)
 
@@ -261,8 +287,8 @@ build_scan_once :: proc(src: []u8, demand: ^tape.Demand, spec: Spec, read: tape.
 	room: build.Scan_Room = ---
 	h_buf: build.Scanner = ---
 	h := &h_buf
-	if err := build.scanner_start(h, src, &FORMATS[spec], demand, opts.dups, read, nil, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator, budget = &m.main if opts.budget.memory != 0 else nil, scratch = scratch); err != nil {
-		return {}, hook.memory_budget_error(&m.main, err)
+	if err := build.scanner_start(h, src, &FORMATS[spec], demand, opts.dups, read, nil, build.SCAN_NODES, most, frames[:min(depth, build.FRAME_DEPTH)], &room, allocator, budget = budget if opts.budget.memory != 0 else nil, scratch = scratch); err != nil {
+		return {}, hook.memory_budget_error(budget, err)
 	}
 
 	k_local: Kept
@@ -276,17 +302,12 @@ build_scan_once :: proc(src: []u8, demand: ^tape.Demand, spec: Spec, read: tape.
 
 	regs := build.builder_regs(&h.b)
 	tree_spec := Tree_Spec.Fragment if spec == .Fragment else .Document
-	root_close: u64
-	werr: tape.Error
-	tolerated: bool
-	if build.read_lax(opts) {
-		root_close, werr, tolerated = walk_tree_text(src, tree_spec, opts, fopts, 0, true, h, &regs, allocator, &h.b.ctx, build.scanner_key_skip_hook, k)
-	} else {
-		root_close, werr, tolerated = walk_tree_text(src, tree_spec, opts, fopts, 0, false, h, &regs, allocator, &h.b.ctx, build.scanner_key_skip_hook, k)
-	}
+	steps := build.read_steps(opts)
+	r := emit_tree_walk(t, tree_spec, opts, h, &regs, steps, k, true, build.scanner_key_skip_hook) if build.read_lax(opts) else emit_tree_walk(t, tree_spec, opts, h, &regs, steps, k, false, build.scanner_key_skip_hook)
+	root_close, werr, _ := hook.walk_error(hook.Walk_Result(r), &RULES)
 	doc, e := build.scanner_end(h, regs, root_close, werr)
 	if e == nil && ext_keep == nil && !seal_state(&doc, k, doc.allocator) { tape.destroy(&doc); e = runtime.Allocator_Error.Out_Of_Memory }
-	return doc, build.read_end(&doc, e, &m.main, tolerated, caller)
+	return doc, build.read_end(&doc, e, budget, false, caller)
 }
 
 @(private)
@@ -303,7 +324,7 @@ walk_tree_res :: proc "contextless" (
 ) -> (hook.Walk_Result, bool) {
 	context = ctx^
 	scratch_local: hook.Memory_Budget
-	t, terr := build_tree(src, tree_spec, opts, fopts, lo, hook.scratch(opts, allocator, &scratch_local))
+	t, terr := build_tree(src, tree_spec, opts, fopts, lo, hook.scratch(opts, allocator, &scratch_local), .None)
 	if terr != nil {
 		#partial switch ev in hook.memory_budget_error(&scratch_local, terr) {
 		case tape.Exceeded:

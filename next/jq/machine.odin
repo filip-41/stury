@@ -599,7 +599,7 @@ identical :: proc(a, b: query.Value) -> bool {
 	case .Int, .Double:
 		// A number the input and the program wrote is a literal of its own in jq, never the one a function made.
 		return false
-	case .String:
+	case .String, .Bytes:
 		return a.s == b.s && a.n == b.n
 	case .Node, .Overlay:
 		return a.p == b.p && a.n == b.n && query.type_of(a) != .Number

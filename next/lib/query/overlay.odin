@@ -60,7 +60,7 @@ base_needs_decode :: #force_inline proc "contextless" (doc: ^tape.Document, base
 		return {}, false
 	}
 	bt = doc.nodes[base]
-	return bt, (bt.kind == .String || bt.kind == .Plain || bt.kind == .Bytes) && (bt.kind == .Bytes || bt.spelling & tape.SPELLING_DECODE != 0)
+	return bt, (bt.kind == .String || bt.kind == .Plain || bt.kind == .Bytes) && bt.spelling & tape.SPELLING_DECODE != 0
 }
 
 @(private)
@@ -269,12 +269,15 @@ overlay_unwrap_scalar :: #force_no_inline proc "contextless" (v: Value) -> Value
 		case .Uint:                     return int_value(i64(n.val.u)) if n.val.u <= u64(max(i64)) else double_value(f64(n.val.u))
 		case .Float:                    return double_value(n.val.f)
 		case .String, .Number_Text, .Raw: return text_borrowed(n.val.text)
-		case .Bytes:                    return Value{s = raw_data(n.val.raw), n = u32(len(n.val.raw)), kind = .String}
+		case .Bytes:                    return bytes_borrowed(n.val.raw)
 		case .Base_Ref:                 return Value{p = ob.doc_block, n = u32(n.val.base_ref), kind = .Node} if n.val.base_ref != tape.NO_NODE else NULL
 		case .Array, .Object:           return v
 		}
 	}
 	if n.state == .Ancestor && n.val.kind == .String {
+		if bv, has_base := overlay_base_node(ob, n); has_base && node_token(bv).kind == .Bytes {
+			return bytes_borrowed(transmute([]u8)n.val.text)
+		}
 		return text_borrowed(n.val.text)
 	}
 	if bv, has_base := overlay_base_node(ob, n); has_base {
@@ -820,8 +823,9 @@ overlay_write_fact :: proc(data: rawptr, h: ^Heap, v: Value, kind: tape.Fact_Kin
 			release(h, ov_val)
 			return NULL, overlay_fail_edit(h, herr)
 		}
-		if en, eok := edit.get_node(ob.ov, eh); eok && en.state == .Replaced && en.val.kind == .Null && cur_v.kind == .String {
-			if serr := edit.set(ob.ov, eh, edit.val_string(text_of(cur_v))); serr != nil {
+		if en, eok := edit.get_node(ob.ov, eh); eok && en.state == .Replaced && en.val.kind == .Null && (cur_v.kind == .String || cur_v.kind == .Bytes) {
+			ev := edit.val_bytes(bytes_of(cur_v)) if cur_v.kind == .Bytes else edit.val_string(text_of(cur_v))
+			if serr := edit.set(ob.ov, eh, ev); serr != nil {
 				release(h, ov_val)
 				return NULL, overlay_fail_edit(h, serr)
 			}
@@ -992,6 +996,7 @@ try_set_leaf_or_ref :: proc(h: ^Heap, ov: ^edit.Overlay, target: edit.Handle, v:
 			edit.set(ov, target, edit.val_float(as_f64(v))) or_return
 		}
 	case .String:        edit.set(ov, target, edit.val_string(text_of(v))) or_return
+	case .Bytes:         edit.set(ov, target, edit.val_bytes(bytes_of(v))) or_return
 	case .Array, .Object: return false, nil
 	}
 	if v.kind == .Overlay {

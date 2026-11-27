@@ -284,11 +284,11 @@ is_split_text :: proc "contextless" (doc: ^tape.Document, v: tape.Node_Index) ->
 	if v == tape.NO_NODE || int(v) >= len(doc.nodes) { return false }
 	n := doc.nodes[v]
 	if n.kind != .Plain || n.spelling & TEXT_PIECES == 0 || doc.ext == nil { return false }
-	b, head, entry, ok := find_text_entry(&doc.ext.format, n.lo)
+	he, entry, ok := find_text_entry(&doc.ext.format, n.lo)
 	if !ok { return false }
 	for i in 1 ..< entry.count {
-		prev := load_piece(b, head, entry.first + i - 1)
-		cur := load_piece(b, head, entry.first + i)
+		prev := he.pieces[entry.first + i - 1]
+		cur := he.pieces[entry.first + i]
 		end := prev.lo + u64(prev.n)
 		hi := max(cur.lo, end)
 		if hi > end && hi <= u64(len(doc.src)) {
@@ -533,11 +533,11 @@ html_element_of :: proc "contextless" (doc: ^tape.Document, v_in: tape.Node_Inde
 @(private = "file")
 text_before_read_on :: proc "contextless" (doc: ^tape.Document, lo: u64) -> u64 {
 	if doc.ext == nil { return lo }
-	b, head, entry, ok := find_text_entry(&doc.ext.format, lo)
+	he, entry, ok := find_text_entry(&doc.ext.format, lo)
 	if !ok || entry.count == 0 { return lo }
 	k := entry.count - 1
 	for k > 0 {
-		cur, prev := load_piece(b, head, entry.first + k), load_piece(b, head, entry.first + k - 1)
+		cur, prev := he.pieces[entry.first + k], he.pieces[entry.first + k - 1]
 		if cur.lo <= prev.lo + u64(prev.n) { break }
 		all_ws := true
 		if cur.lo + u64(cur.n) <= u64(len(doc.src)) {
@@ -546,7 +546,7 @@ text_before_read_on :: proc "contextless" (doc: ^tape.Document, lo: u64) -> u64 
 		if !all_ws { return cur.lo + u64(cur.n) }
 		k -= 1
 	}
-	last := load_piece(b, head, entry.first + k)
+	last := he.pieces[entry.first + k]
 	return last.lo + u64(last.n)
 }
 
@@ -1176,9 +1176,9 @@ read_on_bytes :: proc(y: ^tape.Document, b: tape.Node_Index, close: u64, sc: run
 	out := make([dynamic]u8, 0, 16, sc)
 	for k in b ..< tape.node_after(y, b) {
 		if y.nodes[k].kind != .Plain || y.nodes[k].spelling & TEXT_PIECES == 0 || y.ext == nil { continue }
-		if b_bytes, head, entry, ok := find_text_entry(&y.ext.format, y.nodes[k].lo); ok {
+		if he, entry, ok := find_text_entry(&y.ext.format, y.nodes[k].lo); ok {
 			for i in 0 ..< entry.count {
-				p := load_piece(b_bytes, head, entry.first + i)
+				p := he.pieces[entry.first + i]
 				if p.lo >= close && p.lo + u64(p.n) <= u64(len(y.src)) { append(&out, ..y.src[p.lo:][:p.n]) }
 			}
 		}

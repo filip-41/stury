@@ -510,6 +510,8 @@ canonical_index_key :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) 
 		return text_borrowed("true"), .Ok
 	case .String:
 		return text_value(h, text_of(v))
+	case .Bytes:
+		return encode_base(h, string(bytes_of(v)), .Base64, true)
 	case .Number:
 		num := number_of(h, v) or_return
 		defer release(h, num)

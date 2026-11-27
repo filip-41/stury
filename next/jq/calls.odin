@@ -341,7 +341,7 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 		count := 1.0
 		if b.op != .First {
 			t := query.type_of(vals[0])
-			if t == .String || t == .Array || t == .Object {
+			if t == .String || t == .Bytes || t == .Array || t == .Object {
 				raise_text(m, "Invalid limit: not a number")
 				finish(m, r, .Fail)
 				return

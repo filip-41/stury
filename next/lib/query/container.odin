@@ -16,7 +16,7 @@ TAPE_NODE_TYPE := [tape.Kind]Type {
 	.Number = .Number,
 	.String = .String,
 	.Plain  = .String,
-	.Bytes  = .String,
+	.Bytes  = .Bytes,
 	.Array  = .Array,
 	.Object = .Object,
 	.End    = .Null,
@@ -80,6 +80,8 @@ type_of :: #force_inline proc "contextless" (v: Value) -> Type {
 		return .Number
 	case .String:
 		return .String
+	case .Bytes:
+		return .Bytes
 	case .Array:
 		return .Array
 	case .Object:
@@ -282,7 +284,7 @@ doc_keeps_origin :: #force_inline proc "contextless" (d: ^Doc_Block) -> bool {
 
 @(private = "file")
 token_is_direct_node :: #force_inline proc "contextless" (t: tape.Node) -> bool {
-	return t.kind == .Number || t.kind >= .Array || (u8(t.kind) - u8(tape.Kind.String) <= 1 && t.role != .Key && t.spelling & tape.SPELLING_DECODE == 0)
+	return t.kind == .Number || t.kind >= .Array || (u8(t.kind) - u8(tape.Kind.Bytes) <= 2 && t.role != .Key && t.spelling & tape.SPELLING_DECODE == 0)
 }
 
 // The value of node `at` of document block `d`.
@@ -295,8 +297,13 @@ node_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, force_origin :=
 	}
 	keep := force_origin || h.keep_origins || doc_keeps_origin(d)
 	#partial switch t.kind {
-	case .String, .Plain, .Bytes:
+	case .String, .Plain:
 		return decoded_text(h, d, at, t.role != .Key && keep)
+	case .Bytes:
+		if t.role == .Key {
+			return decoded_text(h, d, at, false)
+		}
+		return decoded_bytes(h, d, at, keep)
 	case .Null:
 		if !keep {
 			return NULL, .Ok
@@ -366,6 +373,15 @@ decoded_text :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Ind
 		return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
 	}
 	return token_text_value(h, d, t, attach_doc, at)
+}
+
+// The raw bytes of a `.Bytes` value node that requires decoding (e.g. CBOR indefinite byte string or YAML `!!binary`).
+@(private, cold)
+decoded_bytes :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, attach_doc := false) -> (res: Value, status: Status) #no_bounds_check {
+	t := d.doc.nodes[at]
+	v := token_text_value(h, d, t, attach_doc, at) or_return
+	v.kind = .Bytes
+	return v, .Ok
 }
 
 // The key of the built object entry or the document member whose key node is `at`, as a string value.
@@ -1159,6 +1175,9 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		}
 		if is_text(x) {
 			return text_value(h, text_of(x))
+		}
+		if is_bytes(x) {
+			return bytes_value(h, bytes_of(x))
 		}
 		if x.kind == .Big {
 			return big_clone(h, x)

@@ -2,6 +2,7 @@
 # case	kind	reason
 # kind: `better` is a divergence kept on purpose; `reader` is the JSON reader's own wording; `platform` is what jq takes from its libc or libm, which differs by platform; `bug` is a difference not yet fixed or ruled on. A `pending` case (none now) waits on what is not built yet.
 # Math by platform (2026-11-25 ruling): `sin`, `cos`, `tan`, `exp` and `pow` call the platform libm through `core:math` and may differ by platform in the last digit (within 1 ulp), as jq's do. Every other math builtin is pure Odin and bit-exact across platforms.
+# Native bytes extension: binary byte strings from CBOR, MessagePack, and YAML `!!binary` have `type == "bytes"`, `length` equal to their byte count, native lexicographic ordering (distinct from strings), and encode as RFC 4648 base64 when serialized to JSON.
 jq.test:2211	better	Integers are exact: arithmetic past 2^53 keeps every digit, where jq rounds to a double.
 jq.test:2215	better	Integers are exact: arithmetic past 2^53 keeps every digit, where jq rounds to a double.
 jq.test:2219	better	Integers are exact: arithmetic past 2^53 keeps every digit, where jq rounds to a double.

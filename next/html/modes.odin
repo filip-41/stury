@@ -678,7 +678,7 @@ close_element :: proc(t: ^Html_Tree, tag: Tag, bound: Tag_Classes) -> bool {
 any_other_end_tag :: proc(t: ^Html_Tree, tok: ^Html_Token) {
 	#reverse for m, i in t.stack {
 		n := tree_node(t, m)
-		if n.ns == .Html && n.tag == t.tag && (t.tag != .Other || names_equal(raw_data(t.src), n.name, tok.name)) {
+		if n.ns == .Html && n.tag == t.tag && (t.tag != .Other || names_equal_tree(t, n.name, tok.name)) {
 			close_implied(t, t.tag)
 			if m != current(t) { misplaced(t, .Unclosed_Element) }
 			pop_to(t, i)

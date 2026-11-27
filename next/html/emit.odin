@@ -88,6 +88,35 @@ emit_tree_walk :: proc(
 }
 
 @(private)
+flush_kept_open :: proc(e: ^Emitter($H, $LAX)) {
+	if e.keep_state == nil {
+		return
+	}
+	for len(e.keep_state.open) > 0 {
+		entry := pop(&e.keep_state.open)
+		if entry.tag != CONTAINER_ROOT {
+			if _, err := append(&e.keep_state.ends, tape.Html_End{node = entry.node, end = tree_node(e.t, u32(entry.tag)).end}); err != nil {
+				e.keep_state.oom = true
+				e.no_memory = true
+				e.stopped = true
+				return
+			}
+		}
+	}
+}
+
+@(private)
+count_skipped_children :: proc(e: ^Emitter($H, $LAX), from: u32) {
+	when LAX {
+		for c := from; c != 0 && !e.stopped; c = tree_node(e.t, c).next {
+			if tree_node(e.t, c).kind == .Element {
+				count_skipped_objects(e, c)
+			}
+		}
+	}
+}
+
+@(private)
 emit_tree :: proc(
 	e: ^Emitter($H, $LAX),
 	$on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action),
@@ -101,6 +130,12 @@ emit_tree :: proc(
 	child := tree_node(t, top).first
 	prev, opening := false, true
 	for !e.stopped {
+		when !LAX {
+			if e.mute == max(u64) {
+				flush_kept_open(e)
+				return
+			}
+		}
 		next, shut := emit_content(e, on, parent, child, prev, opening, top)
 		if e.stopped {
 			return
@@ -116,7 +151,7 @@ emit_tree :: proc(
 				if e.keep_state != nil && parent != top {
 					if ko := &e.keep_state.open; len(ko) > 0 && ko[len(ko) - 1].tag == tag {
 						entry := pop(ko)
-						if _, err := append(&e.keep_state.ends, End_Entry{node = entry.node, end = lo}); err != nil {
+						if _, err := append(&e.keep_state.ends, tape.Html_End{node = entry.node, end = lo}); err != nil {
 							e.keep_state.oom = true
 							e.no_memory = true
 							e.stopped = true
@@ -150,6 +185,10 @@ emit_content :: proc(
 	top: u32,
 ) -> (next: u32, shut: bool) {
 	t := e.t
+	if e.mute != 0 {
+		count_skipped_children(e, from)
+		return 0, false
+	}
 	end := from
 	last_text := u32(0)
 	for end != 0 && tree_node(t, end).kind != .Element {
@@ -158,16 +197,40 @@ emit_content :: proc(
 		}
 		end = tree_node(t, end).next
 	}
-	if opening && parent != top && end != 0 && !give_open(e, on, parent, end, top) {
-		return 0, true
+	if opening && parent != top && end != 0 {
+		if !give_open(e, on, parent, end, top) {
+			return 0, true
+		}
+		if e.mute != 0 {
+			when !LAX {
+				if e.mute == max(u64) {
+					flush_kept_open(e)
+					return 0, true
+				}
+			}
+			count_skipped_children(e, end)
+			return 0, false
+		}
 	}
 	lead := head_end(e, from, end) if opening && parent == top else max(u32)
 	seen := last_text == 0
 	text_seen := false
 	next_line := !prev
 	for k := from; k != end; k = tree_node(t, k).next {
-		if k == lead && !give_open(e, on, parent, end, top) {
-			return 0, true
+		if k == lead {
+			if !give_open(e, on, parent, end, top) {
+				return 0, true
+			}
+			if e.mute != 0 {
+				when !LAX {
+					if e.mute == max(u64) {
+						flush_kept_open(e)
+						return 0, true
+					}
+				}
+				count_skipped_children(e, end)
+				return 0, false
+			}
 		}
 		n := tree_node(t, k)
 		switch n.kind {
@@ -210,8 +273,20 @@ emit_content :: proc(
 		case .Document, .Element:
 		}
 	}
-	if lead == end && !give_open(e, on, parent, end, top) {
-		return 0, true
+	if lead == end {
+		if !give_open(e, on, parent, end, top) {
+			return 0, true
+		}
+		if e.mute != 0 {
+			when !LAX {
+				if e.mute == max(u64) {
+					flush_kept_open(e)
+					return 0, true
+				}
+			}
+			count_skipped_children(e, end)
+			return 0, false
+		}
 	}
 	if last_text != 0 {
 		if give(e, on, .String, .Key, tree_node(t, last_text).lo, 0, tape.SPELLING_DECODE | tape.SPELLING_TEXT_KEY) == .Stop {
@@ -259,7 +334,7 @@ give_open :: #force_inline proc(
 	}
 	_ = a
 	if e.keep_state != nil && parent != top && e.regs.c > prev_c {
-		if _, err := append(&e.keep_state.open, Open_Entry{tag = tag, node = u32(e.regs.b >> 32)}); err != nil {
+		if _, err := append(&e.keep_state.open, Open_Entry{tag = tag, node = tape.Node_Index(e.regs.b >> 32)}); err != nil {
 			e.keep_state.oom = true
 			e.no_memory = true
 			e.stopped = true
@@ -327,6 +402,13 @@ emit_element :: proc(
 			if give_fact(e, on, .Plain, .Instruction_Foot, child.lo, child.hi - child.lo, markers(child.lo, child.hi, child.name.lo, body_end)) == .Stop {
 				return false
 			}
+		}
+	}
+	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
+	when .Skips in C {
+		if e.skip_value {
+			e.skip_value = false
+			return false
 		}
 	}
 	empty_at := node.lo if .Implied in node.flags else node.hi
@@ -445,13 +527,21 @@ text_value :: proc(
 	if len(e.run) > 1 {
 		spelling = tape.SPELLING_DECODE | tape.SPELLING_LAX | TEXT_PIECES
 		if k := e.keep_state; k != nil && e.mute == 0 {
-			_, err := append(&k.texts, Text_Entry{lo = lo, first = u32(len(k.pieces)), count = u32(len(e.run))})
-			_, perr := append(&k.pieces, ..e.run[:])
-			k.oom ||= err != nil || perr != nil
-			if k.oom {
+			_, err := append(&k.texts, tape.Html_Text{lo = lo, first = u32(len(k.pieces)), count = u32(len(e.run))})
+			rerr := reserve(&k.pieces, len(k.pieces) + len(e.run))
+			if err != nil || rerr != nil {
+				k.oom = true
 				e.no_memory = true
 				e.stopped = true
 				return false
+			}
+			for s in e.run {
+				if _, perr := append(&k.pieces, to_html_span(s)); perr != nil {
+					k.oom = true
+					e.no_memory = true
+					e.stopped = true
+					return false
+				}
 			}
 		}
 	} else if decoded_any {

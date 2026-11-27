@@ -1,6 +1,7 @@
 package jsonpath_tests
 
 import "core:testing"
+import "stury:cbor"
 import "stury:json"
 import "stury:jsonpath"
 import "stury:lib/core/tape"
@@ -120,5 +121,47 @@ reusable_run_across_documents :: proc(t: ^testing.T) {
 			testing.expect_value(t, col.vals[wi], want)
 		}
 		destroy_collected(&col)
+	}
+}
+
+@(test)
+cbor_bytes_length_equality_and_comparison :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// CBOR: {"items": [{"id": 1, "raw": h'0102'}, {"id": 2, "raw": h'01ff'}, {"id": 3, "raw": "0102"}], "ref": h'0102'}
+	cbor_src := [?]u8{
+		0xA2,
+		0x65, 'i', 't', 'e', 'm', 's', 0x83,
+			0xA2, 0x62, 'i', 'd', 0x01, 0x63, 'r', 'a', 'w', 0x42, 0x01, 0x02,
+			0xA2, 0x62, 'i', 'd', 0x02, 0x63, 'r', 'a', 'w', 0x42, 0x01, 0xFF,
+			0xA2, 0x62, 'i', 'd', 0x03, 0x63, 'r', 'a', 'w', 0x64, '0', '1', '0', '2',
+		0x63, 'r', 'e', 'f', 0x42, 0x01, 0x02,
+	}
+
+	// Equality: bytes == bytes matches id=1, never matches string id=3.
+	{
+		prog, cerr := jsonpath.compile(`$.items[?@.raw == $.ref].id`)
+		testing.expect_value(t, cerr.kind, jsonpath.Error_Kind.None)
+		defer jsonpath.destroy_program(prog)
+		doc, derr := cbor.build(cbor_src[:])
+		testing.expect(t, derr == nil)
+		eval_doc_expect(t, prog, doc, {"1"})
+	}
+	// Length: length(@.raw) == 2 matches the two 2-byte payloads (id=1, id=2), not 4-char string (id=3).
+	{
+		prog, cerr := jsonpath.compile(`$.items[?length(@.raw) == 2].id`)
+		testing.expect_value(t, cerr.kind, jsonpath.Error_Kind.None)
+		defer jsonpath.destroy_program(prog)
+		doc, derr := cbor.build(cbor_src[:])
+		testing.expect(t, derr == nil)
+		eval_doc_expect(t, prog, doc, {"1", "2"})
+	}
+	// Comparison: $.ref < @.raw matches id=2 (0x0102 < 0x01ff).
+	{
+		prog, cerr := jsonpath.compile(`$.items[?$.ref < @.raw].id`)
+		testing.expect_value(t, cerr.kind, jsonpath.Error_Kind.None)
+		defer jsonpath.destroy_program(prog)
+		doc, derr := cbor.build(cbor_src[:])
+		testing.expect(t, derr == nil)
+		eval_doc_expect(t, prog, doc, {"2"})
 	}
 }

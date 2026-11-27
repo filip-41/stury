@@ -1,6 +1,7 @@
 package engine
 
 import "base:runtime"
+import "core:encoding/base64"
 import "core:strconv"
 import "stury:json"
 import "stury:lib/base/spell"
@@ -620,7 +621,35 @@ append_node_dsv_cell :: proc(buf: ^[dynamic]u8, doc: ^tape.Document, node: tape.
 		defer delete(text, alloc)
 		append_dsv_escaped(buf, string(text), delim)
 		return nil
-	case .String, .Plain, .Bytes:
+	case .Bytes:
+		raw: []u8
+		tmp: []u8
+		defer if tmp != nil { delete(tmp, alloc) }
+		if t.spelling & tape.SPELLING_DECODE != 0 {
+			room := tape.text_room(doc, node)
+			merr: runtime.Allocator_Error
+			tmp, merr = make([]u8, max(room, int(t.n), 64), alloc)
+			if merr != nil { return merr }
+			text, ok := tape.node_text(doc, node, tmp)
+			if !ok { return write.Refused{node = node, why = .No_Spelling} }
+			raw = transmute([]u8)text
+		} else {
+			raw = tape.span_bytes(doc, t.lo, t.n)
+		}
+		enc_len := base64.encoded_len(raw, base64.Encode_Options{})
+		if enc_len == 0 {
+			append_dsv_escaped(buf, "", delim)
+			return nil
+		}
+		b64, berr := make([]u8, enc_len, alloc)
+		if berr != nil { return berr }
+		defer delete(b64, alloc)
+		if _, eerr := base64.encode_into_buf(b64, raw, options = base64.Encode_Options{}); eerr != nil {
+			return write.Refused{node = node, why = .No_Spelling}
+		}
+		append_dsv_escaped(buf, string(b64), delim)
+		return nil
+	case .String, .Plain:
 		room := tape.text_room(doc, node)
 		if room == 0 && doc.format != nil && .Binary not_in doc.format.caps {
 			append_dsv_escaped(buf, string(tape.span_bytes(doc, t.lo, t.n)), delim)

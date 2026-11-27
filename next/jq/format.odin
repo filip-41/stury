@@ -100,6 +100,14 @@ format_value :: proc(m: ^Machine, name: string, v: query.Value) -> (res: query.V
 		return format_row(m, v, name == "csv")
 	case "sh":
 		return format_shell(m, v)
+	case "base64":
+		if query.is_bytes(v) {
+			return query.encode_base(h, string(query.bytes_of(v)), .Base64, true)
+		}
+	case "base32":
+		if query.is_bytes(v) {
+			return query.encode_base(h, string(query.bytes_of(v)), .Base32, true)
+		}
 	}
 	t := to_text(h, v) or_return
 	defer query.release(h, t)
@@ -217,6 +225,16 @@ format_row :: proc(m: ^Machine, v: query.Value, csv: bool) -> (res: query.Value,
 					}
 				}
 			}
+		case .Bytes:
+			b64 := query.encode_base(h, string(query.bytes_of(x)), .Base64, true) or_return
+			defer query.release(h, b64)
+			if csv {
+				append(&out, '"')
+				append(&out, query.text_of(b64))
+				append(&out, '"')
+			} else {
+				append(&out, query.text_of(b64))
+			}
 		case .Array, .Object:
 			return query.NULL, raise_typed(m, x, " is not valid in a csv row" if csv else " is not valid in a tsv row")
 		}
@@ -254,6 +272,12 @@ format_shell :: proc(m: ^Machine, v: query.Value) -> (res: query.Value, status: 
 					append(&out, c)
 				}
 			}
+			append(&out, '\'')
+		case .Bytes:
+			b64 := query.encode_base(h, string(query.bytes_of(x)), .Base64, true) or_return
+			defer query.release(h, b64)
+			append(&out, '\'')
+			append(&out, query.text_of(b64))
 			append(&out, '\'')
 		case:
 			query.write_json(h, &out, x, {double = jq_double, too_deep = TOO_DEEP}) or_return

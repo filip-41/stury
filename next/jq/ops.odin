@@ -53,6 +53,8 @@ add_values :: proc(h: ^query.Heap, a, b: query.Value) -> (res: query.Value, stat
 		return query.num_add(h, a, b)
 	case ta == .String && tb == .String:
 		return query.text_concat(h, a, b)
+	case ta == .Bytes && tb == .Bytes:
+		return query.bytes_concat(h, a, b)
 	case ta == .Array && tb == .Array:
 		return query.array_concat(h, a, b)
 	case ta == .Object && tb == .Object:

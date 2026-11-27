@@ -691,3 +691,79 @@ ops_edit_commit_target_validation :: proc(t: ^testing.T) {
 	u_bo, u_is_bo := unk_err.(tape.Bad_Option)
 	testing.expect(t, u_is_bo && u_bo.option == "target")
 }
+
+@(test)
+ops_bytes_roundtrip_cbor_msgpack_and_text :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// CBOR map {"payload": h'deadbeef', "label": "ok"} -> MessagePack -> CBOR preserves native `.Bytes`.
+	cbor_src := [?]u8{0xA2, 0x67, 'p', 'a', 'y', 'l', 'o', 'a', 'd', 0x44, 0xDE, 0xAD, 0xBE, 0xEF, 0x65, 'l', 'a', 'b', 'e', 'l', 0x62, 'o', 'k'}
+	raw_want := [?]u8{0xDE, 0xAD, 0xBE, 0xEF}
+
+	mp_bytes, _, f1 := engine.format(cbor_src[:], cbor.Spec.Cbor, msgpack.Spec.Compact)
+	testing.expect_value(t, f1, engine.Format_Error(nil))
+	defer delete(mp_bytes)
+
+	mp_doc, mberr := engine.build(mp_bytes, msgpack.Spec.Msgpack)
+	testing.expect_value(t, mberr, tape.Error(nil))
+	defer tape.destroy(&mp_doc)
+	mp_p, mp_pres := tape.member(tape.Reader{doc = &mp_doc}, tape.ROOT, "payload")
+	testing.expect_value(t, mp_pres, tape.Presence.Found)
+	testing.expect_value(t, mp_doc.nodes[mp_p].kind, tape.Kind.Bytes)
+	testing.expect(t, bytes.equal(tape.span_bytes(&mp_doc, mp_doc.nodes[mp_p].lo, mp_doc.nodes[mp_p].n), raw_want[:]))
+
+	// Through `query.Value` -> `engine.write_value`: binary targets emit native `.Bytes`, text targets emit RFC 4648 base64!
+	h: query.Heap
+	query.heap_init(&h, context.allocator)
+	defer query.heap_destroy(&h)
+	qv, qst := query.document_value(&h, mp_doc, owned = false)
+	testing.expect_value(t, qst, query.Status.Ok)
+	defer query.release(&h, qv)
+
+	// Write `query.Value` back to CBOR and verify native `.Bytes`.
+	cbor_out, cwerr := engine.write_value(&h, qv, cbor.Spec.Cbor)
+	testing.expect_value(t, cwerr, write.Error(nil))
+	defer delete(cbor_out)
+	cdoc, cberr := engine.build(cbor_out, cbor.Spec.Cbor)
+	testing.expect_value(t, cberr, tape.Error(nil))
+	defer tape.destroy(&cdoc)
+	cp, cpres := tape.member(tape.Reader{doc = &cdoc}, tape.ROOT, "payload")
+	testing.expect_value(t, cpres, tape.Presence.Found)
+	testing.expect_value(t, cdoc.nodes[cp].kind, tape.Kind.Bytes)
+	testing.expect(t, bytes.equal(tape.span_bytes(&cdoc, cdoc.nodes[cp].lo, cdoc.nodes[cp].n), raw_want[:]))
+
+	// Write `query.Value` back to MessagePack and verify native `.Bytes`.
+	mp_out, mwerr := engine.write_value(&h, qv, msgpack.Spec.Compact)
+	testing.expect_value(t, mwerr, write.Error(nil))
+	defer delete(mp_out)
+	mdoc2, mberr2 := engine.build(mp_out, msgpack.Spec.Msgpack)
+	testing.expect_value(t, mberr2, tape.Error(nil))
+	defer tape.destroy(&mdoc2)
+	mp2, mpres2 := tape.member(tape.Reader{doc = &mdoc2}, tape.ROOT, "payload")
+	testing.expect_value(t, mpres2, tape.Presence.Found)
+	testing.expect_value(t, mdoc2.nodes[mp2].kind, tape.Kind.Bytes)
+	testing.expect(t, bytes.equal(tape.span_bytes(&mdoc2, mdoc2.nodes[mp2].lo, mdoc2.nodes[mp2].n), raw_want[:]))
+
+	// Text targets emit RFC 4648 base64 (`"3q2+7w=="`).
+	for text_spec in ([?]engine.Spec{json.Spec.Json, yaml.Spec.Yaml_1_2, toml.Spec.Toml_1_0}) {
+		tout, twerr := engine.write_value(&h, qv, text_spec)
+		testing.expectf(t, twerr == nil, "write_value %v err: %v", text_spec, twerr)
+		defer delete(tout)
+		testing.expectf(t, strings.contains(string(tout), "3q2+7w=="), "%v got %q", text_spec, string(tout))
+	}
+
+	// XML unmarshal via `engine.unmarshal`.
+	Item :: struct {
+		name:  string `xml:"name"`,
+		count: int    `xml:"count"`,
+	}
+	Doc :: struct {
+		item: Item `xml:"item"`,
+	}
+	got: Doc
+	uerr := engine.unmarshal(transmute([]u8)string(`<item><name>widget</name><count>5</count></item>`), &got, xml.Spec.Xml)
+	testing.expect_value(t, uerr, tape.Error(nil))
+	defer delete(got.item.name)
+	testing.expect_value(t, got.item.name, "widget")
+	testing.expect_value(t, got.item.count, 5)
+}

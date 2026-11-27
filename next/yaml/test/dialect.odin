@@ -699,7 +699,7 @@ dialect_audit_regressions :: proc(t: ^testing.T) {
 	testing.expect_value(t, mserr, nil)
 	_, mcerr := yaml.commit(&mov, .Yaml_Merge, {}, context.allocator, {.Failsafe})
 	mref, is_mref := mcerr.(edit.Refusal)
-	testing.expectf(t, is_mref && mref.kind == .Unspellable_Value, "failsafe merge edit: got %v, want Unspellable_Value", mcerr)
+	testing.expectf(t, is_mref && mref.group == .Alias_Unshare && mref.kind == .Alias_Edit_Requires_Reflow, "failsafe merge edit: got %v, want Alias_Edit_Requires_Reflow", mcerr)
 
 	// 4. `.Plain` `.Number` key `1.1234: val` (whose `number_spelling` bits overlap `Style.Single` + `SPELLING_ASCII`)
 	// must NEVER be emitted as `'1.1234': val` by `single_quoted_body`!

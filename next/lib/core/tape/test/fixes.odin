@@ -276,8 +276,8 @@ markup_content_bugs_and_fast_paths :: proc(t: ^testing.T) {
 }
 
 // The entries of every list a `Document`, its `Partial` and its `Doc_Ext` (including all `Doc_Ext.format` union arms
-// such as `Tabular_Ext`, `Markup_Ext`, and `Markup_Dtd`) hold are offsets, indexes and plain values, with no address,
-// so a document's lists can be written to a file and read back.
+// such as `Tabular_Ext`, `Markup_Ext`, `Markup_Dtd`, and `Html_Ext`) hold are offsets, indexes and plain values, with
+// no address, so a document's lists can be written to a file and read back.
 @(test)
 document_entries_hold_no_address :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -285,8 +285,8 @@ document_entries_hold_no_address :: proc(t: ^testing.T) {
 	for holder in ([]^runtime.Type_Info{type_info_of(tape.Document), type_info_of(tape.Partial), type_info_of(tape.Doc_Ext)}) {
 		check_holder_lists(t, holder, holder != type_info_of(tape.Document), &checked)
 	}
-	// Document (4) + Partial (5) + Doc_Ext (1) + Tabular_Ext (3) + Markup_Ext (3) + Markup_Dtd (4) = 20 lists.
-	testing.expect(t, checked >= 20)
+	// Document (4) + Partial (5) + Doc_Ext (1) + Tabular_Ext (3) + Markup_Ext (3) + Markup_Dtd (4) + Html_Ext (3) = 23 lists.
+	testing.expect(t, checked >= 23)
 }
 
 // Walks structs and unions inside a document holder, verifying every slice element holds no address; when

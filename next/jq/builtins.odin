@@ -67,7 +67,7 @@ find_builtin :: proc(name: string, arity: int) -> ^Builtin {
 }
 
 @(private)
-NOT_NULL :: bit_set[query.Type]{.False, .True, .Number, .String, .Array, .Object}
+NOT_NULL :: bit_set[query.Type]{.False, .True, .Number, .String, .Bytes, .Array, .Object}
 
 @(private, rodata)
 BUILTINS := [?]Builtin {
@@ -81,7 +81,7 @@ BUILTINS := [?]Builtin {
 	{name = "arrays", kind = .Single, op = .Kind_Filter, native = true, types = {.Array}},
 	{name = "objects", kind = .Single, op = .Kind_Filter, native = true, types = {.Object}},
 	{name = "iterables", kind = .Single, op = .Kind_Filter, native = true, types = {.Array, .Object}},
-	{name = "scalars", kind = .Single, op = .Kind_Filter, native = true, types = {.Absent, .Null, .False, .True, .Number, .String}},
+	{name = "scalars", kind = .Single, op = .Kind_Filter, native = true, types = {.Absent, .Null, .False, .True, .Number, .String, .Bytes}},
 	{name = "error", kind = .Single, op = .Error, native = true},
 	{name = "error", arity = 1, kind = .Single, op = .Error, native = true},
 	{name = "path", arity = 1, kind = .Single_Args, op = .Path},

@@ -219,13 +219,9 @@ group1_and_group2_refusals_and_reflow :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
 
-	// Group 1 (`Format_Impossible`): aliases, anchors, merges, reorder past anchor, invalid raw/comment/UTF-8, >1024B implicit key.
+	// Group 1 (`Format_Impossible`): duplicate-anchor shadowing reorder, invalid raw/comment/UTF-8, >1024B implicit key.
 	// MUST still refuse even when `Options.reflow = true`!
 	g1 := []Edit_Rule {
-		{src = "a: &x 1\nb: *x\n", path = "a", text = "2", refused = .Unspellable_Value},
-		{src = "a: &x\n  k: 1\nb: *x\n", path = "a.k", text = "2", refused = .Unspellable_Value},
-		{src = "a: &x\n  k: 1\nb: *x\n", path = "b.k", text = "2", refused = .Unspellable_Value},
-		{src = "a: &x\n  k: 1\nb: *x\n", op = .Insert_Raw, path = "b", at = 1, key = "l", text = "2", refused = .Unspellable_Value},
 		{src = "l:\n  - &x 1\n  - &x 2\nb: *x\n", op = .Reorder, path = "l", text = "10", refused = .Bad_Order},
 		{src = "a: 1\n", path = "a", text = "bad\n---\ntwo", refused = .Unspellable_Value},
 		{src = "a: 1\n", op = .Fact, path = "a", fact = .Comment, text = "bad\x01c", refused = .Fact_No_Place},
@@ -238,12 +234,30 @@ group1_and_group2_refusals_and_reflow :: proc(t: ^testing.T) {
 		}
 	}
 
-	// Active `<<` merge freeze under `.Yaml_Merge` even with `reflow = true`.
+	// Group 3 (`Alias_Unshare`): edits through aliases, anchored nodes with live aliases, and active `<<` merge keys.
+	// Refused with `.Alias_Edit_Requires_Reflow` when `reflow = false`, accepted cleanly when `reflow = true`!
+	g3 := []Edit_Rule {
+		{src = "a: &x 1\nb: *x\n", path = "a", text = "2"},
+		{src = "a: &x\n  k: 1\nb: *x\n", path = "a.k", text = "2"},
+		{src = "a: &x\n  k: 1\nb: *x\n", path = "b.k", text = "2"},
+		{src = "a: &x\n  k: 1\nb: *x\n", op = .Insert_Raw, path = "b", at = 1, key = "l", text = "2"},
+	}
+	for r in g3 {
+		_, err_no := run_rule(r, .Yaml_1_2, {reflow = false})
+		ref, ok := err_no.(edit.Refusal)
+		testing.expectf(t, ok && ref.group == .Alias_Unshare && ref.kind == .Alias_Edit_Requires_Reflow, "g3 no reflow %q: got %v", r.src, err_no)
+		_, err_yes := run_rule(r, .Yaml_1_2, {reflow = true})
+		testing.expectf(t, err_yes == nil, "g3 reflow %q: got %v", r.src, err_yes)
+	}
+
+	// Active `<<` merge freeze under `.Yaml_Merge` refuses without reflow and succeeds under `reflow = true`.
 	merge_rule := Edit_Rule{src = "a: &x {k: 1}\nb:\n  <<: *x\n  l: 2\n", path = "b.l", text = "3"}
-	for reflow in ([2]bool{false, true}) {
-		_, merr := run_rule(merge_rule, .Yaml_Merge, {reflow = reflow})
+	{
+		_, merr := run_rule(merge_rule, .Yaml_Merge, {reflow = false})
 		ref, ok := merr.(edit.Refusal)
-		testing.expectf(t, ok && ref.group == .Format_Impossible && ref.kind == .Unspellable_Value, "merge reflow=%v: %v", reflow, merr)
+		testing.expectf(t, ok && ref.group == .Alias_Unshare && ref.kind == .Alias_Edit_Requires_Reflow, "merge reflow=false: %v", merr)
+		mout, merr2 := run_rule(merge_rule, .Yaml_Merge, {reflow = true})
+		testing.expectf(t, merr2 == nil && mout == "a: &x {k: 1}\nb:\n  <<: *x\n  l: 3\n", "merge reflow=true: %q (%v)", mout, merr2)
 	}
 
 	// Inactive `<<` literal does NOT block edits.
@@ -352,11 +366,11 @@ removing_aliases_unfreezes_anchor_for_edits :: proc(t: ^testing.T) {
 	_, _ = edit.set_path(&ov, path_steps("a.k"), edit.val_int(2))
 	_, _ = edit.set_path(&ov, path_steps("b"), edit.val_int(0))
 
-	// Still has `c: [*x]`, so refused!
+	// Still has `c: [*x]`, so refused without reflow!
 	res1, e1 := yaml.commit(&ov, .Yaml_1_2)
 	defer edit.destroy_commit_result(&res1)
 	r1, ok1 := e1.(edit.Refusal)
-	testing.expect(t, ok1 && r1.kind == .Unspellable_Value)
+	testing.expect(t, ok1 && r1.group == .Alias_Unshare && r1.kind == .Alias_Edit_Requires_Reflow)
 
 	// Delete `c`, now `&x` has zero remaining live aliases!
 	root_h, _ := edit.ensure_root(&ov)
@@ -500,5 +514,365 @@ empty_reorder_dead_ancestor_key_raw_and_oom_regression :: proc(t: ^testing.T) {
 		sc := Sweep_Ctx{&doc}
 		sw := testkit.sweep_failures(sweep_edit, &sc)
 		testing.expectf(t, sw.bad == 0 && sw.refused >= 1, "edit OOM sweep: %v", sw)
+	}
+}
+
+@(test)
+anchor_reorder_moves_anchor_to_new_first_use :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+
+	// Group 2 anchor reorder works by default (`reflow = false`): moves `&a` to the new first use and turns old anchor into `*a`.
+	expect_edit_rules(t, {
+		// Block mapping with block container anchor + untouched sibling.
+		{
+			src  = "a: &x\n  k: 1\n  m: 2\nb: *x\nc: 3 # keep\n",
+			op   = .Reorder,
+			text = "102",
+			want = "b: &x\n  k: 1\n  m: 2\na: *x\nc: 3 # keep\n",
+		},
+		// Scalar anchor + multiple aliases: earliest alias in new order receives `&x`, others stay `*x`.
+		{
+			src  = "a: &x 1\nb: *x\nc: *x\nd: 9\n",
+			op   = .Reorder,
+			text = "2103",
+			want = "c: &x 1\nb: *x\na: *x\nd: 9\n",
+		},
+		// Tagged anchor preserves tag on the moved anchor.
+		{
+			src  = "a: !!str &x 1\nb: *x\n",
+			op   = .Reorder,
+			text = "10",
+			want = "b: !!str &x 1\na: *x\n",
+		},
+		// Block scalar anchor with no trailing newline (`open_end`).
+		{
+			src  = "a: &x |\n  one\n  two\nb: *x",
+			op   = .Reorder,
+			text = "10",
+			want = "b: &x |\n  one\n  two\na: *x",
+		},
+		// Flow mapping with anchor + untouched sibling.
+		{
+			src  = "f: {a: &x [1, 2], b: *x, c: 3}\n",
+			op   = .Reorder,
+			path = "f",
+			text = "102",
+			want = "f: {b: &x [1, 2], a: *x, c: 3}\n",
+		},
+		// Block container anchor moving into a flow alias target.
+		{
+			src  = "a: &x\n  k: 1\nb: [*x]\n",
+			op   = .Reorder,
+			text = "10",
+			want = "b: [&x {k: 1}]\na: *x\n",
+		},
+	})
+
+	// Nested block sequence items containing `&c` and `*c`, plus an untouched 3rd sibling: verify round-trip data equality!
+	seq_src := transmute([]u8)string("- name: first\n  cfg: &c\n    port: 80\n- name: second\n  cfg: *c\n- name: third # untouched\n  port: 443\n")
+	doc, berr := yaml.build(seq_src)
+	defer yaml.destroy(&doc)
+	expect_nil(t, berr)
+
+	ov: yaml.Overlay
+	testing.expect_value(t, yaml.edit_init(&ov, &doc), nil)
+	defer yaml.edit_destroy(&ov)
+	rh, _ := edit.ensure_root(&ov)
+	testing.expect_value(t, edit.reorder(&ov, rh, {1, 0, 2}), nil)
+
+	res, cerr := yaml.commit(&ov, .Yaml_1_2, {reflow = false})
+	defer edit.destroy_commit_result(&res)
+	testing.expect_value(t, cerr, nil)
+	got := string(res.bytes)
+	testing.expect(t, strings.contains(got, "- name: third # untouched\n  port: 443\n"), got)
+
+	rebuilt, rerr := yaml.build(res.bytes)
+	defer yaml.destroy(&rebuilt)
+	expect_nil(t, rerr)
+	// Verify item 0 is now `second` with `cfg.port == 80`, item 1 is `first` with `cfg.port == 80`, item 2 is `third`.
+	want_doc, _ := yaml.build(transmute([]u8)string("- name: second\n  cfg:\n    port: 80\n- name: first\n  cfg:\n    port: 80\n- name: third\n  port: 443\n"))
+	defer yaml.destroy(&want_doc)
+	testing.expect(t, testkit.values_agree(t, &rebuilt, yaml.ROOT, &want_doc, yaml.ROOT, {}, "nested seq anchor reorder"))
+}
+
+@(test)
+group3_reflow_alias_unsharing :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+
+	// 1. Editing through `*x` refuses without reflow, and cleanly unshares ONLY `b` under `reflow = true` while `a` and `c` keep original value!
+	{
+		src := transmute([]u8)string("a: &x\n  k: 1\n  m: 2\nb: *x\nc: *x\n")
+		doc, berr := yaml.build(src)
+		defer yaml.destroy(&doc)
+		expect_nil(t, berr)
+
+		ov: yaml.Overlay
+		testing.expect_value(t, yaml.edit_init(&ov, &doc), nil)
+		defer yaml.edit_destroy(&ov)
+		_, serr := edit.set_path(&ov, path_steps("b.k"), edit.val_int(99))
+		testing.expect_value(t, serr, nil)
+
+		_, e_no := yaml.commit(&ov, .Yaml_1_2, {reflow = false})
+		ref, is_ref := e_no.(edit.Refusal)
+		testing.expectf(t, is_ref && ref.group == .Alias_Unshare && ref.kind == .Alias_Edit_Requires_Reflow, "alias edit no reflow: %v", e_no)
+
+		res, e_yes := yaml.commit(&ov, .Yaml_1_2, {reflow = true})
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, e_yes, nil)
+		testing.expect(t, len(res.rewritten) > 0)
+		got := string(res.bytes)
+		testing.expect(t, strings.contains(got, "a: &x\n  k: 1\n  m: 2\n") && strings.contains(got, "c: *x\n"), got)
+
+		rebuilt, rerr := yaml.build(res.bytes)
+		defer yaml.destroy(&rebuilt)
+		expect_nil(t, rerr)
+		want_doc, _ := yaml.build(transmute([]u8)string("a: {k: 1, m: 2}\nb: {k: 99, m: 2}\nc: {k: 1, m: 2}\n"))
+		defer yaml.destroy(&want_doc)
+		testing.expect(t, testkit.values_agree(t, &rebuilt, yaml.ROOT, &want_doc, yaml.ROOT, {}, "unshare alias edit"))
+	}
+
+	// 2. Editing inside an anchored node `a` with live aliases `b: *x` and `c: *x`: unshares `a`, moves `&x` to `b`, `c` stays `*x`!
+	{
+		src := transmute([]u8)string("a: &x\n  k: 1\n  m: 2\nb: *x\nc: *x\n")
+		doc, berr := yaml.build(src)
+		defer yaml.destroy(&doc)
+		expect_nil(t, berr)
+
+		ov: yaml.Overlay
+		testing.expect_value(t, yaml.edit_init(&ov, &doc), nil)
+		defer yaml.edit_destroy(&ov)
+		_, serr := edit.set_path(&ov, path_steps("a.k"), edit.val_int(77))
+		testing.expect_value(t, serr, nil)
+
+		_, e_no := yaml.commit(&ov, .Yaml_1_2, {reflow = false})
+		ref, is_ref := e_no.(edit.Refusal)
+		testing.expectf(t, is_ref && ref.group == .Alias_Unshare && ref.kind == .Alias_Edit_Requires_Reflow, "anchor edit no reflow: %v", e_no)
+
+		res, e_yes := yaml.commit(&ov, .Yaml_1_2, {reflow = true})
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, e_yes, nil)
+		testing.expect(t, len(res.rewritten) > 0)
+		got := string(res.bytes)
+		testing.expect(t, strings.contains(got, "c: *x\n"), got)
+
+		rebuilt, rerr := yaml.build(res.bytes)
+		defer yaml.destroy(&rebuilt)
+		expect_nil(t, rerr)
+		want_doc, _ := yaml.build(transmute([]u8)string("a: {k: 77, m: 2}\nb: {k: 1, m: 2}\nc: {k: 1, m: 2}\n"))
+		defer yaml.destroy(&want_doc)
+		testing.expect(t, testkit.values_agree(t, &rebuilt, yaml.ROOT, &want_doc, yaml.ROOT, {}, "unshare anchor edit"))
+	}
+
+	// 3. Editing BOTH anchor `a.k` AND first alias `b.m` while `c: *x` remains unedited!
+	{
+		src := transmute([]u8)string("a: &x\n  k: 1\n  m: 2\nb: *x\nc: *x\n")
+		doc, _ := yaml.build(src)
+		defer yaml.destroy(&doc)
+
+		ov: yaml.Overlay
+		_ = yaml.edit_init(&ov, &doc)
+		defer yaml.edit_destroy(&ov)
+		_, _ = edit.set_path(&ov, path_steps("a.k"), edit.val_int(10))
+		_, _ = edit.set_path(&ov, path_steps("b.m"), edit.val_int(20))
+
+		res, cerr := yaml.commit(&ov, .Yaml_1_2, {reflow = true})
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, cerr, nil)
+
+		rebuilt, rerr := yaml.build(res.bytes)
+		defer yaml.destroy(&rebuilt)
+		expect_nil(t, rerr)
+		want_doc, _ := yaml.build(transmute([]u8)string("a: {k: 10, m: 2}\nb: {k: 1, m: 20}\nc: {k: 1, m: 2}\n"))
+		defer yaml.destroy(&want_doc)
+		testing.expect(t, testkit.values_agree(t, &rebuilt, yaml.ROOT, &want_doc, yaml.ROOT, {}, "unshare both anchor and alias"))
+	}
+
+	// 4. Editing inside a flow alias `arr: [*x, *x]` unshares only element 0; element 1 stays `*x`.
+	{
+		src := transmute([]u8)string("base: &x {k: 1, m: 2}\narr: [*x, *x]\n")
+		doc, _ := yaml.build(src)
+		defer yaml.destroy(&doc)
+
+		ov: yaml.Overlay
+		_ = yaml.edit_init(&ov, &doc)
+		defer yaml.edit_destroy(&ov)
+		_, _ = edit.set_path(&ov, path_steps("arr.0.k"), edit.val_int(5))
+
+		res, cerr := yaml.commit(&ov, .Yaml_1_2, {reflow = true})
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, cerr, nil)
+		testing.expect(t, strings.contains(string(res.bytes), "*x]"), string(res.bytes))
+
+		rebuilt, rerr := yaml.build(res.bytes)
+		defer yaml.destroy(&rebuilt)
+		expect_nil(t, rerr)
+		want_doc, _ := yaml.build(transmute([]u8)string("base: {k: 1, m: 2}\narr: [{k: 5, m: 2}, {k: 1, m: 2}]\n"))
+		defer yaml.destroy(&want_doc)
+		testing.expect(t, testkit.values_agree(t, &rebuilt, yaml.ROOT, &want_doc, yaml.ROOT, {}, "unshare flow alias"))
+	}
+}
+
+@(test)
+group3_reflow_merge_key_override_and_expansion :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+
+	// 1. Modifying a merged member writes an explicit override key while keeping `<<: *b`, `base`, and `other` byte-exact!
+	{
+		src := transmute([]u8)string("base: &b\n  x: 1\n  y: 2\nchild:\n  <<: *b\n  y: 9\nother: 10 # keep\n")
+		doc, berr := yaml.build(src, .Yaml_Merge)
+		defer yaml.destroy(&doc)
+		expect_nil(t, berr)
+
+		ov: yaml.Overlay
+		testing.expect_value(t, yaml.edit_init(&ov, &doc), nil)
+		defer yaml.edit_destroy(&ov)
+		_, serr := edit.set_path(&ov, path_steps("child.x"), edit.val_int(42))
+		testing.expect_value(t, serr, nil)
+
+		_, e_no := yaml.commit(&ov, .Yaml_Merge, {reflow = false})
+		ref, is_ref := e_no.(edit.Refusal)
+		testing.expectf(t, is_ref && ref.group == .Alias_Unshare && ref.kind == .Alias_Edit_Requires_Reflow, "merge override no reflow: %v", e_no)
+
+		res, e_yes := yaml.commit(&ov, .Yaml_Merge, {reflow = true})
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, e_yes, nil)
+		got := string(res.bytes)
+		testing.expect(t, strings.contains(got, "<<: *b"), got)
+		testing.expect(t, strings.contains(got, "base: &b\n  x: 1\n  y: 2\n") && strings.contains(got, "other: 10 # keep\n"), got)
+
+		rebuilt, rerr := yaml.build(res.bytes, .Yaml_Merge)
+		defer yaml.destroy(&rebuilt)
+		expect_nil(t, rerr)
+		want_doc, _ := yaml.build(transmute([]u8)string("base: {x: 1, y: 2}\nchild: {y: 9, x: 42}\nother: 10\n"))
+		defer yaml.destroy(&want_doc)
+		testing.expect(t, testkit.values_agree(t, &rebuilt, yaml.ROOT, &want_doc, yaml.ROOT, {}, "merge override block"))
+	}
+
+	// 2. Modifying a merged member inside a flow mapping writes an explicit override key inside `{...}`.
+	{
+		src := transmute([]u8)string("base: &b {x: 1, y: 2}\nchild: {<<: *b, y: 9}\n")
+		doc, _ := yaml.build(src, .Yaml_Merge)
+		defer yaml.destroy(&doc)
+
+		ov: yaml.Overlay
+		_ = yaml.edit_init(&ov, &doc)
+		defer yaml.edit_destroy(&ov)
+		_, _ = edit.set_path(&ov, path_steps("child.x"), edit.val_int(42))
+
+		res, cerr := yaml.commit(&ov, .Yaml_Merge, {reflow = true})
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, cerr, nil)
+		testing.expect_value(t, string(res.bytes), "base: &b {x: 1, y: 2}\nchild: {<<: *b, y: 9, x: 42}\n")
+	}
+
+	// 3. Deleting a merged member refuses without reflow, and expands `<<: *b` into explicit members minus the deleted key under `reflow = true`!
+	{
+		src := transmute([]u8)string("base: &b\n  x: 1\n  y: 2\n  z: 3\nchild:\n  <<: *b\n  y: 9\nother: 10 # keep\n")
+		doc, berr := yaml.build(src, .Yaml_Merge)
+		defer yaml.destroy(&doc)
+		expect_nil(t, berr)
+
+		ov: yaml.Overlay
+		testing.expect_value(t, yaml.edit_init(&ov, &doc), nil)
+		defer yaml.edit_destroy(&ov)
+		ch, _ := edit.handle_for_base(&ov, base_at(&doc, "child"))
+		testing.expect_value(t, edit.del_member(&ov, ch, "x"), nil)
+
+		_, e_no := yaml.commit(&ov, .Yaml_Merge, {reflow = false})
+		ref, is_ref := e_no.(edit.Refusal)
+		testing.expectf(t, is_ref && ref.group == .Alias_Unshare && ref.kind == .Alias_Edit_Requires_Reflow, "merge delete no reflow: %v", e_no)
+
+		res, e_yes := yaml.commit(&ov, .Yaml_Merge, {reflow = true})
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, e_yes, nil)
+		got := string(res.bytes)
+		testing.expect(t, !strings.contains(got, "<<:"), got)
+		testing.expect(t, strings.contains(got, "base: &b\n  x: 1\n  y: 2\n  z: 3\n") && strings.contains(got, "other: 10 # keep\n"), got)
+
+		rebuilt, rerr := yaml.build(res.bytes, .Yaml_Merge)
+		defer yaml.destroy(&rebuilt)
+		expect_nil(t, rerr)
+		want_doc, _ := yaml.build(transmute([]u8)string("base: {x: 1, y: 2, z: 3}\nchild: {y: 9, z: 3}\nother: 10\n"))
+		defer yaml.destroy(&want_doc)
+		testing.expect(t, testkit.values_agree(t, &rebuilt, yaml.ROOT, &want_doc, yaml.ROOT, {}, "merge delete expand"))
+	}
+
+	// 4. Deleting an explicit override `y` that ALSO exists in `<<: *b` expands `<<: *b` so `base.y` does not resurface!
+	{
+		src := transmute([]u8)string("base: &b {x: 1, y: 2, z: 3}\nchild: {<<: *b, y: 9}\n")
+		doc, _ := yaml.build(src, .Yaml_Merge)
+		defer yaml.destroy(&doc)
+
+		ov: yaml.Overlay
+		_ = yaml.edit_init(&ov, &doc)
+		defer yaml.edit_destroy(&ov)
+		ch, _ := edit.handle_for_base(&ov, base_at(&doc, "child"))
+		testing.expect_value(t, edit.del_member(&ov, ch, "y"), nil)
+
+		res, cerr := yaml.commit(&ov, .Yaml_Merge, {reflow = true})
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, cerr, nil)
+		testing.expect(t, !strings.contains(string(res.bytes), "<<:"), string(res.bytes))
+
+		rebuilt, rerr := yaml.build(res.bytes, .Yaml_Merge)
+		defer yaml.destroy(&rebuilt)
+		expect_nil(t, rerr)
+		want_doc, _ := yaml.build(transmute([]u8)string("base: {x: 1, y: 2, z: 3}\nchild: {x: 1, z: 3}\n"))
+		defer yaml.destroy(&want_doc)
+		testing.expect(t, testkit.values_agree(t, &rebuilt, yaml.ROOT, &want_doc, yaml.ROOT, {}, "merge delete explicit shadow"))
+	}
+
+	// 5. Editing `base.x` when `child` uses `<<: *b`: refuses without reflow; unshares `base` under `reflow = true` so `child.x` keeps `1`!
+	{
+		src := transmute([]u8)string("base: &b\n  x: 1\n  y: 2\nchild:\n  <<: *b\n  y: 9\n")
+		doc, _ := yaml.build(src, .Yaml_Merge)
+		defer yaml.destroy(&doc)
+
+		ov: yaml.Overlay
+		_ = yaml.edit_init(&ov, &doc)
+		defer yaml.edit_destroy(&ov)
+		_, _ = edit.set_path(&ov, path_steps("base.x"), edit.val_int(100))
+
+		_, e_no := yaml.commit(&ov, .Yaml_Merge, {reflow = false})
+		ref, is_ref := e_no.(edit.Refusal)
+		testing.expectf(t, is_ref && ref.group == .Alias_Unshare && ref.kind == .Alias_Edit_Requires_Reflow, "merge base edit no reflow: %v", e_no)
+
+		res, cerr := yaml.commit(&ov, .Yaml_Merge, {reflow = true})
+		defer edit.destroy_commit_result(&res)
+		testing.expect_value(t, cerr, nil)
+
+		rebuilt, rerr := yaml.build(res.bytes, .Yaml_Merge)
+		defer yaml.destroy(&rebuilt)
+		expect_nil(t, rerr)
+		want_doc, _ := yaml.build(transmute([]u8)string("base: {x: 100, y: 2}\nchild: {y: 9, x: 1}\n"))
+		defer yaml.destroy(&want_doc)
+		testing.expect(t, testkit.values_agree(t, &rebuilt, yaml.ROOT, &want_doc, yaml.ROOT, {}, "merge base unshare"))
+	}
+
+	// 6. Failing-allocator OOM sweep over anchor reorder + alias unsharing + merge-key expansion (`bad == 0`, zero leaks).
+	{
+		src := transmute([]u8)string("base: &b\n  x: 1\n  y: 2\nchild:\n  <<: *b\n  y: 9\n")
+		doc, _ := yaml.build(src, .Yaml_Merge)
+		defer yaml.destroy(&doc)
+		Sweep_Ctx :: struct {
+			doc: ^yaml.Document,
+		}
+		sweep_merge := proc(data: rawptr, a: runtime.Allocator) {
+			sc := (^Sweep_Ctx)(data)
+			ov: yaml.Overlay
+			if yaml.edit_init(&ov, sc.doc, a) != nil { return }
+			defer yaml.edit_destroy(&ov)
+			ch, cerr := edit.handle_for_base(&ov, base_at(sc.doc, "child"))
+			if cerr != nil { return }
+			if edit.del_member(&ov, ch, "x") != nil { return }
+			res, err := yaml.commit(&ov, .Yaml_Merge, {reflow = true}, a)
+			if err == nil { edit.destroy_commit_result(&res) }
+		}
+		sc := Sweep_Ctx{&doc}
+		sw := testkit.sweep_failures(sweep_merge, &sc)
+		testing.expectf(t, sw.bad == 0 && sw.refused >= 1, "merge reflow OOM sweep: %v", sw)
 	}
 }

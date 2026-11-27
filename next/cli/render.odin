@@ -233,6 +233,11 @@ write_json_scalar :: proc(h: ^query.Heap, out: ^[dynamic]u8, v: query.Value, cfg
 		st := query.write_text(h, out, query.text_of(v), cfg.ascii)
 		color_wrap(out, cfg, 4, false)
 		return st
+	case .Bytes:
+		color_wrap(out, cfg, 4, true)
+		st := query.write_bytes_base64(h, out, query.bytes_of(v))
+		color_wrap(out, cfg, 4, false)
+		return st
 	case .Number:
 		if v.kind == .Double && math.is_nan(v.f) {
 			append_colored(out, cfg, 0, "null")
@@ -430,6 +435,11 @@ value_emit_tokens :: proc(
 		case .False:         if take(sink, .False, "") != nil { return false }
 		case .True:          if take(sink, .True, "") != nil { return false }
 		case .String:        if take(sink, .String, query.text_of(v)) != nil { return false }
+		case .Bytes:
+			b64, bst := query.encode_base(h, string(query.bytes_of(v)), .Base64, true)
+			if bst != .Ok { return false }
+			defer query.release(h, b64)
+			if take(sink, .String, query.text_of(b64)) != nil { return false }
 		case .Number:
 			clear(&num_buf)
 			if query.write_json(h, &num_buf, v, {double = jq_double}) != .Ok || take(sink, .Number, string(num_buf[:])) != nil {
@@ -458,11 +468,6 @@ value_emit_tokens :: proc(
 		}
 	}
 	return true
-}
-
-@(private = "file")
-token_tape_sink :: proc(sink: rawptr, kind: engine.Write_Token_Kind, text: string) -> engine.Write_Error {
-	return engine.token_tape_take((^engine.Write_Token_Tape)(sink), kind, text)
 }
 
 @(private = "file")
@@ -604,18 +609,12 @@ write_value_as_format :: proc(
 		}
 	}
 
-	tt: engine.Write_Token_Tape
-	if engine.token_tape_start(&tt, false, max_depth, alloc) != nil {
-		return false, strings.clone("out of memory", alloc)
-	}
-	defer engine.token_tape_drop(&tt)
-	if !value_emit_tokens(h, v, &tt, token_tape_sink) {
-		return false, strings.clone("cannot serialize value", alloc)
-	}
-	doc, derr := engine.token_tape_document(&tt)
+	preserve_bytes := rkind == .None && engine.is_binary_spec(to)
+	doc, derr := engine.value_to_document(h, v, preserve_bytes = preserve_bytes, max_depth = max_depth, double_fmt = jq_double, allocator = alloc)
 	if derr != nil {
-		return false, strings.clone("out of memory", alloc)
+		return false, write_error_string(derr, alloc)
 	}
+	defer tape.destroy_document(&doc)
 	if rkind != .None {
 		if sink_w.procedure != nil {
 			if werr := write_doc_render_to(sink_w, &doc, rkind, wopts.sort_keys, wopts.indent == 0, wopts.grow_header, tape.ROOT, alloc); werr != nil {

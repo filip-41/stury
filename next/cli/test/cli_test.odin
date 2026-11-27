@@ -1784,3 +1784,37 @@ cli_binary_tty_refusal_names_format :: proc(t: ^testing.T) {
 		testing.expect(t, strings.contains(rmc.stderr, "binary MessagePack output"), rmc.stderr)
 	}
 }
+
+@(test)
+cli_cbor_bytes_to_msgpack_and_text_formats :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// CBOR: {"raw": h'deadbeef', "k": "v"}
+	cbor_in := [?]u8{0xA2, 0x63, 'r', 'a', 'w', 0x44, 0xDE, 0xAD, 0xBE, 0xEF, 0x61, 'k', 0x61, 'v'}
+
+	// 1. jq transform `{p: .raw}` -> `--to msgpack` preserves native MessagePack bin (0xC4 0x04 DE AD BE EF)!
+	rmp := invoke({"--from", "cbor", "--to", "msgpack", `{p: .raw}`}, cbor_in[:]); defer run_out_destroy(&rmp)
+	testing.expect_value(t, rmp.code, 0)
+	mp_doc, mberr := engine.build(transmute([]u8)rmp.stdout, engine.spec_of_id(.Msgpack))
+	testing.expect_value(t, mberr, tape.Error(nil))
+	defer tape.destroy(&mp_doc)
+	pn, ppres := tape.member(tape.Reader{doc = &mp_doc}, tape.ROOT, "p")
+	testing.expect_value(t, ppres, tape.Presence.Found)
+	testing.expect_value(t, mp_doc.nodes[pn].kind, tape.Kind.Bytes)
+	want_raw := [?]u8{0xDE, 0xAD, 0xBE, 0xEF}
+	testing.expect_value(t, string(tape.span_bytes(&mp_doc, mp_doc.nodes[pn].lo, mp_doc.nodes[pn].n)), string(want_raw[:]))
+
+	// 2. Same jq transform to JSON, YAML, CSV, table, and markdown emits base64 `3q2+7w==`.
+	for fmt_name in ([?]string{"json", "yaml", "toml", "table", "markdown"}) {
+		r := invoke({"--from", "cbor", "--to", fmt_name, `{p: .raw}`}, cbor_in[:]); defer run_out_destroy(&r)
+		testing.expectf(t, r.code == 0, "--to %s failed: %s", fmt_name, r.stderr)
+		testing.expectf(t, strings.contains(r.stdout, "3q2+7w=="), "--to %s got %q", fmt_name, r.stdout)
+	}
+	// Projection_Direct CSV (`{p: .raw}`) and evaluated CSV (`{p: .raw, n: (.raw | length)}`) both emit base64 `3q2+7w==`.
+	rcsv := invoke({"--from", "cbor", "--to", "csv", `{p: .raw}`}, cbor_in[:]); defer run_out_destroy(&rcsv)
+	testing.expectf(t, rcsv.code == 0, "csv direct err: %s", rcsv.stderr)
+	testing.expect_value(t, rcsv.stdout, "p\n3q2+7w==\n")
+
+	rcsv2 := invoke({"--from", "cbor", "--to", "csv", `{p: .raw, n: (.raw | length)}`}, cbor_in[:]); defer run_out_destroy(&rcsv2)
+	testing.expectf(t, rcsv2.code == 0, "csv eval err: %s", rcsv2.stderr)
+	testing.expect_value(t, rcsv2.stdout, "p,n\n3q2+7w==,4\n")
+}

@@ -500,7 +500,7 @@ native_update_general :: #force_no_inline proc(m: ^Machine, n: ^Node, input: que
 		return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
 	}
 	state := input
-	if (n.op == .Modify || n.op == .Add) && !has_slice && (cur.kind == .Array || cur.kind == .Object || cur.kind == .String) {
+	if (n.op == .Modify || n.op == .Add) && !has_slice && (cur.kind == .Array || cur.kind == .Object || cur.kind == .String || cur.kind == .Bytes) {
 		state, s = set_at(h, depth, keys[0], path_arr, state, query.NULL)
 		if s != .Ok || h.tainted {
 			query.release(h, cur)

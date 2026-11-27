@@ -269,6 +269,10 @@ scalar_form :: proc(h: ^Heap, v: Value) -> Value {
 		r := text_borrowed(text_of(v))
 		release(h, v)
 		return r
+	case .Bytes:
+		r := bytes_borrowed(bytes_of(v))
+		release(h, v)
+		return r
 	}
 	return v
 }

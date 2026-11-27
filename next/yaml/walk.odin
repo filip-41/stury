@@ -116,17 +116,23 @@ end_document :: proc(p: ^Parser) -> bool {
 // Validates the entire YAML stream (`0` or more documents).
 @(private)
 validate_stream :: proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (root_close: u64, err: tape.Error, tolerated: bool) {
+	return validate_stream_from(src, u64(spell_bom(src)), build.read_steps(opts), S, LAX, opts, h, regs, allocator, ctx)
+}
+
+// Validates all remaining YAML documents starting at byte offset `lo` with carried step budget `steps`.
+@(private)
+validate_stream_from :: proc "contextless" (src: []u8, lo, steps: u64, $S: Spec, $LAX: bool, opts: Options, h: ^hook.No_Hooks, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	context = ctx^ if ctx != nil else runtime.default_context()
 	local: hook.Memory_Budget
 	scratch := hook.scratch(opts, allocator, &local)
 	w: Walk(hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS)
-	walk_hook_init(&w.wh, h, regs, build.read_steps(opts))
+	walk_hook_init(&w.wh, h, regs, steps)
 	sink: Token_Sink = walk_sink(hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS, hook.no_hook) when LAX else nil
 	sink_data: rawptr = &w when LAX else nil
 	parser_init(&w.p, src, opts.budget.depth, opts.budget.expansion, S == .Yaml_Merge && sink != nil, true, LAX, false, dialect_of(opts), scratch, sink, sink_data)
 	defer parser_destroy(&w.p)
-	w.p.pos = u64(spell_bom(src))
-	w.p.ls, w.p.start = w.p.pos, w.p.pos
+	w.p.pos = lo
+	w.p.ls, w.p.start = lo, lo
 	for w.p.pos < u64(len(src)) {
 		found, ok := read_document(&w.p)
 		if !ok {
@@ -139,6 +145,72 @@ validate_stream :: proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Op
 	}
 	if regs != nil { regs^ = w.wh.regs }
 	return u64(len(src)), nil, false
+}
+
+// Checks whether one YAML document starting at `lo` in `src[:to]` is completely sealed before `to` (ended by an
+// explicit `...\n` line or a following `---` + whitespace/break marker strictly inside `< to`).
+@(private)
+probe_sealed_doc :: proc(
+	src: []u8,
+	lo: u64,
+	$S: Spec,
+	$LAX: bool,
+	opts: Options,
+	steps_in: u64,
+	allow_complex: bool,
+	allocator: runtime.Allocator,
+	ctx: ^runtime.Context,
+) -> (sealed, found: bool, end_pos, steps_out: u64) #no_bounds_check {
+	context = ctx^ if ctx != nil else runtime.default_context()
+	local: hook.Memory_Budget
+	scratch := hook.scratch(opts, allocator, &local)
+	w: Walk(hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS)
+	walk_hook_init(&w.wh, nil, nil, steps_in)
+	sink: Token_Sink = walk_sink(hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS, hook.no_hook) when LAX else nil
+	sink_data: rawptr = &w when LAX else nil
+	parser_init(&w.p, src, opts.budget.depth, opts.budget.expansion, S == .Yaml_Merge && sink != nil, allow_complex, LAX, false, dialect_of(opts), scratch, sink, sink_data)
+	defer parser_destroy(&w.p)
+	w.p.pos, w.p.ls, w.p.start = lo, lo, lo
+	ok: bool
+	found, ok = read_document(&w.p)
+	if !ok { return false, false, lo, steps_in }
+	to := u64(len(src))
+	when LAX { steps_out = w.wh.steps[0] } else { steps_out = steps_in }
+	if !found {
+		// Bare `...` / comments only: sealed if terminated by `\n` (and no pending directives).
+		if !w.p.directives && w.p.pos > lo && w.p.pos <= to && src[w.p.pos - 1] == '\n' {
+			return true, false, w.p.pos, steps_out
+		}
+		return false, false, lo, steps_in
+	}
+	l := w.p.nl
+	if l.kind == .Marker {
+		b := src[l.pos]
+		if b == '.' && w.p.pos > lo && w.p.pos <= to && src[w.p.pos - 1] == '\n' {
+			return true, true, w.p.pos, steps_out
+		}
+		if b == '-' && l.pos + 3 < to {
+			return true, true, w.p.pos, steps_out
+		}
+	}
+	return false, true, lo, steps_in
+}
+
+// Runs `tail_fault` starting at `lo` on `src` (for single-document piece readers after document 1 has finished).
+@(private)
+check_tail_from :: proc(src: []u8, lo: u64, $S: Spec, opts: Options, allow_complex: bool, allocator: runtime.Allocator, ctx: ^runtime.Context) -> tape.Error {
+	if lo >= u64(len(src)) { return nil }
+	context = ctx^ if ctx != nil else runtime.default_context()
+	local: hook.Memory_Budget
+	scratch := hook.scratch(opts, allocator, &local)
+	p: Parser
+	parser_init(&p, src, opts.budget.depth, opts.budget.expansion, false, allow_complex, false, false, dialect_of(opts), scratch, nil, nil)
+	defer parser_destroy(&p)
+	if tf := tail_fault(&p, lo); tf != 0 {
+		_, werr, _ := hook.walk_error(tf, &RULES)
+		return hook.memory_budget_error(&local, werr)
+	}
+	return nil
 }
 
 // Walks a single YAML document starting at `lo`. Used by `build`, `find`, `scan`, `check`, `unmarshal`, and `yaml.walk`.
@@ -159,6 +231,7 @@ walk_text :: proc "contextless" (
 	allow_complex := false,
 	end_pos: ^u64 = nil,
 	found_out: ^bool = nil,
+	stopped_out: ^bool = nil,
 ) -> (root_close: u64, err: tape.Error, tolerated: bool) {
 	hook.check(H)
 	C :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 0)
@@ -176,6 +249,7 @@ walk_text :: proc "contextless" (
 	found, ok := read_document(&w.p)
 	if end_pos != nil { end_pos^ = w.p.pos }
 	if found_out != nil { found_out^ = found }
+	if stopped_out != nil { stopped_out^ = w.wh.stopped }
 	if regs != nil { regs^ = w.wh.regs }
 	if !ok {
 		r := w.p.fail
@@ -192,13 +266,14 @@ walk_text :: proc "contextless" (
 		if allow_empty && !found { return u64(len(src)), nil, false }
 		if !allow_empty { return u64(len(src)), tape.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated, detail = u8(Detail.No_Document)}, false }
 	}
+	rc := w.p.root_close
 	if check_tail && w.p.pos < u64(len(src)) {
 		if tf := tail_fault(&w.p, w.p.pos); tf != 0 {
 			at, werr, _ := hook.walk_error(tf, &RULES)
 			return at, hook.memory_budget_error(&local, werr), false
 		}
 	}
-	return w.p.root_close, nil, false
+	return rc, nil, false
 }
 
 @(private)

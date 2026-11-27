@@ -16,6 +16,8 @@ type_name :: proc(v: query.Value) -> string {
 		return "number"
 	case .String:
 		return "string"
+	case .Bytes:
+		return "bytes"
 	case .Array:
 		return "array"
 	case .Object:

@@ -5,10 +5,11 @@ import "core:math/big"
 import "stury:lib/core/tape"
 import "stury:lib/ops/edit"
 
-// The values every query language evaluates over: absent, null, booleans, exact integers, doubles, strings, arrays and
-// objects. A value is 16 bytes. A string, a big integer and a built container live in a block of the `Heap` with a
-// reference count, so a value is copied by `retain` and given up by `release`, and a container held once is changed
-// in place. A value read out of a document stays a node of it, holding the document's block, until it is changed.
+// The values every query language evaluates over: absent, null, booleans, exact integers, doubles, strings, byte
+// strings, arrays and objects. A value is 16 bytes. A string, byte string, big integer and built container live in a
+// block of the `Heap` with a reference count, so a value is copied by `retain` and given up by `release`, and a
+// container held once is changed in place. A value read out of a document stays a node of it, holding the document's
+// block, until it is changed.
 
 // How a value is held.
 Kind :: enum u8 {
@@ -20,9 +21,10 @@ Kind :: enum u8 {
 	Double, // `f`
 	Big, // an integer past `i64`, `p` a `^Big_Block`
 	String, // `s[:n]`, in a `Str_Block` when `held`, else borrowed from memory that outlives the run
+	Bytes, // `s[:n]`, in a `Str_Block` when `held`, else borrowed from memory that outlives the run
 	Array, // `p` a `^Array_Block`
 	Object, // `p` a `^Object_Block`
-	Node, // node `n` of the document of the `^Doc_Block` at `p`: a number, a string with no escape, or a container
+	Node, // node `n` of the document of the `^Doc_Block` at `p`: a number, a string/bytes with no escape, or a container
 	Overlay, // handle slot `n` of the `^Overlay_Block` at `p`
 }
 
@@ -34,6 +36,7 @@ Type :: enum u8 {
 	True,
 	Number,
 	String,
+	Bytes,
 	Array,
 	Object,
 }
@@ -76,6 +79,11 @@ bool_value :: #force_inline proc "contextless" (b: bool) -> Value {
 // A string of bytes the run does not own, which outlive every value made of them.
 text_borrowed :: #force_inline proc "contextless" (s: string) -> Value {
 	return {s = raw_data(s), n = u32(len(s)), kind = .String}
+}
+
+// A byte slice the run does not own, which outlives every value made of it.
+bytes_borrowed :: #force_inline proc "contextless" (b: []u8) -> Value {
+	return {s = raw_data(b), n = u32(len(b)), kind = .Bytes}
 }
 
 @(private)
@@ -449,7 +457,7 @@ block_of :: #force_inline proc "contextless" (v: Value) -> ^Block {
 	if !v.held {
 		return nil
 	}
-	if v.kind == .String {
+	if v.kind == .String || v.kind == .Bytes {
 		return (^Block)(uintptr(v.s) - size_of(Str_Block))
 	}
 	return (^Block)(v.p)
@@ -590,7 +598,7 @@ drop_scalar :: #force_inline proc(h: ^Heap, v: Value) {
 @(private)
 free_one :: proc(h: ^Heap, kind: Kind, b: ^Block) {
 	#partial switch kind {
-	case .String:
+	case .String, .Bytes:
 		s := (^Str_Block)(b)
 		if s.flags & BLOCK_HAS_DOC != 0 {
 			d := str_doc_slot(s)^

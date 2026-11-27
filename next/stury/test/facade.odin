@@ -588,7 +588,7 @@ universal_marshal_and_unmarshal_all_formats :: proc(t: ^testing.T) {
 		}
 	}
 
-	// XML marshal succeeds on single-root struct; XML unmarshal and nil specs return `Bad_Option`.
+	// XML typed round-trip (marshal + unmarshal) on single-root struct; nil specs return `Bad_Option`.
 	Xml_Doc :: struct {
 		user: User `xml:"user"`,
 	}
@@ -598,9 +598,20 @@ universal_marshal_and_unmarshal_all_formats :: proc(t: ^testing.T) {
 	defer delete(xbytes)
 	testing.expect(t, strings.contains(string(xbytes), "<user>") && strings.contains(string(xbytes), "<name>ada</name>"))
 
+	xdoc_out: Xml_Doc
+	xml_uerr := stury.unmarshal(xbytes, &xdoc_out, xml.Spec.Xml)
+	testing.expect_value(t, xml_uerr, stury.Error(nil))
+	defer delete(xdoc_out.user.name)
+	testing.expect_value(t, xdoc_out, xdoc_val)
+
+	// Streaming XML marshal into `io.Writer` produces identical bytes.
+	xbuf: bytes.Buffer
+	bytes.buffer_init_allocator(&xbuf, 0, 64)
+	defer bytes.buffer_destroy(&xbuf)
+	testing.expect_value(t, stury.marshal(bytes.buffer_to_stream(&xbuf), &xdoc_val, xml.Spec.Xml), stury.Write_Error(nil))
+	testing.expect_value(t, string(bytes.buffer_to_bytes(&xbuf)), string(xbytes))
+
 	dummy: User
-	xml_uerr := stury.unmarshal(xbytes, &dummy, xml.Spec.Xml)
-	testing.expect_value(t, xml_uerr, stury.Error(tape.Bad_Option{"spec"}))
 	nil_uerr := stury.unmarshal(xbytes, &dummy, nil)
 	testing.expect_value(t, nil_uerr, stury.Error(tape.Bad_Option{"spec"}))
 	_, nil_merr := stury.marshal(&want, nil)

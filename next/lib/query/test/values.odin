@@ -272,7 +272,7 @@ custom_collation_orders_nulls_last :: proc(t: ^testing.T) {
 	h := &x.h
 
 	SQL_ORDER :: query.Collation {
-		rank = {.False = 0, .True = 1, .Number = 2, .String = 3, .Array = 4, .Object = 5, .Null = 6, .Absent = 6},
+		rank = {.False = 0, .True = 1, .Number = 2, .String = 3, .Bytes = 4, .Array = 5, .Object = 6, .Null = 7, .Absent = 7},
 	}
 
 	c_null, _ := query.compare(h, query.int_value(9), query.NULL, SQL_ORDER)

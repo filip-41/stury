@@ -1,5 +1,7 @@
 package query
 
+import "base:runtime"
+
 // Order, equality and hashing of values, with no recursion over their depth.
 
 Collation :: struct {
@@ -7,7 +9,18 @@ Collation :: struct {
 }
 
 JSON_ORDER :: Collation{
-	rank = {.Absent = 0, .Null = 1, .False = 2, .True = 3, .Number = 4, .String = 5, .Array = 6, .Object = 7},
+	rank = {.Absent = 0, .Null = 1, .False = 2, .True = 3, .Number = 4, .String = 5, .Bytes = 6, .Array = 7, .Object = 8},
+}
+
+// Unsigned lexicographic comparison of raw byte slices `a` and `b`: -1, 0, or 1.
+compare_bytes :: #force_inline proc "contextless" (a, b: []u8) -> int {
+	n := min(len(a), len(b))
+	if n > 0 {
+		if c := runtime.memory_compare(raw_data(a), raw_data(b), n); c != 0 {
+			return -1 if c < 0 else 1
+		}
+	}
+	return int(len(a) > len(b)) - int(len(a) < len(b))
 }
 
 // Inline stack with dynamic spill for iterative traversals (`equal`, `hash`, `set_path`).
@@ -163,6 +176,7 @@ compare_head :: proc(h: ^Heap, a, b: Value, coll: Collation) -> (int, bool) {
 	#partial switch ta {
 	case .Number:        return compare_numbers(a, b, heap_allocator(h)), false
 	case .String:        x, y := text_of(a), text_of(b); return int(x > y) - int(x < y), false
+	case .Bytes:         return compare_bytes(bytes_of(a), bytes_of(b)), false
 	case .Array, .Object: return 0, true
 	}
 	return 0, false
@@ -418,6 +432,9 @@ equal_head :: proc(h: ^Heap, a, b: Value) -> (same, open: bool) {
 	#partial switch ta {
 	case .Number: return numbers_equal(a, b, heap_allocator(h)), false
 	case .String: return text_of(a) == text_of(b), false
+	case .Bytes:
+		x, y := bytes_of(a), bytes_of(b)
+		return len(x) == len(y) && (len(x) == 0 || runtime.memory_compare(raw_data(x), raw_data(y), len(x)) == 0), false
 	case .Array, .Object:
 		if a.kind == b.kind && a.p == b.p && (a.kind != .Node || (a.n == b.n && (^Doc_Block)(a.p).doc.partial == nil)) && (a.kind != .Overlay || a.n == b.n) {
 			return true, false
@@ -514,6 +531,7 @@ hash_scalar :: proc(v: Value) -> u64 {
 	#partial switch t {
 	case .Number: return hash_number(v)
 	case .String: return hash_text(text_of(v))
+	case .Bytes:  return hash_bytes(bytes_of(v))
 	}
 	return mix64(u64(t) + 1)
 }

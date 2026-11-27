@@ -70,6 +70,8 @@ v_length :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) 
 		return query.retain(x), .Ok
 	case .String:
 		return query.int_value(i64(query.codepoint_count(query.text_of(x)))), .Ok
+	case .Bytes:
+		return query.int_value(i64(len(query.bytes_of(x)))), .Ok
 	case .Array, .Object:
 		return query.int_value(i64(query.length_of(m.h, x))), .Ok
 	}

@@ -19,7 +19,38 @@ is_text :: #force_inline proc "contextless" (v: Value) -> bool {
 
 @(private)
 node_is_text :: #force_inline proc "contextless" (t: tape.Node) -> bool {
-	return t.kind == .String || t.kind == .Plain || t.kind == .Bytes
+	return t.kind == .String || t.kind == .Plain
+}
+
+is_bytes :: #force_inline proc "contextless" (v: Value) -> bool {
+	if v.kind == .Bytes {
+		return true
+	}
+	if v.kind == .Node {
+		return node_token(v).kind == .Bytes
+	}
+	return v.kind == .Overlay && overlay_type(v) == .Bytes
+}
+
+// The raw bytes of byte string `v`, which live as long as `v`.
+bytes_of :: #force_inline proc "contextless" (v: Value) -> []u8 {
+	if v.kind == .Bytes {
+		return v.s[:v.n]
+	}
+	if v.kind == .Overlay {
+		u := overlay_unwrap_scalar(v)
+		if u.kind == .Bytes {
+			return u.s[:u.n]
+		}
+		if u.kind == .Node {
+			return node_bytes(u)
+		}
+		return nil
+	}
+	if v.kind != .Node || v.p == nil {
+		return nil
+	}
+	return node_bytes(v)
 }
 
 // The bytes of string `v`, which live as long as `v`.
@@ -115,6 +146,49 @@ text_value :: proc(h: ^Heap, s: string) -> (res: Value, status: Status) {
 		return NULL, st
 	}
 	runtime.mem_copy_non_overlapping(p, raw_data(s), len(s))
+	return v, .Ok
+}
+
+// A byte string of `n` bytes the caller fills at the pointer returned, in a block of at least `room` bytes.
+@(require_results)
+make_bytes :: proc(h: ^Heap, n: int, room := 0) -> (Value, [^]u8, Status) {
+	v, p, st := make_text(h, n, room)
+	if st != .Ok {
+		return NULL, nil, st
+	}
+	v.kind = .Bytes
+	return v, p, .Ok
+}
+
+// A copy of byte slice `b` the run owns.
+@(require_results)
+bytes_value :: proc(h: ^Heap, b: []u8) -> (res: Value, status: Status) {
+	v, p, st := make_bytes(h, len(b))
+	if st != .Ok {
+		return NULL, st
+	}
+	if len(b) > 0 {
+		runtime.mem_copy_non_overlapping(p, raw_data(b), len(b))
+	}
+	return v, .Ok
+}
+
+// `a` followed by `b`, both byte strings.
+@(require_results)
+bytes_concat :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) {
+	x, y := bytes_of(a), bytes_of(b)
+	if len(y) == 0 {
+		return retain(a), .Ok
+	}
+	if len(x) == 0 {
+		return retain(b), .Ok
+	}
+	v, p, st := make_bytes(h, len(x) + len(y))
+	if st != .Ok {
+		return NULL, st
+	}
+	runtime.mem_copy_non_overlapping(p, raw_data(x), len(x))
+	runtime.mem_copy_non_overlapping(p[len(x):], raw_data(y), len(y))
 	return v, .Ok
 }
 
@@ -502,6 +576,16 @@ text_trim :: proc(h: ^Heap, v: Value, left, right: bool) -> (res: Value, status:
 hash_text :: proc "contextless" (s: string) -> u64 {
 	x := u64(0xCBF29CE484222325)
 	for c in transmute([]u8)s {
+		x = (x ~ u64(c)) * 0x100000001B3
+	}
+	return mix64(x)
+}
+
+// A deterministic hash of raw byte string `b`, domain-separated from `hash_text`.
+@(private)
+hash_bytes :: proc "contextless" (b: []u8) -> u64 {
+	x := u64(0xCBF29CE484222325) ~ 0x9E3779B97F4A7C15
+	for c in b {
 		x = (x ~ u64(c)) * 0x100000001B3
 	}
 	return mix64(x)

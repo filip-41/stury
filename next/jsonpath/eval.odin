@@ -675,6 +675,8 @@ step_func_expr :: proc(m: ^Machine, f: ^Eval_Frame, e: ^Expr) {
 		#partial switch query.type_of(arg) {
 		case .String:
 			out = query.int_value(i64(query.codepoint_count(query.text_of(arg))))
+		case .Bytes:
+			out = query.int_value(i64(len(query.bytes_of(arg))))
 		case .Array, .Object:
 			n := query.length_of(m.h, arg)
 			if m.h.tainted {
@@ -779,6 +781,8 @@ rfc_equal :: proc(m: ^Machine, a, b: query.Value) -> (bool, bool) {
 		return eq, true
 	case .String:
 		return query.text_of(a) == query.text_of(b), true
+	case .Bytes:
+		return query.compare_bytes(query.bytes_of(a), query.bytes_of(b)) == 0, true
 	case .Array, .Object:
 		if query.value_has_partial(a) || query.value_has_partial(b) {
 			m.h.tainted = true
@@ -826,6 +830,8 @@ rfc_less :: proc(m: ^Machine, a, b: query.Value) -> (bool, bool) {
 		return cmp < 0, true
 	case .String:
 		return query.text_of(a) < query.text_of(b), true
+	case .Bytes:
+		return query.compare_bytes(query.bytes_of(a), query.bytes_of(b)) < 0, true
 	}
 	return false, true
 }

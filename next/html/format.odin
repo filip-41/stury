@@ -6,7 +6,7 @@ import "core:slice"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
-// Format services for HTML5: token spelling bit layout, decoded text/key readers, packed `Doc_Ext` state,
+// Format services for HTML5: token spelling bit layout, decoded text/key readers, typed `Html_Ext` state,
 // attributes, and namespaces.
 
 @(private)
@@ -41,24 +41,23 @@ NAMESPACE_URIS := [Namespace]string {
 }
 
 @(private)
-End_Entry :: struct { node: u32, end: u64 }
-@(private)
-Text_Entry :: struct { lo: u64, first, count: u32 }
-@(private)
-STATE_FLAG_INFER :: u32(1 << 0)
-@(private)
-State_Head :: struct { ends, texts, pieces, flags: u32 }
-
-#assert(size_of(State_Head) == 16 && size_of(End_Entry) == 16 && size_of(Text_Entry) == 16 && size_of(Span) == 16)
+to_html_span :: #force_inline proc "contextless" (s: Span) -> tape.Html_Span {
+	return {lo = s.lo, n = s.n, mode = u8(s.mode), flags = transmute(u8)s.flags}
+}
 
 @(private)
-Open_Entry :: struct { tag: u64, node: u32 }
+from_html_span :: #force_inline proc "contextless" (s: tape.Html_Span) -> Span {
+	return {lo = s.lo, n = s.n, mode = Mode(s.mode), flags = transmute(Span_Flags)s.flags}
+}
+
+@(private)
+Open_Entry :: struct { tag: u64, node: tape.Node_Index }
 
 @(private)
 Kept :: struct {
-	ends:   [dynamic]End_Entry,
-	texts:  [dynamic]Text_Entry,
-	pieces: [dynamic]Span,
+	ends:   [dynamic]tape.Html_End,
+	texts:  [dynamic]tape.Html_Text,
+	pieces: [dynamic]tape.Html_Span,
 	open:   [dynamic]Open_Entry,
 	infer:  bool,
 	oom:    bool,
@@ -70,11 +69,11 @@ kept_destroy :: proc(k: ^Kept) {
 }
 
 @(private = "file")
-attach_ext :: proc(doc: ^tape.Document, block: []u8, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+attach_ext :: proc(doc: ^tape.Document, he: tape.Html_Ext, allocator: runtime.Allocator) -> runtime.Allocator_Error {
 	held: []tape.Held_Span
 	origin: tape.Origin
 	if doc.ext != nil { held, origin = doc.ext.held, doc.ext.origin }
-	new_ext := tape.ext_make(held, tape.Markup_Ext{dtd = {bytes = block}}, allocator, origin) or_return
+	new_ext := tape.ext_make(held, he, allocator, origin) or_return
 	if doc.ext != nil { free(doc.ext, doc.allocator) }
 	doc.ext = new_ext
 	return nil
@@ -84,43 +83,27 @@ attach_ext :: proc(doc: ^tape.Document, block: []u8, allocator: runtime.Allocato
 seal_state :: proc(doc: ^tape.Document, k: ^Kept, allocator: runtime.Allocator) -> bool {
 	if k.oom { return false }
 	if len(k.ends) == 0 && len(k.texts) == 0 && !k.infer { return true }
-	slice.sort_by(k.ends[:], proc(a, b: End_Entry) -> bool { return a.node < b.node })
-	slice.sort_by(k.texts[:], proc(a, b: Text_Entry) -> bool { return a.lo < b.lo })
+	slice.sort_by(k.ends[:], proc(a, b: tape.Html_End) -> bool { return a.node < b.node })
+	slice.sort_by(k.texts[:], proc(a, b: tape.Html_Text) -> bool { return a.lo < b.lo })
 	n := 0
 	for e, i in k.texts {
 		if i == 0 || e.lo != k.texts[n - 1].lo { k.texts[n] = e; n += 1 }
 	}
 	resize(&k.texts, n)
-	size := size_of(State_Head) + len(k.ends) * size_of(End_Entry) + len(k.texts) * size_of(Text_Entry) + len(k.pieces) * size_of(Span)
-	block, err := runtime.mem_alloc_bytes(size, align_of(u64), allocator)
-	if err != nil || raw_data(block) == nil { return false }
-	defer delete(block, allocator)
-	(^State_Head)(raw_data(block))^ = {u32(len(k.ends)), u32(len(k.texts)), u32(len(k.pieces)), STATE_FLAG_INFER if k.infer else 0}
-	p := size_of(State_Head)
-	if len(k.ends) > 0 { intrinsics.mem_copy_non_overlapping(raw_data(block[p:]), raw_data(k.ends), len(k.ends) * size_of(End_Entry)); p += len(k.ends) * size_of(End_Entry) }
-	if len(k.texts) > 0 { intrinsics.mem_copy_non_overlapping(raw_data(block[p:]), raw_data(k.texts), len(k.texts) * size_of(Text_Entry)); p += len(k.texts) * size_of(Text_Entry) }
-	if len(k.pieces) > 0 { intrinsics.mem_copy_non_overlapping(raw_data(block[p:]), raw_data(k.pieces), len(k.pieces) * size_of(Span)) }
-	return attach_ext(doc, block, allocator) == nil
+	return attach_ext(doc, tape.Html_Ext{ends = k.ends[:], texts = k.texts[:], pieces = k.pieces[:], infer = k.infer}, allocator) == nil
 }
 
 @(private)
-state_bytes :: #force_inline proc "contextless" (ext: ^tape.Format_Ext) -> []u8 {
-	if ext == nil { return nil }
-	m, ok := &ext.(tape.Markup_Ext)
-	return m.dtd.bytes if ok else nil
-}
-
-@(private)
-load_state_head :: #force_inline proc "contextless" (b: []u8) -> (State_Head, bool) {
-	if len(b) < size_of(State_Head) { return {}, false }
-	return intrinsics.unaligned_load((^State_Head)(raw_data(b))), true
+html_ext :: #force_inline proc "contextless" (ext: ^tape.Format_Ext) -> (^tape.Html_Ext, bool) {
+	if ext == nil { return nil, false }
+	return &ext.(tape.Html_Ext)
 }
 
 @(private)
 doc_inferred :: proc "contextless" (doc: ^tape.Document) -> bool {
 	if doc == nil { return false }
 	if doc.ext != nil {
-		if h, ok := load_state_head(state_bytes(&doc.ext.format)); ok && (h.flags & STATE_FLAG_INFER) != 0 { return true }
+		if he, ok := html_ext(&doc.ext.format); ok && he.infer { return true }
 	}
 	for n in doc.nodes {
 		if n.role == .Value && (n.kind == .Number || n.kind == .True || n.kind == .False) { return true }
@@ -129,99 +112,68 @@ doc_inferred :: proc "contextless" (doc: ^tape.Document) -> bool {
 }
 
 @(private)
-load_end_entry :: #force_inline proc "contextless" (b: []u8, idx: int) -> End_Entry {
-	return intrinsics.unaligned_load((^End_Entry)(raw_data(b[size_of(State_Head) + idx * size_of(End_Entry):])))
-}
-
-@(private)
-load_text_entry :: #force_inline proc "contextless" (b: []u8, h: State_Head, idx: int) -> Text_Entry {
-	return intrinsics.unaligned_load((^Text_Entry)(raw_data(b[size_of(State_Head) + int(h.ends) * size_of(End_Entry) + idx * size_of(Text_Entry):])))
-}
-
-@(private)
-load_piece :: #force_inline proc "contextless" (b: []u8, h: State_Head, idx: u32) -> Span {
-	return intrinsics.unaligned_load((^Span)(raw_data(b[size_of(State_Head) + int(h.ends) * size_of(End_Entry) + int(h.texts) * size_of(Text_Entry) + int(idx) * size_of(Span):])))
-}
-
-@(private)
-find_text_entry :: proc "contextless" (ext: ^tape.Format_Ext, lo: u64) -> (b: []u8, head: State_Head, entry: Text_Entry, ok: bool) {
-	b = state_bytes(ext)
-	head = load_state_head(b) or_return
-	i, j := 0, int(head.texts)
+find_text_entry :: proc "contextless" (ext: ^tape.Format_Ext, lo: u64) -> (he: ^tape.Html_Ext, entry: tape.Html_Text, ok: bool) {
+	he = html_ext(ext) or_return
+	i, j := 0, len(he.texts)
 	for i < j {
 		mid := (i + j) / 2
-		if load_text_entry(b, head, mid).lo < lo { i = mid + 1 } else { j = mid }
+		if he.texts[mid].lo < lo { i = mid + 1 } else { j = mid }
 	}
-	if i == int(head.texts) { return nil, {}, {}, false }
-	entry = load_text_entry(b, head, i)
-	if entry.lo != lo { return nil, {}, {}, false }
-	return b, head, entry, true
+	if i == len(he.texts) { return nil, {}, false }
+	entry = he.texts[i]
+	if entry.lo != lo { return nil, {}, false }
+	return he, entry, true
 }
 
 @(private)
 subdoc_state :: proc(src_doc, dst_doc: ^tape.Document, v, count: tape.Node_Index, allocator: runtime.Allocator) -> runtime.Allocator_Error {
 	if src_doc.ext == nil { return nil }
-	b := state_bytes(&src_doc.ext.format)
-	head, ok := load_state_head(b)
+	he, ok := html_ext(&src_doc.ext.format)
 	if !ok { return nil }
-	lo_idx, hi_idx := 0, int(head.ends)
+	lo_idx, hi_idx := 0, len(he.ends)
 	for lo_idx < hi_idx {
 		mid := (lo_idx + hi_idx) / 2
-		if load_end_entry(b, mid).node < u32(v) { lo_idx = mid + 1 } else { hi_idx = mid }
+		if he.ends[mid].node < v { lo_idx = mid + 1 } else { hi_idx = mid }
 	}
-	end_idx, limit := lo_idx, u32(v + count)
-	for end_idx < int(head.ends) && load_end_entry(b, end_idx).node < limit { end_idx += 1 }
+	end_idx, limit := lo_idx, v + count
+	for end_idx < len(he.ends) && he.ends[end_idx].node < limit { end_idx += 1 }
 
-	mapped: [dynamic]End_Entry
+	mapped: [dynamic]tape.Html_End
 	mapped.allocator = allocator
 	defer delete(mapped)
 	dense := len(dst_doc.nodes) == int(count)
-	if !dense && lo_idx < end_idx {
-		ri, k := v, lo_idx
-		for dnode, di in dst_doc.nodes {
-			if dnode.kind != .Object { continue }
-			for ri < v + count {
-				snode := src_doc.nodes[ri]
-				if snode.kind == .Object && snode.lo == dnode.lo &&
-					(di == 0 && ri == v || di > 0 && ri > 0 && dst_doc.nodes[di - 1].lo == src_doc.nodes[ri - 1].lo) { break }
+	if lo_idx < end_idx {
+		if dense {
+			reserve(&mapped, end_idx - lo_idx) or_return
+			for k in lo_idx ..< end_idx {
+				e := he.ends[k]
+				e.node -= v
+				append(&mapped, e) or_return
+			}
+		} else {
+			ri, k := v, lo_idx
+			for dnode, di in dst_doc.nodes {
+				if dnode.kind != .Object { continue }
+				for ri < v + count {
+					snode := src_doc.nodes[ri]
+					if snode.kind == .Object && snode.lo == dnode.lo &&
+						(di == 0 && ri == v || di > 0 && ri > 0 && dst_doc.nodes[di - 1].lo == src_doc.nodes[ri - 1].lo) { break }
+					ri += 1
+				}
+				if ri >= v + count { break }
+				for k < end_idx && he.ends[k].node < ri { k += 1 }
+				if k < end_idx {
+					if e := he.ends[k]; e.node == ri {
+						append(&mapped, tape.Html_End{node = tape.Node_Index(di), end = e.end}) or_return
+						k += 1
+					}
+				}
 				ri += 1
 			}
-			if ri >= v + count { break }
-			for k < end_idx && load_end_entry(b, k).node < u32(ri) { k += 1 }
-			if k < end_idx {
-				if e := load_end_entry(b, k); e.node == u32(ri) {
-					append(&mapped, End_Entry{u32(di), e.end}) or_return
-					k += 1
-				}
-			}
-			ri += 1
 		}
 	}
-
-	own_ends := (end_idx - lo_idx) if dense else len(mapped)
-	tail_bytes := int(head.texts) * size_of(Text_Entry) + int(head.pieces) * size_of(Span)
-	if own_ends == 0 && tail_bytes == 0 && head.flags == 0 { return nil }
-	block := runtime.mem_alloc_non_zeroed(size_of(State_Head) + own_ends * size_of(End_Entry) + tail_bytes, align_of(u64), allocator) or_return
-	defer delete(block, allocator)
-	(^State_Head)(raw_data(block))^ = {u32(own_ends), head.texts, head.pieces, head.flags}
-	dst_p := size_of(State_Head)
-	if dense {
-		for k in lo_idx ..< end_idx {
-			e := load_end_entry(b, k)
-			e.node -= u32(v)
-			intrinsics.unaligned_store((^End_Entry)(raw_data(block[dst_p:])), e)
-			dst_p += size_of(End_Entry)
-		}
-	} else {
-		for e in mapped {
-			intrinsics.unaligned_store((^End_Entry)(raw_data(block[dst_p:])), e)
-			dst_p += size_of(End_Entry)
-		}
-	}
-	if tail_bytes > 0 {
-		intrinsics.mem_copy_non_overlapping(raw_data(block[dst_p:]), raw_data(b[size_of(State_Head) + int(head.ends) * size_of(End_Entry):]), tail_bytes)
-	}
-	return attach_ext(dst_doc, block, allocator)
+	if len(mapped) == 0 && len(he.texts) == 0 && len(he.pieces) == 0 && !he.infer { return nil }
+	return attach_ext(dst_doc, tape.Html_Ext{ends = mapped[:], texts = he.texts, pieces = he.pieces, infer = he.infer}, allocator)
 }
 
 @(private)
@@ -263,9 +215,9 @@ decode_room_node :: proc "contextless" (src: []u8, t: tape.Node, ext: ^tape.Form
 		return 3 * int(t.n) if t.spelling & tape.SPELLING_LAX != 0 else int(t.n)
 	}
 	if t.spelling & TEXT_PIECES != 0 {
-		if b, head, entry, ok := find_text_entry(ext, t.lo); ok {
+		if he, entry, ok := find_text_entry(ext, t.lo); ok {
 			sum := u64(0)
-			for i in 0 ..< entry.count { sum += u64(load_piece(b, head, entry.first + i).n) }
+			for i in 0 ..< entry.count { sum += u64(he.pieces[entry.first + i].n) }
 			return 3 * int(max(u64(t.n), sum)) + 16
 		}
 	}
@@ -292,10 +244,10 @@ text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, ext: ^ta
 	}
 	mode := Mode((t.spelling >> TEXT_MODE_SHIFT) & 7)
 	if t.spelling & TEXT_PIECES == 0 { return decode(src, Span{lo = t.lo, n = t.n, mode = mode, flags = DECODED}, buf) }
-	b, head, entry := find_text_entry(ext, t.lo) or_return
+	he, entry := find_text_entry(ext, t.lo) or_return
 	w := 0
 	for i in 0 ..< entry.count {
-		p := load_piece(b, head, entry.first + i)
+		p := from_html_span(he.pieces[entry.first + i])
 		p.flags = DECODED
 		part := decode(src, p, buf[w:]) or_return
 		w += copy(buf[w:], part)
@@ -431,7 +383,7 @@ build_text_ext :: proc(src: []u8, spec: Tree_Spec, allocator: runtime.Allocator)
 
 @(private, cold)
 collect_run :: proc(t: ^Html_Tree, from: u32, k: ^Kept) {
-	run := make([dynamic]Span, 0, 4, t.ctx.allocator)
+	run := make([dynamic]tape.Html_Span, 0, 4, t.ctx.allocator)
 	defer delete(run)
 	lo := u64(0)
 	for node := from; node != 0 && tree_node(t, node).kind != .Element; node = tree_node(t, node).next {
@@ -440,12 +392,12 @@ collect_run :: proc(t: ^Html_Tree, from: u32, k: ^Kept) {
 		for p := tn.a;; p = t.pieces[p].next {
 			s := t.pieces[p].span
 			lo = s.lo if len(run) == 0 else min(lo, s.lo)
-			if _, aerr := append(&run, s); aerr != nil { k.oom = true; return }
+			if _, aerr := append(&run, to_html_span(s)); aerr != nil { k.oom = true; return }
 			if p == tn.b { break }
 		}
 	}
 	if len(run) > 1 {
-		_, e1 := append(&k.texts, Text_Entry{lo, u32(len(k.pieces)), u32(len(run))})
+		_, e1 := append(&k.texts, tape.Html_Text{lo = lo, first = u32(len(k.pieces)), count = u32(len(run))})
 		_, e2 := append(&k.pieces, ..run[:])
 		if e1 != nil || e2 != nil { k.oom = true }
 	}
@@ -455,15 +407,14 @@ collect_run :: proc(t: ^Html_Tree, from: u32, k: ^Kept) {
 close_end :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (end: u64, ok: bool) {
 	if at == tape.ROOT { return doc.root_close, true }
 	if .Held in doc.flags || doc.ext == nil { return 0, false }
-	b := state_bytes(&doc.ext.format)
-	head := load_state_head(b) or_return
-	lo, hi, target := 0, int(head.ends), u32(at)
+	he := html_ext(&doc.ext.format) or_return
+	lo, hi := 0, len(he.ends)
 	for lo < hi {
 		mid := (lo + hi) / 2
-		if load_end_entry(b, mid).node < target { lo = mid + 1 } else { hi = mid }
+		if he.ends[mid].node < at { lo = mid + 1 } else { hi = mid }
 	}
-	if lo < int(head.ends) {
-		if e := load_end_entry(b, lo); e.node == target { return e.end, true }
+	if lo < len(he.ends) {
+		if e := he.ends[lo]; e.node == at { return e.end, true }
 	}
 	return 0, false
 }

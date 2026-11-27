@@ -183,12 +183,13 @@ unmarshal :: proc(
 	switch s in spec {
 	case json.Spec:    return json.unmarshal(src, target, s, read, opts, allocator)
 	case toml.Spec:    return toml.unmarshal(src, target, s, read, opts, allocator)
+	case xml.Spec:     return xml.unmarshal(src, target, s, read, opts, allocator)
 	case dsv.Spec:     return dsv.unmarshal(src, target, s, read, opts, allocator)
 	case cbor.Spec:    return cbor.unmarshal(src, target, s, read, opts, allocator)
 	case yaml.Spec:    return yaml.unmarshal(src, target, s, read, opts, allocator)
 	case html.Spec:    return html.unmarshal(src, target, s, read, opts, allocator)
 	case msgpack.Spec: return msgpack.unmarshal(src, target, s, read, opts, allocator)
-	case xml.Spec, nil:
+	case nil:
 	}
 	return tape.Bad_Option{"spec"}
 }

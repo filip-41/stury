@@ -139,9 +139,9 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		cb2, ce2 := cbor.build(cbor_bytes, .Cbor, {}, runtime.heap_allocator())
 		testing.expect(t, ce2 == nil)
 		defer tape.destroy_document(&cb2)
-		co2, cend2, _, _ := eval_doc(t, `[., .@tag]`, cb2)
+		co2, cend2, _, _ := eval_doc(t, `[., type, .@tag]`, cb2)
 		testing.expect_value(t, cend2, jq.Run_End.Done)
-		testing.expect_value(t, co2, `["A",24]`)
+		testing.expect_value(t, co2, `["QQ==","bytes",24]`)
 
 		// Empty `.@()` / `.&[]` and slice `.@(1:2)` / `.&[1:2]` must be compile errors.
 		for bad in ([?]string{`.@()`, `.&[]`, `.@(1:2)`, `.&[1:2]`}) {

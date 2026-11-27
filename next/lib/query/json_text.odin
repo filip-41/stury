@@ -1,5 +1,6 @@
 package query
 
+import "core:encoding/base64"
 import "core:math"
 import "core:unicode/utf8"
 
@@ -168,6 +169,7 @@ write_scalar :: proc(h: ^Heap, out: ^[dynamic]u8, v: Value, opts: Json_Options =
 	case .False:         return put_bytes(h, out, "false")
 	case .True:          return put_bytes(h, out, "true")
 	case .String:        return write_text(h, out, text_of(v), opts.ascii)
+	case .Bytes:         return write_bytes_base64(h, out, bytes_of(v))
 	case .Number:
 		if v.kind == .Overlay {
 			if txt, ok := overlay_number_literal(v); ok && json_number_text(txt) {
@@ -292,6 +294,25 @@ json_number_text :: proc "contextless" (b: []u8) -> bool {
 		if i == start { return false }
 	}
 	return i == n
+}
+
+// Writes raw bytes `data` as a quoted RFC 4648 standard base64 JSON string directly into `out`.
+@(require_results)
+write_bytes_base64 :: proc(h: ^Heap, out: ^[dynamic]u8, data: []u8) -> Status {
+	enc_len := base64.encoded_len(data, base64.Encode_Options{})
+	old_len := len(out)
+	if aerr := resize(out, old_len + enc_len + 2); aerr != nil {
+		return fail_memory(h)
+	}
+	out[old_len] = '"'
+	if enc_len > 0 {
+		if _, err := base64.encode_into_buf(out[old_len + 1 : old_len + 1 + enc_len], data, options = base64.Encode_Options{}); err != nil {
+			resize(out, old_len)
+			return fail_memory(h)
+		}
+	}
+	out[old_len + 1 + enc_len] = '"'
+	return .Ok
 }
 
 @(require_results)

@@ -233,3 +233,128 @@ pieces_and_records_laws :: proc(t: ^testing.T) {
 		testkit.records_alone_agree(t, run, alone, paths[:5], text)
 	}
 }
+
+@(test)
+multidoc_streaming_pieces_bounded_memory_and_parity :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+
+	// Multi-document YAML stream containing `---` and `...` INSIDE block scalars and quoted strings,
+	// plus real column-0 `---` / `...` boundaries, directives, anchors/aliases, and comments.
+	b := strings.builder_make(context.temp_allocator)
+	for i in 0 ..< 30 {
+		if i == 0 || (i % 3 == 0 && (i - 1) % 2 == 0) {
+			strings.write_string(&b, "%YAML 1.2\n---\n")
+		} else if i > 0 {
+			strings.write_string(&b, "---\n")
+		}
+		fmt.sbprintf(&b, "id: &id_%d %d\nref: *id_%d\nblk: |\n  ---\n  ...\n  inside block %d\nq: \"line1\\n---\\n...\\nline2\"\n", i, i, i, i)
+		if i % 2 == 0 {
+			strings.write_string(&b, "...\n# between docs\n")
+		}
+	}
+	full := transmute([]u8)strings.to_string(b)
+	testing.expect_value(t, yaml.validate(full), nil)
+
+	// Stream across small windows, dropping bytes before `p.keep`, and assert bounded memory (`max_win < len(full) / 4`)!
+	for step in ([?]int{19, 37, 113}) {
+		p := tape.Pieces{allocator = context.allocator}
+		defer yaml.destroy(&p)
+		max_win := 0
+		keep_advances := 0
+		prev_keep := u64(0)
+		end := 0
+		for {
+			start := int(p.keep)
+			next_end := min(end + step, len(full))
+			p.from = p.keep
+			p.last = next_end == len(full)
+			end = next_end
+			win := full[start:end]
+			if len(win) > max_win { max_win = len(win) }
+			err := yaml.validate(win, .Yaml_1_2, {pieces = &p})
+			testing.expect_value(t, err, nil)
+			if p.keep > prev_keep {
+				keep_advances += 1
+				prev_keep = p.keep
+			}
+			if !p.more || p.last { break }
+		}
+		testing.expect(t, !p.more)
+		testing.expectf(t, keep_advances >= 20, "step=%d: expected p.keep to advance across docs, got %d advances", step, keep_advances)
+		testing.expectf(t, max_win < len(full) / 4, "step=%d: expected bounded window (< %d), got %d", step, len(full) / 4, max_win)
+	}
+
+	// Verify exact fault parity on a multi-doc stream whose 15th document has a syntax error.
+	bad_b := strings.builder_make(context.temp_allocator)
+	for i in 0 ..< 20 {
+		if i > 0 { strings.write_string(&bad_b, "---\n") }
+		if i == 15 {
+			strings.write_string(&bad_b, "bad: [1, 2\n")
+		} else {
+			fmt.sbprintf(&bad_b, "ok: %d\n...\n", i)
+		}
+	}
+	bad_full := transmute([]u8)strings.to_string(bad_b)
+	want_bad := yaml.validate(bad_full)
+	testing.expect(t, want_bad != nil)
+	{
+		p := tape.Pieces{allocator = context.allocator}
+		defer yaml.destroy(&p)
+		got_bad: tape.Error
+		end := 0
+		for {
+			start := int(p.keep)
+			next_end := min(end + 23, len(bad_full))
+			p.from = p.keep
+			p.last = next_end == len(bad_full)
+			end = next_end
+			got_bad = yaml.validate(bad_full[start:end], .Yaml_1_2, {pieces = &p})
+			if got_bad != nil || !p.more || p.last { break }
+		}
+		testing.expect_value(t, got_bad, want_bad)
+	}
+
+	// Single-doc `find` & `scan` with explicit `...` + long trailing comments releases doc 1 bytes (`p.keep` advances!).
+	tail_b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&tail_b, "target: 42\nother: [1, 2, 3]\n...\n")
+	for i in 0 ..< 40 {
+		fmt.sbprintf(&tail_b, "# trailing comment line %d with padding text\n", i)
+	}
+	tail_full := transmute([]u8)strings.to_string(tail_b)
+	{
+		p := tape.Pieces{allocator = context.allocator}
+		defer yaml.destroy(&p)
+		max_win := 0
+		end := 0
+		ans: tape.Span_Answer
+		err: tape.Error
+		for {
+			start := int(p.keep)
+			next_end := min(end + 31, len(tail_full))
+			p.from = p.keep
+			p.last = next_end == len(tail_full)
+			end = next_end
+			win := tail_full[start:end]
+			if len(win) > max_win { max_win = len(win) }
+			ans, err = yaml.find(win, {yaml.Name("target")}, .Yaml_1_2, {}, {pieces = &p})
+			if err != nil || !p.more || p.last { break }
+		}
+		testing.expect_value(t, err, nil)
+		testing.expect_value(t, ans.outcome, yaml.Presence.Found)
+		testing.expect_value(t, string(p.text), "42")
+		testing.expectf(t, max_win < len(tail_full) / 4, "single-doc tail find expected bounded window, got %d / %d", max_win, len(tail_full))
+	}
+
+	// Exhaustive byte-cut parity via `agree_in_pieces` on tricky boundary-inside-scalar multi-doc texts.
+	tricky := [?]string {
+		"a: |\n  ---\n  ...\n...\n# tail\n",
+		"a: \"---\\n...\"\n---\nb: 2\n...\n",
+		"a: 1\n...\n---\nb: 2\n...\n---\nc: 3\n",
+	}
+	paths := [][]yaml.Step{{}, {yaml.Name("a")}, {yaml.Name("b")}}
+	for txt in tricky {
+		testing.expect(t, testkit.agree_in_pieces(t, yaml.reads(.Yaml_1_2), yaml.as(.Yaml_1_2), transmute([]u8)txt, {}, paths, txt, containers = true))
+		testing.expect(t, testkit.agree_in_pieces(t, yaml.reads(.Yaml_1_2), yaml.as(.Yaml_1_2), transmute([]u8)txt, {budget = {steps = 2}}, paths, txt, containers = true))
+	}
+}

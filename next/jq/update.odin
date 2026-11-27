@@ -304,7 +304,7 @@ update_next :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 
 @(private)
 take_container :: proc(h: ^query.Heap, f: ^Update_Frame, p, cur: query.Value) -> query.Status {
-	if cur.kind != .Array && cur.kind != .Object && cur.kind != .String {
+	if cur.kind != .Array && cur.kind != .Object && cur.kind != .String && cur.kind != .Bytes {
 		return .Ok
 	}
 	for step in query.items_of(p) {

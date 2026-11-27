@@ -121,8 +121,17 @@ Parse_Error :: struct {
 }
 
 @(private)
+Error_Mode :: enum u8 {
+	All,
+	First,
+	None,
+}
+
+@(private)
 Html_Tree :: struct {
 	src:             []u8,
+	src_from:        u64,
+	owned:           [dynamic]u8,
 	nodes:           Node_Chunks,
 	count:           u32,
 	attrs:           [dynamic]Attribute,
@@ -145,6 +154,7 @@ Html_Tree :: struct {
 	quirks:          Quirks,
 	action:          Token_Action,
 	encoding:        Encoding,
+	error_mode:      Error_Mode,
 	frameset_ok:     bool,
 	foster:          bool,
 	skip_lf:         bool,
@@ -155,10 +165,13 @@ Html_Tree :: struct {
 	selected:        bool,
 	tentative:       bool,
 	misread:         bool,
+	seen_high:       bool,
+	seen_esc:        bool,
 	oom:             bool,
 	too_deep:        bool,
 	max_depth:       int,
 	at:              u64,
+	enc_at:          u64,
 	body_end:        Span,
 	html_hi:         u64,
 	tail:            u64,
@@ -202,31 +215,27 @@ tag_of :: proc "contextless" (src: []u8, name: Span) -> Tag #no_bounds_check {
 }
 
 @(private)
-build_tree :: proc(
+tree_init :: proc(
+	t: ^Html_Tree,
 	src: []u8,
 	tree_spec: Tree_Spec,
 	opts: tape.Options,
 	fopts: Fragment_Options,
-	lo := u64(0),
-	allocator := context.allocator,
+	error_mode: Error_Mode,
+	allocator: runtime.Allocator,
 ) -> (
-	t: Html_Tree,
+	start: Content,
 	err: tape.Error,
 ) {
-	from := min(lo, u64(len(src)))
-	if tree_spec == .Document && lo == 0 {
-		found: bool
-		from, t.encoding, found = sniff(src) or_return
-		t.tentative = !found
-	}
 	context.allocator = allocator
 	t.src = src
 	t.ctx = context
+	t.error_mode = error_mode
 	depth := build.read_depth(opts)
 	t.max_depth = int(min(depth, u64(max(int))))
 	t.scripting = fopts.scripting
 	t.frameset_ok = true
-	estimate := len(src) / 32 + 16
+	estimate := min(len(src) / 32 + 16, 4096)
 	t.pieces = make([dynamic]Text_Piece, 0, estimate / 2, allocator)
 	t.attrs = make([dynamic]Attribute, 0, estimate / 2, allocator)
 	t.stack = make([dynamic]u32, 0, 64, allocator)
@@ -235,30 +244,38 @@ build_tree :: proc(
 	t.pending.allocator = allocator
 	t.scratch.allocator = allocator
 	t.errors.allocator = allocator
+	t.owned.allocator = allocator
 	if t.pieces == nil || t.attrs == nil || t.stack == nil {
-		tree_destroy(&t)
-		return {}, runtime.Allocator_Error.Out_Of_Memory
+		tree_destroy(t)
+		return .Data, runtime.Allocator_Error.Out_Of_Memory
 	}
-	new_node(&t, {})
-	new_node(&t, {kind = .Document})
+	new_node(t, {})
+	new_node(t, {kind = .Document})
 	if t.oom {
-		tree_destroy(&t)
-		return {}, runtime.Allocator_Error.Out_Of_Memory
+		tree_destroy(t)
+		return .Data, runtime.Allocator_Error.Out_Of_Memory
 	}
 	append(&t.pieces, Text_Piece{})
-	start := Content.Data
+	start = .Data
 	if tree_spec == .Fragment {
-		start = begin_fragment(&t, fragment_context(fopts))
+		start = begin_fragment(t, fragment_context(fopts))
 	}
-	if !t.oom {
-		_, err, _ = tokenize(src, &t, on_token, start, from = from, in_foreign = t.in_foreign, allocator = allocator, ctx = &t.ctx)
+	if t.oom {
+		tree_destroy(t)
+		return .Data, runtime.Allocator_Error.Out_Of_Memory
 	}
+	return start, nil
+}
+
+@(private)
+tree_finish :: proc(t: ^Html_Tree, end_at: u64, tok_err: tape.Error) -> tape.Error {
+	err := tok_err
 	if err == nil && !t.oom && !t.too_deep && !t.misread {
-		eof := Html_Token{kind = EOF, lo = u64(len(src)), hi = u64(len(src))}
+		eof := Html_Token{kind = EOF, lo = end_at, hi = end_at}
 		t.at = eof.lo
 		t.tok = &eof
-		dispatch(&t, &eof)
-		pop_to(&t, 0)
+		dispatch(t, &eof)
+		pop_to(t, 0)
 		t.tok = nil
 	}
 	switch {
@@ -269,6 +286,31 @@ build_tree :: proc(
 	case t.misread:
 		err = tape.Fault{at = t.at, rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Encoding)}
 	}
+	return err
+}
+
+@(private)
+build_tree :: proc(
+	src: []u8,
+	tree_spec: Tree_Spec,
+	opts: tape.Options,
+	fopts: Fragment_Options,
+	lo := u64(0),
+	allocator := context.allocator,
+	error_mode := Error_Mode.All,
+) -> (
+	t: Html_Tree,
+	err: tape.Error,
+) {
+	from := min(lo, u64(len(src)))
+	if tree_spec == .Document && lo == 0 {
+		found: bool
+		from, t.encoding, found = sniff(src) or_return
+		t.tentative = !found
+	}
+	start := tree_init(&t, src, tree_spec, opts, fopts, error_mode, allocator) or_return
+	_, tok_err, _ := tokenize(src, &t, on_token, start, from = from, in_foreign = t.in_foreign, allocator = allocator, ctx = &t.ctx)
+	err = tree_finish(&t, u64(len(src)), tok_err)
 	if err != nil {
 		tree_destroy(&t)
 		return {}, err
@@ -335,14 +377,136 @@ tree_destroy :: proc(t: ^Html_Tree) {
 	delete(t.errors)
 	delete(t.pending)
 	delete(t.scratch)
+	delete(t.owned)
 	t^ = {}
 }
 
 @(private)
 parse_error :: proc(t: ^Html_Tree, d: Detail, at: u64) {
+	if t.error_mode == .None || (t.error_mode == .First && len(t.errors) > 0) {
+		return
+	}
 	if _, err := append(&t.errors, Parse_Error{at = at, detail = d}); err != nil {
 		t.oom = true
 	}
+}
+
+@(private)
+span_src :: #force_inline proc "contextless" (t: ^Html_Tree, s: Span) -> []u8 {
+	return t.owned[:] if .Owned in s.flags else t.src
+}
+
+@(private)
+names_equal_tree :: #force_inline proc "contextless" (t: ^Html_Tree, a, b: Span) -> bool {
+	return names_equal_two(raw_data(span_src(t, a)), a, raw_data(span_src(t, b)), b)
+}
+
+@(private)
+tree_own_span :: proc(t: ^Html_Tree, s: ^Span) {
+	if s.n == 0 || .Owned in s.flags {
+		return
+	}
+	off := u64(len(t.owned))
+	if _, err := append(&t.owned, ..t.src[s.lo:][:s.n]); err != nil {
+		t.oom = true
+		return
+	}
+	s.lo = off
+	s.flags += {.Owned}
+}
+
+@(private)
+tree_detach_window :: proc(t: ^Html_Tree) {
+	for m, si in t.stack {
+		n := tree_node(t, m)
+		if n.tag == .Other {
+			tree_own_span(t, &n.name)
+		}
+		if si <= 1 && n.b > 0 {
+			for &a in t.attrs[n.a:][:n.b] {
+				tree_own_span(t, &a.name)
+			}
+		}
+	}
+	for e in t.active {
+		if e == 0 {
+			continue
+		}
+		n := tree_node(t, e)
+		if n.tag == .Other {
+			tree_own_span(t, &n.name)
+		}
+		for &a in t.attrs[n.a:][:n.b] {
+			tree_own_span(t, &a.name)
+			tree_own_span(t, &a.value)
+		}
+	}
+	if .Select in t.open_tags {
+		for m in t.stack {
+			if is_html(tree_node(t, m), .Select) {
+				sel_node := tree_node(t, m)
+				for &a in t.attrs[sel_node.a:][:sel_node.b] {
+					tree_own_span(t, &a.name)
+				}
+				for k := next_in(t, m, m); k != 0; k = next_in(t, m, k) {
+					kn := tree_node(t, k)
+					if kn.ns == .Html && (kn.tag == .Option || kn.tag == .Optgroup) {
+						for &a in t.attrs[kn.a:][:kn.b] {
+							tree_own_span(t, &a.name)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+@(private)
+check_tree_steps :: proc "contextless" (t: ^Html_Tree, spec: Tree_Spec, steps_in: u64) -> (u64, bool) {
+	steps := steps_in
+	top := DOCUMENT
+	if spec == .Fragment {
+		top = tree_node(t, DOCUMENT).first
+	}
+	first_elem := tree_node(t, top).first
+	for first_elem != 0 && tree_node(t, first_elem).kind != .Element {
+		first_elem = tree_node(t, first_elem).next
+	}
+	root_lo := tree_node(t, first_elem).lo if first_elem != 0 && spec == .Document else 0
+	steps -= 1
+	if steps == 0 {
+		return root_lo, true
+	}
+	cur := first_elem
+	for cur != 0 {
+		c := tree_node(t, cur).first
+		for c != 0 && tree_node(t, c).kind != .Element {
+			c = tree_node(t, c).next
+		}
+		if c != 0 {
+			steps -= 1
+			if steps == 0 {
+				return tree_node(t, cur).lo, true
+			}
+			cur = c
+			continue
+		}
+		for {
+			nxt := tree_node(t, cur).next
+			for nxt != 0 && tree_node(t, nxt).kind != .Element {
+				nxt = tree_node(t, nxt).next
+			}
+			if nxt != 0 {
+				cur = nxt
+				break
+			}
+			cur = tree_node(t, cur).parent
+			if cur == top || cur == 0 {
+				return 0, false
+			}
+		}
+	}
+	return 0, false
 }
 
 @(private)
@@ -544,7 +708,7 @@ unstacked :: #force_inline proc(t: ^Html_Tree, n: u32) {
 ended :: proc "contextless" (t: ^Html_Tree, n: u32) {
 	node := tree_node(t, n)
 	end := t.at
-	if tok := t.tok; tok != nil && tok.kind == .End_Tag && node.tag == t.tag && (node.tag != .Other || names_equal(raw_data(t.src), node.name, tok.name)) {
+	if tok := t.tok; tok != nil && tok.kind == .End_Tag && node.tag == t.tag && (node.tag != .Other || names_equal_tree(t, node.name, tok.name)) {
 		end = tok.hi
 	} else if t.body_end.n > 0 && node.ns == .Html && node.tag == .Html {
 		end = t.html_hi if t.html_hi > 0 else end
@@ -847,7 +1011,7 @@ merge_attrs :: proc(t: ^Html_Tree, n: u32, tok: ^Html_Token) {
 @(private)
 has_attr :: proc(t: ^Html_Tree, n: ^Tree_Node, name: Span) -> bool {
 	for a in t.attrs[n.a:][:n.b] {
-		if names_equal(raw_data(t.src), a.name, name) {
+		if names_equal_tree(t, a.name, name) {
 			return true
 		}
 	}
@@ -866,7 +1030,8 @@ attr_value_is :: proc(t: ^Html_Tree, attrs: []Attribute, name, want: string) -> 
 @(private)
 attribute_of :: proc(t: ^Html_Tree, attrs: []Attribute, name: string) -> ^Attribute {
 	for &a in attrs {
-		if a.name.n == u32(len(name)) && fold_equal(raw_data(t.src)[a.name.lo:], transmute([]u8)name) && a.name.flags & {.Nul, .Invalid} == {} {
+		src := span_src(t, a.name)
+		if a.name.n == u32(len(name)) && fold_equal(raw_data(src)[a.name.lo:], transmute([]u8)name) && a.name.flags & {.Nul, .Invalid} == {} {
 			return &a
 		}
 	}
@@ -875,14 +1040,15 @@ attribute_of :: proc(t: ^Html_Tree, attrs: []Attribute, name: string) -> ^Attrib
 
 @(private)
 decoded :: proc(t: ^Html_Tree, s: Span, from: int) -> string {
-	if s.flags & ~{.Missing} == {} {
-		return string(t.src[s.lo:][:s.n])
+	src := span_src(t, s)
+	if s.flags & ~{.Missing, .Owned} == {} {
+		return string(src[s.lo:][:s.n])
 	}
 	if err := resize(&t.scratch, from + decode_room(s)); err != nil {
 		t.oom = true
 		return ""
 	}
-	text, _ := decode(t.src, s, t.scratch[from:])
+	text, _ := decode(src, s, t.scratch[from:])
 	return text
 }
 
@@ -891,10 +1057,9 @@ same_attrs :: proc(t: ^Html_Tree, x, y: ^Tree_Node) -> bool {
 	if x.b != y.b {
 		return false
 	}
-	src := raw_data(t.src)
 	outer: for a in t.attrs[x.a:][:x.b] {
 		for b in t.attrs[y.a:][:y.b] {
-			if !names_equal(src, a.name, b.name) {
+			if !names_equal_tree(t, a.name, b.name) {
 				continue
 			}
 			va := decoded(t, a.value, 0)
@@ -919,7 +1084,7 @@ push_active :: proc(t: ^Html_Tree, n: u32) {
 			break
 		}
 		x, y := tree_node(t, e), tree_node(t, n)
-		if x.tag == y.tag && x.ns == y.ns && (x.tag != .Other || names_equal(raw_data(t.src), x.name, y.name)) && same_attrs(t, x, y) {
+		if x.tag == y.tag && x.ns == y.ns && (x.tag != .Other || names_equal_tree(t, x.name, y.name)) && same_attrs(t, x, y) {
 			same += 1
 			earliest = i
 		}

@@ -29,7 +29,7 @@ value_doc_origin :: #force_inline proc "contextless" (v: Value, allow_synthetic 
 		}
 		return nil, tape.NO_NODE, false
 	}
-	if v.kind == .String && v.held {
+	if (v.kind == .String || v.kind == .Bytes) && v.held {
 		sb := (^Str_Block)(block_of(v))
 		if sb != nil && sb.flags & BLOCK_HAS_DOC != 0 {
 			d = str_doc_slot(sb)^

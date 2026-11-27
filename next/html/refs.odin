@@ -140,7 +140,7 @@ C1_REMAP := [32]u16 {
 @(private)
 decode :: proc "contextless" (src: []u8, s: Span, buf: []u8) -> (text: string, ok: bool) #optional_ok #no_bounds_check {
 	p := raw_data(src)[s.lo:]
-	if s.flags & ~{.Missing} == {} {
+	if s.flags & ~{.Missing, .Owned} == {} {
 		return string(p[:s.n]), true
 	}
 	if len(buf) < decode_room(s) {

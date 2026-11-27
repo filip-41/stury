@@ -245,5 +245,5 @@ foreign_end_tag :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 // Whether element `n`'s name is tag `tok`'s, ASCII case folded.
 @(private)
 same_name :: #force_inline proc(t: ^Html_Tree, n: ^Tree_Node, tok: ^Html_Token) -> bool {
-	return n.tag == t.tag && (t.tag != .Other || names_equal(raw_data(t.src), n.name, tok.name))
+	return n.tag == t.tag && (t.tag != .Other || names_equal_tree(t, n.name, tok.name))
 }

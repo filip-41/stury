@@ -57,6 +57,7 @@ Span_Flag :: enum u8 {
 	Cr,
 	Invalid,
 	Missing,
+	Owned,
 }
 
 @(private)
@@ -99,6 +100,19 @@ Token_Action :: enum u8 {
 }
 
 @(private)
+Stream_Pause :: struct {
+	pos:        u64,
+	judged:     u64,
+	content:    Content,
+	in_foreign: bool,
+	last_buf:   [16]u8,
+	last_n:     u8,
+	last_set:   bool,
+	last_plain: bool,
+	paused:     bool,
+}
+
+@(private)
 tokenize :: proc(
 	src: []u8,
 	h: ^$H,
@@ -114,7 +128,7 @@ tokenize :: proc(
 	err: tape.Error,
 	stopped: bool,
 ) {
-	t: Tokenizer(H)
+	t: Tokenizer(H, false)
 	local := context
 	t.ctx = ctx^ if ctx != nil else local
 	t.h = h
@@ -146,43 +160,142 @@ tokenize :: proc(
 	return hook.walk_error(hook.Walk_Result(r), &RULES)
 }
 
+// Feeds `[st.pos, to)` of window `src` into `tree`, pausing cleanly at `st.pos` when `!eof` without premature EOF
+// or split tokens/entities/UTF-8 sequences. When `eof` is true, runs to completion identically to whole-text `tokenize`.
+@(private)
+tokenize_chunk :: proc(
+	src: []u8,
+	tree: ^Html_Tree,
+	st: ^Stream_Pause,
+	to: u64,
+	eof: bool,
+	allocator: runtime.Allocator,
+) -> (
+	err: tape.Error,
+) {
+	if eof {
+		t: Tokenizer(Html_Tree, false)
+		t.ctx = tree.ctx
+		t.h = tree
+		t.base = raw_data(src)
+		start_at := min(st.pos, to)
+		t.text_lo = start_at
+		t.judged = st.judged
+		t.in_foreign = st.in_foreign
+		t.attrs = t.inline[:]
+		t.allocator = allocator
+		t.last = st.last_buf[:st.last_n]
+		t.last_set = st.last_set
+		t.last_plain = st.last_plain
+		t.content = st.content
+		t.text_mode = content_mode(st.content)
+		p := t.base[start_at:]
+		end := t.base[to:]
+		r: u64
+		switch st.content {
+		case .Data:          r = st_data(p, end, &t, on_token)
+		case .Rcdata:        r = st_rcdata(p, end, &t, on_token)
+		case .Rawtext:       r = st_rawtext(p, end, &t, on_token)
+		case .Script_Data:   r = st_script(p, end, &t, on_token)
+		case .Plaintext:     r = st_plaintext(p, end, &t, on_token)
+		case .Cdata_Section: r = st_cdata(p, end, &t, on_token)
+		}
+		delete(t.heap, t.allocator)
+		delete(t.hash, t.allocator)
+		st.pos = to
+		st.paused = false
+		_, err, _ = hook.walk_error(hook.Walk_Result(r), &RULES)
+		return err
+	}
+	st.paused = false
+	if st.pos >= to {
+		st.paused = true
+		return nil
+	}
+	t: Tokenizer(Html_Tree, true)
+	t.ctx = tree.ctx
+	t.h = tree
+	t.base = raw_data(src)
+	t.text_lo = st.pos
+	t.judged = st.judged
+	t.in_foreign = st.in_foreign
+	t.attrs = t.inline[:]
+	t.allocator = allocator
+	t.last = st.last_buf[:st.last_n]
+	t.last_set = st.last_set
+	t.last_plain = st.last_plain
+	t.content = st.content
+	t.text_mode = content_mode(st.content)
+	t.stream = st
+	t.save_err_len = len(tree.errors)
+	t.save_judged = st.judged
+	t.esc_lo = max(u64)
+	p := t.base[st.pos:]
+	end := t.base[to:]
+	r: u64
+	switch st.content {
+	case .Data:          r = st_data(p, end, &t, on_token)
+	case .Rcdata:        r = st_rcdata(p, end, &t, on_token)
+	case .Rawtext:       r = st_rawtext(p, end, &t, on_token)
+	case .Script_Data:   r = st_script(p, end, &t, on_token)
+	case .Plaintext:     r = st_plaintext(p, end, &t, on_token)
+	case .Cdata_Section: r = st_cdata(p, end, &t, on_token)
+	}
+	delete(t.heap, t.allocator)
+	delete(t.hash, t.allocator)
+	if u8(r) == hook.WALK_MORE {
+		return nil
+	}
+	_, err, _ = hook.walk_error(hook.Walk_Result(r), &RULES)
+	return err
+}
+
 @(private)
 decode_room :: proc "contextless" (s: Span) -> int {
 	return int(s.n) * 3
 }
 
 @(private)
-Tokenizer :: struct($H: typeid) {
-	h:          ^H,
-	base:       [^]u8,
-	tok:        Html_Token,
-	text_lo:    u64,
-	text_hi:    u64,
-	lo:         u64,
-	mark:       u64,
-	judged:     u64,
-	text_flags: Span_Flags,
-	flags:      Span_Flags,
-	text_mode:  Mode,
-	content:    Content,
-	back:       Back,
-	ret:        Return,
-	quote:      u8,
-	system:     bool,
-	in_foreign: bool,
-	kept:       bool,
-	wide:       bool,
-	oom:        bool,
-	last_set:   bool,
-	last_plain: bool,
-	last:       []u8,
-	attr_n:     int,
-	attrs:      []Attribute,
-	heap:       []Attribute,
-	hash:       []u32,
-	allocator:  runtime.Allocator,
-	ctx:        runtime.Context,
-	inline:     [ATTRS_INLINE]Attribute,
+Tokenizer :: struct($H: typeid, $STREAM: bool = false) {
+	h:            ^H,
+	base:         [^]u8,
+	tok:          Html_Token,
+	text_lo:      u64,
+	text_hi:      u64,
+	lo:           u64,
+	mark:         u64,
+	judged:       u64,
+	text_flags:   Span_Flags,
+	flags:        Span_Flags,
+	text_mode:    Mode,
+	content:      Content,
+	back:         Back,
+	ret:          Return,
+	quote:        u8,
+	system:       bool,
+	in_foreign:   bool,
+	kept:         bool,
+	wide:         bool,
+	oom:          bool,
+	last_set:     bool,
+	last_plain:   bool,
+	need_more:    bool,
+	last:         []u8,
+	attr_n:       int,
+	attrs:        []Attribute,
+	heap:         []Attribute,
+	hash:         []u32,
+	allocator:    runtime.Allocator,
+	ctx:          runtime.Context,
+	stream:       ^Stream_Pause,
+	save_err_len: int,
+	save_judged:  u64,
+	text_err_len: int,
+	text_judged:  u64,
+	esc_lo:       u64,
+	esc_err_len:  int,
+	esc_judged:   u64,
+	inline:       [ATTRS_INLINE]Attribute,
 }
 
 @(private)
@@ -323,29 +436,185 @@ stop_at :: #force_inline proc "contextless" (p, end: [^]u8, table: kernel.Nibble
 }
 
 @(private)
-at :: #force_inline proc "contextless" (t: ^Tokenizer($H), p: [^]u8) -> u64 {
+at :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), p: [^]u8) -> u64 {
 	return u64(intrinsics.ptr_sub(p, t.base))
 }
 
 @(private)
 content_mode :: #force_inline proc "contextless" (c: Content) -> Mode {
 	switch c {
-	case .Data:                          return .Data
-	case .Rcdata:                        return .Rcdata
+	case .Data:                              return .Data
+	case .Rcdata:                            return .Rcdata
 	case .Rawtext, .Script_Data, .Plaintext: return .Raw
-	case .Cdata_Section:                 return .Verbatim
+	case .Cdata_Section:                     return .Verbatim
 	}
 	return .Data
 }
 
 @(private)
-span_of :: #force_inline proc "contextless" (t: ^Tokenizer($H), lo, hi: u64, mode: Mode, flags: Span_Flags) -> Span {
+span_of :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), lo, hi: u64, mode: Mode, flags: Span_Flags) -> Span {
 	t.wide ||= hi - lo > u64(max(u32))
 	return {lo = lo, n = u32(hi - lo), mode = mode, flags = flags}
 }
 
 @(private)
-halt :: proc "contextless" (t: ^Tokenizer($H), q: [^]u8) -> u64 {
+is_truncated_utf8 :: #force_inline proc "contextless" (q, end: [^]u8) -> bool #no_bounds_check {
+	avail := int(intrinsics.ptr_sub(end, q))
+	if avail >= 4 || avail <= 0 {
+		return false
+	}
+	c := q[0]
+	need: int
+	switch {
+	case c >= 0xC2 && c <= 0xDF: need = 2
+	case c >= 0xE0 && c <= 0xEF: need = 3
+	case c >= 0xF0 && c <= 0xF4: need = 4
+	case:                        return false
+	}
+	if avail >= need {
+		return false
+	}
+	if avail >= 2 {
+		c1 := q[1]
+		switch c {
+		case 0xE0: if c1 < 0xA0 || c1 > 0xBF { return false }
+		case 0xED: if c1 < 0x80 || c1 > 0x9F { return false }
+		case 0xF0: if c1 < 0x90 || c1 > 0xBF { return false }
+		case 0xF4: if c1 < 0x80 || c1 > 0x8F { return false }
+		case:      if c1 < 0x80 || c1 > 0xBF { return false }
+		}
+	}
+	if avail >= 3 && (q[2] < 0x80 || q[2] > 0xBF) {
+		return false
+	}
+	return true
+}
+
+@(private)
+ref_complete :: proc "contextless" (p, end: [^]u8) -> bool #no_bounds_check {
+	q := p[1:]
+	if q >= end {
+		return false
+	}
+	if q[0] == '#' {
+		q = q[1:]
+		if q >= end {
+			return false
+		}
+		hex := q[0] | 0x20 == 'x'
+		if hex {
+			q = q[1:]
+			if q >= end {
+				return false
+			}
+		}
+		base := u8(16 if hex else 10)
+		for q < end && spell.HEX_NIBBLE[q[0]] < base {
+			q = q[1:]
+		}
+		return q < end
+	}
+	if CLASS[q[0]] & C_ALNUM == 0 {
+		return true
+	}
+	for q < end && CLASS[q[0]] & C_ALNUM != 0 {
+		q = q[1:]
+	}
+	return q < end
+}
+
+@(private)
+stream_rollback_errors :: #force_inline proc "contextless" (tree: ^Html_Tree, err_len: int) {
+	raw := (^runtime.Raw_Dynamic_Array)(&tree.errors)
+	if raw.len > err_len {
+		raw.len = err_len
+	}
+}
+
+@(private)
+stream_can_flush :: proc "contextless" (t: ^Tokenizer(Html_Tree, true), hi: u64) -> bool #no_bounds_check {
+	if hi <= t.text_lo {
+		return false
+	}
+	if !(t.h.mode == .In_Body || t.h.mode == .Text || len(t.h.errors) > 0) {
+		return false
+	}
+	if .Nul in t.text_flags {
+		all_nul := true
+		for p := t.text_lo; p < hi; p += 1 {
+			if t.base[p] != 0 {
+				all_nul = false
+				break
+			}
+		}
+		if all_nul {
+			return false
+		}
+	}
+	return true
+}
+
+@(private)
+stream_commit_pause :: proc "contextless" (t: ^Tokenizer(Html_Tree, true), pos, judged: u64, err_len: int) -> u64 {
+	stream_rollback_errors(t.h, err_len)
+	st := t.stream
+	st.pos = pos
+	st.judged = judged
+	st.content = t.content
+	st.in_foreign = t.in_foreign
+	if t.last_set && t.last_plain && len(t.last) <= len(st.last_buf) {
+		if raw_data(t.last) != raw_data(st.last_buf[:]) {
+			copy(st.last_buf[:], t.last)
+		}
+		st.last_n = u8(len(t.last))
+		st.last_set = true
+		st.last_plain = true
+	} else {
+		st.last_n = 0
+		st.last_set = t.last_set
+		st.last_plain = false
+	}
+	st.paused = true
+	return u64(hook.walk_result(pos, hook.WALK_MORE))
+}
+
+@(private)
+stream_pause_at_text :: proc "contextless" (t: ^Tokenizer(Html_Tree, true), $on: proc "contextless" (h: ^Html_Tree, tok: ^Html_Token) -> Token_Action, hi: u64) -> u64 {
+	t.need_more = false
+	if stream_can_flush(t, hi) {
+		if flush(t, on, hi, hi) || t.wide {
+			return halt(t, t.base[hi:])
+		}
+		return stream_commit_pause(t, hi, min(t.judged, hi), len(t.h.errors))
+	}
+	return stream_commit_pause(t, t.text_lo, t.save_judged, t.save_err_len)
+}
+
+@(private)
+stream_pause_tag :: proc "contextless" (t: ^Tokenizer(Html_Tree, true)) -> u64 {
+	t.need_more = false
+	cut_lo, cut_err, cut_judged := t.text_hi, t.text_err_len, t.text_judged
+	if t.esc_lo != max(u64) {
+		cut_lo, cut_err, cut_judged = t.esc_lo, t.esc_err_len, t.esc_judged
+		t.esc_lo = max(u64)
+	}
+	if stream_can_flush(t, cut_lo) {
+		stream_rollback_errors(t.h, cut_err)
+		if flush(t, on_token, cut_lo, cut_lo) || t.wide {
+			return halt(t, t.base[cut_lo:])
+		}
+		return stream_commit_pause(t, cut_lo, min(cut_judged, cut_lo), len(t.h.errors))
+	}
+	return stream_commit_pause(t, t.text_lo, t.save_judged, t.save_err_len)
+}
+
+@(private)
+halt :: proc "contextless" (t: ^Tokenizer($H, $STREAM), q: [^]u8) -> u64 {
+	when STREAM {
+		if t.need_more {
+			return stream_pause_tag(t)
+		}
+	}
 	if t.oom {
 		return u64(hook.walk_result(0, hook.WALK_NO_MEMORY))
 	}
@@ -356,13 +625,13 @@ halt :: proc "contextless" (t: ^Tokenizer($H), q: [^]u8) -> u64 {
 }
 
 @(private)
-report :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q: [^]u8, d: Detail) -> bool {
+report :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q: [^]u8, d: Detail) -> bool {
 	e := Html_Token{kind = .Error, lo = at(t, q), hi = at(t, q), detail = d}
 	return on(t.h, &e) == .Stop
 }
 
 @(private)
-flush :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, hi, next: u64) -> bool {
+flush :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, hi, next: u64) -> bool {
 	lo := t.text_lo
 	t.text_lo = next
 	if hi <= lo {
@@ -379,11 +648,15 @@ flush :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, 
 	case .Foreign: t.in_foreign = true
 	case .Html:    t.in_foreign = false
 	}
+	when STREAM {
+		t.save_err_len = len(t.h.errors)
+		t.save_judged = t.judged
+	}
 	return false
 }
 
 @(private)
-emit :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q: [^]u8) -> bool {
+emit :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q: [^]u8) -> bool {
 	if flush(t, on, t.text_hi, at(t, q)) || t.wide {
 		return true
 	}
@@ -400,18 +673,26 @@ emit :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t
 	case .Foreign:     t.in_foreign = true
 	case .Html:        t.in_foreign = false
 	}
+	when STREAM {
+		t.esc_lo = max(u64)
+		t.save_err_len = len(t.h.errors)
+		t.save_judged = t.judged
+	}
 	return false
 }
 
 @(private)
-finish :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8, hi: u64) -> u64 {
+finish :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8, hi: u64) -> u64 {
 	flush(t, on, hi, at(t, end))
 	out := u8(tape.Fault_Kind.Too_Wide) if t.wide else 0
 	return u64(hook.walk_result(at(t, end), out))
 }
 
 @(private)
-emit_at_end :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+emit_at_end :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+	when STREAM {
+		return stream_pause_tag(t)
+	}
 	if emit(t, on, end) {
 		return halt(t, end)
 	}
@@ -419,7 +700,10 @@ emit_at_end :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h
 }
 
 @(private)
-eof_in_tag :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+eof_in_tag :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+	when STREAM {
+		return stream_pause_tag(t)
+	}
 	if report(t, on, end, .Eof_In_Tag) {
 		return halt(t, end)
 	}
@@ -427,7 +711,10 @@ eof_in_tag :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h:
 }
 
 @(private)
-eof_in_pi :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+eof_in_pi :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+	when STREAM {
+		return stream_pause_tag(t)
+	}
 	q := end
 	if name := t.tok.name; name.n > 0 {
 		q = t.base[name.lo + u64(name.n):]
@@ -439,7 +726,10 @@ eof_in_pi :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: 
 }
 
 @(private)
-eof_error :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8, d: Detail) -> u64 {
+eof_error :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8, d: Detail) -> u64 {
+	when STREAM {
+		return stream_pause_tag(t)
+	}
 	if report(t, on, end, d) {
 		return halt(t, end)
 	}
@@ -447,7 +737,10 @@ eof_error :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: 
 }
 
 @(private)
-eof_in_comment :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+eof_in_comment :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+	when STREAM {
+		return stream_pause_tag(t)
+	}
 	if report(t, on, end, .Eof_In_Comment) {
 		return halt(t, end)
 	}
@@ -456,7 +749,10 @@ eof_in_comment :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless"
 }
 
 @(private)
-eof_in_doctype :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+eof_in_doctype :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
+	when STREAM {
+		return stream_pause_tag(t)
+	}
 	t.tok.flags += {.Force_Quirks}
 	if report(t, on, end, .Eof_In_Doctype) {
 		return halt(t, end)
@@ -465,13 +761,13 @@ eof_in_doctype :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless"
 }
 
 @(private)
-doctype_error :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, p, end: [^]u8, d: Detail, consumes: bool) -> bool {
+doctype_error :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, p, end: [^]u8, d: Detail, consumes: bool) -> bool {
 	t.tok.flags += {.Force_Quirks}
 	return consumes && judge_first(t, on, p, end) || report(t, on, p, d)
 }
 
 @(private)
-judge_first :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, p, end: [^]u8) -> bool {
+judge_first :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, p, end: [^]u8) -> bool {
 	if p >= end || CLASS[p[0]] & C_JUDGE == 0 {
 		return false
 	}
@@ -490,26 +786,26 @@ skip_ws :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 {
 }
 
 @(private)
-open_comment :: #force_inline proc "contextless" (t: ^Tokenizer($H), lo: u64, p: [^]u8) {
+open_comment :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), lo: u64, p: [^]u8) {
 	t.tok = Html_Token{kind = .Comment, lo = lo}
 	t.lo = at(t, p)
 	t.flags = {}
 }
 
 @(private)
-is_script :: #force_inline proc "contextless" (t: ^Tokenizer($H), q: [^]u8) -> bool {
+is_script :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), q: [^]u8) -> bool {
 	return at(t, q) - t.mark == 6 && fold_equal(t.base[t.mark:], transmute([]u8)string("script"))
 }
 
 @(private)
-open_id :: #force_inline proc "contextless" (t: ^Tokenizer($H), p: [^]u8) {
+open_id :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), p: [^]u8) {
 	t.quote = p[0]
 	t.lo = at(t, p) + 1
 	t.flags = {}
 }
 
 @(private)
-doctype_id :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, p, end: [^]u8) -> (q: [^]u8, stop: bool) {
+doctype_id :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, p, end: [^]u8) -> (q: [^]u8, stop: bool) {
 	q = p
 	for q < end {
 		c := q[0]
@@ -536,7 +832,7 @@ doctype_id :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h:
 }
 
 @(private)
-judge :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q, end: [^]u8, flags: ^Span_Flags) -> (n: int, stop: bool) {
+judge :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q, end: [^]u8, flags: ^Span_Flags) -> (n: int, stop: bool) {
 	c := q[0]
 	d := Detail.Control_Character_In_Input_Stream
 	switch {
@@ -546,6 +842,12 @@ judge :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, 
 	case c < 0x80:
 		n = 1
 	case:
+		when STREAM {
+			if is_truncated_utf8(q, end) {
+				t.need_more = true
+				return 0, true
+			}
+		}
 		r, kind := spell.utf8_char(q, end)
 		if kind != .None {
 			flags^ += {.Invalid}
@@ -580,7 +882,7 @@ code_point :: #force_inline proc "contextless" (q: [^]u8, n: int) -> u32 {
 }
 
 @(private)
-open_tag :: #force_inline proc "contextless" (t: ^Tokenizer($H), kind: Html_Token_Kind, lo: u64, p: [^]u8) {
+open_tag :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), kind: Html_Token_Kind, lo: u64, p: [^]u8) {
 	t.tok = Html_Token{kind = kind, lo = lo}
 	t.attr_n = 0
 	t.lo = at(t, p)
@@ -588,12 +890,12 @@ open_tag :: #force_inline proc "contextless" (t: ^Tokenizer($H), kind: Html_Toke
 }
 
 @(private)
-end_name :: #force_inline proc "contextless" (t: ^Tokenizer($H), q: [^]u8) {
+end_name :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), q: [^]u8) {
 	t.tok.name = span_of(t, t.lo, at(t, q), .Name, t.flags)
 }
 
 @(private)
-emit_tag :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q: [^]u8) -> bool {
+emit_tag :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q: [^]u8) -> bool {
 	t.tok.attrs = t.attrs[:t.attr_n]
 	if t.tok.kind == .End_Tag {
 		if t.attr_n > 0 && report(t, on, q, .End_Tag_With_Attributes) {
@@ -612,7 +914,7 @@ emit_tag :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^
 }
 
 @(private)
-appropriate :: #force_inline proc "contextless" (t: ^Tokenizer($H), q: [^]u8) -> bool {
+appropriate :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), q: [^]u8) -> bool {
 	n := int(at(t, q) - t.lo)
 	if !t.last_set || !t.last_plain || n != len(t.last) {
 		return false
@@ -632,13 +934,13 @@ fold_equal :: proc "contextless" (a: [^]u8, b: []u8) -> bool {
 }
 
 @(private)
-open_attr :: #force_inline proc "contextless" (t: ^Tokenizer($H), p: [^]u8) {
+open_attr :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), p: [^]u8) {
 	t.lo = at(t, p)
 	t.flags = {}
 }
 
 @(private)
-end_attr_name :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q: [^]u8) -> bool {
+end_attr_name :: proc "contextless" (t: ^Tokenizer($H, $STREAM), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, q: [^]u8) -> bool {
 	name := span_of(t, t.lo, at(t, q), .Name, t.flags)
 	if repeated(t, name) {
 		t.kept = false
@@ -660,14 +962,14 @@ end_attr_name :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" 
 }
 
 @(private)
-end_value :: #force_inline proc "contextless" (t: ^Tokenizer($H), q: [^]u8) {
+end_value :: #force_inline proc "contextless" (t: ^Tokenizer($H, $STREAM), q: [^]u8) {
 	if t.kept {
 		t.attrs[t.attr_n - 1].value = span_of(t, t.lo, at(t, q), .Value, t.flags)
 	}
 }
 
 @(private)
-repeated :: proc "contextless" (t: ^Tokenizer($H), name: Span) -> bool {
+repeated :: proc "contextless" (t: ^Tokenizer($H, $STREAM), name: Span) -> bool {
 	src := t.base
 	if t.attr_n <= ATTRS_INLINE {
 		for a in t.attrs[:t.attr_n] {
@@ -687,7 +989,7 @@ repeated :: proc "contextless" (t: ^Tokenizer($H), name: Span) -> bool {
 }
 
 @(private)
-grow_attrs :: #force_no_inline proc "contextless" (t: ^Tokenizer($H)) -> bool {
+grow_attrs :: #force_no_inline proc "contextless" (t: ^Tokenizer($H, $STREAM)) -> bool {
 	bigger, ok := regrow(&t.ctx, t.attrs, t.heap, 2 * len(t.attrs), t.allocator)
 	if !ok {
 		t.oom = true
@@ -699,7 +1001,7 @@ grow_attrs :: #force_no_inline proc "contextless" (t: ^Tokenizer($H)) -> bool {
 }
 
 @(private)
-rehash :: #force_no_inline proc "contextless" (t: ^Tokenizer($H)) -> bool {
+rehash :: #force_no_inline proc "contextless" (t: ^Tokenizer($H, $STREAM)) -> bool {
 	room := 2 * len(t.attrs)
 	if len(t.hash) != room {
 		ok: bool
@@ -740,7 +1042,7 @@ fresh_hash :: proc "contextless" (ctx: ^runtime.Context, old: []u32, n: int, all
 }
 
 @(private)
-hash_attr :: proc "contextless" (t: ^Tokenizer($H), i: int) {
+hash_attr :: proc "contextless" (t: ^Tokenizer($H, $STREAM), i: int) {
 	mask := u32(len(t.hash) - 1)
 	k := name_hash(t.base, t.attrs[i].name) & mask
 	for t.hash[k] != 0 {
@@ -750,13 +1052,18 @@ hash_attr :: proc "contextless" (t: ^Tokenizer($H), i: int) {
 }
 
 @(private)
-names_equal :: proc "contextless" (src: [^]u8, a, b: Span) -> bool {
+names_equal :: #force_inline proc "contextless" (src: [^]u8, a, b: Span) -> bool {
+	return names_equal_two(src, a, src, b)
+}
+
+@(private)
+names_equal_two :: proc "contextless" (sa: [^]u8, a: Span, sb: [^]u8, b: Span) -> bool {
 	if (a.flags | b.flags) & {.Nul, .Invalid} == {} {
-		return a.n == b.n && fold_equal(src[a.lo:], src[b.lo:][:b.n])
+		return a.n == b.n && fold_equal(sa[a.lo:], sb[b.lo:][:b.n])
 	}
 	i, j: u32
 	for {
-		x, y := name_char(src, a, &i), name_char(src, b, &j)
+		x, y := name_char(sa, a, &i), name_char(sb, b, &j)
 		if x != y {
 			return false
 		}

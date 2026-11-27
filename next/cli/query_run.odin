@@ -982,7 +982,7 @@ run_prog_on_value :: proc(w: ^Query_Worker, run_ptr: ^jq.Run, inp: query.Value, 
 			return false
 		}
 		return true
-	}, &br)
+	}, rawptr(&br))
 	if br.err != .None { return br.err }
 	return finish_jq_end(w, run_ptr, end)
 }
@@ -1105,7 +1105,7 @@ eval_jp_doc :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, 
 			return false
 		}
 		return true
-	}, &br)
+	}, rawptr(&br))
 	ret := br.err
 	if ret == .None {
 		switch end {

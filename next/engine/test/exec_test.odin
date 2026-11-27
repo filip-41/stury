@@ -126,7 +126,7 @@ jq_run_emit :: proc(run: ^jq.Run, h: ^query.Heap, inp: query.Value, emit: engine
 	}
 	defer delete(br.buf)
 
-	end := jq.run_value(run, inp, on_val, &br)
+	end := jq.run_value(run, inp, on_val, rawptr(&br))
 	if br.err != .None {
 		return br.err
 	}
@@ -185,7 +185,7 @@ jq_doc_pred :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta) 
 	}
 
 	pc: Pred_Cap
-	end := jq.run_value(&st.run, inp, on_pred, &pc)
+	end := jq.run_value(&st.run, inp, on_pred, rawptr(&pc))
 	if st.h.tainted || end == .Tainted {
 		return false, .Tainted
 	}

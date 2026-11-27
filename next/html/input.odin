@@ -43,16 +43,44 @@ meta_changes_encoding :: proc(t: ^Html_Tree, attrs: []Attribute) {
 	}
 	t.tentative = false
 	t.encoding = meta_named(enc)
-	if !reads_as_utf8(t.src, t.encoding) {
+	t.enc_at = at
+	if !encoding_ok_seen(t.encoding, t.seen_high, t.seen_esc) || !reads_as_utf8(t.src[t.src_from:], t.encoding) {
 		t.misread = true
 		t.at = at
 	}
 }
 
 @(private)
+encoding_ok_seen :: proc "contextless" (enc: Encoding, seen_high, seen_esc: bool) -> bool {
+	#partial switch enc {
+	case .Utf_8:
+		return true
+	case .Replacement, .Utf_16be, .Utf_16le:
+		return false
+	case .Iso_2022_Jp:
+		return !seen_high && !seen_esc
+	}
+	return !seen_high
+}
+
+@(private)
+scan_encoding_bytes :: proc "contextless" (b: []u8, seen_high, seen_esc: ^bool) {
+	if seen_high^ && seen_esc^ {
+		return
+	}
+	for c in b {
+		if c >= 0x80 {
+			seen_high^ = true
+		} else if c == 0x0E || c == 0x0F || c == 0x1B {
+			seen_esc^ = true
+		}
+	}
+}
+
+@(private)
 meta_encoding :: proc(t: ^Html_Tree, attrs: []Attribute) -> (enc: Encoding, at: u64, found: bool) {
 	label_at :: proc(a: ^Attribute, i: u64) -> u64 {
-		return a.value.lo + i if a.value.flags & ~{.Missing} == {} else a.value.lo
+		return a.value.lo + i if a.value.flags & ~{.Missing, .Owned} == {} else a.value.lo
 	}
 	if a := attribute_of(t, attrs, "charset"); a != nil {
 		v := transmute([]u8)decoded(t, a.value, 0)
