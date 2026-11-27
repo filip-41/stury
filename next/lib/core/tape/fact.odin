@@ -9,8 +9,8 @@ Fact :: struct {
 	lo:       u64,
 	node:     Node_Index,
 	n:        u32,
-	kind:     Fact_Kind,
 	spelling: u16, // a comment's: opening marker length in the low byte, closing in the high byte
+	kind:     Fact_Kind,
 }
 
 // The kinds of fact, which describe a value and mean nothing on their own. The kinds with a span come first, in the
@@ -55,7 +55,7 @@ fact_tail :: #force_inline proc "contextless" (spelling: u16) -> u64 {
 facts_of :: proc "contextless" (doc: ^Document, at: Node_Index) -> []Fact #no_bounds_check {
 	lo, hi := 0, len(doc.facts)
 	for lo < hi {
-		mid := (lo + hi) / 2
+		mid := lo + (hi - lo) >> 1
 		if doc.facts[mid].node < at {
 			lo = mid + 1
 		} else {

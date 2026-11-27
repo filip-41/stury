@@ -124,8 +124,6 @@ steps_enter_the_values_they_read :: proc(t: ^testing.T) {
 		testing.expect_value(t, tape.step_enters(tape.Index(0), kind), array)
 		testing.expect_value(t, tape.step_enters(tape.All{}, kind), array || object)
 		testing.expect_value(t, tape.step_enters(tape.Slice{}, kind), array)
-		testing.expect_value(t, tape.step_enters(tape.Slice{}, kind, true), array || object)
-		testing.expect_value(t, tape.step_enters(tape.Name("a"), kind, true), object)
 		testing.expect_value(t, tape.step_refused(kind), tape.Presence.Missing if kind == .Null else .Wrong_Kind)
 	}
 	for taken in u64(0) ..= 4 {
@@ -311,7 +309,7 @@ keys_are_one_by_kind_and_text :: proc(t: ^testing.T) {
 text_hashes_every_byte :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
-	for n in 0 ..= 40 {
+	for n in 0 ..= 65 {
 		text := make([]u8, n, context.temp_allocator)
 		for &b, i in text {
 			b = u8('a' + i % 26)
@@ -387,4 +385,41 @@ byte_strings_read_as_their_payload :: proc(t: ^testing.T) {
 	testing.expect(t, ok && text == "\xde\xad")
 	text, ok = tape.node_text(&f, src, tape.Token{lo = 0, n = 2, kind = .Bytes, spelling = tape.SPELLING_DECODE}, buf[:])
 	testing.expect(t, ok && text == "seven")
+}
+
+// Regression cases for empty-container `child_takes`, statically empty `slice_cut`, out-of-range `step_replays`, and
+// asymmetric `same_keys` decode flags.
+@(test)
+step_boundary_regressions :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// `count == 0` is an empty array in `child_takes`, not `slice_takes`'s unknown-count sentinel.
+	testing.expect(t, !tape.child_takes(tape.Slice{0, 5, 0}, 0, 0, false, .Last))
+	testing.expect(t, !tape.child_takes(tape.Slice{0, nil, 0}, 0, 0, false, .Last))
+	testing.expect(t, !tape.child_takes(tape.Slice{-1, nil, 0}, 0, 0, false, .Last))
+	// Statically empty positive slices cut immediately at 0.
+	testing.expect_value(t, tape.slice_cut(tape.Slice{5, 3, 0}), u64(0))
+	testing.expect_value(t, tape.slice_cut(tape.Slice{5, 5, 0}), u64(0))
+	testing.expect_value(t, tape.slice_cut(tape.Slice{0, 0, 2}), u64(0))
+	testing.expect_value(t, tape.slice_cut(tape.Slice{2_000_000, 1_000_000, 0}), u64(0))
+	// Out-of-bounds `at` in `step_replays` returns false rather than panicking.
+	path := []tape.Step{tape.Index(-1), tape.Name("a")}
+	testing.expect(t, !tape.step_replays(path, -1, true))
+	testing.expect(t, !tape.step_replays(path, len(path), true))
+	testing.expect(t, !tape.step_replays(path, len(path) + 5, true))
+	testing.expect(t, tape.step_replays(path, 0, true))
+	// `same_keys` folds `a.kind == b.kind`: asymmetric `SPELLING_DECODE` and `.Number` key vs value roles still dispatch.
+	f := tape.Format{same_text = number_key_same}
+	src := transmute([]u8)string("1 2")
+	plain_a := tape.Token{lo = 0, n = 1, kind = .String}
+	plain_b := tape.Token{lo = 2, n = 1, kind = .String}
+	dec_a := tape.Token{lo = 0, n = 1, kind = .String, spelling = tape.SPELLING_DECODE}
+	dec_b := tape.Token{lo = 2, n = 1, kind = .String, spelling = tape.SPELLING_DECODE}
+	testing.expect(t, !tape.same_keys(&f, src, plain_a, src, plain_b))
+	testing.expect(t, tape.same_keys(&f, src, dec_a, src, plain_b))
+	testing.expect(t, tape.same_keys(&f, src, plain_a, src, dec_b))
+	num_val_a := tape.Token{lo = 0, n = 1, kind = .Number, role = .Value}
+	num_val_b := tape.Token{lo = 2, n = 1, kind = .Number, role = .Value}
+	num_key_b := tape.Token{lo = 2, n = 1, kind = .Number, role = .Key}
+	testing.expect(t, !tape.same_keys(&f, src, num_val_a, src, num_val_b))
+	testing.expect(t, tape.same_keys(&f, src, num_val_a, src, num_key_b))
 }

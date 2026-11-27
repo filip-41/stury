@@ -76,7 +76,7 @@ records_seq_rfc7464_semantics :: proc(t: ^testing.T) {
 	// Pieces agreement across chunk sizes for `.Seq`.
 	for step in ([]int{1, 3, 7, 19}) {
 		p: tape.Pieces
-		defer tape.destroy_pieces(&p)
+		defer tape.destroy(&p)
 		bs := transmute([]u8)src
 		p.last = step >= len(bs)
 		rp := json.records_open(bs[:min(step, len(bs))], .Seq, .Json, {pieces = &p})
@@ -185,7 +185,7 @@ records_max_bytes_limit :: proc(t: ^testing.T) {
 	stream := fmt.tprintf("{{\"a\":1}}\n%s", strings.repeat("x", 64, context.temp_allocator))
 	bs := transmute([]u8)stream
 	p: tape.Pieces
-	defer tape.destroy_pieces(&p)
+	defer tape.destroy(&p)
 	rp := json.records_open(bs[:16], .Lines, .Json, {pieces = &p})
 	defer tape.destroy_records(&rp)
 	rp.max_bytes = 24

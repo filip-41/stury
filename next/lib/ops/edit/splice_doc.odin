@@ -784,8 +784,7 @@ clone_shifted_ext :: proc(
 			}
 		}
 	}
-	ext = tape.ext_make(old_ext.held, old_ext.format, allocator) or_return
-	ext.origin = old_ext.origin
+	ext = tape.ext_make(old_ext.held, old_ext.format, allocator, old_ext.origin) or_return
 	#partial switch &f in ext.format {
 	case tape.Markup_Ext:
 		for &sc in f.scopes {

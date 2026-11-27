@@ -96,7 +96,7 @@ a_read_takes_its_options :: proc(t: ^testing.T) {
 	pieces := tape.Pieces{last = true}
 	testing.expect_value(t, xml.validate(deep, .Xml, {pieces = &pieces}), nil)
 	testing.expect_value(t, pieces.more, false)
-	tape.destroy_pieces(&pieces)
+	tape.destroy(&pieces)
 	testing.expect_value(t, xml.validate(deep, .Xml, {format = tape.Dsv_Options{}}), tape.Error(tape.Bad_Option{"format"}))
 	// XML reads no ill-formed UTF-8, so every read refuses that rule, and takes the rules of tokens it has none of.
 	lax := xml.Options{tolerate = {.Invalid_Utf8}}

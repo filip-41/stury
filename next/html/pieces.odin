@@ -206,14 +206,13 @@ scan_held_once :: proc(
 		intrinsics.mem_copy_non_overlapping(raw_data(copied), raw_data(src), len(src))
 		held := [1]tape.Held_Span{{0, 0}}
 		old_ext := doc.ext
-		new_ext, eerr := tape.ext_make(held[:], old_ext.format if old_ext != nil else nil, caller)
+		new_ext, eerr := tape.ext_make(held[:], old_ext.format if old_ext != nil else nil, caller, old_ext.origin if old_ext != nil else {})
 		if eerr != nil {
 			delete(copied, caller)
 			tape.destroy(&doc)
 			return {}, eerr
 		}
 		if old_ext != nil {
-			new_ext.origin = old_ext.origin
 			free(old_ext, doc.allocator)
 		}
 		doc.ext = new_ext

@@ -155,7 +155,7 @@ base_of :: proc(uri: string, bases: []rules.Base, steps: []tape.Step) -> (base: 
 			continue
 		}
 		for s, k in x.steps {
-			if !tape.step_equal(s, steps[k]) {
+			if s != steps[k] {
 				continue outer
 			}
 		}

@@ -99,35 +99,6 @@ Layout :: struct {
 	ascii:      bool, // `Options.ascii`
 }
 
-// Returns `doc`'s span of `n` bytes at offset `lo`, resolving `.Held` spans out of line with no slice bounds checks.
-// Invariant: every node and fact span `(lo, n)` of `doc` lies within `doc.src` (or a `doc.ext.held` span under `.Held`).
-@(private)
-doc_span :: #force_inline proc "contextless" (doc: ^tape.Document, lo: u64, n: u32) -> []u8 #no_bounds_check {
-	if .Held not_in doc.flags {
-		return doc.src[lo:][:n]
-	}
-	return doc_span_held(doc, lo, n)
-}
-
-@(private, cold)
-doc_span_held :: #force_no_inline proc "contextless" (doc: ^tape.Document, lo: u64, n: u32) -> []u8 #no_bounds_check {
-	held := doc.ext.held
-	l, h := 0, len(held)
-	for l < h {
-		mid := (l + h) / 2
-		if held[mid].lo <= lo {
-			l = mid + 1
-		} else {
-			h = mid
-		}
-	}
-	if l == 0 {
-		return nil
-	}
-	at := held[l - 1].at + lo - held[l - 1].lo
-	return doc.src[at:][:n]
-}
-
 // `write_rows` for the text the document holds: its own quotes when it is JSON5, the ASCII bytes when `ascii`.
 @(private)
 write_rows_of_text :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $PRETTY: bool, $WIDTH: int, facts: bool, spec: Spec) {
@@ -365,7 +336,7 @@ put_scalar :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at
 		out.cursor += 5
 	case .Number:
 		if l.numbers && (t.spelling & tape.NUMBER_KIND == 0 || T == .Json5 && l.json5) {
-			write.put(out, doc_span(w.doc, t.lo, t.n))
+			write.put(out, tape.span_bytes(w.doc, t.lo, t.n))
 			return true
 		}
 		return put_number(out, w, at, t, T)
@@ -486,12 +457,12 @@ put_text_of :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: tape.Node_I
 	doc := w.doc
 	t := doc.nodes[at]
 	if u8(t.kind) - u8(tape.Kind.String) <= 1 && t.spelling & tape.SPELLING_DECODE == 0 {
-		put_string(out, l, string(doc_span(doc, t.lo, t.n)))
+		put_string(out, l, string(tape.span_bytes(doc, t.lo, t.n)))
 		return true
 	}
 	room := tape.text_room(doc, at)
 	if room == 0 {
-		put_string(out, l, string(doc_span(doc, t.lo, t.n)))
+		put_string(out, l, string(tape.span_bytes(doc, t.lo, t.n)))
 		return true
 	}
 	if len(w.scratch) < room && !grow_tree_scratch(w, room) {
@@ -840,7 +811,7 @@ put_number :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, at: tape.No
 	json := w.doc.format == &FORMATS[.Json5] || w.doc.format == &FORMATS[.Json] || w.doc.format == &FORMATS[.Jsonc]
 	if kind := Number_Spelling(t.spelling & tape.NUMBER_KIND); json && (kind == .Infinity || kind == .Nan) {
 		when T == .Json5 {
-			write.put(out, doc_span(w.doc, t.lo, t.n))
+			write.put(out, tape.span_bytes(w.doc, t.lo, t.n))
 			return true
 		}
 	} else {

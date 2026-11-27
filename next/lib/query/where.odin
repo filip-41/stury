@@ -56,6 +56,6 @@ value_place :: proc(h: ^Heap, v: Value) -> (place: tape.Place, ok: bool) {
 	if !from_doc {
 		return {}, false
 	}
-	place = tape.node_place(&d.doc, &d.index, at, heap_allocator(h))
+	place = tape.node_place(&d.doc, &d.index, at)
 	return place, place.ok
 }

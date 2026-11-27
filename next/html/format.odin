@@ -150,11 +150,10 @@ seal_state :: proc(doc: ^tape.Document, k: ^Kept, allocator: runtime.Allocator) 
 		held = doc.ext.held
 		origin = doc.ext.origin
 	}
-	new_ext, eerr := tape.ext_make(held, tape.Markup_Ext{dtd = {bytes = block}}, allocator)
+	new_ext, eerr := tape.ext_make(held, tape.Markup_Ext{dtd = {bytes = block}}, allocator, origin)
 	if eerr != nil {
 		return false
 	}
-	new_ext.origin = origin
 	if doc.ext != nil {
 		free(doc.ext, doc.allocator)
 	}
@@ -364,8 +363,7 @@ subdoc_state :: proc(src_doc, dst_doc: ^tape.Document, v, count: tape.Node_Index
 		held = dst_doc.ext.held
 		origin = dst_doc.ext.origin
 	}
-	new_ext := tape.ext_make(held, tape.Markup_Ext{dtd = {bytes = block}}, allocator) or_return
-	new_ext.origin = origin
+	new_ext := tape.ext_make(held, tape.Markup_Ext{dtd = {bytes = block}}, allocator, origin) or_return
 	if dst_doc.ext != nil {
 		free(dst_doc.ext, dst_doc.allocator)
 	}

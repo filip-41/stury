@@ -762,7 +762,7 @@ scanner_key :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, t:
 			#partial switch step in edge.step {
 			case tape.Name:
 				if NAMED && (t.n <= 16 && !tape.text_decodes(t) ? scan_key_short_eq(h.key_text, t, string(step)) : tape.key_names(h.b.doc.format, h.key_text, t, string(step))) {
-					scan_name_meets(h, f, e, edge.to, node.deep)
+					scan_name_meets(h, f, e, edge.to, .Deep in node.flags)
 				}
 			case tape.All:
 				if tape.all_takes(step.limit, f.count, true, h.dups) {
@@ -854,8 +854,8 @@ scanner_value :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $
 		for p in dm.ends[node.ends:][:node.n_ends] {
 			scan_answer(h, at, p, .Found, 2 * u64(at), n)
 		}
-		ends ||= node.whole
-		stubs ||= node.keys
+		ends ||= .Whole in node.flags
+		stubs ||= .Keys in node.flags
 		when scalar {
 			// No step enters a scalar.
 			for edge in dm.edges[node.edges:][:node.n_edges] {
@@ -871,7 +871,7 @@ scanner_value :: proc "contextless" (h: ^Scanner, s: hook.Regs, t: tape.Token, $
 				}
 			}
 			// An array a `.Keys` grain keeps has a frame that counts its elements.
-			if enters || node.keys && t.kind == .Array {
+			if enters || .Keys in node.flags && t.kind == .Array {
 				scan_push(h, &h.live, n)
 			}
 		}
@@ -1242,40 +1242,38 @@ scan_open :: proc "contextless" (h: ^Scanner, t: tape.Token, live: u32, whole: b
 	}
 	f := Scan_Frame{live = live, n_live = h.live.len - live, gen = h.opens, flags = flags, element = .End}
 	k := u64(0)
-	takes_from, takes_to := u64(0), max(u64)
-	others := false
+	seen: type_of(dm.nodes[0].flags)
 	for n in h.live.data[live:h.live.len] {
 		node := &dm.nodes[n]
-		k = max(k, node.neg)
-		takes_from = max(takes_from, node.takes_from)
-		takes_to = min(takes_to, node.takes_to)
 		f.unmet += node.names if is_obj else node.indexes
 		if is_obj {
 			f.u.obj.lengths |= node.lengths
 			f.u.obj.heads |= node.heads
 			f.u.obj.tails |= node.tails
 		} else {
+			k = max(k, node.neg)
 			f.u.arr.fills = max(f.u.arr.fills, node.fills)
 			f.u.arr.places |= node.places
-			if node.sliced {
-				f.flags -= {.Indexed}
-			}
 		}
-		others ||= node.others
-		if node.alls {
-			f.flags += {.Alls}
-		}
-		if node.keys {
-			f.flags += {.Keys}
-		}
-		if node.slices {
-			f.flags += {.Slices}
-		}
-		if node.deep {
-			f.flags += {.Deep}
-		}
+		seen |= node.flags
 	}
-	if takes_from == 0 && takes_to == max(u64) {
+	others := .Others in seen
+	if !is_obj && .Sliced in seen {
+		f.flags -= {.Indexed}
+	}
+	if .Alls in seen {
+		f.flags += {.Alls}
+	}
+	if .Keys in seen {
+		f.flags += {.Keys}
+	}
+	if .Slices in seen {
+		f.flags += {.Slices}
+	}
+	if .Deep in seen {
+		f.flags += {.Deep}
+	}
+	if .Bounded not_in seen {
 		f.flags += {.Uniform}
 	}
 	// An array's count is kept by every frame.
@@ -1308,7 +1306,7 @@ scan_open :: proc "contextless" (h: ^Scanner, t: tape.Token, live: u32, whole: b
 		}
 	}
 	if f.n_live == 1 && f.flags & {.Indexed, .Passes} != {} {
-		if node := &dm.nodes[h.live.data[live]]; !node.deep {
+		if node := &dm.nodes[h.live.data[live]]; .Deep not_in node.flags {
 			if node.n_edges == 1 && (.Indexed in f.flags || node.names == 1) {
 				if .Passes in f.flags {
 					f.u.obj.named = node.edges + 1
@@ -1357,7 +1355,7 @@ scan_descend :: #force_no_inline proc "contextless" (h: ^Scanner, to: u32) #no_b
 scan_save_marks :: #force_no_inline proc "contextless" (h: ^Scanner, live: u32) #no_bounds_check {
 	dm := h.demand
 	for n in h.live.data[live:h.live.len] {
-		if node := dm.nodes[n]; node.deep {
+		if node := dm.nodes[n]; .Deep in node.flags {
 			for e in node.edges ..< node.edges + node.n_edges {
 				if _, named := dm.edges[e].step.(tape.Name); named {
 					scan_push(h, &h.saved, h.marks[e])
@@ -1372,7 +1370,7 @@ scan_save_marks :: #force_no_inline proc "contextless" (h: ^Scanner, live: u32) 
 scan_restore_marks :: #force_no_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame) #no_bounds_check {
 	dm := h.demand
 	#reverse for n in h.live.data[f.live:][:f.n_live] {
-		if node := dm.nodes[n]; node.deep {
+		if node := dm.nodes[n]; .Deep in node.flags {
 			#reverse for edge, i in dm.edges[node.edges:][:node.n_edges] {
 				if _, named := edge.step.(tape.Name); named && h.saved.len > 0 {
 					h.marks[node.edges + u32(i)] = h.saved.data[h.saved.len - 1]

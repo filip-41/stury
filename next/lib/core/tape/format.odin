@@ -1,5 +1,6 @@
 package tape
 
+import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/base/spell"
 
@@ -74,6 +75,7 @@ Format_Options :: union {
 }
 
 // The family of `Format_Options` a format's reads take, `.None` for a format with no options of its own.
+@(private)
 Options_Family :: enum u8 {
 	None,
 	Dsv,
@@ -84,28 +86,28 @@ Options_Family :: enum u8 {
 // `Bad_Option{"format"}` when `opts.format` holds the options of a family other than `f`'s, and
 // `Bad_Option{"tolerate"}` for a rule `f` refuses, else nil. Every read of a format passes it, so a format cannot take
 // another family's options.
+@(require_results)
 options_refused :: #force_inline proc "contextless" (f: ^Format, opts: Options) -> Error {
-	family := Options_Family.None
 	if opts.tolerate & f.refuses != {} {
 		return Bad_Option{"tolerate"}
 	}
 	switch o in opts.format {
-	case Dsv_Options:
-		family = .Dsv
-	case Xml_Options:
-		if o.arrays > max(Xml_Arrays) {
-			return Bad_Option{"format"}
-		}
-		family = .Xml
-	case Yaml_Options:
-		if o.dialect > max(Yaml_Dialect) {
-			return Bad_Option{"format"}
-		}
-		family = .Yaml
 	case nil:
 		return nil
+	case Dsv_Options:
+		if f.options == .Dsv {
+			return nil
+		}
+	case Xml_Options:
+		if f.options == .Xml && o.arrays <= max(Xml_Arrays) {
+			return nil
+		}
+	case Yaml_Options:
+		if f.options == .Yaml && o.dialect <= max(Yaml_Dialect) {
+			return nil
+		}
 	}
-	return nil if family == f.options else Bad_Option{"format"}
+	return Bad_Option{"format"}
 }
 
 // The options of a delimited text. A delimited document keeps those it was built with in its `Tabular_Ext`.
@@ -242,29 +244,87 @@ format_reads :: proc "contextless" ($Spec: typeid, $first: Format_Id, $validate:
 			return scan(src, demand, spec_of(f), read, opts, allocator)
 		},
 		records = proc(f: ^Format, src: []u8, framing: Framing, opts: Options, path: []Step, allocator: runtime.Allocator) -> (records: ^Records, err: runtime.Allocator_Error) {
+			@(static, rodata) rreads := Records_Reads {
+				validate = proc(r: ^Records, out: []Record, allocator: runtime.Allocator) -> int {
+					return records_validate((^R)(r), out, allocator)
+				},
+				find = proc(r: ^Records, path: []Step, out: []Record, answers: []Span_Answer, read: Read_Options, allocator: runtime.Allocator) -> int {
+					return records_find((^R)(r), path, out, answers, read, allocator)
+				},
+				scan = proc(r: ^Records, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int {
+					return records_scan((^R)(r), demand, out, docs, read, allocator)
+				},
+			}
 			r := new(R, allocator) or_return
+			if r == nil {
+				return nil, .Out_Of_Memory
+			}
 			context.allocator = allocator
 			r^ = records_open(src, framing, spec_of(f), opts, path)
-			r.reads, r.allocator = records_reads(R, records_validate, records_find, records_scan), allocator
+			r.reads, r.allocator = &rreads, allocator
 			return r, nil
 		},
 	}
 	return &reads
 }
 
-// The batch reads of records `R`, which hold `Records` as their first field.
-@(private)
-records_reads :: proc "contextless" ($R: typeid, $validate: proc(r: ^R, out: []Record, allocator: runtime.Allocator) -> int, $find: proc(r: ^R, path: []Step, out: []Record, answers: []Span_Answer, read: Read_Options, allocator: runtime.Allocator) -> int, $scan: proc(r: ^R, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int) -> ^Records_Reads {
-	@(static, rodata) reads := Records_Reads {
-		validate = proc(r: ^Records, out: []Record, allocator: runtime.Allocator) -> int {
-			return validate((^R)(r), out, allocator)
-		},
-		find = proc(r: ^Records, path: []Step, out: []Record, answers: []Span_Answer, read: Read_Options, allocator: runtime.Allocator) -> int {
-			return find((^R)(r), path, out, answers, read, allocator)
-		},
-		scan = proc(r: ^Records, demand: ^Demand, out: []Record, docs: []Document, read: Read_Options, allocator: runtime.Allocator) -> int {
-			return scan((^R)(r), demand, out, docs, read, allocator)
-		},
+// Threads a caller lends to a read, which starts none of its own. A nil `^Runner` means the caller's thread alone.
+// `host.Pool` supplies one.
+//
+//	- `start` runs `task(arg)` as a separate call on each of up to `n` of the `threads`. A call may start late or
+//	  not at all. `start` happens-before every started call's `task(arg)`.
+//	- `finish` returns once no further call will start and every started call has returned; every started `task(arg)`
+//	  happens-before `finish` returns.
+//	- `start` and `finish` alternate, and both run on the calling thread. A runner runs one call at a time; callers
+//	  must not share one concurrently across threads.
+Runner :: struct {
+	data:    rawptr,
+	threads: int,
+	start:   proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr),
+	finish:  proc(data: rawptr),
+}
+
+// What `fan_each` shares: the next index to claim, the count of them and the argument given to each task.
+@(private = "file")
+Fan_Each :: struct {
+	next, count: uint,
+	arg:         rawptr,
+}
+
+// Runs `task(arg, k)` once for each `k` below `count`, on the calling thread and on the threads of `runner`, each thread
+// claiming the next index while any is left. The calls share the work through `arg`. Specializing on `$task` gives each
+// workload a distinct trampoline address so `host.Pool` tracks per-task adaptive widths independently.
+fan_each :: proc(runner: ^Runner, count: int, $task: proc(arg: rawptr, k: int), arg: rawptr) {
+	if count <= 1 || runner == nil || runner.threads <= 0 || runner.start == nil || runner.finish == nil {
+		for k in 0 ..< count {
+			task(arg, k)
+		}
+		return
 	}
-	return &reads
+	each := Fan_Each{count = uint(count), arg = arg}
+	run :: proc(arg: rawptr) {
+		e := (^Fan_Each)(arg)
+		for {
+			k := intrinsics.atomic_add(&e.next, 1)
+			if k >= e.count {
+				return
+			}
+			task(e.arg, int(k))
+		}
+	}
+	runner.start(runner.data, min(runner.threads, count - 1), run, &each)
+	run(&each)
+	runner.finish(runner.data)
+}
+
+// Runs `task(arg)` on the calling thread and on the threads of `runner`, and returns once every call has. The calls
+// share the work through `arg`, as only the caller's call is certain to run.
+fan :: proc(runner: ^Runner, task: proc(arg: rawptr), arg: rawptr) {
+	if runner == nil || runner.threads <= 0 || runner.start == nil || runner.finish == nil {
+		task(arg)
+		return
+	}
+	runner.start(runner.data, runner.threads, task, arg)
+	task(arg)
+	runner.finish(runner.data)
 }

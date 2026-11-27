@@ -34,7 +34,7 @@ free_owned :: #force_inline proc "contextless" (h: ^Reader, owned: []u8) {
 token_text :: proc "contextless" (h: ^Reader, t: tape.Token, buf: []u8) -> (s: string, held: []u8, ok: bool) {
 	context = h.ctx
 	src := h.base[:h.len]
-	if s, ok = tape.node_text_of(h.format, src, t, buf); ok {
+	if s, ok = tape.node_text(h.format, src, t, buf); ok {
 		return
 	}
 	room := h.format.room(src, t, nil)
@@ -42,7 +42,7 @@ token_text :: proc "contextless" (h: ^Reader, t: tape.Token, buf: []u8) -> (s: s
 	if held, err = runtime.mem_alloc_non_zeroed(room, 1, h.scratch); err != nil || len(held) < room {
 		return "", nil, false
 	}
-	s, ok = tape.node_text_of(h.format, src, t, held)
+	s, ok = tape.node_text(h.format, src, t, held)
 	return s, held, ok
 }
 

@@ -166,13 +166,19 @@ error_snippet_eof_windowing_and_binary_guards :: proc(t: ^testing.T) {
 		testing.expect_value(t, s_hi_cols, "  {\"a\": 1\n    ^\n")
 	}
 
-	// 6. `format_fault_with_snippet` formats header + snippet for text and omits snippet for binary.
+	// 6. Bare `\r` is symmetric whether `at` is before or after `\r`, while CRLF still strips trailing `\r`.
 	{
-		src := transmute([]u8)string("{\n  \"a\": ?\n}\n")
-		out := tape.format_fault_with_snippet(buf[:], "in.json", src, 9, "Unexpected character")
-		testing.expect_value(t, out, "in.json:2:8: Unexpected character\n    \"a\": ?\n         ^\n")
+		bare := transmute([]u8)string("foo\rbar")
+		s1, ok1 := tape.error_snippet(buf[:], bare, 1)
+		testing.expect(t, ok1)
+		testing.expect_value(t, s1, "  foo?bar\n   ^\n")
+		s2, ok2 := tape.error_snippet(buf[:], bare, 5)
+		testing.expect(t, ok2)
+		testing.expect_value(t, s2, "  foo?bar\n       ^\n")
 
-		bin_out := tape.format_fault_with_snippet(buf[:], "in.cbor", []u8{0xA2, 0xFF}, 1, "Invalid CBOR", binary = true)
-		testing.expect_value(t, bin_out, "in.cbor:byte 1: Invalid CBOR\n")
+		crlf := transmute([]u8)string("abc\r\ndef")
+		sc, okc := tape.error_snippet(buf[:], crlf, 3)
+		testing.expect(t, okc)
+		testing.expect_value(t, sc, "  abc\n     ^\n")
 	}
 }

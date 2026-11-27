@@ -527,7 +527,7 @@ match_key_rule :: proc(d: ^Differ) -> (rule: Key_Rule, ok: bool) {
 		for s, i in r.at {
 			_, all := s.(tape.All)
 			_, indexed := d.new[i].(tape.Index)
-			if !(all && indexed) && !tape.step_equal(s, d.new[i]) {
+			if !(all && indexed) && s != d.new[i] {
 				continue next
 			}
 		}

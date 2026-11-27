@@ -166,7 +166,7 @@ value_of :: proc(doc: ^tape.Document, at: tape.Node_Index, dups: tape.Duplicates
 	case .Bytes:
 		return nil, .No_Arm
 	case .Number:
-		n, _ := tape.node_number_in(doc, at)
+		n, _ := tape.node_number(doc, at)
 		text := text_at(doc, at, allocator)
 		switch n.kind {
 		case .Int:
@@ -220,7 +220,7 @@ value_of :: proc(doc: ^tape.Document, at: tape.Node_Index, dups: tape.Duplicates
 // The text of scalar node `at` of `doc`, decoded.
 @(private)
 text_at :: proc(doc: ^tape.Document, at: tape.Node_Index, allocator: runtime.Allocator) -> string {
-	buf := make([]u8, max(tape.text_room_in(doc, at), 64), allocator)
-	s, _ := tape.node_text_in(doc, at, buf)
+	buf := make([]u8, max(tape.text_room(doc, at), 64), allocator)
+	s, _ := tape.node_text(doc, at, buf)
 	return strings.clone(s, allocator)
 }

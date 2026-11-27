@@ -15,9 +15,9 @@ STR_EXT :: u16(1 << 14)
 @(private)
 STR_TIMESTAMP :: u16(1 << 15)
 
-#assert((HEAD_MASK << HEAD_SHIFT) & (tape.SPELLING_CREDIT | tape.SPELLING_CREDIT_EXACT | tape.SPELLING_DECODE | tape.SPELLING_LAX | STR_EXT | STR_TIMESTAMP) == 0)
+#assert((HEAD_MASK << HEAD_SHIFT) & (tape.SPELLING_SHARED | STR_EXT | STR_TIMESTAMP) == 0)
 #assert(STR_EXT & STR_TIMESTAMP == 0)
-#assert((STR_EXT | STR_TIMESTAMP) & (tape.SPELLING_CREDIT | tape.SPELLING_CREDIT_EXACT | tape.SPELLING_DECODE | tape.SPELLING_LAX) == 0)
+#assert((STR_EXT | STR_TIMESTAMP) & tape.SPELLING_SHARED == 0)
 
 // The spelling of a string/bin/ext token with head length `hl`.
 @(private)

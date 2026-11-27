@@ -18,7 +18,7 @@ scan_refused :: proc "contextless" (format: ^tape.Format, opts: tape.Options, de
 	}
 	for node in demand.nodes {
 		for edge in demand.edges[node.edges:][:node.n_edges] {
-			if node.deep && tape.step_reach(edge.step) > 0 {
+			if .Deep in node.flags && tape.step_reach(edge.step) > 0 {
 				return tape.Bad_Option{"path"}
 			}
 		}
@@ -81,7 +81,7 @@ list_grow :: #force_no_inline proc "contextless" (ctx: ^runtime.Context, list: ^
 // step that met it `d` steps from the root. Past a `Descend` a value the steps cannot follow gives no answer.
 @(private)
 paths_fail :: #force_inline proc "contextless" (sink: ^$S, dm: ^tape.Demand, to: u32, outcome: tape.Presence, d: u64, at, owner: tape.Node_Index, pos: u64, $answer: proc "contextless" (sink: ^S, node: tape.Node_Index, path: u32, outcome: tape.Presence, pos: u64, leaf: u32) -> runtime.Allocator_Error) -> runtime.Allocator_Error #no_bounds_check {
-	if outcome <= .Wrong_Kind && dm.nodes[to].deep {
+	if outcome <= .Wrong_Kind && .Deep in dm.nodes[to].flags {
 		return nil
 	}
 	return paths_answer_fail(sink, dm, to, outcome, d, at, owner, pos, answer)

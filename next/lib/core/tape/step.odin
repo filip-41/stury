@@ -17,19 +17,14 @@ path_refused :: #force_inline proc "contextless" (taken, alls_end: u64) -> Prese
 	return .Missing if taken >= alls_end else .Wrong_Kind
 }
 
-// Whether `step` goes on into a value of `kind`. An `All` with a limit that a demand reads as a slice of members goes
-// into an object too, as `members` says.
-step_enters :: #force_inline proc "contextless" (step: Step, kind: Kind, members := false) -> bool {
+// Whether `step` goes on into a value of `kind`.
+step_enters :: #force_inline proc "contextless" (step: Step, kind: Kind) -> bool {
 	switch _ in step {
 	case Name:
 		return kind == .Object
-	case Index:
+	case Index, Slice:
 		return kind == .Array
-	case All:
-		return kind == .Array || kind == .Object
-	case Slice:
-		return kind == .Array || members && kind == .Object
-	case Descend:
+	case All, Descend:
 		return kind == .Array || kind == .Object
 	}
 	return false
@@ -60,7 +55,7 @@ child_takes :: proc "contextless" (step: Step, e, count: u64, object: bool, dups
 	case All:
 		return all_takes(s.limit, e, object, dups)
 	case Slice:
-		return !object && slice_takes(s, e, count)
+		return !object && count > 0 && slice_takes(s, e, count)
 	}
 	return false
 }
@@ -114,7 +109,7 @@ slice_cut :: proc "contextless" (s: Slice) -> u64 {
 	if s.lo < 0 || bounded && hi < 0 {
 		return max(u64)
 	}
-	cut := u64(hi) if bounded else max(u64)
+	cut := u64(0) if bounded && hi <= s.lo else u64(hi) if bounded else max(u64)
 	if s.limit > 0 {
 		cut = min(cut, u64(s.lo) + u64(s.limit))
 	}
@@ -140,8 +135,7 @@ step_reach :: #force_inline proc "contextless" (step: Step) -> u64 {
 // Whether a container `step` goes on through can take back the answer a child gave for a later child's: a later member
 // of the key under `.Last`, or a later element under a step from the end.
 step_replaces :: #force_inline proc "contextless" (step: Step, dups: Duplicates) -> bool {
-	#partial switch _ in step {
-	case Name:
+	if _, named := step.(Name); named {
 		return name_take(dups, true) == .Replace
 	}
 	return step_reach(step) > 0
@@ -165,7 +159,7 @@ step_takes_one :: #force_inline proc "contextless" (step: Step, dups: Duplicates
 // less work to walk into, a last step's answer is the element itself, and a `Slice` from the start answers from its
 // first elements.
 step_replays :: #force_inline proc "contextless" (steps: []Step, at: int, rewalks: bool) -> bool {
-	if !rewalks || at + 1 == len(steps) {
+	if !rewalks || at < 0 || at + 1 >= len(steps) {
 		return false
 	}
 	#partial switch s in steps[at] {
@@ -203,6 +197,9 @@ key_names :: #force_inline proc "contextless" (f: ^Format, src: []u8, t: Token, 
 		return false
 	}
 	if text_decodes(t) {
+		if u64(len(name)) > u64(max(u32)) {
+			return false
+		}
 		return f.same_text(src, t, transmute([]u8)name, {n = u32(len(name)), kind = .String})
 	}
 	n := len(name)
@@ -229,7 +226,8 @@ same_keys :: #force_inline proc "contextless" (f: ^Format, src: []u8, a: Token, 
 	if a.kind != b.kind {
 		return false
 	}
-	if !text_decodes(a) && !text_decodes(b) {
+	decodes := (a.role == .Key || b.role == .Key) if a.kind == .Number else (a.spelling | b.spelling) & SPELLING_DECODE != 0
+	if !decodes {
 		return a.n == b.n && string(src[a.lo:][:a.n]) == string(other[b.lo:][:b.n])
 	}
 	return f.same_text(src, a, other, b)
@@ -247,12 +245,21 @@ text_hash :: proc "contextless" (text: []u8) -> u32 #no_bounds_check {
 	p, n := raw_data(text), len(text)
 	h := TEXT_SEED
 	i := 0
-	for ; i + 8 <= n; i += 8 {
-		h = text_hash_word(h, intrinsics.unaligned_load((^u64)(p[i:])))
+	for ; n - i >= 8; i += 8 {
+		h = text_hash_word(h, u64(intrinsics.unaligned_load((^u64le)(p[i:]))))
 	}
+	rem := uint(n - i)
 	tail: u64
-	for j in i ..< n {
-		tail |= u64(p[j]) << (8 * uint(j - i))
+	if rem & 4 != 0 {
+		tail = u64(intrinsics.unaligned_load((^u32le)(p[i:])))
+		i += 4
+	}
+	if rem & 2 != 0 {
+		tail |= u64(intrinsics.unaligned_load((^u16le)(p[i:]))) << (8 * (rem & 4))
+		i += 2
+	}
+	if rem & 1 != 0 {
+		tail |= u64(p[i]) << (8 * (rem & 6))
 	}
 	return text_hash_end(h, tail, n)
 }
@@ -279,16 +286,16 @@ text_hasher_end :: #force_inline proc "contextless" (x: ^Text_Hasher) -> u32 {
 	return text_hash_end(x.h, x.tail, x.n)
 }
 
-@(private)
+@(private = "file")
 TEXT_SEED :: u64(0x9E3779B97F4A7C15)
 
-@(private)
+@(private = "file")
 text_hash_word :: #force_inline proc "contextless" (seed, word: u64) -> u64 {
 	h := (seed ~ word) * TEXT_SEED
 	return h ~ h >> 29
 }
 
-@(private)
+@(private = "file")
 text_hash_end :: #force_inline proc "contextless" (seed, tail: u64, n: int) -> u32 {
 	h := (seed ~ tail ~ u64(n) << 56) * TEXT_SEED
 	h ~= h >> 32

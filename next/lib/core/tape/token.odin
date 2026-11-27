@@ -103,7 +103,10 @@ SPELLING_ASCII :: u16(16)
 // account, has neither credit bit, which proves nothing about its length. A number uses the same bits for its digit
 // counts, kind and form, so a reader checks the token's kind first.
 SPELLING_CREDIT_EXACT :: u16(1 << 5)
+SPELLING_SHARED :: u16(0x07FF) // bits 0..10 reserved across formats; bits 11..15 are a format's own
+@(private = "file")
 SPELLING_CREDIT :: u16(0x1F << 6) // a credit of at most 31
+#assert((SPELLING_DECODE | SPELLING_QUOTED | SPELLING_LAX | SPELLING_PLACED | SPELLING_ASCII | SPELLING_CREDIT_EXACT | SPELLING_CREDIT) == SPELLING_SHARED)
 
 // Whether the text of scalar `t` is not its bytes in the text, so that `Format.decode` or `Format.same_text` reads it.
 // A number's spelling holds its number kind in the bit a text's holds this in, so a number reads as its bytes, except
@@ -169,7 +172,8 @@ number_digits :: #force_inline proc "contextless" (spelling: u16) -> (int_digits
 // The end and spelling of the RFC 8259 number at `p`, where `p < end` and `p[0]` is `-` or a digit, or the fault and
 // the byte it is at. A number ends at the first byte that cannot continue it, which the caller judges. The spelling is
 // 0 unless `SPELLED`. With `HEX_REFUSED` an `x` after a leading zero is a fault, for a grammar whose hex numbers
-// another reader takes.
+// another reader takes. `spelling` stays `u64` (not `u16`) so the 3-tuple return exceeds 16 B and Odin does not pack
+// `(spelling, kind)` into one word, which otherwise forces `lsr+cbz` on every number in the JSON states.
 number_scan :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED, $HEX_REFUSED: bool) -> (q: [^]u8, spelling: u64, kind: Fault_Kind) #no_bounds_check {
 	q = p
 	if q[0] == '-' {
@@ -227,14 +231,17 @@ number_scan :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED, $HEX_R
 
 // The spelling of the number `src[lo:hi]`, which a walk read as an RFC 8259 number.
 number_respell :: proc "contextless" (src: []u8, lo, hi: u64) -> u16 {
+	if lo >= hi || hi > u64(len(src)) {
+		return 0
+	}
 	_, spelling, _ := number_scan(raw_data(src)[lo:], raw_data(src)[hi:], true, false)
 	return u16(spelling)
 }
 
-// The token of the text of `n` bytes at `lo` of `base`, which needs no decode, as a format's option to infer its kind
-// reads an untyped text, a delimited cell or a markup element's text: `true` and `false` are those kinds, an RFC 8259
-// number is a `Number` with its digit counts as JSON's walk spells them, and any other text is a `String`. The first
-// byte selects the check, so a text needs one load.
+// The token of the text of `n` bytes (`n > 0`) at `lo` of `base`, which needs no decode, as a format's option to infer
+// its kind reads an untyped text, a delimited cell or a markup element's text: `true` and `false` are those kinds, an
+// RFC 8259 number is a `Number` with its digit counts as JSON's walk spells them, and any other text is a `String`.
+// Caller guarantees `n > 0` and `base[lo : lo + u64(n)]` readable; the first byte selects the check (one load).
 infer_token :: #force_inline proc "contextless" (base: [^]u8, lo: u64, n: u32) -> Token {
 	t := Token{lo, n, .String, .Value, 0}
 	switch base[lo] {
@@ -264,7 +271,7 @@ number_fault :: #force_inline proc "contextless" (q, end: [^]u8) -> ([^]u8, Faul
 }
 
 // A plain decimal's spelling, 0 unless `SPELLED`.
-@(private)
+@(private = "file")
 digit_spelling :: #force_inline proc "contextless" (int_digits, frac_digits: u64, $SPELLED: bool) -> u16 {
 	when SPELLED {
 		return number_spelling(0, int_digits, frac_digits)

@@ -99,7 +99,7 @@ perf4_write_held_span_ascii_and_comments :: proc(t: ^testing.T) {
 	// Single `.Json5` record holding strings, comments, bare keys, astral runes, and non-finite numbers, streamed in pieces so `.Held` is set.
 	rec_src := "{bare_key:\"é😀\",'sq':'a\\vb',inf:Infinity,ninf:-Infinity,nan:NaN,num:42} // c1\n"
 	p: tape.Pieces
-	defer tape.destroy_pieces(&p)
+	defer tape.destroy(&p)
 	bs := transmute([]u8)rec_src
 	step :: 7
 	p.last = step >= len(bs)
@@ -183,7 +183,7 @@ perf4_write_dense_bypass_and_refusals :: proc(t: ^testing.T) {
 
 	// `.Cut` partial read must return `Refused{0, .Partial}` via `write_as` / `write_walked`.
 	cut_p := tape.Pieces{so_far = true, allocator = context.allocator}
-	defer tape.destroy_pieces(&cut_p)
+	defer tape.destroy(&cut_p)
 	cut_src := `{"a":[1,2`
 	cut_doc, cut_err := json.build(transmute([]u8)cut_src, .Json, {pieces = &cut_p})
 	defer tape.destroy(&cut_doc)

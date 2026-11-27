@@ -196,7 +196,8 @@ scanner_so_far :: proc(h: ^Scanner, regs: hook.Regs, cut: u64, allocator: runtim
 @(private)
 hold_spans :: proc(h: ^Scanner, doc: ^tape.Document) -> runtime.Allocator_Error {
 	format := doc.ext.format if doc.ext != nil else nil
-	ext := tape.ext_make(h.held[:], format, doc.allocator) or_return
+	origin := doc.ext.origin if doc.ext != nil else {}
+	ext := tape.ext_make(h.held[:], format, doc.allocator, origin) or_return
 	free(doc.ext, doc.allocator)
 	doc.ext = ext
 	doc.flags += {.Held}

@@ -11,15 +11,15 @@ Document :: struct {
 	// The root value's preorder: its subtree starts at 0 and has `nodes[0].n` nodes, and no node lies past it, so a loop
 	// over `nodes` walks the root. What a format keeps beside the root value, as a table's header keys, is in `ext`.
 	nodes:      []Node,
-	facts:      []Fact, // sorted by node, then source order
-	counts:     []Child_Count, // sorted by node, only containers whose `spelling` saturated
-	ext:        ^Doc_Ext, // nil for a document that holds nothing beside its lists
 	format:     ^Format,
-	allocator:  runtime.Allocator,
-	root_close: u64, // end of the root value, so writing the root needs no scan
 	partial:    ^Partial, // what a path read kept and knows it lacks, nil for a document of every value
+	ext:        ^Doc_Ext, // nil for a document that holds nothing beside its lists
 	present:    Facts, // fact kinds in `facts`
 	flags:      Doc_Flags,
+	facts:      []Fact, // sorted by node, then source order
+	counts:     []Child_Count, // sorted by node, only containers whose `spelling` saturated
+	root_close: u64, // end of the root value, so writing the root needs no scan
+	allocator:  runtime.Allocator,
 }
 
 destroy :: proc {
@@ -35,19 +35,35 @@ destroy :: proc {
 // Frees what `doc` holds and leaves it zero. The source is freed only under `.Owns_Src`, and under `.Borrowed` only the
 // answers are.
 destroy_document :: proc(doc: ^Document) {
+	if doc == nil {
+		return
+	}
+	a := doc.allocator
 	if .Borrowed in doc.flags {
-		free(doc.partial, doc.allocator)
+		if doc.partial != nil {
+			free(doc.partial, a)
+		}
 		doc^ = {}
 		return
 	}
-	free(raw_data(doc.nodes), doc.allocator)
-	free(raw_data(doc.facts), doc.allocator)
-	free(raw_data(doc.counts), doc.allocator)
-	free(doc.ext, doc.allocator)
-	if .Owns_Src in doc.flags {
-		free(raw_data(doc.src), doc.allocator)
+	if p := raw_data(doc.nodes); p != nil {
+		free(p, a)
 	}
-	free(doc.partial, doc.allocator)
+	if p := raw_data(doc.facts); p != nil {
+		free(p, a)
+	}
+	if p := raw_data(doc.counts); p != nil {
+		free(p, a)
+	}
+	if doc.ext != nil {
+		free(doc.ext, a)
+	}
+	if .Owns_Src in doc.flags && raw_data(doc.src) != nil {
+		free(raw_data(doc.src), a)
+	}
+	if doc.partial != nil {
+		free(doc.partial, a)
+	}
 	doc^ = {}
 }
 
@@ -74,13 +90,12 @@ clone_document :: proc(doc: ^Document, allocator := context.allocator) -> (c: Do
 			c.src = clone_list(doc.src, allocator) or_return
 		}
 		if doc.ext != nil {
-			c.ext = ext_make(doc.ext.held, doc.ext.format, allocator) or_return
-			c.ext.origin = doc.ext.origin
+			c.ext = ext_make(doc.ext.held, doc.ext.format, allocator, doc.ext.origin) or_return
 		}
 	}
 	if x := doc.partial; x != nil {
 		owned := .Borrowed not_in doc.flags
-		y := partial_block(len(x.starts) - 1, len(x.answers), len(x.kept) if owned else 0, len(x.missing) if owned else 0, len(x.names) if owned else 0, x.dups, allocator) or_return
+		y := partial_block(max(len(x.starts) - 1, 0), len(x.answers), len(x.kept) if owned else 0, len(x.missing) if owned else 0, len(x.names) if owned else 0, x.dups, allocator) or_return
 		y.facts = x.facts
 		copy(y.answers, x.answers)
 		copy(y.starts, x.starts)
@@ -100,13 +115,20 @@ clone_document :: proc(doc: ^Document, allocator := context.allocator) -> (c: Do
 // starts of `paths` paths, zero, `kept` kept children, `missing` missing names and `names` bytes of their names, each
 // list of its length and unset. A refused allocation is the error.
 partial_block :: proc(paths, answers, kept, missing, names: int, dups: Duplicates, allocator: runtime.Allocator) -> (x: ^Partial, err: runtime.Allocator_Error) {
-	starts_at := size_of(Partial) + answers * size_of(Answer)
-	kept_at := starts_at + (paths + 1) * size_of(u32)
-	missing_at := kept_at + kept * size_of(Kept_Child)
-	names_at := missing_at + missing * size_of(Missing_Name)
-	block := runtime.mem_alloc_non_zeroed(names_at + names, align_of(Partial), allocator) or_return
+	if paths < 0 || answers < 0 || kept < 0 || missing < 0 || names < 0 {
+		return nil, .Invalid_Argument
+	}
+	starts_at := u64(size_of(Partial)) + u64(answers) * size_of(Answer)
+	kept_at := starts_at + (u64(paths) + 1) * size_of(u32)
+	missing_at := kept_at + u64(kept) * size_of(Kept_Child)
+	names_at := missing_at + u64(missing) * size_of(Missing_Name)
+	total := names_at + u64(names)
+	if answers > max(int) / size_of(Answer) || paths >= max(int) / size_of(u32) || kept > max(int) / size_of(Kept_Child) || missing > max(int) / size_of(Missing_Name) || total > u64(max(int)) || total < names_at || names_at < missing_at || missing_at < kept_at || kept_at < starts_at {
+		return nil, .Out_Of_Memory
+	}
+	block := runtime.mem_alloc_non_zeroed(int(total), align_of(Partial), allocator) or_return
 	// An empty allocator gives no block and no error, or a shorter one, either read as a refusal.
-	if len(block) < names_at + names || raw_data(block) == nil {
+	if len(block) < int(total) || raw_data(block) == nil {
 		return nil, .Out_Of_Memory
 	}
 	x = (^Partial)(raw_data(block))
@@ -122,70 +144,79 @@ partial_block :: proc(paths, answers, kept, missing, names: int, dups: Duplicate
 	return
 }
 
-@(private)
+@(private = "file")
 clone_list :: proc(list: []$T, allocator: runtime.Allocator) -> (out: []T, err: runtime.Allocator_Error) {
 	if len(list) == 0 {
 		return nil, nil
 	}
-	data := runtime.mem_alloc_non_zeroed(len(list) * size_of(T), align_of(T), allocator) or_return
+	if size_of(T) > 0 && len(list) > max(int) / size_of(T) {
+		return nil, .Out_Of_Memory
+	}
+	need := len(list) * size_of(T)
+	data := runtime.mem_alloc_non_zeroed(need, align_of(T), allocator) or_return
+	if len(data) < need || raw_data(data) == nil {
+		return nil, .Out_Of_Memory
+	}
 	out = ([^]T)(raw_data(data))[:len(list)]
 	copy(out, list)
 	return
 }
 
-// A `Doc_Ext` of `held` and `format` in one block of `allocator`, with copies of the lists they name, which `destroy`
-// frees whole.
-ext_make :: proc(held: []Held_Span, format: Format_Ext, allocator: runtime.Allocator) -> (ext: ^Doc_Ext, err: runtime.Allocator_Error) {
-	sized := Ext_Block{size = size_of(Doc_Ext)}
-	scratch: Doc_Ext
-	ext_lists(&sized, &scratch, held, format)
-	raw := runtime.mem_alloc_non_zeroed(sized.size, align_of(Doc_Ext), allocator) or_return
-	// A nil allocator gives no memory and no error.
-	if raw == nil {
+// A `Doc_Ext` of `held`, `format` and `origin` in one block of `allocator`, with copies of the lists they name, which
+// `destroy` frees whole.
+ext_make :: proc(held: []Held_Span, format: Format_Ext, allocator: runtime.Allocator, origin := Origin{}) -> (ext: ^Doc_Ext, err: runtime.Allocator_Error) {
+	f := format
+	size := ext_lists(nil, held, &f)
+	if size < 0 {
+		return nil, .Out_Of_Memory
+	}
+	raw := runtime.mem_alloc_non_zeroed(size, align_of(Doc_Ext), allocator) or_return
+	// An empty allocator gives no block and no error, or a shorter one, either read as a refusal.
+	if len(raw) < size || raw_data(raw) == nil {
 		return nil, .Out_Of_Memory
 	}
 	ext = (^Doc_Ext)(raw_data(raw))
-	ext^ = {}
-	block := Ext_Block{base = raw_data(raw), size = size_of(Doc_Ext)}
-	ext_lists(&block, ext, held, format)
+	ext.origin, ext.format = origin, f
+	ext_lists(raw_data(raw), held, &ext.format)
 	return
 }
 
-// The block `ext_make` fills, its lists placed one after another from `size` on. With no `base` it only sizes them.
-@(private)
-Ext_Block :: struct {
-	base: [^]u8,
-	size: int,
-}
-
-// Gives `ext` `held` and `format` with their lists placed in `b`.
-@(private)
-ext_lists :: proc "contextless" (b: ^Ext_Block, ext: ^Doc_Ext, held: []Held_Span, format: Format_Ext) {
-	ext.held = ext_list(b, held)
-	switch f in format {
+// Places the lists of `held` and `format` in `base`, or only sizes them when `base == nil` (negative on overflow).
+@(private = "file")
+ext_lists :: proc "contextless" (base: [^]u8, held: []Held_Span, format: ^Format_Ext) -> int {
+	size := size_of(Doc_Ext)
+	if h := ext_list(&size, base, held); base != nil {
+		(^Doc_Ext)(base).held = h
+	}
+	switch &f in format {
 	case Tabular_Ext:
-		placed := f
-		placed.tables, placed.keys, placed.slots = ext_list(b, f.tables), ext_list(b, f.keys), ext_list(b, f.slots)
-		ext.format = placed
+		f.tables, f.keys, f.slots = ext_list(&size, base, f.tables), ext_list(&size, base, f.keys), ext_list(&size, base, f.slots)
 	case Markup_Ext:
-		placed := f
-		placed.scopes, placed.uris, placed.uri_text = ext_list(b, f.scopes), ext_list(b, f.uris), ext_list(b, f.uri_text)
-		placed.dtd.entities, placed.dtd.attrs = ext_list(b, f.dtd.entities), ext_list(b, f.dtd.attrs)
-		placed.dtd.slots, placed.dtd.bytes = ext_list(b, f.dtd.slots), ext_list(b, f.dtd.bytes)
-		ext.format = placed
+		f.scopes, f.uris, f.uri_text = ext_list(&size, base, f.scopes), ext_list(&size, base, f.uris), ext_list(&size, base, f.uri_text)
+		f.dtd.entities, f.dtd.attrs = ext_list(&size, base, f.dtd.entities), ext_list(&size, base, f.dtd.attrs)
+		f.dtd.slots, f.dtd.bytes = ext_list(&size, base, f.dtd.slots), ext_list(&size, base, f.dtd.bytes)
 	case nil:
 	}
+	return size
 }
 
-// Places a copy of `list` in `b`, aligned for its entries.
-@(private)
-ext_list :: proc "contextless" (b: ^Ext_Block, list: []$T) -> []T {
-	at := (b.size + align_of(T) - 1) / align_of(T) * align_of(T)
-	b.size = at + len(list) * size_of(T)
-	if b.base == nil || len(list) == 0 {
+// Places a copy of `list` in `base`, aligned for its entries, or only advances `size^` when `base == nil`.
+@(private = "file")
+ext_list :: proc "contextless" (size: ^int, base: [^]u8, list: []$T) -> []T {
+	if len(list) == 0 || size^ < 0 {
 		return nil
 	}
-	placed := ([^]T)(b.base[at:])[:len(list)]
+	pad := (-size^) & (align_of(T) - 1)
+	if pad > max(int) - size^ || len(list) > (max(int) - size^ - pad) / size_of(T) {
+		size^ = -1
+		return nil
+	}
+	at := size^ + pad
+	size^ = at + len(list) * size_of(T)
+	if base == nil {
+		return list
+	}
+	placed := ([^]T)(base[at:])[:len(list)]
 	copy(placed, list)
 	return placed
 }

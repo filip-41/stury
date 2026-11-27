@@ -130,13 +130,14 @@ keep_scopes :: proc(doc: ^tape.Document, whole: bool) -> (err: tape.Error) {
 	}
 	kept := tape.Markup_Ext{scopes = scopes, uris = uris[:d], uri_text = text[:], whole = whole}
 	held: []tape.Held_Span
+	origin: tape.Origin
 	if doc.ext != nil {
-		held = doc.ext.held
+		held, origin = doc.ext.held, doc.ext.origin
 		if m, ok := doc.ext.format.(tape.Markup_Ext); ok {
 			kept.dtd = m.dtd
 		}
 	}
-	ext := tape.ext_make(held, kept, doc.allocator) or_return
+	ext := tape.ext_make(held, kept, doc.allocator, origin) or_return
 	free(doc.ext, doc.allocator)
 	doc.ext = ext
 	return nil

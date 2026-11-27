@@ -13,7 +13,7 @@ HEAD_SHIFT :: 11
 @(private)
 STR_INDEF :: u16(1 << 15)
 
-#assert(u16(0xF) << HEAD_SHIFT & (tape.SPELLING_CREDIT | tape.SPELLING_CREDIT_EXACT | STR_INDEF) == 0)
+#assert((u16(0xF) << HEAD_SHIFT) & (tape.SPELLING_SHARED | STR_INDEF) == 0)
 
 // The spelling of a string token of head length `hl`.
 @(private)
@@ -69,4 +69,4 @@ simple_spelling :: #force_inline proc "contextless" (v: u8) -> u16 {
 	return (u16(v) + 1) << 1
 }
 
-#assert(STR_INDEF & (tape.SPELLING_CREDIT | tape.SPELLING_DECODE | tape.SPELLING_LAX) == 0)
+#assert(STR_INDEF & tape.SPELLING_SHARED == 0)

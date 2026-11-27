@@ -331,7 +331,7 @@ query_open :: proc(q: ^Query, at: tape.Node_Index, depth: u64) -> runtime.Alloca
 			taken = true
 			#partial switch s in e.step {
 			case tape.Name:
-				if !dn.deep && q.dups != .Group {
+				if .Deep not_in dn.flags && q.dups != .Group {
 					query_take(q, at, e.step, e.to, depth, false) or_return
 					continue
 				}
@@ -444,7 +444,7 @@ query_direct :: #force_inline proc "contextless" (dm: ^tape.Demand, n: u32, dups
 		return false
 	}
 	dn := dm.nodes[n]
-	if dn.n_edges != 1 || dn.deep {
+	if dn.n_edges != 1 || .Deep in dn.flags {
 		return false
 	}
 	e := dm.edges[dn.edges]

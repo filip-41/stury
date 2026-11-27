@@ -377,7 +377,7 @@ html_scan_refused :: #force_inline proc "contextless" (format: ^tape.Format, opt
 	}
 	for node in demand.nodes {
 		for edge in demand.edges[node.edges:][:node.n_edges] {
-			if node.deep && tape.step_reach(edge.step) > 0 {
+			if .Deep in node.flags && tape.step_reach(edge.step) > 0 {
 				return tape.Bad_Option{"path"}
 			}
 		}

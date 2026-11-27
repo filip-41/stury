@@ -23,7 +23,7 @@ Style :: enum u8 {
 @(private)
 STYLE_SHIFT :: 11
 
-#assert(1 << STYLE_SHIFT > tape.SPELLING_CREDIT && u32(max(Style)) << STYLE_SHIFT < 1 << DATE_SHIFT)
+#assert(1 << STYLE_SHIFT > tape.SPELLING_SHARED && u32(max(Style)) << STYLE_SHIFT < 1 << DATE_SHIFT)
 
 // The spelling of a quoted text of `style`, with `SPELLING_DECODE` when its text is not its bytes.
 @(private)

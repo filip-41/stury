@@ -168,99 +168,27 @@ pool_alloc_locked :: proc(pool: ^Block_Pool, size, align: int, zero: bool) -> ([
 // Per-worker bump-block allocator for `.Blocks` mode (ruling 8). Frees are no-ops; refills double from `next` under lock.
 @(private)
 Worker_Block :: struct {
-	pool: ^Block_Pool,
-	buf:  []u8,
-	used: int,
-	last: int,
-	next: int,
+	using bump: tape.Bump_Block,
+	pool:       ^Block_Pool,
+	next:       int,
 }
 
 @(private)
 worker_block_allocator :: proc "contextless" (b: ^Worker_Block) -> runtime.Allocator {
-	return {worker_block_proc, b}
-}
-
-@(private)
-worker_block_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
-	b := (^Worker_Block)(data)
-	#partial switch mode {
-	case .Alloc, .Alloc_Non_Zeroed:
-		if size <= 0 {
-			return nil, nil
-		}
-		out, err := worker_block_take(b, size, alignment)
-		if err == nil && mode == .Alloc {
-			runtime.mem_zero(raw_data(out), size)
-		}
-		return out, err
-	case .Resize, .Resize_Non_Zeroed:
-		if old_memory == nil {
-			return worker_block_proc(data, .Alloc if mode == .Resize else .Alloc_Non_Zeroed, size, alignment, nil, 0, loc)
-		}
-		if size <= 0 {
-			return nil, nil
-		}
-		old_p := uintptr(old_memory)
-		buf_p := uintptr(raw_data(b.buf))
-		if b.buf != nil && old_p >= buf_p && old_p < buf_p + uintptr(len(b.buf)) {
-			at := int(old_p - buf_p)
-			if at == b.last && at + size <= len(b.buf) {
-				b.used = at + size
-				if mode == .Resize && size > old_size {
-					runtime.mem_zero(&b.buf[at + old_size], size - old_size)
-				}
-				return b.buf[at:][:size], nil
-			}
-		}
-		if size <= old_size {
-			return ([^]u8)(old_memory)[:size], nil
-		}
-		out, err := worker_block_take(b, size, alignment)
-		if err != nil {
-			return nil, err
-		}
-		if old_size > 0 {
-			runtime.mem_copy_non_overlapping(raw_data(out), old_memory, old_size)
-		}
-		if mode == .Resize {
-			runtime.mem_zero(&out[old_size], size - old_size)
-		}
-		return out, nil
-	case .Free, .Free_All:
-		return nil, nil
-	case .Query_Features:
-		if set := (^runtime.Allocator_Mode_Set)(old_memory); set != nil {
-			set^ = {.Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed, .Free, .Free_All, .Query_Features}
-		}
-		return nil, nil
-	}
-	return nil, .Mode_Not_Implemented
-}
-
-@(private)
-worker_block_take :: #force_inline proc(b: ^Worker_Block, size, alignment: int) -> ([]u8, runtime.Allocator_Error) {
-	align := max(alignment, 1)
-	if b.buf != nil {
-		base := uintptr(raw_data(b.buf))
-		at := int((base + uintptr(b.used) + uintptr(align - 1)) &~ uintptr(align - 1) - base)
-		if at + size <= len(b.buf) {
-			b.last, b.used = at, at + size
-			return b.buf[at:][:size], nil
-		}
-	}
-	return worker_block_grow(b, size, align)
+	return tape.bump_allocator(b, worker_block_grow)
 }
 
 @(private, cold)
 worker_block_grow :: proc(b: ^Worker_Block, size, align: int) -> ([]u8, runtime.Allocator_Error) {
-	grow := max(b.next, size + align)
+	grow := max(b.next, size)
 	data, err := pool_alloc_locked(b.pool, grow, max(align, 64), false)
-	if err != nil {
-		return nil, err
+	if err != nil || len(data) < size {
+		return nil, err if err != nil else .Out_Of_Memory
 	}
 	b.next = min(max(b.next * 2, BLOCK_INIT), BLOCK_MAX)
-	b.buf, b.last, b.used = data, 0, size
-	return b.buf[:size], nil
+	b.chunk, b.last, b.used = data, 0, size
+	// Guarded by `0 < size <= len(data)` checked above.
+	#no_bounds_check return b.chunk[:size], nil
 }
 
 // Mutex-guarded scratch allocator (also counting against `pool.limit` when `pool != nil && pool.limit != 0`).

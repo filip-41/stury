@@ -1,7 +1,6 @@
 package tape
 
 import "base:intrinsics"
-import "base:runtime"
 
 // The readers that step from a node of a document to the values in it, on a whole document and on a path read's
 // partial one alike. A partial container answers `.Not_Loaded` for what it cannot settle, so no reader takes a value
@@ -15,70 +14,6 @@ Reader :: struct {
 	doc:   ^Document,
 	index: ^Doc_Index,
 }
-
-// The tables the readers built over the whole containers of a document, each when a read first needed it: a wide
-// array's elements by place, a wide object's distinct keys in text order with a hash table over them, and for each
-// object the readers examined whether it repeats a key, so they take the others as written. A refused allocation
-// leaves the readers walking, which answers the same. An index serves the readers of one document, from its first read
-// to `destroy`, and is empty until a read needs a table, so a zero one with its allocator set starts it. With no
-// allocator each table is refused, so a zero index reads as none.
-Doc_Index :: struct {
-	examined:  []u64, // a bit per node, set for a whole object whose keys were compared
-	repeats:   []u64, // a bit per node, set for an examined object two of whose members share a key
-	entries:   [dynamic]Index_Entry,
-	table:     []u32, // one past an entry, by its node's hash, 0 for an empty slot, at most half full
-	lines:     Line_Index, // lazy 4 KiB line-checkpoint table and cursor for `node_place`
-	allocator: runtime.Allocator,
-}
-
-// A wide container's tables in a `Doc_Index`: an array's elements, or an object's distinct keys and their hash table,
-// each its own allocation, so a `Children` holding them outlives later entries.
-@(private)
-Index_Entry :: struct {
-	node:     Node_Index,
-	elements: []Node_Index,
-	kept:     []Kept_Child, // for a partial array, its kept direct children sorted by index
-	members:  []Distinct_Member,
-	room:     []Distinct_Member, // the whole block `members` is a prefix of
-	slots:    []Key_Slot,
-	// Two of an object's distinct keys hash alike, as keys of two kinds of one text do, which its table cannot take a
-	// member by a name from, as the member of the name is the first or last of all the keys that read as it.
-	clash:    bool,
-}
-
-// The fewest elements a read passes in an array before the index lists its elements.
-@(private)
-INDEX_ELEMENTS :: 16
-
-// A walk over the children of a container, from `children`, which `next_child` moves and `destroy_children` frees.
-Children :: struct {
-	container: Node_Index,
-	next:      Node_Index, // the next member's key or the next element
-	room:      []Distinct_Member, // the whole block `members` is a prefix of, which `owned` frees
-	place:     u32, // the next element's index, or the next distinct key's in `members`
-	kept:      u32, // in a partial array, the first `Partial.kept` entry not passed
-	// For a wide object that may repeat a key, its distinct keys in text order, else nil.
-	members:   []Distinct_Member,
-	allocator: runtime.Allocator, // of `members` when `owned`, else the index's
-	owned:     bool,
-	once:      bool, // an object holding each key once, whose members are taken as written
-	expanded:  bool, // with `named`, the name is one the format reads as an expanded name
-	keys_lo:   u32, // for a table's row, its table's `Table.keys_lo`
-	keys_n:    u32, // for a table's row, the keys of its table, which name its cells by place, else 0
-	name:      string, // with `named`, the key every member the walk gives has
-	named:     bool,
-}
-
-// A key of an object at its first place, and the values of its first and last members.
-@(private)
-Distinct_Member :: struct {
-	key, first, last: Node_Index,
-}
-
-// The most members of an object whose repeated keys the readers find by comparing each key with the others, with no
-// table, and that the index lists no table of.
-@(private)
-SMALL_OBJECT :: 8
 
 // The root value, `.Not_Loaded` for a partial document that kept none.
 @(require_results)
@@ -127,11 +62,11 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 }
 
 // Fast leaf lookup for an object with no tabular row extension. Every cold helper takes at most 7 register arguments so
-// LLVM tail-calls all of them (`b`) and keeps `member` a zero-frame leaf procedure on the common unescaped-key path.
+// LLVM tail-calls all of them (`b`) and keeps `member` a leaf procedure on the common unescaped-key path.
 @(private = "file", require_results)
 member_plain :: #force_inline proc(r: Reader, at: Node_Index, node: Node, name: string, dups: Duplicates) -> (Node_Index, Presence) #no_bounds_check {
 	doc := r.doc
-	if intrinsics.expect(doc.format.expanded != nil && len(name) > 0 && name[0] == '{', false) {
+	if intrinsics.expect(names_expanded(doc, name), false) {
 		return member_expanded(r, at, name, dups)
 	}
 	if intrinsics.expect(r.index != nil && node.spelling & CONTAINER_PARTIAL == 0 && int(node.spelling & MAX_CHILDREN) > SMALL_OBJECT, false) {
@@ -148,11 +83,11 @@ member_plain :: #force_inline proc(r: Reader, at: Node_Index, node: Node, name: 
 	src := raw_data(doc.src)
 	end := at + Node_Index(node.n)
 	name_len := len(name)
-	name_u32 := u32(name_len)
 	name_p := raw_data(name)
 	found := NO_NODE
 	for k := at + 1; k < end; {
 		kp := &nodes[k]
+		key_n: u32
 		when ODIN_ENDIAN == .Little {
 			// Single 64-bit load of `n` (bits 0..31), `kind` (32..39), `role` (40..47), `spelling` (48..63).
 			hdr := (^u64)(uintptr(kp) + 8)^
@@ -162,42 +97,33 @@ member_plain :: #force_inline proc(r: Reader, at: Node_Index, node: Node, name: 
 					return member_scan_slow(doc, at, k, found, name, first)
 				}
 			}
-			if u32(hdr) == name_u32 {
-				a := src[kp.lo:]
-				if name_len <= 16 {
-					if raw_key_eq_short(a, name_p, name_len) {
-						if first {
-							return k + 1, .Found
-						}
-						found = k
-					}
-				} else if intrinsics.unaligned_load((^u64)(a)) == intrinsics.unaligned_load((^u64)(name_p)) &&
-					intrinsics.unaligned_load((^u64)(a[name_len - 8:])) == intrinsics.unaligned_load((^u64)(name_p[name_len - 8:])) {
-					return member_scan_slow(doc, at, k, found, name, first)
-				}
-			}
-			vhdr := (^u64)(uintptr(kp) + 24)^
-			k += 1 + (Node_Index(u32(vhdr)) if u8(vhdr >> 32) > u8(Kind.Plain) else 1)
+			key_n = u32(hdr)
 		} else {
 			t := kp^
 			if intrinsics.expect(u8(t.kind) - u8(Kind.String) <= 1 && t.spelling & SPELLING_DECODE == 0, true) {
-				if t.n == name_u32 {
-					a := src[t.lo:]
-					if name_len <= 16 {
-						if raw_key_eq_short(a, name_p, name_len) {
-							if first {
-								return k + 1, .Found
-							}
-							found = k
-						}
-					} else if intrinsics.unaligned_load((^u64)(a)) == intrinsics.unaligned_load((^u64)(name_p)) &&
-						intrinsics.unaligned_load((^u64)(a[name_len - 8:])) == intrinsics.unaligned_load((^u64)(name_p[name_len - 8:])) {
-						return member_scan_slow(doc, at, k, found, name, first)
-					}
-				}
+				key_n = t.n
 			} else {
 				return member_scan_slow(doc, at, k, found, name, first)
 			}
+		}
+		if int(key_n) == name_len {
+			a := src[kp.lo:]
+			if name_len <= 16 {
+				if raw_key_eq_short(a, name_p, name_len) {
+					if first {
+						return k + 1, .Found
+					}
+					found = k
+				}
+			} else if intrinsics.unaligned_load((^u64)(a)) == intrinsics.unaligned_load((^u64)(name_p)) &&
+				intrinsics.unaligned_load((^u64)(a[name_len - 8:])) == intrinsics.unaligned_load((^u64)(name_p[name_len - 8:])) {
+				return member_scan_slow(doc, at, k, found, name, first)
+			}
+		}
+		when ODIN_ENDIAN == .Little {
+			vhdr := (^u64)(uintptr(kp) + 24)^
+			k += 1 + (Node_Index(u32(vhdr)) if u8(vhdr >> 32) > u8(Kind.Plain) else 1)
+		} else {
 			v := nodes[k + 1]
 			k = k + 1 + (Node_Index(v.n) if v.kind > .Plain else 1)
 		}
@@ -239,11 +165,9 @@ member_with_ext :: #force_no_inline proc(r: Reader, at: Node_Index, name: string
 member_indexed :: #force_no_inline proc(r: Reader, at: Node_Index, name: string, dups: Duplicates) -> (Node_Index, Presence) #no_bounds_check {
 	node := r.doc.nodes[at]
 	policy := read_dups(r.doc.format, dups)
-	if count := child_count(r.doc, at, node); count > SMALL_OBJECT {
-		// An object whose keys of two kinds may read as one name takes its member by comparing keys, as the finder does.
-		if e, ok := object_entry(r, at, count); ok && !e.clash {
-			return index_member(r, e, name, policy)
-		}
+	// An object whose keys of two kinds may read as one name takes its member by comparing keys, as the finder does.
+	if e, ok := object_entry(r, at, child_count(r.doc, at, node)); ok && !e.clash {
+		return index_member(r, e, name, policy)
 	}
 	first := policy != .Last || keys_known_once(r, at)
 	return member_scan_slow(r.doc, at, at + 1, NO_NODE, name, first)
@@ -272,16 +196,13 @@ member_expanded :: #force_no_inline proc "contextless" (r: Reader, at: Node_Inde
 	if found == NO_NODE && unknown {
 		return NO_NODE, .Not_Loaded
 	}
+	if partial {
+		return member_partial_finish(doc, at, found, name, first)
+	}
 	if found != NO_NODE {
-		if !partial || policy != .Last || doc.partial != nil && doc.partial.dups != .First && child_count(doc, at, node) >= 0 {
-			return found + 1, .Found
-		}
-		return NO_NODE, .Not_Loaded
+		return found + 1, .Found
 	}
-	if !partial || named_missing(doc.partial, at, name) {
-		return NO_NODE, .Missing
-	}
-	return NO_NODE, .Not_Loaded
+	return NO_NODE, .Missing
 }
 
 @(private = "file", cold, require_results)
@@ -298,17 +219,13 @@ member_scan_slow :: #force_no_inline proc "contextless" (doc: ^Document, at, sta
 			}
 		}
 	}
-	if found != NO_NODE {
-		// When `partial` holds, `first` equals `policy != .Last`.
-		if !partial {
-			return found + 1, .Found
-		}
+	if partial {
 		return member_partial_finish(doc, at, found, name, first)
 	}
-	if !partial {
-		return NO_NODE, .Missing
+	if found != NO_NODE {
+		return found + 1, .Found
 	}
-	return member_partial_finish(doc, at, NO_NODE, name, first)
+	return NO_NODE, .Missing
 }
 
 @(private = "file", cold, require_results)
@@ -374,6 +291,11 @@ element_partial :: #force_no_inline proc(r: Reader, at: Node_Index, node: Node, 
 	if doc.partial == nil {
 		return NO_NODE, .Not_Loaded
 	}
+	when size_of(int) > 4 {
+		if i > int(max(u32)) {
+			return NO_NODE, .Not_Loaded
+		}
+	}
 	if r.index != nil && i >= INDEX_ELEMENTS {
 		if e, ok := partial_array_entry(r, at, node); ok {
 			return kept_lookup(e.kept, u32(i))
@@ -397,7 +319,7 @@ element_partial :: #force_no_inline proc(r: Reader, at: Node_Index, node: Node, 
 // Looks up original array index `want` in `kept`, the direct kept children of a partial array sorted by index.
 @(private = "file", require_results)
 kept_lookup :: #force_inline proc "contextless" (kept: []Kept_Child, want: u32) -> (Node_Index, Presence) #no_bounds_check {
-	if int(want) < len(kept) && kept[want].index == want {
+	if uint(want) < uint(len(kept)) && kept[want].index == want {
 		return kept[want].node, .Found
 	}
 	lo, hi := 0, len(kept)
@@ -415,609 +337,6 @@ kept_lookup :: #force_inline proc "contextless" (kept: []Kept_Child, want: u32) 
 	return NO_NODE, .Not_Loaded
 }
 
-// The kept direct children of the partial array at `at`, listed in the reader's index the first time, false when the
-// index cannot hold them.
-@(private = "file")
-partial_array_entry :: proc(r: Reader, at: Node_Index, node: Node) -> (e: Index_Entry, ok: bool) #no_bounds_check {
-	x := r.index
-	if e, ok = index_entry(x, at); ok {
-		return
-	}
-	doc := r.doc
-	end := at + Node_Index(node.n)
-	start := kept_from(doc.partial, at)
-	// First pass counts direct children kept in `at` so the index allocates exact capacity.
-	c := Children{container = at, next = at + 1, kept = start}
-	n := 0
-	for ; c.next < end; c.next = node_after(doc, c.next) {
-		if _, has := kept_place(doc.partial, &c); has {
-			n += 1
-		}
-	}
-	kept: []Kept_Child
-	if n > 0 {
-		err: runtime.Allocator_Error
-		kept, err = make([]Kept_Child, n, x.allocator)
-		if err != nil || raw_data(kept) == nil {
-			return {}, false
-		}
-		c = Children{container = at, next = at + 1, kept = start}
-		j := 0
-		for ; c.next < end; c.next = node_after(doc, c.next) {
-			if place, has := kept_place(doc.partial, &c); has {
-				kept[j] = {node = c.next, index = place}
-				j += 1
-			}
-		}
-	}
-	e = {node = at, kept = kept}
-	if !index_add(x, e) {
-		delete(kept, x.allocator)
-		return {}, false
-	}
-	return e, true
-}
-
-// The length of the container at `at`, an array's elements or an object's distinct keys, 0 for null and
-// `.Wrong_Kind` for any other scalar. With no index, the keys of a wide object that may repeat one are counted through
-// a table, in `allocator` past the room `key_table` keeps it in, freed before the return, and a refused allocation is
-// the error. An index keeps that table.
-@(require_results)
-length :: proc(r: Reader, at: Node_Index, allocator: runtime.Allocator) -> (n: int, p: Presence, err: runtime.Allocator_Error) #no_bounds_check {
-	if at == NO_NODE {
-		return 0, .Missing, nil
-	}
-	doc := r.doc
-	node := doc.nodes[at]
-	#partial switch node.kind {
-	case .Null:
-		return 0, .Found, nil
-	case .Array, .Object:
-	case:
-		return 0, .Wrong_Kind, nil
-	}
-	count := child_count(doc, at, node)
-	if node.kind == .Array || count <= 1 {
-		return count, .Found if count >= 0 else .Not_Loaded, nil
-	}
-	if t, row := row_of(doc, at); row {
-		return row_length(doc, t, at), .Found, nil
-	}
-	// A member a partial object did not keep may repeat a key.
-	if node.spelling & CONTAINER_PARTIAL != 0 {
-		return 0, .Not_Loaded, nil
-	}
-	if r.index != nil && count > SMALL_OBJECT {
-		if e, ok := object_entry(r, at, count); ok {
-			return len(e.members), .Found, nil
-		}
-	}
-	if keys_once(r, at) {
-		return count, .Found, nil
-	}
-	if count <= SMALL_OBJECT {
-		c := Children{container = at, next = at + 1}
-		for {
-			if _, _, p = next_key(doc, &c, at + Node_Index(node.n), .First); p == .Missing {
-				return int(c.place), .Found, nil
-			}
-		}
-	}
-	room: [WIDE_ROOM]Key_Slot = ---
-	slots := key_table(count, room[:], allocator) or_return
-	defer if len(slots) > len(room) {
-		delete(slots, allocator)
-	}
-	keys, _ := distinct_keys(doc, at, nil, slots)
-	return keys, .Found, nil
-}
-
-// A walk over the children of the container at `at`, which `next_child` moves. `.Wrong_Kind` for a scalar, null
-// included, and `.Not_Loaded` for a partial object, whose members' places are not kept. The distinct keys of an object
-// that may repeat one are listed in the index, or with none in `allocator`, which the walk holds until
-// `destroy_children`, and a refused allocation is the error.
-@(require_results)
-children :: proc(r: Reader, at: Node_Index, allocator: runtime.Allocator) -> (c: Children, p: Presence, err: runtime.Allocator_Error) #no_bounds_check {
-	if at == NO_NODE {
-		return {}, .Missing, nil
-	}
-	doc := r.doc
-	node := doc.nodes[at]
-	if node.kind < .Array {
-		return {}, .Wrong_Kind, nil
-	}
-	partial := node.spelling & CONTAINER_PARTIAL != 0
-	if node.kind == .Object && partial {
-		return {}, .Not_Loaded, nil
-	}
-	c = Children{container = at, next = at + 1, allocator = allocator}
-	if partial {
-		c.kept = kept_from(doc.partial, at)
-	}
-	if node.kind != .Object {
-		if t, table := table_of(doc, at); table {
-			c.next = t.first_row
-		}
-		return c, .Found, nil
-	}
-	if t, row := row_of(doc, at); row {
-		c.keys_lo, c.keys_n, c.once = t.keys_lo, t.keys_n, bool(t.unique_keys)
-		return c, .Found, nil
-	}
-	count := child_count(doc, at, node)
-	if r.index != nil && count > SMALL_OBJECT {
-		if e, ok := object_entry(r, at, count); ok {
-			if c.once = len(e.members) == count; !c.once {
-				c.members = e.members
-			}
-			return c, .Found, nil
-		}
-	}
-	// With no index a small object's keys are compared once here, so a walk over it takes its members as written.
-	if r.index == nil && count <= SMALL_OBJECT {
-		c.once = !small_repeats(doc, at)
-		return c, .Found, nil
-	}
-	if c.once = r.index != nil && (keys_known_once(r, at) || keys_once(r, at)); c.once || count <= SMALL_OBJECT {
-		return c, .Found, nil
-	}
-	werr: runtime.Allocator_Error
-	c.members, c.room, werr = wide_members(doc, at, count, allocator)
-	if werr != nil {
-		return c, {}, werr
-	}
-	c.once, c.owned = c.members == nil, c.members != nil
-	return c, .Found, nil
-}
-
-// The distinct keys of the whole object at `at` of `count` members, wider than `SMALL_OBJECT`, in `allocator`, or nil
-// for an object that holds each key once, whose keys are counted first so it lists none.
-@(private)
-wide_members :: proc(doc: ^Document, at: Node_Index, count: int, allocator: runtime.Allocator) -> (members: []Distinct_Member, room: []Distinct_Member, err: runtime.Allocator_Error) {
-	table_room: [WIDE_ROOM]Key_Slot = ---
-	slots := key_table(count, table_room[:], allocator) or_return
-	defer if len(slots) > len(table_room) {
-		delete(slots, allocator)
-	}
-	if n, _ := distinct_keys(doc, at, nil, slots); n == count {
-		return nil, nil, nil
-	}
-	made, merr2 := make([]Distinct_Member, count, allocator)
-	if merr2 == nil && (len(made) < count || count > 0 && raw_data(made) == nil) {
-		merr2 = .Out_Of_Memory
-	}
-	if merr2 != nil {
-		return nil, nil, merr2
-	}
-	members = made
-	intrinsics.mem_zero(raw_data(slots), len(slots) * size_of(Key_Slot))
-	n, _ := distinct_keys(doc, at, members, slots)
-	return members[:n], members, nil
-}
-
-// The slots of a key table `key_table` keeps in a caller's room, for a wide object of up to half as many members.
-@(private)
-WIDE_ROOM :: 128
-
-// An empty key table for `count` keys, in `room` when it fits and else in `allocator`, which the caller frees. A
-// nil allocator's empty table is a refusal, as a key probe cannot read one.
-@(private)
-key_table :: proc(count: int, room: []Key_Slot, allocator: runtime.Allocator) -> ([]Key_Slot, runtime.Allocator_Error) {
-	size := table_size(count)
-	if size > len(room) {
-		s, err := make([]Key_Slot, size, allocator)
-		if err == nil && (len(s) < size || raw_data(s) == nil) {
-			err = .Out_Of_Memory
-		}
-		return s, err
-	}
-	intrinsics.mem_zero(raw_data(room), size * size_of(Key_Slot))
-	return room[:size], nil
-}
-
-// Frees what `children` listed for `c` and leaves it zero. The members list is a prefix of `room`, freed whole.
-destroy_children :: proc(c: ^Children) {
-	if c.owned {
-		delete(c.room, c.allocator)
-	}
-	c^ = {}
-}
-
-// The next element of an array, or the next distinct key of an object in text order with its value under `dups`, the
-// key `NO_NODE` for an element and for a table row's cell, whose key is `cell_key`. Under `.Group`, and for a walk from
-// `named`, the next member as written. `.Missing` once no child is left, and `.Not_Loaded` for each child a partial
-// array did not keep, the walk going on past it.
-@(require_results)
-next_child :: proc "contextless" (r: Reader, c: ^Children, dups := Duplicates.Default) -> (key, value: Node_Index, p: Presence) #no_bounds_check {
-	doc := r.doc
-	nodes := raw_data(doc.nodes)
-	node := nodes[c.container]
-	end := c.container + Node_Index(node.n)
-	if node.kind == .Object {
-		if intrinsics.expect(c.keys_n != 0, false) {
-			return next_child_cell(doc, c, dups)
-		}
-		policy := read_dups(doc.format, dups)
-		if intrinsics.expect(c.named || policy == .Group, false) {
-			return next_child_named(doc, c, end)
-		}
-		if c.members == nil {
-			if !c.once {
-				return next_key(doc, c, end, policy)
-			}
-			if c.next >= end {
-				return NO_NODE, NO_NODE, .Missing
-			}
-			key = c.next
-			v := nodes[key + 1]
-			c.next = key + 1 + (Node_Index(v.n) if v.kind > .Plain else 1)
-			c.place += 1
-			return key, key + 1, .Found
-		}
-		if int(c.place) == len(c.members) {
-			return NO_NODE, NO_NODE, .Missing
-		}
-		m := c.members[c.place]
-		c.place += 1
-		return m.key, m.first if policy != .Last else m.last, .Found
-	}
-	if intrinsics.expect(node.spelling & CONTAINER_PARTIAL != 0, false) {
-		return next_child_partial_array(doc, node, c, end)
-	}
-	if c.next >= end {
-		return NO_NODE, NO_NODE, .Missing
-	}
-	value = c.next
-	// The nodes ahead are fetched, as each step waits on the load of the element it passes.
-	intrinsics.prefetch_read_data(&nodes[value + NTH_AHEAD], 3)
-	v := nodes[value]
-	c.next = value + (Node_Index(v.n) if v.kind > .Plain else 1)
-	c.place += 1
-	return NO_NODE, value, .Found
-}
-
-@(private = "file", cold, require_results)
-next_child_cell :: #force_no_inline proc "contextless" (doc: ^Document, c: ^Children, dups: Duplicates) -> (Node_Index, Node_Index, Presence) #no_bounds_check {
-	value, p := next_cell(doc, c, row_policy(doc, dups))
-	return NO_NODE, value, p
-}
-
-@(private = "file", cold, require_results)
-next_child_named :: #force_no_inline proc "contextless" (doc: ^Document, c: ^Children, end: Node_Index) -> (key, value: Node_Index, p: Presence) #no_bounds_check {
-	for c.next < end {
-		key = c.next
-		c.next = node_after(doc, key + 1)
-		unknown := false
-		if !c.named || key_at_names(doc, key, c.name, c.expanded, &unknown) {
-			c.place += 1
-			return key, key + 1, .Found
-		}
-		if unknown {
-			return NO_NODE, NO_NODE, .Not_Loaded
-		}
-	}
-	return NO_NODE, NO_NODE, .Missing
-}
-
-@(private = "file", cold, require_results)
-next_child_partial_array :: #force_no_inline proc "contextless" (doc: ^Document, node: Node, c: ^Children, end: Node_Index) -> (key, value: Node_Index, p: Presence) #no_bounds_check {
-	count := child_count(doc, c.container, node)
-	if count >= 0 && int(c.place) >= count {
-		return NO_NODE, NO_NODE, .Missing
-	}
-	if doc.partial == nil || c.next >= end {
-		c.place += 1
-		return NO_NODE, NO_NODE, .Not_Loaded
-	}
-	if place, ok := kept_place(doc.partial, c); !ok || place != c.place {
-		c.place += 1
-		return NO_NODE, NO_NODE, .Not_Loaded
-	}
-	value = c.next
-	intrinsics.prefetch_read_data(&raw_data(doc.nodes)[value + NTH_AHEAD], 3)
-	c.next = node_after(doc, value)
-	c.place += 1
-	return NO_NODE, value, .Found
-}
-
-// A walk over the members of the object at `at` whose key is `name`, in document order, which `next_child` moves: the
-// group a repeated name reads as. `.Missing` for an object with no such member and for null, `.Wrong_Kind` for any
-// other value, and `.Not_Loaded` for a partial object that may hold a member it did not keep.
-@(require_results)
-named :: proc "contextless" (r: Reader, at: Node_Index, name: string) -> (c: Children, p: Presence) #no_bounds_check {
-	if at == NO_NODE {
-		return {}, .Missing
-	}
-	doc := r.doc
-	node := doc.nodes[at]
-	if node.kind != .Object {
-		return {}, step_refused(node.kind)
-	}
-	c = Children{container = at, next = at + 1, name = name, named = true, expanded = names_expanded(doc, name)}
-	if t, row := row_of(doc, at); row {
-		c.keys_lo, c.keys_n = t.keys_lo, t.keys_n
-		_, p = row_member(doc, t, at, name, .First)
-		return c, p
-	}
-	unknown := false
-	hit := false
-	end := at + Node_Index(node.n)
-	if !c.expanded {
-		for k := at + 1; k < end; k = node_after(doc, k + 1) {
-			if doc_names(doc, doc.nodes[k], name) {
-				hit = true
-				break
-			}
-		}
-	} else {
-		for k := at + 1; k < end; k = node_after(doc, k + 1) {
-			pres := doc.format.expanded(doc, k, name)
-			unknown ||= pres == .Not_Loaded
-			if pres == .Found {
-				hit = true
-				break
-			}
-		}
-	}
-	if hit {
-		// A read keeps every member of a key it keeps one of, but under `.First` the first only, and none past a
-		// stop, which leaves the count of an object it comes inside not known.
-		if node.spelling & CONTAINER_PARTIAL != 0 && (doc.partial.dups == .First || child_count(doc, at, node) < 0) {
-			return {}, .Not_Loaded
-		}
-		return c, .Found
-	}
-	if !unknown && (node.spelling & CONTAINER_PARTIAL == 0 || named_missing(doc.partial, at, name)) {
-		return {}, .Missing
-	}
-	return {}, .Not_Loaded
-}
-
-// Frees what the readers listed in `x` and leaves it zero. A members list is a prefix of its entry's `room`,
-// freed whole.
-destroy_index :: proc(x: ^Doc_Index) {
-	for e in x.entries {
-		delete(e.elements, x.allocator)
-		delete(e.kept, x.allocator)
-		delete(e.room, x.allocator)
-		delete(e.slots, x.allocator)
-	}
-	delete(x.entries)
-	delete(x.table, x.allocator)
-	if x.examined != nil {
-		free(raw_data(x.examined), x.allocator)
-	}
-	destroy_line_index(&x.lines)
-	x^ = {}
-}
-
-// Whether the index found the whole object at `at` holding each key once, without examining an object it did not.
-@(private)
-keys_known_once :: #force_inline proc "contextless" (r: Reader, at: Node_Index) -> bool #no_bounds_check {
-	x := r.index
-	return x != nil && x.examined != nil && x.examined[at / 64] & (1 << uint(at % 64)) != 0 && x.repeats[at / 64] & (1 << uint(at % 64)) == 0
-}
-
-// Whether the whole object at `at` holds each key once, which the index examines once and keeps. False with no index,
-// and when the index cannot keep its verdict, which leaves the readers comparing keys.
-@(private)
-keys_once :: proc(r: Reader, at: Node_Index) -> bool #no_bounds_check {
-	x := r.index
-	node := r.doc.nodes[at]
-	assert_contextless(node.kind == .Object && node.spelling & CONTAINER_PARTIAL == 0, "keys_once of a partial object or no object")
-	if x == nil {
-		return false
-	}
-	if x.examined != nil && x.examined[at / 64] & (1 << uint(at % 64)) != 0 {
-		return x.repeats[at / 64] & (1 << uint(at % 64)) == 0
-	}
-	if count := child_count(r.doc, at, node); count > SMALL_OBJECT {
-		e, ok := object_entry(r, at, count)
-		return ok && len(e.members) == count
-	}
-	repeats := small_repeats(r.doc, at)
-	return index_mark(r, at, repeats) && !repeats
-}
-
-// Keeps in the reader's index whether the whole object at `at` repeats a key, false when memory is refused.
-@(private)
-index_mark :: proc(r: Reader, at: Node_Index, repeats: bool) -> bool #no_bounds_check {
-	x := r.index
-	if x.examined == nil {
-		words := (len(r.doc.nodes) + 63) / 64
-		bits, err := make([]u64, 2 * words, x.allocator)
-		if err != nil || raw_data(bits) == nil {
-			return false
-		}
-		x.examined, x.repeats = bits[:words], bits[words:]
-	}
-	x.examined[at / 64] |= 1 << uint(at % 64)
-	if repeats {
-		x.repeats[at / 64] |= 1 << uint(at % 64)
-	}
-	return true
-}
-
-// Whether two members of the whole object at `at`, of at most `SMALL_OBJECT` members, share a key or have keys of two
-// kinds that read as one text.
-@(private)
-small_repeats :: proc "contextless" (doc: ^Document, at: Node_Index) -> bool #no_bounds_check {
-	keys: [SMALL_OBJECT]Node_Index = ---
-	// Each key's length, which two keys of one text share unless one of them is spelled with escapes.
-	sizes: [SMALL_OBJECT]u64 = ---
-	n := 0
-	end := at + Node_Index(doc.nodes[at].n)
-	for k := at + 1; k < end; k = node_after(doc, k + 1) {
-		t := doc.nodes[k]
-		size := u64(t.n) if t.spelling & SPELLING_DECODE == 0 else max(u64)
-		for i in 0 ..< n {
-			if (sizes[i] == size || sizes[i] == max(u64) || size == max(u64)) && doc_same_text(doc, doc.nodes[keys[i]], t) {
-				return true
-			}
-		}
-		keys[n], sizes[n] = k, size
-		n += 1
-	}
-	return false
-}
-
-// The entry of the container at `at` in `x`, false for one it lists no table of.
-@(private)
-index_entry :: #force_inline proc "contextless" (x: ^Doc_Index, at: Node_Index) -> (Index_Entry, bool) #no_bounds_check {
-	if len(x.table) == 0 {
-		return {}, false
-	}
-	mask := u32(len(x.table) - 1)
-	for h := node_hash(at) & mask; ; h = (h + 1) & mask {
-		e := x.table[h]
-		if e == 0 {
-			return {}, false
-		}
-		if entry := x.entries[e - 1]; entry.node == at {
-			return entry, true
-		}
-	}
-}
-
-// The elements of the whole array at `at` of `count` elements, listed in the reader's index the first time, false when
-// the index cannot hold them.
-@(private)
-array_entry :: proc(r: Reader, at, first: Node_Index, count: int) -> (e: Index_Entry, ok: bool) #no_bounds_check {
-	x := r.index
-	if e, ok = index_entry(x, at); ok {
-		return
-	}
-	elements, err := make([]Node_Index, count, x.allocator)
-	if err != nil || raw_data(elements) == nil {
-		return {}, false
-	}
-	for k, j := first, 0; j < count; j += 1 {
-		elements[j] = k
-		k = node_after(r.doc, k)
-	}
-	e = {node = at, elements = elements}
-	if !index_add(x, e) {
-		delete(elements, x.allocator)
-		return {}, false
-	}
-	return e, true
-}
-
-// The distinct keys of the whole object at `at` of `count` members and their table, listed in the reader's index the
-// first time, false when the index cannot hold them.
-@(private)
-object_entry :: proc(r: Reader, at: Node_Index, count: int) -> (e: Index_Entry, ok: bool) #no_bounds_check {
-	x := r.index
-	if e, ok = index_entry(x, at); ok {
-		return
-	}
-	members, merr := make([]Distinct_Member, count, x.allocator)
-	slots, serr := make([]Key_Slot, table_size(count), x.allocator)
-	// A nil allocator gives no block and no error, or a shorter one, either read as a refusal.
-	if merr == nil && (len(members) < count || count > 0 && raw_data(members) == nil) {
-		merr = .Out_Of_Memory
-	}
-	if serr == nil && (len(slots) < table_size(count) || raw_data(slots) == nil) {
-		serr = .Out_Of_Memory
-	}
-	if merr == nil && serr == nil {
-		n, clash := distinct_keys(r.doc, at, members, slots)
-		e = {node = at, members = members[:n], room = members, slots = slots, clash = clash}
-		if index_mark(r, at, n < count || clash) && index_add(x, e) {
-			return e, true
-		}
-	}
-	delete(members, x.allocator)
-	delete(slots, x.allocator)
-	return {}, false
-}
-
-// Adds `e` to `x`, false when memory is refused.
-@(private)
-index_add :: proc(x: ^Doc_Index, e: Index_Entry) -> bool #no_bounds_check {
-	if 2 * (len(x.entries) + 1) > len(x.table) {
-		table, err := make([]u32, max(16, 2 * len(x.table)), x.allocator)
-		if err != nil || raw_data(table) == nil {
-			return false
-		}
-		mask := u32(len(table) - 1)
-		for i in 0 ..< len(x.entries) {
-			h := node_hash(x.entries[i].node) & mask
-			for table[h] != 0 {
-				h = (h + 1) & mask
-			}
-			table[h] = u32(i) + 1
-		}
-		delete(x.table, x.allocator)
-		x.table = table
-	}
-	if x.entries.allocator.procedure == nil {
-		x.entries.allocator = x.allocator
-	}
-	if _, err := append(&x.entries, e); err != nil {
-		return false
-	}
-	mask := u32(len(x.table) - 1)
-	h := node_hash(e.node) & mask
-	for x.table[h] != 0 {
-		h = (h + 1) & mask
-	}
-	x.table[h] = u32(len(x.entries))
-	return true
-}
-
-@(private)
-node_hash :: #force_inline proc "contextless" (at: Node_Index) -> u32 {
-	return u32((u64(at) * 0x9E3779B97F4A7C15) >> 32)
-}
-
-// The member `name` of the indexed object `e` under `dups`.
-@(private)
-index_member :: proc "contextless" (r: Reader, e: Index_Entry, name: string, dups: Duplicates) -> (Node_Index, Presence) #no_bounds_check {
-	slots, members := e.slots, e.members
-	h := r.doc.format.key_hash(transmute([]u8)name, {n = u32(len(name)), kind = .String})
-	mask := u32(len(slots) - 1)
-	for i := h & mask; ; i = (i + 1) & mask {
-		s := slots[i]
-		if s.entry == 0 {
-			return NO_NODE, .Missing
-		}
-		if s.hash == h {
-			m := members[s.entry - 1]
-			if doc_names(r.doc, r.doc.nodes[m.key], name) {
-				return m.first if dups != .Last else m.last, .Found
-			}
-		}
-	}
-}
-
-// The next key of the whole object ending at `end` that no member before it has, and its value under `dups`, by
-// comparing keys, for an object of at most `SMALL_OBJECT` members.
-@(private)
-next_key :: proc "contextless" (doc: ^Document, c: ^Children, end: Node_Index, dups: Duplicates) -> (key, value: Node_Index, p: Presence) #no_bounds_check {
-	next: for c.next < end {
-		key = c.next
-		value = key + 1
-		c.next = node_after(doc, value)
-		t := doc.nodes[key]
-		for k := c.container + 1; k < key; k = node_after(doc, k + 1) {
-			if doc_same_keys(doc, doc.nodes[k], t) {
-				continue next
-			}
-		}
-		if dups != .First {
-			for k := c.next; k < end; k = node_after(doc, k + 1) {
-				if doc_same_keys(doc, doc.nodes[k], t) {
-					value = k + 1
-				}
-			}
-		}
-		c.place += 1
-		return key, value, .Found
-	}
-	return NO_NODE, NO_NODE, .Missing
-}
-
 // The child count of the container `node` at `at`, -1 when a partial document does not know it.
 child_count :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index, node: Node) -> int {
 	count := node.spelling & MAX_CHILDREN
@@ -1027,7 +346,7 @@ child_count :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index,
 	return saturated_count(doc, at)
 }
 
-@(private)
+@(private = "file")
 saturated_count :: proc "contextless" (doc: ^Document, at: Node_Index) -> int #no_bounds_check {
 	lo := by_node(doc.counts, at, false)
 	if lo < len(doc.counts) && doc.counts[lo].node == at {
@@ -1037,7 +356,7 @@ saturated_count :: proc "contextless" (doc: ^Document, at: Node_Index) -> int #n
 }
 
 // The first entry of `list`, a list sorted by node, whose node is at or past `at`, or past it under `PAST`.
-@(private)
+@(private = "file")
 by_node :: #force_inline proc "contextless" (list: []$T, at: Node_Index, $PAST: bool) -> int #no_bounds_check {
 	lo, hi := 0, len(list)
 	for lo < hi {
@@ -1054,7 +373,7 @@ by_node :: #force_inline proc "contextless" (list: []$T, at: Node_Index, $PAST: 
 // The child `i` of a whole container whose first child is `first`, which it has. Each step waits on the load of the
 // child before, so the nodes `NTH_AHEAD` past it are fetched ahead, as the walk only goes forward, and the step past a
 // container is the branch the walk predicts. A fetch past the nodes reads nothing.
-@(private)
+@(private = "file")
 nth_child :: proc "contextless" (doc: ^Document, first: Node_Index, i: int) -> Node_Index #no_bounds_check {
 	nodes := raw_data(doc.nodes)
 	k := first
@@ -1120,284 +439,10 @@ kept_place :: proc "contextless" (x: ^Partial, c: ^Children) -> (index: u32, ok:
 	return 0, false
 }
 
-// The slots of a key table at most half full for `count` keys.
-@(private)
-table_size :: #force_inline proc "contextless" (count: int) -> int {
-	size := 1
-	for size < 2 * count {
-		size *= 2
-	}
-	return size
-}
-
-// The number of distinct keys of the whole object at `at`, found through the empty hash table `slots`, and with
-// `members` each distinct key in text order with its first and last values, the slots' entries then one past a member.
-// Keys are hashed and compared by the format's one relation, `Format.key_hash` with `same_keys`.
-@(private)
-distinct_keys :: proc "contextless" (doc: ^Document, at: Node_Index, members: []Distinct_Member, slots: []Key_Slot) -> (n: int, clash: bool) #no_bounds_check {
-	mask := u32(len(slots) - 1)
-	end := at + Node_Index(doc.nodes[at].n)
-	for k := at + 1; k < end; k = node_after(doc, k + 1) {
-		value := k + 1
-		t := doc.nodes[k]
-		h := doc_key_hash(doc, t)
-		i := h & mask
-		for {
-			s := &slots[i]
-			if s.entry == 0 {
-				s.hash = h
-				if members == nil {
-					s.entry = u32(k) + 1
-				} else {
-					members[n] = {k, value, value}
-					s.entry = u32(n) + 1
-				}
-				n += 1
-				break
-			}
-			if s.hash == h {
-				key := Node_Index(s.entry - 1) if members == nil else members[s.entry - 1].key
-				if doc_same_keys(doc, doc.nodes[key], t) {
-					if members != nil {
-						members[s.entry - 1].last = value
-					}
-					break
-				}
-				// The same hash of another key: a key of another kind and the same text, or a collision.
-				clash = true
-			}
-			i = (i + 1) & mask
-		}
-	}
-	return
-}
-
-@(private)
-Key_Slot :: struct {
-	hash:  u32,
-	entry: u32, // 0 for an empty slot
-}
-
-
-// The table whose row is the object at `at`, false for an object of no table.
-@(private)
-row_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (Table, bool) {
-	if doc.ext == nil {
-		return {}, false
-	}
-	ext, tabular := &doc.ext.format.(Tabular_Ext)
-	if !tabular {
-		return {}, false
-	}
-	return table_around(ext, doc, at)
-}
-
-// How a table kept the cells of a header name that repeats: the first or the last of a name under `.First` and `.Last`,
-// as an object built under them keeps one member of a key, and every one under the other policies.
-@(private)
-table_kept :: #force_inline proc "contextless" (doc: ^Document) -> Duplicates {
-	d := doc.ext.format.(Tabular_Ext).dups
-	return d if d == .First || d == .Last else .All
-}
-
-// The policy a row of a table reads `dups` as. A table that kept one cell of a repeated name never reads another, so
-// its policy is the table's, and the cells of a table that kept every one are read as an object's members are.
-@(private)
-row_policy :: #force_inline proc "contextless" (doc: ^Document, dups: Duplicates) -> Duplicates {
-	if kept := table_kept(doc); kept != .All {
-		return kept
-	}
-	return read_dups(doc.format, dups)
-}
-
-// Whether cell `j` of the `cells` of a row of a table whose keys are `keys` is one its build stored but drops, a cell of
-// a repeated key the table's `Duplicates` policy does not keep.
-column_dropped :: proc "contextless" (doc: ^Document, keys: []Node, j, cells: int) -> bool {
-	kept := table_kept(doc)
-	return kept != .All && cell_dropped(doc, keys, j, cells, kept)
-}
-
-// Whether cell `j` of the `cells` of a row is one a table that kept the `kept` cell of a name stored but dropped: a
-// later cell of its key under `.Last`, an earlier under `.First`.
-@(private)
-cell_dropped :: proc "contextless" (doc: ^Document, keys: []Node, j, cells: int, kept: Duplicates) -> bool #no_bounds_check {
-	k := keys[j]
-	lo, hi := 0, j
-	if kept == .Last {
-		lo, hi = j + 1, cells
-	}
-	for o in lo ..< hi {
-		if doc_same_keys(doc, keys[o], k) {
-			return true
-		}
-	}
-	return false
-}
-
-// The table whose node is the array at `at`, false for an array that is no table.
-@(private)
-table_of :: #force_inline proc "contextless" (doc: ^Document, at: Node_Index) -> (Table, bool) {
-	if doc.ext == nil {
-		return {}, false
-	}
-	ext, tabular := &doc.ext.format.(Tabular_Ext)
-	if !tabular {
-		return {}, false
-	}
-	t, inside := table_around(ext, doc, at)
-	return t, inside && t.node == at
-}
-
-// The table whose node holds node `at`, false for none. Tables are sorted by node and do not nest.
-@(private)
-table_around :: proc "contextless" (ext: ^Tabular_Ext, doc: ^Document, at: Node_Index) -> (Table, bool) #no_bounds_check {
-	lo, hi := 0, len(ext.tables)
-	for lo < hi {
-		mid := (lo + hi) / 2
-		if ext.tables[mid].node <= at {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	if lo == 0 {
-		return {}, false
-	}
-	t := ext.tables[lo - 1]
-	return t, at < t.node + Node_Index(doc.nodes[t.node].n)
-}
-
-// The keys of the table whose keys are `keys_n` from `keys_lo` of its `Tabular_Ext`.
-@(private)
-table_keys_at :: #force_inline proc "contextless" (doc: ^Document, keys_lo, keys_n: u32) -> []Node #no_type_assert #no_bounds_check {
-	return doc.ext.format.(Tabular_Ext).keys[keys_lo:][:keys_n]
-}
-
-// The keys of the table whose node is `at`, none for a table with no header, and whether `at` is a table.
-table_keys :: proc "contextless" (doc: ^Document, at: Node_Index) -> (keys: []Node, table: bool) {
-	t := table_of(doc, at) or_return
-	return table_keys_at(doc, t.keys_lo, t.keys_n), true
-}
-
-// The cells of row `at` that a key names, of the `keys` keys of its table, which a row with more cells than keys has
-// fewer of.
-@(private)
-row_cells :: #force_inline proc "contextless" (doc: ^Document, keys: u32, at: Node_Index) -> int {
-	return min(int(doc.nodes[at].n) - 1, int(keys))
-}
-
-// The cell of row `at` of table `t` whose key is `name` under `dups`, through the table's key slots when they settle
-// it.
-@(private)
-row_member :: proc "contextless" (doc: ^Document, t: Table, at: Node_Index, name: string, dups: Duplicates) -> (Node_Index, Presence) #no_bounds_check {
-	cells := row_cells(doc, t.keys_n, at)
-	keys := table_keys_at(doc, t.keys_lo, t.keys_n)
-	f := doc.format
-	// The slots hold each key's first column, which is its only one in a table whose keys are unique.
-	if t.slots_len != 0 && (t.unique_keys || dups != .Last) {
-		slots := doc.ext.format.(Tabular_Ext).slots[t.slots_lo:][:t.slots_len]
-		mask := t.slots_len - 1
-		for i := f.key_hash(transmute([]u8)name, {n = u32(len(name)), kind = .String}) & mask; slots[i] != 0; i = (i + 1) & mask {
-			col := Node_Index(slots[i]) - 1
-			if doc_names(doc, keys[col], name) {
-				if int(col) < cells {
-					return at + 1 + col, .Found
-				}
-				break
-			}
-		}
-		return NO_NODE, .Missing
-	}
-	found := NO_NODE
-	for j in 0 ..< cells {
-		if doc_names(doc, keys[j], name) {
-			found = at + 1 + Node_Index(j)
-			if dups != .Last || t.unique_keys {
-				break
-			}
-		}
-	}
-	return found, .Found if found != NO_NODE else .Missing
-}
-
-// The distinct keys of row `at` of table `t`.
-@(private)
-row_length :: proc "contextless" (doc: ^Document, t: Table, at: Node_Index) -> int #no_bounds_check {
-	cells := row_cells(doc, t.keys_n, at)
-	if t.unique_keys {
-		return cells
-	}
-	c := Children{container = at, next = at + 1, keys_lo = t.keys_lo, keys_n = t.keys_n}
-	for {
-		if _, p := next_cell(doc, &c, row_policy(doc, .Default)); p != .Found {
-			return int(c.place)
-		}
-	}
-}
-
-// `next_child` over a table's row: each cell as written under `.Group`, for a walk from `named` and for a table of
-// unique keys, else each distinct key with the cell `dups` takes. A cell's key is no node, but `cell_key`'s.
-@(private)
-next_cell :: proc "contextless" (doc: ^Document, c: ^Children, dups: Duplicates) -> (value: Node_Index, p: Presence) #no_bounds_check {
-	keys := table_keys_at(doc, c.keys_lo, c.keys_n)
-	cells := Node_Index(row_cells(doc, c.keys_n, c.container))
-	kept := table_kept(doc)
-	next: for c.next < c.container + 1 + cells {
-		j := c.next - c.container - 1
-		value = c.next
-		k := keys[j]
-		c.next += 1
-		if c.named {
-			if !doc_names(doc, k, c.name) || !c.once && kept != .All && cell_dropped(doc, keys, int(j), int(cells), kept) {
-				continue
-			}
-		} else if !c.once && kept == .Last {
-			if cell_dropped(doc, keys, int(j), int(cells), kept) {
-				continue
-			}
-		} else if !c.once && dups != .Group {
-			for o in 0 ..< j {
-				if doc_same_keys(doc, keys[o], k) {
-					continue next
-				}
-			}
-			if dups != .First {
-				for o in j + 1 ..< cells {
-					if doc_same_keys(doc, keys[o], k) {
-						value = c.container + 1 + o
-					}
-				}
-			}
-		}
-		c.place += 1
-		return value, .Found
-	}
-	return NO_NODE, .Missing
-}
-
-// The key of the cell `next_child` last gave from `c`, a cursor over a table's row, which `next_child` gives `NO_NODE`
-// for as the key has no node: the cursor's `keys_n` is not 0.
-@(require_results)
-cell_key :: proc "contextless" (r: Reader, c: Children) -> Token #no_bounds_check {
-	return table_keys_at(r.doc, c.keys_lo, c.keys_n)[c.next - c.container - 2]
-}
-
 // Whether `name` is one the format of `doc` reads as an expanded name.
 @(private)
 names_expanded :: #force_inline proc "contextless" (doc: ^Document, name: string) -> bool {
 	return doc.format.expanded != nil && len(name) > 0 && name[0] == '{'
-}
-
-// Whether key node `k` of `doc` reads as `name`, by the format's reading for an `expanded` one, which sets `unknown`
-// for a key whose document did not keep what decides it.
-@(private)
-key_at_names :: #force_inline proc "contextless" (doc: ^Document, k: Node_Index, name: string, expanded: bool, unknown: ^bool) -> bool #no_bounds_check {
-	if !expanded {
-		return doc_names(doc, doc.nodes[k], name)
-	}
-	p := doc.format.expanded(doc, k, name)
-	unknown^ ||= p == .Not_Loaded
-	return p == .Found
 }
 
 // Whether key `t` of `doc` reads as `name`.

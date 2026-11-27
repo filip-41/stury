@@ -864,7 +864,6 @@ rebuild_markup_ext :: proc(
 		dtd      = old_m.dtd,
 		whole    = old_m.whole,
 	}
-	ext = tape.ext_make(doc.ext.held, kept, doc_alloc) or_return
-	ext.origin = doc.ext.origin
+	ext = tape.ext_make(doc.ext.held, kept, doc_alloc, doc.ext.origin) or_return
 	return ext, nil
 }

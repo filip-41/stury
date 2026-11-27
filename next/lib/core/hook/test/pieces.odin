@@ -39,7 +39,7 @@ piece_path_clears_open_on_oom :: proc(t: ^testing.T) {
 
 	p: tape.Pieces
 	p.allocator = context.allocator
-	defer tape.destroy_pieces(&p)
+	defer tape.destroy(&p)
 
 	s, serr := hook.piece_state(&p, hook.Piece_State)
 	testing.expect_value(t, serr, nil)

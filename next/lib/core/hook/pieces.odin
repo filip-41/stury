@@ -145,7 +145,7 @@ piece_path :: proc(p: ^tape.Pieces, src: []u8, f: ^tape.Format) -> runtime.Alloc
 		} else {
 			room := max(tape.text_room(f, src, lv.key), int(lv.key.n))
 			resize(&names, at + room) or_return
-			text, ok := tape.node_text_of(f, src, lv.key, names[at:])
+			text, ok := tape.node_text(f, src, lv.key, names[at:])
 			if !ok {
 				text = ""
 			}
