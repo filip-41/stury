@@ -1,5 +1,6 @@
 # Build outputs
 /build/
+/next/build/
 *.o
 *.obj
 *.exe
@@ -23,6 +24,9 @@ __pycache__/
 !/core/regex/tables/*.bin
 !/core/rules/tables/*.bin
 !/core/spell/entities/*.bin
+!/next/lib/base/regex/tables/*.bin
+!/next/lib/base/spell/entities/*.bin
+!/next/lib/base/spell/zmij/*.bin
 *.dmp
 
 # Editor and OS droppings

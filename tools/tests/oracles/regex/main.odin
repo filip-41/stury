@@ -1,7 +1,8 @@
 // Reads the ECMA patterns for test_regex.py from the file named by the first argument, a JSON array of [pattern, text]
-// pairs. It prints one line per pair: `E` for a pattern core/regex refuses (with the message when the search fails),
-// `W` where a search that reads no bounds disagrees with the search that does, `-` for no match, otherwise each group's
-// start and length in code points with the whole match first, -1 -1 for a group that did not take part.
+// pairs, through the engine that `-collection:engine=` names, `engines/v1` for core/regex or `engines/v2` for
+// lib/base/regex. It prints one line per pair: `E` for a pattern the engine refuses (with the message when the search
+// fails), `W` where a search that reads no bounds disagrees with the search that does, `-` for no match, otherwise
+// each group's start and length in code points with the whole match first, -1 -1 for a group that did not take part.
 package regex_oracle
 
 import "core:encoding/json"
@@ -10,7 +11,7 @@ import "core:mem/virtual"
 import "core:os"
 import "core:strings"
 import "core:unicode/utf8"
-import regex "../../../../core/regex"
+import "engine:ecma"
 
 main :: proc() {
 	input, read_err := os.read_entire_file(os.args[1] if len(os.args) > 1 else "", context.allocator)
@@ -19,7 +20,7 @@ main :: proc() {
 		fmt.eprintln("usage: ecma_probe FILE, of a JSON array of [pattern, text] pairs")
 		os.exit(2)
 	}
-	scratch: regex.Scratch
+	scratch := ecma.scratch_make(context.allocator)
 	for c in cases {
 		if len(c) != 2 {
 			fmt.eprintln("usage: ecma_probe FILE, of a JSON array of [pattern, text] pairs")
@@ -28,20 +29,20 @@ main :: proc() {
 		arena: virtual.Arena
 		_ = virtual.arena_init_growing(&arena)
 		defer virtual.arena_destroy(&arena)
-		re, err := regex.compile(c[0], {ecma = true}, virtual.arena_allocator(&arena))
-		if err != "" {
+		re, compiled := ecma.compile(c[0], virtual.arena_allocator(&arena))
+		if !compiled {
 			fmt.println("E")
 			continue
 		}
-		caps := make([]int, 2 * len(regex.group_names(&re)), virtual.arena_allocator(&arena))
-		found, search_err := regex.search(&re, c[1], 0, caps, &scratch)
+		caps := make([]int, 2 * ecma.groups(&re), virtual.arena_allocator(&arena))
+		found, search_err := ecma.search(&re, c[1], caps, &scratch)
 		if search_err != "" {
 			fmt.println("E", search_err)
 			continue
 		}
 		// A search that reads no bounds uses the automaton where there is one. It must agree on whether there is a
 		// match.
-		if whether, _ := regex.search(&re, c[1], 0, nil, &scratch); whether != found {
+		if whether, _ := ecma.search(&re, c[1], nil, &scratch); whether != found {
 			fmt.println("W")
 			continue
 		}

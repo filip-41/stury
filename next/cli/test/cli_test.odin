@@ -1,0 +1,1820 @@
+package cli_tests
+
+import "core:fmt"
+import "core:io"
+import "core:math/rand"
+import "core:os"
+import "core:path/filepath"
+import "core:strconv"
+import "core:strings"
+import "core:testing"
+import "stury:cli"
+import "stury:engine"
+import "stury:lib/core/tape"
+import "stury:testkit"
+
+Run_Out :: struct {
+	code:   int,
+	stdout: string,
+	stderr: string,
+}
+
+run_out_destroy :: proc(r: ^Run_Out, alloc := context.allocator) {
+	delete(r.stdout, alloc)
+	delete(r.stderr, alloc)
+	r^ = {}
+}
+
+invoke :: proc(args: []string, stdin_bytes: Maybe([]u8) = nil, stdout_tty := false, stdin_tty := false, alloc := context.allocator) -> Run_Out {
+	ob := strings.builder_make(alloc)
+	eb := strings.builder_make(alloc)
+	code := cli.run_cli(args, stdin_bytes, strings.to_writer(&ob), strings.to_writer(&eb), stdout_tty, stdin_tty, alloc)
+	return {code = code, stdout = strings.to_string(ob), stderr = strings.to_string(eb)}
+}
+
+invoke_str :: proc(args: []string, stdin_text: string, alloc := context.allocator) -> Run_Out {
+	return invoke(args, transmute([]u8)stdin_text, false, false, alloc)
+}
+
+make_tmp_dir :: proc(t: ^testing.T, alloc := context.allocator) -> string {
+	base, ok := os.lookup_env("TMPDIR", alloc)
+	if !ok { base, ok = os.lookup_env("TEMP", alloc) }
+	if !ok { base, ok = os.lookup_env("TMP", alloc) }
+	if !ok || base == "" {
+		if ok { delete(base, alloc) }
+		base = strings.clone("/tmp", alloc)
+	}
+	digits: [24]u8
+	found: string
+	for _ in 0 ..< 32 {
+		num := strconv.write_uint(digits[:], rand.uint64(), 10)
+		name := strings.concatenate({"stury-cli-test-", num}, alloc)
+		cand, jerr := filepath.join({base, name}, alloc)
+		delete(name, alloc)
+		if jerr != nil { continue }
+		if err := os.make_directory(cand); err == nil { found = cand; break }
+		delete(cand, alloc)
+	}
+	delete(base, alloc)
+	testing.expect(t, found != "", "could not create temporary directory")
+	return found
+}
+
+drop_tmp_dir :: proc(dir: string, alloc := context.allocator) {
+	_ = os.remove_all(dir)
+	delete(dir, alloc)
+}
+
+join_path :: proc(t: ^testing.T, dir, name: string, alloc := context.allocator) -> string {
+	p, err := filepath.join({dir, name}, alloc)
+	testing.expect(t, err == nil, "filepath.join failed")
+	return p
+}
+
+write_tmp_file :: proc(t: ^testing.T, dir, name: string, data: []u8, alloc := context.allocator) -> string {
+	p := join_path(t, dir, name, alloc)
+	err := os.write_entire_file(p, data)
+	testing.expectf(t, err == nil, "write %s failed: %v", p, err)
+	return p
+}
+
+@(test)
+parses_args_help_version_and_errors :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	{
+		r := invoke({"--help"}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "--jsonpath"), r.stdout)
+	}
+	for sub in ([]string{"check", "fmt", "edit", "diff", "schema"}) {
+		r := invoke({sub, "--help"}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, sub), r.stdout)
+	}
+	{
+		r := invoke({"--version"}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.has_prefix(r.stdout, "stury-"), r.stdout)
+	}
+	{
+		r := invoke({"--build-configuration"}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "odin "), r.stdout)
+	}
+	{
+		r := invoke(nil, nil, true, true); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 2)
+		testing.expect(t, strings.contains(r.stderr, "Usage:"), r.stderr)
+	}
+	bad_cases := [][]string {
+		{"--unknown-flag", "."},
+		{"--from", "bogusfmt", "."},
+		{"--to", "bogusfmt", "."},
+		{"--from", "table", "."},
+		{"--from", "markdown", "."},
+		{"--indent", "9", "."},
+		{"--arg", "k"},
+		{"-L"},
+		{"edit", "-i", ".a=1"},
+		{"fmt", "-i", "-"},
+		{"--no-filename", ".a"},
+		{"diff", "--set", "--position", "a", "b"},
+		{"check", "--jsonpath", "."},
+	}
+	for bc in bad_cases {
+		r := invoke_str(bc, "{}"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 2)
+		testing.expect(t, len(r.stderr) > 0, fmt.tprintf("expected stderr for %v", bc))
+	}
+}
+
+@(test)
+jq_core_flags_and_exit_codes :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	{
+		r := invoke_str({"-r", ".a"}, `{"a":"hi\n"}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "hi\n\n")
+	}
+	{
+		r := invoke_str({"-j", ".[]"}, `["a","b"]`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "ab")
+	}
+	{
+		r := invoke_str({"--raw-output0", ".[]"}, `["a","b"]`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "a\x00b\x00")
+	}
+	{
+		r := invoke_str({"-c", "-S", "."}, `{"z":1,"a":2}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "{\"a\":2,\"z\":1}\n")
+	}
+	{
+		r := invoke_str({"--indent", "4", "."}, `[1]`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "[\n    1\n]\n")
+	}
+	{
+		r := invoke_str({"--tab", "."}, `[1]`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "[\n\t1\n]\n")
+	}
+	{
+		r := invoke_str({"-a", "."}, "\"é\""); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\"\\u00e9\"\n")
+	}
+	{
+		r := invoke_str({"-C", "-c", "."}, `{"a":1}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "\e["), r.stdout)
+	}
+	{
+		r := invoke({"-n", "--arg", "x", "hi", "--argjson", "n", "[1,2]", "{$x,$n,named:$ARGS.named.x}"}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "\"x\": \"hi\""), r.stdout)
+	}
+	{
+		r := invoke_str({"-n", "--args", "$ARGS.positional", "--", "a", "b"}, ""); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "\"a\""), r.stdout)
+	}
+	{
+		r := invoke_str({"-n", "[inputs]"}, "{\"x\":1}\n{\"x\":2}\n"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "\"x\": 2"), r.stdout)
+	}
+	{
+		r := invoke_str({"-c", "-s", "."}, "1\n2\n3\n"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "[1,2,3]\n")
+	}
+	{
+		r := invoke_str({"-R", "."}, "a\nb"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\"a\"\n\"b\"\n")
+	}
+	{
+		r := invoke_str({"-R", "-c", "."}, ""); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "")
+	}
+	{
+		r := invoke_str({"-Rs", "."}, ""); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\"\"\n")
+	}
+	{
+		r0 := invoke_str({"-e", "true"}, "null"); defer run_out_destroy(&r0); testing.expect_value(t, r0.code, 0)
+		r1 := invoke_str({"-e", "false"}, "null"); defer run_out_destroy(&r1); testing.expect_value(t, r1.code, 1)
+		r4 := invoke_str({"-e", "empty"}, "null"); defer run_out_destroy(&r4); testing.expect_value(t, r4.code, 4)
+		r3 := invoke_str({"[1,2"}, "null"); defer run_out_destroy(&r3); testing.expect_value(t, r3.code, 3)
+		r5 := invoke_str({"."}, "{bad"); defer run_out_destroy(&r5); testing.expect_value(t, r5.code, 5)
+		rh := invoke_str({"-n", `"oops" | halt_error(7)`}, ""); defer run_out_destroy(&rh); testing.expect_value(t, rh.code, 7)
+	}
+	{
+		r := invoke_str({"--seq", "-c", "."}, "\x1e1\n\x1e2\n"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\x1e1\n\x1e2\n")
+	}
+	{
+		r := invoke_str({"--stream", "-c", "."}, `{"a":1}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "[[\"a\"],1]\n[[\"a\"]]\n")
+	}
+	{
+		r := invoke_str({"--stream-errors", "-c", "."}, "{\"a\":1}\n{bad\n"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "[[\"a\"],1]"), r.stdout)
+	}
+}
+
+@(test)
+jq_files_modules_rawfile_slurpfile_and_each :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+	mod_dir := join_path(t, dir, "mods"); defer delete(mod_dir)
+	testing.expect(t, os.make_directory(mod_dir) == nil, "mkdir mods")
+
+	mod_p := write_tmp_file(t, mod_dir, "m.jq", transmute([]u8)string("def dbl: . * 2;\n")); defer delete(mod_p)
+	filt_p := write_tmp_file(t, dir, "f.jq", transmute([]u8)string("import \"m\" as m; (.v | m::dbl) + ($raw | length) + ($sl | length)\n")); defer delete(filt_p)
+	raw_p := write_tmp_file(t, dir, "raw.txt", transmute([]u8)string("abc")); defer delete(raw_p)
+	sl_p := write_tmp_file(t, dir, "sl.json", transmute([]u8)string("10\n20\n")); defer delete(sl_p)
+	d1_p := write_tmp_file(t, dir, "a.json", transmute([]u8)string(`{"v":5}`)); defer delete(d1_p)
+	d2_p := write_tmp_file(t, dir, "b.json", transmute([]u8)string(`{"v":7}`)); defer delete(d2_p)
+
+	r := invoke({"-L", mod_dir, "-f", "--rawfile", "raw", raw_p, "--slurpfile", "sl", sl_p, "--each", "-c", filt_p, d1_p, d2_p}); defer run_out_destroy(&r)
+	testing.expect_value(t, r.code, 0)
+	testing.expect(t, strings.contains(r.stdout, "15\n"), r.stdout)
+	testing.expect(t, strings.contains(r.stdout, "19\n"), r.stdout)
+	testing.expect(t, strings.contains(r.stdout, d1_p), r.stdout)
+}
+
+@(test)
+engine_features_explain_where_threads_dups_and_quarantine :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	{
+		r := invoke_str({"--explain", "-c", ".a"}, `{"a":1,"b":2}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "1\n")
+		testing.expect(t, strings.contains(r.stderr, "route:"), r.stderr)
+	}
+	{
+		dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+		p := write_tmp_file(t, dir, "w.json", transmute([]u8)string("{\n  \"a\": {\n    \"b\": 42\n  }\n}\n")); defer delete(p)
+		r := invoke({"--where", "-c", ".a.b", p}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, ":3:10: 42\n"), r.stdout)
+	}
+	{
+		doc, berr := engine.build(transmute([]u8)string(`{"k":99}`), engine.spec_of_id(.Json), {})
+		testing.expect(t, berr == nil, "build")
+		defer tape.destroy_document(&doc)
+		cbor_bytes, _, werr := engine.write(&doc, engine.spec_of_id(.Cbor), {})
+		testing.expect(t, werr == nil, "write cbor")
+		defer delete(cbor_bytes)
+		r := invoke({"--where", "--from", "cbor", "-c", ".k"}, cbor_bytes); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "byte ") && strings.contains(r.stdout, ": 99\n"), r.stdout)
+	}
+	{
+		r := invoke_str({"--dups", "refuse", ".a"}, `{"a":1,"a":2}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 5)
+	}
+	{
+		rl := invoke_str({"--dups", "last", "-c", ".a"}, `{"a":1,"a":2}`); defer run_out_destroy(&rl)
+		rf := invoke_str({"--dups", "first", "-c", ".a"}, `{"a":1,"a":2}`); defer run_out_destroy(&rf)
+		testing.expect_value(t, rl.code, 0); testing.expect_value(t, rl.stdout, "2\n")
+		testing.expect_value(t, rf.code, 0); testing.expect_value(t, rf.stdout, "1\n")
+	}
+	{
+		dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+		qp := join_path(t, dir, "bad.ndjson"); defer delete(qp)
+		dp := write_tmp_file(t, dir, "in.ndjson", transmute([]u8)string("{\"a\":1}\n{bad\n{\"a\":3}\n")); defer delete(dp)
+		r := invoke({"--from", "ndjson", "--skip-bad", "--quarantine", qp, "-c", ".a", dp}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 5)
+		testing.expect_value(t, r.stdout, "1\n3\n")
+		qdata, qerr := os.read_entire_file_from_path(qp, context.allocator); testing.expect(t, qerr == nil, "read quarantine")
+		defer delete(qdata)
+		testing.expect(t, strings.contains(string(qdata), "{bad"), string(qdata))
+	}
+	{
+		r := invoke_str({"--max-depth", "2", "."}, `[[[1]]]`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 5)
+	}
+	{
+		r := invoke_str({"--threads", "2", "--from", "ndjson", "-c", ".x"}, "{\"x\":1}\n{\"x\":2}\n{\"x\":3}\n"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "1\n2\n3\n")
+	}
+}
+
+@(test)
+multiformat_query_and_to_conversion :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	{
+		r := invoke_str({"--from", "toml", "-c", ".pkg.name"}, "[pkg]\nname = \"stury\"\n"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\"stury\"\n")
+	}
+	{
+		r := invoke_str({"--from", "xml", "-c", ".root.item"}, "<root><item>hi</item></root>"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\"hi\"\n")
+	}
+	{
+		r := invoke_str({"--from", "csv", "-c", ".a"}, "a,b\n1,2\n3,4\n"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\"1\"\n\"3\"\n")
+	}
+	{
+		r := invoke_str({"--to", "toml", "."}, `{"app":{"port":8080}}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "[app]") && strings.contains(r.stdout, "port = 8080"), r.stdout)
+	}
+	{
+		r := invoke_str({"--to", "xml", "."}, `{"root":{"item":"ok"}}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "<root>") && strings.contains(r.stdout, "<item>ok</item>"), r.stdout)
+	}
+	{
+		r := invoke_str({"--to", "csv", ".[]"}, `[{"a":1,"b":2},{"a":3,"b":4}]`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "a,b\n1,2\n3,4"), r.stdout)
+	}
+	{
+		rx := invoke_str({"--from", "xml", "--to", "xml", "-c", `.r.a.&["k"] = "2"`}, `<r><a aria-label="x">t</a></r>`); defer run_out_destroy(&rx)
+		testing.expect_value(t, rx.code, 0)
+		testing.expect_value(t, rx.stdout, "<r><a aria-label=\"x\" k=\"2\">t</a></r>\n")
+	}
+	{
+		rs := invoke_str({"--from", "xml", "--to", "xml", "-c", `.`}, `<r><a aria-label="x">t</a></r>`); defer run_out_destroy(&rs)
+		testing.expect_value(t, rs.code, 0)
+		testing.expect_value(t, rs.stdout, "<r><a aria-label=\"x\">t</a></r>\n")
+	}
+	{
+		rj := invoke_str({"--from", "jsonc", "--to", "jsonc", "."}, "/* c */\n{\"a\":1}\n"); defer run_out_destroy(&rj)
+		testing.expect_value(t, rj.code, 0)
+		testing.expect(t, strings.contains(rj.stdout, "/* c */") && strings.contains(rj.stdout, "\"a\": 1"), rj.stdout)
+	}
+}
+
+@(test)
+jsonpath_queries_and_options :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	{
+		r := invoke_str({"--jsonpath", "-c", "$.store.book[?@.price < 10].title"}, `{"store":{"book":[{"title":"A","price":5},{"title":"B","price":15}]}}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\"A\"\n")
+	}
+	{
+		r := invoke_str({"--jsonpath", "--explain", "-c", "$..x"}, `{"a":{"x":1},"b":{"x":2}}`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "1\n2\n")
+		testing.expect(t, strings.contains(r.stderr, "route:"), r.stderr)
+	}
+	{
+		dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+		p := write_tmp_file(t, dir, "jp.json", transmute([]u8)string("{\n  \"items\": [\"ok\"]\n}\n")); defer delete(p)
+		r := invoke({"--jsonpath", "--where", "-c", "$.items[0]", p}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect(t, strings.contains(r.stdout, "$['items'][0]") && strings.contains(r.stdout, ":2:13: "), r.stdout)
+	}
+	{
+		r3 := invoke_str({"--path", "$["}, `{}`); defer run_out_destroy(&r3); testing.expect_value(t, r3.code, 3)
+		r4 := invoke_str({"--jsonpath", "-e", "$.missing"}, `{}`); defer run_out_destroy(&r4); testing.expect_value(t, r4.code, 4)
+		r1 := invoke_str({"--jsonpath", "-e", "$.f"}, `{"f":false}`); defer run_out_destroy(&r1); testing.expect_value(t, r1.code, 1)
+	}
+}
+
+@(test)
+parallel_threads_parity_and_errors :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	// Multi-record NDJSON testing `-e`, runtime errors, halt_error, preloaded globals, and jsonpath under `--threads 4`.
+	sb := strings.builder_make(context.allocator); defer strings.builder_destroy(&sb)
+	for i in 0 ..< 24 {
+		fmt.sbprintf(&sb, "{{\"k\":%d,\"ok\":%s}}\n", i, "false" if i == 23 else "true")
+	}
+	nd := strings.to_string(sb)
+	raw_p := write_tmp_file(t, dir, "raw.txt", transmute([]u8)string("hi")); defer delete(raw_p)
+	sl_p := write_tmp_file(t, dir, "sl.json", transmute([]u8)string("10\n20\n")); defer delete(sl_p)
+
+	r_e1 := invoke_str({"--threads", "1", "--from", "ndjson", "-e", ".ok"}, nd); defer run_out_destroy(&r_e1)
+	r_e4 := invoke_str({"--threads", "4", "--from", "ndjson", "-e", ".ok"}, nd); defer run_out_destroy(&r_e4)
+	testing.expect_value(t, r_e1.code, 1)
+	testing.expect(t, r_e1.stderr == "", r_e1.stderr)
+	testing.expect_value(t, r_e4.code, 1)
+	testing.expect(t, r_e4.stderr == "", r_e4.stderr)
+	testing.expect_value(t, r_e4.stdout, r_e1.stdout)
+
+	r_emp := invoke_str({"--threads", "4", "--from", "ndjson", "-e", "empty"}, nd); defer run_out_destroy(&r_emp)
+	testing.expect_value(t, r_emp.code, 4)
+
+	r_g1 := invoke_str({"--threads", "1", "--from", "ndjson", "-c", "--argjson", "n", "5", "--rawfile", "r", raw_p, "--slurpfile", "s", sl_p, ".k + $n + ($r|length) + ($s|length)"}, nd); defer run_out_destroy(&r_g1)
+	r_g4 := invoke_str({"--threads", "4", "--from", "ndjson", "-c", "--argjson", "n", "5", "--rawfile", "r", raw_p, "--slurpfile", "s", sl_p, ".k + $n + ($r|length) + ($s|length)"}, nd); defer run_out_destroy(&r_g4)
+	testing.expect_value(t, r_g4.code, 0)
+	testing.expect_value(t, r_g4.stdout, r_g1.stdout)
+
+	r_halt := invoke_str({"--threads", "4", "--from", "ndjson", `if .k == 7 then ("boom" | halt_error(9)) else .k end`}, nd); defer run_out_destroy(&r_halt)
+	testing.expect_value(t, r_halt.code, 9)
+	testing.expect(t, strings.contains(r_halt.stderr, "boom"), r_halt.stderr)
+
+	r_err := invoke_str({"--threads", "4", "--from", "ndjson", `if .k == 5 then ("x" + 1) else .k end`}, nd); defer run_out_destroy(&r_err)
+	testing.expect_value(t, r_err.code, 5)
+	testing.expect(t, len(r_err.stderr) > 0, "expected runtime error message on parallel worker error")
+
+	r_jp := invoke_str({"--jsonpath", "--threads", "4", "--from", "ndjson", "-e", "$.ok"}, nd); defer run_out_destroy(&r_jp)
+	testing.expect_value(t, r_jp.code, 1)
+	r_jpm := invoke_str({"--jsonpath", "--threads", "4", "--from", "ndjson", "-e", "$.missing"}, nd); defer run_out_destroy(&r_jpm)
+	testing.expect_value(t, r_jpm.code, 4)
+}
+
+@(test)
+engine_fast_paths_spine_pred_proj_files :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	// Build a >550 KiB JSON array of objects to exceed `engine.SPINE_PARALLEL_FROM` (512 KiB).
+	ab := strings.builder_make(context.allocator); defer strings.builder_destroy(&ab)
+	strings.write_byte(&ab, '[')
+	for i in 0 ..< 14000 {
+		if i > 0 {
+			strings.write_byte(&ab, ',')
+		}
+		fmt.sbprintf(&ab, "{{\"k\":%d,\"pad\":\"abcdefghijklmnopqrstuvwxyz\"}}", i)
+	}
+	strings.write_byte(&ab, ']')
+	big_arr := strings.to_string(ab)
+
+	// Spine_Parallel (.Stream).
+	rs1 := invoke_str({"--threads", "1", "-c", ".[] | .k"}, big_arr); defer run_out_destroy(&rs1)
+	rs4 := invoke_str({"--threads", "4", "--explain", "-c", ".[] | .k"}, big_arr); defer run_out_destroy(&rs4)
+	testing.expect_value(t, rs4.code, 0)
+	testing.expect(t, strings.contains(rs4.stderr, "spine_parallel"), rs4.stderr)
+	testing.expect_value(t, rs4.stdout, rs1.stdout)
+
+	// Spine_Parallel (.Collect).
+	rc1 := invoke_str({"--threads", "1", "-c", "[.[] | .k + 1]"}, big_arr); defer run_out_destroy(&rc1)
+	rc4 := invoke_str({"--threads", "4", "--explain", "-c", "[.[] | .k + 1]"}, big_arr); defer run_out_destroy(&rc4)
+	testing.expect_value(t, rc4.code, 0)
+	testing.expect(t, strings.contains(rc4.stderr, "spine_parallel"), rc4.stderr)
+	testing.expect_value(t, rc4.stdout, rc1.stdout)
+
+	// Conditional_Whole general predicate (`pred_eval` + `pred_prog`).
+	ob := strings.builder_make(context.allocator); defer strings.builder_destroy(&ob)
+	fmt.sbprintf(&ob, "{{\"items\":%s}}", big_arr)
+	big_obj := strings.to_string(ob)
+	rp1 := invoke_str({"--threads", "1", "-c", "select((.items | length) > 10 and .items[0].k == 0)"}, big_obj); defer run_out_destroy(&rp1)
+	rp4 := invoke_str({"--threads", "4", "--explain", "-c", "select((.items | length) > 10 and .items[0].k == 0)"}, big_obj); defer run_out_destroy(&rp4)
+	testing.expect_value(t, rp4.code, 0)
+	testing.expect(t, strings.contains(rp4.stderr, "conditional_whole"), rp4.stderr)
+	testing.expect_value(t, rp4.stdout, rp1.stdout)
+	rp_no := invoke_str({"--threads", "4", "--explain", "-c", "select((.items | length) > 99999 and .items[0].k == 0)"}, big_obj); defer run_out_destroy(&rp_no)
+	testing.expect_value(t, rp_no.code, 0)
+	testing.expect(t, strings.contains(rp_no.stderr, "conditional_whole"), rp_no.stderr)
+	testing.expect_value(t, rp_no.stdout, "")
+
+	// Projection_Direct JSON and CSV.
+	nd := "{\"k\":1,\"b\":\"x\"}\n{\"k\":2,\"b\":\"y\"}\n"
+	rproj := invoke_str({"--explain", "--from", "ndjson", "-c", ".k"}, nd); defer run_out_destroy(&rproj)
+	testing.expect_value(t, rproj.code, 0)
+	testing.expect(t, strings.contains(rproj.stderr, "projection_direct"), rproj.stderr)
+	testing.expect_value(t, rproj.stdout, "1\n2\n")
+
+	rproj_csv := invoke_str({"--explain", "--from", "ndjson", "--to", "csv", "{k,b}"}, nd); defer run_out_destroy(&rproj_csv)
+	testing.expect_value(t, rproj_csv.code, 0)
+	testing.expect(t, strings.contains(rproj_csv.stderr, "projection_direct"), rproj_csv.stderr)
+	testing.expect_value(t, rproj_csv.stdout, "k,b\n1,x\n2,y\n")
+
+	// Files_Parallel across 3 regular files preserves `(file_idx, rec_idx)` order.
+	p1 := write_tmp_file(t, dir, "f1.ndjson", transmute([]u8)string("{\"k\":1}\n{\"k\":2}\n")); defer delete(p1)
+	p2 := write_tmp_file(t, dir, "f2.ndjson", transmute([]u8)string("{\"k\":3}\n")); defer delete(p2)
+	p3 := write_tmp_file(t, dir, "f3.ndjson", transmute([]u8)string("{\"k\":4}\n{\"k\":5}\n")); defer delete(p3)
+	rfp := invoke({"--threads", "4", "--explain", "-c", ".k", p1, p2, p3}); defer run_out_destroy(&rfp)
+	testing.expect_value(t, rfp.code, 0)
+	testing.expect(t, strings.contains(rfp.stderr, "files_parallel"), rfp.stderr)
+	testing.expect_value(t, rfp.stdout, "1\n2\n3\n4\n5\n")
+}
+
+@(private = "file")
+Fail_Sink :: struct {
+	fail_write: bool,
+	fail_flush: bool,
+	writes:     int,
+	flushes:    int,
+	out:        [dynamic]u8,
+}
+
+@(private = "file")
+fail_sink_writer :: proc(fs: ^Fail_Sink) -> io.Writer {
+	p :: proc(d: rawptr, mode: io.Stream_Mode, buf: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
+		s := (^Fail_Sink)(d)
+		#partial switch mode {
+		case .Query:
+			return io.query_utility({.Write, .Flush})
+		case .Write:
+			s.writes += 1
+			if s.fail_write {
+				return 0, .Unknown
+			}
+			append(&s.out, ..buf)
+			return i64(len(buf)), .None
+		case .Flush:
+			s.flushes += 1
+			if s.fail_flush {
+				return 0, .Unknown
+			}
+			return 0, .None
+		}
+		return 0, .Empty
+	}
+	return io.Writer{procedure = p, data = fs}
+}
+
+@(test)
+stdout_errors_unbuffered_and_one_doc :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// Failing stdout exits 2 across query and verbs.
+	{
+		fs := Fail_Sink{fail_write = true, out = make([dynamic]u8)}
+		defer delete(fs.out)
+		eb := strings.builder_make(); defer strings.builder_destroy(&eb)
+		c := cli.run_cli({"-c", "."}, transmute([]u8)string(`{"a":1}`), fail_sink_writer(&fs), strings.to_writer(&eb), false, false)
+		testing.expect_value(t, c, 2)
+	}
+	{
+		fs := Fail_Sink{fail_flush = true, out = make([dynamic]u8)}
+		defer delete(fs.out)
+		eb := strings.builder_make(); defer strings.builder_destroy(&eb)
+		c := cli.run_cli({"fmt", "-c"}, transmute([]u8)string(`{"a": 1}`), fail_sink_writer(&fs), strings.to_writer(&eb), false, false)
+		testing.expect_value(t, c, 2)
+	}
+	{
+		fs := Fail_Sink{fail_write = true, out = make([dynamic]u8)}
+		defer delete(fs.out)
+		eb := strings.builder_make(); defer strings.builder_destroy(&eb)
+		c := cli.run_cli({"edit", ".a=2"}, transmute([]u8)string(`{"a":1}`), fail_sink_writer(&fs), strings.to_writer(&eb), false, false)
+		testing.expect_value(t, c, 2)
+	}
+
+	// `--unbuffered` flushes per emitted value.
+	{
+		fs_u := Fail_Sink{out = make([dynamic]u8)}; defer delete(fs_u.out)
+		eb_u := strings.builder_make(); defer strings.builder_destroy(&eb_u)
+		cu := cli.run_cli({"--unbuffered", "-c", ".[]"}, transmute([]u8)string("[1,2,3]"), fail_sink_writer(&fs_u), strings.to_writer(&eb_u), false, false)
+		testing.expect_value(t, cu, 0)
+		testing.expect(t, fs_u.flushes >= 3, fmt.tprintf("expected >=3 flushes, got %d", fs_u.flushes))
+
+		fs_b := Fail_Sink{out = make([dynamic]u8)}; defer delete(fs_b.out)
+		eb_b := strings.builder_make(); defer strings.builder_destroy(&eb_b)
+		cb := cli.run_cli({"-c", ".[]"}, transmute([]u8)string("[1,2,3]"), fail_sink_writer(&fs_b), strings.to_writer(&eb_b), false, false)
+		testing.expect_value(t, cb, 0)
+		testing.expect_value(t, fs_b.flushes, 1)
+	}
+
+	// `--to toml` and `--to xml` refuse a second document with exit 5.
+	{
+		rt := invoke_str({"--to", "toml", ".[]"}, `[{"a":1},{"a":2}]`); defer run_out_destroy(&rt)
+		testing.expect_value(t, rt.code, 5)
+		testing.expect(t, strings.contains(rt.stderr, "--to toml writes one document"), rt.stderr)
+		rx := invoke_str({"--to", "xml", ".[]"}, `[{"r":1},{"r":2}]`); defer run_out_destroy(&rx)
+		testing.expect_value(t, rx.code, 5)
+		testing.expect(t, strings.contains(rx.stderr, "--to xml writes one document"), rx.stderr)
+	}
+}
+
+@(test)
+format_options_isolation_and_edges :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	// XML `--infer` & TSV `--infer` + `--delimiter`.
+	{
+		rx := invoke_str({"--from", "xml", "--infer", "-c", ".r.n == 5"}, `<r><n>5</n></r>`); defer run_out_destroy(&rx)
+		testing.expect_value(t, rx.code, 0); testing.expect_value(t, rx.stdout, "true\n")
+
+		rt := invoke_str({"--from", "tsv", "--infer", "-c", ".a == 1"}, "a\tb\n1\tx\n"); defer run_out_destroy(&rt)
+		testing.expect_value(t, rt.code, 0); testing.expect_value(t, rt.stdout, "true\n")
+
+		rd := invoke_str({"--from", "csv", "--delimiter", ";", "-c", ".b"}, "a;b\n1;hi\n"); defer run_out_destroy(&rd)
+		testing.expect_value(t, rd.code, 0); testing.expect_value(t, rd.stdout, "\"hi\"\n")
+
+		rr := invoke_str({"--from", "csv", "--ragged", "--lazy-quotes", "-c", ".b"}, "a,b\n1\n2,ok\n"); defer run_out_destroy(&rr)
+		testing.expect_value(t, rr.code, 0); testing.expect_value(t, rr.stdout, "null\n\"ok\"\n")
+
+		rg := invoke_str({"--to", "csv", "--grow-header", ".[]"}, `[{"a":1},{"a":2,"b":3}]`); defer run_out_destroy(&rg)
+		testing.expect_value(t, rg.code, 0); testing.expect_value(t, rg.stdout, "a,b\n1,\n2,3\n")
+	}
+	// JSONC multi-line auto-detected from extension parses as single document, never Concatenated.
+	{
+		jc_p := write_tmp_file(t, dir, "cfg.jsonc", transmute([]u8)string("{\n  // c\n  \"a\": 1,\n  \"b\": 2\n}\n")); defer delete(jc_p)
+		r := invoke({"-c", ".a + .b", jc_p}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0); testing.expect_value(t, r.stdout, "3\n")
+	}
+	// Missing file continues to subsequent valid file and exits 2.
+	{
+		ok_p := write_tmp_file(t, dir, "ok.json", transmute([]u8)string(`{"a":7}`)); defer delete(ok_p)
+		miss_p := join_path(t, dir, "missing.json"); defer delete(miss_p)
+		r := invoke({"-c", ".a", miss_p, ok_p}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 2); testing.expect_value(t, r.stdout, "7\n")
+		testing.expect(t, len(r.stderr) > 0, "expected open error")
+	}
+	// `-n [inputs]` with multi-file CSV keeps header clean across every row.
+	{
+		c1 := write_tmp_file(t, dir, "c1.csv", transmute([]u8)string("a,b\n1,x\n")); defer delete(c1)
+		c2 := write_tmp_file(t, dir, "c2.csv", transmute([]u8)string("a,b\n2,y\n")); defer delete(c2)
+		r := invoke({"--from", "csv", "-n", "-c", "[inputs | .b]", c1, c2}); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0); testing.expect_value(t, r.stdout, "[\"x\",\"y\"]\n")
+	}
+	// Output flags: `-r -a`, `--raw-output0` NUL error, `--seq -r` no RS before raw strings, `NaN` slot 0 color, negative filter, duplicate `--arg`.
+	{
+		ra := invoke_str({"-r", "-a", "."}, `"é"`); defer run_out_destroy(&ra)
+		testing.expect_value(t, ra.code, 0); testing.expect_value(t, ra.stdout, "\"\\u00e9\"\n")
+
+		rnul := invoke_str({"--raw-output0", "."}, "\"a\\u0000b\""); defer run_out_destroy(&rnul)
+		testing.expect_value(t, rnul.code, 5)
+
+		rsr := invoke_str({"--seq", "-r", ".a"}, "\x1e{\"a\":\"hi\"}\n"); defer run_out_destroy(&rsr)
+		testing.expect_value(t, rsr.code, 0); testing.expect(t, rsr.stderr == "", rsr.stderr); testing.expect_value(t, rsr.stdout, "hi\n")
+
+		rnan := invoke_str({"-C", "-c", "nan"}, "null"); defer run_out_destroy(&rnan)
+		testing.expect_value(t, rnan.code, 0); testing.expect_value(t, rnan.stdout, "\e[0;90mnull\e[0m\n")
+
+		rneg := invoke_str({"-1"}, `{"x":1}`); defer run_out_destroy(&rneg)
+		testing.expect_value(t, rneg.code, 0); testing.expect_value(t, rneg.stdout, "-1\n")
+
+		rdup := invoke_str({"-n", "--arg", "k", "first", "--arg", "k", "second", "$k"}, ""); defer run_out_destroy(&rdup)
+		testing.expect_value(t, rdup.code, 0); testing.expect_value(t, rdup.stdout, "\"first\"\n")
+
+		rloc := invoke_str({"-n", "-c", "0 | localtime | length"}, ""); defer run_out_destroy(&rloc)
+		testing.expect_value(t, rloc.code, 0); testing.expect_value(t, rloc.stdout, "8\n")
+	}
+	// Streaming delimited spans handle unterminated final LF lines without looping.
+	{
+		nd_p := write_tmp_file(t, dir, "noeol.ndjson", transmute([]u8)string("{\"x\":1}\ntru")); defer delete(nd_p)
+		bs, bok := cli.byte_stream_open(nd_p, nil, {}, context.allocator)
+		testing.expect(t, bok, "open stream")
+		defer cli.byte_stream_close(&bs)
+		sbuf := make([dynamic]u8); defer delete(sbuf)
+		span: []u8
+		has1, d1, e1 := cli.byte_stream_next_delim_span(&bs, '\n', &span, &sbuf, true)
+		testing.expect(t, has1 && d1 && e1 == nil && string(span) == "{\"x\":1}", string(span))
+		has2, d2, e2 := cli.byte_stream_next_delim_span(&bs, '\n', &span, &sbuf, true)
+		testing.expect(t, has2 && !d2 && e2 == nil && string(span) == "tru", string(span))
+		has3, _, e3 := cli.byte_stream_next_delim_span(&bs, '\n', &span, &sbuf, true)
+		testing.expect(t, !has3 && e3 == nil, "EOF")
+	}
+}
+
+@(test)
+reaudit_parallel_streaming_and_seq_fixes :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	// 1. Allocator race safety & outcome merge under `--threads 4` on `.Records_Parallel` and `.Spine_Parallel`.
+	{
+		sb := strings.builder_make(); defer strings.builder_destroy(&sb)
+		for i in 0 ..< 600 {
+			fmt.sbprintf(&sb, "{{\"i\":%d,\"s\":\"payload-item-%d\"}}\n", i, i)
+		}
+		nd_p := write_tmp_file(t, dir, "par.ndjson", transmute([]u8)strings.to_string(sb)); defer delete(nd_p)
+		r_ok := invoke({"--threads", "4", "-c", ".i + 1", nd_p}); defer run_out_destroy(&r_ok)
+		testing.expect_value(t, r_ok.code, 0)
+		testing.expect(t, strings.has_prefix(r_ok.stdout, "1\n2\n") && strings.has_suffix(r_ok.stdout, "599\n600\n"), "parallel records order")
+
+		r_err := invoke({"--threads", "4", "-c", "if .i == 300 then error(\"boom\") else .i end", nd_p}); defer run_out_destroy(&r_err)
+		testing.expect_value(t, r_err.code, 5)
+		testing.expect(t, strings.contains(r_err.stderr, "boom"), r_err.stderr)
+
+		// Hint 1 `.Collect` (`[.[].x] | input_filename`) keeps real filename & locked allocs cleanly.
+		sp_sb := strings.builder_make(); defer strings.builder_destroy(&sp_sb)
+		strings.write_string(&sp_sb, `{"items":[`)
+		for i in 0 ..< 2500 {
+			if i > 0 { strings.write_byte(&sp_sb, ',') }
+			fmt.sbprintf(&sp_sb, "{{\"x\":%d,\"pad\":\"abcdefghijklmnopqrstuvwxyz\"}}", i)
+		}
+		strings.write_string(&sp_sb, "]}")
+		sp_p := write_tmp_file(t, dir, "spine.json", transmute([]u8)strings.to_string(sp_sb)); defer delete(sp_p)
+		r_sp := invoke({"--threads", "4", "-c", `[.items[] | .x + 1] | [length, input_filename]`, sp_p}); defer run_out_destroy(&r_sp)
+		testing.expect_value(t, r_sp.code, 0)
+		testing.expect(t, strings.contains(r_sp.stdout, "[2500,") && strings.contains(r_sp.stdout, "spine.json"), r_sp.stdout)
+	}
+
+	// 2. `.Files_Parallel`: heterogeneous formats (`--infer`), failing filename on `Read_Error`, >32KiB chunks, and blocked-direct flags.
+	{
+		j1 := write_tmp_file(t, dir, "mix1.json", transmute([]u8)string(`{"a":1,"b":"ok"}`)); defer delete(j1)
+		c1 := write_tmp_file(t, dir, "mix2.csv", transmute([]u8)string("a,b\n10,row\n")); defer delete(c1)
+		rmix := invoke({"--threads", "4", "--infer", "-c", ".", j1, c1}); defer run_out_destroy(&rmix)
+		testing.expect_value(t, rmix.code, 0)
+		testing.expect_value(t, rmix.stdout, "{\"a\":1,\"b\":\"ok\"}\n{\"a\":10,\"b\":\"row\"}\n")
+
+		g1 := write_tmp_file(t, dir, "goodf.json", transmute([]u8)string(`{"a":1}`)); defer delete(g1)
+		b2 := write_tmp_file(t, dir, "badf2.json", transmute([]u8)string(`{"a": [1, }`)); defer delete(b2)
+		rf_err := invoke({"--threads", "4", "-c", ".a", g1, b2}); defer run_out_destroy(&rf_err)
+		testing.expect_value(t, rf_err.code, 5)
+		testing.expect(t, strings.contains(rf_err.stderr, "badf2.json") && !strings.contains(rf_err.stderr, "<files>"), rf_err.stderr)
+
+		// Large > 80 KiB value across `.Files_Parallel` must never get `\n` injected mid-chunk.
+		big_pad := strings.repeat("x", 80 * 1024); defer delete(big_pad)
+		big_doc := strings.concatenate({`{"big":"`, big_pad, `","k":{"z":2,"a":1}}`}); defer delete(big_doc)
+		bf1 := write_tmp_file(t, dir, "bf1.json", transmute([]u8)big_doc); defer delete(bf1)
+		bf2 := write_tmp_file(t, dir, "bf2.json", transmute([]u8)big_doc); defer delete(bf2)
+		rbig := invoke({"--threads", "4", "-c", ".big", bf1, bf2}); defer run_out_destroy(&rbig)
+		testing.expect_value(t, rbig.code, 0)
+		want_line := strings.concatenate({`"`, big_pad, `"`}); defer delete(want_line)
+		want_two := strings.concatenate({want_line, "\n", want_line, "\n"}); defer delete(want_two)
+		testing.expect_value(t, len(rbig.stdout), len(want_two))
+		testing.expect(t, rbig.stdout == want_two, "80 KiB projection output corrupted")
+
+		rsort := invoke({"--threads", "4", "-S", "-c", ".k", bf1, bf2}); defer run_out_destroy(&rsort)
+		testing.expect_value(t, rsort.code, 0)
+		testing.expect_value(t, rsort.stdout, "{\"a\":1,\"z\":2}\n{\"a\":1,\"z\":2}\n")
+
+		rexit := invoke({"--threads", "4", "-e", ".missing", bf1, bf2}); defer run_out_destroy(&rexit)
+		testing.expect_value(t, rexit.code, 1)
+	}
+
+	// 3. Concatenated JSON under `-S`/`--explain` avoids `.Single` double-scan (`framing: concatenated`).
+	{
+		rcat := invoke_str({"--explain", "-S", "-c", ".a"}, "{\"a\":{\"y\":2,\"x\":1}}\n{\"a\":{\"z\":3}}\n"); defer run_out_destroy(&rcat)
+		testing.expect_value(t, rcat.code, 0)
+		testing.expect_value(t, rcat.stdout, "{\"x\":1,\"y\":2}\n{\"z\":3}\n")
+		testing.expect(t, strings.contains(rcat.stderr, "framing: concatenated"), rcat.stderr)
+		testing.expect(t, !strings.contains(rcat.stderr, "framing: single"), rcat.stderr)
+	}
+
+	// 4. Multi-file `--to csv` keeps header + `Table_Writer` intact across files (jq + JSONPath).
+	{
+		t1 := write_tmp_file(t, dir, "t1.json", transmute([]u8)string(`{"a":1,"b":"x"}`)); defer delete(t1)
+		t2 := write_tmp_file(t, dir, "t2.json", transmute([]u8)string(`{"a":2,"b":"y"}`)); defer delete(t2)
+		rj := invoke({"--to", "csv", "{a, b}", t1, t2}); defer run_out_destroy(&rj)
+		testing.expect_value(t, rj.code, 0)
+		testing.expect_value(t, rj.stdout, "a,b\n1,x\n2,y\n")
+		rjp := invoke({"--jsonpath", "--to", "csv", "$", t1, t2}); defer run_out_destroy(&rjp)
+		testing.expect_value(t, rjp.code, 0)
+		testing.expect_value(t, rjp.stdout, "a,b\n1,x\n2,y\n")
+	}
+
+	// 5. `-n --stream` emits `tostream` events cleanly for `inputs` / `fromstream` / `--stream-errors` and releases on early stop.
+	{
+		rs := invoke_str({"-nc", "--stream", "[inputs]"}, "{\"a\":[1,2]}\n{\"b\":true}\n"); defer run_out_destroy(&rs)
+		testing.expect_value(t, rs.code, 0)
+		testing.expect_value(t, rs.stdout, `[[["a",0],1],[["a",1],2],[["a",1]],[["a"]],[["b"],true],[["b"]]]`+"\n")
+
+		rf := invoke_str({"-nc", "--stream", "fromstream(inputs)"}, "{\"a\":1}\n"); defer run_out_destroy(&rf)
+		testing.expect_value(t, rf.code, 0)
+		testing.expect_value(t, rf.stdout, "{\"a\":1}\n")
+
+		rse := invoke_str({"-nc", "--stream", "--stream-errors", "[inputs]"}, "[1]\n:\n[2]\n"); defer run_out_destroy(&rse)
+		testing.expect_value(t, rse.code, 0)
+		testing.expect(t, strings.contains(rse.stdout, "[[0],1]") && strings.contains(rse.stdout, ",[]]"), rse.stdout)
+
+		rfirst := invoke_str({"-nc", "--stream", "first(inputs)"}, "{\"a\":[1,2,3]}\n"); defer run_out_destroy(&rfirst)
+		testing.expect_value(t, rfirst.code, 0)
+		testing.expect_value(t, rfirst.stdout, `[["a",0],1]`+"\n")
+	}
+
+	// 6. `--seq` trailing RS & error semantics, failing stdout exit 2, `-f` NUL byte exit 2, `-R` `input_line_number`, `JQ_COLORS`.
+	{
+		// Trailing RS at EOF (`\x1e[1]\x1e` and `\x1e\x1e`) yields zero empty-record parse errors.
+		sq_p := write_tmp_file(t, dir, "trail.seq", transmute([]u8)string("\x1e[1]\x1e")); defer delete(sq_p)
+		bs, bok := cli.byte_stream_open(sq_p, nil, {}, context.allocator)
+		testing.expect(t, bok, "open trail.seq")
+		defer cli.byte_stream_close(&bs)
+		sbuf := make([dynamic]u8); defer delete(sbuf)
+		span: []u8
+		h1, d1, e1 := cli.byte_stream_next_delim_span(&bs, 0x1e, &span, &sbuf, false)
+		testing.expect(t, h1 && d1 && e1 == nil && string(span) == "[1]", string(span))
+		h2, _, e2 := cli.byte_stream_next_delim_span(&bs, 0x1e, &span, &sbuf, false)
+		testing.expect(t, !h2 && e2 == nil, "trailing RS consumed cleanly")
+
+		// Non-stdin `.Seq` ignores parse errors cleanly with exit 0, while filter runtime error aborts with exit 5.
+		rseq_ok := invoke_str({"--seq", "-c", "."}, "\x1e{\"a\":1}\n\x1e[bad\n\x1e{\"a\":2}\n"); defer run_out_destroy(&rseq_ok)
+		testing.expect_value(t, rseq_ok.code, 0)
+		testing.expect_value(t, rseq_ok.stdout, "\x1e{\"a\":1}\n\x1e{\"a\":2}\n")
+
+		rseq_err := invoke_str({"--seq", "-c", `if . == 1 then error("boom") else . end`}, "\x1e1\n\x1e2\n"); defer run_out_destroy(&rseq_err)
+		testing.expect_value(t, rseq_err.code, 5)
+		testing.expect_value(t, rseq_err.stdout, "")
+
+		// `-f` with NUL byte rejected with exit 2.
+		nul_f := write_tmp_file(t, dir, "bad.jq", []u8{'.', 0, 'a'}); defer delete(nul_f)
+		rnul := invoke_str({"-f", nul_f}, `{}`); defer run_out_destroy(&rnul)
+		testing.expect_value(t, rnul.code, 2)
+		testing.expect(t, strings.contains(rnul.stderr, "NUL"), rnul.stderr)
+
+		// `-R` `input_line_number` counts newlines seen rather than unterminated EOF segments.
+		rr1 := invoke_str({"-Rc", "[., input_line_number]"}, "a"); defer run_out_destroy(&rr1)
+		testing.expect_value(t, rr1.code, 0); testing.expect_value(t, rr1.stdout, "[\"a\",0]\n")
+		rr2 := invoke_str({"-Rnc", "[inputs | [., input_line_number]]"}, "a\nb\nc"); defer run_out_destroy(&rr2)
+		testing.expect_value(t, rr2.code, 0); testing.expect_value(t, rr2.stdout, "[[\"a\",1],[\"b\",2],[\"c\",2]]\n")
+
+		// Failing `stdout_w` must return EXIT_USAGE (2) everywhere, never 0, and avoid double-write in `write_value_as_format`.
+		fs := Fail_Sink{fail_write = true}
+		fail_w := fail_sink_writer(&fs)
+		eb := strings.builder_make(); defer strings.builder_destroy(&eb)
+		big_pad2 := strings.repeat("z", 70 * 1024); defer delete(big_pad2)
+		big_json := strings.concatenate({`{"big":"`, big_pad2, `"}`}); defer delete(big_json)
+		fc := cli.run_cli({"--to", "jsonc", "."}, transmute([]u8)big_json, fail_w, strings.to_writer(&eb))
+		testing.expect_value(t, fc, 2)
+		testing.expect_value(t, fs.writes, 1)
+
+		eb2 := strings.builder_make(); defer strings.builder_destroy(&eb2)
+		fc2 := cli.run_cli({"-R", "."}, transmute([]u8)big_pad2, fail_w, strings.to_writer(&eb2))
+		testing.expect_value(t, fc2, 2)
+
+		// `$JQ_COLORS` matches `cli.tsv:708` (`:::::::::` accepted cleanly, default slot 7 preserved).
+		cols, owned, cok := cli.parse_jq_colors(":::::::::", context.allocator)
+		testing.expect(t, cok, "parse_jq_colors :::::::::")
+		testing.expect_value(t, cols[7], cli.DEFAULT_COLORS[7])
+		cfg := cli.Render_Config{colors = cols, colors_owned = owned}
+		cli.render_config_destroy(&cfg, context.allocator)
+
+		// `try input` after malformed JSON cursor failure closes cursor cleanly instead of re-polling.
+		rtry := invoke_str({"-nc", "[try input catch \"err\", try input catch \"eof\"]"}, "[1,\n"); defer run_out_destroy(&rtry)
+		testing.expect_value(t, rtry.code, 0)
+		testing.expect_value(t, rtry.stdout, "[\"err\",\"eof\"]\n")
+	}
+
+	// 7. `--to csv`/`tsv` `--grow-header` early-exit flush + leak freedom, and `Projection_Direct` tabular fallback.
+	{
+		gf1 := write_tmp_file(t, dir, "gf1.json", transmute([]u8)string(`{"a":1}`)); defer delete(gf1)
+		gf2_bad := write_tmp_file(t, dir, "gf2_bad.json", transmute([]u8)string(`{bad`)); defer delete(gf2_bad)
+		gf2_b := write_tmp_file(t, dir, "gf2_b.json", transmute([]u8)string(`{"b":2}`)); defer delete(gf2_b)
+
+		// Multi-file `--grow-header` hitting parse error on file 2 flushes buffered rows and does not leak `worker.tw`.
+		r_ge := invoke({"--to", "csv", "--grow-header", ".", gf1, gf2_bad}); defer run_out_destroy(&r_ge)
+		testing.expect_value(t, r_ge.code, 5)
+		testing.expect_value(t, r_ge.stdout, "a\n1\n")
+
+		// Multi-file `--grow-header` hitting `halt_error(1)` on file 2 flushes buffered rows and frees cleanly.
+		r_gh := invoke({"--to", "csv", "--grow-header", `if has("b") then halt_error(1) else . end`, gf1, gf2_b}); defer run_out_destroy(&r_gh)
+		testing.expect_value(t, r_gh.code, 1)
+		testing.expect_value(t, r_gh.stdout, "a\n1\n")
+
+		// Single-doc `Projection_Direct` fallback (`null.x` triggers `.Wrong_Kind` -> `eval_jq_doc`).
+		r_f1 := invoke_str({"--to", "csv", "{x: .a.x}"}, `{"a":null}`); defer run_out_destroy(&r_f1)
+		testing.expect_value(t, r_f1.code, 0)
+		testing.expect_value(t, r_f1.stdout, "x\n\n")
+
+		r_f_err := invoke_str({"--to", "csv", "{x: .b.c}"}, `{"b":1}`); defer run_out_destroy(&r_f_err)
+		testing.expect_value(t, r_f_err.code, 5)
+		testing.expect(t, !strings.contains(r_f_err.stderr, "tabular output requires serial execution"), r_f_err.stderr)
+
+		// Mixed NDJSON records across direct -> fallback -> direct keep exact row order and single header.
+		r_fmix1 := invoke_str({"--to", "csv", "{x: .a.x}"}, "{\"a\":{\"x\":1}}\n{\"a\":null}\n{\"a\":{\"x\":2}}\n"); defer run_out_destroy(&r_fmix1)
+		testing.expect_value(t, r_fmix1.code, 0)
+		testing.expect_value(t, r_fmix1.stdout, "x\n1\n\n2\n")
+
+		// Mixed NDJSON records starting with fallback -> direct suppress duplicate header cleanly.
+		r_fmix2 := invoke_str({"--to", "csv", "{x: .a.x}"}, "{\"a\":null}\n{\"a\":{\"x\":1}}\n"); defer run_out_destroy(&r_fmix2)
+		testing.expect_value(t, r_fmix2.code, 0)
+		testing.expect_value(t, r_fmix2.stdout, "x\n\n1\n")
+
+		// JSONPath `--to csv` `Projection_Direct` fallback on `.Wrong_Kind` (`[1]` / `null`) + `--to tsv` fallback.
+		r_jpfb := invoke_str({"--jsonpath", "--to", "csv", "$.a.x"}, "{\"a\":{\"x\":1}}\n[1]\n{\"a\":null}\n{\"a\":{\"x\":2}}\n"); defer run_out_destroy(&r_jpfb)
+		testing.expect_value(t, r_jpfb.code, 0)
+		testing.expect_value(t, r_jpfb.stdout, "x\n1\n\n2\n")
+
+		r_tsv := invoke_str({"--to", "tsv", "{x: .a.x}"}, "{\"a\":null}\n{\"a\":{\"x\":\"hi\"}}\n"); defer run_out_destroy(&r_tsv)
+		testing.expect_value(t, r_tsv.code, 0)
+		testing.expect_value(t, r_tsv.stdout, "x\n\nhi\n")
+
+		r_jpfb2 := invoke_str({"--jsonpath", "--to", "csv", "--out-no-header", "$.a.x"}, "[1]\n{\"a\":{\"x\":7}}\n"); defer run_out_destroy(&r_jpfb2)
+		testing.expect_value(t, r_jpfb2.code, 0)
+		testing.expect_value(t, r_jpfb2.stdout, "7\n")
+	}
+}
+
+@(test)
+plan_pinning_out_and_file_verification :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	pin_p := join_path(t, dir, "plan.json"); defer delete(pin_p)
+	nd := "{\"a\":1,\"b\":2}\n{\"a\":3,\"b\":4}\n"
+
+	// 1. `--plan-out` writes canonical deterministic JSON alongside normal query output (and `--explain`).
+	{
+		r := invoke_str({"--explain", "--plan-out", pin_p, "--from", "ndjson", "-c", ".a"}, nd); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "1\n3\n")
+		testing.expect(t, strings.contains(r.stderr, "route: projection_direct"), r.stderr)
+
+		raw, err := os.read_entire_file_from_path(pin_p, context.allocator)
+		testing.expect(t, err == nil, "read plan-out")
+		defer delete(raw)
+		txt := string(raw)
+		testing.expect(t, engine.validate(raw, engine.spec_of_id(.Json), {}) == nil, txt)
+		testing.expect(t, strings.contains(txt, `"route":"projection_direct"`), txt)
+		testing.expect(t, strings.contains(txt, `"framing":"lines"`), txt)
+		testing.expect(t, strings.contains(txt, `"hint":"projection_direct"`), txt)
+		testing.expect(t, strings.contains(txt, `"demand_kind":"partial"`), txt)
+		testing.expect(t, strings.contains(txt, `"format":"json"`), txt)
+	}
+
+	// 2. `--plan-file` succeeds (exit 0) when the route matches (without needing `--explain`).
+	{
+		r := invoke_str({"--plan-file", pin_p, "--from", "ndjson", "-c", ".a"}, nd); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "1\n3\n")
+		testing.expect_value(t, r.stderr, "")
+	}
+
+	// 3. `--plan-file` fails (exit 1) with clear diff when route / demand / hint regresses.
+	{
+		r := invoke_str({"--plan-file", pin_p, "--from", "ndjson", "-c", "."}, nd); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 1)
+		testing.expect(t, strings.contains(r.stderr, "stury: plan mismatch:"), r.stderr)
+		testing.expect(t, strings.contains(r.stderr, "expected route projection_direct, got "), r.stderr)
+		testing.expect(t, strings.contains(r.stderr, "expected demand_kind partial, got whole"), r.stderr)
+	}
+
+	// 4. `--plan-out=` and `--plan-file=` work with `--jsonpath`.
+	{
+		jp_pin := join_path(t, dir, "jp_plan.json"); defer delete(jp_pin)
+		out_flag := strings.concatenate({"--plan-out=", jp_pin}); defer delete(out_flag)
+		file_flag := strings.concatenate({"--plan-file=", jp_pin}); defer delete(file_flag)
+
+		r1 := invoke_str({"--jsonpath", out_flag, "-c", "$.a"}, `{"a":42}`); defer run_out_destroy(&r1)
+		testing.expect_value(t, r1.code, 0)
+		testing.expect_value(t, r1.stdout, "42\n")
+
+		r2 := invoke_str({"--jsonpath", file_flag, "-c", "$.a"}, `{"a":42}`); defer run_out_destroy(&r2)
+		testing.expect_value(t, r2.code, 0)
+		testing.expect_value(t, r2.stdout, "42\n")
+
+		r3 := invoke_str({"--jsonpath", file_flag, "-c", "$..a"}, `{"a":42}`); defer run_out_destroy(&r3)
+		testing.expect_value(t, r3.code, 1)
+		testing.expect(t, strings.contains(r3.stderr, "stury: plan mismatch:"), r3.stderr)
+	}
+
+	// 5. Usage/IO error cases exit `2`: unwritable/dir `--plan-out`, missing/corrupt `--plan-file`, non-query verbs.
+	{
+		r_dir := invoke_str({"--plan-out", dir, "-c", ".a"}, `{"a":1}`); defer run_out_destroy(&r_dir)
+		testing.expect_value(t, r_dir.code, 2)
+
+		missing_p := join_path(t, dir, "nope.json"); defer delete(missing_p)
+		r_miss := invoke_str({"--plan-file", missing_p, "-c", ".a"}, `{"a":1}`); defer run_out_destroy(&r_miss)
+		testing.expect_value(t, r_miss.code, 2)
+
+		bad_pin := write_tmp_file(t, dir, "bad_pin.json", transmute([]u8)string(`{"route":"whole"}`)); defer delete(bad_pin)
+		r_bad := invoke_str({"--plan-file", bad_pin, "-c", ".a"}, `{"a":1}`); defer run_out_destroy(&r_bad)
+		testing.expect_value(t, r_bad.code, 2)
+		testing.expect(t, strings.contains(r_bad.stderr, "invalid plan file"), r_bad.stderr)
+
+		r_verb := invoke_str({"check", "--plan-out", pin_p}, `{}`); defer run_out_destroy(&r_verb)
+		testing.expect_value(t, r_verb.code, 2)
+	}
+
+	// 6. `--each -n` honors `--plan-out` and `--plan-file`.
+	{
+		en_pin := join_path(t, dir, "each_null.json"); defer delete(en_pin)
+		f1 := write_tmp_file(t, dir, "en1.json", transmute([]u8)string(`{"x":1}`)); defer delete(f1)
+		r1 := invoke({"--each", "-n", "--plan-out", en_pin, "1", f1}); defer run_out_destroy(&r1)
+		testing.expect_value(t, r1.code, 0)
+		testing.expect_value(t, r1.stdout, "1\n")
+
+		r2 := invoke({"--each", "-n", "--plan-file", en_pin, "1", f1}); defer run_out_destroy(&r2)
+		testing.expect_value(t, r2.code, 0)
+
+		r3 := invoke({"--each", "-n", "--plan-file", pin_p, "1", f1}); defer run_out_destroy(&r3)
+		testing.expect_value(t, r3.code, 1)
+		testing.expect(t, strings.contains(r3.stderr, "stury: plan mismatch:"), r3.stderr)
+	}
+
+	// 7. `--plan-out` refuses symlinks and leaves target untouched.
+	{
+		orig := "untouched"
+		target_p := write_tmp_file(t, dir, "pin_target.json", transmute([]u8)orig); defer delete(target_p)
+		link_p := join_path(t, dir, "pin_link.json"); defer delete(link_p)
+		if os.symlink(target_p, link_p) == nil {
+			rl := invoke_str({"--plan-out", link_p, "-c", ".a"}, `{"a":1}`); defer run_out_destroy(&rl)
+			testing.expect_value(t, rl.code, 2)
+			testing.expect(t, strings.contains(rl.stderr, "not a regular file"), rl.stderr)
+			saved, serr := os.read_entire_file_from_path(target_p, context.allocator)
+			testing.expect(t, serr == nil)
+			defer delete(saved)
+			testing.expect_value(t, string(saved), orig)
+		}
+	}
+
+	// 8. `.Single -> .Concatenated` fallback records and validates the actual `.Concatenated` decision (jq and JSONPath).
+	{
+		concat_in := "{\"a\":1}\n{\"a\":2}\n"
+		single_in := `{"a":1}`
+		cpin := join_path(t, dir, "concat_pin.json"); defer delete(cpin)
+		spin := join_path(t, dir, "single_pin.json"); defer delete(spin)
+
+		rc_out := invoke_str({"--plan-out", cpin, "-c", ".a"}, concat_in); defer run_out_destroy(&rc_out)
+		testing.expect_value(t, rc_out.code, 0)
+		testing.expect_value(t, rc_out.stdout, "1\n2\n")
+		craw, cerr := os.read_entire_file_from_path(cpin, context.allocator); testing.expect(t, cerr == nil)
+		defer delete(craw)
+		testing.expect(t, strings.contains(string(craw), `"framing":"concatenated"`), string(craw))
+
+		rc_ok := invoke_str({"--plan-file", cpin, "-c", ".a"}, concat_in); defer run_out_destroy(&rc_ok)
+		testing.expect_value(t, rc_ok.code, 0)
+		testing.expect_value(t, rc_ok.stdout, "1\n2\n")
+
+		rs_out := invoke_str({"--plan-out", spin, "-c", ".a"}, single_in); defer run_out_destroy(&rs_out)
+		testing.expect_value(t, rs_out.code, 0)
+
+		// Single pin must fail on concatenated input with zero stdout emitted.
+		rc_bad := invoke_str({"--plan-file", spin, "-c", ".a"}, concat_in); defer run_out_destroy(&rc_bad)
+		testing.expect_value(t, rc_bad.code, 1)
+		testing.expect_value(t, rc_bad.stdout, "")
+		testing.expect(t, strings.contains(rc_bad.stderr, "expected framing single, got concatenated"), rc_bad.stderr)
+
+		// Concatenated pin must fail on single input with zero stdout emitted.
+		rs_bad := invoke_str({"--plan-file", cpin, "-c", ".a"}, single_in); defer run_out_destroy(&rs_bad)
+		testing.expect_value(t, rs_bad.code, 1)
+		testing.expect_value(t, rs_bad.stdout, "")
+		testing.expect(t, strings.contains(rs_bad.stderr, "expected framing concatenated, got single"), rs_bad.stderr)
+
+		// Same `.Single -> .Concatenated` accuracy for `--jsonpath`.
+		jp_cpin := join_path(t, dir, "jp_concat.json"); defer delete(jp_cpin)
+		rjp_out := invoke_str({"--jsonpath", "--plan-out", jp_cpin, "-c", "$.a"}, concat_in); defer run_out_destroy(&rjp_out)
+		testing.expect_value(t, rjp_out.code, 0)
+		testing.expect_value(t, rjp_out.stdout, "1\n2\n")
+		jraw, jerr := os.read_entire_file_from_path(jp_cpin, context.allocator); testing.expect(t, jerr == nil)
+		defer delete(jraw)
+		testing.expect(t, strings.contains(string(jraw), `"framing":"concatenated"`), string(jraw))
+
+		rjp_ok := invoke_str({"--jsonpath", "--plan-file", jp_cpin, "-c", "$.a"}, concat_in); defer run_out_destroy(&rjp_ok)
+		testing.expect_value(t, rjp_ok.code, 0)
+		testing.expect_value(t, rjp_ok.stdout, "1\n2\n")
+	}
+}
+
+@(test)
+universal_fault_caret_snippets_across_commands :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	// 1. Query parse fault (with UTF-8) shows file:line:col + indented source line + caret.
+	{
+		r := invoke_str({"."}, "{\n  \"é\": [1, }\n}"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 5)
+		testing.expect(t, strings.contains(r.stderr, "<stdin>:2:12:"), r.stderr)
+		testing.expect(t, strings.contains(r.stderr, "    \"é\": [1, }\n             ^\n"), r.stderr)
+	}
+
+	// 2. Query budget exceeded (`--max-depth`) shows source line + caret.
+	{
+		r := invoke_str({"--max-depth", "2", "."}, `[[[1]]]`); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 5)
+		testing.expect(t, strings.contains(r.stderr, "  [[[1]]]\n"), r.stderr)
+		testing.expect(t, strings.contains(r.stderr, "^\n"), r.stderr)
+	}
+
+	// 3. `check` syntax fault and `check --schema --report lines` validation fault show source line + caret.
+	{
+		r := invoke_str({"check"}, "{\"a\": @}"); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 5)
+		testing.expect(t, strings.contains(r.stderr, "  {\"a\": @}\n        ^\n"), r.stderr)
+
+		sch := write_tmp_file(t, dir, "s.json", transmute([]u8)string(`{"type":"object","properties":{"a":{"type":"integer"}}}`)); defer delete(sch)
+		rs := invoke_str({"check", "--schema", sch, "--report", "lines"}, `{"a":"oops"}`); defer run_out_destroy(&rs)
+		testing.expect_value(t, rs.code, 1)
+		testing.expect(t, strings.contains(rs.stderr, "  {\"a\":\"oops\"}\n"), rs.stderr)
+		testing.expect(t, strings.contains(rs.stderr, "^\n"), rs.stderr)
+	}
+
+	// 4. `fmt`, `edit`, `diff`, `schema infer` all show source line + caret on syntax faults.
+	{
+		rf := invoke_str({"fmt"}, "{\"a\": 1,\n  \"b\": ]\n}"); defer run_out_destroy(&rf)
+		testing.expect_value(t, rf.code, 5)
+		testing.expect(t, strings.contains(rf.stderr, "<stdin>:2:8:"), rf.stderr)
+		testing.expect(t, strings.contains(rf.stderr, "    \"b\": ]\n         ^\n"), rf.stderr)
+
+		re := invoke_str({"edit", ".a = 2"}, "{\"a\": [}"); defer run_out_destroy(&re)
+		testing.expect_value(t, re.code, 5)
+		testing.expect(t, strings.contains(re.stderr, "  {\"a\": [}\n         ^\n"), re.stderr)
+
+		p_ok := write_tmp_file(t, dir, "ok.json", transmute([]u8)string(`{"a":1}`)); defer delete(p_ok)
+		p_bad := write_tmp_file(t, dir, "bad.json", transmute([]u8)string("{\n  \"a\": ?\n}")); defer delete(p_bad)
+		rd := invoke({"diff", p_ok, p_bad}); defer run_out_destroy(&rd)
+		testing.expect_value(t, rd.code, 5)
+		testing.expect(t, strings.contains(rd.stderr, "bad.json:2:8:"), rd.stderr)
+		testing.expect(t, strings.contains(rd.stderr, "    \"a\": ?\n         ^\n"), rd.stderr)
+
+		ri := invoke({"schema", "infer", p_bad}); defer run_out_destroy(&ri)
+		testing.expect_value(t, ri.code, 5)
+		testing.expect(t, strings.contains(ri.stderr, "    \"a\": ?\n         ^\n"), ri.stderr)
+	}
+
+	// 5. `--jsonpath` compile error and `jq` compile error (with tab!) show source line + caret.
+	{
+		rjp := invoke_str({"--jsonpath", "$[1,"}, `{}`); defer run_out_destroy(&rjp)
+		testing.expect_value(t, rjp.code, 3)
+		testing.expect(t, strings.contains(rjp.stderr, "<jsonpath>:1:5:"), rjp.stderr)
+		testing.expect(t, strings.contains(rjp.stderr, "  $[1,\n      ^\n"), rjp.stderr)
+
+		rjq := invoke_str({"\t[1, 2"}, `{}`); defer run_out_destroy(&rjq)
+		testing.expect_value(t, rjq.code, 3)
+		testing.expect(t, strings.contains(rjq.stderr, "<top-level>:1:"), rjq.stderr)
+		testing.expect(t, strings.contains(rjq.stderr, "      [1, 2\n"), rjq.stderr)
+		testing.expect(t, strings.contains(rjq.stderr, "^\n"), rjq.stderr)
+	}
+
+	// 6. Binary CBOR parse fault cleanly skips bogus source caret snippets.
+	{
+		rcb := invoke({"--from", "cbor", "."}, []u8{0xFF, 0xFE, 0x00, 0xA2}); defer run_out_destroy(&rcb)
+		testing.expect_value(t, rcb.code, 5)
+		testing.expect(t, strings.contains(rcb.stderr, "byte "), rcb.stderr)
+		testing.expect(t, !strings.contains(rcb.stderr, "\n  "), rcb.stderr)
+	}
+}
+
+@(test)
+cli_xml_arrays_always_and_schema_end_to_end :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	schema_src := `{
+		"type": "object",
+		"properties": {
+			"root": {
+				"type": "object",
+				"properties": {
+					"title": { "type": "string" },
+					"item": { "type": "array", "items": { "type": "string" } }
+				},
+				"required": ["title", "item"]
+			}
+		},
+		"required": ["root"]
+	}`
+	schema_path := write_tmp_file(t, dir, "xml_arr.schema.json", transmute([]u8)schema_src); defer delete(schema_path)
+	xml_one :: `<root><title>hello</title><item>only</item></root>`
+	xml_two :: `<root><title>hello</title><item>a</item><item>b</item></root>`
+	xml_file := write_tmp_file(t, dir, "one.xml", transmute([]u8)string(xml_one)); defer delete(xml_file)
+
+	// 1. Query with `--xml-arrays=always` (both `=` and space forms) + jq indexing & JSONPath.
+	{
+		r := invoke_str({"--from", "xml", "--xml-arrays=always", "-c", ".root.item[0]"}, xml_one); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "\"only\"\n")
+
+		r2 := invoke_str({"--from", "xml", "--xml-arrays", "always", "-c", "."}, xml_one); defer run_out_destroy(&r2)
+		testing.expect_value(t, r2.code, 0)
+		testing.expect_value(t, r2.stdout, "{\"root\":{\"title\":[\"hello\"],\"item\":[\"only\"]}}\n")
+
+		rjp := invoke_str({"--from", "xml", "--xml-arrays=always", "--jsonpath", "-c", "$.root.item[0]"}, xml_one); defer run_out_destroy(&rjp)
+		testing.expect_value(t, rjp.code, 0)
+		testing.expect_value(t, rjp.stdout, "\"only\"\n")
+
+		// Auto-detected `.xml` file without `--from`.
+		rf := invoke({"--xml-arrays=always", "-c", ".root.item[0]", xml_file}); defer run_out_destroy(&rf)
+		testing.expect_value(t, rf.code, 0)
+		testing.expect_value(t, rf.stdout, "\"only\"\n")
+	}
+
+	// 2. Query with `--xml-arrays=schema --schema ...` (jq + JSONPath + slurp).
+	{
+		r := invoke_str({"--from", "xml", "--xml-arrays=schema", "--schema", schema_path, "-c", "."}, xml_one); defer run_out_destroy(&r)
+		testing.expect_value(t, r.code, 0)
+		testing.expect_value(t, r.stdout, "{\"root\":{\"title\":\"hello\",\"item\":[\"only\"]}}\n")
+
+		r0 := invoke_str({"--from", "xml", "--xml-arrays=schema", "--schema", schema_path, "-r", ".root.item[0]"}, xml_one); defer run_out_destroy(&r0)
+		testing.expect_value(t, r0.code, 0)
+		testing.expect_value(t, r0.stdout, "only\n")
+
+		rjp := invoke_str({"--from", "xml", "--xml-arrays=schema", "--schema", schema_path, "--jsonpath", "-c", "$.root.item[0]"}, xml_one); defer run_out_destroy(&rjp)
+		testing.expect_value(t, rjp.code, 0)
+		testing.expect_value(t, rjp.stdout, "\"only\"\n")
+
+		rs := invoke_str({"--from", "xml", "--xml-arrays=schema", "--schema", schema_path, "-s", "-c", ".[0].root.item[0]"}, xml_one); defer run_out_destroy(&rs)
+		testing.expect_value(t, rs.code, 0)
+		testing.expect_value(t, rs.stdout, "\"only\"\n")
+	}
+
+	// 3. `fmt --from xml --to json` under `always` and `schema` (direct stream & buffered `--check` path), plus XML roundtrip.
+	{
+		ra := invoke_str({"fmt", "--from", "xml", "--to", "json", "--xml-arrays=always", "-c"}, xml_one); defer run_out_destroy(&ra)
+		testing.expect_value(t, ra.code, 0)
+		testing.expect_value(t, ra.stdout, "{\"root\":{\"title\":[\"hello\"],\"item\":[\"only\"]}}\n")
+
+		rs := invoke_str({"fmt", "--from", "xml", "--to", "json", "--xml-arrays=schema", "--schema", schema_path, "-c"}, xml_one); defer run_out_destroy(&rs)
+		testing.expect_value(t, rs.code, 0)
+		testing.expect_value(t, rs.stdout, "{\"root\":{\"title\":\"hello\",\"item\":[\"only\"]}}\n")
+
+		rx := invoke_str({"fmt", "--from", "xml", "--to", "xml", "--xml-arrays=always", "-c"}, xml_one); defer run_out_destroy(&rx)
+		testing.expect_value(t, rx.code, 0)
+		testing.expect_value(t, rx.stdout, xml_one+"\n")
+
+		// Buffered `fmt --check` with `--xml-arrays=schema --to xml` confirms identical formatting.
+		rchk := invoke({"fmt", "--from", "xml", "--to", "xml", "--xml-arrays=schema", "--schema", schema_path, "-c", "--check", xml_file}); defer run_out_destroy(&rchk)
+		testing.expect_value(t, rchk.code, 1) // `one.xml` has no trailing newline, so `--check` reports unformatted (exercises buffered path!)
+	}
+
+	// 4. `check` and `validate` with `--xml-arrays=schema` and `--xml-arrays=always`.
+	{
+		// Single `<item>` passes schema expecting `"type": "array"` when `--xml-arrays=schema` is set.
+		rc1 := invoke_str({"check", "--from", "xml", "--xml-arrays=schema", "--schema", schema_path}, xml_one); defer run_out_destroy(&rc1)
+		testing.expect_value(t, rc1.code, 0)
+
+		// Multiple `<item>` also passes.
+		rc2 := invoke_str({"check", "--from", "xml", "--xml-arrays=schema", "--schema", schema_path}, xml_two); defer run_out_destroy(&rc2)
+		testing.expect_value(t, rc2.code, 0)
+
+		// Under `--xml-arrays=always`, `title` is wrapped as `["hello"]`, which fails `"title": {"type": "string"}` (`EXIT_FALSY` = 1).
+		rc_always_fail := invoke_str({"check", "--from", "xml", "--xml-arrays=always", "--schema", schema_path}, xml_one); defer run_out_destroy(&rc_always_fail)
+		testing.expect_value(t, rc_always_fail.code, 1)
+
+		// Missing required `item` fails under `--xml-arrays=schema` (`EXIT_FALSY` = 1).
+		rc_miss := invoke_str({"check", "--from", "xml", "--xml-arrays=schema", "--schema", schema_path}, `<root><title>hello</title></root>`); defer run_out_destroy(&rc_miss)
+		testing.expect_value(t, rc_miss.code, 1)
+
+		// `validate --from xml --xml-arrays=always` validates syntax cleanly.
+		rv := invoke_str({"validate", "--from", "xml", "--xml-arrays=always"}, xml_one); defer run_out_destroy(&rv)
+		testing.expect_value(t, rv.code, 0)
+	}
+
+	// 5. Usage errors (exit code 2): invalid value, missing `--schema`, non-XML `--from` / resolved format, disallowed verbs.
+	{
+		json_file := write_tmp_file(t, dir, "foo.json", transmute([]u8)string(`{"a":1}`)); defer delete(json_file)
+		bad_cases := [][]string {
+			{"--from", "xml", "--xml-arrays=bogus", "."},
+			{"--from", "xml", "--xml-arrays=schema", "."},
+			{"fmt", "--from", "xml", "--to", "json", "--xml-arrays=schema"},
+			{"check", "--from", "xml", "--xml-arrays=schema"},
+			{"validate", "--from", "xml", "--xml-arrays=schema"},
+			{"--from", "json", "--xml-arrays=always", "."},
+			{"fmt", "--from", "json", "--xml-arrays=always"},
+			// Resolved non-XML input without explicit `--from` (stdin defaults to JSON; `.json` file auto-detects JSON).
+			{"--xml-arrays=always", "."},
+			{"--xml-arrays=always", ".", json_file},
+			{"fmt", "--xml-arrays=always", json_file},
+			{"check", "--xml-arrays=always", json_file},
+			{"validate", "--xml-arrays=always", json_file},
+			// Disallowed verbs (`diff`, `edit`, `schema`).
+			{"diff", "--xml-arrays=always", xml_file, xml_file},
+			{"edit", "--xml-arrays=always", ".", xml_file},
+			{"schema", "infer", "--xml-arrays=always", xml_file},
+		}
+		for bc in bad_cases {
+			r := invoke_str(bc, `{}`); defer run_out_destroy(&r)
+			testing.expectf(t, r.code == 2, "expected exit 2 for %v, got %d (stderr=%q)", bc, r.code, r.stderr)
+		}
+	}
+
+	// 6. B2: jq `.@namespace` and `.@name` on wrapped XML `.Array` elements (including non-adjacent grouped siblings).
+	{
+		ns_xml := `<root xmlns:p="http://example.com/ns"><p:item id="1">a</p:item><other/><p:item id="2">b</p:item></root>`
+		rns := invoke_str({"--from", "xml", "--xml-arrays=always", "-c", `.root["p:item"][0] | .@namespace`}, ns_xml); defer run_out_destroy(&rns)
+		testing.expect_value(t, rns.code, 0)
+		testing.expect_value(t, rns.stdout, "\"http://example.com/ns\"\n")
+
+		rname := invoke_str({"--from", "xml", "--xml-arrays=always", "-c", `.root["p:item"][] | .@name`}, ns_xml); defer run_out_destroy(&rname)
+		testing.expect_value(t, rname.code, 0)
+		testing.expect_value(t, rname.stdout, "\"p:item\"\n\"p:item\"\n")
+	}
+
+	// 7. B5: `--explain` & `--plan-out` under `--xml-arrays=always` accurately report `.Whole` + `force_whole`.
+	{
+		pin_path := join_path(t, dir, "xml_arr_plan.json"); defer delete(pin_path)
+		rexp := invoke_str({"--from", "xml", "--xml-arrays=always", "--explain", "--plan-out", pin_path, "-c", ".root.item[0]"}, xml_one); defer run_out_destroy(&rexp)
+		testing.expect_value(t, rexp.code, 0)
+		testing.expect_value(t, rexp.stdout, "\"only\"\n")
+		testing.expect(t, strings.contains(rexp.stderr, "route: whole (hint=none"), rexp.stderr)
+		testing.expect(t, strings.contains(rexp.stderr, "caller forced whole document build"), rexp.stderr)
+		pin_raw, perr := os.read_entire_file_from_path(pin_path, context.allocator); testing.expect(t, perr == nil)
+		defer delete(pin_raw)
+		testing.expect(t, strings.contains(string(pin_raw), `"route":"whole"`), string(pin_raw))
+		testing.expect(t, strings.contains(string(pin_raw), `"hint":"none"`), string(pin_raw))
+	}
+}
+
+@(test)
+cli_multi_format_table_markdown_ddl_and_yaml_flags :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	// 1. YAML, YAML:merge, HTML, and MessagePack across validate, check, fmt, edit, diff, and query.
+	yaml_src :: "# hdr\nuser:\n  name: ada\n  age: 36\n"
+	yaml_file := write_tmp_file(t, dir, "user.yaml", transmute([]u8)string(yaml_src)); defer delete(yaml_file)
+	html_src :: `<!DOCTYPE html><html><body><p id="msg">hello</p></body></html>`
+	html_file := write_tmp_file(t, dir, "page.html", transmute([]u8)string(html_src)); defer delete(html_file)
+
+	{
+		// validate & check on YAML, HTML
+		rv := invoke({"validate", yaml_file}); defer run_out_destroy(&rv)
+		testing.expect_value(t, rv.code, 0)
+		rh := invoke({"validate", html_file}); defer run_out_destroy(&rh)
+		testing.expect_value(t, rh.code, 0)
+
+		// fmt YAML -> JSON and JSON -> YAML
+		rf1 := invoke({"fmt", "--to", "json", "-c", yaml_file}); defer run_out_destroy(&rf1)
+		testing.expect_value(t, rf1.code, 0)
+		testing.expect_value(t, rf1.stdout, "{\"user\":{\"name\":\"ada\",\"age\":36}}\n")
+
+		rf2 := invoke_str({"fmt", "--from", "json", "--to", "yaml"}, `{"user":{"name":"ada","age":36}}`); defer run_out_destroy(&rf2)
+		testing.expect_value(t, rf2.code, 0)
+		testing.expect(t, strings.contains(rf2.stdout, "name: ada"), rf2.stdout)
+
+		// fmt HTML -> JSON
+		rfh := invoke({"fmt", "--to", "json", "-c", html_file}); defer run_out_destroy(&rfh)
+		testing.expect_value(t, rfh.code, 0)
+		testing.expect(t, strings.contains(rfh.stdout, `"hello"`), rfh.stdout)
+
+		// fmt JSON -> MessagePack -> JSON + validate MessagePack
+		rfm := invoke_str({"fmt", "--from", "json", "--to", "msgpack:compact"}, `{"a":1,"b":"ok"}`); defer run_out_destroy(&rfm)
+		testing.expect_value(t, rfm.code, 0)
+		mp_file := write_tmp_file(t, dir, "data.mpk", transmute([]u8)rfm.stdout); defer delete(mp_file)
+
+		rvm := invoke({"validate", mp_file}); defer run_out_destroy(&rvm)
+		testing.expect_value(t, rvm.code, 0)
+
+		rmj := invoke({"fmt", "--to", "json", "-c", mp_file}); defer run_out_destroy(&rmj)
+		testing.expect_value(t, rmj.code, 0)
+		testing.expect_value(t, rmj.stdout, "{\"a\":1,\"b\":\"ok\"}\n")
+
+		// query (jq & JSONPath) over YAML, HTML, MessagePack
+		rqy := invoke({"-r", ".user.name", yaml_file}); defer run_out_destroy(&rqy)
+		testing.expect_value(t, rqy.code, 0)
+		testing.expect_value(t, rqy.stdout, "ada\n")
+
+		rqh := invoke({"--jsonpath", "-c", "$.html.body.p", html_file}); defer run_out_destroy(&rqh)
+		testing.expect_value(t, rqh.code, 0)
+		testing.expect_value(t, rqh.stdout, "\"hello\"\n")
+
+		rqm := invoke({"-r", ".b", mp_file}); defer run_out_destroy(&rqm)
+		testing.expect_value(t, rqm.code, 0)
+		testing.expect_value(t, rqm.stdout, "ok\n")
+
+		// edit YAML preserving comment
+		rey := invoke({"edit", ".user.age = 37", yaml_file}); defer run_out_destroy(&rey)
+		testing.expect_value(t, rey.code, 0)
+		testing.expect(t, strings.contains(rey.stdout, "# hdr") && strings.contains(rey.stdout, "37"), rey.stdout)
+
+		// diff YAML vs JSON (identical -> exit 0)
+		j_same := write_tmp_file(t, dir, "same.json", transmute([]u8)string(`{"user":{"name":"ada","age":36}}`)); defer delete(j_same)
+		rdy := invoke({"diff", yaml_file, j_same}); defer run_out_destroy(&rdy)
+		testing.expect_value(t, rdy.code, 0)
+	}
+
+	// 2. `--to table` and `--to markdown` on both `fmt` and query output.
+	{
+		rows_json :: `[{"name":"ada","age":36},{"name":"bob","age":42}]`
+		rt_fmt := invoke_str({"fmt", "--to", "table"}, rows_json); defer run_out_destroy(&rt_fmt)
+		testing.expect_value(t, rt_fmt.code, 0)
+		testing.expect(t, strings.contains(rt_fmt.stdout, "name") && strings.contains(rt_fmt.stdout, "ada") && strings.contains(rt_fmt.stdout, "42"), rt_fmt.stdout)
+
+		rm_fmt := invoke_str({"fmt", "--to", "markdown"}, rows_json); defer run_out_destroy(&rm_fmt)
+		testing.expect_value(t, rm_fmt.code, 0)
+		testing.expect(t, strings.contains(rm_fmt.stdout, "| name") && strings.contains(rm_fmt.stdout, "---:"), rm_fmt.stdout)
+
+		// Query output rendered with `--to table` and `--to markdown` via `render.odin`.
+		rt_q := invoke_str({"--to", "table", "."}, rows_json); defer run_out_destroy(&rt_q)
+		testing.expect_value(t, rt_q.code, 0)
+		testing.expect(t, strings.contains(rt_q.stdout, "ada") && strings.contains(rt_q.stdout, "bob"), rt_q.stdout)
+
+		rm_q := invoke_str({"--to", "markdown", "."}, rows_json); defer run_out_destroy(&rm_q)
+		testing.expect_value(t, rm_q.code, 0)
+		testing.expect(t, strings.contains(rm_q.stdout, "| name") && strings.contains(rm_q.stdout, "| ada"), rm_q.stdout)
+	}
+
+	// 3. SQL DDL frontend (`check --schema users.sql`, `diff --old-schema v1.sql --new-schema v2.sql`, `schema sample users.sql`).
+	{
+		ddl_v1 :: "CREATE TABLE users (\n  name VARCHAR(50) NOT NULL,\n  age INT NOT NULL CHECK (age >= 0)\n);\n"
+		ddl_v2 :: "CREATE TABLE users (\n  name VARCHAR(50) NOT NULL,\n  age INT NOT NULL CHECK (age >= 0),\n  email VARCHAR(100)\n);\n"
+		sql_v1 := write_tmp_file(t, dir, "users_v1.sql", transmute([]u8)string(ddl_v1)); defer delete(sql_v1)
+		sql_v2 := write_tmp_file(t, dir, "users_v2.sql", transmute([]u8)string(ddl_v2)); defer delete(sql_v2)
+
+		rc_ok := invoke_str({"check", "--schema", sql_v1}, `{"name":"ada","age":36}`); defer run_out_destroy(&rc_ok)
+		testing.expect_value(t, rc_ok.code, 0)
+
+		rc_bad := invoke_str({"check", "--schema", sql_v1}, `{"name":"ada","age":-3}`); defer run_out_destroy(&rc_bad)
+		testing.expect_value(t, rc_bad.code, 1)
+
+		// `--redact` masks error details on sensitive fields in `--report problem`.
+		rc_red := invoke_str({"check", "--schema", sql_v1, "--report", "problem", "--redact", "/age"}, `{"name":"ada","age":-3}`); defer run_out_destroy(&rc_red)
+		testing.expect_value(t, rc_red.code, 1)
+		testing.expect(t, strings.contains(rc_red.stdout, "[REDACTED]"), rc_red.stdout)
+
+		rd_ddl := invoke({"diff", "--old-schema", sql_v1, "--new-schema", sql_v2, "--compat", "backward"}); defer run_out_destroy(&rd_ddl)
+		testing.expect_value(t, rd_ddl.code, 0)
+
+		rs_ddl := invoke({"schema", "sample", sql_v1}); defer run_out_destroy(&rs_ddl)
+		testing.expect_value(t, rs_ddl.code, 0)
+		testing.expect(t, strings.contains(rs_ddl.stdout, `"name"`), rs_ddl.stdout)
+	}
+
+	// 4. `--yaml-schema core|json|failsafe`, `--merge-keys`, `--alias-limit` + usage error validation.
+	{
+		rf_fs := invoke_str({"fmt", "--from", "yaml", "--yaml-schema=failsafe", "--to", "json", "-c"}, "a: 1\nb: true\n"); defer run_out_destroy(&rf_fs)
+		testing.expect_value(t, rf_fs.code, 0)
+		testing.expect_value(t, rf_fs.stdout, "{\"a\":\"1\",\"b\":\"true\"}\n")
+
+		rf_js := invoke_str({"fmt", "--from", "yaml", "--yaml-schema", "json", "--to", "json", "-c"}, "a: 0x10\nb: 42\n"); defer run_out_destroy(&rf_js)
+		testing.expect_value(t, rf_js.code, 0)
+		testing.expect_value(t, rf_js.stdout, "{\"a\":\"0x10\",\"b\":42}\n")
+
+		merge_yml :: "base: &b\n  x: 1\nchild:\n  <<: *b\n  y: 2\n"
+		rf_mg := invoke_str({"fmt", "--from", "yaml", "--merge-keys", "--to", "json", "-c"}, merge_yml); defer run_out_destroy(&rf_mg)
+		testing.expect_value(t, rf_mg.code, 0)
+		testing.expect(t, strings.contains(rf_mg.stdout, `"x":1`) && strings.contains(rf_mg.stdout, `"y":2`), rf_mg.stdout)
+
+		// Finding 4 regression: `stury edit --from yaml --yaml-schema=failsafe` preserves `.Failsafe` dialect during commit.
+		re_fs := invoke_str({"edit", "--from", "yaml", "--yaml-schema=failsafe", `.b = "01"`}, "a: 1\n"); defer run_out_destroy(&re_fs)
+		testing.expect_value(t, re_fs.code, 0)
+		rf_fs_chk := invoke_str({"fmt", "--from", "yaml", "--yaml-schema=failsafe", "--to", "json", "-c"}, re_fs.stdout); defer run_out_destroy(&rf_fs_chk)
+		testing.expect_value(t, rf_fs_chk.code, 0)
+		testing.expect_value(t, rf_fs_chk.stdout, "{\"a\":\"1\",\"b\":\"01\"}\n")
+
+		bad_yaml_flags := [][]string {
+			{"fmt", "--from", "yaml", "--yaml-schema=bogus"},
+			{"fmt", "--from", "json", "--yaml-schema=failsafe"},
+			{"fmt", "--from", "json", "--merge-keys"},
+			{"fmt", "--from", "json", "--alias-limit", "100"},
+			{"fmt", "--yaml-schema=json"},
+			{"-n", "--yaml-schema=failsafe", "."},
+			{"-n", "--merge-keys", "."},
+			{"-n", "--alias-limit", "100", "."},
+			{"check", "--redact", "/a~2"},
+			{"check", "--redact", "/a~"},
+		}
+		for bc in bad_yaml_flags {
+			r := invoke_str(bc, `{}`); defer run_out_destroy(&r)
+			testing.expectf(t, r.code == 2, "expected exit 2 for %v, got %d (stderr=%q)", bc, r.code, r.stderr)
+		}
+	}
+}
+
+@(test)
+cli_with_relational_joins_and_aux_demand :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	users_json := write_tmp_file(t, dir, "users.json", transmute([]u8)string(`[{"id":1,"name":"ada","role":"admin"},{"id":2,"name":"bob","role":"user"}]`)); defer delete(users_json)
+	users_map := write_tmp_file(t, dir, "users_map.json", transmute([]u8)string(`{"u1":{"name":"ada","secret":"s1"},"u2":{"name":"bob","secret":"s2"}}`)); defer delete(users_map)
+	users_csv := write_tmp_file(t, dir, "users.csv", transmute([]u8)string("id,name\n1,ada\n2,bob\n")); defer delete(users_csv)
+	users_ndjson := write_tmp_file(t, dir, "users.ndjson", transmute([]u8)string("{\"id\":1,\"name\":\"ada\"}\n{\"id\":2,\"name\":\"bob\"}\n")); defer delete(users_ndjson)
+	users_yaml := write_tmp_file(t, dir, "users.yaml", transmute([]u8)string("- id: 1\n  name: ada\n- id: 2\n  name: bob\n")); defer delete(users_yaml)
+	orders_json := write_tmp_file(t, dir, "orders.json", transmute([]u8)string(`[{"oid":10,"uid":1},{"oid":11,"uid":3},{"oid":12,"uid":2}]`)); defer delete(orders_json)
+	orders_ndjson := write_tmp_file(t, dir, "orders.ndjson", transmute([]u8)string("{\"oid\":10,\"uid\":1}\n{\"oid\":11,\"uid\":2}\n{\"oid\":12,\"uid\":1}\n{\"oid\":13,\"uid\":2}\n")); defer delete(orders_ndjson)
+	bad_json := write_tmp_file(t, dir, "bad.json", transmute([]u8)string(`{broken`)); defer delete(bad_json)
+	missing_p := join_path(t, dir, "does_not_exist.json"); defer delete(missing_p)
+
+	w_users := strings.concatenate({"users=", users_json}); defer delete(w_users)
+	w_users_eq := strings.concatenate({"--with=users=", users_json}); defer delete(w_users_eq)
+	w_map := strings.concatenate({"users=", users_map}); defer delete(w_map)
+	w_csv_fmt := strings.concatenate({"users=csv:", users_csv}); defer delete(w_csv_fmt)
+	w_csv_ext := strings.concatenate({"users=", users_csv}); defer delete(w_csv_ext)
+	w_nd_fmt := strings.concatenate({"users=ndjson:", users_ndjson}); defer delete(w_nd_fmt)
+	w_yaml_ext := strings.concatenate({"users=", users_yaml}); defer delete(w_yaml_ext)
+	w_orders := strings.concatenate({"orders=", orders_json}); defer delete(w_orders)
+	w_bad := strings.concatenate({"users=", bad_json}); defer delete(w_bad)
+	w_missing := strings.concatenate({"users=", missing_p}); defer delete(w_missing)
+
+	// 1. `hash_join`, `left_join`, `semi_join`, `anti_join`, `index_by` + `lookup`.
+	{
+		rh := invoke({"--with", w_users, "-c", `hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&rh)
+		testing.expect_value(t, rh.code, 0)
+		testing.expect_value(t, rh.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rl := invoke({"--with", w_users, "-c", `left_join($users; .uid; .id) | map({oid: .[0].oid, who: (.[1].name // "none")})`, orders_json}); defer run_out_destroy(&rl)
+		testing.expect_value(t, rl.code, 0)
+		testing.expect_value(t, rl.stdout, `[{"oid":10,"who":"ada"},{"oid":11,"who":"none"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rs := invoke({"--with", w_users, "-c", `semi_join($users; .uid; .id) | map(.oid)`, orders_json}); defer run_out_destroy(&rs)
+		testing.expect_value(t, rs.code, 0)
+		testing.expect_value(t, rs.stdout, "[10,12]\n")
+
+		ra := invoke({"--with", w_users, "-c", `anti_join($users; .uid; .id) | map(.oid)`, orders_json}); defer run_out_destroy(&ra)
+		testing.expect_value(t, ra.code, 0)
+		testing.expect_value(t, ra.stdout, "[11]\n")
+
+		ri := invoke({w_users_eq, "-c", `($users | index_by(.id)) as $u | map({oid, who: (lookup($u; .uid).name // null)})`, orders_json}); defer run_out_destroy(&ri)
+		testing.expect_value(t, ri.code, 0)
+		testing.expect_value(t, ri.stdout, `[{"oid":10,"who":"ada"},{"oid":11,"who":null},{"oid":12,"who":"bob"}]`+"\n")
+	}
+
+	// 2. Explicit format prefix (`csv:`, `ndjson:`) and extension auto-detection (`.csv`, `.yaml`).
+	{
+		rc1 := invoke({"--with", w_csv_fmt, "-c", `hash_join($users; .uid | tostring; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&rc1)
+		testing.expect_value(t, rc1.code, 0)
+		testing.expect_value(t, rc1.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rc2 := invoke({"--with", w_csv_ext, "--infer", "-c", `hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&rc2)
+		testing.expect_value(t, rc2.code, 0)
+		testing.expect_value(t, rc2.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rnd := invoke({"--with", w_nd_fmt, "-c", `hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&rnd)
+		testing.expect_value(t, rnd.code, 0)
+		testing.expect_value(t, rnd.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		ry := invoke({"--with", w_yaml_ext, "-c", `hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`, orders_json}); defer run_out_destroy(&ry)
+		testing.expect_value(t, ry.code, 0)
+		testing.expect_value(t, ry.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+	}
+
+	// 3. Partial pruning on aux source (`$users[.uid].name`) verified via `--explain`.
+	{
+		re := invoke_str({"--with", w_map, "--explain", "-c", `$users[.uid].name`}, `{"uid":"u1"}`); defer run_out_destroy(&re)
+		testing.expect_value(t, re.code, 0)
+		testing.expect_value(t, re.stdout, "\"ada\"\n")
+		testing.expect(t, strings.contains(re.stderr, "aux users: partial"), re.stderr)
+	}
+
+	// 4. `-n --with` joining two auxiliary sources directly, plus `--threads 2` parallel NDJSON execution.
+	{
+		rn := invoke({"-n", "--with", w_orders, "--with", w_users, "-c", `$orders | hash_join($users; .uid; .id) | map({oid: .[0].oid, who: .[1].name})`}); defer run_out_destroy(&rn)
+		testing.expect_value(t, rn.code, 0)
+		testing.expect_value(t, rn.stdout, `[{"oid":10,"who":"ada"},{"oid":12,"who":"bob"}]`+"\n")
+
+		rp := invoke({"--threads", "2", "--with", w_users, "-c", `hash_join($users; .uid; .id) | {oid: .[0].oid, who: .[1].name}`, orders_ndjson}); defer run_out_destroy(&rp)
+		testing.expect_value(t, rp.code, 0)
+		testing.expect_value(t, rp.stdout, "{\"oid\":10,\"who\":\"ada\"}\n{\"oid\":11,\"who\":\"bob\"}\n{\"oid\":12,\"who\":\"ada\"}\n{\"oid\":13,\"who\":\"bob\"}\n")
+	}
+
+	// 5. Validation errors (exit `2`) and parse error in aux source (exit `5`).
+	{
+		bad_with_cases := [][]string {
+			{"--with", w_missing, "."},
+			{"--with", "noequals", "."},
+			{"--with", "=file.json", "."},
+			{"--with", "users=", "."},
+			{"--with", "123=file.json", "."},
+			{"--with", "__prog_args=file.json", "."},
+			{"--with", "users=:file.json", "."},
+			{"--with", "users=bogusfmt:file.json", "."},
+			{"--with", "users=csv:", "."},
+			{"--with", w_users, "--with", w_users, "."},
+			{"--arg", "users", "x", "--with", w_users, "."},
+			{"--with", w_users, "--jsonpath", "$"},
+			{"--with", w_users, "--stream", "."},
+			{"fmt", "--with", w_users, orders_json},
+			{"check", "--with", w_users, orders_json},
+		}
+		for bc in bad_with_cases {
+			r := invoke_str(bc, `{}`); defer run_out_destroy(&r)
+			testing.expectf(t, r.code == 2, "expected exit 2 for %v, got %d (stderr=%q)", bc, r.code, r.stderr)
+		}
+
+		rbad := invoke_str({"--with", w_bad, "$users"}, `{}`); defer run_out_destroy(&rbad)
+		testing.expect_value(t, rbad.code, 5)
+	}
+
+	// 6. Relative Unix paths containing colons (`dir:1/users.json` and `v1:users.json`) resolve when existing on disk.
+	when ODIN_OS != .Windows {
+		tag := rand.uint64()
+		colon_dir := fmt.aprintf(".stury-colon-%d:1", tag); defer delete(colon_dir)
+		if os.make_directory(colon_dir) == nil {
+			defer _ = os.remove_all(colon_dir)
+			colon_sub := fmt.aprintf("%s/users.json", colon_dir); defer delete(colon_sub)
+			testing.expect(t, os.write_entire_file(colon_sub, transmute([]u8)string(`[{"id":1,"name":"ada"}]`)) == nil)
+			w_cdir := strings.concatenate({"users=", colon_sub}); defer delete(w_cdir)
+			rcd := invoke({"-n", "--with", w_cdir, "-c", "$users[0].name"}); defer run_out_destroy(&rcd)
+			testing.expect_value(t, rcd.code, 0)
+			testing.expect_value(t, rcd.stdout, "\"ada\"\n")
+		}
+		colon_file := fmt.aprintf(".stury-colon-%d:users.json", tag); defer delete(colon_file)
+		if os.write_entire_file(colon_file, transmute([]u8)string(`[{"id":2,"name":"bob"}]`)) == nil {
+			defer _ = os.remove(colon_file)
+			w_cfile := strings.concatenate({"users=", colon_file}); defer delete(w_cfile)
+			rcf := invoke({"-n", "--with", w_cfile, "-c", "$users[0].name"}); defer run_out_destroy(&rcf)
+			testing.expect_value(t, rcf.code, 0)
+			testing.expect_value(t, rcf.stdout, "\"bob\"\n")
+		}
+	}
+
+	// 7. `--with` compile error line numbers map back to user filter lines (not shifted by injected `JOIN_STDLIB`).
+	{
+		re1_base := invoke({"-n", ".["}); defer run_out_destroy(&re1_base)
+		re1 := invoke({"-n", "--with", w_users, ".["}); defer run_out_destroy(&re1)
+		testing.expect_value(t, re1.code, 3)
+		testing.expect_value(t, re1.stderr, re1_base.stderr)
+		testing.expect(t, strings.contains(re1.stderr, "<top-level>:1:2:"), re1.stderr)
+		testing.expect(t, !strings.contains(re1.stderr, ":74:"), re1.stderr)
+
+		re2_base := invoke({"-n", "unknown_fn"}); defer run_out_destroy(&re2_base)
+		re2 := invoke({"-n", "--with", w_users, "unknown_fn"}); defer run_out_destroy(&re2)
+		testing.expect_value(t, re2.code, 3)
+		testing.expect_value(t, re2.stderr, re2_base.stderr)
+		testing.expect(t, strings.contains(re2.stderr, "<top-level>:1:1:"), re2.stderr)
+		testing.expect(t, !strings.contains(re2.stderr, ":74:"), re2.stderr)
+
+		re3_base := invoke({"-n", "module {}; .["}); defer run_out_destroy(&re3_base)
+		re3 := invoke({"-n", "--with", w_users, "module {}; .["}); defer run_out_destroy(&re3)
+		testing.expect_value(t, re3.code, 3)
+		testing.expect_value(t, re3.stderr, re3_base.stderr)
+		testing.expect(t, strings.contains(re3.stderr, "<top-level>:1:"), re3.stderr)
+		testing.expect(t, strings.contains(re3.stderr, "module {}; .["), re3.stderr)
+	}
+}
+
+@(test)
+cli_yaml_query_flags_and_in_place_preflight :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	// 1. `--yaml-schema=failsafe` in both jq and `--jsonpath` query mode.
+	{
+		rq := invoke_str({"--from", "yaml", "--yaml-schema=failsafe", "-c", "."}, "a: 1\nb: true\n"); defer run_out_destroy(&rq)
+		testing.expect_value(t, rq.code, 0)
+		testing.expect_value(t, rq.stdout, "{\"a\":\"1\",\"b\":\"true\"}\n")
+
+		rjp := invoke_str({"--from", "yaml", "--yaml-schema=failsafe", "--jsonpath", "-c", "$.a"}, "a: 1\nb: true\n"); defer run_out_destroy(&rjp)
+		testing.expect_value(t, rjp.code, 0)
+		testing.expect_value(t, rjp.stdout, "\"1\"\n")
+	}
+
+	// 2. `--merge-keys` on extension-detected `.yaml` in jq & `--jsonpath`, plus `fmt -i --merge-keys --to yaml:merge`.
+	{
+		merge_yml :: "base: &b\n  x: 1\nchild:\n  <<: *b\n  y: 2\n"
+		mf := write_tmp_file(t, dir, "merge.yaml", transmute([]u8)string(merge_yml)); defer delete(mf)
+
+		rm := invoke({"--merge-keys", "-c", ".child.x", mf}); defer run_out_destroy(&rm)
+		testing.expect_value(t, rm.code, 0)
+		testing.expect_value(t, rm.stdout, "1\n")
+
+		rm_jp := invoke({"--merge-keys", "--jsonpath", "-c", "$.child.x", mf}); defer run_out_destroy(&rm_jp)
+		testing.expect_value(t, rm_jp.code, 0)
+		testing.expect_value(t, rm_jp.stdout, "1\n")
+
+		rfi := invoke({"fmt", "-i", "--merge-keys", "--to", "yaml:merge", mf}); defer run_out_destroy(&rfi)
+		testing.expect_value(t, rfi.code, 0)
+		saved, rerr := os.read_entire_file_from_path(mf, context.allocator)
+		testing.expect(t, rerr == nil)
+		defer delete(saved)
+		testing.expect(t, strings.contains(string(saved), "x: 1") && strings.contains(string(saved), "y: 2"), string(saved))
+	}
+}
+
+@(test)
+cli_unified_table_markdown_html_one_doc_and_tsan_parallel :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
+
+	rows_json :: `[{"name":"ada","age":36},{"name":"bob","age":42}]`
+	rows_ndjson :: "{\"name\":\"ada\",\"age\":36}\n{\"name\":\"bob\",\"age\":42}\n"
+
+	// 1. Multi-value `--to table '.[]'` and `--jsonpath --to markdown '$[*]'` emit ONE unified aligned table (1 header!).
+	{
+		rt_single := invoke_str({"--to", "table", "."}, rows_json); defer run_out_destroy(&rt_single)
+		testing.expect_value(t, rt_single.code, 0)
+
+		rt_multi := invoke_str({"--to", "table", ".[]"}, rows_json); defer run_out_destroy(&rt_multi)
+		testing.expect_value(t, rt_multi.code, 0)
+		testing.expect_value(t, rt_multi.stdout, rt_single.stdout)
+		testing.expect_value(t, strings.count(rt_multi.stdout, "name"), 1)
+		testing.expect_value(t, strings.count(rt_multi.stdout, "----"), 1)
+
+		rt_nd := invoke_str({"--from", "ndjson", "--to", "table", "."}, rows_ndjson); defer run_out_destroy(&rt_nd)
+		testing.expect_value(t, rt_nd.code, 0)
+		testing.expect_value(t, rt_nd.stdout, rt_single.stdout)
+
+		rm_single := invoke_str({"--to", "markdown", "."}, rows_json); defer run_out_destroy(&rm_single)
+		testing.expect_value(t, rm_single.code, 0)
+
+		rm_jp := invoke_str({"--jsonpath", "--to", "markdown", "$[*]"}, rows_json); defer run_out_destroy(&rm_jp)
+		testing.expect_value(t, rm_jp.code, 0)
+		testing.expect_value(t, rm_jp.stdout, rm_single.stdout)
+		testing.expect_value(t, strings.count(rm_jp.stdout, "| name"), 1)
+		testing.expect_value(t, strings.count(rm_jp.stdout, "---:"), 1)
+
+		// Single object still renders key/value table; empty filter emits nothing.
+		rt_obj := invoke_str({"--to", "table", "."}, `{"name":"ada","age":36}`); defer run_out_destroy(&rt_obj)
+		testing.expect_value(t, rt_obj.code, 0)
+		testing.expect(t, strings.contains(rt_obj.stdout, "key") && strings.contains(rt_obj.stdout, "value"), rt_obj.stdout)
+
+		rt_empty := invoke_str({"--to", "table", "empty"}, rows_json); defer run_out_destroy(&rt_empty)
+		testing.expect_value(t, rt_empty.code, 0)
+		testing.expect_value(t, rt_empty.stdout, "")
+	}
+
+	// 2. `--to html` refuses 2+ emitted values with exit `5` (`one_doc`).
+	{
+		rh1 := invoke_str({"--to", "html", "."}, `{"html":{"head":{},"body":{"p":"ok"}}}`); defer run_out_destroy(&rh1)
+		testing.expect_value(t, rh1.code, 0)
+		testing.expect(t, strings.contains(rh1.stdout, "<p>ok</p>"), rh1.stdout)
+
+		rh2 := invoke_str({"--to", "html", ".[]"}, `[{"html":{"head":{},"body":{"p":"a"}}},{"html":{"head":{},"body":{"p":"b"}}}]`); defer run_out_destroy(&rh2)
+		testing.expect_value(t, rh2.code, 5)
+		testing.expect(t, strings.contains(rh2.stderr, "--to html writes one document"), rh2.stderr)
+
+		rh2_jp := invoke_str({"--jsonpath", "--to", "html", "$[*]"}, `[{"html":{"head":{},"body":{"p":"a"}}},{"html":{"head":{},"body":{"p":"b"}}}]`); defer run_out_destroy(&rh2_jp)
+		testing.expect_value(t, rh2_jp.code, 5)
+		testing.expect(t, strings.contains(rh2_jp.stderr, "--to html writes one document"), rh2_jp.stderr)
+	}
+
+	// 3. `--threads 2` across multiple files for `--to markdown|table|yaml|msgpack|html` (TSan race regression test!).
+	{
+		f1 := write_tmp_file(t, dir, "f1.json", transmute([]u8)string(`{"name":"ada","age":36}`)); defer delete(f1)
+		f2 := write_tmp_file(t, dir, "f2.json", transmute([]u8)string(`{"name":"bob","age":42}`)); defer delete(f2)
+		h1 := write_tmp_file(t, dir, "h1.json", transmute([]u8)string(`{"html":{"head":{},"body":{"p":"a"}}}`)); defer delete(h1)
+		h2 := write_tmp_file(t, dir, "h2.json", transmute([]u8)string(`{"html":{"head":{},"body":{"p":"b"}}}`)); defer delete(h2)
+
+		rm := invoke({"--threads", "2", "--to", "markdown", ".", f1, f2}); defer run_out_destroy(&rm)
+		testing.expect_value(t, rm.code, 0)
+		testing.expect_value(t, strings.count(rm.stdout, "| name"), 1)
+		testing.expect(t, strings.contains(rm.stdout, "ada") && strings.contains(rm.stdout, "bob"), rm.stdout)
+
+		rt := invoke({"--threads", "2", "--to", "table", ".", f1, f2}); defer run_out_destroy(&rt)
+		testing.expect_value(t, rt.code, 0)
+		testing.expect_value(t, strings.count(rt.stdout, "name"), 1)
+		testing.expect(t, strings.contains(rt.stdout, "ada") && strings.contains(rt.stdout, "bob"), rt.stdout)
+
+		ry := invoke({"--threads", "2", "--to", "yaml", ".", f1, f2}); defer run_out_destroy(&ry)
+		testing.expect_value(t, ry.code, 0)
+		testing.expect(t, strings.contains(ry.stdout, "name: ada") && strings.contains(ry.stdout, "name: bob"), ry.stdout)
+
+		rmp := invoke({"--threads", "2", "--to", "msgpack", ".", f1, f2}); defer run_out_destroy(&rmp)
+		testing.expect_value(t, rmp.code, 0)
+		testing.expect(t, len(rmp.stdout) > 0, "expected msgpack bytes")
+
+		rhp := invoke({"--threads", "2", "--to", "html", ".", h1, h2}); defer run_out_destroy(&rhp)
+		testing.expect_value(t, rhp.code, 5)
+		testing.expect(t, strings.contains(rhp.stderr, "--to html writes one document"), rhp.stderr)
+	}
+
+	// 4. `Render_Table_Writer` error suppression (no spurious `"malformed output sequence"`) and no partial table flush on error.
+	{
+		raw_bin := write_tmp_file(t, dir, "raw.bin", []u8{0xff}); defer delete(raw_bin)
+		r_inv := invoke({"-n", "--rawfile", "bad", raw_bin, "--to", "table", `{"a":1},{"b":$bad}`}); defer run_out_destroy(&r_inv)
+		testing.expect_value(t, r_inv.code, 5)
+		testing.expect_value(t, r_inv.stdout, "")
+		testing.expect(t, strings.contains(r_inv.stderr, "value cannot be spelled in target format"), r_inv.stderr)
+		testing.expect(t, !strings.contains(r_inv.stderr, "malformed output sequence"), r_inv.stderr)
+
+		good_f := write_tmp_file(t, dir, "good.json", transmute([]u8)string(`{"a":1}`)); defer delete(good_f)
+		bad_f := write_tmp_file(t, dir, "bad.json", transmute([]u8)string(`{broken`)); defer delete(bad_f)
+		miss_f := join_path(t, dir, "missing_table.json"); defer delete(miss_f)
+
+		r_part := invoke({"--to", "table", ".", good_f, bad_f}); defer run_out_destroy(&r_part)
+		testing.expect_value(t, r_part.code, 5)
+		testing.expect_value(t, r_part.stdout, "")
+		testing.expect(t, len(r_part.stderr) > 0, "expected parse error on stderr")
+
+		r_jp_part := invoke({"--jsonpath", "--to", "markdown", "$", good_f, bad_f}); defer run_out_destroy(&r_jp_part)
+		testing.expect_value(t, r_jp_part.code, 5)
+		testing.expect_value(t, r_jp_part.stdout, "")
+
+		r_open := invoke({"--to", "table", ".", good_f, miss_f}); defer run_out_destroy(&r_open)
+		testing.expect_value(t, r_open.code, 2)
+		testing.expect_value(t, r_open.stdout, "")
+	}
+}
+
+@(test)
+cli_binary_tty_refusal_names_format :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	{
+		rc := invoke({"--to", "cbor", "."}, transmute([]u8)string(`{"a":1}`), stdout_tty = true); defer run_out_destroy(&rc)
+		testing.expect_value(t, rc.code, 2)
+		testing.expect(t, strings.contains(rc.stderr, "binary CBOR output"), rc.stderr)
+	}
+	{
+		rm := invoke({"--to", "msgpack", "."}, transmute([]u8)string(`{"a":1}`), stdout_tty = true); defer run_out_destroy(&rm)
+		testing.expect_value(t, rm.code, 2)
+		testing.expect(t, strings.contains(rm.stderr, "binary MessagePack output"), rm.stderr)
+		testing.expect(t, !strings.contains(rm.stderr, "CBOR"), rm.stderr)
+	}
+	{
+		rmc := invoke({"--to", "msgpack:compact", "."}, transmute([]u8)string(`{"a":1}`), stdout_tty = true); defer run_out_destroy(&rmc)
+		testing.expect_value(t, rmc.code, 2)
+		testing.expect(t, strings.contains(rmc.stderr, "binary MessagePack output"), rmc.stderr)
+	}
+}
+
+@(test)
+cli_cbor_bytes_to_msgpack_and_text_formats :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// CBOR: {"raw": h'deadbeef', "k": "v"}
+	cbor_in := [?]u8{0xA2, 0x63, 'r', 'a', 'w', 0x44, 0xDE, 0xAD, 0xBE, 0xEF, 0x61, 'k', 0x61, 'v'}
+
+	// 1. jq transform `{p: .raw}` -> `--to msgpack` preserves native MessagePack bin (0xC4 0x04 DE AD BE EF)!
+	rmp := invoke({"--from", "cbor", "--to", "msgpack", `{p: .raw}`}, cbor_in[:]); defer run_out_destroy(&rmp)
+	testing.expect_value(t, rmp.code, 0)
+	mp_doc, mberr := engine.build(transmute([]u8)rmp.stdout, engine.spec_of_id(.Msgpack))
+	testing.expect_value(t, mberr, tape.Error(nil))
+	defer tape.destroy(&mp_doc)
+	pn, ppres := tape.member(tape.Reader{doc = &mp_doc}, tape.ROOT, "p")
+	testing.expect_value(t, ppres, tape.Presence.Found)
+	testing.expect_value(t, mp_doc.nodes[pn].kind, tape.Kind.Bytes)
+	want_raw := [?]u8{0xDE, 0xAD, 0xBE, 0xEF}
+	testing.expect_value(t, string(tape.span_bytes(&mp_doc, mp_doc.nodes[pn].lo, mp_doc.nodes[pn].n)), string(want_raw[:]))
+
+	// 2. Same jq transform to JSON, YAML, CSV, table, and markdown emits base64 `3q2+7w==`.
+	for fmt_name in ([?]string{"json", "yaml", "toml", "table", "markdown"}) {
+		r := invoke({"--from", "cbor", "--to", fmt_name, `{p: .raw}`}, cbor_in[:]); defer run_out_destroy(&r)
+		testing.expectf(t, r.code == 0, "--to %s failed: %s", fmt_name, r.stderr)
+		testing.expectf(t, strings.contains(r.stdout, "3q2+7w=="), "--to %s got %q", fmt_name, r.stdout)
+	}
+	// Projection_Direct CSV (`{p: .raw}`) and evaluated CSV (`{p: .raw, n: (.raw | length)}`) both emit base64 `3q2+7w==`.
+	rcsv := invoke({"--from", "cbor", "--to", "csv", `{p: .raw}`}, cbor_in[:]); defer run_out_destroy(&rcsv)
+	testing.expectf(t, rcsv.code == 0, "csv direct err: %s", rcsv.stderr)
+	testing.expect_value(t, rcsv.stdout, "p\n3q2+7w==\n")
+
+	rcsv2 := invoke({"--from", "cbor", "--to", "csv", `{p: .raw, n: (.raw | length)}`}, cbor_in[:]); defer run_out_destroy(&rcsv2)
+	testing.expectf(t, rcsv2.code == 0, "csv eval err: %s", rcsv2.stderr)
+	testing.expect_value(t, rcsv2.stdout, "p,n\n3q2+7w==,4\n")
+}

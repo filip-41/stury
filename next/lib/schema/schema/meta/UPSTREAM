@@ -1,0 +1,3 @@
+The meta-schemas of JSON Schema 2020-12, 2019-09, draft-07, draft-06 and draft-04, and the vocabulary meta-schemas of 2020-12 and 2019-09 under meta/.
+Copied unchanged from the jsonschema-specifications 2025.9.1 Python package, which ships them as json-schema.org publishes them. The 2019-09 vocabulary files carry a .json extension here.
+License: the json-schema-org/json-schema-spec repository's, not yet confirmed.

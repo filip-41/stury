@@ -1,10 +1,10 @@
 name: ci
+# v2 only: this branch builds and tests `next/`, and v1's suites stay on main's copy of this file.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  workflow_call:
 
 permissions:
   contents: read
@@ -14,52 +14,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # A push to main or a pull request that changes only docs runs lint alone, which checks the docs. Every other run,
-  # a tag's gate among them, runs everything.
-  scope:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      code: ${{ steps.scope.outputs.code }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - id: scope
-        env:
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          code=true
-          if [ "$EVENT" = pull_request ] || [ "$EVENT/$GITHUB_REF" = push/refs/heads/main ]; then
-            if [ -n "$BASE" ] && [ "$BASE" != 0000000000000000000000000000000000000000 ] && git fetch -q --depth=1 origin "$BASE"; then
-              files=$(git diff --name-only "$BASE" HEAD)
-              if [ -n "$files" ] && ! grep -qvE '^(docs/.*|[^/]+\.md|LICENSE|THIRD_PARTY_NOTICES)$' <<< "$files"; then
-                code=false
-              fi
-            fi
-          fi
-          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
-
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
-      - run: make lint
-      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
-        with:
-          python-version: "3.14"
-      - name: Docs
-        run: |
-          sudo apt-get install -y mandoc
-          python3 -m pip install uv==0.13.5
-          make lint-fixtures lint-man
+      - run: make -C next lint
 
-  # The library suites, then the command line against its smoke cases and the jq corpus.
-  # The command line's suites time their runs, so they do not share the host with the compiles.
   test:
-    needs: scope
-    if: needs.scope.outputs.code == 'true'
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -69,154 +32,24 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - run: make -j4 test-lib
-      - run: make test-examples test-cli test-jq
+      # The x86-64 tier tests run under Rosetta.
+      - if: runner.os == 'macOS'
+        run: arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license
+      - run: make -C next test
 
-  # Odin has no macOS Intel toolchain: the x86 suites are cross-compiled from the arm64 runner and run under Rosetta.
-  test-x86:
-    needs: scope
-    if: needs.scope.outputs.code == 'true'
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        opt: [none, speed]
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/setup-odin
-      # One suite per core, each on one test thread, so the timed tests do not share a core under Rosetta.
-      - run: make -j3 test-x86 X86_OPTS=${{ matrix.opt }} X86_THREADS=1
-
-  # The differentials: jq_diff and regex_diff against jq 1.8.2 over a seed per runner, beside the jq suite in diff mode,
-  # core/regex against Node's RegExp, and model.load against pydantic.
-  diff:
-    needs: scope
-    if: needs.scope.outputs.code == 'true'
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        seed: [77, 1016, 5]
-        include:
-          - seed: 77
-            suite: diff-suite
-          - seed: 1016
-            suite: ecma-diff
-          - seed: 5
-            suite: diff-model
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/setup-odin
-      - name: Install jq 1.8.2
-        run: |
-          curl -fsSL -o /tmp/jq \
-            https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64
-          echo 'b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f  /tmp/jq' | sha256sum -c -
-          sudo install -m 0755 /tmp/jq /usr/local/bin/jq
-          jq --version | grep -qx 'jq-1.8.2'
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - run: make -j -O diff-seed-${{ matrix.seed }} ${{ matrix.suite }}
-
-  # The x86 tiers, a runner each. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed), so each tier
-  # runs under Intel SDE.
-  wide:
-    needs: scope
-    if: needs.scope.outputs.code == 'true'
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        tier: ["0:nhm", "1:hsw", "2:spr"]
-    runs-on: ubuntu-24.04
-    env:
-      SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
-      SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/setup-odin
-      - name: Install Intel SDE
-        run: |
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/sde.tar.xz" "$SDE_URL"
-          echo "$SDE_SHA256  $RUNNER_TEMP/sde.tar.xz" | sha256sum -c -
-          mkdir "$RUNNER_TEMP/sde"
-          tar -xJf "$RUNNER_TEMP/sde.tar.xz" -C "$RUNNER_TEMP/sde" --strip-components=1
-          echo "$RUNNER_TEMP/sde" >> "$GITHUB_PATH"
-          # SDE injects itself with ptrace, which Ubuntu's yama setting forbids.
-          echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
-      - run: make test-wide WIDE_TIERS=${{ matrix.tier }}
-
-  # Sanitizer runs are checked where they were made to pass: macOS on Apple silicon.
-  # The sanitized CLI builds take most of this, so the ASan library suites run beside them.
-  sanitizers:
-    needs: scope
-    if: needs.scope.outputs.code == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [test-asan-lib, test-asan-cli, test-tsan]
-    runs-on: macos-15
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/setup-odin
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - run: make -j3 ${{ matrix.target }}
-
-  # Windows is built only here
+  # The test packages `make -C next test` runs, found the same way, without make.
   windows:
-    needs: scope
-    if: needs.scope.outputs.code == 'true'
     timeout-minutes: 60
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
       - shell: bash
+        working-directory: next
         run: |
           set -e
-          python xml/test/conformance/fetch.py
-          # A thread's stack is the 8 MiB a POSIX thread takes from its limit, not Windows' 1 MiB.
-          stack=-extra-linker-flags:-STACK:8388608
-          for p in $(sed -n 's/^TEST_PKGS *:= *//p' Makefile | tr -d '\r' | tr ' ' '\n'); do
-            odin test $p -o:minimal $stack -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:RECORDS_SLICE=1 -define:RECORDS_FAN_AFTER=1 -define:RECORDS_SPARSE=1000000000 -out:test.exe
+          mkdir -p build
+          for p in $(find . -type d -name test -not -path './build/*' | sed 's|^\./||' | sort); do
+            echo "== $p"
+            odin test $p -o:minimal -collection:stury=. -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:BUILD_PARALLEL_FROM=0 -define:TEST_TIMEOUT_SECONDS=120 -out:build/test.exe
           done
-          odin build cmd/stury -o:speed $stack -resource:cmd/stury/stury.rc -define:STURY_VERSION="'$(git log -1 --format=%h)'" -out:stury.exe
-      - name: Answers through files and pipes
-        shell: bash
-        run: |
-          set -e
-          [ "$(echo '{"a":[1,2]}' | ./stury.exe -c '.a')" = "[1,2]" ]
-          [ "$(echo '[1,2]' | ./stury.exe -c '.[]' | od -An -tx1 | tr -d ' \n')" = "310a320a" ]
-          [ "$(echo '[1,2]' | ./stury.exe -b -c '.[]' | od -An -tx1 | tr -d ' \n')" = "310a320a" ]
-          printf '{"a":1}\n{"a":2}\n' > two.json
-          [ "$(./stury.exe -c '.a' two.json | tr -d '\r' | paste -sd, -)" = "1,2" ]
-          [ "$(echo '"2015-03-05T23:51:47Z"' | ./stury.exe -r 'fromdate | todate')" = "2015-03-05T23:51:47Z" ]
-          # The UCRT's strftime has no %s, %k or %l; the jq suite's libc rows are not run here.
-          [ "$(./stury.exe -nr '1425599621 | strftime("%s %k %l %V %r")')" = "1425599621 23 11 10 11:53:41 PM" ]
-          [ "$(./stury.exe -n '[limit(3; recurse(.+1))] | length' <<< 0)" = "3" ]
-          # `! cmd` does not trip errexit: a command that must fail exits the script when it succeeds.
-          echo '{' | ./stury.exe . 2>/dev/null && exit 1
-          # The CSV codec, both halves, through a file and a pipe.
-          printf 'a,b\n1,2\n' > two.csv
-          [ "$(./stury.exe --from csv -c '.b' two.csv)" = '"2"' ]
-          [ "$(./stury.exe --from csv --to csv 'select(.a == "1")' two.csv | tr -d '\r' | paste -sd, -)" = "a,b,1,2" ]
-          [ "$(printf 'a,b\n3,4\n' | ./stury.exe --from csv -c '.a')" = '"3"' ]
-          # fmt: the layout with every spelling and member kept, --check, and --in-place over an existing file.
-          printf '{"b":1e2,"b":2}' > fmt.json
-          [ "$(./stury.exe fmt fmt.json | tr -d ' \r\n')" = '{"b":1e2,"b":2}' ]
-          s=0; ./stury.exe fmt --check fmt.json || s=$?; [ "$s" = 1 ]
-          ./stury.exe fmt --in-place fmt.json
-          ./stury.exe fmt --check fmt.json
-          [ "$(tr -d ' \r\n' < fmt.json)" = '{"b":1e2,"b":2}' ]
-          [ "$(wc -l < fmt.json | tr -d ' ')" = 4 ]
-
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - name: Smoke cases, jq 1.8.2 corpus and cli.tsv
-        shell: bash
-        env:
-          PYTHONUTF8: "1"
-          STURY_TEST_TIMEOUT: "30"
-        run: uv run --frozen --directory tools/tests pytest -n auto --stury="$PWD/stury.exe" cli/test_smoke.py cli/test_jq.py cli/test_walk.py oracles/gitignore
