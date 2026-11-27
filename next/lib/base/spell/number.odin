@@ -364,3 +364,127 @@ decimal_order :: proc "contextless" (src: []u8, n: Number_Lex) -> (order: i64, a
 	}
 	return 0, false
 }
+
+// Canonical signed decimal parts of an integer text: `neg` and `digits` without leading zeros.
+@(require_results)
+decimal_parts :: proc "contextless" (s: string) -> (neg: bool, digits: string) {
+	t := s
+	if len(t) > 0 && t[0] == '-' {
+		neg = true
+		t = t[1:]
+	}
+	for len(t) > 1 && t[0] == '0' {
+		t = t[1:]
+	}
+	if t == "0" {
+		neg = false
+	}
+	return neg, t
+}
+
+// Whether `s` is a plain decimal integer (optional leading `-`, digits only).
+@(require_results)
+is_plain_int_dec :: proc "contextless" (s: string) -> bool {
+	if len(s) == 0 {
+		return false
+	}
+	i := 1 if s[0] == '-' else 0
+	if i >= len(s) {
+		return false
+	}
+	for c in transmute([]u8)s[i:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// The binary64 a `.Wide` decimal text rounds to, including decimals past `MAX_NUMBER_DIGITS` digits whose order still
+// falls within binary64's finite range.
+@(cold, require_results)
+wide_double :: #force_no_inline proc "contextless" (text: []u8) -> f64 {
+	if len(text) == 0 {
+		return 0
+	}
+	n := lex_decimal(text, 0, u64(len(text)), true)
+	if n.ok {
+		sign := u64(n.neg) << 63
+		order, any_nonzero := decimal_order(text, n)
+		switch {
+		case !any_nonzero, order <= UNDERFLOW_ORDER:
+			return transmute(f64)sign
+		case order >= OVERFLOW_ORDER:
+			return transmute(f64)(F64_INF_BITS | sign)
+		}
+		// Finite order past `MAX_NUMBER_DIGITS` or near the f64 boundary: collect up to 768 significant digits plus a
+		// sticky digit so `strconv.parse_f64` rounds every binary64 midpoint exactly.
+		SIG_MAX :: 768
+		buf: [SIG_MAX + 32]u8 = ---
+		w := 0
+		if n.neg {
+			buf[w] = '-'
+			w += 1
+		}
+		started := false
+		sig := 0
+		sticky := false
+		runs := [2][]u8 {
+			text[n.int_at : n.int_at + n.int_digits],
+			text[n.frac_at : n.frac_at + n.frac_digits],
+		}
+		for run in runs {
+			for c in run {
+				if !started {
+					if c == '0' {
+						continue
+					}
+					started = true
+				}
+				if sig < SIG_MAX {
+					buf[w] = c
+					w += 1
+					sig += 1
+				} else if c != '0' {
+					sticky = true
+				}
+			}
+		}
+		if sticky {
+			buf[w] = '1'
+			w += 1
+			sig += 1
+		} else {
+			for sig > 1 && buf[w - 1] == '0' {
+				w -= 1
+				sig -= 1
+			}
+		}
+		buf[w] = 'e'
+		w += 1
+		ebuf: [24]u8 = ---
+		context = runtime.default_context()
+		exp_s := strconv.write_int(ebuf[:], order - i64(sig), 10)
+		copy(buf[w:], exp_s)
+		w += len(exp_s)
+		v, ok := strconv.parse_f64(string(buf[:w]))
+		if ok || transmute(u64)v & F64_INF_BITS == F64_INF_BITS {
+			return v
+		}
+		return transmute(f64)sign
+	}
+	context = runtime.default_context()
+	if v, ok := strconv.parse_f64(string(text)); ok || transmute(u64)v & F64_INF_BITS == F64_INF_BITS {
+		return v
+	}
+	neg := text[0] == '-'
+	big_order := true
+	for c, i in text {
+		if c | 0x20 == 'e' {
+			big_order = i + 1 >= len(text) || text[i + 1] != '-'
+			break
+		}
+	}
+	sign := u64(neg) << 63
+	return transmute(f64)(F64_INF_BITS | sign) if big_order else transmute(f64)sign
+}

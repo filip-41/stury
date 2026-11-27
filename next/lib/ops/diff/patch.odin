@@ -21,41 +21,51 @@ Pointer_Error :: enum u8 {
 
 // Encodes `steps` (`tape.Name` and `tape.Index`) as an RFC 6901 JSON Pointer (`~` -> `~0`, `/` -> `~1`).
 // Empty `steps` encodes to `""` (root).
-@(require_results)
+@(private = "file", require_results)
 encode_pointer :: proc(steps: []tape.Step, allocator := context.allocator) -> (res: string, err: runtime.Allocator_Error) {
 	if len(steps) == 0 {
 		return "", nil
 	}
-	sb := strings.builder_make(allocator)
-	defer if err != nil {
-		strings.builder_destroy(&sb)
-	}
+	ibuf: [24]u8 = ---
+	total := 0
 	for s in steps {
-		strings.write_byte(&sb, '/') or_return
+		total += 1
 		#partial switch step in s {
 		case tape.Name:
-			write_escaped_token(&sb, string(step)) or_return
+			for b in transmute([]u8)string(step) {
+				total += 2 if (b == '~' || b == '/') else 1
+			}
 		case tape.Index:
-			buf: [24]u8
-			strings.write_string(&sb, strconv.write_int(buf[:], i64(step), 10)) or_return
+			total += len(strconv.write_int(ibuf[:], i64(step), 10))
 		}
 	}
-	return strings.to_string(sb), nil
-}
-
-@(private = "file")
-write_escaped_token :: proc(sb: ^strings.Builder, tok: string) -> runtime.Allocator_Error {
-	for b in transmute([]u8)tok {
-		switch b {
-		case '~':
-			strings.write_string(sb, "~0") or_return
-		case '/':
-			strings.write_string(sb, "~1") or_return
-		case:
-			strings.write_byte(sb, b) or_return
+	buf := make([]u8, total, allocator) or_return
+	w := 0
+	for s in steps {
+		buf[w] = '/'
+		w += 1
+		#partial switch step in s {
+		case tape.Name:
+			for b in transmute([]u8)string(step) {
+				switch b {
+				case '~':
+					buf[w], buf[w + 1] = '~', '0'
+					w += 2
+				case '/':
+					buf[w], buf[w + 1] = '~', '1'
+					w += 2
+				case:
+					buf[w] = b
+					w += 1
+				}
+			}
+		case tape.Index:
+			idx := strconv.write_int(ibuf[:], i64(step), 10)
+			copy(buf[w:], idx)
+			w += len(idx)
 		}
 	}
-	return nil
+	return string(buf), nil
 }
 
 // Decodes an RFC 6901 JSON Pointer into its unescaped reference tokens (`~1` -> `/`, `~0` -> `~`).
@@ -90,42 +100,34 @@ decode_pointer :: proc(ptr: string, allocator := context.allocator) -> (tokens: 
 	i := 1
 	for t in 0 ..< count {
 		start := i
-		has_tilde := false
+		escapes := 0
 		for i < len(ptr) && ptr[i] != '/' {
 			if ptr[i] == '~' {
-				has_tilde = true
+				if i + 1 >= len(ptr) || (ptr[i + 1] != '0' && ptr[i + 1] != '1') {
+					return nil, .Bad_Escape
+				}
+				escapes += 1
+				i += 2
+				continue
 			}
 			i += 1
 		}
 		raw := ptr[start:i]
-		if !has_tilde {
+		if escapes == 0 {
 			cloned, cerr := strings.clone(raw, allocator)
 			if cerr != nil {
 				return nil, .Out_Of_Memory
 			}
 			out[t] = cloned
 		} else {
-			buf, berr := make([]u8, len(raw), allocator)
+			buf, berr := make([]u8, len(raw) - escapes, allocator)
 			if berr != nil {
 				return nil, .Out_Of_Memory
 			}
 			w := 0
-			j := 0
-			for j < len(raw) {
+			for j := 0; j < len(raw); {
 				if raw[j] == '~' {
-					if j + 1 >= len(raw) {
-						delete(buf, allocator)
-						return nil, .Bad_Escape
-					}
-					switch raw[j + 1] {
-					case '0':
-						buf[w] = '~'
-					case '1':
-						buf[w] = '/'
-					case:
-						delete(buf, allocator)
-						return nil, .Bad_Escape
-					}
+					buf[w] = '~' if raw[j + 1] == '0' else '/'
 					w += 1
 					j += 2
 				} else {
@@ -134,17 +136,10 @@ decode_pointer :: proc(ptr: string, allocator := context.allocator) -> (tokens: 
 					j += 1
 				}
 			}
-			exact, eerr := make([]u8, w, allocator)
-			if eerr != nil {
-				delete(buf, allocator)
-				return nil, .Out_Of_Memory
-			}
-			copy(exact, buf[:w])
-			delete(buf, allocator)
-			out[t] = string(exact)
+			out[t] = string(buf)
 		}
 		filled += 1
-		if i < len(ptr) && ptr[i] == '/' {
+		if i < len(ptr) {
 			i += 1
 		}
 	}
@@ -175,21 +170,18 @@ parse_array_index :: proc "contextless" (token: string) -> (index: int, append_e
 	if token[0] == '0' {
 		return 0, false, false
 	}
-	val: i64
+	val := 0
 	for c in transmute([]u8)token {
 		if c < '0' || c > '9' {
 			return 0, false, false
 		}
-		d := i64(c - '0')
-		if val > (max(i64) - d) / 10 {
+		d := int(c - '0')
+		if val > (max(int) - d) / 10 {
 			return 0, false, false
 		}
 		val = val * 10 + d
 	}
-	if val > i64(max(int)) {
-		return 0, false, false
-	}
-	return int(val), false, true
+	return val, false, true
 }
 
 // ---- RFC 6902 JSON Patch
@@ -207,12 +199,16 @@ Patch_Op_Kind :: enum u8 {
 // For `.Add`, `.Replace`, and `.Test`, `(doc, node)` references a single value in a `tape.Document`, or `(doc, nodes)`
 // references a virtual grouped array of 2+ nodes (XML `.Group` repeated elements) backed by `Patch.arena`.
 Patch_Op :: struct {
-	op:    Patch_Op_Kind,
 	path:  string,
 	from:  string,
+	nodes: []tape.Node_Index,
 	doc:   ^tape.Document,
 	node:  tape.Node_Index,
-	nodes: []tape.Node_Index,
+	op:    Patch_Op_Kind,
+}
+
+when size_of(int) == 8 {
+	#assert(size_of(Patch_Op) == 64)
 }
 
 // A generated RFC 6902 JSON Patch. Paths live in `arena`; free with `destroy_patch`.
@@ -228,11 +224,7 @@ destroy_patch :: proc(p: ^Patch) {
 	if p == nil {
 		return
 	}
-	if p.arena != nil {
-		alloc := p.arena.block_allocator
-		mem.dynamic_arena_destroy(p.arena)
-		free(p.arena, alloc)
-	}
+	destroy_arena(&p.arena)
 	p^ = {}
 }
 
@@ -245,174 +237,168 @@ Patch_Task_Kind :: enum u8 {
 
 @(private = "file")
 Patch_Task :: struct {
-	kind:  Patch_Task_Kind,
-	op:    Patch_Op_Kind,
 	a, b:  Val,
 	step:  tape.Step,
+	depth: u32,
+	kind:  Patch_Task_Kind,
+	op:    Patch_Op_Kind,
 	has_s: bool,
-	depth: int,
+}
+
+when size_of(int) == 8 {
+	#assert(size_of(Patch_Task) == 80)
 }
 
 @(private = "file")
-make_patch_op :: proc(op: Patch_Op_Kind, ptr: string, doc: ^tape.Document, v: Val, out_alloc: runtime.Allocator) -> (res: Patch_Op, err: Error) {
-	if op == .Remove {
-		return Patch_Op{op = .Remove, path = ptr, doc = nil, node = tape.NO_NODE}, nil
+emit_patch_op :: proc(d: ^Differ, ops: ^[dynamic]Patch_Op, op: Patch_Op_Kind, v: Val) -> Error {
+	if d.opts.max_changes > 0 && len(ops) >= d.opts.max_changes {
+		d.truncated = true
+		return nil
 	}
-	if len(v.group) > 0 {
-		cloned := slice.clone(v.group, out_alloc) or_return
-		return Patch_Op{op = op, path = ptr, doc = doc, node = tape.NO_NODE, nodes = cloned}, nil
+	ptr := encode_pointer(d.new[:], d.allocator) or_return
+	po := Patch_Op{op = op, path = ptr, node = tape.NO_NODE}
+	if op != .Remove {
+		po.doc = d.docs[1]
+		if len(v.group) > 0 {
+			po.nodes = slice.clone(v.group, d.allocator) or_return
+		} else {
+			po.node = v.node
+		}
 	}
-	return Patch_Op{op = op, path = ptr, doc = doc, node = v.node}, nil
+	append(ops, po) or_return
+	return nil
 }
 
 // Generates a minimal sequential RFC 6902 JSON Patch turning document `a` into document `b`.
 // Uses live array indices along Myers LCS so applying `patch.ops` in order to `a` always yields `b`.
+// Honors `Options.max_edits`, `Options.max_changes`, and `Options.max_depth`; ignores `arrays`, `keys`, and `facts`.
 @(require_results)
 diff_to_patch :: proc(a, b: ^tape.Document, opts := Options{}, allocator := context.allocator) -> (p: Patch, err: Error) {
 	if a == nil || b == nil {
 		return {}, nil
 	}
-	p.arena = new(mem.Dynamic_Arena, allocator) or_return
-	mem.dynamic_arena_init(p.arena, allocator, allocator)
-	defer if err != nil {
-		destroy_patch(&p)
-	}
-	out_alloc := mem.dynamic_arena_allocator(p.arena)
-	scratch_arena := new(mem.Dynamic_Arena, allocator) or_return
-	mem.dynamic_arena_init(scratch_arena, allocator, allocator)
-	defer {
-		mem.dynamic_arena_destroy(scratch_arena)
-		free(scratch_arena, allocator)
-	}
-	scratch_alloc := mem.dynamic_arena_allocator(scratch_arena)
-
-	// Force sequence/position mode for valid sequential RFC 6902 patch generation.
-	popts := opts
-	popts.ignore_order = false
-	if popts.arrays == .Set {
-		popts.arrays = .Sequence
-	}
-
 	d: Differ
-	init_differ(&d, a, b, popts, out_alloc, scratch_alloc) or_return
-	defer destroy_differ(&d)
+	popts := Options{max_edits = opts.max_edits, max_changes = opts.max_changes, max_depth = opts.max_depth}
+	out_arena := open_differ(&d, a, b, popts, allocator) or_return
+	defer close_differ(&d)
+	defer if out_arena != nil {
+		destroy_arena(&out_arena)
+	}
 
-	ops := make([dynamic]Patch_Op, 0, 16, out_alloc) or_return
+	ops: [dynamic]Patch_Op
+	ops.allocator = d.allocator
 	ra, pa := tape.root(d.readers[0])
 	rb, pb := tape.root(d.readers[1])
-	if pa != .Found && pb != .Found {
-		p.ops = ops[:]
-		return p, nil
-	}
-	if pa != .Found {
-		append(&ops, Patch_Op{op = .Add, path = "", doc = b, node = rb}) or_return
-		p.ops = ops[:]
-		return p, nil
-	}
-	if pb != .Found {
-		append(&ops, Patch_Op{op = .Remove, path = "", doc = nil, node = tape.NO_NODE}) or_return
-		p.ops = ops[:]
-		return p, nil
-	}
+	switch {
+	case pa != .Found && pb != .Found:
+	case pa != .Found:
+		emit_patch_op(&d, &ops, .Add, val_node(rb)) or_return
+	case pb != .Found:
+		emit_patch_op(&d, &ops, .Remove, {}) or_return
+	case:
+		stack := make([dynamic]Patch_Task, 0, 32, d.scratch) or_return
+		append(&stack, Patch_Task{kind = .Diff, a = val_node(ra), b = val_node(rb), depth = 0}) or_return
 
-	stack := make([dynamic]Patch_Task, 0, 32, scratch_alloc) or_return
-	defer delete(stack)
-	append(&stack, Patch_Task{kind = .Diff, a = val_node(ra), b = val_node(rb), depth = 0}) or_return
-
-	patch_loop: for len(stack) > 0 {
-		if d.too_deep {
-			break patch_loop
-		}
-		task := pop(&stack)
-		switch task.kind {
-		case .Pop:
-			pop(&d.new)
-		case .Emit_Op:
-			if d.opts.max_changes > 0 && len(ops) >= d.opts.max_changes {
-				d.truncated = true
+		patch_loop: for len(stack) > 0 {
+			if d.scratch_gate.failed {
+				return {}, .Out_Of_Memory
+			}
+			if d.too_deep || (d.truncated && d.opts.max_changes > 0 && len(ops) >= d.opts.max_changes) {
 				break patch_loop
 			}
-			if task.has_s {
-				append(&d.new, task.step) or_return
-			}
-			ptr, perr := encode_pointer(d.new[:], out_alloc)
-			if task.has_s {
+			task := pop(&stack)
+			switch task.kind {
+			case .Pop:
 				pop(&d.new)
-			}
-			if perr != nil {
-				return {}, perr
-			}
-			po := make_patch_op(task.op, ptr, b, task.b, out_alloc) or_return
-			append(&ops, po) or_return
-		case .Diff:
-			if d.opts.max_changes > 0 && len(ops) >= d.opts.max_changes {
-				d.truncated = true
-				break patch_loop
-			}
-			if task.has_s {
-				append(&stack, Patch_Task{kind = .Pop}) or_return
-				append(&d.new, task.step) or_return
-			}
-			na, nb, depth := task.a, task.b, task.depth
-			ca, cb := val_class(a, na), val_class(b, nb)
-			if ca != cb {
-				ptr := encode_pointer(d.new[:], out_alloc) or_return
-				po := make_patch_op(.Replace, ptr, b, nb, out_alloc) or_return
-				append(&ops, po) or_return
-				continue
-			}
-			if ca != .Array && ca != .Object {
-				if !scalars_equal(&d, na.node, nb.node) {
-					ptr := encode_pointer(d.new[:], out_alloc) or_return
-					append(&ops, Patch_Op{op = .Replace, path = ptr, doc = b, node = nb.node}) or_return
+			case .Emit_Op:
+				if task.has_s {
+					append(&d.new, task.step) or_return
 				}
-				continue
-			}
-			if depth >= d.opts.max_depth {
-				if !vals_equal_exact(&d, na, nb, depth) {
-					if d.too_deep {
-						break patch_loop
+				emit_err := emit_patch_op(&d, &ops, task.op, task.b)
+				if task.has_s {
+					pop(&d.new)
+				}
+				if emit_err != nil {
+					return {}, emit_err
+				}
+			case .Diff:
+				if task.has_s {
+					append(&stack, Patch_Task{kind = .Pop}) or_return
+					append(&d.new, task.step) or_return
+				}
+				na, nb, depth := task.a, task.b, int(task.depth)
+				ca, cb := val_class(a, na), val_class(b, nb)
+				if ca != cb {
+					emit_patch_op(&d, &ops, .Replace, nb) or_return
+					continue
+				}
+				if ca != .Array && ca != .Object {
+					if !scalars_equal(&d, na.node, nb.node) {
+						if d.scratch_gate.failed {
+							return {}, .Out_Of_Memory
+						}
+						emit_patch_op(&d, &ops, .Replace, nb) or_return
 					}
-					ptr := encode_pointer(d.new[:], out_alloc) or_return
-					po := make_patch_op(.Replace, ptr, b, nb, out_alloc) or_return
-					append(&ops, po) or_return
+					continue
 				}
-				continue
-			}
-			if vals_equal(&d, na, nb, depth) {
-				continue
-			}
-			if d.too_deep {
-				break patch_loop
-			}
-			if ca == .Object {
-				push_patch_object(&d, &stack, na.node, nb.node, depth) or_return
-			} else {
-				push_patch_array(&d, &stack, na, nb, depth, &ops, out_alloc) or_return
+				if depth >= d.opts.max_depth {
+					if !vals_equal_exact(&d, na, nb, depth) {
+						if d.scratch_gate.failed {
+							return {}, .Out_Of_Memory
+						}
+						if d.too_deep {
+							break patch_loop
+						}
+						emit_patch_op(&d, &ops, .Replace, nb) or_return
+					}
+					continue
+				}
+				if vals_equal(&d, na, nb, depth) {
+					continue
+				}
+				if d.scratch_gate.failed {
+					return {}, .Out_Of_Memory
+				}
+				if d.too_deep {
+					break patch_loop
+				}
+				if ca == .Object {
+					push_patch_object(&d, &stack, na.node, nb.node, depth) or_return
+				} else {
+					push_patch_array(&d, &stack, na, nb, depth, &ops) or_return
+				}
 			}
 		}
 	}
 
-	p.ops = ops[:]
-	p.truncated = d.truncated
-	p.too_deep = d.too_deep
+	if d.scratch_gate.failed {
+		return {}, .Out_Of_Memory
+	}
+	if len(ops) == 0 {
+		destroy_arena(&out_arena)
+	}
+	p = {
+		ops       = ops[:],
+		truncated = d.truncated,
+		too_deep  = d.too_deep,
+		arena     = out_arena,
+	}
+	out_arena = nil
 	return p, nil
 }
 
 @(private = "file")
 push_patch_object :: proc(d: ^Differ, stack: ^[dynamic]Patch_Task, a, b: tape.Node_Index, depth: int) -> Error {
-	names := collect_object_names(d, a, b) or_return
-	#reverse for name in names {
-		va, in_a := member_val(d, 0, a, name) or_return
-		vb, in_b := member_val(d, 1, b, name) or_return
-		step := tape.Step(tape.Name(name))
+	members := collect_object_members(d, a, b) or_return
+	#reverse for m in members {
+		step := tape.Step(tape.Name(m.name))
 		switch {
-		case in_a && in_b:
-			append(stack, Patch_Task{kind = .Diff, a = va, b = vb, step = step, has_s = true, depth = depth + 1}) or_return
-		case in_a:
+		case m.has[0] && m.has[1]:
+			append(stack, Patch_Task{kind = .Diff, a = m.vals[0], b = m.vals[1], step = step, has_s = true, depth = u32(depth + 1)}) or_return
+		case m.has[0]:
 			append(stack, Patch_Task{kind = .Emit_Op, op = .Remove, step = step, has_s = true}) or_return
-		case in_b:
-			append(stack, Patch_Task{kind = .Emit_Op, op = .Add, b = vb, step = step, has_s = true}) or_return
+		case m.has[1]:
+			append(stack, Patch_Task{kind = .Emit_Op, op = .Add, b = m.vals[1], step = step, has_s = true}) or_return
 		}
 	}
 	return nil
@@ -425,16 +411,13 @@ push_patch_array :: proc(
 	a, b: Val,
 	depth: int,
 	ops: ^[dynamic]Patch_Op,
-	out_alloc: runtime.Allocator,
 ) -> Error {
 	xs := val_elements(d, 0, a) or_return
 	ys := val_elements(d, 1, b) or_return
 	removed, added, ok := sequence_edits(d, xs, ys, depth) or_return
 	if !ok {
+		emit_patch_op(d, ops, .Replace, b) or_return
 		d.truncated = true
-		ptr := encode_pointer(d.new[:], out_alloc) or_return
-		po := make_patch_op(.Replace, ptr, d.docs[1], b, out_alloc) or_return
-		append(ops, po) or_return
 		return nil
 	}
 
@@ -467,7 +450,7 @@ push_patch_array :: proc(
 				b     = val_node(ys[lo_j + k]),
 				step  = tape.Index(lo_j + k),
 				has_s = true,
-				depth = depth + 1,
+				depth = u32(depth + 1),
 			}) or_return
 		}
 		// Excess removals: each removes at `lo_j + paired`, shifting subsequent elements left into place.

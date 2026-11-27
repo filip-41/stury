@@ -418,7 +418,7 @@ overlay_big_int :: proc(v: Value) -> (u: u64, is_uint: bool, dec: string, ok: bo
 			}
 			return
 		case .Number_Text:
-			if is_plain_int_dec(n.val.text) {
+			if spell.is_plain_int_dec(n.val.text) {
 				if sn, sok := spell.number_strict(transmute([]u8)n.val.text, 0, u64(len(n.val.text))); sok && sn.kind == .Int {
 					return
 				}
@@ -490,10 +490,10 @@ overlay_as_f64 :: #force_no_inline proc(v: Value) -> f64 {
 				case .Float:
 					return transmute(f64)sn.bits
 				case .Wide:
-					return wide_double(b)
+					return spell.wide_double(b)
 				}
 			}
-			return wide_double(b)
+			return spell.wide_double(b)
 		}
 	}
 	if bv, has_base := overlay_base_node(ob, n); has_base {
@@ -551,7 +551,7 @@ overlay_is_integer :: #force_no_inline proc(v: Value) -> bool {
 		case .Float:
 			return n.val.f == math.trunc(n.val.f) && !math.is_inf(n.val.f)
 		case .Number_Text:
-			if is_plain_int_dec(n.val.text) {
+			if spell.is_plain_int_dec(n.val.text) {
 				return true
 			}
 			b := transmute([]u8)n.val.text

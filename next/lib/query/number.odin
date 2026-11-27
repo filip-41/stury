@@ -55,7 +55,7 @@ number_of :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 					defer if owned != nil {
 						delete(owned, alloc)
 					}
-					if ok && is_plain_int_dec(s) {
+					if ok && spell.is_plain_int_dec(s) {
 						return big_from_text(h, s)
 					}
 				}
@@ -68,7 +68,7 @@ number_of :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 				delete(owned, alloc)
 			}
 			if ok {
-				if is_plain_int_dec(s) {
+				if spell.is_plain_int_dec(s) {
 					return big_from_text(h, s)
 				}
 				if sn, valid := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); valid {
@@ -80,7 +80,7 @@ number_of :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 					case .Float:
 						return double_value(transmute(f64)sn.bits), .Ok
 					case .Wide:
-						return double_value(wide_double(transmute([]u8)s)), .Ok
+						return double_value(spell.wide_double(transmute([]u8)s)), .Ok
 					}
 				}
 			}
@@ -91,7 +91,7 @@ number_of :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 			return big_from_text(h, string(node_bytes(v)))
 		}
 		if n.kind == .Wide {
-			return double_value(wide_double(node_bytes(v))), .Ok
+			return double_value(spell.wide_double(node_bytes(v))), .Ok
 		}
 		return double_value(transmute(f64)n.bits), .Ok
 	}
@@ -122,39 +122,6 @@ binary_number_text :: proc(doc: ^tape.Document, at: tape.Node_Index, buf: []u8, 
 		return "", nil, false
 	}
 	return s, tmp, true
-}
-
-// Whether `s` is a plain decimal integer (optional leading `-`, digits only).
-@(private)
-is_plain_int_dec :: proc "contextless" (s: string) -> bool {
-	if len(s) == 0 {
-		return false
-	}
-	i := 1 if s[0] == '-' else 0
-	if i >= len(s) {
-		return false
-	}
-	for ; i < len(s); i += 1 {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// A number past binary64's range as the double it rounds to: an infinity or a zero, with its sign.
-@(private)
-wide_double :: proc "contextless" (text: []u8) -> f64 {
-	neg := len(text) > 0 && text[0] == '-'
-	big_order := true
-	for c, i in text {
-		if c | 0x20 == 'e' {
-			big_order = i + 1 >= len(text) || text[i + 1] != '-'
-			break
-		}
-	}
-	f := math.inf_f64(1) if big_order else 0
-	return -f if neg else f
 }
 
 // The double nearest number `v`.
@@ -194,13 +161,13 @@ as_f64 :: proc(v: Value) -> f64 {
 						case .Float:
 							return transmute(f64)sn.bits
 						case .Wide:
-							return wide_double(transmute([]u8)s)
+							return spell.wide_double(transmute([]u8)s)
 						}
 					}
 				}
 				return math.nan_f64()
 			}
-			return wide_double(node_bytes(v))
+			return spell.wide_double(node_bytes(v))
 		}
 	case .Overlay:
 		return overlay_as_f64(v)
@@ -261,7 +228,7 @@ trunc_i64 :: proc(v: Value) -> i64 {
 		if is_uint {
 			return max(i64)
 		}
-		neg, _ := decimal_parts(dec)
+		neg, _ := spell.decimal_parts(dec)
 		return min(i64) if neg else max(i64)
 	}
 	f := as_f64(v)
@@ -302,7 +269,7 @@ is_integer :: proc(v: Value) -> bool {
 			if !ok {
 				return false
 			}
-			if is_plain_int_dec(s) {
+			if spell.is_plain_int_dec(s) {
 				return true
 			}
 			if sn, valid := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); valid {
@@ -843,28 +810,11 @@ node_big_int :: proc(v: Value) -> (u: u64, is_uint: bool, dec: string, ok: bool)
 	return
 }
 
-// Canonical signed decimal parts of an integer text: `neg` and `digits` without leading zeros.
-@(private)
-decimal_parts :: proc "contextless" (s: string) -> (neg: bool, digits: string) {
-	t := s
-	if len(t) > 0 && t[0] == '-' {
-		neg = true
-		t = t[1:]
-	}
-	for len(t) > 1 && t[0] == '0' {
-		t = t[1:]
-	}
-	if t == "0" {
-		neg = false
-	}
-	return neg, t
-}
-
 // The order of two canonical decimal integer texts.
 @(private)
 compare_decimal :: proc "contextless" (a, b: string) -> int {
-	an, ad := decimal_parts(a)
-	bn, bd := decimal_parts(b)
+	an, ad := spell.decimal_parts(a)
+	bn, bd := spell.decimal_parts(b)
 	if an != bn {
 		return -1 if an else 1
 	}
@@ -896,7 +846,7 @@ compare_node_big_double :: proc(a: Value, f: f64) -> int {
 	}
 	abuf: [24]u8
 	ad := node_big_decimal(a, &abuf)
-	aneg, _ := decimal_parts(ad)
+	aneg, _ := spell.decimal_parts(ad)
 	if f == 0 {
 		return -1 if aneg else 1
 	}
@@ -927,7 +877,7 @@ compare_node_big_against_big :: proc(a: Value, y: ^big.Int, allocator: runtime.A
 		yv, _ := big.int_get_u64(y)
 		return int(u > yv) - int(u < yv)
 	}
-	aneg, ad := decimal_parts(dec)
+	aneg, ad := spell.decimal_parts(dec)
 	yneg := y.sign == .Negative
 	if aneg != yneg {
 		return -1 if aneg else 1
@@ -985,7 +935,7 @@ compare_wide :: proc(a, b: Value, allocator: runtime.Allocator) -> int {
 	}
 	if x.kind == .Int {
 		ybuf: [24]u8
-		yneg, _ := decimal_parts(node_big_decimal(y, &ybuf))
+		yneg, _ := spell.decimal_parts(node_big_decimal(y, &ybuf))
 		return 1 if yneg else -1
 	}
 	return -compare_node_big_double(y, x.f)
@@ -1058,7 +1008,7 @@ hash_number :: proc(v: Value) -> u64 {
 		if is_uint {
 			return hash_wide_int(false, mod_hash_p(u128(u)))
 		}
-		neg, digits := decimal_parts(dec)
+		neg, digits := spell.decimal_parts(dec)
 		acc: u64
 		for c in transmute([]u8)digits {
 			acc = mod_hash_p(u128(acc) * 10 + u128(c - '0'))
@@ -1159,7 +1109,7 @@ parse_number :: proc(h: ^Heap, text: string, loose := false) -> (v: Value, ok: b
 	}
 	if !good {
 		// An exponent past a double's range reads as infinity or zero.
-		f = wide_double(b)
+		f = spell.wide_double(b)
 	}
 	if integer_text(text) {
 		x, s := big_from_text(h, text[1:] if text[0] == '+' else text)
@@ -1182,7 +1132,7 @@ number_of_spelled :: proc(h: ^Heap, n: spell.Number, text: string) -> (Value, bo
 			return x, s == .Ok, s
 		}
 		if n.kind == .Wide {
-			return double_value(wide_double(transmute([]u8)text)), true, .Ok
+			return double_value(spell.wide_double(transmute([]u8)text)), true, .Ok
 		}
 		if n.kind == .Uint {
 			return double_value(f64(n.bits)), true, .Ok

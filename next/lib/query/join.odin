@@ -2,6 +2,7 @@ package query
 
 import "core:fmt"
 import "core:math"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
 // Relational hash-index and join primitives over `query.Value` and `query.Heap`.
@@ -845,7 +846,7 @@ is_nan_scalar :: proc(h: ^Heap, v: Value) -> (bool, Status) {
 				if d.doc.format != nil && .Binary in d.doc.format.caps {
 					return false, .Error
 				}
-				return math.is_nan(wide_double(node_bytes(v))), .Ok
+				return math.is_nan(spell.wide_double(node_bytes(v))), .Ok
 			}
 		}
 	}
