@@ -5,6 +5,7 @@ import "core:bytes"
 import "core:mem"
 import "core:strings"
 import "core:testing"
+import "core:unicode/utf8"
 import "stury:cbor"
 import "stury:dsv"
 import "stury:json"
@@ -266,17 +267,29 @@ render_shapes_heterogeneous_nested_and_empty :: proc(t: ^testing.T) {
 	}
 }
 
+@(private = "file")
+test_display_width :: proc "contextless" (s: string) -> int {
+	total := 0
+	for i := 0; i < len(s); {
+		r, sz := utf8.decode_rune_in_string(s[i:])
+		if sz <= 0 {
+			sz = 1
+		}
+		switch {
+		case r < 0x20 || (r >= 0x7F && r < 0xA0) || (r >= 0x0300 && r <= 0x036F):
+		case (r >= 0x4E00 && r <= 0x9FFF) || (r >= 0x1F300 && r <= 0x1FAFF):
+			total += 2
+		case:
+			total += 1
+		}
+		i += sz
+	}
+	return total
+}
+
 @(test)
 render_utf8_width_control_chars_and_truncation :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-
-	// Display width sanity checks.
-	testing.expect_value(t, write.display_width("hello"), 5)
-	testing.expect_value(t, write.display_width("café"), 4)
-	testing.expect_value(t, write.display_width("cafe\u0301"), 4) // combining acute accent
-	testing.expect_value(t, write.display_width("日本語"), 6) // 3 CJK wide chars
-	testing.expect_value(t, write.display_width("hi日本!"), 7)
-	testing.expect_value(t, write.display_width("🚀"), 2)
 
 	// Box table with CJK wide chars, combining marks, and control chars (\n, \r, \t, \x00, \x1b).
 	src := "[{\"label\":\"日本語\",\"note\":\"a\\nb\\tc\"},{\"label\":\"cafe\u0301\",\"note\":\"x\\u0000\\u001by\"}]"
@@ -291,9 +304,9 @@ render_utf8_width_control_chars_and_truncation :: proc(t: ^testing.T) {
 	// Verify every line in the box table has the exact same terminal display width!
 	lines := strings.split(strings.trim_suffix(string(boxed), "\n"), "\n", context.temp_allocator)
 	testing.expect_value(t, len(lines), 6)
-	expected_w := write.display_width(lines[0])
+	expected_w := test_display_width(lines[0])
 	for line, idx in lines {
-		testing.expectf(t, write.display_width(line) == expected_w, "line %d width %d != %d: %q", idx, write.display_width(line), expected_w, line)
+		testing.expectf(t, test_display_width(line) == expected_w, "line %d width %d != %d: %q", idx, test_display_width(line), expected_w, line)
 	}
 	// Verify control chars were escaped and never broke rows.
 	testing.expect(t, strings.contains(string(boxed), `a\nb\tc`))
@@ -304,9 +317,9 @@ render_utf8_width_control_chars_and_truncation :: proc(t: ^testing.T) {
 	defer delete(trunc_box)
 	testing.expect_value(t, terr, nil)
 	tlines := strings.split(strings.trim_suffix(string(trunc_box), "\n"), "\n", context.temp_allocator)
-	tw := write.display_width(tlines[0])
+	tw := test_display_width(tlines[0])
 	for line, idx in tlines {
-		testing.expectf(t, write.display_width(line) == tw, "trunc line %d width %d != %d: %q", idx, write.display_width(line), tw, line)
+		testing.expectf(t, test_display_width(line) == tw, "trunc line %d width %d != %d: %q", idx, test_display_width(line), tw, line)
 	}
 	testing.expect(t, strings.contains(string(trunc_box), "日…"))
 
@@ -450,44 +463,40 @@ render_docs_batch_streaming_sinks_and_errors :: proc(t: ^testing.T) {
 	defer delete(empty_docs)
 	testing.expectf(t, ederr == nil && len(empty_docs) == 0, "empty_docs: %q %v", empty_docs, ederr)
 
-	// Sink streaming (`write_table_to`, `write_markdown_to`, `write_table_docs_to`, `write_markdown_docs_to`).
+	// Sink streaming (`write_table_to`, `write_markdown_to`) and `Token_Tape` framed collection.
 	buf: bytes.Buffer
 	defer bytes.buffer_destroy(&buf)
-	testing.expect_value(t, write.write_table_docs_to(bytes.buffer_to_stream(&buf), docs[:], {style = .Compact}), nil)
-	testing.expectf(t, bytes.buffer_to_string(&buf) == string(batch_tbl), "sink tbl mismatch")
+	testing.expect_value(t, write.write_table_to(bytes.buffer_to_stream(&buf), &d1, {style = .Compact}), nil)
+	testing.expectf(t, bytes.buffer_to_string(&buf) == "key   value\nid    1\nname  alice\n", "sink tbl: %q", bytes.buffer_to_string(&buf))
 
 	bytes.buffer_reset(&buf)
-	testing.expect_value(t, write.write_markdown_docs_to(bytes.buffer_to_stream(&buf), docs[:], {compact = true}), nil)
-	testing.expectf(t, bytes.buffer_to_string(&buf) == string(batch_md), "sink md mismatch")
+	testing.expect_value(t, write.write_markdown_to(bytes.buffer_to_stream(&buf), &d1, {compact = true}), nil)
+	testing.expectf(t, bytes.buffer_to_string(&buf) == "| key | value |\n| --- | --- |\n| id | 1 |\n| name | alice |\n", "sink md: %q", bytes.buffer_to_string(&buf))
 
-	// Streaming token writers (framed = true for multi-record stream).
-	tw: write.Table_Render_Writer
-	testing.expect_value(t, write.table_render_writer_start(&tw, {style = .Compact}, {}, true), nil)
-	testing.expect_value(t, write.table_render_writer_token(&tw, .Object), nil)
-	testing.expect_value(t, write.table_render_writer_token(&tw, .Key, "k"), nil)
-	testing.expect_value(t, write.table_render_writer_token(&tw, .String, "v1"), nil)
-	testing.expect_value(t, write.table_render_writer_token(&tw, .Close), nil)
-	testing.expect_value(t, write.table_render_writer_token(&tw, .Object), nil)
-	testing.expect_value(t, write.table_render_writer_token(&tw, .Key, "k"), nil)
-	testing.expect_value(t, write.table_render_writer_token(&tw, .String, "v2"), nil)
-	testing.expect_value(t, write.table_render_writer_token(&tw, .Close), nil)
-	tw_out, tw_err := write.table_render_writer_end(&tw)
+	// Framed `Token_Tape` feeding `write_table` and `write_markdown_to`.
+	tt: write.Token_Tape
+	testing.expect_value(t, write.token_tape_start(&tt, true, 0, context.allocator), nil)
+	defer write.token_tape_drop(&tt)
+	testing.expect_value(t, write.token_tape_take(&tt, .Object, ""), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .Key, "k"), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .String, "v1"), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .Close, ""), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .Object, ""), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .Key, "k"), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .String, "v2"), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .Close, ""), nil)
+	tt_doc, tt_derr := write.token_tape_document(&tt)
+	testing.expect_value(t, tt_derr, nil)
+	tw_out, tw_err := write.write_table(&tt_doc, {style = .Compact})
 	defer delete(tw_out)
 	testing.expect_value(t, tw_err, nil)
 	testing.expectf(t, string(tw_out) == "k\nv1\nv2\n", "tw_out: %q", tw_out)
 
-	mw: write.Markdown_Writer
 	bytes.buffer_reset(&buf)
-	testing.expect_value(t, write.markdown_writer_start(&mw, {compact = true}, bytes.buffer_to_stream(&buf), true), nil)
-	testing.expect_value(t, write.markdown_writer_token(&mw, .Object), nil)
-	testing.expect_value(t, write.markdown_writer_token(&mw, .Key, "n"), nil)
-	testing.expect_value(t, write.markdown_writer_token(&mw, .Number, "10"), nil)
-	testing.expect_value(t, write.markdown_writer_token(&mw, .Close), nil)
-	mw_out, mw_err := write.markdown_writer_end(&mw)
-	testing.expectf(t, mw_err == nil && mw_out == nil, "mw sink: %v", mw_err)
-	testing.expectf(t, bytes.buffer_to_string(&buf) == "| n |\n| ---: |\n| 10 |\n", "mw sink out: %q", bytes.buffer_to_string(&buf))
+	testing.expect_value(t, write.write_markdown_to(bytes.buffer_to_stream(&buf), &tt_doc, {compact = true}), nil)
+	testing.expectf(t, bytes.buffer_to_string(&buf) == "| k |\n| --- |\n| v1 |\n| v2 |\n", "md sink out: %q", bytes.buffer_to_string(&buf))
 
-	// Error checks: nil sink, negative max_col_width, invalid node, partial scan doc, malformed token stream.
+	// Error checks: nil sink, negative max_col_width, invalid node, partial scan doc.
 	testing.expect_value(t, write.write_table_to({}, &d1), write.Error(tape.Bad_Option{"sink"}))
 	testing.expect_value(t, write.write_markdown_to({}, &d1), write.Error(tape.Bad_Option{"sink"}))
 	_, neg_err := write.write_table(&d1, {max_col_width = -1})
@@ -506,13 +515,6 @@ render_docs_batch_streaming_sinks_and_errors :: proc(t: ^testing.T) {
 	r2, ok2 := p_merr.(write.Refused)
 	testing.expectf(t, ok1 && r1.why == .Partial, "partial table: %v", p_terr)
 	testing.expectf(t, ok2 && r2.why == .Partial, "partial md: %v", p_merr)
-
-	bad_mw: write.Markdown_Writer
-	testing.expect_value(t, write.markdown_writer_start(&bad_mw), nil)
-	testing.expect_value(t, write.markdown_writer_token(&bad_mw, .Object), nil)
-	_, mal_err := write.markdown_writer_end(&bad_mw)
-	r3, ok3 := mal_err.(write.Refused)
-	testing.expectf(t, ok3 && r3.why == .Malformed, "malformed writer: %v", mal_err)
 }
 
 @(private = "file")
@@ -632,42 +634,31 @@ render_table_markdown_oom_sweep_and_zero_temp :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
-Writer_Start_Sweep :: struct {
+Token_Tape_Render_Sweep :: struct {
 	markdown: bool,
 	framed:   bool,
 }
 
 @(private = "file")
-writer_start_sweep_one :: proc(data: rawptr, a: runtime.Allocator) {
-	r := (^Writer_Start_Sweep)(data)
+token_tape_render_sweep_one :: proc(data: rawptr, a: runtime.Allocator) {
+	r := (^Token_Tape_Render_Sweep)(data)
+	tt: write.Token_Tape
+	if err := write.token_tape_start(&tt, r.framed, 0, a); err != nil {
+		return
+	}
+	defer write.token_tape_drop(&tt)
+	for step in ([?]struct{ kind: write.Token_Kind, text: string }{{.Object, ""}, {.Key, "k"}, {.Number, "1"}, {.Close, ""}}) {
+		if terr := write.token_tape_take(&tt, step.kind, step.text); terr != nil {
+			_ = terr.(runtime.Allocator_Error)
+			return
+		}
+	}
+	doc, derr := write.token_tape_document(&tt)
+	if derr != nil {
+		return
+	}
 	if r.markdown {
-		mw: write.Markdown_Writer
-		err := write.markdown_writer_start(&mw, {compact = true}, {}, r.framed, a)
-		if err != nil {
-			_ = err.(runtime.Allocator_Error)
-			return
-		}
-		if terr := write.markdown_writer_token(&mw, .Object); terr != nil {
-			_ = terr.(runtime.Allocator_Error)
-			write.markdown_writer_drop(&mw)
-			return
-		}
-		if terr := write.markdown_writer_token(&mw, .Key, "k"); terr != nil {
-			_ = terr.(runtime.Allocator_Error)
-			write.markdown_writer_drop(&mw)
-			return
-		}
-		if terr := write.markdown_writer_token(&mw, .Number, "1"); terr != nil {
-			_ = terr.(runtime.Allocator_Error)
-			write.markdown_writer_drop(&mw)
-			return
-		}
-		if terr := write.markdown_writer_token(&mw, .Close); terr != nil {
-			_ = terr.(runtime.Allocator_Error)
-			write.markdown_writer_drop(&mw)
-			return
-		}
-		text, eerr := write.markdown_writer_end(&mw)
+		text, eerr := write.write_markdown(&doc, {compact = true}, a)
 		if eerr == nil {
 			delete(text, a)
 		} else {
@@ -675,33 +666,7 @@ writer_start_sweep_one :: proc(data: rawptr, a: runtime.Allocator) {
 		}
 		return
 	}
-	tw: write.Table_Render_Writer
-	err := write.table_render_writer_start(&tw, {style = .Compact}, {}, r.framed, a)
-	if err != nil {
-		_ = err.(runtime.Allocator_Error)
-		return
-	}
-	if terr := write.table_render_writer_token(&tw, .Object); terr != nil {
-		_ = terr.(runtime.Allocator_Error)
-		write.table_render_writer_drop(&tw)
-		return
-	}
-	if terr := write.table_render_writer_token(&tw, .Key, "k"); terr != nil {
-		_ = terr.(runtime.Allocator_Error)
-		write.table_render_writer_drop(&tw)
-		return
-	}
-	if terr := write.table_render_writer_token(&tw, .Number, "1"); terr != nil {
-		_ = terr.(runtime.Allocator_Error)
-		write.table_render_writer_drop(&tw)
-		return
-	}
-	if terr := write.table_render_writer_token(&tw, .Close); terr != nil {
-		_ = terr.(runtime.Allocator_Error)
-		write.table_render_writer_drop(&tw)
-		return
-	}
-	text, eerr := write.table_render_writer_end(&tw)
+	text, eerr := write.write_table(&doc, {style = .Compact}, a)
 	if eerr == nil {
 		delete(text, a)
 	} else {
@@ -713,12 +678,12 @@ writer_start_sweep_one :: proc(data: rawptr, a: runtime.Allocator) {
 render_audit_regressions :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 
-	// 1. OOM sweep for framed=true and framed=false streaming token writers (verifies token_tape_drop on start OOM).
+	// 1. OOM sweep for framed=true and framed=false Token_Tape -> render pipelines.
 	for md in ([?]bool{false, true}) {
 		for framed in ([?]bool{false, true}) {
-			run := Writer_Start_Sweep{markdown = md, framed = framed}
-			s := testkit.sweep_failures(writer_start_sweep_one, &run)
-			testing.expectf(t, s.bad == 0 && s.refused >= 1, "writer_start sweep md=%v framed=%v: %v", md, framed, s)
+			run := Token_Tape_Render_Sweep{markdown = md, framed = framed}
+			s := testkit.sweep_failures(token_tape_render_sweep_one, &run)
+			testing.expectf(t, s.bad == 0 && s.refused >= 1, "token_tape render sweep md=%v framed=%v: %v", md, framed, s)
 		}
 	}
 
@@ -737,29 +702,15 @@ render_audit_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, write.write_table_to(sink, &sample_doc, {}, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
 		_, e2 := write.write_table_docs(docs[:], {}, bad_alloc)
 		testing.expect_value(t, e2, write.Error(runtime.Allocator_Error.Out_Of_Memory))
-		testing.expect_value(t, write.write_table_docs_to(sink, docs[:], {}, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
 
 		_, e3 := write.write_markdown(&sample_doc, {}, bad_alloc)
 		testing.expect_value(t, e3, write.Error(runtime.Allocator_Error.Out_Of_Memory))
 		testing.expect_value(t, write.write_markdown_to(sink, &sample_doc, {}, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
 		_, e4 := write.write_markdown_docs(docs[:], {}, bad_alloc)
 		testing.expect_value(t, e4, write.Error(runtime.Allocator_Error.Out_Of_Memory))
-		testing.expect_value(t, write.write_markdown_docs_to(sink, docs[:], {}, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
 
-		// Valid write.Out with nil/mem.nil_allocator() passed to write_*_out.
-		out: write.Out
-		testing.expect_value(t, write.out_start(&out, context.allocator, {}, write.ROOM_MAX), nil)
-		testing.expect_value(t, write.write_table_out(&out, &sample_doc, {}, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
-		write.out_drop(&out)
-
-		testing.expect_value(t, write.out_start(&out, context.allocator, {}, write.ROOM_MAX), nil)
-		testing.expect_value(t, write.write_markdown_out(&out, &sample_doc, {}, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
-		write.out_drop(&out)
-
-		tw: write.Table_Render_Writer
-		testing.expect_value(t, write.table_render_writer_start(&tw, {}, {}, true, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
-		mw: write.Markdown_Writer
-		testing.expect_value(t, write.markdown_writer_start(&mw, {}, {}, true, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
+		tt: write.Token_Tape
+		testing.expect_value(t, write.token_tape_start(&tt, true, 0, bad_alloc), runtime.Allocator_Error.Out_Of_Memory)
 	}
 
 	// 3. opts.node pointing directly to a DSV row .Object (no key nodes, keys live in Tabular_Ext.keys).
@@ -883,4 +834,23 @@ render_audit_regressions :: proc(t: ^testing.T) {
 	defer delete(xr_md)
 	testing.expect_value(t, xr_werr, nil)
 	testing.expectf(t, string(xr_md) == "| key | value |\n| --- | --- |\n| x | 1 |\n| x | 2 |\n| y | 3 |\n| x | 4 |\n", "xml repeated: %q", xr_md)
+
+	// P17: Ragged short DSV row with duplicate headers under `.Last` matches `tape.member` and single-row output.
+	rag_doc, rag_err := dsv.build(transmute([]u8)string("a,b,a\n1,2\n"), .Csv, {dups = .Last, tolerate = {.Ragged}})
+	defer dsv.destroy(&rag_doc)
+	testing.expect_value(t, rag_err, nil)
+	rag_md, rag_werr := write.write_markdown(&rag_doc, {compact = true})
+	defer delete(rag_md)
+	testing.expect_value(t, rag_werr, nil)
+	testing.expectf(t, string(rag_md) == "| b | a |\n| --- | --- |\n| 2 | 1 |\n", "ragged dup .Last md: %q", rag_md)
+
+	// P17: Orphan leading zero-width mark before a wide char is not emitted before ellipsis; combining mark after a base char is kept.
+	zw_doc, zw_err := json.build(transmute([]u8)string("[{\"a\":\"\u0301日本語\",\"b\":\"x\u0301日本語\"}]"))
+	defer json.destroy(&zw_doc)
+	testing.expect_value(t, zw_err, nil)
+	zw_tbl, zw_werr := write.write_table(&zw_doc, {style = .Box, max_col_width = 2})
+	defer delete(zw_tbl)
+	testing.expect_value(t, zw_werr, nil)
+	testing.expectf(t, !strings.contains(string(zw_tbl), " \u0301…"), "orphan leading combining mark leaked: %q", zw_tbl)
+	testing.expectf(t, strings.contains(string(zw_tbl), "x\u0301…"), "base + combining mark missing: %q", zw_tbl)
 }

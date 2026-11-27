@@ -124,7 +124,7 @@ put :: proc(w: ^Writer, doc: ^tape.Document, node := tape.ROOT) -> Write_Error {
 // `Refused{index, .Malformed}`, which leaves no text, though a sink holds what it was given. `w` is not used again.
 @(require_results)
 writer_end :: proc(w: ^Writer) -> (text: []u8, err: Write_Error) {
-	whole := write.sequence_done(&w.seq) || w.opts.framing != .None && w.seq.depth == 0
+	whole := write.sequence_done(&w.seq)
 	taken := w.seq.taken
 	write.sequence_drop(&w.seq)
 	if !whole {

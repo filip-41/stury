@@ -25,7 +25,7 @@ token :: proc(w: ^Writer, kind: Token_Kind, text := "") -> Write_Error {
 // Writes `node` of `doc` as tokens into `w`.
 @(require_results)
 put :: proc(w: ^Writer, doc: ^tape.Document, node := tape.ROOT) -> Write_Error {
-	return write.tokens_of(doc, node, w, token, w.tw.tokens.allocator)
+	return write.tokens_of(doc, node, w, token, w.tw.allocator)
 }
 
 @(require_results)
