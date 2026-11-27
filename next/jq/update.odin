@@ -3,38 +3,38 @@ package jq
 import "base:intrinsics"
 import "stury:lib/query"
 
-// Path expressions and the assignments over them: `path(f)`, and `a = b`, `a |= f`, `a op= b`, `a //= b`, which take the
-// paths `a` makes on the input and set each in turn.
+// Path expressions and the assignments over them: `path(f)`, and `a = b`, `a |= f`, `a op= b`, `a //= b`.
+
+// Materializes a tracked path register `p` (taken) into a built array, or raises an invalid-path error.
+@(private = "file")
+materialize_path :: proc(m: ^Machine, p: query.Value) -> (res: query.Value, status: query.Status) {
+	h := m.h
+	if !is_path(p) {
+		s := raise_taken(h, path_error(m, "Invalid path expression with result ", p))
+		query.release(h, p)
+		return query.NULL, s
+	}
+	if (p.kind == .Node || p.kind == .Overlay) && query.type_of(p) == .Array {
+		defer query.release(h, p)
+		return query.built(h, p)
+	}
+	return p if p.kind == .Array else m.empty, .Ok
+}
 
 // An output of `path(f)`'s filter: its path, which must be one.
 @(private)
 emit_path :: proc(m: ^Machine, r: ^Regs, f: ^Frame) {
-	h := m.h
 	p := r.vpath
-	query.release(h, r.v)
+	query.release(m.h, r.v)
 	r.v, r.vpath = query.ABSENT, query.ABSENT
-	if !is_path(p) {
-		s := raise_taken(h, path_error(m, "Invalid path expression with result ", p))
-		query.release(h, p)
-		r.sig, r.mode = fail_status(s), .Ret
+	mat, s := materialize_path(m, p)
+	if s != .Ok {
+		r.sig, r.mode = .Fail, .Ret
 		return
 	}
-	if (p.kind == .Node || p.kind == .Overlay) && query.type_of(p) == .Array {
-		b, s := query.built(h, p)
-		query.release(h, p)
-		if s != .Ok {
-			r.sig, r.mode = .Fail, .Ret
-			return
-		}
-		p = b
-	} else if p.kind != .Array {
-		p = m.empty
-	}
-	give_value(m, r, f, p)
+	give_value(m, r, f, mat)
 }
 
-// jq's message for a path expression's output that is no path, `p` its marked value, as a text value: `prefix`, the
-// value cut to `size` as jq cuts it, and `suffix`.
 @(private)
 path_error :: proc(m: ^Machine, prefix: string, p: query.Value, size := 30, suffix := "") -> query.Value {
 	v := p
@@ -48,7 +48,6 @@ path_error :: proc(m: ^Machine, prefix: string, p: query.Value, size := 30, suff
 	return t
 }
 
-// jq's message for a step by `key` on `result`, what a path expression made that is no path.
 @(private)
 step_path_error :: proc(m: ^Machine, result, key: query.Value) -> query.Value {
 	out := make([dynamic]u8, m.h.allocator)
@@ -64,7 +63,6 @@ eval_parts :: proc(m: ^Machine, r: ^Regs) {
 	start_parts(m, r, 0xFF, r.n.kind == .Object)
 }
 
-// `@name` on each output of a filter that generates.
 @(private)
 eval_format :: proc(m: ^Machine, r: ^Regs) {
 	n := r.n
@@ -77,12 +75,10 @@ eval_format :: proc(m: ^Machine, r: ^Regs) {
 		value_out(m, r, v)
 		return
 	}
-	f := push_or_fail(m, r, Input_Frame, .Format)
-	if f == nil {
-		return
+	if f := push_or_fail(m, r, Input_Frame, .Format); f != nil {
+		f.n = n
+		r.n, r.k = n.a, f
 	}
-	f.n = n
-	r.n, r.k = n.a, f
 }
 
 @(private)
@@ -105,11 +101,11 @@ Update_Frame :: struct {
 	using frame: Frame,
 	n:           ^Node,
 	env:         ^Env,
-	x:           query.Value, // the right side's value, but for `|=`
+	x:           query.Value,
 	state:       query.Value,
-	paths:       query.Value, // an array
-	dels:        query.Value, // the paths `|=`'s filter gave nothing for, deleted at the end
-	out:         query.Value, // `|=`'s filter's first output
+	paths:       query.Value,
+	dels:        query.Value,
+	out:         query.Value,
 	i:           int,
 	applying:    bool,
 	got:         bool,
@@ -131,16 +127,12 @@ eval_update :: proc(m: ^Machine, r: ^Regs) {
 		start_update(m, r, x)
 		return
 	}
-	f := push_or_fail(m, r, Input_Frame, .Update)
-	if f == nil {
-		return
+	if f := push_or_fail(m, r, Input_Frame, .Update); f != nil {
+		f.n, f.env, f.input, f.path = n, env_retain(r.env), query.retain(r.input), r.path
+		r.path, r.n, r.k, r.track = query.ABSENT, n.b, f, false
 	}
-	f.n, f.env, f.input, f.path = n, env_retain(r.env), query.retain(r.input), r.path
-	r.path = query.ABSENT
-	r.n, r.k, r.track = n.b, f, false
 }
 
-// An assignment of `r.n` on the registers' input with right side value `x`, taken: its paths first.
 @(private)
 start_update :: proc(m: ^Machine, r: ^Regs, x: query.Value) {
 	h := m.h
@@ -160,11 +152,9 @@ start_update :: proc(m: ^Machine, r: ^Regs, x: query.Value) {
 	}
 	f.track, f.n, f.env, f.x, f.state, f.paths, f.dels = r.track, n, env_retain(r.env), x, query.retain(r.input), paths, m.empty
 	query.release(h, r.path)
-	r.path = query.ABSENT
-	r.n, r.k, r.track = n.a, f, true
+	r.path, r.n, r.k, r.track = query.ABSENT, n.a, f, true
 }
 
-// An output of an assignment's right side: an assignment with it.
 @(private)
 emit_update :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame) {
 	query.release(m.h, r.vpath)
@@ -174,7 +164,6 @@ emit_update :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame) {
 	start_update(m, r, x)
 }
 
-// An output to an assignment's frame: a path of its left side, or the first output of `|=`'s filter.
 @(private)
 emit_update_each :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 	h := m.h
@@ -189,19 +178,9 @@ emit_update_each :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 	p := r.vpath
 	query.release(h, r.v)
 	r.v, r.vpath = query.ABSENT, query.ABSENT
-	s := query.Status.Ok
-	if !is_path(p) {
-		s = raise_taken(h, path_error(m, "Invalid path expression with result ", p))
-		query.release(h, p)
-	} else if (p.kind == .Node || p.kind == .Overlay) && query.type_of(p) == .Array {
-		b: query.Value
-		b, s = query.built(h, p)
-		query.release(h, p)
-		if s == .Ok {
-			s = query.append_owned(h, &f.paths, b)
-		}
-	} else {
-		s = query.append_owned(h, &f.paths, p if p.kind == .Array else m.empty)
+	mat, s := materialize_path(m, p)
+	if s == .Ok {
+		s = query.append_owned(h, &f.paths, mat)
 	}
 	r.sig, r.mode = fail_status(s), .Ret
 }
@@ -209,10 +188,7 @@ emit_update_each :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 @(private)
 resume_update_each :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 	h := m.h
-	sig := r.sig
-	if sig == .Break && m.brk == f {
-		sig = .Go
-	}
+	sig := Signal.Go if r.sig == .Break && m.brk == f else r.sig
 	if sig != .Go {
 		drop_update(m, f)
 		pop_frame(m)
@@ -221,7 +197,7 @@ resume_update_each :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 	}
 	if f.applying {
 		p := query.items_of(f.paths)[f.i]
-		s := query.Status.Ok
+		s: query.Status
 		if f.got {
 			f.state, s = query.set_path(h, f.state, p, f.out)
 			f.out, f.got = query.ABSENT, false
@@ -240,7 +216,6 @@ resume_update_each :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 	update_next(m, r, f)
 }
 
-// Sets the paths of `f` from its `i`th, running `|=`'s filter in the machine when it is not native.
 @(private)
 update_next :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 	h := m.h
@@ -255,61 +230,53 @@ update_next :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 		}
 		p := paths[f.i]
 		s := query.Status.Ok
-		#partial switch n.op {
-		case .Assign:
+		if n.op == .Assign {
 			f.state, s = query.set_path(h, f.state, p, query.retain(f.x))
-		case .Modify:
+		} else {
 			cur: query.Value
 			cur, s = query.get_path(h, f.state, p)
-			if s != .Ok {
-				break
-			}
-			if f.i + 1 == len(paths) {
-				if s = take_container(h, f, p, cur); s != .Ok {
-					break
-				}
-			}
-			if .Native not_in n.b.flags {
-				f.got = false
-				if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(cur) {
-					if os := push_origin(m, cur, f); os != .Ok {
-						query.release(h, cur)
-						s = os
-						break
-					}
-				}
-				r.n, r.input, r.path, r.env, r.k, r.track, r.mode = n.b, cur, query.ABSENT, env_retain(f.env), f, false, .Eval
-				return
-			}
-			v, found, vs := eval_native_maybe_origin(m, n.b, cur, f.env)
-			s = vs
-			if s == .Ok && found {
-				f.state, s = query.set_path(h, f.state, p, v)
-			} else if s == .Ok {
-				s = query.append_owned(h, &f.dels, query.retain(p))
-			}
-		case:
-			cur: query.Value
-			cur, s = query.get_path(h, f.state, p)
-			if s != .Ok {
-				break
-			}
-			if n.op == .Add && f.i + 1 == len(paths) {
-				if s = take_container(h, f, p, cur); s != .Ok {
-					break
-				}
-			}
-			v: query.Value
-			if n.op == .Alt {
-				v = cur if truthy(cur) else query.retain(f.x)
-				if !truthy(cur) {
-					query.release(h, cur)
-				}
-			} else {
-				v, s = binary_owned(h, n.op, cur, f.x)
+			if s == .Ok && (n.op == .Modify || n.op == .Add) && f.i + 1 == len(paths) {
+				s = take_container(h, f, p, cur)
 			}
 			if s == .Ok {
-				f.state, s = query.set_path(h, f.state, p, v)
+				if n.op == .Modify {
+					if .Native not_in n.b.flags {
+						f.got = false
+						if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(cur) {
+							if os := push_origin(m, cur, f); os != .Ok {
+								query.release(h, cur)
+								s = os
+							}
+						}
+						if s == .Ok {
+							r.n, r.input, r.path, r.env, r.k, r.track, r.mode = n.b, cur, query.ABSENT, env_retain(f.env), f, false, .Eval
+							return
+						}
+					} else {
+						v, found, vs := eval_native_maybe_origin(m, n.b, cur, f.env)
+						s = vs
+						if s == .Ok && found {
+							f.state, s = query.set_path(h, f.state, p, v)
+						} else if s == .Ok {
+							s = query.append_owned(h, &f.dels, query.retain(p))
+						}
+					}
+				} else {
+					v: query.Value
+					if n.op == .Alt {
+						if truthy(cur) {
+							v = cur
+						} else {
+							query.release(h, cur)
+							v = query.retain(f.x)
+						}
+					} else {
+						v, s = binary_owned(h, n.op, cur, f.x)
+					}
+					if s == .Ok {
+						f.state, s = query.set_path(h, f.state, p, v)
+					}
+				}
 			}
 		}
 		if s != .Ok || h.tainted {
@@ -332,14 +299,9 @@ update_next :: proc(m: ^Machine, r: ^Regs, f: ^Update_Frame) {
 		r.sig, r.mode = .Fail, .Ret
 		return
 	}
-	r.v, r.vpath, r.k, r.mode = v, query.ABSENT, k, .Emit
-	if track {
-		r.vpath = not_path_marker(m, v)
-	}
+	r.v, r.vpath, r.k, r.mode = v, not_path_marker(m, v) if track else query.ABSENT, k, .Emit
 }
 
-// Lets the state's slot at path `p` go of `cur`, the value read there, so the operation on `cur` runs in place. On
-// failure `cur` is released. A path with a slice is left alone: a slice takes only an array.
 @(private)
 take_container :: proc(h: ^query.Heap, f: ^Update_Frame, p, cur: query.Value) -> query.Status {
 	if cur.kind != .Array && cur.kind != .Object && cur.kind != .String {

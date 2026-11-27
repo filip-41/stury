@@ -8,6 +8,20 @@ import "stury:lib/core/tape"
 // holds each key once, in the order its keys first came. An operation that changes a container takes it by pointer,
 // owned by the caller: it changes the block in place when the caller holds it alone, else a copy that replaces it.
 
+@(private, rodata)
+TAPE_NODE_TYPE := [tape.Kind]Type {
+	.Null   = .Null,
+	.False  = .False,
+	.True   = .True,
+	.Number = .Number,
+	.String = .String,
+	.Plain  = .String,
+	.Bytes  = .String,
+	.Array  = .Array,
+	.Object = .Object,
+	.End    = .Null,
+}
+
 @(private)
 array_size :: #force_inline proc "contextless" (cap: int) -> int {
 	return size_of(Array_Block) + cap * size_of(Value)
@@ -38,8 +52,21 @@ entries_of :: #force_inline proc "contextless" (v: Value) -> []Entry {
 	return object_entries((^Object_Block)(v.p))
 }
 
+@(private)
+array_note_value :: #force_inline proc "contextless" (b: ^Array_Block, x: Value) {
+	if x.held {
+		b.flags |= BLOCK_HAS_HELD
+	}
+	if x.kind >= .Array {
+		b.flags |= BLOCK_HAS_CONTAINER
+		if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
+			b.flags |= BLOCK_HAS_PARTIAL
+		}
+	}
+}
+
 // The type of `v`.
-type_of :: proc "contextless" (v: Value) -> Type {
+type_of :: #force_inline proc "contextless" (v: Value) -> Type {
 	switch v.kind {
 	case .Absent:
 		return .Absent
@@ -58,30 +85,26 @@ type_of :: proc "contextless" (v: Value) -> Type {
 	case .Object:
 		return .Object
 	case .Node:
-		return node_type(node_token(v))
+		return TAPE_NODE_TYPE[node_token(v).kind]
 	case .Overlay:
 		return overlay_type(v)
 	}
 	return .Null
 }
 
-@(private)
-node_type :: #force_inline proc "contextless" (t: tape.Node) -> Type {
-	#partial switch t.kind {
-	case .Null:
-		return .Null
-	case .False:
-		return .False
-	case .True:
-		return .True
-	case .Number:
-		return .Number
-	case .Array:
-		return .Array
-	case .Object:
-		return .Object
+// O(1) element count of a complete, non-overlay, non-grouped container `t`, or false if iteration is required.
+fast_container_length :: #force_inline proc(h: ^Heap, t: Value) -> (count: int, ok: bool) #no_bounds_check {
+	if t.kind == .Overlay {
+		return 0, false
 	}
-	return .String
+	if t.kind == .Node {
+		d := (^Doc_Block)(t.p)
+		if (d.doc.format != nil && d.doc.format.dups == .Group) || node_token(t).spelling & tape.CONTAINER_PARTIAL != 0 {
+			return 0, false
+		}
+	}
+	cnt := length_of(h, t)
+	return cnt, !h.tainted
 }
 
 @(require_results)
@@ -114,7 +137,6 @@ own_array :: proc(h: ^Heap, a: ^Value, more: int) -> Status {
 	if unique(a^) {
 		cap = max(cap, 2 * n)
 		if old.class == DIRECT {
-			// The allocator may grow a large block where it is, with no copy.
 			b := resize_direct(h, old, array_size(int(old.cap)), array_size(cap)) or_return
 			x := (^Array_Block)(b)
 			x.cap = u32(cap)
@@ -126,10 +148,8 @@ own_array :: proc(h: ^Heap, a: ^Value, more: int) -> Status {
 	x := (^Array_Block)(w.p)
 	items := array_items(old)
 	runtime.mem_copy_non_overlapping(rawptr(uintptr(x) + size_of(Array_Block)), raw_data(items), n * size_of(Value))
-	x.len = u32(n)
-	x.flags = old.flags
+	x.len, x.flags = u32(n), old.flags
 	if unique(a^) {
-		// The elements move: the old block is freed without giving them up.
 		free_block(h, block_of(a^), array_size(int(old.cap)))
 	} else {
 		for v in items {
@@ -154,15 +174,7 @@ append_owned :: proc(h: ^Heap, a: ^Value, x: Value) -> Status #no_bounds_check {
 	}
 	([^]Value)(uintptr(b) + size_of(Array_Block))[b.len] = x
 	b.len += 1
-	if x.held {
-		b.flags |= BLOCK_HAS_HELD
-	}
-	if x.kind >= .Array {
-		b.flags |= BLOCK_HAS_CONTAINER
-		if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
-			b.flags |= BLOCK_HAS_PARTIAL
-		}
-	}
+	array_note_value(b, x)
 	return .Ok
 }
 
@@ -184,15 +196,7 @@ array_put :: proc(h: ^Heap, a: ^Value, i: int, x: Value) -> Status #no_bounds_ch
 	}
 	items[i] = x
 	b.len = u32(max(n, i + 1))
-	if x.held {
-		b.flags |= BLOCK_HAS_HELD
-	}
-	if x.kind >= .Array {
-		b.flags |= BLOCK_HAS_CONTAINER
-		if b.flags & BLOCK_HAS_PARTIAL == 0 && value_has_partial(x) {
-			b.flags |= BLOCK_HAS_PARTIAL
-		}
-	}
+	array_note_value(b, x)
 	return .Ok
 }
 
@@ -259,19 +263,15 @@ node_has_partial_slow :: #force_no_inline proc "contextless" (doc: ^tape.Documen
 }
 
 // Whether `v` is or contains a partial document container (an unloaded subtree that must not be emitted whole).
-// O(1) on scalars, whole-doc nodes, and built containers (tracked via `BLOCK_HAS_PARTIAL`, no DAG walk).
 value_has_partial :: #force_inline proc "contextless" (v: Value) -> bool {
 	if v.kind < .Array {
 		return false
 	}
 	if v.kind == .Node {
-		d := (^Doc_Block)(v.p)
-		return node_has_partial(&d.doc, tape.Node_Index(v.n))
+		return node_has_partial(&(^Doc_Block)(v.p).doc, tape.Node_Index(v.n))
 	}
-	if b := block_of(v); b != nil {
-		return b.flags & BLOCK_HAS_PARTIAL != 0
-	}
-	return false
+	b := block_of(v)
+	return b != nil && b.flags & BLOCK_HAS_PARTIAL != 0
 }
 
 // Whether nodes of `d` may carry facts or belong to a partial document (so scalars keep their document origin).
@@ -280,34 +280,33 @@ doc_keeps_origin :: #force_inline proc "contextless" (d: ^Doc_Block) -> bool {
 	return d.doc.present != {} || d.doc.partial != nil || (d.doc.format != nil && (d.doc.format.attribute != nil || d.doc.format.fact_name != nil))
 }
 
-// The value of node `at` of document block `d`: null and booleans as themselves (or as `.Node` when `doc_keeps_origin`),
-// a string with an escape decoded into a string of the heap (carrying `(d, at)` when `doc_keeps_origin`), anything else
-// the node, holding the block.
+@(private = "file")
+token_is_direct_node :: #force_inline proc "contextless" (t: tape.Node) -> bool {
+	return t.kind == .Number || t.kind >= .Array || (u8(t.kind) - u8(tape.Kind.String) <= 1 && t.role != .Key && t.spelling & tape.SPELLING_DECODE == 0)
+}
+
+// The value of node `at` of document block `d`.
 @(private, require_results)
 node_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, force_origin := false) -> (res: Value, status: Status) #no_bounds_check {
 	t := d.doc.nodes[at]
-	#partial switch t.kind {
-	case .Number, .Array, .Object:
+	if intrinsics.expect(token_is_direct_node(t), true) {
 		d.rc += 1
 		return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
-	case .String, .Plain:
-		if intrinsics.expect(t.role != .Key && t.spelling & tape.SPELLING_DECODE == 0, true) {
-			d.rc += 1
-			return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
-		}
-		return decoded_text(h, d, at, t.role != .Key && (force_origin || h.keep_origins || doc_keeps_origin(d)))
-	case .Bytes:
-		return decoded_text(h, d, at, t.role != .Key && (force_origin || h.keep_origins || doc_keeps_origin(d)))
+	}
+	keep := force_origin || h.keep_origins || doc_keeps_origin(d)
+	#partial switch t.kind {
+	case .String, .Plain, .Bytes:
+		return decoded_text(h, d, at, t.role != .Key && keep)
 	case .Null:
-		if !(force_origin || h.keep_origins || doc_keeps_origin(d)) {
+		if !keep {
 			return NULL, .Ok
 		}
 	case .False:
-		if !(force_origin || h.keep_origins || doc_keeps_origin(d)) {
+		if !keep {
 			return FALSE, .Ok
 		}
 	case .True:
-		if !(force_origin || h.keep_origins || doc_keeps_origin(d)) {
+		if !keep {
 			return TRUE, .Ok
 		}
 	}
@@ -317,8 +316,18 @@ node_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, force_origin :=
 
 // The value of node `at` inside the document of `d`, retaining `d` when a node value is returned.
 @(require_results)
-node_at :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) {
+node_at :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (Value, Status) {
 	return node_value(h, d, at)
+}
+
+@(private = "file", require_results)
+copy_text_maybe_doc :: proc(h: ^Heap, d: ^Doc_Block, origin: tape.Node_Index, s: string, attach_doc: bool) -> (res: Value, status: Status) {
+	if !attach_doc {
+		return text_value(h, s)
+	}
+	v, p := make_doc_text(h, d, origin, len(s)) or_return
+	runtime.mem_copy_non_overlapping(p, raw_data(s), len(s))
+	return v, .Ok
 }
 
 // The text of a document token decoded into a string of the heap, optionally retaining `(d, origin)` for facts.
@@ -326,13 +335,7 @@ node_at :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, st
 token_text_value :: proc(h: ^Heap, d: ^Doc_Block, t: tape.Token, attach_doc := false, origin := tape.NO_NODE) -> (res: Value, status: Status) {
 	room := tape.text_room(&d.doc, t)
 	if room == 0 {
-		raw := string(tape.span_bytes(&d.doc, t.lo, t.n))
-		if !attach_doc {
-			return text_value(h, raw)
-		}
-		v, p := make_doc_text(h, d, origin, len(raw)) or_return
-		runtime.mem_copy_non_overlapping(p, raw_data(raw), len(raw))
-		return v, .Ok
+		return copy_text_maybe_doc(h, d, origin, string(tape.span_bytes(&d.doc, t.lo, t.n)), attach_doc)
 	}
 	v: Value
 	p: [^]u8
@@ -346,15 +349,9 @@ token_text_value :: proc(h: ^Heap, d: ^Doc_Block, t: tape.Token, attach_doc := f
 		release(h, v)
 		return NULL, fail(h, .Parse, .To_Text)
 	}
-	// The decode may be its bytes in the text, which `buf` did not take.
 	if raw_data(s) != p {
 		release(h, v)
-		if !attach_doc {
-			return text_value(h, s)
-		}
-		w, wp := make_doc_text(h, d, origin, len(s)) or_return
-		runtime.mem_copy_non_overlapping(wp, raw_data(s), len(s))
-		return w, .Ok
+		return copy_text_maybe_doc(h, d, origin, s, attach_doc)
 	}
 	v.n = u32(len(s))
 	return v, .Ok
@@ -373,7 +370,7 @@ decoded_text :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Ind
 
 // The key of the built object entry or the document member whose key node is `at`, as a string value.
 @(require_results)
-key_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) {
+key_value :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (Value, Status) {
 	return decoded_text(h, d, at)
 }
 
@@ -406,10 +403,7 @@ member :: proc(h: ^Heap, v: Value, key: string) -> (res: Value, status: Status) 
 	if v.kind == .Object {
 		o := (^Object_Block)(v.p)
 		k := find_key(o, key)
-		if k < 0 {
-			return ABSENT, .Ok
-		}
-		return retain(object_entries(o)[k].value), .Ok
+		return (retain(object_entries(o)[k].value) if k >= 0 else ABSENT), .Ok
 	}
 	if intrinsics.expect(v.kind == .Overlay, false) {
 		return overlay_member(h, v, key)
@@ -423,8 +417,7 @@ member :: proc(h: ^Heap, v: Value, key: string) -> (res: Value, status: Status) 
 		note_presence(h, p)
 		return ABSENT, .Ok
 	}
-	t := d.doc.nodes[at]
-	if t.kind == .Number || t.kind >= .Array || (u8(t.kind) - u8(tape.Kind.String) <= 1 && t.role != .Key && t.spelling & tape.SPELLING_DECODE == 0) {
+	if token_is_direct_node(d.doc.nodes[at]) {
 		d.rc += 1
 		return {p = d, n = u32(at), kind = .Node, held = true}, .Ok
 	}
@@ -437,8 +430,7 @@ groups_names :: #force_inline proc "contextless" (d: ^Doc_Block, at: u32) -> boo
 	return d.doc.format.dups == .Group && d.doc.nodes[at].kind == .Object
 }
 
-// Member `key` of the markup element at `at` of `d`: its one child as itself, several as an array of them in document
-// order, `.Absent` for none.
+// Member `key` of the markup element at `at` of `d`.
 @(private, cold)
 group_member :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, key: string) -> (res: Value, status: Status) {
 	c, p := tape.named(reader(d), at, key)
@@ -458,29 +450,7 @@ group_member :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Ind
 			release(h, out)
 			return ABSENT, s
 		}
-		if out.kind == .Absent {
-			out = x
-			continue
-		}
-		if out.kind != .Array {
-			first := out
-			out, s = make_array(h, 2)
-			if s != .Ok {
-				release(h, first)
-				release(h, x)
-				return ABSENT, s
-			}
-			s = append_owned(h, &out, first)
-			if s != .Ok {
-				release(h, out)
-				release(h, x)
-				return ABSENT, s
-			}
-		}
-		if s = append_owned(h, &out, x); s != .Ok {
-			release(h, out)
-			return ABSENT, s
-		}
+		out = append_grouped(h, out, x) or_return
 	}
 }
 
@@ -515,7 +485,6 @@ object_key_hash_short :: #force_inline proc "contextless" (p: [^]u8, n: int) -> 
 	return u32((h * 0x9E3779B97F4A7C15) >> 32)
 }
 
-// Fast word-at-a-time hash for built `Object_Block.slots` tables (private to this file).
 @(private = "file")
 object_key_hash :: #force_inline proc "contextless" (s: string) -> u32 #no_bounds_check {
 	n := len(s)
@@ -538,7 +507,6 @@ entry_key_text :: #force_inline proc "contextless" (v: Value) -> string #no_boun
 	return entry_node_text(v)
 }
 
-// Byte equality of two equal-or-arbitrary-length strings, fast-pathing short slices inline.
 @(private = "file")
 raw_text_eq :: #force_inline proc "contextless" (s, ks: string) -> bool #no_bounds_check {
 	n := len(ks)
@@ -564,7 +532,6 @@ raw_text_eq :: #force_inline proc "contextless" (s, ks: string) -> bool #no_boun
 	return n == 0 || a[0] == b[0]
 }
 
-// Fast equality of built object entry key `v` against `ks`.
 @(private = "file")
 entry_key_eq :: #force_inline proc "contextless" (v: Value, ks: string) -> bool #no_bounds_check {
 	return raw_text_eq(entry_key_text(v), ks)
@@ -615,26 +582,19 @@ index_keys :: proc(h: ^Heap, o: ^Object_Block) -> Status #no_bounds_check {
 		return fail_memory(h)
 	}
 	h.used += u64(count) * size_of(u32)
-	o.next_or_slots = raw_data(mem)
-	o.slot_log2 = log2
-	slots := ([^]u32)(o.next_or_slots)
-	mask := count - 1
+	o.next_or_slots, o.slot_log2 = raw_data(mem), log2
 	entries := ([^]Entry)(uintptr(o) + size_of(Object_Block))
-	for i in 0 ..< int(o.len) {
-		at := object_key_hash(entry_key_text(entries[i].key)) & mask
-		for slots[at] != 0 {
-			at = (at + 1) & mask
-		}
-		slots[at] = u32(i) + 1
+	for i in 0 ..< o.len {
+		slot_put_hash(o, object_key_hash(entry_key_text(entries[i].key)), i)
 	}
 	return .Ok
 }
 
-@(private)
-slot_put :: #force_inline proc "contextless" (o: ^Object_Block, key: string, i: u32) #no_bounds_check {
+@(private = "file")
+slot_put_hash :: #force_inline proc "contextless" (o: ^Object_Block, kh: u32, i: u32) #no_bounds_check {
 	slots := ([^]u32)(o.next_or_slots)
 	mask := (u32(1) << o.slot_log2) - 1
-	at := object_key_hash(key) & mask
+	at := kh & mask
 	for slots[at] != 0 {
 		at = (at + 1) & mask
 	}
@@ -664,8 +624,7 @@ own_object :: proc(h: ^Heap, o: ^Value, more: int) -> Status #no_bounds_check {
 	x := (^Object_Block)(w.p)
 	entries := object_entries(old)
 	runtime.mem_copy_non_overlapping(rawptr(uintptr(x) + size_of(Object_Block)), raw_data(entries), n * size_of(Entry))
-	x.len = u32(n)
-	x.flags = old.flags
+	x.len, x.flags = u32(n), old.flags
 	if unique(o^) {
 		free_object_slots(h, old)
 		free_block(h, block_of(o^), object_size(int(old.cap)))
@@ -676,13 +635,9 @@ own_object :: proc(h: ^Heap, o: ^Value, more: int) -> Status #no_bounds_check {
 		release(h, o^)
 	}
 	o^ = w
-	if s := index_keys(h, x); s != .Ok {
-		return s
-	}
-	return .Ok
+	return index_keys(h, x)
 }
 
-// Marks container/partial flags on `b` when a value inserted or replaced into it may hold containers.
 @(private = "file", cold, require_results)
 object_note_container :: #force_no_inline proc "contextless" (b: ^Object_Block, x: Value) -> Status {
 	b.flags |= BLOCK_HAS_CONTAINER
@@ -692,7 +647,6 @@ object_note_container :: #force_no_inline proc "contextless" (b: ^Object_Block, 
 	return .Ok
 }
 
-// Updates container flags on `b` after inserting `{key, x}` (or replacing an existing entry with `x`).
 @(private = "file")
 object_note_value :: #force_inline proc "contextless" (b: ^Object_Block, key, x: Value) {
 	if key.held || x.held {
@@ -723,7 +677,7 @@ object_replace_at :: #force_no_inline proc(h: ^Heap, o: ^Value, k: int, key, x: 
 }
 
 @(private = "file", cold, require_results)
-object_insert_grow :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value, ks: string, kh: u32) -> Status #no_bounds_check {
+object_insert_grow :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value, kh: u32) -> Status #no_bounds_check {
 	if s := own_object(h, o, 1); s != .Ok {
 		release(h, key)
 		release(h, x)
@@ -734,13 +688,7 @@ object_insert_grow :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value, 
 	b.len += 1
 	object_note_value(b, key, x)
 	if b.slot_log2 != 0 {
-		slots := ([^]u32)(b.next_or_slots)
-		mask := (u32(1) << b.slot_log2) - 1
-		at := kh & mask
-		for slots[at] != 0 {
-			at = (at + 1) & mask
-		}
-		slots[at] = b.len
+		slot_put_hash(b, kh, b.len - 1)
 	} else if b.len > SMALL_ENTRIES {
 		return index_keys(h, b)
 	}
@@ -757,24 +705,21 @@ object_put_small :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value) ->
 		}
 	}
 	if intrinsics.expect(!(unique(o^) && b.len < b.cap), false) {
-		return object_insert_grow(h, o, key, x, ks, 0)
+		return object_insert_grow(h, o, key, x, 0)
 	}
 	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
 	b.len += 1
 	object_note_value(b, key, x)
-	if b.len > SMALL_ENTRIES {
-		return index_keys(h, b)
-	}
-	return .Ok
+	return index_keys(h, b) if b.len > SMALL_ENTRIES else .Ok
 }
 
 @(private = "file", cold, require_results)
 object_put_slow :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value) -> Status #no_bounds_check {
 	b := (^Object_Block)(o.p)
-	ks := entry_key_text(key)
 	if b.slot_log2 == 0 {
 		return object_put_small(h, o, key, x)
 	}
+	ks := entry_key_text(key)
 	slots := ([^]u32)(b.next_or_slots)
 	entries := object_entries(b)
 	mask := (u32(1) << b.slot_log2) - 1
@@ -791,7 +736,7 @@ object_put_slow :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value) -> 
 		at = (at + 1) & mask
 	}
 	if intrinsics.expect(!(unique(o^) && b.len < b.cap), false) {
-		return object_insert_grow(h, o, key, x, ks, kh)
+		return object_insert_grow(h, o, key, x, kh)
 	}
 	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
 	b.len += 1
@@ -800,8 +745,7 @@ object_put_slow :: #force_no_inline proc(h: ^Heap, o: ^Value, key, x: Value) -> 
 	return .Ok
 }
 
-// Sets member `key`, a string, of the built object `o^` the caller owns to `x`. Both move into the object. A member
-// already there keeps its place.
+// Sets member `key`, a string, of the built object `o^` the caller owns to `x`. Both move into the object.
 @(require_results)
 object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_bounds_check {
 	b := (^Object_Block)(o.p)
@@ -832,7 +776,7 @@ object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_boun
 		at = (at + 1) & mask
 	}
 	if intrinsics.expect(!(unique(o^) && b.len < b.cap), false) {
-		return object_insert_grow(h, o, key, x, ks, kh)
+		return object_insert_grow(h, o, key, x, kh)
 	}
 	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
 	b.len += 1
@@ -851,18 +795,13 @@ object_put :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_boun
 object_put_fresh :: proc(h: ^Heap, o: ^Value, key: Value, x: Value) -> Status #no_bounds_check {
 	b := (^Object_Block)(o.p)
 	if !(unique(o^) && b.len < b.cap) {
-		if s := own_object(h, o, 1); s != .Ok {
-			release(h, key)
-			release(h, x)
-			return s
-		}
-		b = (^Object_Block)(o.p)
+		return object_insert_grow(h, o, key, x, object_key_hash(entry_key_text(key)))
 	}
 	([^]Entry)(uintptr(b) + size_of(Object_Block))[b.len] = {key, x}
 	b.len += 1
 	object_note_value(b, key, x)
 	if b.slot_log2 != 0 {
-		slot_put(b, entry_key_text(key), b.len - 1)
+		slot_put_hash(b, object_key_hash(entry_key_text(key)), b.len - 1)
 	} else if b.len > SMALL_ENTRIES {
 		return index_keys(h, b)
 	}
@@ -908,8 +847,7 @@ object_delete_many :: proc(h: ^Heap, o: ^Value, keys: []Value) -> Status {
 	defer delete(gone, alloc)
 	removed := 0
 	for k in keys {
-		idx := find_key(b, text_of(k))
-		if idx >= 0 && !gone[idx] {
+		if idx := find_key(b, text_of(k)); idx >= 0 && !gone[idx] {
 			gone[idx] = true
 			removed += 1
 		}
@@ -936,12 +874,11 @@ object_delete_many :: proc(h: ^Heap, o: ^Value, keys: []Value) -> Status {
 	return index_keys(h, b)
 }
 
-// A walk over the children of an array or object, built or a document's. Its container is borrowed: the caller keeps
-// it until `cursor_close`.
+// A walk over the children of an array or object, built or a document's.
 Cursor :: struct {
-	of:       Value, // under `h`, the grouped copy of a markup element, which the cursor owns
-	at:       u32, // a built container's next child
-	h:        ^Heap, // set when the cursor owns `of`
+	of:       Value,
+	at:       u32,
+	h:        ^Heap,
 	children: tape.Children,
 }
 
@@ -972,13 +909,11 @@ cursor_open :: proc(h: ^Heap, v: Value) -> (c: Cursor, s: Status) {
 		tape.destroy_children(&c.children)
 		c.of = grouped(h, v) or_return
 		c.h = h
-		return c, .Ok
 	}
 	return c, .Ok
 }
 
-// The next child: an object's key as a string and its value, an array's element with `.Absent` for its key. False
-// once none is left. Both are the caller's.
+// The next child: an object's key as a string and its value, an array's element with `.Absent` for its key.
 @(require_results)
 cursor_next :: proc(h: ^Heap, c: ^Cursor) -> (key, value: Value, more: bool, s: Status) #no_bounds_check {
 	#partial switch c.of.kind {
@@ -1013,7 +948,7 @@ cursor_next :: proc(h: ^Heap, c: ^Cursor) -> (key, value: Value, more: bool, s: 
 		elem := nodes[at]
 		c.children.next = at + (tape.Node_Index(elem.n) if elem.kind > .Plain else 1)
 		c.children.place += 1
-		if elem.kind == .Number || elem.kind >= .Array || (u8(elem.kind) - u8(tape.Kind.String) <= 1 && elem.role != .Key && elem.spelling & tape.SPELLING_DECODE == 0) {
+		if token_is_direct_node(elem) {
 			d.rc += 1
 			return ABSENT, {p = d, n = u32(at), kind = .Node, held = true}, true, .Ok
 		}
@@ -1026,13 +961,11 @@ cursor_next :: proc(h: ^Heap, c: ^Cursor) -> (key, value: Value, more: bool, s: 
 			return ABSENT, ABSENT, false, .Ok
 		}
 		intrinsics.prefetch_read_data(&nodes[at + 64], 3)
-		kt := nodes[at]
+		kt, vt := nodes[at], nodes[at + 1]
 		val_at := at + 1
-		vt := nodes[val_at]
 		c.children.next = val_at + (tape.Node_Index(vt.n) if vt.kind > .Plain else 1)
 		c.children.place += 1
-		if kt.role == .Key && u8(kt.kind) - u8(tape.Kind.String) <= 1 && kt.n > 0 && kt.spelling & tape.SPELLING_DECODE == 0 &&
-		   (vt.kind == .Number || vt.kind >= .Array || (u8(vt.kind) - u8(tape.Kind.String) <= 1 && vt.role != .Key && vt.spelling & tape.SPELLING_DECODE == 0)) {
+		if kt.role == .Key && u8(kt.kind) - u8(tape.Kind.String) <= 1 && kt.n > 0 && kt.spelling & tape.SPELLING_DECODE == 0 && token_is_direct_node(vt) {
 			d.rc += 2
 			return {p = d, n = u32(at), kind = .Node, held = true}, {p = d, n = u32(val_at), kind = .Node, held = true}, true, .Ok
 		}
@@ -1043,10 +976,7 @@ cursor_next :: proc(h: ^Heap, c: ^Cursor) -> (key, value: Value, more: bool, s: 
 
 @(private = "file", cold, require_results)
 cursor_next_array_slow :: #force_no_inline proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (key, value: Value, more: bool, s: Status) {
-	value, s = node_value(h, d, at)
-	if s != .Ok {
-		return ABSENT, ABSENT, false, s
-	}
+	value = node_value(h, d, at) or_return
 	return ABSENT, value, true, .Ok
 }
 
@@ -1090,9 +1020,7 @@ cursor_close :: proc(c: ^Cursor) {
 	c^ = {}
 }
 
-// A built object of the markup element `v`'s children, a repeated name one member that holds an array of its children
-// in document order, at the place its first came. Each child is still its node. Only this reads a built array among
-// the children, so an array among them is a group.
+// A built object of the markup element `v`'s children, a repeated name one member that holds an array of its children.
 @(private, require_results)
 grouped :: #force_no_inline proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	d := (^Doc_Block)(v.p)
@@ -1123,40 +1051,24 @@ grouped :: #force_no_inline proc(h: ^Heap, v: Value) -> (res: Value, status: Sta
 		}
 		i := find_key((^Object_Block)(out.p), text_of(key))
 		if i < 0 {
-			if s = object_put_fresh(h, &out, key, x); s != .Ok {
-				return NULL, s
-			}
+			object_put_fresh(h, &out, key, x) or_return
 			continue
 		}
 		release(h, key)
 		ob := (^Object_Block)(out.p)
 		entry := &object_entries(ob)[i]
-		if entry.value.kind != .Array {
-			first := entry.value
-			entry.value, s = make_array(h, 2)
-			if s != .Ok {
-				entry.value = first
-				release(h, x)
-				return NULL, s
-			}
-			ob.flags |= BLOCK_HAS_HELD | BLOCK_HAS_CONTAINER
-			if s = append_owned(h, &entry.value, first); s != .Ok {
-				entry.value = NULL
-				release(h, x)
-				return NULL, s
-			}
-		}
-		if s = append_owned(h, &entry.value, x); s != .Ok {
-			return NULL, s
-		}
-		if value_has_partial(entry.value) {
+		prev := entry.value
+		entry.value = NULL
+		merged := append_grouped(h, prev, x) or_return
+		entry.value = merged
+		ob.flags |= BLOCK_HAS_HELD | BLOCK_HAS_CONTAINER
+		if value_has_partial(merged) {
 			ob.flags |= BLOCK_HAS_PARTIAL
 		}
 	}
 }
 
-// A built copy of document container `v`'s children, one level: an array of its elements or an object of its members,
-// each child still its node.
+// A built copy of document container `v`'s children, one level.
 @(require_results)
 built :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	if v.kind == .Overlay {
@@ -1176,52 +1088,63 @@ built :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	} else {
 		out = make_object(h, n) or_return
 	}
+	defer if status != .Ok {
+		release(h, out)
+	}
 	c := cursor_open(h, v) or_return
 	defer cursor_close(&c)
 	for {
-		k, x, more, s := cursor_next(h, &c)
-		if s != .Ok {
-			release(h, out)
-			return NULL, s
-		}
+		k, x, more := cursor_next(h, &c) or_return
 		if !more {
 			return out, .Ok
 		}
 		if array {
-			s = append_owned(h, &out, x)
+			append_owned(h, &out, x) or_return
 		} else {
-			s = object_put(h, &out, k, x)
-		}
-		if s != .Ok {
-			release(h, out)
-			return NULL, s
+			object_put(h, &out, k, x) or_return
 		}
 	}
 }
 
-
-// A copy of `v` that reads no document: every container built, every number and string a value of its own. It is what
-// a constant needs that outlives the document it was read from. No recursion.
+// A copy of `v` that reads no document: every container built, every number and string a value of its own. No recursion.
 @(require_results)
 built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	Frame :: struct {
-		from: Value, // the container being copied, held
-		c:    Cursor,
-		out:  Value, // its copy, owned
-		key:  Value, // its key in the container above, owned, `.Absent` for an element or the outermost
+		from, out, key: Value,
+		c:              Cursor,
 	}
-	open :: proc(h: ^Heap, from, key: Value) -> (f: Frame, s: Status) {
-		f.from, f.key = from, key
+	drop_f :: proc(h: ^Heap, f: ^Frame) {
+		cursor_close(&f.c)
+		release(h, f.out)
+		release(h, f.key)
+		release(h, f.from)
+	}
+	push_f :: proc(h: ^Heap, frames: ^[dynamic]Frame, from, key: Value) -> Status {
 		n := length_of(h, from)
+		out: Value
+		s: Status
 		if type_of(from) == .Array {
-			f.out, s = make_array(h, n)
+			out, s = make_array(h, n)
 		} else {
-			f.out, s = make_object(h, n)
+			out, s = make_object(h, n)
 		}
+		c: Cursor
 		if s == .Ok {
-			f.c, s = cursor_open(h, from)
+			c, s = cursor_open(h, from)
 		}
-		return
+		f := Frame{from = from, out = out, key = key, c = c}
+		if s != .Ok {
+			drop_f(h, &f)
+			return s
+		}
+		if _, aerr := append(frames, f); aerr != nil {
+			drop_f(h, &f)
+			return fail_memory(h)
+		}
+		return .Ok
+	}
+	put_into :: proc(h: ^Heap, f: ^Frame, k, val: Value) -> Status {
+		return append_owned(h, &f.out, val) if type_of(f.from) == .Array else object_put(h, &f.out, k, val)
 	}
 	scalar :: proc(h: ^Heap, x: Value) -> (Value, Status) {
 		if x.kind == .Node || x.kind == .Overlay {
@@ -1252,30 +1175,16 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	if ferr != nil {
 		return NULL, fail_memory(h)
 	}
-	defer delete(frames)
-	defer for &f in frames {
-		cursor_close(&f.c)
-		release(h, f.out)
-		release(h, f.key)
-		release(h, f.from)
+	defer {
+		for &f in frames {
+			drop_f(h, &f)
+		}
+		delete(frames)
 	}
-	top, opened := open(h, retain(v), ABSENT)
-	if _, aerr := append(&frames, top); aerr != nil {
-		cursor_close(&top.c)
-		release(h, top.out)
-		release(h, top.key)
-		release(h, top.from)
-		return NULL, fail_memory(h)
-	}
-	if opened != .Ok {
-		return NULL, opened
-	}
+	push_f(h, &frames, retain(v), ABSENT) or_return
 	for {
 		f := &frames[len(frames) - 1]
-		k, x, more, next := cursor_next(h, &f.c)
-		if next != .Ok {
-			return NULL, next
-		}
+		k, x, more := cursor_next(h, &f.c) or_return
 		if !more {
 			done := pop(&frames)
 			cursor_close(&done.c)
@@ -1283,16 +1192,7 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 			if len(frames) == 0 {
 				return done.out, .Ok
 			}
-			parent := &frames[len(frames) - 1]
-			put: Status
-			if type_of(parent.from) == .Array {
-				put = append_owned(h, &parent.out, done.out)
-			} else {
-				put = object_put(h, &parent.out, done.key, done.out)
-			}
-			if put != .Ok {
-				return NULL, put
-			}
+			put_into(h, &frames[len(frames) - 1], done.key, done.out) or_return
 			continue
 		}
 		if type_of(f.from) == .Object {
@@ -1310,17 +1210,7 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 				release(h, x)
 				return NULL, fail(h, .Depth, .None)
 			}
-			child, made := open(h, x, k)
-			if _, aerr := append(&frames, child); aerr != nil {
-				cursor_close(&child.c)
-				release(h, child.out)
-				release(h, child.key)
-				release(h, child.from)
-				return NULL, fail_memory(h)
-			}
-			if made != .Ok {
-				return NULL, made
-			}
+			push_f(h, &frames, x, k) or_return
 			continue
 		}
 		y, copied := scalar(h, x)
@@ -1329,14 +1219,6 @@ built_deep :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 			release(h, k)
 			return NULL, copied
 		}
-		put: Status
-		if type_of(f.from) == .Array {
-			put = append_owned(h, &f.out, y)
-		} else {
-			put = object_put(h, &f.out, k, y)
-		}
-		if put != .Ok {
-			return NULL, put
-		}
+		put_into(h, f, k, y) or_return
 	}
 }

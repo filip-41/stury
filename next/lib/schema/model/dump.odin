@@ -17,26 +17,20 @@ import "stury:lib/ops/write"
 import "stury:lib/schema/rules"
 
 Dump_Opts :: struct {
-	exclude_unset:    bool,
-	exclude_none:     bool,
-	exclude_defaults: bool,
-	check:            bool,
-	redact:           bool,
-	redact_mask:      string,
-	redact_paths:     []string,
-	validators:       ^Validator_Registry,
+	exclude_unset, exclude_none, exclude_defaults, check, redact: bool,
+	redact_mask:  string,
+	redact_paths: []string,
+	validators:   ^Validator_Registry,
 }
 
 Format_Write_Proc :: proc(doc: ^tape.Document, opts: write.Options, allocator: runtime.Allocator) -> ([]u8, tape.Facts, write.Error)
 Format_Write_To_Proc :: proc(w: io.Writer, doc: ^tape.Document, opts: write.Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error)
 
-// Emits `v` according to `m` and `opts` into a self-contained `tape.Document` owned by `allocator` (zero double-copy!).
 @(require_results)
 dump_document :: proc(m: ^Model($T), v: ^T, opts := Dump_Opts{}, sink: ^Sink = nil, allocator := context.allocator) -> (doc: tape.Document, err: Error) {
 	if m == nil || v == nil || len(m.plan.nodes) == 0 { return {}, Model_Error{kind = .Bad_Option, want = {text = "value"}} }
 	tt: write.Token_Tape
-	write.token_tape_start(&tt, false, 0, allocator) or_return
-	defer write.token_tape_drop(&tt)
+	write.token_tape_start(&tt, false, 0, allocator) or_return; defer write.token_tape_drop(&tt)
 	dump_tokens(m, v, &tt, opts, sink, allocator) or_return
 	view := write.token_tape_document(&tt) or_return
 	view.flags += {.Owns_Src}; tt.nodes, tt.texts, tt.counts = {}, {}, {}
@@ -158,17 +152,13 @@ JSON_TRUE_U32 :: u32le('t') | u32le('r') << 8 | u32le('u') << 16 | u32le('e') <<
 JSON_FALSE_U64 :: u64le('f') | u64le('a') << 8 | u64le('l') << 16 | u64le('s') << 24 | u64le('e') << 32
 @(private)
 DUMP_INLINE_FRAMES :: 32
-
 @(private)
 Dump_Frame_Mode :: enum u8 { Root, Struct, List, Map, Bits }
 
 // Zero-padding layout so `[DUMP_INLINE_FRAMES]Dump_Frame = ---` is never zeroed by Odin.
 @(private)
 Dump_Frame :: struct {
-	u:         struct #raw_union {
-		sf:    ^Stream_Field,
-		total: int,
-	},
+	u:         struct #raw_union { sf: ^Stream_Field, total: int },
 	si:        ^Struct_Info,
 	at:        uintptr,
 	left:      int,
@@ -208,124 +198,119 @@ dump_check_with_omit :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawpt
 }
 
 @(private)
-dump_check_value :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, opts: Dump_Opts, sink: ^Sink, allocator: runtime.Allocator, ls: ^Lazy_Scratch) -> Error {
-	scr := lazy_scratch_get(ls)
-	omit_state := Dump_Omit{plan = plan, opts = opts}
-	mem.dynamic_arena_init(&omit_state.defaults, scr, scr); defer mem.dynamic_arena_destroy(&omit_state.defaults)
-	omit_hook := Omit_Hook{fn = dump_field_omitted, ctx = &omit_state}
-	return dump_check_with_omit(plan, judging, val_ptr, sink, &omit_hook, opts.validators, allocator, scr)
+dump_put_colon :: #force_inline proc(w: ^$W, cursor: ^int, $PRETTY: bool, $room: proc(w: ^W, n: int) -> [^]u8) -> [^]u8 #no_bounds_check {
+	p := room(w, 2 + JSON_LEAF_ROOM)
+	when PRETTY { p[0], p[1] = ':', ' '; cursor^ += 2; return p[2:] } else { p[0] = ':'; cursor^ += 1; return p[1:] }
 }
 
-// Writes `v` directly as JSON into `w` via format callbacks, avoiding `Token_Tape`, `tape.Document`, and per-call arenas.
-// Fast path (`REDACT == false`) compiles with zero redaction branches when `!opts.redact` (or no `secret` fields) and `len(opts.redact_paths) == 0`.
+@(private)
+dump_put_lead :: #force_inline proc(w: ^$W, cursor: ^int, lead: ^u8, depth: int, $PRETTY: bool, $room: proc(w: ^W, n: int) -> [^]u8, $put_line: proc(w: ^W, p: [^]u8, depth, after: int) -> [^]u8) -> [^]u8 #no_bounds_check {
+	when PRETTY {
+		p := room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
+		p[0] = lead^; lead^ = ','; cursor^ += 1
+		return put_line(w, p[1:], depth, JSON_LEAF_ROOM)
+	} else {
+		p := room(w, 1 + JSON_LEAF_ROOM)
+		p[0] = lead^; lead^ = ','; cursor^ += 1
+		return p[1:]
+	}
+}
+
+@(private)
+dump_put_list_sep :: #force_inline proc(w: ^$W, cursor: ^int, lead: ^u8, depth: int, $PRETTY: bool, $room: proc(w: ^W, n: int) -> [^]u8, $put_line: proc(w: ^W, p: [^]u8, depth, after: int) -> [^]u8) -> [^]u8 #no_bounds_check {
+	when PRETTY {
+		p := room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
+		p[0] = ','; p = p[lead^:]; cursor^ += int(lead^); lead^ = 1
+		return put_line(w, p, depth, JSON_LEAF_ROOM)
+	} else {
+		p := room(w, 1 + JSON_LEAF_ROOM)
+		p[0] = ','; p = p[lead^:]; cursor^ += int(lead^); lead^ = 1
+		return p
+	}
+}
+
+@(private)
+dump_put_close_obj :: #force_inline proc(w: ^$W, cursor: ^int, lead: u8, depth: int, $PRETTY: bool, $room: proc(w: ^W, n: int) -> [^]u8, $put_line: proc(w: ^W, p: [^]u8, depth, after: int) -> [^]u8) #no_bounds_check {
+	when PRETTY {
+		p := room(w, JSON_PRETTY_CLOSE_ROOM)
+		if lead == '{' { p[0], p[1] = '{', '}'; cursor^ += 2 } else { p = put_line(w, p, depth, 2); p[0] = '}'; cursor^ += 1 }
+	} else {
+		p := room(w, 3)
+		if lead == '{' { p[0], p[1] = '{', '}'; cursor^ += 2 } else { p[0] = '}'; cursor^ += 1 }
+	}
+}
+
+@(private)
+dump_put_close_arr :: #force_inline proc(w: ^$W, cursor: ^int, non_empty: bool, depth: int, $PRETTY: bool, $room: proc(w: ^W, n: int) -> [^]u8, $put_line: proc(w: ^W, p: [^]u8, depth, after: int) -> [^]u8) #no_bounds_check {
+	when PRETTY {
+		p := room(w, 1 + JSON_LINE_MAX + 8)
+		if non_empty { p = put_line(w, p, depth, 1) }
+		p[0] = ']'; cursor^ += 1
+	} else {
+		room(w, 1)[0] = ']'; cursor^ += 1
+	}
+}
+
 dump_json :: #force_inline proc(
-	m: ^Model($T),
-	v: ^T,
-	opts: Dump_Opts,
-	sink: ^Sink,
-	w: ^$W,
-	$PRETTY: bool,
-	$room: proc(w: ^W, n: int) -> [^]u8,
-	$cursor_of: proc "contextless" (w: ^W) -> ^int,
-	$has_err: proc "contextless" (w: ^W) -> bool,
-	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
-	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
+	m: ^Model($T), v: ^T, opts: Dump_Opts, sink: ^Sink, w: ^$W, $PRETTY: bool,
+	$room: proc(w: ^W, n: int) -> [^]u8, $cursor_of: proc "contextless" (w: ^W) -> ^int, $has_err: proc "contextless" (w: ^W) -> bool,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool, $put_line: proc(w: ^W, p: [^]u8, depth, after: int) -> [^]u8,
 	allocator := context.allocator,
 ) -> Error {
 	if m == nil || v == nil { return Model_Error{kind = .Bad_Option, want = {text = "value"}} }
 	return dump_json_raw(model_view(m), rawptr(v), opts, sink, w, PRETTY, room, cursor_of, has_err, put_string, put_line, allocator)
 }
 
-// Type-erased direct-buffer JSON dumper so `dump_json_core` instantiates once per `(PRETTY, ASCII, REDACT)` instead of per `$T`.
 dump_json_raw :: proc(
-	mv: Model_View,
-	v: rawptr,
-	opts: Dump_Opts,
-	sink: ^Sink,
-	w: ^$W,
-	$PRETTY: bool,
-	$room: proc(w: ^W, n: int) -> [^]u8,
-	$cursor_of: proc "contextless" (w: ^W) -> ^int,
-	$has_err: proc "contextless" (w: ^W) -> bool,
-	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
-	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
+	mv: Model_View, v: rawptr, opts: Dump_Opts, sink: ^Sink, w: ^$W, $PRETTY: bool,
+	$room: proc(w: ^W, n: int) -> [^]u8, $cursor_of: proc "contextless" (w: ^W) -> ^int, $has_err: proc "contextless" (w: ^W) -> bool,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool, $put_line: proc(w: ^W, p: [^]u8, depth, after: int) -> [^]u8,
 	allocator := context.allocator,
 ) -> Error {
-	plan, judging := mv.plan, mv.judging
-	if plan == nil || v == nil || len(plan.nodes) == 0 {
-		return Model_Error{kind = .Bad_Option, want = {text = "value"}}
+	if mv.plan == nil || v == nil || len(mv.plan.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "value"}} }
+	if (opts.redact && mv.plan.has_secrets) || len(opts.redact_paths) > 0 {
+		return dump_json_core(mv.plan, mv.judging, v, opts, sink, w, PRETTY, true, room, cursor_of, has_err, put_string, put_line, allocator)
 	}
-	if (opts.redact && plan.has_secrets) || len(opts.redact_paths) > 0 {
-		return dump_json_core(plan, judging, v, opts, sink, w, PRETTY, true, room, cursor_of, has_err, put_string, put_line, allocator)
-	}
-	return dump_json_core(plan, judging, v, opts, sink, w, PRETTY, false, room, cursor_of, has_err, put_string, put_line, allocator)
+	return dump_json_core(mv.plan, mv.judging, v, opts, sink, w, PRETTY, false, room, cursor_of, has_err, put_string, put_line, allocator)
 }
 
 @(private)
 dump_json_core :: proc(
-	plan: ^Type_Plan,
-	judging: ^Applied,
-	v: rawptr,
-	opts: Dump_Opts,
-	sink: ^Sink,
-	w: ^$W,
-	$PRETTY: bool,
-	$REDACT: bool,
-	$room: proc(w: ^W, n: int) -> [^]u8,
-	$cursor_of: proc "contextless" (w: ^W) -> ^int,
-	$has_err: proc "contextless" (w: ^W) -> bool,
-	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
-	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
+	plan: ^Type_Plan, judging: ^Applied, v: rawptr, opts: Dump_Opts, sink: ^Sink, w: ^$W, $PRETTY: bool, $REDACT: bool,
+	$room: proc(w: ^W, n: int) -> [^]u8, $cursor_of: proc "contextless" (w: ^W) -> ^int, $has_err: proc "contextless" (w: ^W) -> bool,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool, $put_line: proc(w: ^W, p: [^]u8, depth, after: int) -> [^]u8,
 	allocator := context.allocator,
 ) -> Error #no_bounds_check {
-	ls := Lazy_Scratch{backing = allocator}
-	defer lazy_scratch_end(&ls)
-
+	ls := Lazy_Scratch{backing = allocator}; defer lazy_scratch_end(&ls)
 	if opts.check {
-		dump_check_value(plan, judging, v, opts, sink, allocator, &ls) or_return
+		scr := lazy_scratch_get(&ls)
+		chk_omit := Dump_Omit{plan = plan, opts = opts}
+		mem.dynamic_arena_init(&chk_omit.defaults, scr, scr); defer mem.dynamic_arena_destroy(&chk_omit.defaults)
+		omit_hook := Omit_Hook{fn = dump_field_omitted, ctx = &chk_omit}
+		dump_check_with_omit(plan, judging, v, sink, &omit_hook, opts.validators, allocator, scr) or_return
 	}
 
-	omit_state := Dump_Omit{plan = plan, opts = opts}
-	omit_ready := false
+	omit_state := Dump_Omit{plan = plan, opts = opts}; omit_ready := false
 	defer if omit_ready { mem.dynamic_arena_destroy(&omit_state.defaults) }
-	if opts.exclude_defaults {
-		scr := lazy_scratch_get(&ls)
-		mem.dynamic_arena_init(&omit_state.defaults, scr, scr)
-		omit_ready = true
-	}
+	if opts.exclude_defaults { scr := lazy_scratch_get(&ls); mem.dynamic_arena_init(&omit_state.defaults, scr, scr); omit_ready = true }
 	any_exclude := opts.exclude_unset || opts.exclude_none || opts.exclude_defaults
-	when REDACT {
-		redact_mask := resolve_redact_mask(opts.redact_mask)
-	}
+	when REDACT { redact_mask := resolve_redact_mask(opts.redact_mask) }
 
 	inline_frames: [DUMP_INLINE_FRAMES]Dump_Frame = ---
-	frames := raw_data(inline_frames[:])
-	top, cap_frames := 0, DUMP_INLINE_FRAMES
-	defer if cap_frames > DUMP_INLINE_FRAMES {
-		runtime.mem_free_with_size(frames, cap_frames * size_of(Dump_Frame), allocator)
-	}
+	frames := raw_data(inline_frames[:]); top, cap_frames := 0, DUMP_INLINE_FRAMES
+	defer if cap_frames > DUMP_INLINE_FRAMES { runtime.mem_free_with_size(frames, cap_frames * size_of(Dump_Frame), allocator) }
 
-	keys := raw_data(plan.json_keys)
-	cursor := cursor_of(w)
+	keys, cursor := raw_data(plan.json_keys), cursor_of(w)
 	cur := Dump_Frame{mode = .Root, node_idx = plan.root, at = uintptr(v), left = 1}
 
 	next: for {
-		vkind: Type_Kind
-		vnode: i32
-		vsidx: i32
-		va: uintptr
-		p: [^]u8
-		tag_key, tag_val: string
+		vkind: Type_Kind; vnode, vsidx: i32; va: uintptr; p: [^]u8; tag_key, tag_val: string
 
 		if cur.mode == .Struct {
 			sf := cur.u.sf
 			if cur.check_opt {
-				for sf.kind != .Invalid {
-					if .Write_Only in sf.flags || dump_sf_omitted(&omit_state, cur.si, sf, cur.at) {
-						sf = intrinsics.ptr_offset(sf, 1)
-						continue
-					}
-					break
+				for sf.kind != .Invalid && (.Write_Only in sf.flags || dump_sf_omitted(&omit_state, cur.si, sf, cur.at)) {
+					sf = intrinsics.ptr_offset(sf, 1)
 				}
 			}
 			if sf.kind == .Invalid {
@@ -335,66 +320,38 @@ dump_json_core :: proc(
 					entries, merr := collect_sorted_map_entries(cap_tn.ti, rawptr(cur.at + si.capture_offset), lazy_scratch_get(&ls))
 					if merr != nil { return merr }
 					if len(entries) > 0 {
-						cur = Dump_Frame{mode = .Map, lead = cur.lead, is_cap = true, node_idx = cap_tn.child, si = si, entries = entries, step = 0, left = len(entries)}
+						cur = {mode = .Map, lead = cur.lead, is_cap = true, node_idx = cap_tn.child, si = si, entries = entries, left = len(entries)}
 						continue next
 					}
 				}
-				when PRETTY {
-					p = room(w, JSON_PRETTY_CLOSE_ROOM)
-					if cur.lead == '{' { p[0], p[1] = '{', '}'; cursor^ += 2; p = p[2:] } else { p = put_line(w, p, top - 1, 2); p[0] = '}'; cursor^ += 1; p = p[1:] }
-				} else {
-					p = room(w, 3)
-					if cur.lead == '{' { p[0], p[1] = '{', '}'; cursor^ += 2; p = p[2:] } else { p[0] = '}'; cursor^ += 1; p = p[1:] }
-				}
-				top -= 1
-				cur = frames[top]
-				if has_err(w) { return nil }
-				continue next
+				dump_put_close_obj(w, cursor, cur.lead, top - 1, PRETTY, room, put_line)
+				top -= 1; cur = frames[top]; if has_err(w) { return nil }; continue next
 			}
-			ks := int(sf.key_size)
-			if ks != 0 {
+			if ks := int(sf.key_size); ks != 0 {
+				ksrc := keys[uint(sf.key_off):]
 				when PRETTY {
-					p = room(w, JSON_PRETTY_MEMBER_ROOM)
-					p[0] = cur.lead; cur.lead = ','; cursor^ += 1
+					p = room(w, JSON_PRETTY_MEMBER_ROOM); p[0] = cur.lead; cur.lead = ','; cursor^ += 1
 					p = put_line(w, p[1:], top, 256 + 16 + 1 + JSON_LEAF_ROOM)
-					ksrc := keys[uint(sf.key_off):]
-					if ks <= 16 {
-						intrinsics.unaligned_store((^u128)(p), intrinsics.unaligned_load((^u128)(ksrc)))
-					} else if ks <= 32 {
+					if ks <= 16 { intrinsics.unaligned_store((^u128)(p), intrinsics.unaligned_load((^u128)(ksrc))) } else if ks <= 32 {
 						intrinsics.unaligned_store((^u128)(p), intrinsics.unaligned_load((^u128)(ksrc)))
 						intrinsics.unaligned_store((^u128)(p[ks - 16:]), intrinsics.unaligned_load((^u128)(ksrc[ks - 16:])))
-					} else {
-						intrinsics.mem_copy_non_overlapping(p, ksrc, ks)
-					}
+					} else { intrinsics.mem_copy_non_overlapping(p, ksrc, ks) }
 					p = p[ks:]; p[0] = ' '; p = p[1:]; cursor^ += ks + 1
 				} else {
-					ksrc := keys[uint(sf.key_off):]
 					if ks <= 32 {
-						p = room(w, 1 + 32 + JSON_LEAF_ROOM)
-						p[0] = cur.lead; cur.lead = ','
+						p = room(w, 1 + 32 + JSON_LEAF_ROOM); p[0] = cur.lead; cur.lead = ','
 						intrinsics.unaligned_store((^u128)(p[1:]), intrinsics.unaligned_load((^u128)(ksrc)))
-						if ks > 16 {
-							intrinsics.unaligned_store((^u128)(p[1 + ks - 16:]), intrinsics.unaligned_load((^u128)(ksrc[ks - 16:])))
-						}
+						if ks > 16 { intrinsics.unaligned_store((^u128)(p[1 + ks - 16:]), intrinsics.unaligned_load((^u128)(ksrc[ks - 16:]))) }
 					} else {
-						p = room(w, JSON_MEMBER_ROOM)
-						p[0] = cur.lead; cur.lead = ','
+						p = room(w, JSON_MEMBER_ROOM); p[0] = cur.lead; cur.lead = ','
 						intrinsics.mem_copy_non_overlapping(p[1:], ksrc, ks)
 					}
 					cursor^ += 1 + ks; p = p[1 + ks:]
 				}
 			} else {
-				when PRETTY {
-					p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
-					p[0] = cur.lead; cur.lead = ','; cursor^ += 1
-					p = put_line(w, p[1:], top, JSON_LEAF_ROOM)
-				} else {
-					p = room(w, 1 + JSON_LEAF_ROOM)
-					p[0] = cur.lead; cur.lead = ','; p = p[1:]; cursor^ += 1
-				}
+				p = dump_put_lead(w, cursor, &cur.lead, top, PRETTY, room, put_line)
 				if !put_string(w, p, cur.si.fields[sf.field_idx].name) { return write.Error(write.Refused{0, .No_Spelling}) }
-				p = room(w, 2 + JSON_LEAF_ROOM)
-				when PRETTY { p[0], p[1] = ':', ' '; p = p[2:]; cursor^ += 2 } else { p[0] = ':'; p = p[1:]; cursor^ += 1 }
+				p = dump_put_colon(w, cursor, PRETTY, room)
 			}
 			cur.u.sf = intrinsics.ptr_offset(sf, 1)
 			when REDACT {
@@ -406,26 +363,11 @@ dump_json_core :: proc(
 			vkind, vnode, vsidx, va = sf.kind, sf.node, sf.struct_idx, cur.at + uintptr(sf.offset)
 		} else if cur.mode == .List {
 			if cur.left == 0 {
-				when PRETTY {
-					p = room(w, 1 + JSON_LINE_MAX + 8)
-					p = put_line(w, p, top - 1, 1); p[0] = ']'; cursor^ += 1
-				} else {
-					p = room(w, 1); p[0] = ']'; cursor^ += 1
-				}
-				top -= 1
-				cur = frames[top]
-				if has_err(w) { return nil }
-				continue next
+				dump_put_close_arr(w, cursor, true, top - 1, PRETTY, room, put_line)
+				top -= 1; cur = frames[top]; if has_err(w) { return nil }; continue next
 			}
 			cur.left -= 1
-			when PRETTY {
-				p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
-				p[0] = ','; p = p[cur.lead:]; cursor^ += int(cur.lead); cur.lead = 1
-				p = put_line(w, p, top, JSON_LEAF_ROOM)
-			} else {
-				p = room(w, 1 + JSON_LEAF_ROOM)
-				p[0] = ','; p = p[cur.lead:]; cursor^ += int(cur.lead); cur.lead = 1
-			}
+			p = dump_put_list_sep(w, cursor, &cur.lead, top, PRETTY, room, put_line)
 			when REDACT {
 				if len(opts.redact_paths) > 0 && dump_json_path_redacted(frames, top, &cur, opts.redact_paths, &ls) {
 					cur.at += uintptr(cur.step)
@@ -438,33 +380,14 @@ dump_json_core :: proc(
 			cur.at += uintptr(cur.step)
 		} else if cur.mode == .Map {
 			if cur.step >= cur.left {
-				when PRETTY {
-					p = room(w, 1 + JSON_LINE_MAX + 8)
-					if cur.lead == '{' { p[0], p[1] = '{', '}'; cursor^ += 2 } else { p = put_line(w, p, top - 1, 1); p[0] = '}'; cursor^ += 1 }
-				} else {
-					p = room(w, 2)
-					if cur.lead == '{' { p[0], p[1] = '{', '}'; cursor^ += 2 } else { p[0] = '}'; cursor^ += 1 }
-				}
-				top -= 1
-				cur = frames[top]
-				if has_err(w) { return nil }
-				continue next
+				dump_put_close_obj(w, cursor, cur.lead, top - 1, PRETTY, room, put_line)
+				top -= 1; cur = frames[top]; if has_err(w) { return nil }; continue next
 			}
 			e := cur.entries[cur.step]; cur.step += 1
-			if cur.is_cap && struct_find_field(cur.si, e.key_text) >= 0 {
-				return dump_json_fail(frames, top, &cur, sink, allocator, .Duplicate_Key)
-			}
-			when PRETTY {
-				p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
-				p[0] = cur.lead; cur.lead = ','; cursor^ += 1
-				p = put_line(w, p[1:], top, JSON_LEAF_ROOM)
-			} else {
-				p = room(w, 1 + JSON_LEAF_ROOM)
-				p[0] = cur.lead; cur.lead = ','; p = p[1:]; cursor^ += 1
-			}
+			if cur.is_cap && struct_find_field(cur.si, e.key_text) >= 0 { return dump_json_fail(frames, top, &cur, sink, allocator, .Duplicate_Key) }
+			p = dump_put_lead(w, cursor, &cur.lead, top, PRETTY, room, put_line)
 			if !put_string(w, p, e.key_text) { return write.Error(write.Refused{0, .No_Spelling}) }
-			p = room(w, 2 + JSON_LEAF_ROOM)
-			when PRETTY { p[0], p[1] = ':', ' '; p = p[2:]; cursor^ += 2 } else { p[0] = ':'; p = p[1:]; cursor^ += 1 }
+			p = dump_put_colon(w, cursor, PRETTY, room)
 			when REDACT {
 				if len(opts.redact_paths) > 0 && dump_json_path_redacted(frames, top, &cur, opts.redact_paths, &ls) {
 					if !put_string(w, p, redact_mask) { return write.Error(write.Refused{0, .No_Spelling}) }
@@ -474,53 +397,28 @@ dump_json_core :: proc(
 			vtn := &plan.nodes[cur.node_idx]
 			vkind, vnode, vsidx, va = vtn.kind, cur.node_idx, vtn.struct_idx, uintptr(e.val_ptr)
 		} else if cur.mode == .Bits {
-			tn := &plan.nodes[cur.node_idx]
-			bytes := ([^]u8)(cur.at)[:tn.size]
-			i := cur.step
+			tn := &plan.nodes[cur.node_idx]; bytes := ([^]u8)(cur.at)[:tn.size]; i := cur.step
 			for i < cur.left && (bytes[i >> 3] >> uint(i & 7)) & 1 == 0 { i += 1 }
 			if i >= cur.left {
-				when PRETTY {
-					p = room(w, 1 + JSON_LINE_MAX + 8)
-					if cur.lead != 0 { p = put_line(w, p, top - 1, 1) }
-					p[0] = ']'; cursor^ += 1
-				} else {
-					p = room(w, 1); p[0] = ']'; cursor^ += 1
-				}
-				top -= 1
-				cur = frames[top]
-				if has_err(w) { return nil }
-				continue next
+				dump_put_close_arr(w, cursor, cur.lead != 0, top - 1, PRETTY, room, put_line)
+				top -= 1; cur = frames[top]; if has_err(w) { return nil }; continue next
 			}
 			cur.step = i + 1
-			when PRETTY {
-				p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
-				p[0] = ','; p = p[cur.lead:]; cursor^ += int(cur.lead); cur.lead = 1
-				p = put_line(w, p, top, JSON_LEAF_ROOM)
-			} else {
-				p = room(w, 1 + JSON_LEAF_ROOM)
-				p[0] = ','; p = p[cur.lead:]; cursor^ += int(cur.lead); cur.lead = 1
-			}
+			p = dump_put_list_sep(w, cursor, &cur.lead, top, PRETTY, room, put_line)
 			val := tn.bit_lower + i64(i)
 			if tn.enum_idx >= 0 {
 				ei := &plan.enums[tn.enum_idx]
 				for ev, k in ei.values {
 					if ev == val {
-						if ei.by_name {
-							if !put_string(w, p, ei.names[k]) { return write.Error(write.Refused{0, .No_Spelling}) }
-						} else {
-							cursor^ += dump_put_u64(p, u64(val)) if ei.is_unsigned else dump_put_i64(p, val)
-						}
+						if ei.by_name { if !put_string(w, p, ei.names[k]) { return write.Error(write.Refused{0, .No_Spelling}) } } else { cursor^ += dump_put_u64(p, u64(val)) if ei.is_unsigned else dump_put_i64(p, val) }
 						break
 					}
 				}
-			} else {
-				cursor^ += dump_put_i64(p, val)
-			}
+			} else { cursor^ += dump_put_i64(p, val) }
 			continue next
 		} else {
 			if cur.left == 0 { return nil }
-			cur.left = 0
-			p = room(w, JSON_LEAF_ROOM)
+			cur.left = 0; p = room(w, JSON_LEAF_ROOM)
 			rtn := &plan.nodes[cur.node_idx]
 			vkind, vnode, vsidx, va = rtn.kind, cur.node_idx, rtn.struct_idx, cur.at
 		}
@@ -532,124 +430,71 @@ dump_json_core :: proc(
 				continue next
 			}
 			#partial switch vkind {
-			case .I64:
-				cursor^ += dump_put_i64(p, (^i64)(va)^)
+			case .I64:  cursor^ += dump_put_i64(p, (^i64)(va)^)
 			case .F64:
 				n, ok := dump_put_f64(p, (^f64)(va)^)
-				if !ok {
-					return dump_json_fail(frames, top, &cur, sink, allocator, .Non_Finite)
-				}
+				if !ok { return dump_json_fail(frames, top, &cur, sink, allocator, .Non_Finite) }
 				cursor^ += n
 			case .Bool:
 				if (^bool)(va)^ { intrinsics.unaligned_store((^u32le)(p), JSON_TRUE_U32); cursor^ += 4 } else { intrinsics.unaligned_store((^u64le)(p), JSON_FALSE_U64); cursor^ += 5 }
 			case .Struct:
 				if top >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }
 				if !dump_push_frame(&frames, &top, &cap_frames, cur, allocator) { return runtime.Allocator_Error.Out_Of_Memory }
-				si := &plan.structs[vsidx]
-				lead := u8('{')
+				si := &plan.structs[vsidx]; lead := u8('{')
 				if tag_key != "" {
-					when PRETTY {
-						p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM)
-						p[0] = '{'; cursor^ += 1
-						p = put_line(w, p[1:], top, JSON_LEAF_ROOM)
-					} else {
-						p = room(w, 1 + JSON_LEAF_ROOM)
-						p[0] = '{'; p = p[1:]; cursor^ += 1
-					}
+					p = dump_put_lead(w, cursor, &lead, top, PRETTY, room, put_line)
 					if !put_string(w, p, tag_key) { return write.Error(write.Refused{0, .No_Spelling}) }
-					p = room(w, 2 + JSON_LEAF_ROOM)
-					when PRETTY { p[0], p[1] = ':', ' '; p = p[2:]; cursor^ += 2 } else { p[0] = ':'; p = p[1:]; cursor^ += 1 }
+					p = dump_put_colon(w, cursor, PRETTY, room)
 					if !put_string(w, p, tag_val) { return write.Error(write.Refused{0, .No_Spelling}) }
-					lead = ','
 				}
-				cur = Dump_Frame{
-					mode      = .Struct,
-					lead      = lead,
-					check_opt = si.has_omit_tag || (any_exclude && si.has_optional),
-					u         = {sf = raw_data(si.stream_fields)},
-					si        = si,
-					at        = va,
-				}
+				cur = {mode = .Struct, lead = lead, check_opt = si.has_omit_tag || (any_exclude && si.has_optional), u = {sf = raw_data(si.stream_fields)}, si = si, at = va}
 			case .Slice, .Dynamic, .Array, .Fixed_List:
-				tn := &plan.nodes[vnode]
-				base, n := list_span(tn, rawptr(va))
-				if n == 0 {
-					p[0], p[1] = '[', ']'; cursor^ += 2
-				} else {
+				tn := &plan.nodes[vnode]; base, n := list_span(tn, rawptr(va))
+				if n == 0 { p[0], p[1] = '[', ']'; cursor^ += 2 } else {
 					if top >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }
 					if !dump_push_frame(&frames, &top, &cap_frames, cur, allocator) { return runtime.Allocator_Error.Out_Of_Memory }
 					p[0] = '['; cursor^ += 1
-					cur = Dump_Frame{mode = .List, lead = 0, node_idx = tn.child, at = base, left = n, step = plan.nodes[tn.child].size, u = {total = n}}
+					cur = {mode = .List, node_idx = tn.child, at = base, left = n, step = plan.nodes[tn.child].size, u = {total = n}}
 				}
 			case .Map:
 				tn := &plan.nodes[vnode]
-				if (^runtime.Raw_Map)(va).len == 0 {
-					p[0], p[1] = '{', '}'; cursor^ += 2
-				} else {
+				if (^runtime.Raw_Map)(va).len == 0 { p[0], p[1] = '{', '}'; cursor^ += 2 } else {
 					if top >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }
-					entries, merr := collect_sorted_map_entries(tn.ti, rawptr(va), lazy_scratch_get(&ls))
-					if merr != nil { return merr }
+					entries, merr := collect_sorted_map_entries(tn.ti, rawptr(va), lazy_scratch_get(&ls)); if merr != nil { return merr }
 					if !dump_push_frame(&frames, &top, &cap_frames, cur, allocator) { return runtime.Allocator_Error.Out_Of_Memory }
-					cur = Dump_Frame{mode = .Map, lead = '{', node_idx = tn.child, entries = entries, step = 0, left = len(entries)}
+					cur = {mode = .Map, lead = '{', node_idx = tn.child, entries = entries, left = len(entries)}
 				}
 			case .Maybe:
 				tn := &plan.nodes[vnode]
-				if !maybe_is_set(tn, rawptr(va)) {
-					intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4
-				} else {
-					ctn := &plan.nodes[tn.child]
-					vkind, vnode, vsidx = ctn.kind, tn.child, ctn.struct_idx
-					continue value
+				if !maybe_is_set(tn, rawptr(va)) { intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4 } else {
+					ctn := &plan.nodes[tn.child]; vkind, vnode, vsidx = ctn.kind, tn.child, ctn.struct_idx; continue value
 				}
 			case .Ptr:
 				inner := (^uintptr)(va)^
-				if inner == 0 {
-					intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4
-				} else {
-					ptr_hops += 1
-					if top + ptr_hops > int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }
-					tn := &plan.nodes[vnode]
-					ctn := &plan.nodes[tn.child]
-					vkind, vnode, vsidx, va = ctn.kind, tn.child, ctn.struct_idx, inner
-					continue value
+				if inner == 0 { intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4 } else {
+					ptr_hops += 1; if top + ptr_hops > int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }
+					tn := &plan.nodes[vnode]; ctn := &plan.nodes[tn.child]; vkind, vnode, vsidx, va = ctn.kind, tn.child, ctn.struct_idx, inner; continue value
 				}
 			case .Union:
-				tn := &plan.nodes[vnode]
-				u := &plan.unions[tn.union_idx]
+				tn := &plan.nodes[vnode]; u := &plan.unions[tn.union_idx]
 				arm_idx := int(read_union_tag(rawptr(va), u.tag_offset, u.tag_size)) - (0 if u.no_nil else 1)
-				if arm_idx < 0 {
-					intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4
-				} else if arm_idx >= len(u.arms) {
-					return Model_Error{kind = .No_Arm}
-				} else {
+				if arm_idx < 0 { intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4 } else if arm_idx >= len(u.arms) { return Model_Error{kind = .No_Arm} } else {
 					arm := u.arms[arm_idx]
-					if u.mode == .Tag && u.tag_key != "" && arm.is_struct && arm.name != "" {
-						tag_key, tag_val = u.tag_key, arm.name
-					}
-					atn := &plan.nodes[arm.node]
-					vkind, vnode, vsidx = atn.kind, arm.node, atn.struct_idx
-					continue value
+					if u.mode == .Tag && u.tag_key != "" && arm.is_struct && arm.name != "" { tag_key, tag_val = u.tag_key, arm.name }
+					atn := &plan.nodes[arm.node]; vkind, vnode, vsidx = atn.kind, arm.node, atn.struct_idx; continue value
 				}
 			case .Custom:
-				tn := &plan.nodes[vnode]
-				c := &plan.customs[tn.custom_idx]
-				ctn := &plan.nodes[tn.child]
-				scr := lazy_scratch_get(&ls)
-				cbuf, cerr := runtime.mem_alloc(max(ctn.size, 1), ctn.align, scr)
-				if cerr != nil { return cerr }
+				tn := &plan.nodes[vnode]; c, ctn := &plan.customs[tn.custom_idx], &plan.nodes[tn.child]; scr := lazy_scratch_get(&ls)
+				cbuf, cerr := runtime.mem_alloc(max(ctn.size, 1), ctn.align, scr); if cerr != nil { return cerr }
 				if ck := c.convert_to(c.to, rawptr(va), raw_data(cbuf), scr); ck != .None { return Model_Error{kind = ck} }
-				vkind, vnode, vsidx, va = ctn.kind, tn.child, ctn.struct_idx, uintptr(raw_data(cbuf))
-				continue value
+				vkind, vnode, vsidx, va = ctn.kind, tn.child, ctn.struct_idx, uintptr(raw_data(cbuf)); continue value
 			case .Bit_Set:
 				if top >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }
-				tn := &plan.nodes[vnode]
 				if !dump_push_frame(&frames, &top, &cap_frames, cur, allocator) { return runtime.Allocator_Error.Out_Of_Memory }
 				p[0] = '['; cursor^ += 1
-				cur = Dump_Frame{mode = .Bits, lead = 0, node_idx = vnode, at = va, left = tn.count, step = 0}
+				cur = {mode = .Bits, node_idx = vnode, at = va, left = plan.nodes[vnode].count}
 			case:
-				if rerr := dump_put_rare(plan, &plan.nodes[vnode], rawptr(va), w, p, cursor, &ls, frames, top, &cur, sink, allocator, PRETTY, room, put_string, put_line); rerr != nil {
-					return rerr
-				}
+				if rerr := dump_put_rare(plan, &plan.nodes[vnode], rawptr(va), w, p, cursor, &ls, frames, top, &cur, sink, allocator, PRETTY, room, put_string, put_line); rerr != nil { return rerr }
 			}
 			continue next
 		}
@@ -657,49 +502,38 @@ dump_json_core :: proc(
 }
 
 @(private, cold)
+dump_frame_step :: proc "contextless" (fr: ^Dump_Frame) -> (tape.Step, bool) {
+	#partial switch fr.mode {
+	case .Struct: return tape.Name(fr.si.fields[intrinsics.ptr_offset(fr.u.sf, -1).field_idx].name), true
+	case .List:   return tape.Index(fr.u.total - fr.left - 1), true
+	case .Map:    return tape.Name(fr.entries[fr.step - 1].key_text), true
+	}
+	return {}, false
+}
+
+@(private, cold)
 dump_json_path_redacted :: #force_no_inline proc(frames: [^]Dump_Frame, top: int, cur: ^Dump_Frame, patterns: []string, ls: ^Lazy_Scratch) -> bool {
 	if len(patterns) == 0 { return false }
-	buf: [32]tape.Step = ---
-	n := 0
-	dyn: [dynamic]tape.Step
-	owned := false
+	buf: [32]tape.Step = ---; n := 0; dyn: [dynamic]tape.Step; owned := false
 	push_fr :: proc(buf: []tape.Step, n: ^int, dyn: ^[dynamic]tape.Step, owned: ^bool, ls: ^Lazy_Scratch, fr: ^Dump_Frame) {
-		st: tape.Step
-		#partial switch fr.mode {
-		case .Struct: sf := intrinsics.ptr_offset(fr.u.sf, -1); st = tape.Name(fr.si.fields[sf.field_idx].name)
-		case .List:   st = tape.Index(fr.u.total - fr.left - 1)
-		case .Map:    st = tape.Name(fr.entries[fr.step - 1].key_text)
-		case: return
-		}
+		st, ok := dump_frame_step(fr); if !ok { return }
 		if !owned^ {
 			if n^ < len(buf) { buf[n^] = st; n^ += 1; return }
-			scr := lazy_scratch_get(ls)
-			dyn^ = make([dynamic]tape.Step, 0, len(buf) * 2, scr)
-			append(dyn, ..buf[:n^])
-			owned^ = true
+			dyn^ = make([dynamic]tape.Step, 0, len(buf) * 2, lazy_scratch_get(ls)); append(dyn, ..buf[:n^]); owned^ = true
 		}
 		_, _ = append(dyn, st)
 	}
 	for i in 1 ..< top { push_fr(buf[:], &n, &dyn, &owned, ls, &frames[i]) }
 	if cur != nil { push_fr(buf[:], &n, &dyn, &owned, ls, cur) }
-	steps := dyn[:] if owned else buf[:n]
-	return redact_steps_match(steps, patterns)
+	return redact_steps_match(dyn[:] if owned else buf[:n], patterns)
 }
 
 @(private, cold)
 dump_json_fail :: #force_no_inline proc(frames: [^]Dump_Frame, top: int, cur: ^Dump_Frame, sink: ^Sink, allocator: runtime.Allocator, kind: Error_Kind) -> Error {
 	if sink == nil && kind != .Duplicate_Key { return Model_Error{kind = kind} }
 	steps: [dynamic]tape.Step; steps.allocator = allocator; defer delete(steps)
-	push_fr :: proc(steps: ^[dynamic]tape.Step, fr: ^Dump_Frame) -> runtime.Allocator_Error {
-		#partial switch fr.mode {
-		case .Struct: sf := intrinsics.ptr_offset(fr.u.sf, -1); _, err := append(steps, tape.Step(tape.Name(fr.si.fields[sf.field_idx].name))); return err
-		case .List:   _, err := append(steps, tape.Step(tape.Index(fr.u.total - fr.left - 1))); return err
-		case .Map:    _, err := append(steps, tape.Step(tape.Name(fr.entries[fr.step - 1].key_text))); return err
-		}
-		return nil
-	}
-	for i in 1 ..< top { push_fr(&steps, &frames[i]) or_return }
-	if cur != nil { push_fr(&steps, cur) or_return }
+	for i in 1 ..< top { if st, ok := dump_frame_step(&frames[i]); ok { append(&steps, st) or_return } }
+	if cur != nil { if st, ok := dump_frame_step(cur); ok { append(&steps, st) or_return } }
 	first: Model_Error; oom := false
 	_ = record_failure(sink, &first, &oom, allocator, kind, 0, steps[:], "", {}, false)
 	return runtime.Allocator_Error.Out_Of_Memory if oom else first
@@ -707,8 +541,7 @@ dump_json_fail :: #force_no_inline proc(frames: [^]Dump_Frame, top: int, cur: ^D
 
 @(private)
 dump_sf_omitted :: #force_inline proc(o: ^Dump_Omit, si: ^Struct_Info, sf: ^Stream_Field, struct_at: uintptr) -> bool {
-	if .Omit_Unset not_in sf.flags && .Omit_Empty not_in sf.flags && .Optional not_in sf.flags { return false }
-	return dump_field_omitted(o, si, int(sf.field_idx), rawptr(struct_at))
+	return (sf.flags & {.Omit_Unset, .Omit_Empty, .Optional} != {}) && dump_field_omitted(o, si, int(sf.field_idx), rawptr(struct_at))
 }
 
 @(private)
@@ -790,8 +623,7 @@ dump_put_rare :: #force_no_inline proc(
 dump_put_raw :: proc(w: ^$W, cursor: ^int, s: string, $room: proc(w: ^W, n: int) -> [^]u8) #no_bounds_check {
 	for at := 0; at < len(s); at += write.ROOM_MAX {
 		k := min(write.ROOM_MAX, len(s) - at)
-		intrinsics.mem_copy_non_overlapping(room(w, k), raw_data(s[at:]), k)
-		cursor^ += k
+		intrinsics.mem_copy_non_overlapping(room(w, k), raw_data(s[at:]), k); cursor^ += k
 	}
 }
 
@@ -814,13 +646,11 @@ dump_put_rules_value :: proc(
 				when PRETTY { p = room(w, 1 + JSON_LINE_MAX + 8); if n_items > 0 { p = put_line(w, p, top + len(stack), 1) }; p[0] = ch; cursor^ += 1 } else { room(w, 1)[0] = ch; cursor^ += 1 }
 				continue
 			}
-			first := fr.idx == 0; fr.idx += 1
-			when PRETTY { p = room(w, 1 + 1 + JSON_LINE_MAX + JSON_LEAF_ROOM); if !first { p[0] = ','; p = p[1:]; cursor^ += 1 }; p = put_line(w, p, top + len(stack), JSON_LEAF_ROOM) } else { p = room(w, 1 + JSON_LEAF_ROOM); if !first { p[0] = ','; p = p[1:]; cursor^ += 1 } }
+			lead := u8(0) if fr.idx == 0 else u8(1); fr.idx += 1
+			p = dump_put_list_sep(w, cursor, &lead, top + len(stack), PRETTY, room, put_line)
 			if fr.is_obj {
 				m := fr.members[fr.idx - 1]; if !put_string(w, p, m.key) { return write.Error(write.Refused{0, .No_Spelling}) }
-				p = room(w, 2 + JSON_LEAF_ROOM)
-				when PRETTY { p[0], p[1] = ':', ' '; p = p[2:]; cursor^ += 2 } else { p[0] = ':'; p = p[1:]; cursor^ += 1 }
-				cur_v = m.value
+				p = dump_put_colon(w, cursor, PRETTY, room); cur_v = m.value
 			} else { cur_v = fr.elems[fr.idx - 1] }
 		}
 		have_v = false
@@ -833,8 +663,8 @@ dump_put_rules_value :: proc(
 		case string:            if !put_string(w, p, x) { return write.Error(write.Refused{0, .No_Spelling}) }
 		case []rules.Value:     if top + len(stack) >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }; p[0] = '['; cursor^ += 1; append(&stack, Rv_Frame{elems = x}) or_return
 		case []rules.Member_Value: if top + len(stack) >= int(tape.DEFAULT_DEPTH) { return tape.Error(tape.Exceeded{kind = .Depth}) }; p[0] = '{'; cursor^ += 1; append(&stack, Rv_Frame{is_obj = true, members = x}) or_return
-		case rules.Node_Ref:  cur_v = clone_rules_value(cur_v, scratch, scratch) or_return; have_v = true
-		case rules.Null, nil: intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4
+		case rules.Node_Ref:    cur_v = clone_rules_value(cur_v, scratch, scratch) or_return; have_v = true
+		case rules.Null, nil:   intrinsics.unaligned_store((^u32le)(p), JSON_NULL_U32); cursor^ += 4
 		}
 	}
 }
@@ -846,8 +676,7 @@ DUMP_ZEROS8 :: u64(0x3030_3030_3030_3030)
 dump_bcd8 :: #force_inline proc "contextless" (x: u64) -> u64 {
 	abcd_efgh := x + (1 << 32 - 10000) * ((x * ((1 << 40) / 10000 + 1)) >> 40)
 	ab_cd_ef_gh := abcd_efgh + (1 << 16 - 100) * ((abcd_efgh * ((1 << 19) / 100 + 1)) >> 19 & 0x7f_0000_007f)
-	a_b_c_d_e_f_g_h := ab_cd_ef_gh + (1 << 8 - 10) * ((ab_cd_ef_gh * ((1 << 10) / 10 + 1)) >> 10 & 0xf_000f_000f_000f)
-	return intrinsics.byte_swap(a_b_c_d_e_f_g_h)
+	return intrinsics.byte_swap(ab_cd_ef_gh + (1 << 8 - 10) * ((ab_cd_ef_gh * ((1 << 10) / 10 + 1)) >> 10 & 0xf_000f_000f_000f))
 }
 
 @(private)
@@ -862,14 +691,11 @@ dump_lead8 :: #force_inline proc "contextless" (dst: [^]u8, x: u64) -> int #no_b
 dump_put_u64 :: #force_inline proc "contextless" (dst: [^]u8, u: u64) -> int #no_bounds_check {
 	if u < 100_000_000 { return dump_lead8(dst, u) }
 	if u < 10_000_000_000_000_000 {
-		high := u / 100_000_000
-		n := dump_lead8(dst, high)
+		high := u / 100_000_000; n := dump_lead8(dst, high)
 		intrinsics.unaligned_store((^u64le)(dst[n:]), u64le(dump_bcd8(u - high * 100_000_000) | DUMP_ZEROS8))
 		return n + 8
 	}
-	top := u / 10_000_000_000_000_000
-	low16 := u - top * 10_000_000_000_000_000
-	mid := low16 / 100_000_000
+	top := u / 10_000_000_000_000_000; low16 := u - top * 10_000_000_000_000_000; mid := low16 / 100_000_000
 	n := dump_lead8(dst, top)
 	intrinsics.unaligned_store((^u64le)(dst[n:]), u64le(dump_bcd8(mid) | DUMP_ZEROS8))
 	intrinsics.unaligned_store((^u64le)(dst[n + 8:]), u64le(dump_bcd8(low16 - mid * 100_000_000) | DUMP_ZEROS8))
@@ -878,35 +704,23 @@ dump_put_u64 :: #force_inline proc "contextless" (dst: [^]u8, u: u64) -> int #no
 
 @(private)
 dump_put_i64 :: #force_inline proc "contextless" (dst: [^]u8, v: i64) -> int #no_bounds_check {
-	neg := int(v < 0)
-	dst[0] = '-'
-	u := u64(v)
+	neg := int(v < 0); dst[0] = '-'; u := u64(v)
 	return neg + dump_put_u64(dst[neg:], 0 - u if neg != 0 else u)
 }
 
 @(private)
 dump_put_f64 :: #force_inline proc(dst: [^]u8, f: f64) -> (int, bool) #no_bounds_check {
 	if f - f != 0 { return 0, false }
-	bits := transmute(u64)f
-	neg := int(bits >> 63)
-	abs_f := transmute(f64)(bits & 0x7FFF_FFFF_FFFF_FFFF)
+	bits := transmute(u64)f; neg := int(bits >> 63); abs_f := transmute(f64)(bits & 0x7FFF_FFFF_FFFF_FFFF)
 	if abs_f < 1_000_000.0 && (abs_f >= 0.001 || abs_f == 0) {
-		scaled := abs_f * 1000.0
-		k := u64(scaled + 0.5)
-		diff := scaled - f64(k)
+		scaled := abs_f * 1000.0; k := u64(scaled + 0.5); diff := scaled - f64(k)
 		if diff > -1e-7 && diff < 1e-7 && k < 1_000_000_000 && f64(k) / 1000.0 == abs_f {
-			dst[0] = '-'
-			whole := k / 1000
-			frac := k - whole * 1000
+			dst[0] = '-'; whole := k / 1000; frac := k - whole * 1000
 			n := neg + dump_lead8(dst[neg:], whole)
 			if frac == 0 { return n, true }
-			dst[n] = '.'
-			d1 := frac / 100
-			rem := frac - d1 * 100
-			d2 := rem / 10
-			d3 := rem - d2 * 10
+			dst[n] = '.'; d1 := frac / 100; rem := frac - d1 * 100; d2 := rem / 10; d3 := rem - d2 * 10
 			dst[n + 1] = '0' + u8(d1)
-			if d3 != 0 { dst[n + 2] = '0' + u8(d2); dst[n + 3] = '0' + u8(d3); return n + 4, true }
+			if d3 != 0 { dst[n + 2], dst[n + 3] = '0' + u8(d2), '0' + u8(d3); return n + 4, true }
 			if d2 != 0 { dst[n + 2] = '0' + u8(d2); return n + 3, true }
 			return n + 2, true
 		}

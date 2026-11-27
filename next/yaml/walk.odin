@@ -10,8 +10,7 @@ import "stury:lib/ops/build"
 // expansion, memory}`) cleanly in a single pass with explicit heap parser stacks.
 
 @(private)
-Walk :: struct($H: typeid, $LAX: bool, $C: hook.Capabilities) {
-	p:          Parser,
+Walk_Hook :: struct($H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	hooks:      ^H,
 	regs:       hook.Regs,
 	rooms:      uintptr,
@@ -19,44 +18,40 @@ Walk :: struct($H: typeid, $LAX: bool, $C: hook.Capabilities) {
 	mute:       u64,
 	keep_depth: u64,
 	steps:      [int(LAX)]u64,
+	last_at:    u64,
 	skip_value: bool,
 	mute_end:   bool,
 	keep_stubs: bool,
 	failed_mem: bool,
 	bad_hook:   bool,
 	stopped:    bool,
+	out_steps:  bool,
+}
+
+@(private)
+Walk :: struct($H: typeid, $LAX: bool, $C: hook.Capabilities) {
+	p:  Parser,
+	wh: Walk_Hook(H, LAX, C),
+}
+
+@(private)
+walk_hook_init :: #force_inline proc "contextless" (wh: ^Walk_Hook($H, $LAX, $C), h: ^H, regs: ^hook.Regs, steps: u64, at := u64(0)) {
+	wh.hooks = h
+	wh.regs = regs^ if regs != nil else {}
+	wh.last_at = at
+	when .Rooms in C { if h != nil { wh.rooms = hook.rooms_end(h) } }
+	when LAX { wh.steps[0] = steps }
 }
 
 @(private)
 reset_document :: proc(p: ^Parser) {
-	clear(&p.handles)
-	clear(&p.anchors)
-	clear(&p.names)
-	p.indexed = 0
-	clear(&p.log)
-	clear(&p.open)
+	clear(&p.handles); clear(&p.anchors); clear(&p.names); clear(&p.log); clear(&p.open)
 	keys_reset(&p.keys)
-	clear(&p.stage)
-	clear(&p.blocks)
-	clear(&p.flows)
-	clear(&p.merge_runs)
-	clear(&p.merges)
-	p.holding = false
-	p.hold_open_n = 0
-	p.hold_anch_lo = 0
-	p.hold_log_lo = 0
-	p.next = .After
-	p.staging = false
-	p.pend_anch = -1
-	p.expanded = 0
-	p.depth = 0
-	p.tdepth = 0
-	p.open_roots = 0
-	p.root_close = 0
-	p.saw_node = false
-	p.has_yaml = false
-	p.directives = false
-	p.tag.n = 0
+	clear(&p.stage); clear(&p.blocks); clear(&p.flows); clear(&p.merge_runs); clear(&p.merges)
+	p.indexed, p.holding, p.hold_open_n, p.hold_anch_lo, p.hold_log_lo = 0, false, 0, 0, 0
+	p.next, p.staging, p.pend_anch, p.expanded = .After, false, -1, 0
+	p.depth, p.tdepth, p.open_roots, p.root_close = 0, 0, 0, 0
+	p.saw_node, p.has_yaml, p.directives, p.tag.n = false, false, false, 0
 }
 
 // Reads the next YAML document from `p.pos`, returning `found = false` when only comments/blanks/`...` remain.
@@ -70,30 +65,22 @@ read_document :: proc(p: ^Parser) -> (found: bool, ok: bool) #no_bounds_check {
 		}
 		peek_next(p) or_return
 		for p.nl.kind == .Content && p.nl.ind == 0 && at(p, p.pos) == '%' {
-			if p.nl.tab {
-				return false, fault(p, p.pos, .Bad_Char, .Tab_Indent)
-			}
+			if p.nl.tab { return false, fault(p, p.pos, .Bad_Char, .Tab_Indent) }
 			read_directive(p) or_return
 			peek_next(p) or_return
 		}
 		l := p.nl
 		switch {
 		case l.kind == .Eof:
-			if p.directives {
-				return false, fault(p, p.pos, .Truncated, .Expected_Document_Start)
-			}
+			if p.directives { return false, fault(p, p.pos, .Truncated, .Expected_Document_Start) }
 			clear(&p.pending)
 			return false, true
 		case l.kind == .Marker && at(p, p.pos) == '.':
-			if p.directives {
-				return false, fault(p, p.pos, .Bad_Char, .Expected_Document_Start)
-			}
+			if p.directives { return false, fault(p, p.pos, .Bad_Char, .Expected_Document_Start) }
 			p.pos += 3
 			finish_line(p, false) or_return
 			clear(&p.pending)
-			if !at_eof(p) {
-				consume_break(p)
-			}
+			if !at_eof(p) { consume_break(p) }
 			continue
 		case l.kind == .Marker:
 			emit_now(p, tape.Token{p.pos, 3, .Plain, .Directive, 0}) or_return
@@ -114,18 +101,14 @@ read_document :: proc(p: ^Parser) -> (found: bool, ok: bool) #no_bounds_check {
 end_document :: proc(p: ^Parser) -> bool {
 	peek_next(p) or_return
 	l := p.nl
-	if l.kind == .Content {
-		return fault(p, p.pos, .Bad_Char, .Unexpected_Content)
-	}
+	if l.kind == .Content { return fault(p, p.pos, .Bad_Char, .Unexpected_Content) }
 	flush_foot(p, 0) or_return
 	if l.kind == .Marker && at(p, p.pos) == '.' {
 		emit_raw(p, tape.Token{p.pos, 3, .Plain, .Directive, 0}) or_return
 		p.pos += 3
 		finish_line(p, false) or_return
 		clear(&p.pending)
-		if !at_eof(p) {
-			consume_break(p)
-		}
+		if !at_eof(p) { consume_break(p) }
 	}
 	return true
 }
@@ -136,42 +119,29 @@ validate_stream :: proc "contextless" (src: []u8, $S: Spec, $LAX: bool, opts: Op
 	context = ctx^ if ctx != nil else runtime.default_context()
 	local: hook.Memory_Budget
 	scratch := hook.scratch(opts, allocator, &local)
-	w := Walk(hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS) {
-		hooks = h,
-		regs  = regs^ if regs != nil else {},
-	}
-	when LAX {
-		w.steps[0] = build.read_steps(opts)
-	}
+	w: Walk(hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS)
+	walk_hook_init(&w.wh, h, regs, build.read_steps(opts))
 	sink: Token_Sink = walk_sink(hook.No_Hooks, LAX, hook.NO_HOOKS_CAPS, hook.no_hook) when LAX else nil
 	sink_data: rawptr = &w when LAX else nil
 	parser_init(&w.p, src, opts.budget.depth, opts.budget.expansion, S == .Yaml_Merge && sink != nil, true, LAX, false, dialect_of(opts), scratch, sink, sink_data)
 	defer parser_destroy(&w.p)
 	w.p.pos = u64(spell_bom(src))
-	w.p.ls = w.p.pos
-	w.p.start = w.p.pos
+	w.p.ls, w.p.start = w.p.pos, w.p.pos
 	for w.p.pos < u64(len(src)) {
 		found, ok := read_document(&w.p)
 		if !ok {
 			r := w.p.fail
-			when LAX {
-				r = hook.steps_result(r, w.steps[0])
-			}
+			when LAX { r = hook.steps_result(r, w.wh.steps[0]) }
 			_, err, _ = hook.walk_error(r, &RULES)
 			return w.p.pos, hook.memory_budget_error(&local, err), false
 		}
-		if !found {
-			break
-		}
+		if !found { break }
 	}
-	if regs != nil {
-		regs^ = w.regs
-	}
+	if regs != nil { regs^ = w.wh.regs }
 	return u64(len(src)), nil, false
 }
 
-// Walks a single YAML document starting at `lo` (with `tail_fault` check for trailing documents unless `single_doc == false`
-// or the hook stopped). Used by `build`, `find`, `scan`, `check`, `unmarshal`, and `yaml.walk`.
+// Walks a single YAML document starting at `lo`. Used by `build`, `find`, `scan`, `check`, `unmarshal`, and `yaml.walk`.
 @(private)
 walk_text :: proc "contextless" (
 	src: []u8,
@@ -195,66 +165,35 @@ walk_text :: proc "contextless" (
 	context = ctx^ if ctx != nil else runtime.default_context()
 	local: hook.Memory_Budget
 	scratch := hook.scratch(opts, allocator, &local)
-	w := Walk(H, LAX, C) {
-		hooks = h,
-		regs  = regs^ if regs != nil else {},
-	}
-	when .Rooms in C {
-		if h != nil {
-			w.rooms = hook.rooms_end(h)
-		}
-	}
-	when LAX {
-		w.steps[0] = build.read_steps(opts)
-	}
+	w: Walk(H, LAX, C)
+	walk_hook_init(&w.wh, h, regs, build.read_steps(opts))
 	sink: Token_Sink = walk_sink(H, LAX, C, on) if H != hook.No_Hooks else (walk_sink(H, LAX, C, on) when LAX else nil)
 	sink_data: rawptr = &w if sink != nil else nil
 	parser_init(&w.p, src, opts.budget.depth, opts.budget.expansion, S == .Yaml_Merge && sink != nil, allow_complex, H != hook.No_Hooks || LAX, H != hook.No_Hooks, dialect_of(opts), scratch, sink, sink_data)
 	defer parser_destroy(&w.p)
-	w.p.pos = lo
-	if lo == 0 {
-		w.p.pos = u64(spell_bom(src))
-	}
-	w.p.ls = w.p.pos
-	w.p.start = w.p.pos
+	w.p.pos = u64(spell_bom(src)) if lo == 0 else lo
+	w.p.ls, w.p.start = w.p.pos, w.p.pos
 	found, ok := read_document(&w.p)
-	if end_pos != nil {
-		end_pos^ = w.p.pos
-	}
-	if found_out != nil {
-		found_out^ = found
-	}
-	if regs != nil {
-		regs^ = w.regs
-	}
+	if end_pos != nil { end_pos^ = w.p.pos }
+	if found_out != nil { found_out^ = found }
+	if regs != nil { regs^ = w.wh.regs }
 	if !ok {
 		r := w.p.fail
-		when LAX {
-			r = hook.steps_result(r, w.steps[0])
-		}
+		when LAX { r = hook.steps_result(r, w.wh.steps[0]) }
 		if u8(r) == hook.WALK_STOPPED {
-			if w.failed_mem {
-				return w.p.pos, hook.memory_budget_error(&local, runtime.Allocator_Error.Out_Of_Memory), false
-			}
-			if w.bad_hook {
-				return w.p.pos, tape.Bad_Option{"action"}, false
-			}
+			if w.wh.failed_mem { return w.p.pos, hook.memory_budget_error(&local, runtime.Allocator_Error.Out_Of_Memory), false }
+			if w.wh.bad_hook { return w.p.pos, tape.Bad_Option{"action"}, false }
 			return w.p.root_close, nil, false
 		}
 		at, werr, _ := hook.walk_error(r, &RULES)
 		return at, hook.memory_budget_error(&local, werr), false
 	}
-	if !found {
-		if allow_empty {
-			return u64(len(src)), nil, false
-		}
-		return u64(len(src)), tape.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated, detail = u8(Detail.No_Document)}, false
-	}
-	if !w.p.saw_node && !allow_empty {
-		return u64(len(src)), tape.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated, detail = u8(Detail.No_Document)}, false
+	if !found || !w.p.saw_node {
+		if allow_empty && !found { return u64(len(src)), nil, false }
+		if !allow_empty { return u64(len(src)), tape.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated, detail = u8(Detail.No_Document)}, false }
 	}
 	if check_tail && w.p.pos < u64(len(src)) {
-		if tf := tail_fault(&w.p, src, w.p.pos, opts, S); tf != 0 {
+		if tf := tail_fault(&w.p, w.p.pos); tf != 0 {
 			at, werr, _ := hook.walk_error(tf, &RULES)
 			return at, hook.memory_budget_error(&local, werr), false
 		}
@@ -263,24 +202,16 @@ walk_text :: proc "contextless" (
 }
 
 @(private)
-tail_fault :: proc(p: ^Parser, src: []u8, lo: u64, opts: Options, $S: Spec) -> hook.Walk_Result {
+tail_fault :: proc(p: ^Parser, lo: u64) -> hook.Walk_Result {
 	reset_document(p)
 	clear(&p.pending)
 	p.sink, p.sink_data, p.needs_log = nil, nil, false
-	p.pos, p.ls = lo, lo
-	p.nl_valid = false
-	if !peek_next(p) {
-		return p.fail
-	}
+	p.pos, p.ls, p.nl_valid = lo, lo, false
+	if !peek_next(p) { return p.fail }
 	start := p.nl.pos
 	found, ok := read_document(p)
-	if !ok {
-		return p.fail
-	}
-	if found {
-		return hook.walk_result(start, u8(tape.Fault_Kind.Bad_Char), u8(Detail.Extra_Document))
-	}
-	return 0
+	if !ok { return p.fail }
+	return hook.walk_result(start, u8(tape.Fault_Kind.Bad_Char), u8(Detail.Extra_Document)) if found else 0
 }
 
 @(private = "file")
@@ -291,224 +222,151 @@ spell_bom :: #force_inline proc "contextless" (src: []u8) -> int #no_bounds_chec
 @(private)
 walk_sink :: proc "contextless" ($H: typeid, $LAX: bool, $C: hook.Capabilities, $ON: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> Token_Sink {
 	return proc "contextless" (data: rawptr, t: tape.Token) -> bool {
-		return walk_deliver((^Walk(H, LAX, C))(data), t, ON)
-	}
-}
-
-@(private)
-walk_deliver :: proc "contextless" (w: ^Walk($H, $LAX, $C), t: tape.Token, $ON: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> bool {
-	container := t.kind > .Plain && t.kind != .End
-	if container {
-		w.open_depth += 1
-	}
-	when .Skips in C {
-		if w.mute != 0 {
-			when LAX {
-				if container {
-					w.steps[0] -= 1
-					if w.steps[0] == 0 {
-						w.p.fail = hook.walk_result(t.lo, hook.WALK_STEPS)
-						return false
-					}
-				}
-			}
-			if t.kind == .End {
-				w.open_depth -= 1
-				if w.mute != max(u64) && w.open_depth + 1 == w.mute {
-					send_end := !w.mute_end
-					w.mute, w.mute_end = 0, false
-					if send_end {
-						return deliver_outer(w, t, false, ON)
-					}
-				}
-			}
-			return true
-		} else if w.skip_value {
-			if t.role > .Key {
-				// Facts between the skipped key and its value are still delivered to the hook.
-			} else {
-				w.skip_value = false
-				if container {
-					when LAX {
-						w.steps[0] -= 1
-						if w.steps[0] == 0 {
-							w.p.fail = hook.walk_result(t.lo, hook.WALK_STEPS)
-							return false
-						}
-					}
-					w.mute = w.open_depth
-					w.mute_end = true
-				}
-				return true
-			}
+		w := (^Walk(H, LAX, C))(data)
+		if walk_hook_deliver(&w.wh, t, ON) { return true }
+		when LAX {
+			if w.wh.out_steps { w.p.fail = hook.walk_result(t.lo, hook.WALK_STEPS) }
 		}
+		return false
 	}
-
-	if t.kind == .End {
-		w.open_depth -= 1
-		when .Keeps in C {
-			if w.keep_depth != 0 && w.open_depth + 1 == w.keep_depth {
-				// Close inner kept container first, then restore outer hook and also deliver `.End` to it.
-				if !deliver_inner(w, t) {
-					return false
-				}
-				w.keep_depth = 0
-				when .Rooms in C {
-					w.rooms = hook.rooms_end(w.hooks)
-				}
-			}
-		}
-	}
-
-	when .Keeps in C {
-		if w.keep_depth != 0 {
-			when LAX {
-				if container {
-					w.steps[0] -= 1
-					if w.steps[0] == 0 {
-						w.p.fail = hook.walk_result(t.lo, hook.WALK_STEPS)
-						return false
-					}
-				}
-			}
-			return deliver_inner(w, t)
-		}
-	}
-
-	return deliver_outer(w, t, container, ON)
 }
 
 @(private = "file")
-deliver_outer :: #force_inline proc "contextless" (w: ^Walk($H, $LAX, $C), t: tape.Token, container: bool, $ON: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> bool {
-	when .Rooms in C {
-		if t.kind != .End && t.role <= .Key && uintptr(w.regs.a) >= w.rooms {
-			if !hook.rooms_grow(w.hooks, &w.regs, t.lo) {
-				w.failed_mem = true
-				return false
+step_budget :: #force_inline proc "contextless" (wh: ^Walk_Hook($H, $LAX, $C), container: bool) -> bool {
+	when LAX {
+		if container {
+			wh.steps[0] -= 1
+			if wh.steps[0] == 0 { wh.out_steps = true; return false }
+		}
+	}
+	return true
+}
+
+@(private)
+walk_hook_deliver :: proc "contextless" (wh: ^Walk_Hook($H, $LAX, $C), t: tape.Token, $ON: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> bool {
+	wh.last_at = t.lo
+	container := t.kind > .Plain && t.kind != .End
+	if container { wh.open_depth += 1 }
+	when .Skips in C {
+		if wh.mute != 0 {
+			step_budget(wh, container) or_return
+			if t.kind == .End {
+				wh.open_depth -= 1
+				if wh.mute != max(u64) && wh.open_depth + 1 == wh.mute {
+					send_end := !wh.mute_end
+					wh.mute, wh.mute_end = 0, false
+					if send_end { return walk_hook_outer(wh, t, false, ON) }
+				}
 			}
-			w.rooms = hook.rooms_end(w.hooks)
+			return true
+		} else if wh.skip_value && t.role <= .Key {
+			wh.skip_value = false
+			if container {
+				step_budget(wh, true) or_return
+				wh.mute, wh.mute_end = wh.open_depth, true
+			}
+			return true
+		}
+	}
+	if t.kind == .End {
+		wh.open_depth -= 1
+		when .Keeps in C {
+			if wh.keep_depth != 0 && wh.open_depth + 1 == wh.keep_depth {
+				walk_hook_inner(wh, t) or_return
+				wh.keep_depth = 0
+				when .Rooms in C { wh.rooms = hook.rooms_end(wh.hooks) }
+			}
+		}
+	}
+	when .Keeps in C {
+		if wh.keep_depth != 0 {
+			step_budget(wh, container) or_return
+			return walk_hook_inner(wh, t)
+		}
+	}
+	return walk_hook_outer(wh, t, container, ON)
+}
+
+@(private = "file")
+walk_hook_outer :: #force_inline proc "contextless" (wh: ^Walk_Hook($H, $LAX, $C), t: tape.Token, container: bool, $ON: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> bool {
+	when .Rooms in C {
+		if t.kind != .End && t.role <= .Key && uintptr(wh.regs.a) >= wh.rooms {
+			if !hook.rooms_grow(wh.hooks, &wh.regs, t.lo) { wh.failed_mem = true; return false }
+			wh.rooms = hook.rooms_end(wh.hooks)
 		}
 	}
 	if container {
 		when .Levels in C {
-			held := hook.levels_held(w.hooks)
-			if held <= int(w.regs.c) {
-				want := max(2 * held, int(w.regs.c) + 1)
-				if !hook.levels_grow(w.hooks, want, &w.regs, t.lo) {
-					w.failed_mem = true
-					return false
-				}
-				when .Rooms in C {
-					w.rooms = hook.rooms_end(w.hooks)
-				}
+			held := hook.levels_held(wh.hooks)
+			if held <= int(wh.regs.c) {
+				if !hook.levels_grow(wh.hooks, max(2 * held, int(wh.regs.c) + 1), &wh.regs, t.lo) { wh.failed_mem = true; return false }
+				when .Rooms in C { wh.rooms = hook.rooms_end(wh.hooks) }
 			}
 		}
-		when LAX {
-			w.steps[0] -= 1
-			if w.steps[0] == 0 {
-				w.p.fail = hook.walk_result(t.lo, hook.WALK_STEPS)
-				return false
-			}
-		}
+		step_budget(wh, true) or_return
 	}
 	when H == hook.No_Hooks {
 		return true
 	} else {
 		act: hook.Action
-		w.regs, act = ON(w.hooks, w.regs, t)
+		wh.regs, act = ON(wh.hooks, wh.regs, t)
 		when .Skips not_in C && .Keeps not_in C {
-			if act == .Next {
-				return true
-			}
-			if act == .Stop {
-				w.stopped = true
-				return false
-			}
-			w.bad_hook = true
+			if act == .Next { return true }
+			if act == .Stop { wh.stopped = true; return false }
+			wh.bad_hook = true
 			return false
 		} else {
 			#partial switch act {
-			case .Next:
-				return true
-			case .Stop:
-				w.stopped = true
-				return false
+			case .Next: return true
+			case .Stop: wh.stopped = true; return false
 			case .Skip:
 				when .Skips in C {
-					if t.role == .Key {
-						w.skip_value = true
-					} else if container {
-						w.mute = w.open_depth
-						w.mute_end = false
-					}
+					if t.role == .Key { wh.skip_value = true } else if container { wh.mute, wh.mute_end = wh.open_depth, false }
 					return true
 				}
-				w.bad_hook = true
-				return false
 			case .Rest:
-				when .Skips in C {
-					w.mute = max(u64)
-					return true
-				}
-				w.bad_hook = true
-				return false
+				when .Skips in C { wh.mute = max(u64); return true }
 			case .Keep, .Keep_Stubs:
 				when .Keeps in C {
-					if !container {
-						w.bad_hook = true
-						return false
-					}
-					w.keep_depth = w.open_depth
-					w.keep_stubs = (act == .Keep_Stubs)
-					return deliver_inner(w, t)
+					if !container { wh.bad_hook = true; return false }
+					wh.keep_depth, wh.keep_stubs = wh.open_depth, act == .Keep_Stubs
+					return walk_hook_inner(wh, t)
 				}
-				w.bad_hook = true
-				return false
 			}
-			w.bad_hook = true
+			wh.bad_hook = true
 			return false
 		}
 	}
 }
 
 @(private = "file")
-deliver_inner :: proc "contextless" (w: ^Walk($H, $LAX, $C), t: tape.Token) -> bool {
+walk_hook_inner :: proc "contextless" (wh: ^Walk_Hook($H, $LAX, $C), t: tape.Token) -> bool {
 	when .Keeps in C {
 		K :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(H, hook.PROTOCOL_FIELD), 3)
 		Inner :: intrinsics.type_polymorphic_record_parameter_value(K, 0)
 		IC :: intrinsics.type_polymorphic_record_parameter_value(intrinsics.type_field_type(Inner, hook.PROTOCOL_FIELD), 0)
-		inner := (^Inner)(hook.keeps_inner(w.hooks))
+		inner := (^Inner)(hook.keeps_inner(wh.hooks))
 		container := t.kind > .Plain && t.kind != .End
 		when .Rooms in IC {
-			if t.kind != .End && t.role <= .Key && uintptr(w.regs.a) >= hook.rooms_end(inner) {
-				if !hook.rooms_grow(inner, &w.regs, t.lo) {
-					w.failed_mem = true
-					return false
-				}
+			if t.kind != .End && t.role <= .Key && uintptr(wh.regs.a) >= hook.rooms_end(inner) {
+				if !hook.rooms_grow(inner, &wh.regs, t.lo) { wh.failed_mem = true; return false }
 			}
 		}
 		if container {
 			when .Levels in IC {
 				held := hook.levels_held(inner)
-				if held <= int(w.regs.c) {
-					want := max(2 * held, int(w.regs.c) + 1)
-					if !hook.levels_grow(inner, want, &w.regs, t.lo) {
-						w.failed_mem = true
-						return false
-					}
+				if held <= int(wh.regs.c) {
+					if !hook.levels_grow(inner, max(2 * held, int(wh.regs.c) + 1), &wh.regs, t.lo) { wh.failed_mem = true; return false }
 				}
 			}
 		}
 		act: hook.Action
-		if w.keep_stubs {
-			w.regs, act = hook.keeps_give(w.hooks, w.regs, t, true)
+		if wh.keep_stubs {
+			wh.regs, act = hook.keeps_give(wh.hooks, wh.regs, t, true)
 		} else {
-			w.regs, act = hook.keeps_give(w.hooks, w.regs, t, false)
+			wh.regs, act = hook.keeps_give(wh.hooks, wh.regs, t, false)
 		}
-		if act == .Stop {
-			w.stopped = true
-			return false
-		}
+		if act == .Stop { wh.stopped = true; return false }
 		return true
 	} else {
 		return false

@@ -18,146 +18,72 @@ import "stury:yaml"
 
 // Plain-text aligned table (`--to table`) and GitHub-Flavored Markdown table (`--to markdown`) output writers.
 
+@(private = "file")
+expect_tbl :: proc(t: ^testing.T, doc: ^tape.Document, want: string, opts := write.Table_Render_Options{}, loc := #caller_location) {
+	got, err := write.write_table(doc, opts)
+	defer delete(got)
+	testing.expectf(t, err == nil && string(got) == want, "table: %v\ngot:\n%q\nwant:\n%q", err, got, want, loc = loc)
+}
+
+@(private = "file")
+expect_md :: proc(t: ^testing.T, doc: ^tape.Document, want: string, opts := write.Markdown_Options{}, loc := #caller_location) {
+	got, err := write.write_markdown(doc, opts)
+	defer delete(got)
+	testing.expectf(t, err == nil && string(got) == want, "markdown: %v\ngot:\n%q\nwant:\n%q", err, got, want, loc = loc)
+}
+
+@(private = "file")
+expect_json_tbl :: proc(t: ^testing.T, src, want: string, opts := write.Table_Render_Options{}, spec := json.Spec.Json, loc := #caller_location) {
+	doc, err := json.build(transmute([]u8)src, spec)
+	defer json.destroy(&doc)
+	testing.expect_value(t, err, nil, loc = loc)
+	expect_tbl(t, &doc, want, opts, loc)
+}
+
+@(private = "file")
+expect_json_md :: proc(t: ^testing.T, src, want: string, opts := write.Markdown_Options{}, spec := json.Spec.Json, loc := #caller_location) {
+	doc, err := json.build(transmute([]u8)src, spec)
+	defer json.destroy(&doc)
+	testing.expect_value(t, err, nil, loc = loc)
+	expect_md(t, &doc, want, opts, loc)
+}
+
 @(test)
 render_table_styles_and_alignment :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := `[{"name":"alice","age":30,"active":true},{"name":"bob","age":7,"active":false}]`
-	doc, berr := json.build(transmute([]u8)src)
+	doc, berr := json.build(transmute([]u8)string(`[{"name":"alice","age":30,"active":true},{"name":"bob","age":7,"active":false}]`))
 	defer json.destroy(&doc)
 	testing.expect_value(t, berr, nil)
 
-	// .Plain (default): underlined header, auto right-align numeric columns, left-align strings/booleans.
-	plain, err := write.write_table(&doc)
-	defer delete(plain)
-	testing.expect_value(t, err, nil)
-	want_plain := strings.concatenate({
-		"name   age  active\n",
-		"-----  ---  ------\n",
-		"alice   30  true\n",
-		"bob      7  false\n",
-	}, context.temp_allocator)
-	testing.expectf(t, string(plain) == want_plain, "plain:\n%s\nwant:\n%s", plain, want_plain)
+	expect_tbl(t, &doc, "name   age  active\n-----  ---  ------\nalice   30  true\nbob      7  false\n")
+	expect_tbl(t, &doc, "name   age  active\nalice   30  true\nbob      7  false\n", {style = .Compact})
+	expect_tbl(t, &doc, "┌───────┬─────┬────────┐\n│ name  │ age │ active │\n├───────┼─────┼────────┤\n│ alice │  30 │ true   │\n│ bob   │   7 │ false  │\n└───────┴─────┴────────┘\n", {style = .Box})
+	expect_tbl(t, &doc, "+-------+-----+--------+\n| name  | age | active |\n+-------+-----+--------+\n| alice |  30 | true   |\n| bob   |   7 | false  |\n+-------+-----+--------+\n", {style = .Ascii})
+	expect_tbl(t, &doc, "alice 30 true\nbob   7  false\n", {style = .Plain, align = .Left, no_header = true, column_gap = 1})
+	expect_tbl(t, &doc, " name  age  active\nalice   30    true\n  bob    7   false\n", {style = .Compact, align = .Right})
 
-	// .Compact: aligned columns with no horizontal rule.
-	compact, cerr := write.write_table(&doc, {style = .Compact})
-	defer delete(compact)
-	testing.expect_value(t, cerr, nil)
-	want_compact := strings.concatenate({
-		"name   age  active\n",
-		"alice   30  true\n",
-		"bob      7  false\n",
-	}, context.temp_allocator)
-	testing.expectf(t, string(compact) == want_compact, "compact:\n%s\nwant:\n%s", compact, want_compact)
-
-	// .Box: crisp Unicode box borders.
-	boxed, xerr := write.write_table(&doc, {style = .Box})
-	defer delete(boxed)
-	testing.expect_value(t, xerr, nil)
-	want_box := strings.concatenate({
-		"┌───────┬─────┬────────┐\n",
-		"│ name  │ age │ active │\n",
-		"├───────┼─────┼────────┤\n",
-		"│ alice │  30 │ true   │\n",
-		"│ bob   │   7 │ false  │\n",
-		"└───────┴─────┴────────┘\n",
-	}, context.temp_allocator)
-	testing.expectf(t, string(boxed) == want_box, "box:\n%s\nwant:\n%s", boxed, want_box)
-
-	// .Ascii: pure ASCII box borders.
-	asc, aerr := write.write_table(&doc, {style = .Ascii})
-	defer delete(asc)
-	testing.expect_value(t, aerr, nil)
-	want_ascii := strings.concatenate({
-		"+-------+-----+--------+\n",
-		"| name  | age | active |\n",
-		"+-------+-----+--------+\n",
-		"| alice |  30 | true   |\n",
-		"| bob   |   7 | false  |\n",
-		"+-------+-----+--------+\n",
-	}, context.temp_allocator)
-	testing.expectf(t, string(asc) == want_ascii, "ascii:\n%s\nwant:\n%s", asc, want_ascii)
-
-	// Left alignment override + custom gap + no_header.
-	left_no_hdr, lerr := write.write_table(&doc, {style = .Plain, align = .Left, no_header = true, column_gap = 1})
-	defer delete(left_no_hdr)
-	testing.expect_value(t, lerr, nil)
-	testing.expectf(t, string(left_no_hdr) == "alice 30 true\nbob   7  false\n", "left_no_hdr: %q", left_no_hdr)
-
-	// Right alignment override.
-	right_all, rerr := write.write_table(&doc, {style = .Compact, align = .Right})
-	defer delete(right_all)
-	testing.expect_value(t, rerr, nil)
-	want_right := " name  age  active\nalice   30    true\n  bob    7   false\n"
-	testing.expectf(t, string(right_all) == want_right, "right:\n%s\nwant:\n%s", right_all, want_right)
-
-	// Numeric column with null: numbers right-align while null left-aligns under .Auto.
-	null_src := `[{"k":"a","v":10000},{"k":"b","v":null},{"k":"c","v":7}]`
-	null_doc, _ := json.build(transmute([]u8)null_src)
+	// Numeric column with null: numbers right-align while null left-aligns under .Auto, plus custom null_text.
+	null_doc, _ := json.build(transmute([]u8)string(`[{"k":"a","v":10000},{"k":"b","v":null},{"k":"c","v":7}]`))
 	defer json.destroy(&null_doc)
-	null_tbl, nerr := write.write_table(&null_doc, {style = .Box})
-	defer delete(null_tbl)
-	testing.expect_value(t, nerr, nil)
-	want_null_tbl := strings.concatenate({
-		"┌───┬───────┐\n",
-		"│ k │     v │\n",
-		"├───┼───────┤\n",
-		"│ a │ 10000 │\n",
-		"│ b │ null  │\n",
-		"│ c │     7 │\n",
-		"└───┴───────┘\n",
-	}, context.temp_allocator)
-	testing.expectf(t, string(null_tbl) == want_null_tbl, "null_tbl:\n%s\nwant:\n%s", null_tbl, want_null_tbl)
-
-	// Custom null_text (including empty string "").
-	blank_null, bnerr := write.write_table(&null_doc, {style = .Compact, null_text = ""})
-	defer delete(blank_null)
-	testing.expect_value(t, bnerr, nil)
-	want_blank := "k      v\na  10000\nb\nc      7\n"
-	testing.expectf(t, string(blank_null) == want_blank, "blank_null: %q want %q", blank_null, want_blank)
+	expect_tbl(t, &null_doc, "┌───┬───────┐\n│ k │     v │\n├───┼───────┤\n│ a │ 10000 │\n│ b │ null  │\n│ c │     7 │\n└───┴───────┘\n", {style = .Box})
+	expect_tbl(t, &null_doc, "k      v\na  10000\nb\nc      7\n", {style = .Compact, null_text = ""})
 }
 
 @(test)
 render_markdown_tables_and_escaping :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := `[{"col1":"val","col2":42},{"col1":"a|b\\c\nd\r\ne","col2":7}]`
-	doc, berr := json.build(transmute([]u8)src)
+	doc, berr := json.build(transmute([]u8)string(`[{"col1":"val","col2":42},{"col1":"a|b\\c\nd\r\ne","col2":7}]`))
 	defer json.destroy(&doc)
 	testing.expect_value(t, berr, nil)
 
-	// Compact GFM pipe table.
-	compact, cerr := write.write_markdown(&doc, {compact = true})
-	defer delete(compact)
-	testing.expect_value(t, cerr, nil)
-	want_compact := strings.concatenate({
-		"| col1 | col2 |\n",
-		"| --- | ---: |\n",
-		"| val | 42 |\n",
-		"| a\\|b\\\\c<br>d<br>e | 7 |\n",
-	}, context.temp_allocator)
-	testing.expectf(t, string(compact) == want_compact, "md compact:\n%s\nwant:\n%s", compact, want_compact)
+	expect_md(t, &doc, "| col1 | col2 |\n| --- | ---: |\n| val | 42 |\n| a\\|b\\\\c<br>d<br>e | 7 |\n", {compact = true})
+	expect_md(t, &doc, "| col1              | col2 |\n| ----------------- | ---: |\n| val               |   42 |\n| a\\|b\\\\c<br>d<br>e |    7 |\n")
 
-	// Default padded GFM pipe table: aligned pipes and >=3 dashes in divider.
-	padded, perr := write.write_markdown(&doc)
-	defer delete(padded)
-	testing.expect_value(t, perr, nil)
-	want_padded := strings.concatenate({
-		"| col1              | col2 |\n",
-		"| ----------------- | ---: |\n",
-		"| val               |   42 |\n",
-		"| a\\|b\\\\c<br>d<br>e |    7 |\n",
-	}, context.temp_allocator)
-	testing.expectf(t, string(padded) == want_padded, "md padded:\n%s\nwant:\n%s", padded, want_padded)
-
-	// Alignment overrides in Markdown.
-	left_md, lerr := write.write_markdown(&doc, {compact = true, align = .Left})
-	defer delete(left_md)
-	testing.expect_value(t, lerr, nil)
-	testing.expect(t, strings.contains(string(left_md), "| --- | --- |\n"))
-
-	right_md, rerr := write.write_markdown(&doc, {compact = true, align = .Right})
-	defer delete(right_md)
-	testing.expect_value(t, rerr, nil)
-	testing.expect(t, strings.contains(string(right_md), "| ---: | ---: |\n"))
+	for tc in ([?]struct { align: write.Column_Align, sep: string }{{.Left, "| --- | --- |\n"}, {.Right, "| ---: | ---: |\n"}}) {
+		md, err := write.write_markdown(&doc, {compact = true, align = tc.align})
+		defer delete(md)
+		testing.expect(t, err == nil && strings.contains(string(md), tc.sep))
+	}
 }
 
 @(test)
@@ -165,105 +91,24 @@ render_shapes_heterogeneous_nested_and_empty :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 
 	// Heterogeneous array of objects: union of keys in first-seen order, and sort_keys = true.
-	het_src := `[{"z":1,"a":"x"},{"a":"y","m":true},{"z":3,"b":null}]`
-	het_doc, _ := json.build(transmute([]u8)het_src)
+	het_doc, _ := json.build(transmute([]u8)string(`[{"z":1,"a":"x"},{"a":"y","m":true},{"z":3,"b":null}]`))
 	defer json.destroy(&het_doc)
+	expect_md(t, &het_doc, "| z | a | m | b |\n| ---: | --- | --- | --- |\n| 1 | x |  |  |\n|  | y | true |  |\n| 3 |  |  | null |\n", {compact = true})
+	expect_md(t, &het_doc, "| a | b | m | z |\n| --- | --- | --- | ---: |\n| x |  |  | 1 |\n| y |  | true |  |\n|  | null |  | 3 |\n", {compact = true, sort_keys = true})
 
-	het_md, herr := write.write_markdown(&het_doc, {compact = true})
-	defer delete(het_md)
-	testing.expect_value(t, herr, nil)
-	want_het := strings.concatenate({
-		"| z | a | m | b |\n",
-		"| ---: | --- | --- | --- |\n",
-		"| 1 | x |  |  |\n",
-		"|  | y | true |  |\n",
-		"| 3 |  |  | null |\n",
-	}, context.temp_allocator)
-	testing.expectf(t, string(het_md) == want_het, "het:\n%s\nwant:\n%s", het_md, want_het)
-
-	het_sorted, serr := write.write_markdown(&het_doc, {compact = true, sort_keys = true})
-	defer delete(het_sorted)
-	testing.expect_value(t, serr, nil)
-	want_het_sorted := strings.concatenate({
-		"| a | b | m | z |\n",
-		"| --- | --- | --- | ---: |\n",
-		"| x |  |  | 1 |\n",
-		"| y |  | true |  |\n",
-		"|  | null |  | 3 |\n",
-	}, context.temp_allocator)
-	testing.expectf(t, string(het_sorted) == want_het_sorted, "het_sorted:\n%s\nwant:\n%s", het_sorted, want_het_sorted)
-
-	// Array of arrays (ragged widths -> columns 0, 1, 2).
-	arr_src := `[[1,"x"],[2,"y",true]]`
-	arr_doc, _ := json.build(transmute([]u8)arr_src)
-	defer json.destroy(&arr_doc)
-	arr_tbl, aerr := write.write_table(&arr_doc, {style = .Compact})
-	defer delete(arr_tbl)
-	testing.expect_value(t, aerr, nil)
-	testing.expectf(t, string(arr_tbl) == "0  1  2\n1  x\n2  y  true\n", "arr_tbl: %q", arr_tbl)
-
-	// Single object: .Key_Value (default) vs .Row.
-	obj_src := `{"b":2,"a":"hi"}`
-	obj_doc, _ := json.build(transmute([]u8)obj_src)
-	defer json.destroy(&obj_doc)
-
-	kv_tbl, kverr := write.write_table(&obj_doc, {style = .Compact, sort_keys = true})
-	defer delete(kv_tbl)
-	testing.expect_value(t, kverr, nil)
-	testing.expectf(t, string(kv_tbl) == "key  value\na    hi\nb    2\n", "kv_tbl: %q", kv_tbl)
-
-	row_md, rowerr := write.write_markdown(&obj_doc, {object_layout = .Row, compact = true, sort_keys = true})
-	defer delete(row_md)
-	testing.expect_value(t, rowerr, nil)
-	testing.expectf(t, string(row_md) == "| a | b |\n| --- | ---: |\n| hi | 2 |\n", "row_md: %q", row_md)
-
-	// Scalar root & array of scalars.
-	sc_doc, _ := json.build(transmute([]u8)string("42"))
-	defer json.destroy(&sc_doc)
-	sc_md, scerr := write.write_markdown(&sc_doc, {compact = true})
-	defer delete(sc_md)
-	testing.expect_value(t, scerr, nil)
-	testing.expectf(t, string(sc_md) == "| value |\n| ---: |\n| 42 |\n", "sc_md: %q", sc_md)
-
-	sc_arr_doc, _ := json.build(transmute([]u8)string(`[10,20,30]`))
-	defer json.destroy(&sc_arr_doc)
-	sc_arr_tbl, saerr := write.write_table(&sc_arr_doc, {style = .Compact, value_header = "num"})
-	defer delete(sc_arr_tbl)
-	testing.expect_value(t, saerr, nil)
-	testing.expectf(t, string(sc_arr_tbl) == "num\n 10\n 20\n 30\n", "sc_arr_tbl: %q", sc_arr_tbl)
-
-	// Mixed array (objects + arrays + scalars): single column with compact inline JSON for containers.
-	mix_doc, _ := json.build(transmute([]u8)string(`[{"a":1},[2,3],"ok"]`))
-	defer json.destroy(&mix_doc)
-	mix_md, merr := write.write_markdown(&mix_doc, {compact = true})
-	defer delete(mix_md)
-	testing.expect_value(t, merr, nil)
-	testing.expectf(t, string(mix_md) == "| value |\n| --- |\n| {\"a\":1} |\n| [2,3] |\n| ok |\n", "mix_md: %q", mix_md)
-
-	// Nested objects/arrays inside object cells (including pipes & quotes!).
-	nest_src := `[{"id":1,"meta":{"z":true,"a":"p|q"},"tags":[1,2]}]`
-	nest_doc, _ := json.build(transmute([]u8)nest_src)
-	defer json.destroy(&nest_doc)
-	nest_md, nerr := write.write_markdown(&nest_doc, {compact = true, sort_keys = true})
-	defer delete(nest_md)
-	testing.expect_value(t, nerr, nil)
-	testing.expectf(
-		t,
-		string(nest_md) == "| id | meta | tags |\n| ---: | --- | --- |\n| 1 | {\"a\":\"p\\|q\",\"z\":true} | [1,2] |\n",
-		"nest_md: %q",
-		nest_md,
-	)
+	// Array of arrays, single object (.Key_Value vs .Row), scalar root, array of scalars, mixed array, nested cells.
+	expect_json_tbl(t, `[[1,"x"],[2,"y",true]]`, "0  1  2\n1  x\n2  y  true\n", {style = .Compact})
+	expect_json_tbl(t, `{"b":2,"a":"hi"}`, "key  value\na    hi\nb    2\n", {style = .Compact, sort_keys = true})
+	expect_json_md(t, `{"b":2,"a":"hi"}`, "| a | b |\n| --- | ---: |\n| hi | 2 |\n", {object_layout = .Row, compact = true, sort_keys = true})
+	expect_json_md(t, `42`, "| value |\n| ---: |\n| 42 |\n", {compact = true})
+	expect_json_tbl(t, `[10,20,30]`, "num\n 10\n 20\n 30\n", {style = .Compact, value_header = "num"})
+	expect_json_md(t, `[{"a":1},[2,3],"ok"]`, "| value |\n| --- |\n| {\"a\":1} |\n| [2,3] |\n| ok |\n", {compact = true})
+	expect_json_md(t, `[{"id":1,"meta":{"z":true,"a":"p|q"},"tags":[1,2]}]`, "| id | meta | tags |\n| ---: | --- | --- |\n| 1 | {\"a\":\"p\\|q\",\"z\":true} | [1,2] |\n", {compact = true, sort_keys = true})
 
 	// Empty inputs produce 0 bytes without error.
 	for empty_src in ([?]string{"[]", "{}", "[{},{}]", "[[],[]]"}) {
-		ed, _ := json.build(transmute([]u8)empty_src)
-		defer json.destroy(&ed)
-		et, terr := write.write_table(&ed)
-		defer delete(et)
-		em, merr2 := write.write_markdown(&ed)
-		defer delete(em)
-		testing.expectf(t, terr == nil && len(et) == 0, "empty table %s: %q %v", empty_src, et, terr)
-		testing.expectf(t, merr2 == nil && len(em) == 0, "empty md %s: %q %v", empty_src, em, merr2)
+		expect_json_tbl(t, empty_src, "")
+		expect_json_md(t, empty_src, "")
 	}
 }
 
@@ -287,46 +132,40 @@ test_display_width :: proc "contextless" (s: string) -> int {
 	return total
 }
 
+@(private = "file")
+expect_uniform_width :: proc(t: ^testing.T, out: []u8, want_lines := 0, loc := #caller_location) {
+	lines := strings.split(strings.trim_suffix(string(out), "\n"), "\n", context.temp_allocator)
+	if want_lines > 0 {
+		testing.expect_value(t, len(lines), want_lines, loc = loc)
+	}
+	expected_w := test_display_width(lines[0])
+	for line, idx in lines {
+		testing.expectf(t, test_display_width(line) == expected_w, "line %d width %d != %d: %q", idx, test_display_width(line), expected_w, line, loc = loc)
+	}
+}
+
 @(test)
 render_utf8_width_control_chars_and_truncation :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-
-	// Box table with CJK wide chars, combining marks, and control chars (\n, \r, \t, \x00, \x1b).
-	src := "[{\"label\":\"日本語\",\"note\":\"a\\nb\\tc\"},{\"label\":\"cafe\u0301\",\"note\":\"x\\u0000\\u001by\"}]"
-	doc, berr := json.build(transmute([]u8)src)
+	doc, berr := json.build(transmute([]u8)string("[{\"label\":\"日本語\",\"note\":\"a\\nb\\tc\"},{\"label\":\"cafe\u0301\",\"note\":\"x\\u0000\\u001by\"}]"))
 	defer json.destroy(&doc)
 	testing.expect_value(t, berr, nil)
 
 	boxed, err := write.write_table(&doc, {style = .Box})
 	defer delete(boxed)
 	testing.expect_value(t, err, nil)
+	expect_uniform_width(t, boxed, 6)
+	testing.expect(t, strings.contains(string(boxed), `a\nb\tc`) && strings.contains(string(boxed), `x\x00\x1by`))
 
-	// Verify every line in the box table has the exact same terminal display width!
-	lines := strings.split(strings.trim_suffix(string(boxed), "\n"), "\n", context.temp_allocator)
-	testing.expect_value(t, len(lines), 6)
-	expected_w := test_display_width(lines[0])
-	for line, idx in lines {
-		testing.expectf(t, test_display_width(line) == expected_w, "line %d width %d != %d: %q", idx, test_display_width(line), expected_w, line)
-	}
-	// Verify control chars were escaped and never broke rows.
-	testing.expect(t, strings.contains(string(boxed), `a\nb\tc`))
-	testing.expect(t, strings.contains(string(boxed), `x\x00\x1by`))
-
-	// Truncation with max_col_width on CJK & ASCII.
 	trunc_box, terr := write.write_table(&doc, {style = .Box, max_col_width = 4})
 	defer delete(trunc_box)
 	testing.expect_value(t, terr, nil)
-	tlines := strings.split(strings.trim_suffix(string(trunc_box), "\n"), "\n", context.temp_allocator)
-	tw := test_display_width(tlines[0])
-	for line, idx in tlines {
-		testing.expectf(t, test_display_width(line) == tw, "trunc line %d width %d != %d: %q", idx, test_display_width(line), tw, line)
-	}
+	expect_uniform_width(t, trunc_box)
 	testing.expect(t, strings.contains(string(trunc_box), "日…"))
 
 	trunc_ascii, taerr := write.write_table(&doc, {style = .Ascii, max_col_width = 4})
 	defer delete(trunc_ascii)
-	testing.expect_value(t, taerr, nil)
-	testing.expectf(t, strings.contains(string(trunc_ascii), "l..."), "trunc_ascii:\n%s", trunc_ascii)
+	testing.expect(t, taerr == nil && strings.contains(string(trunc_ascii), "l..."))
 }
 
 @(test)
@@ -334,167 +173,104 @@ render_across_all_source_formats :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 
 	// 1. JSON5 with NaN / Infinity / hex integer.
-	j5_doc, j5_err := json.build(transmute([]u8)string("[{k: 'hex', v: 0xff}, {k: 'nan', v: NaN}, {k: 'inf', v: -Infinity}]"), .Json5)
-	defer json.destroy(&j5_doc)
-	testing.expect_value(t, j5_err, nil)
-	j5_md, j5_werr := write.write_markdown(&j5_doc, {compact = true})
-	defer delete(j5_md)
-	testing.expect_value(t, j5_werr, nil)
-	testing.expectf(t, string(j5_md) == "| k | v |\n| --- | ---: |\n| hex | 255 |\n| nan | NaN |\n| inf | -Infinity |\n", "json5: %q", j5_md)
+	expect_json_md(t, "[{k: 'hex', v: 0xff}, {k: 'nan', v: NaN}, {k: 'inf', v: -Infinity}]", "| k | v |\n| --- | ---: |\n| hex | 255 |\n| nan | NaN |\n| inf | -Infinity |\n", {compact = true}, .Json5)
 
-	// 2. CSV (with infer = true, and duplicate header policy, and header-only, and no_header).
+	// 2. CSV (infer, duplicate header .Last + sort_keys, header-only) and TSV (no_header).
 	csv_doc, csv_err := dsv.build(transmute([]u8)string("item,qty\nbolt,12\nnut,3\n"), .Csv, {format = dsv.Dsv_Options{infer = true}})
-	defer dsv.destroy(&csv_doc)
-	testing.expect_value(t, csv_err, nil)
-	csv_tbl, csv_werr := write.write_table(&csv_doc, {style = .Compact})
-	defer delete(csv_tbl)
-	testing.expect_value(t, csv_werr, nil)
-	testing.expectf(t, string(csv_tbl) == "item  qty\nbolt   12\nnut     3\n", "csv: %q", csv_tbl)
-
-	// CSV duplicate column dropped under .Last policy + sort_keys.
 	csv_dup, dup_err := dsv.build(transmute([]u8)string("b,a,b\n1,2,3\n"), .Csv, {dups = .Last})
-	defer dsv.destroy(&csv_dup)
-	testing.expect_value(t, dup_err, nil)
-	dup_md, dup_werr := write.write_markdown(&csv_dup, {compact = true, sort_keys = true})
-	defer delete(dup_md)
-	testing.expect_value(t, dup_werr, nil)
-	testing.expectf(t, string(dup_md) == "| a | b |\n| --- | --- |\n| 2 | 3 |\n", "csv_dup: %q", dup_md)
-
-	// CSV header-only.
 	csv_hdr, hdr_err := dsv.build(transmute([]u8)string("x,y\n"), .Csv)
-	defer dsv.destroy(&csv_hdr)
-	testing.expect_value(t, hdr_err, nil)
-	hdr_md, hdr_werr := write.write_markdown(&csv_hdr, {compact = true})
-	defer delete(hdr_md)
-	testing.expect_value(t, hdr_werr, nil)
-	testing.expectf(t, string(hdr_md) == "| x | y |\n| --- | --- |\n", "csv_hdr: %q", hdr_md)
-
-	// TSV without header.
 	tsv_doc, tsv_err := dsv.build(transmute([]u8)string("alpha\t10\nbeta\t20\n"), .Tsv, {format = dsv.Dsv_Options{no_header = true, infer = true}})
-	defer dsv.destroy(&tsv_doc)
-	testing.expect_value(t, tsv_err, nil)
-	tsv_md, tsv_werr := write.write_markdown(&tsv_doc, {compact = true})
-	defer delete(tsv_md)
-	testing.expect_value(t, tsv_werr, nil)
-	testing.expectf(t, string(tsv_md) == "| 0 | 1 |\n| --- | ---: |\n| alpha | 10 |\n| beta | 20 |\n", "tsv: %q", tsv_md)
+	defer {
+		dsv.destroy(&csv_doc)
+		dsv.destroy(&csv_dup)
+		dsv.destroy(&csv_hdr)
+		dsv.destroy(&tsv_doc)
+	}
+	testing.expect(t, csv_err == nil && dup_err == nil && hdr_err == nil && tsv_err == nil)
+	expect_tbl(t, &csv_doc, "item  qty\nbolt   12\nnut     3\n", {style = .Compact})
+	expect_md(t, &csv_dup, "| a | b |\n| --- | --- |\n| 2 | 3 |\n", {compact = true, sort_keys = true})
+	expect_md(t, &csv_hdr, "| x | y |\n| --- | --- |\n", {compact = true})
+	expect_md(t, &tsv_doc, "| 0 | 1 |\n| --- | ---: |\n| alpha | 10 |\n| beta | 20 |\n", {compact = true})
 
-	// 3. TOML (single table + subtree [[items]] array of tables via opts.node).
-	toml_src := "title = \"demo\"\n[[items]]\nname = \"a\"\ncount = 1\n[[items]]\nname = \"b\"\ncount = 25\n"
-	toml_doc, toml_err := toml.build(transmute([]u8)toml_src)
-	defer toml.destroy(&toml_doc)
-	testing.expect_value(t, toml_err, nil)
+	// 3. TOML subtree [[items]], 4. XML repeated tags, 5. YAML sequence of mappings.
+	toml_doc, toml_err := toml.build(transmute([]u8)string("title = \"demo\"\n[[items]]\nname = \"a\"\ncount = 1\n[[items]]\nname = \"b\"\ncount = 25\n"))
+	xml_doc, xml_err := xml.build(transmute([]u8)string("<root><item>one</item><item>two</item></root>"))
+	yaml_doc, yaml_err := yaml.build(transmute([]u8)string("- name: alice\n  score: 100\n- name: bob\n  score: 85\n"))
+	defer {
+		toml.destroy(&toml_doc)
+		xml.destroy(&xml_doc)
+		yaml.destroy(&yaml_doc)
+	}
+	testing.expect(t, toml_err == nil && xml_err == nil && yaml_err == nil)
 	items_node, items_p := toml.member({&toml_doc, nil}, toml.ROOT, "items")
-	testing.expect_value(t, items_p, tape.Presence.Found)
-	toml_md, toml_werr := write.write_markdown(&toml_doc, {node = items_node, compact = true})
-	defer delete(toml_md)
-	testing.expect_value(t, toml_werr, nil)
-	testing.expectf(t, string(toml_md) == "| name | count |\n| --- | ---: |\n| a | 1 |\n| b | 25 |\n", "toml items: %q", toml_md)
-
-	// 4. XML (object tree with repeated sibling tags rendered in .Key_Value mode).
-	xml_src := "<root><item>one</item><item>two</item></root>"
-	xml_doc, xml_err := xml.build(transmute([]u8)xml_src)
-	defer xml.destroy(&xml_doc)
-	testing.expect_value(t, xml_err, nil)
 	root_el, root_p := xml.member({&xml_doc, nil}, xml.ROOT, "root")
-	testing.expect_value(t, root_p, tape.Presence.Found)
-	xml_tbl, xml_werr := write.write_table(&xml_doc, {node = root_el, style = .Compact})
-	defer delete(xml_tbl)
-	testing.expect_value(t, xml_werr, nil)
-	testing.expectf(t, string(xml_tbl) == "key   value\nitem  one\nitem  two\n", "xml: %q", xml_tbl)
+	testing.expect(t, items_p == .Found && root_p == .Found)
+	expect_md(t, &toml_doc, "| name | count |\n| --- | ---: |\n| a | 1 |\n| b | 25 |\n", {node = items_node, compact = true})
+	expect_tbl(t, &xml_doc, "key   value\nitem  one\nitem  two\n", {node = root_el, style = .Compact})
+	expect_tbl(t, &yaml_doc, "name   score\nalice    100\nbob       85\n", {style = .Compact})
 
-	// 5. YAML (sequence of mappings).
-	yaml_src := "- name: alice\n  score: 100\n- name: bob\n  score: 85\n"
-	yaml_doc, yaml_err := yaml.build(transmute([]u8)yaml_src)
-	defer yaml.destroy(&yaml_doc)
-	testing.expect_value(t, yaml_err, nil)
-	yaml_tbl, yaml_werr := write.write_table(&yaml_doc, {style = .Compact})
-	defer delete(yaml_tbl)
-	testing.expect_value(t, yaml_werr, nil)
-	testing.expectf(t, string(yaml_tbl) == "name   score\nalice    100\nbob       85\n", "yaml: %q", yaml_tbl)
-
-	// 6. CBOR (binary document round-tripped from JSON, plus raw CBOR byte string & int map key).
+	// 6. CBOR round-trip from JSON, plus raw CBOR map with int key -> byte string ("hi" -> "aGk=").
 	j_doc, _ := json.build(transmute([]u8)string(`[{"id":1,"tag":"ok"},{"id":2,"tag":"done"}]`))
 	defer json.destroy(&j_doc)
 	cbor_bytes, _, cwerr := cbor.write(&j_doc)
 	defer delete(cbor_bytes)
-	testing.expect_value(t, cwerr, nil)
 	cbor_doc, cberr := cbor.build(cbor_bytes)
-	defer cbor.destroy(&cbor_doc)
-	testing.expect_value(t, cberr, nil)
-	cbor_md, cmerr := write.write_markdown(&cbor_doc, {compact = true})
-	defer delete(cbor_md)
-	testing.expect_value(t, cmerr, nil)
-	testing.expectf(t, string(cbor_md) == "| id | tag |\n| ---: | --- |\n| 1 | ok |\n| 2 | done |\n", "cbor: %q", cbor_md)
-
-	// Raw CBOR map with integer key (1) -> byte string ("hi" = 0x68 0x69 -> base64 "aGk="): A1 01 42 68 69.
-	raw_cbor := []u8{0xA1, 0x01, 0x42, 0x68, 0x69}
-	raw_cbor_doc, rcerr := cbor.build(raw_cbor)
-	defer cbor.destroy(&raw_cbor_doc)
-	testing.expect_value(t, rcerr, nil)
-	rc_tbl, rtwerr := write.write_table(&raw_cbor_doc, {style = .Compact})
-	defer delete(rc_tbl)
-	testing.expect_value(t, rtwerr, nil)
-	testing.expectf(t, string(rc_tbl) == "key  value\n1    aGk=\n", "cbor raw bytes: %q", rc_tbl)
+	raw_cbor_doc, rcerr := cbor.build([]u8{0xA1, 0x01, 0x42, 0x68, 0x69})
+	defer {
+		cbor.destroy(&cbor_doc)
+		cbor.destroy(&raw_cbor_doc)
+	}
+	testing.expect(t, cwerr == nil && cberr == nil && rcerr == nil)
+	expect_md(t, &cbor_doc, "| id | tag |\n| ---: | --- |\n| 1 | ok |\n| 2 | done |\n", {compact = true})
+	expect_tbl(t, &raw_cbor_doc, "key  value\n1    aGk=\n", {style = .Compact})
 }
 
 @(test)
 render_docs_batch_streaming_sinks_and_errors :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 
-	// Multi-document batch (simulating NDJSON records).
 	d1, _ := json.build(transmute([]u8)string(`{"id":1,"name":"alice"}`))
-	defer json.destroy(&d1)
 	d2, _ := json.build(transmute([]u8)string(`{"id":2,"name":"bob","role":"admin"}`))
+	defer json.destroy(&d1)
 	defer json.destroy(&d2)
 	docs := [?]tape.Document{d1, d2}
 
 	batch_tbl, bterr := write.write_table_docs(docs[:], {style = .Compact})
-	defer delete(batch_tbl)
-	testing.expect_value(t, bterr, nil)
-	testing.expectf(t, string(batch_tbl) == "id  name   role\n 1  alice\n 2  bob    admin\n", "batch_tbl: %q", batch_tbl)
-
 	batch_md, bmerr := write.write_markdown_docs(docs[:], {compact = true})
-	defer delete(batch_md)
-	testing.expect_value(t, bmerr, nil)
-	testing.expectf(t, string(batch_md) == "| id | name | role |\n| ---: | --- | --- |\n| 1 | alice |  |\n| 2 | bob | admin |\n", "batch_md: %q", batch_md)
-
-	// Empty docs slice -> empty output.
 	empty_docs, ederr := write.write_table_docs(nil)
-	defer delete(empty_docs)
-	testing.expectf(t, ederr == nil && len(empty_docs) == 0, "empty_docs: %q %v", empty_docs, ederr)
+	defer {
+		delete(batch_tbl)
+		delete(batch_md)
+		delete(empty_docs)
+	}
+	testing.expect(t, bterr == nil && string(batch_tbl) == "id  name   role\n 1  alice\n 2  bob    admin\n")
+	testing.expect(t, bmerr == nil && string(batch_md) == "| id | name | role |\n| ---: | --- | --- |\n| 1 | alice |  |\n| 2 | bob | admin |\n")
+	testing.expect(t, ederr == nil && len(empty_docs) == 0)
 
 	// Sink streaming (`write_table_to`, `write_markdown_to`) and `Token_Tape` framed collection.
 	buf: bytes.Buffer
 	defer bytes.buffer_destroy(&buf)
 	testing.expect_value(t, write.write_table_to(bytes.buffer_to_stream(&buf), &d1, {style = .Compact}), nil)
-	testing.expectf(t, bytes.buffer_to_string(&buf) == "key   value\nid    1\nname  alice\n", "sink tbl: %q", bytes.buffer_to_string(&buf))
-
+	testing.expect_value(t, bytes.buffer_to_string(&buf), "key   value\nid    1\nname  alice\n")
 	bytes.buffer_reset(&buf)
 	testing.expect_value(t, write.write_markdown_to(bytes.buffer_to_stream(&buf), &d1, {compact = true}), nil)
-	testing.expectf(t, bytes.buffer_to_string(&buf) == "| key | value |\n| --- | --- |\n| id | 1 |\n| name | alice |\n", "sink md: %q", bytes.buffer_to_string(&buf))
+	testing.expect_value(t, bytes.buffer_to_string(&buf), "| key | value |\n| --- | --- |\n| id | 1 |\n| name | alice |\n")
 
-	// Framed `Token_Tape` feeding `write_table` and `write_markdown_to`.
 	tt: write.Token_Tape
 	testing.expect_value(t, write.token_tape_start(&tt, true, 0, context.allocator), nil)
 	defer write.token_tape_drop(&tt)
-	testing.expect_value(t, write.token_tape_take(&tt, .Object, ""), nil)
-	testing.expect_value(t, write.token_tape_take(&tt, .Key, "k"), nil)
-	testing.expect_value(t, write.token_tape_take(&tt, .String, "v1"), nil)
-	testing.expect_value(t, write.token_tape_take(&tt, .Close, ""), nil)
-	testing.expect_value(t, write.token_tape_take(&tt, .Object, ""), nil)
-	testing.expect_value(t, write.token_tape_take(&tt, .Key, "k"), nil)
-	testing.expect_value(t, write.token_tape_take(&tt, .String, "v2"), nil)
-	testing.expect_value(t, write.token_tape_take(&tt, .Close, ""), nil)
+	for step in ([?]struct { kind: write.Token_Kind, text: string }{
+		{.Object, ""}, {.Key, "k"}, {.String, "v1"}, {.Close, ""},
+		{.Object, ""}, {.Key, "k"}, {.String, "v2"}, {.Close, ""},
+	}) {
+		testing.expect_value(t, write.token_tape_take(&tt, step.kind, step.text), nil)
+	}
 	tt_doc, tt_derr := write.token_tape_document(&tt)
 	testing.expect_value(t, tt_derr, nil)
-	tw_out, tw_err := write.write_table(&tt_doc, {style = .Compact})
-	defer delete(tw_out)
-	testing.expect_value(t, tw_err, nil)
-	testing.expectf(t, string(tw_out) == "k\nv1\nv2\n", "tw_out: %q", tw_out)
-
+	expect_tbl(t, &tt_doc, "k\nv1\nv2\n", {style = .Compact})
 	bytes.buffer_reset(&buf)
 	testing.expect_value(t, write.write_markdown_to(bytes.buffer_to_stream(&buf), &tt_doc, {compact = true}), nil)
-	testing.expectf(t, bytes.buffer_to_string(&buf) == "| k |\n| --- |\n| v1 |\n| v2 |\n", "md sink out: %q", bytes.buffer_to_string(&buf))
+	testing.expect_value(t, bytes.buffer_to_string(&buf), "| k |\n| --- |\n| v1 |\n| v2 |\n")
 
 	// Error checks: nil sink, negative max_col_width, invalid node, partial scan doc.
 	testing.expect_value(t, write.write_table_to({}, &d1), write.Error(tape.Bad_Option{"sink"}))
@@ -513,60 +289,39 @@ render_docs_batch_streaming_sinks_and_errors :: proc(t: ^testing.T) {
 	_, p_merr := write.write_markdown(&part)
 	r1, ok1 := p_terr.(write.Refused)
 	r2, ok2 := p_merr.(write.Refused)
-	testing.expectf(t, ok1 && r1.why == .Partial, "partial table: %v", p_terr)
-	testing.expectf(t, ok2 && r2.why == .Partial, "partial md: %v", p_merr)
+	testing.expect(t, ok1 && r1.why == .Partial && ok2 && r2.why == .Partial)
 }
 
 @(private = "file")
 Render_Sweep_Run :: struct {
-	doc:      ^tape.Document,
-	markdown: bool,
-	sink:     bool,
-	sort:     bool,
-	box:      bool,
+	doc:                       ^tape.Document,
+	markdown, sink, sort, box: bool,
 }
 
 @(private = "file")
 render_sweep_one :: proc(data: rawptr, a: runtime.Allocator) {
 	r := (^Render_Sweep_Run)(data)
-	if r.markdown {
-		opts := write.Markdown_Options{sort_keys = r.sort}
-		if r.sink {
-			taken: bytes.Buffer
-			bytes.buffer_init_allocator(&taken, 0, 0, context.allocator)
-			defer bytes.buffer_destroy(&taken)
-			err := write.write_markdown_to(bytes.buffer_to_stream(&taken), r.doc, opts, a)
-			if err != nil {
-				_ = err.(runtime.Allocator_Error)
-			}
-			return
-		}
-		text, err := write.write_markdown(r.doc, opts, a)
-		if err == nil {
-			delete(text, a)
-		} else {
-			_ = err.(runtime.Allocator_Error)
-		}
-		return
-	}
-	opts := write.Table_Render_Options{
-		style     = .Box if r.box else .Plain,
-		sort_keys = r.sort,
-	}
+	md_opts := write.Markdown_Options{sort_keys = r.sort}
+	tbl_opts := write.Table_Render_Options{style = .Box if r.box else .Plain, sort_keys = r.sort}
+	err: write.Error
 	if r.sink {
 		taken: bytes.Buffer
 		bytes.buffer_init_allocator(&taken, 0, 0, context.allocator)
 		defer bytes.buffer_destroy(&taken)
-		err := write.write_table_to(bytes.buffer_to_stream(&taken), r.doc, opts, a)
-		if err != nil {
-			_ = err.(runtime.Allocator_Error)
-		}
-		return
-	}
-	text, err := write.write_table(r.doc, opts, a)
-	if err == nil {
-		delete(text, a)
+		s := bytes.buffer_to_stream(&taken)
+		err = write.write_markdown_to(s, r.doc, md_opts, a) if r.markdown else write.write_table_to(s, r.doc, tbl_opts, a)
 	} else {
+		text: []u8
+		if r.markdown {
+			text, err = write.write_markdown(r.doc, md_opts, a)
+		} else {
+			text, err = write.write_table(r.doc, tbl_opts, a)
+		}
+		if err == nil {
+			delete(text, a)
+		}
+	}
+	if err != nil {
 		_ = err.(runtime.Allocator_Error)
 	}
 }
@@ -575,20 +330,15 @@ render_sweep_one :: proc(data: rawptr, a: runtime.Allocator) {
 render_table_markdown_oom_sweep_and_zero_temp :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 
-	// 1. Exhaustive OOM sweep across JSON (heterogeneous + nested + UTF-8) and CSV (tabular) documents.
-	json_src := `[{"z":1,"name":"日本語|a\\b\nc","meta":{"k":true,"arr":[1,2]}},{"name":"alice","extra":null,"z":200}]`
-	jdoc, jerr := json.build(transmute([]u8)json_src)
-	defer json.destroy(&jdoc)
-	testing.expect_value(t, jerr, nil)
-
-	csv_src := "b,a\n1,\"x|y\"\n20,z\n"
-	cdoc, cerr := dsv.build(transmute([]u8)csv_src, .Csv, {format = dsv.Dsv_Options{infer = true}})
-	defer dsv.destroy(&cdoc)
-	testing.expect_value(t, cerr, nil)
-
+	jdoc, jerr := json.build(transmute([]u8)string(`[{"z":1,"name":"日本語|a\\b\nc","meta":{"k":true,"arr":[1,2]}},{"name":"alice","extra":null,"z":200}]`))
+	cdoc, cerr := dsv.build(transmute([]u8)string("b,a\n1,\"x|y\"\n20,z\n"), .Csv, {format = dsv.Dsv_Options{infer = true}})
 	obj_doc, oerr := json.build(transmute([]u8)string(`{"b":[1,2],"a":"hello\nworld"}`))
-	defer json.destroy(&obj_doc)
-	testing.expect_value(t, oerr, nil)
+	defer {
+		json.destroy(&jdoc)
+		dsv.destroy(&cdoc)
+		json.destroy(&obj_doc)
+	}
+	testing.expect(t, jerr == nil && cerr == nil && oerr == nil)
 
 	docs := [?]^tape.Document{&jdoc, &cdoc, &obj_doc}
 	for d in docs {
@@ -603,7 +353,7 @@ render_table_markdown_oom_sweep_and_zero_temp :: proc(t: ^testing.T) {
 		}
 	}
 
-	// 2. Verify zero allocations on `context.temp_allocator`.
+	// Verify zero allocations on `context.temp_allocator`.
 	f := testkit.Failing{backing = context.temp_allocator, fail_at = -1}
 	prev_temp := context.temp_allocator
 	context.temp_allocator = testkit.failing_allocator(&f)
@@ -615,28 +365,23 @@ render_table_markdown_oom_sweep_and_zero_temp :: proc(t: ^testing.T) {
 			delete(t_out)
 			testing.expect_value(t, terr, nil)
 		}
-		m_out, merr := write.write_markdown(d, {sort_keys = true})
-		delete(m_out)
-		testing.expect_value(t, merr, nil)
-		m_cmp, mcerr := write.write_markdown(d, {compact = true})
-		delete(m_cmp)
-		testing.expect_value(t, mcerr, nil)
+		for cmp in ([?]bool{false, true}) {
+			m_out, merr := write.write_markdown(d, {compact = cmp, sort_keys = !cmp})
+			delete(m_out)
+			testing.expect_value(t, merr, nil)
+		}
 	}
 	batch := [?]tape.Document{jdoc, obj_doc}
 	bt, bterr := write.write_table_docs(batch[:], {style = .Box})
-	delete(bt)
-	testing.expect_value(t, bterr, nil)
 	bm, bmerr := write.write_markdown_docs(batch[:])
+	delete(bt)
 	delete(bm)
-	testing.expect_value(t, bmerr, nil)
-
-	testing.expect_value(t, f.count, 0)
+	testing.expect(t, bterr == nil && bmerr == nil && f.count == 0)
 }
 
 @(private = "file")
 Token_Tape_Render_Sweep :: struct {
-	markdown: bool,
-	framed:   bool,
+	markdown, framed: bool,
 }
 
 @(private = "file")
@@ -647,7 +392,7 @@ token_tape_render_sweep_one :: proc(data: rawptr, a: runtime.Allocator) {
 		return
 	}
 	defer write.token_tape_drop(&tt)
-	for step in ([?]struct{ kind: write.Token_Kind, text: string }{{.Object, ""}, {.Key, "k"}, {.Number, "1"}, {.Close, ""}}) {
+	for step in ([?]struct { kind: write.Token_Kind, text: string }{{.Object, ""}, {.Key, "k"}, {.Number, "1"}, {.Close, ""}}) {
 		if terr := write.token_tape_take(&tt, step.kind, step.text); terr != nil {
 			_ = terr.(runtime.Allocator_Error)
 			return
@@ -657,16 +402,13 @@ token_tape_render_sweep_one :: proc(data: rawptr, a: runtime.Allocator) {
 	if derr != nil {
 		return
 	}
+	text: []u8
+	eerr: write.Error
 	if r.markdown {
-		text, eerr := write.write_markdown(&doc, {compact = true}, a)
-		if eerr == nil {
-			delete(text, a)
-		} else {
-			_ = eerr.(runtime.Allocator_Error)
-		}
-		return
+		text, eerr = write.write_markdown(&doc, {compact = true}, a)
+	} else {
+		text, eerr = write.write_table(&doc, {style = .Compact}, a)
 	}
-	text, eerr := write.write_table(&doc, {style = .Compact}, a)
 	if eerr == nil {
 		delete(text, a)
 	} else {
@@ -695,83 +437,48 @@ render_audit_regressions :: proc(t: ^testing.T) {
 	sink_buf: bytes.Buffer
 	defer bytes.buffer_destroy(&sink_buf)
 	sink := bytes.buffer_to_stream(&sink_buf)
-
+	oom := write.Error(runtime.Allocator_Error.Out_Of_Memory)
 	for bad_alloc in ([?]runtime.Allocator{mem.nil_allocator(), {}}) {
 		_, e1 := write.write_table(&sample_doc, {}, bad_alloc)
-		testing.expect_value(t, e1, write.Error(runtime.Allocator_Error.Out_Of_Memory))
-		testing.expect_value(t, write.write_table_to(sink, &sample_doc, {}, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
 		_, e2 := write.write_table_docs(docs[:], {}, bad_alloc)
-		testing.expect_value(t, e2, write.Error(runtime.Allocator_Error.Out_Of_Memory))
-
 		_, e3 := write.write_markdown(&sample_doc, {}, bad_alloc)
-		testing.expect_value(t, e3, write.Error(runtime.Allocator_Error.Out_Of_Memory))
-		testing.expect_value(t, write.write_markdown_to(sink, &sample_doc, {}, bad_alloc), write.Error(runtime.Allocator_Error.Out_Of_Memory))
 		_, e4 := write.write_markdown_docs(docs[:], {}, bad_alloc)
-		testing.expect_value(t, e4, write.Error(runtime.Allocator_Error.Out_Of_Memory))
-
 		tt: write.Token_Tape
+		testing.expect(t, e1 == oom && e2 == oom && e3 == oom && e4 == oom)
+		testing.expect_value(t, write.write_table_to(sink, &sample_doc, {}, bad_alloc), oom)
+		testing.expect_value(t, write.write_markdown_to(sink, &sample_doc, {}, bad_alloc), oom)
 		testing.expect_value(t, write.token_tape_start(&tt, true, 0, bad_alloc), runtime.Allocator_Error.Out_Of_Memory)
 	}
 
 	// 3. opts.node pointing directly to a DSV row .Object (no key nodes, keys live in Tabular_Ext.keys).
 	csv_doc, cerr := dsv.build(transmute([]u8)string("name,qty\nbolt,12\nnut,3\n"), .Csv, {format = dsv.Dsv_Options{infer = true}})
 	defer dsv.destroy(&csv_doc)
-	testing.expect_value(t, cerr, nil)
 	row0, row0_p := dsv.element({&csv_doc, nil}, dsv.ROOT, 0)
-	testing.expect_value(t, row0_p, tape.Presence.Found)
-
-	row_kv, rkv_err := write.write_table(&csv_doc, {node = row0, style = .Compact})
-	defer delete(row_kv)
-	testing.expect_value(t, rkv_err, nil)
-	testing.expectf(t, string(row_kv) == "key   value\nname  bolt\nqty   12\n", "dsv row kv: %q", row_kv)
-
-	row_md, rmd_err := write.write_markdown(&csv_doc, {node = row0, object_layout = .Row, compact = true})
-	defer delete(row_md)
-	testing.expect_value(t, rmd_err, nil)
-	testing.expectf(t, string(row_md) == "| name | qty |\n| --- | ---: |\n| bolt | 12 |\n", "dsv row md: %q", row_md)
-
-	// Multi-doc batch with opts.node pointing to a DSV row .Object.
+	testing.expect(t, cerr == nil && row0_p == .Found)
+	expect_tbl(t, &csv_doc, "key   value\nname  bolt\nqty   12\n", {node = row0, style = .Compact})
+	expect_md(t, &csv_doc, "| name | qty |\n| --- | ---: |\n| bolt | 12 |\n", {node = row0, object_layout = .Row, compact = true})
 	csv_docs := [?]tape.Document{csv_doc}
 	batch_dsv_row, bderr := write.write_markdown_docs(csv_docs[:], {node = row0, compact = true})
 	defer delete(batch_dsv_row)
-	testing.expect_value(t, bderr, nil)
-	testing.expectf(t, string(batch_dsv_row) == "| name | qty |\n| --- | ---: |\n| bolt | 12 |\n", "dsv row batch: %q", batch_dsv_row)
+	testing.expect(t, bderr == nil && string(batch_dsv_row) == "| name | qty |\n| --- | ---: |\n| bolt | 12 |\n")
 
-	// 4. CBOR .Bytes keys (single base64, NOT double-base64) + YAML !!binary & .Number keys (1e0, .inf, -.inf, .nan).
-	// CBOR: [{ h'6869': 42 }] -> 81 A1 42 68 69 18 2A (h'6869' = "hi" -> base64 "aGk=").
-	cbor_bkey := []u8{0x81, 0xA1, 0x42, 0x68, 0x69, 0x18, 0x2A}
-	cbor_bkey_doc, cbk_err := cbor.build(cbor_bkey)
-	defer cbor.destroy(&cbor_bkey_doc)
-	testing.expect_value(t, cbk_err, nil)
-	cbk_md, cbk_werr := write.write_markdown(&cbor_bkey_doc, {compact = true})
-	defer delete(cbk_md)
-	testing.expect_value(t, cbk_werr, nil)
-	testing.expectf(t, string(cbk_md) == "| aGk= |\n| ---: |\n| 42 |\n", "cbor bytes key: %q", cbk_md)
-
-	// Nested CBOR map with .Bytes key inside a cell: [{ "m": { h'6869': 7 } }] -> 81 A1 61 6D A1 42 68 69 07.
-	cbor_nested_bkey := []u8{0x81, 0xA1, 0x61, 0x6D, 0xA1, 0x42, 0x68, 0x69, 0x07}
-	cbor_nb_doc, cnb_err := cbor.build(cbor_nested_bkey)
-	defer cbor.destroy(&cbor_nb_doc)
-	testing.expect_value(t, cnb_err, nil)
-	cnb_md, cnb_werr := write.write_markdown(&cbor_nb_doc, {compact = true})
-	defer delete(cnb_md)
-	testing.expect_value(t, cnb_werr, nil)
-	testing.expectf(t, string(cnb_md) == "| m |\n| --- |\n| {\"aGk=\":7} |\n", "cbor nested bytes key: %q", cnb_md)
-
-	// YAML array of mappings with !!binary key and .Number keys (1e0, .inf, -.inf, .nan).
-	yaml_keys_src := "- !!binary aGk=: 1\n  1e0: 2\n  .inf: 3\n  -.inf: 4\n  .nan: 5\n"
-	yaml_keys_doc, yk_err := yaml.build(transmute([]u8)yaml_keys_src)
-	defer yaml.destroy(&yaml_keys_doc)
-	testing.expect_value(t, yk_err, nil)
+	// 4. CBOR .Bytes keys (single base64, NOT double-base64) + YAML !!binary & .Number keys.
+	cbor_bkey_doc, cbk_err := cbor.build([]u8{0x81, 0xA1, 0x42, 0x68, 0x69, 0x18, 0x2A})
+	cbor_nb_doc, cnb_err := cbor.build([]u8{0x81, 0xA1, 0x61, 0x6D, 0xA1, 0x42, 0x68, 0x69, 0x07})
+	yaml_keys_doc, yk_err := yaml.build(transmute([]u8)string("- !!binary aGk=: 1\n  1e0: 2\n  .inf: 3\n  -.inf: 4\n  .nan: 5\n"))
+	defer {
+		cbor.destroy(&cbor_bkey_doc)
+		cbor.destroy(&cbor_nb_doc)
+		yaml.destroy(&yaml_keys_doc)
+	}
+	testing.expect(t, cbk_err == nil && cnb_err == nil && yk_err == nil)
+	expect_md(t, &cbor_bkey_doc, "| aGk= |\n| ---: |\n| 42 |\n", {compact = true})
+	expect_md(t, &cbor_nb_doc, "| m |\n| --- |\n| {\"aGk=\":7} |\n", {compact = true})
 	yk_md, yk_werr := write.write_markdown(&yaml_keys_doc, {compact = true})
 	defer delete(yk_md)
-	testing.expect_value(t, yk_werr, nil)
-	// Every cell value (1, 2, 3, 4, 5) MUST be found via tape.member (not dropped to absent) and aGk= NOT double-encoded.
-	testing.expectf(t, strings.contains(string(yk_md), "| aGk= |"), "yaml binary key not double-base64: %q", yk_md)
-	testing.expectf(t, strings.contains(string(yk_md), "| 1 | 2 | 3 | 4 | 5 |\n"), "yaml number keys matched values: %q", yk_md)
+	testing.expect(t, yk_werr == nil && strings.contains(string(yk_md), "| aGk= |") && strings.contains(string(yk_md), "| 1 | 2 | 3 | 4 | 5 |\n"))
 
-	// 5. Synthetic tape.Document with container keys ([1, 2]) + duplicate container key (.Last policy) + OOM sweep on find_container_key_member.
-	ck_src := "12firstlast"
+	// 5. Synthetic tape.Document with container keys ([1, 2]) + duplicate container key (.Last policy) + OOM sweep.
 	ck_nodes := [?]tape.Node{
 		{kind = .Array, role = .Value, n = 10, spelling = 1},
 		{kind = .Object, role = .Value, n = 9, spelling = 2},
@@ -784,73 +491,44 @@ render_audit_regressions :: proc(t: ^testing.T) {
 		{kind = .Number, role = .Value, lo = 1, n = 1},
 		{kind = .String, role = .Value, lo = 7, n = 4},
 	}
-	ck_doc := tape.Document{src = transmute([]u8)ck_src, nodes = ck_nodes[:], format = json.as(.Json)}
-	ck_md, ck_werr := write.write_markdown(&ck_doc, {compact = true})
-	defer delete(ck_md)
-	testing.expect_value(t, ck_werr, nil)
-	testing.expectf(t, string(ck_md) == "| [1,2] |\n| --- |\n| last |\n", "container key dup .Last: %q", ck_md)
-
-	ck_run := Render_Sweep_Run{doc = &ck_doc, markdown = true, sink = false, sort = false}
+	ck_doc := tape.Document{src = transmute([]u8)string("12firstlast"), nodes = ck_nodes[:], format = json.as(.Json)}
+	expect_md(t, &ck_doc, "| [1,2] |\n| --- |\n| last |\n", {compact = true})
+	ck_run := Render_Sweep_Run{doc = &ck_doc, markdown = true}
 	ck_sweep := testkit.sweep_failures(render_sweep_one, &ck_run)
 	testing.expectf(t, ck_sweep.bad == 0 && ck_sweep.refused >= 1, "container key oom sweep: %v", ck_sweep)
 
 	// 6. opts.node = tape.NO_NODE returns Bad_Option{"node"} (safe on 32-bit wasm32 without signed wrap to -1).
+	bad_node_err := write.Error(tape.Bad_Option{"node"})
 	_, no_node_tbl := write.write_table(&sample_doc, {node = tape.NO_NODE})
-	testing.expect_value(t, no_node_tbl, write.Error(tape.Bad_Option{"node"}))
 	_, no_node_md := write.write_markdown(&sample_doc, {node = tape.NO_NODE})
-	testing.expect_value(t, no_node_md, write.Error(tape.Bad_Option{"node"}))
 	_, no_node_docs := write.write_table_docs(docs[:], {node = tape.NO_NODE})
-	testing.expect_value(t, no_node_docs, write.Error(tape.Bad_Option{"node"}))
+	testing.expect(t, no_node_tbl == bad_node_err && no_node_md == bad_node_err && no_node_docs == bad_node_err)
 
-	// Bonus: .Plain underline alignment when col 0 has empty header and empty cell.
-	empty_col_doc, ec_err := json.build(transmute([]u8)string(`[{"":"","b":1}]`))
-	defer json.destroy(&empty_col_doc)
-	testing.expect_value(t, ec_err, nil)
-	ec_tbl, ec_werr := write.write_table(&empty_col_doc, {style = .Plain})
-	defer delete(ec_tbl)
-	testing.expect_value(t, ec_werr, nil)
-	want_ec := "   b\n-  -\n   1\n"
-	testing.expectf(t, string(ec_tbl) == want_ec, "empty col plain:\n%q\nwant:\n%q", ec_tbl, want_ec)
-
-	// Bonus: max_col_width = 1 and 2 with .Ascii ellipsis ("." and "..").
+	// Bonus: .Plain underline alignment on empty col 0, .Ascii max_col_width 1/2, XML repeated tags, ragged DSV .Last, orphan combining mark.
+	expect_json_tbl(t, `[{"":"","b":1}]`, "   b\n-  -\n   1\n", {style = .Plain})
 	wide_doc, _ := json.build(transmute([]u8)string(`[{"header":"abcdef"}]`))
 	defer json.destroy(&wide_doc)
-	a1, a1_err := write.write_table(&wide_doc, {style = .Ascii, max_col_width = 1})
-	defer delete(a1)
-	testing.expect_value(t, a1_err, nil)
-	testing.expectf(t, strings.contains(string(a1), "| . |\n"), "ascii max_col_width=1: %q", a1)
-	a2, a2_err := write.write_table(&wide_doc, {style = .Ascii, max_col_width = 2})
-	defer delete(a2)
-	testing.expect_value(t, a2_err, nil)
-	testing.expectf(t, strings.contains(string(a2), "| .. |\n"), "ascii max_col_width=2: %q", a2)
+	for tc in ([?]struct { w: int, want: string }{{1, "| . |\n"}, {2, "| .. |\n"}}) {
+		a_out, a_err := write.write_table(&wide_doc, {style = .Ascii, max_col_width = tc.w})
+		defer delete(a_out)
+		testing.expect(t, a_err == nil && strings.contains(string(a_out), tc.want))
+	}
 
-	// Bonus: XML repeated sibling tags under .Key_Value preserve every element in document order.
 	xml_rep_doc, xr_err := xml.build(transmute([]u8)string("<list><x>1</x><x>2</x><y>3</y><x>4</x></list>"))
 	defer xml.destroy(&xml_rep_doc)
-	testing.expect_value(t, xr_err, nil)
 	list_el, list_p := xml.member({&xml_rep_doc, nil}, xml.ROOT, "list")
-	testing.expect_value(t, list_p, tape.Presence.Found)
-	xr_md, xr_werr := write.write_markdown(&xml_rep_doc, {node = list_el, compact = true})
-	defer delete(xr_md)
-	testing.expect_value(t, xr_werr, nil)
-	testing.expectf(t, string(xr_md) == "| key | value |\n| --- | --- |\n| x | 1 |\n| x | 2 |\n| y | 3 |\n| x | 4 |\n", "xml repeated: %q", xr_md)
+	testing.expect(t, xr_err == nil && list_p == .Found)
+	expect_md(t, &xml_rep_doc, "| key | value |\n| --- | --- |\n| x | 1 |\n| x | 2 |\n| y | 3 |\n| x | 4 |\n", {node = list_el, compact = true})
 
-	// P17: Ragged short DSV row with duplicate headers under `.Last` matches `tape.member` and single-row output.
 	rag_doc, rag_err := dsv.build(transmute([]u8)string("a,b,a\n1,2\n"), .Csv, {dups = .Last, tolerate = {.Ragged}})
 	defer dsv.destroy(&rag_doc)
 	testing.expect_value(t, rag_err, nil)
-	rag_md, rag_werr := write.write_markdown(&rag_doc, {compact = true})
-	defer delete(rag_md)
-	testing.expect_value(t, rag_werr, nil)
-	testing.expectf(t, string(rag_md) == "| b | a |\n| --- | --- |\n| 2 | 1 |\n", "ragged dup .Last md: %q", rag_md)
+	expect_md(t, &rag_doc, "| b | a |\n| --- | --- |\n| 2 | 1 |\n", {compact = true})
 
-	// P17: Orphan leading zero-width mark before a wide char is not emitted before ellipsis; combining mark after a base char is kept.
 	zw_doc, zw_err := json.build(transmute([]u8)string("[{\"a\":\"\u0301日本語\",\"b\":\"x\u0301日本語\"}]"))
 	defer json.destroy(&zw_doc)
 	testing.expect_value(t, zw_err, nil)
 	zw_tbl, zw_werr := write.write_table(&zw_doc, {style = .Box, max_col_width = 2})
 	defer delete(zw_tbl)
-	testing.expect_value(t, zw_werr, nil)
-	testing.expectf(t, !strings.contains(string(zw_tbl), " \u0301…"), "orphan leading combining mark leaked: %q", zw_tbl)
-	testing.expectf(t, strings.contains(string(zw_tbl), "x\u0301…"), "base + combining mark missing: %q", zw_tbl)
+	testing.expect(t, zw_werr == nil && !strings.contains(string(zw_tbl), " \u0301…") && strings.contains(string(zw_tbl), "x\u0301…"))
 }

@@ -1,6 +1,7 @@
 package query_test
 
 import "core:testing"
+import "stury:lib/core/tape"
 import "stury:lib/query"
 import "stury:testkit"
 
@@ -87,4 +88,23 @@ a_code_walk_turns_bytes_into_code_points_and_back :: proc(t: ^testing.T) {
 	testing.expect_value(t, query.code_points_before(&w, s, 1), 1)
 	testing.expect_value(t, query.code_point_start(&w, s, 2), 3)
 	testing.expect_value(t, query.code_point_start(&w, s, 9), len(s))
+}
+
+@(test)
+regex_search_respects_step_budget :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	x: Test_Heap
+	heap_start(&x)
+	defer heap_done(t, &x)
+	cache: query.Regex_Cache
+	defer query.regex_cache_destroy(&cache)
+	re, status := query.regex_compile(&x.h, &cache, query.text_borrowed(`^(a|a)*\1$`), .Oniguruma, {})
+	testing.expect(t, status == .Ok)
+	found: [4]int
+	hit, s := query.regex_search(&x.h, &cache, re, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab", 0, found[:], steps = 100)
+	testing.expect(t, !hit && s == .Error)
+	e := query.take_error(&x.h)
+	testing.expect_value(t, e.kind, query.Error_Kind.Budget)
+	testing.expect_value(t, e.budget, tape.Budget_Kind.Steps)
+	query.destroy_error(&x.h, &e)
 }

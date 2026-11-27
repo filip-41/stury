@@ -467,23 +467,11 @@ fact_container_closes :: #force_inline proc "contextless" (f: ^Rows_Facts, level
 	return n > 0 && f.frames[n - 1].level == level
 }
 
-// Whether any of `facts` is a comment that follows its value on its line.
+// Whether any of `facts` has a kind in `kinds`.
 @(private)
-holds_inline :: proc "contextless" (facts: []tape.Fact) -> bool {
+has_fact_kind :: proc "contextless" (facts: []tape.Fact, kinds: tape.Facts) -> bool {
 	for f in facts {
-		if f.kind == .Comment_Inline {
-			return true
-		}
-	}
-	return false
-}
-
-// Whether any of the facts of a container is written at its close: a foot comment, or an inline one after it. Its lead
-// comments are written at its open, and its close is like any other's.
-@(private)
-writes_at_close :: proc "contextless" (facts: []tape.Fact) -> bool {
-	for f in facts {
-		if f.kind == .Comment_Inline || f.kind == .Comment_Foot {
+		if f.kind in kinds {
 			return true
 		}
 	}
@@ -535,7 +523,7 @@ rows_fact_value_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows
 	}
 	if t.kind < .Array {
 		r.after = 2
-		if !holds_inline(l.pending) {
+		if !has_fact_kind(l.pending, {.Comment_Inline}) {
 			l.pending = nil
 		}
 		return at + 1, true
@@ -544,7 +532,7 @@ rows_fact_value_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows
 	r.top += 1
 	r.stack[r.top] = {at + tape.Node_Index(t.n), u32(open) + 2}
 	r.after = 1
-	if writes_at_close(s.facts) {
+	if has_fact_kind(s.facts, {.Comment_Inline, .Comment_Foot}) {
 		if _, err := append(&f.frames, Fact_Container{end = at + tape.Node_Index(t.n), level = r.top, facts = s.facts}); err != nil {
 			w.err = err
 			return i, false
@@ -575,7 +563,7 @@ rows_fact_close_as :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, r: ^Rows
 	}
 	l.line_value, l.wrote = r.after == 2, true
 	step_close(out, w, l, s, u8(r.stack[r.top].close), T, true, PRETTY)
-	if !holds_inline(l.pending) {
+	if !has_fact_kind(l.pending, {.Comment_Inline}) {
 		l.pending = nil
 	}
 	r.top -= 1

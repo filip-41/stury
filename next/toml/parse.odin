@@ -1,6 +1,7 @@
 package toml
 
 import "base:runtime"
+import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 
@@ -65,23 +66,16 @@ no_memory :: proc "contextless" (p: ^Parser) -> bool {
 @(private)
 refused :: proc "contextless" (p: ^Parser, r: Tree_Refusal, at: int) -> bool {
 	switch r {
-	case .None:
-		return true
-	case .Redefined:
-		return fault(p, at, .Bad_Char, .Redefined_Table)
-	case .Duplicate:
-		return fault(p, at, .Bad_Char, .Duplicate_Key)
-	case .Inline:
-		return fault(p, at, .Bad_Char, .Extends_Inline)
-	case .Static:
-		return fault(p, at, .Bad_Char, .Extends_Array)
-	case .Not_Table:
-		return fault(p, at, .Bad_Char, .Not_Table)
+	case .None:      return true
+	case .Redefined: return fault(p, at, .Bad_Char, .Redefined_Table)
+	case .Duplicate: return fault(p, at, .Bad_Char, .Duplicate_Key)
+	case .Inline:    return fault(p, at, .Bad_Char, .Extends_Inline)
+	case .Static:    return fault(p, at, .Bad_Char, .Extends_Array)
+	case .Not_Table: return fault(p, at, .Bad_Char, .Not_Table)
 	case .Too_Deep:
 		p.fail = hook.walk_result(u64(at), hook.WALK_TOO_DEEP)
 		return false
-	case .No_Memory:
-		return no_memory(p)
+	case .No_Memory: return no_memory(p)
 	}
 	return false
 }
@@ -122,27 +116,18 @@ blanks :: proc(p: ^Parser, newlines: bool) -> bool #no_bounds_check {
 			p.pos = k
 			comment(p) or_return
 			k = p.pos
-		case '\n':
+		case '\n', '\r':
 			if !newlines {
 				p.pos = k
 				return true
 			}
-			p.pos = k
-			root_heads(p)
-			k += 1
-			p.inline_ok = false
-		case '\r':
-			if !newlines {
-				p.pos = k
-				return true
-			}
-			if k + 1 >= len(src) || src[k + 1] != '\n' {
+			if src[k] == '\r' && (k + 1 >= len(src) || src[k + 1] != '\n') {
 				p.pos = k
 				return fault(p, k, .Bad_Char, .Lone_Cr)
 			}
 			p.pos = k
 			root_heads(p)
-			k += 2
+			k += 2 if src[k] == '\r' else 1
 			p.inline_ok = false
 		case:
 			p.pos = k
@@ -414,15 +399,21 @@ header :: proc(p: ^Parser) -> bool #no_bounds_check {
 	return true
 }
 
+// Gives pending comments as foot comments of `id`.
+@(private)
+take_foots :: #force_inline proc(p: ^Parser, id: u32) {
+	if foots := u32(len(p.tree.comments)) - p.pending; foots > 0 {
+		n := notes_for(&p.tree, id)
+		n.foot, n.foots = p.pending, foots
+	}
+	p.pending = u32(len(p.tree.comments))
+}
+
 // Ends the innermost open array or inline table at its closing byte.
 @(private)
 close_top :: proc(p: ^Parser) #no_bounds_check {
 	top := pop(&p.stack)
-	if foots := u32(len(p.tree.comments)) - p.pending; foots > 0 {
-		n := notes_for(&p.tree, top)
-		n.foot, n.foots = p.pending, foots
-	}
-	p.pending = u32(len(p.tree.comments))
+	take_foots(p, top)
 	n := &p.tree.nodes[top]
 	n.value.n = u32(u64(p.pos) - n.value.lo)
 	p.pos += 1
@@ -485,24 +476,26 @@ value :: proc(p: ^Parser, id: u32) -> (opened: bool, ok: bool) #no_bounds_check 
 	c := src[lo]
 	switch c {
 	case '"', '\'':
+		lit := c == '\''
+		multi := lo + 2 < len(src) && src[lo + 1] == c && src[lo + 2] == c
 		end: int
 		escaped: bool
 		v: Verdict
 		style: Style
-		multi := lo + 2 < len(src) && src[lo + 1] == c && src[lo + 2] == c
-		switch {
-		case c == '"' && multi:
-			end, escaped, v = scan_multiline(src, lo, false, p.v11)
-			style = .Multiline
-		case c == '"':
-			end, escaped, v = scan_string(src, lo, p.v11, false)
-			style = .Basic
-		case multi:
-			end, _, v = scan_multiline(src, lo, true, p.v11)
-			style = .Multiline_Literal
-		case:
-			end, escaped, v = scan_string(src, lo, p.v11, true)
-			style = .Literal
+		if multi {
+			if lit {
+				end, _, v = scan_multiline(src, lo, true, p.v11)
+			} else {
+				end, escaped, v = scan_multiline(src, lo, false, p.v11)
+			}
+			style = .Multiline_Literal if lit else .Multiline
+		} else {
+			if lit {
+				end, escaped, v = scan_string(src, lo, p.v11, true)
+			} else {
+				end, escaped, v = scan_string(src, lo, p.v11, false)
+			}
+			style = .Literal if lit else .Basic
 		}
 		if v != 0 {
 			p.fail = v
@@ -512,7 +505,7 @@ value :: proc(p: ^Parser, id: u32) -> (opened: bool, ok: bool) #no_bounds_check 
 		if u64(text_hi - text_lo) > u64(max(u32)) {
 			return false, fault(p, lo, .Too_Wide, .None)
 		}
-		return false, set_scalar(p, id, {u64(text_lo), u32(text_hi - text_lo), .String, .Value, string_spelling(style, escaped)}, end)
+		return false, set_scalar(p, id, {u64(text_lo), u32(text_hi - text_lo), .String, .Value, string_spelling(style, escaped && !(multi && lit))}, end)
 	case '[', '{':
 		n := &p.tree.nodes[id]
 		if n.depth + 1 > p.tree.max_depth {
@@ -611,10 +604,7 @@ value_tree :: proc(p: ^Parser, id: u32) -> bool #no_bounds_check {
 // The first byte of the text from `lo`, past one byte order mark there.
 @(private)
 text_start :: #force_inline proc "contextless" (src: []u8, lo: int) -> int {
-	if lo + 3 <= len(src) && src[lo] == 0xef && src[lo + 1] == 0xbb && src[lo + 2] == 0xbf {
-		return lo + 3
-	}
-	return lo
+	return lo + spell.bom_length(src[lo:])
 }
 
 // Reads the whole text into `p.tree`. Returns false with `p.fail` set at the first fault.
@@ -633,11 +623,7 @@ statement :: proc(p: ^Parser) -> bool #no_bounds_check {
 	blanks(p, true) or_return
 	if p.pos >= len(p.src) {
 		// The comments past the last member end the table open at the text's end, the root when no header opened one.
-		if foots := u32(len(p.tree.comments)) - p.pending; foots > 0 {
-			last := notes_for(&p.tree, p.cur)
-			last.foot, last.foots = p.pending, foots
-		}
-		p.pending = u32(len(p.tree.comments))
+		take_foots(p, p.cur)
 		p.done = true
 		return true
 	}

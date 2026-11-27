@@ -269,28 +269,37 @@ builder_again :: proc(b: ^Builder, src: []u8, format: ^tape.Format, nodes, most:
 @(private)
 builder_reserve_counts :: proc(b: ^Builder, room: int) -> runtime.Allocator_Error {
 	wide := len(b.counts) + wide_room(room)
-	if wide <= cap(b.counts) {
-		return nil
-	}
-	if wide > MAX_COUNTS || b.counts.allocator.procedure == nil {
+	return nil if wide <= cap(b.counts) else builder_counts_grow(b, wide, wide)
+}
+
+// Grows `b.counts` to `want` (backing off down to `need` on OOM), migrating out of a borrowed stack buffer if needed.
+@(private = "file", cold)
+builder_counts_grow :: proc(b: ^Builder, want, need: int) -> runtime.Allocator_Error {
+	if need > MAX_COUNTS || b.counts.allocator.procedure == nil {
 		return .Out_Of_Memory
 	}
+	want := want
 	if .Counts_Borrowed in b.flags {
-		raw, err := runtime.mem_alloc_non_zeroed(wide * size_of(tape.Child_Count), align_of(tape.Child_Count), b.counts.allocator)
-		if e := took(err, raw_data(raw), wide); e != nil {
-			return e
+		raw, err := runtime.mem_alloc_non_zeroed(want * size_of(tape.Child_Count), align_of(tape.Child_Count), b.counts.allocator)
+		for err == .Out_Of_Memory && want > need {
+			want = need + (want - need) / 2
+			raw, err = runtime.mem_alloc_non_zeroed(want * size_of(tape.Child_Count), align_of(tape.Child_Count), b.counts.allocator)
 		}
-		dst := ([^]tape.Child_Count)(raw_data(raw))[:wide]
+		took(err, raw_data(raw), want) or_return
 		if len(b.counts) > 0 {
-			copy(dst, b.counts[:])
+			copy(([^]tape.Child_Count)(raw_data(raw))[:want], b.counts[:])
 		}
 		rc := (^runtime.Raw_Dynamic_Array)(&b.counts)
-		rc.data, rc.cap = raw_data(raw), wide
+		rc.data, rc.cap = raw_data(raw), want
 		b.flags -= {.Counts_Borrowed}
 		return nil
 	}
-	non_zero_reserve(&b.counts, wide) or_return
-	return .Out_Of_Memory if cap(b.counts) < wide else nil
+	err := non_zero_reserve(&b.counts, want)
+	for err == .Out_Of_Memory && want > need {
+		want = need + (want - need) / 2
+		err = non_zero_reserve(&b.counts, want)
+	}
+	return .Out_Of_Memory if err == nil && cap(b.counts) < need else err
 }
 
 // The entries of `counts` a room of `room` nodes may need, one per `MAX_CHILDREN` nodes, rounded up so that a room
@@ -476,51 +485,17 @@ builder_partial_count :: #force_no_inline proc "contextless" (h: ^Builder, node:
 	}
 	need := len(h.counts) + 1 + wide_room(len(h.doc.nodes))
 	if need > cap(h.counts) {
-		if need > MAX_COUNTS || h.counts.allocator.procedure == nil {
-			h.err = .Out_Of_Memory
-			return
-		}
 		context = h.ctx
 		have := cap(h.counts)
-		want := MAX_COUNTS if have > MAX_COUNTS / 2 else max(2 * have, 8)
-		want = max(want, need)
+		want := max(MAX_COUNTS if have > MAX_COUNTS / 2 else max(2 * have, 8), need)
 		if h.budget != nil {
 			held_cap := 0 if .Counts_Borrowed in h.flags else have
 			fit := held_cap + int(min(hook.memory_budget_left(h.budget) / size_of(tape.Child_Count), u64(MAX_COUNTS - held_cap)))
 			want = min(want, max(held_cap + max((fit - held_cap) / 2, 1), need))
 		}
-		err: runtime.Allocator_Error
-		if .Counts_Borrowed in h.flags {
-			raw: []u8
-			raw, err = runtime.mem_alloc_non_zeroed(want * size_of(tape.Child_Count), align_of(tape.Child_Count), h.counts.allocator)
-			for err == .Out_Of_Memory && want > need {
-				want = need + (want - need) / 2
-				raw, err = runtime.mem_alloc_non_zeroed(want * size_of(tape.Child_Count), align_of(tape.Child_Count), h.counts.allocator)
-			}
-			if e := took(err, raw_data(raw), want); e != nil {
-				h.err = e
-				return
-			}
-			dst := ([^]tape.Child_Count)(raw_data(raw))[:want]
-			if len(h.counts) > 0 {
-				copy(dst, h.counts[:])
-			}
-			rc := (^runtime.Raw_Dynamic_Array)(&h.counts)
-			rc.data, rc.cap = raw_data(raw), want
-			h.flags -= {.Counts_Borrowed}
-		} else {
-			err = non_zero_reserve(&h.counts, want)
-			for err == .Out_Of_Memory && want > need {
-				want = need + (want - need) / 2
-				err = non_zero_reserve(&h.counts, want)
-			}
-			if err == nil && cap(h.counts) < need {
-				err = .Out_Of_Memory
-			}
-			if err != nil {
-				h.err = err
-				return
-			}
+		if err := builder_counts_grow(h, want, need); err != nil {
+			h.err = err
+			return
 		}
 	}
 	// `cap(h.counts) >= need > len(h.counts)` is guaranteed above.
@@ -907,43 +882,32 @@ builder_end_fail :: #force_no_inline proc(h: ^Builder, e: tape.Error) -> tape.Er
 
 // Sorts and finalizes non-empty `h.counts` into an owned slice for `doc.counts`.
 @(private = "file", cold)
-builder_finish_counts :: #force_no_inline proc(h: ^Builder) -> ([]tape.Child_Count, runtime.Allocator_Error) {
+builder_finish_counts :: #force_no_inline proc(h: ^Builder) -> (res: []tape.Child_Count, rerr: runtime.Allocator_Error) {
 	// Counts are in closing order, an inner container before the one holding it, so they need sorting by node.
 	slice.sort_by(h.counts[:], proc(a, b: tape.Child_Count) -> bool { return a.node < b.node })
 	if .Counts_Borrowed in h.flags || !same_backing(h, h.counts.allocator, h.doc.allocator) {
 		n := len(h.counts)
+		tmp: [64]tape.Child_Count = ---
+		src := h.counts[:]
 		if .Counts_Borrowed not_in h.flags {
-			if n <= 64 {
-				tmp: [64]tape.Child_Count = ---
-				copy(tmp[:n], h.counts[:])
+			if n <= len(tmp) {
+				copy(tmp[:n], src)
 				delete(h.counts)
 				h.counts = {}
-				raw, err := runtime.mem_alloc_non_zeroed(n * size_of(tape.Child_Count), align_of(tape.Child_Count), h.doc.allocator)
-				if e := took(err, raw_data(raw), n); e != nil {
-					return nil, e
-				}
-				out := ([^]tape.Child_Count)(raw_data(raw))[:n]
-				copy(out, tmp[:n])
-				return out, nil
-			}
-			if h.counts.allocator.procedure != nil {
+				src = tmp[:n]
+			} else if h.counts.allocator.procedure != nil {
 				shrink(&h.counts)
+				src = h.counts[:]
 			}
 		}
-		raw, err := runtime.mem_alloc_non_zeroed(n * size_of(tape.Child_Count), align_of(tape.Child_Count), h.doc.allocator)
-		if e := took(err, raw_data(raw), n); e != nil {
-			if .Counts_Borrowed not_in h.flags {
-				delete(h.counts)
-				h.counts = {}
-			}
-			return nil, e
-		}
-		out := ([^]tape.Child_Count)(raw_data(raw))[:n]
-		copy(out, h.counts[:])
-		if .Counts_Borrowed not_in h.flags {
+		defer if .Counts_Borrowed not_in h.flags && len(h.counts) > 0 {
 			delete(h.counts)
 			h.counts = {}
 		}
+		raw, err := runtime.mem_alloc_non_zeroed(n * size_of(tape.Child_Count), align_of(tape.Child_Count), h.doc.allocator)
+		took(err, raw_data(raw), n) or_return
+		out := ([^]tape.Child_Count)(raw_data(raw))[:n]
+		copy(out, src)
 		return out, nil
 	}
 	if h.counts.allocator.procedure != nil {
@@ -1102,11 +1066,12 @@ builder_so_far :: proc(h: ^Builder, regs: hook.Regs, cut: u64, allocator: runtim
 
 	// Copy only facts belonging to kept nodes, plus leading comments/instructions/doctypes directly at `count`
 	// (which `builder_place_facts` turns into root feet). Non-comment facts on a dropped key or at `count` are dropped.
+	keep_fact :: #force_inline proc "contextless" (f: tape.Fact, count: int) -> bool {
+		return uint(f.node) < uint(count) || uint(f.node) == uint(count) && (f.kind == .Comment || f.kind == .Instruction || f.kind == .Doctype)
+	}
 	kept_facts := 0
 	for f in h.doc.facts {
-		if uint(f.node) < uint(count) || uint(f.node) == uint(count) && (f.kind == .Comment || f.kind == .Instruction || f.kind == .Doctype) {
-			kept_facts += 1
-		}
+		kept_facts += int(keep_fact(f, count))
 	}
 	facts, ferr := make([]tape.Fact, kept_facts, allocator)
 	if e := took(ferr, raw_data(facts), kept_facts); e != nil {
@@ -1115,7 +1080,7 @@ builder_so_far :: proc(h: ^Builder, regs: hook.Regs, cut: u64, allocator: runtim
 	present: tape.Facts
 	fi := 0
 	for f in h.doc.facts {
-		if uint(f.node) < uint(count) || uint(f.node) == uint(count) && (f.kind == .Comment || f.kind == .Instruction || f.kind == .Doctype) {
+		if keep_fact(f, count) {
 			facts[fi] = f
 			fi += 1
 			if f.kind != .Comment {

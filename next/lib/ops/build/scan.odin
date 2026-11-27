@@ -319,15 +319,12 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 		h.demand = nil
 		return h.b.err
 	}
-	h.key_text = src
 	h.demand = demand
-	h.rewalk, h.walk = rewalk, nil
+	h.rewalk = rewalk
 	h.dups = tape.read_dups(format, dups)
 	h.facts = demand.facts
 	h.key_skips = !demand.facts
 	h.alike = tape.demand_children_alike(demand)
-	h.scattered = false
-	h.end_of = .None
 	flags: Scan_Flags
 	if .Rewalk in format.caps && rewalk != nil {
 		flags += {.Rewalks}
@@ -339,24 +336,14 @@ scanner_start :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^tap
 		flags += {.Settles}
 	}
 	h.flags = flags
-	h.has_key = false
-	if demand.facts {
-		h.b.flags += {.Keep_Facts}
-	}
 	h.key = {}
-	h.opens = 0
-	h.pending = len(demand.paths)
-	h.passed, h.wait_at = tape.NO_NODE, tape.NO_NODE
-	h.wait_from, h.forced_at, h.dropped = 0, 0, 0
-	h.replay, h.record = {}, {}
+	h.forced_at = 0
 	h.held, h.bytes = nil, nil
-	h.held.allocator, h.bytes.allocator = allocator, allocator
-	h.hold_from, h.held_live, h.head = 0, 0, {}
 	h.room = room
 	h.scratch = scratch_alloc
-	h.scratch_used = false
 	h.marks, h.made, h.done = nil, nil, nil
 	h.frames, h.elements, h.live, h.picks, h.answers, h.kept, h.missing, h.ring, h.tokens, h.saved = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+	scan_reset_state(h, src, demand, allocator)
 	defer if err != nil {
 		scanner_free(h)
 		if .Counts_Borrowed not_in h.b.flags && cap(h.b.counts) > 0 {
@@ -415,21 +402,24 @@ scanner_restart :: proc(h: ^Scanner, src: []u8, format: ^tape.Format, demand: ^t
 	if h.b.err != nil {
 		return h.b.err
 	}
+	h.flags &= {.Rewalks, .Stop, .Settles}
+	scan_reset_state(h, src, demand, allocator)
+	scan_lists_reset(h, room)
+	return nil
+}
+
+@(private = "file")
+scan_reset_state :: #force_inline proc "contextless" (h: ^Scanner, src: []u8, demand: ^tape.Demand, allocator: runtime.Allocator) {
 	if h.facts {
 		h.b.flags += {.Keep_Facts}
 	}
 	h.key_text = src
-	h.scattered = false
-	h.has_key = false
-	h.scratch_used = false
-	h.flags &= {.Rewalks, .Stop, .Settles}
+	h.scattered, h.has_key, h.scratch_used = false, false, false
 	h.walk, h.dropped = nil, 0
 	h.end_of, h.opens, h.pending, h.passed, h.wait_at = .None, 0, len(demand.paths), tape.NO_NODE, tape.NO_NODE
 	h.wait_from, h.hold_from, h.held_live, h.head = 0, 0, 0, {}
 	h.held.allocator, h.bytes.allocator = allocator, allocator
 	h.replay, h.record = {}, {}
-	scan_lists_reset(h, room)
-	return nil
 }
 
 // Points the scan's lists at `room`, empty, and clears its marks, answers made and settled paths. No frame has
@@ -535,17 +525,7 @@ scanner_take :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 			e := f.u.obj.named - 1
 			edge := &h.demand.edges[e]
 			if name, ok := edge.step.(tape.Name); ok && scan_key_short_eq(h.key_text, t, string(name)) {
-				if u32(h.marks[e] >> 32) != f.gen {
-					f.unmet -= 1
-					h.key = t
-					h.key.spelling = tape.without_credit(h.key.spelling)
-					h.has_key = true
-					h.marks[e] = u64(f.gen) << 32 | u64(h.answers.len)
-					h.picks.data[0] = edge.to
-					h.picks.len = 1
-				} else {
-					scan_key_dup(h, f, t, e, edge.to, true)
-				}
+				scan_key_hit(h, f, t, e, edge.to, true)
 			}
 		} else if .Names in f.flags && t.kind <= .Plain && !tape.text_decodes(t) && t.n <= 16 {
 			dm := h.demand
@@ -553,17 +533,7 @@ scanner_take :: #force_inline proc "contextless" (h: ^Scanner, s: hook.Regs, t: 
 			for e in node.edges ..< node.edges + node.n_edges {
 				edge := &dm.edges[e]
 				if name, ok := edge.step.(tape.Name); ok && scan_key_short_eq(h.key_text, t, string(name)) {
-					if u32(h.marks[e] >> 32) != f.gen {
-						f.unmet -= 1
-						h.key = t
-						h.key.spelling = tape.without_credit(h.key.spelling)
-						h.has_key = true
-						h.marks[e] = u64(f.gen) << 32 | u64(h.answers.len)
-						h.picks.data[0] = edge.to
-						h.picks.len = 1
-					} else {
-						scan_key_dup(h, f, t, e, edge.to, false)
-					}
+					scan_key_hit(h, f, t, e, edge.to, false)
 					break
 				}
 			}
@@ -639,6 +609,21 @@ scan_key_short_eq :: #force_inline proc "contextless" (src: []u8, t: tape.Token,
 		return intrinsics.unaligned_load((^u16)(a)) == intrinsics.unaligned_load((^u16)(b)) && a[n - 1] == b[n - 1]
 	}
 	return n == 0 || a[0] == b[0]
+}
+
+@(private = "file")
+scan_key_hit :: #force_inline proc "contextless" (h: ^Scanner, f: ^Scan_Frame, t: tape.Token, e, to: u32, tail_pop: bool) #no_bounds_check {
+	if u32(h.marks[e] >> 32) != f.gen {
+		f.unmet -= 1
+		h.key = t
+		h.key.spelling = tape.without_credit(h.key.spelling)
+		h.has_key = true
+		h.marks[e] = u64(f.gen) << 32 | u64(h.answers.len)
+		h.picks.data[0] = to
+		h.picks.len = 1
+	} else {
+		scan_key_dup(h, f, t, e, to, tail_pop)
+	}
 }
 
 // Out-of-line duplicate key handling for fast `.Passes` frames.

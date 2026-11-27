@@ -111,8 +111,7 @@ scan_escape :: proc "contextless" (src: []u8, i: int, v11: bool) -> (next: int, 
 	c := src[i + 1]
 	count: int
 	switch c {
-	case 'b', 't', 'n', 'f', 'r', '"', '\\':
-		return i + 2, 0
+	case 'b', 't', 'n', 'f', 'r', '"', '\\': return i + 2, 0
 	case 'e':
 		if v11 {
 			return i + 2, 0
@@ -123,12 +122,9 @@ scan_escape :: proc "contextless" (src: []u8, i: int, v11: bool) -> (next: int, 
 			return i + 1, bad(i + 1, .Bad_Escape, .None)
 		}
 		count = 2
-	case 'u':
-		count = 4
-	case 'U':
-		count = 8
-	case:
-		return i + 1, bad(i + 1, .Bad_Escape, .None)
+	case 'u': count = 4
+	case 'U': count = 8
+	case:     return i + 1, bad(i + 1, .Bad_Escape, .None)
 	}
 	r, at, ok := hex_run(src, i + 2, count)
 	if !ok {
@@ -329,22 +325,14 @@ bounds :: proc "contextless" (src: []u8, t: tape.Token) -> (head, tail: u8) #no_
 escape_at :: #force_inline proc "contextless" (s: []u8, i, hi: int) -> (r: rune, next: int, spells: bool) {
 	c := s[i + 1]
 	switch c {
-	case 'b':
-		return 8, i + 2, true
-	case 't':
-		return '\t', i + 2, true
-	case 'n':
-		return '\n', i + 2, true
-	case 'f':
-		return 12, i + 2, true
-	case 'r':
-		return '\r', i + 2, true
-	case 'e':
-		return 0x1b, i + 2, true
-	case '"':
-		return '"', i + 2, true
-	case '\\':
-		return '\\', i + 2, true
+	case 'b':  return 8, i + 2, true
+	case 't':  return '\t', i + 2, true
+	case 'n':  return '\n', i + 2, true
+	case 'f':  return 12, i + 2, true
+	case 'r':  return '\r', i + 2, true
+	case 'e':  return 0x1b, i + 2, true
+	case '"':  return '"', i + 2, true
+	case '\\': return '\\', i + 2, true
 	case 'x', 'u', 'U':
 		count := 2 if c == 'x' else 4 if c == 'u' else 8
 		u, _, _ := hex_run(s, i + 2, count)

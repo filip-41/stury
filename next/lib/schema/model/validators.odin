@@ -7,7 +7,6 @@ import "core:strings"
 import "stury:lib/core/tape"
 import "stury:lib/schema/rules"
 
-// JSON Schema extension keyword for declarative named validators.
 X_STURY_VALIDATORS_KEY :: "x-stury-validators"
 
 @(private)
@@ -45,44 +44,20 @@ register_validator :: proc(reg: ^Registry, $T: typeid, check_fn: proc(value: T, 
 	return add_hook(reg, &reg.validators, Validator_Of{T, "", {call, rawptr(check_fn)}}, false)
 }
 
-// ============================================================================
 // Declarative Named Validators (`Validator_Registry`, `x-stury-validators`)
-// ============================================================================
-
-// Callback for a named validator operating on a decoded Odin value (`any`), reporting failures into `r`.
 Named_Validator_Fn :: proc(value: any, r: ^Report, data: rawptr)
-
-// Callback for a named validator operating directly on a `rules.Value` (e.g. schema-driven document validation).
 Value_Validator_Fn :: proc(value: rules.Value, r: ^Report, data: rawptr)
-
-Named_Validator :: struct {
-	name: string,
-	fn:   Named_Validator_Fn,
-	vfn:  Value_Validator_Fn,
-	data: rawptr,
-}
+Named_Validator :: struct { name: string, fn: Named_Validator_Fn, vfn: Value_Validator_Fn, data: rawptr }
 
 @(private)
-Named_Validator_Ref :: struct {
-	name:  string,
-	v:     Named_Validator,
-	has_v: bool,
-}
+Named_Validator_Ref :: struct { name: string, v: Named_Validator, has_v: bool }
 
-// Caller-owned registry of declarative named validators (zero global mutable state).
-Validator_Registry :: struct {
-	entries:     map[string]Named_Validator,
-	arena:       mem.Dynamic_Arena,
-	arena_ready: bool,
-	allocator:   runtime.Allocator,
-}
+Validator_Registry :: struct { entries: map[string]Named_Validator, arena: mem.Dynamic_Arena, arena_ready: bool, allocator: runtime.Allocator }
 
 validator_registry_init :: proc(vr: ^Validator_Registry, allocator := context.allocator) {
 	if vr == nil { return }
 	vr^ = {allocator = allocator}
-	mem.dynamic_arena_init(&vr.arena, allocator, allocator)
-	vr.arena_ready = true
-	vr.entries.allocator = allocator
+	_ = vr_ensure(vr)
 }
 
 validator_registry_destroy :: proc(vr: ^Validator_Registry) {
@@ -96,28 +71,22 @@ validator_registry_destroy :: proc(vr: ^Validator_Registry) {
 vr_ensure :: proc(vr: ^Validator_Registry) -> runtime.Allocator {
 	if !vr.arena_ready {
 		alloc := vr.allocator if vr.allocator.procedure != nil else context.allocator
-		vr.allocator = alloc
+		vr.allocator, vr.arena_ready = alloc, true
 		mem.dynamic_arena_init(&vr.arena, alloc, alloc)
-		vr.arena_ready = true
 		vr.entries.allocator = alloc
 	}
 	return mem.dynamic_arena_allocator(&vr.arena)
 }
 
 register_named_validator :: proc {
-	register_named_validator_any,
-	register_named_validator_typed,
-	register_named_validator_value,
-	register_reg_named_validator_any,
-	register_reg_named_validator_typed,
-	register_reg_named_validator_value,
+	register_named_validator_any, register_named_validator_typed, register_named_validator_value,
+	register_reg_named_validator_any, register_reg_named_validator_typed, register_reg_named_validator_value,
 }
 
 register_named_validator_any :: proc(vr: ^Validator_Registry, name: string, fn: Named_Validator_Fn, data: rawptr = nil, vfn: Value_Validator_Fn = nil) -> runtime.Allocator_Error {
 	if vr == nil || !valid_validator_name(name) || (fn == nil && vfn == nil) { return .Invalid_Argument }
-	arena := vr_ensure(vr)
-	key := strings.clone(name, arena) or_return
-	_, err := map_insert(&vr.entries, key, Named_Validator{name = key, fn = fn, vfn = vfn, data = data})
+	key := strings.clone(name, vr_ensure(vr)) or_return
+	_, err := map_insert(&vr.entries, key, Named_Validator{key, fn, vfn, data})
 	return err
 }
 
@@ -125,40 +94,50 @@ register_named_validator_value :: proc(vr: ^Validator_Registry, name: string, vf
 	return register_named_validator_any(vr, name, nil, data, vfn)
 }
 
+@(private)
+unwrap_any_to_type :: proc(value: any, target: typeid) -> (rawptr, ^runtime.Type_Info, bool) {
+	if value.data == nil || value.id == nil { return nil, nil, false }
+	if value.id == target { return value.data, type_info_of(value.id), true }
+	cur_data, cur_ti := value.data, type_info_of(value.id)
+	for cur_ti != nil {
+		base := runtime.type_info_base(cur_ti)
+		if p, is_ptr := base.variant.(^runtime.Type_Info_Pointer); is_ptr && p.elem != nil {
+			inner := (^rawptr)(cur_data)^
+			if inner == nil { return nil, nil, false }
+			cur_data, cur_ti = inner, p.elem
+		} else if u, is_u := base.variant.(^runtime.Type_Info_Union); is_u && len(u.variants) == 1 && !u.no_nil {
+			if u.tag_type == nil {
+				if (^rawptr)(cur_data)^ == nil { return nil, nil, false }
+			} else {
+				tag := u64(0); mem.copy(&tag, rawptr(uintptr(cur_data) + u.tag_offset), u.tag_type.size)
+				if tag == 0 { return nil, nil, false }
+			}
+			cur_ti = u.variants[0]
+		} else { break }
+		if cur_ti.id == target { return cur_data, cur_ti, true }
+	}
+	return cur_data, cur_ti, false
+}
+
+@(private)
+validator_num_text :: proc(val: rules.Value, r: ^Report, buf: []u8) -> (s: string, owned, ok: bool) {
+	s, owned, ok = rules.value_number_text(val, buf, r.allocator)
+	if !ok {
+		if ref, is_ref := val.(rules.Node_Ref); is_ref && ref.doc != nil && tape.text_room(ref.doc, ref.node) > len(buf) { r.oom = true }
+	}
+	return
+}
+
 register_named_validator_typed :: proc(vr: ^Validator_Registry, name: string, $V: typeid, check_fn: proc(value: V, r: ^Report)) -> runtime.Allocator_Error {
 	if vr == nil || !valid_validator_name(name) || check_fn == nil { return .Invalid_Argument }
 	call :: proc(value: any, r: ^Report, data: rawptr) {
 		fn := (proc(value: V, r: ^Report))(data)
-		if value.data == nil || value.id == nil { return }
-		if value.id == V { fn((^V)(value.data)^, r); return }
-		// Unwrap `Maybe(T)` and `^T` transparently when validating optional/nullable fields.
-		cur_data := value.data
-		cur_ti := type_info_of(value.id)
-		for cur_ti != nil {
-			base := runtime.type_info_base(cur_ti)
-			if p, is_ptr := base.variant.(^runtime.Type_Info_Pointer); is_ptr && p.elem != nil {
-				inner := (^rawptr)(cur_data)^
-				if inner == nil { return }
-				cur_data, cur_ti = inner, p.elem
-			} else if u, is_u := base.variant.(^runtime.Type_Info_Union); is_u && len(u.variants) == 1 && !u.no_nil {
-				if u.tag_type == nil {
-					if (^rawptr)(cur_data)^ == nil { return }
-				} else {
-					tag := u64(0)
-					mem.copy(&tag, rawptr(uintptr(cur_data) + u.tag_offset), u.tag_type.size)
-					if tag == 0 { return }
-				}
-				cur_ti = u.variants[0]
-			} else {
-				break
-			}
-			if cur_ti.id == V { fn((^V)(cur_data)^, r); return }
-		}
+		ptr, ti, exact := unwrap_any_to_type(value, V)
+		if exact { fn((^V)(ptr)^, r); return }
+		if ti == nil { return }
 		when V == string {
-			if cur_ti != nil {
-				if str_ti, is_str := runtime.type_info_base(cur_ti).variant.(^runtime.Type_Info_String); is_str && !str_ti.is_cstring {
-					fn((^string)(cur_data)^, r); return
-				}
+			if str_ti, is_str := runtime.type_info_base(ti).variant.(^runtime.Type_Info_String); is_str && !str_ti.is_cstring {
+				fn((^string)(ptr)^, r); return
 			}
 		}
 		fail(r, "validator type mismatch")
@@ -177,15 +156,10 @@ register_named_validator_typed :: proc(vr: ^Validator_Registry, name: string, $V
 		vcall = proc(val: rules.Value, r: ^Report, data: rawptr) {
 			if rules.value_kind(val) != .Number { return }
 			buf: [64]u8 = ---
-			s, owned, ok := rules.value_number_text(val, buf[:], r.allocator)
-			if !ok {
-				if ref, is_ref := val.(rules.Node_Ref); is_ref && ref.doc != nil && tape.text_room(ref.doc, ref.node) > len(buf) { r.oom = true }
-				return
-			}
+			s, owned, ok := validator_num_text(val, r, buf[:]); if !ok { return }
 			defer if owned { delete(s, r.allocator) }
-			d := rules.decimal_of(s)
-			if iv, fits := rules.decimal_i64(d); fits && rules.integral(d) {
-				(proc(value: V, r: ^Report))(data)(V(iv), r)
+			if d := rules.decimal_of(s); rules.integral(d) {
+				if iv, fits := rules.decimal_i64(d); fits { (proc(value: V, r: ^Report))(data)(V(iv), r) }
 			}
 		}
 	} else when V == f64 {
@@ -193,37 +167,26 @@ register_named_validator_typed :: proc(vr: ^Validator_Registry, name: string, $V
 			if rules.value_kind(val) != .Number { return }
 			if fv, is_f := val.(f64); is_f { (proc(value: f64, r: ^Report))(data)(fv, r); return }
 			buf: [64]u8 = ---
-			s, owned, ok := rules.value_number_text(val, buf[:], r.allocator)
-			if !ok {
-				if ref, is_ref := val.(rules.Node_Ref); is_ref && ref.doc != nil && tape.text_room(ref.doc, ref.node) > len(buf) { r.oom = true }
-				return
-			}
+			s, owned, ok := validator_num_text(val, r, buf[:]); if !ok { return }
 			defer if owned { delete(s, r.allocator) }
 			(proc(value: f64, r: ^Report))(data)(parse_f64_approx(s), r)
 		}
 	} else when V == bool {
 		vcall = proc(val: rules.Value, r: ^Report, data: rawptr) {
-			vk := rules.value_kind(val)
-			if vk != .True && vk != .False { return }
-			(proc(value: bool, r: ^Report))(data)(vk == .True, r)
+			if vk := rules.value_kind(val); vk == .True || vk == .False { (proc(value: bool, r: ^Report))(data)(vk == .True, r) }
 		}
 	}
 	return register_named_validator_any(vr, name, call, rawptr(check_fn), vcall)
 }
 
 register_reg_named_validator_any :: proc(reg: ^Registry, name: string, fn: Named_Validator_Fn, data: rawptr = nil, vfn: Value_Validator_Fn = nil) -> runtime.Allocator_Error {
-	if reg == nil { return .Invalid_Argument }
-	return register_named_validator_any(&reg.named_validators, name, fn, data, vfn)
+	return .Invalid_Argument if reg == nil else register_named_validator_any(&reg.named_validators, name, fn, data, vfn)
 }
-
 register_reg_named_validator_value :: proc(reg: ^Registry, name: string, vfn: Value_Validator_Fn, data: rawptr = nil) -> runtime.Allocator_Error {
-	if reg == nil { return .Invalid_Argument }
-	return register_named_validator_value(&reg.named_validators, name, vfn, data)
+	return .Invalid_Argument if reg == nil else register_named_validator_value(&reg.named_validators, name, vfn, data)
 }
-
 register_reg_named_validator_typed :: proc(reg: ^Registry, name: string, $V: typeid, check_fn: proc(value: V, r: ^Report)) -> runtime.Allocator_Error {
-	if reg == nil { return .Invalid_Argument }
-	return register_named_validator_typed(&reg.named_validators, name, V, check_fn)
+	return .Invalid_Argument if reg == nil else register_named_validator_typed(&reg.named_validators, name, V, check_fn)
 }
 
 lookup_named_validator :: proc(vr: ^Validator_Registry, name: string) -> (v: Named_Validator, ok: bool) {
@@ -237,28 +200,15 @@ resolve_named_validator :: proc(primary, secondary: ^Validator_Registry, name: s
 	return lookup_named_validator(secondary, name)
 }
 
-// Invokes all named validators in `refs` on `(val_ptr, ti)`.
-// Returns the first missing validator name if any ref was deferred and not found in `runtime_vr`.
 @(private)
-run_named_validators :: proc(refs: []Named_Validator_Ref, val_ptr: rawptr, ti: ^runtime.Type_Info, runtime_vr: ^Validator_Registry, rep: ^Report) -> (missing: string) {
+run_named_validators :: proc(refs: []Named_Validator_Ref, val_ptr: rawptr, ti: ^runtime.Type_Info, runtime_vr: ^Validator_Registry, rep: ^Report) -> string {
 	if len(refs) == 0 || ti == nil { return "" }
 	val := any{val_ptr, ti.id}
 	for ref in refs {
-		nv: Named_Validator
-		found := false
-		// Runtime registry overrides compile-time binding when provided.
-		if runtime_vr != nil {
-			nv, found = lookup_named_validator(runtime_vr, ref.name)
-		}
-		if !found && ref.has_v {
-			nv, found = ref.v, true
-		}
-		if !found {
-			return ref.name
-		}
-		if nv.fn != nil {
-			nv.fn(val, rep, nv.data)
-		}
+		nv, found := lookup_named_validator(runtime_vr, ref.name)
+		if !found && ref.has_v { nv, found = ref.v, true }
+		if !found { return ref.name }
+		if nv.fn != nil { nv.fn(val, rep, nv.data) }
 	}
 	return ""
 }
@@ -277,11 +227,7 @@ emit_report :: proc(r: ^Report, base_steps: []tape.Step, at: u64, si: ^Struct_In
 			wire := f.field
 			if si != nil {
 				for fld in si.fields {
-					if fld.odin_name == f.field || fld.name == f.field {
-						wire = fld.name
-						field_secret ||= .Secret in fld.flags
-						break
-					}
+					if fld.odin_name == f.field || fld.name == f.field { wire = fld.name; field_secret ||= .Secret in fld.flags; break }
 				}
 			}
 			if _, aerr := append(&steps, tape.Name(wire)); aerr != nil { if oom != nil { oom^ = true }; return false }

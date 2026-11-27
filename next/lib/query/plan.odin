@@ -288,6 +288,19 @@ destroy_source_demand :: proc(s: ^Source_Demand) {
 	s^ = {}
 }
 
+@(private = "file")
+destroy_aux :: proc(p: ^Plan, alloc: runtime.Allocator) {
+	for &a in p.aux {
+		if p.aux_names_owned {
+			delete(a.name, alloc)
+		}
+		destroy_source_demand(&a.demand)
+	}
+	delete(p.aux, alloc)
+	p.aux = nil
+	p.aux_names_owned = false
+}
+
 destroy_plan :: proc(p: ^Plan) {
 	if p == nil {
 		return
@@ -295,13 +308,7 @@ destroy_plan :: proc(p: ^Plan) {
 	for &s in p.sources {
 		destroy_source_demand(&s)
 	}
-	for &a in p.aux {
-		if p.aux_names_owned {
-			delete(a.name, p.allocator)
-		}
-		destroy_source_demand(&a.demand)
-	}
-	delete(p.aux, p.allocator)
+	destroy_aux(p, p.allocator)
 	delete(p.hints.split.prefix, p.allocator)
 	destroy_source_demand(&p.hints.split.each_demand)
 	for f in p.hints.projection.fields {
@@ -336,34 +343,21 @@ set_aux_demands :: proc(p: ^Plan, entries: []Named_Demand) -> runtime.Allocator_
 	}
 	alloc := p.allocator if p.allocator.procedure != nil else context.allocator
 	p.allocator = alloc
-	for &a in p.aux {
-		if p.aux_names_owned {
-			delete(a.name, alloc)
-		}
-		destroy_source_demand(&a.demand)
-	}
-	delete(p.aux, alloc)
-	p.aux = nil
-	p.aux_names_owned = false
+	destroy_aux(p, alloc)
 	if len(entries) == 0 {
 		return nil
 	}
-	out, err := make([]Named_Demand, len(entries), alloc)
-	if err != nil {
-		return err
-	}
-	cloned_n := 0
+	out := make([]Named_Demand, len(entries), alloc) or_return
 	for e, i in entries {
 		name_copy, nerr := strings.clone(e.name, alloc)
 		if nerr != nil {
-			for j in 0 ..< cloned_n {
+			for j in 0 ..< i {
 				delete(out[j].name, alloc)
 			}
 			delete(out, alloc)
 			return nerr
 		}
 		out[i] = {name = name_copy, demand = e.demand}
-		cloned_n += 1
 	}
 	p.aux = out
 	p.aux_names_owned = true
@@ -372,28 +366,12 @@ set_aux_demands :: proc(p: ^Plan, entries: []Named_Demand) -> runtime.Allocator_
 
 // Whether two step slices are identical.
 steps_equal :: proc "contextless" (a, b: []tape.Step) -> bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i in 0 ..< len(a) {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return slice.equal(a, b)
 }
 
 // Whether `prefix` is a prefix of `full`.
 steps_prefix :: proc "contextless" (prefix, full: []tape.Step) -> bool {
-	if len(prefix) > len(full) {
-		return false
-	}
-	for i in 0 ..< len(prefix) {
-		if prefix[i] != full[i] {
-			return false
-		}
-	}
-	return true
+	return len(prefix) <= len(full) && slice.equal(prefix, full[:len(prefix)])
 }
 
 @(private = "file")

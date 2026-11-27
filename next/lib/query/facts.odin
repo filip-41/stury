@@ -41,12 +41,20 @@ FACT_CATALOG := [?]Fact_Info {
 
 FACT_LIST :: "comment, comment_inline, comment_foot, tag, anchor, alias, style, name, namespace, content, pi, doctype, directives, attrs, comment_head"
 
-// Looks up `.@name` (without `@`) in the fact catalogue, including the `comment_head` alias.
-fact_named :: proc "contextless" (name: string) -> (tape.Fact_Kind, bool) {
+@(private = "file")
+catalog_kind :: proc "contextless" (name: string) -> (tape.Fact_Kind, bool) {
 	for info in FACT_CATALOG {
 		if info.name == name {
 			return info.kind, true
 		}
+	}
+	return .Comment, false
+}
+
+// Looks up `.@name` (without `@`) in the fact catalogue, including the `comment_head` alias.
+fact_named :: proc "contextless" (name: string) -> (tape.Fact_Kind, bool) {
+	if kind, ok := catalog_kind(name); ok {
+		return kind, true
 	}
 	if name == "comment_head" {
 		return .Comment, true
@@ -96,9 +104,9 @@ attribute_key :: proc(h: ^Heap, attr: string) -> (res: Value, status: Status) {
 	return o, .Ok
 }
 
-// Read-only `fact_step` for compile-time literal `.Object` values without touching a `Heap` (safe across threads on a
-// shared immutable `Program`).
-fact_step_literal :: proc "contextless" (key: Value) -> (kind: tape.Fact_Kind, is_attr: bool, ok: bool) {
+// Classifies a compile-time literal `.Object` value as a fact step without touching a `Heap`.
+@(private = "file")
+classify_literal_fact :: proc "contextless" (key: Value) -> (kind: tape.Fact_Kind, is_attr, known, unknown: bool) {
 	if key.kind != .Object {
 		return
 	}
@@ -118,40 +126,28 @@ fact_step_literal :: proc "contextless" (key: Value) -> (kind: tape.Fact_Kind, i
 			return
 		}
 		ni := find_key(ob, "name")
-		if ni < 0 || entries[ni].value.kind != .String {
-			return
+		if ni >= 0 && entries[ni].value.kind == .String {
+			return .Attribute, true, true, false
 		}
-		return .Attribute, true, true
+		return
 	}
-	for info in FACT_CATALOG {
-		if info.name == fname {
-			return info.kind, false, true
-		}
+	if fk, ok := catalog_kind(fname); ok {
+		return fk, false, true, false
 	}
+	return .Comment, false, false, true
+}
+
+// Read-only `fact_step` for compile-time literal `.Object` values without touching a `Heap` (safe across threads on a
+// shared immutable `Program`).
+fact_step_literal :: proc "contextless" (key: Value) -> (kind: tape.Fact_Kind, is_attr: bool, ok: bool) {
+	kind, is_attr, ok, _ = classify_literal_fact(key)
 	return
 }
 
 // Read-only `unknown_fact_step` for compile-time literal `.Object` values without touching a `Heap`.
 is_unknown_fact_step_literal :: proc "contextless" (key: Value) -> bool {
-	if key.kind != .Object {
-		return false
-	}
-	ob := (^Object_Block)(key.p)
-	if ob.len != 1 {
-		return false
-	}
-	entries := object_entries(ob)
-	fi := find_key(ob, "fact")
-	if fi < 0 || entries[fi].value.kind != .String {
-		return false
-	}
-	fname := text_of(entries[fi].value)
-	for info in FACT_CATALOG {
-		if info.name == fname {
-			return false
-		}
-	}
-	return true
+	_, _, _, unknown := classify_literal_fact(key)
+	return unknown
 }
 
 // Whether `key` is a known fact path step (`{"fact": "<name>"}` or `{"fact": "attribute", "name": "<attr>"}`).
@@ -164,28 +160,24 @@ fact_step :: proc(h: ^Heap, key: Value) -> (kind: tape.Fact_Kind, is_attr: bool,
 		return
 	}
 	fv, fs := member(h, key, "fact")
+	defer release(h, fv)
 	if fs != .Ok || !is_text(fv) {
-		release(h, fv)
 		return
 	}
-	defer release(h, fv)
 	fname := text_of(fv)
 	if n == 2 {
 		if fname != "attribute" {
 			return
 		}
 		nv, ns := member(h, key, "name")
-		if ns != .Ok || !is_text(nv) {
-			release(h, nv)
-			return
+		defer release(h, nv)
+		if ns == .Ok && is_text(nv) {
+			return .Attribute, true, true
 		}
-		release(h, nv)
-		return .Attribute, true, true
+		return
 	}
-	for info in FACT_CATALOG {
-		if info.name == fname {
-			return info.kind, false, true
-		}
+	if fk, found := catalog_kind(fname); found {
+		return fk, false, true
 	}
 	return
 }
@@ -208,12 +200,9 @@ unknown_fact_step :: proc(h: ^Heap, key: Value) -> (name: Value, unknown: bool) 
 		release(h, fv)
 		return ABSENT, false
 	}
-	fname := text_of(fv)
-	for info in FACT_CATALOG {
-		if info.name == fname {
-			release(h, fv)
-			return ABSENT, false
-		}
+	if _, ok := catalog_kind(text_of(fv)); ok {
+		release(h, fv)
+		return ABSENT, false
 	}
 	return fv, true
 }
@@ -222,13 +211,7 @@ unknown_fact_step :: proc(h: ^Heap, key: Value) -> (name: Value, unknown: bool) 
 fail_unknown_fact :: proc(h: ^Heap, name: string) -> Status {
 	msg := fmt.aprintf("unknown fact .@%s, the facts are %s", name, FACT_LIST, allocator = h.allocator)
 	defer delete(msg, h.allocator)
-	v, s := text_value(h, msg)
-	if s != .Ok {
-		return s
-	}
-	st := fail(h, .Raised, .None, v)
-	release(h, v)
-	return st
+	return fail_fact_msg(h, msg)
 }
 
 // Raises a plain raised-string error on `h`.
@@ -237,9 +220,8 @@ fail_fact_msg :: proc(h: ^Heap, msg: string) -> Status {
 	if s != .Ok {
 		return s
 	}
-	st := fail(h, .Raised, .None, v)
-	release(h, v)
-	return st
+	defer release(h, v)
+	return fail(h, .Raised, .None, v)
 }
 
 // Validates that no fact step in `keys` is unknown or appears before the last step.
@@ -275,8 +257,7 @@ fact_read :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr := "", is_attr 
 		ob := (^Overlay_Block)(h.write_fact_data)
 		if ob != nil && ob.ov != nil && &d.doc == ob.ov.base {
 			if ch, has := ob.ov.by_base[at]; has {
-				ov_ref := Value{p = ob, n = ch.idx, kind = .Overlay}
-				return overlay_fact_read(h, ov_ref, kind, attr, is_attr)
+				return overlay_fact_read(h, Value{p = ob, n = ch.idx, kind = .Overlay}, kind, attr, is_attr)
 			}
 		}
 	}
@@ -296,36 +277,37 @@ read_base_node_fact :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, kind: 
 	}
 	#partial switch kind {
 	case .Comment, .Comment_Inline, .Comment_Foot:
-		return read_comments(h, doc, at, kind)
+		return read_fact_array(h, doc, at, {kind}, trim_comment = true)
 	case .Tag:
 		return read_tag(h, doc, at)
-	case .Anchor, .Alias:
-		return read_span_fact(h, doc, at, kind)
+	case .Anchor, .Alias, .Doctype:
+		if kind in doc.present {
+			for f in tape.facts_of(doc, at) {
+				if f.kind == kind {
+					return text_value(h, string(fact_body(doc, f)))
+				}
+			}
+		}
 	case .Style:
 		if name, ok := tape.fact_name(doc, at, .Style); ok {
 			return text_value(h, name)
 		}
-		return NULL, .Ok
 	case .Instruction:
-		return read_instructions(h, doc, at)
+		return read_fact_array(h, doc, at, {.Instruction, .Instruction_Foot})
 	case .Directive:
-		return read_many_facts(h, doc, at, .Directive)
-	case .Doctype:
-		return read_span_fact(h, doc, at, .Doctype)
+		return read_fact_array(h, doc, at, {.Directive})
 	case .Attribute:
 		return read_attributes(h, d, at, "", false)
 	case .Name:
 		return read_element_name(h, d, at)
 	case .Namespace:
-		if doc.format == nil || doc.format.namespace == nil {
-			return NULL, .Ok
+		if doc.format != nil && doc.format.namespace != nil {
+			uri, p := doc.format.namespace(doc, at)
+			note_presence(h, p)
+			if p == .Found {
+				return text_value(h, uri)
+			}
 		}
-		uri, p := doc.format.namespace(doc, at)
-		note_presence(h, p)
-		if p != .Found {
-			return NULL, .Ok
-		}
-		return text_value(h, uri)
 	case .Content:
 		return read_content(h, doc, at)
 	}
@@ -338,45 +320,39 @@ Fact_Writer :: #type proc(data: rawptr, h: ^Heap, v: Value, kind: tape.Fact_Kind
 // Validates a fact write (`set_path` / `del_paths` on a fact step) and dispatches to `overlay_write_fact` / `Heap.write_fact`.
 @(require_results)
 fact_write :: proc(h: ^Heap, v: Value, kind: tape.Fact_Kind, attr: string, is_attr: bool, nv: Value, overlay_depth := 0) -> (res: Value, status: Status) {
+	err_msg := ""
 	info, ok := fact_info(kind)
-	if !ok {
-		release(h, v)
-		release(h, nv)
-		return NULL, fail_fact_msg(h, "unknown fact")
-	}
-	if is_attr {
+	switch {
+	case !ok:
+		err_msg = "unknown fact"
+	case is_attr:
 		if t := type_of(nv); t != .String && t != .Null && t != .Absent {
-			release(h, v)
-			release(h, nv)
-			return NULL, fail_fact_msg(h, "an attribute is a string or null")
+			err_msg = "an attribute is a string or null"
 		}
-	} else if info.class == .Comment {
+	case info.class == .Comment:
 		if !valid_comment_value(h, nv) {
-			release(h, v)
-			release(h, nv)
-			return NULL, fail_fact_msg(h, "a comment is a string, an array of strings, or null")
+			err_msg = "a comment is a string, an array of strings, or null"
 		}
-	} else if info.read_only || info.class != .Property {
-		release(h, v)
-		release(h, nv)
-		return NULL, fail_fact_msg(h, "A markup name, namespace, content, instruction, doctype or document marker cannot be written")
-	} else {
+	case info.read_only || info.class != .Property:
+		err_msg = "A markup name, namespace, content, instruction, doctype or document marker cannot be written"
+	case:
 		t := type_of(nv)
 		if t != .String && t != .Null && t != .Absent && !(kind == .Tag && t == .Number) {
-			release(h, v)
-			release(h, nv)
-			return NULL, fail_fact_msg(h, "a tag, an anchor, an alias or a style is a string or null, and a tag may be a number")
+			err_msg = "a tag, an anchor, an alias or a style is a string or null, and a tag may be a number"
 		}
 	}
-	if v.kind == .Overlay {
-		return overlay_write_fact(v.p, h, v, kind, attr, is_attr, nv, overlay_depth)
-	}
-	if h.write_fact != nil {
-		return h.write_fact(h.write_fact_data, h, v, kind, attr, is_attr, nv)
+	if err_msg == "" {
+		if v.kind == .Overlay {
+			return overlay_write_fact(v.p, h, v, kind, attr, is_attr, nv, overlay_depth)
+		}
+		if h.write_fact != nil {
+			return h.write_fact(h.write_fact_data, h, v, kind, attr, is_attr, nv)
+		}
+		err_msg = "fact writes require an overlay"
 	}
 	release(h, v)
 	release(h, nv)
-	return NULL, fail_fact_msg(h, "fact writes require an overlay")
+	return NULL, fail_fact_msg(h, err_msg)
 }
 
 @(private = "file")
@@ -417,25 +393,32 @@ fact_body :: #force_inline proc "contextless" (doc: ^tape.Document, f: tape.Fact
 }
 
 @(private = "file")
-read_comments :: proc(h: ^Heap, doc: ^tape.Document, at: tape.Node_Index, kind: tape.Fact_Kind) -> (res: Value, status: Status) {
-	if kind not_in doc.present {
+read_fact_array :: proc(
+	h: ^Heap,
+	doc: ^tape.Document,
+	at: tape.Node_Index,
+	kinds: bit_set[tape.Fact_Kind; u32],
+	trim_comment := false,
+) -> (res: Value, status: Status) {
+	if doc.present & kinds == {} {
 		return NULL, .Ok
 	}
-	facts := tape.facts_of(doc, at)
 	out := ABSENT
 	defer if status != .Ok {
 		release(h, out)
 	}
-	for f in facts {
-		if f.kind != kind {
+	for f in tape.facts_of(doc, at) {
+		if f.kind not_in kinds {
 			continue
 		}
 		body := string(fact_body(doc, f))
-		if tape.fact_lead(f.spelling) > 0 && len(body) > 0 && body[0] == ' ' {
-			body = body[1:]
-		}
-		if tape.fact_tail(f.spelling) > 0 && len(body) > 0 && body[len(body) - 1] == ' ' {
-			body = body[:len(body) - 1]
+		if trim_comment {
+			if tape.fact_lead(f.spelling) > 0 && len(body) > 0 && body[0] == ' ' {
+				body = body[1:]
+			}
+			if tape.fact_tail(f.spelling) > 0 && len(body) > 0 && body[len(body) - 1] == ' ' {
+				body = body[:len(body) - 1]
+			}
 		}
 		if out.kind == .Absent {
 			out = make_array(h, 2) or_return
@@ -477,64 +460,6 @@ read_tag :: proc(h: ^Heap, doc: ^tape.Document, at: tape.Node_Index) -> (res: Va
 	return NULL, .Ok
 }
 
-@(private = "file")
-read_span_fact :: proc(h: ^Heap, doc: ^tape.Document, at: tape.Node_Index, kind: tape.Fact_Kind) -> (res: Value, status: Status) {
-	if kind not_in doc.present {
-		return NULL, .Ok
-	}
-	for f in tape.facts_of(doc, at) {
-		if f.kind == kind {
-			return text_value(h, string(fact_body(doc, f)))
-		}
-	}
-	return NULL, .Ok
-}
-
-// Processing instructions (`.@pi`) include both `.Instruction` and `.Instruction_Foot`.
-@(private = "file")
-read_instructions :: proc(h: ^Heap, doc: ^tape.Document, at: tape.Node_Index) -> (res: Value, status: Status) {
-	if .Instruction not_in doc.present && .Instruction_Foot not_in doc.present {
-		return NULL, .Ok
-	}
-	out := ABSENT
-	defer if status != .Ok {
-		release(h, out)
-	}
-	for f in tape.facts_of(doc, at) {
-		if f.kind != .Instruction && f.kind != .Instruction_Foot {
-			continue
-		}
-		if out.kind == .Absent {
-			out = make_array(h, 2) or_return
-		}
-		s := text_value(h, string(fact_body(doc, f))) or_return
-		append_owned(h, &out, s) or_return
-	}
-	return out if out.kind != .Absent else NULL, .Ok
-}
-
-@(private = "file")
-read_many_facts :: proc(h: ^Heap, doc: ^tape.Document, at: tape.Node_Index, kind: tape.Fact_Kind) -> (res: Value, status: Status) {
-	if kind not_in doc.present {
-		return NULL, .Ok
-	}
-	out := ABSENT
-	defer if status != .Ok {
-		release(h, out)
-	}
-	for f in tape.facts_of(doc, at) {
-		if f.kind != kind {
-			continue
-		}
-		if out.kind == .Absent {
-			out = make_array(h, 2) or_return
-		}
-		s := text_value(h, string(fact_body(doc, f))) or_return
-		append_owned(h, &out, s) or_return
-	}
-	return out if out.kind != .Absent else NULL, .Ok
-}
-
 @(private)
 read_attributes :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, name: string, one: bool) -> (res: Value, status: Status) {
 	doc := &d.doc
@@ -574,10 +499,7 @@ read_attributes :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index, name: stri
 @(private = "file")
 read_element_name :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) {
 	doc := &d.doc
-	if doc.format == nil || doc.format.attribute == nil || at == tape.ROOT {
-		return NULL, .Ok
-	}
-	if doc.nodes[at].kind == .Array {
+	if doc.format == nil || doc.format.attribute == nil || at == tape.ROOT || doc.nodes[at].kind == .Array {
 		return NULL, .Ok
 	}
 	key_idx := tape.NO_NODE

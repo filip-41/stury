@@ -12,12 +12,9 @@ import schema_check "stury:lib/schema/check"
 @(require_results)
 check :: #force_inline proc(src: []u8, plan: ^schema_check.Plan, spec := Spec.Csv, opts := schema_check.Options{}, sink: ^schema_check.Sink = nil, allocator := context.allocator, dsv_opts := tape.Dsv_Options{}) -> schema_check.Result {
 	switch spec {
-	case .Csv:
-		return check_spec(src, plan, .Csv, opts, sink, allocator, dsv_opts)
-	case .Tsv:
-		return check_spec(src, plan, .Tsv, opts, sink, allocator, dsv_opts)
-	case .Plain:
-		return check_spec(src, plan, .Plain, opts, sink, allocator, dsv_opts)
+	case .Csv:   return check_spec(src, plan, .Csv, opts, sink, allocator, dsv_opts)
+	case .Tsv:   return check_spec(src, plan, .Tsv, opts, sink, allocator, dsv_opts)
+	case .Plain: return check_spec(src, plan, .Plain, opts, sink, allocator, dsv_opts)
 	}
 	return {valid = false, err = {kind = .Bad_Option, keyword = "spec"}}
 }
@@ -28,7 +25,6 @@ check_spec :: #force_inline proc(src: []u8, plan: ^schema_check.Plan, $S: Spec, 
 	if _, refused := pass_options(S, walk_opts); refused != nil {
 		return {valid = false, err = {kind = .Bad_Option, walk_err = refused}, walk_err = refused}
 	}
-	// Run `refuse_repeat` through budget-wrapped scratch and map OOM / Budget.memory cleanly (A-H4)!
 	rb: hook.Read_Budget
 	out_alloc := hook.read_budget(&rb, walk_opts, allocator)
 	local_mb: hook.Memory_Budget
@@ -38,17 +34,13 @@ check_spec :: #force_inline proc(src: []u8, plan: ^schema_check.Plan, $S: Spec, 
 			e = hook.memory_budget_error(&rb.main, e)
 		}
 		kind := schema_check.Error_Kind.Duplicate_Key
-		if _, is_ex := e.(tape.Exceeded); is_ex {
-			kind = .Exceeded
-		} else if _, is_oom := e.(runtime.Allocator_Error); is_oom {
-			kind = .No_Memory
+		#partial switch _ in e {
+		case tape.Exceeded:           kind = .Exceeded
+		case runtime.Allocator_Error: kind = .No_Memory
 		}
 		return {valid = false, err = {kind = kind, walk_err = e}, walk_err = e}
 	}
-	if opts.budget.steps != 0 {
-		return check_as(src, plan, S, true, opts, walk_opts, sink, allocator)
-	}
-	return check_as(src, plan, S, false, opts, walk_opts, sink, allocator)
+	return check_as(src, plan, S, true, opts, walk_opts, sink, allocator) if opts.budget.steps != 0 else check_as(src, plan, S, false, opts, walk_opts, sink, allocator)
 }
 
 @(private)

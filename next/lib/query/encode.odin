@@ -8,7 +8,6 @@ import "stury:lib/base/spell"
 
 // Byte encodings of texts: base64 (standard and URL alphabets), base32, hex and percent encoding, each way.
 
-// The alphabets of base 64 and 32 that texts are written in.
 Base :: enum u8 {
 	Base64,
 	Base64_Url,
@@ -40,10 +39,9 @@ encode_base :: proc(h: ^Heap, s: string, base: Base, pad: bool) -> (res: Value, 
 	return v, .Ok
 }
 
-// Why a text does not decode as base 64 or 32.
 Decode_Fault :: enum u8 {
 	None,
-	Bad_Digit, // a byte outside the alphabet
+	Bad_Digit,  // a byte outside the alphabet
 	Lone_Digit, // a last digit that holds no whole byte
 }
 
@@ -51,7 +49,6 @@ Decode_Fault :: enum u8 {
 // U+FFFD, or the fault that is in `s`.
 @(require_results)
 decode_base :: proc(h: ^Heap, s: string, base: Base) -> (res: Value, fault: Decode_Fault, status: Status) {
-	// What the groups of `s` hold at most, its padding not yet taken off.
 	room := len(s) / 8 * 5 + 4 if base == .Base32 else len(s) / 4 * 3 + 2
 	out := make([]u8, room, h.allocator)
 	if out == nil {
@@ -61,13 +58,10 @@ decode_base :: proc(h: ^Heap, s: string, base: Base) -> (res: Value, fault: Deco
 	decoded: []u8
 	malformed, failed: bool
 	switch base {
-	case .Base64:
+	case .Base64, .Base64_Url:
+		tbl := base64.DEC_TABLE if base == .Base64 else base64.DEC_URL_TABLE
 		err: base64.Error
-		decoded, err = base64.decode_into_buf(out, s)
-		malformed, failed = err == base64.Decode_Error.Malformed_Quantum, err != nil
-	case .Base64_Url:
-		err: base64.Error
-		decoded, err = base64.decode_into_buf(out, s, base64.DEC_URL_TABLE)
+		decoded, err = base64.decode_into_buf(out, s, tbl)
 		malformed, failed = err == base64.Decode_Error.Malformed_Quantum, err != nil
 	case .Base32:
 		err: base32.Error
@@ -75,7 +69,6 @@ decode_base :: proc(h: ^Heap, s: string, base: Base) -> (res: Value, fault: Deco
 		malformed, failed = err == base32.Decode_Error.Malformed_Quantum, err != nil
 	}
 	if failed {
-		// A text that ends in a lone digit is judged by the digits before it first, as jq reads from the front.
 		if malformed && !has_bad_digit(s, base) {
 			return NULL, .Lone_Digit, .Ok
 		}
@@ -85,7 +78,6 @@ decode_base :: proc(h: ^Heap, s: string, base: Base) -> (res: Value, fault: Deco
 	return v, .None, st
 }
 
-// Whether `s` holds a byte that is no digit of `base`, its trailing padding aside.
 @(private)
 has_bad_digit :: proc(s: string, base: Base) -> bool {
 	end := len(s)
@@ -109,9 +101,7 @@ has_bad_digit :: proc(s: string, base: Base) -> bool {
 	return false
 }
 
-// A string of `bytes`, each ill-formed UTF-8 sequence in them one U+FFFD. A sequence takes the bytes its lead byte
-// announces, and all that is left when the text ends inside it, or fewer when a byte that is no continuation comes
-// first.
+// A string of `bytes`, each ill-formed UTF-8 sequence in them one U+FFFD.
 @(private, require_results)
 text_lossy :: proc(h: ^Heap, bytes: []u8) -> (res: Value, status: Status) {
 	if kernel.utf8_valid(bytes) {
@@ -141,10 +131,8 @@ text_lossy :: proc(h: ^Heap, bytes: []u8) -> (res: Value, status: Status) {
 		case 0xF0 <= p[0] && p[0] < 0xF8:
 			announced = 4
 		}
-		taken := announced
-		if left := int(uintptr(end) - uintptr(p)); announced > left {
-			taken = left
-		} else {
+		taken := min(announced, int(uintptr(end) - uintptr(p)))
+		if taken == announced {
 			for i in 1 ..< announced {
 				if p[i] & 0xC0 != 0x80 {
 					taken = i
@@ -162,33 +150,18 @@ text_lossy :: proc(h: ^Heap, bytes: []u8) -> (res: Value, status: Status) {
 @(private)
 HEX_DIGITS :: "0123456789abcdef"
 
-// `s` as lowercase hex. `core:encoding/hex` writes into a fresh slice or a writer only, which would copy the text.
+// `s` as lowercase hex.
 @(require_results)
 encode_hex :: proc(h: ^Heap, s: string) -> (res: Value, status: Status) {
 	v, out := make_text(h, 2 * len(s)) or_return
-	for i in 0 ..< len(s) {
-		digits := HEX_DIGITS
-		out[2 * i] = digits[s[i] >> 4]
-		out[2 * i + 1] = digits[s[i] & 15]
+	digits := HEX_DIGITS
+	for c, i in transmute([]u8)s {
+		out[2 * i], out[2 * i + 1] = digits[c >> 4], digits[c & 15]
 	}
 	return v, .Ok
 }
 
-@(private)
-hex_value :: proc "contextless" (c: u8) -> int {
-	switch c {
-	case '0' ..= '9':
-		return int(c - '0')
-	case 'a' ..= 'f':
-		return int(c - 'a' + 10)
-	case 'A' ..= 'F':
-		return int(c - 'A' + 10)
-	}
-	return -1
-}
-
-// The text of the bytes hex text `s` holds, each ill-formed UTF-8 sequence one U+FFFD, or false for an odd length or a
-// byte that is no hex digit.
+// The text of the bytes hex text `s` holds, each ill-formed UTF-8 sequence one U+FFFD.
 @(require_results)
 decode_hex :: proc(h: ^Heap, s: string) -> (res: Value, ok: bool, status: Status) {
 	out := make([]u8, len(s) / 2, h.allocator)
@@ -219,21 +192,20 @@ percent_encode :: proc(h: ^Heap, s: string, keep: string) -> (res: Value, status
 		return false
 	}
 	n := 0
-	for i in 0 ..< len(s) {
-		n += 1 if kept(s[i], keep) else 3
+	for c in transmute([]u8)s {
+		n += 1 if kept(c, keep) else 3
 	}
 	v, out := make_text(h, n) or_return
+	upper := "0123456789ABCDEF"
 	k := 0
-	for i in 0 ..< len(s) {
-		c := s[i]
+	for c in transmute([]u8)s {
 		if kept(c, keep) {
 			out[k] = c
 			k += 1
-			continue
+		} else {
+			out[k], out[k + 1], out[k + 2] = '%', upper[c >> 4], upper[c & 15]
+			k += 3
 		}
-		upper := "0123456789ABCDEF"
-		out[k], out[k + 1], out[k + 2] = '%', upper[c >> 4], upper[c & 15]
-		k += 3
 	}
 	return v, .Ok
 }
@@ -247,10 +219,14 @@ percent_decode :: proc(h: ^Heap, s: string, plus: bool) -> (res: Value, ok: bool
 		c := s[i]
 		switch {
 		case c == '%':
-			if i + 2 >= len(s) || hex_value(s[i + 1]) < 0 || hex_value(s[i + 2]) < 0 {
+			if i + 2 >= len(s) {
 				return NULL, false, .Ok
 			}
-			append(&out, u8(hex_value(s[i + 1]) << 4 | hex_value(s[i + 2])))
+			hi, lo := spell.HEX_NIBBLE[s[i + 1]], spell.HEX_NIBBLE[s[i + 2]]
+			if hi | lo > 15 {
+				return NULL, false, .Ok
+			}
+			append(&out, hi << 4 | lo)
 			i += 2
 		case c == '+' && plus:
 			append(&out, ' ')

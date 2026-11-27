@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:io"
 import "core:simd"
+import "core:unicode/utf8"
 import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
 import "stury:lib/ops/typed"
@@ -18,11 +19,26 @@ import "stury:lib/ops/write"
 // writes many values of one type makes once, else nil. A `Raw` member or a `time.Time` outside years 0 to 9999 is
 // `Bad_Option` naming it, and a value with no JSON spelling, a non-finite float, is `Refused`.
 marshal :: proc(value: ^$T, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> (text: []u8, err: Write_Error) {
-	if err = check_marshal_opts(opts); err != nil {
+	return marshal_run({}, value, T, opts, plan, allocator)
+}
+
+// `marshal` into `sink`, through a buffer of `write.SINK_BYTES` from `allocator`. On a refusal or a failed sink the
+// sink may hold a prefix of the text.
+marshal_to :: proc(sink: io.Writer, value: ^$T, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> Write_Error {
+	if sink.procedure == nil {
+		return tape.Bad_Option{"sink"}
+	}
+	_, err := marshal_run(sink, value, T, opts, plan, allocator)
+	return err
+}
+
+@(private)
+marshal_run :: proc(sink: io.Writer, value: rawptr, T: typeid, opts: Write_Options, plan: ^Plan, allocator: runtime.Allocator) -> (text: []u8, err: Write_Error) {
+	if err = check_write_opts(opts); err != nil {
 		return nil, err
 	}
 	fj: Fast_Json
-	if e := write.out_start(&fj.out, allocator, {}, 0); e != nil {
+	if e := write.out_start(&fj.out, allocator, sink, 0); e != nil {
 		return nil, e
 	}
 	if err = marshal_out(&fj, value, T, opts, plan, allocator); err != nil {
@@ -32,29 +48,8 @@ marshal :: proc(value: ^$T, opts := Write_Options{}, plan: ^Plan = nil, allocato
 	return write.out_finish(&fj.out)
 }
 
-// `marshal` into `sink`, through a buffer of `write.SINK_BYTES` from `allocator`. On a refusal or a failed sink the
-// sink may hold a prefix of the text.
-marshal_to :: proc(sink: io.Writer, value: ^$T, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> Write_Error {
-	if sink.procedure == nil {
-		return tape.Bad_Option{"sink"}
-	}
-	if err := check_marshal_opts(opts); err != nil {
-		return err
-	}
-	fj: Fast_Json
-	if e := write.out_start(&fj.out, allocator, sink, 0); e != nil {
-		return e
-	}
-	if err := marshal_out(&fj, value, T, opts, plan, allocator); err != nil {
-		write.out_drop(&fj.out)
-		return err
-	}
-	_, err := write.out_finish(&fj.out)
-	return err
-}
-
 @(private)
-check_marshal_opts :: #force_inline proc "contextless" (opts: Write_Options) -> Write_Error {
+check_write_opts :: #force_inline proc "contextless" (opts: Write_Options) -> Write_Error {
 	if opts.format != nil {
 		return tape.Bad_Option{"format"}
 	}
@@ -90,31 +85,13 @@ marshal_out :: proc(fj: ^Fast_Json, value: rawptr, T: typeid, opts: Write_Option
 	fj.fill = fill_u64
 	fj.line_fill = transmute(JSON_V)[2]u64{fill_u64, fill_u64}
 	fj.width = 1 if opts.tab else int(opts.indent)
+	pretty := !write.compact(opts)
 	refusal: typed.Marshal_Refusal
 	err: tape.Error
-	pretty := !write.compact(opts)
-	if !opts.sort_keys {
-		switch {
-		case !pretty && !opts.ascii:
-			refusal, err = marshal_mode(fj, value, T, plan, false, false, false, allocator)
-		case pretty && !opts.ascii:
-			refusal, err = marshal_mode(fj, value, T, plan, true, false, false, allocator)
-		case !pretty && opts.ascii:
-			refusal, err = marshal_mode(fj, value, T, plan, false, true, false, allocator)
-		case:
-			refusal, err = marshal_mode(fj, value, T, plan, true, true, false, allocator)
-		}
+	if opts.sort_keys {
+		refusal, err = marshal_sort(fj, value, T, plan, pretty, opts.ascii, true, allocator)
 	} else {
-		switch {
-		case !pretty && !opts.ascii:
-			refusal, err = marshal_mode(fj, value, T, plan, false, false, true, allocator)
-		case pretty && !opts.ascii:
-			refusal, err = marshal_mode(fj, value, T, plan, true, false, true, allocator)
-		case !pretty && opts.ascii:
-			refusal, err = marshal_mode(fj, value, T, plan, false, true, true, allocator)
-		case:
-			refusal, err = marshal_mode(fj, value, T, plan, true, true, true, allocator)
-		}
+		refusal, err = marshal_sort(fj, value, T, plan, pretty, opts.ascii, false, allocator)
 	}
 	if fj.out.err != nil {
 		return fj.out.err
@@ -134,6 +111,19 @@ marshal_out :: proc(fj: ^Fast_Json, value: rawptr, T: typeid, opts: Write_Option
 		write.put_byte(&fj.out, '\n')
 	}
 	return fj.out.err
+}
+
+@(private)
+marshal_sort :: #force_inline proc(
+	fj: ^Fast_Json, value: rawptr, T: typeid, plan: ^Plan,
+	pretty, ascii: bool, $SORT_KEYS: bool, allocator: runtime.Allocator,
+) -> (typed.Marshal_Refusal, tape.Error) {
+	switch {
+	case !pretty && !ascii: return marshal_mode(fj, value, T, plan, false, false, SORT_KEYS, allocator)
+	case pretty && !ascii:  return marshal_mode(fj, value, T, plan, true, false, SORT_KEYS, allocator)
+	case !pretty && ascii:  return marshal_mode(fj, value, T, plan, false, true, SORT_KEYS, allocator)
+	}
+	return marshal_mode(fj, value, T, plan, true, true, SORT_KEYS, allocator)
 }
 
 @(private)
@@ -206,16 +196,16 @@ fast_put_line :: #force_inline proc(fj: ^Fast_Json, buf, p, limit: [^]u8, depth,
 @(private, cold)
 fast_put_line_long :: #force_no_inline proc(fj: ^Fast_Json, buf, p: [^]u8, n, after, slop: int) -> ([^]u8, [^]u8, [^]u8) #no_bounds_check {
 	fj.out.cursor = int(intrinsics.ptr_sub(p, buf))
-	put_line_long(&fj.out, fj.fill, n)
+	write.line_indent(&fj.out, 1, fj.fill, n)
 	q := write.room(&fj.out, max(after, slop))
 	out := &fj.out
 	return out.buf, q, out.buf[max(out.size - slop, 0):]
 }
 
 @(private)
-fast_put_string_utf8_sync :: #force_no_inline proc(fj: ^Fast_Json, buf, p: [^]u8, s: string, slop: int) -> ([^]u8, [^]u8, [^]u8, bool) #no_bounds_check {
+fast_put_string_sync :: #force_inline proc(fj: ^Fast_Json, buf, p: [^]u8, s: string, slop: int, $ASCII: bool) -> ([^]u8, [^]u8, [^]u8, bool) #no_bounds_check {
 	fj.out.cursor = int(intrinsics.ptr_sub(p, buf))
-	if !put_string_long_fast(&fj.out, s, false) {
+	if !put_string_long_fast(&fj.out, s, ASCII) {
 		return buf, p, buf, false
 	}
 	out := &fj.out
@@ -226,16 +216,13 @@ fast_put_string_utf8_sync :: #force_no_inline proc(fj: ^Fast_Json, buf, p: [^]u8
 }
 
 @(private)
+fast_put_string_utf8_sync :: #force_no_inline proc(fj: ^Fast_Json, buf, p: [^]u8, s: string, slop: int) -> ([^]u8, [^]u8, [^]u8, bool) #no_bounds_check {
+	return fast_put_string_sync(fj, buf, p, s, slop, false)
+}
+
+@(private)
 fast_put_string_ascii_sync :: #force_no_inline proc(fj: ^Fast_Json, buf, p: [^]u8, s: string, slop: int) -> ([^]u8, [^]u8, [^]u8, bool) #no_bounds_check {
-	fj.out.cursor = int(intrinsics.ptr_sub(p, buf))
-	if !put_string_long_fast(&fj.out, s, true) {
-		return buf, p, buf, false
-	}
-	out := &fj.out
-	if out.size - out.cursor < slop && out.err == nil {
-		_ = write.room(out, slop)
-	}
-	return out.buf, out.buf[out.cursor:], out.buf[max(out.size - slop, 0):], true
+	return fast_put_string_sync(fj, buf, p, s, slop, true)
 }
 
 @(private)
@@ -476,19 +463,9 @@ put_ascii_body :: proc(out: ^write.Out, s: string) #no_bounds_check {
 			out.cursor += escape_into(p, b[i])
 			i += 1
 		} else {
-			c := b[i]
-			switch {
-			case c < 0xE0:
-				out.cursor += u_escape(p, u32(c & 0x1F) << 6 | u32(b[i + 1] & 0x3F))
-				i += 2
-			case c < 0xF0:
-				out.cursor += u_escape(p, u32(c & 0x0F) << 12 | u32(b[i + 1] & 0x3F) << 6 | u32(b[i + 2] & 0x3F))
-				i += 3
-			case:
-				r := rune(u32(c & 0x07) << 18 | u32(b[i + 1] & 0x3F) << 12 | u32(b[i + 2] & 0x3F) << 6 | u32(b[i + 3] & 0x3F))
-				out.cursor += rune_units(p, r)
-				i += 4
-			}
+			r, size := utf8.decode_rune(b[i:])
+			out.cursor += rune_units(p, r)
+			i += size
 		}
 		run = i
 	}

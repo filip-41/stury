@@ -2,8 +2,6 @@ package query
 
 import "core:fmt"
 import "core:math"
-import "stury:lib/base/spell"
-import "stury:lib/core/tape"
 
 // Relational hash-index and join primitives over `query.Value` and `query.Heap`.
 // Supports O(1) amortized lookup on any value key (including strings, `1 == 1.0` numeric equality,
@@ -69,8 +67,7 @@ hash_index_destroy :: proc(idx: ^Hash_Index) {
 	if idx == nil {
 		return
 	}
-	if idx.h != nil {
-		h := idx.h
+	if h := idx.h; h != nil {
 		alloc := heap_allocator(h)
 		for g in idx.groups {
 			release(h, g.key)
@@ -98,26 +95,14 @@ hash_index_add :: proc(idx: ^Hash_Index, key, row: Value) -> Status {
 	}
 	h := idx.h
 	if idx.sealed {
-		if status := hash_index_unseal(idx); status != .Ok {
-			return status
-		}
+		hash_index_unseal(idx) or_return
 	}
-	matchable, ms := join_key_matchable(h, key)
-	if ms != .Ok {
-		return ms
-	}
-	if !matchable {
+	if !(join_key_matchable(h, key) or_return) {
 		return .Ok
 	}
-	kh, hstatus := hash(h, key)
-	if hstatus != .Ok {
-		return hstatus
-	}
+	kh := hash(h, key) or_return
 	if (len(idx.groups) + 1) * 2 > len(idx.buckets) {
-		new_cap := max(16, len(idx.buckets) * 2)
-		if status := rehash_groups(idx, new_cap); status != .Ok {
-			return status
-		}
+		rehash_groups(idx, max(16, len(idx.buckets) * 2)) or_return
 	}
 	mask := len(idx.buckets) - 1
 	at := int(kh) & mask
@@ -127,18 +112,25 @@ hash_index_add :: proc(idx: ^Hash_Index, key, row: Value) -> Status {
 			break
 		}
 		gi := int(slot - 1)
-		if idx.groups[gi].hash == kh {
-			same, eq_status := equal(h, idx.groups[gi].key, key)
-			if eq_status != .Ok {
-				return eq_status
-			}
-			if same {
-				return append_row_to_group(idx, gi, row)
-			}
+		if idx.groups[gi].hash == kh && (equal(h, idx.groups[gi].key, key) or_return) {
+			row_idx := stage_row(idx, row) or_return
+			g := &idx.groups[gi]
+			idx.next[g.tail] = row_idx
+			g.tail = row_idx
+			g.count += 1
+			return .Ok
 		}
 		at = (at + 1) & mask
 	}
-	return insert_new_group(idx, at, key, kh, row)
+	row_idx := stage_row(idx, row) or_return
+	if _, err := append(&idx.groups, Index_Group{hash = kh, head = row_idx, tail = row_idx, count = 1}); err != nil {
+		release(h, pop(&idx.rows))
+		pop(&idx.next)
+		return fail_memory(h)
+	}
+	idx.groups[len(idx.groups) - 1].key = retain(key)
+	idx.buckets[at] = i32(len(idx.groups))
+	return .Ok
 }
 
 // Materializes contiguous per-group slices into `idx.packed` so `hash_index_lookup` returns a direct
@@ -149,33 +141,23 @@ hash_index_seal :: proc(idx: ^Hash_Index) -> Status {
 	}
 	h := idx.h
 	alloc := heap_allocator(h)
-	total := len(idx.rows)
-	if total == 0 {
-		delete(idx.rows)
-		delete(idx.next)
-		idx.rows = nil
-		idx.rows.allocator = alloc
-		idx.next = nil
-		idx.next.allocator = alloc
-		idx.sealed = true
-		return .Ok
-	}
-	packed, err := make([]Value, total, alloc)
-	if err != nil {
-		return fail_memory(h)
-	}
-	cursor := u32(0)
-	for &g in idx.groups {
-		g.lo = cursor
-		cur := g.head
-		for cur >= 0 {
-			packed[cursor] = retain(idx.rows[cur])
-			cursor += 1
-			cur = idx.next[cur]
+	if total := len(idx.rows); total > 0 {
+		packed, err := make([]Value, total, alloc)
+		if err != nil {
+			return fail_memory(h)
 		}
-	}
-	for r in idx.rows {
-		release(h, r)
+		cursor := u32(0)
+		for &g in idx.groups {
+			g.lo = cursor
+			for cur := g.head; cur >= 0; cur = idx.next[cur] {
+				packed[cursor] = retain(idx.rows[cur])
+				cursor += 1
+			}
+		}
+		for r in idx.rows {
+			release(h, r)
+		}
+		idx.packed = packed
 	}
 	delete(idx.rows)
 	delete(idx.next)
@@ -183,7 +165,6 @@ hash_index_seal :: proc(idx: ^Hash_Index) -> Status {
 	idx.rows.allocator = alloc
 	idx.next = nil
 	idx.next.allocator = alloc
-	idx.packed = packed
 	idx.sealed = true
 	return .Ok
 }
@@ -191,22 +172,19 @@ hash_index_seal :: proc(idx: ^Hash_Index) -> Status {
 // Builds and seals a `Hash_Index` over all rows in `collection` (`.Array` elements or `.Object` member
 // values) keyed by `extractor`. When `extractor == nil`, rows themselves serve as keys (useful for semi-joins).
 @(require_results)
-hash_index_build :: proc(h: ^Heap, collection: Value, extractor: Key_Extractor, ctx: rawptr = nil) -> (Hash_Index, Status) {
+hash_index_build :: proc(h: ^Heap, collection: Value, extractor: Key_Extractor, ctx: rawptr = nil) -> (out: Hash_Index, status: Status) {
 	if h == nil {
 		return {}, .Error
 	}
-	ct := type_of(collection)
-	if ct != .Array && ct != .Object {
+	if ct := type_of(collection); ct != .Array && ct != .Object {
 		return {}, fail(h, .Types, .Iterate, collection)
 	}
 	idx: Hash_Index
 	hash_index_init(&idx, h)
-	ok := false
-	defer if !ok {
+	defer if status != .Ok {
 		hash_index_destroy(&idx)
 	}
-	n := length_of(h, collection)
-	if n > 0 {
+	if n := length_of(h, collection); n > 0 {
 		if reserve(&idx.rows, n) != nil || reserve(&idx.next, n) != nil || reserve(&idx.groups, min(n, 64)) != nil {
 			return {}, fail_memory(h)
 		}
@@ -214,81 +192,54 @@ hash_index_build :: proc(h: ^Heap, collection: Value, extractor: Key_Extractor, 
 		for cap_b < 2 * n {
 			cap_b <<= 1
 		}
-		if s := rehash_groups(&idx, cap_b); s != .Ok {
-			return {}, s
-		}
+		rehash_groups(&idx, cap_b) or_return
 	}
-	cur, cs := cursor_open(h, collection)
-	if cs != .Ok {
-		return {}, cs
-	}
+	cur := cursor_open(h, collection) or_return
 	defer cursor_close(&cur)
 	for {
-		k, row, more, ns := cursor_next(h, &cur)
+		k, row, more := cursor_next(h, &cur) or_return
 		release(h, k)
-		if ns != .Ok {
-			return {}, ns
-		}
 		if !more {
 			break
 		}
-		key := ABSENT
-		has_key := true
-		if extractor != nil {
-			ks: Status
-			key, has_key, ks = extractor(ctx, h, row)
-			if ks != .Ok {
-				release(h, row)
-				release(h, key)
-				return {}, ks
-			}
-		} else {
-			key = retain(row)
-		}
+		defer release(h, row)
+		key, has_key := extract_join_key(h, extractor, ctx, row) or_return
+		defer release(h, key)
 		if has_key && key.kind != .Absent {
-			if as := hash_index_add(&idx, key, row); as != .Ok {
-				release(h, row)
-				release(h, key)
-				return {}, as
-			}
+			hash_index_add(&idx, key, row) or_return
 		}
-		release(h, row)
-		release(h, key)
 	}
-	if ss := hash_index_seal(&idx); ss != .Ok {
-		return {}, ss
-	}
-	ok = true
+	hash_index_seal(&idx) or_return
 	return idx, .Ok
 }
 
 // Convenience wrapper building a `Hash_Index` keyed by object member `key_field` on each row.
 @(require_results)
-hash_index_build_field :: proc(h: ^Heap, collection: Value, key_field: string) -> (idx: Hash_Index, status: Status) {
+hash_index_build_field :: proc(h: ^Heap, collection: Value, key_field: string) -> (Hash_Index, Status) {
 	ctx := Field_Key_Ctx{field = key_field}
 	return hash_index_build(h, collection, field_key_extractor, &ctx)
 }
 
-// Looks up all right rows matching `key` in O(1) amortized time without allocating.
-// Returned values are borrowed from `idx`; retain any values kept past `hash_index_destroy`.
-@(require_results)
-hash_index_lookup :: proc(idx: ^Hash_Index, key: Value) -> (matches: []Value, status: Status) {
+@(private = "file")
+lookup_group :: proc(idx: ^Hash_Index, key: Value, need_seal: bool) -> (gi: int, found: bool, status: Status) {
 	if idx == nil || idx.h == nil || len(idx.groups) == 0 {
-		return nil, .Ok
+		return 0, false, .Ok
 	}
-	matchable, ms := join_key_matchable(idx.h, key)
-	if ms != .Ok {
-		return nil, ms
+	if !(join_key_matchable(idx.h, key) or_return) {
+		return 0, false, .Ok
 	}
-	if !matchable {
-		return nil, .Ok
-	}
-	if !idx.sealed {
+	if need_seal && !idx.sealed {
 		hash_index_seal(idx) or_return
 	}
-	gi, found, gs := find_group(idx, key)
-	if gs != .Ok || !found {
-		return nil, gs
+	return find_group(idx, key)
+}
+
+// Looks up all right rows matching `key` in O(1) amortized time without allocating.
+@(require_results)
+hash_index_lookup :: proc(idx: ^Hash_Index, key: Value) -> (matches: []Value, status: Status) {
+	gi, found := lookup_group(idx, key, true) or_return
+	if !found {
+		return nil, .Ok
 	}
 	g := idx.groups[gi]
 	return idx.packed[g.lo:g.lo + g.count], .Ok
@@ -297,75 +248,40 @@ hash_index_lookup :: proc(idx: ^Hash_Index, key: Value) -> (matches: []Value, st
 // Reports whether at least one row in `idx` matches `key`.
 @(require_results)
 hash_index_has :: proc(idx: ^Hash_Index, key: Value) -> (found: bool, status: Status) {
-	if idx == nil || idx.h == nil || len(idx.groups) == 0 {
-		return false, .Ok
-	}
-	matchable, ms := join_key_matchable(idx.h, key)
-	if ms != .Ok {
-		return false, ms
-	}
-	if !matchable {
-		return false, .Ok
-	}
-	_, found, status = find_group(idx, key)
+	_, found, status = lookup_group(idx, key, false)
 	return
 }
 
 // Returns the number of rows matching `key`.
 @(require_results)
 hash_index_count :: proc(idx: ^Hash_Index, key: Value) -> (count: int, status: Status) {
-	if idx == nil || idx.h == nil || len(idx.groups) == 0 {
-		return 0, .Ok
-	}
-	matchable, ms := join_key_matchable(idx.h, key)
-	if ms != .Ok {
-		return 0, ms
-	}
-	if !matchable {
-		return 0, .Ok
-	}
-	gi, found, gs := find_group(idx, key)
-	if gs != .Ok || !found {
-		return 0, gs
-	}
-	return int(idx.groups[gi].count), .Ok
+	gi, found := lookup_group(idx, key, false) or_return
+	return (int(idx.groups[gi].count) if found else 0), .Ok
 }
 
 // Combines a matched `(left, right)` pair (or `(left, NULL)` when `!has_right` under left outer join)
 // according to `combine`.
 @(require_results)
 join_combine_rows :: proc(h: ^Heap, left, right: Value, has_right: bool, combine: Join_Combine) -> (res: Value, status: Status) {
-	switch combine {
-	case .Pair:
+	if combine == .Pair {
 		arr := make_array(h, 2) or_return
-		if s := append_owned(h, &arr, retain(left)); s != .Ok {
+		defer if status != .Ok {
 			release(h, arr)
-			return NULL, s
 		}
-		rval := retain(right) if has_right else NULL
-		if s := append_owned(h, &arr, rval); s != .Ok {
-			release(h, arr)
-			return NULL, s
-		}
+		append_owned(h, &arr, retain(left)) or_return
+		append_owned(h, &arr, retain(right) if has_right else NULL) or_return
 		return arr, .Ok
-	case .Merge_Right:
-		if !has_right {
-			return retain(left), .Ok
-		}
-		if type_of(left) != .Object || type_of(right) != .Object {
-			return join_combine_rows(h, left, right, true, .Pair)
-		}
-		return object_merge(h, left, right, deep = false)
-	case .Merge_Left:
-		if !has_right {
-			return retain(left), .Ok
-		}
-		if type_of(left) != .Object || type_of(right) != .Object {
-			return join_combine_rows(h, left, right, true, .Pair)
-		}
-		return object_merge(h, right, left, deep = false)
 	}
-	return NULL, .Error
+	if !has_right {
+		return retain(left), .Ok
+	}
+	if type_of(left) != .Object || type_of(right) != .Object {
+		return join_combine_rows(h, left, right, true, .Pair)
+	}
+	if combine == .Merge_Right {
+		return object_merge(h, left, right, deep = false)
+	}
+	return object_merge(h, right, left, deep = false)
 }
 
 // Performs an O(N + M) hash join between `left` and `right` collections using key extractors `left_key`
@@ -378,15 +294,11 @@ hash_join :: proc(
 	ctx: rawptr = nil,
 	kind := Join_Kind.Inner,
 	combine := Join_Combine.Pair,
-) -> (
-	res: Value,
-	status: Status,
-) {
+) -> (res: Value, status: Status) {
 	if h == nil {
 		return NULL, .Error
 	}
-	lt := type_of(left)
-	if lt != .Array && lt != .Object {
+	if lt := type_of(left); lt != .Array && lt != .Object {
 		return NULL, fail(h, .Types, .Iterate, left)
 	}
 	idx := hash_index_build(h, right, right_key, ctx) or_return
@@ -396,89 +308,39 @@ hash_join :: proc(
 	defer if status != .Ok {
 		release(h, out)
 	}
-
 	cur := cursor_open(h, left) or_return
 	defer cursor_close(&cur)
 	for {
-		k, lrow, more, ns := cursor_next(h, &cur)
+		k, lrow, more := cursor_next(h, &cur) or_return
 		release(h, k)
-		if ns != .Ok {
-			return NULL, ns
-		}
 		if !more {
 			break
 		}
-		lkey := ABSENT
-		has_key := true
-		if left_key != nil {
-			ks: Status
-			lkey, has_key, ks = left_key(ctx, h, lrow)
-			if ks != .Ok {
-				release(h, lrow)
-				release(h, lkey)
-				return NULL, ks
-			}
-		} else {
-			lkey = retain(lrow)
-		}
+		defer release(h, lrow)
+		lkey, has_key := extract_join_key(h, left_key, ctx, lrow) or_return
+		defer release(h, lkey)
 		matches: []Value
 		if has_key && lkey.kind != .Absent {
-			ls: Status
-			matches, ls = hash_index_lookup(&idx, lkey)
-			if ls != .Ok {
-				release(h, lrow)
-				release(h, lkey)
-				return NULL, ls
-			}
+			matches = hash_index_lookup(&idx, lkey) or_return
 		}
-		release(h, lkey)
-
 		switch kind {
-		case .Inner:
-			for rrow in matches {
-				joined, js := join_combine_rows(h, lrow, rrow, true, combine)
-				if js != .Ok {
-					release(h, lrow)
-					return NULL, js
-				}
-				if as := append_owned(h, &out, joined); as != .Ok {
-					release(h, lrow)
-					return NULL, as
-				}
-			}
-		case .Left:
+		case .Inner, .Left:
 			if len(matches) == 0 {
-				joined, js := join_combine_rows(h, lrow, ABSENT, false, combine)
-				if js != .Ok {
-					release(h, lrow)
-					return NULL, js
-				}
-				if as := append_owned(h, &out, joined); as != .Ok {
-					release(h, lrow)
-					return NULL, as
+				if kind == .Left {
+					joined := join_combine_rows(h, lrow, ABSENT, false, combine) or_return
+					append_owned(h, &out, joined) or_return
 				}
 			} else {
 				for rrow in matches {
-					joined, js := join_combine_rows(h, lrow, rrow, true, combine)
-					if js != .Ok {
-						release(h, lrow)
-						return NULL, js
-					}
-					if as := append_owned(h, &out, joined); as != .Ok {
-						release(h, lrow)
-						return NULL, as
-					}
+					joined := join_combine_rows(h, lrow, rrow, true, combine) or_return
+					append_owned(h, &out, joined) or_return
 				}
 			}
 		case .Semi:
 			if len(matches) > 0 {
-				if as := append_owned(h, &out, retain(lrow)); as != .Ok {
-					release(h, lrow)
-					return NULL, as
-				}
+				append_owned(h, &out, retain(lrow)) or_return
 			}
 		}
-		release(h, lrow)
 	}
 	return out, .Ok
 }
@@ -491,10 +353,7 @@ hash_join_fields :: proc(
 	left_field, right_field: string,
 	kind := Join_Kind.Inner,
 	combine := Join_Combine.Merge_Left,
-) -> (
-	res: Value,
-	status: Status,
-) {
+) -> (Value, Status) {
 	Pair_Ctx :: struct {
 		left_field, right_field: string,
 	}
@@ -517,158 +376,71 @@ index_by :: proc(
 	extractor: Key_Extractor,
 	ctx: rawptr = nil,
 	group_dups := false,
-) -> (
-	Value,
-	Status,
-) {
+) -> (res: Value, status: Status) {
 	if h == nil {
 		return NULL, .Error
 	}
-	ct := type_of(collection)
-	if ct != .Array && ct != .Object {
+	if ct := type_of(collection); ct != .Array && ct != .Object {
 		return NULL, fail(h, .Types, .Iterate, collection)
 	}
-	n := length_of(h, collection)
-	if !group_dups {
-		obj, obj_status := make_object(h, n)
-		if obj_status != .Ok {
-			return NULL, obj_status
-		}
-		ok := false
-		defer if !ok {
-			release(h, obj)
-		}
-		cur, cur_status := cursor_open(h, collection)
-		if cur_status != .Ok {
-			return NULL, cur_status
-		}
-		defer cursor_close(&cur)
-		for {
-			k, row, more, ns := cursor_next(h, &cur)
-			release(h, k)
-			if ns != .Ok {
-				return NULL, ns
-			}
-			if !more {
-				break
-			}
-			key := ABSENT
-			has_key := true
-			if extractor != nil {
-				ks: Status
-				key, has_key, ks = extractor(ctx, h, row)
-				if ks != .Ok {
-					release(h, row)
-					release(h, key)
-					return NULL, ks
-				}
-			} else {
-				key = retain(row)
-			}
-			matchable, ms := join_key_matchable(h, key)
-			if ms != .Ok {
-				release(h, row)
-				release(h, key)
-				return NULL, ms
-			}
-			if !has_key || !matchable {
-				release(h, row)
-				release(h, key)
-				continue
-			}
-			kstr, kstatus := canonical_index_key(h, key)
-			release(h, key)
-			if kstatus != .Ok {
-				release(h, row)
-				return NULL, kstatus
-			}
-			if kstr.kind == .Absent {
-				release(h, row)
-				continue
-			}
-			if os := object_put(h, &obj, kstr, row); os != .Ok {
-				return NULL, os
-			}
-		}
-		ok = true
-		return obj, .Ok
-	}
-
 	Group_Bucket :: struct {
-		key: Value,
-		arr: Value,
+		key, arr: Value,
 	}
 	alloc := heap_allocator(h)
-	idx_obj, idx_status := make_object(h, n)
-	if idx_status != .Ok {
-		return NULL, idx_status
-	}
+	n := length_of(h, collection)
+	obj := make_object(h, n) or_return
 	buckets: [dynamic]Group_Bucket
 	buckets.allocator = alloc
-	if n > 0 {
-		if reserve(&buckets, min(n, 64)) != nil {
-			release(h, idx_obj)
-			return NULL, fail_memory(h)
-		}
-	}
 	defer {
-		release(h, idx_obj)
+		if status != .Ok || group_dups {
+			release(h, obj)
+		}
 		for &bk in buckets {
 			release(h, bk.key)
 			release(h, bk.arr)
 		}
 		delete(buckets)
 	}
-
-	cur, cur_status := cursor_open(h, collection)
-	if cur_status != .Ok {
-		return NULL, cur_status
+	if group_dups && n > 0 && reserve(&buckets, min(n, 64)) != nil {
+		return NULL, fail_memory(h)
 	}
+	cur := cursor_open(h, collection) or_return
 	defer cursor_close(&cur)
 	for {
-		k, row, more, ns := cursor_next(h, &cur)
+		k, row, more := cursor_next(h, &cur) or_return
 		release(h, k)
-		if ns != .Ok {
-			return NULL, ns
-		}
 		if !more {
 			break
 		}
-		key := ABSENT
-		has_key := true
-		if extractor != nil {
-			ks: Status
-			key, has_key, ks = extractor(ctx, h, row)
-			if ks != .Ok {
-				release(h, row)
-				release(h, key)
-				return NULL, ks
-			}
-		} else {
-			key = retain(row)
+		key, has_key, ks := extract_join_key(h, extractor, ctx, row)
+		if ks != .Ok {
+			release(h, row)
+			release(h, key)
+			return NULL, ks
 		}
 		matchable, ms := join_key_matchable(h, key)
-		if ms != .Ok {
+		if ms != .Ok || !has_key || !matchable {
 			release(h, row)
 			release(h, key)
-			return NULL, ms
-		}
-		if !has_key || !matchable {
-			release(h, row)
-			release(h, key)
+			if ms != .Ok {
+				return NULL, ms
+			}
 			continue
 		}
 		kstr, kstatus := canonical_index_key(h, key)
 		release(h, key)
-		if kstatus != .Ok {
+		if kstatus != .Ok || kstr.kind == .Absent {
 			release(h, row)
-			return NULL, kstatus
-		}
-		if kstr.kind == .Absent {
-			release(h, row)
+			if kstatus != .Ok {
+				return NULL, kstatus
+			}
 			continue
 		}
-		existing, es := member(h, idx_obj, text_of(kstr))
+		if !group_dups {
+			object_put(h, &obj, kstr, row) or_return
+			continue
+		}
+		existing, es := member(h, obj, text_of(kstr))
 		if es != .Ok {
 			release(h, kstr)
 			release(h, row)
@@ -692,44 +464,32 @@ index_by :: proc(
 				release(h, kstr)
 				return NULL, fail_memory(h)
 			}
-			if os := object_put(h, &idx_obj, retain(kstr), int_value(gi)); os != .Ok {
-				return NULL, os
-			}
+			object_put(h, &obj, retain(kstr), int_value(gi)) or_return
 		} else {
-			gi := int(existing.i)
 			release(h, kstr)
-			// `buckets[gi].arr` stays at refcount 1 so `append_owned` grows geometrically in O(1) amortized.
-			if as := append_owned(h, &buckets[gi].arr, row); as != .Ok {
-				return NULL, as
-			}
+			append_owned(h, &buckets[int(existing.i)].arr, row) or_return
 		}
 	}
-
-	release(h, idx_obj)
-	idx_obj = ABSENT
-
-	out, out_status := make_object(h, len(buckets))
-	if out_status != .Ok {
-		return NULL, out_status
+	if !group_dups {
+		return obj, .Ok
 	}
-	ok := false
-	defer if !ok {
+	release(h, obj)
+	obj = ABSENT
+	out := make_object(h, len(buckets)) or_return
+	defer if status != .Ok {
 		release(h, out)
 	}
 	for &bk in buckets {
 		bk_key, bk_arr := bk.key, bk.arr
 		bk = {}
-		if put_status := object_put(h, &out, bk_key, bk_arr); put_status != .Ok {
-			return NULL, put_status
-		}
+		object_put(h, &out, bk_key, bk_arr) or_return
 	}
-	ok = true
 	return out, .Ok
 }
 
 // Convenience lookup-object builder keyed by object member `key_field`.
 @(require_results)
-index_by_field :: proc(h: ^Heap, collection: Value, key_field: string, group_dups := false) -> (res: Value, status: Status) {
+index_by_field :: proc(h: ^Heap, collection: Value, key_field: string, group_dups := false) -> (Value, Status) {
 	ctx := Field_Key_Ctx{field = key_field}
 	return index_by(h, collection, field_key_extractor, &ctx, group_dups)
 }
@@ -766,8 +526,7 @@ canonical_index_key :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) 
 		}
 		if iv, is_int := as_i64(num); is_int {
 			buf: [32]u8
-			s := fmt.bprintf(buf[:], "%d", iv)
-			return text_value(h, s)
+			return text_value(h, fmt.bprintf(buf[:], "%d", iv))
 		}
 		return format_json_owned(h, num)
 	case .Array, .Object:
@@ -789,80 +548,50 @@ field_key_extractor :: proc(ctx: rawptr, h: ^Heap, row: Value) -> (Value, bool, 
 }
 
 @(private = "file")
-extract_object_field :: proc(h: ^Heap, row: Value, field: string) -> (Value, bool, Status) {
+extract_object_field :: proc(h: ^Heap, row: Value, field: string) -> (res: Value, ok: bool, status: Status) {
 	if type_of(row) != .Object {
 		return ABSENT, false, .Ok
 	}
-	v, s := member(h, row, field)
-	if s != .Ok {
-		return ABSENT, false, s
-	}
-	if v.kind == .Absent {
-		return ABSENT, false, .Ok
-	}
-	return v, true, .Ok
+	v := member(h, row, field) or_return
+	return v, v.kind != .Absent, .Ok
 }
 
 @(private = "file")
-format_json_owned :: proc(h: ^Heap, v: Value) -> (Value, Status) {
-	alloc := heap_allocator(h)
-	buf := make([dynamic]u8, 0, 32, alloc)
+extract_join_key :: proc(h: ^Heap, extractor: Key_Extractor, ctx: rawptr, row: Value) -> (Value, bool, Status) {
+	if extractor != nil {
+		return extractor(ctx, h, row)
+	}
+	return retain(row), true, .Ok
+}
+
+@(private = "file")
+format_json_owned :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
+	buf := make([dynamic]u8, 0, 32, heap_allocator(h))
 	if buf == nil {
 		return ABSENT, fail_memory(h)
 	}
 	defer delete(buf)
-	if ws := write_json(h, &buf, v, {sort_keys = true}); ws != .Ok {
-		return ABSENT, ws
-	}
+	write_json(h, &buf, v, {sort_keys = true}) or_return
 	return text_value(h, string(buf[:]))
 }
 
 @(private = "file")
-is_nan_scalar :: proc(h: ^Heap, v: Value) -> (bool, Status) {
-	if type_of(v) != .Number {
-		return false, .Ok
-	}
-	if v.kind == .Int || v.kind == .Big {
-		return false, .Ok
-	}
-	if v.kind == .Double {
-		return math.is_nan(v.f), .Ok
-	}
-	if h != nil {
-		num, ns := number_of(h, v)
-		if ns != .Ok {
-			return false, ns
-		}
-		defer release(h, num)
-		return num.kind == .Double && math.is_nan(num.f), .Ok
-	}
-	if v.kind == .Node {
-		d := (^Doc_Block)(v.p)
-		if n, ok := tape.node_number(&d.doc, tape.Node_Index(v.n)); ok {
-			if n.kind == .Float {
-				return math.is_nan(transmute(f64)n.bits), .Ok
-			}
-			if n.kind == .Wide {
-				if d.doc.format != nil && .Binary in d.doc.format.caps {
-					return false, .Error
-				}
-				return math.is_nan(spell.wide_double(node_bytes(v))), .Ok
-			}
-		}
-	}
-	if v.kind == .Overlay {
-		return math.is_nan(overlay_as_f64(v)), .Ok
-	}
-	return false, .Ok
-}
-
-@(private = "file")
-join_key_matchable :: proc(h: ^Heap, v: Value) -> (bool, Status) {
+join_key_matchable :: proc(h: ^Heap, v: Value) -> (ok: bool, status: Status) {
 	if v.kind == .Absent {
 		return false, .Ok
 	}
-	nan, st := is_nan_scalar(h, v)
-	return !nan, st
+	if type_of(v) != .Number || v.kind == .Int || v.kind == .Big {
+		return true, .Ok
+	}
+	if v.kind == .Double {
+		return !math.is_nan(v.f), .Ok
+	}
+	if h != nil {
+		num := number_of(h, v) or_return
+		defer release(h, num)
+		return !(num.kind == .Double && math.is_nan(num.f)), .Ok
+	}
+	return !math.is_nan(as_f64(v)), .Ok
 }
 
 @(private = "file")
@@ -899,88 +628,43 @@ find_group :: proc(idx: ^Hash_Index, key: Value) -> (gi: int, found: bool, statu
 			return 0, false, .Ok
 		}
 		cand := int(slot - 1)
-		if idx.groups[cand].hash == kh {
-			same := equal(h, idx.groups[cand].key, key) or_return
-			if same {
-				return cand, true, .Ok
-			}
+		if idx.groups[cand].hash == kh && (equal(h, idx.groups[cand].key, key) or_return) {
+			return cand, true, .Ok
 		}
 	}
 }
 
 @(private = "file")
-append_row_to_group :: proc(idx: ^Hash_Index, gi: int, row: Value) -> Status {
-	row_idx := i32(len(idx.rows))
+stage_row :: proc(idx: ^Hash_Index, row: Value) -> (row_idx: i32, status: Status) {
+	row_idx = i32(len(idx.rows))
 	if _, err := append(&idx.rows, ABSENT); err != nil {
-		return fail_memory(idx.h)
+		return 0, fail_memory(idx.h)
 	}
 	if _, err := append(&idx.next, i32(-1)); err != nil {
 		pop(&idx.rows)
-		return fail_memory(idx.h)
+		return 0, fail_memory(idx.h)
 	}
 	idx.rows[row_idx] = retain(row)
-	g := &idx.groups[gi]
-	idx.next[g.tail] = row_idx
-	g.tail = row_idx
-	g.count += 1
-	return .Ok
-}
-
-@(private = "file")
-insert_new_group :: proc(idx: ^Hash_Index, slot: int, key: Value, kh: u64, row: Value) -> Status {
-	row_idx := i32(len(idx.rows))
-	if _, err := append(&idx.rows, ABSENT); err != nil {
-		return fail_memory(idx.h)
-	}
-	if _, err := append(&idx.next, i32(-1)); err != nil {
-		pop(&idx.rows)
-		return fail_memory(idx.h)
-	}
-	g := Index_Group{
-		hash  = kh,
-		head  = row_idx,
-		tail  = row_idx,
-		count = 1,
-	}
-	if _, err := append(&idx.groups, g); err != nil {
-		pop(&idx.next)
-		pop(&idx.rows)
-		return fail_memory(idx.h)
-	}
-	idx.rows[row_idx] = retain(row)
-	idx.groups[len(idx.groups) - 1].key = retain(key)
-	idx.buckets[slot] = i32(len(idx.groups))
-	return .Ok
+	return row_idx, .Ok
 }
 
 @(private = "file")
 hash_index_unseal :: proc(idx: ^Hash_Index) -> Status {
 	h := idx.h
 	alloc := heap_allocator(h)
-	n := len(idx.packed)
-	if n > 0 {
+	if n := len(idx.packed); n > 0 {
 		if reserve(&idx.rows, n) != nil || reserve(&idx.next, n) != nil {
 			return fail_memory(h)
 		}
 		for &g in idx.groups {
 			first := i32(len(idx.rows))
 			for j in u32(0) ..< g.count {
-				cur := i32(len(idx.rows))
-				if _, err := append(&idx.rows, ABSENT); err != nil {
-					return fail_memory(h)
-				}
-				if _, err := append(&idx.next, i32(-1)); err != nil {
-					pop(&idx.rows)
-					return fail_memory(h)
-				}
-				idx.rows[cur] = retain(idx.packed[g.lo + j])
+				cur := stage_row(idx, idx.packed[g.lo + j]) or_return
 				if j > 0 {
 					idx.next[cur - 1] = cur
 				}
 			}
-			g.head = first
-			g.tail = first + i32(g.count) - 1
-			g.lo = 0
+			g.head, g.tail, g.lo = first, first + i32(g.count) - 1, 0
 		}
 		for r in idx.packed {
 			release(h, r)

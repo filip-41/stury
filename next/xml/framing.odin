@@ -210,35 +210,27 @@ misc_run :: proc "contextless" (w: ^Walk($H, $LAX), p, end: [^]u8) -> (q: [^]u8,
 @(private)
 instruction :: proc "contextless" (w: ^Walk($H, $LAX), q, end: [^]u8) -> (next: [^]u8, r: Run) #no_bounds_check {
 	t, nf := name_end(q[2:], end)
-	switch nf {
-	case .Truncated:
-		return q, Run{q = end, kind = .Truncated}
-	case .Not_Name:
-		return q, Run{q = q[2:], kind = .Bad_Char, detail = .Instruction}
-	case .Bad_Utf8:
-		return q, Run{q = t, kind = .Bad_Char, detail = .Invalid_Utf8}
-	case .None:
+	if f := name_dtd_fault(q[2:], t, end, nf, .Instruction); f.kind != .None {
+		return q, {q = f.at, kind = f.kind, detail = f.detail}
 	}
-	if intrinsics.ptr_sub(t, q[2:]) == 3 && q[2] | 0x20 == 'x' && q[3] | 0x20 == 'm' && q[4] | 0x20 == 'l' {
-		return q, Run{q = q[2:], kind = .Bad_Char, detail = .Reserved_Target}
+	n := intrinsics.ptr_sub(t, q[2:])
+	if n == 3 && q[2] | 0x20 == 'x' && q[3] | 0x20 == 'm' && q[4] | 0x20 == 'l' {
+		return q, {q = q[2:], kind = .Bad_Char, detail = .Reserved_Target}
 	}
-	if has_colon(q[2:], intrinsics.ptr_sub(t, q[2:])) {
-		return q, Run{q = q[2:], kind = .Bad_Char, detail = .Qualified_Name}
+	if has_colon(q[2:], n) {
+		return q, {q = q[2:], kind = .Bad_Char, detail = .Qualified_Name}
 	}
-	if t >= end {
-		return q, Run{q = end, kind = .Truncated}
+	if t >= end || t[0] == '?' && intrinsics.ptr_sub(end, t) < 2 {
+		return q, {q = end, kind = .Truncated}
 	}
 	if t[0] == '?' {
-		if intrinsics.ptr_sub(end, t) < 2 {
-			return q, Run{q = end, kind = .Truncated}
-		}
 		if t[1] != '>' {
-			return q, Run{q = t, kind = .Bad_Char, detail = .Instruction}
+			return q, {q = t, kind = .Bad_Char, detail = .Instruction}
 		}
 		return t[2:], {}
 	}
 	if !kernel.is_ws(t[0]) {
-		return q, Run{q = t, kind = .Bad_Char, detail = .Instruction}
+		return q, {q = t, kind = .Bad_Char, detail = .Instruction}
 	}
 	d := run(w, t, end, .Pi, 0)
 	if d.kind != .None {
@@ -393,14 +385,8 @@ doctype :: proc "contextless" (w: ^Walk($H, $LAX), src: []u8, q, end: [^]u8, sta
 		return q, p, .Bad_Char, .Doctype
 	}
 	n, nf := name_end(s, end)
-	switch nf {
-	case .Truncated:
-		return q, end, .Truncated, .None
-	case .Not_Name:
-		return q, s, .Bad_Char, .Doctype
-	case .Bad_Utf8:
-		return q, n, .Bad_Char, .Invalid_Utf8
-	case .None:
+	if f := name_dtd_fault(s, n, end, nf, .Doctype); f.kind != .None {
+		return q, f.at, f.kind, f.detail
 	}
 	p = kernel.skip_ws(n, end)
 	if p >= end {
@@ -408,34 +394,15 @@ doctype :: proc "contextless" (w: ^Walk($H, $LAX), src: []u8, q, end: [^]u8, sta
 	}
 	external := false
 	public: []u8
-	room := intrinsics.ptr_sub(end, p)
-	for word in ([]string{"SYSTEM", "PUBLIC"}) {
-		if room >= len(word) && string(p[:len(word)]) == word {
-			if p == n {
-				return q, p, .Bad_Char, .Doctype
-			}
-			external = true
-			is_public := word == "PUBLIC"
-			p = p[len(word):]
-			passes := 2 if is_public else 1
-			for pass in 0 ..< passes {
-				l := kernel.skip_ws(p, end)
-				if l >= end {
-					return q, end, .Truncated, .None
-				}
-				if l == p {
-					return q, p, .Bad_Char, .Doctype
-				}
-				e, k, bad_at := literal(l, end, is_public && pass == 0)
-				if k != .None {
-					return q, bad_at, k, .Doctype if k == .Bad_Char else .None
-				}
-				if is_public && pass == 0 {
-					public = l[1:][:intrinsics.ptr_sub(e, l) - 2]
-				}
-				p = e
-			}
-			break
+	if keyword(p, end, "SYSTEM") || keyword(p, end, "PUBLIC") {
+		if p == n {
+			return q, p, .Bad_Char, .Doctype
+		}
+		external = true
+		ef: Dtd_Fault
+		p, public, ef = external_id(p, end, .Doctype)
+		if ef.kind != .None {
+			return q, ef.at, ef.kind, ef.detail
 		}
 	}
 	p = kernel.skip_ws(p, end)
@@ -466,11 +433,7 @@ doctype :: proc "contextless" (w: ^Walk($H, $LAX), src: []u8, q, end: [^]u8, sta
 	}
 	if p[0] == '[' {
 		d.subset_lo = u64(intrinsics.ptr_sub(p[1:], raw_data(src)))
-		rw := Walk(hook.No_Hooks, false) {
-			base = w.base,
-			tier = w.tier,
-			dtd  = d,
-		}
+		rw := Walk(hook.No_Hooks, false){base = w.base, tier = w.tier, dtd = d}
 		close, f := declarations(d, &rw, p[1:], end, true, false, 0)
 		if f.kind != .None {
 			return q, f.at if f.at != nil else p, f.kind, f.detail
@@ -496,18 +459,17 @@ literal :: proc "contextless" (p, end: [^]u8, pubid: bool) -> (next: [^]u8, kind
 	if quote != '"' && quote != '\'' {
 		return p, .Bad_Char, p
 	}
-	q := p[1:]
-	for q < end {
+	for q := p[1:]; q < end; {
 		c := q[0]
 		if c == quote {
 			return q[1:], .None, nil
 		}
 		if c >= 0x80 {
-			r, k := spell.utf8_char(q, end)
+			r, k, _ := xml_utf8_step(q, end)
 			if k == .Truncated {
 				return end, .Truncated, end
 			}
-			if k != .None || pubid || c == 0xef && non_char(q, end) {
+			if k != .None || pubid {
 				return q, .Bad_Char, q
 			}
 			q = r
@@ -528,21 +490,13 @@ literal :: proc "contextless" (p, end: [^]u8, pubid: bool) -> (next: [^]u8, kind
 // Whether the first `n` bytes at `p` are the first `n` bytes of `word`, where `n` is at most `len(word)`.
 @(private)
 prefix_of :: #force_inline proc "contextless" (p: [^]u8, n: int, word: string) -> bool #no_bounds_check {
-	for i in 0 ..< n {
-		if p[i] != word[i] {
-			return false
-		}
-	}
-	return true
+	return string(p[:n]) == word[:n]
 }
 
 // Where the document of `src` read from `lo` starts: past a BOM at the text's first byte.
 @(private)
 text_start :: #force_inline proc "contextless" (src: []u8, lo: u64) -> u64 {
-	if lo == 0 && len(src) >= 3 && src[0] == 0xef && src[1] == 0xbb && src[2] == 0xbf {
-		return 3
-	}
-	return min(lo, u64(len(src)))
+	return u64(spell.bom_length(src)) if lo == 0 else min(lo, u64(len(src)))
 }
 
 // Whether the prolog of `src` may hold a document type declaration, which may declare entities: false only when a

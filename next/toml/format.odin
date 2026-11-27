@@ -90,6 +90,18 @@ STRING_STYLES := [Style]string {
 	.Multiline_Literal = "multiline_literal",
 }
 
+@(private)
+number_style_name :: proc "contextless" (ns: Number_Spelling) -> string {
+	#partial switch ns {
+	case .Hex:    return "hex"
+	case .Octal:  return "octal"
+	case .Binary: return "binary"
+	case .Inf:    return "inf"
+	case .Nan:    return "nan"
+	}
+	return ""
+}
+
 // The facts a TOML node spells. `.Tag` is a date-time's type: `datetime`, `datetime-local`, `date-local` or
 // `time-local`. `.Style` is how a value is written: a string's or key's quotes, `bare` for a key without them, a
 // number's `integer`, `float`, `hex`, `octal`, `binary`, `inf` or `nan`, and for a container below the root
@@ -113,32 +125,19 @@ spelled_fact :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index, ki
 				return "bare", true
 			}
 		case .Number:
-			switch Number_Spelling(n.spelling & tape.NUMBER_KIND) {
-			case .Plain, .Decimal:
-				form, _ := tape.number_form(doc, at)
-				return "float" if form.frac_digits > 0 || form.exponent else "integer", true
-			case .Hex:
-				return "hex", true
-			case .Octal:
-				return "octal", true
-			case .Binary:
-				return "binary", true
-			case .Inf:
-				return "inf", true
-			case .Nan:
-				return "nan", true
+			if s := number_style_name(Number_Spelling(n.spelling & tape.NUMBER_KIND)); len(s) > 0 {
+				return s, true
 			}
+			form, _ := tape.number_form(doc, at)
+			return "float" if form.frac_digits > 0 || form.exponent else "integer", true
 		case .Array, .Object:
 			if at == tape.ROOT {
 				return "", false
 			}
 			switch n.spelling & tape.CONTAINER_STYLE {
-			case STYLE_INLINE:
-				return "inline", true
-			case STYLE_DOTTED:
-				return "dotted", true
-			case STYLE_IMPLICIT:
-				return "implicit", true
+			case STYLE_INLINE:   return "inline", true
+			case STYLE_DOTTED:   return "dotted", true
+			case STYLE_IMPLICIT: return "implicit", true
 			}
 			return "header", true
 		}

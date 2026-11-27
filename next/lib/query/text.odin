@@ -43,6 +43,20 @@ text_of :: #force_inline proc "contextless" (v: Value) -> string {
 	return string(node_bytes(v))
 }
 
+// The raw UTF-8 bytes of `v` when it is a plain, undecoded string value (not an object key or escaped node).
+plain_text_of :: #force_inline proc "contextless" (v: Value) -> (string, bool) #no_bounds_check {
+	if v.kind == .String {
+		return string(v.s[:v.n]), true
+	}
+	if v.kind == .Node && v.p != nil {
+		t := node_token(v)
+		if (t.kind == .String || t.kind == .Plain) && t.role != .Key && (t.spelling & tape.SPELLING_DECODE) == 0 {
+			return string(node_bytes(v)), true
+		}
+	}
+	return "", false
+}
+
 // The token of node value `v`. Read where the node is in hand: the reader that gave it reached it.
 @(private)
 node_token :: #force_inline proc "contextless" (v: Value) -> tape.Node #no_bounds_check {

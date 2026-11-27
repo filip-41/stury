@@ -1,7 +1,6 @@
 package jq
 
 import "base:intrinsics"
-import "stury:lib/core/tape"
 import "stury:lib/query"
 
 // The evaluator: a push model on an explicit stack. A filter sends each output on, and the answer steers it: `.Go`
@@ -1082,23 +1081,7 @@ tally_container_length :: #force_inline proc(m: ^Machine, n: ^Node, t: query.Val
 	if tt != .Array && tt != .Object {
 		return 0, .Opt in n.flags
 	}
-	if t.kind == .Overlay {
-		return 0, false
-	}
-	if t.kind == .Node {
-		d := (^query.Doc_Block)(t.p)
-		if d.doc.format != nil && d.doc.format.dups == .Group {
-			return 0, false
-		}
-		if d.doc.nodes[t.n].spelling & tape.CONTAINER_PARTIAL != 0 {
-			return 0, false
-		}
-	}
-	cnt := query.length_of(m.h, t)
-	if m.h.tainted {
-		return 0, false
-	}
-	return cnt, true
+	return query.fast_container_length(m.h, t)
 }
 
 @(private = "file")

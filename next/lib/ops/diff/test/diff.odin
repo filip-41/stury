@@ -420,38 +420,23 @@ pointer_rfc6901_encoding_and_decoding :: proc(t: ^testing.T) {
 	}
 
 	// Error cases.
-	_, err_slash := diff.decode_pointer("no-leading-slash", alloc)
-	testing.expect_value(t, err_slash, diff.Pointer_Error.Missing_Slash)
-	_, err_bad := diff.decode_pointer("/a~2b", alloc)
-	testing.expect_value(t, err_bad, diff.Pointer_Error.Bad_Escape)
-	_, err_trail := diff.decode_pointer("/a~", alloc)
-	testing.expect_value(t, err_trail, diff.Pointer_Error.Bad_Escape)
-	_, err_slash_esc := diff.decode_pointer("/~/", alloc)
-	testing.expect_value(t, err_slash_esc, diff.Pointer_Error.Bad_Escape)
-	_, err_double := diff.decode_pointer("/a~~0", alloc)
-	testing.expect_value(t, err_double, diff.Pointer_Error.Bad_Escape)
+	for tc in ([?]struct { ptr: string, err: diff.Pointer_Error }{
+		{"no-leading-slash", .Missing_Slash}, {"/a~2b", .Bad_Escape}, {"/a~", .Bad_Escape},
+		{"/~/", .Bad_Escape}, {"/a~~0", .Bad_Escape},
+	}) {
+		_, perr := diff.decode_pointer(tc.ptr, alloc)
+		testing.expect_value(t, perr, tc.err)
+	}
 
 	// Strict RFC 6901 array index parsing.
-	idx, dash, ok := diff.parse_array_index("-")
-	testing.expect(t, ok && dash && idx == 0)
-	idx, dash, ok = diff.parse_array_index("0")
-	testing.expect(t, ok && !dash && idx == 0)
-	idx, dash, ok = diff.parse_array_index("42")
-	testing.expect(t, ok && !dash && idx == 42)
-	_, _, ok = diff.parse_array_index("01")
-	testing.expect(t, !ok)
-	_, _, ok = diff.parse_array_index("00")
-	testing.expect(t, !ok)
-	_, _, ok = diff.parse_array_index("-1")
-	testing.expect(t, !ok)
-	_, _, ok = diff.parse_array_index("+1")
-	testing.expect(t, !ok)
-	_, _, ok = diff.parse_array_index("1a")
-	testing.expect(t, !ok)
-	_, _, ok = diff.parse_array_index("9223372036854775808")
-	testing.expect(t, !ok)
-	_, _, ok = diff.parse_array_index("")
-	testing.expect(t, !ok)
+	for tc in ([?]struct { tok: string, idx: int, dash, ok: bool }{
+		{"-", 0, true, true}, {"0", 0, false, true}, {"42", 42, false, true},
+		{"01", 0, false, false}, {"00", 0, false, false}, {"-1", 0, false, false},
+		{"+1", 0, false, false}, {"1a", 0, false, false}, {"9223372036854775808", 0, false, false}, {"", 0, false, false},
+	}) {
+		idx, dash, ok := diff.parse_array_index(tc.tok)
+		testing.expectf(t, ok == tc.ok && (!ok || (idx == tc.idx && dash == tc.dash)), "parse_array_index(%q)", tc.tok)
+	}
 }
 
 @(test)
@@ -562,10 +547,15 @@ diff_cbor_wide_numbers :: proc(t: ^testing.T) {
 		return out[:]
 	}
 
-	// 1. 2^2000 vs 2^2000 + 1 (251-byte bignums): MUST compare unequal, identical MUST compare equal!
-	{
-		b1 := make_cbor_bignum(251, 0x00, alloc)
-		b2 := make_cbor_bignum(251, 0x01, alloc)
+	expect_doc_changes :: proc(t: ^testing.T, a, b: ^tape.Document, want: int, alloc: runtime.Allocator, loc := #caller_location) {
+		r, err := diff.diff_documents(a, b, {}, alloc)
+		defer diff.destroy_result(&r)
+		testing.expectf(t, err == nil && len(r.changes) == want, "got %d changes (%v), want %d", len(r.changes), err, want, loc = loc)
+	}
+
+	// 1. 2^2000 vs 2^2000 + 1 (251-byte) and >BIGNUM_BYTES_MAX (8200-byte) raw-bytes fallback.
+	for sz in ([?]int{251, 8200}) {
+		b1, b2 := make_cbor_bignum(sz, 0x00, alloc), make_cbor_bignum(sz, 0x01, alloc)
 		defer delete(b1, alloc)
 		defer delete(b2, alloc)
 		d1, e1 := cbor.build(b1, .Cbor, {}, alloc)
@@ -573,91 +563,28 @@ diff_cbor_wide_numbers :: proc(t: ^testing.T) {
 		defer tape.destroy_document(&d1)
 		defer tape.destroy_document(&d2)
 		testing.expect(t, e1 == nil && e2 == nil)
-
-		r_eq, _ := diff.diff_documents(&d1, &d1, {}, alloc)
-		defer diff.destroy_result(&r_eq)
-		testing.expect_value(t, len(r_eq.changes), 0)
-
-		r_ne, _ := diff.diff_documents(&d1, &d2, {}, alloc)
-		defer diff.destroy_result(&r_ne)
-		testing.expect_value(t, len(r_ne.changes), 1)
+		expect_doc_changes(t, &d1, &d1, 0, alloc)
+		expect_doc_changes(t, &d1, &d2, 1, alloc)
 	}
 
-	// 2. CBOR 10^20 + 1 vs JSON 100000000000000000001: cross-format exact equality!
-	{
-		// 10^20 + 1 = 0x05_6BC7_5E2D_6310_0001 (9 bytes).
-		cbytes := []u8{0xC2, 0x49, 0x05, 0x6B, 0xC7, 0x5E, 0x2D, 0x63, 0x10, 0x00, 0x01}
-		cdoc, ce := cbor.build(cbytes, .Cbor, {}, alloc)
-		jdoc, je := json.build(transmute([]u8)string(`100000000000000000001`), .Json, {}, alloc)
-		jdoc2, je2 := json.build(transmute([]u8)string(`100000000000000000002`), .Json, {}, alloc)
-		defer tape.destroy_document(&cdoc)
-		defer tape.destroy_document(&jdoc)
-		defer tape.destroy_document(&jdoc2)
-		testing.expect(t, ce == nil && je == nil && je2 == nil)
-
-		r_eq, _ := diff.diff_documents(&cdoc, &jdoc, {}, alloc)
-		defer diff.destroy_result(&r_eq)
-		testing.expect_value(t, len(r_eq.changes), 0)
-
-		r_ne, _ := diff.diff_documents(&cdoc, &jdoc2, {}, alloc)
-		defer diff.destroy_result(&r_ne)
-		testing.expect_value(t, len(r_ne.changes), 1)
-	}
-
-	// 3. CBOR Decimal(-30, 1) (tag 4, [-30, 1]) vs JSON 1e-30 (equal) and 2e-30 (unequal).
-	{
-		// Tag 4 (0xC4), array(2) (0x82), negative int -30 = -1 - 29 (0x38, 0x1D), uint 1 (0x01).
-		dbytes := []u8{0xC4, 0x82, 0x38, 0x1D, 0x01}
-		cdoc, ce := cbor.build(dbytes, .Cbor, {}, alloc)
-		j1, je1 := json.build(transmute([]u8)string(`1e-30`), .Json, {}, alloc)
-		j2, je2 := json.build(transmute([]u8)string(`2e-30`), .Json, {}, alloc)
+	// 2. CBOR 10^20+1 vs JSON, 3. CBOR Decimal(-30,1) vs JSON, 4. CBOR -2^64 vs JSON.
+	for tc in ([?]struct { cbor_bytes: []u8, eq_json, ne_json: string }{
+		{{0xC2, 0x49, 0x05, 0x6B, 0xC7, 0x5E, 0x2D, 0x63, 0x10, 0x00, 0x01}, `100000000000000000001`, `100000000000000000002`},
+		{{0xC4, 0x82, 0x38, 0x1D, 0x01}, `1e-30`, `2e-30`},
+		{{0x3B, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, `-18446744073709551616`, ""},
+	}) {
+		cdoc, ce := cbor.build(tc.cbor_bytes, .Cbor, {}, alloc)
+		j1, je1 := json.build(transmute([]u8)tc.eq_json, .Json, {}, alloc)
 		defer tape.destroy_document(&cdoc)
 		defer tape.destroy_document(&j1)
-		defer tape.destroy_document(&j2)
-		testing.expect(t, ce == nil && je1 == nil && je2 == nil)
-
-		r_eq, _ := diff.diff_documents(&cdoc, &j1, {}, alloc)
-		defer diff.destroy_result(&r_eq)
-		testing.expect_value(t, len(r_eq.changes), 0)
-
-		r_ne, _ := diff.diff_documents(&cdoc, &j2, {}, alloc)
-		defer diff.destroy_result(&r_ne)
-		testing.expect_value(t, len(r_ne.changes), 1)
-	}
-
-	// 4. CBOR -2^64 (major 1, arg = max(u64), `.Float` with `form.kind == 0`) vs JSON -18446744073709551616.
-	{
-		cneg := []u8{0x3B, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
-		cdoc, ce := cbor.build(cneg, .Cbor, {}, alloc)
-		jdoc, je := json.build(transmute([]u8)string(`-18446744073709551616`), .Json, {}, alloc)
-		defer tape.destroy_document(&cdoc)
-		defer tape.destroy_document(&jdoc)
-		testing.expect(t, ce == nil && je == nil)
-
-		r, _ := diff.diff_documents(&cdoc, &jdoc, {}, alloc)
-		defer diff.destroy_result(&r)
-		testing.expect_value(t, len(r.changes), 0)
-	}
-
-	// 5. Huge CBOR bignums past `BIGNUM_BYTES_MAX` (8200 bytes): raw-bytes fallback keeps distinct bignums unequal.
-	{
-		h1 := make_cbor_bignum(8200, 0x00, alloc)
-		h2 := make_cbor_bignum(8200, 0x01, alloc)
-		defer delete(h1, alloc)
-		defer delete(h2, alloc)
-		d1, e1 := cbor.build(h1, .Cbor, {}, alloc)
-		d2, e2 := cbor.build(h2, .Cbor, {}, alloc)
-		defer tape.destroy_document(&d1)
-		defer tape.destroy_document(&d2)
-		testing.expect(t, e1 == nil && e2 == nil)
-
-		r_eq, _ := diff.diff_documents(&d1, &d1, {}, alloc)
-		defer diff.destroy_result(&r_eq)
-		testing.expect_value(t, len(r_eq.changes), 0)
-
-		r_ne, _ := diff.diff_documents(&d1, &d2, {}, alloc)
-		defer diff.destroy_result(&r_ne)
-		testing.expect_value(t, len(r_ne.changes), 1)
+		testing.expect(t, ce == nil && je1 == nil)
+		expect_doc_changes(t, &cdoc, &j1, 0, alloc)
+		if tc.ne_json != "" {
+			j2, je2 := json.build(transmute([]u8)tc.ne_json, .Json, {}, alloc)
+			defer tape.destroy_document(&j2)
+			testing.expect_value(t, je2, nil)
+			expect_doc_changes(t, &cdoc, &j2, 1, alloc)
+		}
 	}
 }
 
@@ -820,40 +747,20 @@ diff_key_rules_and_exact_max_changes :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	alloc := runtime.heap_allocator()
 
-	// Identical docs with nested `--key` must NOT report `unused_keys`.
-	{
-		a, _ := build_json(t, `{"rows":[{"id":1,"v":"a"},{"id":2,"v":"b"}]}`)
-		b, _ := build_json(t, `{"rows":[{"id":1,"v":"a"},{"id":2,"v":"b"}]}`)
+	// Identical docs with nested `--key`, moved element with nested `--key`, and genuinely missing key path.
+	for tc in ([?]struct { a, b: string, rule: diff.Key_Rule, want_unused: int }{
+		{`{"rows":[{"id":1,"v":"a"},{"id":2,"v":"b"}]}`, `{"rows":[{"id":1,"v":"a"},{"id":2,"v":"b"}]}`, {at = {tape.Name("rows")}, member = "id"}, 0},
+		{`[{"rows":[{"id":1}]},{"x":2}]`, `[{"x":2},{"rows":[{"id":1}]}]`, {at = {tape.All{}, tape.Name("rows")}, member = "id"}, 0},
+		{`{"other":[1,2]}`, `{"other":[1,2]}`, {at = {tape.Name("rows")}, member = "id"}, 1},
+	}) {
+		a, _ := build_json(t, tc.a)
+		b, _ := build_json(t, tc.b)
 		defer tape.destroy_document(&a)
 		defer tape.destroy_document(&b)
-		rules := []diff.Key_Rule{{at = {tape.Name("rows")}, member = "id"}}
-		r, err := diff.diff_documents(&a, &b, {keys = rules}, alloc)
+		rules := [1]diff.Key_Rule{tc.rule}
+		r, err := diff.diff_documents(&a, &b, {keys = rules[:]}, alloc)
 		defer diff.destroy_result(&r)
-		testing.expect(t, err == nil && len(r.changes) == 0 && len(r.unused_keys) == 0)
-	}
-
-	// Unchanged moved element containing nested keyed array must NOT report `unused_keys`.
-	{
-		a, _ := build_json(t, `[{"rows":[{"id":1}]},{"x":2}]`)
-		b, _ := build_json(t, `[{"x":2},{"rows":[{"id":1}]}]`)
-		defer tape.destroy_document(&a)
-		defer tape.destroy_document(&b)
-		rules := []diff.Key_Rule{{at = {tape.All{}, tape.Name("rows")}, member = "id"}}
-		r, err := diff.diff_documents(&a, &b, {keys = rules}, alloc)
-		defer diff.destroy_result(&r)
-		testing.expect(t, err == nil && len(r.unused_keys) == 0)
-	}
-
-	// Genuinely missing key path still reports `unused_keys`.
-	{
-		a, _ := build_json(t, `{"other":[1,2]}`)
-		b, _ := build_json(t, `{"other":[1,2]}`)
-		defer tape.destroy_document(&a)
-		defer tape.destroy_document(&b)
-		rules := []diff.Key_Rule{{at = {tape.Name("rows")}, member = "id"}}
-		r, err := diff.diff_documents(&a, &b, {keys = rules}, alloc)
-		defer diff.destroy_result(&r)
-		testing.expect(t, err == nil && len(r.unused_keys) == 1 && r.unused_keys[0] == 0)
+		testing.expect(t, err == nil && len(r.unused_keys) == tc.want_unused && (tc.want_unused == 0 || r.unused_keys[0] == 0))
 	}
 
 	// Exact `max_changes = 1` with trailing equal siblings must NOT set `truncated = true`.
@@ -862,14 +769,11 @@ diff_key_rules_and_exact_max_changes :: proc(t: ^testing.T) {
 		b, _ := build_json(t, `{"a":9,"b":2,"c":3}`)
 		defer tape.destroy_document(&a)
 		defer tape.destroy_document(&b)
-
 		r, err := diff.diff_documents(&a, &b, {max_changes = 1}, alloc)
-		defer diff.destroy_result(&r)
-		testing.expect(t, err == nil && !r.truncated && len(r.changes) == 1)
-
 		p, perr := diff.diff_to_patch(&a, &b, {max_changes = 1}, alloc)
+		defer diff.destroy_result(&r)
 		defer diff.destroy_patch(&p)
-		testing.expect(t, perr == nil && !p.truncated && len(p.ops) == 1)
+		testing.expect(t, err == nil && !r.truncated && len(r.changes) == 1 && perr == nil && !p.truncated && len(p.ops) == 1)
 	}
 
 	// `diff_to_patch` continues sibling diffs after a `max_edits` array fallback when `max_changes == 0`.
@@ -889,42 +793,21 @@ diff_sequence_boundaries_and_too_deep_matched :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	alloc := runtime.heap_allocator()
 
-	// Exact `max_edits` boundary (D == max_edits passes, D == max_edits + 1 truncates).
-	{
-		// Even delta: [1,2] -> [3,4] has edit distance 4.
-		a, _ := build_json(t, `[1,2]`)
-		b, _ := build_json(t, `[3,4]`)
+	// Exact `max_edits` boundaries (even delta, odd delta, and `max(int)` overflow guard).
+	for tc in ([?]struct { a, b: string, max_edits: int, want_trunc: bool, want_changes: int }{
+		{`[1,2]`, `[3,4]`, 4, false, 2},
+		{`[1,2]`, `[3,4]`, 3, true, 1},
+		{`[1,2]`, `[3,4,5]`, 5, false, -1},
+		{`[1,2]`, `[3,4,5]`, 4, true, -1},
+		{`[1,2,3]`, `[1,4,3]`, max(int), false, 1},
+	}) {
+		a, _ := build_json(t, tc.a)
+		b, _ := build_json(t, tc.b)
 		defer tape.destroy_document(&a)
 		defer tape.destroy_document(&b)
-		r_ok, _ := diff.diff_documents(&a, &b, {max_edits = 4}, alloc)
-		defer diff.destroy_result(&r_ok)
-		testing.expect(t, !r_ok.truncated && len(r_ok.changes) == 2)
-		r_tr, _ := diff.diff_documents(&a, &b, {max_edits = 3}, alloc)
-		defer diff.destroy_result(&r_tr)
-		testing.expect(t, r_tr.truncated && len(r_tr.changes) == 1)
-	}
-	{
-		// Odd delta: [1,2] -> [3,4,5] has edit distance 5.
-		a, _ := build_json(t, `[1,2]`)
-		b, _ := build_json(t, `[3,4,5]`)
-		defer tape.destroy_document(&a)
-		defer tape.destroy_document(&b)
-		r_ok, _ := diff.diff_documents(&a, &b, {max_edits = 5}, alloc)
-		defer diff.destroy_result(&r_ok)
-		testing.expect(t, !r_ok.truncated)
-		r_tr, _ := diff.diff_documents(&a, &b, {max_edits = 4}, alloc)
-		defer diff.destroy_result(&r_tr)
-		testing.expect(t, r_tr.truncated)
-	}
-	{
-		// `max_edits = max(int)` must not overflow.
-		a, _ := build_json(t, `[1,2,3]`)
-		b, _ := build_json(t, `[1,4,3]`)
-		defer tape.destroy_document(&a)
-		defer tape.destroy_document(&b)
-		r, err := diff.diff_documents(&a, &b, {max_edits = max(int)}, alloc)
+		r, err := diff.diff_documents(&a, &b, {max_edits = tc.max_edits}, alloc)
 		defer diff.destroy_result(&r)
-		testing.expect(t, err == nil && !r.truncated && len(r.changes) == 1)
+		testing.expect(t, err == nil && r.truncated == tc.want_trunc && (tc.want_changes < 0 || len(r.changes) == tc.want_changes))
 	}
 
 	// `too_deep` in keyed and set arrays exits cleanly with `too_deep = true`.
@@ -935,12 +818,10 @@ diff_sequence_boundaries_and_too_deep_matched :: proc(t: ^testing.T) {
 		defer tape.destroy_document(&b)
 		rules := []diff.Key_Rule{{member = "id"}}
 		r1, e1 := diff.diff_documents(&a, &b, {keys = rules, max_depth = 2}, alloc)
-		defer diff.destroy_result(&r1)
-		testing.expect(t, e1 == nil && r1.too_deep)
-
 		r2, e2 := diff.diff_documents(&a, &b, {arrays = .Set, max_depth = 2}, alloc)
+		defer diff.destroy_result(&r1)
 		defer diff.destroy_result(&r2)
-		testing.expect(t, e2 == nil && r2.too_deep)
+		testing.expect(t, e1 == nil && r1.too_deep && e2 == nil && r2.too_deep)
 	}
 }
 

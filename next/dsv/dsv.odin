@@ -21,13 +21,15 @@ Spec :: enum u8 {
 // `validate`, `build`, `unmarshal`, and records; reads in `pieces` run on the calling thread. Under `Budget.memory` a
 // build with no runner is made on one thread, and a build with a runner counts the blocks of its parts.
 Options :: tape.Options
-Dsv_Options :: tape.Dsv_Options
+
+// Capabilities advertised by every delimited format handle.
+CAPS :: tape.Caps{.Rewalk, .Names_Ahead}
 
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Csv   = {name = "csv", id = FIRST_ID + tape.Format_Id(Spec.Csv), facts = FACTS, caps = {.Rewalk, .Names_Ahead}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_csv, number = number_value, same_text = same_csv, key_hash = hash_csv, room = decode_room, close_end = close_csv},
-	.Tsv   = {name = "tsv", id = FIRST_ID + tape.Format_Id(Spec.Tsv), facts = FACTS, caps = {.Rewalk, .Names_Ahead}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_tsv, number = number_value, same_text = same_tsv, key_hash = hash_tsv, room = decode_room, close_end = close_tsv},
-	.Plain = {name = "plain", id = FIRST_ID + tape.Format_Id(Spec.Plain), facts = FACTS, caps = {.Rewalk, .Names_Ahead}, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_plain, number = number_value, same_text = same_plain, key_hash = hash_plain, room = decode_room, close_end = close_plain},
+	.Csv   = {name = "csv", id = FIRST_ID + tape.Format_Id(Spec.Csv), facts = FACTS, caps = CAPS, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_csv, number = number_value, same_text = same_csv, key_hash = hash_csv, room = decode_room, close_end = close_csv},
+	.Tsv   = {name = "tsv", id = FIRST_ID + tape.Format_Id(Spec.Tsv), facts = FACTS, caps = CAPS, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_tsv, number = number_value, same_text = same_tsv, key_hash = hash_tsv, room = decode_room, close_end = close_tsv},
+	.Plain = {name = "plain", id = FIRST_ID + tape.Format_Id(Spec.Plain), facts = FACTS, caps = CAPS, options = .Dsv, dups = .Last, bounds = quotes, decode = decode_plain, number = number_value, same_text = same_plain, key_hash = hash_plain, room = decode_room, close_end = close_plain},
 }
 
 // A comment line is a fact of the record after it, or of the root as its foot when it follows the last record.
@@ -46,12 +48,9 @@ as :: proc "contextless" (spec: Spec) -> ^tape.Format {
 @(require_results)
 validate :: #force_inline proc(src: []u8, spec := Spec.Csv, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	switch spec {
-	case .Csv:
-		return validate_as(src, .Csv, opts, allocator)
-	case .Tsv:
-		return validate_as(src, .Tsv, opts, allocator)
-	case .Plain:
-		return validate_as(src, .Plain, opts, allocator)
+	case .Csv:   return validate_as(src, .Csv, opts, allocator)
+	case .Tsv:   return validate_as(src, .Tsv, opts, allocator)
+	case .Plain: return validate_as(src, .Plain, opts, allocator)
 	}
 	runtime.panic_contextless("dsv: spec out of range")
 }
@@ -66,12 +65,9 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Csv, opts := Options{}, a
 @(require_results)
 build :: #force_inline proc(src: []u8, spec := Spec.Csv, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	switch spec {
-	case .Csv:
-		return build_as(src, .Csv, opts, allocator)
-	case .Tsv:
-		return build_as(src, .Tsv, opts, allocator)
-	case .Plain:
-		return build_as(src, .Plain, opts, allocator)
+	case .Csv:   return build_as(src, .Csv, opts, allocator)
+	case .Tsv:   return build_as(src, .Tsv, opts, allocator)
+	case .Plain: return build_as(src, .Plain, opts, allocator)
 	}
 	panic("dsv: spec out of range")
 }
@@ -81,12 +77,9 @@ build :: #force_inline proc(src: []u8, spec := Spec.Csv, opts := Options{}, allo
 @(require_results)
 find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Csv, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
 	switch spec {
-	case .Csv:
-		return find_as(src, path, .Csv, read, opts, allocator)
-	case .Tsv:
-		return find_as(src, path, .Tsv, read, opts, allocator)
-	case .Plain:
-		return find_as(src, path, .Plain, read, opts, allocator)
+	case .Csv:   return find_as(src, path, .Csv, read, opts, allocator)
+	case .Tsv:   return find_as(src, path, .Tsv, read, opts, allocator)
+	case .Plain: return find_as(src, path, .Plain, read, opts, allocator)
 	}
 	panic("dsv: spec out of range")
 }
@@ -98,31 +91,28 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Csv, read 
 @(require_results)
 scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Csv, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	switch spec {
-	case .Csv:
-		return scan_as(src, demand, .Csv, read, opts, allocator)
-	case .Tsv:
-		return scan_as(src, demand, .Tsv, read, opts, allocator)
-	case .Plain:
-		return scan_as(src, demand, .Plain, read, opts, allocator)
+	case .Csv:   return scan_as(src, demand, .Csv, read, opts, allocator)
+	case .Tsv:   return scan_as(src, demand, .Tsv, read, opts, allocator)
+	case .Plain: return scan_as(src, demand, .Plain, read, opts, allocator)
 	}
 	panic("dsv: spec out of range")
 }
 
 @(private)
-validate_as :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocator) -> tape.Error {
+check_read_opts :: #force_inline proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocator) -> tape.Error {
 	if _, refused := pass_options(S, opts); refused != nil {
 		return refused
 	}
-	if e := refuse_repeat(src, S, opts, allocator); e != nil {
-		return e
-	}
+	return refuse_repeat(src, S, opts, allocator)
+}
+
+@(private)
+validate_as :: #force_no_inline proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocator) -> tape.Error {
+	check_read_opts(src, S, opts, allocator) or_return
 	if opts.runner != nil && opts.runner.threads > 0 && opts.pieces == nil && opts.budget.steps == 0 && len(src) >= build.PARALLEL_FROM {
 		return validate_parallel(src, S, opts, allocator)
 	}
-	if build.read_lax(opts) {
-		return validate_walk(src, S, true, opts, allocator)
-	}
-	return validate_walk(src, S, false, opts, allocator)
+	return validate_walk(src, S, true, opts, allocator) if build.read_lax(opts) else validate_walk(src, S, false, opts, allocator)
 }
 
 @(private)
@@ -133,18 +123,14 @@ validate_walk :: #force_inline proc(src: []u8, $S: Spec, $LAX: bool, opts: Optio
 		}
 	}
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-		p := options_resolved(S, opts)
-		return walk_text(src, S, LAX, p, h, regs, a, ctx, hook.no_hook, nil, opts.budget.steps)
+		return walk_text(src, S, LAX, options_resolved(S, opts), h, regs, a, ctx, hook.no_hook, nil, opts.budget.steps)
 	}
 	return build.read_validate(src, &FORMATS[S], opts, allocator, 0, walk)
 }
 
 @(private)
 find_as :: #force_no_inline proc(src: []u8, path: []tape.Step, $S: Spec, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Span_Answer, tape.Error) {
-	if _, refused := pass_options(S, opts); refused != nil {
-		return {}, refused
-	}
-	if e := refuse_repeat(src, S, opts, caller); e != nil {
+	if e := check_read_opts(src, S, opts, caller); e != nil {
 		return {}, e
 	}
 	if build.read_lax(opts) {
@@ -165,18 +151,14 @@ find_walk :: #force_inline proc(src: []u8, path: []tape.Step, $S: Spec, $LAX: bo
 		return walk_record_again((^Pass(S, build.Finder, LAX, build.FINDER_CAPS))(h.walk), h.src, lo, &regs, build.finder_hook)
 	}
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-		p := options_resolved(S, opts)
-		return walk_text(src, S, LAX, p, h, regs, a, ctx, build.finder_hook, nil, opts.budget.steps)
+		return walk_text(src, S, LAX, options_resolved(S, opts), h, regs, a, ctx, build.finder_hook, nil, opts.budget.steps)
 	}
 	return build.read_find(src, path, &FORMATS[S], read, opts, caller, tape.number_respell, rewalk, walk)
 }
 
 @(private)
 scan_as :: #force_no_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, read: tape.Read_Options, opts: Options, caller: runtime.Allocator) -> (tape.Document, tape.Error) {
-	if _, refused := pass_options(S, opts); refused != nil {
-		return {}, refused
-	}
-	if e := refuse_repeat(src, S, opts, caller); e != nil {
+	if e := check_read_opts(src, S, opts, caller); e != nil {
 		return {}, e
 	}
 	if build.read_lax(opts) {
@@ -193,8 +175,7 @@ scan_walk :: #force_inline proc(src: []u8, demand: ^tape.Demand, $S: Spec, $LAX:
 		}
 	}
 	walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
-		p := options_resolved(S, opts)
-		return walk_text(src, S, LAX, p, h, regs, a, ctx, build.scanner_key_skip_hook, nil, opts.budget.steps)
+		return walk_text(src, S, LAX, options_resolved(S, opts), h, regs, a, ctx, build.scanner_key_skip_hook, nil, opts.budget.steps)
 	}
 	return build.read_scan(src, demand, &FORMATS[S], read, opts, caller, nil, node_bound, walk)
 }

@@ -24,10 +24,12 @@ Spec :: enum u8 {
 // repeated key is a fault, so no policy has a repeat to keep.
 Options :: tape.Options
 
+CAPS :: tape.Caps{.Names_Ahead}
+
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
-	.Toml_1_0 = {name = "toml", id = ID + tape.Format_Id(Spec.Toml_1_0), facts = FACTS, caps = {.Names_Ahead}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end, fact_name = spelled_fact},
-	.Toml_1_1 = {name = "toml-1.1", id = ID + tape.Format_Id(Spec.Toml_1_1), facts = FACTS, caps = {.Names_Ahead}, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end, fact_name = spelled_fact},
+	.Toml_1_0 = {name = "toml", id = ID + tape.Format_Id(Spec.Toml_1_0), facts = FACTS, caps = CAPS, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end, fact_name = spelled_fact},
+	.Toml_1_1 = {name = "toml-1.1", id = ID + tape.Format_Id(Spec.Toml_1_1), facts = FACTS, caps = CAPS, dups = .Last, bounds = bounds, decode = text_decoded, number = number_value, same_text = same_text, key_hash = key_hash, room = decode_room, close_end = close_end, fact_name = spelled_fact},
 }
 
 // The facts a TOML text holds: its comments, and in its nodes' spellings a date-time's type and how a value is written,
@@ -51,16 +53,8 @@ as :: proc "contextless" (spec: Spec) -> ^tape.Format {
 validate :: #force_inline proc(src: []u8, spec := Spec.Toml_1_0, opts := Options{}, allocator := context.allocator) -> tape.Error {
 	lax := build.read_lax(opts)
 	switch spec {
-	case .Toml_1_0:
-		if lax {
-			return validate_as(src, .Toml_1_0, true, opts, allocator)
-		}
-		return validate_as(src, .Toml_1_0, false, opts, allocator)
-	case .Toml_1_1:
-		if lax {
-			return validate_as(src, .Toml_1_1, true, opts, allocator)
-		}
-		return validate_as(src, .Toml_1_1, false, opts, allocator)
+	case .Toml_1_0: return validate_as(src, .Toml_1_0, true, opts, allocator) if lax else validate_as(src, .Toml_1_0, false, opts, allocator)
+	case .Toml_1_1: return validate_as(src, .Toml_1_1, true, opts, allocator) if lax else validate_as(src, .Toml_1_1, false, opts, allocator)
 	}
 	runtime.panic_contextless("toml: spec out of range")
 }
@@ -72,16 +66,8 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Toml_1_0, opts := Options
 build :: #force_inline proc(src: []u8, spec := Spec.Toml_1_0, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	lax := build.read_lax(opts)
 	switch spec {
-	case .Toml_1_0:
-		if lax {
-			return build_as(src, .Toml_1_0, true, opts, allocator)
-		}
-		return build_as(src, .Toml_1_0, false, opts, allocator)
-	case .Toml_1_1:
-		if lax {
-			return build_as(src, .Toml_1_1, true, opts, allocator)
-		}
-		return build_as(src, .Toml_1_1, false, opts, allocator)
+	case .Toml_1_0: if lax { return build_as(src, .Toml_1_0, true, opts, allocator) }; return build_as(src, .Toml_1_0, false, opts, allocator)
+	case .Toml_1_1: if lax { return build_as(src, .Toml_1_1, true, opts, allocator) }; return build_as(src, .Toml_1_1, false, opts, allocator)
 	}
 	panic("toml: spec out of range")
 }
@@ -94,16 +80,8 @@ build :: #force_inline proc(src: []u8, spec := Spec.Toml_1_0, opts := Options{},
 find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Toml_1_0, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Span_Answer, tape.Error) {
 	lax := build.read_lax(opts)
 	switch spec {
-	case .Toml_1_0:
-		if lax {
-			return find_as(src, path, .Toml_1_0, true, read, opts, allocator)
-		}
-		return find_as(src, path, .Toml_1_0, false, read, opts, allocator)
-	case .Toml_1_1:
-		if lax {
-			return find_as(src, path, .Toml_1_1, true, read, opts, allocator)
-		}
-		return find_as(src, path, .Toml_1_1, false, read, opts, allocator)
+	case .Toml_1_0: if lax { return find_as(src, path, .Toml_1_0, true, read, opts, allocator) }; return find_as(src, path, .Toml_1_0, false, read, opts, allocator)
+	case .Toml_1_1: if lax { return find_as(src, path, .Toml_1_1, true, read, opts, allocator) }; return find_as(src, path, .Toml_1_1, false, read, opts, allocator)
 	}
 	panic("toml: spec out of range")
 }
@@ -114,16 +92,8 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Toml_1_0, 
 scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Toml_1_0, read := tape.Read_Options{}, opts := Options{}, allocator := context.allocator) -> (tape.Document, tape.Error) {
 	lax := build.read_lax(opts)
 	switch spec {
-	case .Toml_1_0:
-		if lax {
-			return scan_as(src, demand, .Toml_1_0, true, read, opts, allocator)
-		}
-		return scan_as(src, demand, .Toml_1_0, false, read, opts, allocator)
-	case .Toml_1_1:
-		if lax {
-			return scan_as(src, demand, .Toml_1_1, true, read, opts, allocator)
-		}
-		return scan_as(src, demand, .Toml_1_1, false, read, opts, allocator)
+	case .Toml_1_0: if lax { return scan_as(src, demand, .Toml_1_0, true, read, opts, allocator) }; return scan_as(src, demand, .Toml_1_0, false, read, opts, allocator)
+	case .Toml_1_1: if lax { return scan_as(src, demand, .Toml_1_1, true, read, opts, allocator) }; return scan_as(src, demand, .Toml_1_1, false, read, opts, allocator)
 	}
 	panic("toml: spec out of range")
 }

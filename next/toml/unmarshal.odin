@@ -35,16 +35,8 @@ unmarshal_type :: #force_inline proc(src: []u8, target: rawptr, T: typeid, spec:
 	// A text in pieces is refused by the read, so only a step budget needs the lax walk.
 	lax := opts.budget.steps != 0
 	switch spec {
-	case .Toml_1_0:
-		if lax {
-			return unmarshal_as(src, target, T, .Toml_1_0, true, read, opts, allocator)
-		}
-		return unmarshal_as(src, target, T, .Toml_1_0, false, read, opts, allocator)
-	case .Toml_1_1:
-		if lax {
-			return unmarshal_as(src, target, T, .Toml_1_1, true, read, opts, allocator)
-		}
-		return unmarshal_as(src, target, T, .Toml_1_1, false, read, opts, allocator)
+	case .Toml_1_0: return unmarshal_as(src, target, T, .Toml_1_0, true, read, opts, allocator) if lax else unmarshal_as(src, target, T, .Toml_1_0, false, read, opts, allocator)
+	case .Toml_1_1: return unmarshal_as(src, target, T, .Toml_1_1, true, read, opts, allocator) if lax else unmarshal_as(src, target, T, .Toml_1_1, false, read, opts, allocator)
 	}
 	return tape.Bad_Option{"spec"}
 }

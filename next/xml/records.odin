@@ -132,14 +132,8 @@ records_close :: proc(records: ^tape.Records) {
 // when `err` says why, nil at the text's end.
 @(require_results)
 records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.allocator) -> (n: int) {
-	switch r.spec {
-	case .Xml:
-		if records_lax(r) {
-			return records_validate_as(r, out, .Xml, true, allocator)
-		}
-		return records_validate_as(r, out, .Xml, false, allocator)
-	}
-	return
+	if r.spec != .Xml { return }
+	return records_validate_as(r, out, .Xml, true, allocator) if records_lax(r) else records_validate_as(r, out, .Xml, false, allocator)
 }
 
 // Reads the next records of `r` into `out`, and for each the first value `path` reaches in it into the same place of
@@ -150,14 +144,8 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 		r.err, r.at = tape.Bad_Option{"path"}, .Done
 		return
 	}
-	switch r.spec {
-	case .Xml:
-		if records_lax(r) {
-			return records_find_as(r, path, out, answers, .Xml, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Xml, false, read, allocator)
-	}
-	return
+	if r.spec != .Xml { return }
+	return records_find_as(r, path, out, answers, .Xml, true, read, allocator) if records_lax(r) else records_find_as(r, path, out, answers, .Xml, false, read, allocator)
 }
 
 // Reads the next records of `r` into `out`, and for each the document of its nodes the paths of `demand` reach into the
@@ -169,14 +157,8 @@ records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs
 		r.err, r.at = tape.Bad_Option{"path"}, .Done
 		return
 	}
-	switch r.spec {
-	case .Xml:
-		if records_lax(r) {
-			return records_scan_as(r, demand, out, docs, .Xml, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Xml, false, read, allocator)
-	}
-	return
+	if r.spec != .Xml { return }
+	return records_scan_as(r, demand, out, docs, .Xml, true, read, allocator) if records_lax(r) else records_scan_as(r, demand, out, docs, .Xml, false, read, allocator)
 }
 
 // Whether the records' walk is the `LAX` one: it counts `Budget.steps`, or it pauses at each member.

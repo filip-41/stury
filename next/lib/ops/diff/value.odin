@@ -258,36 +258,46 @@ hash_val :: proc(d: ^Differ, side: int, v: Val, base_depth := 0) -> u64 {
 	return nonzero_hash(mix64(acc ~ u64(len(v.group))))
 }
 
+// Attempts to resolve `at`'s hash immediately (memoized, scalar, empty container, or `max_depth` limit).
+// Returns `(hash, true)` when resolved or `too_deep` was tripped; `(0, false)` when a container must be pushed.
+@(private = "file")
+resolve_hash_node :: proc(d: ^Differ, side: int, at: tape.Node_Index, depth: int) -> (h: u64, done: bool) #no_bounds_check {
+	hashes := d.hashes[side]
+	if h = hashes[at]; h != 0 {
+		return h, true
+	}
+	doc := d.docs[side]
+	c := class_of(doc, at)
+	if c != .Array && c != .Object {
+		h = nonzero_hash(hash_scalar(d, doc, at))
+		hashes[at] = h
+		return h, true
+	}
+	empty_hash := nonzero_hash(mix64(HASH_SEED_OBJ if c == .Object else HASH_SEED_ARR))
+	if is_empty_container(doc, at) {
+		hashes[at] = empty_hash
+		return empty_hash, true
+	}
+	if depth >= d.opts.max_depth {
+		if n, p, e := tape.length(d.readers[side], at, d.scratch); e == nil && p == .Found && n == 0 {
+			hashes[at] = empty_hash
+			return empty_hash, true
+		}
+		d.too_deep = true
+		return 1, true
+	}
+	return 0, false
+}
+
 // Invariant: `root` is a valid index in `d.docs[side].nodes` and `d.hashes[side]`; non-reentrant (reuses `d.hash_stack`).
 @(private, require_results)
 hash_node :: proc(d: ^Differ, side: int, root: tape.Node_Index, base_depth := 0) -> u64 #no_bounds_check {
-	hashes := d.hashes[side]
-	if h := hashes[root]; h != 0 {
+	if h, done := resolve_hash_node(d, side, root, base_depth); done {
 		return h
 	}
 	doc := d.docs[side]
 	r := d.readers[side]
-	c0 := class_of(doc, root)
-	if c0 != .Array && c0 != .Object {
-		h := nonzero_hash(hash_scalar(d, doc, root))
-		hashes[root] = h
-		return h
-	}
-	// Empty `{}` / `[]` at `base_depth == max_depth` hashes immediately without triggering `too_deep`.
-	if is_empty_container(doc, root) {
-		done := nonzero_hash(mix64(HASH_SEED_OBJ if c0 == .Object else HASH_SEED_ARR))
-		hashes[root] = done
-		return done
-	}
-	if base_depth >= d.opts.max_depth {
-		if n0, p0, e0 := tape.length(r, root, d.scratch); e0 == nil && p0 == .Found && n0 == 0 {
-			done := nonzero_hash(mix64(HASH_SEED_OBJ if c0 == .Object else HASH_SEED_ARR))
-			hashes[root] = done
-			return done
-		}
-		d.too_deep = true
-		return 1
-	}
+	hashes := d.hashes[side]
 
 	stack := &d.hash_stack
 	defer {
@@ -340,70 +350,46 @@ hash_node :: proc(d: ^Differ, side: int, root: tape.Node_Index, base_depth := 0)
 			continue
 		}
 
-		kh: u64
+		kh := u64(1)
 		if f.is_obj {
 			ks, owned, ok := read_member_key(d, side, f.c, k_node, buf[:])
+			mv: Val
+			found := true
+			merr: Error
 			if ok {
 				kh = hash_bytes(ks)
 				if grouped && !f.c.once {
-					mv, found, merr := member_val(d, side, f.node, ks)
-					if owned != nil {
-						delete(owned, d.scratch)
-					}
-					if merr != nil || !found {
+					mv, found, merr = member_val(d, side, f.node, ks)
+				}
+			}
+			if owned != nil {
+				delete(owned, d.scratch)
+			}
+			if ok && grouped && !f.c.once {
+				if merr != nil || !found {
+					return 1
+				}
+				if len(mv.group) > 0 {
+					if base_depth + len(stack) >= d.opts.max_depth {
+						d.too_deep = true
 						return 1
 					}
-					if len(mv.group) > 0 {
-						if base_depth + len(stack) >= d.opts.max_depth {
-							d.too_deep = true
-							return 1
-						}
-						f.key_hash = kh
-						if _, aerr := append(stack, Hash_Frame{node = tape.NO_NODE, group = mv.group, acc = HASH_SEED_ARR}); aerr != nil {
-							return 1
-						}
-						continue
+					f.key_hash = kh
+					if _, aerr := append(stack, Hash_Frame{node = tape.NO_NODE, group = mv.group, acc = HASH_SEED_ARR}); aerr != nil {
+						return 1
 					}
-					v_node = mv.node
-				} else if owned != nil {
-					delete(owned, d.scratch)
+					continue
 				}
-			} else {
-				if owned != nil {
-					delete(owned, d.scratch)
-				}
-				kh = 1
+				v_node = mv.node
 			}
 		}
 
-		if vh := hashes[v_node]; vh != 0 {
-			fold_hash(f, kh, vh)
-			continue
-		}
-
-		vc := class_of(doc, v_node)
-		if vc != .Array && vc != .Object {
-			vh := nonzero_hash(hash_scalar(d, doc, v_node))
-			hashes[v_node] = vh
-			fold_hash(f, kh, vh)
-			continue
-		}
-		if is_empty_container(doc, v_node) {
-			vh := nonzero_hash(mix64(HASH_SEED_OBJ if vc == .Object else HASH_SEED_ARR))
-			hashes[v_node] = vh
-			fold_hash(f, kh, vh)
-			continue
-		}
-
-		if base_depth + len(stack) >= d.opts.max_depth {
-			if nv, pv, ev := tape.length(r, v_node, d.scratch); ev == nil && pv == .Found && nv == 0 {
-				vh := nonzero_hash(mix64(HASH_SEED_OBJ if vc == .Object else HASH_SEED_ARR))
-				hashes[v_node] = vh
-				fold_hash(f, kh, vh)
-				continue
+		if vh, done := resolve_hash_node(d, side, v_node, base_depth + len(stack)); done {
+			if d.too_deep {
+				return 1
 			}
-			d.too_deep = true
-			return 1
+			fold_hash(f, kh, vh)
+			continue
 		}
 		f.key_hash = kh
 		if !push_hash(d, side, stack, v_node) {
@@ -534,6 +520,20 @@ vals_equal :: proc(d: ^Differ, a, b: Val, base_depth := 0) -> bool {
 	return vals_equal_exact(d, a, b, base_depth)
 }
 
+@(private = "file")
+next_eq_elem :: #force_inline proc(r: tape.Reader, g: []tape.Node_Index, gi: ^int, c: ^tape.Children) -> (tape.Node_Index, tape.Presence) {
+	if len(g) == 0 {
+		_, node, p := tape.next_child(r, c)
+		return node, p
+	}
+	if gi^ < len(g) {
+		node := g[gi^]
+		gi^ += 1
+		return node, .Found
+	}
+	return tape.NO_NODE, .Missing
+}
+
 // Invariant: `a` and `b` hold valid nodes in `d.docs[0]` and `d.docs[1]`; non-reentrant (reuses `d.eq_stack`).
 @(private, require_results)
 vals_equal_exact :: proc(d: ^Differ, a, b: Val, base_depth := 0) -> bool #no_bounds_check {
@@ -564,28 +564,8 @@ vals_equal_exact :: proc(d: ^Differ, a, b: Val, base_depth := 0) -> bool #no_bou
 		f := &stack[len(stack) - 1]
 		va, vb: Val
 		if !f.is_obj {
-			x, y: tape.Node_Index
-			px, py: tape.Presence
-			if len(f.ga) > 0 {
-				if f.gia < len(f.ga) {
-					x, px = f.ga[f.gia], .Found
-					f.gia += 1
-				} else {
-					px = .Missing
-				}
-			} else {
-				_, x, px = tape.next_child(d.readers[0], &f.ca)
-			}
-			if len(f.gb) > 0 {
-				if f.gib < len(f.gb) {
-					y, py = f.gb[f.gib], .Found
-					f.gib += 1
-				} else {
-					py = .Missing
-				}
-			} else {
-				_, y, py = tape.next_child(d.readers[1], &f.cb)
-			}
+			x, px := next_eq_elem(d.readers[0], f.ga, &f.gia, &f.ca)
+			y, py := next_eq_elem(d.readers[1], f.gb, &f.gib, &f.cb)
 			if px != .Found || py != .Found {
 				if px != py {
 					return false
@@ -604,32 +584,25 @@ vals_equal_exact :: proc(d: ^Differ, a, b: Val, base_depth := 0) -> bool #no_bou
 				continue
 			}
 			ks, owned, ok := read_member_key(d, 0, f.ca, kn, buf[:])
-			if !ok {
-				if owned != nil {
-					delete(owned, d.scratch)
+			matched := ok
+			if matched {
+				if grouped0 && !f.ca.once {
+					mva, found_a, erra := member_val(d, 0, f.a, ks)
+					va, matched = mva, erra == nil && found_a
+				} else {
+					va = val_node(x)
 				}
-				return false
 			}
-			if grouped0 && !f.ca.once {
-				mva, found_a, erra := member_val(d, 0, f.a, ks)
-				if erra != nil || !found_a {
-					if owned != nil {
-						delete(owned, d.scratch)
-					}
-					return false
-				}
-				va = mva
-			} else {
-				va = val_node(x)
+			if matched {
+				mvb, found_b, errb := member_val(d, 1, f.b, ks)
+				vb, matched = mvb, errb == nil && found_b
 			}
-			mvb, found_b, errb := member_val(d, 1, f.b, ks)
 			if owned != nil {
 				delete(owned, d.scratch)
 			}
-			if errb != nil || !found_b {
+			if !matched {
 				return false
 			}
-			vb = mvb
 		}
 
 		c1, c2 := val_class(d.docs[0], va), val_class(d.docs[1], vb)

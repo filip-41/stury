@@ -1,74 +1,36 @@
-// A description says which values are allowed: per node, the kinds it takes, the rules on each kind, and the arms. An
-// Odin type, a JSON Schema and inference give one, and the check plan compiler, the schema writer, sample and compare
-// read it.
 package rules
 
 import "base:runtime"
 import "core:slice"
 import "stury:lib/core/tape"
 
-// The kinds of value a node takes. `Integer` lies inside `Number`: a node of kind `Number` takes `1`.
-Kind :: enum u8 {
-	Null,
-	Bool,
-	Integer,
-	Number,
-	String,
-	Array,
-	Object,
-}
-
+Kind :: enum u8 { Null, Bool, Integer, Number, String, Array, Object }
 Kinds :: bit_set[Kind; u8]
-
 EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
-
-// A node's place in `Description.nodes`.
 Node_Index :: distinct i32
-
-// No node: an array's items or an object's other members that take any value.
 NONE :: Node_Index(-1)
+Markup_Node :: enum u8 { Any, Attribute, Element, Text }
 
-// The node of a markup element a value is read from, which `xml.nodeType` names: `.Any` an attribute or a child element
-// of the member's name.
-Markup_Node :: enum u8 {
-	Any,
-	Attribute,
-	Element,
-	Text,
-}
-
-// Limits on a value, each read only for its kind: a number's bounds and divisor as exact decimal text, empty where there
-// is none, a string's length in code points, its pattern and format, an array's elements and an object's members.
 Rules :: struct {
 	minimum, maximum:                     string,
 	multiple_of, pattern, format:         string,
 	unique:                               bool,
-	// Whether `format` asserts and does not only annotate.
-	assert_format:                        bool,
-	// Whether `format` names a format a later draft than the schema's defines, which annotates even where format
-	// assertion is asked for.
-	format_foreign:                       bool,
+	assert_format, format_foreign:        bool,
 	exclusive_minimum, exclusive_maximum: bool,
-	// The `readOnly` and `writeOnly` annotations, which no check reads.
 	read_only, write_only:                bool,
 	min_length, min_items, min_members:   u64,
 	max_length, max_items, max_members:   Maybe(u64),
 	markup:                               Markup_Node,
 }
 
-// A node takes a value of one of `kinds` that passes the node's rules and, when there are arms, one of `any_of`.
-// `array` and `object` index the kind's block in the description, -1 for an array or object of any shape, so nodes
-// that differ only in kinds or rules share one.
 Node :: struct {
 	kinds:                  Kinds,
-	// Draft 4's integer: a number spelled with a fraction or an exponent is not one, `1.0` included.
 	integer_spelled:        bool,
 	rules:                  Rules,
-	array:                  i32,
-	object:                 i32,
+	array, object:          i32,
 	any_of:                 []Node_Index,
 	enum_of:                []Value,
-	has_enum:               bool, // an `enum` is set, which may hold no value
+	has_enum:               bool,
 	const_of:               Maybe(Value),
 	all_of, one_of:         []Node_Index,
 	not:                    Maybe(Node_Index),
@@ -78,9 +40,7 @@ Node :: struct {
 	unevaluated_items:      Maybe(Node_Index),
 	unevaluated_properties: Maybe(Node_Index),
 	resource:               Node_Index,
-	// The annotations a schema holds beside its rules: judged by nothing and written back as they were read.
-	description:            string,
-	title:                  string,
+	description, title:     string,
 	content_encoding:       string,
 	content_media_type:     string,
 	deprecated:             bool,
@@ -88,42 +48,21 @@ Node :: struct {
 	examples:               []Value,
 }
 
-// How a schema wrote a node's references where `ref` is not a `$ref` or `dynamic_ref` not a `$dynamicRef` that
-// resolves dynamically. A keyword location names the keyword as written.
-Ref_Spelling :: enum u8 {
-	Ref_Dynamic,       // `ref` is a `$dynamicRef` that reaches its node statically
-	Ref_Recursive,     // `ref` is a `$recursiveRef` whose resource has no recursive anchor
-	Dynamic_Recursive, // `dynamic_ref` is a `$recursiveRef`
-	Dynamic_Static,    // `dynamic_ref` reaches its node statically, and `ref` holds the `$ref` beside it
-}
-
+Ref_Spelling :: enum u8 { Ref_Dynamic, Ref_Recursive, Dynamic_Recursive, Dynamic_Static }
 Ref_Spellings :: bit_set[Ref_Spelling; u8]
 
-// The keyword `n.ref` was written with.
 ref_keyword :: proc "contextless" (n: ^Node) -> string {
-	switch {
-	case .Ref_Dynamic in n.spelled:
-		return "$dynamicRef"
-	case .Ref_Recursive in n.spelled:
-		return "$recursiveRef"
-	}
+	if .Ref_Dynamic in n.spelled { return "$dynamicRef" }
+	if .Ref_Recursive in n.spelled { return "$recursiveRef" }
 	return "$ref"
 }
 
-// The keyword `n.dynamic_ref` was written with.
 dynamic_keyword :: proc "contextless" (n: ^Node) -> string {
 	return "$recursiveRef" if .Dynamic_Recursive in n.spelled else "$dynamicRef"
 }
 
-// An `if` with its `then` and `else`.
-Conditional :: struct {
-	test, then, other: Maybe(Node_Index),
-}
+Conditional :: struct { test, then, other: Maybe(Node_Index) }
 
-// An array's elements: the first take the nodes of `prefix` in order, and the rest `items`. `contains` takes between
-// `min_contains` (1 when nil) and `max_contains` of the elements. `evaluates_contains` says the elements it takes count
-// as evaluated for `unevaluatedItems`, which holds from draft 2020-12 on. `tuple` says the schema wrote `prefix` as an
-// array `items` and `items` as `additionalItems`, as the drafts before 2020-12 do.
 Array :: struct {
 	prefix:             []Node_Index,
 	items:              Node_Index,
@@ -134,8 +73,6 @@ Array :: struct {
 	max_contains:       Maybe(u64),
 }
 
-// An object's named members, the node every other member's value passes, and the node each member's name passes as a
-// string. `NONE` for any value or name.
 Object :: struct {
 	members:      []Member,
 	additional:   Node_Index,
@@ -145,242 +82,127 @@ Object :: struct {
 	dependencies: bool,
 }
 
-Pattern :: struct {
-	expression: string,
-	node:       Node_Index,
-}
+Pattern :: struct { expression: string, node: Node_Index }
+Dependent :: struct { name: string, required: []string, node: Maybe(Node_Index) }
+Base :: struct { steps: []tape.Step, uri: string }
+Anchor :: struct { name: string, resource, node: Node_Index }
 
-Dependent :: struct {
-	name:     string,
-	required: []string,
-	node:     Maybe(Node_Index),
-}
-
-// An embedded schema resource: the keyword steps from the root to it and its URI.
-Base :: struct {
-	steps: []tape.Step,
-	uri:   string,
-}
-
-// A dynamic anchor: the node of schema resource `resource` that `$dynamicAnchor: name` marks.
-Anchor :: struct {
-	name:     string,
-	resource: Node_Index,
-	node:     Node_Index,
-}
-
-// A member as one use of a node: its name, whether it must be present, and the rules this use adds to the node's.
-// `only_required` marks a name that only `required` lists, which leaves the member to the object's other members.
 Member :: struct {
-	name:          string,
-	node:          Node_Index,
-	rules:         Rules,
-	required:      bool,
-	only_required: bool,
+	name:                    string,
+	node:                    Node_Index,
+	rules:                   Rules,
+	required, only_required: bool,
 }
 
-// A description owns its nodes, blocks and slices, allocated with `allocator`, and the strings in `texts`. It borrows
-// its other strings from where it was made: a plan, a schema's document.
 Description :: struct {
 	nodes:     [dynamic]Node,
 	arrays:    [dynamic]Array,
 	objects:   [dynamic]Object,
 	texts:     [dynamic]string,
 	anchors:   [dynamic]Anchor,
-	// The name a node goes by: a schema's `$defs` key or `$anchor`, a type's name. The writer names a definition by it.
 	names:     map[Node_Index]string,
 	root:      Node_Index,
-	// The URI of the schema's root resource, "" for none: the base of its keyword locations.
 	uri:       string,
-	// The schema resources embedded in the root that it reaches in place, each the base of the keyword locations under it.
 	bases:     [dynamic]Base,
 	allocator: runtime.Allocator,
 }
 
-// Frees what `d` owns and sets it to the zero value without mutating caller's `context.allocator`.
 description_destroy :: proc(d: ^Description) {
-	if d == nil {
-		return
-	}
+	if d == nil { return }
 	a := d.allocator
-	for n in d.nodes {
-		delete(n.any_of, a)
-		delete(n.enum_of, a)
-		delete(n.examples, a)
-		delete(n.all_of, a)
-		delete(n.one_of, a)
-	}
-	for arr in d.arrays {
-		delete(arr.prefix, a)
-	}
+	for n in d.nodes { delete(n.any_of, a); delete(n.enum_of, a); delete(n.examples, a); delete(n.all_of, a); delete(n.one_of, a) }
+	for arr in d.arrays { delete(arr.prefix, a) }
 	for o in d.objects {
-		delete(o.members, a)
-		delete(o.patterns, a)
-		for x in o.dependents {
-			delete(x.required, a)
-		}
+		delete(o.members, a); delete(o.patterns, a)
+		for x in o.dependents { delete(x.required, a) }
 		delete(o.dependents, a)
 	}
-	for t in d.texts {
-		delete(t, a)
-	}
-	for x in d.bases {
-		delete(x.steps, a)
-	}
-	delete(d.bases)
-	delete(d.nodes)
-	delete(d.arrays)
-	delete(d.objects)
-	delete(d.texts)
-	delete(d.anchors)
-	delete(d.names)
+	for t in d.texts { delete(t, a) }
+	for x in d.bases { delete(x.steps, a) }
+	delete(d.bases); delete(d.nodes); delete(d.arrays); delete(d.objects); delete(d.texts); delete(d.anchors); delete(d.names)
 	d^ = {}
 }
 
-// Whether `n` is a `$ref` and nothing else, which judges a value as the node it reaches does.
 ref_only :: proc "contextless" (n: ^Node) -> bool {
 	return n.ref != nil && n.kinds == EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 && !n.has_enum && n.const_of == nil && len(n.any_of) == 0 && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil && n.cond == {} && n.dynamic_ref == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil
 }
 
-// The node a use of `node` judges by, past each `$ref` that holds nothing else, and the `$ref`s it passed. `NONE` for
-// one that never reaches a node that judges.
 ref_end :: proc "contextless" (d: ^Description, node: Node_Index) -> (Node_Index, int) {
 	node := node
 	hops := 0
 	for ; node != NONE && ref_only(&d.nodes[node]); hops += 1 {
-		if hops == len(d.nodes) {
-			return NONE, 0
-		}
+		if hops == len(d.nodes) { return NONE, 0 }
 		node = d.nodes[node].ref.?
 	}
 	return node, hops
 }
 
-// Appends to `out` the subschemas of `n`: with `in_place` only those that judge `n`'s own value, otherwise all of them.
 node_children :: proc(d: ^Description, n: ^Node, out: ^[dynamic]Node_Index, in_place: bool) {
-	append(out, ..n.all_of)
-	append(out, ..n.any_of)
-	append(out, ..n.one_of)
+	append(out, ..n.all_of); append(out, ..n.any_of); append(out, ..n.one_of)
 	for x in ([?]Maybe(Node_Index){n.not, n.cond.test, n.cond.then, n.cond.other, n.ref, n.dynamic_ref}) {
-		if r, has := x.?; has {
-			append(out, r)
-		}
+		if r, has := x.?; has { append(out, r) }
 	}
 	if n.object >= 0 {
 		o := &d.objects[n.object]
-		for x in o.dependents {
-			if r, has := x.node.?; has {
-				append(out, r)
-			}
-		}
+		for x in o.dependents { if r, has := x.node.?; has { append(out, r) } }
 		if !in_place {
-			for x in o.members {
-				append(out, x.node)
-			}
-			for x in o.patterns {
-				append(out, x.node)
-			}
+			for x in o.members { append(out, x.node) }
+			for x in o.patterns { append(out, x.node) }
 			append(out, o.additional, o.keys)
 		}
 	}
-	if in_place {
-		return
-	}
+	if in_place { return }
 	for x in ([?]Maybe(Node_Index){n.unevaluated_items, n.unevaluated_properties}) {
-		if r, has := x.?; has {
-			append(out, r)
-		}
+		if r, has := x.?; has { append(out, r) }
 	}
 	if n.array >= 0 {
 		a := &d.arrays[n.array]
-		append(out, ..a.prefix)
-		append(out, a.items)
-		if r, has := a.contains.?; has {
-			append(out, r)
-		}
+		append(out, ..a.prefix); append(out, a.items)
+		if r, has := a.contains.?; has { append(out, r) }
 	}
 }
 
-// The conjunctions that `nodes` alternate between: a `$ref` and an `allOf` join their targets to a conjunction, and an
-// `anyOf` splits it by its arms. Under `choices` a `oneOf` splits it too, an `if` splits it into what passes the `if` and
-// `then` and what passes the `else`, and a `$dynamicRef` into each node of its anchor's name it may reach. False when
-// more than `limit` would be open at once. Working memory comes from `scratch` and is freed before returning.
 branches :: proc(d: ^Description, nodes: []Node_Index, choices: bool, limit: int, allocator := context.allocator, scratch := context.allocator) -> (out: [][dynamic]Node_Index, complete: bool) {
-	Open :: struct {
-		nodes: [dynamic]Node_Index,
-		next:  int,
-	}
+	Open :: struct { nodes: [dynamic]Node_Index, next: int }
 	join :: proc(o: ^Open, ids: ..Node_Index) {
-		for id in ids {
-			if id != NONE && !slice.contains(o.nodes[:], id) {
-				append(&o.nodes, id)
-			}
-		}
+		for id in ids { if id != NONE && !slice.contains(o.nodes[:], id) { append(&o.nodes, id) } }
+	}
+	cleanup_done :: proc(done: ^[dynamic][dynamic]Node_Index) {
+		for x in done { delete(x) }
+		delete(done^)
 	}
 	work := make([dynamic]Open, scratch)
-	defer {
-		for w in work {
-			delete(w.nodes)
-		}
-		delete(work)
-	}
+	defer { for w in work { delete(w.nodes) }; delete(work) }
 	first := Open{nodes = make([dynamic]Node_Index, allocator)}
 	join(&first, ..nodes)
 	append(&work, first)
 	done := make([dynamic][dynamic]Node_Index, allocator)
-	ways := make([dynamic][2]Node_Index, scratch)
-	defer delete(ways)
-	forks := make([dynamic]Open, scratch)
-	defer delete(forks)
-	cleanup_done :: proc(done: ^[dynamic][dynamic]Node_Index) {
-		for x in done {
-			delete(x)
-		}
-		delete(done^)
-	}
+	ways := make([dynamic][2]Node_Index, scratch); defer delete(ways)
+	forks := make([dynamic]Open, scratch); defer delete(forks)
 	for len(work) > 0 {
-		if len(work) + len(done) > limit {
-			cleanup_done(&done)
-			return nil, false
-		}
-		cur := pop(&work)
-		forked := false
+		if len(work) + len(done) > limit { cleanup_done(&done); return nil, false }
+		cur, forked := pop(&work), false
 		for cur.next < len(cur.nodes) && !forked {
 			n := &d.nodes[cur.nodes[cur.next]]
 			cur.next += 1
-			join(&cur, n.ref.? or_else NONE)
-			join(&cur, ..n.all_of)
-			clear(&forks)
-			append(&forks, cur)
+			join(&cur, n.ref.? or_else NONE); join(&cur, ..n.all_of)
+			clear(&forks); append(&forks, cur)
 			for split in 0 ..< (4 if choices else 1) {
 				clear(&ways)
 				switch split {
-				case 0:
-					for arm in n.any_of {
-						append(&ways, [2]Node_Index{arm, NONE})
-					}
-				case 1:
-					for arm in n.one_of {
-						append(&ways, [2]Node_Index{arm, NONE})
-					}
+				case 0: for arm in n.any_of { append(&ways, [2]Node_Index{arm, NONE}) }
+				case 1: for arm in n.one_of { append(&ways, [2]Node_Index{arm, NONE}) }
 				case 2:
 					if test, has := n.cond.test.?; has && (n.cond.then != nil || n.cond.other != nil) {
 						append(&ways, [2]Node_Index{test, n.cond.then.? or_else NONE}, [2]Node_Index{n.cond.other.? or_else NONE, NONE})
 					}
 				case 3:
-					if target, has := n.dynamic_ref.?; has {
-						dynamic_targets(d, target, &ways)
-					}
+					if target, has := n.dynamic_ref.?; has { dynamic_targets(d, target, &ways) }
 				}
-				if len(ways) == 0 {
-					continue
-				}
+				if len(ways) == 0 { continue }
 				if len(work) + len(done) + len(forks) * len(ways) > limit {
-					for f in forks {
-						delete(f.nodes)
-					}
-					cleanup_done(&done)
-					return nil, false
+					for f in forks { delete(f.nodes) }
+					cleanup_done(&done); return nil, false
 				}
 				open := len(forks)
 				for _ in 0 ..< open {
@@ -394,15 +216,9 @@ branches :: proc(d: ^Description, nodes: []Node_Index, choices: bool, limit: int
 				}
 				forked = true
 			}
-			if forked {
-				append(&work, ..forks[:])
-			} else {
-				cur = forks[0]
-			}
+			if forked { append(&work, ..forks[:]) } else { cur = forks[0] }
 		}
-		if !forked {
-			append(&done, cur.nodes)
-		}
+		if !forked { append(&done, cur.nodes) }
 	}
 	return done[:], true
 }
@@ -410,21 +226,14 @@ branches :: proc(d: ^Description, nodes: []Node_Index, choices: bool, limit: int
 @(private = "file")
 dynamic_targets :: proc(d: ^Description, target: Node_Index, ways: ^[dynamic][2]Node_Index) {
 	for x in d.anchors {
-		if x.node != target {
-			continue
-		}
+		if x.node != target { continue }
 		for y in d.anchors {
-			if y.name == x.name && !slice.contains(ways[:], [2]Node_Index{y.node, NONE}) {
-				append(ways, [2]Node_Index{y.node, NONE})
-			}
+			if y.name == x.name && !slice.contains(ways[:], [2]Node_Index{y.node, NONE}) { append(ways, [2]Node_Index{y.node, NONE}) }
 		}
 	}
-	if len(ways) == 0 {
-		append(ways, [2]Node_Index{target, NONE})
-	}
+	if len(ways) == 0 { append(ways, [2]Node_Index{target, NONE}) }
 }
 
-// The kinds that the conjunction `ids` takes, `Number` counting its integers.
 kinds_of :: proc "contextless" (d: ^Description, ids: []Node_Index) -> Kinds {
 	k := EVERY_KIND
 	for id in ids {

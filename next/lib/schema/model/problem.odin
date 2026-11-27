@@ -21,52 +21,17 @@ Error_Kind :: enum u8 {
 	Cyclic_Migration, Duplicate_Migration, Migration_Failed, Incompatible_Schema,
 }
 
-Want :: struct {
-	type: typeid,
-	text: string,
-}
+Want :: struct { type: typeid, text: string }
+Error_Entry :: struct { kind: Error_Kind, at: u64, path: []tape.Step, pointer, operand: string, want: Want, secret: bool }
+Model_Error :: struct { kind: Error_Kind, at: u64, pointer, operand: string, want: Want, owned, secret: bool }
+Error :: union { Model_Error, tape.Error, write.Error, runtime.Allocator_Error }
 
-Error_Entry :: struct {
-	kind:    Error_Kind,
-	at:      u64,
-	path:    []tape.Step,
-	pointer: string,
-	operand: string,
-	want:    Want,
-	secret:  bool,
-}
-
-// Structured error returned by model operations. Borrows from `Sink` (`owned == false`) when a sink was
-// provided; otherwise owns any allocated strings (`owned == true`), freed by `error_destroy` / `destroy`.
-Model_Error :: struct {
-	kind:    Error_Kind,
-	at:      u64,
-	pointer: string,
-	operand: string,
-	want:    Want,
-	owned:   bool,
-	secret:  bool,
-}
-
-Error :: union {
-	Model_Error,
-	tape.Error,
-	write.Error,
-	runtime.Allocator_Error,
-}
-
-// Frees heap strings owned by a `Model_Error` inside `err` (a no-op when borrowed from a `Sink` or static).
 error_destroy :: proc(err: Error, allocator := context.allocator) {
 	me, ok := err.(Model_Error)
-	if !ok || !me.owned {
-		return
-	}
-	delete(me.pointer, allocator)
-	delete(me.operand, allocator)
-	delete(me.want.text, allocator)
+	if !ok || !me.owned { return }
+	delete(me.pointer, allocator); delete(me.operand, allocator); delete(me.want.text, allocator)
 }
 
-// Collects every validation/load failure up to `max_errors` (0 = unlimited) in a `mem.Dynamic_Arena`.
 Sink :: struct {
 	entries:     [dynamic]Error_Entry,
 	max_errors:  int,
@@ -79,46 +44,41 @@ Sink :: struct {
 }
 
 sink_init :: proc(s: ^Sink, allocator := context.allocator, max_errors := 0) {
-	s^ = {max_errors = max_errors, allocator = allocator}
-	s.entries.allocator = allocator
+	s^ = {max_errors = max_errors, allocator = allocator}; s.entries.allocator = allocator
 	_ = sink_ensure(s, allocator)
 }
 
 sink_destroy :: proc(s: ^Sink) {
 	if s == nil { return }
-	delete(s.entries)
-	if s.arena_ready { mem.dynamic_arena_destroy(&s.arena) }
-	s^ = {}
+	delete(s.entries); if s.arena_ready { mem.dynamic_arena_destroy(&s.arena) }; s^ = {}
 }
 
 sink_clear :: proc(s: ^Sink) {
 	if s == nil { return }
 	clear(&s.entries)
-	if s.arena_dirty && s.arena_ready {
-		mem.dynamic_arena_reset(&s.arena)
-		s.arena_dirty = false
-	}
+	if s.arena_dirty && s.arena_ready { mem.dynamic_arena_reset(&s.arena); s.arena_dirty = false }
 	s.truncated, s.oom = false, false
 }
 
 @(private)
 sink_ensure :: proc(s: ^Sink, fallback: runtime.Allocator) -> runtime.Allocator {
 	if s.allocator.procedure == nil { s.allocator, s.entries.allocator = fallback, fallback }
-	if !s.arena_ready {
-		mem.dynamic_arena_init(&s.arena, s.allocator, s.allocator)
-		s.arena_ready = true
-	}
+	if !s.arena_ready { mem.dynamic_arena_init(&s.arena, s.allocator, s.allocator); s.arena_ready = true }
 	return mem.dynamic_arena_allocator(&s.arena)
+}
+
+@(private)
+redact_err_texts :: proc "contextless" (kind: Error_Kind, operand, want_text: string, secret: bool) -> (string, string) {
+	if !secret { return operand, want_text }
+	return "", DEFAULT_REDACT_MASK if kind == .Custom else ""
 }
 
 @(private)
 sink_push :: proc(s: ^Sink, fallback: runtime.Allocator, kind: Error_Kind, at: u64, steps: []tape.Step, operand := "", want := Want{}, secret := false) -> bool {
 	if s == nil { return false }
 	if s.max_errors > 0 && len(s.entries) >= s.max_errors { s.truncated = true; return false }
-	arena := sink_ensure(s, fallback)
-	s.arena_dirty = true
-	safe_op := "" if secret else operand
-	safe_wt := DEFAULT_REDACT_MASK if (secret && kind == .Custom) else ("" if secret else want.text)
+	arena := sink_ensure(s, fallback); s.arena_dirty = true
+	safe_op, safe_wt := redact_err_texts(kind, operand, want.text, secret)
 	entry := Error_Entry{kind = kind, at = at, want = {type = want.type}, secret = secret}
 	perr: runtime.Allocator_Error
 	if entry.pointer, entry.operand, entry.want.text, perr = alloc_error_strings(arena, steps, safe_op, safe_wt); perr == nil {
@@ -131,38 +91,27 @@ sink_push :: proc(s: ^Sink, fallback: runtime.Allocator, kind: Error_Kind, at: u
 @(private)
 format_pointer_fast :: proc(steps: []tape.Step, allocator: runtime.Allocator) -> (string, runtime.Allocator_Error) {
 	if len(steps) == 0 { return "", nil }
-	// Fast path: single allocation + copy when every step is an unescaped Name.
 	n := 0
 	for s in steps {
 		nm, is_nm := s.(tape.Name)
 		if !is_nm { return check.format_pointer(steps, allocator) }
 		n += 1 + len(string(nm))
-		for c in transmute([]u8)string(nm) {
-			if c == '~' || c == '/' { return check.format_pointer(steps, allocator) }
-		}
+		for c in transmute([]u8)string(nm) { if c == '~' || c == '/' { return check.format_pointer(steps, allocator) } }
 	}
 	buf, err := runtime.mem_alloc_non_zeroed(n, 1, allocator)
 	if err != nil { return "", err }
 	pos := 0
 	for s in steps {
 		nm := string(s.(tape.Name))
-		buf[pos] = '/'
-		pos += 1
-		if len(nm) > 0 {
-			copy(buf[pos:], nm)
-			pos += len(nm)
-		}
+		buf[pos] = '/'; pos += 1
+		if len(nm) > 0 { copy(buf[pos:], nm); pos += len(nm) }
 	}
 	return string(buf[:n]), nil
 }
 
 @(private)
 alloc_error_strings :: proc(allocator: runtime.Allocator, steps: []tape.Step, operand, want_text: string) -> (ptr, op, wt: string, err: runtime.Allocator_Error) {
-	defer if err != nil {
-		delete(ptr, allocator)
-		delete(op, allocator)
-		delete(wt, allocator)
-	}
+	defer if err != nil { delete(ptr, allocator); delete(op, allocator); delete(wt, allocator) }
 	ptr = format_pointer_fast(steps, allocator) or_return
 	if len(operand) > 0 { op = strings.clone(operand, allocator) or_return }
 	if len(want_text) > 0 { wt = strings.clone(want_text, allocator) or_return }
@@ -170,10 +119,7 @@ alloc_error_strings :: proc(allocator: runtime.Allocator, steps: []tape.Step, op
 }
 
 @(private)
-record_failure :: proc(
-	sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator: runtime.Allocator,
-	kind: Error_Kind, at: u64, steps: []tape.Step, operand := "", want := Want{}, silent := false, secret := false,
-) -> bool {
+record_failure :: proc(sink: ^Sink, first: ^Model_Error, oom: ^bool, allocator: runtime.Allocator, kind: Error_Kind, at: u64, steps: []tape.Step, operand := "", want := Want{}, silent := false, secret := false) -> bool {
 	if silent { if first.kind == .None { first^ = {kind = kind, at = at, secret = secret} }; return false }
 	pushed := sink_push(sink, allocator, kind, at, steps, operand, want, secret) if sink != nil else false
 	if sink != nil && sink.oom { if oom != nil { oom^ = true }; return false }
@@ -182,8 +128,7 @@ record_failure :: proc(
 			e := sink.entries[len(sink.entries) - 1]
 			first^ = {kind = e.kind, at = e.at, pointer = e.pointer, operand = e.operand, want = e.want, secret = e.secret}
 		} else {
-			safe_op := "" if secret else operand
-			safe_wt := DEFAULT_REDACT_MASK if (secret && kind == .Custom) else ("" if secret else want.text)
+			safe_op, safe_wt := redact_err_texts(kind, operand, want.text, secret)
 			ptr, op, wt, err := alloc_error_strings(allocator, steps, safe_op, safe_wt)
 			if err != nil { if oom != nil { oom^ = true }; first^ = {kind = kind, at = at, secret = secret} } else {
 				first^ = {kind = kind, at = at, pointer = ptr, operand = op, want = {want.type, wt}, owned = len(ptr) > 0 || len(op) > 0 || len(wt) > 0, secret = secret}
@@ -227,15 +172,10 @@ RULES_KIND_MAP := [rules.Error_Kind]Error_Kind{
 }
 
 @(private)
-map_rules_kind :: proc "contextless" (k: rules.Error_Kind) -> Error_Kind {
-	return RULES_KIND_MAP[k] if k <= max(rules.Error_Kind) else .Wrong_Kind
-}
-
-@(private)
-Error_Meta :: struct { code, msg: string }
+map_rules_kind :: proc "contextless" (k: rules.Error_Kind) -> Error_Kind { return RULES_KIND_MAP[k] if k <= max(rules.Error_Kind) else .Wrong_Kind }
 
 @(private, rodata)
-ERROR_META := [Error_Kind]Error_Meta{
+ERROR_META := [Error_Kind]struct { code, msg: string }{
 	.None = {"none", "No error"}, .Wrong_Kind = {"wrong_kind", "Value does not fit the field's type"},
 	.Not_Allowed = {"not_allowed", "Field is not allowed"}, .Below_Minimum = {"below_minimum", "Number is below minimum"},
 	.Above_Maximum = {"above_maximum", "Number is above maximum"}, .Not_Multiple = {"not_multiple", "Number is not a multiple"},
@@ -260,25 +200,20 @@ ERROR_META := [Error_Kind]Error_Meta{
 	.Incompatible_Schema = {"incompatible_schema", "Schemas are not compatible without a migration"},
 }
 
-error_code :: proc "contextless" (kind: Error_Kind) -> string {
-	return ERROR_META[kind].code if kind <= max(Error_Kind) else "unknown"
-}
+error_code :: proc "contextless" (kind: Error_Kind) -> string { return ERROR_META[kind].code if kind <= max(Error_Kind) else "unknown" }
 
 entry_message :: proc(e: Error_Entry, allocator := context.allocator, opts := Problem_Opts{}) -> (msg: string, err: runtime.Allocator_Error) {
 	redacted := e.secret || redact_pointer_matches(e.pointer, opts.redact_paths)
-	if redacted {
-		mask := resolve_redact_mask(opts.redact_mask)
-		b := strings.builder_make(0, 64, allocator) or_return
-		strings.write_string(&b, ERROR_META[e.kind].msg if e.kind <= max(Error_Kind) else "Validation failed")
-		strings.write_string(&b, " (")
-		strings.write_string(&b, mask)
-		strings.write_byte(&b, ')')
-		return strings.to_string(b), nil
-	}
-	if e.kind == .Custom && len(e.want.text) > 0 { return strings.clone(e.want.text, allocator) }
+	if !redacted && e.kind == .Custom && len(e.want.text) > 0 { return strings.clone(e.want.text, allocator) }
 	b := strings.builder_make(0, 64, allocator) or_return
 	strings.write_string(&b, ERROR_META[e.kind].msg if e.kind <= max(Error_Kind) else "Validation failed")
-	if len(e.operand) > 0 { strings.write_string(&b, ", "); strings.write_string(&b, e.operand) } else if len(e.want.text) > 0 { strings.write_string(&b, ", expected "); strings.write_string(&b, e.want.text) }
+	if redacted {
+		strings.write_string(&b, " ("); strings.write_string(&b, resolve_redact_mask(opts.redact_mask)); strings.write_byte(&b, ')')
+	} else if len(e.operand) > 0 {
+		strings.write_string(&b, ", "); strings.write_string(&b, e.operand)
+	} else if len(e.want.text) > 0 {
+		strings.write_string(&b, ", expected "); strings.write_string(&b, e.want.text)
+	}
 	return strings.to_string(b), nil
 }
 
@@ -286,12 +221,11 @@ Problem :: struct { type: string `stury:"type,omitempty"`, title: string, status
 Problem_Error :: struct { pointer, code, message: string }
 
 problem :: proc(entries: []Error_Entry, title: string, status: int, type := "", allocator := context.allocator, opts := Problem_Opts{}) -> (p: Problem, err: runtime.Allocator_Error) {
-	p = {type = type, title = title, status = status}
-	p.errors = make([]Problem_Error, len(entries), allocator) or_return
+	p = {type = type, title = title, status = status, errors = make([]Problem_Error, len(entries), allocator) or_return}
 	defer if err != nil { problem_destroy(p, allocator) }
 	for e, i in entries {
-		p.errors[i].code = error_code(e.kind)
 		p.errors[i].pointer = strings.clone(e.pointer, allocator) or_return
+		p.errors[i].code = error_code(e.kind)
 		p.errors[i].message = entry_message(e, allocator, opts) or_return
 	}
 	return p, nil
@@ -304,8 +238,7 @@ problem_destroy :: proc(p: Problem, allocator := context.allocator) {
 
 write_problem_tokens :: proc(t: ^write.Token_Tape, entries: []Error_Entry, p: Problem, truncated := false, scratch := context.allocator, opts := Problem_Opts{}) -> write.Error {
 	kv :: proc(t: ^write.Token_Tape, k: string, kind: write.Token_Kind, v: string) -> write.Error {
-		write.token_tape_take(t, .Key, k) or_return
-		return write.token_tape_take(t, kind, v)
+		write.token_tape_take(t, .Key, k) or_return; return write.token_tape_take(t, kind, v)
 	}
 	write.token_tape_take(t, .Object, "") or_return
 	if p.type != "" { kv(t, "type", .String, p.type) or_return }
@@ -317,8 +250,7 @@ write_problem_tokens :: proc(t: ^write.Token_Tape, entries: []Error_Entry, p: Pr
 		write.token_tape_take(t, .Object, "") or_return
 		kv(t, "pointer", .String, e.pointer) or_return
 		kv(t, "code", .String, error_code(e.kind)) or_return
-		msg := entry_message(e, scratch, opts) or_return
-		defer delete(msg, scratch)
+		msg := entry_message(e, scratch, opts) or_return; defer delete(msg, scratch)
 		kv(t, "message", .String, msg) or_return
 		write.token_tape_take(t, .Close, "") or_return
 	}

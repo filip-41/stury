@@ -125,26 +125,22 @@ Inline_Frame :: struct {
 }
 
 @(private)
-push_bytes :: #force_inline proc(t: ^Writing, dst: ^[dynamic]u8, b: []u8) -> bool {
+put_str :: #force_inline proc(t: ^Writing, s: string) {
+	write.put(t.out, transmute([]u8)s)
+}
+
+@(private)
+push_val :: #force_inline proc(t: ^Writing, dst: ^[dynamic]$T, v: T) -> bool {
+	if _, err := append(dst, v); err != nil {
+		t.w.err = err
+		return false
+	}
+	return true
+}
+
+@(private)
+push_slice :: #force_inline proc(t: ^Writing, dst: ^[dynamic]$T, b: []T) -> bool {
 	if _, err := append(dst, ..b); err != nil {
-		t.w.err = err
-		return false
-	}
-	return true
-}
-
-@(private)
-push_byte :: #force_inline proc(t: ^Writing, dst: ^[dynamic]u8, c: u8) -> bool {
-	if _, err := append(dst, c); err != nil {
-		t.w.err = err
-		return false
-	}
-	return true
-}
-
-@(private)
-push_pending :: #force_inline proc(t: ^Writing, p: Pending) -> bool {
-	if _, err := append(&t.pending, p); err != nil {
 		t.w.err = err
 		return false
 	}
@@ -212,14 +208,14 @@ write_tables :: proc(t: ^Writing, root: tape.Node_Index, allocator: runtime.Allo
 	stack: [dynamic]Table_Frame
 	stack.allocator = allocator
 	defer delete(stack)
-	if put_lead(t, root, 0) {
+	if put_comments(t, root, .Comment, 0) {
 		write.put_byte(t.out, '\n')
 	}
 	if !put_table(t, root, &stack, 0) {
 		return
 	}
 	defer if t.w.err == nil {
-		put_foot(t, root, 0)
+		put_comments(t, root, .Comment_Foot, 0)
 	}
 	for len(stack) > 0 && t.w.err == nil {
 		f := &stack[len(stack) - 1]
@@ -232,13 +228,7 @@ write_tables :: proc(t: ^Writing, root: tape.Node_Index, allocator: runtime.Allo
 		item := t.pending[f.cursor]
 		f.cursor += 1
 		resize(&t.path, f.path_to)
-		if len(t.path) > 0 && !push_byte(t, &t.path, '.') {
-			return
-		}
-		if !push_bytes(t, &t.path, t.via[item.via_lo:item.via_hi]) {
-			return
-		}
-		if !spell_key(t, item.key) || !push_bytes(t, &t.path, t.key) {
+		if (len(t.path) > 0 && !push_val(t, &t.path, u8('.'))) || !push_slice(t, &t.path, t.via[item.via_lo:item.via_hi]) || !spell_key(t, item.key) || !push_slice(t, &t.path, t.key) {
 			return
 		}
 		level := len(stack) - 1
@@ -251,13 +241,13 @@ write_tables :: proc(t: ^Writing, root: tape.Node_Index, allocator: runtime.Allo
 				write.put_byte(t.out, '\n')
 			}
 			if item.array != tape.NO_NODE {
-				put_lead(t, item.array, level)
+				put_comments(t, item.array, .Comment, level)
 			}
-			put_lead(t, item.value, level)
+			put_comments(t, item.value, .Comment, level)
 			put_indent(t, level)
-			write.put(t.out, transmute([]u8)string("[[" if item.element else "["))
+			put_str(t, "[[" if item.element else "[")
 			write.put(t.out, t.path[:])
-			write.put(t.out, transmute([]u8)string("]]" if item.element else "]"))
+			put_str(t, "]]" if item.element else "]")
 			put_tail(t, item.value)
 			write.put_byte(t.out, '\n')
 			t.wrote = true
@@ -272,19 +262,14 @@ write_tables :: proc(t: ^Writing, root: tape.Node_Index, allocator: runtime.Allo
 // tables after the pending ones, as a frame on `stack`.
 @(private)
 put_table :: proc(t: ^Writing, at: tape.Node_Index, stack: ^[dynamic]Table_Frame, level: int) -> bool {
-	frame := Table_Frame{path_to = len(t.path)}
-	// A frame's tables come after those of the frames below it, so the list is cut back to where its own start.
-	first := len(t.pending)
-	if !t.sort && write.plain_members(&t.w, at) && t.w.nodes[at].kind == .Object {
-		// Native TOML has no duplicate keys; non-TOML objects check duplicates without copying members.
-		if !t.toml && !check_plain_dups(t, at) {
-			return false
-		}
+	path_to, first := len(t.path), len(t.pending)
+	if !t.sort && t.toml && write.plain_members(&t.w, at) && t.w.nodes[at].kind == .Object {
+		// Native TOML has no duplicate keys, so plain tables stream without copying members.
 		for k, end := at + 1, at + tape.Node_Index(t.w.nodes[at].n); k < end; {
-			val := tape.node_after(t.w.doc, k)
-			m := Member{key = k, value = val}
-			k = tape.node_after(t.w.doc, m.value)
-			if !put_table_member(t, m, level) {
+			key := k
+			val := tape.node_after(t.w.doc, key)
+			k = tape.node_after(t.w.doc, val)
+			if !put_table_member(t, Member{key = key, value = val}, level) {
 				return false
 			}
 		}
@@ -301,15 +286,9 @@ put_table :: proc(t: ^Writing, at: tape.Node_Index, stack: ^[dynamic]Table_Frame
 		}
 	}
 	if at != t.root {
-		put_foot(t, at, level)
+		put_comments(t, at, .Comment_Foot, level)
 	}
-	frame.lo, frame.cursor, frame.end = first, first, len(t.pending)
-	_, e := append(stack, frame)
-	if e != nil {
-		t.w.err = e
-		return false
-	}
-	return true
+	return push_val(t, stack, Table_Frame{lo = first, cursor = first, end = len(t.pending), path_to = path_to})
 }
 
 // Writes member `m` of a table in line, or lists it as a table still to be written under a header.
@@ -328,40 +307,28 @@ defer_table :: proc(t: ^Writing, m: Member) -> (deferred, ok: bool) {
 	via_lo := len(t.via)
 	switch {
 	case kind == .Object && !style_is(t, m.value, "inline") && !style_is(t, m.value, "dotted"):
-		if !push_bytes(t, &t.via, t.dots[:]) {
-			return false, false
-		}
-		if !push_pending(t, Pending{key = m.key, value = m.value, array = tape.NO_NODE, via_lo = via_lo, via_hi = len(t.via)}) {
+		if !push_slice(t, &t.via, t.dots[:]) || !push_val(t, &t.pending, Pending{key = m.key, value = m.value, array = tape.NO_NODE, via_lo = via_lo, via_hi = len(t.via)}) {
 			return false, false
 		}
 	case kind == .Array && !style_is(t, m.value, "inline"):
 		if !all_tables(t, m.value) {
 			return false, t.w.err == nil
 		}
-		if !push_bytes(t, &t.via, t.dots[:]) {
+		if !push_slice(t, &t.via, t.dots[:]) {
 			return false, false
-		}
-		array := m.value
-		if write.plain_members(&t.w, m.value) {
-			for element, end := m.value + 1, m.value + tape.Node_Index(t.w.nodes[m.value].n); element < end; element = tape.node_after(t.w.doc, element) {
-				if !push_pending(t, Pending{key = m.key, value = element, array = array, element = true, via_lo = via_lo, via_hi = len(t.via)}) {
-					return false, false
-				}
-				array = tape.NO_NODE
-			}
-			break
 		}
 		elements, ok_c := write.children_as_written(&t.w, m.value)
 		if !ok_c {
 			return false, false
 		}
 		defer tape.destroy_children(&elements)
+		array := m.value
 		for {
 			_, element, q := tape.next_child(t.reader, &elements, .Group)
 			if q != .Found {
 				break
 			}
-			if !push_pending(t, Pending{key = m.key, value = element, array = array, element = true, via_lo = via_lo, via_hi = len(t.via)}) {
+			if !push_val(t, &t.pending, Pending{key = m.key, value = element, array = array, element = true, via_lo = via_lo, via_hi = len(t.via)}) {
 				return false, false
 			}
 			array = tape.NO_NODE
@@ -379,20 +346,16 @@ put_member :: proc(t: ^Writing, m: Member, level: int) -> bool {
 	if is_dotted(t, m.value) {
 		return put_dotted_member(t, m, level)
 	}
-	put_lead(t, m.value, level)
+	put_comments(t, m.value, .Comment, level)
 	put_indent(t, level)
 	write.put(t.out, t.dots[:])
 	if !spell_key(t, m.key) {
 		return false
 	}
 	write.put(t.out, t.key)
-	write.put(t.out, transmute([]u8)string(" = "))
+	put_str(t, " = ")
 	// A scalar opens no container, so it takes no walk of its own.
-	if t.w.nodes[m.value].kind < .Array {
-		if !put_scalar(t, m.value) {
-			return false
-		}
-	} else if !put_inline(t, m.value, level) {
+	if !(put_scalar(t, m.value) if t.w.nodes[m.value].kind < .Array else put_inline(t, m.value, level)) {
 		return false
 	}
 	put_tail(t, m.value)
@@ -406,8 +369,7 @@ put_member :: proc(t: ^Writing, m: Member, level: int) -> bool {
 put_dotted_member :: proc(t: ^Writing, m: Member, level: int) -> bool {
 	dstack: [dynamic]Dotted_Frame
 	dstack.allocator = t.w.allocator
-	dots_base := len(t.dots)
-	members_base := len(t.members)
+	dots_base, members_base := len(t.dots), len(t.members)
 	defer {
 		delete(dstack)
 		release(t, members_base)
@@ -418,17 +380,13 @@ put_dotted_member :: proc(t: ^Writing, m: Member, level: int) -> bool {
 		if !spell_key(t, cur.key) {
 			return false
 		}
-		put_lead(t, cur.value, level)
+		put_comments(t, cur.value, .Comment, level)
 		dots_len := len(t.dots)
-		if !push_bytes(t, &t.dots, t.key) || !push_byte(t, &t.dots, '.') {
+		if !push_slice(t, &t.dots, t.key) || !push_val(t, &t.dots, u8('.')) {
 			return false
 		}
 		lo, hi, ok := collect(t, cur.value, true)
-		if !ok {
-			return false
-		}
-		if _, err := append(&dstack, Dotted_Frame{lo = lo, cur = lo, hi = hi, dots_len = dots_len}); err != nil {
-			t.w.err = err
+		if !ok || !push_val(t, &dstack, Dotted_Frame{lo = lo, cur = lo, hi = hi, dots_len = dots_len}) {
 			return false
 		}
 		for len(dstack) > 0 {
@@ -465,18 +423,6 @@ put_dotted_member :: proc(t: ^Writing, m: Member, level: int) -> bool {
 // Whether the array at `at` holds objects and nothing else, at least one.
 @(private)
 all_tables :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
-	if write.plain_members(&t.w, at) {
-		end := at + tape.Node_Index(t.w.nodes[at].n)
-		if at + 1 >= end {
-			return false
-		}
-		for e := at + 1; e < end; e = tape.node_after(t.w.doc, e) {
-			if t.w.nodes[e].kind != .Object {
-				return false
-			}
-		}
-		return true
-	}
 	c, ok_c := write.children_as_written(&t.w, at)
 	if !ok_c {
 		return false
@@ -527,14 +473,12 @@ collect :: proc(t: ^Writing, at: tape.Node_Index, object: bool) -> (lo, hi: int,
 		return lo, lo, false
 	}
 	defer tape.destroy_children(&c)
-	aerr: runtime.Allocator_Error
 	for {
 		key, value, p := tape.next_child(t.reader, &c, .Group)
 		if p != .Found {
 			break
 		}
-		if _, aerr = append(&t.members, Member{key = key, value = value}); aerr != nil {
-			t.w.err = aerr
+		if !push_val(t, &t.members, Member{key = key, value = value}) {
 			return lo, lo, false
 		}
 	}
@@ -549,8 +493,8 @@ collect :: proc(t: ^Writing, at: tape.Node_Index, object: bool) -> (lo, hi: int,
 			if !good {
 				return lo, hi, false
 			}
-			m.name, aerr = strings.clone(s, t.w.allocator)
-			if aerr != nil {
+			aerr: runtime.Allocator_Error
+			if m.name, aerr = strings.clone(s, t.w.allocator); aerr != nil {
 				t.w.err = aerr
 				return lo, hi, false
 			}
@@ -564,30 +508,64 @@ collect :: proc(t: ^Writing, at: tape.Node_Index, object: bool) -> (lo, hi: int,
 				}
 			}
 		}
-	} else if object && !t.toml && hi - lo > 1 {
-		if !check_no_dups(t, at, lo, hi) {
-			return lo, hi, false
-		}
+	} else if object && !t.toml && hi - lo > 1 && !check_no_dups(t, at, lo, hi) {
+		return lo, hi, false
 	}
 	return lo, hi, true
 }
 
+// Refuses duplicate keys among `t.members[lo:hi]` of a non-TOML object at `at`.
 @(private)
-Key_Entry :: struct {
-	name:  string,
-	key:   tape.Node_Index,
-	owned: bool,
-}
-
-// Refuses duplicate keys in `entries` (pairwise for small objects, sorted for larger ones).
-@(private)
-check_entries_unique :: proc(t: ^Writing, entries: []Key_Entry) -> bool {
-	n := len(entries)
+check_no_dups :: proc(t: ^Writing, at: tape.Node_Index, lo, hi: int) -> bool {
+	Key_Entry :: struct {
+		name:  string,
+		key:   tape.Node_Index,
+		owned: bool,
+	}
+	n := hi - lo
+	inline_buf: [16]Key_Entry
+	entries := inline_buf[:n] if n <= len(inline_buf) else nil
+	if entries == nil {
+		aerr: runtime.Allocator_Error
+		if entries, aerr = make([]Key_Entry, n, t.w.allocator); aerr != nil {
+			t.w.err = aerr
+			return false
+		}
+	}
+	defer {
+		for e in entries {
+			if e.owned {
+				delete(e.name, t.w.allocator)
+			}
+		}
+		if n > len(inline_buf) {
+			delete(entries, t.w.allocator)
+		}
+	}
+	for m, i in t.members[lo:hi] {
+		k := m.key
+		if k == tape.NO_NODE || t.w.nodes[k].kind > .Plain {
+			return refuse(t, k if k != tape.NO_NODE else at)
+		}
+		s, ok := write.text_of(&t.w, k)
+		if !ok {
+			return false
+		}
+		owned := raw_data(s) == raw_data(t.w.scratch)
+		if owned {
+			cloned, aerr := strings.clone(s, t.w.allocator)
+			if aerr != nil {
+				t.w.err = aerr
+				return false
+			}
+			s = cloned
+		}
+		entries[i] = {name = s, key = k, owned = owned}
+	}
 	if n <= 12 {
 		for i in 0 ..< n {
-			a := entries[i].name
 			for j in i + 1 ..< n {
-				if a == entries[j].name {
+				if entries[i].name == entries[j].name {
 					return refuse(t, entries[j].key)
 				}
 			}
@@ -601,146 +579,6 @@ check_entries_unique :: proc(t: ^Writing, entries: []Key_Entry) -> bool {
 		}
 	}
 	return true
-}
-
-// Refuses duplicate keys in a plain non-TOML object at `at` without copying its members into `t.members`.
-@(private)
-check_plain_dups :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
-	end := at + tape.Node_Index(t.w.nodes[at].n)
-	if at + 1 >= end {
-		return true
-	}
-	inline_buf: [16]Key_Entry = ---
-	heap: [dynamic]Key_Entry
-	heap.allocator = t.w.allocator
-	n := 0
-	using_heap := false
-	any_owned := false
-	defer {
-		if any_owned {
-			slice_to_free := heap[:] if using_heap else inline_buf[:n]
-			for e in slice_to_free {
-				if e.owned {
-					delete(e.name, t.w.allocator)
-				}
-			}
-		}
-		if using_heap {
-			delete(heap)
-		}
-	}
-	for k := at + 1; k < end; {
-		node := t.w.nodes[k]
-		if node.kind > .Plain {
-			return refuse(t, k)
-		}
-		s: string
-		owned := false
-		if node.spelling & tape.SPELLING_DECODE == 0 {
-			s = string(tape.span_bytes(t.w.doc, node.lo, node.n))
-		} else {
-			ok: bool
-			s, ok = write.text_of(&t.w, k)
-			if !ok {
-				return false
-			}
-			if raw_data(s) == raw_data(t.w.scratch) {
-				cloned, aerr := strings.clone(s, t.w.allocator)
-				if aerr != nil {
-					t.w.err = aerr
-					return false
-				}
-				s = cloned
-				owned = true
-				any_owned = true
-			}
-		}
-		entry := Key_Entry{name = s, key = k, owned = owned}
-		if !using_heap {
-			if n < len(inline_buf) {
-				inline_buf[n] = entry
-				n += 1
-			} else {
-				if _, aerr := append(&heap, ..inline_buf[:]); aerr != nil {
-					if owned {
-						delete(s, t.w.allocator)
-					}
-					t.w.err = aerr
-					return false
-				}
-				using_heap = true
-				if _, aerr := append(&heap, entry); aerr != nil {
-					if owned {
-						delete(s, t.w.allocator)
-					}
-					t.w.err = aerr
-					return false
-				}
-			}
-		} else if _, aerr := append(&heap, entry); aerr != nil {
-			if owned {
-				delete(s, t.w.allocator)
-			}
-			t.w.err = aerr
-			return false
-		}
-		val := tape.node_after(t.w.doc, k)
-		k = tape.node_after(t.w.doc, val)
-	}
-	entries := heap[:] if using_heap else inline_buf[:n]
-	if len(entries) <= 1 {
-		return true
-	}
-	return check_entries_unique(t, entries)
-}
-
-// Refuses duplicate keys among `t.members[lo:hi]` of a non-TOML object at `at`.
-@(private)
-check_no_dups :: proc(t: ^Writing, at: tape.Node_Index, lo, hi: int) -> bool {
-	n := hi - lo
-	inline_buf: [16]Key_Entry
-	entries: []Key_Entry
-	heap := n > len(inline_buf)
-	if heap {
-		aerr: runtime.Allocator_Error
-		entries, aerr = make([]Key_Entry, n, t.w.allocator)
-		if aerr != nil {
-			t.w.err = aerr
-			return false
-		}
-	} else {
-		entries = inline_buf[:n]
-	}
-	defer {
-		for e in entries {
-			if e.owned {
-				delete(e.name, t.w.allocator)
-			}
-		}
-		if heap {
-			delete(entries, t.w.allocator)
-		}
-	}
-	for m, i in t.members[lo:hi] {
-		if m.key == tape.NO_NODE || t.w.nodes[m.key].kind > .Plain {
-			return refuse(t, m.key if m.key != tape.NO_NODE else at)
-		}
-		s, ok := write.text_of(&t.w, m.key)
-		if !ok {
-			return false
-		}
-		owned := raw_data(s) == raw_data(t.w.scratch)
-		if owned {
-			cloned, aerr := strings.clone(s, t.w.allocator)
-			if aerr != nil {
-				t.w.err = aerr
-				return false
-			}
-			s = cloned
-		}
-		entries[i] = {name = s, key = m.key, owned = owned}
-	}
-	return check_entries_unique(t, entries)
 }
 
 // Drops the members from `lo` on and the key texts they hold.
@@ -789,8 +627,7 @@ put_inline :: proc(t: ^Writing, at: tape.Node_Index, level: int) -> bool {
 				frame.outer = t.dots
 				t.dots = make([dynamic]u8, t.w.allocator)
 			}
-			if _, err := append(&stack, frame); err != nil {
-				t.w.err = err
+			if !push_val(t, &stack, frame) {
 				return false
 			}
 			write.put_byte(t.out, '{' if kind == .Object else '[')
@@ -814,7 +651,7 @@ put_inline :: proc(t: ^Writing, at: tape.Node_Index, level: int) -> bool {
 			}
 			if f.cur == f.hi {
 				if f.broken {
-					put_foot(t, f.node, f.level + 1)
+					put_comments(t, f.node, .Comment_Foot, f.level + 1)
 					put_indent(t, f.level)
 				} else {
 					for fact in comments_of(t, f.node) {
@@ -839,11 +676,11 @@ put_inline :: proc(t: ^Writing, at: tape.Node_Index, level: int) -> bool {
 			m := t.members[f.cur]
 			f.cur += 1
 			if f.broken {
-				_ = put_lead(t, m.value, f.level + 1)
+				put_comments(t, m.value, .Comment, f.level + 1)
 				put_indent(t, f.level + 1)
 				f.last = m.value
 			} else if !f.first {
-				write.put(t.out, transmute([]u8)string(", "))
+				put_str(t, ", ")
 			}
 			f.first = false
 			if f.object {
@@ -853,15 +690,11 @@ put_inline :: proc(t: ^Writing, at: tape.Node_Index, level: int) -> bool {
 				if is_dotted(t, m.value) {
 					// The members of a table of dotted keys stand in this one's, each under the key and a point.
 					dots_len := len(t.dots)
-					if !push_bytes(t, &t.dots, t.key) || !push_byte(t, &t.dots, '.') {
+					if !push_slice(t, &t.dots, t.key) || !push_val(t, &t.dots, u8('.')) {
 						return false
 					}
 					lo, hi, ok := collect(t, m.value, true)
-					if !ok {
-						return false
-					}
-					if _, err := append(&stack, Inline_Frame{lo = lo, cur = lo, hi = hi, node = m.value, last = tape.NO_NODE, level = f.level, object = true, first = true, dotted = true, dots_len = dots_len}); err != nil {
-						t.w.err = err
+					if !ok || !push_val(t, &stack, Inline_Frame{lo = lo, cur = lo, hi = hi, node = m.value, last = tape.NO_NODE, level = f.level, object = true, first = true, dotted = true, dots_len = dots_len}) {
 						return false
 					}
 					// The separator before the first of them is written, so each after it takes its own.
@@ -869,7 +702,7 @@ put_inline :: proc(t: ^Writing, at: tape.Node_Index, level: int) -> bool {
 				}
 				write.put(t.out, t.dots[:])
 				write.put(t.out, t.key)
-				write.put(t.out, transmute([]u8)string(" = "))
+				put_str(t, " = ")
 			}
 			next = m.value
 			break
@@ -909,27 +742,16 @@ has_notes :: proc(t: ^Writing, at: tape.Node_Index, lo, hi: int) -> bool {
 @(private)
 put_datetime :: proc(t: ^Writing, span: []u8, dk: Date_Kind) {
 	if !t.v11 {
-		switch dk {
-		case .Local_Time:
-			if len(span) == 5 {
-				write.put(t.out, span)
-				write.put(t.out, transmute([]u8)string(":00"))
-				return
-			}
-		case .Local_Datetime:
-			if len(span) == 16 {
-				write.put(t.out, span)
-				write.put(t.out, transmute([]u8)string(":00"))
-				return
-			}
-		case .Datetime:
-			if len(span) > 16 && span[16] != ':' {
-				write.put(t.out, span[:16])
-				write.put(t.out, transmute([]u8)string(":00"))
-				write.put(t.out, span[16:])
-				return
-			}
-		case .Local_Date, .None:
+		if (dk == .Local_Time && len(span) == 5) || (dk == .Local_Datetime && len(span) == 16) {
+			write.put(t.out, span)
+			write.put(t.out, transmute([]u8)string(":00"))
+			return
+		}
+		if dk == .Datetime && len(span) > 16 && span[16] != ':' {
+			write.put(t.out, span[:16])
+			write.put(t.out, transmute([]u8)string(":00"))
+			write.put(t.out, span[16:])
+			return
 		}
 	}
 	write.put(t.out, span)
@@ -976,74 +798,42 @@ put_scalar :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
 @(private)
 put_number :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
 	buf: [write.NUMBER_ROOM]u8 = ---
-	// A number of a TOML text is spelled in its own base by its bits. Its text is a TOML number already, and a float
-	// has a point or an exponent in it, so only a base or an infinite or not-a-number float needs its value.
 	base := 0
 	value: spell.Number
 	if t.toml {
 		#partial switch Number_Spelling(t.w.nodes[at].spelling & tape.NUMBER_KIND) {
 		case .Plain, .Decimal:
-		case .Hex: base = 16
-		case .Octal: base = 8
+		case .Hex:    base = 16
+		case .Octal:  base = 8
 		case .Binary: base = 2
-		case:
-			value, _ = tape.node_number(t.w.doc, at)
+		case:         value, _ = tape.node_number(t.w.doc, at)
 		}
 		if base != 0 {
 			value, _ = tape.node_number(t.w.doc, at)
 		}
 	} else {
 		style := style_name(t, at)
-		if style == "hex" || style == "octal" || style == "binary" {
-			base = 16 if style == "hex" else 8 if style == "octal" else 2
-		}
-		if base == 0 && .Binary not_in t.w.doc.format.caps {
-			node := t.w.nodes[at]
-			if node.spelling & tape.SPELLING_DECODE == 0 {
-				raw := tape.span_bytes(t.w.doc, node.lo, node.n)
-				if write.is_json_number(raw) {
-					has_frac := false
-					for c in raw {
-						if c == '.' || c == 'e' || c == 'E' {
-							has_frac = true
-							break
-						}
-					}
-					if has_frac {
-						write.put(t.out, raw)
-						return true
-					}
-					if len(raw) <= 18 || raw[0] == '-' && len(raw) <= 19 {
-						write.put(t.out, raw)
-						if style == "float" {
-							write.put(t.out, transmute([]u8)string(".0"))
-						}
-						return true
-					}
-				}
-			}
-		}
+		base = 16 if style == "hex" else 8 if style == "octal" else 2 if style == "binary" else 0
 		value, _ = tape.node_number(t.w.doc, at)
 	}
 	if value.kind == .Float {
-		f := transmute(f64)value.bits
-		if math.is_nan(f) || math.is_inf(f) {
-			write.put(t.out, transmute([]u8)string("nan" if math.is_nan(f) else "inf" if f > 0 else "-inf"))
+		if f := transmute(f64)value.bits; math.is_nan(f) || math.is_inf(f) {
+			put_str(t, "nan" if math.is_nan(f) else "inf" if f > 0 else "-inf")
 			return true
 		}
 	}
 	if base != 0 && (value.kind == .Uint || value.kind == .Int && i64(value.bits) >= 0) {
-		write.put(t.out, transmute([]u8)string("0x" if base == 16 else "0o" if base == 8 else "0b"))
-		write.put(t.out, transmute([]u8)strconv.write_bits(buf[:], value.bits, base, false, 64, "0123456789abcdef", {}))
+		put_str(t, "0x" if base == 16 else "0o" if base == 8 else "0b")
+		put_str(t, strconv.write_bits(buf[:], value.bits, base, false, 64, "0123456789abcdef", {}))
 		return true
 	}
 	s, ok := write.number_text(&t.w, at, &buf)
-	if !ok || !t.toml && !toml_number(value.kind, s) {
+	if !ok || !t.toml && (!write.is_json_number(transmute([]u8)s) || value.kind != .Int && !strings.contains_any(s, ".eE")) {
 		return refuse(t, at)
 	}
-	write.put(t.out, transmute([]u8)s)
+	put_str(t, s)
 	if !t.toml && style_name(t, at) == "float" && !strings.contains_any(s, ".eE") {
-		write.put(t.out, transmute([]u8)string(".0"))
+		put_str(t, ".0")
 	}
 	return true
 }
@@ -1054,21 +844,6 @@ refuse :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
 		t.w.err = write.Refused{at, .No_Spelling}
 	}
 	return false
-}
-
-// Whether the number of `kind` and text `s` is a TOML number: an integer that fits 64 bits, or a float, which TOML
-// reads as JSON does.
-@(private)
-toml_number :: proc(kind: spell.Number_Kind, s: string) -> bool {
-	if !write.is_json_number(transmute([]u8)s) {
-		return false
-	}
-	for c in transmute([]u8)s {
-		if c == '.' || c == 'e' || c == 'E' {
-			return true
-		}
-	}
-	return kind == .Int
 }
 
 // The name a TOML document gives how node `at` is written, empty for another document and a node that has none.
@@ -1090,13 +865,18 @@ style_is :: proc(t: ^Writing, at: tape.Node_Index, name: string) -> bool {
 	return t.styled && style_name(t, at) == name
 }
 
-@(private, rodata)
-BARE_KEY := [256]bool{
-	'a' ..= 'z' = true,
-	'A' ..= 'Z' = true,
-	'0' ..= '9' = true,
-	'_'         = true,
-	'-'         = true,
+// Whether `s` is a valid TOML bare key (non-empty ASCII letters, digits, `_`, `-`).
+@(private)
+is_bare_key :: proc "contextless" (s: string) -> bool {
+	if len(s) == 0 {
+		return false
+	}
+	for c in transmute([]u8)s {
+		if !bare_byte(c) {
+			return false
+		}
+	}
+	return true
 }
 
 // Makes the spelling of the key at `at` in `t.tmp`: bare when it is letters, digits, `_` and `-` and the key was not
@@ -1115,15 +895,8 @@ spell_key :: proc(t: ^Writing, at: tape.Node_Index) -> bool {
 		t.key = transmute([]u8)s
 		return true
 	}
-	bare := len(s) > 0
-	for c in transmute([]u8)s {
-		if !BARE_KEY[c] {
-			bare = false
-			break
-		}
-	}
 	style := style_name(t, at)
-	if bare && (style == "" || style == "bare") {
+	if is_bare_key(s) && (style == "" || style == "bare") {
 		t.key = transmute([]u8)s
 		return true
 	}
@@ -1160,33 +933,27 @@ is_literal :: proc(s: string, multi: bool) -> bool {
 literal_string :: proc(t: ^Writing, s: string, multi: bool) -> bool {
 	clear(&t.tmp)
 	quote := "'''\n" if multi else "'"
-	return push_bytes(t, &t.tmp, transmute([]u8)quote) &&
-		push_bytes(t, &t.tmp, transmute([]u8)s) &&
-		push_bytes(t, &t.tmp, transmute([]u8)(quote[:3] if multi else quote))
+	return push_slice(t, &t.tmp, transmute([]u8)quote) &&
+		push_slice(t, &t.tmp, transmute([]u8)s) &&
+		push_slice(t, &t.tmp, transmute([]u8)(quote[:3] if multi else quote))
 }
 
 // Writes string `s` as TOML spells it by `style`, a basic string when `s` has no spelling in that one.
 @(private)
 put_string :: proc(t: ^Writing, s: string, style: string) -> bool {
+	ok := true
 	switch {
-	case style == "literal" && is_literal(s, false):
-		if !literal_string(t, s, false) {
-			return false
-		}
-	case style == "multiline_literal" && is_literal(s, true):
-		if !literal_string(t, s, true) {
-			return false
-		}
-	case style == "multiline":
-		if !basic_string(t, s, true) {
-			return false
-		}
+	case style == "literal" && is_literal(s, false):          ok = literal_string(t, s, false)
+	case style == "multiline_literal" && is_literal(s, true): ok = literal_string(t, s, true)
+	case style == "multiline":                                ok = basic_string(t, s, true)
 	case:
 		spell_basic(t, s, false, true)
 		return true
 	}
-	write.put(t.out, t.tmp[:])
-	return true
+	if ok {
+		write.put(t.out, t.tmp[:])
+	}
+	return ok
 }
 
 // Makes the basic string of `s` in `t.tmp`: a quote, a backslash and the control bytes escaped, each other character
@@ -1206,7 +973,7 @@ spell_basic :: proc(t: ^Writing, s: string, multi: bool, $DIRECT: bool) -> bool 
 			write.put(t.out, b)
 			return true
 		} else {
-			return push_bytes(t, &t.tmp, b)
+			return push_slice(t, &t.tmp, b)
 		}
 	}
 	quote := transmute([]u8)string("\"\"\"\n" if multi else "\"")
@@ -1237,28 +1004,16 @@ spell_basic :: proc(t: ^Writing, s: string, multi: bool, $DIRECT: bool) -> bool 
 		n := 2
 		escape[0] = '\\'
 		switch {
-		case c == '"':
-			escape[1] = '"'
-		case c == '\\':
-			escape[1] = '\\'
-		case c == '\n' && multi:
-			escape[0], n = '\n', 1
-		case c == '\n':
-			escape[1] = 'n'
-		case c == '\t':
-			escape[1] = 't'
-		case c == '\r':
-			escape[1] = 'r'
-		case c == '\b':
-			escape[1] = 'b'
-		case c == '\f':
-			escape[1] = 'f'
-		case c < 0x20 || c == 0x7F:
-			escape = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 15]}
-			n = 6
-		case:
-			escape = {0xEF, 0xBF, 0xBD, 0, 0, 0}
-			n = 3
+		case c == '"':               escape[1] = '"'
+		case c == '\\':              escape[1] = '\\'
+		case c == '\n' && multi:     escape[0], n = '\n', 1
+		case c == '\n':              escape[1] = 'n'
+		case c == '\t':              escape[1] = 't'
+		case c == '\r':              escape[1] = 'r'
+		case c == '\b':              escape[1] = 'b'
+		case c == '\f':              escape[1] = 'f'
+		case c < 0x20 || c == 0x7F:  escape, n = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 15]}, 6
+		case:                        escape, n = {0xEF, 0xBF, 0xBD, 0, 0, 0}, 3
 		}
 		if !emit(t, escape[:n], DIRECT) {
 			return false
@@ -1275,32 +1030,21 @@ put_indent :: proc(t: ^Writing, level: int) {
 	}
 }
 
-// The comments of kind `kind` of the value at `at`, none for a document that holds no comment.
+// The comments of the value at `at`, none for a document that holds no comment.
 @(private)
 comments_of :: proc(t: ^Writing, at: tape.Node_Index) -> []tape.Fact {
 	return tape.facts_of(t.w.doc, at) if t.comments else nil
 }
 
-// Writes the comments before the value at `at` as lines at indent `level`, each line of a body after a `#`. Returns
-// whether it wrote any.
+// Writes the comments of `kind` on `at` as lines at indent `level`, each line of a body after a `#`.
 @(private)
-put_lead :: proc(t: ^Writing, at: tape.Node_Index, level: int) -> (wrote: bool) {
+put_comments :: proc(t: ^Writing, at: tape.Node_Index, kind: tape.Fact_Kind, level: int) -> (wrote: bool) {
 	for f in comments_of(t, at) {
-		if f.kind == .Comment {
+		if f.kind == kind {
 			wrote = put_comment_lines(t, f, level) || wrote
 		}
 	}
 	return
-}
-
-// Writes the comments that end the table at `at` as lines at indent `level`.
-@(private)
-put_foot :: proc(t: ^Writing, at: tape.Node_Index, level: int) {
-	for f in comments_of(t, at) {
-		if f.kind == .Comment_Foot {
-			put_comment_lines(t, f, level)
-		}
-	}
 }
 
 // Writes the comment on the line where the value at `at` ends, its body joined on one line.
@@ -1317,7 +1061,7 @@ put_tail :: proc(t: ^Writing, at: tape.Node_Index) {
 			continue
 		}
 		done = true
-		write.put(t.out, transmute([]u8)string(" #"))
+		put_str(t, " #")
 		for c in body {
 			write.put_byte(t.out, ' ' if c == '\n' || c == '\r' else c)
 		}
@@ -1343,14 +1087,13 @@ put_comment_lines :: proc(t: ^Writing, f: tape.Fact, level: int) -> bool {
 	rest := string(body)
 	if len(rest) == 0 {
 		put_indent(t, level)
-		write.put_byte(t.out, '#')
-		write.put_byte(t.out, '\n')
+		put_str(t, "#\n")
 		return true
 	}
 	for line in strings.split_lines_iterator(&rest) {
 		put_indent(t, level)
 		write.put_byte(t.out, '#')
-		write.put(t.out, transmute([]u8)line)
+		put_str(t, line)
 		write.put_byte(t.out, '\n')
 	}
 	return true

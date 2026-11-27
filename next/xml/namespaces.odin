@@ -69,12 +69,7 @@ bound_uri :: proc "contextless" (w: ^Walk($H, $LAX), value: []u8, tokenized: boo
 // Whether the `n` bytes at `p` hold a colon.
 @(private)
 has_colon :: #force_inline proc "contextless" (p: [^]u8, n: int) -> bool #no_bounds_check {
-	for i in 0 ..< n {
-		if p[i] == ':' {
-			return true
-		}
-	}
-	return false
+	return kernel.index_byte(p[:n], ':') >= 0
 }
 
 // Whether the attribute name at `p` declares a namespace: `xmlns`, or `xmlns:` and a prefix.

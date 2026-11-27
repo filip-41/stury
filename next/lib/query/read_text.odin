@@ -4,10 +4,8 @@ import "core:strings"
 import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 
-// Texts that hold structure: URL references, query strings and logfmt lines read into objects, and JSON Pointers into
-// their tokens. Every `v` below is a string, which the caller checked.
+// Texts that hold structure: URLs, query strings, logfmt lines, and JSON Pointers.
 
-// Sets member `key` of the built object `o^` to the string `s`, or to null for none.
 @(private, require_results)
 put_text :: proc(h: ^Heap, o: ^Value, key: string, s: Maybe(string)) -> Status {
 	x := NULL
@@ -17,7 +15,6 @@ put_text :: proc(h: ^Heap, o: ^Value, key: string, s: Maybe(string)) -> Status {
 	return object_put(h, o, text_borrowed(key), x)
 }
 
-// The value of the decimal digits `s`, or false for none, a byte that is no digit, or a value of `limit` and more.
 @(private)
 decimal_below :: proc "contextless" (s: string, limit: i64) -> (n: i64, ok: bool) {
 	if len(s) == 0 {
@@ -35,9 +32,6 @@ decimal_below :: proc "contextless" (s: string, limit: i64) -> (n: i64, ok: bool
 	return n, true
 }
 
-// URL reference `v` by RFC 3986 section 3 as `{scheme, user, host, port, path, query, fragment}`. What the URL leaves
-// out is null, except the path, which is "" when empty. `user` is the userinfo as written, a password included, `host`
-// an IPv6 literal without its brackets, `port` a number, and nothing is percent-decoded.
 @(require_results)
 parse_url :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	url := text_of(v)
@@ -49,12 +43,8 @@ parse_url :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	rest := url
 	fragment, query, scheme, user, host: Maybe(string)
 	port := i64(-1)
-	if i := strings.index_byte(rest, '#'); i >= 0 {
-		fragment, rest = rest[i + 1:], rest[:i]
-	}
-	if i := strings.index_byte(rest, '?'); i >= 0 {
-		query, rest = rest[i + 1:], rest[:i]
-	}
+	if i := strings.index_byte(rest, '#'); i >= 0 { fragment, rest = rest[i + 1:], rest[:i] }
+	if i := strings.index_byte(rest, '?'); i >= 0 { query, rest = rest[i + 1:], rest[:i] }
 	if i := strings.index_any(rest, ":/"); i > 0 && rest[i] == ':' && is_url_scheme(rest[:i]) {
 		scheme, rest = rest[:i], rest[i + 1:]
 	}
@@ -70,7 +60,7 @@ parse_url :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		if strings.has_prefix(authority, "[") {
 			close := strings.index_byte(authority, ']')
 			after := authority[close + 1:] if close >= 0 else "?"
-			if close < 0 || after != "" && after[0] != ':' {
+			if close < 0 || (after != "" && after[0] != ':') {
 				return NULL, fail(h, .Parse, .Url, v, detail = "is not a URL: its host is a bad IP literal")
 			}
 			host, port_text = authority[1:close], after[1:] if after != "" else ""
@@ -88,9 +78,7 @@ parse_url :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		}
 	}
 	out := make_object(h, 7) or_return
-	defer if status != .Ok {
-		release(h, out)
-	}
+	defer if status != .Ok { release(h, out) }
 	put_text(h, &out, "scheme", scheme) or_return
 	put_text(h, &out, "user", user) or_return
 	put_text(h, &out, "host", host) or_return
@@ -104,7 +92,7 @@ parse_url :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 @(private)
 is_url_scheme :: proc "contextless" (s: string) -> bool {
 	for c, i in transmute([]u8)s {
-		alpha := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+		alpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 		if !alpha && (i == 0 || !(c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.')) {
 			return false
 		}
@@ -112,16 +100,11 @@ is_url_scheme :: proc "contextless" (s: string) -> bool {
 	return true
 }
 
-// Query string `v` as an object of strings, its `name=value` pairs split at `&` as the WHATWG URL standard reads
-// application/x-www-form-urlencoded. A leading `?` is skipped, `+` is a space, `%XX` is a byte (a malformed one stays
-// as written), a name without `=` has the value "", and a name that repeats becomes an array of its values in order.
 @(require_results)
 parse_query_string :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	rest := strings.trim_prefix(text_of(v), "?")
 	out := make_object(h, 0) or_return
-	defer if status != .Ok {
-		release(h, out)
-	}
+	defer if status != .Ok { release(h, out) }
 	for pair in strings.split_iterator(&rest, "&") {
 		if pair == "" {
 			continue
@@ -138,8 +121,6 @@ parse_query_string :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	return out, .Ok
 }
 
-// Adds `x` to the built object `o^` under `key`, both moving in. A name that is there already holds an array of its
-// values, which `x` joins.
 @(private, require_results)
 add_member :: proc(h: ^Heap, o: ^Value, key, x: Value) -> Status {
 	k := find_key((^Object_Block)(o.p), text_of(key))
@@ -171,7 +152,6 @@ add_member :: proc(h: ^Heap, o: ^Value, key, x: Value) -> Status {
 	return append_owned(h, &e.value, x)
 }
 
-// `s` with each `+` a space and each `%XX` its byte, a `%` not before two hex digits as written.
 @(private, require_results)
 form_component :: proc(h: ^Heap, s: string) -> (res: Value, status: Status) {
 	if strings.index_any(s, "+%") < 0 {
@@ -193,17 +173,11 @@ form_component :: proc(h: ^Heap, s: string) -> (res: Value, status: Status) {
 	return text_lossy(h, bytes[:])
 }
 
-// Line `v` of logfmt, the Heroku `key=value` pairs separated by white space, as an object of strings. A bare key is
-// true, `key=` is "", a value in double quotes may hold white space and the escapes `\"`, `\\`, `\n`, `\r` and `\t`,
-// and a key that repeats keeps its last value. A fault has the line in `a` and a byte offset in `b`: where a stray
-// character is, or where the key of the faulty value starts.
 @(require_results)
 parse_logfmt :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	line := text_of(v)
 	out := make_object(h, 0) or_return
-	defer if status != .Ok {
-		release(h, out)
-	}
+	defer if status != .Ok { release(h, out) }
 	fault :: proc(h: ^Heap, v: Value, at: int, why: string) -> Status {
 		return fail(h, .Parse, .Logfmt, v, int_value(i64(at)), why)
 	}
@@ -227,7 +201,7 @@ parse_logfmt :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 		if line[i] == '"' {
 			return NULL, fault(h, v, i, "unexpected")
 		}
-		i += 1 // past the =
+		i += 1
 		value: Value
 		if i < len(line) && line[i] == '"' {
 			i += 1
@@ -236,25 +210,17 @@ parse_logfmt :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 			closed := false
 			for ; i < len(line) && !closed; i += 1 {
 				switch c := line[i]; c {
-				case '"':
-					closed = true
+				case '"': closed = true
 				case '\\':
 					i += 1
-					escaped := line[i] if i < len(line) else 0
-					switch escaped {
-					case '"', '\\':
-						append(&text, escaped)
-					case 'n':
-						append(&text, '\n')
-					case 'r':
-						append(&text, '\r')
-					case 't':
-						append(&text, '\t')
-					case:
-						return NULL, fault(h, v, start, "unknown escape")
+					switch escaped := line[i] if i < len(line) else 0; escaped {
+					case '"', '\\': append(&text, escaped)
+					case 'n':       append(&text, '\n')
+					case 'r':       append(&text, '\r')
+					case 't':       append(&text, '\t')
+					case:           return NULL, fault(h, v, start, "unknown escape")
 					}
-				case:
-					append(&text, c)
+				case: append(&text, c)
 				}
 			}
 			if !closed {
@@ -281,30 +247,24 @@ parse_logfmt :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	return out, .Ok
 }
 
-// The reference tokens of RFC 6901 pointer `v` as an array of strings, `~1` unescaped to `/` and `~0` to `~`, or a
-// fault for a value that is not a string, empty or starting with `/`.
 @(require_results)
 pointer_tokens :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
-	if !is_text(v) || text_of(v) != "" && text_of(v)[0] != '/' {
+	if !is_text(v) || (text_of(v) != "" && text_of(v)[0] != '/') {
 		return NULL, fail(h, .Parse, .Pointer, v)
 	}
 	rest := text_of(v)
 	out := make_array(h, 4) or_return
-	defer if status != .Ok {
-		release(h, out)
-	}
+	defer if status != .Ok { release(h, out) }
 	for len(rest) > 0 {
 		rest = rest[1:]
 		end := strings.index_byte(rest, '/')
 		token := rest if end < 0 else rest[:end]
 		rest = "" if end < 0 else rest[end:]
-		x := unescape_token(h, token) or_return
-		append_owned(h, &out, x) or_return
+		append_owned(h, &out, unescape_token(h, token) or_return) or_return
 	}
 	return out, .Ok
 }
 
-// Reference token `token` with `~1` as `/` and `~0` as `~`.
 @(private, require_results)
 unescape_token :: proc(h: ^Heap, token: string) -> (res: Value, status: Status) {
 	if strings.index_byte(token, '~') < 0 {
@@ -323,7 +283,6 @@ unescape_token :: proc(h: ^Heap, token: string) -> (res: Value, status: Status) 
 	return text_value(h, string(bytes[:]))
 }
 
-// The array index reference token `token` names: its decimal digits with no leading zero, below 2^31, or false.
 pointer_index :: proc "contextless" (token: string) -> (index: i64, ok: bool) {
 	if len(token) > 1 && token[0] == '0' {
 		return 0, false

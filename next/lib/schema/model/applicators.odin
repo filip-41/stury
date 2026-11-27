@@ -23,7 +23,6 @@ init_desc :: proc(d: ^rules.Description, alloc: runtime.Allocator) -> runtime.Al
 	return nil
 }
 
-// Registers a `rules.Description` fragment on type `T` (deep-copied into the registry's arena).
 register_schema :: proc(reg: ^Registry, T: typeid, fragment: ^rules.Description) -> runtime.Allocator_Error {
 	if fragment == nil { return .Invalid_Argument }
 	x := Schema_Of{type = T}
@@ -33,14 +32,11 @@ register_schema :: proc(reg: ^Registry, T: typeid, fragment: ^rules.Description)
 	return err
 }
 
-// Iterative deep copy of a `rules.Value` into `arena`, resolving any `Node_Ref` so it never dangles.
 @(private)
 clone_rules_value :: proc(v: rules.Value, arena, scratch: runtime.Allocator) -> (res: rules.Value, err: runtime.Allocator_Error) {
 	Frame :: struct { src: rules.Value, dst: ^rules.Value }
-	stack := make([dynamic]Frame, 0, 16, scratch) or_return
-	defer delete(stack)
+	stack := make([dynamic]Frame, 0, 16, scratch) or_return; defer delete(stack)
 	append(&stack, Frame{v, &res}) or_return
-
 	buf: [128]u8 = ---
 	for len(stack) > 0 {
 		f := pop(&stack)
@@ -50,16 +46,11 @@ clone_rules_value :: proc(v: rules.Value, arena, scratch: runtime.Allocator) -> 
 		case rules.Number_Text:               f.dst^ = rules.Number_Text{strings.clone(x.text, arena) or_return}
 		case string:                          f.dst^ = strings.clone(x, arena) or_return
 		case []rules.Value:
-			out := make([]rules.Value, len(x), arena) or_return
-			f.dst^ = out
+			out := make([]rules.Value, len(x), arena) or_return; f.dst^ = out
 			for i := len(x) - 1; i >= 0; i -= 1 { append(&stack, Frame{x[i], &out[i]}) or_return }
 		case []rules.Member_Value:
-			out := make([]rules.Member_Value, len(x), arena) or_return
-			f.dst^ = out
-			for i := len(x) - 1; i >= 0; i -= 1 {
-				out[i].key = strings.clone(x[i].key, arena) or_return
-				append(&stack, Frame{x[i].value, &out[i].value}) or_return
-			}
+			out := make([]rules.Member_Value, len(x), arena) or_return; f.dst^ = out
+			for i := len(x) - 1; i >= 0; i -= 1 { out[i].key = strings.clone(x[i].key, arena) or_return; append(&stack, Frame{x[i].value, &out[i].value}) or_return }
 		case rules.Node_Ref:
 			if x.doc == nil || int(x.node) >= len(x.doc.nodes) { f.dst^ = rules.Null{}; continue }
 			switch rules.value_kind(x) {
@@ -68,8 +59,7 @@ clone_rules_value :: proc(v: rules.Value, arena, scratch: runtime.Allocator) -> 
 			case .True:  f.dst^ = true
 			case .String, .Number:
 				is_str := rules.value_kind(x) == .String
-				s: string
-				owned, ok: bool
+				s: string; owned, ok: bool
 				if is_str { s, owned, ok = rules.value_string(x, buf[:], scratch) } else { s, owned, ok = rules.value_number_text(x, buf[:], scratch) }
 				defer if owned { delete(s, scratch) }
 				if !ok { if is_str { return nil, .Out_Of_Memory }; f.dst^ = rules.Null{}; continue }
@@ -78,8 +68,7 @@ clone_rules_value :: proc(v: rules.Value, arena, scratch: runtime.Allocator) -> 
 			case .Array:
 				elems, aok := extract_array(x, scratch)
 				if !aok { return nil, .Out_Of_Memory }
-				out := make([]rules.Value, len(elems), arena) or_return
-				f.dst^ = out
+				out := make([]rules.Value, len(elems), arena) or_return; f.dst^ = out
 				for i := len(elems) - 1; i >= 0; i -= 1 { append(&stack, Frame{elems[i], &out[i]}) or_return }
 			case .Object:
 				r := tape.Reader{doc = x.doc}
@@ -91,13 +80,11 @@ clone_rules_value :: proc(v: rules.Value, arena, scratch: runtime.Allocator) -> 
 				for {
 					kn, vn, np := tape.next_child(r, &ch, .Last)
 					if np != .Found { break }
-					ktok := x.doc.nodes[kn] if kn != tape.NO_NODE else tape.cell_key(r, ch)
-					kc, kok := clone_token_text(x.doc, ktok, arena)
+					kc, kok := clone_token_text(x.doc, x.doc.nodes[kn] if kn != tape.NO_NODE else tape.cell_key(r, ch), arena)
 					if !kok { return nil, .Out_Of_Memory }
 					append(&list, rules.Member_Value{kc, rules.Node_Ref{x.doc, vn}}) or_return
 				}
-				out := list[:]
-				f.dst^ = out
+				out := list[:]; f.dst^ = out
 				for i := len(out) - 1; i >= 0; i -= 1 { append(&stack, Frame{out[i].value, &out[i].value}) or_return }
 			}
 		}
@@ -117,13 +104,8 @@ graft :: proc(into, from: ^rules.Description, own: bool) -> (root: rules.Node_In
 		for x, i in xs { out[i] = at(x, by) }
 		return out, nil
 	}
-	tcopy :: proc(s: string, own: bool, a: runtime.Allocator) -> (string, runtime.Allocator_Error) {
-		return strings.clone(s, a) if own && len(s) > 0 else s, nil
-	}
-	rcopy :: proc(r: rules.Rules, own: bool, a: runtime.Allocator) -> (rules.Rules, runtime.Allocator_Error) {
-		if own { return clone_rules(r, a) }
-		return r, nil
-	}
+	tcopy :: proc(s: string, own: bool, a: runtime.Allocator) -> (string, runtime.Allocator_Error) { return strings.clone(s, a) if own && len(s) > 0 else s, nil }
+	rcopy :: proc(r: rules.Rules, own: bool, a: runtime.Allocator) -> (rules.Rules, runtime.Allocator_Error) { if own { return clone_rules(r, a) }; return r, nil }
 	vcopy :: proc(xs: []rules.Value, own: bool, a: runtime.Allocator) -> (out: []rules.Value, err: runtime.Allocator_Error) {
 		if len(xs) == 0 { return nil, nil }
 		out = make([]rules.Value, len(xs), a) or_return
@@ -154,10 +136,7 @@ graft :: proc(into, from: ^rules.Description, own: bool) -> (root: rules.Node_In
 		x := rules.Object{additional = at(o.additional, nb), keys = at(o.keys, nb)}
 		if len(o.members) > 0 {
 			x.members = make([]rules.Member, len(o.members), a) or_return
-			for m, i in o.members {
-				x.members[i] = m; x.members[i].name = tcopy(m.name, own, a) or_return
-				x.members[i].node = at(m.node, nb); x.members[i].rules = rcopy(m.rules, own, a) or_return
-			}
+			for m, i in o.members { x.members[i] = m; x.members[i].name = tcopy(m.name, own, a) or_return; x.members[i].node = at(m.node, nb); x.members[i].rules = rcopy(m.rules, own, a) or_return }
 		}
 		if len(o.patterns) > 0 {
 			x.patterns = make([]rules.Pattern, len(o.patterns), a) or_return
@@ -180,18 +159,9 @@ graft :: proc(into, from: ^rules.Description, own: bool) -> (root: rules.Node_In
 }
 
 @(private)
-Applied :: struct {
-	schemas:    []Schema_Of,
-	unions:     []typeid,
-	judged:     [dynamic]^Judged,
-	kept:       mem.Dynamic_Arena,
-	kept_ready: bool,
-	allocator:  runtime.Allocator,
-}
-
+Applied :: struct { schemas: []Schema_Of, unions: []typeid, judged: [dynamic]^Judged, kept: mem.Dynamic_Arena, kept_ready: bool, allocator: runtime.Allocator }
 @(private)
 Judged :: struct { type: typeid, unique: bool, plan: check.Plan }
-
 @(private)
 Judged_Key :: struct { type: typeid, unique: bool }
 
@@ -242,9 +212,7 @@ pattern_beside_extra :: proc(j: ^Applied, plan: ^Type_Plan, type: typeid, scratc
 		if x.type != type { continue }
 		ways, _ := rules.branches(&x.fragment, {x.fragment.root}, false, 64, scratch, scratch)
 		for way in ways {
-			for i in way {
-				if o := x.fragment.nodes[i].object; o >= 0 && len(x.fragment.objects[o].patterns) > 0 { return {kind = .Unsupported, want = {type, "patternProperties"}} }
-			}
+			for i in way { if o := x.fragment.nodes[i].object; o >= 0 && len(x.fragment.objects[o].patterns) > 0 { return {kind = .Unsupported, want = {type, "patternProperties"}} } }
 		}
 	}
 	return {}
@@ -276,24 +244,21 @@ judges :: proc(j: ^Applied, type: typeid) -> bool {
 	for x in j.schemas { if x.type == type { return true } }
 	return one_match(j, type)
 }
-
 @(private)
 one_match :: proc(j: ^Applied, type: typeid) -> bool { return j != nil && slice.contains(j.unions, type) }
 
 @(private)
 build_judged_description :: proc(j: ^Applied, plan: ^Type_Plan, k: Judged_Key, d: ^rules.Description, scratch: runtime.Allocator) -> Error {
-	root := rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1}
-	root.rules.unique = k.unique
+	root := rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, rules = {unique = k.unique}}
 	append(&d.nodes, root) or_return
-
 	if one_match(j, k.type) {
 		for &tn in plan.nodes {
 			if tn.type == k.type && tn.kind == .Union {
 				u := &plan.unions[tn.union_idx]
 				sub := Reading{plan = plan, d = d, direction = .Load, allocator = d.allocator, scratch = scratch, nodes = make(map[Desc_Use]rules.Node_Index, 16, scratch) or_return, shapes = make(map[i32]i32, 16, scratch) or_return}
-				arms := desc_arms_of(&sub, u, !u.no_nil)
+				root.one_of = desc_arms_of(&sub, u, !u.no_nil)
 				if sub.failed { return runtime.Allocator_Error.Out_Of_Memory }
-				root.one_of = arms; break
+				break
 			}
 		}
 	}
@@ -327,8 +292,7 @@ fragments_of :: proc(j: ^Applied, d: ^rules.Description, type: typeid) -> (roots
 
 @(private)
 judged_of :: proc(j: ^Applied, type: typeid, unique: bool) -> ^Judged {
-	if j == nil { return nil }
-	for x in j.judged { if x.type == type && x.unique == unique { return x } }
+	if j != nil { for x in j.judged { if x.type == type && x.unique == unique { return x } } }
 	return nil
 }
 
@@ -347,15 +311,13 @@ run_judged_on_doc :: proc(j: ^Judged, doc: ^tape.Document, node: tape.Node_Index
 	if j == nil || doc == nil || int(node) >= len(doc.nodes) { return true }
 	sub_doc: tape.Document; tt: write.Token_Tape; used_tape := false
 	defer if used_tape { write.token_tape_drop(&tt) }
-
 	if node == 0 { sub_doc = doc^ } else if len(doc.counts) == 0 && doc.ext == nil && len(doc.facts) == 0 {
 		n := doc.nodes[node]; sub_doc = doc^; sub_doc.nodes = doc.nodes[node : node + tape.Node_Index(u32(1) if n.kind <= .Plain else n.n)]
 	} else {
 		if write.token_tape_start(&tt, false, 0, scratch) != nil { oom^ = true; return false }
 		used_tape = true
 		if write.tokens_of(doc, node, &tt, write.token_tape_take, scratch) != nil { oom^ = true; return false }
-		td, terr := write.token_tape_document(&tt)
-		if terr != nil { oom^ = true; return false }
+		td, terr := write.token_tape_document(&tt); if terr != nil { oom^ = true; return false }
 		sub_doc = td
 	}
 	return run_judged_on_subdoc(j, &sub_doc, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent, secret)
@@ -364,9 +326,7 @@ run_judged_on_doc :: proc(j: ^Judged, doc: ^tape.Document, node: tape.Node_Index
 @(private)
 run_judged_on_value :: proc(j: ^Judged, v: rules.Value, dups: tape.Duplicates, budget: tape.Budget, prefix_steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, exceeded: ^tape.Exceeded, allocator, scratch: runtime.Allocator, silent := false, secret := false) -> bool {
 	if j == nil { return true }
-	if ref, is_ref := v.(rules.Node_Ref); is_ref && ref.doc != nil {
-		return run_judged_on_doc(j, ref.doc, ref.node, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent, secret)
-	}
+	if ref, is_ref := v.(rules.Node_Ref); is_ref && ref.doc != nil { return run_judged_on_doc(j, ref.doc, ref.node, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent, secret) }
 	tt: write.Token_Tape
 	if write.token_tape_start(&tt, false, 0, scratch) != nil { oom^ = true; return false }
 	defer write.token_tape_drop(&tt)
@@ -374,24 +334,33 @@ run_judged_on_value :: proc(j: ^Judged, v: rules.Value, dups: tape.Duplicates, b
 		if me, is_me := eerr.(Model_Error); is_me { return record_failure(sink, first, oom, allocator, me.kind, 0, prefix_steps, "", me.want, silent, secret) }
 		oom^ = true; return false
 	}
-	sub_doc, terr := write.token_tape_document(&tt)
-	if terr != nil { oom^ = true; return false }
+	sub_doc, terr := write.token_tape_document(&tt); if terr != nil { oom^ = true; return false }
 	return run_judged_on_subdoc(j, &sub_doc, dups, budget, prefix_steps, sink, first, oom, exceeded, allocator, scratch, silent, secret)
 }
 
 @(private)
 run_judged_on_subdoc :: proc(j: ^Judged, sub_doc: ^tape.Document, dups: tape.Duplicates, budget: tape.Budget, prefix_steps: []tape.Step, sink: ^Sink, first: ^Model_Error, oom: ^bool, exceeded: ^tape.Exceeded, allocator, scratch: runtime.Allocator, silent := false, secret := false) -> bool {
+	return run_check_plan(&j.plan, sub_doc, dups, budget, prefix_steps, sink, first, oom, exceeded, nil, allocator, scratch, .Wrong_Kind, silent, secret)
+}
+
+@(private)
+run_check_plan :: proc(
+	plan: ^check.Plan, sub_doc: ^tape.Document, dups: tape.Duplicates, budget: tape.Budget, prefix_steps: []tape.Step,
+	sink: ^Sink, first: ^Model_Error, oom: ^bool, exceeded: ^tape.Exceeded, walk_err_out: ^tape.Error,
+	allocator, scratch: runtime.Allocator, fallback_kind: Error_Kind, silent := false, secret := false,
+) -> bool {
 	chk_sink: check.Sink
 	use_sink := sink != nil && !silent
 	if use_sink { check.sink_init(&chk_sink, scratch) }
 	defer check.sink_destroy(&chk_sink)
 
-	res := check.check_document(sub_doc, &j.plan, {dups = dups, budget = budget, scratch = scratch}, &chk_sink if use_sink else nil, scratch)
+	res := check.check_document(sub_doc, plan, {dups = dups, budget = budget, scratch = scratch}, &chk_sink if use_sink else nil, scratch)
 	defer check.result_destroy(&res)
 	if res.valid { return true }
 	if res.walk_err != nil {
 		if exc, is_exc := res.walk_err.(tape.Exceeded); is_exc { if exceeded != nil { exceeded^ = exc }; return false }
 		if _, is_oom := res.walk_err.(runtime.Allocator_Error); is_oom { oom^ = true; return false }
+		if walk_err_out != nil { walk_err_out^ = res.walk_err; return false }
 	}
 	if res.err.kind == .No_Memory || chk_sink.oom { oom^ = true; return false }
 	if res.err.kind == .Exceeded { if exceeded != nil { exceeded^ = {at = res.err.at, kind = .Steps} }; return false }
@@ -403,9 +372,9 @@ run_judged_on_subdoc :: proc(j: ^Judged, sub_doc: ^tape.Document, dups: tape.Dup
 	errs := chk_sink.entries[:] if (use_sink && len(chk_sink.entries) > 0) else []check.Check_Error{res.err}
 	for e in errs {
 		k := map_rules_kind(e.kind)
-		if k == .None { k = .Wrong_Kind }
+		if k == .None { k = fallback_kind }
 		clear(&steps)
-		if _, aerr := append(&steps, ..prefix_steps); aerr != nil { oom^ = true; return false }
+		if len(prefix_steps) > 0 { if _, aerr := append(&steps, ..prefix_steps); aerr != nil { oom^ = true; return false } }
 		if _, aerr := append(&steps, ..e.path); aerr != nil { oom^ = true; return false }
 		if !record_failure(sink, first, oom, allocator, k, e.at, steps[:], e.expected, {text = e.keyword}, silent, secret) { break }
 	}
@@ -415,15 +384,9 @@ run_judged_on_subdoc :: proc(j: ^Judged, sub_doc: ^tape.Document, dups: tape.Dup
 @(private)
 emit_rules_value_tokens :: proc(tt: ^write.Token_Tape, v: rules.Value, scratch: runtime.Allocator) -> Error {
 	Frame :: struct { kind: enum u8 { Val, Key, Close }, val: rules.Value, key: string }
-	stack, serr := make([dynamic]Frame, 0, 16, scratch)
-	if serr != nil { return serr }
-	defer delete(stack)
-	if _, aerr := append(&stack, Frame{kind = .Val, val = v}); aerr != nil { return aerr }
-
-	take :: #force_inline proc(tt: ^write.Token_Tape, k: write.Token_Kind, t: string) -> Error {
-		werr := write.token_tape_take(tt, k, t)
-		return werr if werr != nil else nil
-	}
+	stack := make([dynamic]Frame, 0, 16, scratch) or_return; defer delete(stack)
+	append(&stack, Frame{kind = .Val, val = v}) or_return
+	take :: #force_inline proc(tt: ^write.Token_Tape, k: write.Token_Kind, t: string) -> Error { werr := write.token_tape_take(tt, k, t); return werr if werr != nil else nil }
 	buf: [128]u8 = ---
 	for len(stack) > 0 {
 		f := pop(&stack)
@@ -437,8 +400,7 @@ emit_rules_value_tokens :: proc(tt: ^write.Token_Tape, v: rules.Value, scratch: 
 		case bool:            take(tt, .True if x else .False, "") or_return
 		case i64, u64, f64, rules.Number_Text:
 			if fv, is_f64 := x.(f64); is_f64 && (math.is_nan(fv) || math.is_inf(fv, 0)) { return Model_Error{kind = .Non_Finite} }
-			s, owned, ok := rules.value_number_text(f.val, buf[:], scratch)
-			defer if owned { delete(s, scratch) }
+			s, owned, ok := rules.value_number_text(f.val, buf[:], scratch); defer if owned { delete(s, scratch) }
 			if !ok { return Model_Error{kind = .Non_Finite} }
 			take(tt, .Number, s) or_return
 		case string: take(tt, .String, x) or_return
@@ -447,7 +409,7 @@ emit_rules_value_tokens :: proc(tt: ^write.Token_Tape, v: rules.Value, scratch: 
 			for i := len(x) - 1; i >= 0; i -= 1 { append(&stack, Frame{kind = .Val, val = x[i]}) or_return }
 		case []rules.Member_Value:
 			take(tt, .Object, "") or_return; append(&stack, Frame{kind = .Close}) or_return
-			for i := len(x) - 1; i >= 0; i -= 1 { append(&stack, Frame{kind = .Val, val = x[i].value}) or_return; append(&stack, Frame{kind = .Key, key = x[i].key}) or_return }
+			for i := len(x) - 1; i >= 0; i -= 1 { append(&stack, Frame{kind = .Val, val = x[i].value}, Frame{kind = .Key, key = x[i].key}) or_return }
 		case rules.Node_Ref:
 			if x.doc == nil || int(x.node) >= len(x.doc.nodes) { take(tt, .Null, "") or_return } else if werr := write.tokens_of(x.doc, x.node, tt, write.token_tape_take, scratch); werr != nil { return werr }
 		}

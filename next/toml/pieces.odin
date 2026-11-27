@@ -87,120 +87,62 @@ statement_ends :: proc "contextless" (s: ^Piece, p: ^Parser) -> bool #no_bounds_
 		switch state {
 		case .Blank:
 			switch b {
-			case ' ', '\t', '\n', '\r':
-				i += 1
-			case '#':
-				state = .Blank_Comment
-				i += 1
-			case:
-				state = .Body
+			case ' ', '\t', '\n', '\r': i += 1
+			case '#':                   state, i = .Blank_Comment, i + 1
+			case:                       state = .Body
 			}
 		case .Blank_Comment, .Body_Comment:
-			if b == '\n' {
-				state = .Blank if state == .Blank_Comment else .Body
-			} else {
-				i += 1
-			}
+			if b == '\n' { state = .Blank if state == .Blank_Comment else .Body } else { i += 1 }
 		case .Body:
 			i += 1
 			switch b {
-			case '"':
-				state = .Quote
-			case '\'':
-				state = .Literal_Quote
-			case '#':
-				state = .Body_Comment
-			case '[', '{':
-				depth += 1
-			case ']', '}':
-				depth -= 1 if depth > 0 else 0
+			case '"':      state = .Quote
+			case '\'':     state = .Literal_Quote
+			case '#':      state = .Body_Comment
+			case '[', '{': depth += 1
+			case ']', '}': depth -= 1 if depth > 0 else 0
 			case '\n':
-				if depth == 0 {
-					state, done = .Blank, true
-				}
+				if depth == 0 { state, done = .Blank, true }
 			}
-		case .Quote:
-			if b == '"' {
-				state = .Quotes
-				i += 1
+		case .Quote, .Literal_Quote:
+			q := u8('"') if state == .Quote else u8('\'')
+			if b == q {
+				state, i = .Quotes if state == .Quote else .Literal_Quotes, i + 1
 			} else {
-				state = .Basic
+				state = .Basic if state == .Quote else .Literal
 			}
-		case .Quotes:
-			if b == '"' {
-				state, quotes = .Multi, 0
-				i += 1
+		case .Quotes, .Literal_Quotes:
+			q := u8('"') if state == .Quotes else u8('\'')
+			if b == q {
+				state, quotes, i = .Multi if state == .Quotes else .Multi_Literal, 0, i + 1
 			} else {
 				state = .Body
 			}
-		case .Basic:
-			switch b {
-			case '\\':
-				state = .Basic_Escape
-				i += 1
-			case '"':
-				state = .Body
-				i += 1
-			case '\n':
-				// A line end ends the string, which the read of the statement refuses.
-				state = .Body
-			case:
-				i += 1
+		case .Basic, .Literal:
+			q := u8('"') if state == .Basic else u8('\'')
+			switch {
+			case b == '\\' && state == .Basic: state, i = .Basic_Escape, i + 1
+			case b == q:                       state, i = .Body, i + 1
+			case b == '\n':                    state = .Body
+			case:                              i += 1
 			}
 		case .Basic_Escape:
-			if b == '\n' {
-				state = .Body
-			} else {
-				state = .Basic
-				i += 1
-			}
-		case .Literal_Quote:
-			if b == '\'' {
-				state = .Literal_Quotes
-				i += 1
-			} else {
-				state = .Literal
-			}
-		case .Literal_Quotes:
-			if b == '\'' {
-				state, quotes = .Multi_Literal, 0
-				i += 1
-			} else {
-				state = .Body
-			}
-		case .Literal:
-			switch b {
-			case '\'':
-				state = .Body
-				i += 1
-			case '\n':
-				state = .Body
-			case:
-				i += 1
-			}
+			if b == '\n' { state = .Body } else { state, i = .Basic, i + 1 }
 		case .Multi, .Multi_Literal:
 			q := u8('"') if state == .Multi else u8('\'')
 			switch {
 			case b == q:
-				quotes += 1
-				i += 1
-				if quotes == 5 {
-					state = .Body
-				}
+				quotes, i = quotes + 1, i + 1
+				if quotes == 5 { state = .Body }
 			case quotes >= 3:
-				// The run of quotes closed the string before this byte.
 				state = .Body
 			case b == '\\' && state == .Multi:
-				quotes = 0
-				state = .Multi_Escape
-				i += 1
+				quotes, state, i = 0, .Multi_Escape, i + 1
 			case:
-				quotes = 0
-				i += 1
+				quotes, i = 0, i + 1
 			}
 		case .Multi_Escape:
-			state = .Multi
-			i += 1
+			state, i = .Multi, i + 1
 		}
 	}
 	f.at, f.state, f.depth, f.quotes = i, state, depth, quotes
@@ -299,21 +241,8 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 piece_walk :: proc(w: ^Walk($H, $LAX, $C), hs: ^hook.Regs, s: ^Piece, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
 	pa := w.p
 	if !s.rooted {
-		if reads_whole(w.hooks, C) {
-			for !pa.done {
-				if !pa.final && !statement_ends(s, pa) {
-					return hook.walk_result(u64(pa.pos), hook.WALK_MORE)
-				}
-				if !statement(pa) {
-					return pa.fail
-				}
-			}
-			when H == hook.No_Hooks {
-				if !s.counts {
-					return 0
-				}
-			}
-		} else if !pa.done && !s.first {
+		whole := reads_whole(w.hooks, C)
+		for !pa.done && (whole || !s.first) {
 			if !pa.final && !statement_ends(s, pa) {
 				return hook.walk_result(u64(pa.pos), hook.WALK_MORE)
 			}
@@ -321,6 +250,11 @@ piece_walk :: proc(w: ^Walk($H, $LAX, $C), hs: ^hook.Regs, s: ^Piece, $on: proc 
 				return pa.fail
 			}
 			s.first = true
+		}
+		when H == hook.No_Hooks {
+			if whole && !s.counts {
+				return 0
+			}
 		}
 		s.rooted = true
 		return walk_root(w, hs, on)

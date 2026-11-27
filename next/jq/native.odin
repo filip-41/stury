@@ -53,11 +53,7 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 			}
 		}
 		defer query.release(h, t)
-		if t.kind == .Object {
-			v, _ := query.member(h, t, query.text_of(n.value))
-			return v if v.kind != .Absent else query.NULL, .Value
-		}
-		if t.kind == .Node && (^query.Doc_Block)(t.p).doc.nodes[t.n].kind == .Object {
+		if t.kind == .Object || (t.kind == .Node && query.type_of(t) == .Object) {
 			v, ms := query.member(h, t, query.text_of(n.value))
 			if ms != .Ok {
 				return query.NULL, .Failed
@@ -79,9 +75,11 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 		defer query.release(h, t)
 		return step_got(apply_step(m, n, t, key, query.ABSENT, query.ABSENT))
 	case .Slice:
-		from, to := query.NULL, query.NULL
-		defer query.release(h, from)
-		defer query.release(h, to)
+		bounds := [2]query.Value{query.NULL, query.NULL}
+		defer {
+			query.release(h, bounds[0])
+			query.release(h, bounds[1])
+		}
 		for b, i in ([2]^Node{n.b, n.c}) {
 			if b == nil {
 				continue
@@ -91,27 +89,20 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 				query.release(h, input)
 				return x, xg
 			}
-			if i == 0 {
-				from = x
-			} else {
-				to = x
-			}
+			bounds[i] = x
 		}
 		t, tg := native(m, n.a, input, env)
 		if tg != .Value {
 			return t, tg
 		}
 		defer query.release(h, t)
-		return step_got(apply_step(m, n, t, query.ABSENT, from, to))
+		return step_got(apply_step(m, n, t, query.ABSENT, bounds[0], bounds[1]))
 	case .Pipe:
 		x, xg := native(m, n.a, input, env)
 		if xg != .Value {
 			return x, xg
 		}
-		if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(x) {
-			return native_with_origin(m, n.b, x, env)
-		}
-		return native(m, n.b, x, env)
+		return native_maybe_origin(m, n.b, x, env)
 	case .Binary:
 		r, leaf_r := leaf_value(m, n.b, input, env)
 		if !leaf_r {
@@ -213,11 +204,9 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 		}
 		t := truthy(c)
 		query.release(h, c)
-		if t {
-			return native(m, n.b, input, env)
-		}
-		if n.c != nil {
-			return native(m, n.c, input, env)
+		branch := n.b if t else n.c
+		if branch != nil {
+			return native(m, branch, input, env)
 		}
 		return input, .Value
 	case .Try:
@@ -270,15 +259,16 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 		if s != .Ok {
 			return query.NULL, .Failed
 		}
+		defer if got != .Value {
+			query.release(h, o)
+		}
 		if .Distinct_Keys in n.flags {
 			for i := 0; i < len(n.args); i += 2 {
 				v, vg := native(m, n.args[i + 1], query.retain(input), env)
 				if vg != .Value {
-					query.release(h, o)
 					return v, vg
 				}
-				if s = query.object_put_fresh(h, &o, n.args[i].value, v); s != .Ok {
-					query.release(h, o)
+				if query.object_put_fresh(h, &o, n.args[i].value, v) != .Ok {
 					return query.NULL, .Failed
 				}
 			}
@@ -287,7 +277,6 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 		for i := 0; i < len(n.args); i += 2 {
 			k, kg := native(m, n.args[i], query.retain(input), env)
 			if kg != .Value {
-				query.release(h, o)
 				return k, kg
 			}
 			v: query.Value
@@ -301,11 +290,9 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 			}
 			if vg != .Value {
 				query.release(h, k)
-				query.release(h, o)
 				return v, vg
 			}
-			if s = put_entry(h, &o, k, v); s != .Ok {
-				query.release(h, o)
+			if put_entry(h, &o, k, v) != .Ok {
 				return query.NULL, .Failed
 			}
 		}
@@ -313,10 +300,12 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 	case .String:
 		defer query.release(h, input)
 		acc := query.text_borrowed("")
+		defer if got != .Value {
+			query.release(h, acc)
+		}
 		for part in n.args {
 			if part.kind == .Literal {
 				if query.text_append(h, &acc, query.text_of(part.value)) != .Ok {
-					query.release(h, acc)
 					return query.NULL, .Failed
 				}
 				continue
@@ -327,7 +316,6 @@ native :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (res: qu
 			}
 			query.release(h, t)
 			if tg != .Value {
-				query.release(h, acc)
 				return query.NULL, tg
 			}
 		}
@@ -415,7 +403,6 @@ native_update_general :: #force_no_inline proc(m: ^Machine, n: ^Node, input: que
 		}
 	}
 	defer query.release(h, rhs)
-	// Collect path steps from outermost to innermost (at most 8).
 	steps: [8]^Node
 	depth := 0
 	for cur := n.a; cur.kind != .Identity; cur = cur.a {
@@ -452,6 +439,7 @@ native_update_general :: #force_no_inline proc(m: ^Machine, n: ^Node, input: que
 	defer for k in keys[:depth] {
 		query.release(h, k)
 	}
+	has_slice := false
 	for i in 0 ..< depth {
 		step := steps[depth - 1 - i]
 		if step.kind == .Field {
@@ -467,119 +455,66 @@ native_update_general :: #force_no_inline proc(m: ^Machine, n: ^Node, input: que
 			}
 			keys[i] = k
 		}
-	}
-	if depth == 1 {
-		k := keys[0]
-		#partial switch n.op {
-		case .Assign:
-			r := rhs
-			rhs = query.ABSENT
-			v, s := query.set_one(h, input, k, r)
-			return v, got_of(s)
-		case .Modify:
-			cur, s := query.get(h, input, k)
-			if s != .Ok || h.tainted {
-				query.release(h, cur)
-				query.release(h, input)
-				return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
-			}
-			state := input
-			if (cur.kind == .Array || cur.kind == .Object || cur.kind == .String) && query.type_of(k) != .Object {
-				state, s = query.set_one(h, state, k, query.NULL)
-				if s != .Ok || h.tainted {
-					query.release(h, cur)
-					if h.tainted {
-						query.release(h, state)
-						return query.ABSENT, .None
-					}
-					return query.NULL, .Failed
-				}
-			}
-			v, vg := native_maybe_origin(m, n.b, cur, env)
-			if vg == .Failed || h.tainted {
-				if vg == .Value {
-					query.release(h, v)
-				}
-				query.release(h, state)
-				return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
-			}
-			if vg == .None {
-				out, ds := query.del_one(h, state, k)
-				return out, got_of(ds)
-			}
-			out, ss := query.set_one(h, state, k, v)
-			return out, got_of(ss)
-		case:
-			cur, s := query.get(h, input, k)
-			if s != .Ok || h.tainted {
-				query.release(h, cur)
-				query.release(h, input)
-				return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
-			}
-			state := input
-			if n.op == .Add && (cur.kind == .Array || cur.kind == .Object || cur.kind == .String) && query.type_of(k) != .Object {
-				state, s = query.set_one(h, state, k, query.NULL)
-				if s != .Ok {
-					query.release(h, cur)
-					return query.NULL, .Failed
-				}
-			}
-			v: query.Value
-			if n.op == .Alt {
-				if truthy(cur) {
-					v = cur
-				} else {
-					query.release(h, cur)
-					v = query.retain(rhs)
-				}
-			} else {
-				v, s = binary_owned(h, n.op, cur, rhs)
-				if s != .Ok {
-					query.release(h, state)
-					return query.NULL, .Failed
-				}
-			}
-			out, ss := query.set_one(h, state, k, v)
-			return out, got_of(ss)
-		}
-	}
-	path_arr, ps := query.make_array(h, depth)
-	if ps != .Ok {
-		query.release(h, input)
-		return query.NULL, .Failed
-	}
-	defer query.release(h, path_arr)
-	has_slice := false
-	for k in keys[:depth] {
-		if query.type_of(k) == .Object {
+		if query.type_of(keys[i]) == .Object {
 			has_slice = true
 		}
-		if query.append_owned(h, &path_arr, query.retain(k)) != .Ok {
-			query.release(h, input)
-			return query.NULL, .Failed
-		}
 	}
-	#partial switch n.op {
-	case .Assign:
-		r := rhs
-		rhs = query.ABSENT
-		v, s := query.set_path(h, input, path_arr, r)
-		return v, got_of(s)
-	case .Modify:
-		cur, s := query.get_path(h, input, path_arr)
-		if s != .Ok {
+	path_arr := query.ABSENT
+	defer query.release(h, path_arr)
+	if depth > 1 {
+		ps: query.Status
+		path_arr, ps = query.make_array(h, depth)
+		if ps != .Ok {
 			query.release(h, input)
 			return query.NULL, .Failed
 		}
-		state := input
-		if !has_slice && (cur.kind == .Array || cur.kind == .Object || cur.kind == .String) {
-			state, s = query.set_path(h, state, path_arr, query.NULL)
-			if s != .Ok {
-				query.release(h, cur)
+		for k in keys[:depth] {
+			if query.append_owned(h, &path_arr, query.retain(k)) != .Ok {
+				query.release(h, input)
 				return query.NULL, .Failed
 			}
 		}
-		v, vg := native_maybe_origin(m, n.b, cur, env)
+	}
+	set_at :: proc(h: ^query.Heap, depth: int, k, path_arr, state, val: query.Value) -> (query.Value, query.Status) {
+		if depth == 1 {
+			return query.set_one(h, state, k, val)
+		}
+		return query.set_path(h, state, path_arr, val)
+	}
+	if n.op == .Assign {
+		r := rhs
+		rhs = query.ABSENT
+		v, s := set_at(h, depth, keys[0], path_arr, input, r)
+		return v, got_of(s)
+	}
+	cur: query.Value
+	s: query.Status
+	if depth == 1 {
+		cur, s = query.get(h, input, keys[0])
+	} else {
+		cur, s = query.get_path(h, input, path_arr)
+	}
+	if s != .Ok || h.tainted {
+		query.release(h, cur)
+		query.release(h, input)
+		return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
+	}
+	state := input
+	if (n.op == .Modify || n.op == .Add) && !has_slice && (cur.kind == .Array || cur.kind == .Object || cur.kind == .String) {
+		state, s = set_at(h, depth, keys[0], path_arr, state, query.NULL)
+		if s != .Ok || h.tainted {
+			query.release(h, cur)
+			if h.tainted {
+				query.release(h, state)
+				return query.ABSENT, .None
+			}
+			return query.NULL, .Failed
+		}
+	}
+	v: query.Value
+	if n.op == .Modify {
+		vg: Got
+		v, vg = native_maybe_origin(m, n.b, cur, env)
 		if vg == .Failed || h.tainted {
 			if vg == .Value {
 				query.release(h, v)
@@ -588,53 +523,49 @@ native_update_general :: #force_no_inline proc(m: ^Machine, n: ^Node, input: que
 			return query.ABSENT if h.tainted else query.NULL, .None if h.tainted else .Failed
 		}
 		if vg == .None {
+			if depth == 1 {
+				out, ds := query.del_one(h, state, keys[0])
+				return out, got_of(ds)
+			}
 			dels, ds := query.make_array(h, 1)
-			if ds != .Ok {
+			if ds != .Ok || query.append_owned(h, &dels, query.retain(path_arr)) != .Ok {
+				query.release(h, dels)
 				query.release(h, state)
 				return query.NULL, .Failed
 			}
 			defer query.release(h, dels)
-			if query.append_owned(h, &dels, query.retain(path_arr)) != .Ok {
-				query.release(h, state)
-				return query.NULL, .Failed
-			}
 			out, dss := query.del_paths(h, state, dels)
 			return out, got_of(dss)
 		}
-		out, ss := query.set_path(h, state, path_arr, v)
-		return out, got_of(ss)
-	case:
-		cur, s := query.get_path(h, input, path_arr)
+	} else if n.op == .Alt {
+		if truthy(cur) {
+			v = cur
+		} else {
+			query.release(h, cur)
+			v = query.retain(rhs)
+		}
+	} else {
+		v, s = binary_owned(h, n.op, cur, rhs)
 		if s != .Ok {
-			query.release(h, input)
+			query.release(h, state)
 			return query.NULL, .Failed
 		}
-		state := input
-		if n.op == .Add && !has_slice && (cur.kind == .Array || cur.kind == .Object || cur.kind == .String) {
-			state, s = query.set_path(h, state, path_arr, query.NULL)
-			if s != .Ok {
-				query.release(h, cur)
-				return query.NULL, .Failed
-			}
-		}
-		v: query.Value
-		if n.op == .Alt {
-			if truthy(cur) {
-				v = cur
-			} else {
-				query.release(h, cur)
-				v = query.retain(rhs)
-			}
-		} else {
-			v, s = binary_owned(h, n.op, cur, rhs)
-			if s != .Ok {
-				query.release(h, state)
-				return query.NULL, .Failed
-			}
-		}
-		out, ss := query.set_path(h, state, path_arr, v)
-		return out, got_of(ss)
 	}
+	out, ss := set_at(h, depth, keys[0], path_arr, state, v)
+	return out, got_of(ss)
+}
+
+@(private)
+step_tick :: #force_inline proc(m: ^Machine) -> bool {
+	if m.steps < 0 {
+		return true
+	}
+	if m.steps == 0 {
+		_ = fail_budget(m)
+		return false
+	}
+	m.steps -= 1
+	return true
 }
 
 // `[t[] | f]`, `it` the iteration, `f` nil for `[t[]]`.
@@ -663,29 +594,22 @@ native_map :: proc(m: ^Machine, it, t, f: ^Node, input: query.Value, env: ^Env) 
 	if as != .Ok {
 		return query.NULL, .Failed
 	}
+	defer if got != .Value {
+		query.release(h, arr)
+	}
 	if of.kind == .Array {
 		for x in query.items_of(of) {
-			if m.steps >= 0 {
-				if m.steps == 0 {
-					query.release(h, arr)
-					_ = fail_budget(m)
-					return query.NULL, .Failed
-				}
-				m.steps -= 1
+			if !step_tick(m) {
+				return query.NULL, .Failed
 			}
 			y, yg := query.retain(x), Got.Value
 			if f != nil {
-				if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(y) {
-					y, yg = native_with_origin(m, f, y, env)
-				} else {
-					y, yg = native(m, f, y, env)
-				}
+				y, yg = native_maybe_origin(m, f, y, env)
 			}
 			if yg == .None {
 				continue
 			}
 			if yg == .Failed || query.append_owned(h, &arr, y) != .Ok {
-				query.release(h, arr)
 				return query.NULL, .Failed
 			}
 		}
@@ -693,41 +617,29 @@ native_map :: proc(m: ^Machine, it, t, f: ^Node, input: query.Value, env: ^Env) 
 	}
 	c, cs := query.cursor_open(h, of)
 	if cs != .Ok {
-		query.release(h, arr)
 		return query.NULL, .Failed
 	}
 	defer query.cursor_close(&c)
 	for {
-		if m.steps >= 0 {
-			if m.steps == 0 {
-				query.release(h, arr)
-				_ = fail_budget(m)
-				return query.NULL, .Failed
-			}
-			m.steps -= 1
+		if !step_tick(m) {
+			return query.NULL, .Failed
 		}
 		key, x, more, s := query.cursor_next(h, &c)
 		query.release(h, key)
-		if s != .Ok || !more {
-			if s != .Ok {
-				query.release(h, arr)
-				return query.NULL, .Failed
-			}
+		if s != .Ok {
+			return query.NULL, .Failed
+		}
+		if !more {
 			return arr, .Value
 		}
 		y, yg := x, Got.Value
 		if f != nil {
-			if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(x) {
-				y, yg = native_with_origin(m, f, x, env)
-			} else {
-				y, yg = native(m, f, x, env)
-			}
+			y, yg = native_maybe_origin(m, f, x, env)
 		}
 		if yg == .None {
 			continue
 		}
 		if yg == .Failed || query.append_owned(h, &arr, y) != .Ok {
-			query.release(h, arr)
 			return query.NULL, .Failed
 		}
 	}
@@ -764,14 +676,14 @@ leaf_value :: #force_inline proc(m: ^Machine, n: ^Node, input: query.Value, env:
 int_binary :: #force_inline proc "contextless" (op: Op, a, b: i64) -> (query.Value, bool) {
 	#partial switch op {
 	case .Add:
-		r, overflow := intrinsics.overflow_add(a, b)
-		return query.int_value(r), !overflow
+		r, ov := intrinsics.overflow_add(a, b)
+		return query.int_value(r), !ov
 	case .Sub:
-		r, overflow := intrinsics.overflow_sub(a, b)
-		return query.int_value(r), !overflow
+		r, ov := intrinsics.overflow_sub(a, b)
+		return query.int_value(r), !ov
 	case .Mul:
-		r, overflow := intrinsics.overflow_mul(a, b)
-		return query.int_value(r), !overflow
+		r, ov := intrinsics.overflow_mul(a, b)
+		return query.int_value(r), !ov
 	case .Mod:
 		if b == 0 {
 			return {}, false
@@ -842,8 +754,6 @@ native_call :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (re
 	defer for a in args[:len(n.args)] {
 		query.release(h, a)
 	}
-	// Fast path for `sort_by`/`group_by`/`unique_by`/`min_by`/`max_by`: unwrap `map([f])` when `f` is native,
-	// avoiding per-element 1-element wrapper array allocations.
 	unwrapped_keys := false
 	if b.fn == v_by && len(n.args) == 1 && query.type_of(input) == .Array {
 		if key_expr, key_env, ok := unwrap_by_key_env(n.args[0], env); ok {
@@ -859,7 +769,6 @@ native_call :: proc(m: ^Machine, n: ^Node, input: query.Value, env: ^Env) -> (re
 		}
 	}
 	if !unwrapped_keys {
-		// The last argument first, as the call evaluates them when they generate.
 		for k in 0 ..< len(n.args) {
 			i := k if b.op != .None else len(n.args) - 1 - k
 			x, xg := native(m, n.args[i], query.retain(input), env)
@@ -898,7 +807,7 @@ unwrap_by_key_env :: proc(arg: ^Node, env: ^Env) -> (key_expr: ^Node, key_env: ^
 }
 
 // Evaluates `key_expr` once per element of array `input` directly into a flat keys array.
-// Falls back (`fell_back = true`) if any element yields `empty` (since `[empty]` is `[]`, which sorts differently from scalars).
+// Falls back (`fell_back = true`) if any element yields `empty`.
 @(private)
 eval_by_keys :: proc(m: ^Machine, input: query.Value, key_expr: ^Node, env: ^Env) -> (res: query.Value, got: Got, fell_back: bool) {
 	h := m.h
@@ -910,23 +819,19 @@ eval_by_keys :: proc(m: ^Machine, input: query.Value, key_expr: ^Node, env: ^Env
 	if s != .Ok {
 		return query.NULL, .Failed, false
 	}
+	defer if got != .Value {
+		query.release(h, keys)
+	}
 	if input.kind == .Array {
 		for x in query.items_of(input) {
-			if m.steps >= 0 {
-				if m.steps == 0 {
-					query.release(h, keys)
-					_ = fail_budget(m)
-					return query.NULL, .Failed, false
-				}
-				m.steps -= 1
+			if !step_tick(m) {
+				return query.NULL, .Failed, false
 			}
 			y, yg := native_maybe_origin(m, key_expr, query.retain(x), env)
 			if yg == .None {
-				query.release(h, keys)
 				return query.NULL, .None, true
 			}
 			if yg == .Failed || query.append_owned(h, &keys, y) != .Ok {
-				query.release(h, keys)
 				return query.NULL, .Failed, false
 			}
 		}
@@ -934,22 +839,15 @@ eval_by_keys :: proc(m: ^Machine, input: query.Value, key_expr: ^Node, env: ^Env
 	}
 	c, cs := query.cursor_open(h, input)
 	if cs != .Ok {
-		query.release(h, keys)
 		return query.NULL, .Failed, false
 	}
 	defer query.cursor_close(&c)
 	for {
-		if m.steps >= 0 {
-			if m.steps == 0 {
-				query.release(h, keys)
-				_ = fail_budget(m)
-				return query.NULL, .Failed, false
-			}
-			m.steps -= 1
+		if !step_tick(m) {
+			return query.NULL, .Failed, false
 		}
 		_, x, more, ns := query.cursor_next(h, &c)
 		if ns != .Ok {
-			query.release(h, keys)
 			return query.NULL, .Failed, false
 		}
 		if !more {
@@ -957,23 +855,19 @@ eval_by_keys :: proc(m: ^Machine, input: query.Value, key_expr: ^Node, env: ^Env
 		}
 		y, yg := native_maybe_origin(m, key_expr, x, env)
 		if yg == .None {
-			query.release(h, keys)
 			return query.NULL, .None, true
 		}
 		if yg == .Failed || query.append_owned(h, &keys, y) != .Ok {
-			query.release(h, keys)
 			return query.NULL, .Failed, false
 		}
 	}
 }
 
-// Raises `x` as a jq error value.
 @(private)
 raise :: proc(h: ^query.Heap, x: query.Value) -> query.Status {
 	return query.fail(h, .Raised, .None, x)
 }
 
-// Raises `x`, which it takes.
 @(private)
 raise_taken :: proc(h: ^query.Heap, x: query.Value) -> query.Status {
 	s := raise(h, x)
@@ -981,7 +875,6 @@ raise_taken :: proc(h: ^query.Heap, x: query.Value) -> query.Status {
 	return s
 }
 
-// `-x`.
 @(private)
 negate :: proc(h: ^query.Heap, x: query.Value) -> (res: query.Value, status: query.Status) {
 	if query.type_of(x) != .Number {
@@ -1010,8 +903,7 @@ binary_owned :: proc(h: ^query.Heap, op: Op, a, b: query.Value) -> (res: query.V
 		case .String:
 			if query.is_text(b) {
 				acc := a
-				s := query.text_append(h, &acc, query.text_of(b))
-				if s != .Ok {
+				if s := query.text_append(h, &acc, query.text_of(b)); s != .Ok {
 					query.release(h, acc)
 					return query.NULL, s
 				}
@@ -1024,8 +916,7 @@ binary_owned :: proc(h: ^query.Heap, op: Op, a, b: query.Value) -> (res: query.V
 		case .Object:
 			if query.type_of(b) == .Object {
 				acc := a
-				s := query.object_merge_into(h, &acc, b)
-				if s != .Ok {
+				if s := query.object_merge_into(h, &acc, b); s != .Ok {
 					query.release(h, acc)
 					return query.NULL, s
 				}
@@ -1041,35 +932,23 @@ binary_owned :: proc(h: ^query.Heap, op: Op, a, b: query.Value) -> (res: query.V
 @(private)
 append_all :: proc(h: ^query.Heap, a, b: query.Value) -> (res: query.Value, status: query.Status) {
 	acc := a
-	s := query.own_array(h, &acc, query.length_of(h, b))
-	if s == .Ok && b.kind == .Array {
+	defer if status != .Ok {
+		query.release(h, acc)
+	}
+	query.own_array(h, &acc, query.length_of(h, b)) or_return
+	if b.kind == .Array {
 		for x in query.items_of(b) {
-			if s = query.append_owned(h, &acc, query.retain(x)); s != .Ok {
-				break
-			}
-		}
-		if s != .Ok {
-			query.release(h, acc)
-			return query.NULL, s
+			query.append_owned(h, &acc, query.retain(x)) or_return
 		}
 		return acc, .Ok
 	}
-	c: query.Cursor
-	if s == .Ok {
-		c, s = query.cursor_open(h, b)
-	}
-	for s == .Ok {
-		_, x, more, cs := query.cursor_next(h, &c)
-		if cs != .Ok || !more {
-			s = cs
-			break
+	c := query.cursor_open(h, b) or_return
+	defer query.cursor_close(&c)
+	for {
+		_, x, more := query.cursor_next(h, &c) or_return
+		if !more {
+			return acc, .Ok
 		}
-		s = query.append_owned(h, &acc, x)
+		query.append_owned(h, &acc, x) or_return
 	}
-	query.cursor_close(&c)
-	if s != .Ok {
-		query.release(h, acc)
-		return query.NULL, s
-	}
-	return acc, .Ok
 }

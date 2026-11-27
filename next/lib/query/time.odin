@@ -1,6 +1,35 @@
 package query
 
 import "core:math"
+import "core:strings"
+
+@(private, rodata)
+TIME_WEEKDAYS := [7]string{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"}
+@(private, rodata)
+TIME_MONTHS := [12]string{"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}
+
+// Truncates `s` at its first NUL byte, matching C string semantics.
+@(private)
+time_c_str :: proc "contextless" (s: string) -> string {
+	for b, i in transmute([]u8)s {
+		if b == 0 {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// Whether POSIX `E`/`O` modifier is valid for conversion `letter`.
+@(private)
+time_valid_modifier :: proc(modifier, letter: u8) -> bool {
+	switch modifier {
+	case 'E':
+		return strings.index_byte("cCxXyY", letter) >= 0
+	case 'O':
+		return strings.index_byte("deHImMSuUVwWy", letter) >= 0
+	}
+	return true
+}
 
 // Calendar time on the proleptic Gregorian calendar with no leap seconds, the same on every OS: Unix seconds to
 // broken-down time and back, with a zone only where the caller gives one. A broken-down time is an array of eight

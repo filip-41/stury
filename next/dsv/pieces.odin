@@ -371,19 +371,11 @@ build_pieces :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocat
 // so far, under the header once the header has ended, widened by a key for each column a row past it named.
 @(private)
 table_so_far :: proc(doc: ^tape.Document, opts: Options, rules: ^tape.Rules) -> tape.Error {
-	s := (^Piece)(opts.pieces.state)
 	if len(doc.nodes) == 0 {
 		return nil
 	}
-	if s.headed && len(s.keys) > 0 {
-		ext, err := table_ext(doc.allocator, s.keys[:], max(s.widest, len(s.keys)))
-		if err != nil {
-			tape.destroy(doc)
-			return err
-		}
-		doc.ext = ext
-	}
-	return finish_table(doc, opts, true)
+	s := (^Piece)(opts.pieces.state)
+	return attach_and_finish_table(doc, s.keys[:] if s.headed else nil, s.widest, opts, true)
 }
 
 @(private)

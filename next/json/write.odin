@@ -42,14 +42,8 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 	if spec > u8(max(Spec)) {
 		return {}, tape.Bad_Option{"spec"}
 	}
-	if opts.format != nil {
-		return {}, tape.Bad_Option{"format"}
-	}
-	if opts.grow_header || len(opts.header) > 0 {
-		return {}, tape.Bad_Option{"header" if len(opts.header) > 0 else "options"}
-	}
-	if opts.framing == .Lines && !write.compact(opts) {
-		return {}, tape.Bad_Option{"framing"}
+	if err := check_write_opts(opts); err != nil {
+		return {}, err
 	}
 	if opts.framing == .Seq {
 		write.put_byte(out, RECORD_SEPARATOR)
@@ -64,10 +58,8 @@ write_out :: proc(out: ^write.Out, doc: ^tape.Document, spec: u8, opts: Write_Op
 @(private)
 write_spec :: proc(out: ^write.Out, doc: ^tape.Document, spec: Spec, opts: Write_Options, allocator: runtime.Allocator) -> (tape.Facts, write.Error) {
 	switch spec {
-	case .Json:
-		return write_as(out, doc, .Json, opts, allocator)
-	case .Jsonc:
-		return write_as(out, doc, .Jsonc, opts, allocator)
+	case .Json:  return write_as(out, doc, .Json, opts, allocator)
+	case .Jsonc: return write_as(out, doc, .Jsonc, opts, allocator)
 	case .Json5:
 	}
 	return write_as(out, doc, .Json5, opts, allocator)
@@ -167,14 +159,10 @@ write_walked :: #force_no_inline proc(out: ^write.Out, doc: ^tape.Document, $T: 
 @(private)
 write_tree_for :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, facts, tables: bool, $PRETTY: bool) {
 	switch {
-	case !facts && !tables:
-		write_tree(out, w, l, T, false, false, PRETTY)
-	case !facts:
-		write_tree(out, w, l, T, false, true, PRETTY)
-	case !tables:
-		write_tree(out, w, l, T, true, false, PRETTY)
-	case:
-		write_tree(out, w, l, T, true, true, PRETTY)
+	case !facts && !tables: write_tree(out, w, l, T, false, false, PRETTY)
+	case !facts:            write_tree(out, w, l, T, false, true, PRETTY)
+	case !tables:           write_tree(out, w, l, T, true, false, PRETTY)
+	case:                   write_tree(out, w, l, T, true, true, PRETTY)
 	}
 }
 
@@ -406,46 +394,12 @@ put_key :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: t
 	return put_text_of(out, w, l, at)
 }
 
-// Grows `w.scratch` to at least `room` bytes, matching `write.scratch_grow`.
-@(private, cold)
-grow_tree_scratch :: #force_no_inline proc(w: ^write.Tree, room: int) -> bool {
-	size := max(room, 2 * len(w.scratch), 256)
-	raw, err := runtime.mem_alloc_non_zeroed(size, 1, w.allocator)
-	if err == nil && (raw_data(raw) == nil || len(raw) < size) {
-		err = .Out_Of_Memory
-	}
-	if err != nil {
-		w.err = err
-		return false
-	}
-	if w.scratch != nil {
-		delete(w.scratch, w.allocator)
-	}
-	w.scratch = raw
-	return true
-}
-
 // Writes the text of scalar node `at` as a JSON string, false with `w.err` set when it cannot be read.
-// Invariant: `at` is a valid node index and its decoded or raw bytes lie in `w.doc` / `w.scratch`.
 @(private)
 put_text_of :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: tape.Node_Index) -> bool #no_bounds_check {
-	doc := w.doc
-	t := doc.nodes[at]
-	if u8(t.kind) - u8(tape.Kind.String) <= 1 && t.spelling & tape.SPELLING_DECODE == 0 {
-		put_string(out, l, string(tape.span_bytes(doc, t.lo, t.n)))
-		return true
-	}
-	room := tape.text_room(doc, at)
-	if room == 0 {
-		put_string(out, l, string(tape.span_bytes(doc, t.lo, t.n)))
-		return true
-	}
-	if len(w.scratch) < room && !grow_tree_scratch(w, room) {
-		return false
-	}
-	s, ok := tape.node_text(doc, at, w.scratch)
+	s, ok := write.text_of(w, at)
 	if ok {
-		put_string(out, l, s)
+		put_string(out, l.ascii, s)
 	}
 	return ok
 }
@@ -455,7 +409,7 @@ put_text_of :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, at: tape.Node_I
 put_cell_key :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout) -> bool {
 	s, ok := write.text_of_token(w, w.cell)
 	if ok {
-		put_string(out, l, s)
+		put_string(out, l.ascii, s)
 	}
 	return ok
 }
@@ -476,8 +430,8 @@ bracket_of :: #force_inline proc "contextless" (kind: tape.Kind) -> u8 {
 
 // Writes `s` as a JSON string, under `ascii` with each character past ASCII escaped.
 @(private)
-put_string :: #force_inline proc(out: ^write.Out, l: ^Layout, s: string) {
-	if l.ascii {
+put_string :: #force_inline proc(out: ^write.Out, ascii: bool, s: string) {
+	if ascii {
 		put_ascii(out, s, true)
 	} else {
 		put_escaped(out, s)
@@ -526,8 +480,6 @@ put_ascii_text :: proc(out: ^write.Out, s: []u8) #no_bounds_check {
 			i += 1
 			continue
 		}
-		// An odd run of backslashes before the character escapes it: JSON5 reads it as the character, and as nothing for a
-		// line separator, which JSON has no escape for.
 		end, back := i, 0
 		for end - back > run && s[end - back - 1] == '\\' {
 			back += 1
@@ -539,8 +491,10 @@ put_ascii_text :: proc(out: ^write.Out, s: []u8) #no_bounds_check {
 			}
 		}
 		write.put(out, s[run:end])
-		if i < len(s) && s[i] >= 0x80 {
-			i = put_ascii_burst(out, s, i)
+		for i < len(s) && s[i] >= 0x80 {
+			r, size := utf8.decode_rune(s[i:])
+			out.cursor += rune_units(write.room(out, 12), r)
+			i += size
 		}
 		run = i
 	}
@@ -551,9 +505,7 @@ put_ascii_text :: proc(out: ^write.Out, s: []u8) #no_bounds_check {
 @(private)
 has_astral :: proc "contextless" (s: []u8) -> bool {
 	for c in s {
-		if c >= 0xF0 {
-			return true
-		}
+		if c >= 0xF0 { return true }
 	}
 	return false
 }
@@ -562,9 +514,7 @@ has_astral :: proc "contextless" (s: []u8) -> bool {
 @(private)
 holds_line_separator :: proc "contextless" (s: []u8) -> bool {
 	for c, i in s {
-		if c == 0xE2 && is_line_separator(s[i:]) {
-			return true
-		}
+		if c == 0xE2 && is_line_separator(s[i:]) { return true }
 	}
 	return false
 }
@@ -573,48 +523,6 @@ holds_line_separator :: proc "contextless" (s: []u8) -> bool {
 @(private)
 is_line_separator :: #force_inline proc "contextless" (s: []u8) -> bool {
 	return len(s) >= 3 && s[0] == 0xE2 && s[1] == 0x80 && s[2] | 1 == 0xA9
-}
-
-// Writes the characters of `s` from `at`, which holds one past ASCII, as `\u` escapes, and each ASCII byte that stands
-// between two characters past ASCII as it is, in the room of the whole burst. Returns where it stopped: at the end, or
-// at an ASCII byte that another follows. `s` is well formed UTF-8.
-@(private)
-put_ascii_burst :: #force_no_inline proc(out: ^write.Out, s: []u8, at: int) -> int #no_bounds_check {
-	// A byte of `s` takes at most three of the output, and a character that starts before `end` ends at most three
-	// bytes past it.
-	end := min(len(s), at + write.ROOM_MAX / 3 - 4)
-	p := write.room(out, 3 * (end - at + 4))
-	o, i := 0, at
-	for i < end {
-		c := s[i]
-		switch {
-		case c < 0x80:
-			if i + 1 >= len(s) || s[i + 1] < 0x80 {
-				out.cursor += o
-				return i
-			}
-			// A backslash escapes the character after it, which is read as itself, or as nothing for a line separator.
-			if c != '\\' {
-				p[o] = c
-				o += 1
-			}
-			i += 1
-			if c == '\\' && is_line_separator(s[i:]) {
-				i += 3
-			}
-		case c < 0xE0:
-			o += u_escape(p[o:], u32(c & 0x1F) << 6 | u32(s[i + 1] & 0x3F))
-			i += 2
-		case c < 0xF0:
-			o += u_escape(p[o:], u32(c & 0x0F) << 12 | u32(s[i + 1] & 0x3F) << 6 | u32(s[i + 2] & 0x3F))
-			i += 3
-		case:
-			o += rune_units(p[o:], rune(u32(c & 0x07) << 18 | u32(s[i + 1] & 0x3F) << 12 | u32(s[i + 2] & 0x3F) << 6 | u32(s[i + 3] & 0x3F)))
-			i += 4
-		}
-	}
-	out.cursor += o
-	return i
 }
 
 // Writes `s`, the bytes between the quotes of a JSON5 string, as a JSON string. An escape JSON has is kept as written,
@@ -762,19 +670,7 @@ escape_from :: #force_inline proc "contextless" (s: []u8, i: int, past_ascii: u6
 @(private)
 put_escaped :: proc(out: ^write.Out, s: string) #no_bounds_check {
 	write.put_byte(out, '"')
-	b := transmute([]u8)s
-	run, i := 0, 0
-	for {
-		i = escape_from(b, i, 0)
-		if i >= len(b) {
-			break
-		}
-		write.put(out, b[run:i])
-		out.cursor += escape_into(write.room(out, 6), b[i])
-		i += 1
-		run = i
-	}
-	write.put(out, b[run:])
+	put_escaped_body(out, transmute([]u8)s)
 	write.put_byte(out, '"')
 }
 
@@ -802,27 +698,31 @@ put_number :: #force_no_inline proc(out: ^write.Out, w: ^write.Tree, at: tape.No
 	return false
 }
 
+@(private)
+put_line_comment :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, f: tape.Fact, depth: int, indent_now: bool, $T: Spec, $PRETTY: bool) {
+	when PRETTY {
+		if indent_now {
+			line_indent(out, l, depth)
+		}
+	} else {
+		if l.line_value {
+			write.put_byte(out, '\n')
+		}
+	}
+	l.line_value = false
+	put_comment(out, w, l, f, false, T, PRETTY)
+}
+
 // Before value `s`: the inline comments of the value before it, after its comma, then its own lead comments, each on
 // a line of its own.
 @(private)
 lead_comments :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, s: write.Step, $T: Spec, $PRETTY: bool) {
 	inline_comments(out, w, l, T, PRETTY)
 	for f in s.facts {
-		if f.kind != .Comment || after_key(w, s, f) {
-			continue
+		if f.kind == .Comment && !after_key(w, s, f) {
+			put_line_comment(out, w, l, f, s.depth, l.wrote, T, PRETTY)
+			l.wrote = true
 		}
-		when PRETTY {
-			if l.wrote {
-				line_indent(out, l, s.depth)
-			}
-		} else {
-			if l.line_value {
-				write.put_byte(out, '\n')
-			}
-		}
-		l.line_value = false
-		put_comment(out, w, l, f, false, T, PRETTY)
-		l.wrote = true
 	}
 }
 
@@ -866,19 +766,10 @@ after_root :: #force_inline proc(w: ^write.Tree, f: tape.Fact) -> bool {
 foot_comments :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, s: write.Step, $T: Spec, $PRETTY: bool) -> (feet: bool) {
 	inline_comments(out, w, l, T, PRETTY)
 	for f in s.facts {
-		if f.kind != .Comment_Foot || s.depth == 0 && after_root(w, f) {
-			continue
+		if f.kind == .Comment_Foot && !(s.depth == 0 && after_root(w, f)) {
+			put_line_comment(out, w, l, f, s.depth + 1, true, T, PRETTY)
+			feet = true
 		}
-		when PRETTY {
-			line_indent(out, l, s.depth + 1)
-		} else {
-			if l.line_value {
-				write.put_byte(out, '\n')
-			}
-		}
-		l.line_value = false
-		put_comment(out, w, l, f, false, T, PRETTY)
-		feet = true
 	}
 	return
 }
@@ -891,15 +782,7 @@ end_comments :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, $T: Spec, $PRE
 	inline_comments(out, w, l, T, PRETTY)
 	for f in l.root_facts {
 		if f.kind == .Comment_Foot && (w.nodes[f.node].kind < .Array || after_root(w, f)) {
-			when PRETTY {
-				write.put_byte(out, '\n')
-			} else {
-				if l.line_value {
-					write.put_byte(out, '\n')
-				}
-			}
-			l.line_value = false
-			put_comment(out, w, l, f, false, T, PRETTY)
+			put_line_comment(out, w, l, f, 0, true, T, PRETTY)
 		}
 	}
 	when PRETTY {
@@ -947,54 +830,18 @@ put_body :: proc(out: ^write.Out, l: ^Layout, body: []u8) {
 	}
 }
 
-// Whether `body`, a comment's text, holds none of the bytes its form depends on: a line end, a `*`, and in JSON5 the
-// first byte of U+2028 and U+2029.
-@(private)
-comment_plain :: proc "contextless" (body: []u8, $T: Spec) -> bool #no_bounds_check {
-	ONES :: u64(0x0101010101010101)
-	HIGH :: u64(0x8080808080808080)
-	i := 0
-	for ; i + 8 <= len(body); i += 8 {
-		v := intrinsics.unaligned_load((^u64)(raw_data(body[i:])))
-		a, b, c := v ~ (ONES * '\n'), v ~ (ONES * '\r'), v ~ (ONES * '*')
-		hit := (a - ONES) & ~a | (b - ONES) & ~b | (c - ONES) & ~c
-		when T == .Json5 {
-			d := v ~ (ONES * 0xE2)
-			hit |= (d - ONES) & ~d
-		}
-		if hit & HIGH != 0 {
-			return false
-		}
-	}
-	for ; i < len(body); i += 1 {
-		c := body[i]
-		if c == '\n' || c == '\r' || c == '*' || T == .Json5 && c == 0xE2 {
-			return false
-		}
-	}
-	return true
-}
-
 // Writes comment `f` as a line comment when it was one and its body holds no line end, else as a block comment when
 // its body holds no `*/`, else drops it. With `block` it takes the block form where it can. In compact text a line
 // comment ends with a line end, which pretty text writes after it anyway. Returns whether it wrote a line comment.
-// Invariant: `scan` is either `nil` or `body`, so `0 <= i < len(body)` and `i + 1 < len(body)` guards `body[i + 1]`.
 @(private)
 put_comment :: proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, f: tape.Fact, block: bool, $T: Spec, $PRETTY: bool) -> (line_comment: bool) #no_bounds_check {
 	body, line := write.comment_body(w.doc, f)
 	can_line, can_block := true, true
-	scan := body if !comment_plain(body, T) else nil
-	for c, i in scan {
+	for c, i in body {
 		switch c {
-		case '\n', '\r':
-			can_line = false
-		case '*':
-			can_block &&= i + 1 >= len(body) || body[i + 1] != '/'
-		case 0xE2:
-			// U+2028 and U+2029 end a JSON5 line comment.
-			if T == .Json5 && is_line_separator(body[i:]) {
-				can_line = false
-			}
+		case '\n', '\r': can_line = false
+		case '*':        can_block &&= i + 1 >= len(body) || body[i + 1] != '/'
+		case 0xE2:       if T == .Json5 && is_line_separator(body[i:]) { can_line = false }
 		}
 	}
 	switch {

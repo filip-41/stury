@@ -210,43 +210,40 @@ table_batch_write :: proc(w: ^Table_Writer) -> Error {
 	return nil
 }
 
+@(private = "file")
+stream_push_name :: proc(s: ^Table_Stream, text: string) -> runtime.Allocator_Error {
+	name := strings.clone(text, s.allocator) or_return
+	if _, err := append(&s.names, name); err != nil {
+		delete(name, s.allocator)
+		return err
+	}
+	return nil
+}
+
 // Starts `s` under `header`, whose keys are copied, in the order of their texts under `sort_keys`, nil for the keys of
 // the first row. A key repeated is `Bad_Option{"header"}`.
 @(private = "file")
-table_stream_start :: proc(s: ^Table_Stream, header: []string, sort_keys: bool, allocator: runtime.Allocator) -> Error {
+table_stream_start :: proc(s: ^Table_Stream, header: []string, sort_keys: bool, allocator: runtime.Allocator) -> (err: Error) {
 	s^ = {allocator = allocator, known = len(header) > 0}
 	s.names.allocator = allocator
+	defer if err != nil {
+		table_stream_drop(s)
+	}
 	for k in header {
-		name, err := strings.clone(k, allocator)
-		if err != nil {
-			table_stream_drop(s)
-			return err
-		}
-		if _, err = append(&s.names, name); err != nil {
-			delete(name, allocator)
-			table_stream_drop(s)
-			return err
-		}
+		stream_push_name(s, k) or_return
 	}
 	if sort_keys {
 		slice.stable_sort(s.names[:])
 	}
-	repeated := false
 	if len(header) > 1 {
-		copied, cerr := slice.clone(s.names[:], allocator)
-		if cerr != nil {
-			table_stream_drop(s)
-			return cerr
-		}
+		copied := slice.clone(s.names[:], allocator) or_return
+		defer delete(copied, allocator)
 		slice.sort(copied)
 		for i in 1 ..< len(copied) {
-			repeated ||= copied[i] == copied[i - 1]
+			if copied[i] == copied[i - 1] {
+				return tape.Bad_Option{"header"}
+			}
 		}
-		delete(copied, allocator)
-	}
-	if repeated {
-		table_stream_drop(s)
-		return tape.Bad_Option{"header"}
 	}
 	return nil
 }
@@ -270,15 +267,13 @@ stream_shape :: proc(t: ^Table_Write, root: tape.Node_Index, h: Header, objects:
 	if s.shape == .Unset {
 		s.shape, s.width = shape, h.width
 	}
-	switch {
-	case shape != s.shape:
-		t.w.err = Refused{root + 1, .Not_A_Table}
-	case shape == .Cells && h.width != s.width:
-		t.w.err = Refused{root + 1, .Row_Keys}
-	case:
-		return true
+	if shape != s.shape {
+		return table_refuse(t.w, root + 1, .Not_A_Table)
 	}
-	return false
+	if shape == .Cells && h.width != s.width {
+		return table_refuse(t.w, root + 1, .Row_Keys)
+	}
+	return true
 }
 
 // Keeps the keys of the first row of a stream whose header is not known, in the order they are written, as its header.
@@ -289,17 +284,8 @@ stream_names :: proc(t: ^Table_Write, h: Header) -> bool {
 		return true
 	}
 	for c in 0 ..< h.width {
-		text, ok := text_of(t.w, t.keys_at[column(t, c)])
-		if !ok {
-			return false
-		}
-		name, err := strings.clone(text, s.allocator)
-		if err != nil {
-			t.w.err = err
-			return false
-		}
-		if _, err = append(&s.names, name); err != nil {
-			delete(name, s.allocator)
+		text := text_of(t.w, t.keys_at[column(t, c)]) or_return
+		if err := stream_push_name(s, text); err != nil {
 			t.w.err = err
 			return false
 		}

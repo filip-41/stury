@@ -2,12 +2,34 @@ package query
 
 import "core:math"
 
-// Reads and changes at paths: a path is an array of steps, each a member's key, an element's index or a slice
-// `{"start": a, "end": b}`. Null reads as nothing at every path and grows into what a change at a path needs.
+// Reads and changes at paths: steps are member keys, array indexes, or slices `{"start", "end"}`.
 
-// `t[key]`: a member of an object by a string, an element of an array by a number rounded down, from the end when
-// negative, the places of a subarray by an array, a slice by `{"start", "end"}`, and null for anything of null. Absent
-// past an array's ends and for a missing member reads as null.
+@(private = "file")
+write_fact_step :: proc(h: ^Heap, t, key, x: Value, overlay_depth: int) -> (res: Value, handled: bool, status: Status) {
+	if kind, is_attr, is_fact := fact_step(h, key); is_fact {
+		if is_attr {
+			an, as := fact_step_attr(h, key)
+			if as != .Ok {
+				release(h, t)
+				release(h, x)
+				return NULL, true, as
+			}
+			defer release(h, an)
+			res, status = fact_write(h, t, .Attribute, text_of(an), true, x, overlay_depth)
+			return res, true, status
+		}
+		res, status = fact_write(h, t, kind, "", false, x, overlay_depth)
+		return res, true, status
+	}
+	if unk, is_unk := unknown_fact_step(h, key); is_unk {
+		defer release(h, unk)
+		release(h, t)
+		release(h, x)
+		return NULL, true, fail_unknown_fact(h, text_of(unk))
+	}
+	return ABSENT, false, .Ok
+}
+
 @(require_results)
 get :: proc(h: ^Heap, t, key: Value) -> (res: Value, status: Status) {
 	tt, kt := type_of(t), type_of(key)
@@ -49,7 +71,6 @@ get :: proc(h: ^Heap, t, key: Value) -> (res: Value, status: Status) {
 	return NULL, fail(h, .Types, .Index, t, key)
 }
 
-// The element index number `key` names, rounded down, or false past what an index can be.
 @(private)
 element_index :: proc(key: Value) -> (int, bool) {
 	if i, ok := as_i64(key); ok {
@@ -62,20 +83,18 @@ element_index :: proc(key: Value) -> (int, bool) {
 	return int(math.floor(f)), true
 }
 
-// Whether number `key` is an index past what an array holds, a double too large for `element_index` included.
 @(private)
 index_past_limit :: proc(key: Value) -> bool {
 	i, ok := element_index(key)
 	f := as_f64(key)
-	return i > MAX_INDEX || !ok && f > 0 && !math.is_nan(f)
+	return i > MAX_INDEX || (!ok && f > 0 && !math.is_nan(f))
 }
 
-// The bounds of a slice step, each a number or null.
 @(private)
 slice_key :: proc(h: ^Heap, key: Value) -> (from, to: Value, status: Status) {
 	from = member(h, key, "start") or_return
 	to = member(h, key, "end") or_return
-	for x in ([]Value{from, to}) {
+	for x in ([2]Value{from, to}) {
 		if t := type_of(x); t != .Number && t != .Null {
 			release(h, from)
 			release(h, to)
@@ -85,7 +104,6 @@ slice_key :: proc(h: ^Heap, key: Value) -> (from, to: Value, status: Status) {
 	return from, to, .Ok
 }
 
-// The places in array `t` where array `sub`, not empty, starts.
 @(private, require_results)
 places_of :: proc(h: ^Heap, t, sub: Value) -> (res: Value, status: Status) {
 	a := built(h, t) or_return
@@ -103,8 +121,7 @@ places_of :: proc(h: ^Heap, t, sub: Value) -> (res: Value, status: Status) {
 	for i in 0 ..= len(xs) - len(ys) {
 		same := true
 		for y, j in ys {
-			eq := equal(h, xs[i + j], y) or_return
-			if !eq {
+			if !(equal(h, xs[i + j], y) or_return) {
 				same = false
 				break
 			}
@@ -116,8 +133,6 @@ places_of :: proc(h: ^Heap, t, sub: Value) -> (res: Value, status: Status) {
 	return out, .Ok
 }
 
-// `t[from:to]` of an array or a string, the bounds null for its ends, the start rounded down and the end up, each from
-// the end when negative. Null for null.
 @(require_results)
 slice :: proc(h: ^Heap, t, from, to: Value) -> (res: Value, status: Status) {
 	tt := type_of(t)
@@ -126,17 +141,15 @@ slice :: proc(h: ^Heap, t, from, to: Value) -> (res: Value, status: Status) {
 	}
 	ft, tot := type_of(from), type_of(to)
 	if tt != .Array && tt != .String {
-		step, ms := make_object(h, 2)
-		if ms != .Ok {
-			return NULL, ms
-		}
+		step := make_object(h, 2) or_return
 		defer release(h, step)
 		object_put(h, &step, text_borrowed("start"), retain(from) if from.kind != .Absent else NULL) or_return
 		object_put(h, &step, text_borrowed("end"), retain(to) if to.kind != .Absent else NULL) or_return
 		return NULL, fail(h, .Types, .Index, t, step)
 	}
-	if ft != .Number && ft != .Null && ft != .Absent || tot != .Number && tot != .Null && tot != .Absent {
-		return NULL, fail(h, .Types, .Slice, t, from if ft != .Number && ft != .Null && ft != .Absent else to)
+	bad_bound :: proc(bt: Type) -> bool { return bt != .Number && bt != .Null && bt != .Absent }
+	if bad_bound(ft) || bad_bound(tot) {
+		return NULL, fail(h, .Types, .Slice, t, from if bad_bound(ft) else to)
 	}
 	n := length_of(h, t) if tt == .Array else codepoint_count(text_of(t))
 	lo, hi := slice_bounds(from, to, n)
@@ -151,13 +164,11 @@ slice :: proc(h: ^Heap, t, from, to: Value) -> (res: Value, status: Status) {
 		release(h, out)
 	}
 	for i in lo ..< hi {
-		x := element(h, t, i) or_return
-		append_owned(h, &out, x) or_return
+		append_owned(h, &out, element(h, t, i) or_return) or_return
 	}
 	return out, .Ok
 }
 
-// The range a slice from `from` to `to` takes of `n` children, clamped.
 @(private)
 slice_bounds :: proc(from, to: Value, n: int) -> (lo, hi: int) {
 	bound :: proc(v: Value, n: int, end: bool) -> int {
@@ -168,20 +179,13 @@ slice_bounds :: proc(from, to: Value, n: int) -> (lo, hi: int) {
 		if x < 0 {
 			x += f64(n)
 		}
-		x = math.ceil(x) if end else math.floor(x)
-		return int(clamp(x, 0, f64(n)))
+		return int(clamp(math.ceil(x) if end else math.floor(x), 0, f64(n)))
 	}
-	lo, hi = 0, n
-	if type_of(from) == .Number {
-		lo = bound(from, n, false)
-	}
-	if type_of(to) == .Number {
-		hi = bound(to, n, true)
-	}
+	lo = bound(from, n, false) if type_of(from) == .Number else 0
+	hi = bound(to, n, true) if type_of(to) == .Number else n
 	return lo, max(lo, hi)
 }
 
-// The value at `path`, an array of steps, in `v`.
 @(require_results)
 get_path :: proc(h: ^Heap, v, path: Value) -> (res: Value, status: Status) {
 	if type_of(path) != .Array {
@@ -194,94 +198,103 @@ get_path :: proc(h: ^Heap, v, path: Value) -> (res: Value, status: Status) {
 	}
 	validate_path_facts(h, items_of(keys)) or_return
 	cur := retain(v)
+	defer if status != .Ok {
+		release(h, cur)
+	}
 	for k in items_of(keys) {
 		if t := type_of(cur); t == .Null || t == .Absent {
 			release(h, cur)
 			return NULL, .Ok
 		}
-		next, s := get(h, cur, k)
+		next := get(h, cur, k) or_return
 		release(h, cur)
-		if s != .Ok {
-			return NULL, s
-		}
 		cur = next
 	}
 	return cur, .Ok
 }
 
-// `v`, taken, with the value at `path` set to `x`, taken: containers along the path that are not there are made, and
-// a container the caller alone holds changes in place.
+@(private = "file")
+overlay_item_refs :: proc "contextless" (item: Value, target_p: rawptr) -> int {
+	if item.kind == .Overlay && item.p == target_p {
+		return 1
+	}
+	if item.kind == .Array {
+		count := 0
+		for el in items_of(item) {
+			count += int(el.kind == .Overlay && el.p == target_p)
+		}
+		return count
+	}
+	return 0
+}
+
+@(private = "file")
+overlay_chain_refs :: proc "contextless" (chain: []Value, target_p: rawptr) -> int {
+	if target_p == nil {
+		return 0
+	}
+	count := 0
+	for item in chain {
+		count += overlay_item_refs(item, target_p)
+	}
+	return count
+}
+
 @(require_results)
 set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
-	if type_of(path) != .Array {
+	fail_vx :: proc(h: ^Heap, v, x: Value, s: Status) -> (Value, Status) {
 		release(h, v)
 		release(h, x)
-		return NULL, fail(h, .Types, .Set_Path, path)
+		return NULL, s
+	}
+	if type_of(path) != .Array {
+		return fail_vx(h, v, x, fail(h, .Types, .Set_Path, path))
 	}
 	keys_v, ks := built(h, path)
 	if ks != .Ok {
-		release(h, v)
-		release(h, x)
-		return NULL, ks
+		return fail_vx(h, v, x, ks)
 	}
 	defer release(h, keys_v)
 	keys := items_of(keys_v)
 	if len(keys) > depth_limit(h) {
-		release(h, v)
-		release(h, x)
-		return NULL, fail(h, .Depth, .Set_Path)
+		return fail_vx(h, v, x, fail(h, .Depth, .Set_Path))
 	}
 	if fs := validate_path_facts(h, keys); fs != .Ok {
-		release(h, v)
-		release(h, x)
-		return NULL, fs
+		return fail_vx(h, v, x, fs)
 	}
 	if len(keys) == 0 {
 		release(h, v)
 		return x, .Ok
 	}
-	// If root `v` is an aliased `.Overlay`, COW-clone upfront so aliases (`$orig`, `[., ...]`, `try`) are untouched!
 	cur_root := v
 	if cur_root.kind == .Overlay {
-		same_ov := 1 if (x.kind == .Overlay && x.p == cur_root.p) else 0
-		if !overlay_is_unique(cur_root, same_ov) {
-			cloned, cs := cow_clone_overlay(h, cur_root)
-			if cs != .Ok {
-				release(h, x)
-				return NULL, cs
-			}
-			cur_root = cloned
+		cs: Status
+		cur_root, cs = ensure_unique_overlay(h, cur_root, int(x.kind == .Overlay && x.p == cur_root.p))
+		if cs != .Ok {
+			release(h, x)
+			return NULL, cs
 		}
 	}
 	if len(keys) == 1 {
 		return set(h, cur_root, keys[0], x)
 	}
-	// Each container on the way down has its child taken out, so the child is held once and changes in place.
 	chain_buf: [16]Value
 	chain_n := 0
 	chain_dyn: [dynamic]Value
 	defer delete(chain_dyn)
-	cur := cur_root
-	s := Status.Ok
+	cur, s := cur_root, Status.Ok
 	_, _, last_is_fact := fact_step(h, keys[len(keys) - 1])
 	for k in keys[:len(keys) - 1] {
 		child: Value
-		if type_of(k) == .Number && (type_of(cur) == .Array || type_of(cur) == .Null || type_of(cur) == .Absent) {
-			// An index past the limit is refused before a key further down is looked at.
-			if index_past_limit(k) {
-				s = fail(h, .Range, .Set_Path, cur, k, "Array index too large")
-				break
-			}
+		if type_of(k) == .Number && (type_of(cur) == .Array || type_of(cur) == .Null || type_of(cur) == .Absent) && index_past_limit(k) {
+			s = fail(h, .Range, .Set_Path, cur, k, "Array index too large")
+			break
 		}
 		if cur.kind == .Overlay {
 			chain_so_far := chain_dyn[:] if len(chain_dyn) > 0 else chain_buf[:chain_n]
-			if !overlay_is_unique(cur, overlay_chain_refs(chain_so_far, cur.p)) {
-				cloned, cs := cow_clone_overlay(h, cur)
-				if cs != .Ok {
-					s = cs
-					break
-				}
-				cur = cloned
+			cur, s = ensure_unique_overlay(h, cur, overlay_chain_refs(chain_so_far, cur.p))
+			if s != .Ok {
+				break
 			}
 		}
 		child, s = get(h, cur, k)
@@ -320,8 +333,7 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 		cur, s = overlay_promote_fact_target(h, chain[len(chain) - 1], keys[len(keys) - 2], cur)
 	}
 	if s == .Ok {
-		ov_refs := overlay_chain_refs(chain, cur.p) if cur.kind == .Overlay else 0
-		cur, s = set(h, cur, keys[len(keys) - 1], x, ov_refs)
+		cur, s = set(h, cur, keys[len(keys) - 1], x, overlay_chain_refs(chain, cur.p) if cur.kind == .Overlay else 0)
 	} else {
 		release(h, cur)
 		release(h, x)
@@ -331,8 +343,7 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 			release(h, parent)
 			continue
 		}
-		ov_refs := overlay_chain_refs(chain[:i], parent.p) if parent.kind == .Overlay else 0
-		cur, s = set(h, parent, keys[i], cur, ov_refs)
+		cur, s = set(h, parent, keys[i], cur, overlay_chain_refs(chain[:i], parent.p) if parent.kind == .Overlay else 0)
 	}
 	if s != .Ok {
 		return NULL, s
@@ -340,42 +351,11 @@ set_path :: proc(h: ^Heap, v, path, x: Value) -> (res: Value, status: Status) {
 	return cur, .Ok
 }
 
-// Counts references to `target_p` held in ancestor `chain` (including any synthetic XML array in `chain` holding child `.Overlay` refs).
-@(private)
-overlay_chain_refs :: proc(chain: []Value, target_p: rawptr) -> int {
-	if target_p == nil {
-		return 0
-	}
-	count := 0
-	for item in chain {
-		if item.kind == .Overlay && item.p == target_p {
-			count += 1
-		} else if item.kind == .Array {
-			for el in items_of(item) {
-				if el.kind == .Overlay && el.p == target_p {
-					count += 1
-				}
-			}
-		}
-	}
-	return count
-}
-
-// `t`, taken, with `t[key]` set to `x`, taken (single-step `set_path` without allocating a path array).
 @(require_results)
-set_one :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
-	if t.kind == .Object && key.kind == .String {
-		out := t
-		if ps := object_put(h, &out, retain(key), x); ps != .Ok {
-			release(h, out)
-			return NULL, ps
-		}
-		return out, .Ok
-	}
-	return set(h, t, key, x, 0)
+set_one :: proc(h: ^Heap, t, key, x: Value) -> (Value, Status) {
+	return set_one_key_owned(h, t, retain(key), x)
 }
 
-// Like `set_one`, but consumes `key` as well as `t` and `x`.
 @(require_results)
 set_one_key_owned :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 	if t.kind == .Object && key.kind == .String {
@@ -390,43 +370,39 @@ set_one_key_owned :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: St
 	return set(h, t, key, x, 0)
 }
 
-// `t`, taken, without `t[key]` (single-step `del_paths` without allocating a path array).
 @(require_results)
-del_one :: proc(h: ^Heap, t, key: Value) -> (res: Value, status: Status) {
+del_one :: proc(h: ^Heap, t, key: Value) -> (Value, Status) {
 	ks := [1]Value{key}
 	return del_keys(h, t, ks[:], 0)
 }
 
-// `t`, taken, with `t[key]` set to `x`, taken.
+@(private = "file", require_results)
+set_overlay_unique :: proc(h: ^Heap, t: Value, key: string, idx: int, is_member: bool, x: Value, overlay_depth: int) -> (Value, Status) {
+	out_ov, cs := ensure_unique_overlay(h, t, overlay_depth + int(x.kind == .Overlay && x.p == t.p))
+	if cs != .Ok {
+		release(h, x)
+		return NULL, cs
+	}
+	return overlay_set_at(h, out_ov, key, idx, is_member, x)
+}
+
 @(private, require_results)
 set :: proc(h: ^Heap, t, key, x: Value, overlay_depth := 0) -> (res: Value, status: Status) {
 	tt, kt := type_of(t), type_of(key)
-	out := t
-	s := Status.Ok
+	out, s := t, Status.Ok
 	switch {
 	case (tt == .Object || tt == .Null || tt == .Absent) && kt == .String:
 		if t.kind == .Overlay && tt == .Object {
-			same_ov := 1 if (x.kind == .Overlay && x.p == t.p) else 0
-			out_ov := t
-			if !overlay_is_unique(t, overlay_depth + same_ov) {
-				cloned, cs := cow_clone_overlay(h, t)
-				if cs != .Ok {
-					release(h, x)
-					return NULL, cs
-				}
-				out_ov = cloned
-			}
-			return overlay_set_member(h, out_ov, text_of(key), x)
-		} else if tt != .Object {
+			return set_overlay_unique(h, t, text_of(key), 0, true, x, overlay_depth)
+		}
+		if tt != .Object {
 			release(h, t)
 			out, s = make_object(h, 1)
-		} else if t.kind == .Node {
-			out, s = built(h, t)
-			release(h, t)
+		} else {
+			out, s = ensure_built(h, t)
 		}
 		if s == .Ok {
-			ps := object_put(h, &out, retain(key), x)
-			if ps != .Ok {
+			if ps := object_put(h, &out, retain(key), x); ps != .Ok {
 				release(h, out)
 				return NULL, ps
 			}
@@ -436,8 +412,7 @@ set :: proc(h: ^Heap, t, key, x: Value, overlay_depth := 0) -> (res: Value, stat
 		i, _ := element_index(key)
 		if math.is_nan(as_f64(key)) {
 			s = fail(h, .Range, .Set_Path, out, key, "Cannot set array element at NaN index")
-		}
-		if s == .Ok && i < 0 {
+		} else if i < 0 {
 			i += length_of(h, out)
 			if i < 0 {
 				s = fail(h, .Range, .Set_Path, out, key, "Out of bounds negative array index")
@@ -447,60 +422,32 @@ set :: proc(h: ^Heap, t, key, x: Value, overlay_depth := 0) -> (res: Value, stat
 			s = fail(h, .Range, .Set_Path, out, key, "Array index too large")
 		}
 		if s == .Ok && t.kind == .Overlay && tt == .Array {
-			same_ov := 1 if (x.kind == .Overlay && x.p == t.p) else 0
-			out_ov := t
-			if !overlay_is_unique(t, overlay_depth + same_ov) {
-				cloned, cs := cow_clone_overlay(h, t)
-				if cs != .Ok {
-					release(h, x)
-					return NULL, cs
-				}
-				out_ov = cloned
-			}
-			return overlay_set_element(h, out_ov, i, x)
-		} else if s == .Ok {
+			return set_overlay_unique(h, t, "", i, false, x, overlay_depth)
+		}
+		if s == .Ok {
 			if tt != .Array {
 				release(h, t)
 				out, s = make_array(h, 1)
-			} else if t.kind == .Node {
-				out, s = built(h, t)
-				release(h, t)
+			} else {
+				out, s = ensure_built(h, t)
 			}
 		}
 		if s == .Ok {
-			ps := array_put(h, &out, i, x)
-			if ps != .Ok {
+			if ps := array_put(h, &out, i, x); ps != .Ok {
 				release(h, out)
 				return NULL, ps
 			}
 			return out, .Ok
 		}
 	case kt == .Object:
-		if kind, is_attr, is_fact := fact_step(h, key); is_fact {
-			if is_attr {
-				an, as := fact_step_attr(h, key)
-				if as != .Ok {
-					release(h, out)
-					release(h, x)
-					return NULL, as
-				}
-					defer release(h, an)
-					return fact_write(h, out, .Attribute, text_of(an), true, x, overlay_depth)
-				}
-				return fact_write(h, out, kind, "", false, x, overlay_depth)
-		}
-		if unk, is_unk := unknown_fact_step(h, key); is_unk {
-			defer release(h, unk)
-			release(h, out)
-			release(h, x)
-			return NULL, fail_unknown_fact(h, text_of(unk))
+		if f_res, handled, fs := write_fact_step(h, out, key, x, overlay_depth); handled {
+			return f_res, fs
 		}
 		if tt == .Array || tt == .Null || tt == .Absent {
 			return set_slice(h, t, key, x)
 		}
 		if tt == .String {
-			from, to, ks := slice_key(h, key)
-			if ks == .Ok {
+			if from, to, ks := slice_key(h, key); ks == .Ok {
 				release(h, from)
 				release(h, to)
 				s = fail(h, .Types, .Set_Path, t, key, "Cannot update string slices")
@@ -520,7 +467,6 @@ set :: proc(h: ^Heap, t, key, x: Value, overlay_depth := 0) -> (res: Value, stat
 	return NULL, s
 }
 
-// Array `t`, taken, with the slice step `key` names replaced by array `x`, taken.
 @(private)
 set_slice :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 	defer release(h, t)
@@ -534,29 +480,21 @@ set_slice :: proc(h: ^Heap, t, key, x: Value) -> (res: Value, status: Status) {
 	n := length_of(h, t) if type_of(t) == .Array else 0
 	lo, hi := slice_bounds(from, to, n)
 	out := make_array(h, n - (hi - lo) + length_of(h, x)) or_return
+	defer if status != .Ok {
+		release(h, out)
+	}
 	add :: proc(h: ^Heap, out: ^Value, from: Value, lo, hi: int) -> Status {
 		for i in lo ..< hi {
-			v := element(h, from, i) or_return
-			append_owned(h, out, v) or_return
+			append_owned(h, out, element(h, from, i) or_return) or_return
 		}
 		return .Ok
 	}
-	s := add(h, &out, t, 0, lo)
-	if s == .Ok {
-		s = add(h, &out, x, 0, length_of(h, x))
-	}
-	if s == .Ok {
-		s = add(h, &out, t, hi, n)
-	}
-	if s != .Ok {
-		release(h, out)
-		return NULL, s
-	}
+	add(h, &out, t, 0, lo) or_return
+	add(h, &out, x, 0, length_of(h, x)) or_return
+	add(h, &out, t, hi, n) or_return
 	return out, .Ok
 }
 
-// `v`, taken, without the values at each of `paths`, an array of paths. The paths are sorted, and those that share a
-// first step delete under it together, so the indexes of one array all count from the array before any deletion.
 @(require_results)
 del_paths :: proc(h: ^Heap, v, paths: Value) -> (res: Value, status: Status) {
 	if type_of(paths) != .Array {
@@ -564,12 +502,8 @@ del_paths :: proc(h: ^Heap, v, paths: Value) -> (res: Value, status: Status) {
 		return NULL, fail(h, .Types, .Delete_Paths, paths)
 	}
 	ps, s := built(h, paths)
-	if s == .Ok {
-		s = own_array(h, &ps, 0)
-	}
-	if s == .Ok {
-		s = sort_values(h, items_of(ps))
-	}
+	if s == .Ok { s = own_array(h, &ps, 0) }
+	if s == .Ok { s = sort_values(h, items_of(ps)) }
 	defer release(h, ps)
 	if s != .Ok {
 		release(h, v)
@@ -616,18 +550,21 @@ del_paths :: proc(h: ^Heap, v, paths: Value) -> (res: Value, status: Status) {
 	return del_sorted(h, v, lists[:])
 }
 
-// `v`, taken, without the values at `paths`, sorted and none empty, with no recursion: a frame for each container on
-// the way down deletes its children at the paths that end there and changes the others' in turn.
 @(private)
 del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: Status) {
 	Del_Frame :: struct {
-		out:   Value, // owned, the container being changed
-		paths: []Value, // the paths below it, alike in their steps down to it
-		depth: int, // its level: each path's step `depth` names one of its children
-		i:     int, // the first path not done
-		j:     int, // past the paths of the child being changed below it
-		key:   Value, // that child's step
-		keys:  [dynamic]Value, // the children to delete, at the paths that end at them
+		out, key:    Value,
+		paths:       []Value,
+		depth, i, j: int,
+		keys:        [dynamic]Value,
+	}
+	del_stack_ov_refs :: proc(frames: []Del_Frame, target_p: rawptr) -> int {
+		if target_p == nil { return 0 }
+		count := 0
+		for fr in frames {
+			count += overlay_item_refs(fr.out, target_p)
+		}
+		return count
 	}
 	alloc := heap_allocator(h)
 	stack := make([dynamic]Del_Frame, 0, 8, alloc)
@@ -639,34 +576,12 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 		delete(stack)
 	}
 	root_v := v
-	if root_v.kind == .Overlay && !overlay_is_unique(root_v) {
-		cloned, cs := cow_clone_overlay(h, root_v)
-		if cs != .Ok {
-			return NULL, cs
-		}
-		root_v = cloned
+	if root_v.kind == .Overlay {
+		root_v = ensure_unique_overlay(h, root_v) or_return
 	}
 	if _, err := append(&stack, Del_Frame{out = root_v, paths = paths, keys = make([dynamic]Value, alloc)}); err != nil {
 		release(h, root_v)
 		return NULL, fail_memory(h)
-	}
-	del_stack_ov_refs :: proc(frames: []Del_Frame, target_p: rawptr) -> int {
-		if target_p == nil {
-			return 0
-		}
-		count := 0
-		for fr in frames {
-			if fr.out.kind == .Overlay && fr.out.p == target_p {
-				count += 1
-			} else if fr.out.kind == .Array {
-				for el in items_of(fr.out) {
-					if el.kind == .Overlay && el.p == target_p {
-						count += 1
-					}
-				}
-			}
-		}
-		return count
 	}
 	for {
 		f := &stack[len(stack) - 1]
@@ -694,11 +609,7 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 		key := items_of(f.paths[f.i])[f.depth]
 		whole := len(items_of(f.paths[f.i])) == f.depth + 1
 		j := f.i + 1
-		for j < len(f.paths) {
-			same := equal(h, key, items_of(f.paths[j])[f.depth]) or_return
-			if !same {
-				break
-			}
+		for j < len(f.paths) && (equal(h, key, items_of(f.paths[j])[f.depth]) or_return) {
 			j += 1
 		}
 		if whole {
@@ -716,39 +627,24 @@ del_sorted :: proc(h: ^Heap, v: Value, paths: []Value) -> (res: Value, status: S
 		}
 		if sub.kind != .Overlay && f.out.kind == .Overlay && len(items_of(f.paths[f.i])) == f.depth + 2 {
 			if _, _, is_fact := fact_step(h, items_of(f.paths[f.i])[f.depth + 1]); is_fact {
-				ps: Status
-				sub, ps = overlay_promote_fact_target(h, f.out, key, sub)
-				if ps != .Ok {
-					return NULL, ps
-				}
+				sub = overlay_promote_fact_target(h, f.out, key, sub) or_return
 			}
 		} else if sub.kind == .Overlay {
-			ov_refs := del_stack_ov_refs(stack[:], sub.p)
-			if !overlay_is_unique(sub, ov_refs) {
-				cloned, cs := cow_clone_overlay(h, sub)
-				if cs != .Ok {
-					return NULL, cs
-				}
-				sub = cloned
-			}
+			sub = ensure_unique_overlay(h, sub, del_stack_ov_refs(stack[:], sub.p)) or_return
 		}
 		f.key, f.j = key, j
-		below := Del_Frame{out = sub, paths = f.paths[f.i:j], depth = f.depth + 1, keys = make([dynamic]Value, alloc)}
-		if _, err := append(&stack, below); err != nil {
+		if _, err := append(&stack, Del_Frame{out = sub, paths = f.paths[f.i:j], depth = f.depth + 1, keys = make([dynamic]Value, alloc)}); err != nil {
 			release(h, sub)
 			return NULL, fail_memory(h)
 		}
 	}
 }
 
-// `t`, taken, without its children at `keys`: indexes and slices of an array, all counted from `t` as it is, or keys
-// of an object.
 @(private)
 del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res: Value, status: Status) {
 	if len(keys) == 0 {
 		return t, .Ok
 	}
-	// Handle fact-step deletions (`del(.a.@comment)`, `del(.r.&k)`) separately from container member/element deletions.
 	has_fact := false
 	for k in keys {
 		if _, _, is_fact := fact_step(h, k); is_fact {
@@ -757,21 +653,15 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 		}
 	}
 	if has_fact {
-		rest := make([dynamic]Value, 0, len(keys), heap_allocator(h))
-		facts := make([dynamic]Value, 0, len(keys), heap_allocator(h))
-		defer delete(rest)
-		defer delete(facts)
+		alloc := heap_allocator(h)
+		rest := make([dynamic]Value, 0, len(keys), alloc)
+		facts := make([dynamic]Value, 0, len(keys), alloc)
+		defer { delete(rest); delete(facts) }
 		for k in keys {
-			if _, _, is_fact := fact_step(h, k); is_fact {
-				if _, err := append(&facts, k); err != nil {
-					release(h, t)
-					return NULL, fail_memory(h)
-				}
-			} else {
-				if _, err := append(&rest, k); err != nil {
-					release(h, t)
-					return NULL, fail_memory(h)
-				}
+			_, _, is_fact := fact_step(h, k)
+			if _, err := append(&facts if is_fact else &rest, k); err != nil {
+				release(h, t)
+				return NULL, fail_memory(h)
 			}
 		}
 		cur := t
@@ -779,18 +669,7 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 			cur = del_keys(h, cur, rest[:], overlay_depth) or_return
 		}
 		for fk in facts {
-			kind, is_attr, _ := fact_step(h, fk)
-			if is_attr {
-				an, as := fact_step_attr(h, fk)
-				if as != .Ok {
-					release(h, cur)
-					return NULL, as
-				}
-				defer release(h, an)
-				cur = fact_write(h, cur, .Attribute, text_of(an), true, NULL, overlay_depth) or_return
-			} else {
-				cur = fact_write(h, cur, kind, "", false, NULL, overlay_depth) or_return
-			}
+			cur, _ = write_fact_step(h, cur, fk, NULL, overlay_depth) or_return
 		}
 		return cur, .Ok
 	}
@@ -799,21 +678,9 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 		return t, .Ok
 	case .Object:
 		if t.kind == .Overlay {
-			out_ov := t
-			if !overlay_is_unique(t, overlay_depth) {
-				out_ov = cow_clone_overlay(h, t) or_return
-			}
-			return overlay_del_members(h, out_ov, keys)
+			return overlay_del_members(h, ensure_unique_overlay(h, t, overlay_depth) or_return, keys)
 		}
-		out := t
-		if t.kind == .Node {
-			bs: Status
-			out, bs = built(h, t)
-			release(h, t)
-			if bs != .Ok {
-				return NULL, bs
-			}
-		}
+		out := ensure_built(h, t) or_return
 		defer if status != .Ok {
 			release(h, out)
 		}
@@ -825,8 +692,7 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 		object_delete_many(h, &out, keys) or_return
 		return out, .Ok
 	case .Array:
-		n := length_of(h, t)
-		alloc := heap_allocator(h)
+		n, alloc := length_of(h, t), heap_allocator(h)
 		gone := make([]bool, n, alloc)
 		if gone == nil && n > 0 {
 			release(h, t)
@@ -836,12 +702,11 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 		for k in keys {
 			#partial switch type_of(k) {
 			case .Number:
-				i, ok := element_index(k)
-				if ok && i < 0 {
-					i += n
-				}
-				if ok && i >= 0 && i < n {
-					gone[i] = true
+				if i, ok := element_index(k); ok {
+					idx := i + n if i < 0 else i
+					if idx >= 0 && idx < n {
+						gone[idx] = true
+					}
 				}
 			case .Object:
 				from, to, s := slice_key(h, k)
@@ -862,29 +727,17 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 			}
 		}
 		if t.kind == .Overlay {
-			out_ov := t
-			if !overlay_is_unique(t, overlay_depth) {
-				out_ov = cow_clone_overlay(h, t) or_return
-			}
-			return overlay_del_elements(h, out_ov, gone)
+			return overlay_del_elements(h, ensure_unique_overlay(h, t, overlay_depth) or_return, gone)
 		}
-		out, s := make_array(h, n)
-		for i in 0 ..< n {
-			if s != .Ok {
-				break
-			}
-			if !gone[i] {
-				x: Value
-				x, s = element(h, t, i)
-				if s == .Ok {
-					s = append_owned(h, &out, x)
-				}
-			}
-		}
-		release(h, t)
-		if s != .Ok {
+		defer release(h, t)
+		out := make_array(h, n) or_return
+		defer if status != .Ok {
 			release(h, out)
-			return NULL, s
+		}
+		for i in 0 ..< n {
+			if !gone[i] {
+				append_owned(h, &out, element(h, t, i) or_return) or_return
+			}
 		}
 		return out, .Ok
 	}
@@ -893,6 +746,5 @@ del_keys :: proc(h: ^Heap, t: Value, keys: []Value, overlay_depth := 0) -> (res:
 	return NULL, s
 }
 
-// The greatest index a change at a path may make an array reach.
 @(private)
-MAX_INDEX :: 1 << 29 - 1
+MAX_INDEX :: 1 << 29

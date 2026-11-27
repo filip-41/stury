@@ -9,6 +9,29 @@ import "stury:lib/core/tape"
 // display-width truncation shared by `table_render.odin`, `markdown_render.odin`, and `render_grid.odin`.
 
 @(private)
+alloc_err :: #force_inline proc "contextless" (err: runtime.Allocator_Error) -> Error {
+	return err if err != nil else nil
+}
+
+@(private)
+buf_put :: #force_inline proc(dst: ^[dynamic]u8, s: string) -> runtime.Allocator_Error {
+	_, err := append(dst, s)
+	return err
+}
+
+@(private)
+buf_byte :: #force_inline proc(dst: ^[dynamic]u8, c: u8) -> runtime.Allocator_Error {
+	_, err := append(dst, c)
+	return err
+}
+
+@(private)
+buf_bytes :: #force_inline proc(dst: ^[dynamic]u8, b: []u8) -> runtime.Allocator_Error {
+	_, err := append(dst, ..b)
+	return err
+}
+
+@(private)
 append_value_cell :: proc(b: ^Grid_Builder, w: ^Tree, at: tape.Node_Index) -> Error {
 	node := w.doc.nodes[at]
 	clear(&b.scratch)
@@ -49,8 +72,7 @@ append_value_cell :: proc(b: ^Grid_Builder, w: ^Tree, at: tape.Node_Index) -> Er
 
 @(private)
 format_key_raw :: proc(b: ^Grid_Builder, w: ^Tree, at: tape.Node_Index) -> Error {
-	node := w.doc.nodes[at]
-	if node.kind == .Array || node.kind == .Object {
+	if k := w.doc.nodes[at].kind; k == .Array || k == .Object {
 		return append_compact_json(&b.scratch, w.doc, at, b.opts.sort_keys, b.alloc)
 	}
 	return format_key_scalar_into(&b.scratch, w, at)
@@ -61,25 +83,16 @@ format_key_scalar_into :: proc(dst: ^[dynamic]u8, w: ^Tree, at: tape.Node_Index)
 	node := w.doc.nodes[at]
 	switch node.kind {
 	case .Null:
-		if _, err := append(dst, "null"); err != nil {
-			return err
-		}
+		return alloc_err(buf_put(dst, "null"))
 	case .True:
-		if _, err := append(dst, "true"); err != nil {
-			return err
-		}
+		return alloc_err(buf_put(dst, "true"))
 	case .False:
-		if _, err := append(dst, "false"); err != nil {
-			return err
-		}
+		return alloc_err(buf_put(dst, "false"))
 	case .Number:
 		// Use the format's canonical key spelling via `text_of` first (so YAML `1e0`/`.inf`/`.nan` and CBOR int keys
 		// match `tape.member` identically), falling back to `format_number_into` for unspelled binary floats.
 		if s, ok := text_of(w, at); ok && len(s) > 0 {
-			if _, err := append(dst, s); err != nil {
-				return err
-			}
-			return nil
+			return alloc_err(buf_put(dst, s))
 		}
 		if w.err != nil {
 			return w.err
@@ -90,17 +103,12 @@ format_key_scalar_into :: proc(dst: ^[dynamic]u8, w: ^Tree, at: tape.Node_Index)
 		if !ok {
 			return w.err
 		}
-		if _, err := append(dst, s); err != nil {
-			return err
-		}
+		return alloc_err(buf_put(dst, s))
 	case .Bytes:
 		// Formats with `.Bytes` keys (CBOR, YAML `!!binary`) already return base64 from `text_of` when `role == .Key`.
 		if node.role == .Key {
 			if s, ok := text_of(w, at); ok {
-				if _, err := append(dst, s); err != nil {
-					return err
-				}
-				return nil
+				return alloc_err(buf_put(dst, s))
 			}
 			if w.err != nil {
 				return w.err
@@ -111,9 +119,7 @@ format_key_scalar_into :: proc(dst: ^[dynamic]u8, w: ^Tree, at: tape.Node_Index)
 			return w.err
 		}
 		defer delete(encoded, w.allocator)
-		if _, err := append(dst, encoded); err != nil {
-			return err
-		}
+		return alloc_err(buf_put(dst, encoded))
 	case .Array, .Object, .End:
 	}
 	return nil
@@ -123,10 +129,7 @@ format_key_scalar_into :: proc(dst: ^[dynamic]u8, w: ^Tree, at: tape.Node_Index)
 format_number_into :: proc(dst: ^[dynamic]u8, w: ^Tree, at: tape.Node_Index) -> Error {
 	buf: [NUMBER_ROOM]u8
 	if s, ok := number_text(w, at, &buf); ok {
-		if _, err := append(dst, s); err != nil {
-			return err
-		}
-		return nil
+		return alloc_err(buf_put(dst, s))
 	}
 	if w.err != nil {
 		return w.err
@@ -135,29 +138,17 @@ format_number_into :: proc(dst: ^[dynamic]u8, w: ^Tree, at: tape.Node_Index) -> 
 		f := transmute(f64)n.bits
 		switch {
 		case math.is_nan(f):
-			if _, err := append(dst, "NaN"); err != nil {
-				return err
-			}
-			return nil
+			return alloc_err(buf_put(dst, "NaN"))
 		case math.is_inf(f, 1):
-			if _, err := append(dst, "Infinity"); err != nil {
-				return err
-			}
-			return nil
+			return alloc_err(buf_put(dst, "Infinity"))
 		case math.is_inf(f, -1):
-			if _, err := append(dst, "-Infinity"); err != nil {
-				return err
-			}
-			return nil
+			return alloc_err(buf_put(dst, "-Infinity"))
 		}
 	}
 	// Fallback for wide non-binary numbers or raw spans.
-	node := w.doc.nodes[at]
 	if .Binary not_in w.doc.format.caps {
-		if _, err := append(dst, ..tape.span_bytes(w.doc, node.lo, node.n)); err != nil {
-			return err
-		}
-		return nil
+		node := w.doc.nodes[at]
+		return alloc_err(buf_bytes(dst, tape.span_bytes(w.doc, node.lo, node.n)))
 	}
 	return Refused{at, .No_Spelling}
 }
@@ -184,54 +175,34 @@ append_compact_json :: proc(dst: ^[dynamic]u8, doc: ^tape.Document, root: tape.N
 			break
 		}
 		if s.kind == .Close {
-			ch: u8 = '}' if doc.nodes[s.node].kind == .Object else ']'
-			if _, err := append(dst, ch); err != nil {
-				return err
-			}
+			buf_byte(dst, '}' if doc.nodes[s.node].kind == .Object else ']') or_return
 			continue
 		}
 		if !s.first {
-			if _, err := append(dst, ','); err != nil {
-				return err
-			}
+			buf_byte(dst, ',') or_return
 		}
 		if s.key != tape.NO_NODE {
 			append_json_key_node(dst, &key_scratch, &w, s.key) or_return
-			if _, err := append(dst, ':'); err != nil {
-				return err
-			}
+			buf_byte(dst, ':') or_return
 		} else if s.cell {
 			ks, ok := text_of_token(&w, w.cell)
 			if !ok {
 				return w.err
 			}
 			append_json_quoted(dst, ks) or_return
-			if _, err := append(dst, ':'); err != nil {
-				return err
-			}
+			buf_byte(dst, ':') or_return
 		}
-		n := doc.nodes[s.node]
-		switch n.kind {
+		switch doc.nodes[s.node].kind {
 		case .Object:
-			if _, err := append(dst, '{'); err != nil {
-				return err
-			}
+			buf_byte(dst, '{') or_return
 		case .Array:
-			if _, err := append(dst, '['); err != nil {
-				return err
-			}
+			buf_byte(dst, '[') or_return
 		case .Null:
-			if _, err := append(dst, "null"); err != nil {
-				return err
-			}
+			buf_put(dst, "null") or_return
 		case .True:
-			if _, err := append(dst, "true"); err != nil {
-				return err
-			}
+			buf_put(dst, "true") or_return
 		case .False:
-			if _, err := append(dst, "false"); err != nil {
-				return err
-			}
+			buf_put(dst, "false") or_return
 		case .Number:
 			format_number_into(dst, &w, s.node) or_return
 		case .String, .Plain:
@@ -258,28 +229,23 @@ append_compact_json :: proc(dst: ^[dynamic]u8, doc: ^tape.Document, root: tape.N
 
 @(private = "file")
 append_json_key_node :: proc(dst, scratch: ^[dynamic]u8, w: ^Tree, key_at: tape.Node_Index) -> Error {
-	node := w.doc.nodes[key_at]
-	#partial switch node.kind {
+	#partial switch w.doc.nodes[key_at].kind {
 	case .Array:
-		append_json_quoted(dst, "[...]") or_return
-		return nil
+		return alloc_err(append_json_quoted(dst, "[...]"))
 	case .Object:
-		append_json_quoted(dst, "{...}") or_return
-		return nil
+		return alloc_err(append_json_quoted(dst, "{...}"))
 	case .End:
-		append_json_quoted(dst, "") or_return
-		return nil
+		return alloc_err(append_json_quoted(dst, ""))
 	}
 	clear(scratch)
 	format_key_scalar_into(scratch, w, key_at) or_return
-	append_json_quoted(dst, string(scratch[:])) or_return
-	return nil
+	return alloc_err(append_json_quoted(dst, string(scratch[:])))
 }
 
 @(private = "file")
 append_json_quoted :: proc(dst: ^[dynamic]u8, s: string) -> runtime.Allocator_Error {
 	hex := "0123456789abcdef"
-	append(dst, '"') or_return
+	buf_byte(dst, '"') or_return
 	run := 0
 	b := transmute([]u8)s
 	for c, i in b {
@@ -287,34 +253,30 @@ append_json_quoted :: proc(dst: ^[dynamic]u8, s: string) -> runtime.Allocator_Er
 			continue
 		}
 		if i > run {
-			append(dst, ..b[run:i]) or_return
+			buf_bytes(dst, b[run:i]) or_return
 		}
+		esc: string
 		switch c {
-		case '"':
-			append(dst, `\"`) or_return
-		case '\\':
-			append(dst, `\\`) or_return
-		case '\b':
-			append(dst, `\b`) or_return
-		case '\f':
-			append(dst, `\f`) or_return
-		case '\n':
-			append(dst, `\n`) or_return
-		case '\r':
-			append(dst, `\r`) or_return
-		case '\t':
-			append(dst, `\t`) or_return
-		case:
-			esc := [6]u8{'\\', 'u', '0', '0', hex[c >> 4], hex[c & 0xF]}
-			append(dst, ..esc[:]) or_return
+		case '"':  esc = `\"`
+		case '\\': esc = `\\`
+		case '\b': esc = `\b`
+		case '\f': esc = `\f`
+		case '\n': esc = `\n`
+		case '\r': esc = `\r`
+		case '\t': esc = `\t`
+		}
+		if len(esc) > 0 {
+			buf_put(dst, esc) or_return
+		} else {
+			u := [6]u8{'\\', 'u', '0', '0', hex[c >> 4], hex[c & 0xF]}
+			buf_bytes(dst, u[:]) or_return
 		}
 		run = i + 1
 	}
 	if run < len(b) {
-		append(dst, ..b[run:]) or_return
+		buf_bytes(dst, b[run:]) or_return
 	}
-	append(dst, '"') or_return
-	return nil
+	return buf_byte(dst, '"')
 }
 
 // ---------------------------------------------------------------------------
@@ -327,78 +289,49 @@ append_escaped :: proc(dst: ^[dynamic]u8, raw: []u8, mode: Escape_Mode) -> (widt
 	if len(raw) == 0 {
 		return 0, nil
 	}
+	is_md := mode == .Markdown
 	// ASCII fast path: printable ASCII without mode-special bytes copies straight through.
 	clean := true
-	switch mode {
-	case .Table:
-		for c in raw {
-			if c < 0x20 || c >= 0x7F {
-				clean = false
-				break
-			}
-		}
-	case .Markdown:
-		for c in raw {
-			if c < 0x20 || c >= 0x7F || c == '|' || c == '\\' {
-				clean = false
-				break
-			}
+	for c in raw {
+		if c < 0x20 || c >= 0x7F || (is_md && (c == '|' || c == '\\')) {
+			clean = false
+			break
 		}
 	}
 	if clean {
-		append(dst, ..raw) or_return
+		buf_bytes(dst, raw) or_return
 		return len(raw), nil
 	}
 
 	hex := "0123456789abcdef"
 	s := string(raw)
-	i := 0
-	for i < len(raw) {
+	for i := 0; i < len(raw); {
 		c := raw[i]
 		if c < 0x80 {
-			if c >= 0x20 && c < 0x7F && (mode == .Table || (c != '|' && c != '\\')) {
-				append(dst, c) or_return
+			if c >= 0x20 && c < 0x7F && (!is_md || (c != '|' && c != '\\')) {
+				buf_byte(dst, c) or_return
 				width += 1
 				i += 1
 				continue
 			}
+			tok: string
 			switch c {
-			case '\n':
-				if mode == .Markdown {
-					append(dst, "<br>") or_return
-					width += 4
-				} else {
-					append(dst, `\n`) or_return
-					width += 2
-				}
+			case '\n': tok = "<br>" if is_md else `\n`
 			case '\r':
-				if mode == .Markdown {
-					if i + 1 < len(raw) && raw[i + 1] == '\n' {
-						i += 1
-					}
-					append(dst, "<br>") or_return
-					width += 4
-				} else {
-					append(dst, `\r`) or_return
-					width += 2
+				if is_md && i + 1 < len(raw) && raw[i + 1] == '\n' {
+					i += 1
 				}
-			case '\t':
-				if mode == .Markdown {
-					append(dst, ' ') or_return
-					width += 1
-				} else {
-					append(dst, `\t`) or_return
-					width += 2
-				}
-			case '|':
-				append(dst, `\|`) or_return
-				width += 2
-			case '\\':
-				append(dst, `\\`) or_return
-				width += 2
-			case:
+				tok = "<br>" if is_md else `\r`
+			case '\t': tok = " " if is_md else `\t`
+			case '|':  tok = `\|`
+			case '\\': tok = `\\`
+			}
+			if len(tok) > 0 {
+				buf_put(dst, tok) or_return
+				width += len(tok)
+			} else {
 				esc := [4]u8{'\\', 'x', hex[c >> 4], hex[c & 0xF]}
-				append(dst, ..esc[:]) or_return
+				buf_bytes(dst, esc[:]) or_return
 				width += 4
 			}
 			i += 1
@@ -411,12 +344,12 @@ append_escaped :: proc(dst: ^[dynamic]u8, raw: []u8, mode: Escape_Mode) -> (widt
 		// Escape C1 control characters (U+0080..U+009F) so terminal sequences cannot leak through.
 		if r >= 0x80 && r <= 0x9F {
 			esc := [6]u8{'\\', 'u', '0', '0', hex[(r >> 4) & 0xF], hex[r & 0xF]}
-			append(dst, ..esc[:]) or_return
+			buf_bytes(dst, esc[:]) or_return
 			width += 6
 			i += sz
 			continue
 		}
-		append(dst, ..raw[i:i + sz]) or_return
+		buf_bytes(dst, raw[i:i + sz]) or_return
 		width += rune_display_width(r)
 		i += sz
 	}
@@ -429,24 +362,14 @@ truncate_display :: proc "contextless" (s: string, max_width: int, ascii_ellipsi
 	if max_width <= 0 {
 		return "", 0, ""
 	}
-	if ascii_ellipsis {
-		if max_width >= 3 {
-			suffix = "..."
-		} else if max_width == 2 {
-			suffix = ".."
-		} else {
-			suffix = "."
-		}
-	} else {
-		suffix = "…"
-	}
+	dots := "..."
+	suffix = dots[:min(max_width, 3)] if ascii_ellipsis else "…"
 	suffix_w := len(suffix) if ascii_ellipsis else 1
 	budget := max_width - suffix_w
 	if budget <= 0 {
 		return "", suffix_w, suffix
 	}
-	i := 0
-	w := 0
+	i, w := 0, 0
 	for i < len(s) {
 		r, sz := utf8.decode_rune_in_string(s[i:])
 		if sz <= 0 {
@@ -532,8 +455,5 @@ rune_display_width :: proc "contextless" (r: rune) -> int {
 	if in_rune_ranges(ZERO_WIDTH_RANGES[:], r) {
 		return 0
 	}
-	if in_rune_ranges(WIDE_RANGES[:], r) {
-		return 2
-	}
-	return 1
+	return 2 if in_rune_ranges(WIDE_RANGES[:], r) else 1
 }

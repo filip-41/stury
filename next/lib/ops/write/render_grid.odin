@@ -50,38 +50,25 @@ render_extract_from_target :: proc "contextless" (target: Render_Target) -> (opt
 	return {}, nil
 }
 
-@(private = "file")
-render_grid_empty :: proc "contextless" (grid: ^Render_Grid, target: Render_Target) -> bool {
-	if len(grid.headers) == 0 {
-		return true
-	}
-	if o, ok := target.(Table_Render_Options); ok && o.no_header && grid.rows == 0 {
-		return true
-	}
-	return false
-}
-
-@(private = "file", require_results)
-render_emit :: proc(out: ^Out, grid: ^Render_Grid, target: Render_Target, allocator: runtime.Allocator) -> Error {
-	switch o in target {
-	case Table_Render_Options:
-		return emit_plain_table(out, grid, o, allocator)
-	case Markdown_Options:
-		return emit_markdown_table(out, grid, o, allocator)
-	}
-	return nil
-}
-
 @(private = "file", require_results)
 render_grid_emit :: proc(grid: ^Render_Grid, target: Render_Target, sink: io.Writer, hint: int, allocator: runtime.Allocator) -> (text: []u8, err: Error) {
-	if render_grid_empty(grid, target) {
+	if len(grid.headers) == 0 {
+		return nil, nil
+	}
+	if o, ok := target.(Table_Render_Options); ok && o.no_header && grid.rows == 0 {
 		return nil, nil
 	}
 	out: Out
 	if e := out_start(&out, allocator, sink, hint); e != nil {
 		return nil, e
 	}
-	if err = render_emit(&out, grid, target, allocator); err != nil {
+	switch o in target {
+	case Table_Render_Options:
+		err = emit_plain_table(&out, grid, o, allocator)
+	case Markdown_Options:
+		err = emit_markdown_table(&out, grid, o, allocator)
+	}
+	if err != nil {
 		out_drop(&out)
 		return nil, err
 	}
@@ -90,14 +77,7 @@ render_grid_emit :: proc(grid: ^Render_Grid, target: Render_Target, sink: io.Wri
 
 @(private, require_results)
 render_doc :: proc(doc: ^tape.Document, target: Render_Target, allocator: runtime.Allocator) -> (text: []u8, err: Error) {
-	ext := render_extract_from_target(target) or_return
-	if allocator.procedure == nil {
-		return nil, .Out_Of_Memory
-	}
-	grid: Render_Grid
-	defer grid_destroy(&grid)
-	grid_build_doc(&grid, doc, ext, allocator) or_return
-	return render_grid_emit(&grid, target, {}, max(len(doc.src), ROOM_MAX), allocator)
+	return render_doc_impl({}, doc, target, allocator)
 }
 
 @(private, require_results)
@@ -105,15 +85,21 @@ render_doc_to :: proc(sink: io.Writer, doc: ^tape.Document, target: Render_Targe
 	if sink.procedure == nil {
 		return tape.Bad_Option{"sink"}
 	}
+	_, err := render_doc_impl(sink, doc, target, allocator)
+	return err
+}
+
+@(private = "file", require_results)
+render_doc_impl :: proc(sink: io.Writer, doc: ^tape.Document, target: Render_Target, allocator: runtime.Allocator) -> (text: []u8, err: Error) {
 	ext := render_extract_from_target(target) or_return
 	if allocator.procedure == nil {
-		return .Out_Of_Memory
+		return nil, .Out_Of_Memory
 	}
 	grid: Render_Grid
 	defer grid_destroy(&grid)
 	grid_build_doc(&grid, doc, ext, allocator) or_return
-	_, err := render_grid_emit(&grid, target, sink, 0, allocator)
-	return err
+	hint := 0 if sink.procedure != nil else max(len(doc.src), ROOM_MAX)
+	return render_grid_emit(&grid, target, sink, hint, allocator)
 }
 
 @(private, require_results)
@@ -138,17 +124,32 @@ put_str :: #force_inline proc(out: ^Out, s: string) {
 }
 
 @(private)
-put_spaces :: proc(out: ^Out, n: int) {
+put_spaces :: #force_inline proc(out: ^Out, n: int) {
 	put_repeat_byte(out, ' ', n)
 }
 
 @(private)
-put_repeat_byte :: proc(out: ^Out, ch: u8, n: int) {
-	if n <= 0 {
+put_padded_cell :: #force_inline proc(out: ^Out, prefix, suffix: string, pad: int, align_right, pad_trailing: bool) {
+	if align_right {
+		put_spaces(out, pad)
+		put_str(out, prefix)
+		if len(suffix) > 0 {
+			put_str(out, suffix)
+		}
 		return
 	}
-	left := n
-	for left > 0 && out.err == nil {
+	put_str(out, prefix)
+	if len(suffix) > 0 {
+		put_str(out, suffix)
+	}
+	if pad_trailing {
+		put_spaces(out, pad)
+	}
+}
+
+@(private)
+put_repeat_byte :: proc(out: ^Out, ch: u8, n: int) {
+	for left := n; left > 0 && out.err == nil; {
 		k := min(left, ROOM_MAX)
 		p := room(out, k)
 		for i in 0 ..< k {
@@ -157,6 +158,16 @@ put_repeat_byte :: proc(out: ^Out, ch: u8, n: int) {
 		out.cursor += k
 		left -= k
 	}
+}
+
+// Whether `doc` is a tabular document whose `.Last` duplicate-key policy dropped at least one column.
+@(private)
+is_tabular_dups_last :: #force_inline proc "contextless" (doc: ^tape.Document, kept, total: int) -> bool {
+	if doc.ext == nil || kept >= total {
+		return false
+	}
+	ext, ok := doc.ext.format.(tape.Tabular_Ext)
+	return ok && ext.dups == .Last
 }
 
 // ---------------------------------------------------------------------------
@@ -188,17 +199,13 @@ render_extract_opts :: #force_inline proc "contextless" (
 	value_header: string,
 	escape_mode: Escape_Mode,
 ) -> Render_Extract_Options {
-	nt := "null"
-	if v, ok := null_text.?; ok {
-		nt = v
-	}
-	vh := value_header if len(value_header) > 0 else "value"
+	nt, ok := null_text.?
 	return {
 		node          = node,
 		object_layout = object_layout,
 		sort_keys     = sort_keys,
-		null_text     = nt,
-		value_header  = vh,
+		null_text     = nt if ok else "null",
+		value_header  = value_header if len(value_header) > 0 else "value",
 		escape_mode   = escape_mode,
 	}
 }
@@ -215,16 +222,13 @@ Cell_Flags :: bit_set[Cell_Flag; u8]
 
 @(private)
 Cell_Span :: struct {
-	lo:    int,
-	n:     int,
-	width: int,
-	flags: Cell_Flags,
+	lo, n, width: int,
+	flags:        Cell_Flags,
 }
 
 @(private = "file")
 Key_Span :: struct {
-	lo: int,
-	n:  int,
+	lo, n: int,
 }
 
 @(private)
@@ -249,17 +253,14 @@ compute_column_metrics :: proc(
 	grid: ^Render_Grid,
 	align: Column_Align,
 	no_header: bool,
-	min_left: int,
-	min_right: int,
-	max_col_width: int,
+	min_left, min_right, max_col_width: int,
 	widths: []int,
 	right: []bool,
 ) {
 	cols := len(grid.headers)
 	want_widths := len(widths) > 0
 	for c in 0 ..< cols {
-		num_count := 0
-		other_count := 0
+		num_count, other_count := 0, 0
 		max_w := 0 if no_header else grid.headers[c].width
 		for r in 0 ..< grid.rows {
 			cell := grid.cells[r * cols + c]
@@ -272,23 +273,12 @@ compute_column_metrics :: proc(
 				other_count += 1
 			}
 		}
-		is_right := false
-		switch align {
-		case .Left:
-			is_right = false
-		case .Right:
-			is_right = true
-		case .Auto:
-			is_right = num_count > 0 && other_count == 0
-		}
+		is_right := align == .Right || (align == .Auto && num_count > 0 && other_count == 0)
 		right[c] = is_right
 		if want_widths {
-			min_w := min_right if is_right else min_left
-			if max_w < min_w {
-				max_w = min_w
-			}
-			if max_col_width > 0 && max_w > max_col_width {
-				max_w = max_col_width
+			max_w = max(max_w, min_right if is_right else min_left)
+			if max_col_width > 0 {
+				max_w = min(max_w, max_col_width)
 			}
 			widths[c] = max_w
 		}
@@ -309,13 +299,9 @@ Grid_Builder :: struct {
 @(private = "file")
 grid_builder_init :: proc(b: ^Grid_Builder, grid: ^Render_Grid, opts: Render_Extract_Options, allocator: runtime.Allocator) {
 	grid^ = {allocator = allocator}
-	grid.text_buf.allocator = allocator
-	grid.headers.allocator = allocator
-	grid.cells.allocator = allocator
+	grid.text_buf.allocator, grid.headers.allocator, grid.cells.allocator = allocator, allocator, allocator
 	b^ = {grid = grid, opts = opts, alloc = allocator}
-	b.scratch.allocator = allocator
-	b.key_buf.allocator = allocator
-	b.keys.allocator = allocator
+	b.scratch.allocator, b.key_buf.allocator, b.keys.allocator = allocator, allocator, allocator
 }
 
 @(private = "file")
@@ -340,6 +326,37 @@ make_slice :: proc($T: typeid, n: int, allocator: runtime.Allocator) -> ([]T, ru
 		return nil, .Out_Of_Memory
 	}
 	return s, err
+}
+
+@(private = "file")
+classify_row_node :: proc(doc: ^tape.Document, at: tape.Node_Index, all_objects, all_arrays: ^bool, max_arr_len: ^int) -> Error {
+	n := doc.nodes[at]
+	if n.kind >= .Array && n.spelling & tape.CONTAINER_PARTIAL != 0 {
+		return Refused{at, .Partial}
+	}
+	if n.kind != .Object {
+		all_objects^ = false
+	}
+	if n.kind != .Array {
+		all_arrays^ = false
+	} else {
+		max_arr_len^ = max(max_arr_len^, tape.child_count(doc, at, n))
+	}
+	return nil
+}
+
+@(private = "file")
+finalize_key_headers :: proc(b: ^Grid_Builder) -> (has_keys: bool, err: Error) {
+	if len(b.keys) == 0 {
+		return false, nil
+	}
+	if b.opts.sort_keys {
+		sort_spans(b.keys[:], b.key_buf[:])
+	}
+	for ks in b.keys {
+		append_escaped_span(b, &b.grid.headers, string(b.key_buf[ks.lo:][:ks.n])) or_return
+	}
+	return true, nil
 }
 
 @(private = "file")
@@ -370,7 +387,49 @@ grid_build_doc :: proc(grid: ^Render_Grid, doc: ^tape.Document, opts: Render_Ext
 	case .Object:
 		return build_single_object(&b, &w, root)
 	case .Null, .False, .True, .Number, .Bytes, .String, .Plain, .End:
-		return build_single_scalar(&b, &w, root)
+		append_escaped_span(&b, &b.grid.headers, opts.value_header) or_return
+		append_value_cell(&b, &w, root) or_return
+		b.grid.rows = 1
+	}
+	return nil
+}
+
+@(private = "file")
+Doc_Row_Pass :: enum u8 {
+	Collect_Keys,
+	Object_Row,
+	Array_Row,
+	Value_Cell,
+}
+
+@(private = "file")
+grid_docs_pass :: proc(b: ^Grid_Builder, docs: []tape.Document, pass: Doc_Row_Pass, max_arr_len: int, allocator: runtime.Allocator) -> Error {
+	for &d in docs {
+		w: Tree
+		tree_start(&w, &d, {node = b.opts.node}, {}, allocator) or_return
+		index := tape.Doc_Index{allocator = allocator}
+		if pass == .Object_Row {
+			w.reader.index = &index
+		}
+		err: Error
+		switch pass {
+		case .Collect_Keys:
+			err = collect_object_keys(b, &w, b.opts.node)
+		case .Object_Row:
+			err = append_object_row(b, &w, b.opts.node)
+		case .Array_Row:
+			err = append_array_row(b, &w, b.opts.node, max_arr_len)
+		case .Value_Cell:
+			err = append_value_cell(b, &w, b.opts.node)
+			if err == nil {
+				b.grid.rows += 1
+			}
+		}
+		tape.destroy(&index)
+		tree_end(&w)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -384,148 +443,66 @@ grid_build_docs :: proc(grid: ^Render_Grid, docs: []tape.Document, opts: Render_
 		return nil
 	}
 
-	all_objects := true
-	all_arrays := true
+	all_objects, all_arrays := true, true
 	max_arr_len := 0
 	for &d in docs {
 		tree_check_root(&d, opts.node) or_return
-		n := d.nodes[opts.node]
-		if n.kind >= .Array && n.spelling & tape.CONTAINER_PARTIAL != 0 {
-			return Refused{opts.node, .Partial}
-		}
-		if n.kind != .Object {
-			all_objects = false
-		}
-		if n.kind != .Array {
-			all_arrays = false
-		} else {
-			cnt := tape.child_count(&d, opts.node, n)
-			if cnt > max_arr_len {
-				max_arr_len = cnt
-			}
-		}
+		classify_row_node(&d, opts.node, &all_objects, &all_arrays, &max_arr_len) or_return
 	}
 
 	if all_objects {
-		for &d in docs {
-			w: Tree
-			tree_start(&w, &d, {node = opts.node}, {}, allocator) or_return
-			err := collect_object_keys(&b, &w, opts.node)
-			tree_end(&w)
-			if err != nil {
-				return err
-			}
-		}
-		if len(b.keys) == 0 {
+		grid_docs_pass(&b, docs, .Collect_Keys, 0, allocator) or_return
+		if !(finalize_key_headers(&b) or_return) {
 			return nil
 		}
-		if opts.sort_keys {
-			sort_spans(b.keys[:], b.key_buf[:])
-		}
-		finalize_headers_from_keys(&b) or_return
-		for &d in docs {
-			w: Tree
-			tree_start(&w, &d, {node = opts.node}, {}, allocator) or_return
-			index := tape.Doc_Index{allocator = allocator}
-			w.reader.index = &index
-			err := append_object_row(&b, &w, opts.node)
-			tape.destroy(&index)
-			tree_end(&w)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
+		return grid_docs_pass(&b, docs, .Object_Row, 0, allocator)
 	}
-
 	if all_arrays {
 		if max_arr_len == 0 {
 			return nil
 		}
 		add_index_headers(&b, max_arr_len) or_return
-		for &d in docs {
-			w: Tree
-			tree_start(&w, &d, {node = opts.node}, {}, allocator) or_return
-			err := append_array_row(&b, &w, opts.node, max_arr_len)
-			tree_end(&w)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
+		return grid_docs_pass(&b, docs, .Array_Row, max_arr_len, allocator)
 	}
-
 	append_escaped_span(&b, &b.grid.headers, opts.value_header) or_return
-	for &d in docs {
-		w: Tree
-		tree_start(&w, &d, {node = opts.node}, {}, allocator) or_return
-		err := append_value_cell(&b, &w, opts.node)
-		tree_end(&w)
-		if err != nil {
-			return err
-		}
-		grid.rows += 1
-	}
-	return nil
+	return grid_docs_pass(&b, docs, .Value_Cell, 0, allocator)
 }
 
 @(private = "file")
 build_delimited_table :: proc(b: ^Grid_Builder, w: ^Tree, root: tape.Node_Index, keys: []tape.Node) -> Error {
 	doc := w.doc
-	kept_cols := make([dynamic]int, b.alloc)
-	defer delete(kept_cols)
+	Col_Order :: struct {
+		span: Key_Span,
+		col:  int,
+	}
+	ordered := make([dynamic]Col_Order, b.alloc)
+	defer delete(ordered)
 
 	for j in 0 ..< len(keys) {
 		if tape.column_dropped(doc, keys, j, len(keys)) {
 			continue
 		}
-		if _, err := append(&kept_cols, j); err != nil {
-			return err
-		}
-	}
-	if len(kept_cols) == 0 {
-		return nil
-	}
-
-	// Build raw key list for optional sorting and header display.
-	Col_Order :: struct {
-		span: Key_Span,
-		col:  int,
-	}
-	ordered, oerr := make_slice(Col_Order, len(kept_cols), b.alloc)
-	if oerr != nil {
-		return oerr
-	}
-	defer delete(ordered, b.alloc)
-
-	for col, idx in kept_cols {
-		s, ok := text_of_token(w, keys[col])
+		s, ok := text_of_token(w, keys[j])
 		if !ok {
 			return w.err
 		}
 		lo := len(b.key_buf)
-		if _, err := append(&b.key_buf, s); err != nil {
+		buf_put(&b.key_buf, s) or_return
+		if _, err := append(&ordered, Col_Order{span = {lo = lo, n = len(s)}, col = j}); err != nil {
 			return err
 		}
-		ordered[idx] = {span = {lo = lo, n = len(s)}, col = col}
 	}
-
+	if len(ordered) == 0 {
+		return nil
+	}
 	if b.opts.sort_keys {
-		sort_spans(ordered, b.key_buf[:])
+		sort_spans(ordered[:], b.key_buf[:])
 	}
-
 	for item in ordered {
-		s := string(b.key_buf[item.span.lo:][:item.span.n])
-		append_escaped_span(b, &b.grid.headers, s) or_return
+		append_escaped_span(b, &b.grid.headers, string(b.key_buf[item.span.lo:][:item.span.n])) or_return
 	}
 
-	dups_last := false
-	if doc.ext != nil {
-		if ext, ok := doc.ext.format.(tape.Tabular_Ext); ok && ext.dups == .Last {
-			dups_last = len(kept_cols) < len(keys)
-		}
-	}
-
+	dups_last := is_tabular_dups_last(doc, len(ordered), len(keys))
 	end := tape.node_after(doc, root)
 	for at := root + 1; at < end; at = tape.node_after(doc, at) {
 		row := doc.nodes[at]
@@ -561,38 +538,19 @@ build_array :: proc(b: ^Grid_Builder, w: ^Tree, root: tape.Node_Index) -> Error 
 		return nil
 	}
 
-	all_objects := true
-	all_arrays := true
+	all_objects, all_arrays := true, true
 	max_arr_len := 0
 	for at := root + 1; at < end; at = tape.node_after(doc, at) {
-		n := doc.nodes[at]
-		if n.kind >= .Array && n.spelling & tape.CONTAINER_PARTIAL != 0 {
-			return Refused{at, .Partial}
-		}
-		if n.kind != .Object {
-			all_objects = false
-		}
-		if n.kind != .Array {
-			all_arrays = false
-		} else {
-			cnt := tape.child_count(doc, at, n)
-			if cnt > max_arr_len {
-				max_arr_len = cnt
-			}
-		}
+		classify_row_node(doc, at, &all_objects, &all_arrays, &max_arr_len) or_return
 	}
 
 	if all_objects {
 		for at := root + 1; at < end; at = tape.node_after(doc, at) {
 			collect_object_keys(b, w, at) or_return
 		}
-		if len(b.keys) == 0 {
+		if !(finalize_key_headers(b) or_return) {
 			return nil
 		}
-		if b.opts.sort_keys {
-			sort_spans(b.keys[:], b.key_buf[:])
-		}
-		finalize_headers_from_keys(b) or_return
 		for at := root + 1; at < end; at = tape.node_after(doc, at) {
 			append_object_row(b, w, at) or_return
 		}
@@ -621,20 +579,14 @@ build_array :: proc(b: ^Grid_Builder, w: ^Tree, root: tape.Node_Index) -> Error 
 @(private = "file")
 build_single_object :: proc(b: ^Grid_Builder, w: ^Tree, root: tape.Node_Index) -> Error {
 	doc := w.doc
-	end := tape.node_after(doc, root)
-	if root + 1 >= end {
+	if root + 1 >= tape.node_after(doc, root) {
 		return nil
 	}
-
 	if b.opts.object_layout == .Row {
 		collect_object_keys(b, w, root) or_return
-		if len(b.keys) == 0 {
+		if !(finalize_key_headers(b) or_return) {
 			return nil
 		}
-		if b.opts.sort_keys {
-			sort_spans(b.keys[:], b.key_buf[:])
-		}
-		finalize_headers_from_keys(b) or_return
 		return append_object_row(b, w, root)
 	}
 
@@ -648,10 +600,7 @@ build_single_object :: proc(b: ^Grid_Builder, w: ^Tree, root: tape.Node_Index) -
 	members := make([dynamic]Member_Entry, b.alloc)
 	defer delete(members)
 
-	c, cp, cerr := tape.children(w.reader, root, b.alloc)
-	if cerr != nil {
-		return cerr
-	}
+	c, cp := tape.children(w.reader, root, b.alloc) or_return
 	defer tape.destroy_children(&c)
 	if cp == .Not_Loaded {
 		return Refused{root, .Partial}
@@ -669,16 +618,12 @@ build_single_object :: proc(b: ^Grid_Builder, w: ^Tree, root: tape.Node_Index) -
 				if !ok {
 					return w.err
 				}
-				if _, err := append(&b.scratch, ks); err != nil {
-					return err
-				}
+				buf_put(&b.scratch, ks) or_return
 			} else {
 				format_key_raw(b, w, key_node) or_return
 			}
 			lo := len(b.key_buf)
-			if _, err := append(&b.key_buf, ..b.scratch[:]); err != nil {
-				return err
-			}
+			buf_bytes(&b.key_buf, b.scratch[:]) or_return
 			if _, err := append(&members, Member_Entry{span = {lo = lo, n = len(b.scratch)}, val_node = val_node}); err != nil {
 				return err
 			}
@@ -687,27 +632,16 @@ build_single_object :: proc(b: ^Grid_Builder, w: ^Tree, root: tape.Node_Index) -
 	if len(members) == 0 {
 		return nil
 	}
-
 	if b.opts.sort_keys {
 		sort_spans(members[:], b.key_buf[:])
 	}
-
 	append_escaped_span(b, &b.grid.headers, "key") or_return
 	append_escaped_span(b, &b.grid.headers, "value") or_return
 	for m in members {
-		key_text := string(b.key_buf[m.span.lo:][:m.span.n])
-		append_escaped_span(b, &b.grid.cells, key_text) or_return
+		append_escaped_span(b, &b.grid.cells, string(b.key_buf[m.span.lo:][:m.span.n])) or_return
 		append_value_cell(b, w, m.val_node) or_return
 		b.grid.rows += 1
 	}
-	return nil
-}
-
-@(private = "file")
-build_single_scalar :: proc(b: ^Grid_Builder, w: ^Tree, root: tape.Node_Index) -> Error {
-	append_escaped_span(b, &b.grid.headers, b.opts.value_header) or_return
-	append_value_cell(b, w, root) or_return
-	b.grid.rows = 1
 	return nil
 }
 
@@ -737,17 +671,13 @@ collect_object_keys :: proc(b: ^Grid_Builder, w: ^Tree, obj_at: tape.Node_Index)
 	}
 	// A DSV table row `.Object` stores value cells with no key nodes; read its keys via `tape.children` / `cell_key`.
 	if tree_tables(w) && doc.nodes[obj_at + 1].role != .Key {
-		c, cp, cerr := tape.children(w.reader, obj_at, b.alloc)
-		if cerr != nil {
-			return cerr
-		}
+		c, cp := tape.children(w.reader, obj_at, b.alloc) or_return
 		defer tape.destroy_children(&c)
 		if cp == .Not_Loaded {
 			return Refused{obj_at, .Partial}
 		}
 		if cp == .Found && c.keys_n != 0 {
-			j := 0
-			for {
+			for j := 0; ; j += 1 {
 				_, _, next_p := tape.next_child(w.reader, &c, .Default)
 				if next_p != .Found {
 					break
@@ -756,34 +686,20 @@ collect_object_keys :: proc(b: ^Grid_Builder, w: ^Tree, obj_at: tape.Node_Index)
 				if !ok {
 					return w.err
 				}
-				if err := record_distinct_key(b, transmute([]u8)ks, j); err != nil {
-					return err
-				}
-				j += 1
+				record_distinct_key(b, transmute([]u8)ks, j) or_return
 			}
 			return nil
 		}
 	}
-	j := 0
-	for k := obj_at + 1; k < end; j += 1 {
+	for k, j := obj_at + 1, 0; k < end; j += 1 {
 		val := tape.node_after(doc, k)
 		if doc.nodes[k].kind >= .Array {
 			b.has_container_keys = true
 		}
 		clear(&b.scratch)
 		format_key_raw(b, w, k) or_return
-		if err := record_distinct_key(b, b.scratch[:], j); err != nil {
-			return err
-		}
+		record_distinct_key(b, b.scratch[:], j) or_return
 		k = tape.node_after(doc, val)
-	}
-	return nil
-}
-
-@(private = "file")
-finalize_headers_from_keys :: proc(b: ^Grid_Builder) -> Error {
-	for ks in b.keys {
-		append_escaped_span(b, &b.grid.headers, string(b.key_buf[ks.lo:][:ks.n])) or_return
 	}
 	return nil
 }
@@ -798,9 +714,7 @@ append_object_row :: proc(b: ^Grid_Builder, w: ^Tree, obj_at: tape.Node_Index) -
 			append_value_cell(b, w, val) or_return
 		case .Missing:
 			if b.has_container_keys {
-				// Fallback for container keys (which `tape.member` does not index by JSON text).
-				fallback, found := find_container_key_member(b, w, obj_at, name) or_return
-				if found {
+				if fallback, found := find_container_key_member(b, w, obj_at, name) or_return; found {
 					append_value_cell(b, w, fallback) or_return
 					continue
 				}
@@ -831,8 +745,7 @@ find_container_key_member :: proc(b: ^Grid_Builder, w: ^Tree, obj_at: tape.Node_
 			clear(&b.scratch)
 			format_key_raw(b, w, k) or_return
 			if string(b.scratch[:]) == name {
-				val_out = val
-				found = true
+				val_out, found = val, true
 				if take_first {
 					return val_out, true, nil
 				}
@@ -863,8 +776,7 @@ append_array_row :: proc(b: ^Grid_Builder, w: ^Tree, arr_at: tape.Node_Index, wi
 add_index_headers :: proc(b: ^Grid_Builder, count: int) -> Error {
 	buf: [24]u8
 	for i in 0 ..< count {
-		s := strconv.write_int(buf[:], i64(i), 10)
-		append_escaped_span(b, &b.grid.headers, s) or_return
+		append_escaped_span(b, &b.grid.headers, strconv.write_int(buf[:], i64(i), 10)) or_return
 	}
 	return nil
 }
@@ -873,19 +785,14 @@ add_index_headers :: proc(b: ^Grid_Builder, count: int) -> Error {
 append_escaped_span :: proc(b: ^Grid_Builder, dst: ^[dynamic]Cell_Span, raw: string, flags: Cell_Flags = {}) -> Error {
 	lo := len(b.grid.text_buf)
 	width := append_escaped(&b.grid.text_buf, transmute([]u8)raw, b.opts.escape_mode) or_return
-	n := len(b.grid.text_buf) - lo
-	if _, err := append(dst, Cell_Span{lo = lo, n = n, width = width, flags = flags}); err != nil {
-		return err
-	}
-	return nil
+	_, err := append(dst, Cell_Span{lo = lo, n = len(b.grid.text_buf) - lo, width = width, flags = flags})
+	return alloc_err(err)
 }
 
 @(private)
 append_absent_cell :: proc(b: ^Grid_Builder) -> Error {
-	if _, err := append(&b.grid.cells, Cell_Span{lo = len(b.grid.text_buf), n = 0, width = 0, flags = {.Absent}}); err != nil {
-		return err
-	}
-	return nil
+	_, err := append(&b.grid.cells, Cell_Span{lo = len(b.grid.text_buf), flags = {.Absent}})
+	return alloc_err(err)
 }
 
 // Stable zero-allocation binary insertion sort over `Key_Span` or structs carrying `.span: Key_Span`.

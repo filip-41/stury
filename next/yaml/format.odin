@@ -33,7 +33,6 @@ FACTS :: tape.COMMENTS + {.Tag, .Anchor, .Alias, .Style, .Directive}
 
 // Format capabilities: YAML values depend on document context (anchors/directives/indentation), keys are judged at
 // object close under `.Last`/`.Refuse`, and inputs are UTF-8 text.
-@(private)
 CAPS :: tape.Caps{}
 
 @(private, rodata)

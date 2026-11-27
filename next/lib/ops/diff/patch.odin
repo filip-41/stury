@@ -444,33 +444,15 @@ push_patch_array :: proc(
 		add_n := j - lo_j
 		paired := min(rem_n, add_n)
 		for k in 0 ..< paired {
-			append(&tasks, Patch_Task {
-				kind  = .Diff,
-				a     = val_node(xs[lo_i + k]),
-				b     = val_node(ys[lo_j + k]),
-				step  = tape.Index(lo_j + k),
-				has_s = true,
-				depth = u32(depth + 1),
-			}) or_return
+			append(&tasks, Patch_Task{kind = .Diff, a = val_node(xs[lo_i + k]), b = val_node(ys[lo_j + k]), step = tape.Index(lo_j + k), has_s = true, depth = u32(depth + 1)}) or_return
 		}
 		// Excess removals: each removes at `lo_j + paired`, shifting subsequent elements left into place.
 		for _ in paired ..< rem_n {
-			append(&tasks, Patch_Task {
-				kind  = .Emit_Op,
-				op    = .Remove,
-				step  = tape.Index(lo_j + paired),
-				has_s = true,
-			}) or_return
+			append(&tasks, Patch_Task{kind = .Emit_Op, op = .Remove, step = tape.Index(lo_j + paired), has_s = true}) or_return
 		}
 		// Excess additions: insert sequentially at `lo_j + k` (`k = paired ..< add_n`).
 		for k in paired ..< add_n {
-			append(&tasks, Patch_Task {
-				kind  = .Emit_Op,
-				op    = .Add,
-				b     = val_node(ys[lo_j + k]),
-				step  = tape.Index(lo_j + k),
-				has_s = true,
-			}) or_return
+			append(&tasks, Patch_Task{kind = .Emit_Op, op = .Add, b = val_node(ys[lo_j + k]), step = tape.Index(lo_j + k), has_s = true}) or_return
 		}
 	}
 

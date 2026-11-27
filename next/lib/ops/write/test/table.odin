@@ -358,25 +358,24 @@ table_bug_regressions :: proc(t: ^testing.T) {
 
 	// P16 Bug 6: `table_writer_start` rejects non-zero `opts.node`, `indent`, `ascii`, out-of-range `framing`.
 	bad_w: dsv.Writer
-	testing.expect_value(t, dsv.writer_start(&bad_w, .Csv, {node = 1}), dsv.Write_Error(tape.Bad_Option{"node"}))
-	testing.expect_value(t, dsv.writer_start(&bad_w, .Csv, {indent = 2}), dsv.Write_Error(tape.Bad_Option{"indent"}))
-	testing.expect_value(t, dsv.writer_start(&bad_w, .Csv, {ascii = true}), dsv.Write_Error(tape.Bad_Option{"ascii"}))
-	testing.expect_value(t, dsv.writer_start(&bad_w, .Csv, {framing = write.Record_Framing(9)}), dsv.Write_Error(tape.Bad_Option{"framing"}))
+	for tc in ([?]struct { opts: dsv.Write_Options, opt: string }{
+		{{node = 1}, "node"}, {{indent = 2}, "indent"}, {{ascii = true}, "ascii"}, {{framing = write.Record_Framing(9)}, "framing"},
+	}) {
+		testing.expect_value(t, dsv.writer_start(&bad_w, .Csv, tc.opts), dsv.Write_Error(tape.Bad_Option{tc.opt}))
+	}
 
 	// P16 Bug 7: short ragged delimited rows under `sort_keys` and `dups = .Last`.
-	rag1, r1err := dsv.build(transmute([]u8)string("b,a\n1\n"), .Csv, {tolerate = {.Ragged}})
-	defer dsv.destroy(&rag1)
-	testing.expect_value(t, r1err, nil)
-	rag1_out, _, rag1_werr := dsv.write(&rag1, .Csv, {sort_keys = true})
-	defer delete(rag1_out)
-	testing.expectf(t, rag1_werr == nil && string(rag1_out) == "a,b\n,1\n", "short ragged sort_keys: %q %v", rag1_out, rag1_werr)
-
-	rag2, r2err := dsv.build(transmute([]u8)string("a,b,a\n1,2\n"), .Csv, {dups = .Last, tolerate = {.Ragged}})
-	defer dsv.destroy(&rag2)
-	testing.expect_value(t, r2err, nil)
-	rag2_out, _, rag2_werr := dsv.write(&rag2, .Csv)
-	defer delete(rag2_out)
-	testing.expectf(t, rag2_werr == nil && string(rag2_out) == "b,a\n2,1\n", "short ragged dup .Last: %q %v", rag2_out, rag2_werr)
+	for tc in ([?]struct { src, want: string, dups: tape.Duplicates, sort: bool }{
+		{"b,a\n1\n", "a,b\n,1\n", .Default, true},
+		{"a,b,a\n1,2\n", "b,a\n2,1\n", .Last, false},
+	}) {
+		rag, rerr := dsv.build(transmute([]u8)tc.src, .Csv, {dups = tc.dups, tolerate = {.Ragged}})
+		defer dsv.destroy(&rag)
+		testing.expect_value(t, rerr, nil)
+		out, _, werr := dsv.write(&rag, .Csv, {sort_keys = tc.sort})
+		defer delete(out)
+		testing.expectf(t, werr == nil && string(out) == tc.want, "short ragged %q: %q %v", tc.src, out, werr)
+	}
 
 	// P16 Bug 5: `Table_Writer` OOM sweep across explicit header, streaming header, and `grow_header`.
 	for mode in 0 ..< 3 {

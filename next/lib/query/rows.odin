@@ -1,9 +1,7 @@
 package query
 
-// Reshaping arrays of records: gaps filled forward, wide rows made long (melt) and long rows made wide (pivot).
+// Reshaping arrays of records: fill_forward, melt (wide -> long), and pivot (long -> wide).
 
-// Array `v` with each null replaced by the last value before it that is not null: an object's members by key, any
-// other element by the elements before it. Leading nulls stay.
 @(require_results)
 fill_forward :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	if type_of(v) != .Array {
@@ -16,25 +14,17 @@ fill_forward :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 	last := NULL
 	defer release(h, last)
 	out := make_array(h, len(items_of(xs))) or_return
+	defer if status != .Ok { release(h, out) }
 	for x in items_of(xs) {
-		y, s := fill_one(h, x, &last, &seen)
-		if s == .Ok {
-			s = append_owned(h, &out, y)
-		}
-		if s != .Ok {
-			release(h, out)
-			return NULL, s
-		}
+		append_owned(h, &out, fill_one(h, x, &last, &seen) or_return) or_return
 	}
 	return out, .Ok
 }
 
-// `x` filled: a null from `last^`, an object's null members from `seen^`, which keeps each key's last value.
 @(private)
 fill_one :: proc(h: ^Heap, x: Value, last, seen: ^Value) -> (res: Value, status: Status) {
 	#partial switch type_of(x) {
-	case .Null:
-		return retain(last^), .Ok
+	case .Null:   return retain(last^), .Ok
 	case .Object:
 	case:
 		release(h, last^)
@@ -42,44 +32,30 @@ fill_one :: proc(h: ^Heap, x: Value, last, seen: ^Value) -> (res: Value, status:
 		return retain(x), .Ok
 	}
 	row := built(h, x) or_return
-	for e in entries_of(row) {
-		if type_of(e.value) == .Null {
-			continue
-		}
-		if s := object_put(h, seen, retain(e.key), retain(e.value)); s != .Ok {
-			release(h, row)
-			return NULL, s
-		}
-	}
-	// A put only replaces a member, so the entries stay where they are, or in the block `x` still holds.
+	defer if status != .Ok { release(h, row) }
 	for e in entries_of(row) {
 		if type_of(e.value) != .Null {
-			continue
+			object_put(h, seen, retain(e.key), retain(e.value)) or_return
 		}
-		before, s := member(h, seen^, text_of(e.key))
-		if s == .Ok && before.kind != .Absent {
-			s = object_put(h, &row, retain(e.key), before)
-		}
-		if s != .Ok {
-			release(h, row)
-			return NULL, s
+	}
+	for e in entries_of(row) {
+		if type_of(e.value) == .Null {
+			if before := member(h, seen^, text_of(e.key)) or_return; before.kind != .Absent {
+				object_put(h, &row, retain(e.key), before) or_return
+			}
 		}
 	}
 	return row, .Ok
 }
 
-// Array `v` of objects from wide to long: for each member of a row whose key is not one of array `ids`, the row's
-// members whose keys are, with `var` the member's key and `val` its value.
 @(require_results)
 melt :: proc(h: ^Heap, v, ids, var, val: Value) -> (res: Value, status: Status) {
 	xs := reshaped(h, v, ids, var, val) or_return
 	defer release(h, xs)
 	out := make_array(h, len(items_of(xs))) or_return
+	defer if status != .Ok { release(h, out) }
 	for r in items_of(xs) {
-		if s := melt_row(h, r, ids, var, val, &out); s != .Ok {
-			release(h, out)
-			return NULL, s
-		}
+		melt_row(h, r, ids, var, val, &out) or_return
 	}
 	return out, .Ok
 }
@@ -96,54 +72,34 @@ melt_row :: proc(h: ^Heap, r, ids, var, val: Value, out: ^Value) -> Status {
 		}
 		long := retain(id)
 		s := object_put(h, &long, retain(var), retain(e.key))
-		if s == .Ok {
-			s = object_put(h, &long, retain(val), retain(e.value))
-		}
-		if s == .Ok {
-			s = append_owned(h, out, long)
-		} else {
-			release(h, long)
-		}
-		if s != .Ok {
-			return s
-		}
+		if s == .Ok { s = object_put(h, &long, retain(val), retain(e.value)) }
+		if s == .Ok { s = append_owned(h, out, long) } else { release(h, long) }
+		if s != .Ok { return s }
 	}
 	return .Ok
 }
 
-// Array `v` of objects from long to wide: an object for each distinct set of members whose keys are in array `ids`,
-// in `coll`'s order, with a member for each value of member `var` in any row, in order, holding member `val` of the
-// last row of the set with that value, or null.
 @(require_results)
 pivot :: proc(h: ^Heap, v, ids, var, val: Value, coll := JSON_ORDER) -> (res: Value, status: Status) {
 	xs := reshaped(h, v, ids, var, val) or_return
 	defer release(h, xs)
 	rows := items_of(xs)
-	n := len(rows)
-	keys := make_array(h, n) or_return
+	keys := make_array(h, len(rows)) or_return
 	defer release(h, keys)
-	names := make_array(h, n) or_return
+	names := make_array(h, len(rows)) or_return
 	defer release(h, names)
 	for r in rows {
-		id := id_of(h, r, ids) or_return
-		append_owned(h, &keys, id) or_return
-		name := member_or_null(h, r, var) or_return
-		append_owned(h, &names, name) or_return
+		append_owned(h, &keys, id_of(h, r, ids) or_return) or_return
+		append_owned(h, &names, member_or_null(h, r, var) or_return) or_return
 	}
 	cols := runs_by(h, names, ABSENT, .First, coll) or_return
 	defer release(h, cols)
 	groups := runs_by(h, xs, keys, .Group, coll) or_return
 	defer release(h, groups)
 	out := make_array(h, len(items_of(groups))) or_return
+	defer if status != .Ok { release(h, out) }
 	for g in items_of(groups) {
-		wide, s := pivot_group(h, items_of(g), ids, var, val, items_of(cols))
-		if s == .Ok {
-			s = append_owned(h, &out, wide)
-		}
-		if s != .Ok {
-			release(h, out)
-			return NULL, s
-		}
+		append_owned(h, &out, pivot_group(h, items_of(g), ids, var, val, items_of(cols)) or_return) or_return
 	}
 	return out, .Ok
 }
@@ -151,9 +107,7 @@ pivot :: proc(h: ^Heap, v, ids, var, val: Value, coll := JSON_ORDER) -> (res: Va
 @(private)
 pivot_group :: proc(h: ^Heap, rows: []Value, ids, var, val: Value, cols: []Value) -> (res: Value, status: Status) {
 	wide := id_of(h, rows[0], ids) or_return
-	defer if status != .Ok {
-		release(h, wide)
-	}
+	defer if status != .Ok { release(h, wide) }
 	for c in cols {
 		if type_of(c) != .String {
 			return NULL, fail(h, .Types, .Index, wide, c, detail = "object key")
@@ -163,22 +117,15 @@ pivot_group :: proc(h: ^Heap, rows: []Value, ids, var, val: Value, cols: []Value
 			name := member_or_null(h, r, var) or_return
 			same, s := equal(h, name, c)
 			release(h, name)
-			if s == .Ok && same {
-				x, s = member_or_null(h, r, val)
-			}
-			if s != .Ok {
-				return NULL, s
-			}
-			if same {
-				break
-			}
+			if s == .Ok && same { x, s = member_or_null(h, r, val) }
+			if s != .Ok { return NULL, s }
+			if same { break }
 		}
 		object_put(h, &wide, retain(c), x) or_return
 	}
 	return wide, .Ok
 }
 
-// Array `v` built, its elements objects, `ids` an array, `var` and `val` strings.
 @(private)
 reshaped :: proc(h: ^Heap, v, ids, var, val: Value) -> (res: Value, status: Status) {
 	if type_of(v) != .Array {
@@ -197,20 +144,15 @@ reshaped :: proc(h: ^Heap, v, ids, var, val: Value) -> (res: Value, status: Stat
 	return xs, .Ok
 }
 
-// The members of object `r` whose keys are in array `ids`, in `r`'s order.
 @(private)
 id_of :: proc(h: ^Heap, r, ids: Value) -> (res: Value, status: Status) {
 	row := built(h, r) or_return
 	defer release(h, row)
 	id := make_object(h, 0) or_return
+	defer if status != .Ok { release(h, id) }
 	for e in entries_of(row) {
-		keep, s := in_ids(h, e.key, ids)
-		if s == .Ok && keep {
-			s = object_put(h, &id, retain(e.key), retain(e.value))
-		}
-		if s != .Ok {
-			release(h, id)
-			return NULL, s
+		if in_ids(h, e.key, ids) or_return {
+			object_put(h, &id, retain(e.key), retain(e.value)) or_return
 		}
 	}
 	return id, .Ok

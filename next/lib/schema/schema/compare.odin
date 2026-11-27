@@ -10,33 +10,16 @@ import "stury:lib/ops/write"
 import "stury:lib/schema/check"
 import "stury:lib/schema/rules"
 
-// Whether one schema includes every value of another:
-// `Yes` = structural proof, `No` = confirmed counterexample witness, `Unknown` = undecided (names facet).
-Verdict :: enum u8 {
-	Yes,
-	No,
-	Unknown,
-}
+Verdict :: enum u8 { Yes, No, Unknown }
 
-// Inclusion verdict in one direction: does the target accept every value the source accepts?
 Inclusion :: struct {
 	verdict: Verdict,
-	// For `.No`: JSON text of a value accepted by the source and rejected by the target, confirmed by `check`.
 	witness: string,
-	// For `.Unknown`: keyword or reason where the proof stopped.
 	reason:  string,
 }
 
-// Effect of a single schema change on the set of accepted values.
-Effect :: enum u8 {
-	None,
-	Widens,
-	Narrows,
-	Both,
-	Unknown,
-}
+Effect :: enum u8 { None, Widens, Narrows, Both, Unknown }
 
-// One structural difference between two schemas at a given instance `path`.
 Change :: struct {
 	path:    []tape.Step,
 	keyword: string,
@@ -46,14 +29,9 @@ Change :: struct {
 }
 
 Compare_Options :: struct {
-	// Whether `format` asserts even if the schema did not enable format assertion.
 	format_assert: bool,
 }
 
-// Result of `compare(old, new)`:
-// - `old_in_new`: whether `new` accepts every value `old` accepts (backward compatibility / non-breaking).
-// - `new_in_old`: whether `old` accepts every value `new` accepts (forward compatibility).
-// - `changes`: list of per-location differences with widening/narrowing effects.
 Comparison :: struct {
 	old_in_new:  Inclusion,
 	new_in_old:  Inclusion,
@@ -76,7 +54,6 @@ comparison_destroy :: proc(c: ^Comparison) {
 @(private)
 MAX_JUDGES :: 64
 
-// One side of a comparison with lazily compiled per-root `check.Plan` judges.
 @(private)
 Side :: struct {
 	d:         ^rules.Description,
@@ -84,8 +61,6 @@ Side :: struct {
 	allocator: runtime.Allocator,
 }
 
-// Compares `old` and `new` (both borrowed and left unmodified).
-// Call `comparison_destroy(&r)` to free the returned `Comparison`.
 @(require_results)
 compare :: proc(old, new: ^rules.Description, opts := Compare_Options{}, allocator := context.allocator) -> (r: Comparison, err: runtime.Allocator_Error) {
 	if old == nil || new == nil {
@@ -133,16 +108,12 @@ inclusion :: proc(from, to: ^Side, out_alloc, scratch, backing: runtime.Allocato
 		return {verdict = .Yes}
 	}
 	text, found, searched_out := refute(from, to, p.foci[:], scratch, backing)
-	switch {
-	case found:
+	if found {
 		return {verdict = .No, witness = strings.clone(text, out_alloc)}
-	case searched_out:
-		return {verdict = .Unknown, reason = p.why if p.why != "" else "search"}
 	}
-	return {verdict = .Unknown, reason = p.why}
+	return {verdict = .Unknown, reason = p.why if p.why != "" else ("search" if searched_out else "")}
 }
 
-// Lazily compiles a `check.Plan` rooted at node `n` of `s`.
 @(private)
 judge_of :: proc(s: ^Side, n: rules.Node_Index) -> ^check.Plan {
 	if j, found := s.judges[n]; found {
@@ -169,9 +140,8 @@ judge_of :: proc(s: ^Side, n: rules.Node_Index) -> ^check.Plan {
 	return j
 }
 
-// Checks whether `doc` passes every node in `nodes` of `s`.
 @(private)
-accepts_doc :: proc(s: ^Side, nodes: []rules.Node_Index, doc: ^tape.Document, scratch: runtime.Allocator) -> (taken, known: bool) {
+accepts_doc :: proc(s: ^Side, nodes: []rules.Node_Index, doc: ^tape.Document, scratch: runtime.Allocator) -> (bool, bool) {
 	for n in nodes {
 		j := judge_of(s, n)
 		if j == nil {
@@ -187,9 +157,8 @@ accepts_doc :: proc(s: ^Side, nodes: []rules.Node_Index, doc: ^tape.Document, sc
 	return true, true
 }
 
-// Checks whether `v` passes every node in `nodes` of `s` (via `Token_Tape` + `check.check_document`).
 @(private)
-accepts_value :: proc(s: ^Side, nodes: []rules.Node_Index, v: rules.Value, scratch: runtime.Allocator) -> (taken, known: bool) {
+accepts_value :: proc(s: ^Side, nodes: []rules.Node_Index, v: rules.Value, scratch: runtime.Allocator) -> (bool, bool) {
 	tt: write.Token_Tape
 	doc, ok := value_to_tape(v, &tt, scratch)
 	if !ok {

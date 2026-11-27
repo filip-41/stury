@@ -21,8 +21,17 @@ reject_partial :: proc(h: ^Heap, v: Value) -> Status {
 	return .Ok
 }
 
+// Ensures container `v` (consumed) is a built mutable `.Array`/`.Object`.
+@(private, require_results)
+ensure_built :: proc(h: ^Heap, v: Value) -> (Value, Status) {
+	if v.kind != .Node && v.kind != .Overlay {
+		return v, .Ok
+	}
+	defer release(h, v)
+	return built(h, v)
+}
+
 // Applies a sequence of RFC 6902 `diff.Patch_Op` operations atomically to `target` (borrowed).
-// Returns a newly retained patched value, or `.Error` with `target` unmodified.
 @(require_results)
 apply_patch_ops :: proc(h: ^Heap, target: Value, ops: []diff.Patch_Op) -> (res: Value, status: Status) {
 	reject_partial(h, target) or_return
@@ -32,14 +41,13 @@ apply_patch_ops :: proc(h: ^Heap, target: Value, ops: []diff.Patch_Op) -> (res: 
 	}
 	for op in ops {
 		val := ABSENT
-		need_val := op.op == .Add || op.op == .Replace || op.op == .Test
-		if need_val {
+		if op.op == .Add || op.op == .Replace || op.op == .Test {
 			val = materialize_op_val(h, op) or_return
 		}
 		next, s := apply_one_op(h, cur, op.op, op.path, op.from, val)
 		release(h, val)
 		if s != .Ok {
-			cur = ABSENT // `apply_one_op` released `cur` on error
+			cur = ABSENT
 			return NULL, s
 		}
 		cur = next
@@ -65,10 +73,7 @@ apply_patch_value :: proc(h: ^Heap, target: Value, patch: Value) -> (res: Value,
 	c := cursor_open(h, patch) or_return
 	defer cursor_close(&c)
 	for {
-		_, item, more, cs := cursor_next(h, &c)
-		if cs != .Ok {
-			return NULL, cs
-		}
+		_, item, more := cursor_next(h, &c) or_return
 		if !more {
 			break
 		}
@@ -90,8 +95,9 @@ apply_patch_value :: proc(h: ^Heap, target: Value, patch: Value) -> (res: Value,
 		if !is_text(path_v) {
 			return NULL, fail(h, .Parse, .Pointer, item, detail = "patch operation missing string 'path'")
 		}
-		from_v := ABSENT
+		from_v, val_v := ABSENT, ABSENT
 		defer release(h, from_v)
+		defer release(h, val_v)
 		from_s := ""
 		if kind == .Move || kind == .Copy {
 			from_v = member(h, item, "from") or_return
@@ -100,8 +106,6 @@ apply_patch_value :: proc(h: ^Heap, target: Value, patch: Value) -> (res: Value,
 			}
 			from_s = text_of(from_v)
 		}
-		val_v := ABSENT
-		defer release(h, val_v)
 		if kind == .Add || kind == .Replace || kind == .Test {
 			val_v = member(h, item, "value") or_return
 			if val_v.kind == .Absent {
@@ -151,19 +155,12 @@ apply_one_op :: proc(h: ^Heap, cur: Value, kind: diff.Patch_Op_Kind, path, from:
 	case .Replace:
 		return ptr_mutate(h, cur, path, .Replace, retain(val))
 	case .Test:
-		got, s := ptr_get(h, cur, path)
-		if s != .Ok {
+		defer if status != .Ok {
 			release(h, cur)
-			return NULL, s
 		}
+		got := ptr_get(h, cur, path) or_return
 		defer release(h, got)
-		eq, es := equal(h, got, val)
-		if es != .Ok {
-			release(h, cur)
-			return NULL, es
-		}
-		if !eq {
-			release(h, cur)
+		if !(equal(h, got, val) or_return) {
 			return NULL, fail(h, .Raised, .Pointer, got, val, "patch test failed")
 		}
 		return cur, .Ok
@@ -201,10 +198,7 @@ apply_one_op :: proc(h: ^Heap, cur: Value, kind: diff.Patch_Op_Kind, path, from:
 
 @(private = "file")
 is_proper_prefix :: proc "contextless" (from, path: string) -> bool {
-	if len(from) == 0 {
-		return len(path) > 0
-	}
-	return len(path) > len(from) && path[:len(from)] == from && path[len(from)] == '/'
+	return len(path) > 0 if len(from) == 0 else (len(path) > len(from) && path[:len(from)] == from && path[len(from)] == '/')
 }
 
 @(private = "file")
@@ -228,39 +222,41 @@ decode_ptr :: proc(h: ^Heap, ptr: string) -> (tokens: []string, status: Status) 
 	return nil, fail(h, .Parse, .Pointer)
 }
 
+// Steps one JSON Pointer token into `cur` (borrowed), returning the child, whether `cur` was an array, and its index.
+@(private = "file", require_results)
+ptr_step_child :: proc(h: ^Heap, cur: Value, tok: string) -> (child: Value, is_arr: bool, idx: int, status: Status) {
+	#partial switch type_of(cur) {
+	case .Object:
+		child = member(h, cur, tok) or_return
+		if child.kind == .Absent {
+			return NULL, false, 0, fail(h, .Range, .Pointer, detail = "pointer target member not found")
+		}
+		return child, false, 0, .Ok
+	case .Array:
+		is_dash, ok: bool
+		idx, is_dash, ok = diff.parse_array_index(tok)
+		if !ok || is_dash || idx < 0 || idx >= length_of(h, cur) {
+			return NULL, true, 0, fail(h, .Range, .Pointer, detail = "pointer array index out of bounds")
+		}
+		child = element(h, cur, idx) or_return
+		return child, true, idx, .Ok
+	}
+	return NULL, false, 0, fail(h, .Types, .Pointer, detail = "cannot traverse scalar with JSON Pointer")
+}
+
 // Resolves `ptr` in `root` (borrowed), returning a retained value or `.Error` if missing/invalid.
 @(private = "file", require_results)
 ptr_get :: proc(h: ^Heap, root: Value, ptr: string) -> (res: Value, status: Status) {
 	alloc := heap_allocator(h)
 	tokens := decode_ptr(h, ptr) or_return
 	defer diff.destroy_pointer_tokens(tokens, alloc)
-
 	cur := retain(root)
-	for tok in tokens {
-		next: Value
-		s: Status
-		#partial switch type_of(cur) {
-		case .Object:
-			next, s = member(h, cur, tok)
-			if s == .Ok && next.kind == .Absent {
-				release(h, cur)
-				return NULL, fail(h, .Range, .Pointer, detail = "pointer target member not found")
-			}
-		case .Array:
-			idx, is_dash, ok := diff.parse_array_index(tok)
-			if !ok || is_dash || idx < 0 || idx >= length_of(h, cur) {
-				release(h, cur)
-				return NULL, fail(h, .Range, .Pointer, detail = "pointer array index out of bounds")
-			}
-			next, s = element(h, cur, idx)
-		case:
-			release(h, cur)
-			return NULL, fail(h, .Types, .Pointer, detail = "cannot traverse scalar with JSON Pointer")
-		}
+	defer if status != .Ok {
 		release(h, cur)
-		if s != .Ok {
-			return NULL, s
-		}
+	}
+	for tok in tokens {
+		next, _, _ := ptr_step_child(h, cur, tok) or_return
+		release(h, cur)
 		cur = next
 	}
 	return cur, .Ok
@@ -294,12 +290,11 @@ ptr_mutate :: proc(h: ^Heap, root: Value, ptr: string, mut: Mut_Kind, val: Value
 	defer diff.destroy_pointer_tokens(tokens, alloc)
 
 	if len(tokens) == 0 {
+		release(h, root)
 		if mut == .Remove {
-			release(h, root)
 			release(h, val)
 			return NULL, fail(h, .Range, .Pointer, detail = "cannot remove root document")
 		}
-		release(h, root)
 		return val, .Ok
 	}
 
@@ -313,33 +308,7 @@ ptr_mutate :: proc(h: ^Heap, root: Value, ptr: string, mut: Mut_Kind, val: Value
 
 	cur := root
 	for tok in tokens[:len(tokens) - 1] {
-		child: Value
-		s: Status
-		is_arr := false
-		idx := 0
-		#partial switch type_of(cur) {
-		case .Object:
-			child, s = member(h, cur, tok)
-			if s == .Ok && child.kind == .Absent {
-				release(h, cur)
-				release(h, val)
-				return NULL, fail(h, .Range, .Pointer, detail = "intermediate object member missing")
-			}
-		case .Array:
-			is_arr = true
-			is_dash, ok: bool
-			idx, is_dash, ok = diff.parse_array_index(tok)
-			if !ok || is_dash || idx < 0 || idx >= length_of(h, cur) {
-				release(h, cur)
-				release(h, val)
-				return NULL, fail(h, .Range, .Pointer, detail = "intermediate array index out of bounds")
-			}
-			child, s = element(h, cur, idx)
-		case:
-			release(h, cur)
-			release(h, val)
-			return NULL, fail(h, .Types, .Pointer, detail = "cannot traverse scalar with JSON Pointer")
-		}
+		child, is_arr, idx, s := ptr_step_child(h, cur, tok)
 		if s != .Ok {
 			release(h, cur)
 			release(h, val)
@@ -354,41 +323,25 @@ ptr_mutate :: proc(h: ^Heap, root: Value, ptr: string, mut: Mut_Kind, val: Value
 		cur = child
 	}
 
-	last := tokens[len(tokens) - 1]
-	leaf, ls := mutate_leaf(h, cur, last, mut, val)
-	if ls != .Ok {
-		return NULL, ls
-	}
-	cur = leaf
+	cur = mutate_leaf(h, cur, tokens[len(tokens) - 1], mut, val) or_return
 
 	#reverse for &st in chain {
 		parent := st.parent
 		st.parent = ABSENT
-		if parent.kind == .Node || parent.kind == .Overlay {
-			b, bs := built(h, parent)
-			release(h, parent)
-			if bs != .Ok {
-				release(h, cur)
-				return NULL, bs
-			}
-			parent = b
+		ps: Status
+		parent, ps = ensure_built(h, parent)
+		if ps != .Ok {
+			release(h, cur)
+			return NULL, ps
 		}
 		if st.is_arr {
-			if ps := array_put(h, &parent, st.idx, cur); ps != .Ok {
-				release(h, parent)
-				return NULL, ps
-			}
+			ps = array_put(h, &parent, st.idx, cur)
 		} else {
-			kv, ks := text_value(h, st.key)
-			if ks != .Ok {
-				release(h, parent)
-				release(h, cur)
-				return NULL, ks
-			}
-			if ps := object_put(h, &parent, kv, cur); ps != .Ok {
-				release(h, parent)
-				return NULL, ps
-			}
+			ps = put_key_str(h, &parent, st.key, cur)
+		}
+		if ps != .Ok {
+			release(h, parent)
+			return NULL, ps
 		}
 		cur = parent
 	}
@@ -398,99 +351,64 @@ ptr_mutate :: proc(h: ^Heap, root: Value, ptr: string, mut: Mut_Kind, val: Value
 // Applies `mut` at the final token `tok` of container `parent` (consumed), with `val` (consumed).
 @(private = "file", require_results)
 mutate_leaf :: proc(h: ^Heap, parent: Value, tok: string, mut: Mut_Kind, val: Value) -> (res: Value, status: Status) {
-	#partial switch type_of(parent) {
-	case .Object:
-		if mut == .Remove || mut == .Replace {
-			if !has_member(h, parent, tok) {
-				release(h, parent)
-				release(h, val)
-				return NULL, fail(h, .Range, .Pointer, detail = "target object member does not exist")
-			}
+	out := parent
+	val_owned := true
+	defer if status != .Ok {
+		release(h, out)
+		if val_owned {
+			release(h, val)
 		}
-		out := parent
-		if out.kind == .Node || out.kind == .Overlay {
-			b, bs := built(h, out)
-			release(h, out)
-			if bs != .Ok {
-				release(h, val)
-				return NULL, bs
-			}
-			out = b
+	}
+	#partial switch type_of(out) {
+	case .Object:
+		if (mut == .Remove || mut == .Replace) && !has_member(h, out, tok) {
+			return NULL, fail(h, .Range, .Pointer, detail = "target object member does not exist")
+		}
+		b, bs := ensure_built(h, out)
+		out = b
+		if bs != .Ok {
+			return NULL, bs
 		}
 		if mut == .Remove {
-			if ds := object_delete(h, &out, tok); ds != .Ok {
-				release(h, out)
-				return NULL, ds
-			}
+			object_delete(h, &out, tok) or_return
 			return out, .Ok
 		}
-		kv, ks := text_value(h, tok)
-		if ks != .Ok {
-			release(h, out)
-			release(h, val)
-			return NULL, ks
-		}
-		if ps := object_put(h, &out, kv, val); ps != .Ok {
-			release(h, out)
-			return NULL, ps
-		}
+		val_owned = false
+		put_key_str(h, &out, tok, val) or_return
 		return out, .Ok
 
 	case .Array:
-		n := length_of(h, parent)
+		n := length_of(h, out)
 		idx, is_dash, ok := diff.parse_array_index(tok)
 		if !ok {
-			release(h, parent)
-			release(h, val)
 			return NULL, fail(h, .Parse, .Pointer, detail = "invalid array index in JSON Pointer")
 		}
-		switch mut {
-		case .Add:
+		if mut == .Add {
 			if is_dash {
 				idx = n
 			} else if idx < 0 || idx > n {
-				release(h, parent)
-				release(h, val)
 				return NULL, fail(h, .Range, .Pointer, detail = "add array index out of bounds")
 			}
-		case .Remove, .Replace:
-			if is_dash || idx < 0 || idx >= n {
-				release(h, parent)
-				release(h, val)
-				return NULL, fail(h, .Range, .Pointer, detail = "array index out of bounds")
-			}
+		} else if is_dash || idx < 0 || idx >= n {
+			return NULL, fail(h, .Range, .Pointer, detail = "array index out of bounds")
 		}
-		out := parent
-		if out.kind == .Node || out.kind == .Overlay {
-			b, bs := built(h, out)
-			release(h, out)
-			if bs != .Ok {
-				release(h, val)
-				return NULL, bs
-			}
-			out = b
+		b, bs := ensure_built(h, out)
+		out = b
+		if bs != .Ok {
+			return NULL, bs
 		}
 		switch mut {
 		case .Add:
-			if is := array_insert(h, &out, idx, val); is != .Ok {
-				release(h, out)
-				return NULL, is
-			}
+			val_owned = false
+			array_insert(h, &out, idx, val) or_return
 		case .Remove:
-			if rs := array_remove(h, &out, idx); rs != .Ok {
-				release(h, out)
-				return NULL, rs
-			}
+			array_remove(h, &out, idx) or_return
 		case .Replace:
-			if ps := array_put(h, &out, idx, val); ps != .Ok {
-				release(h, out)
-				return NULL, ps
-			}
+			val_owned = false
+			array_put(h, &out, idx, val) or_return
 		}
 		return out, .Ok
 	}
-	release(h, parent)
-	release(h, val)
 	return NULL, fail(h, .Types, .Pointer, detail = "patch parent is not an object or array")
 }
 
@@ -509,15 +427,7 @@ array_insert :: proc(h: ^Heap, a: ^Value, idx: int, x: Value) -> Status #no_boun
 	}
 	items[idx] = x
 	b.len = u32(n + 1)
-	if x.held {
-		b.flags |= BLOCK_HAS_HELD
-	}
-	if x.kind >= .Array {
-		b.flags |= BLOCK_HAS_CONTAINER
-		if value_has_partial(x) {
-			b.flags |= BLOCK_HAS_PARTIAL
-		}
-	}
+	array_note_value(b, x)
 	return .Ok
 }
 
@@ -549,47 +459,51 @@ materialize_op_val :: proc(h: ^Heap, op: diff.Patch_Op) -> (res: Value, status: 
 	}
 	b := alloc_block(h, size_of(Doc_Block)) or_return
 	d := (^Doc_Block)(b)
-	d.doc, d.owned = op.doc^, false
-	d.index = {allocator = heap_allocator(h)}
+	d.doc, d.owned, d.index = op.doc^, false, {allocator = heap_allocator(h)}
 	holder := Value{p = d, n = 0, kind = .Node, held = true}
 	defer release(h, holder)
 
-	if len(op.nodes) > 0 {
-		arr := make_array(h, len(op.nodes)) or_return
-		defer if status != .Ok {
-			release(h, arr)
+	materialize_node :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res: Value, status: Status) {
+		if int(at) >= len(d.doc.nodes) {
+			return NULL, fail(h, .Range, .Pointer, detail = "node index out of range")
 		}
-		for at in op.nodes {
-			if int(at) >= len(d.doc.nodes) {
-				return NULL, fail(h, .Range, .Pointer, detail = "node index out of range")
-			}
-			ref := node_value(h, d, at) or_return
-			v, vs := built_deep(h, ref)
-			release(h, ref)
-			if vs != .Ok {
-				return NULL, vs
-			}
-			append_owned(h, &arr, v) or_return
-		}
-		return arr, .Ok
+		ref := node_value(h, d, at) or_return
+		defer release(h, ref)
+		return built_deep(h, ref)
 	}
-	if int(op.node) >= len(d.doc.nodes) {
-		return NULL, fail(h, .Range, .Pointer, detail = "node index out of range")
+
+	if len(op.nodes) == 0 {
+		return materialize_node(h, d, op.node)
 	}
-	ref := node_value(h, d, op.node) or_return
-	defer release(h, ref)
-	return built_deep(h, ref)
+	arr := make_array(h, len(op.nodes)) or_return
+	defer if status != .Ok {
+		release(h, arr)
+	}
+	for at in op.nodes {
+		v := materialize_node(h, d, at) or_return
+		append_owned(h, &arr, v) or_return
+	}
+	return arr, .Ok
 }
 
 // ---- RFC 7396 JSON Merge Patch (explicit heap stack, zero native recursion)
 
 @(private = "file")
-Merge_Frame :: struct {
-	out:     Value,  // built object being assembled
-	target:  Value,  // borrowed original target (`.Absent` if non-object or missing)
-	patch:   Value,  // retained patch object
-	c:       Cursor, // cursor over `patch`
-	pending: Value,  // owned key waiting for child merge
+Merge_Patch_Frame :: struct {
+	a, b:    Value, // for apply: target, patch; for diff: a, b
+	out:     Value,
+	c:       Cursor,
+	pending: Value,
+}
+
+@(private = "file")
+drop_merge_frame :: proc(h: ^Heap, f: ^Merge_Patch_Frame) {
+	cursor_close(&f.c)
+	release(h, f.a)
+	release(h, f.b)
+	release(h, f.out)
+	release(h, f.pending)
+	f^ = {}
 }
 
 // Applies RFC 7396 JSON Merge Patch `patch` to `target` (both borrowed), returning the merged value.
@@ -600,25 +514,20 @@ apply_merge_patch :: proc(h: ^Heap, target, patch: Value) -> (res: Value, status
 	if type_of(patch) != .Object {
 		return retain(patch), .Ok
 	}
-	alloc := heap_allocator(h)
-	stack := make([dynamic]Merge_Frame, 0, 16, alloc)
+	stack := make([dynamic]Merge_Patch_Frame, 0, 16, heap_allocator(h))
 	defer {
 		for &f in stack {
-			cursor_close(&f.c)
-			release(h, f.out)
-			release(h, f.target)
-			release(h, f.patch)
-			release(h, f.pending)
+			drop_merge_frame(h, &f)
 		}
 		delete(stack)
 	}
-
-	open_merge :: proc(h: ^Heap, stack: ^[dynamic]Merge_Frame, tgt, pat: Value) -> Status {
+	open_merge :: proc(h: ^Heap, stack: ^[dynamic]Merge_Patch_Frame, tgt, pat: Value) -> Status {
 		if len(stack) >= depth_limit(h) {
 			return fail(h, .Depth, .Merge)
 		}
+		tgt_obj := type_of(tgt) == .Object
 		out: Value
-		if type_of(tgt) == .Object {
+		if tgt_obj {
 			out = built(h, tgt) or_return
 		} else {
 			out = make_object(h, max(length_of(h, pat), 1)) or_return
@@ -628,17 +537,9 @@ apply_merge_patch :: proc(h: ^Heap, target, patch: Value) -> (res: Value, status
 			release(h, out)
 			return cs
 		}
-		f := Merge_Frame {
-			out    = out,
-			target = retain(tgt) if type_of(tgt) == .Object else ABSENT,
-			patch  = retain(pat),
-			c      = c,
-		}
+		f := Merge_Patch_Frame{a = retain(tgt) if tgt_obj else ABSENT, b = retain(pat), out = out, c = c}
 		if _, aerr := append(stack, f); aerr != nil {
-			cursor_close(&f.c)
-			release(h, f.out)
-			release(h, f.target)
-			release(h, f.patch)
+			drop_merge_frame(h, &f)
 			return fail_memory(h)
 		}
 		return .Ok
@@ -647,17 +548,11 @@ apply_merge_patch :: proc(h: ^Heap, target, patch: Value) -> (res: Value, status
 	open_merge(h, &stack, target, patch) or_return
 	for len(stack) > 0 {
 		f := &stack[len(stack) - 1]
-		key, pv, more, cs := cursor_next(h, &f.c)
-		if cs != .Ok {
-			return NULL, cs
-		}
+		key, pv, more := cursor_next(h, &f.c) or_return
 		if !more {
 			done := f.out
 			f.out = ABSENT
-			cursor_close(&f.c)
-			release(h, f.target)
-			release(h, f.patch)
-			f.target, f.patch = ABSENT, ABSENT
+			drop_merge_frame(h, f)
 			pop(&stack)
 			if len(stack) == 0 {
 				return done, .Ok
@@ -668,21 +563,17 @@ apply_merge_patch :: proc(h: ^Heap, target, patch: Value) -> (res: Value, status
 			object_put(h, &parent.out, pk, done) or_return
 			continue
 		}
-
 		pt := type_of(pv)
 		if pt == .Null {
 			release(h, pv)
-			ds := object_delete(h, &f.out, text_of(key))
-			release(h, key)
-			if ds != .Ok {
-				return NULL, ds
-			}
+			defer release(h, key)
+			object_delete(h, &f.out, text_of(key)) or_return
 			continue
 		}
 		if pt == .Object {
 			existing := ABSENT
-			if f.target.kind != .Absent {
-				ex, ms := member(h, f.target, text_of(key))
+			if f.a.kind != .Absent {
+				ex, ms := member(h, f.a, text_of(key))
 				if ms != .Ok {
 					release(h, key)
 					release(h, pv)
@@ -694,9 +585,7 @@ apply_merge_patch :: proc(h: ^Heap, target, patch: Value) -> (res: Value, status
 			os := open_merge(h, &stack, existing, pv)
 			release(h, existing)
 			release(h, pv)
-			if os != .Ok {
-				return NULL, os
-			}
+			os or_return
 			continue
 		}
 		object_put(h, &f.out, key, pv) or_return
@@ -712,76 +601,40 @@ diff_merge_patch :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) 
 	if type_of(a) != .Object || type_of(b) != .Object {
 		return retain(b), .Ok
 	}
-	Diff_Merge_Frame :: struct {
-		a, b:    Value,
-		out:     Value,
-		c:       Cursor,
-		pending: Value,
-	}
-	alloc := heap_allocator(h)
-	stack := make([dynamic]Diff_Merge_Frame, 0, 16, alloc)
+	stack := make([dynamic]Merge_Patch_Frame, 0, 16, heap_allocator(h))
 	defer {
 		for &f in stack {
-			cursor_close(&f.c)
-			release(h, f.a)
-			release(h, f.b)
-			release(h, f.out)
-			release(h, f.pending)
+			drop_merge_frame(h, &f)
 		}
 		delete(stack)
 	}
-
-	open_diff :: proc(h: ^Heap, stack: ^[dynamic]Diff_Merge_Frame, va, vb: Value) -> Status {
+	open_diff :: proc(h: ^Heap, stack: ^[dynamic]Merge_Patch_Frame, va, vb: Value) -> (status: Status) {
 		if len(stack) >= depth_limit(h) {
 			return fail(h, .Depth, .Merge)
 		}
 		out := make_object(h, 4) or_return
-		// Emit `null` for any member present in `a` and absent in `b`.
-		ca, cas := cursor_open(h, va)
-		if cas != .Ok {
+		defer if status != .Ok {
 			release(h, out)
-			return cas
 		}
+		ca := cursor_open(h, va) or_return
+		defer cursor_close(&ca)
 		for {
-			k, x, more, ns := cursor_next(h, &ca)
+			k, x, more := cursor_next(h, &ca) or_return
 			release(h, x)
-			if ns != .Ok {
-				release(h, k)
-				cursor_close(&ca)
-				release(h, out)
-				return ns
-			}
 			if !more {
 				break
 			}
 			if !has_member(h, vb, text_of(k)) {
-				if ps := object_put(h, &out, k, NULL); ps != .Ok {
-					cursor_close(&ca)
-					release(h, out)
-					return ps
-				}
+				object_put(h, &out, k, NULL) or_return
 			} else {
 				release(h, k)
 			}
 		}
-		cursor_close(&ca)
-
-		cb, cbs := cursor_open(h, vb)
-		if cbs != .Ok {
-			release(h, out)
-			return cbs
-		}
-		f := Diff_Merge_Frame {
-			a   = retain(va),
-			b   = retain(vb),
-			out = out,
-			c   = cb,
-		}
+		cb := cursor_open(h, vb) or_return
+		f := Merge_Patch_Frame{a = retain(va), b = retain(vb), out = out, c = cb}
+		out = ABSENT
 		if _, aerr := append(stack, f); aerr != nil {
-			cursor_close(&f.c)
-			release(h, f.a)
-			release(h, f.b)
-			release(h, f.out)
+			drop_merge_frame(h, &f)
 			return fail_memory(h)
 		}
 		return .Ok
@@ -790,17 +643,11 @@ diff_merge_patch :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) 
 	open_diff(h, &stack, a, b) or_return
 	for len(stack) > 0 {
 		f := &stack[len(stack) - 1]
-		key, bv, more, cs := cursor_next(h, &f.c)
-		if cs != .Ok {
-			return NULL, cs
-		}
+		key, bv, more := cursor_next(h, &f.c) or_return
 		if !more {
 			done := f.out
 			f.out = ABSENT
-			cursor_close(&f.c)
-			release(h, f.a)
-			release(h, f.b)
-			f.a, f.b = ABSENT, ABSENT
+			drop_merge_frame(h, f)
 			pop(&stack)
 			if len(stack) == 0 {
 				return done, .Ok
@@ -811,33 +658,27 @@ diff_merge_patch :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) 
 			object_put(h, &parent.out, pk, done) or_return
 			continue
 		}
-
-		av, ms := member(h, f.a, text_of(key))
-		if ms != .Ok {
+		av, as := member(h, f.a, text_of(key))
+		if as != .Ok {
 			release(h, key)
 			release(h, bv)
-			return NULL, ms
+			return NULL, as
 		}
 		if av.kind == .Absent {
-			if type_of(bv) == .Null {
-				release(h, key)
-				release(h, bv)
-				continue
-			}
 			object_put(h, &f.out, key, bv) or_return
 			continue
 		}
 		eq, es := equal(h, av, bv)
 		if es != .Ok {
 			release(h, av)
-			release(h, key)
 			release(h, bv)
+			release(h, key)
 			return NULL, es
 		}
 		if eq {
 			release(h, av)
-			release(h, key)
 			release(h, bv)
+			release(h, key)
 			continue
 		}
 		if type_of(av) == .Object && type_of(bv) == .Object {
@@ -845,9 +686,7 @@ diff_merge_patch :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) 
 			os := open_diff(h, &stack, av, bv)
 			release(h, av)
 			release(h, bv)
-			if os != .Ok {
-				return NULL, os
-			}
+			os or_return
 			continue
 		}
 		release(h, av)

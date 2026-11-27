@@ -101,6 +101,21 @@ Validate_Job :: struct {
 	width: int,
 }
 
+@(private)
+part_astray :: #force_inline proc "contextless" (end: bool, r: hook.Walk_Result, held, rec_lo, part_end: int) -> bool {
+	return !end && (u8(r) == u8(tape.Fault_Kind.Truncated) || u8(r) == 0 && (held != 0 || rec_lo != part_end))
+}
+
+@(private)
+first_record_head :: proc "contextless" (src: []u8, $S: Spec, p: Pass_Options) -> (start: int, head: Record_Scan, ok: bool) {
+	start = int(text_start(src, 0))
+	first := record_start(src, start, p.comment)
+	if first >= len(src) {
+		return 0, {}, false
+	}
+	return start, scan_record(src, first, 0, S, p.delim), true
+}
+
 // Validates `src` in parts on the threads of `opts.runner`, returning `done` false to fall back to one thread.
 @(private)
 validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (err: tape.Error, done: bool) {
@@ -113,12 +128,10 @@ validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 	m: hook.Memory_Budget
 	allocator := build.read_allocator(&m, opts, caller)
 	p := options_resolved(S, opts)
-	start := int(text_start(src, 0))
-	first := record_start(src, start, p.comment)
-	if first >= len(src) {
+	start, head, ok := first_record_head(src, S, p)
+	if !ok {
 		return nil, false
 	}
-	head := scan_record(src, first, 0, S, p.delim)
 	parts, planned := plan_dsv_parts(src, start, head.line_end + 1, head.cells + 1 if !p.no_header else 0, S, p, opts.runner, allocator)
 	defer delete(parts, allocator)
 	if !planned || len(parts) < 2 {
@@ -130,20 +143,17 @@ validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 		w: Pass(S, hook.No_Hooks, false, hook.NO_HOOKS_CAPS)
 		none: hook.No_Hooks
 		regs: hook.Regs
-		pass_start(&w, len(j.src[:part.to]), &none, j.p, 0)
+		pass_start(&w, part.to, &none, j.p, 0)
 		w.p = j.p
 		if k == 0 {
 			w.in_header = !j.p.no_header
-			w.opened = false
 		} else {
-			w.in_header = false
-			w.opened = true
-			w.width = j.width
+			w.opened, w.width = true, j.width
 		}
 		end := k == len(j.parts) - 1
 		w.unclosed = !end
 		r := run(&w, j.src[:part.to], u64(part.from), j.p, &regs, hook.no_hook)
-		part.astray = !end && (u8(r) == u8(tape.Fault_Kind.Truncated) || u8(r) == 0 && (w.held != 0 || w.rec_lo != len(j.src[:part.to])))
+		part.astray = part_astray(end, r, w.held, w.rec_lo, part.to)
 		part.close, part.err, _ = hook.walk_error(r, &RULES)
 	}
 	vj := Validate_Job{src = src, parts = parts, p = p, width = head.cells}
@@ -275,18 +285,15 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 	m: hook.Memory_Budget
 	allocator := build.read_allocator(&m, opts, caller)
 	p := options_resolved(S, opts)
-	start := int(text_start(src, 0))
+	start, head, ok := first_record_head(src, S, p)
+	if !ok {
+		return {}, nil, false
+	}
 	chunks, cok := scan_csv_chunks(src, start, S, p, opts.runner, build.chunk_count(opts.runner, len(src) - start), allocator)
 	if !cok {
 		return {}, nil, false
 	}
 	defer delete(chunks, allocator)
-	// The first record. Parts past the first take their width from it, and read as a header it holds the keys.
-	first := record_start(src, start, p.comment)
-	if first >= len(src) {
-		return {}, nil, false
-	}
-	head := scan_record(src, first, 0, S, p.delim)
 	parts := seam_plan(src, chunks, head.line_end + 1 if !p.no_header else 0, head.cells + 1 if !p.no_header else 0, allocator)
 	defer delete(parts, allocator)
 	if len(parts) < 2 {
@@ -308,28 +315,19 @@ build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocato
 		d := (^Part_Data)(data)
 		p := &parts[k]
 		r: hook.Walk_Result
-		if k == 0 {
-			r, d.widest[k], p.tolerated, p.astray = walk_part(src[:p.to], S, d.p, &s.b, &s.regs, 0, d.keys, 0, k == len(parts) - 1)
-		} else {
-			r, d.widest[k], p.tolerated, p.astray = walk_part(src[:p.to], S, d.p, &s.b, &s.regs, p.from, d.blank, d.width, k == len(parts) - 1)
-		}
+		from := 0 if k == 0 else p.from
+		pkeys := d.keys if k == 0 else d.blank
+		width := 0 if k == 0 else d.width
+		r, d.widest[k], p.tolerated, p.astray = walk_part(src[:p.to], S, d.p, &s.b, &s.regs, from, pkeys, width, k == len(parts) - 1)
 		p.close, p.err, _ = hook.walk_error(r, &RULES)
 	}
 	finish :: proc(doc: ^tape.Document, segs: []build.Segment, opts: Options, data: rawptr) -> tape.Error {
 		d := (^Part_Data)(data)
-		if len(d.keys) > 0 {
-			wide := 0
-			for w in d.widest {
-				wide = max(wide, w)
-			}
-			ext, err := table_ext(doc.allocator, d.keys, max(wide, len(d.keys)))
-			if err != nil {
-				tape.destroy(doc)
-				return err
-			}
-			doc.ext = ext
+		wide := 0
+		for w in d.widest {
+			wide = max(wide, w)
 		}
-		return finish_table(doc, opts)
+		return attach_and_finish_table(doc, d.keys, wide, opts)
 	}
 	doc, err, built = build.parts_build(src, &FORMATS[S], &RULES, parts, opts, 0, allocator, caller, walk, finish, &data)
 	err = repeat_first(err, src, S, p, data.keys, opts, allocator)
@@ -544,9 +542,7 @@ walk_part :: proc "contextless" (src: []u8, $S: Spec, p: Pass_Options, h: ^build
 	w.p, w.keys, w.width, w.in_header = p, keys, width, !p.no_header && from == 0
 	w.opened, w.unclosed = from > 0, !end
 	r = run(&w, src, u64(from), p, regs, build.builder_hook_rows)
-	// A walk faults as `Truncated` only at the text's end, which a part before the last does not hold.
-	astray = !end && (u8(r) == u8(tape.Fault_Kind.Truncated) || u8(r) == 0 && (w.held != 0 || w.rec_lo != len(src)))
-	return r, w.widest, w.tolerated, astray
+	return r, w.widest, w.tolerated, part_astray(end, r, w.held, w.rec_lo, len(src))
 }
 
 // Parallel typed unmarshal of a delimited text into a slice or dynamic array of rows.
@@ -556,12 +552,10 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 		return nil, false
 	}
 	p := options_resolved(S, opts)
-	start := int(text_start(src, 0))
-	first := record_start(src, start, p.comment)
-	if first >= len(src) {
+	start, head, ok := first_record_head(src, S, p)
+	if !ok {
 		return nil, false
 	}
-	head := scan_record(src, first, 0, S, p.delim)
 	mb: hook.Memory_Budget
 	scratch := hook.scratch(opts, caller, &mb) if opts.budget.memory != 0 else typed.parallel_scratch_backing(opts, caller)
 	frame: [FRAME_KEYS]tape.Token = ---
@@ -613,8 +607,7 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 		r: hook.Walk_Result
 		when S == .Csv {
 			if hk.alike && len(w.keys) >= MASKED_WIDTH {
-				m := (^Pass(S, typed.Cells_Reader, false, C + MASK_COLUMNS))(&w)
-				r = run(m, d.src[:part.to], u64(part.from), d.p, regs, cells_reader_hook)
+				r = run((^Pass(S, typed.Cells_Reader, false, C + MASK_COLUMNS))(&w), d.src[:part.to], u64(part.from), d.p, regs, cells_reader_hook)
 			} else {
 				r = run(&w, d.src[:part.to], u64(part.from), d.p, regs, cells_reader_hook)
 			}
@@ -622,10 +615,8 @@ unmarshal_parallel :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid
 			r = run(&w, d.src[:part.to], u64(part.from), d.p, regs, cells_reader_hook)
 		}
 		hk.replay.cells = nil
-		end := k == d.n_parts - 1
-		astray := !end && (u8(r) == u8(tape.Fault_Kind.Truncated) || u8(r) == 0 && (w.held != 0 || w.rec_lo != part.to))
 		_, err, _ := hook.walk_error(r, &RULES)
-		return {err = err, astray = astray}
+		return {err = err, astray = part_astray(k == d.n_parts - 1, r, w.held, w.rec_lo, part.to)}
 	}
 	td := Typed_Data{src = src, p = p, keys = keys, width = head.cells, n_parts = nc}
 	return typed.read_parallel_list(src, target, T, &FORMATS[S], &RULES, TAG, opts, read, caller, parts[:nc], typed.Cells_Reader, walk_part_typed, &td, mb.held)

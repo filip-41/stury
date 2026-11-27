@@ -13,39 +13,7 @@ import "stury:lib/base/spell"
 // false when `buf` is too short.
 @(private)
 content_text :: proc "contextless" (span: []u8, buf: []u8, dtd: ^Dtd_View = nil, src: []u8 = nil) -> (s: string, ok: bool) #no_bounds_check {
-	if dtd != nil {
-		x := Expander{dtd, src, buf, 0}
-		ok = expand(&x, span, true, false, 0)
-		return string(buf[:x.w]), ok
-	}
-	if len(buf) < len(span) {
-		return "", false
-	}
-	w, i := 0, 0
-	for i < len(span) {
-		switch c := span[i]; c {
-		case '&':
-			n, r, named := decode_reference(span[i:])
-			if named {
-				copy(buf[w:], span[i:i + n])
-				w += n
-			} else {
-				w += rune_text(buf[w:], r)
-			}
-			i += n
-		case '\r':
-			buf[w] = '\n'
-			w += 1
-			i += 2 if i + 1 < len(span) && span[i + 1] == '\n' else 1
-		case '<':
-			i = markup_text(span, i, buf, &w, true)
-		case:
-			buf[w] = c
-			w += 1
-			i += 1
-		}
-	}
-	return string(buf[:w]), true
+	return decode_text(span, buf, dtd, src, false, false)
 }
 
 // Decodes the comment, instruction or CDATA section at `span[i]`, a `<`, into `buf` at `w^`: a CDATA section's bytes,
@@ -69,18 +37,9 @@ markup_text :: proc "contextless" (span: []u8, i: int, buf: []u8, w: ^int, lines
 		}
 		return i + 3
 	}
-	if span[i + 1] == '!' {
-		i += 4
-		for !(span[i] == '-' && span[i + 1] == '-' && span[i + 2] == '>') {
-			i += 1
-		}
-		return i + 3
-	}
-	i += 2
-	for !(span[i] == '?' && span[i + 1] == '>') {
-		i += 1
-	}
-	return i + 2
+	p := raw_data(span)
+	past, _ := markup_end(p[i:], p[len(span):])
+	return intrinsics.ptr_sub(past, p)
 }
 
 // Decodes the value of an attribute, the bytes between its quotes: references are replaced by their characters, and a
@@ -89,13 +48,15 @@ markup_text :: proc "contextless" (span: []u8, i: int, buf: []u8, w: ^int, lines
 // its leading and trailing spaces, and each run of spaces is one.
 @(private)
 attribute_text :: proc "contextless" (span: []u8, buf: []u8, dtd: ^Dtd_View = nil, src: []u8 = nil, tokenized := false) -> (s: string, ok: bool) #no_bounds_check {
+	return decode_text(span, buf, dtd, src, true, tokenized)
+}
+
+@(private)
+decode_text :: #force_inline proc "contextless" (span, buf: []u8, dtd: ^Dtd_View, src: []u8, $ATTR: bool, tokenized: bool) -> (s: string, ok: bool) #no_bounds_check {
 	if dtd != nil {
 		x := Expander{dtd, src, buf, 0}
-		ok = expand(&x, span, true, true, 0)
-		s = string(buf[:x.w])
-		if tokenized {
-			s = collapse(buf[:x.w])
-		}
+		ok = expand(&x, span, true, ATTR, 0)
+		s = collapse(buf[:x.w]) if ATTR && tokenized else string(buf[:x.w])
 		return
 	}
 	if len(buf) < len(span) {
@@ -114,20 +75,28 @@ attribute_text :: proc "contextless" (span: []u8, buf: []u8, dtd: ^Dtd_View = ni
 			}
 			i += n
 		case '\r':
-			buf[w] = ' '
+			buf[w] = ' ' when ATTR else '\n'
 			w += 1
 			i += 2 if i + 1 < len(span) && span[i + 1] == '\n' else 1
 		case '\n', '\t':
-			buf[w] = ' '
+			buf[w] = ' ' when ATTR else c
 			w += 1
 			i += 1
+		case '<':
+			when !ATTR {
+				i = markup_text(span, i, buf, &w, true)
+			} else {
+				buf[w] = c
+				w += 1
+				i += 1
+			}
 		case:
 			buf[w] = c
 			w += 1
 			i += 1
 		}
 	}
-	return collapse(buf[:w]) if tokenized else string(buf[:w]), true
+	return collapse(buf[:w]) if ATTR && tokenized else string(buf[:w]), true
 }
 
 // The decode of a text that refers to the entities of `v`, written into `buf` at `w`.
@@ -152,7 +121,7 @@ expand :: proc "contextless" (x: ^Expander, span: []u8, top, attr: bool, nest: i
 			n, r, named := decode_reference(span[i:])
 			i += n
 			if !named {
-				if x.w + rune_size(r) > len(x.buf) {
+				if x.w + utf8.rune_size(r) > len(x.buf) {
 					return false
 				}
 				x.w += rune_text(x.buf[x.w:], r)
@@ -214,11 +183,6 @@ put_bytes :: #force_inline proc "contextless" (x: ^Expander, b: []u8) -> bool {
 	copy(x.buf[x.w:], b)
 	x.w += len(b)
 	return true
-}
-
-@(private)
-rune_size :: #force_inline proc "contextless" (r: rune) -> int {
-	return 1 if r < 0x80 else 2 if r < 0x800 else 3 if r < 0x10000 else 4
 }
 
 // Removes the leading and trailing spaces of `b` and makes each run of spaces one, in place.

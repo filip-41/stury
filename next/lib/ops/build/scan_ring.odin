@@ -128,28 +128,20 @@ scan_drop :: #force_no_inline proc "contextless" (h: ^Scanner, s: hook.Regs, f: 
 			a.node -= gone
 		}
 	}
-	kept, missing, counts := int(from.kept), int(from.missing), int(from.counts)
-	for k in h.kept.data[from.kept:h.kept.len] {
-		k := k
-		if scan_node_moved(&k.node, lo, hi) {
-			h.kept.data[kept] = k
-			kept += 1
+	compact_nodes :: #force_inline proc "contextless" (items: []$T, lo, hi: tape.Node_Index) -> int #no_bounds_check {
+		w := 0
+		for item in items {
+			item := item
+			if scan_node_moved(&item.node, lo, hi) {
+				items[w] = item
+				w += 1
+			}
 		}
+		return w
 	}
-	for m in h.missing.data[from.missing:h.missing.len] {
-		m := m
-		if scan_node_moved(&m.node, lo, hi) {
-			h.missing.data[missing] = m
-			missing += 1
-		}
-	}
-	for c in h.b.counts[from.counts:] {
-		c := c
-		if scan_node_moved(&c.node, lo, hi) {
-			h.b.counts[counts] = c
-			counts += 1
-		}
-	}
+	kept := int(from.kept) + compact_nodes(h.kept.data[from.kept:h.kept.len], lo, hi)
+	missing := int(from.missing) + compact_nodes(h.missing.data[from.missing:h.missing.len], lo, hi)
+	counts := int(from.counts) + compact_nodes(h.b.counts[from.counts:], lo, hi)
 	gone_kept, gone_missing, gone_counts := h.kept.len - u32(kept), h.missing.len - u32(missing), u32(len(h.b.counts) - counts)
 	h.kept.len = u32(kept)
 	h.missing.len = u32(missing)

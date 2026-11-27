@@ -120,26 +120,17 @@ walk_fragment :: proc(
 }
 
 @(private = "file")
-xml_walk_fragment_cb :: proc(
-	data: rawptr,
-	src: []u8,
-	range: edit.Byte_Range,
-	ctx: edit.Fragment_Context,
-	allocator: runtime.Allocator,
-) -> (edit.Fragment_Tape, tape.Error) {
-	_ = data
+xml_walk_fragment_cb :: proc(_: rawptr, src: []u8, range: edit.Byte_Range, ctx: edit.Fragment_Context, allocator: runtime.Allocator) -> (edit.Fragment_Tape, tape.Error) {
 	return walk_fragment(src, range, ctx, allocator)
 }
 
 @(private = "file")
-xml_full_build_cb :: proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> (tape.Document, tape.Error) {
-	_ = data
+xml_full_build_cb :: proc(_: rawptr, src: []u8, allocator: runtime.Allocator) -> (tape.Document, tape.Error) {
 	return build(src, .Xml, {}, allocator)
 }
 
 @(private = "file")
-xml_edit_validate :: proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> tape.Error {
-	_ = data
+xml_edit_validate :: proc(_: rawptr, src: []u8, allocator: runtime.Allocator) -> tape.Error {
 	return validate(src, .Xml, {}, allocator)
 }
 
@@ -211,33 +202,21 @@ xml_element_of :: proc "contextless" (doc: ^tape.Document, v: tape.Node_Index) -
 }
 
 @(private = "file")
-xml_spell_attr_val :: proc(data: rawptr, val: string, quote: u8, out: ^[dynamic]u8) -> edit.Error {
-	_ = data
+xml_spell_attr_val :: proc(_: rawptr, val: string, quote: u8, out: ^[dynamic]u8) -> edit.Error {
 	if !xml_valid_chars(transmute([]u8)val) {
 		return edit.refuse(.Unspellable_Value, "XML 1.0 cannot encode control character or noncharacter")
 	}
 	for c in transmute([]u8)val {
 		switch c {
-		case '&': append(out, "&amp;")
-		case '<': append(out, "&lt;")
-		case '>': append(out, "&gt;")
+		case '&':  append(out, "&amp;")
+		case '<':  append(out, "&lt;")
+		case '>':  append(out, "&gt;")
 		case '\t': append(out, "&#9;")
 		case '\n': append(out, "&#10;")
 		case '\r': append(out, "&#13;")
-		case '"':
-			if quote == '"' {
-				append(out, "&quot;")
-			} else {
-				append(out, '"')
-			}
-		case '\'':
-			if quote == '\'' {
-				append(out, "&apos;")
-			} else {
-				append(out, '\'')
-			}
-		case:
-			append(out, c)
+		case '"':  append(out, "&quot;" if quote == '"' else "\"")
+		case '\'': append(out, "&apos;" if quote == '\'' else "'")
+		case:      append(out, c)
 		}
 	}
 	return nil
@@ -310,21 +289,10 @@ xml_spell_content :: proc(data: rawptr, ov: ^Overlay, h: Handle, out: ^[dynamic]
 	}
 	defer delete(encoded, ov.allocator)
 
-	// `xml.write` emits `<_ .../>` (empty) or `<_ ...>CONTENT</_>`. Strip the synthetic outer `<_>` / `</_>` wrapper!
-	if len(encoded) >= 4 && string(encoded[:3]) == "<_>" && string(encoded[len(encoded) - 4:]) == "</_>" {
-		append(out, ..encoded[3 : len(encoded) - 4])
-		return nil
-	}
-	// If wrapper carried attributes (when `h` had attributes on itself), find the first `>` and strip trailing `</_>`.
-	if len(encoded) >= 4 && encoded[0] == '<' && encoded[1] == '_' {
-		if encoded[len(encoded) - 2] == '/' && encoded[len(encoded) - 1] == '>' {
-			return nil
-		}
-		for i := 2; i < len(encoded); i += 1 {
-			if encoded[i] == '>' && len(encoded) >= i + 5 && string(encoded[len(encoded) - 4:]) == "</_>" {
-				append(out, ..encoded[i + 1 : len(encoded) - 4])
-				return nil
-			}
+	// `xml.write` emits `<_ .../>` (empty) or `<_ ...>CONTENT</_>`. Strip the synthetic outer `<_>` / `</_>` wrapper.
+	if len(encoded) >= 4 && encoded[0] == '<' && encoded[1] == '_' && !(encoded[len(encoded) - 2] == '/' && encoded[len(encoded) - 1] == '>') {
+		if gt := kernel.index_byte(encoded[2:], '>'); gt >= 0 && len(encoded) >= gt + 7 && string(encoded[len(encoded) - 4:]) == "</_>" {
+			append(out, ..encoded[gt + 3 : len(encoded) - 4])
 		}
 	}
 	return nil

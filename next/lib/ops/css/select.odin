@@ -273,50 +273,26 @@ subtree_has_partial :: proc "contextless" (doc: ^tape.Document, from: tape.Node_
 	return false
 }
 
-// Whether keys `a` and `b` of the document read as one name.
+// Whether keys `a` and `b` have the same element type name, folding ASCII case when `m.opts.fold` is set.
 @(private)
-same_name :: #force_inline proc(m: ^Matcher, a, b: tape.Node_Index) -> bool {
-	if .Held not_in m.doc.flags && m.doc.format != nil && m.doc.format.same_text != nil {
+same_type :: proc(m: ^Matcher, a, b: tape.Node_Index) -> bool {
+	if !m.opts.fold && .Held not_in m.doc.flags && m.doc.format != nil && m.doc.format.same_text != nil {
 		return m.doc.format.same_text(m.doc.src, m.doc.nodes[a], m.doc.src, m.doc.nodes[b])
 	}
 	abuf, bbuf: [64]u8
 	sa, aok := tape.node_text(m.doc, m.doc.nodes[a], abuf[:])
 	sb, bok := tape.node_text(m.doc, m.doc.nodes[b], bbuf[:])
-	if aok && bok {
-		return sa == sb
+	if !aok || !bok {
+		ra := tape.text_room(m.doc, m.doc.nodes[a])
+		rb := tape.text_room(m.doc, m.doc.nodes[b])
+		if err := resize(&m.scratch, ra + rb); err != nil {
+			m.err = err
+			return false
+		}
+		sa, _ = tape.node_text(m.doc, m.doc.nodes[a], m.scratch[:ra])
+		sb, _ = tape.node_text(m.doc, m.doc.nodes[b], m.scratch[ra:ra + rb])
 	}
-	ra := tape.text_room(m.doc, m.doc.nodes[a])
-	rb := tape.text_room(m.doc, m.doc.nodes[b])
-	if err := resize(&m.scratch, ra + rb); err != nil {
-		m.err = err
-		return false
-	}
-	sa, _ = tape.node_text(m.doc, m.doc.nodes[a], m.scratch[:ra])
-	sb, _ = tape.node_text(m.doc, m.doc.nodes[b], m.scratch[ra:ra + rb])
-	return sa == sb
-}
-
-// Whether keys `a` and `b` have the same element type name, folding ASCII case when `m.opts.fold` is set.
-@(private)
-same_type :: proc(m: ^Matcher, a, b: tape.Node_Index) -> bool {
-	if !m.opts.fold {
-		return same_name(m, a, b)
-	}
-	abuf, bbuf: [64]u8
-	sa, aok := tape.node_text(m.doc, m.doc.nodes[a], abuf[:])
-	sb, bok := tape.node_text(m.doc, m.doc.nodes[b], bbuf[:])
-	if aok && bok {
-		return fold_equal(sa, sb)
-	}
-	ra := tape.text_room(m.doc, m.doc.nodes[a])
-	rb := tape.text_room(m.doc, m.doc.nodes[b])
-	if err := resize(&m.scratch, ra + rb); err != nil {
-		m.err = err
-		return false
-	}
-	sa, _ = tape.node_text(m.doc, m.doc.nodes[a], m.scratch[:ra])
-	sb, _ = tape.node_text(m.doc, m.doc.nodes[b], m.scratch[ra:ra + rb])
-	return fold_equal(sa, sb)
+	return names_equal(m.opts.fold, sa, sb)
 }
 
 // Whether key `k` names an element, not a run of text.

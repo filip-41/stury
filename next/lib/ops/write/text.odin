@@ -161,13 +161,24 @@ scratch_grow :: #force_no_inline proc(w: ^Tree, room: int) -> bool {
 	return true
 }
 
+@(private = "file")
+number_buf :: #force_inline proc(w: ^Tree, buf: ^[NUMBER_ROOM]u8, room: int) -> ([]u8, bool) {
+	if room <= len(buf) {
+		return buf[:], true
+	}
+	if len(w.scratch) < room && !scratch_grow(w, room) {
+		return nil, false
+	}
+	return w.scratch, true
+}
+
 // The RFC 8259 text of number node `at`: in a binary format its value in decimal, exact, else its bytes when they are
 // one, a JSON5 decimal (`+1`, `.5`, `5.`) or hex integer spelled as one exactly, in `buf` or the walk's scratch, else
 // its value's decimal, the shortest that reads back as the same binary64 for a fraction, with `.0` added to a whole one
 // so it stays a float. False for a value with none: infinite, not a number, past 64 bits with no exact spelling, or
 // with `w.err` set when the scratch cannot grow. Invariant: `at` is a valid index in `w.doc.nodes`.
 @(require_results)
-number_text :: proc(w: ^Tree, at: tape.Node_Index, buf: ^[NUMBER_ROOM]u8) -> (string, bool) #no_bounds_check {
+number_text :: proc(w: ^Tree, at: tape.Node_Index, buf: ^[NUMBER_ROOM]u8) -> (res: string, ok: bool) #no_bounds_check {
 	doc := w.doc
 	t := doc.nodes[at]
 	if .Binary in doc.format.caps {
@@ -176,15 +187,9 @@ number_text :: proc(w: ^Tree, at: tape.Node_Index, buf: ^[NUMBER_ROOM]u8) -> (st
 		if room == 0 {
 			return "", false
 		}
-		dst := buf[:]
-		if room > len(dst) {
-			if len(w.scratch) < room && !scratch_grow(w, room) {
-				return "", false
-			}
-			dst = w.scratch
-		}
-		s, ok := tape.node_text(doc, t, dst)
-		return s, ok && len(s) > 0
+		dst := number_buf(w, buf, room) or_return
+		s, node_ok := tape.node_text(doc, t, dst)
+		return s, node_ok && len(s) > 0
 	}
 	b := tape.span_bytes(doc, t.lo, t.n)
 	// A `+` is the one sign JSON5 adds to a number that is otherwise RFC 8259's, and its text is the bytes after it.
@@ -201,26 +206,12 @@ number_text :: proc(w: ^Tree, at: tape.Node_Index, buf: ^[NUMBER_ROOM]u8) -> (st
 			}
 			if digits <= MAX_HEX_DIGITS {
 				// A hex digit is under 1.21 decimal digits, plus optional sign.
-				room := digits * 5 / 4 + 4
-				dst := buf[:]
-				if room > len(dst) {
-					if len(w.scratch) < room && !scratch_grow(w, room) {
-						return "", false
-					}
-					dst = w.scratch
-				}
+				dst := number_buf(w, buf, digits * 5 / 4 + 4) or_return
 				return string(dst[:decimal_of_hex(dst, b, hex_at)]), true
 			}
 		} else if len(b) <= max(int) - 2 {
 			// A single-point decimal gains at most a `0` on each side of its point.
-			room := len(b) + 2
-			dst := buf[:]
-			if room > len(dst) {
-				if len(w.scratch) < room && !scratch_grow(w, room) {
-					return "", false
-				}
-				dst = w.scratch
-			}
+			dst := number_buf(w, buf, len(b) + 2) or_return
 			s := dst[:respell_decimal5(dst, b)]
 			if is_json_number(s) {
 				return string(s), true

@@ -1,6 +1,7 @@
 package json
 
 import "base:runtime"
+import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
 import "stury:lib/ops/edit"
 import ops_write "stury:lib/ops/write"
@@ -221,15 +222,7 @@ json_spell_value :: proc(
 			same_compat := bf != nil && (bf.id == tape.FORMAT_ID_JSON || bf == as(jc.spec))
 			if same_compat {
 				if blo, bhi, bok := edit.node_byte_span(ov.base, n.val.base_ref); bok && bhi <= u64(len(ov.base.src)) {
-					raw := ov.base.src[blo:bhi]
-					has_nl := false
-					for b in raw {
-						if b == '\n' {
-							has_nl = true
-							break
-						}
-					}
-					if !has_nl {
+					if raw := ov.base.src[blo:bhi]; kernel.index_byte(raw, '\n') < 0 {
 						append(out, ..raw)
 						return nil
 					}

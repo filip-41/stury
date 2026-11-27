@@ -97,3 +97,49 @@ write_schema_deep_2000_levels_in_one_mib_stack :: proc(t: ^testing.T) {
 	}
 	testkit.expect_reads_on_thread(t, 1 << 20, 1, transmute([]u8)strings.to_string(b), "write_schema 2k deep", run_deep_write_on_thread)
 }
+
+@(private = "file")
+run_deep_odin_and_compare_on_thread :: proc(_: int, text: []u8) -> bool {
+	doc, berr := json.build(text, .Json, {budget = {depth = 5000}})
+	if berr != nil {
+		return false
+	}
+	defer tape.destroy_document(&doc)
+
+	d, rerr := schema.read(&doc)
+	if rerr.kind != .None {
+		schema.error_destroy(&rerr)
+		return false
+	}
+	defer rules.description_destroy(&d)
+
+	src, oerr := schema.write_odin(&d, "deep_pkg")
+	if oerr.kind != .None {
+		schema.error_destroy(&oerr)
+		return false
+	}
+	defer delete(src)
+
+	cmp, cerr := schema.compare(&d, &d)
+	if cerr != .None {
+		return false
+	}
+	defer schema.comparison_destroy(&cmp)
+	return len(src) > 10_000 && cmp.old_in_new.verdict == .Yes && cmp.new_in_old.verdict == .Yes && len(cmp.changes) == 0
+}
+
+@(test)
+odin_and_compare_deep_2000_levels_in_one_mib_stack :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	DEPTH :: 2_000
+	b := strings.builder_make(0, DEPTH * 36 + 32)
+	defer strings.builder_destroy(&b)
+	for _ in 0 ..< DEPTH {
+		strings.write_string(&b, `{"type":"object","properties":{"a":`)
+	}
+	strings.write_string(&b, `{"type":"integer"}`)
+	for _ in 0 ..< DEPTH {
+		strings.write_string(&b, `}}`)
+	}
+	testkit.expect_reads_on_thread(t, 1 << 20, 1, transmute([]u8)strings.to_string(b), "write_odin+compare 2k deep", run_deep_odin_and_compare_on_thread)
+}

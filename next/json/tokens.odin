@@ -1,6 +1,5 @@
 package json
 
-import "base:intrinsics"
 import "core:io"
 import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
@@ -22,14 +21,8 @@ Writer :: struct {
 // `Bad_Option{"format"}`.
 @(require_results)
 writer_start :: proc(w: ^Writer, opts := Write_Options{}, sink := io.Writer{}, allocator := context.allocator) -> Write_Error {
-	if opts.format != nil {
-		return tape.Bad_Option{"format"}
-	}
-	if opts.grow_header || len(opts.header) > 0 {
-		return tape.Bad_Option{"header" if len(opts.header) > 0 else "options"}
-	}
-	if opts.framing == .Lines && !write.compact(opts) {
-		return tape.Bad_Option{"framing"}
+	if err := check_write_opts(opts); err != nil {
+		return err
 	}
 	w^ = {opts = opts}
 	write.sequence_start(&w.seq, opts.framing != .None, 0, allocator)
@@ -66,10 +59,12 @@ token :: proc(w: ^Writer, kind: write.Token_Kind, text := "") -> Write_Error {
 	}
 	out := &w.out
 	pretty := !write.compact(w.opts)
+	fill := u64(0x0909_0909_0909_0909) if w.opts.tab else u64(0x2020_2020_2020_2020)
+	width := 1 if w.opts.tab else int(w.opts.indent)
 	switch kind {
 	case .Close:
 		if pretty && !p.empty {
-			put_line(out, w.opts, p.depth)
+			write.line_indent(out, width, fill, p.depth)
 		}
 		write.put_byte(out, '}' if p.object else ']')
 	case .Key:
@@ -77,9 +72,9 @@ token :: proc(w: ^Writer, kind: write.Token_Kind, text := "") -> Write_Error {
 			write.put_byte(out, ',')
 		}
 		if pretty {
-			put_line(out, w.opts, p.depth)
+			write.line_indent(out, width, fill, p.depth)
 		}
-		put_text_string(out, w.opts, text)
+		put_string(out, w.opts.ascii, text)
 		write.put_byte(out, ':')
 		if pretty {
 			write.put_byte(out, ' ')
@@ -93,13 +88,13 @@ token :: proc(w: ^Writer, kind: write.Token_Kind, text := "") -> Write_Error {
 				write.put_byte(out, ',')
 			}
 			if pretty {
-				put_line(out, w.opts, p.depth)
+				write.line_indent(out, width, fill, p.depth)
 			}
 		}
 		switch kind {
 		case .Object: write.put_byte(out, '{')
 		case .Array: write.put_byte(out, '[')
-		case .String: put_text_string(out, w.opts, text)
+		case .String: put_string(out, w.opts.ascii, text)
 		case .Number: write.put(out, transmute([]u8)text)
 		case .True: write.put(out, transmute([]u8)string("true"))
 		case .False: write.put(out, transmute([]u8)string("false"))
@@ -139,45 +134,4 @@ writer_drop :: proc(w: ^Writer) {
 	write.sequence_drop(&w.seq)
 	write.out_drop(&w.out)
 	w^ = {}
-}
-
-// A line end and the indent of `depth` levels.
-@(private)
-put_line :: proc(out: ^write.Out, opts: Write_Options, depth: int) #no_bounds_check {
-	fill := u64(0x0909_0909_0909_0909) if opts.tab else u64(0x2020_2020_2020_2020)
-	width := 1 if opts.tab else int(opts.indent)
-	n := depth * width
-	if n + 9 > write.ROOM_MAX {
-		put_line_long(out, fill, n)
-		return
-	}
-	p := write.room(out, n + 9)
-	p[0] = '\n'
-	for k := 0; k < n; k += 8 {
-		intrinsics.unaligned_store((^u64)(p[1 + k:]), fill)
-	}
-	out.cursor += n + 1
-}
-
-@(private, cold)
-put_line_long :: #force_no_inline proc(out: ^write.Out, fill: u64, n: int) #no_bounds_check {
-	write.put_byte(out, '\n')
-	for left := n; left > 0; {
-		k := min(left, write.ROOM_MAX - 8)
-		p := write.room(out, k + 8)
-		for i := 0; i < k; i += 8 {
-			intrinsics.unaligned_store((^u64)(p[i:]), fill)
-		}
-		out.cursor += k
-		left -= k
-	}
-}
-
-@(private)
-put_text_string :: proc(out: ^write.Out, opts: Write_Options, s: string) {
-	if opts.ascii {
-		put_ascii(out, s, true)
-	} else {
-		put_escaped(out, s)
-	}
 }

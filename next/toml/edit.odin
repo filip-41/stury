@@ -129,84 +129,31 @@ resolve_edit_spec :: proc "contextless" (ov: ^Overlay, spec: Maybe(Spec), opts: 
 }
 
 @(private = "file")
-toml_walk_fragment_cb :: proc(
-	data: rawptr,
-	src: []u8,
-	range: edit.Byte_Range,
-	ctx: edit.Fragment_Context,
-	allocator: runtime.Allocator,
-) -> (edit.Fragment_Tape, tape.Error) {
-	tc := (^Toml_Edit_Ctx)(data)
-	return walk_fragment(src, range, ctx, tc.spec, allocator)
+toml_walk_fragment_cb :: proc(data: rawptr, src: []u8, range: edit.Byte_Range, ctx: edit.Fragment_Context, allocator: runtime.Allocator) -> (edit.Fragment_Tape, tape.Error) {
+	return walk_fragment(src, range, ctx, (^Toml_Edit_Ctx)(data).spec, allocator)
 }
 
 @(private = "file")
 toml_full_build_cb :: proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> (tape.Document, tape.Error) {
-	tc := (^Toml_Edit_Ctx)(data)
-	return build(src, tc.spec, {}, allocator)
+	return build(src, (^Toml_Edit_Ctx)(data).spec, {}, allocator)
 }
 
 @(private = "file")
 toml_edit_validate :: proc(data: rawptr, src: []u8, allocator: runtime.Allocator) -> tape.Error {
-	tc := (^Toml_Edit_Ctx)(data)
-	return validate(src, tc.spec, {}, allocator)
+	return validate(src, (^Toml_Edit_Ctx)(data).spec, {}, allocator)
 }
 
 @(private = "file")
-toml_bare_key :: proc "contextless" (s: string) -> bool {
-	if len(s) == 0 {
-		return false
-	}
-	for c in transmute([]u8)s {
-		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
-		if !ok {
-			return false
-		}
-	}
-	return true
-}
-
-@(private = "file")
-toml_spell_key :: proc(data: rawptr, key: string, out: ^[dynamic]u8) -> edit.Error {
-	_ = data
+toml_spell_key :: proc(_: rawptr, key: string, out: ^[dynamic]u8) -> edit.Error {
 	if !utf8.valid_string(key) {
 		return edit.refuse(.Bad_Name, "TOML key must be valid UTF-8")
 	}
-	if toml_bare_key(key) {
+	if is_bare_key(key) {
 		append(out, key)
 		return nil
 	}
 	edit.append_quoted_escaped(out, key, '"', escape_del = true)
 	return nil
-}
-
-@(private = "file")
-toml_can_literal :: proc "contextless" (s: string, multiline: bool) -> bool {
-	if !utf8.valid_string(s) {
-		return false
-	}
-	q_run := 0
-	for c in transmute([]u8)s {
-		if c == '\'' {
-			if !multiline {
-				return false
-			}
-			q_run += 1
-			if q_run >= 3 {
-				return false
-			}
-		} else {
-			q_run = 0
-		}
-		if c < 0x20 && c != '\t' && !(multiline && (c == '\n' || c == '\r')) {
-			return false
-		}
-		if c == 0x7F {
-			return false
-		}
-	}
-	// In multiline literal `'''...'''`, trailing `'` cannot exceed 2 quotes (avoid `''''''`).
-	return !multiline || q_run == 0
 }
 
 // Reuses `toml.write` via `edit.materialize_subtree` for full-document `--reflow`!
@@ -224,6 +171,18 @@ toml_spell_document :: proc(data: rawptr, ov: ^Overlay, out: ^[dynamic]u8) -> ed
 	defer delete(encoded, ov.allocator)
 	append(out, ..encoded)
 	return nil
+}
+
+@(private = "file")
+edit_node_string :: proc(ov: ^Overlay, n: ^edit.Edit_Node) -> (txt: string, tmp: edit.Tmp_Text) {
+	if n.state == .Replaced && n.val.kind == .String {
+		return n.val.text, {}
+	}
+	if n.base != tape.NO_NODE {
+		tmp = edit.decode_node_text_tmp(ov.base, n.base, ov.allocator)
+		return tmp.text, tmp
+	}
+	return "", {}
 }
 
 // Reuses `toml.write` via `edit.materialize_subtree` wrapped in `v = <val>` for scalars, arrays, and inline tables!
@@ -260,16 +219,8 @@ toml_spell_value :: proc(
 		if !known_dt {
 			return edit.refuse(.Fact_No_Place, "unknown TOML datetime tag", n.base)
 		}
-		txt: string
-		tmp_tk: edit.Tmp_Text
-		if n.state == .Replaced && n.val.kind == .String {
-			txt = n.val.text
-		} else if n.base != tape.NO_NODE {
-			tmp_tk = edit.decode_node_text_tmp(ov.base, n.base, ov.allocator)
-			txt = tmp_tk.text
-		}
+		txt, tmp_tk := edit_node_string(ov, n)
 		defer edit.free_tmp_text(tmp_tk, ov.allocator)
-		// Validate via `toml.validate` on `v = <txt>`.
 		chk := make([]u8, 4 + len(txt), ov.allocator)
 		defer delete(chk, ov.allocator)
 		copy(chk[:4], "v = ")
@@ -283,35 +234,23 @@ toml_spell_value :: proc(
 
 	// Explicit string style overrides (`"literal"`, `"multiline"`, `"multiline_literal"`):
 	if len(style) > 0 && edit.node_kind(ov, h) == .String {
-		txt: string
-		tmp_tk: edit.Tmp_Text
-		if n.state == .Replaced && n.val.kind == .String {
-			txt = n.val.text
-		} else if n.base != tape.NO_NODE {
-			tmp_tk = edit.decode_node_text_tmp(ov.base, n.base, ov.allocator)
-			txt = tmp_tk.text
-		}
+		txt, tmp_tk := edit_node_string(ov, n)
 		defer edit.free_tmp_text(tmp_tk, ov.allocator)
 		if !utf8.valid_string(txt) {
 			return edit.refuse(.Unspellable_Value, "TOML string must be valid UTF-8", n.base)
 		}
 		switch style {
 		case "literal":
-			if toml_can_literal(txt, false) {
-				append(out, '\'')
-				append(out, txt)
-				append(out, '\'')
+			if is_literal(txt, false) {
+				append(out, '\''); append(out, txt); append(out, '\'')
 				return nil
 			}
 		case "multiline_literal":
-			if toml_can_literal(txt, true) {
-				append(out, "'''\n")
-				append(out, txt)
-				append(out, "'''")
+			if is_literal(txt, true) && (len(txt) == 0 || txt[len(txt) - 1] != '\'') {
+				append(out, "'''\n"); append(out, txt); append(out, "'''")
 				return nil
 			}
 		case "multiline":
-			// Delegate safely: escape every `"` inside `"""..."""` when trailing or triple-quoted (prevents `"""x""""`!).
 			append(out, "\"\"\"\n")
 			toml_append_multiline_basic_body(out, txt)
 			append(out, "\"\"\"")

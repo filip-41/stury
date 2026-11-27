@@ -280,11 +280,11 @@ segment_facts :: proc(arg: rawptr, k: int) {
 @(private)
 DUP_BUCKETS :: 128
 
-// Hash-bucketed parallel duplicate-key check for `parts_build`: whole inner objects are checked in each segment with a
+// Hash-bucketed parallel duplicate-key check for `segments_join`: whole inner objects are checked in each segment with a
 // stack scratch buffer (no heap allocs for <= 32 keys), while crossing keys scatter into `DUP_BUCKETS` node-ordered
 // buckets and probe L2-resident open-addressed hash tables in parallel with no sorting.
-@(private, require_results)
-segments_dups_fast :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicates, rules: ^tape.Rules, runner: ^tape.Runner) -> tape.Error {
+@(require_results)
+segments_dups :: proc(doc: ^tape.Document, segs: []Segment, dups: tape.Duplicates, rules: ^tape.Rules, runner: ^tape.Runner) -> tape.Error {
 	if !dups_apply(doc, dups) {
 		return nil
 	}
@@ -448,24 +448,20 @@ dup_scan_part :: proc(arg: rawptr, k: int) #no_bounds_check {
 			overflow := false
 			for m := tape.Node_Index(i) + 1; int(m) < i + int(node.n); m = tape.node_after(doc, tape.node_after(doc, m)) {
 				hk := Hashed_Key{doc.format.key_hash(doc.src, doc.nodes[m]), 0, m}
+				if !overflow && inline_n < len(inline_scratch) {
+					inline_scratch[inline_n] = hk
+					inline_n += 1
+					continue
+				}
 				if !overflow {
-					if inline_n < len(inline_scratch) {
-						inline_scratch[inline_n] = hk
-						inline_n += 1
-					} else {
-						clear(&p.scratch)
-						if _, p.err = append(&p.scratch, ..inline_scratch[:]); p.err != nil {
-							return
-						}
-						if _, p.err = append(&p.scratch, hk); p.err != nil {
-							return
-						}
-						overflow = true
-					}
-				} else {
-					if _, p.err = append(&p.scratch, hk); p.err != nil {
+					clear(&p.scratch)
+					if _, p.err = append(&p.scratch, ..inline_scratch[:]); p.err != nil {
 						return
 					}
+					overflow = true
+				}
+				if _, p.err = append(&p.scratch, hk); p.err != nil {
+					return
 				}
 			}
 			obj_keys := p.scratch[:] if overflow else inline_scratch[:inline_n]

@@ -291,24 +291,16 @@ paths_through_long_runs_of_siblings :: proc(t: ^testing.T) {
 @(test)
 faults_say_where_and_why :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	refused(t, "", .None, 0)
-	refused(t, "a,", .None, 2)
-	refused(t, "a >", .None, 3)
-	refused(t, "a[b", .None, 3)
-	refused(t, "a[b=]", .Syntax, 4)
-	refused(t, "a[b=c x]", .Syntax, 6)
-	refused(t, "a:hover", .Pseudo_Class, 1)
-	refused(t, "a:is(b):focus-within", .Pseudo_Class, 7)
-	refused(t, "p:nth-child(2n+)", .Syntax, 15)
-	refused(t, "p::before", .Pseudo_Element, 1)
-	refused(t, "p:first-line", .Pseudo_Element, 1)
-	refused(t, "svg|a", .Namespace, 0)
-	refused(t, "*|a", .Namespace, 0)
-	refused(t, "[svg|href]", .Namespace, 1)
-	refused(t, "a::", .Pseudo_Element, 1)
-	refused(t, "#1a", .Syntax, 1)
-	refused(t, "a)", .Syntax, 1)
-	refused(t, ":has()", .Syntax, 5)
+	for tc in ([?]struct { sel: string, detail: css.Detail, at: u64 }{
+		{"", .None, 0}, {"a,", .None, 2}, {"a >", .None, 3}, {"a[b", .None, 3},
+		{"a[b=]", .Syntax, 4}, {"a[b=c x]", .Syntax, 6}, {"a:hover", .Pseudo_Class, 1},
+		{"a:is(b):focus-within", .Pseudo_Class, 7}, {"p:nth-child(2n+)", .Syntax, 15},
+		{"p::before", .Pseudo_Element, 1}, {"p:first-line", .Pseudo_Element, 1},
+		{"svg|a", .Namespace, 0}, {"*|a", .Namespace, 0}, {"[svg|href]", .Namespace, 1},
+		{"a::", .Pseudo_Element, 1}, {"#1a", .Syntax, 1}, {"a)", .Syntax, 1}, {":has()", .Syntax, 5},
+	}) {
+		refused(t, tc.sel, tc.detail, tc.at)
+	}
 }
 
 @(test)

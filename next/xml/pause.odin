@@ -107,14 +107,10 @@ resume :: proc "contextless" (w: ^Walk($H, $LAX), src: []u8, end: [^]u8, hs: hoo
 	pc := w.pause
 	p := w.base[pc.at:]
 	switch pc.place {
-	case .Prolog:
-		return prolog(w, src, 0, hs.a, hs.b, hs.c, on)
-	case .Content:
-		return st_content(p, end, pc.depth, w, hs.a, hs.b, hs.c, on)
-	case .Member:
-		return st_member(p, end, pc.depth, w, hs.a, hs.b, hs.c, on)
-	case .Epilog:
-		return st_epilog(p, end, pc.depth, w, hs.a, hs.b, hs.c, on)
+	case .Prolog:  return prolog(w, src, 0, hs.a, hs.b, hs.c, on)
+	case .Content: return st_content(p, end, pc.depth, w, hs.a, hs.b, hs.c, on)
+	case .Member:  return st_member(p, end, pc.depth, w, hs.a, hs.b, hs.c, on)
+	case .Epilog:  return st_epilog(p, end, pc.depth, w, hs.a, hs.b, hs.c, on)
 	}
 	return 0
 }

@@ -131,50 +131,42 @@ ip_canonical :: proc(h: ^Heap, v: Value) -> (res: Value, status: Status) {
 // Whether address `v` is in the network `cidr`, `address/length`. An address of the other family is not.
 @(require_results)
 ip_in_cidr :: proc(h: ^Heap, v, cidr: Value) -> (res: bool, status: Status) {
+	bad_cidr :: proc(h: ^Heap, cidr: Value) -> (bool, Status) {
+		return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+	}
 	a := address_of(h, v) or_return
 	text := text_of(cidr) if is_text(cidr) else ""
 	slash := strings.index_byte(text, '/')
 	if slash <= 0 || slash + 1 >= len(text) {
-		return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+		return bad_cidr(h, cidr)
 	}
 	net_addr, addr_ok := parse_address(text[:slash])
 	if !addr_ok {
-		return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+		return bad_cidr(h, cidr)
 	}
 	plen_str := text[slash + 1:]
 	if len(plen_str) > 3 || (len(plen_str) > 1 && plen_str[0] == '0') {
-		return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+		return bad_cidr(h, cidr)
 	}
-	plen := 0
-	for c in transmute([]u8)plen_str {
-		if c < '0' || c > '9' {
-			return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
-		}
-		plen = plen * 10 + int(c - '0')
+	plen, pok := decimal_below(plen_str, 1000)
+	if !pok {
+		return bad_cidr(h, cidr)
 	}
 	switch n in net_addr {
 	case net.IP4_Address:
 		if plen > 32 {
-			return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+			return bad_cidr(h, cidr)
 		}
 		b, same := a.(net.IP4_Address)
-		if !same {
-			return false, .Ok
-		}
-		nb := n
-		bb := b
-		return bytes_match_prefix(nb[:], bb[:], plen), .Ok
+		nb, bb := n, b
+		return same && bytes_match_prefix(nb[:], bb[:], int(plen)), .Ok
 	case net.IP6_Address:
 		if plen > 128 {
-			return false, fail(h, .Parse, .Address, cidr, detail = "is not a CIDR network")
+			return bad_cidr(h, cidr)
 		}
 		b, same := a.(net.IP6_Address)
-		if !same {
-			return false, .Ok
-		}
-		nb := transmute([16]u8)n
-		bb := transmute([16]u8)b
-		return bytes_match_prefix(nb[:], bb[:], plen), .Ok
+		nb, bb := transmute([16]u8)n, transmute([16]u8)b
+		return same && bytes_match_prefix(nb[:], bb[:], int(plen)), .Ok
 	}
 	return false, .Ok
 }

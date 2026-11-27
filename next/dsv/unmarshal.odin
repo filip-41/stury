@@ -37,12 +37,9 @@ unmarshal :: #force_inline proc(src: []u8, target: ^$T, spec := Spec.Csv, read :
 @(private)
 unmarshal_type :: #force_inline proc(src: []u8, target: rawptr, T: typeid, spec: Spec, read: Unmarshal_Options, opts: Options, allocator: runtime.Allocator) -> tape.Error {
 	switch spec {
-	case .Csv:
-		return unmarshal_as(src, target, T, .Csv, read, opts, allocator)
-	case .Tsv:
-		return unmarshal_as(src, target, T, .Tsv, read, opts, allocator)
-	case .Plain:
-		return unmarshal_as(src, target, T, .Plain, read, opts, allocator)
+	case .Csv:   return unmarshal_as(src, target, T, .Csv, read, opts, allocator)
+	case .Tsv:   return unmarshal_as(src, target, T, .Tsv, read, opts, allocator)
+	case .Plain: return unmarshal_as(src, target, T, .Plain, read, opts, allocator)
 	}
 	return tape.Bad_Option{"spec"}
 }
@@ -58,18 +55,13 @@ unmarshal_as :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: 
 		d.no_header = true
 		o.format = d
 	}
-	if e := refuse_repeat(src, S, o, allocator); e != nil {
-		return e
-	}
+	refuse_repeat(src, S, o, allocator) or_return
 	if o.runner != nil && o.runner.threads > 0 && o.pieces == nil && o.budget.steps == 0 && len(src) >= typed.PARALLEL_FROM {
 		if err, done := unmarshal_parallel(src, target, T, S, read, o, allocator); done {
 			return err
 		}
 	}
-	if o.budget.steps != 0 {
-		return unmarshal_walk(src, target, T, S, true, read, o, allocator)
-	}
-	return unmarshal_walk(src, target, T, S, false, read, o, allocator)
+	return unmarshal_walk(src, target, T, S, true, read, o, allocator) if o.budget.steps != 0 else unmarshal_walk(src, target, T, S, false, read, o, allocator)
 }
 
 // Whether `T` is a list of rows that are lists of cells, which take the header's line as a record.
@@ -77,14 +69,10 @@ unmarshal_as :: #force_no_inline proc(src: []u8, target: rawptr, T: typeid, $S: 
 list_rows :: proc(T: typeid) -> bool {
 	list :: proc(ti: ^runtime.Type_Info) -> ^runtime.Type_Info {
 		#partial switch v in runtime.type_info_base(ti).variant {
-		case ^runtime.Type_Info_Slice:
-			return v.elem
-		case ^runtime.Type_Info_Dynamic_Array:
-			return v.elem
-		case ^runtime.Type_Info_Array:
-			return v.elem
-		case ^runtime.Type_Info_Enumerated_Array:
-			return v.elem
+		case ^runtime.Type_Info_Slice:            return v.elem
+		case ^runtime.Type_Info_Dynamic_Array:    return v.elem
+		case ^runtime.Type_Info_Array:            return v.elem
+		case ^runtime.Type_Info_Enumerated_Array: return v.elem
 		}
 		return nil
 	}

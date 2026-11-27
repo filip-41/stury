@@ -22,10 +22,40 @@ Record_Walk :: struct {
 
 // A format's framing: the next record's first byte and the end its walk may read to, or false once the records have
 // ended, with `err` set by the format when a fault ends them, judging what it passes with memory from `allocator`, the
-// record's. Its `$walk` walks the record from `lo` to `cut` for the
-// read's hook, first in the walk of the whole text, or with `alone` as a text of its bytes alone, which gives only
-// `res` and `tolerated`.
+// record's. Its `$walk` walks the record from `lo` to `cut` for the read's hook, first in the walk of the whole text,
+// or with `alone` as a text of its bytes alone, which gives only `res` and `tolerated`.
 Record_Frame :: #type proc(r: ^tape.Records, allocator: runtime.Allocator) -> (lo, cut: u64, ok: bool)
+
+// Handles a framing or walk failure: resolves budget errors, checks streaming window width, and skips/quarantines bad
+// records when configured. Returns `skipped = true` with `bad` when the caller should continue the batch loop.
+@(private = "file", cold)
+records_gap :: proc(r: ^tape.Records, m: ^hook.Memory_Budget) -> (bad: tape.Record, skipped: bool) {
+	r.err = hook.memory_budget_error(m, r.err)
+	if r.err == nil && window_too_wide(r) {
+		records_stop(r, tape.record_too_long(r.pos if r.at != .Start else 0))
+		return {}, false
+	}
+	if r.err != nil && (r.skip_bad || r.quarantine != nil) {
+		if skipped_rec, ok := tape.records_skip(r); ok {
+			if !quarantine_add(r, skipped_rec) {
+				return {}, false
+			}
+			r.index += 1
+			return {lo = skipped_rec.lo, hi = skipped_rec.hi, err = skipped_rec.err}, true
+		}
+	}
+	return {}, false
+}
+
+// Stops `r` with `record_too_long(lo)` and returns true when `[lo, hi)` exceeds `r.max_bytes`.
+@(private = "file")
+reject_wide :: #force_inline proc "contextless" (r: ^tape.Records, lo, hi: u64) -> bool {
+	if record_too_wide(r, lo, hi) {
+		records_stop(r, tape.record_too_long(lo))
+		return true
+	}
+	return false
+}
 
 // Reads the next records of `r`, judges each, and keeps in `out` those that do not read. With `one` it reads one
 // record.
@@ -34,6 +64,7 @@ records_validate :: proc(r: ^tape.Records, out: []tape.Record, format: ^tape.For
 		records_stop(r, tape.Bad_Option{"dups"})
 		return
 	}
+	delimited := r.framing == .Lines || r.framing == .Seq
 	m: hook.Read_Budget
 	ctx := context
 	h: hook.No_Hooks
@@ -42,56 +73,32 @@ records_validate :: proc(r: ^tape.Records, out: []tape.Record, format: ^tape.For
 		allocator := hook.read_budget(&m, r.opts, caller)
 		lo, cut, framed := frame(r, allocator)
 		if !framed {
-			r.err = hook.memory_budget_error(&m.main, r.err)
-			if r.err == nil && window_too_wide(r) {
-				records_stop(r, tape.record_too_long(r.pos if r.at != .Start else 0))
-				break
-			}
-			if r.err != nil && (r.skip_bad || r.quarantine != nil) {
-				if bad, skipped := tape.records_skip(r); skipped {
-					if !quarantine_add(r, bad) {
-						break
-					}
-					r.index += 1
-					out[n] = {lo = bad.lo, hi = bad.hi, err = bad.err}
-					n += 1
-					if one {
-						break
-					}
-					continue
+			if bad, skipped := records_gap(r, &m.main); skipped {
+				out[n] = bad
+				n += 1
+				if one {
+					break
 				}
+				continue
 			}
 			break
 		}
-		if (r.framing == .Lines || r.framing == .Seq) && cut < u64(len(r.src)) && record_too_wide(r, lo, cut) {
-			records_stop(r, tape.record_too_long(lo))
+		if delimited && cut < u64(len(r.src)) && reject_wide(r, lo, cut) {
 			break
 		}
 		w := walk(r, lo, cut, false, &h, &regs, allocator, &ctx)
 		if !w.ok {
-			r.err = hook.memory_budget_error(&m.main, r.err)
-			if r.err == nil && window_too_wide(r) {
-				records_stop(r, tape.record_too_long(r.pos if r.at != .Start else 0))
-				break
-			}
-			if r.err != nil && (r.skip_bad || r.quarantine != nil) {
-				if bad, skipped := tape.records_skip(r); skipped {
-					if !quarantine_add(r, bad) {
-						break
-					}
-					r.index += 1
-					out[n] = {lo = bad.lo, hi = bad.hi, err = bad.err}
-					n += 1
-					if one {
-						break
-					}
-					continue
+			if bad, skipped := records_gap(r, &m.main); skipped {
+				out[n] = bad
+				n += 1
+				if one {
+					break
 				}
+				continue
 			}
 			break
 		}
-		if record_too_wide(r, lo, w.hi) {
-			records_stop(r, tape.record_too_long(lo))
+		if reject_wide(r, lo, w.hi) {
 			break
 		}
 		if w.again {
@@ -120,41 +127,29 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 		return
 	}
 	// Under a framing other than `.Lines` and `.Seq` each record is read to its end, as the next starts there.
+	delimited := r.framing == .Lines || r.framing == .Seq
 	read := read
-	read.stop_early &&= r.framing == .Lines || r.framing == .Seq
-	out := out
-	out = out[:min(len(out), len(answers))]
+	read.stop_early &&= delimited
+	limit := min(len(out), len(answers))
 	m: hook.Read_Budget
 	ctx := context
 	room: Find_Room = ---
 	f: Finder
 	defer finder_end(&f)
-	for n < len(out) {
+	for n < limit {
 		allocator := hook.read_budget(&m, r.opts, caller)
 		lo, cut, framed := frame(r, allocator)
 		if !framed {
-			r.err = hook.memory_budget_error(&m.main, r.err)
-			if r.err == nil && window_too_wide(r) {
-				records_stop(r, tape.record_too_long(r.pos if r.at != .Start else 0))
-				break
-			}
-			if r.err != nil && (r.skip_bad || r.quarantine != nil) {
-				if bad, skipped := tape.records_skip(r); skipped {
-					if !quarantine_add(r, bad) {
-						break
-					}
-					r.index += 1
-					if r.quarantine == nil {
-						out[n], answers[n] = {lo = bad.lo, hi = bad.hi, err = bad.err}, {outcome = .Missing}
-						n += 1
-					}
-					continue
+			if bad, skipped := records_gap(r, &m.main); skipped {
+				if r.quarantine == nil {
+					out[n], answers[n] = bad, {outcome = .Missing}
+					n += 1
 				}
+				continue
 			}
 			break
 		}
-		if (r.framing == .Lines || r.framing == .Seq) && cut < u64(len(r.src)) && record_too_wide(r, lo, cut) {
-			records_stop(r, tape.record_too_long(lo))
+		if delimited && cut < u64(len(r.src)) && reject_wide(r, lo, cut) {
 			break
 		}
 		if err := find_begin(&f, r.src, format, steps, r.opts.dups, read, respell, rewalk, &room, allocator); err != nil {
@@ -164,28 +159,16 @@ records_find :: proc(r: ^tape.Records, path: []tape.Step, out: []tape.Record, an
 		regs: hook.Regs
 		w := walk(r, lo, cut, false, &f, &regs, allocator, &ctx)
 		if !w.ok {
-			r.err = hook.memory_budget_error(&m.main, r.err)
-			if r.err == nil && window_too_wide(r) {
-				records_stop(r, tape.record_too_long(r.pos if r.at != .Start else 0))
-				break
-			}
-			if r.err != nil && (r.skip_bad || r.quarantine != nil) {
-				if bad, skipped := tape.records_skip(r); skipped {
-					if !quarantine_add(r, bad) {
-						break
-					}
-					r.index += 1
-					if r.quarantine == nil {
-						out[n], answers[n] = {lo = bad.lo, hi = bad.hi, err = bad.err}, {outcome = .Missing}
-						n += 1
-					}
-					continue
+			if bad, skipped := records_gap(r, &m.main); skipped {
+				if r.quarantine == nil {
+					out[n], answers[n] = bad, {outcome = .Missing}
+					n += 1
 				}
+				continue
 			}
 			break
 		}
-		if record_too_wide(r, lo, w.hi) {
-			records_stop(r, tape.record_too_long(lo))
+		if reject_wide(r, lo, w.hi) {
 			break
 		}
 		if w.again {
@@ -221,10 +204,10 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 		records_stop(r, refused)
 		return
 	}
+	delimited := r.framing == .Lines || r.framing == .Seq
 	read := read
-	read.stop_early &&= r.framing == .Lines || r.framing == .Seq
-	out := out
-	out = out[:min(len(out), len(docs))]
+	read.stop_early &&= delimited
+	limit := min(len(out), len(docs))
 	// The documents of the batch are in the records' block, which the last batch's documents leave.
 	block := tape.record_block_batch(&r.block, caller)
 	m: hook.Read_Budget
@@ -237,36 +220,23 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 	lent: []tape.Node
 	has_mem_budget := r.opts.budget.memory != 0
 	max_depth := read_depth(r.opts)
-	delimited := r.framing == .Lines || r.framing == .Seq
 	pieces := r.opts.pieces != nil
-	for n < len(out) {
+	for n < limit {
 		allocator := hook.read_budget(&m, r.opts, block)
 		scratch := hook.scratch(r.opts, allocator, &scratch_local)
 		budget := &m.main if has_mem_budget else nil
 		lo, cut, framed := frame(r, allocator)
 		if !framed {
-			r.err = hook.memory_budget_error(&m.main, r.err)
-			if r.err == nil && window_too_wide(r) {
-				records_stop(r, tape.record_too_long(r.pos if r.at != .Start else 0))
-				break
-			}
-			if r.err != nil && (r.skip_bad || r.quarantine != nil) {
-				if bad, skipped := tape.records_skip(r); skipped {
-					if !quarantine_add(r, bad) {
-						break
-					}
-					r.index += 1
-					if r.quarantine == nil {
-						out[n], docs[n] = {lo = bad.lo, hi = bad.hi, err = bad.err}, {}
-						n += 1
-					}
-					continue
+			if bad, skipped := records_gap(r, &m.main); skipped {
+				if r.quarantine == nil {
+					out[n], docs[n] = bad, {}
+					n += 1
 				}
+				continue
 			}
 			break
 		}
-		if delimited && cut < u64(len(r.src)) && record_too_wide(r, lo, cut) {
-			records_stop(r, tape.record_too_long(lo))
+		if delimited && cut < u64(len(r.src)) && reject_wide(r, lo, cut) {
 			break
 		}
 		depth := min(max_depth, cut - lo)
@@ -292,28 +262,16 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 				lent = h.b.doc.nodes
 			}
 			if !w.ok {
-				r.err = hook.memory_budget_error(&m.main, r.err)
-				if r.err == nil && window_too_wide(r) {
-					records_stop(r, tape.record_too_long(r.pos if r.at != .Start else 0))
-					break
-				}
-				if r.err != nil && (r.skip_bad || r.quarantine != nil) {
-					if bad, skipped := tape.records_skip(r); skipped {
-						if !quarantine_add(r, bad) {
-							break
-						}
-						r.index += 1
-						if r.quarantine == nil {
-							out[n], docs[n] = {lo = bad.lo, hi = bad.hi, err = bad.err}, {}
-							n += 1
-						}
-						continue
+				if bad, skipped := records_gap(r, &m.main); skipped {
+					if r.quarantine == nil {
+						out[n], docs[n] = bad, {}
+						n += 1
 					}
+					continue
 				}
 				break
 			}
-			if record_too_wide(r, lo, w.hi) {
-				records_stop(r, tape.record_too_long(lo))
+			if reject_wide(r, lo, w.hi) {
 				break
 			}
 			if err := scanner_restart(&h, r.src, format, demand, r.opts.dups, read, rewalk, SCAN_NODES, most, frames[:min(depth, FRAME_DEPTH)], &room, allocator, lent, budget, scratch); err != nil {
@@ -324,12 +282,11 @@ records_scan :: proc(r: ^tape.Records, demand: ^tape.Demand, out: []tape.Record,
 			a := walk(r, lo, cut, true, &h, &regs, allocator, &h.b.ctx)
 			w.res, w.tolerated = a.res, a.tolerated
 		}
-		if record_too_wide(r, lo, w.hi) {
+		if reject_wide(r, lo, w.hi) {
 			_, _ = scanner_end(&h, regs, 0, runtime.Allocator_Error.Out_Of_Memory)
 			if lent != nil {
 				lent = h.b.doc.nodes
 			}
-			records_stop(r, tape.record_too_long(lo))
 			break
 		}
 		root_close, werr, _ := hook.walk_error(w.res, rules)

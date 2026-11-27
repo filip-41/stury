@@ -14,15 +14,7 @@ import "stury:lib/ops/typed"
 // once, else nil. A `Raw` member or a `time.Time` outside years 0 to 9999 is `Bad_Option` naming it, and a value with no
 // delimited spelling, a null or a non-finite float, is `Refused`.
 marshal :: proc(value: ^$T, spec := Spec.Csv, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> (text: []u8, err: Write_Error) {
-	w: Writer
-	if err = writer_start(&w, spec, opts, {}, allocator); err != nil {
-		return nil, err
-	}
-	if err = marshal_into(&w, value, T, plan, allocator); err != nil {
-		writer_drop(&w)
-		return nil, err
-	}
-	return writer_end(&w)
+	return marshal_run(value, T, spec, opts, plan, {}, allocator)
 }
 
 // `marshal` into `sink`, through a buffer of `write.SINK_BYTES` from `allocator`. On a refusal or a failed sink the
@@ -31,30 +23,25 @@ marshal_to :: proc(sink: io.Writer, value: ^$T, spec := Spec.Csv, opts := Write_
 	if sink.procedure == nil {
 		return tape.Bad_Option{"sink"}
 	}
-	w: Writer
-	if err := writer_start(&w, spec, opts, sink, allocator); err != nil {
-		return err
-	}
-	if err := marshal_into(&w, value, T, plan, allocator); err != nil {
-		writer_drop(&w)
-		return err
-	}
-	_, err := writer_end(&w)
+	_, err := marshal_run(value, T, spec, opts, plan, sink, allocator)
 	return err
 }
 
 @(private)
-marshal_into :: proc(w: ^Writer, value: rawptr, T: typeid, plan: ^Plan, allocator: runtime.Allocator) -> Write_Error {
-	werr, err := typed.marshal(value, T, TAG, plan, w, token, allocator)
-	if werr != nil {
-		return werr
-	}
-	if err != nil {
-		if memory, ok := err.(runtime.Allocator_Error); ok {
-			return memory
+marshal_run :: proc(value: rawptr, T: typeid, spec: Spec, opts: Write_Options, plan: ^Plan, sink: io.Writer, allocator: runtime.Allocator) -> (text: []u8, err: Write_Error) {
+	w: Writer
+	writer_start(&w, spec, opts, sink, allocator) or_return
+	werr, perr := typed.marshal(value, T, TAG, plan, &w, token, allocator)
+	if werr != nil || perr != nil {
+		writer_drop(&w)
+		if werr != nil {
+			return nil, werr
 		}
-		bad, _ := err.(tape.Bad_Option)
-		return bad
+		if memory, ok := perr.(runtime.Allocator_Error); ok {
+			return nil, memory
+		}
+		bad, _ := perr.(tape.Bad_Option)
+		return nil, bad
 	}
-	return nil
+	return writer_end(&w)
 }

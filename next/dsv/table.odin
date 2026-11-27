@@ -47,12 +47,23 @@ table_ext :: proc(allocator: runtime.Allocator, keys: []tape.Token, wide: int) -
 // Gives the build `h` the table of the header of `head`, which `finish_built` completes.
 @(private, cold)
 store_header :: proc(h: ^build.Builder, allocator: runtime.Allocator, head: Head) -> tape.Error {
-	ext, err := table_ext(allocator, head.keys, max(head.widest, len(head.keys)))
-	if err != nil {
-		return err
-	}
+	ext := table_ext(allocator, head.keys, max(head.widest, len(head.keys))) or_return
 	h.doc.ext = ext
 	return nil
+}
+
+// Attaches header `keys` (widened to `wide`) when non-empty, then finishes `doc`'s table.
+@(private, cold)
+attach_and_finish_table :: proc(doc: ^tape.Document, keys: []tape.Token, wide: int, opts: Options, cut := false) -> tape.Error {
+	if len(keys) > 0 {
+		ext, err := table_ext(doc.allocator, keys, max(wide, len(keys)))
+		if err != nil {
+			tape.destroy(doc)
+			return err
+		}
+		doc.ext = ext
+	}
+	return finish_table(doc, opts, cut)
 }
 
 // Completes the document's table, which a build gave its header with `store_header`: its first row, width and key
@@ -115,10 +126,17 @@ repeat_first :: proc(err: tape.Error, src: []u8, $S: Spec, p: Pass_Options, keys
 	if oom != nil {
 		return oom
 	}
-	if found && at < fault.at {
-		return tape.Fault{at = at, rules = &RULES, kind = .Duplicate_Key}
+	return tape.Fault{at = at, rules = &RULES, kind = .Duplicate_Key} if found && at < fault.at else err
+}
+
+// The duplicate-key fault (or OOM) among header `keys` of `src`, or nil.
+@(private, cold)
+repeat_fault :: proc(src: []u8, $S: Spec, keys: []tape.Token, allocator: runtime.Allocator) -> tape.Error {
+	at, found, oom := header_repeat(src, S, keys, allocator)
+	if oom != nil {
+		return oom
 	}
-	return err
+	return tape.Fault{at = at, rules = &RULES, kind = .Duplicate_Key} if found else nil
 }
 
 // Returns the offset of the first header key of `keys`, cells of `src`, that repeats an earlier one, and whether there
@@ -143,10 +161,7 @@ header_repeat :: proc(src: []u8, $S: Spec, keys: []tape.Token, allocator: runtim
 @(private, cold)
 refuse_repeat :: proc(src: []u8, $S: Spec, opts: Options, allocator: runtime.Allocator) -> tape.Error {
 	p := options_resolved(S, opts)
-	if opts.dups != .Refuse || opts.pieces != nil || p.no_header {
-		return nil
-	}
-	return header_fault(src, S, p, allocator)
+	return nil if opts.dups != .Refuse || opts.pieces != nil || p.no_header else header_fault(src, S, p, allocator)
 }
 
 // The fault of a repeated name among the header's keys of `src`, a text that holds the header's line, or nil. A header
@@ -165,11 +180,7 @@ header_fault :: proc(src: []u8, $S: Spec, p: Pass_Options, allocator: runtime.Al
 	if _, _, err := read_header(src, S, p, keys); err != nil {
 		return nil
 	}
-	at, found, oom := header_repeat(src, S, keys, allocator)
-	if oom != nil {
-		return oom
-	}
-	return tape.Fault{at = at, rules = &RULES, kind = .Duplicate_Key} if found else nil
+	return repeat_fault(src, S, keys, allocator)
 }
 
 // The slots of a table of `keys` keys: a power of two at least twice them.

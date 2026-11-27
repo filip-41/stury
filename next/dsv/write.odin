@@ -77,12 +77,9 @@ resolve_options :: proc(spec: Spec, opts: Write_Options, doc: ^tape.Document, al
 	// Validate directly through `pass_options` so write-only binaries do not link the DSV parser walks.
 	refused: tape.Error
 	switch spec {
-	case .Csv:
-		_, refused = pass_options(.Csv, {format = d})
-	case .Tsv:
-		_, refused = pass_options(.Tsv, {format = d})
-	case .Plain:
-		_, refused = pass_options(.Plain, {format = d})
+	case .Csv:   _, refused = pass_options(.Csv, {format = d})
+	case .Tsv:   _, refused = pass_options(.Tsv, {format = d})
+	case .Plain: _, refused = pass_options(.Plain, {format = d})
 	}
 	if bad, ok := refused.(tape.Bad_Option); ok {
 		return {}, {}, false, bad

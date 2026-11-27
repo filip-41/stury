@@ -3,6 +3,7 @@ package xml
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
+import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
@@ -131,15 +132,31 @@ begin :: #force_inline proc(s: ^Writing, level: int, pretty: bool) {
 		s.open = false
 	}
 	if pretty && s.wrote {
-		line_indent(s.out, s, level)
+		write.line_indent(s.out, s.width, s.fill, level)
 	}
 	s.wrote = true
 }
 
-// A line end and the indent of `level` levels, written in eight-byte stores.
 @(private)
-line_indent :: #force_inline proc(out: ^write.Out, s: ^Writing, level: int) #no_bounds_check {
-	write.line_indent(out, s.width, s.fill, level)
+put_str :: #force_inline proc(out: ^write.Out, s: string) {
+	write.put(out, transmute([]u8)s)
+}
+
+@(private)
+emit_misc :: #force_inline proc(s: ^Writing, facts: []tape.Fact, kinds: tape.Facts, level: int, pretty, lead: bool, $FACTS: bool) {
+	when FACTS {
+		if len(facts) != 0 {
+			put_misc(s, facts, kinds, level, pretty, lead)
+		}
+	}
+}
+
+@(private)
+put_close_tag :: proc(out: ^write.Out, w: ^write.Tree, name_node: tape.Node_Index) {
+	put_str(out, "</")
+	name, _ := write.text_of(w, name_node)
+	put_str(out, name)
+	write.put_byte(out, '>')
 }
 
 // Writes the facts among `facts` of the kinds `kinds`, each on a line at `level` when `pretty`: a comment as XML spells
@@ -151,7 +168,7 @@ put_misc :: proc(s: ^Writing, facts: []tape.Fact, kinds: tape.Facts, level: int,
 		if f.kind not_in kinds {
 			continue
 		}
-		verbatim := f.kind != .Comment && f.kind != .Comment_Inline && f.kind != .Comment_Foot
+		verbatim := f.kind not_in tape.COMMENTS
 		if verbatim && !s.xml {
 			continue
 		}
@@ -170,9 +187,9 @@ put_misc :: proc(s: ^Writing, facts: []tape.Fact, kinds: tape.Facts, level: int,
 		if verbatim {
 			write.put(s.out, tape.span_bytes(s.doc, f.lo, f.n))
 		} else {
-			write.put(s.out, transmute([]u8)string("<!--"))
+			put_str(s.out, "<!--")
 			write.put(s.out, body)
-			write.put(s.out, transmute([]u8)string("-->"))
+			put_str(s.out, "-->")
 		}
 	}
 }
@@ -204,12 +221,6 @@ comment_holds :: proc "contextless" (body: []u8) -> bool #no_bounds_check {
 	return prev != '-'
 }
 
-// Whether the object at `at` holds a `#text` member, so that no whitespace may be added between its children.
-@(private)
-holds_text :: proc(w: ^write.Tree, at: tape.Node_Index, xml: bool) -> bool {
-	return write.holds_text(w, at, xml, TEXT_KEY)
-}
-
 // Whether `facts` hold a comment or instruction that ends its element.
 @(private)
 has_foot :: proc "contextless" (facts: []tape.Fact) -> bool {
@@ -235,59 +246,29 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 		if step.kind == .Close {
 			top := pop(&s.stack)
 			if top.root {
-				// What follows the root element, each on a line of its own.
-				when FACTS {
-					if len(step.facts) != 0 {
-						put_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, 0, s.pretty, true)
-					}
-				}
+				emit_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, 0, s.pretty, true, FACTS)
 				continue
 			}
 			if top.array {
 				continue
 			}
-			feet := false
-			when FACTS {
-				feet = has_foot(step.facts)
-			}
+			feet := has_foot(step.facts) when FACTS else false
 			if s.open && !feet {
-				write.put(out, transmute([]u8)string("/>"))
+				put_str(out, "/>")
 				s.open = false
 			} else {
-				when FACTS {
-					if len(step.facts) != 0 {
-						put_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, top.level + 1, top.pretty, false)
-					}
-				}
+				emit_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, top.level + 1, top.pretty, false, FACTS)
 				begin(s, top.level, top.pretty)
-				write.put(out, transmute([]u8)string("</"))
-				name, _ := write.text_of(w, top.name)
-				write.put(out, transmute([]u8)name)
-				write.put_byte(out, '>')
+				put_close_tag(out, w, top.name)
 			}
-			when FACTS {
-				if len(step.facts) != 0 {
-					put_misc(s, step.facts, {.Comment_Inline}, 0, false, false)
-				}
-			}
+			emit_misc(s, step.facts, {.Comment_Inline}, 0, false, false, FACTS)
 			continue
 		}
-		parent: Open_Frame
-		if len(s.stack) > 0 {
-			parent = s.stack[len(s.stack) - 1]
-		}
-		name_node := step.key
-		if name_node == tape.NO_NODE {
-			name_node = parent.name
-		}
+		parent := s.stack[len(s.stack) - 1] if len(s.stack) > 0 else Open_Frame{}
+		name_node := step.key if step.key != tape.NO_NODE else parent.name
 		is_array := step.kind == .Open && w.nodes[step.node].kind == .Array
 		if len(s.stack) == 0 {
-			// The document's object, whose declaration and document type stand before its element.
-			when FACTS {
-				if len(step.facts) != 0 {
-					put_misc(s, step.facts, {.Comment, .Instruction, .Directive, .Doctype}, 0, s.pretty, false)
-				}
-			}
+			emit_misc(s, step.facts, {.Comment, .Instruction, .Directive, .Doctype}, 0, s.pretty, false, FACTS)
 			if _, e := append(&s.stack, Open_Frame{root = true, pretty = s.pretty, level = -1}); e != nil {
 				w.err = e
 			}
@@ -308,11 +289,7 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 			return
 		}
 		level := parent.level + 1
-		when FACTS {
-			if len(step.facts) != 0 {
-				put_misc(s, step.facts, {.Comment, .Instruction}, level, parent.pretty, !step.first && !parent.text)
-			}
-		}
+		emit_misc(s, step.facts, {.Comment, .Instruction}, level, parent.pretty, !step.first && !parent.text, FACTS)
 		if name == TEXT_KEY {
 			if parent.root {
 				fail(w, name_node)
@@ -334,50 +311,35 @@ write_steps :: proc(s: ^Writing, $FACTS, $TABLES: bool) {
 			continue
 		}
 		write.put_byte(out, '<')
-		write.put(out, transmute([]u8)name)
+		put_str(out, name)
 		when FACTS {
 			if s.xml {
 				put_attributes(s, step.facts)
 			}
 		}
 		if step.kind == .Open {
-			text := holds_text(w, step.node, s.xml)
-			frame := Open_Frame{name = name_node, level = level, pretty = parent.pretty && !text, text = text}
-			if _, e := append(&s.stack, frame); e != nil {
+			text := write.holds_text(w, step.node, s.xml, TEXT_KEY)
+			if _, e := append(&s.stack, Open_Frame{name = name_node, level = level, pretty = parent.pretty && !text, text = text}); e != nil {
 				w.err = e
 				return
 			}
 			s.open = true
 			continue
 		}
-		feet := false
-		when FACTS {
-			feet = has_foot(step.facts)
-		}
+		feet := has_foot(step.facts) when FACTS else false
 		null := w.nodes[step.node].kind == .Null
 		if null && !feet {
-			write.put(out, transmute([]u8)string("/>"))
+			put_str(out, "/>")
 		} else {
 			write.put_byte(out, '>')
 			if !null && !put_text(s, step.node) {
 				fail(w, step.node)
 				return
 			}
-			when FACTS {
-				if len(step.facts) != 0 {
-					put_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, 0, false, false)
-				}
-			}
-			write.put(out, transmute([]u8)string("</"))
-			again, _ := write.text_of(w, name_node)
-			write.put(out, transmute([]u8)again)
-			write.put_byte(out, '>')
+			emit_misc(s, step.facts, {.Comment_Foot, .Instruction_Foot}, 0, false, false, FACTS)
+			put_close_tag(out, w, name_node)
 		}
-		when FACTS {
-			if len(step.facts) != 0 {
-				put_misc(s, step.facts, {.Comment_Inline}, 0, false, false)
-			}
-		}
+		emit_misc(s, step.facts, {.Comment_Inline}, 0, false, false, FACTS)
 	}
 }
 
@@ -390,12 +352,7 @@ put_attributes :: proc(s: ^Writing, facts: []tape.Fact) {
 			continue
 		}
 		name, value := attribute_parts(tape.span_bytes(doc, f.lo, f.n), f.spelling)
-		quote := u8('"')
-		for c in value {
-			if c == '"' {
-				quote = '\''
-			}
-		}
+		quote := u8('\'') if kernel.index_byte(value, '"') >= 0 else '"'
 		write.put_byte(out, ' ')
 		write.put(out, name)
 		write.put_byte(out, '=')

@@ -2,6 +2,7 @@ package html
 
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
+import ops_build "stury:lib/ops/build"
 
 // The names an HTML user calls beside the reads, so a caller reading HTML needs no direct `core/tape` import.
 
@@ -35,6 +36,7 @@ Name :: tape.Name
 Index :: tape.Index
 All :: tape.All
 Slice :: tape.Slice
+Descend :: tape.Descend
 Grain :: tape.Grain
 Demand :: tape.Demand
 demand_of :: tape.demand_of
@@ -80,6 +82,8 @@ number_form :: tape.number_form
 number_exact :: tape.number_exact
 text_is_ascii :: tape.text_is_ascii
 destroy :: tape.destroy
+clone_document :: tape.clone_document
+query :: ops_build.query
 records_window :: tape.records_window
 
 TEXT_KEY :: tape.TEXT_KEY

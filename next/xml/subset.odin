@@ -1,7 +1,6 @@
 package xml
 
 import "base:intrinsics"
-import "stury:lib/base/spell"
 import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
 import "stury:lib/core/hook"
@@ -123,28 +122,29 @@ gap :: proc "contextless" (q, end: [^]u8, detail: Detail) -> ([^]u8, Dtd_Fault) 
 	return s, {}
 }
 
-// Reads the name at `q` of a declaration. `colons` is the namespace rule it follows: a qualified name, or no colon at
-// all for an entity or a notation.
+@(private)
+name_dtd_fault :: #force_inline proc "contextless" (q, n, end: [^]u8, nf: Name_Fault, detail: Detail) -> Dtd_Fault {
+	switch nf {
+	case .Truncated: return {end, .Truncated, .None}
+	case .Not_Name:  return {q, .Bad_Char, detail}
+	case .Bad_Utf8:  return {n, .Bad_Char, .Invalid_Utf8}
+	case .None:
+	}
+	return {}
+}
+
+// Reads the name at `q` of a declaration. `no_colon` forbids any colon (entity or notation name).
 @(private)
 decl_name :: proc "contextless" (q, end: [^]u8, detail: Detail, no_colon := false) -> ([^]u8, Dtd_Fault) {
 	n, nf := name_end(q, end)
-	switch nf {
-	case .Truncated:
-		return n, {end, .Truncated, .None}
-	case .Not_Name:
-		return n, {q, .Bad_Char, decl_rule(q, end, detail)}
-	case .Bad_Utf8:
-		return n, {n, .Bad_Char, .Invalid_Utf8}
-	case .None:
+	if f := name_dtd_fault(q, n, end, nf, decl_rule(q, end, detail)); f.kind != .None {
+		return n, f
 	}
 	if n >= end {
 		return n, {end, .Truncated, .None}
 	}
 	count := intrinsics.ptr_sub(n, q)
-	if no_colon && has_colon(q, count) {
-		return n, {q, .Bad_Char, .Qualified_Name}
-	}
-	if _, ok := qname(q, count); !ok {
+	if _, ok := qname(q, count); !ok || no_colon && has_colon(q, count) {
 		return n, {q, .Bad_Char, .Qualified_Name}
 	}
 	if count > int(max(u16)) {
@@ -166,26 +166,36 @@ decl_close :: proc "contextless" (q, end: [^]u8, detail: Detail) -> ([^]u8, Dtd_
 	return s[1:], {}
 }
 
+// Reads `S Name S` (or without trailing `S` when `trailing` is false) at `p`, returning the name bytes and position after.
+@(private)
+decl_head :: proc "contextless" (p, end: [^]u8, detail: Detail, no_colon := false, trailing := true) -> (next: [^]u8, name: []u8, f: Dtd_Fault) #no_bounds_check {
+	q: [^]u8
+	q, f = gap(p, end, detail)
+	if f.kind != .None {
+		return q, nil, f
+	}
+	name_at := q
+	q, f = decl_name(q, end, detail, no_colon)
+	if f.kind != .None {
+		return q, nil, f
+	}
+	name = name_at[:intrinsics.ptr_sub(q, name_at)]
+	if trailing {
+		q, f = gap(q, end, detail)
+	}
+	return q, name, f
+}
+
 // `<!ELEMENT S Name S contentspec S? >`, from past the keyword.
 @(private)
 element_declaration :: proc "contextless" (p, end: [^]u8) -> ([^]u8, Dtd_Fault) #no_bounds_check {
-	q, f := gap(p, end, .Element_Declaration)
-	if f.kind != .None {
-		return q, f
-	}
-	q, f = decl_name(q, end, .Element_Declaration)
-	if f.kind != .None {
-		return q, f
-	}
-	q, f = gap(q, end, .Element_Declaration)
+	q, _, f := decl_head(p, end, .Element_Declaration)
 	if f.kind != .None {
 		return q, f
 	}
 	switch {
-	case keyword(q, end, "EMPTY"):
-		q = q[5:]
-	case keyword(q, end, "ANY"):
-		q = q[3:]
+	case keyword(q, end, "EMPTY"): q = q[5:]
+	case keyword(q, end, "ANY"):   q = q[3:]
 	case q[0] == '(':
 		s := kernel.skip_ws(q[1:], end)
 		if keyword(s, end, "#PCDATA") {
@@ -297,16 +307,10 @@ ATT_TYPES := [?]string{"CDATA", "ID", "IDREF", "IDREFS", "ENTITY", "ENTITIES", "
 // A default read from a parameter entity's stored replacement text has no bytes of the text to span and is refused.
 @(private)
 attlist_declaration :: proc "contextless" (d: ^Dtd, rw: ^Walk(hook.No_Hooks, false), p, end: [^]u8, stored: bool) -> ([^]u8, Dtd_Fault) #no_bounds_check {
-	q, f := gap(p, end, .Attribute_Declaration)
+	q, element_name, f := decl_head(p, end, .Attribute_Declaration, false, false)
 	if f.kind != .None {
 		return q, f
 	}
-	element := q
-	q, f = decl_name(q, end, .Attribute_Declaration)
-	if f.kind != .None {
-		return q, f
-	}
-	element_name := element[:intrinsics.ptr_sub(q, element)]
 	for {
 		s := kernel.skip_ws(q, end)
 		if s >= end {
@@ -363,16 +367,10 @@ attlist_declaration :: proc "contextless" (d: ^Dtd, rw: ^Walk(hook.No_Hooks, fal
 		if f.kind != .None {
 			return q, f
 		}
-		a := Attr_Decl {
-			tokenized = tokenized,
-			qualified = has_colon(raw_data(name), len(name)),
-			next      = NO_DECL,
-		}
+		a := Attr_Decl{tokenized = tokenized, qualified = has_colon(raw_data(name), len(name)), next = NO_DECL}
 		switch {
-		case keyword(q, end, "#REQUIRED"):
-			q = q[9:]
-		case keyword(q, end, "#IMPLIED"):
-			q = q[8:]
+		case keyword(q, end, "#REQUIRED"): q = q[9:]
+		case keyword(q, end, "#IMPLIED"):  q = q[8:]
 		case:
 			if keyword(q, end, "#FIXED") {
 				q, f = gap(q[6:], end, .Attribute_Declaration)
@@ -382,12 +380,9 @@ attlist_declaration :: proc "contextless" (d: ^Dtd, rw: ^Walk(hook.No_Hooks, fal
 			}
 			r: Run
 			switch q[0] {
-			case '"':
-				r = run(rw, q[1:], end, .Attr, '"')
-			case '\'':
-				r = run(rw, q[1:], end, .Attr, '\'')
-			case:
-				return q, {q, .Bad_Char, decl_rule(q, end, .Attribute_Declaration)}
+			case '"':  r = run(rw, q[1:], end, .Attr, '"')
+			case '\'': r = run(rw, q[1:], end, .Attr, '\'')
+			case:      return q, {q, .Bad_Char, decl_rule(q, end, .Attribute_Declaration)}
 			}
 			if r.kind != .None {
 				return r.q, {r.q, r.kind, r.detail}
@@ -427,32 +422,22 @@ declare_attribute :: proc "contextless" (d: ^Dtd, element, name: []u8, a: Attr_D
 	if head != NO_DECL {
 		a.element_lo, a.element_n = d.attrs[head].element_lo, d.attrs[head].element_n
 	} else {
-		lo, ok := dtd_bytes(d, element)
-		if !ok {
-			return {kind = NO_MEMORY}
-		}
-		a.element_lo, a.element_n = u32(lo), u16(len(element))
+		elo, ok := dtd_bytes(d, element)
+		if !ok { return {kind = NO_MEMORY} }
+		a.element_lo, a.element_n = u32(elo), u16(len(element))
 	}
-	lo, ok := dtd_bytes(d, name)
-	if !ok {
-		return {kind = NO_MEMORY}
-	}
-	a.name_lo, a.name_n = u32(lo), u16(len(name))
+	nlo, ok := dtd_bytes(d, name)
+	if !ok { return {kind = NO_MEMORY} }
+	a.name_lo, a.name_n = u32(nlo), u16(len(name))
 	i := dtd_push(d, &d.attrs, &d.att_cap, a)
-	if i == NO_DECL {
-		return {kind = NO_MEMORY}
-	}
+	if i == NO_DECL { return {kind = NO_MEMORY} }
 	if last != NO_DECL {
 		d.attrs[last].next = i
 	} else if !dtd_put(d, .Element, i) {
 		return {kind = NO_MEMORY}
 	}
-	if a.defaulted {
-		d.flags += {.Defaults}
-	}
-	if a.tokenized {
-		d.flags += {.Tokenized}
-	}
+	if a.defaulted { d.flags += {.Defaults} }
+	if a.tokenized { d.flags += {.Tokenized} }
 	return {}
 }
 
@@ -495,11 +480,8 @@ nmtoken :: proc "contextless" (q, end: [^]u8) -> ([^]u8, Dtd_Fault) #no_bounds_c
 	if t < end && NAME_BYTE[t[0]] == .High {
 		nf: Name_Fault
 		t, nf = name_end_high(nil, t, end)
-		if nf == .Truncated {
-			return t, {end, .Truncated, .None}
-		}
-		if nf == .Bad_Utf8 {
-			return t, {t, .Bad_Char, .Invalid_Utf8}
+		if f := name_dtd_fault(q, t, end, nf, .Attribute_Declaration); f.kind != .None {
+			return t, f
 		}
 	}
 	if t >= end {
@@ -547,15 +529,7 @@ external_id :: proc "contextless" (p, end: [^]u8, detail: Detail, notation := fa
 // `<!NOTATION S Name S (ExternalID | PublicID) S? >`, from past the keyword.
 @(private)
 notation_declaration :: proc "contextless" (p, end: [^]u8) -> ([^]u8, Dtd_Fault) {
-	q, f := gap(p, end, .Notation_Declaration)
-	if f.kind != .None {
-		return q, f
-	}
-	q, f = decl_name(q, end, .Notation_Declaration, true)
-	if f.kind != .None {
-		return q, f
-	}
-	q, f = gap(q, end, .Notation_Declaration)
+	q, _, f := decl_head(p, end, .Notation_Declaration, true)
 	if f.kind != .None {
 		return q, f
 	}
@@ -702,15 +676,9 @@ entity_value :: proc "contextless" (p, end: [^]u8) -> (next: [^]u8, value: []u8,
 				return q, nil, false, {q, .Bad_Char, .Control_Char}
 			}
 			if c >= 0x80 {
-				r, kind := spell.utf8_char(q, end)
-				if kind == .Truncated {
-					return q, nil, false, {end, .Truncated, .None}
-				}
+				r, kind, detail := xml_utf8_step(q, end)
 				if kind != .None {
-					return q, nil, false, {q, .Bad_Char, .Invalid_Utf8}
-				}
-				if c == 0xef && non_char(q, end) {
-					return q, nil, false, {q, .Bad_Char, .Non_Char}
+					return q, nil, false, {r, kind, detail}
 				}
 				q = r
 				continue
@@ -756,15 +724,11 @@ replacement_text :: proc "contextless" (d: ^Dtd, value: []u8) -> (lo: u64, n: u3
 @(private)
 parameter_reference :: proc "contextless" (d: ^Dtd, rw: ^Walk(hook.No_Hooks, false), q, end: [^]u8, stored: bool, nest: int) -> ([^]u8, Dtd_Fault) #no_bounds_check {
 	n, nf := name_end(q[1:], end)
-	switch nf {
-	case .Truncated:
+	if nf == .Truncated || n >= end {
 		return n, {end, .Truncated, .None}
-	case .Not_Name, .Bad_Utf8:
-		return n, {q, .Bad_Char, .Reference}
-	case .None:
 	}
-	if n >= end {
-		return n, {end, .Truncated, .None}
+	if nf != .None {
+		return n, {q, .Bad_Char, .Reference}
 	}
 	if n[0] != ';' {
 		return n, {n, .Bad_Char, .Reference}

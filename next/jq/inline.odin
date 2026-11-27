@@ -1,17 +1,10 @@
 package jq
 
-// Inlining of the prelude: a call of a prelude function that binds nothing and does not recur is replaced, once its names
-// are bound, by a copy of the function's body with each filter argument in place of the call of its parameter. Such a
-// call makes no scope at run time, so `map(f)` runs as `[.[] | f]` with no closure entry for each element. No pass
-// recurses: copies and the order are made with stacks of their own.
+// Inlining of the prelude: replaces calls to small non-binding, non-recursive prelude functions.
 
-// The most nodes a body may have and still be copied into each call of it.
-@(private)
-INLINE_NODES :: 64
+@(private) INLINE_NODES :: 64
+@(private) Inline_State :: enum u8 { Unknown, No, Yes }
 
-// Replaces the inlinable calls of `prog`'s prelude functions, `first` the index in the unit's order of the prelude's
-// first node. The prelude's nodes go first: its definitions are in order and each sees only the ones before it, so a body
-// is final before any call copies it.
 @(private)
 inline_prelude :: proc(prog: ^Program, first: int) {
 	order := prog.unit.order[:]
@@ -29,15 +22,6 @@ inline_prelude :: proc(prog: ^Program, first: int) {
 }
 
 @(private)
-Inline_State :: enum u8 {
-	Unknown,
-	No,
-	Yes,
-}
-
-// Whether the body of `fn` is made of nodes a call may copy: no binding, no variable, no label, no call of itself, each
-// parameter called at most once, and few nodes.
-@(private)
 inlinable :: proc(fn: ^Func) -> bool {
 	if fn.inline != .Unknown {
 		return fn.inline == .Yes
@@ -51,14 +35,13 @@ inlinable :: proc(fn: ^Func) -> bool {
 	append(&stack, fn.body)
 	uses := make([]int, len(fn.params))
 	defer delete(uses)
-	nodes := 0
-	for len(stack) > 0 {
+	for nodes := 0; len(stack) > 0; {
 		n := pop(&stack)
 		nodes += 1
 		if nodes > INLINE_NODES {
 			return false
 		}
-		switch n.kind {
+		#partial switch n.kind {
 		case .Def, .Bind, .Reduce, .Foreach, .Label, .Break, .Var:
 			return false
 		case .Call:
@@ -79,8 +62,6 @@ inlinable :: proc(fn: ^Func) -> bool {
 			case .Var, .Label, .Global:
 				return false
 			}
-		case .Identity, .Field, .Index, .Slice, .Iterate, .Literal, .String, .Format, .Array, .Object, .Neg, .Pipe, .Comma,
-		     .Binary, .And, .Or, .Alt, .If, .Try, .Update:
 		}
 		for i in 0 ..< child_count(n) {
 			if c := child(n, i); c != nil {
@@ -92,19 +73,11 @@ inlinable :: proc(fn: ^Func) -> bool {
 	return true
 }
 
-// `call`, a call of an inlinable function, as a copy of the function's body. Its scopes are as the body's were, less the
-// one a call with parameters makes and over the call's own distance to the prelude, which moves each function it calls.
 @(private)
 inline_call :: proc(u: ^Unit, call: ^Node) {
 	fn := call.callee
-	shift := i64(call.ref.hops)
-	if len(fn.params) > 0 {
-		shift -= 1
-	}
-	Copy :: struct {
-		from: ^Node,
-		to:   ^^Node,
-	}
+	shift := i64(call.ref.hops) - i64(len(fn.params) > 0)
+	Copy :: struct { from: ^Node, to: ^^Node }
 	root: ^Node
 	stack := make([dynamic]Copy)
 	defer delete(stack)
@@ -144,13 +117,9 @@ inline_call :: proc(u: ^Unit, call: ^Node) {
 	}
 }
 
-// The unit's order again, children first, from the program's body and every function's.
 @(private)
 reorder :: proc(prog: ^Program) {
-	Visit :: struct {
-		n: ^Node,
-		i: int,
-	}
+	Visit :: struct { n: ^Node, i: int }
 	u := &prog.unit
 	order := make([dynamic]^Node, 0, len(u.order), u.allocator)
 	stack := make([dynamic]Visit)

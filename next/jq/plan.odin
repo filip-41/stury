@@ -10,48 +10,40 @@ import "stury:lib/query"
 // Query planning for compiled jq programs:
 // 1. Backward demand analysis per input source (`.`, `inputs`, slurped records, raw lines).
 // 2. Non-data serial flags (`Inputs`, `Position`, `Messages`, `Halts`, `Recurses`).
-// 3. Three optional execution hints (`Per_Element_Split`, `Projection_Template`, `Conditional_Whole`).
-// Soundness invariant: every byte read at run time is covered by the analyzed demand; caps or dynamic
-// constructs degrade only the affected part to `.Whole`.
+// 3. Execution hints (`Per_Element_Split`, `Projection_Template`, `Conditional_Whole`).
 
 Analyze_Options :: struct {
-	null_input:       bool, // -n: `.` is null, inputs come through `input`/`inputs`
-	slurp:            bool, // -s: `.` is an array of all input records
-	raw_input:        bool, // -R: inputs are raw strings
-	stream:           bool, // --stream: always demands whole
-	materialize_each: bool, // keep synthesized split `each_body` AST nodes in `owned_nodes` (caller MUST use `jq.destroy_plan`)
+	null_input:       bool,
+	slurp:            bool,
+	raw_input:        bool,
+	stream:           bool,
+	materialize_each: bool,
 }
 
-// A jq program's query plan: the shared `query.Plan` contract plus borrowed/owned AST roots for the hints.
 Plan :: struct {
 	using contract: query.Plan,
-	each_body:      ^Node, // borrowed from `Program` or `owned_nodes`; set when `hints.split.has_each`
-	tail_body:      ^Node, // borrowed from `Program`; set when `hints.split.has_tail`
-	pred_body:      ^Node, // borrowed from `Program`; set when `hints.conditional.active`
-	owned_nodes:    [dynamic]^Node, // synthesized hint AST nodes freed by `jq.destroy_plan` (populated only when `materialize_each`)
+	each_body:      ^Node,
+	tail_body:      ^Node,
+	pred_body:      ^Node,
+	owned_nodes:    [dynamic]^Node,
 }
 
-@(private = "file")
-MAX_ANALYSIS_DEPTH :: 32
-@(private = "file")
-MAX_MEMO_ENTRIES :: 256
-@(private = "file")
-MAX_CALL_DEPTH :: 64
+@(private = "file") MAX_ANALYSIS_DEPTH :: 32
+@(private = "file") MAX_MEMO_ENTRIES   :: 256
+@(private = "file") MAX_CALL_DEPTH     :: 64
 
-// Abstract backward demand on one value during analysis. Every slice lives in `Analyzer.scratch`.
 @(private = "file")
 Need :: struct {
-	whole:  bool,
-	facts:  bool,
-	reason: query.Whole_Reason,
-	paths:  []query.Demand_Path,
+	whole, facts: bool,
+	reason:       query.Whole_Reason,
+	paths:        []query.Demand_Path,
 }
 
 @(private = "file")
 Var_Frame :: struct {
 	parent: ^Var_Frame,
-	slots:  []Need, // demand accumulated for each local variable slot
-	args:   []Arg_Binding, // filter parameters of a jq function call
+	slots:  []Need,
+	args:   []Arg_Binding,
 }
 
 @(private = "file")
@@ -90,69 +82,39 @@ Analyzer :: struct {
 	call_depth:        int,
 }
 
-// Analyzes `prog` under `opts`, allocating the returned `Plan` in `allocator`. Free with `destroy_plan`.
 analyze :: proc(prog: ^Program, opts := Analyze_Options{}, allocator := context.allocator) -> Plan {
 	plan, _ := analyze_plan_with_vars(prog, nil, opts, allocator)
 	return plan
 }
 
-// Reports whether `prog` is the bare identity filter `.`.
 is_identity :: proc "contextless" (prog: ^Program) -> bool {
 	return prog != nil && prog.body != nil && prog.body.kind == .Identity
 }
 
-// Analyzes `prog` with named external `$var` bindings `ext_vars`, returning the shared `query.Plan` contract.
-// Each variable in `ext_vars` is recorded in `plan.aux` with its pruned `Source_Demand`.
-// Free the returned plan with `query.destroy_plan`.
-analyze_with_vars :: proc(
-	prog: ^Program,
-	ext_vars: []string,
-	allocator := context.allocator,
-	opts := Analyze_Options{},
-) -> (
-	plan: query.Plan,
-	ok: bool,
-) {
-	jq_plan, valid := analyze_plan_with_vars(prog, ext_vars, opts, allocator)
-	if !valid {
-		return {}, false
-	}
+analyze_with_vars :: proc(prog: ^Program, ext_vars: []string, allocator := context.allocator, opts := Analyze_Options{}) -> (plan: query.Plan, ok: bool) {
+	jq_plan := analyze_plan_with_vars(prog, ext_vars, opts, allocator) or_return
 	destroy_jq_extras(&jq_plan)
 	return jq_plan.contract, true
 }
 
-// Analyzes `prog` with named external `$var` bindings `ext_vars`, returning the full `jq.Plan` (with hints + `aux`).
-analyze_plan_with_vars :: proc(
-	prog: ^Program,
-	ext_vars: []string,
-	opts := Analyze_Options{},
-	allocator := context.allocator,
-) -> (
-	plan: Plan,
-	ok: bool,
-) {
+analyze_plan_with_vars :: proc(prog: ^Program, ext_vars: []string, opts := Analyze_Options{}, allocator := context.allocator) -> (plan: Plan, ok: bool) {
 	if prog == nil {
 		return {}, false
 	}
 	a: Analyzer
 	mem.dynamic_arena_init(&a.arena, allocator, allocator)
 	defer mem.dynamic_arena_destroy(&a.arena)
-	a.prog = prog
-	a.scratch = mem.dynamic_arena_allocator(&a.arena)
+	a.prog, a.scratch = prog, mem.dynamic_arena_allocator(&a.arena)
 	a.active_fns = make([dynamic]^Func, 0, 16, a.scratch)
 	a.memo = make([dynamic]Memo_Entry, 0, 32, a.scratch)
 
 	init_ext_vars(&a, ext_vars)
-
-	// Always collect serial flags across the entire reachable program (even dead branches).
 	a.serial = collect_serial(prog, a.scratch)
 	if len(a.ext_names) > 0 {
 		collect_ext_reachable(&a)
 	}
 
-	plan = Plan{contract = {allocator = allocator}}
-	plan.serial = a.serial
-
+	plan = Plan{contract = {allocator = allocator, serial = a.serial}}
 	if opts.stream {
 		stream_facts := needs_facts(prog, a.scratch)
 		plan.sources[.Main] = query.whole_demand(stream_facts, .Stream_Mode)
@@ -167,26 +129,21 @@ analyze_plan_with_vars :: proc(
 
 	root_need := demand_node(&a, prog.body, whole_need(.Identity), nil)
 	plan.serial |= a.serial
-
-	if opts.null_input {
+	switch {
+	case opts.null_input:
 		plan.sources[.Main] = {mode = .None, allocator = allocator}
-	} else if opts.raw_input {
+	case opts.raw_input:
 		plan.sources[.Raw] = finalize_need(&a, root_need, allocator)
-	} else if opts.slurp {
-		elem := array_element_need(&a, root_need)
-		plan.sources[.Slurp] = finalize_need(&a, elem, allocator)
+	case opts.slurp:
+		plan.sources[.Slurp] = finalize_need(&a, unwrap_container_need(&a, root_need, false, ""), allocator)
 		plan.sources[.Main] = finalize_need(&a, root_need, allocator)
-	} else {
+	case:
 		plan.sources[.Main] = finalize_need(&a, root_need, allocator)
 	}
-
-	if a.inputs_need.whole || len(a.inputs_need.paths) > 0 || a.inputs_need.facts {
+	if !need_is_empty(a.inputs_need) {
 		plan.sources[.Inputs] = finalize_need(&a, a.inputs_need, allocator)
 	}
-
 	finalize_ext_aux(&a, &plan.contract, allocator)
-
-	// Extract optional execution hints (only for standard non-slurp, non-null-input, non-raw runs).
 	if !opts.null_input && !opts.slurp && !opts.raw_input {
 		extract_hints(&a, prog.body, &plan, opts.materialize_each, allocator)
 	}
@@ -200,17 +157,7 @@ init_ext_vars :: proc(a: ^Analyzer, ext_vars: []string) {
 	}
 	names := make([dynamic]string, 0, len(ext_vars), a.scratch)
 	for name in ext_vars {
-		if name == "" {
-			continue
-		}
-		dup := false
-		for prev in names {
-			if prev == name {
-				dup = true
-				break
-			}
-		}
-		if !dup {
+		if name != "" && !slice.contains(names[:], name) {
 			append(&names, name)
 		}
 	}
@@ -221,16 +168,9 @@ init_ext_vars :: proc(a: ^Analyzer, ext_vars: []string) {
 	a.ext_needs = make([]Need, len(names), a.scratch)
 	a.ext_reachable = make([]bool, len(names), a.scratch)
 	a.global_to_ext = make([]int, len(a.prog.globals), a.scratch)
-	for &m in a.global_to_ext {
-		m = -1
-	}
-	for g, gi in a.prog.globals {
-		for name, ei in names {
-			if g == name {
-				a.global_to_ext[gi] = ei
-				break
-			}
-		}
+	for &m, gi in a.global_to_ext {
+		ei, found := slice.linear_search(names[:], a.prog.globals[gi])
+		m = ei if found else -1
 	}
 }
 
@@ -241,10 +181,7 @@ finalize_ext_aux :: proc(a: ^Analyzer, contract: ^query.Plan, allocator: runtime
 	}
 	entries := make([]query.Named_Demand, len(a.ext_names), a.scratch)
 	for name, i in a.ext_names {
-		entries[i] = {
-			name   = name,
-			demand = finalize_need(a, a.ext_needs[i], allocator),
-		}
+		entries[i] = {name = name, demand = finalize_need(a, a.ext_needs[i], allocator)}
 	}
 	if query.set_aux_demands(contract, entries) != nil {
 		for &e in entries {
@@ -258,9 +195,8 @@ destroy_jq_extras :: proc(p: ^Plan) {
 	if p == nil {
 		return
 	}
-	a := p.allocator
 	for n in p.owned_nodes {
-		free(n, a)
+		free(n, p.allocator)
 	}
 	delete(p.owned_nodes)
 	p.owned_nodes = nil
@@ -272,7 +208,6 @@ destroy_plan :: proc(p: ^Plan) {
 	p^ = {}
 }
 
-// Formats `p` as a human-readable `--explain` string in `allocator`.
 explain_plan :: proc(p: ^Plan, allocator := context.allocator) -> string {
 	b := strings.builder_make(allocator)
 	query.format_plan(&b, &p.contract)
@@ -280,11 +215,6 @@ explain_plan :: proc(p: ^Plan, allocator := context.allocator) -> string {
 }
 
 // ---- Need algebra
-
-@(private = "file")
-empty_need :: #force_inline proc "contextless" () -> Need {
-	return {}
-}
 
 @(private = "file")
 whole_need :: #force_inline proc "contextless" (reason: query.Whole_Reason, facts := false) -> Need {
@@ -309,19 +239,12 @@ need_is_empty :: #force_inline proc "contextless" (n: Need) -> bool {
 @(private = "file")
 need_join :: proc(a: ^Analyzer, x, y: Need) -> Need {
 	facts := x.facts || y.facts
-	if x.whole {
-		return {whole = true, facts = facts, reason = x.reason if x.reason != .None else y.reason}
+	if x.whole || y.whole {
+		r := x.reason if (x.whole && x.reason != .None) else (y.reason if y.whole && y.reason != .None else (x.reason if x.reason != .None else y.reason))
+		return {whole = true, facts = facts, reason = r}
 	}
-	if y.whole {
-		return {whole = true, facts = facts, reason = y.reason if y.reason != .None else x.reason}
-	}
-	if len(x.paths) == 0 {
-		out := y
-		out.facts = facts
-		return out
-	}
-	if len(y.paths) == 0 {
-		out := x
+	if len(x.paths) == 0 || len(y.paths) == 0 {
+		out := y if len(x.paths) == 0 else x
 		out.facts = facts
 		return out
 	}
@@ -331,9 +254,7 @@ need_join :: proc(a: ^Analyzer, x, y: Need) -> Need {
 		merged := false
 		for &k in out {
 			if query.steps_equal(k.steps, p.steps) {
-				k.grain = query.broader_grain(k.grain, p.grain)
-				k.limit = query.merge_limit(k.limit, p.limit)
-				merged = true
+				k.grain, k.limit, merged = query.broader_grain(k.grain, p.grain), query.merge_limit(k.limit, p.limit), true
 				break
 			}
 		}
@@ -366,11 +287,8 @@ need_equal :: proc "contextless" (x, y: Need) -> bool {
 
 @(private = "file")
 need_hash :: proc "contextless" (n: Need) -> u64 {
-	h := u64(0xCBF29CE484222325)
-	mix :: #force_inline proc "contextless" (h, v: u64) -> u64 {
-		return (h ~ v) * 0x100000001B3
-	}
-	h = mix(h, u64(n.whole) | u64(n.facts) << 1)
+	mix :: #force_inline proc "contextless" (h, v: u64) -> u64 { return (h ~ v) * 0x100000001B3 }
+	h := mix(0xCBF29CE484222325, u64(n.whole) | u64(n.facts) << 1)
 	if n.whole {
 		return h
 	}
@@ -384,27 +302,20 @@ need_hash :: proc "contextless" (n: Need) -> u64 {
 				for c in transmute([]u8)string(step) {
 					h = mix(h, u64(c))
 				}
-			case tape.Index:
-				h = mix(h, 2)
-				h = mix(h, u64(i64(step)))
-			case tape.All:
-				h = mix(h, 3)
-				h = mix(h, u64(step.limit))
+			case tape.Index:   h = mix(mix(h, 2), u64(i64(step)))
+			case tape.All:     h = mix(mix(h, 3), u64(step.limit))
 			case tape.Slice:
-				h = mix(h, 4)
-				h = mix(h, u64(i64(step.lo)))
+				h = mix(mix(h, 4), u64(i64(step.lo)))
 				if hi, ok := step.hi.?; ok {
 					h = mix(h, u64(i64(hi)))
 				}
-			case tape.Descend:
-				h = mix(h, 5)
+			case tape.Descend: h = mix(h, 5)
 			}
 		}
 	}
 	return h
 }
 
-// Prepends `step` to every path in `child`, keeping at least `[step]@min_grain` when `child` is empty.
 @(private = "file")
 need_prepend :: proc(a: ^Analyzer, step: tape.Step, child: Need, min_grain := tape.Grain.Exists) -> Need {
 	if child.whole || len(child.paths) == 0 {
@@ -427,8 +338,6 @@ need_prepend :: proc(a: ^Analyzer, step: tape.Step, child: Need, min_grain := ta
 	return {facts = child.facts, paths = ps}
 }
 
-// Whether consumer demand `out` is safe to combine with a path-level `limit` from `first`/`limit`:
-// rejects demands that fan out across multiple children or read container length after the limit boundary.
 @(private = "file")
 out_safe_for_limit :: proc "contextless" (out: Need) -> bool {
 	if out.whole {
@@ -440,8 +349,7 @@ out_safe_for_limit :: proc "contextless" (out: Need) -> bool {
 		}
 		for s in p.steps {
 			#partial switch step in s {
-			case tape.All, tape.Slice, tape.Descend:
-				return false
+			case tape.All, tape.Slice, tape.Descend: return false
 			case tape.Index:
 				if step < 0 {
 					return false
@@ -452,8 +360,6 @@ out_safe_for_limit :: proc "contextless" (out: Need) -> bool {
 	return true
 }
 
-// Marks all reachable outer variable slots (and `inputs_need` if the program reads inputs) `.Whole` on
-// a recursion or cap bailout so no skipped variable/input read is under-demanded.
 @(private = "file")
 taint_outer_env :: proc(a: ^Analyzer, env: ^Var_Frame, reason: query.Whole_Reason, facts := false) {
 	for f := env; f != nil; f = f.parent {
@@ -471,7 +377,6 @@ taint_outer_env :: proc(a: ^Analyzer, env: ^Var_Frame, reason: query.Whole_Reaso
 	}
 }
 
-// Applies a path-level `limit` to every path in `n` (used for `first(f)` and `limit(k; f)`).
 @(private = "file")
 need_limit :: proc(a: ^Analyzer, n: Need, limit: int) -> Need {
 	if n.whole || len(n.paths) == 0 || limit <= 0 {
@@ -501,46 +406,12 @@ need_limit :: proc(a: ^Analyzer, n: Need, limit: int) -> Need {
 	return {facts = n.facts, paths = ps}
 }
 
-// Unwraps one array-element layer from consumer demand `out` (for `[a]`, `a[lo:hi]`, and `-s` slurp).
 @(private = "file")
-array_element_need :: proc(a: ^Analyzer, out: Need) -> Need {
+unwrap_container_need :: proc(a: ^Analyzer, out: Need, is_object: bool, key_name: string) -> Need {
 	if out.whole {
 		return whole_need(out.reason, out.facts)
 	}
-	acc := empty_need()
-	for p in out.paths {
-		if len(p.steps) == 0 {
-			if p.grain == .Whole {
-				return whole_need(.Identity, out.facts)
-			}
-			// `.Keys` or `.Exists` on a built array does not inspect elements.
-			continue
-		}
-		switch _ in p.steps[0] {
-		case tape.Index, tape.All, tape.Slice:
-			rest := p.steps[1:]
-			if len(rest) == 0 && p.grain == .Whole {
-				return whole_need(.Identity, out.facts)
-			}
-			sub := make([]query.Demand_Path, 1, a.scratch)
-			sub[0] = {steps = rest, grain = p.grain}
-			acc = need_join(a, acc, {facts = out.facts, paths = sub})
-		case tape.Descend:
-			return whole_need(.Whole_Op, out.facts)
-		case tape.Name:
-			// Indexing an array with a name fails on the array itself, not its elements.
-		}
-	}
-	return acc
-}
-
-// Unwraps one object-member layer for static key `key_name` from consumer demand `out` (for `{k: v}`).
-@(private = "file")
-object_member_need :: proc(a: ^Analyzer, out: Need, key_name: string) -> Need {
-	if out.whole {
-		return whole_need(out.reason, out.facts)
-	}
-	acc := empty_need()
+	acc: Need
 	for p in out.paths {
 		if len(p.steps) == 0 {
 			if p.grain == .Whole {
@@ -548,29 +419,23 @@ object_member_need :: proc(a: ^Analyzer, out: Need, key_name: string) -> Need {
 			}
 			continue
 		}
-		#partial switch step in p.steps[0] {
-		case tape.Name:
-			if string(step) != key_name {
-				continue
-			}
-			rest := p.steps[1:]
-			if len(rest) == 0 && p.grain == .Whole {
-				return whole_need(.Identity, out.facts)
-			}
-			sub := make([]query.Demand_Path, 1, a.scratch)
-			sub[0] = {steps = rest, grain = p.grain}
-			acc = need_join(a, acc, {facts = out.facts, paths = sub})
-		case tape.All:
-			rest := p.steps[1:]
-			if len(rest) == 0 && p.grain == .Whole {
-				return whole_need(.Identity, out.facts)
-			}
-			sub := make([]query.Demand_Path, 1, a.scratch)
-			sub[0] = {steps = rest, grain = p.grain}
-			acc = need_join(a, acc, {facts = out.facts, paths = sub})
-		case tape.Descend:
-			return whole_need(.Whole_Op, out.facts)
+		matched := false
+		switch step in p.steps[0] {
+		case tape.Descend:            return whole_need(.Whole_Op, out.facts)
+		case tape.All:                matched = true
+		case tape.Index, tape.Slice:  matched = !is_object
+		case tape.Name:               matched = is_object && string(step) == key_name
 		}
+		if !matched {
+			continue
+		}
+		rest := p.steps[1:]
+		if len(rest) == 0 && p.grain == .Whole {
+			return whole_need(.Identity, out.facts)
+		}
+		sub := make([]query.Demand_Path, 1, a.scratch)
+		sub[0] = {steps = rest, grain = p.grain}
+		acc = need_join(a, acc, {facts = out.facts, paths = sub})
 	}
 	return acc
 }
@@ -581,10 +446,7 @@ finalize_need :: proc(a: ^Analyzer, n: Need, allocator: runtime.Allocator) -> qu
 		return query.whole_demand(n.facts, n.reason if n.reason != .None else .Identity)
 	}
 	if len(n.paths) == 0 {
-		if n.facts {
-			return query.whole_demand(true, .Whole_Op)
-		}
-		return {mode = .None, allocator = allocator}
+		return query.whole_demand(true, .Whole_Op) if n.facts else {mode = .None, allocator = allocator}
 	}
 	return query.finalize_source_demand(n.paths, n.facts, allocator)
 }
@@ -592,9 +454,17 @@ finalize_need :: proc(a: ^Analyzer, n: Need, allocator: runtime.Allocator) -> qu
 // ---- Backward demand transfer
 
 @(private = "file")
+demand_all_whole :: proc(a: ^Analyzer, nodes: []^Node, env: ^Var_Frame, reason := query.Whole_Reason.Whole_Op) -> (acc: Need) {
+	for x in nodes {
+		acc = need_join(a, acc, demand_node(a, x, whole_need(reason), env))
+	}
+	return
+}
+
+@(private = "file")
 demand_node :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need {
 	if n == nil {
-		return empty_need()
+		return {}
 	}
 	if a.call_depth > MAX_CALL_DEPTH {
 		taint_outer_env(a, env, .Analysis_Cap, out.facts)
@@ -604,92 +474,54 @@ demand_node :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need 
 	defer a.call_depth -= 1
 
 	switch n.kind {
-	case .Identity:
-		return out
-	case .Literal:
-		return empty_need()
+	case .Identity:       return out
+	case .Literal, .Break: return {}
 	case .Var:
 		if n.ref.kind == .Var {
-			f := var_frame_up(env, n.ref.hops)
-			if f != nil && int(n.ref.slot) < len(f.slots) {
+			if f := var_frame_up(env, n.ref.hops); f != nil && int(n.ref.slot) < len(f.slots) {
 				f.slots[n.ref.slot] = need_join(a, f.slots[n.ref.slot], out)
 			}
 		} else if n.ref.kind == .Global && int(n.ref.slot) < len(a.global_to_ext) {
-			ext_i := a.global_to_ext[n.ref.slot]
-			if ext_i >= 0 {
+			if ext_i := a.global_to_ext[n.ref.slot]; ext_i >= 0 {
 				a.ext_needs[ext_i] = need_join(a, a.ext_needs[ext_i], out)
 			}
 		}
-		return empty_need()
-	case .Field:
-		return demand_node(a, n.a, need_prepend(a, tape.Name(n.name), out), env)
-	case .Index:
-		return demand_index(a, n, out, env)
-	case .Slice:
-		return demand_slice(a, n, out, env)
-	case .Iterate:
-		return demand_node(a, n.a, need_prepend(a, tape.All{}, out), env)
-	case .String:
-		acc := empty_need()
-		for part in n.args {
-			acc = need_join(a, acc, demand_node(a, part, whole_need(.Whole_Op), env))
-		}
-		return acc
-	case .Format:
-		if n.a == nil {
-			return whole_need(.Whole_Op)
-		}
-		return demand_node(a, n.a, whole_need(.Whole_Op), env)
-	case .Array:
-		if n.a == nil {
-			return empty_need()
-		}
-		return demand_node(a, n.a, array_element_need(a, out), env)
+		return {}
+	case .Field:   return demand_node(a, n.a, need_prepend(a, tape.Name(n.name), out), env)
+	case .Index:   return demand_index(a, n, out, env)
+	case .Slice:   return demand_slice(a, n, out, env)
+	case .Iterate: return demand_node(a, n.a, need_prepend(a, tape.All{}, out), env)
+	case .String:  return demand_all_whole(a, n.args, env)
+	case .Format:  return whole_need(.Whole_Op) if n.a == nil else demand_node(a, n.a, whole_need(.Whole_Op), env)
+	case .Array:   return {} if n.a == nil else demand_node(a, n.a, unwrap_container_need(a, out, false, ""), env)
 	case .Object:
-		acc := empty_need()
+		acc: Need
 		for i := 0; i < len(n.args); i += 2 {
 			k, v := n.args[i], n.args[i + 1]
 			if k.kind == .Literal && k.value.kind == .String {
-				key_name := query.text_of(k.value)
 				if v != nil {
-					acc = need_join(a, acc, demand_node(a, v, object_member_need(a, out, key_name), env))
+					acc = need_join(a, acc, demand_node(a, v, unwrap_container_need(a, out, true, query.text_of(k.value)), env))
 				}
 			} else {
 				acc = need_join(a, acc, demand_node(a, k, whole_need(.Dynamic_Step), env))
 				if v == nil {
-					// Shorthand `{(expr)}`: indexes `.` dynamically by `expr`.
 					acc = need_join(a, acc, whole_need(.Dynamic_Step, out.facts))
 				} else {
-					val_out := empty_need()
-					if out.whole || has_non_shallow_path(out) {
-						val_out = whole_need(.Dynamic_Step, out.facts)
-					}
+					val_out := whole_need(.Dynamic_Step, out.facts) if out.whole || has_non_shallow_path(out) else Need{}
 					acc = need_join(a, acc, demand_node(a, v, val_out, env))
 				}
 			}
 		}
 		return acc
-	case .Neg:
-		return demand_node(a, n.a, whole_need(.Whole_Op), env)
-	case .Pipe:
-		db := demand_node(a, n.b, out, env)
-		return demand_node(a, n.a, db, env)
-	case .Comma:
-		da := demand_node(a, n.a, out, env)
-		db := demand_node(a, n.b, out, env)
-		return need_join(a, da, db)
-	case .Binary:
-		da := demand_node(a, n.a, whole_need(.Whole_Op), env)
-		db := demand_node(a, n.b, whole_need(.Whole_Op), env)
-		return need_join(a, da, db)
+	case .Neg:    return demand_node(a, n.a, whole_need(.Whole_Op), env)
+	case .Pipe:   return demand_node(a, n.a, demand_node(a, n.b, out, env), env)
+	case .Comma:  return need_join(a, demand_node(a, n.a, out, env), demand_node(a, n.b, out, env))
+	case .Binary: return need_join(a, demand_node(a, n.a, whole_need(.Whole_Op), env), demand_node(a, n.b, whole_need(.Whole_Op), env))
 	case .And, .Or:
-		da := demand_node(a, n.a, grain_need(a, .Exists), env)
-		db := demand_node(a, n.b, grain_need(a, .Exists), env)
-		return need_join(a, da, db)
+		g := grain_need(a, .Exists)
+		return need_join(a, demand_node(a, n.a, g, env), demand_node(a, n.b, g, env))
 	case .Alt:
-		da := demand_node(a, n.a, need_join(a, out, grain_need(a, .Exists)), env)
-		db := demand_node(a, n.b, out, env)
-		return need_join(a, da, db)
+		return need_join(a, demand_node(a, n.a, need_join(a, out, grain_need(a, .Exists)), env), demand_node(a, n.b, out, env))
 	case .If:
 		dc := demand_node(a, n.a, grain_need(a, .Exists), env)
 		dt := demand_node(a, n.b, out, env)
@@ -698,28 +530,20 @@ demand_node :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need 
 	case .Try:
 		da := demand_node(a, n.a, out, env)
 		if n.b != nil {
-			// Catch runs on the error value, not `.`, so discard its `.` paths while preserving var/input/facts needs.
-			db := demand_node(a, n.b, out, env)
-			da.facts ||= db.facts
+			da.facts = demand_node(a, n.b, out, env).facts || da.facts
 		}
 		return da
-	case .Bind:
-		return demand_bind(a, n, out, env)
-	case .Reduce, .Foreach:
-		return demand_fold(a, n, out, env)
-	case .Def:
-		return demand_node(a, n.a, out, env)
+	case .Bind:             return demand_bind(a, n, out, env)
+	case .Reduce, .Foreach: return demand_fold(a, n, out, env)
+	case .Def:              return demand_node(a, n.a, out, env)
 	case .Label:
 		frame := Var_Frame{parent = env}
 		return demand_node(a, n.a, out, &frame)
-	case .Break:
-		return empty_need()
 	case .Update:
 		da := demand_node(a, n.a, whole_need(.Whole_Op), env)
 		db := demand_node(a, n.b, whole_need(.Whole_Op), env)
 		return whole_need(.Whole_Op, out.facts || da.facts || db.facts)
-	case .Call:
-		return demand_call(a, n, out, env)
+	case .Call: return demand_call(a, n, out, env)
 	}
 	return whole_need(.Whole_Op, out.facts)
 }
@@ -738,12 +562,8 @@ has_non_shallow_path :: proc "contextless" (n: Need) -> bool {
 demand_index :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need {
 	b := n.b
 	if b.kind == .Literal {
-		// Static fact step: `.@comment`, `.@tag`, `.&attr`, etc.
 		if kind, _, is_fact := query.fact_step_literal(b.value); is_fact {
-			if kind == .Content {
-				return demand_node(a, n.a, whole_need(.Whole_Op, true), env)
-			}
-			return demand_node(a, n.a, grain_need(a, .Exists, true), env)
+			return demand_node(a, n.a, whole_need(.Whole_Op, true) if kind == .Content else grain_need(a, .Exists, true), env)
 		}
 		if query.is_unknown_fact_step_literal(b.value) {
 			return demand_node(a, n.a, grain_need(a, .Exists, true), env)
@@ -756,23 +576,12 @@ demand_index :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need
 		}
 		return demand_node(a, n.a, whole_need(.Dynamic_Step, out.facts), env)
 	}
-	// Dynamic fact / attribute accessor: `.@(expr)` or `.&[expr]`.
 	if b.kind == .Call && b.builtin != nil && (b.builtin.fn == v_fact_step || b.builtin.fn == v_attribute_step) {
-		dk := demand_node(a, b.args[0], whole_need(.Whole_Op), env)
-		da := demand_node(a, n.a, whole_need(.Dynamic_Step, true), env)
-		return need_join(a, dk, da)
+		return need_join(a, demand_node(a, b.args[0], whole_need(.Whole_Op), env), demand_node(a, n.a, whole_need(.Dynamic_Step, true), env))
 	}
 	dk := demand_node(a, b, whole_need(.Whole_Op), env)
-	elem_need: Need
-	if !out.whole && len(out.paths) > 0 && all_paths_start_with_name(out) && b.kind != .Array && b.kind != .Object {
-		// Dynamic lookup `$src[expr].field` only accesses `.field` (and siblings in `out`) on matched entries,
-		// so keep `[].field` rather than upgrading the entire indexed source to `.Whole`.
-		elem_need = need_prepend(a, tape.All{}, out)
-	} else {
-		elem_need = whole_need(.Dynamic_Step, out.facts)
-	}
-	da := demand_node(a, n.a, elem_need, env)
-	return need_join(a, dk, da)
+	elem_need := need_prepend(a, tape.All{}, out) if !out.whole && len(out.paths) > 0 && all_paths_start_with_name(out) && b.kind != .Array && b.kind != .Object else whole_need(.Dynamic_Step, out.facts)
+	return need_join(a, dk, demand_node(a, n.a, elem_need, env))
 }
 
 @(private = "file")
@@ -793,46 +602,29 @@ all_paths_start_with_name :: proc "contextless" (n: Need) -> bool {
 
 @(private = "file")
 demand_slice :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need {
-	lo_need := demand_node(a, n.b, whole_need(.Whole_Op), env) if n.b != nil else empty_need()
-	hi_need := demand_node(a, n.c, whole_need(.Whole_Op), env) if n.c != nil else empty_need()
-	bounds_need := need_join(a, lo_need, hi_need)
-
-	lo := i32(0)
-	hi: Maybe(i32) = nil
-	static := true
+	bounds_need := need_join(a, demand_node(a, n.b, whole_need(.Whole_Op), env), demand_node(a, n.c, whole_need(.Whole_Op), env))
+	lo, hi, static := i32(0), Maybe(i32)(nil), true
 	if n.b != nil {
-		if i, ok := literal_exact_i32(n.b); ok {
-			lo = i
-		} else {
-			static = false
-		}
+		lo, static = literal_exact_i32(n.b)
 	}
-	if n.c != nil {
-		if i, ok := literal_exact_i32(n.c); ok {
-			hi = i
-		} else {
-			static = false
-		}
+	if static && n.c != nil {
+		v, ok := literal_exact_i32(n.c)
+		hi, static = v, ok
 	}
 	if !static {
 		return need_join(a, bounds_need, demand_node(a, n.a, whole_need(.Dynamic_Step, out.facts), env))
 	}
-	// `slice` reads `length_of` (`.Keys` keeps exact array count even under `stop_early`) and elements `lo..hi`.
-	elem_out := array_element_need(a, out)
+	elem_out := unwrap_container_need(a, out, false, "")
 	if need_is_empty(elem_out) {
 		elem_out = grain_need(a, .Exists, out.facts)
 	}
 	slice_need := need_join(a, grain_need(a, .Keys, out.facts), need_prepend(a, tape.Slice{lo = lo, hi = hi}, elem_out))
-	da := demand_node(a, n.a, slice_need, env)
-	return need_join(a, bounds_need, da)
+	return need_join(a, bounds_need, demand_node(a, n.a, slice_need, env))
 }
 
 @(private = "file")
 literal_exact_i32 :: proc(n: ^Node) -> (i32, bool) {
-	if n.kind != .Literal || n.value.kind != .Int {
-		return 0, false
-	}
-	if n.value.i < -(1 << 30) || n.value.i > (1 << 30) {
+	if n.kind != .Literal || n.value.kind != .Int || n.value.i < -(1 << 30) || n.value.i > (1 << 30) {
 		return 0, false
 	}
 	return i32(n.value.i), true
@@ -842,19 +634,14 @@ literal_exact_i32 :: proc(n: ^Node) -> (i32, bool) {
 demand_bind :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need {
 	frame := Var_Frame{parent = env, slots = make([]Need, int(n.slots), a.scratch)}
 	dot_need := demand_node(a, n.b, out, &frame)
-	key_env := &frame if len(n.patterns) > 1 else env
-	key_need, pat_need := lift_patterns(a, n.patterns, frame.slots, key_env)
-	src_need := demand_node(a, n.a, pat_need, env)
-	return need_join(a, need_join(a, dot_need, key_need), src_need)
+	key_need, pat_need := lift_patterns(a, n.patterns, frame.slots, &frame if len(n.patterns) > 1 else env)
+	return need_join(a, need_join(a, dot_need, key_need), demand_node(a, n.a, pat_need, env))
 }
 
 @(private = "file")
 demand_fold :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need {
 	frame := Var_Frame{parent = env, slots = make([]Need, int(n.slots), a.scratch)}
-	acc_need := out
-	if n.kind == .Foreach && n.d != nil {
-		acc_need = demand_node(a, n.d, out, &frame)
-	}
+	acc_need := demand_node(a, n.d, out, &frame) if n.kind == .Foreach && n.d != nil else out
 	upd_dot := demand_node(a, n.c, acc_need, &frame)
 	acc_need.facts ||= upd_dot.facts
 	if !acc_need.whole && !need_equal(need_join(a, acc_need, upd_dot), acc_need) {
@@ -863,26 +650,19 @@ demand_fold :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need 
 		if n.kind == .Foreach && n.d != nil {
 			_ = demand_node(a, n.d, out, &frame)
 		}
-		upd2 := demand_node(a, n.c, acc_need, &frame)
-		acc_need.facts ||= upd2.facts
+		acc_need.facts = demand_node(a, n.c, acc_need, &frame).facts || acc_need.facts
 	}
-	key_env := &frame if len(n.patterns) > 1 else env
-	key_need, pat_need := lift_patterns(a, n.patterns, frame.slots, key_env)
-	init_need := demand_node(a, n.b, acc_need, env)
-	gen_need := demand_node(a, n.a, pat_need, env)
-	return need_join(a, need_join(a, init_need, key_need), gen_need)
+	key_need, pat_need := lift_patterns(a, n.patterns, frame.slots, &frame if len(n.patterns) > 1 else env)
+	return need_join(a, need_join(a, demand_node(a, n.b, acc_need, env), key_need), demand_node(a, n.a, pat_need, env))
 }
 
-// Lifts variable demands in `slots` back through `patterns` into a demand on the bound value,
-// plus any demand on `.` from dynamic object-pattern keys.
+// Lifts variable demands in `slots` back through `patterns` iteratively (no unbounded recursion).
 @(private = "file")
 lift_patterns :: proc(a: ^Analyzer, patterns: []^Pattern, slots: []Need, env: ^Var_Frame) -> (key_need, val_need: Need) {
 	for pat in patterns {
 		kn, vn := lift_pattern(a, pat, slots, env)
-		key_need = need_join(a, key_need, kn)
-		val_need = need_join(a, val_need, vn)
+		key_need, val_need = need_join(a, key_need, kn), need_join(a, val_need, vn)
 	}
-	// Multiple `?//` alternatives test types during destructuring, so keep at least `.Exists`.
 	if len(patterns) > 1 && need_is_empty(val_need) {
 		val_need = grain_need(a, .Exists)
 	}
@@ -890,42 +670,81 @@ lift_patterns :: proc(a: ^Analyzer, patterns: []^Pattern, slots: []Need, env: ^V
 }
 
 @(private = "file")
-lift_pattern :: proc(a: ^Analyzer, pat: ^Pattern, slots: []Need, env: ^Var_Frame) -> (key_need, val_need: Need) {
-	if pat == nil {
+lift_pattern :: proc(a: ^Analyzer, root: ^Pattern, slots: []Need, env: ^Var_Frame) -> (key_need, val_need: Need) {
+	if root == nil {
 		return
 	}
-	switch pat.kind {
-	case .Var:
-		if int(pat.slot) < len(slots) {
-			return empty_need(), slots[pat.slot]
-		}
-	case .Array:
-		val_need = grain_need(a, .Exists)
-		for elem, i in pat.elems {
-			kn, vn := lift_pattern(a, elem, slots, env)
-			key_need = need_join(a, key_need, kn)
-			val_need = need_join(a, val_need, need_prepend(a, tape.Index(i), vn))
-		}
-	case .Object:
-		val_need = grain_need(a, .Exists)
-		// Reverse order so dynamic keys referencing earlier pattern variables write into `slots` before those slots are lifted.
-		#reverse for m in pat.members {
-			member_need := empty_need()
-			if m.var != "" && int(m.slot) < len(slots) {
-				member_need = need_join(a, member_need, slots[m.slot])
+	Lift_Frame :: struct {
+		pat:                ^Pattern,
+		idx:                int,
+		val_need, child_vn: Need,
+		waiting:            bool,
+	}
+	stack := make([dynamic]Lift_Frame, 0, 8, a.scratch)
+	push_pat :: proc(a: ^Analyzer, stack: ^[dynamic]Lift_Frame, pat: ^Pattern) {
+		append(stack, Lift_Frame{pat = pat, idx = len(pat.members) - 1 if pat.kind == .Object else 0, val_need = grain_need(a, .Exists) if pat.kind != .Var else Need{}})
+	}
+	push_pat(a, &stack, root)
+	for len(stack) > 0 {
+		f := &stack[len(stack) - 1]
+		pat := f.pat
+		done, res_vn := false, Need{}
+		switch pat.kind {
+		case .Var:
+			if int(pat.slot) < len(slots) {
+				res_vn = slots[pat.slot]
 			}
-			if m.pattern != nil {
-				kn, vn := lift_pattern(a, m.pattern, slots, env)
-				key_need = need_join(a, key_need, kn)
-				member_need = need_join(a, member_need, vn)
+			done = true
+		case .Array:
+			if f.waiting {
+				f.val_need = need_join(a, f.val_need, need_prepend(a, tape.Index(f.idx), f.child_vn))
+				f.waiting, f.idx = false, f.idx + 1
 			}
-			if m.key != nil && m.key.kind == .Literal && m.key.value.kind == .String {
-				val_need = need_join(a, val_need, need_prepend(a, tape.Name(query.text_of(m.key.value)), member_need))
-			} else {
-				if m.key != nil {
-					key_need = need_join(a, key_need, demand_node(a, m.key, whole_need(.Dynamic_Step), env))
+			for f.idx < len(pat.elems) {
+				if elem := pat.elems[f.idx]; elem != nil {
+					f.waiting = true
+					push_pat(a, &stack, elem)
+					break
 				}
-				val_need = need_join(a, val_need, whole_need(.Dynamic_Step, member_need.facts))
+				f.val_need = need_join(a, f.val_need, need_prepend(a, tape.Index(f.idx), Need{}))
+				f.idx += 1
+			}
+			if !f.waiting {
+				res_vn, done = f.val_need, true
+			}
+		case .Object:
+			for f.idx >= 0 {
+				m := pat.members[f.idx]
+				if m.pattern != nil && !f.waiting {
+					f.waiting = true
+					push_pat(a, &stack, m.pattern)
+					break
+				}
+				member_need := f.child_vn if f.waiting else Need{}
+				f.waiting, f.child_vn = false, {}
+				if m.var != "" && int(m.slot) < len(slots) {
+					member_need = need_join(a, member_need, slots[m.slot])
+				}
+				if m.key != nil && m.key.kind == .Literal && m.key.value.kind == .String {
+					f.val_need = need_join(a, f.val_need, need_prepend(a, tape.Name(query.text_of(m.key.value)), member_need))
+				} else {
+					if m.key != nil {
+						key_need = need_join(a, key_need, demand_node(a, m.key, whole_need(.Dynamic_Step), env))
+					}
+					f.val_need = need_join(a, f.val_need, whole_need(.Dynamic_Step, member_need.facts))
+				}
+				f.idx -= 1
+			}
+			if !f.waiting {
+				res_vn, done = f.val_need, true
+			}
+		}
+		if done {
+			pop(&stack)
+			if len(stack) == 0 {
+				val_need = res_vn
+			} else {
+				stack[len(stack) - 1].child_vn = res_vn
 			}
 		}
 	}
@@ -948,8 +767,7 @@ var_frame_up :: #force_inline proc "contextless" (env: ^Var_Frame, hops: u32) ->
 demand_call :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need {
 	#partial switch n.ref.kind {
 	case .Param:
-		f := var_frame_up(env, n.ref.hops)
-		if f != nil && int(n.ref.slot) < len(f.args) {
+		if f := var_frame_up(env, n.ref.hops); f != nil && int(n.ref.slot) < len(f.args) {
 			arg := f.args[n.ref.slot]
 			return demand_node(a, arg.node, out, arg.env)
 		}
@@ -962,17 +780,12 @@ demand_call :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need 
 		if fn.prelude && fn.name == "tostream" && len(fn.params) == 0 {
 			return whole_need(.Stream_Mode, out.facts)
 		}
-		// Recursion check.
 		if slice.contains(a.active_fns[:], fn) {
 			a.serial += {.Recurses}
-			arg_need := empty_need()
-			for arg in n.args {
-				arg_need = need_join(a, arg_need, demand_node(a, arg, whole_need(.Dynamic_Call, out.facts), env))
-			}
-			taint_outer_env(a, env, .Dynamic_Call, out.facts || arg_need.facts)
-			return whole_need(.Dynamic_Call, out.facts || arg_need.facts)
+			facts := out.facts || demand_all_whole(a, n.args, env, .Dynamic_Call).facts
+			taint_outer_env(a, env, .Dynamic_Call, facts)
+			return whole_need(.Dynamic_Call, facts)
 		}
-		// Memoize zero-arg functions by `(fn, out)` unless tracked external `$var`s may accumulate per-callsite demands.
 		memo_key: Memo_Key
 		can_memo := len(fn.params) == 0 && len(n.args) == 0 && env == nil && !a.has_reachable_ext
 		if can_memo {
@@ -1005,105 +818,62 @@ demand_call :: proc(a: ^Analyzer, n: ^Node, out: Need, env: ^Var_Frame) -> Need 
 		}
 		return res
 	}
-	b := n.builtin
-	if b == nil {
-		return whole_need(.Dynamic_Call, out.facts)
-	}
-	return demand_builtin(a, n, b, out, env)
+	return whole_need(.Dynamic_Call, out.facts) if n.builtin == nil else demand_builtin(a, n, n.builtin, out, env)
 }
 
 @(private = "file")
 demand_builtin :: proc(a: ^Analyzer, n: ^Node, b: ^Builtin, out: Need, env: ^Var_Frame) -> Need {
 	switch b.op {
-	case .Empty:
-		return empty_need()
-	case .Select:
-		dp := demand_node(a, n.args[0], grain_need(a, .Exists), env)
-		return need_join(a, out, dp)
-	case .Kind_Filter:
-		return need_join(a, out, grain_need(a, .Exists))
-	case .Error:
-		if len(n.args) > 0 {
-			return demand_node(a, n.args[0], whole_need(.Whole_Op), env)
-		}
-		return whole_need(.Whole_Op)
-	case .Path:
-		if is_pure_path_expr(n.args[0]) {
-			return demand_node(a, n.args[0], empty_need(), env)
-		}
-		return demand_node(a, n.args[0], whole_need(.Whole_Op), env)
-	case .Getpath:
-		return demand_getpath(a, n.args[0], out, env)
-	case .First:
-		df := demand_node(a, n.args[0], out, env)
-		if is_non_filtering(n.args[0]) && out_safe_for_limit(out) {
-			return need_limit(a, df, 1)
-		}
-		return df
-	case .Limit:
-		if k, ok := literal_nonneg_int(n.args[0]); ok {
+	case .Empty:       return {}
+	case .Select:      return need_join(a, out, demand_node(a, n.args[0], grain_need(a, .Exists), env))
+	case .Kind_Filter: return need_join(a, out, grain_need(a, .Exists))
+	case .Error:       return demand_node(a, n.args[0], whole_need(.Whole_Op), env) if len(n.args) > 0 else whole_need(.Whole_Op)
+	case .Path:        return demand_node(a, n.args[0], Need{} if is_pure_path_expr(a, n.args[0]) else whole_need(.Whole_Op), env)
+	case .Getpath:     return demand_getpath(a, n.args[0], out, env)
+	case .First, .Limit:
+		lim, body := 1, n.args[0]
+		if b.op == .Limit {
+			k, ok := literal_nonneg_int(n.args[0])
+			if !ok {
+				return need_join(a, demand_node(a, n.args[0], whole_need(.Whole_Op), env), demand_node(a, n.args[1], out, env))
+			}
 			if k == 0 {
-				return empty_need()
+				return {}
 			}
-			df := demand_node(a, n.args[1], out, env)
-			if is_non_filtering(n.args[1]) && out_safe_for_limit(out) {
-				return need_limit(a, df, k)
-			}
-			return df
+			lim, body = k, n.args[1]
 		}
-		dk := demand_node(a, n.args[0], whole_need(.Whole_Op), env)
-		df := demand_node(a, n.args[1], out, env)
-		return need_join(a, dk, df)
-	case .Skip:
-		dk := demand_node(a, n.args[0], whole_need(.Whole_Op), env)
-		df := demand_node(a, n.args[1], out, env)
-		return need_join(a, dk, df)
-	case .Last:
-		return demand_node(a, n.args[0], out, env)
-	case .Isempty:
-		return demand_node(a, n.args[0], empty_need(), env)
-	case .Range:
-		acc := empty_need()
-		for arg in n.args {
-			acc = need_join(a, acc, demand_node(a, arg, whole_need(.Whole_Op), env))
-		}
-		return acc
+		df := demand_node(a, body, out, env)
+		return need_limit(a, df, lim) if is_non_filtering(a, body) && out_safe_for_limit(out) else df
+	case .Skip:    return need_join(a, demand_node(a, n.args[0], whole_need(.Whole_Op), env), demand_node(a, n.args[1], out, env))
+	case .Last:    return demand_node(a, n.args[0], out, env)
+	case .Isempty: return demand_node(a, n.args[0], {}, env)
+	case .Range:   return demand_all_whole(a, n.args, env)
 	case .Input, .Inputs:
 		a.serial += {.Inputs}
 		a.inputs_need = need_join(a, a.inputs_need, out)
-		return empty_need()
+		return {}
 	case .Debug, .Stderr:
 		a.serial += {.Messages}
 		return whole_need(.Whole_Op, out.facts)
 	case .Halt:
 		a.serial += {.Halts}
-		return empty_need()
+		return {}
 	case .Halt_Error:
 		a.serial += {.Halts}
-		da := demand_node(a, n.args[0], whole_need(.Whole_Op), env)
-		return need_join(a, da, whole_need(.Whole_Op))
+		return need_join(a, demand_node(a, n.args[0], whole_need(.Whole_Op), env), whole_need(.Whole_Op))
 	case .Css:
-		da := demand_node(a, n.args[0], whole_need(.Whole_Op), env)
-		return need_join(a, da, whole_need(.Whole_Op, true))
+		return need_join(a, demand_node(a, n.args[0], whole_need(.Whole_Op), env), whole_need(.Whole_Op, true))
 	case .None:
-		// Value builtins: evaluate arguments on `.`, then apply builtin to `.`.
-		args_need := empty_need()
-		for arg in n.args {
-			args_need = need_join(a, args_need, demand_node(a, arg, whole_need(.Whole_Op), env))
-		}
+		args_need := demand_all_whole(a, n.args, env)
 		switch b.name {
 		case "not", "type", "where":
 			return need_join(a, args_need, grain_need(a, .Exists))
 		case "length", "keys", "keys_unsorted":
 			return need_join(a, args_need, grain_need(a, .Keys))
 		case "has":
-			if len(n.args) == 1 && n.args[0].kind == .Literal {
-				kv := n.args[0].value
-				if kv.kind == .String {
-					return need_join(a, args_need, need_prepend(a, tape.Name(query.text_of(kv)), empty_need(), .Exists))
-				}
+			if len(n.args) == 1 && n.args[0].kind == .Literal && n.args[0].value.kind == .String {
+				return need_join(a, args_need, need_prepend(a, tape.Name(query.text_of(n.args[0].value)), {}, .Exists))
 			}
-			// `has(N)` on an array reads `length_of`, so keep `.Keys` (exact count even under `stop_early`).
 			return need_join(a, args_need, grain_need(a, .Keys))
 		case "input_filename", "input_line_number":
 			a.serial += {.Position}
@@ -1119,22 +889,24 @@ demand_builtin :: proc(a: ^Analyzer, n: ^Node, b: ^Builtin, out: Need, env: ^Var
 }
 
 @(private = "file")
+prepend_all_steps :: proc(a: ^Analyzer, steps: []tape.Step, base: Need) -> Need {
+	res := base
+	#reverse for s in steps {
+		res = need_prepend(a, s, res)
+	}
+	return res
+}
+
+@(private = "file")
 demand_getpath :: proc(a: ^Analyzer, arg: ^Node, out: Need, env: ^Var_Frame) -> Need {
 	if arg.kind == .Literal && arg.value.kind == .Array {
 		items := query.items_of(arg.value)
 		steps := make([dynamic]tape.Step, 0, len(items), a.scratch)
 		static := true
-		facts := out.facts
 		for item, i in items {
 			if kind, _, is_fact := query.fact_step_literal(item); is_fact {
-				facts = true
 				if i + 1 == len(items) && kind != .Content {
-					// Static path ending in non-content fact.
-					res := grain_need(a, .Exists, true)
-					#reverse for s in steps {
-						res = need_prepend(a, s, res)
-					}
-					return res
+					return prepend_all_steps(a, steps[:], grain_need(a, .Exists, true))
 				}
 				return whole_need(.Whole_Op, true)
 			}
@@ -1148,16 +920,10 @@ demand_getpath :: proc(a: ^Analyzer, arg: ^Node, out: Need, env: ^Var_Frame) -> 
 			}
 		}
 		if static {
-			res := out
-			res.facts ||= facts
-			#reverse for s in steps {
-				res = need_prepend(a, s, res)
-			}
-			return res
+			return prepend_all_steps(a, steps[:], out)
 		}
 	}
-	da := demand_node(a, arg, whole_need(.Whole_Op), env)
-	return need_join(a, da, whole_need(.Dynamic_Step, out.facts))
+	return need_join(a, demand_node(a, arg, whole_need(.Whole_Op), env), whole_need(.Dynamic_Step, out.facts))
 }
 
 @(private = "file")
@@ -1168,66 +934,89 @@ literal_nonneg_int :: proc(n: ^Node) -> (int, bool) {
 	return int(n.value.i), true
 }
 
-// Whether `n` is a pure path expression (never builds a non-path value whose brief text error_message would print).
 @(private = "file")
-is_pure_path_expr :: proc(n: ^Node) -> bool {
-	if n == nil {
-		return false
-	}
-	#partial switch n.kind {
-	case .Identity:
-		return true
-	case .Field, .Iterate:
-		return is_pure_path_expr(n.a)
-	case .Index:
-		return is_pure_path_expr(n.a)
-	case .Slice:
-		return is_pure_path_expr(n.a)
-	case .Pipe:
-		return is_pure_path_expr(n.a) && is_pure_path_expr(n.b)
-	case .Comma:
-		return is_pure_path_expr(n.a) && is_pure_path_expr(n.b)
-	case .Call:
-		if n.builtin != nil && n.builtin.op == .Select {
-			return true
+is_pure_path_expr :: proc(a: ^Analyzer, root: ^Node) -> bool {
+	stack := make([dynamic]^Node, 0, 8, a.scratch)
+	append(&stack, root)
+	for len(stack) > 0 {
+		n := pop(&stack)
+		if n == nil {
+			return false
+		}
+		#partial switch n.kind {
+		case .Identity:
+		case .Field, .Iterate, .Index, .Slice: append(&stack, n.a)
+		case .Pipe, .Comma:                    append(&stack, n.b, n.a)
+		case .Call:
+			if n.builtin == nil || n.builtin.op != .Select {
+				return false
+			}
+		case: return false
 		}
 	}
-	return false
+	return true
 }
 
-// Whether `n` never drops or multiplies outputs before its path steps (so `first(n)` / `limit(k; n)` can bound its demand paths).
 @(private = "file")
-is_non_filtering :: proc(n: ^Node) -> bool {
-	if n == nil {
-		return false
+is_non_filtering :: proc(a: ^Analyzer, root: ^Node) -> bool {
+	stack := make([dynamic]^Node, 0, 8, a.scratch)
+	append(&stack, root)
+	for len(stack) > 0 {
+		n := pop(&stack)
+		if n == nil {
+			return false
+		}
+		#partial switch n.kind {
+		case .Identity:
+		case .Field, .Iterate, .Index:
+			if .Opt in n.flags || (n.kind == .Index && n.b.kind != .Literal) {
+				return false
+			}
+			append(&stack, n.a)
+		case .Pipe: append(&stack, n.b, n.a)
+		case:       return false
+		}
 	}
-	#partial switch n.kind {
-	case .Identity:
-		return true
-	case .Field:
-		return .Opt not_in n.flags && is_non_filtering(n.a)
-	case .Index:
-		return .Opt not_in n.flags && n.b.kind == .Literal && is_non_filtering(n.a)
-	case .Iterate:
-		return .Opt not_in n.flags && is_non_filtering(n.a)
-	case .Pipe:
-		return is_non_filtering(n.a) && is_non_filtering(n.b)
-	}
-	return false
+	return true
 }
 
-// ---- Serial & facts scan over reachable AST
+// ---- Serial, globals & facts scan over reachable AST
 
 @(private = "file")
-collect_serial :: proc(prog: ^Program, alloc: runtime.Allocator) -> query.Serial_Flags {
-	why: query.Serial_Flags
+walk_reachable :: proc(prog: ^Program, alloc: runtime.Allocator, ctx: rawptr, visit: proc(ctx: rawptr, n: ^Node) -> bool) {
 	if prog == nil || prog.body == nil {
-		return why
+		return
 	}
-	Frame :: struct {
-		n:       ^Node,
-		exit_fn: ^Func,
+	seen := make([dynamic]^Func, 0, 16, alloc)
+	defer delete(seen)
+	stack := make([dynamic]^Node, 0, 64, alloc)
+	defer delete(stack)
+	append(&stack, prog.body)
+	for len(stack) > 0 {
+		n := pop(&stack)
+		if !visit(ctx, n) {
+			return
+		}
+		if n.kind == .Call && n.ref.kind == .Def && n.callee != nil && !slice.contains(seen[:], n.callee) {
+			append(&seen, n.callee)
+			if n.callee.body != nil {
+				append(&stack, n.callee.body)
+			}
+		}
+		for i in 0 ..< child_count(n) {
+			if c := child(n, i); c != nil {
+				append(&stack, c)
+			}
+		}
 	}
+}
+
+@(private = "file")
+collect_serial :: proc(prog: ^Program, alloc: runtime.Allocator) -> (why: query.Serial_Flags) {
+	if prog == nil || prog.body == nil {
+		return
+	}
+	Frame :: struct { n: ^Node, exit_fn: ^Func }
 	on := make([dynamic]^Func, 0, 16, alloc)
 	done := make([dynamic]^Func, 0, 16, alloc)
 	stack := make([dynamic]Frame, 0, 64, alloc)
@@ -1248,584 +1037,172 @@ collect_serial :: proc(prog: ^Program, alloc: runtime.Allocator) -> query.Serial
 				append(&stack, Frame{n = c})
 			}
 		}
-		if n.kind == .Call {
-			if n.builtin != nil {
-				#partial switch n.builtin.op {
-				case .Input, .Inputs:
-					why += {.Inputs}
-				case .Debug, .Stderr:
-					why += {.Messages}
-				case .Halt, .Halt_Error:
-					why += {.Halts}
-				case .None:
-					if n.builtin.name == "input_filename" || n.builtin.name == "input_line_number" {
-						why += {.Position}
-					}
+		if n.kind != .Call {
+			continue
+		}
+		if n.builtin != nil {
+			#partial switch n.builtin.op {
+			case .Input, .Inputs:    why += {.Inputs}
+			case .Debug, .Stderr:    why += {.Messages}
+			case .Halt, .Halt_Error: why += {.Halts}
+			case .None:
+				if n.builtin.name == "input_filename" || n.builtin.name == "input_line_number" {
+					why += {.Position}
 				}
 			}
-			if n.ref.kind == .Def && n.callee != nil {
-				f := n.callee
-				if f.prelude && f.name == "recurse" && len(n.args) > 0 {
-					why += {.Recurses}
-				}
-				if slice.contains(on[:], f) {
-					why += {.Recurses}
-				} else if !slice.contains(done[:], f) {
-					append(&on, f)
-					append(&stack, Frame{exit_fn = f})
-					if f.body != nil {
-						append(&stack, Frame{n = f.body})
-					}
+		}
+		if n.ref.kind == .Def && n.callee != nil {
+			f := n.callee
+			if (f.prelude && f.name == "recurse" && len(n.args) > 0) || slice.contains(on[:], f) {
+				why += {.Recurses}
+			} else if !slice.contains(done[:], f) {
+				append(&on, f)
+				append(&stack, Frame{exit_fn = f})
+				if f.body != nil {
+					append(&stack, Frame{n = f.body})
 				}
 			}
 		}
 	}
-	return why
+	return
 }
 
-// Returns a `[]bool` mask indexed by `prog.globals` indicating which global variables are reachable
-// from `prog.body`. Caller owns and frees the returned slice with `delete(..., allocator)`.
 used_globals_of :: proc(prog: ^Program, allocator := context.allocator) -> []bool {
-	if prog == nil {
+	if prog == nil || len(prog.globals) == 0 {
 		return nil
 	}
-	n_globals := len(prog.globals)
-	if n_globals == 0 {
-		return nil
-	}
-	used := make([]bool, n_globals, allocator)
-	if prog.body == nil {
-		return used
-	}
-	seen := make([dynamic]^Func, 0, 16, allocator)
-	defer delete(seen)
-	stack := make([dynamic]^Node, 0, 64, allocator)
-	defer delete(stack)
-	append(&stack, prog.body)
-	for len(stack) > 0 {
-		n := pop(&stack)
-		if n.kind == .Var && n.ref.kind == .Global && int(n.ref.slot) < len(used) {
-			used[n.ref.slot] = true
-		} else if n.kind == .Call && n.ref.kind == .Def && n.callee != nil {
-			f := n.callee
-			if !slice.contains(seen[:], f) {
-				append(&seen, f)
-				if f.body != nil {
-					append(&stack, f.body)
-				}
-			}
+	used := make([]bool, len(prog.globals), allocator)
+	visit :: proc(ctx: rawptr, n: ^Node) -> bool {
+		u := (^[]bool)(ctx)^
+		if n.kind == .Var && n.ref.kind == .Global && int(n.ref.slot) < len(u) {
+			u[n.ref.slot] = true
 		}
-		for i := 0; i < child_count(n); i += 1 {
-			if c := child(n, i); c != nil {
-				append(&stack, c)
-			}
-		}
+		return true
 	}
+	walk_reachable(prog, allocator, &used, visit)
 	return used
 }
 
 @(private = "file")
 collect_ext_reachable :: proc(a: ^Analyzer) {
-	if a.prog == nil || a.prog.body == nil {
-		return
-	}
-	seen := make([dynamic]^Func, 0, 16, a.scratch)
-	stack := make([dynamic]^Node, 0, 64, a.scratch)
-	append(&stack, a.prog.body)
-	for len(stack) > 0 {
-		node := pop(&stack)
-		if node.kind == .Var && node.ref.kind == .Global && int(node.ref.slot) < len(a.global_to_ext) {
-			if ext_i := a.global_to_ext[node.ref.slot]; ext_i >= 0 {
-				a.ext_reachable[ext_i] = true
-				a.has_reachable_ext = true
-			}
-		} else if node.kind == .Call && node.ref.kind == .Def && node.callee != nil {
-			fn := node.callee
-			if !slice.contains(seen[:], fn) {
-				append(&seen, fn)
-				if fn.body != nil {
-					append(&stack, fn.body)
-				}
+	visit :: proc(ctx: rawptr, n: ^Node) -> bool {
+		an := (^Analyzer)(ctx)
+		if n.kind == .Var && n.ref.kind == .Global && int(n.ref.slot) < len(an.global_to_ext) {
+			if ext_i := an.global_to_ext[n.ref.slot]; ext_i >= 0 {
+				an.ext_reachable[ext_i], an.has_reachable_ext = true, true
 			}
 		}
-		for i := 0; i < child_count(node); i += 1 {
-			if c := child(node, i); c != nil {
-				append(&stack, c)
-			}
-		}
+		return true
 	}
+	walk_reachable(a.prog, a.scratch, a, visit)
 }
 
 @(private = "file")
 needs_facts :: proc(prog: ^Program, alloc: runtime.Allocator) -> bool {
-	if prog == nil || prog.body == nil {
-		return false
-	}
-	seen := make([dynamic]^Func, 0, 16, alloc)
-	stack := make([dynamic]^Node, 0, 64, alloc)
-	append(&stack, prog.body)
-	for len(stack) > 0 {
-		n := pop(&stack)
+	found := false
+	visit :: proc(ctx: rawptr, n: ^Node) -> bool {
 		if n.kind == .Index && n.b.kind == .Literal {
 			if _, _, is_fact := query.fact_step_literal(n.b.value); is_fact {
-				return true
+				(^bool)(ctx)^ = true
+				return false
 			}
 		}
-		if n.kind == .Call {
-			if n.builtin != nil && (n.builtin.op == .Css || n.builtin.fn == v_fact_step || n.builtin.fn == v_attribute_step) {
-				return true
-			}
-			if n.ref.kind == .Def && n.callee != nil && !slice.contains(seen[:], n.callee) {
-				append(&seen, n.callee)
-				if n.callee.body != nil {
-					append(&stack, n.callee.body)
-				}
-			}
+		if n.kind == .Call && n.builtin != nil && (n.builtin.op == .Css || n.builtin.fn == v_fact_step || n.builtin.fn == v_attribute_step) {
+			(^bool)(ctx)^ = true
+			return false
 		}
-		for i := 0; i < child_count(n); i += 1 {
-			if c := child(n, i); c != nil {
-				append(&stack, c)
-			}
-		}
+		return true
 	}
-	return false
+	walk_reachable(prog, alloc, &found, visit)
+	return found
 }
 
 // ---- Plan Hints extraction
 
 @(private = "file")
 extract_hints :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, materialize: bool, allocator: runtime.Allocator) {
-	root := unwrap_defs(body)
-	if root == nil {
-		return
+	root := body
+	for root != nil && root.kind == .Def {
+		root = root.a
 	}
-	extract_split(a, root, plan, materialize, allocator)
-	extract_projection(a, root, plan, allocator)
-	extract_conditional(a, root, plan, allocator)
+	if root != nil {
+		extract_split(a, root, plan, materialize, allocator)
+		extract_projection(a, root, plan, allocator)
+		extract_conditional(a, root, plan, allocator)
+	}
 }
 
-@(private = "file")
-unwrap_defs :: proc "contextless" (n: ^Node) -> ^Node {
-	cur := n
-	for cur != nil && cur.kind == .Def {
-		cur = cur.a
-	}
-	return cur
-}
-
-// Hint 1: Per_Element_Split — `.prefix[] | each`, `[.prefix[] | each] | tail`, `.prefix | map(each) | tail`,
-// `.prefix | length`, `[.prefix[] | each] | length`, or `reduce .prefix[] as $x (init; update)`.
 @(private = "file")
 extract_split :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, materialize: bool, allocator: runtime.Allocator) {
 	steps := make([dynamic]tape.Step, 0, 4, a.scratch)
-
-	// 1. `.prefix | length` or `length` or `[.prefix[] | each] | length`.
-	if is_builtin_length(body) {
+	owned := &plan.owned_nodes if materialize else nil
+	is_len :: proc "contextless" (n: ^Node) -> bool {
+		return n != nil && n.kind == .Call && n.ref.kind == .None && n.builtin != nil && n.builtin.name == "length" && n.builtin.arity == 0
+	}
+	if is_len(body) {
 		plan.hints.split = {kind = .Length}
 		return
 	}
-	if body.kind == .Pipe && is_builtin_length(body.b) {
-		if static_name_steps(body.a, &steps) && len(steps) > 0 {
+	if body.kind == .Pipe && is_len(body.b) {
+		if collect_static_steps(body.a, &steps, .Names) && len(steps) > 0 {
 			plan.hints.split = {kind = .Length, prefix = slice.clone(steps[:], allocator)}
 			return
 		}
 		clear(&steps)
 		if body.a.kind == .Array && body.a.a != nil {
-			if each, borrowed, ok := split_iterate_prefix(a, body.a.a, &steps, &plan.owned_nodes if materialize else nil, allocator); ok {
-				each_d: query.Source_Demand
-				if each != nil {
-					each_d = finalize_need(a, demand_node(a, each, empty_need(), nil), allocator)
-				}
+			if each, borrowed, ok := split_iterate_prefix(a, body.a.a, &steps, owned, allocator); ok {
+				each_d := finalize_need(a, demand_node(a, each, {}, nil), allocator) if each != nil else query.Source_Demand{}
 				plan.hints.split = {kind = .Length, prefix = slice.clone(steps[:], allocator), each_demand = each_d, has_each = each != nil}
 				plan.each_body = each if borrowed else nil
 				return
 			}
 		}
 	}
-
-	// 2. `reduce .prefix[] as pat (init; update)`.
 	clear(&steps)
-	if body.kind == .Reduce && body.a.kind == .Iterate && (.Opt not_in body.a.flags) && static_name_steps(body.a.a, &steps) {
+	if body.kind == .Reduce && body.a.kind == .Iterate && (.Opt not_in body.a.flags) && collect_static_steps(body.a.a, &steps, .Names) {
 		frame := Var_Frame{slots = make([]Need, int(body.slots), a.scratch)}
 		_ = demand_node(a, body.c, whole_need(.Whole_Op), &frame)
-		key_env := &frame if len(body.patterns) > 1 else nil
-		_, pat_need := lift_patterns(a, body.patterns, frame.slots, key_env)
-		plan.hints.split = {
-			kind        = .Reduce,
-			prefix      = slice.clone(steps[:], allocator),
-			each_demand = finalize_need(a, pat_need, allocator),
-			has_each    = true,
-		}
+		_, pat_need := lift_patterns(a, body.patterns, frame.slots, &frame if len(body.patterns) > 1 else nil)
+		plan.hints.split = {kind = .Reduce, prefix = slice.clone(steps[:], allocator), each_demand = finalize_need(a, pat_need, allocator), has_each = true}
 		plan.each_body = body.c
 		return
 	}
-
-	// 3. `[.prefix[] | each] | tail` or `.prefix | map(each) | tail`.
 	clear(&steps)
-	if each, tail, borrowed, ok := split_collect(a, body, &steps, &plan.owned_nodes if materialize else nil, allocator); ok {
-		tail_elem := array_element_need(a, demand_node(a, tail, whole_need(.Identity), nil)) if tail != nil else whole_need(.Identity)
+	if each, tail, borrowed, ok := split_collect(a, body, &steps, owned, allocator); ok {
+		tail_elem := unwrap_container_need(a, demand_node(a, tail, whole_need(.Identity), nil), false, "") if tail != nil else whole_need(.Identity)
 		each_need := demand_node(a, each, tail_elem, nil) if each != nil else tail_elem
-		plan.hints.split = {
-			kind        = .Collect,
-			prefix      = slice.clone(steps[:], allocator),
-			each_demand = finalize_need(a, each_need, allocator),
-			has_each    = each != nil,
-			has_tail    = tail != nil,
-		}
-		plan.each_body = each if borrowed else nil
-		plan.tail_body = tail
+		plan.hints.split = {kind = .Collect, prefix = slice.clone(steps[:], allocator), each_demand = finalize_need(a, each_need, allocator), has_each = each != nil, has_tail = tail != nil}
+		plan.each_body, plan.tail_body = each if borrowed else nil, tail
 		return
 	}
-
-	// 4. `.prefix[] | each` (stream, including postfix chains `.prefix[].field` and multi-stage pipes `.prefix[] | f | g`).
 	clear(&steps)
-	if each, borrowed, ok := split_iterate_prefix(a, body, &steps, &plan.owned_nodes if materialize else nil, allocator); ok {
+	if each, borrowed, ok := split_iterate_prefix(a, body, &steps, owned, allocator); ok {
 		each_d := finalize_need(a, demand_node(a, each, whole_need(.Identity), nil), allocator) if each != nil else query.whole_demand(false, .Identity)
-		plan.hints.split = {
-			kind        = .Stream,
-			prefix      = slice.clone(steps[:], allocator),
-			each_demand = each_d,
-			has_each    = each != nil,
-		}
+		plan.hints.split = {kind = .Stream, prefix = slice.clone(steps[:], allocator), each_demand = each_d, has_each = each != nil}
 		plan.each_body = each if borrowed else nil
 	}
 }
 
 @(private = "file")
-is_builtin_length :: proc "contextless" (n: ^Node) -> bool {
-	return n != nil && n.kind == .Call && n.ref.kind == .None && n.builtin != nil && n.builtin.name == "length" && n.builtin.arity == 0
-}
+Static_Step_Mode :: enum u8 { Names, Nonneg_Idx, Any_Idx }
 
-// Matches `.NAME...` (or `.`), appending each `tape.Name` to `steps`.
 @(private = "file")
-static_name_steps :: proc(n: ^Node, steps: ^[dynamic]tape.Step) -> bool {
+collect_static_steps :: proc(n: ^Node, steps: ^[dynamic]tape.Step, mode: Static_Step_Mode) -> bool {
 	at := len(steps)
-	cur := n
-	for cur != nil && cur.kind == .Field && (.Opt not_in cur.flags) {
-		inject_at(steps, at, tape.Name(cur.name))
-		cur = cur.a
-	}
-	if cur == nil || cur.kind != .Identity {
-		resize(steps, at)
-		return false
-	}
-	return true
-}
-
-// Matches `.NAME` and non-negative constant `.[IDX]` chains starting at `.`.
-@(private = "file")
-static_prefix_steps :: proc(n: ^Node, steps: ^[dynamic]tape.Step) -> bool {
-	at := len(steps)
-	cur := n
-	for cur != nil {
-		if .Opt in cur.flags {
-			resize(steps, at)
-			return false
-		}
+	for cur := n; cur != nil && (.Opt not_in cur.flags); {
 		#partial switch cur.kind {
-		case .Identity:
-			return true
+		case .Identity: return true
 		case .Field:
 			inject_at(steps, at, tape.Name(cur.name))
 			cur = cur.a
 		case .Index:
-			if idx, ok := literal_nonneg_int(cur.b); ok {
-				inject_at(steps, at, tape.Index(idx))
-				cur = cur.a
-				continue
-			}
-			resize(steps, at)
-			return false
-		case:
-			resize(steps, at)
-			return false
-		}
-	}
-	resize(steps, at)
-	return false
-}
-
-@(private = "file")
-is_const_literal_expr :: proc "contextless" (n: ^Node) -> bool {
-	if n == nil {
-		return false
-	}
-	if n.kind == .Literal {
-		return true
-	}
-	if n.kind == .Neg && n.a != nil && n.a.kind == .Literal {
-		return true
-	}
-	return false
-}
-
-@(private = "file")
-mk_plan_node :: proc(a: ^Analyzer, owned: ^[dynamic]^Node, val: Node, allocator: runtime.Allocator) -> ^Node {
-	if owned == nil {
-		return new_clone(val, a.scratch)
-	}
-	if owned.allocator.procedure == nil {
-		owned.allocator = allocator
-	}
-	x := new_clone(val, allocator)
-	append(owned, x)
-	return x
-}
-
-@(private = "file")
-recompute_plan_marks :: proc(n: ^Node) {
-	if n == nil {
-		return
-	}
-	a, b, c := n.a, n.b, n.c
-	single := is_single(a) && is_single(b) && is_single(c)
-	nat := false
-	h := 0
-	if a != nil {
-		h = max(h, int(a.height))
-	}
-	if b != nil {
-		h = max(h, int(b.height))
-	}
-	if c != nil {
-		h = max(h, int(c.height))
-	}
-	n.height = u8(min(h + 1, 255))
-	#partial switch n.kind {
-	case .Identity, .Literal, .Var:
-		single = true
-		nat = true
-	case .Field, .Index, .Slice, .Pipe:
-		nat = single && (a == nil || .Native in a.flags) && (b == nil || .Native in b.flags) && (c == nil || .Native in c.flags) && int(n.height) <= NATIVE_HEIGHT
-	case .Iterate:
-		single = false
-		nat = false
-	}
-	if single {
-		n.flags += {.Single}
-	} else {
-		n.flags -= {.Single}
-	}
-	if nat {
-		n.flags += {.Native}
-	} else {
-		n.flags -= {.Native}
-	}
-}
-
-// Matches `.prefix[]` (plus optional postfix field/index/slice/iterate steps like `.logs[].msg` or `.logs[][]`)
-// followed by zero or more left-associated `| stage` pipes.
-// Re-associates synthesized AST nodes in `owned` when non-nil so `each` outlives `analyze`; otherwise keeps `borrowed = false`.
-@(private = "file")
-split_iterate_prefix :: proc(
-	a: ^Analyzer,
-	n: ^Node,
-	steps: ^[dynamic]tape.Step,
-	owned: ^[dynamic]^Node,
-	allocator: runtime.Allocator,
-) -> (each: ^Node, borrowed, ok: bool) {
-	at := len(steps)
-	stages := make([dynamic]^Node, 0, 4, a.scratch)
-	cur := n
-	for cur != nil && cur.kind == .Pipe {
-		append(&stages, cur.b)
-		cur = cur.a
-	}
-	append(&stages, cur)
-	i := len(stages) - 1
-	for i > 0 && static_prefix_steps(stages[i], steps) {
-		i -= 1
-	}
-
-	head := stages[i]
-	wraps := make([dynamic]^Node, 0, 4, a.scratch)
-	for head != nil {
-		if head.kind == .Iterate && (.Opt not_in head.flags) && static_prefix_steps(head.a, steps) {
-			break
-		}
-		#partial switch head.kind {
-		case .Field:
-			append(&wraps, head)
-			head = head.a
-		case .Iterate:
-			append(&wraps, head)
-			head = head.a
-		case .Index:
-			if !is_const_literal_expr(head.b) {
-				resize(steps, at)
-				return nil, false, false
-			}
-			append(&wraps, head)
-			head = head.a
-		case .Slice:
-			if (head.b != nil && !is_const_literal_expr(head.b)) || (head.c != nil && !is_const_literal_expr(head.c)) {
-				resize(steps, at)
-				return nil, false, false
-			}
-			append(&wraps, head)
-			head = head.a
-		case:
-			resize(steps, at)
-			return nil, false, false
-		}
-	}
-	if head == nil || head.kind != .Iterate || (.Opt in head.flags) {
-		resize(steps, at)
-		return nil, false, false
-	}
-
-	each_head: ^Node
-	if len(wraps) > 0 {
-		cur_e := mk_plan_node(a, owned, Node{kind = .Identity}, allocator)
-		recompute_plan_marks(cur_e)
-		#reverse for w in wraps {
-			clone := w^
-			clone.a = cur_e
-			node_p := mk_plan_node(a, owned, clone, allocator)
-			recompute_plan_marks(node_p)
-			cur_e = node_p
-		}
-		each_head = cur_e
-	}
-
-	if i == 0 {
-		return each_head, each_head == nil || owned != nil, true
-	}
-	if each_head == nil {
-		if i == 1 {
-			return stages[0], true, true
-		}
-		tail := stages[i - 1]
-		for j := i - 2; j >= 0; j -= 1 {
-			pipe_n := mk_plan_node(a, owned, Node{kind = .Pipe, a = tail, b = stages[j]}, allocator)
-			recompute_plan_marks(pipe_n)
-			tail = pipe_n
-		}
-		return tail, owned != nil, true
-	}
-	tail := each_head
-	for j := i - 1; j >= 0; j -= 1 {
-		pipe_n := mk_plan_node(a, owned, Node{kind = .Pipe, a = tail, b = stages[j]}, allocator)
-		recompute_plan_marks(pipe_n)
-		tail = pipe_n
-	}
-	return tail, owned != nil, true
-}
-
-// Matches `[.prefix[] | each] | tail` or `.prefix | map(each) | tail` (with optional `| tail`).
-@(private = "file")
-split_collect :: proc(
-	a: ^Analyzer,
-	n: ^Node,
-	steps: ^[dynamic]tape.Step,
-	owned: ^[dynamic]^Node,
-	allocator: runtime.Allocator,
-) -> (each, tail: ^Node, borrowed, ok: bool) {
-	at := len(steps)
-	c := n
-	for c != nil && c.kind == .Pipe && static_prefix_steps(c.a, steps) {
-		c = c.b
-	}
-	if c != nil && c.kind == .Pipe {
-		c, tail = c.a, c.b
-	}
-	if c == nil {
-		resize(steps, at)
-		return nil, nil, false, false
-	}
-	if c.kind == .Call && c.ref.kind == .Def && c.callee != nil && c.callee.prelude && c.callee.name == "map" && len(c.args) == 1 {
-		return c.args[0], tail, true, true
-	}
-	if c.kind == .Array && c.a != nil {
-		if e, e_borrowed, matched := split_iterate_prefix(a, c.a, steps, owned, allocator); matched {
-			return e, tail, e_borrowed, true
-		}
-	}
-	resize(steps, at)
-	return nil, nil, false, false
-}
-
-// Hint 2: Projection_Template — `.p`, `.p1, .p2`, `[.p1, .p2]`, or `{k1: .p1, k2: .p2}` of static paths.
-@(private = "file")
-extract_projection :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, allocator: runtime.Allocator) {
-	fields := make([dynamic]query.Projection_Field, 0, 4, a.scratch)
-	#partial switch body.kind {
-	case .Object:
-		if len(body.args) == 0 {
-			return
-		}
-		for i := 0; i < len(body.args); i += 2 {
-			k, v := body.args[i], body.args[i + 1]
-			if k.kind != .Literal || k.value.kind != .String || v == nil {
-				return
-			}
-			steps := make([dynamic]tape.Step, 0, 4, a.scratch)
-			if !static_path_steps(v, &steps) || len(steps) == 0 {
-				return
-			}
-			key := query.text_of(k.value)
-			// Duplicate keys still evaluate shadowed expressions for errors in jq, so bail out of projection hint.
-			for f in fields {
-				if f.key == key {
-					return
+			if mode == .Nonneg_Idx {
+				if idx, ok := literal_nonneg_int(cur.b); ok {
+					inject_at(steps, at, tape.Index(idx))
+					cur = cur.a
+					continue
 				}
-			}
-			append(&fields, query.Projection_Field{key = key, path = steps[:]})
-		}
-		plan.hints.projection = {shape = .Object, fields = clone_projection_fields(fields[:], allocator)}
-	case .Array:
-		if body.a == nil || !collect_path_comma(a, body.a, &fields) || len(fields) == 0 {
-			return
-		}
-		plan.hints.projection = {shape = .Array, fields = clone_projection_fields(fields[:], allocator)}
-	case .Comma:
-		if !collect_path_comma(a, body, &fields) || len(fields) == 0 {
-			return
-		}
-		plan.hints.projection = {shape = .Stream, fields = clone_projection_fields(fields[:], allocator)}
-	case .Field, .Index:
-		steps := make([dynamic]tape.Step, 0, 4, a.scratch)
-		if static_path_steps(body, &steps) && len(steps) > 0 {
-			append(&fields, query.Projection_Field{path = steps[:]})
-			plan.hints.projection = {shape = .Single, fields = clone_projection_fields(fields[:], allocator)}
-		}
-	}
-}
-
-@(private = "file")
-collect_path_comma :: proc(a: ^Analyzer, n: ^Node, fields: ^[dynamic]query.Projection_Field) -> bool {
-	if n == nil {
-		return false
-	}
-	if n.kind == .Comma {
-		return collect_path_comma(a, n.a, fields) && collect_path_comma(a, n.b, fields)
-	}
-	steps := make([dynamic]tape.Step, 0, 4, a.scratch)
-	if !static_path_steps(n, &steps) || len(steps) == 0 {
-		return false
-	}
-	append(fields, query.Projection_Field{path = steps[:]})
-	return true
-}
-
-// Matches a static non-optional chain of `Name` and `Index` steps starting at `.`.
-@(private = "file")
-static_path_steps :: proc(n: ^Node, steps: ^[dynamic]tape.Step) -> bool {
-	at := len(steps)
-	cur := n
-	for cur != nil {
-		if .Opt in cur.flags {
-			resize(steps, at)
-			return false
-		}
-		#partial switch cur.kind {
-		case .Identity:
-			return true
-		case .Field:
-			inject_at(steps, at, tape.Name(cur.name))
-			cur = cur.a
-		case .Index:
-			if cur.b.kind == .Literal {
+			} else if mode == .Any_Idx && cur.b.kind == .Literal {
 				if idx, ok := query.as_i64(cur.b.value); ok && idx >= -(1 << 30) && idx <= (1 << 30) {
 					inject_at(steps, at, tape.Index(int(idx)))
 					cur = cur.a
@@ -1844,32 +1221,203 @@ static_path_steps :: proc(n: ^Node, steps: ^[dynamic]tape.Step) -> bool {
 }
 
 @(private = "file")
-clone_projection_fields :: proc(src: []query.Projection_Field, allocator: runtime.Allocator) -> []query.Projection_Field {
-	out := make([]query.Projection_Field, len(src), allocator)
-	for f, i in src {
-		out[i] = {key = f.key, path = slice.clone(f.path, allocator)}
-	}
-	return out
+is_const_literal_expr :: proc "contextless" (n: ^Node) -> bool {
+	return n != nil && (n.kind == .Literal || (n.kind == .Neg && n.a != nil && n.a.kind == .Literal))
 }
 
-// Hint 3: Conditional_Whole — `select(P)` where predicate `P` has a narrow demand; also extracts
-// `Simple_Compare` when `P` is `PATH op SCALAR_LITERAL`.
+@(private = "file")
+mk_plan_node :: proc(a: ^Analyzer, owned: ^[dynamic]^Node, val: Node, allocator: runtime.Allocator) -> ^Node {
+	x: ^Node
+	if owned == nil {
+		x = new_clone(val, a.scratch)
+	} else {
+		if owned.allocator.procedure == nil {
+			owned.allocator = allocator
+		}
+		x = new_clone(val, allocator)
+		append(owned, x)
+	}
+	a0, b0, c0 := x.a, x.b, x.c
+	single := is_single(a0) && is_single(b0) && is_single(c0)
+	nat := false
+	h := max(int(a0.height) if a0 != nil else 0, int(b0.height) if b0 != nil else 0, int(c0.height) if c0 != nil else 0)
+	x.height = u8(min(h + 1, 255))
+	#partial switch x.kind {
+	case .Identity, .Literal, .Var: single, nat = true, true
+	case .Field, .Index, .Slice, .Pipe:
+		nat = single && (a0 == nil || .Native in a0.flags) && (b0 == nil || .Native in b0.flags) && (c0 == nil || .Native in c0.flags) && int(x.height) <= NATIVE_HEIGHT
+	case .Iterate: single, nat = false, false
+	}
+	x.flags = (x.flags + {.Single}) if single else (x.flags - {.Single})
+	x.flags = (x.flags + {.Native}) if nat else (x.flags - {.Native})
+	return x
+}
+
+@(private = "file")
+split_iterate_prefix :: proc(a: ^Analyzer, n: ^Node, steps: ^[dynamic]tape.Step, owned: ^[dynamic]^Node, allocator: runtime.Allocator) -> (each: ^Node, borrowed, ok: bool) {
+	at := len(steps)
+	stages := make([dynamic]^Node, 0, 4, a.scratch)
+	cur := n
+	for cur != nil && cur.kind == .Pipe {
+		append(&stages, cur.b)
+		cur = cur.a
+	}
+	append(&stages, cur)
+	i := len(stages) - 1
+	for i > 0 && collect_static_steps(stages[i], steps, .Nonneg_Idx) {
+		i -= 1
+	}
+	head := stages[i]
+	wraps := make([dynamic]^Node, 0, 4, a.scratch)
+	for head != nil {
+		if head.kind == .Iterate && (.Opt not_in head.flags) && collect_static_steps(head.a, steps, .Nonneg_Idx) {
+			break
+		}
+		valid := false
+		#partial switch head.kind {
+		case .Field, .Iterate: valid = true
+		case .Index:           valid = is_const_literal_expr(head.b)
+		case .Slice:           valid = (head.b == nil || is_const_literal_expr(head.b)) && (head.c == nil || is_const_literal_expr(head.c))
+		}
+		if !valid {
+			resize(steps, at)
+			return nil, false, false
+		}
+		append(&wraps, head)
+		head = head.a
+	}
+	if head == nil || head.kind != .Iterate || (.Opt in head.flags) {
+		resize(steps, at)
+		return nil, false, false
+	}
+	each_head: ^Node
+	if len(wraps) > 0 {
+		each_head = mk_plan_node(a, owned, Node{kind = .Identity}, allocator)
+		#reverse for w in wraps {
+			clone := w^
+			clone.a = each_head
+			each_head = mk_plan_node(a, owned, clone, allocator)
+		}
+	}
+	if i == 0 {
+		return each_head, each_head == nil || owned != nil, true
+	}
+	if each_head == nil && i == 1 {
+		return stages[0], true, true
+	}
+	tail := each_head if each_head != nil else stages[i - 1]
+	for j := (i - 1) if each_head != nil else (i - 2); j >= 0; j -= 1 {
+		tail = mk_plan_node(a, owned, Node{kind = .Pipe, a = tail, b = stages[j]}, allocator)
+	}
+	return tail, owned != nil, true
+}
+
+@(private = "file")
+split_collect :: proc(a: ^Analyzer, n: ^Node, steps: ^[dynamic]tape.Step, owned: ^[dynamic]^Node, allocator: runtime.Allocator) -> (each, tail: ^Node, borrowed, ok: bool) {
+	at := len(steps)
+	c := n
+	for c != nil && c.kind == .Pipe && collect_static_steps(c.a, steps, .Nonneg_Idx) {
+		c = c.b
+	}
+	if c != nil && c.kind == .Pipe {
+		c, tail = c.a, c.b
+	}
+	if c != nil {
+		if c.kind == .Call && c.ref.kind == .Def && c.callee != nil && c.callee.prelude && c.callee.name == "map" && len(c.args) == 1 {
+			return c.args[0], tail, true, true
+		}
+		if c.kind == .Array && c.a != nil {
+			if e, e_borrowed, matched := split_iterate_prefix(a, c.a, steps, owned, allocator); matched {
+				return e, tail, e_borrowed, true
+			}
+		}
+	}
+	resize(steps, at)
+	return nil, nil, false, false
+}
+
+@(private = "file")
+extract_projection :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, allocator: runtime.Allocator) {
+	fields := make([dynamic]query.Projection_Field, 0, 4, a.scratch)
+	shape := query.Projection_Shape.None
+	#partial switch body.kind {
+	case .Object:
+		if len(body.args) == 0 {
+			return
+		}
+		for i := 0; i < len(body.args); i += 2 {
+			k, v := body.args[i], body.args[i + 1]
+			steps := make([dynamic]tape.Step, 0, 4, a.scratch)
+			if k.kind != .Literal || k.value.kind != .String || v == nil || !collect_static_steps(v, &steps, .Any_Idx) || len(steps) == 0 {
+				return
+			}
+			key := query.text_of(k.value)
+			for f in fields {
+				if f.key == key {
+					return
+				}
+			}
+			append(&fields, query.Projection_Field{key = key, path = steps[:]})
+		}
+		shape = .Object
+	case .Array, .Comma:
+		root := body.a if body.kind == .Array else body
+		if root == nil || !collect_path_comma(a, root, &fields) || len(fields) == 0 {
+			return
+		}
+		shape = .Array if body.kind == .Array else .Stream
+	case .Field, .Index:
+		steps := make([dynamic]tape.Step, 0, 4, a.scratch)
+		if !collect_static_steps(body, &steps, .Any_Idx) || len(steps) == 0 {
+			return
+		}
+		append(&fields, query.Projection_Field{path = steps[:]})
+		shape = .Single
+	}
+	if shape != .None {
+		out := make([]query.Projection_Field, len(fields), allocator)
+		for f, i in fields {
+			out[i] = {key = f.key, path = slice.clone(f.path, allocator)}
+		}
+		plan.hints.projection = {shape = shape, fields = out}
+	}
+}
+
+@(private = "file")
+collect_path_comma :: proc(a: ^Analyzer, root: ^Node, fields: ^[dynamic]query.Projection_Field) -> bool {
+	stack := make([dynamic]^Node, 0, 8, a.scratch)
+	append(&stack, root)
+	for len(stack) > 0 {
+		n := pop(&stack)
+		if n == nil {
+			return false
+		}
+		if n.kind == .Comma {
+			append(&stack, n.b, n.a)
+			continue
+		}
+		steps := make([dynamic]tape.Step, 0, 4, a.scratch)
+		if !collect_static_steps(n, &steps, .Any_Idx) || len(steps) == 0 {
+			return false
+		}
+		append(fields, query.Projection_Field{path = steps[:]})
+	}
+	return true
+}
+
 @(private = "file")
 extract_conditional :: proc(a: ^Analyzer, body: ^Node, plan: ^Plan, allocator: runtime.Allocator) {
 	if body.kind != .Call || body.ref.kind != .None || body.builtin == nil || body.builtin.op != .Select || len(body.args) != 1 {
 		return
 	}
 	pred := body.args[0]
-	pred_need := demand_node(a, pred, grain_need(a, .Exists), nil)
 	plan.hints.conditional.active = true
-	plan.hints.conditional.pred_demand = finalize_need(a, pred_need, allocator)
+	plan.hints.conditional.pred_demand = finalize_need(a, demand_node(a, pred, grain_need(a, .Exists), nil), allocator)
 	plan.pred_body = pred
-
 	if pred.kind == .Binary && pred.op >= .Eq && pred.op <= .Ge && pred.b.kind == .Literal {
-		t := query.type_of(pred.b.value)
-		if t != .Array && t != .Object {
+		if t := query.type_of(pred.b.value); t != .Array && t != .Object {
 			steps := make([dynamic]tape.Step, 0, 4, a.scratch)
-			if static_path_steps(pred.a, &steps) && len(steps) > 0 {
+			if collect_static_steps(pred.a, &steps, .Any_Idx) && len(steps) > 0 {
 				plan.hints.conditional.cmp = {
 					path    = slice.clone(steps[:], allocator),
 					op      = query.Compare_Op(int(pred.op) - int(Op.Eq) + int(query.Compare_Op.Eq)),

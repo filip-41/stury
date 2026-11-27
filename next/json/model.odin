@@ -4,27 +4,10 @@ package json
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
-import "core:simd"
-import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 import "stury:lib/schema/model"
-
-@(private)
-model_has_high16 :: #force_inline proc "contextless" (v: #simd[16]u8) -> bool {
-	return kernel.any_lane16(simd.lanes_ge(v, JSON_V(0x80)))
-}
-
-@(private)
-model_probe_stack :: #force_inline proc "contextless" () {
-	hook.probe_stack(READ_STACK)
-}
-
-@(private)
-model_bad_sink :: proc "contextless" () -> model.Error {
-	return tape.Error(tape.Bad_Option{"sink"})
-}
 
 // Loads `src`, a JSON/JSONC/JSON5 text of `spec`, directly into `out` according to compiled model `m`
 // by streaming tokens over the format walk with zero intermediate `tape.Document` allocation.
@@ -42,10 +25,9 @@ load_raw :: proc(
 	mv: model.Model_View, src: []u8, out: rawptr,
 	spec: Spec, sink: ^model.Sink, opts: model.Load_Opts, allocator: runtime.Allocator,
 ) -> model.Error {
-	model_probe_stack()
-	if spec > .Json5 { return model.Model_Error{kind = .Bad_Option, want = {text = "spec"}} }
+	hook.probe_stack(READ_STACK)
 	lax, refuse := opts.budget.steps != 0, opts.dups == .Default || opts.dups == .Refuse
-	#partial switch spec {
+	switch spec {
 	case .Json:  return load_as(mv, src, out, .Json, lax, refuse, sink, opts, allocator)
 	case .Jsonc: return load_as(mv, src, out, .Jsonc, lax, refuse, sink, opts, allocator)
 	case .Json5: return load_as(mv, src, out, .Json5, lax, refuse, sink, opts, allocator)
@@ -107,7 +89,7 @@ dump_raw :: proc(
 	mv: model.Model_View, v: rawptr, hint: int,
 	opts: model.Dump_Opts, wopts: Write_Options, sink: ^model.Sink, allocator: runtime.Allocator,
 ) -> (text: []u8, err: model.Error) {
-	if werr := check_marshal_opts(wopts); werr != nil { return nil, werr }
+	if werr := check_write_opts(wopts); werr != nil { return nil, werr }
 	min_room := model.JSON_PRETTY_CLOSE_ROOM if !write.compact(wopts) else max(512, hint * 2)
 	raw, aerr := runtime.mem_alloc_non_zeroed(min_room, 1, allocator)
 	if aerr != nil || raw_data(raw) == nil || len(raw) < min_room { return nil, runtime.Allocator_Error.Out_Of_Memory }
@@ -120,7 +102,7 @@ dump_raw :: proc(
 dump_to :: #force_inline proc(
 	w: io.Writer, m: ^model.Model($T), v: ^T, opts := model.Dump_Opts{}, wopts := Write_Options{}, sink: ^model.Sink = nil, allocator := context.allocator,
 ) -> model.Error {
-	if w.procedure == nil { return model_bad_sink() }
+	if w.procedure == nil { return tape.Error(tape.Bad_Option{"sink"}) }
 	if m == nil || v == nil { return model.Model_Error{kind = .Bad_Option, want = {text = "value"}} }
 	return dump_to_raw(w, model.model_view(m), rawptr(v), opts, wopts, sink, allocator)
 }
@@ -130,7 +112,7 @@ dump_to_raw :: proc(
 	w: io.Writer, mv: model.Model_View, v: rawptr,
 	opts: model.Dump_Opts, wopts: Write_Options, sink: ^model.Sink, allocator: runtime.Allocator,
 ) -> model.Error {
-	if werr := check_marshal_opts(wopts); werr != nil { return werr }
+	if werr := check_write_opts(wopts); werr != nil { return werr }
 	fj: Fast_Json
 	if e := write.out_start(&fj.out, allocator, w, 0); e != nil { return e }
 	_, err := dump_run(&fj, mv, v, opts, wopts, sink, allocator)
@@ -193,7 +175,7 @@ model_fast_put_line :: #force_inline proc(fj: ^Fast_Json, p: [^]u8, depth: int, 
 
 @(private, cold)
 model_fast_put_line_long :: #force_no_inline proc(fj: ^Fast_Json, n: int, after: int) -> [^]u8 #no_bounds_check {
-	put_line_long(&fj.out, fj.fill, n)
+	write.line_indent(&fj.out, 1, fj.fill, n)
 	return write.room(&fj.out, after)
 }
 
@@ -209,40 +191,11 @@ model_put_string_ascii :: #force_inline proc(fj: ^Fast_Json, p: [^]u8, s: string
 
 @(private)
 model_put_string :: #force_inline proc(fj: ^Fast_Json, p: [^]u8, s: string, $ASCII: bool) -> bool #no_bounds_check {
-	when JSON_SCALAR_WASM {
-		return put_string_slow(&fj.out, s, 0, ASCII)
-	} else {
-		n := len(s)
-		if n < 16 {
-			v, live, ok := kernel.head16(raw_data(s), n)
-			if ok {
-				v = simd.select(simd.lanes_ne(live, JSON_V(0)), v, JSON_PAD)
-			} else {
-				v = json_short_block(raw_data(s), n)
-			}
-			if !json_dirty16(v) {
-				p[0] = '"'
-				kernel.store16(p[1:], v)
-				p[1 + n] = '"'
-				fj.out.cursor += n + 2
-				return true
-			}
-		} else if n <= 32 {
-			// Caller guarantees `JSON_LEAF_ROOM` (64 B) at `p`: two overlapping 16-byte SIMD ops handle 16..32 B inline.
-			src := raw_data(s)
-			v0 := kernel.load16(src)
-			v1 := kernel.load16(src[n - 16:])
-			if !json_dirty16(v0) && !json_dirty16(v1) {
-				p[0] = '"'
-				kernel.store16(p[1:], v0)
-				kernel.store16(p[1 + n - 16:], v1)
-				p[1 + n] = '"'
-				fj.out.cursor += n + 2
-				return true
-			}
-		}
-		return model_put_string_long(fj, s, ASCII)
+	if n := fast_put_string_inline(p, s); n > 0 {
+		fj.out.cursor += n
+		return true
 	}
+	return put_string_long_fast(&fj.out, s, ASCII)
 }
 
 // Branchless JSON escape table: low bytes hold the escaped ASCII sequence, high byte holds its length (1, 2, or 6).
@@ -292,74 +245,4 @@ model_put_esc16 :: #force_inline proc "contextless" (dst: [^]u8, v: JSON_V) -> i
 		pos += int(seq >> 56)
 	}
 	return pos
-}
-
-@(private)
-model_put_tail :: #force_inline proc(dst: [^]u8, src: [^]u8, b: []u8, i, n: int, utf8_ok: ^bool) -> (int, bool) #no_bounds_check {
-	pos := 0
-	for j := i; j < n; j += 1 {
-		c := src[j]
-		if !utf8_ok^ && c >= 0x80 {
-			if !kernel.utf8_valid(b[j:]) { return 0, false }
-			utf8_ok^ = true
-		}
-		seq := MODEL_ESC_SEQ[c]
-		intrinsics.unaligned_store((^u64le)(dst[pos:]), seq)
-		pos += int(seq >> 56)
-	}
-	dst[pos] = '"'
-	return pos + 1, true
-}
-
-// Fast copy + escape for strings > 32 B or containing escapes/UTF-8.
-// Reuses `put_string_slow` for ASCII/long/tight-room fallbacks while keeping the fast in-buffer branchless SIMD path.
-@(private)
-model_put_string_long :: #force_no_inline proc(fj: ^Fast_Json, s: string, $ASCII: bool) -> bool #no_bounds_check {
-	n := len(s)
-	out := &fj.out
-	src := raw_data(s)
-	i := 0
-	when !JSON_SCALAR_WASM {
-		if n >= 16 && n <= JSON_MID_MAX && src[0] < 0x80 {
-			p := write.room(out, n + 18)
-			clean := true
-			for ; i + 16 < n; i += 16 {
-				v := kernel.load16(src[i:])
-				if json_dirty16(v) { clean = false; break }
-				kernel.store16(p[1 + i:], v)
-			}
-			if clean {
-				v := kernel.load16(src[n - 16:])
-				if !json_dirty16(v) {
-					kernel.store16(p[1 + n - 16:], v)
-					p[0], p[1 + n] = '"', '"'
-					out.cursor += n + 2
-					return true
-				}
-			}
-		}
-	}
-	when !ASCII && !JSON_SCALAR_WASM && ODIN_ENDIAN == .Little {
-		if n <= JSON_MID_MAX && (n - i) * 6 + 16 <= out.size - (out.cursor + 1 + i) {
-			b := transmute([]u8)s
-			write.room(out, 1)[0] = '"'
-			out.cursor += 1 + i
-			utf8_ok := false
-			p := out.buf[out.cursor:]
-			pos := 0
-			for ; i + 16 <= n; i += 16 {
-				v := kernel.load16(src[i:])
-				if !utf8_ok && model_has_high16(v) {
-					if !kernel.utf8_valid(b[i:]) { return false }
-					utf8_ok = true
-				}
-				if !json_dirty16(v) { kernel.store16(p[pos:], v); pos += 16 } else { pos += model_put_esc16(p[pos:], v) }
-			}
-			tail, ok := model_put_tail(p[pos:], src, b, i, n, &utf8_ok)
-			if !ok { return false }
-			out.cursor += pos + tail
-			return true
-		}
-	}
-	return put_string_slow(out, s, i, ASCII)
 }

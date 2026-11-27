@@ -1,7 +1,5 @@
 // Compiles SQL `CREATE TABLE` DDL into `stury:lib/schema/rules.Description` and `stury:lib/schema/check.Plan`,
 // preserving table metadata (primary key, unique column groups, foreign keys, uncompiled cross-column checks).
-// Compatible with `check.check_document`, `schema.compare`, `schema.sample`, `schema.write_schema`, and
-// `schema.write_odin`.
 // Zero `core:os`, zero `core:mem/virtual`, zero `context.temp_allocator`, WASM-clean, OOM-safe.
 package ddl
 
@@ -13,36 +11,17 @@ import "stury:lib/core/tape"
 import "stury:lib/schema/check"
 import "stury:lib/schema/rules"
 
-// Options controlling SQL DDL -> `rules.Description` compilation.
-// `Maybe(bool)` fields default to `true` when left `nil`, so `Compile_Options{as_array = true}`
-// keeps `strict_columns`, `default_optional`, and `assert_format` enabled unless explicitly overridden.
 Compile_Options :: struct {
-	// Table to compile in multi-table DDL (matches `table` or `schema.table`, case-insensitively).
-	// Empty selects the first `CREATE TABLE`.
 	table_name:       string,
-	// When `false` (default), compiles a single-row object schema `{...}`.
-	// When `true`, compiles an array-of-rows schema `[{...}, ...]` (with `uniqueItems` when the table
-	// has a `PRIMARY KEY` or `UNIQUE` constraint).
 	as_array:         bool,
-	// Forbid undeclared columns (`additionalProperties: false`). Defaults to `true` when `nil`.
 	strict_columns:   Maybe(bool),
-	// Treat `NOT NULL` columns with a `DEFAULT` clause as optional rather than `required`.
-	// Defaults to `true` when `nil`.
 	default_optional: Maybe(bool),
-	// Enable `assert_format` on `UUID`, `DATE`, `TIME`, and `TIMESTAMP`/`DATETIME` columns.
-	// Defaults to `true` when `nil`.
 	assert_format:    Maybe(bool),
-	// When `true`, return `.Bad_Check` if a `CHECK` expression cannot be represented in `rules.Description`
-	// (e.g. cross-column `end_date >= start_date`). When `false` (default), skip unrepresentable checks
-	// and count them in `Table_Meta.uncompiled_checks`.
 	strict_checks:    bool,
-	// Duplicate-key policy for `check_document` runs on `Compiled`.
 	dups:             tape.Duplicates,
-	// Resource budget for `check_document` runs on `Compiled`.
 	budget:           tape.Budget,
 }
 
-// Relational table metadata extracted from `CREATE TABLE` alongside the compiled `rules.Description`.
 Table_Meta :: struct {
 	schema_name:       string,
 	table_name:        string,
@@ -52,8 +31,6 @@ Table_Meta :: struct {
 	uncompiled_checks: int,
 }
 
-// A compiled SQL DDL schema owning its self-contained `rules.Description`, thread-safe `check.Plan`,
-// and extracted relational `Table_Meta`. Free with `destroy`.
 Compiled :: struct {
 	description: rules.Description,
 	plan:        check.Plan,
@@ -64,8 +41,6 @@ Compiled :: struct {
 	allocator:   runtime.Allocator,
 }
 
-// Compiles SQL DDL bytes directly into a self-contained `rules.Description` (borrowing nothing from `src`).
-// Free the returned description with `rules.description_destroy`.
 @(require_results)
 compile_description :: proc(src: []u8, opts := Compile_Options{}, allocator := context.allocator) -> (desc: rules.Description, err: Error) {
 	parsed, perr := parse_ddl(src, allocator)
@@ -78,12 +53,9 @@ compile_description :: proc(src: []u8, opts := Compile_Options{}, allocator := c
 	if terr.kind != .None {
 		return {}, terr
 	}
-
 	return compile_table_description(&parsed, tbl, opts, nil, {}, allocator)
 }
 
-// Compiles SQL DDL bytes into a `Compiled` handle holding `rules.Description`, `check.Plan`, and `Table_Meta`.
-// `src` does NOT need to outlive the returned `^Compiled`. Free with `destroy`.
 @(require_results)
 compile_ddl :: proc(src: []u8, opts := Compile_Options{}, allocator := context.allocator) -> (c: ^Compiled, err: Error) {
 	parsed, perr := parse_ddl(src, allocator)
@@ -106,9 +78,8 @@ compile_ddl :: proc(src: []u8, opts := Compile_Options{}, allocator := context.a
 	c.opts = opts
 	mem.dynamic_arena_init(&c.arena, allocator, allocator)
 	c.arena_ready = true
-	meta_alloc := mem.dynamic_arena_allocator(&c.arena)
 
-	desc, derr := compile_table_description(&parsed, tbl, opts, &c.meta, meta_alloc, allocator)
+	desc, derr := compile_table_description(&parsed, tbl, opts, &c.meta, mem.dynamic_arena_allocator(&c.arena), allocator)
 	if derr.kind != .None {
 		destroy(c)
 		return nil, derr
@@ -125,7 +96,6 @@ compile_ddl :: proc(src: []u8, opts := Compile_Options{}, allocator := context.a
 	return c, {}
 }
 
-// Frees all resources owned by `c` and `c` itself.
 destroy :: proc(c: ^Compiled) {
 	if c == nil {
 		return
@@ -139,17 +109,14 @@ destroy :: proc(c: ^Compiled) {
 	free(c, a)
 }
 
-// Checks an already-built `tape.Document` (JSON, CSV, TOML, YAML, XML, CBOR) against compiled DDL `c`.
 @(require_results)
 check_document :: proc(c: ^Compiled, doc: ^tape.Document, sink: ^check.Sink = nil, allocator := context.allocator) -> check.Result {
 	if c == nil {
 		return {valid = false, err = {kind = .Bad_Option, keyword = "compiled"}}
 	}
-	copts := check.Options{dups = c.opts.dups, budget = c.opts.budget}
-	return check.check_document(doc, &c.plan, copts, sink, allocator)
+	return check.check_document(doc, &c.plan, {dups = c.opts.dups, budget = c.opts.budget}, sink, allocator)
 }
 
-// Convenience predicate: whether `doc` satisfies compiled DDL `c`.
 valid_document :: proc(c: ^Compiled, doc: ^tape.Document, allocator := context.allocator) -> bool {
 	res := check_document(c, doc, nil, allocator)
 	ok := res.valid
@@ -158,7 +125,7 @@ valid_document :: proc(c: ^Compiled, doc: ^tape.Document, allocator := context.a
 }
 
 // ============================================================================
-// Table selection & metadata extraction
+// Table selection, compiler helpers, and metadata extraction
 // ============================================================================
 
 @(private = "file")
@@ -170,18 +137,10 @@ select_table :: proc(parsed: ^Parsed, want: string, err_alloc: runtime.Allocator
 		return &parsed.tables[0], {}
 	}
 	dot := strings.index_byte(want, '.')
-	want_schema := ""
-	want_name := want
-	if dot >= 0 {
-		want_schema = want[:dot]
-		want_name = want[dot + 1:]
-	}
+	want_schema := want[:dot] if dot >= 0 else ""
+	want_name := want[dot + 1:] if dot >= 0 else want
 	for &t in parsed.tables {
-		if want_schema != "" {
-			if ascii_eq_fold(t.schema_name, want_schema) && ascii_eq_fold(t.name, want_name) {
-				return &t, {}
-			}
-		} else if ascii_eq_fold(t.name, want_name) {
+		if ascii_eq_fold(t.name, want_name) && (want_schema == "" || ascii_eq_fold(t.schema_name, want_schema)) {
 			return &t, {}
 		}
 	}
@@ -207,6 +166,20 @@ Compiler :: struct {
 }
 
 @(private = "file")
+c_failed :: proc "contextless" (c: ^Compiler) -> bool {
+	return c.oom || c.err.kind != .None
+}
+
+@(private = "file")
+c_push :: proc(c: ^Compiler, arr: ^[dynamic]$T, vals: ..T) -> bool {
+	if _, err := append(arr, ..vals); err != nil {
+		c.oom = true
+		return false
+	}
+	return true
+}
+
+@(private = "file")
 c_keep :: proc(c: ^Compiler, s: string) -> string {
 	if c.oom || s == "" {
 		return ""
@@ -216,9 +189,8 @@ c_keep :: proc(c: ^Compiler, s: string) -> string {
 		c.oom = true
 		return ""
 	}
-	if _, aerr := append(&c.d.texts, cp); aerr != nil {
+	if !c_push(c, &c.d.texts, cp) {
 		delete(cp, c.allocator)
-		c.oom = true
 		return ""
 	}
 	return cp
@@ -231,47 +203,52 @@ destroy_node_slices :: proc(n: ^rules.Node, a: runtime.Allocator) {
 	delete(n.examples, a)
 	delete(n.all_of, a)
 	delete(n.one_of, a)
-	n.any_of = nil
-	n.enum_of = nil
-	n.examples = nil
-	n.all_of = nil
-	n.one_of = nil
+	n.any_of, n.enum_of, n.examples, n.all_of, n.one_of = nil, nil, nil, nil, nil
 }
 
 @(private = "file")
 c_add_node :: proc(c: ^Compiler, n: rules.Node) -> rules.Node_Index {
 	n := n
-	if c.oom {
+	if c.oom || !c_push(c, &c.d.nodes, n) {
 		destroy_node_slices(&n, c.allocator)
-		return rules.NONE
-	}
-	if _, err := append(&c.d.nodes, n); err != nil {
-		destroy_node_slices(&n, c.allocator)
-		c.oom = true
 		return rules.NONE
 	}
 	return rules.Node_Index(len(c.d.nodes) - 1)
 }
 
 @(private = "file")
-c_add_object :: proc(c: ^Compiler, o: rules.Object) -> i32 {
+c_scalar :: proc(c: ^Compiler, n: rules.Node) -> rules.Node_Index {
+	n := n
+	n.array = -1
+	n.object = -1
+	return c_add_node(c, n)
+}
+
+@(private = "file")
+c_not :: proc(c: ^Compiler, inner: rules.Node_Index, kinds: rules.Kinds = rules.EVERY_KIND) -> rules.Node_Index {
+	return c_scalar(c, rules.Node{kinds = kinds, not = inner})
+}
+
+@(private = "file")
+c_maybe_not :: proc(c: ^Compiler, inner: rules.Node_Index, negated: bool) -> (rules.Node_Index, bool, Null_Eval) {
 	if c.oom {
-		delete(o.members, c.allocator)
-		delete(o.patterns, c.allocator)
-		for x in o.dependents {
-			delete(x.required, c.allocator)
-		}
-		delete(o.dependents, c.allocator)
-		return -1
+		return rules.NONE, false, .Unknown
 	}
-	if _, err := append(&c.d.objects, o); err != nil {
+	if !negated {
+		return inner, true, .Unknown
+	}
+	return c_not(c, inner), !c.oom, .Unknown
+}
+
+@(private = "file")
+c_add_object :: proc(c: ^Compiler, o: rules.Object) -> i32 {
+	if c.oom || !c_push(c, &c.d.objects, o) {
 		delete(o.members, c.allocator)
 		delete(o.patterns, c.allocator)
 		for x in o.dependents {
 			delete(x.required, c.allocator)
 		}
 		delete(o.dependents, c.allocator)
-		c.oom = true
 		return -1
 	}
 	return i32(len(c.d.objects) - 1)
@@ -279,11 +256,7 @@ c_add_object :: proc(c: ^Compiler, o: rules.Object) -> i32 {
 
 @(private = "file")
 c_add_array :: proc(c: ^Compiler, a: rules.Array) -> i32 {
-	if c.oom {
-		return -1
-	}
-	if _, err := append(&c.d.arrays, a); err != nil {
-		c.oom = true
+	if c.oom || !c_push(c, &c.d.arrays, a) {
 		return -1
 	}
 	return i32(len(c.d.arrays) - 1)
@@ -310,6 +283,25 @@ c_find_enum :: proc(c: ^Compiler, name: string) -> ([]string, bool) {
 }
 
 @(private = "file")
+flatten_and :: proc(c: ^Compiler, root: Expr_Index, work, out: ^[dynamic]Expr_Index) {
+	clear(work)
+	clear(out)
+	_ = c_push(c, work, root)
+	for len(work) > 0 && !c.oom {
+		idx := pop(work)
+		if idx == NO_EXPR {
+			continue
+		}
+		e := c.parsed.exprs[idx]
+		if e.kind == .And {
+			_ = c_push(c, work, e.rhs, e.lhs)
+		} else {
+			_ = c_push(c, out, idx)
+		}
+	}
+}
+
+@(private = "file")
 compile_table_description :: proc(
 	parsed: ^Parsed,
 	tbl: ^Table_Def,
@@ -317,33 +309,56 @@ compile_table_description :: proc(
 	meta: ^Table_Meta,
 	meta_alloc: runtime.Allocator,
 	allocator: runtime.Allocator,
-) -> (d: rules.Description, err: Error) {
-	d.allocator = allocator
+) -> (rules.Description, Error) {
+	d := rules.Description {
+		allocator = allocator,
+		root      = rules.NONE,
+	}
 	d.nodes.allocator = allocator
 	d.arrays.allocator = allocator
 	d.objects.allocator = allocator
 	d.texts.allocator = allocator
 	d.anchors.allocator = allocator
 	d.bases.allocator = allocator
-	d.root = rules.NONE
 
-	names_map, nm_err := make(map[rules.Node_Index]string, 4, allocator)
-	if nm_err != nil {
+	ok := false
+	members: []rules.Member
+	members_owned := false
+	defer if !ok {
+		if members_owned {
+			delete(members, allocator)
+		}
 		rules.description_destroy(&d)
-		return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
 	}
-	d.names = names_map
+
+	oom_err :: proc(a: runtime.Allocator) -> Error {
+		return make_error(.No_Memory, "out of memory", allocator = a)
+	}
+
+	nm, nm_err := make(map[rules.Node_Index]string, 4, allocator)
+	if nm_err != nil {
+		return {}, oom_err(allocator)
+	}
+	d.names = nm
 
 	scratch_arena: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&scratch_arena, allocator, allocator)
 	defer mem.dynamic_arena_destroy(&scratch_arena)
 	scratch := mem.dynamic_arena_allocator(&scratch_arena)
 
-	col_nn, nn_err := make([]bool, len(tbl.columns), scratch)
-	col_kinds, ck_err := make([]rules.Kinds, len(tbl.columns), scratch)
-	if nn_err != nil || ck_err != nil {
-		rules.description_destroy(&d)
-		return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
+	col_nn, e1 := make([]bool, len(tbl.columns), scratch)
+	col_kinds, e2 := make([]rules.Kinds, len(tbl.columns), scratch)
+	col_extras, e3 := make([][dynamic]rules.Node_Index, len(tbl.columns), scratch)
+	col_node_ids, e4 := make([]rules.Node_Index, len(tbl.columns), scratch)
+	mem_err: runtime.Allocator_Error
+	members, mem_err = make([]rules.Member, len(tbl.columns), allocator)
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || mem_err != nil {
+		delete(members, allocator)
+		return {}, oom_err(allocator)
+	}
+	members_owned = true
+	for i in 0 ..< len(tbl.columns) {
+		col_extras[i].allocator = scratch
 	}
 
 	c := Compiler {
@@ -360,7 +375,6 @@ compile_table_description :: proc(
 		scratch          = scratch,
 	}
 
-	// Effective NOT NULL per column (includes table-level PRIMARY KEY columns).
 	for col, i in tbl.columns {
 		c.col_not_null[i] = col.not_null || col.primary_key
 	}
@@ -370,116 +384,51 @@ compile_table_description :: proc(
 		}
 	}
 
-	// Build each column node and its member entry.
-	members, mem_err := make([]rules.Member, len(tbl.columns), allocator)
-	if mem_err != nil {
-		rules.description_destroy(&d)
-		return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
-	}
-
-	// Per-column extra `all_of` lists for complex CHECK expressions (populated by both column and single-col table CHECKs).
-	col_extras, ce_err := make([][dynamic]rules.Node_Index, len(tbl.columns), scratch)
-	if ce_err != nil {
-		delete(members, allocator)
-		rules.description_destroy(&d)
-		return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
-	}
-	for i in 0 ..< len(tbl.columns) {
-		col_extras[i].allocator = scratch
-	}
-
-	col_node_ids, cn_err := make([]rules.Node_Index, len(tbl.columns), scratch)
-	if cn_err != nil {
-		delete(members, allocator)
-		rules.description_destroy(&d)
-		return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
-	}
-
 	for &col, i in tbl.columns {
 		node_idx := build_column_node(&c, i, &col)
-		if c.oom || c.err.kind != .None {
-			delete(members, allocator)
-			rules.description_destroy(&d)
+		if c_failed(&c) {
 			return {}, c_final_error(&c)
 		}
 		col_node_ids[i] = node_idx
 		c.col_non_null_k[i] = d.nodes[node_idx].kinds - {.Null}
 
-		// Compile column-level CHECK constraints.
 		for chk in col.checks {
 			apply_column_check(&c, i, node_idx, chk, &col_extras[i])
-			if c.oom || c.err.kind != .None {
-				delete(members, allocator)
-				rules.description_destroy(&d)
+			if c_failed(&c) {
 				return {}, c_final_error(&c)
 			}
 		}
 
-		members[i] = rules.Member {
+		members[i] = {
 			name     = c_keep(&c, col.name),
 			node     = node_idx,
 			required = c.col_not_null[i] && !(c.default_optional && col.has_default),
 		}
 		if c.oom {
-			delete(members, allocator)
-			rules.description_destroy(&d)
-			return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
+			return {}, oom_err(allocator)
 		}
 	}
 
-	// Compile table-level CHECK constraints: flatten top-level `AND` chains first so single-column
-	// conjuncts fold onto their column node and cross-column unsupported conjuncts never poison sibling conjuncts.
 	row_all_of := make([dynamic]rules.Node_Index, scratch)
 	tbl_work := make([dynamic]Expr_Index, scratch)
 	tbl_conjuncts := make([dynamic]Expr_Index, scratch)
 	for chk in tbl.checks {
-		clear(&tbl_work)
-		clear(&tbl_conjuncts)
-		if _, aerr := append(&tbl_work, chk); aerr != nil {
-			c.oom = true
-		}
-		for len(tbl_work) > 0 && !c.oom {
-			idx := pop(&tbl_work)
-			if idx == NO_EXPR {
-				continue
-			}
-			ex := c.parsed.exprs[idx]
-			if ex.kind == .And {
-				if _, aerr := append(&tbl_work, ex.rhs, ex.lhs); aerr != nil {
-					c.oom = true
-					break
-				}
-			} else {
-				if _, aerr := append(&tbl_conjuncts, idx); aerr != nil {
-					c.oom = true
-					break
-				}
-			}
-		}
+		flatten_and(&c, chk, &tbl_work, &tbl_conjuncts)
 		for conj in tbl_conjuncts {
-			if c.oom || c.err.kind != .None {
+			if c_failed(&c) {
 				break
 			}
-			target_col, is_single := check_single_column(&c, conj)
-			if is_single {
+			if target_col, is_single := check_single_column(&c, conj); is_single {
 				apply_column_check(&c, target_col, col_node_ids[target_col], conj, &col_extras[target_col])
-			} else {
-				obj_chk, compiled := compile_table_check(&c, conj)
-				if compiled && obj_chk != rules.NONE {
-					if _, aerr := append(&row_all_of, obj_chk); aerr != nil {
-						c.oom = true
-					}
-				}
+			} else if obj_chk, compiled, _ := compile_bool_expr(&c, conj, -1, {}); compiled && obj_chk != rules.NONE {
+				_ = c_push(&c, &row_all_of, obj_chk)
 			}
 		}
-		if c.oom || c.err.kind != .None {
-			delete(members, allocator)
-			rules.description_destroy(&d)
+		if c_failed(&c) {
 			return {}, c_final_error(&c)
 		}
 	}
 
-	// Finalize any per-column `all_of` slices into `allocator` (owned by `d`).
 	for i in 0 ..< len(tbl.columns) {
 		if len(col_extras[i]) == 0 {
 			continue
@@ -487,45 +436,26 @@ compile_table_description :: proc(
 		n := &d.nodes[col_node_ids[i]]
 		if len(col_extras[i]) == 1 && can_inline_single_all_of(n, &d.nodes[col_extras[i][0]]) {
 			inline_into(n, &d.nodes[col_extras[i][0]], allocator, &c.oom)
+		} else if sl, serr := slice.clone(col_extras[i][:], allocator); serr != nil {
+			c.oom = true
 		} else {
-			sl, serr := slice.clone(col_extras[i][:], allocator)
-			if serr != nil {
-				c.oom = true
-			} else {
-				n.all_of = sl
-			}
+			n.all_of = sl
 		}
 		if c.oom {
-			delete(members, allocator)
-			rules.description_destroy(&d)
-			return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
+			return {}, oom_err(allocator)
 		}
 	}
 
-	// Build row object block.
-	add_node := rules.NONE
-	if c.strict_columns {
-		add_node = c_add_node(&c, rules.Node{kinds = {}, array = -1, object = -1})
-	}
-	obj_idx := c_add_object(&c, rules.Object{
-		members    = members,
-		additional = add_node,
-		keys       = rules.NONE,
-	})
+	add_node := c_scalar(&c, rules.Node{kinds = {}}) if c.strict_columns else rules.NONE
+	members_owned = false
+	obj_idx := c_add_object(&c, rules.Object{members = members, additional = add_node, keys = rules.NONE})
 	if c.oom {
-		rules.description_destroy(&d)
-		return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
+		return {}, oom_err(allocator)
 	}
 
-	row_node := rules.Node {
-		kinds  = {.Object},
-		array  = -1,
-		object = obj_idx,
-		title  = c_keep(&c, tbl.name),
-	}
+	row_node := rules.Node{kinds = {.Object}, array = -1, object = obj_idx, title = c_keep(&c, tbl.name)}
 	if len(row_all_of) > 0 {
-		sl, serr := slice.clone(row_all_of[:], allocator)
-		if serr != nil {
+		if sl, serr := slice.clone(row_all_of[:], allocator); serr != nil {
 			c.oom = true
 		} else {
 			row_node.all_of = sl
@@ -541,44 +471,31 @@ compile_table_description :: proc(
 		}
 	}
 	if c.oom {
-		rules.description_destroy(&d)
-		return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
-	}
-
-	// Determine whether table has any PRIMARY KEY or UNIQUE constraint.
-	has_unique := len(tbl.primary_key) > 0 || len(tbl.uniques) > 0
-	for col in tbl.columns {
-		if col.primary_key || col.unique {
-			has_unique = true
-			break
-		}
+		return {}, oom_err(allocator)
 	}
 
 	if opts.as_array {
+		has_unique := len(tbl.primary_key) > 0 || len(tbl.uniques) > 0
+		for col in tbl.columns {
+			if col.primary_key || col.unique {
+				has_unique = true
+				break
+			}
+		}
 		arr_idx := c_add_array(&c, rules.Array{items = row_idx})
-		arr_node := rules.Node {
-			kinds = {.Array},
-			array = arr_idx,
-			object = -1,
-			rules = {unique = has_unique},
-		}
-		root_idx := c_add_node(&c, arr_node)
+		d.root = c_add_node(&c, rules.Node{kinds = {.Array}, array = arr_idx, object = -1, rules = {unique = has_unique}})
 		if c.oom {
-			rules.description_destroy(&d)
-			return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
+			return {}, oom_err(allocator)
 		}
-		d.root = root_idx
 	} else {
 		d.root = row_idx
 	}
 
-	if meta != nil {
-		if !populate_meta(&c, meta, meta_alloc) {
-			rules.description_destroy(&d)
-			return {}, make_error(.No_Memory, "out of memory", allocator = allocator)
-		}
+	if meta != nil && !populate_meta(&c, meta, meta_alloc) {
+		return {}, oom_err(allocator)
 	}
 
+	ok = true
 	return d, {}
 }
 
@@ -591,42 +508,53 @@ c_final_error :: proc(c: ^Compiler) -> Error {
 }
 
 @(private = "file")
-populate_meta :: proc(c: ^Compiler, meta: ^Table_Meta, a: runtime.Allocator) -> bool {
-	clone_s :: proc(s: string, a: runtime.Allocator) -> (string, bool) {
-		if s == "" {
-			return "", true
-		}
-		cp, err := strings.clone(s, a)
-		return cp, err == nil
+clone_s :: proc(s: string, a: runtime.Allocator) -> (string, bool) {
+	if s == "" {
+		return "", true
 	}
-	clone_ss :: proc(xs: []string, a: runtime.Allocator) -> ([]string, bool) {
-		if len(xs) == 0 {
-			return nil, true
-		}
-		out, err := make([]string, len(xs), a)
-		if err != nil {
+	cp, err := strings.clone(s, a)
+	return cp, err == nil
+}
+
+@(private = "file")
+clone_ss :: proc(xs: []string, a: runtime.Allocator) -> ([]string, bool) {
+	if len(xs) == 0 {
+		return nil, true
+	}
+	out, err := make([]string, len(xs), a)
+	if err != nil {
+		return nil, false
+	}
+	for s, i in xs {
+		cp, ok := clone_s(s, a)
+		if !ok {
 			return nil, false
 		}
-		for s, i in xs {
-			cp, ok := clone_s(s, a)
-			if !ok {
-				return nil, false
-			}
-			out[i] = cp
-		}
-		return out, true
+		out[i] = cp
 	}
+	return out, true
+}
 
-	sn, ok1 := clone_s(c.tbl.schema_name, a)
-	tn, ok2 := clone_s(c.tbl.name, a)
+@(private = "file")
+clone_fk :: proc(fk: Foreign_Key, a: runtime.Allocator) -> (out: Foreign_Key, ok: bool) {
+	ok1, ok2, ok3, ok4: bool
+	out.name, ok1 = clone_s(fk.name, a)
+	out.ref_table, ok2 = clone_s(fk.ref_table, a)
+	out.columns, ok3 = clone_ss(fk.columns, a)
+	out.ref_columns, ok4 = clone_ss(fk.ref_columns, a)
+	return out, ok1 && ok2 && ok3 && ok4
+}
+
+@(private = "file")
+populate_meta :: proc(c: ^Compiler, meta: ^Table_Meta, a: runtime.Allocator) -> bool {
+	ok1, ok2: bool
+	meta.schema_name, ok1 = clone_s(c.tbl.schema_name, a)
+	meta.table_name, ok2 = clone_s(c.tbl.name, a)
 	if !ok1 || !ok2 {
 		return false
 	}
-	meta.schema_name = sn
-	meta.table_name = tn
 	meta.uncompiled_checks = c.uncompiled
 
-	// Primary key
 	if len(c.tbl.primary_key) > 0 {
 		pk, ok := clone_ss(c.tbl.primary_key, a)
 		if !ok {
@@ -641,7 +569,7 @@ populate_meta :: proc(c: ^Compiler, meta: ^Table_Meta, a: runtime.Allocator) -> 
 				if !ok {
 					return false
 				}
-				if _, aerr := append(&pk_list, cp); aerr != nil {
+				if _, err := append(&pk_list, cp); err != nil {
 					return false
 				}
 			}
@@ -649,7 +577,6 @@ populate_meta :: proc(c: ^Compiler, meta: ^Table_Meta, a: runtime.Allocator) -> 
 		meta.primary_key = pk_list[:]
 	}
 
-	// Unique column groups
 	ug := make([dynamic][]string, a)
 	for col in c.tbl.columns {
 		if col.primary_key || col.unique {
@@ -657,7 +584,7 @@ populate_meta :: proc(c: ^Compiler, meta: ^Table_Meta, a: runtime.Allocator) -> 
 			if !ok {
 				return false
 			}
-			if _, aerr := append(&ug, one); aerr != nil {
+			if _, err := append(&ug, one); err != nil {
 				return false
 			}
 		}
@@ -667,83 +594,35 @@ populate_meta :: proc(c: ^Compiler, meta: ^Table_Meta, a: runtime.Allocator) -> 
 		if !ok {
 			return false
 		}
-		if _, aerr := append(&ug, grp); aerr != nil {
+		if _, err := append(&ug, grp); err != nil {
 			return false
 		}
 	}
 	meta.unique_columns = ug[:]
 
-	// Foreign keys
 	fks := make([dynamic]Foreign_Key, a)
 	for col in c.tbl.columns {
 		if fk, has := col.references.?; has {
-			fk_cp, ok := clone_fk(fk, a)
+			cp, ok := clone_fk(fk, a)
 			if !ok {
 				return false
 			}
-			if _, aerr := append(&fks, fk_cp); aerr != nil {
+			if _, err := append(&fks, cp); err != nil {
 				return false
 			}
 		}
 	}
 	for fk in c.tbl.foreign_keys {
-		fk_cp, ok := clone_fk(fk, a)
+		cp, ok := clone_fk(fk, a)
 		if !ok {
 			return false
 		}
-		if _, aerr := append(&fks, fk_cp); aerr != nil {
+		if _, err := append(&fks, cp); err != nil {
 			return false
 		}
 	}
 	meta.foreign_keys = fks[:]
 	return true
-}
-
-@(private = "file")
-clone_fk :: proc(fk: Foreign_Key, a: runtime.Allocator) -> (out: Foreign_Key, ok: bool) {
-	if fk.name != "" {
-		n, e := strings.clone(fk.name, a)
-		if e != nil {
-			return {}, false
-		}
-		out.name = n
-	}
-	if fk.ref_table != "" {
-		rt, e := strings.clone(fk.ref_table, a)
-		if e != nil {
-			return {}, false
-		}
-		out.ref_table = rt
-	}
-	if len(fk.columns) > 0 {
-		cols, e := make([]string, len(fk.columns), a)
-		if e != nil {
-			return {}, false
-		}
-		for s, i in fk.columns {
-			cp, se := strings.clone(s, a)
-			if se != nil {
-				return {}, false
-			}
-			cols[i] = cp
-		}
-		out.columns = cols
-	}
-	if len(fk.ref_columns) > 0 {
-		rcols, e := make([]string, len(fk.ref_columns), a)
-		if e != nil {
-			return {}, false
-		}
-		for s, i in fk.ref_columns {
-			cp, se := strings.clone(s, a)
-			if se != nil {
-				return {}, false
-			}
-			rcols[i] = cp
-		}
-		out.ref_columns = rcols
-	}
-	return out, true
 }
 
 // ============================================================================
@@ -759,71 +638,48 @@ build_column_node :: proc(c: ^Compiler, col_idx: int, col: ^Column_Def) -> rules
 		return rules.NONE
 	}
 
-	n: rules.Node
+	n := elem
 	if col.type.is_array {
 		elem_idx := c_add_node(c, elem)
 		arr_idx := c_add_array(c, rules.Array{items = elem_idx})
-		n = rules.Node {
-			kinds  = {.Array} if not_null else {.Array, .Null},
-			array  = arr_idx,
-			object = -1,
-		}
-	} else {
-		n = elem
+		n = {kinds = {.Array} if not_null else {.Array, .Null}, array = arr_idx, object = -1}
 	}
-
-	// Default value annotation (only when literal kind is compatible with column kinds).
 	if col.has_default_lit {
-		if val, vok := literal_to_value(c, col.default_lit); vok {
-			if value_matches_kinds(val, n.kinds) {
-				n.default_of = val
-			}
+		if val, vok := literal_to_value(c, col.default_lit); vok && value_matches_kinds(val, n.kinds) {
+			n.default_of = val
 		}
 	}
-
 	return c_add_node(c, n)
 }
 
 @(private = "file")
+Int_Bounds :: struct { smin, smax, umax: string }
+
+@(private = "file")
+INT_BOUNDS := [?]struct { kind: Sql_Type_Kind, b: Int_Bounds }{
+	{.TinyInt,     {"-128", "127", "255"}},
+	{.SmallInt,    {"-32768", "32767", "65535"}},
+	{.SmallSerial, {"-32768", "32767", "65535"}},
+	{.MediumInt,   {"-8388608", "8388607", "16777215"}},
+	{.Int,         {"-2147483648", "2147483647", "4294967295"}},
+	{.Serial,      {"-2147483648", "2147483647", "4294967295"}},
+	{.BigInt,      {"-9223372036854775808", "9223372036854775807", "18446744073709551615"}},
+	{.BigSerial,   {"-9223372036854775808", "9223372036854775807", "18446744073709551615"}},
+}
+
+@(private = "file")
 build_scalar_type_node :: proc(c: ^Compiler, t: Sql_Type, not_null: bool) -> (n: rules.Node) {
-	n.array = -1
-	n.object = -1
+	n = {array = -1, object = -1}
 
 	switch t.kind {
-	case .TinyInt:
+	case .TinyInt, .SmallInt, .SmallSerial, .MediumInt, .Int, .Serial, .BigInt, .BigSerial:
 		n.kinds = {.Integer}
-		if t.unsigned {
-			n.rules.minimum, n.rules.maximum = "0", "255"
-		} else {
-			n.rules.minimum, n.rules.maximum = "-128", "127"
-		}
-	case .SmallInt, .SmallSerial:
-		n.kinds = {.Integer}
-		if t.unsigned {
-			n.rules.minimum, n.rules.maximum = "0", "65535"
-		} else {
-			n.rules.minimum, n.rules.maximum = "-32768", "32767"
-		}
-	case .MediumInt:
-		n.kinds = {.Integer}
-		if t.unsigned {
-			n.rules.minimum, n.rules.maximum = "0", "16777215"
-		} else {
-			n.rules.minimum, n.rules.maximum = "-8388608", "8388607"
-		}
-	case .Int, .Serial:
-		n.kinds = {.Integer}
-		if t.unsigned {
-			n.rules.minimum, n.rules.maximum = "0", "4294967295"
-		} else {
-			n.rules.minimum, n.rules.maximum = "-2147483648", "2147483647"
-		}
-	case .BigInt, .BigSerial:
-		n.kinds = {.Integer}
-		if t.unsigned {
-			n.rules.minimum, n.rules.maximum = "0", "18446744073709551615"
-		} else {
-			n.rules.minimum, n.rules.maximum = "-9223372036854775808", "9223372036854775807"
+		for entry in INT_BOUNDS {
+			if entry.kind == t.kind {
+				n.rules.minimum = "0" if t.unsigned else entry.b.smin
+				n.rules.maximum = entry.b.umax if t.unsigned else entry.b.smax
+				break
+			}
 		}
 	case .Float, .Double:
 		n.kinds = {.Number}
@@ -834,41 +690,23 @@ build_scalar_type_node :: proc(c: ^Compiler, t: Sql_Type, not_null: bool) -> (n:
 		build_numeric_type(c, t, &n)
 	case .Bool:
 		n.kinds = {.Bool}
-	case .Text:
+	case .Text, .Varchar, .Char:
 		n.kinds = {.String}
-		if t.has_len && t.len > 0 {
+		if t.has_len && (t.kind != .Text || t.len > 0) {
 			n.rules.max_length = t.len
+			if t.kind == .Char {
+				n.rules.min_length = t.len
+			}
 		}
-	case .Varchar:
+	case .Uuid, .Date, .Time, .Timestamp:
 		n.kinds = {.String}
-		if t.has_len {
-			n.rules.max_length = t.len
+		n.rules.assert_format = c.assert_format
+		#partial switch t.kind {
+		case .Uuid:      n.rules.format = "uuid"
+		case .Date:      n.rules.format = "date"
+		case .Time:      n.rules.format = "time"
+		case .Timestamp: n.rules.format = "date-time"
 		}
-	case .Char:
-		// Fixed-length SQL `CHAR(N)` enforces exact code-point length N when N is specified.
-		n.kinds = {.String}
-		if t.has_len {
-			n.rules.min_length = t.len
-			n.rules.max_length = t.len
-		}
-	case .Uuid:
-		n.kinds = {.String}
-		n.rules.format = "uuid"
-		n.rules.assert_format = c.assert_format
-	case .Date:
-		n.kinds = {.String}
-		n.rules.format = "date"
-		n.rules.assert_format = c.assert_format
-	case .Time:
-		n.kinds = {.String}
-		n.rules.format = "time"
-		n.rules.assert_format = c.assert_format
-	case .Timestamp:
-		n.kinds = {.String}
-		n.rules.format = "date-time"
-		n.rules.assert_format = c.assert_format
-	case .Json:
-		n.kinds = rules.EVERY_KIND - {.Null}
 	case .Bytes:
 		n.kinds = {.String}
 	case .Enum:
@@ -881,7 +719,7 @@ build_scalar_type_node :: proc(c: ^Compiler, t: Sql_Type, not_null: bool) -> (n:
 		} else {
 			n.kinds = rules.EVERY_KIND - {.Null}
 		}
-	case .Unknown:
+	case .Json, .Unknown:
 		n.kinds = rules.EVERY_KIND - {.Null}
 	}
 
@@ -904,60 +742,47 @@ build_numeric_type :: proc(c: ^Compiler, t: Sql_Type, n: ^rules.Node) {
 	if scale_u > t.len {
 		return
 	}
-	p := int(t.len)
-	s := int(scale_u)
+	p, s := int(t.len), int(scale_u)
 	int_digits := p - s
+
+	// Build `max_buf`: `999...` (if s == 0) or `999.999` (or `0.999` if p == s).
+	buf: [65]u8 = ---
+	buf[0] = '-'
+	pos := 1
 	if s == 0 {
 		n.kinds = {.Integer}
-		max_buf: [48]u8 = ---
-		for i in 0 ..< p {
-			max_buf[i] = '9'
-		}
-		max_str := c_keep(c, string(max_buf[:p]))
-		n.rules.maximum = max_str
-		if !t.unsigned {
-			min_buf: [49]u8 = ---
-			min_buf[0] = '-'
-			copy(min_buf[1:], max_buf[:p])
-			n.rules.minimum = c_keep(c, string(min_buf[:p + 1]))
-		}
-		return
-	}
-
-	// Decimal with scale `s > 0`: exact bounds `±(10^(p-s) - 10^-s)` and exact `multiple_of = 10^-s`.
-	max_buf: [64]u8 = ---
-	pos := 0
-	if int_digits == 0 {
-		max_buf[pos] = '0'
-		pos += 1
-	} else {
-		for _ in 0 ..< int_digits {
-			max_buf[pos] = '9'
+		for _ in 0 ..< p {
+			buf[pos] = '9'
 			pos += 1
 		}
-	}
-	max_buf[pos] = '.'
-	pos += 1
-	for _ in 0 ..< s {
-		max_buf[pos] = '9'
+	} else {
+		if int_digits == 0 {
+			buf[pos] = '0'
+			pos += 1
+		} else {
+			for _ in 0 ..< int_digits {
+				buf[pos] = '9'
+				pos += 1
+			}
+		}
+		buf[pos] = '.'
 		pos += 1
+		for _ in 0 ..< s {
+			buf[pos] = '9'
+			pos += 1
+		}
+		step: [64]u8 = ---
+		step[0], step[1] = '0', '.'
+		for i in 0 ..< s - 1 {
+			step[2 + i] = '0'
+		}
+		step[2 + s - 1] = '1'
+		n.rules.multiple_of = c_keep(c, string(step[:2 + s]))
 	}
-	n.rules.maximum = c_keep(c, string(max_buf[:pos]))
+	n.rules.maximum = c_keep(c, string(buf[1:pos]))
 	if !t.unsigned {
-		min_buf: [65]u8 = ---
-		min_buf[0] = '-'
-		copy(min_buf[1:], max_buf[:pos])
-		n.rules.minimum = c_keep(c, string(min_buf[:pos + 1]))
+		n.rules.minimum = c_keep(c, string(buf[:pos]))
 	}
-
-	step_buf: [64]u8 = ---
-	step_buf[0] = '0'
-	step_buf[1] = '.'
-	for i in 0 ..< s - 1 {
-		step_buf[2 + i] = '0'
-	}
-	step_buf[2 + s - 1] = '1'
-	n.rules.multiple_of = c_keep(c, string(step_buf[:2 + s]))
 }
 
 @(private = "file")
@@ -985,24 +810,15 @@ build_string_enum :: proc(c: ^Compiler, vals: []string, not_null: bool, n: ^rule
 @(private = "file")
 literal_to_value :: proc(c: ^Compiler, lit: Literal) -> (rules.Value, bool) {
 	switch lit.kind {
-	case .Null:
-		return rules.Null{}, true
-	case .Bool:
-		return lit.bool_val, true
-	case .Integer:
-		return lit.int_val, true
+	case .Null:    return rules.Null{}, true
+	case .Bool:    return lit.bool_val, true
+	case .Integer: return lit.int_val, true
 	case .Decimal:
 		txt := c_keep(c, lit.text)
-		if c.oom {
-			return nil, false
-		}
-		return rules.Number_Text{text = txt}, true
+		return rules.Number_Text{text = txt}, !c.oom
 	case .String:
 		txt := c_keep(c, lit.text)
-		if c.oom {
-			return nil, false
-		}
-		return txt, true
+		return txt, !c.oom
 	}
 	return nil, false
 }
@@ -1010,14 +826,11 @@ literal_to_value :: proc(c: ^Compiler, lit: Literal) -> (rules.Value, bool) {
 @(private = "file")
 value_matches_kinds :: proc "contextless" (v: rules.Value, kinds: rules.Kinds) -> bool {
 	#partial switch x in v {
-	case rules.Null:
-		return .Null in kinds
-	case bool:
-		return .Bool in kinds
-	case i64, u64:
-		return .Integer in kinds || .Number in kinds
-	case f64:
-		return .Number in kinds
+	case rules.Null:   return .Null in kinds
+	case bool:         return .Bool in kinds
+	case i64, u64:     return .Integer in kinds || .Number in kinds
+	case f64:          return .Number in kinds
+	case string:       return .String in kinds
 	case rules.Number_Text:
 		if .Number in kinds {
 			return true
@@ -1026,20 +839,13 @@ value_matches_kinds :: proc "contextless" (v: rules.Value, kinds: rules.Kinds) -
 			d := rules.decimal_of(x.text)
 			return d.head == "" || (d.wide == "" && d.point >= i128(len(d.head) + len(d.tail)))
 		}
-		return false
-	case string:
-		return .String in kinds
 	}
 	return false
 }
 
-// Whether an `.Ident` / `.Length_Call` expression refers to column `col_name` of the current table.
 @(private = "file")
 expr_matches_col :: proc "contextless" (c: ^Compiler, e: Expr, col_name: string) -> bool {
-	if e.table_qual != "" && !ascii_eq_fold(e.table_qual, c.tbl.name) {
-		return false
-	}
-	return ascii_eq_fold(e.ident, col_name)
+	return (e.table_qual == "" || ascii_eq_fold(e.table_qual, c.tbl.name)) && ascii_eq_fold(e.ident, col_name)
 }
 
 // ============================================================================
@@ -1047,10 +853,9 @@ expr_matches_col :: proc "contextless" (c: ^Compiler, e: Expr, col_name: string)
 // ============================================================================
 
 @(private = "file")
-check_single_column :: proc(c: ^Compiler, root: Expr_Index) -> (col_idx: int, ok: bool) {
+check_single_column :: proc(c: ^Compiler, root: Expr_Index) -> (int, bool) {
 	stack := make([dynamic]Expr_Index, c.scratch)
-	if _, aerr := append(&stack, root); aerr != nil {
-		c.oom = true
+	if !c_push(c, &stack, root) {
 		return -1, false
 	}
 	found := -1
@@ -1066,29 +871,16 @@ check_single_column :: proc(c: ^Compiler, root: Expr_Index) -> (col_idx: int, ok
 				return -1, false
 			}
 			ci := c_find_col(c, e.ident)
-			if ci < 0 {
+			if ci < 0 || (found >= 0 && found != ci) {
 				return -1, false
 			}
-			if found < 0 {
-				found = ci
-			} else if found != ci {
-				return -1, false
-			}
+			found = ci
 		case .Compare, .And, .Or:
-			if _, aerr := append(&stack, e.lhs, e.rhs); aerr != nil {
-				c.oom = true
-				return -1, false
-			}
+			if !c_push(c, &stack, e.lhs, e.rhs) { return -1, false }
 		case .Between:
-			if _, aerr := append(&stack, e.lhs, e.rhs, e.hi); aerr != nil {
-				c.oom = true
-				return -1, false
-			}
+			if !c_push(c, &stack, e.lhs, e.rhs, e.hi) { return -1, false }
 		case .In_List, .Is_Null, .Like, .Not:
-			if _, aerr := append(&stack, e.lhs); aerr != nil {
-				c.oom = true
-				return -1, false
-			}
+			if !c_push(c, &stack, e.lhs) { return -1, false }
 		}
 	}
 	return found, found >= 0
@@ -1103,75 +895,67 @@ mark_uncompiled :: proc(c: ^Compiler, e: Expr, msg: string) {
 }
 
 @(private = "file")
-apply_column_check :: proc(
-	c: ^Compiler,
-	col_idx: int,
-	node_idx: rules.Node_Index,
-	root: Expr_Index,
-	extras: ^[dynamic]rules.Node_Index,
-) {
-	// Flatten top-level `AND` chains iteratively so `a >= 0 AND a <= 100 AND LENGTH(s) >= 3` folds cleanly.
+apply_column_check :: proc(c: ^Compiler, col_idx: int, node_idx: rules.Node_Index, root: Expr_Index, extras: ^[dynamic]rules.Node_Index) {
 	work := make([dynamic]Expr_Index, c.scratch)
-	if _, aerr := append(&work, root); aerr != nil {
-		c.oom = true
-		return
-	}
 	conjuncts := make([dynamic]Expr_Index, c.scratch)
-	for len(work) > 0 {
-		idx := pop(&work)
-		if idx == NO_EXPR {
-			continue
-		}
-		e := c.parsed.exprs[idx]
-		if e.kind == .And {
-			if _, aerr := append(&work, e.rhs, e.lhs); aerr != nil {
-				c.oom = true
-				return
-			}
-		} else {
-			if _, aerr := append(&conjuncts, idx); aerr != nil {
-				c.oom = true
-				return
-			}
-		}
-	}
-
+	flatten_and(c, root, &work, &conjuncts)
 	non_null_k := c.col_non_null_k[col_idx]
 
 	for idx in conjuncts {
+		if c_failed(c) {
+			return
+		}
 		not_null := c.col_not_null[col_idx]
-		if try_fold_direct_col_pred(c, col_idx, node_idx, idx, not_null) {
-			if c.oom || c.err.kind != .None {
-				return
-			}
+		if try_fold_direct_col_pred(c, col_idx, node_idx, idx, not_null) || c_failed(c) {
 			continue
 		}
-		if c.oom || c.err.kind != .None {
-			return
+		sub, compiled, null_eval := compile_bool_expr(c, idx, col_idx, non_null_k)
+		if c_failed(c) || !compiled || sub == rules.NONE {
+			continue
 		}
-		sub, compiled := compile_col_expr(c, col_idx, idx, non_null_k, !not_null)
-		if c.oom || c.err.kind != .None {
-			return
-		}
-		if compiled && sub != rules.NONE {
-			if _, aerr := append(extras, sub); aerr != nil {
-				c.oom = true
+		if !not_null && null_eval != .False {
+			wok: bool
+			sub, wok = wrap_allow_null(c, sub)
+			if !wok {
 				return
 			}
 		}
+		_ = c_push(c, extras, sub)
 	}
 }
 
-// Attempts to fold a simple single-column predicate directly onto `d.nodes[node_idx]`.
-// Returns `true` if handled (including when marked uncompiled).
 @(private = "file")
-try_fold_direct_col_pred :: proc(
-	c: ^Compiler,
-	col_idx: int,
-	node_idx: rules.Node_Index,
-	idx: Expr_Index,
-	not_null: bool,
-) -> bool {
+set_const_or_nullable_enum :: proc(c: ^Compiler, n: ^rules.Node, val: rules.Value, not_null: bool) -> bool {
+	if n.has_enum || n.const_of != nil {
+		return false
+	}
+	if not_null {
+		n.const_of = val
+		return true
+	}
+	vals, verr := make([]rules.Value, 2, c.allocator)
+	if verr != nil {
+		c.oom = true
+		return true
+	}
+	vals[0], vals[1] = val, rules.Null{}
+	n.enum_of = vals
+	n.has_enum = true
+	return true
+}
+
+@(private = "file")
+merge_num_edge :: proc(c: ^Compiler, n: ^rules.Node, edge: rules.Rules) -> bool {
+	if !c.oom {
+		if merged_r, clash := rules.merged(n, edge); clash == "" {
+			n.rules = merged_r
+		}
+	}
+	return true
+}
+
+@(private = "file")
+try_fold_direct_col_pred :: proc(c: ^Compiler, col_idx: int, node_idx: rules.Node_Index, idx: Expr_Index, not_null: bool) -> bool {
 	e := c.parsed.exprs[idx]
 	n := &c.d.nodes[node_idx]
 	col_name := c.tbl.columns[col_idx].name
@@ -1187,14 +971,12 @@ try_fold_direct_col_pred :: proc(
 			return false
 		}
 		if e.negated {
-			// `col IS NOT NULL`
 			n.kinds -= {.Null}
 			c.col_not_null[col_idx] = true
 			if n.has_enum {
 				strip_null_from_enum(n, c.allocator, &c.oom)
 			}
 		} else {
-			// `col IS NULL`
 			n.kinds = {.Null}
 		}
 		return true
@@ -1203,10 +985,7 @@ try_fold_direct_col_pred :: proc(
 		return try_fold_compare(c, col_idx, n, e, not_null)
 
 	case .Between:
-		if e.negated {
-			return false
-		}
-		return try_fold_between(c, col_idx, n, e)
+		return !e.negated && try_fold_between(c, col_idx, n, e)
 
 	case .In_List:
 		if e.negated || n.has_enum || n.const_of != nil {
@@ -1216,22 +995,9 @@ try_fold_direct_col_pred :: proc(
 		if lhs.kind != .Ident || !expr_matches_col(c, lhs, col_name) {
 			return false
 		}
-		extra := 0 if not_null else 1
-		vals, verr := make([]rules.Value, len(e.literals) + extra, c.allocator)
-		if verr != nil {
-			c.oom = true
+		vals, vok := make_literal_values(c, e.literals, !not_null)
+		if !vok {
 			return true
-		}
-		for lit, i in e.literals {
-			v, vok := literal_to_value(c, lit)
-			if !vok {
-				delete(vals, c.allocator)
-				return true
-			}
-			vals[i] = v
-		}
-		if !not_null {
-			vals[len(e.literals)] = rules.Null{}
 		}
 		n.enum_of = vals
 		n.has_enum = true
@@ -1246,14 +1012,34 @@ try_fold_direct_col_pred :: proc(
 			return false
 		}
 		pat := like_to_ecma(c, e.pattern, e.escape)
-		if c.oom {
-			return true
+		if !c.oom {
+			n.rules.pattern = pat
 		}
-		n.rules.pattern = pat
 		return true
 	}
-
 	return false
+}
+
+@(private = "file")
+make_literal_values :: proc(c: ^Compiler, lits: []Literal, add_null: bool) -> ([]rules.Value, bool) {
+	extra := 1 if add_null else 0
+	vals, verr := make([]rules.Value, len(lits) + extra, c.allocator)
+	if verr != nil {
+		c.oom = true
+		return nil, false
+	}
+	for lit, i in lits {
+		v, vok := literal_to_value(c, lit)
+		if !vok {
+			delete(vals, c.allocator)
+			return nil, false
+		}
+		vals[i] = v
+	}
+	if add_null {
+		vals[len(lits)] = rules.Null{}
+	}
+	return vals, true
 }
 
 @(private = "file")
@@ -1286,28 +1072,20 @@ strip_null_from_enum :: proc(n: ^rules.Node, allocator: runtime.Allocator, oom: 
 @(private = "file")
 flip_cmp :: proc "contextless" (op: Cmp_Op) -> Cmp_Op {
 	switch op {
-	case .Eq:
-		return .Eq
-	case .Neq:
-		return .Neq
-	case .Lt:
-		return .Gt
-	case .Lte:
-		return .Gte
-	case .Gt:
-		return .Lt
-	case .Gte:
-		return .Lte
+	case .Eq:  return .Eq
+	case .Neq: return .Neq
+	case .Lt:  return .Gt
+	case .Lte: return .Gte
+	case .Gt:  return .Lt
+	case .Gte: return .Lte
 	}
 	return op
 }
 
 @(private = "file")
-normalize_compare :: proc(c: ^Compiler, col_idx: int, e: Expr) -> (target: Expr, op: Cmp_Op, lit: Literal, ok: bool) {
-	lhs := c.parsed.exprs[e.lhs]
-	rhs := c.parsed.exprs[e.rhs]
+normalize_compare :: proc(c: ^Compiler, col_idx: int, e: Expr) -> (Expr, Cmp_Op, Literal, bool) {
+	lhs, rhs := c.parsed.exprs[e.lhs], c.parsed.exprs[e.rhs]
 	col_name := c.tbl.columns[col_idx].name
-
 	if (lhs.kind == .Ident || lhs.kind == .Length_Call) && expr_matches_col(c, lhs, col_name) && rhs.kind == .Literal {
 		return lhs, e.cmp, rhs.lit, true
 	}
@@ -1323,283 +1101,108 @@ try_fold_compare :: proc(c: ^Compiler, col_idx: int, n: ^rules.Node, e: Expr, no
 	if !ok {
 		return false
 	}
-
-	// `LENGTH(col) <op> <integer>`
 	if target.kind == .Length_Call {
-		if lit.kind != .Integer {
-			return false
-		}
-		return apply_length_cmp(&n.rules, op, lit.int_val)
+		return lit.kind == .Integer && apply_length_cmp(&n.rules, op, lit.int_val)
 	}
-
-	// `col <op> <literal>`
 	switch lit.kind {
 	case .Integer, .Decimal:
 		#partial switch op {
-		case .Gte, .Gt:
-			edge := rules.Rules{minimum = c_keep(c, lit.text), exclusive_minimum = op == .Gt}
-			if !c.oom {
-				merged_r, clash := rules.merged(n, edge)
-				if clash == "" {
-					n.rules = merged_r
-					return true
-				}
-			}
-			return true
-		case .Lte, .Lt:
-			edge := rules.Rules{maximum = c_keep(c, lit.text), exclusive_maximum = op == .Lt}
-			if !c.oom {
-				merged_r, clash := rules.merged(n, edge)
-				if clash == "" {
-					n.rules = merged_r
-					return true
-				}
-			}
-			return true
+		case .Gte, .Gt: return merge_num_edge(c, n, {minimum = c_keep(c, lit.text), exclusive_minimum = op == .Gt})
+		case .Lte, .Lt: return merge_num_edge(c, n, {maximum = c_keep(c, lit.text), exclusive_maximum = op == .Lt})
 		case .Eq:
-			if n.has_enum || n.const_of != nil {
-				return false
-			}
+			if n.has_enum || n.const_of != nil { return false }
 			v, vok := literal_to_value(c, lit)
-			if !vok {
-				return true
-			}
-			if not_null {
-				n.const_of = v
-			} else {
-				vals, verr := make([]rules.Value, 2, c.allocator)
-				if verr != nil {
-					c.oom = true
-					return true
-				}
-				vals[0] = v
-				vals[1] = rules.Null{}
-				n.enum_of = vals
-				n.has_enum = true
-			}
-			return true
-		case .Neq:
-			return false // Handled via `not: {const: N}` in `compile_col_expr`.
+			return !vok || set_const_or_nullable_enum(c, n, v, not_null)
 		}
 	case .String:
-		#partial switch op {
-		case .Eq:
-			if n.has_enum || n.const_of != nil {
-				return false
-			}
+		if op == .Eq {
+			if n.has_enum || n.const_of != nil { return false }
 			v, vok := literal_to_value(c, lit)
-			if !vok {
-				return true
-			}
-			if not_null {
-				n.const_of = v
-			} else {
-				vals, verr := make([]rules.Value, 2, c.allocator)
-				if verr != nil {
-					c.oom = true
-					return true
-				}
-				vals[0] = v
-				vals[1] = rules.Null{}
-				n.enum_of = vals
-				n.has_enum = true
-			}
+			return !vok || set_const_or_nullable_enum(c, n, v, not_null)
+		}
+		if op == .Neq && lit.text == "" {
+			n.rules.min_length = max(n.rules.min_length, 1)
 			return true
-		case .Neq:
-			// `col <> ''` / `col != ''` -> `minLength = 1`
-			if lit.text == "" {
-				n.rules.min_length = max(n.rules.min_length, 1)
-				return true
-			}
-			return false // Handled via `not: {const: S}`
 		}
 	case .Bool:
-		if op == .Eq {
-			if n.has_enum || n.const_of != nil {
-				return false
-			}
-			if not_null {
-				n.const_of = rules.Value(lit.bool_val)
-			} else {
-				vals, verr := make([]rules.Value, 2, c.allocator)
-				if verr != nil {
-					c.oom = true
-					return true
-				}
-				vals[0] = rules.Value(lit.bool_val)
-				vals[1] = rules.Null{}
-				n.enum_of = vals
-				n.has_enum = true
-			}
-			return true
-		}
-		if op == .Neq {
-			if n.has_enum || n.const_of != nil {
-				return false
-			}
-			flipped := !lit.bool_val
-			if not_null {
-				n.const_of = rules.Value(flipped)
-			} else {
-				vals, verr := make([]rules.Value, 2, c.allocator)
-				if verr != nil {
-					c.oom = true
-					return true
-				}
-				vals[0] = rules.Value(flipped)
-				vals[1] = rules.Null{}
-				n.enum_of = vals
-				n.has_enum = true
-			}
-			return true
+		if op == .Eq || op == .Neq {
+			return set_const_or_nullable_enum(c, n, rules.Value(lit.bool_val if op == .Eq else !lit.bool_val), not_null)
 		}
 	case .Null:
-		return false
 	}
 	return false
 }
 
 @(private = "file")
 apply_length_cmp :: proc "contextless" (r: ^rules.Rules, op: Cmp_Op, val: i64) -> bool {
+	tighten :: proc "contextless" (slot: ^Maybe(u64), limit: u64) {
+		if cur, has := slot^.(u64); has {
+			slot^ = min(cur, limit)
+		} else {
+			slot^ = limit
+		}
+	}
 	switch op {
 	case .Gte:
-		if val > 0 {
-			r.min_length = max(r.min_length, u64(val))
-		}
+		if val > 0 { r.min_length = max(r.min_length, u64(val)) }
 		return true
 	case .Gt:
-		if val >= 0 {
-			r.min_length = max(r.min_length, u64(val) + 1)
-		}
+		if val >= 0 { r.min_length = max(r.min_length, u64(val) + 1) }
 		return true
 	case .Lte:
-		if val < 0 {
-			return false
-		}
-		tighten_max_u64(&r.max_length, u64(val))
+		if val < 0 { return false }
+		tighten(&r.max_length, u64(val))
 		return true
 	case .Lt:
-		if val <= 0 {
-			return false
-		}
-		tighten_max_u64(&r.max_length, u64(val - 1))
+		if val <= 0 { return false }
+		tighten(&r.max_length, u64(val - 1))
 		return true
 	case .Eq:
-		if val < 0 {
-			return false
-		}
-		u := u64(val)
-		r.min_length = max(r.min_length, u)
-		tighten_max_u64(&r.max_length, u)
+		if val < 0 { return false }
+		r.min_length = max(r.min_length, u64(val))
+		tighten(&r.max_length, u64(val))
 		return true
 	case .Neq:
 		if val == 0 {
 			r.min_length = max(r.min_length, 1)
 			return true
 		}
-		return false
 	}
 	return false
-}
-
-@(private = "file")
-tighten_max_u64 :: proc "contextless" (slot: ^Maybe(u64), limit: u64) {
-	if cur, has := slot^.(u64); has {
-		slot^ = min(cur, limit)
-	} else {
-		slot^ = limit
-	}
 }
 
 @(private = "file")
 try_fold_between :: proc(c: ^Compiler, col_idx: int, n: ^rules.Node, e: Expr) -> bool {
-	lhs := c.parsed.exprs[e.lhs]
-	lo := c.parsed.exprs[e.rhs]
-	hi := c.parsed.exprs[e.hi]
+	lhs, lo, hi := c.parsed.exprs[e.lhs], c.parsed.exprs[e.rhs], c.parsed.exprs[e.hi]
 	col_name := c.tbl.columns[col_idx].name
-
-	if lo.kind != .Literal || hi.kind != .Literal {
+	if lo.kind != .Literal || hi.kind != .Literal || !expr_matches_col(c, lhs, col_name) {
 		return false
 	}
-	if lhs.kind == .Length_Call && expr_matches_col(c, lhs, col_name) {
-		if lo.lit.kind != .Integer || hi.lit.kind != .Integer || hi.lit.int_val < 0 {
-			return false
-		}
-		if lo.lit.int_val > 0 {
-			n.rules.min_length = max(n.rules.min_length, u64(lo.lit.int_val))
-		}
-		tighten_max_u64(&n.rules.max_length, u64(hi.lit.int_val))
-		return true
+	if lhs.kind == .Length_Call && lo.lit.kind == .Integer && hi.lit.kind == .Integer && hi.lit.int_val >= 0 {
+		_ = apply_length_cmp(&n.rules, .Gte, lo.lit.int_val)
+		return apply_length_cmp(&n.rules, .Lte, hi.lit.int_val)
 	}
-	if lhs.kind == .Ident && expr_matches_col(c, lhs, col_name) {
-		if (lo.lit.kind == .Integer || lo.lit.kind == .Decimal) && (hi.lit.kind == .Integer || hi.lit.kind == .Decimal) {
-			edge := rules.Rules{minimum = c_keep(c, lo.lit.text), maximum = c_keep(c, hi.lit.text)}
-			if !c.oom {
-				merged_r, clash := rules.merged(n, edge)
-				if clash == "" {
-					n.rules = merged_r
-					return true
-				}
-			}
-			return true
-		}
+	if lhs.kind == .Ident && (lo.lit.kind == .Integer || lo.lit.kind == .Decimal) && (hi.lit.kind == .Integer || hi.lit.kind == .Decimal) {
+		return merge_num_edge(c, n, {minimum = c_keep(c, lo.lit.text), maximum = c_keep(c, hi.lit.text)})
 	}
 	return false
 }
 
-// Kleene 3-valued truth result when evaluating a single-column CHECK expression on SQL `NULL`.
 @(private = "file")
-Null_Eval :: enum u8 {
-	False,
-	Unknown,
-	True,
-}
+Null_Eval :: enum u8 { False, Unknown, True }
 
 @(private = "file")
-null_eval_not :: proc "contextless" (v: Null_Eval) -> Null_Eval {
-	switch v {
-	case .False:
-		return .True
-	case .True:
-		return .False
-	case .Unknown:
-		return .Unknown
-	}
-	return .Unknown
+is_pure_null :: proc "contextless" (n: ^rules.Node) -> bool {
+	return n.kinds == {.Null} && is_bare_node(n) && len(n.all_of) == 0 && len(n.any_of) == 0 && n.not == nil
 }
 
-@(private = "file")
-null_eval_and :: proc "contextless" (a, b: Null_Eval) -> Null_Eval {
-	if a == .False || b == .False {
-		return .False
-	}
-	if a == .True && b == .True {
-		return .True
-	}
-	return .Unknown
-}
-
-@(private = "file")
-null_eval_or :: proc "contextless" (a, b: Null_Eval) -> Null_Eval {
-	if a == .True || b == .True {
-		return .True
-	}
-	if a == .False && b == .False {
-		return .False
-	}
-	return .Unknown
-}
-
-// Wraps `raw_node` so that SQL `NULL` is accepted (flattening into an existing `any_of` safely).
 @(private = "file")
 wrap_allow_null :: proc(c: ^Compiler, raw_node: rules.Node_Index) -> (rules.Node_Index, bool) {
 	rn := &c.d.nodes[raw_node]
-	if rn.kinds == {.Null} && rn.rules == {} && !rn.has_enum && rn.const_of == nil && rn.not == nil && len(rn.all_of) == 0 && len(rn.any_of) == 0 {
+	if is_pure_null(rn) {
 		return raw_node, true
 	}
-	if rn.not != nil && rn.kinds == rules.EVERY_KIND && rn.rules == {} && !rn.has_enum && rn.const_of == nil && len(rn.all_of) == 0 && len(rn.any_of) == 0 {
-		// If `not` target rejects Null (e.g. `not: {kinds = {.Integer}, ...}` or `not: {const: 5}`),
-		// Null already passes `not` without needing an extra `anyOf` wrapper!
+	if rn.not != nil && rn.kinds == rules.EVERY_KIND && is_bare_node(rn) && len(rn.all_of) == 0 && len(rn.any_of) == 0 {
 		not_target := &c.d.nodes[rn.not.?]
 		if .Null not_in not_target.kinds || not_target.const_of != nil || not_target.has_enum {
 			return raw_node, true
@@ -1607,17 +1210,15 @@ wrap_allow_null :: proc(c: ^Compiler, raw_node: rules.Node_Index) -> (rules.Node
 	}
 	if is_pure_any_of(rn) {
 		for arm in rn.any_of {
-			a := &c.d.nodes[arm]
-			if a.kinds == {.Null} && a.rules == {} && !a.has_enum && a.const_of == nil && a.not == nil && len(a.all_of) == 0 && len(a.any_of) == 0 {
+			if is_pure_null(&c.d.nodes[arm]) {
 				return raw_node, true
 			}
 		}
 	}
-	null_arm := c_add_node(c, rules.Node{kinds = {.Null}, array = -1, object = -1})
+	null_arm := c_scalar(c, rules.Node{kinds = {.Null}})
 	if c.oom {
 		return rules.NONE, false
 	}
-	// Re-index `rn` AFTER `c_add_node` because `c.d.nodes` may have reallocated!
 	rn = &c.d.nodes[raw_node]
 	if is_pure_any_of(rn) {
 		arms, aerr := make([]rules.Node_Index, len(rn.any_of) + 1, c.allocator)
@@ -1636,42 +1237,16 @@ wrap_allow_null :: proc(c: ^Compiler, raw_node: rules.Node_Index) -> (rules.Node
 		c.oom = true
 		return rules.NONE, false
 	}
-	arms[0] = raw_node
-	arms[1] = null_arm
-	wrap := c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, any_of = arms})
-	if c.oom {
-		return rules.NONE, false
-	}
-	return wrap, true
-}
-
-// Compiles an arbitrary single-column boolean CHECK expression (`AND`, `OR`, `NOT`, `NOT BETWEEN`,
-// `NOT IN`, `<>`, `LIKE`, etc.) into a `rules.Node_Index` using an explicit post-order stack.
-@(private = "file")
-compile_col_expr :: proc(
-	c: ^Compiler,
-	col_idx: int,
-	root: Expr_Index,
-	non_null_k: rules.Kinds,
-	nullable: bool,
-) -> (node_idx: rules.Node_Index, ok: bool) {
-	raw_node, rok, null_eval := compile_col_expr_inner(c, col_idx, root, non_null_k)
-	if !rok || raw_node == rules.NONE {
-		return rules.NONE, false
-	}
-	// SQL 3-valued logic: `CHECK (expr)` passes on `NULL` whenever `expr` evaluates to `TRUE` or `UNKNOWN`
-	// (fails only when `eval_on_null == .False`).
-	if !nullable || null_eval == .False {
-		return raw_node, true
-	}
-	return wrap_allow_null(c, raw_node)
+	arms[0], arms[1] = raw_node, null_arm
+	wrap := c_scalar(c, rules.Node{kinds = rules.EVERY_KIND, any_of = arms})
+	return wrap, !c.oom
 }
 
 @(private = "file")
 Eval_Frame :: struct {
 	expr:        Expr_Index,
 	visited:     bool,
-	strict_true: bool, // Kleene polarity for `compile_table_check`: false = pass on T|U, true = pass only on T
+	strict_true: bool,
 }
 
 @(private = "file")
@@ -1681,44 +1256,35 @@ Eval_Result :: struct {
 	null_eval: Null_Eval,
 }
 
+// Unified explicit-stack post-order compiler for both single-column (`col_idx >= 0`) and
+// multi-column table-level (`col_idx < 0`) boolean CHECK expressions under SQL 3-valued logic.
 @(private = "file")
-compile_col_expr_inner :: proc(
+compile_bool_expr :: proc(
 	c: ^Compiler,
-	col_idx: int,
 	root: Expr_Index,
+	col_idx: int,
 	non_null_k: rules.Kinds,
-) -> (node: rules.Node_Index, ok: bool, null_eval: Null_Eval) {
+) -> (rules.Node_Index, bool, Null_Eval) {
+	is_table := col_idx < 0
 	stack := make([dynamic]Eval_Frame, c.scratch)
 	results := make([dynamic]Eval_Result, c.scratch)
-	if _, aerr := append(&stack, Eval_Frame{expr = root}); aerr != nil {
-		c.oom = true
+	if !c_push(c, &stack, Eval_Frame{expr = root}) {
 		return rules.NONE, false, .Unknown
 	}
 
-	for len(stack) > 0 && !c.oom && c.err.kind == .None {
+	for len(stack) > 0 && !c_failed(c) {
 		fr := pop(&stack)
 		if fr.expr == NO_EXPR {
-			if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false, null_eval = .Unknown}); aerr != nil {
-				c.oom = true
-			}
+			_ = c_push(c, &results, Eval_Result{node = rules.NONE, null_eval = .Unknown})
 			continue
 		}
 		e := c.parsed.exprs[fr.expr]
 		if !fr.visited && (e.kind == .And || e.kind == .Or || e.kind == .Not) {
-			if _, aerr := append(&stack, Eval_Frame{expr = fr.expr, visited = true}); aerr != nil {
-				c.oom = true
-				break
-			}
+			_ = c_push(c, &stack, Eval_Frame{expr = fr.expr, visited = true, strict_true = fr.strict_true})
 			if e.kind == .Not {
-				if _, aerr := append(&stack, Eval_Frame{expr = e.lhs}); aerr != nil {
-					c.oom = true
-					break
-				}
+				_ = c_push(c, &stack, Eval_Frame{expr = e.lhs, strict_true = !fr.strict_true})
 			} else {
-				if _, aerr := append(&stack, Eval_Frame{expr = e.rhs}, Eval_Frame{expr = e.lhs}); aerr != nil {
-					c.oom = true
-					break
-				}
+				_ = c_push(c, &stack, Eval_Frame{expr = e.rhs, strict_true = fr.strict_true}, Eval_Frame{expr = e.lhs, strict_true = fr.strict_true})
 			}
 			continue
 		}
@@ -1726,60 +1292,41 @@ compile_col_expr_inner :: proc(
 		#partial switch e.kind {
 		case .Not:
 			child := pop(&results)
-			ne := null_eval_not(child.null_eval)
+			ne: Null_Eval = .True if child.null_eval == .False else (.False if child.null_eval == .True else .Unknown)
 			if !child.ok || child.node == rules.NONE {
-				if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false, null_eval = ne}); aerr != nil {
-					c.oom = true
-				}
-				continue
-			}
-			nid := c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, not = child.node})
-			if _, aerr := append(&results, Eval_Result{node = nid, ok = !c.oom, null_eval = ne}); aerr != nil {
-				c.oom = true
+				_ = c_push(c, &results, Eval_Result{node = rules.NONE, null_eval = ne})
+			} else {
+				nid := c_not(c, child.node, {.Object} if is_table else rules.EVERY_KIND)
+				_ = c_push(c, &results, Eval_Result{node = nid, ok = !c.oom, null_eval = ne})
 			}
 
-		case .And:
-			r_res := pop(&results)
-			l_res := pop(&results)
-			ne := null_eval_and(l_res.null_eval, r_res.null_eval)
-			// Never drop an unsupported conjunct inside a subexpression (an enclosing `NOT` would flip
-			// weakening into over-rejection). Top-level `AND` flattening happens in `apply_column_check`.
+		case .And, .Or:
+			r_res, l_res := pop(&results), pop(&results)
+			ne: Null_Eval = .Unknown
+			if e.kind == .And {
+				if l_res.null_eval == .False || r_res.null_eval == .False { ne = .False } else if l_res.null_eval == .True && r_res.null_eval == .True { ne = .True }
+			} else {
+				if l_res.null_eval == .True || r_res.null_eval == .True { ne = .True } else if l_res.null_eval == .False && r_res.null_eval == .False { ne = .False }
+			}
 			if !l_res.ok || !r_res.ok {
-				if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false, null_eval = ne}); aerr != nil {
-					c.oom = true
-				}
-				continue
-			}
-			nid := combine_all_of(c, l_res.node, r_res.node)
-			if _, aerr := append(&results, Eval_Result{node = nid, ok = !c.oom, null_eval = ne}); aerr != nil {
-				c.oom = true
-			}
-
-		case .Or:
-			r_res := pop(&results)
-			l_res := pop(&results)
-			ne := null_eval_or(l_res.null_eval, r_res.null_eval)
-			if !l_res.ok || !r_res.ok {
-				// Cannot drop one arm of OR without rejecting valid values.
-				if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false, null_eval = ne}); aerr != nil {
-					c.oom = true
-				}
-				continue
-			}
-			nid := combine_any_of(c, l_res.node, r_res.node)
-			if _, aerr := append(&results, Eval_Result{node = nid, ok = !c.oom, null_eval = ne}); aerr != nil {
-				c.oom = true
+				_ = c_push(c, &results, Eval_Result{node = rules.NONE, null_eval = ne})
+			} else {
+				nid := combine_logic(c, l_res.node, r_res.node, e.kind == .And)
+				_ = c_push(c, &results, Eval_Result{node = nid, ok = !c.oom, null_eval = ne})
 			}
 
 		case:
-			atom, aok, atom_ne := compile_col_atom(c, col_idx, e, non_null_k)
-			if _, aerr := append(&results, Eval_Result{node = atom, ok = aok, null_eval = atom_ne}); aerr != nil {
-				c.oom = true
+			if !is_table {
+				atom, aok, ane := compile_col_atom(c, col_idx, e, non_null_k)
+				_ = c_push(c, &results, Eval_Result{node = atom, ok = aok, null_eval = ane})
+			} else {
+				res := compile_table_leaf(c, fr.expr, e, fr.strict_true)
+				_ = c_push(c, &results, res)
 			}
 		}
 	}
 
-	if c.oom || c.err.kind != .None || len(results) == 0 {
+	if c_failed(c) || len(results) == 0 {
 		return rules.NONE, false, .Unknown
 	}
 	res := results[len(results) - 1]
@@ -1787,12 +1334,58 @@ compile_col_expr_inner :: proc(
 }
 
 @(private = "file")
-compile_col_atom :: proc(
-	c: ^Compiler,
-	col_idx: int,
-	e: Expr,
-	non_null_k: rules.Kinds,
-) -> (node: rules.Node_Index, ok: bool, null_eval: Null_Eval) {
+compile_table_leaf :: proc(c: ^Compiler, expr_idx: Expr_Index, e: Expr, strict_true: bool) -> Eval_Result {
+	ci, is_single := check_single_column(c, expr_idx)
+	if !is_single {
+		mark_uncompiled(c, e, "cross-column CHECK predicate cannot be represented in rules.Description")
+		return {node = rules.NONE}
+	}
+	col_pred, pok, atom_ne := compile_col_atom(c, ci, e, c.col_non_null_k[ci])
+	if !pok || col_pred == rules.NONE {
+		return {node = rules.NONE}
+	}
+	req := atom_ne != .True
+	if atom_ne == .Unknown && !c.col_not_null[ci] {
+		if !strict_true {
+			req = false
+			wok: bool
+			col_pred, wok = wrap_allow_null(c, col_pred)
+			if !wok {
+				return {node = rules.NONE}
+			}
+		} else if .Null in c.d.nodes[col_pred].kinds {
+			not_null_node := c_scalar(c, rules.Node{kinds = c.col_non_null_k[ci]})
+			col_pred = combine_logic(c, not_null_node, col_pred, true)
+			if c.oom {
+				return {node = rules.NONE}
+			}
+		}
+	}
+	mems, merr := make([]rules.Member, 1, c.allocator)
+	if merr != nil {
+		c.oom = true
+		return {node = rules.NONE}
+	}
+	mems[0] = {name = c_keep(c, c.tbl.columns[ci].name), node = col_pred, required = req}
+	if c.oom {
+		delete(mems, c.allocator)
+		return {node = rules.NONE}
+	}
+	oid := c_add_object(c, rules.Object{members = mems, additional = rules.NONE, keys = rules.NONE})
+	if c.oom {
+		return {node = rules.NONE}
+	}
+	return {node = c_add_node(c, rules.Node{kinds = {.Object}, array = -1, object = oid}), ok = !c.oom}
+}
+
+@(private = "file")
+col_num_kinds :: proc "contextless" (non_null_k: rules.Kinds) -> rules.Kinds {
+	nk := non_null_k & {.Integer, .Number}
+	return nk if nk != {} else {.Number}
+}
+
+@(private = "file")
+compile_col_atom :: proc(c: ^Compiler, col_idx: int, e: Expr, non_null_k: rules.Kinds) -> (rules.Node_Index, bool, Null_Eval) {
 	col_name := c.tbl.columns[col_idx].name
 
 	#partial switch e.kind {
@@ -1803,13 +1396,11 @@ compile_col_atom :: proc(
 			return rules.NONE, false, .Unknown
 		}
 		k := rules.EVERY_KIND - {.Null} if e.negated else rules.Kinds{.Null}
-		ne: Null_Eval = .False if e.negated else .True
-		return c_add_node(c, rules.Node{kinds = k, array = -1, object = -1}), !c.oom, ne
+		return c_scalar(c, rules.Node{kinds = k}), !c.oom, .False if e.negated else .True
 
 	case .Ident:
-		// Bare boolean column: `CHECK (active)` -> `const: true`
 		if expr_matches_col(c, e, col_name) && .Bool in non_null_k {
-			return c_add_node(c, rules.Node{kinds = {.Bool}, const_of = rules.Value(true), array = -1, object = -1}), !c.oom, .Unknown
+			return c_scalar(c, rules.Node{kinds = {.Bool}, const_of = rules.Value(true)}), !c.oom, .Unknown
 		}
 		mark_uncompiled(c, e, "unsupported identifier predicate in CHECK")
 		return rules.NONE, false, .Unknown
@@ -1826,80 +1417,39 @@ compile_col_atom :: proc(
 				return rules.NONE, false, .Unknown
 			}
 			if op == .Neq && lit.int_val > 0 {
-				eq_n := c_add_node(c, rules.Node{
-					kinds = {.String},
-					array = -1,
-					object = -1,
-					rules = {min_length = u64(lit.int_val), max_length = u64(lit.int_val)},
-				})
-				return c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, not = eq_n}), !c.oom, .Unknown
+				eq_n := c_scalar(c, rules.Node{kinds = {.String}, rules = {min_length = u64(lit.int_val), max_length = u64(lit.int_val)}})
+				return c_maybe_not(c, eq_n, true)
 			}
-			n := rules.Node{kinds = {.String}, array = -1, object = -1}
+			n := rules.Node{kinds = {.String}}
 			if !apply_length_cmp(&n.rules, op, lit.int_val) {
 				mark_uncompiled(c, e, "unsatisfiable LENGTH comparison in CHECK")
 				return rules.NONE, false, .Unknown
 			}
-			return c_add_node(c, n), !c.oom, .Unknown
+			return c_scalar(c, n), !c.oom, .Unknown
 		}
-		// `col <op> lit`
 		switch lit.kind {
 		case .Integer, .Decimal:
-			nk := non_null_k & {.Integer, .Number}
-			if nk == {} {
-				nk = {.Number}
-			}
+			nk := col_num_kinds(non_null_k)
 			#partial switch op {
-			case .Gte, .Gt:
-				return c_add_node(c, rules.Node{
-					kinds  = nk,
-					array  = -1,
-					object = -1,
-					rules  = {minimum = c_keep(c, lit.text), exclusive_minimum = op == .Gt},
-				}), !c.oom, .Unknown
-			case .Lte, .Lt:
-				return c_add_node(c, rules.Node{
-					kinds  = nk,
-					array  = -1,
-					object = -1,
-					rules  = {maximum = c_keep(c, lit.text), exclusive_maximum = op == .Lt},
-				}), !c.oom, .Unknown
-			case .Eq:
+			case .Gte, .Gt: return c_scalar(c, rules.Node{kinds = nk, rules = {minimum = c_keep(c, lit.text), exclusive_minimum = op == .Gt}}), !c.oom, .Unknown
+			case .Lte, .Lt: return c_scalar(c, rules.Node{kinds = nk, rules = {maximum = c_keep(c, lit.text), exclusive_maximum = op == .Lt}}), !c.oom, .Unknown
+			case .Eq, .Neq:
 				v, vok := literal_to_value(c, lit)
-				if !vok {
-					return rules.NONE, false, .Unknown
-				}
-				return c_add_node(c, rules.Node{kinds = nk, const_of = v, array = -1, object = -1}), !c.oom, .Unknown
-			case .Neq:
-				v, vok := literal_to_value(c, lit)
-				if !vok {
-					return rules.NONE, false, .Unknown
-				}
-				inner := c_add_node(c, rules.Node{kinds = nk, const_of = v, array = -1, object = -1})
-				return c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, not = inner, array = -1, object = -1}), !c.oom, .Unknown
+				if !vok { return rules.NONE, false, .Unknown }
+				return c_maybe_not(c, c_scalar(c, rules.Node{kinds = nk, const_of = v}), op == .Neq)
 			}
 		case .String:
-			#partial switch op {
-			case .Eq:
+			if op == .Neq && lit.text == "" {
+				return c_scalar(c, rules.Node{kinds = {.String}, rules = {min_length = 1}}), !c.oom, .Unknown
+			}
+			if op == .Eq || op == .Neq {
 				v, vok := literal_to_value(c, lit)
-				if !vok {
-					return rules.NONE, false, .Unknown
-				}
-				return c_add_node(c, rules.Node{kinds = {.String}, const_of = v, array = -1, object = -1}), !c.oom, .Unknown
-			case .Neq:
-				if lit.text == "" {
-					return c_add_node(c, rules.Node{kinds = {.String}, rules = {min_length = 1}, array = -1, object = -1}), !c.oom, .Unknown
-				}
-				v, vok := literal_to_value(c, lit)
-				if !vok {
-					return rules.NONE, false, .Unknown
-				}
-				inner := c_add_node(c, rules.Node{kinds = {.String}, const_of = v, array = -1, object = -1})
-				return c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, not = inner, array = -1, object = -1}), !c.oom, .Unknown
+				if !vok { return rules.NONE, false, .Unknown }
+				return c_maybe_not(c, c_scalar(c, rules.Node{kinds = {.String}, const_of = v}), op == .Neq)
 			}
 		case .Bool:
 			if op == .Eq || op == .Neq {
-				b := lit.bool_val if op == .Eq else !lit.bool_val
-				return c_add_node(c, rules.Node{kinds = {.Bool}, const_of = rules.Value(b), array = -1, object = -1}), !c.oom, .Unknown
+				return c_scalar(c, rules.Node{kinds = {.Bool}, const_of = rules.Value(lit.bool_val if op == .Eq else !lit.bool_val)}), !c.oom, .Unknown
 			}
 		case .Null:
 			mark_uncompiled(c, e, "comparison with NULL in CHECK (use IS [NOT] NULL)")
@@ -1909,41 +1459,18 @@ compile_col_atom :: proc(
 		return rules.NONE, false, .Unknown
 
 	case .Between:
-		lhs := c.parsed.exprs[e.lhs]
-		lo := c.parsed.exprs[e.rhs]
-		hi := c.parsed.exprs[e.hi]
-		if lo.kind != .Literal || hi.kind != .Literal {
-			mark_uncompiled(c, e, "non-literal BETWEEN bounds in CHECK")
+		lhs, lo, hi := c.parsed.exprs[e.lhs], c.parsed.exprs[e.rhs], c.parsed.exprs[e.hi]
+		if lo.kind != .Literal || hi.kind != .Literal || !expr_matches_col(c, lhs, col_name) {
+			mark_uncompiled(c, e, "unsupported BETWEEN expression in CHECK")
 			return rules.NONE, false, .Unknown
 		}
-		if lhs.kind == .Length_Call && expr_matches_col(c, lhs, col_name) && lo.lit.kind == .Integer && hi.lit.kind == .Integer && hi.lit.int_val >= 0 {
-			inner := c_add_node(c, rules.Node{
-				kinds  = {.String},
-				array  = -1,
-				object = -1,
-				rules  = {min_length = u64(max(lo.lit.int_val, 0)), max_length = u64(hi.lit.int_val)},
-			})
-			if !e.negated {
-				return inner, !c.oom, .Unknown
-			}
-			return c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, not = inner, array = -1, object = -1}), !c.oom, .Unknown
+		if lhs.kind == .Length_Call && lo.lit.kind == .Integer && hi.lit.kind == .Integer && hi.lit.int_val >= 0 {
+			inner := c_scalar(c, rules.Node{kinds = {.String}, rules = {min_length = u64(max(lo.lit.int_val, 0)), max_length = u64(hi.lit.int_val)}})
+			return c_maybe_not(c, inner, e.negated)
 		}
-		if lhs.kind == .Ident && expr_matches_col(c, lhs, col_name) &&
-			(lo.lit.kind == .Integer || lo.lit.kind == .Decimal) && (hi.lit.kind == .Integer || hi.lit.kind == .Decimal) {
-			nk := non_null_k & {.Integer, .Number}
-			if nk == {} {
-				nk = {.Number}
-			}
-			inner := c_add_node(c, rules.Node{
-				kinds  = nk,
-				array  = -1,
-				object = -1,
-				rules  = {minimum = c_keep(c, lo.lit.text), maximum = c_keep(c, hi.lit.text)},
-			})
-			if !e.negated {
-				return inner, !c.oom, .Unknown
-			}
-			return c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, not = inner, array = -1, object = -1}), !c.oom, .Unknown
+		if lhs.kind == .Ident && (lo.lit.kind == .Integer || lo.lit.kind == .Decimal) && (hi.lit.kind == .Integer || hi.lit.kind == .Decimal) {
+			inner := c_scalar(c, rules.Node{kinds = col_num_kinds(non_null_k), rules = {minimum = c_keep(c, lo.lit.text), maximum = c_keep(c, hi.lit.text)}})
+			return c_maybe_not(c, inner, e.negated)
 		}
 		mark_uncompiled(c, e, "unsupported BETWEEN expression in CHECK")
 		return rules.NONE, false, .Unknown
@@ -1954,27 +1481,11 @@ compile_col_atom :: proc(
 			mark_uncompiled(c, e, "unsupported IN target in CHECK")
 			return rules.NONE, false, .Unknown
 		}
-		vals, verr := make([]rules.Value, len(e.literals), c.allocator)
-		if verr != nil {
-			c.oom = true
+		vals, vok := make_literal_values(c, e.literals, false)
+		if !vok {
 			return rules.NONE, false, .Unknown
 		}
-		for lit, i in e.literals {
-			v, vok := literal_to_value(c, lit)
-			if !vok {
-				delete(vals, c.allocator)
-				return rules.NONE, false, .Unknown
-			}
-			vals[i] = v
-		}
-		inner := c_add_node(c, rules.Node{kinds = non_null_k, has_enum = true, enum_of = vals, array = -1, object = -1})
-		if c.oom {
-			return rules.NONE, false, .Unknown
-		}
-		if !e.negated {
-			return inner, true, .Unknown
-		}
-		return c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, not = inner, array = -1, object = -1}), !c.oom, .Unknown
+		return c_maybe_not(c, c_scalar(c, rules.Node{kinds = non_null_k, has_enum = true, enum_of = vals}), e.negated)
 
 	case .Like:
 		lhs := c.parsed.exprs[e.lhs]
@@ -1986,187 +1497,21 @@ compile_col_atom :: proc(
 		if c.oom {
 			return rules.NONE, false, .Unknown
 		}
-		inner := c_add_node(c, rules.Node{kinds = {.String}, rules = {pattern = pat}, array = -1, object = -1})
-		if !e.negated {
-			return inner, !c.oom, .Unknown
-		}
-		return c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, not = inner, array = -1, object = -1}), !c.oom, .Unknown
-
-	case .Unsupported:
-		mark_uncompiled(c, e, "unsupported expression in CHECK constraint")
-		return rules.NONE, false, .Unknown
+		return c_maybe_not(c, c_scalar(c, rules.Node{kinds = {.String}, rules = {pattern = pat}}), e.negated)
 	}
 
 	mark_uncompiled(c, e, "unsupported expression in CHECK constraint")
 	return rules.NONE, false, .Unknown
 }
 
-// Compiles a multi-column table-level boolean CHECK expression (`AND`/`OR`/`NOT` over single-column
-// predicates) into a partial `rules.Object` node applied to the row object's `all_of`.
-// Uses Kleene 3-valued polarity (`strict_true = false` accepts TRUE|UNKNOWN, `strict_true = true` accepts only TRUE)
-// so nullable/absent columns follow exact SQL 3VL across arbitrary `AND` / `OR` / `NOT` nesting.
-@(private = "file")
-compile_table_check :: proc(c: ^Compiler, root: Expr_Index) -> (node: rules.Node_Index, ok: bool) {
-	stack := make([dynamic]Eval_Frame, c.scratch)
-	results := make([dynamic]Eval_Result, c.scratch)
-	if _, aerr := append(&stack, Eval_Frame{expr = root, strict_true = false}); aerr != nil {
-		c.oom = true
-		return rules.NONE, false
-	}
-
-	for len(stack) > 0 && !c.oom && c.err.kind == .None {
-		fr := pop(&stack)
-		if fr.expr == NO_EXPR {
-			if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false}); aerr != nil {
-				c.oom = true
-			}
-			continue
-		}
-		e := c.parsed.exprs[fr.expr]
-		if !fr.visited && (e.kind == .And || e.kind == .Or || e.kind == .Not) {
-			if _, aerr := append(&stack, Eval_Frame{expr = fr.expr, visited = true, strict_true = fr.strict_true}); aerr != nil {
-				c.oom = true
-				break
-			}
-			if e.kind == .Not {
-				if _, aerr := append(&stack, Eval_Frame{expr = e.lhs, strict_true = !fr.strict_true}); aerr != nil {
-					c.oom = true
-					break
-				}
-			} else {
-				if _, aerr := append(&stack, Eval_Frame{expr = e.rhs, strict_true = fr.strict_true}, Eval_Frame{expr = e.lhs, strict_true = fr.strict_true}); aerr != nil {
-					c.oom = true
-					break
-				}
-			}
-			continue
-		}
-
-		#partial switch e.kind {
-		case .Not:
-			child := pop(&results)
-			if !child.ok || child.node == rules.NONE {
-				if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false}); aerr != nil {
-					c.oom = true
-				}
-				continue
-			}
-			nid := c_add_node(c, rules.Node{kinds = {.Object}, array = -1, object = -1, not = child.node})
-			if _, aerr := append(&results, Eval_Result{node = nid, ok = !c.oom}); aerr != nil {
-				c.oom = true
-			}
-
-		case .And:
-			r_res := pop(&results)
-			l_res := pop(&results)
-			// Never drop an unsupported conjunct inside a subexpression (top-level `AND` chains are flattened
-			// before calling `compile_table_check`).
-			if !l_res.ok || !r_res.ok {
-				if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false}); aerr != nil {
-					c.oom = true
-				}
-				continue
-			}
-			nid := combine_all_of(c, l_res.node, r_res.node)
-			if _, aerr := append(&results, Eval_Result{node = nid, ok = !c.oom}); aerr != nil {
-				c.oom = true
-			}
-
-		case .Or:
-			r_res := pop(&results)
-			l_res := pop(&results)
-			if !l_res.ok || !r_res.ok {
-				if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false}); aerr != nil {
-					c.oom = true
-				}
-				continue
-			}
-			nid := combine_any_of(c, l_res.node, r_res.node)
-			if _, aerr := append(&results, Eval_Result{node = nid, ok = !c.oom}); aerr != nil {
-				c.oom = true
-			}
-
-		case:
-			// Leaf predicate: must reference a single known column to compile as a partial object check.
-			ci, is_single := check_single_column(c, fr.expr)
-			if !is_single {
-				mark_uncompiled(c, e, "cross-column CHECK predicate cannot be represented in rules.Description")
-				if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false}); aerr != nil {
-					c.oom = true
-				}
-				continue
-			}
-			col_pred, pok, atom_ne := compile_col_atom(c, ci, e, c.col_non_null_k[ci])
-			if !pok || col_pred == rules.NONE {
-				if _, aerr := append(&results, Eval_Result{node = rules.NONE, ok = false}); aerr != nil {
-					c.oom = true
-				}
-				continue
-			}
-			// Determine presence & null-handling under Kleene 3-valued polarity:
-			// - `IS NULL` (atom_ne == .True): 2-valued, passes iff absent or null (`required = false`).
-			// - `IS NOT NULL` (atom_ne == .False): 2-valued, passes iff present and non-null (`required = true`).
-			// - Other predicates (atom_ne == .Unknown):
-			//   - Under `strict_true == false` (positive polarity): passes when absent, null, or matching predicate.
-			//   - Under `strict_true == true` (inside `NOT`): passes ONLY when present, non-null, and matching predicate.
-			req := true
-			if atom_ne == .True {
-				req = false
-			} else if atom_ne == .Unknown && !fr.strict_true && !c.col_not_null[ci] {
-				req = false
-				wrapped, wok := wrap_allow_null(c, col_pred)
-				if !wok {
-					break
-				}
-				col_pred = wrapped
-			} else if atom_ne == .Unknown && fr.strict_true && !c.col_not_null[ci] && .Null in c.d.nodes[col_pred].kinds {
-				not_null_node := c_add_node(c, rules.Node{kinds = c.col_non_null_k[ci], array = -1, object = -1})
-				if c.oom {
-					break
-				}
-				col_pred = combine_all_of(c, not_null_node, col_pred)
-				if c.oom {
-					break
-				}
-			}
-			mems, merr := make([]rules.Member, 1, c.allocator)
-			if merr != nil {
-				c.oom = true
-				break
-			}
-			mems[0] = rules.Member{name = c_keep(c, c.tbl.columns[ci].name), node = col_pred, required = req}
-			if c.oom {
-				delete(mems, c.allocator)
-				break
-			}
-			oid := c_add_object(c, rules.Object{members = mems, additional = rules.NONE, keys = rules.NONE})
-			if c.oom {
-				break
-			}
-			obj_node := c_add_node(c, rules.Node{kinds = {.Object}, array = -1, object = oid})
-			if _, aerr := append(&results, Eval_Result{node = obj_node, ok = !c.oom}); aerr != nil {
-				c.oom = true
-			}
-		}
-	}
-
-	if c.oom || c.err.kind != .None || len(results) == 0 {
-		return rules.NONE, false
-	}
-	res := results[len(results) - 1]
-	return res.node, res.ok
-}
-
 @(private = "file")
 combine_logic :: proc(c: ^Compiler, a, b: rules.Node_Index, is_all: bool) -> rules.Node_Index {
-	na := &c.d.nodes[a]
-	nb := &c.d.nodes[b]
+	na, nb := &c.d.nodes[a], &c.d.nodes[b]
 	a_flat := is_pure_all_of(na) if is_all else is_pure_any_of(na)
 	b_flat := is_pure_all_of(nb) if is_all else is_pure_any_of(nb)
 	a_list := na.all_of if is_all else na.any_of
 	b_list := nb.all_of if is_all else nb.any_of
-	total := (len(a_list) if a_flat else 1) + (len(b_list) if b_flat else 1)
-	list, err := make([]rules.Node_Index, total, c.allocator)
+	list, err := make([]rules.Node_Index, (len(a_list) if a_flat else 1) + (len(b_list) if b_flat else 1), c.allocator)
 	if err != nil {
 		c.oom = true
 		return rules.NONE
@@ -2184,131 +1529,75 @@ combine_logic :: proc(c: ^Compiler, a, b: rules.Node_Index, is_all: bool) -> rul
 	} else {
 		list[pos] = b
 	}
-	node := rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1}
-	if is_all {
-		node.all_of = list
-	} else {
-		node.any_of = list
-	}
-	nid := c_add_node(c, node)
-	if c.oom {
-		return rules.NONE
-	}
-	return nid
+	node := rules.Node{kinds = rules.EVERY_KIND}
+	if is_all { node.all_of = list } else { node.any_of = list }
+	return c_scalar(c, node)
 }
 
 @(private = "file")
-combine_all_of :: proc(c: ^Compiler, a, b: rules.Node_Index) -> rules.Node_Index {
-	return combine_logic(c, a, b, true)
-}
-
-@(private = "file")
-combine_any_of :: proc(c: ^Compiler, a, b: rules.Node_Index) -> rules.Node_Index {
-	return combine_logic(c, a, b, false)
+is_bare_node :: proc "contextless" (n: ^rules.Node) -> bool {
+	return n.rules == {} && n.array < 0 && n.object < 0 && !n.has_enum && n.const_of == nil && len(n.one_of) == 0
 }
 
 @(private = "file")
 is_pure_all_of :: proc "contextless" (n: ^rules.Node) -> bool {
-	return len(n.all_of) > 0 && n.kinds == rules.EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 &&
-		!n.has_enum && n.const_of == nil && len(n.any_of) == 0 && len(n.one_of) == 0 && n.not == nil
+	return len(n.all_of) > 0 && n.kinds == rules.EVERY_KIND && is_bare_node(n) && len(n.any_of) == 0 && n.not == nil
 }
 
 @(private = "file")
 is_pure_any_of :: proc "contextless" (n: ^rules.Node) -> bool {
-	return len(n.any_of) > 0 && n.kinds == rules.EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 &&
-		!n.has_enum && n.const_of == nil && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil
+	return len(n.any_of) > 0 && n.kinds == rules.EVERY_KIND && is_bare_node(n) && len(n.all_of) == 0 && n.not == nil
 }
 
-// Inline a single `any_of` or `not` node directly onto a column node when there are no clashes.
 @(private = "file")
 can_inline_single_all_of :: proc "contextless" (dst, src: ^rules.Node) -> bool {
-	if src.kinds != rules.EVERY_KIND || src.rules != {} || src.array >= 0 || src.object >= 0 || src.has_enum || src.const_of != nil || len(src.all_of) > 0 || len(src.one_of) > 0 {
+	if src.kinds != rules.EVERY_KIND || !is_bare_node(src) || len(src.all_of) > 0 {
 		return false
 	}
-	if len(src.any_of) > 0 && len(dst.any_of) == 0 && src.not == nil {
-		return true
-	}
-	if src.not != nil && dst.not == nil && len(src.any_of) == 0 {
-		return true
-	}
-	return false
+	return (len(src.any_of) > 0 && len(dst.any_of) == 0 && src.not == nil) ||
+		(src.not != nil && dst.not == nil && len(src.any_of) == 0)
 }
 
 @(private = "file")
 inline_into :: proc(dst, src: ^rules.Node, allocator: runtime.Allocator, oom: ^bool) {
 	if len(src.any_of) > 0 {
-		cl, err := slice.clone(src.any_of, allocator)
-		if err != nil {
+		if cl, err := slice.clone(src.any_of, allocator); err != nil {
 			oom^ = true
-			return
+		} else {
+			dst.any_of = cl
 		}
-		dst.any_of = cl
-		return
-	}
-	if src.not != nil {
+	} else if src.not != nil {
 		dst.not = src.not
 	}
 }
 
-// Converts a SQL `LIKE` pattern (`%` -> `.*`, `_` -> `.`, optional `ESCAPE` char) into an anchored ECMA regex.
 @(private = "file")
 like_to_ecma :: proc(c: ^Compiler, pat: string, esc: u8) -> string {
-	b, berr := strings.builder_make(0, len(pat) * 2 + 2, c.scratch)
-	if berr != nil {
-		c.oom = true
-		return ""
+	buf := make([dynamic]u8, 0, len(pat) * 2 + 2, c.scratch)
+	push_esc :: proc(c: ^Compiler, buf: ^[dynamic]u8, ch: u8) {
+		switch ch {
+		case '.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '\\', '/':
+			_ = c_push(c, buf, '\\')
+		}
+		_ = c_push(c, buf, ch)
 	}
-	defer strings.builder_destroy(&b)
-
-	if _, err := strings.write_byte(&b, '^'); err != nil {
-		c.oom = true
-		return ""
-	}
-	i := 0
-	for i < len(pat) {
+	_ = c_push(c, &buf, '^')
+	for i := 0; i < len(pat) && !c.oom; i += 1 {
 		ch := pat[i]
 		if esc != 0 && ch == esc && i + 1 < len(pat) {
 			i += 1
-			if !write_escaped_regex_byte(&b, pat[i]) {
-				c.oom = true
-				return ""
-			}
-			i += 1
-			continue
-		}
-		if ch == '%' {
-			if _, err := strings.write_string(&b, `[\s\S]*`); err != nil {
-				c.oom = true
-				return ""
-			}
+			push_esc(c, &buf, pat[i])
+		} else if ch == '%' {
+			_ = c_push(c, &buf, '[', '\\', 's', '\\', 'S', ']', '*')
 		} else if ch == '_' {
-			if _, err := strings.write_string(&b, `[\s\S]`); err != nil {
-				c.oom = true
-				return ""
-			}
+			_ = c_push(c, &buf, '[', '\\', 's', '\\', 'S', ']')
 		} else {
-			if !write_escaped_regex_byte(&b, ch) {
-				c.oom = true
-				return ""
-			}
+			push_esc(c, &buf, ch)
 		}
-		i += 1
 	}
-	if _, err := strings.write_byte(&b, '$'); err != nil {
-		c.oom = true
+	_ = c_push(c, &buf, '$')
+	if c.oom {
 		return ""
 	}
-	return c_keep(c, strings.to_string(b))
-}
-
-@(private = "file")
-write_escaped_regex_byte :: proc(b: ^strings.Builder, ch: u8) -> bool {
-	switch ch {
-	case '.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '\\', '/':
-		if _, err := strings.write_byte(b, '\\'); err != nil {
-			return false
-		}
-	}
-	_, err := strings.write_byte(b, ch)
-	return err == nil
+	return c_keep(c, string(buf[:]))
 }

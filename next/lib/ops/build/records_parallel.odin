@@ -180,9 +180,13 @@ records_validate_chunks :: proc(r: ^tape.Records, out: []tape.Record, chunks: []
 	return n, true
 }
 
-// Counts records per chunk in parallel and assigns output slots up to `cap`.
-@(private)
-count_and_plan :: proc(runner: ^tape.Runner, chunks: []Record_Chunk, cap: int, data: rawptr, count_chunk: proc(data: rawptr, chunk: ^Record_Chunk, k: int)) -> (active, total: int) {
+// Counts records per chunk in parallel and assigns output slots up to `cap`, returning false if below parallel floor.
+@(private = "file")
+plan_parallel_chunks :: proc(r: ^tape.Records, chunks: []Record_Chunk, cap: int, data: rawptr, count_chunk: proc(data: rawptr, chunk: ^Record_Chunk, k: int)) -> (active, total: int, ok: bool) {
+	nc := len(chunks)
+	if nc < 2 || nc > MAX_RECORD_CHUNKS || cap < 64 {
+		return 0, 0, false
+	}
 	Count_Job :: struct {
 		data:        rawptr,
 		chunks:      []Record_Chunk,
@@ -193,8 +197,9 @@ count_and_plan :: proc(runner: ^tape.Runner, chunks: []Record_Chunk, cap: int, d
 		j.count_chunk(j.data, &j.chunks[k], k)
 	}
 	cj := Count_Job{data = data, chunks = chunks, count_chunk = count_chunk}
-	tape.fan_each(runner, len(chunks), count_task, &cj)
-	return plan_chunk_slots(chunks, cap)
+	tape.fan_each(r.opts.runner, nc, count_task, &cj)
+	active, total = plan_chunk_slots(chunks, cap)
+	return active, total, active >= 2 && total >= 64
 }
 
 // Runs `records_find` across `chunks` in parallel, writing directly into `out` and `answers`. Returns `(n, done)` where
@@ -203,18 +208,12 @@ records_find_chunks :: proc(r: ^tape.Records, format: ^tape.Format, path: []tape
 	if _, refused := find_path(format, r.opts, path); refused != nil {
 		return 0, false
 	}
-	nc := len(chunks)
-	if nc < 2 || nc > MAX_RECORD_CHUNKS || cap < 64 {
-		return 0, false
-	}
-	active, total := count_and_plan(r.opts.runner, chunks, cap, data, count_chunk)
-	if active < 2 || total < 64 {
+	active, _, ok := plan_parallel_chunks(r, chunks, cap, data, count_chunk)
+	if !ok {
 		return 0, false
 	}
 	locked := Locked_Allocator{backing = caller}
-	alloc := locked_allocator(&locked)
 	locked_scratch: Locked_Allocator
-	scratch := locked_scratch_of(r, &locked_scratch)
 	Run_Job :: struct {
 		data:      rawptr,
 		chunks:    []Record_Chunk,
@@ -226,9 +225,9 @@ records_find_chunks :: proc(r: ^tape.Records, format: ^tape.Format, path: []tape
 		j := (^Run_Job)(arg)
 		j.run_chunk(j.data, &j.chunks[k], k, j.alloc, j.scratch)
 	}
-	rj := Run_Job{data = data, chunks = chunks[:active], alloc = alloc, scratch = scratch, run_chunk = run_chunk}
+	rj := Run_Job{data = data, chunks = chunks[:active], alloc = locked_allocator(&locked), scratch = locked_scratch_of(r, &locked_scratch), run_chunk = run_chunk}
 	tape.fan_each(r.opts.runner, active, run_task, &rj)
-	return settle_chunk_slots(r, chunks[:active], active == nc)
+	return settle_chunk_slots(r, chunks[:active], active == len(chunks))
 }
 
 // Runs `records_scan` across `chunks` in parallel, each chunk building into its own `tape.Record_Block` whose chunks
@@ -237,24 +236,18 @@ records_scan_chunks :: proc(r: ^tape.Records, format: ^tape.Format, demand: ^tap
 	if scan_refused(format, r.opts, demand) != nil {
 		return 0, false
 	}
-	nc := len(chunks)
-	if nc < 2 || nc > MAX_RECORD_CHUNKS || cap < 64 {
-		return 0, false
-	}
-	active, total := count_and_plan(r.opts.runner, chunks, cap, data, count_chunk)
-	if active < 2 || total < 64 {
+	active, total, ok := plan_parallel_chunks(r, chunks, cap, data, count_chunk)
+	if !ok {
 		return 0, false
 	}
 	batch_alloc := tape.record_block_batch(&r.block, caller)
 	locked := Locked_Allocator{backing = caller}
 	backing := locked_allocator(&locked)
 	locked_scratch: Locked_Allocator
-	scratch := locked_scratch_of(r, &locked_scratch)
 	blocks: [MAX_RECORD_CHUNKS]tape.Record_Block
 	for k in 0 ..< active {
-		blocks[k].backing = backing
+		blocks[k] = {backing = backing, last = -1}
 		blocks[k].outgrown.allocator = backing
-		blocks[k].last = -1
 	}
 	Run_Job :: struct {
 		data:        rawptr,
@@ -268,19 +261,15 @@ records_scan_chunks :: proc(r: ^tape.Records, format: ^tape.Format, demand: ^tap
 		j := (^Run_Job)(arg)
 		j.run_chunk(j.data, &j.chunks[k], k, &j.blocks[k], j.batch_alloc, j.scratch)
 	}
-	rj := Run_Job{data = data, chunks = chunks[:active], blocks = blocks[:active], batch_alloc = batch_alloc, scratch = scratch, run_chunk = run_chunk}
+	rj := Run_Job{data = data, chunks = chunks[:active], blocks = blocks[:active], batch_alloc = batch_alloc, scratch = locked_scratch_of(r, &locked_scratch), run_chunk = run_chunk}
 	tape.fan_each(r.opts.runner, active, run_task, &rj)
 	// Pre-reserve `r.block.outgrown` before adopting any chunk so an OOM never frees memory a returned Document points into.
 	need_chunks := 0
-	for k in 0 ..< active {
-		if blocks[k].chunk != nil {
-			need_chunks += 1
-		}
-		need_chunks += len(blocks[k].outgrown)
+	for &b in blocks[:active] {
+		need_chunks += int(b.chunk != nil) + len(b.outgrown)
 	}
 	if err := reserve(&r.block.outgrown, len(r.block.outgrown) + need_chunks); err != nil {
-		for k in 0 ..< active {
-			b := &blocks[k]
+		for &b in blocks[:active] {
 			if b.chunk != nil {
 				runtime.mem_free_with_size(raw_data(b.chunk), len(b.chunk), caller)
 			}
@@ -296,8 +285,7 @@ records_scan_chunks :: proc(r: ^tape.Records, format: ^tape.Format, demand: ^tap
 		return 0, true
 	}
 	// Adopt every worker block's allocated chunks into `r.block.outgrown` so the next batch or `destroy_records` frees them.
-	for k in 0 ..< active {
-		b := &blocks[k]
+	for &b in blocks[:active] {
 		if b.chunk != nil {
 			append(&r.block.outgrown, b.chunk)
 			r.block.spent += b.used
@@ -308,7 +296,7 @@ records_scan_chunks :: proc(r: ^tape.Records, format: ^tape.Format, demand: ^tap
 		r.block.spent += b.spent
 		delete(b.outgrown)
 	}
-	return settle_chunk_slots(r, chunks[:active], active == nc)
+	return settle_chunk_slots(r, chunks[:active], active == len(chunks))
 }
 
 // Assigns `offset` and `limit` per chunk from `count`, stopping once `cap` slots are filled.

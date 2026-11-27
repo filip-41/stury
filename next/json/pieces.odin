@@ -690,17 +690,14 @@ piece_keep_rooms :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C)) {
 // in a sanitizer build.
 @(private)
 enter_place :: #force_no_inline proc "contextless" (place: u8, p, end: [^]u8, d: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	ind := indent_start(w)
 	switch place {
-	case PLACE_OPEN:
-		return st_open(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
-	case PLACE_COLON:
-		return st_colon(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
-	case PLACE_VALUE:
-		return st_value(piece_skip_white(p, end, S), end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
-	case PLACE_MEMBER:
-		return st_member_ws(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case PLACE_OPEN:   return st_open(p, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case PLACE_COLON:  return st_colon(p, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case PLACE_VALUE:  return st_value(skip_white_spec(p, end, S), end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case PLACE_MEMBER: return st_member_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	}
-	return st_after(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	return st_after(p, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 }
 
 // Handles the bytes after the root value ending at `p`, in a window that more bytes may follow. A run of comments is
@@ -894,14 +891,10 @@ piece_run_end :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk
 	when H != hook.No_Hooks {
 		rest := tape.Role.Comment
 		switch state {
-		case RUN_VALUE:
-			rest = .Comment_Foot if !object && open > 0 && q < end && q[0] == ']' else .Comment
-		case RUN_KEY:
-			rest = .Comment_Foot if q < end && q[0] == '}' else .Comment
-		case RUN_AFTER:
-			rest = .Comment if crossed && q < end && q[0] != ']' | u8(object) << 5 else .Comment_Foot
-		case RUN_FOOT:
-			rest = .Comment_Foot
+		case RUN_VALUE: rest = .Comment_Foot if !object && open > 0 && q < end && q[0] == ']' else .Comment
+		case RUN_KEY:   rest = .Comment_Foot if q < end && q[0] == '}' else .Comment
+		case RUN_AFTER: rest = .Comment if crossed && q < end && q[0] != ']' | u8(object) << 5 else .Comment_Foot
+		case RUN_FOOT:  rest = .Comment_Foot
 		}
 		for t, i in s.comments {
 			t := t
@@ -928,18 +921,16 @@ piece_run_end :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_Walk
 // the run held its comma. A separate call whose frame has no base pointer, as `enter` has in a sanitizer build.
 @(private)
 enter_run :: #force_no_inline proc "contextless" (run: u8, crossed: bool, p, end: [^]u8, d: u64, w: ^Walk($S, $H, $LAX, $C), hs: hook.Regs, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> hook.Walk_Result {
+	ind := indent_start(w)
 	switch run {
-	case RUN_VALUE:
-		return st_value(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
-	case RUN_KEY:
-		return st_key(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
-	case RUN_COLON:
-		return st_colon(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case RUN_VALUE: return st_value(p, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case RUN_KEY:   return st_key(p, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	case RUN_COLON: return st_colon(p, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	}
 	if crossed {
-		return st_member_ws(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
+		return st_member_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 	}
-	return st_after_ws(p, end, d, indent_start(w), w, hs.a, hs.b, hs.c, GAP_OFF, on)
+	return st_after_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, GAP_OFF, on)
 }
 
 // The offset of the first byte of the comments that run `s.run` holds back, which a hook that reads a comment's bytes
@@ -947,15 +938,8 @@ enter_run :: #force_no_inline proc "contextless" (run: u8, crossed: bool, p, end
 @(private)
 piece_run_facts :: proc "contextless" (s: ^Piece) -> u64 {
 	r := &s.run
-	switch {
-	case r.state == 0:
-		return max(u64)
-	case len(s.comments) > 0:
-		return s.comments[0].lo
-	case r.part != RUN_GAP:
-		return r.lo
-	}
-	return max(u64)
+	if r.state == 0 { return max(u64) }
+	return s.comments[0].lo if len(s.comments) > 0 else r.lo if r.part != RUN_GAP else max(u64)
 }
 
 // The result of a walk of a window that ended as `r`. When more bytes may follow the window and the walk ended inside
@@ -1021,9 +1005,9 @@ piece_pass_white :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_W
 	// Past the root value, `walk_tail` checked that the rest of the window is white space.
 	if s.place == PLACE_TAIL {
 		run = RUN_FOOT
-	} else if q := piece_skip_white(p, end, S); q < end {
+	} else if q := skip_white_spec(p, end, S); q < end {
 		mark := u8(':') if s.place == PLACE_COLON else ','
-		if s.place != PLACE_COLON && s.place != PLACE_AFTER || q[0] != mark || piece_skip_white(q[1:], end, S) != end {
+		if s.place != PLACE_COLON && s.place != PLACE_AFTER || q[0] != mark || skip_white_spec(q[1:], end, S) != end {
 			if s.place == PLACE_VALUE {
 				s.last = at(w, q)
 			}
@@ -1058,16 +1042,12 @@ piece_pass_white :: proc "contextless" (w: ^Walk($S, $H, $LAX, $C), pw: ^Piece_W
 }
 
 // The first byte past the white space from `p`, including JSON5's white space when `S` is `.Json5`.
-@(private = "file")
-piece_skip_white :: proc "contextless" (p, end: [^]u8, $S: Spec) -> [^]u8 {
+@(private)
+skip_white_spec :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> [^]u8 {
 	q := kernel.skip_ws(p, end)
 	when S == .Json5 {
-		for q < end {
-			n := ws5_len(q, end)
-			if n == 0 {
-				break
-			}
-			q = kernel.skip_ws(q[n:], end)
+		for k := ws5_len(q, end); k > 0; k = ws5_len(q, end) {
+			q = kernel.skip_ws(q[k:], end)
 		}
 	}
 	return q
@@ -1082,28 +1062,12 @@ piece_keep_from :: proc "contextless" (s: ^Piece, $S: Spec) -> u64 {
 	if s.run.state != 0 {
 		return max(s.run.on, 1) - 1
 	}
-	if s.last == 0 {
-		return 0
-	}
-	when S != .Json {
-		return s.last - 1
-	} else {
-		return s.last
-	}
+	return s.last - u64(S != .Json && s.last > 0)
 }
 
 // Whether `src`, a window that starts a text with more bytes to follow, holds too few bytes to tell a byte order mark
 // from none: fewer than 3 bytes that all match the start of the mark.
 @(private)
 piece_bom_open :: proc "contextless" (src: []u8) -> bool {
-	BOM := [3]u8{0xEF, 0xBB, 0xBF}
-	if len(src) >= 3 {
-		return false
-	}
-	for b, k in src {
-		if b != BOM[k] {
-			return false
-		}
-	}
-	return true
+	return len(src) < 3 && (len(src) == 0 || src[0] == 0xef && (len(src) == 1 || src[1] == 0xbb))
 }

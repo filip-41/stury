@@ -180,25 +180,23 @@ table_header :: proc(t: ^Table_Write, root: tape.Node_Index, single: bool) -> (h
 	w := t.w
 	doc := w.doc
 	h.node = tape.NO_NODE
+	delimited_header :: proc "contextless" (root: tape.Node_Index, keys: []tape.Node) -> (Header, bool) {
+		if len(keys) == 0 {
+			return {node = tape.NO_NODE, delimited = true}, false
+		}
+		return {keys = keys, width = len(keys), node = root, delimited = true}, true
+	}
 	if single {
 		if doc.nodes[root].kind == .Object {
 			if keys, is_row := row_table_keys(doc, root); is_row {
-				h.delimited = true
-				if len(keys) > 0 {
-					h.node, h.width, h.keys = root, len(keys), keys
-				}
-				return h, len(keys) > 0
+				return delimited_header(root, keys)
 			}
 			return {node = root}, true
 		}
 		return {node = tape.NO_NODE, width = 1, scalars = true}, false
 	}
 	if keys, is_table := tape.table_keys(doc, root); is_table {
-		h.delimited = true
-		if len(keys) > 0 {
-			h.node, h.width, h.keys = root, len(keys), keys
-		}
-		return h, len(keys) > 0
+		return delimited_header(root, keys)
 	}
 	if t.stream != nil && t.stream.known {
 		return {node = root, width = len(t.stream.names)}, true
@@ -370,14 +368,19 @@ column :: #force_inline proc(t: ^Table_Write, k: int) -> int {
 	return t.order[k] if t.order != nil else k
 }
 
+@(private)
+table_refuse :: #force_inline proc "contextless" (w: ^Tree, at: tape.Node_Index, why: Refusal) -> bool {
+	w.err = Refused{at, why}
+	return false
+}
+
 // The header's keys as a record, false with `w.err` set for one the spec cannot hold.
 @(private = "file")
 table_header_line :: #force_no_inline proc(t: ^Table_Write, h: Header) -> bool {
 	w := t.w
 	doc := w.doc
 	if h.width == 0 {
-		w.err = Refused{h.node, .No_Spelling}
-		return false
+		return table_refuse(w, h.node, .No_Spelling)
 	}
 	t.keys = kept_cells(t, h, h.width)
 	defer t.keys = 0
@@ -422,15 +425,9 @@ table_record_short_row :: #force_no_inline proc(t: ^Table_Write, at: tape.Node_I
 	doc := w.doc
 	kept := kept_cells(t, h, h.width)
 	if kept == 0 {
-		w.err = Refused{at, .No_Spelling}
-		return false
+		return table_refuse(w, at, .No_Spelling)
 	}
-	dups_last := false
-	if doc.ext != nil {
-		if ext, ok := doc.ext.format.(tape.Tabular_Ext); ok && ext.dups == .Last {
-			dups_last = kept < h.width
-		}
-	}
+	dups_last := is_tabular_dups_last(doc, kept, h.width)
 	written := 0
 	for c in 0 ..< h.width {
 		j := column(t, c)
@@ -441,17 +438,13 @@ table_record_short_row :: #force_no_inline proc(t: ^Table_Write, at: tape.Node_I
 		if j < count {
 			cell = at + 1 + tape.Node_Index(j)
 		} else if dups_last {
-			name, ok := text_of_token(w, h.keys[j])
-			if !ok {
-				return false
-			}
+			name := text_of_token(w, h.keys[j]) or_return
 			if val, p := tape.member(w.reader, at, name); p == .Found {
 				cell = val
 			}
 		}
 		if kept == 1 && (cell == tape.NO_NODE || doc.nodes[cell].kind == .Null) {
-			w.err = Refused{at, .No_Spelling}
-			return false
+			return table_refuse(w, at, .No_Spelling)
 		}
 		if written > 0 {
 			put_byte(t.out, t.d.delimiter)
@@ -476,8 +469,7 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 	case h.scalars && node.kind <= .Plain:
 		// A null cell alone on its line would read back as no record.
 		if node.kind == .Null {
-			w.err = Refused{at, .No_Spelling}
-			return false
+			return table_refuse(w, at, .No_Spelling)
 		}
 		if !put_record_cell(t, at, 0) {
 			return false
@@ -486,8 +478,7 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 		// A delimited row, or an array of cells, written by place.
 		count := int(node.n) - 1
 		if !h.delimited && (node.kind != .Array || tape.child_count(doc, at, node) != h.width) {
-			w.err = Refused{at, .Row_Keys}
-			return false
+			return table_refuse(w, at, .Row_Keys)
 		}
 		if h.delimited && h.node != tape.NO_NODE && count < h.width {
 			if !table_record_short_row(t, at, h, count) {
@@ -497,8 +488,7 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 		}
 		kept := kept_cells(t, h, count)
 		if kept == 0 {
-			w.err = Refused{at, .No_Spelling}
-			return false
+			return table_refuse(w, at, .No_Spelling)
 		}
 		if kept == 1 {
 			sole := at + 1
@@ -511,8 +501,7 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 				}
 			}
 			if doc.nodes[sole].kind == .Null {
-				w.err = Refused{at, .No_Spelling}
-				return false
+				return table_refuse(w, at, .No_Spelling)
 			}
 		}
 		if (t.verbatim || t.translate) && t.order == nil && kept == count {
@@ -523,10 +512,7 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 		}
 		written := 0
 		for c in 0 ..< count {
-			j := c
-			if t.order != nil && count == h.width {
-				j = t.order[c]
-			}
+			j := t.order[c] if t.order != nil && count == h.width else c
 			if h.delimited && h.node != tape.NO_NODE && tape.column_dropped(doc, h.keys, j, count) {
 				continue
 			}
@@ -540,8 +526,7 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 		}
 	case node.kind == .Object && h.node != tape.NO_NODE:
 		if h.width == 0 {
-			w.err = Refused{at, .No_Spelling}
-			return false
+			return table_refuse(w, at, .No_Spelling)
 		}
 		// A record with the header's keys in its order takes its values by place.
 		if t.order == nil && int(node.n) == 2 * h.width + 1 {
@@ -559,8 +544,7 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 					}
 					value := at + 2 + 2 * tape.Node_Index(j)
 					if h.width == 1 && doc.nodes[value].kind == .Null {
-						w.err = Refused{at, .No_Spelling}
-						return false
+						return table_refuse(w, at, .No_Spelling)
 					}
 					if !put_record_cell(t, value, j) {
 						return false
@@ -574,18 +558,14 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 			if j > 0 {
 				put_byte(t.out, t.d.delimiter)
 			}
-			name, ok := column_text(t, h, column(t, j))
-			if !ok {
-				return false
-			}
+			name := column_text(t, h, column(t, j)) or_return
 			value, p := tape.member(w.reader, at, name)
 			if p == .Missing && h.width > 1 {
 				w.dropped += {.Absent}
 				continue
 			}
 			if p != .Found || h.width == 1 && doc.nodes[value].kind == .Null {
-				w.err = Refused{at, .No_Spelling}
-				return false
+				return table_refuse(w, at, .No_Spelling)
 			}
 			found += 1
 			if !put_record_cell(t, value, j) {
@@ -594,12 +574,10 @@ table_record :: proc(t: ^Table_Write, at: tape.Node_Index, h: Header) -> bool {
 		}
 		// A stream's header is its first row's, so a key it lacks has no column, and a key repeated has none for its second.
 		if t.stream != nil && found < tape.child_count(doc, at, node) {
-			w.err = Refused{at, .Row_Keys}
-			return false
+			return table_refuse(w, at, .Row_Keys)
 		}
 	case:
-		w.err = Refused{at, .Not_A_Table}
-		return false
+		return table_refuse(w, at, .Not_A_Table)
 	}
 	put_line_end(t)
 	t.started = true

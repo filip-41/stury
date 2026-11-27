@@ -108,21 +108,12 @@ paths_answer_fail :: proc "contextless" (sink: ^$S, dm: ^tape.Demand, to: u32, o
 // `missing`, which it sorts, and `made`, which it overwrites. With records that replay the first record of a `fixed`
 // walk, the first of `answers` and `missing` are the first record's, which each replayed record makes again `size`
 // nodes after the record before, ahead of the rest.
-//
-// `#no_bounds_check` invariants:
-// - When `r.replayed > 0`, `r.answers <= len(answers)` and `r.missing <= len(missing)` (recorded by `scan_learn_record`);
-// - Every `a.path < u32(paths)` (populated from `Demand.ends`), and `len(made) == paths` when `h.demand.limited`;
-// - `tape.partial_block` allocates `x.starts[paths + 1]`, `x.answers[live]`, `x.kept[h.kept.len]`, `x.missing[n_missing]`,
-//   and `x.names[names]`, matching the exact counts accumulated before the call.
 @(private, require_results)
 scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, missing: []Scan_Missing, made: []u32) -> runtime.Allocator_Error #no_bounds_check {
-	if h.record.replayed > 0 {
-		return scan_lists_replay(h, doc, answers, missing, made)
-	}
 	allocator := doc.allocator
 	paths := len(h.demand.paths)
 	// Fast paths for the common single-record / empty / 1-answer scans without replay or limits.
-	if !h.demand.limited && h.kept.len == 0 {
+	if h.record.replayed == 0 && !h.demand.limited && h.kept.len == 0 {
 		if len(answers) == 0 && len(missing) == 0 {
 			x := tape.partial_block(paths, 0, 0, 0, 0, h.dups, allocator) or_return
 			x.facts = h.facts
@@ -147,154 +138,41 @@ scan_lists :: proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, mis
 			return nil
 		}
 	}
-	live, names := 0, 0
-	unordered := false
-	small_starts: [32]u32
-	track_starts := !h.demand.limited && paths > 1 && paths <= len(small_starts)
-	prev_pos := u64(0)
-	prev_path := u32(0)
-	for a, i in answers {
-		if !a.dead {
-			live += 1
-			if track_starts {
-				small_starts[a.path] += 1
-			}
-		}
-		if i > 0 && (a.pos < prev_pos || (a.pos == prev_pos && a.path < prev_path)) {
-			unordered = true
-		}
-		prev_pos, prev_path = a.pos, a.path
-	}
-	if unordered {
-		slice.stable_sort_by(answers, scan_answer_before)
-	}
-	if h.demand.limited {
-		runtime.mem_zero(raw_data(made), len(made) * size_of(u32))
-		for &a in answers {
-			if limit := h.demand.paths[a.path].limit; !a.dead && limit > 0 {
-				a.dead = made[a.path] == limit
-				made[a.path] += u32(!a.dead)
-				live -= int(a.dead)
-			}
-		}
-	}
-	for m in missing {
-		names += len(m.name)
-	}
-	x := tape.partial_block(paths, live, int(h.kept.len), len(missing), names, h.dups, allocator) or_return
-	x.facts = h.facts
-	doc.partial = x
-	if paths == 1 {
-		x.starts[0] = 0
-		x.starts[1] = u32(live)
-		dst := raw_data(x.answers)
-		n := 0
-		for a in answers {
-			if !a.dead {
-				dst[n] = {a.node, a.outcome}
-				n += 1
-			}
-		}
-	} else if track_starts {
-		acc := u32(0)
-		starts := raw_data(x.starts)
-		starts[0] = 0
-		for p in 0 ..< paths {
-			c := small_starts[p]
-			small_starts[p] = acc
-			acc += c
-			starts[p + 1] = acc
-		}
-		dst := raw_data(x.answers)
-		cursors := raw_data(small_starts[:])
-		for a in answers {
-			if !a.dead {
-				off := cursors[a.path]
-				dst[off] = {a.node, a.outcome}
-				cursors[a.path] = off + 1
-			}
-		}
-	} else {
-		for a in answers {
-			x.starts[a.path + 1] += u32(!a.dead)
-		}
-		for p in 0 ..< paths {
-			x.starts[p + 1] += x.starts[p]
-		}
-		dst := raw_data(x.answers)
-		for a in answers {
-			if !a.dead {
-				dst[x.starts[a.path]] = {a.node, a.outcome}
-				x.starts[a.path] += 1
-			}
-		}
-		if paths > 0 {
-			copy(x.starts[1:], x.starts[:paths])
-			x.starts[0] = 0
-		}
-	}
-	#assert(size_of(Scan_Kept) == size_of(type_of(x.kept[0])))
-	#assert(offset_of(Scan_Kept, node) == offset_of(type_of(x.kept[0]), node))
-	#assert(offset_of(Scan_Kept, index) == offset_of(type_of(x.kept[0]), index))
-	if h.kept.len > 0 {
-		runtime.mem_copy_non_overlapping(raw_data(x.kept), h.kept.data, int(h.kept.len) * size_of(Scan_Kept))
-	}
-	if len(missing) > 0 {
-		missing_unordered := false
-		for m, idx in missing {
-			if idx > 0 && m.node < missing[idx - 1].node {
-				missing_unordered = true
-				break
-			}
-		}
-		if missing_unordered {
-			slice.stable_sort_by(missing, proc(a, b: Scan_Missing) -> bool { return a.node < b.node })
-		}
-		at := 0
-		for m, i in missing {
-			x.missing[i] = {m.node, u32(at), u32(len(m.name))}
-			copy(x.names[at:], m.name)
-			at += len(m.name)
-		}
-	}
-	return nil
-}
 
-@(private = "file", cold, require_results)
-scan_lists_replay :: #force_no_inline proc(h: ^Scanner, doc: ^tape.Document, answers: []Scan_Answer, missing: []Scan_Missing, made: []u32) -> runtime.Allocator_Error #no_bounds_check {
-	allocator := doc.allocator
-	paths := len(h.demand.paths)
-	r := &h.record
-	// Each answer of `first` and name of `first_missing` stands for one in each of `rounds` records.
-	rounds := int(r.replayed) + 1
-	first := answers[:r.answers]
-	first_missing := missing[:r.missing]
-	rest, rest_missing := answers[len(first):], missing[len(first_missing):]
-	// The first record's part is made again in each of `rounds` records, each `size` nodes past the one before, and
-	// the rest's part once.
 	Part :: struct {
 		answers: []Scan_Answer,
 		missing: []Scan_Missing,
 		rounds:  int,
 		step:    tape.Node_Index,
 	}
-	parts := [2]Part{{first, first_missing, rounds, tape.Node_Index(r.size)}, {rest, rest_missing, 1, 0}}
-	live, names := 0, 0
-	for a in first {
-		live += rounds * int(!a.dead)
+	parts_buf: [2]Part
+	parts: []Part
+	tail_answers := answers
+	tail_missing := missing
+	live := 0
+	if r := &h.record; r.replayed > 0 {
+		rounds := int(r.replayed) + 1
+		first, first_missing := answers[:r.answers], missing[:r.missing]
+		tail_answers, tail_missing = answers[len(first):], missing[len(first_missing):]
+		parts_buf = {{first, first_missing, rounds, tape.Node_Index(r.size)}, {tail_answers, tail_missing, 1, 0}}
+		parts = parts_buf[:]
+		for a in first {
+			live += rounds * int(!a.dead)
+		}
+	} else {
+		parts_buf[0] = {answers, missing, 1, 0}
+		parts = parts_buf[:1]
 	}
-	// One pass counts the rest's answers and checks their order.
+
 	unordered := false
-	for a, i in rest {
+	for a, i in tail_answers {
 		live += int(!a.dead)
-		unordered ||= i > 0 && scan_answer_before(a, rest[i - 1])
+		unordered ||= i > 0 && scan_answer_before(a, tail_answers[i - 1])
 	}
 	if unordered {
-		slice.stable_sort_by(rest, scan_answer_before)
+		slice.stable_sort_by(tail_answers, scan_answer_before)
 	}
 	if h.demand.limited {
-		// A path keeps its first answers in document order, up to its limit. A limited demand replays no record, so each
-		// answer counts once.
 		runtime.mem_zero(raw_data(made), len(made) * size_of(u32))
 		for &a in answers {
 			if limit := h.demand.paths[a.path].limit; !a.dead && limit > 0 {
@@ -304,17 +182,18 @@ scan_lists_replay :: #force_no_inline proc(h: ^Scanner, doc: ^tape.Document, ans
 			}
 		}
 	}
+
+	n_missing, names := 0, 0
 	for part in parts {
+		n_missing += part.rounds * len(part.missing)
 		for m in part.missing {
 			names += part.rounds * len(m.name)
 		}
 	}
-	n_missing := rounds * len(first_missing) + len(rest_missing)
 	x := tape.partial_block(paths, live, int(h.kept.len), n_missing, names, h.dups, allocator) or_return
 	x.facts = h.facts
 	doc.partial = x
-	// Each path's answers in document order, in three steps: count them, turn the counts into starts, place the
-	// answers.
+
 	if paths > 1 {
 		for part in parts {
 			for a in part.answers {
@@ -325,6 +204,7 @@ scan_lists_replay :: #force_no_inline proc(h: ^Scanner, doc: ^tape.Document, ans
 			x.starts[p + 1] += x.starts[p]
 		}
 	}
+	dst := raw_data(x.answers)
 	for part in parts {
 		for k in 0 ..< part.rounds {
 			shift := tape.Node_Index(k) * part.step
@@ -332,7 +212,7 @@ scan_lists_replay :: #force_no_inline proc(h: ^Scanner, doc: ^tape.Document, ans
 				n := x.starts[0]
 				for a in part.answers {
 					if !a.dead {
-						x.answers[n] = {a.node + shift, a.outcome}
+						dst[n] = {a.node + shift, a.outcome}
 						n += 1
 					}
 				}
@@ -341,7 +221,7 @@ scan_lists_replay :: #force_no_inline proc(h: ^Scanner, doc: ^tape.Document, ans
 			}
 			for a in part.answers {
 				if !a.dead {
-					x.answers[x.starts[a.path]] = {a.node + shift, a.outcome}
+					dst[x.starts[a.path]] = {a.node + shift, a.outcome}
 					x.starts[a.path] += 1
 				}
 			}
@@ -351,29 +231,30 @@ scan_lists_replay :: #force_no_inline proc(h: ^Scanner, doc: ^tape.Document, ans
 		copy(x.starts[1:], x.starts[:paths])
 		x.starts[0] = 0
 	}
+
 	#assert(size_of(Scan_Kept) == size_of(type_of(x.kept[0])))
 	#assert(offset_of(Scan_Kept, node) == offset_of(type_of(x.kept[0]), node))
 	#assert(offset_of(Scan_Kept, index) == offset_of(type_of(x.kept[0]), index))
-	runtime.mem_copy_non_overlapping(raw_data(x.kept), h.kept.data, int(h.kept.len) * size_of(Scan_Kept))
-	missing_unordered := false
-	for m, idx in rest_missing {
-		if idx > 0 && m.node < rest_missing[idx - 1].node {
-			missing_unordered = true
-			break
+	if h.kept.len > 0 {
+		runtime.mem_copy_non_overlapping(raw_data(x.kept), h.kept.data, int(h.kept.len) * size_of(Scan_Kept))
+	}
+	if n_missing > 0 {
+		for i in 1 ..< len(tail_missing) {
+			if tail_missing[i].node < tail_missing[i - 1].node {
+				slice.stable_sort_by(tail_missing, proc(a, b: Scan_Missing) -> bool { return a.node < b.node })
+				break
+			}
 		}
-	}
-	if missing_unordered {
-		slice.stable_sort_by(rest_missing, proc(a, b: Scan_Missing) -> bool { return a.node < b.node })
-	}
-	at, i := 0, 0
-	for part in parts {
-		for k in 0 ..< part.rounds {
-			shift := tape.Node_Index(k) * part.step
-			for m in part.missing {
-				x.missing[i] = {m.node + shift, u32(at), u32(len(m.name))}
-				copy(x.names[at:], m.name)
-				at += len(m.name)
-				i += 1
+		at, i := 0, 0
+		for part in parts {
+			for k in 0 ..< part.rounds {
+				shift := tape.Node_Index(k) * part.step
+				for m in part.missing {
+					x.missing[i] = {m.node + shift, u32(at), u32(len(m.name))}
+					copy(x.names[at:], m.name)
+					at += len(m.name)
+					i += 1
+				}
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package xml
 
 import "base:intrinsics"
+import "base:runtime"
 import "stury:lib/base/kernel"
 import "stury:lib/core/tape"
 
@@ -74,26 +75,25 @@ collapsed :: proc "contextless" (value: []u8) -> bool {
 
 // The index of the first colon of `name`, -1 for none.
 @(private)
-colon_of :: proc "contextless" (name: []u8) -> int {
-	for b, i in name {
-		if b == ':' {
-			return i
-		}
-	}
-	return -1
+colon_of :: #force_inline proc "contextless" (name: []u8) -> int {
+	return kernel.index_byte(name, ':')
 }
 
-// Lists the elements of `doc` that declare a namespace in its format data, which `namespace` reads, beside the DTD and
-// the held spans it holds, with `whole` when the facts of `doc` hold every declaration around its nodes. A document of
-// every value with none has no list. A refusal of memory destroys `doc`.
+// Builds a `tape.Doc_Ext` with namespace scopes and decoded URIs for `nodes`/`facts` (without mutating `doc`).
+// Returns `(nil, nil)` when there are no namespace declarations and `need_empty` is false.
 @(private)
-keep_scopes :: proc(doc: ^tape.Document, whole: bool) -> (err: tape.Error) {
-	if .Attribute not_in doc.present && (doc.partial == nil || !whole) {
-		return nil
-	}
-	// Most documents declare no namespace, so the first declaration is sought alone.
-	first := len(doc.facts)
-	for f, i in doc.facts {
+build_markup_ext :: proc(
+	doc: ^tape.Document,
+	nodes: []tape.Node,
+	facts: []tape.Fact,
+	whole, need_empty: bool,
+	dtd: tape.Markup_Dtd,
+	held: []tape.Held_Span,
+	origin: tape.Origin,
+	doc_alloc, scratch: runtime.Allocator,
+) -> (ext: ^tape.Doc_Ext, err: runtime.Allocator_Error) {
+	first := len(facts)
+	for f, i in facts {
 		if f.kind == .Attribute && f.spelling & ATTRIBUTE_NS != 0 {
 			first = i
 			break
@@ -101,7 +101,7 @@ keep_scopes :: proc(doc: ^tape.Document, whole: bool) -> (err: tape.Error) {
 	}
 	n, m := 0, 0
 	last := tape.NO_NODE
-	for f in doc.facts[first:] {
+	for f in facts[first:] {
 		if f.kind == .Attribute && f.spelling & ATTRIBUTE_NS != 0 {
 			if f.node != last {
 				n, last = n + 1, f.node
@@ -109,21 +109,18 @@ keep_scopes :: proc(doc: ^tape.Document, whole: bool) -> (err: tape.Error) {
 			m += 1
 		}
 	}
-	if n == 0 && (doc.partial == nil || !whole) {
-		return nil
+	if n == 0 && !need_empty {
+		return nil, nil
 	}
-	defer if err != nil {
-		tape.destroy(doc)
-	}
-	scopes := make([]tape.Markup_Scope, n, doc.allocator) or_return
-	defer delete(scopes, doc.allocator)
-	uris := make([]tape.Markup_Uri, m, doc.allocator) or_return
-	defer delete(uris, doc.allocator)
-	text := make([dynamic]u8, doc.allocator)
+	scopes := make([]tape.Markup_Scope, n, scratch) or_return
+	defer delete(scopes, scratch)
+	uris := make([]tape.Markup_Uri, m, scratch) or_return
+	defer delete(uris, scratch)
+	text := make([dynamic]u8, scratch)
 	defer delete(text)
 	k, d := 0, 0
 	last = tape.NO_NODE
-	for f, j in doc.facts[first:] {
+	for f, j in facts[first:] {
 		if f.kind != .Attribute || f.spelling & ATTRIBUTE_NS == 0 {
 			continue
 		}
@@ -139,7 +136,7 @@ keep_scopes :: proc(doc: ^tape.Document, whole: bool) -> (err: tape.Error) {
 			continue
 		}
 		last = f.node
-		end := f.node + (tape.Node_Index(doc.nodes[f.node].n) if doc.nodes[f.node].kind == .Object else 1)
+		end := f.node + (tape.Node_Index(nodes[f.node].n) if nodes[f.node].kind == .Object else 1)
 		// The scopes before this one that hold it are its ancestors, the nearest last.
 		parent := u32(k) - 1 if k > 0 else tape.NO_SCOPE
 		for parent != tape.NO_SCOPE && scopes[parent].end <= f.node {
@@ -148,18 +145,36 @@ keep_scopes :: proc(doc: ^tape.Document, whole: bool) -> (err: tape.Error) {
 		scopes[k] = {node = f.node, end = end, parent = parent}
 		k += 1
 	}
-	kept := tape.Markup_Ext{scopes = scopes, uris = uris[:d], uri_text = text[:], whole = whole}
+	kept := tape.Markup_Ext{scopes = scopes, uris = uris[:d], uri_text = text[:], dtd = dtd, whole = whole}
+	return tape.ext_make(held, kept, doc_alloc, origin)
+}
+
+// Lists the elements of `doc` that declare a namespace in its format data, which `namespace` reads, beside the DTD and
+// the held spans it holds, with `whole` when the facts of `doc` hold every declaration around its nodes. A document of
+// every value with none has no list. A refusal of memory destroys `doc`.
+@(private)
+keep_scopes :: proc(doc: ^tape.Document, whole: bool) -> (err: tape.Error) {
+	need_empty := doc.partial != nil && whole
+	if .Attribute not_in doc.present && !need_empty {
+		return nil
+	}
+	defer if err != nil {
+		tape.destroy(doc)
+	}
 	held: []tape.Held_Span
 	origin: tape.Origin
+	dtd: tape.Markup_Dtd
 	if doc.ext != nil {
 		held, origin = doc.ext.held, doc.ext.origin
 		if m, ok := doc.ext.format.(tape.Markup_Ext); ok {
-			kept.dtd = m.dtd
+			dtd = m.dtd
 		}
 	}
-	ext := tape.ext_make(held, kept, doc.allocator, origin) or_return
-	free(doc.ext, doc.allocator)
-	doc.ext = ext
+	ext := build_markup_ext(doc, doc.nodes, doc.facts, whole, need_empty, dtd, held, origin, doc.allocator, doc.allocator) or_return
+	if ext != nil {
+		free(doc.ext, doc.allocator)
+		doc.ext = ext
+	}
 	return nil
 }
 

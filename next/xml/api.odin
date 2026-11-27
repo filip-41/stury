@@ -2,6 +2,7 @@ package xml
 
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 
 // The names an XML user calls beside the reads, so that a program reading XML imports this package alone. The rest of
 // `lib/core/tape` serves walks and hooks.
@@ -41,6 +42,7 @@ Name :: tape.Name
 Index :: tape.Index
 All :: tape.All
 Slice :: tape.Slice
+Descend :: tape.Descend
 Grain :: tape.Grain
 Demand :: tape.Demand
 demand_of :: tape.demand_of
@@ -68,6 +70,7 @@ Doc_Index :: tape.Doc_Index
 Children :: tape.Children
 root :: tape.root
 answer :: tape.answer
+query :: build.query
 member :: tape.member
 element :: tape.element
 length :: tape.length
@@ -89,6 +92,7 @@ number_form :: tape.number_form
 number_exact :: tape.number_exact
 text_is_ascii :: tape.text_is_ascii
 destroy :: tape.destroy
+clone_document :: tape.clone_document
 records_window :: tape.records_window
 
 // The markup shape's readers: the name of a text member, and an element's string value. `attribute` and

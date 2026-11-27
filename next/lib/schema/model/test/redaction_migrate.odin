@@ -903,4 +903,22 @@ audit_strict_version_token_rejections_and_nil_compat :: proc(t: ^testing.T) {
 
 	_, cerr := model.check_schema_compat(nil, nil)
 	testing.expect_value(t, cerr, runtime.Allocator_Error.Invalid_Argument)
+
+	// Reject unsupported `dups = .All` in `migrate_document` and `versioned_load_document`.
+	Item :: struct { version: int }
+	mi, mie := model.compile(nil, Item)
+	defer model.destroy(&mi)
+	testing.expect_value(t, mie, nil)
+	testing.expect_value(t, model.register_version_model(&p, 2, &mi), nil)
+	ok_doc, ok_err := json.build(transmute([]u8)string(`{"version":2}`))
+	defer tape.destroy(&ok_doc)
+	testing.expect_value(t, ok_err, nil)
+	_, _, dups_err := model.migrate_document(&p, &ok_doc, opts = {dups = .All})
+	dme, dok := dups_err.(model.Model_Error)
+	testing.expectf(t, dok && dme.kind == .Bad_Option && dme.want.text == "dups", "expected Bad_Option dups, got %v", dups_err)
+	vm := model.Versioned_Model(Item){target = &mi, plan = p}
+	out_item: Item
+	_, vdups_err := model.versioned_load_document(&vm, &ok_doc, &out_item, migrate_opts = {dups = .All})
+	vdme, vdok := vdups_err.(model.Model_Error)
+	testing.expectf(t, vdok && vdme.kind == .Bad_Option && vdme.want.text == "dups", "expected Bad_Option dups, got %v", vdups_err)
 }

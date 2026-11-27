@@ -20,16 +20,11 @@ REFERENCE_FLAGS :: Entity_Flags{.Markup, .Element, .Respelled, .Cdata_End, .Exte
 @(private)
 predefined :: #force_inline proc "contextless" (name: []u8) -> (r: rune, ok: bool) {
 	switch string(name) {
-	case "lt":
-		return '<', true
-	case "gt":
-		return '>', true
-	case "amp":
-		return '&', true
-	case "apos":
-		return '\'', true
-	case "quot":
-		return '"', true
+	case "lt":   return '<', true
+	case "gt":   return '>', true
+	case "amp":  return '&', true
+	case "apos": return '\'', true
+	case "quot": return '"', true
 	}
 	return 0, false
 }
@@ -229,12 +224,9 @@ measure :: proc "contextless" (d: ^Dtd, i: u32, nest: int) -> (size: u64, flags:
 @(private)
 markup_close :: proc "contextless" (s: string) -> string {
 	switch {
-	case len(s) >= 4 && s[:4] == "<!--":
-		return "-->"
-	case len(s) >= 9 && s[:9] == "<![CDATA[":
-		return "]]>"
-	case len(s) >= 2 && s[1] == '?':
-		return "?>"
+	case len(s) >= 4 && s[:4] == "<!--":      return "-->"
+	case len(s) >= 9 && s[:9] == "<![CDATA[": return "]]>"
+	case len(s) >= 2 && s[1] == '?':          return "?>"
 	}
 	return ""
 }
@@ -368,6 +360,13 @@ expansion_room :: proc "contextless" (v: ^Dtd_View, src, span: []u8, nest := 0) 
 	return room
 }
 
+@(private)
+apply_run_flags :: #force_inline proc "contextless" (f: ^Frame, r: Run, p, bound: [^]u8) {
+	if bound > p { f.flags += {.Seen, .Chars} }
+	if r.decode  { f.flags += {.Decode} }
+	if r.dtd     { f.flags += {.Dtd} }
+}
+
 // `p` is at the reference that ends a text run in the content of the element with `d` open elements, or at the end
 // of a replacement text's literal. Descends into the literal of an entity whose replacement holds markup, returns
 // from a literal to the text after its reference, or gives the run's fault.
@@ -382,15 +381,7 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 	f := &w.stack[d - 1]
 	if r.entity != 0 {
 		amp := r.q
-		if amp > p {
-			f.flags += {.Seen, .Chars}
-		}
-		if r.decode {
-			f.flags += {.Decode}
-		}
-		if r.dtd {
-			f.flags += {.Dtd}
-		}
+		apply_run_flags(f, r, p, amp)
 		i := r.entity - 1
 		e := t.entities[i]
 		name_after, _ := name_end(amp[1:], end)
@@ -442,37 +433,23 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 			return fault(w, hs, fr.at, .Bad_Char, .Entity_Boundary)
 		}
 		t.depth -= 1
-		if end > p {
-			f.flags += {.Seen, .Chars}
-		}
-		if r.decode {
-			f.flags += {.Decode}
-		}
-		if r.dtd {
-			f.flags += {.Dtd}
-		}
-		if .Element in t.entities[fr.entity].flags {
+		apply_run_flags(f, r, p, end)
+		has_elem := .Element in t.entities[fr.entity].flags
+		if has_elem {
 			if res, done := text_member(w, on, &hs, f, end); done {
 				return res
 			}
-			when LAX {
-				if t.depth == 0 {
-					w.in_subset = false
-					if w.subset != nil {
-						dtd_bind_hook_src(w, t, false)
-					}
+		}
+		when LAX {
+			if t.depth == 0 {
+				w.in_subset = false
+				if w.subset != nil {
+					dtd_bind_hook_src(w, t, false)
 				}
 			}
+		}
+		if has_elem {
 			f.text_lo = at(w, fr.resume)
-		} else {
-			when LAX {
-				if t.depth == 0 {
-					w.in_subset = false
-					if w.subset != nil {
-						dtd_bind_hook_src(w, t, false)
-					}
-				}
-			}
 		}
 		return #must_tail st_content(fr.resume, fr.end, d, w, hs.a, hs.b, hs.c, on)
 	}

@@ -72,16 +72,8 @@ records_close :: proc(records: ^tape.Records) {
 records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.allocator) -> (n: int) {
 	lax := r.opts.budget.steps != 0
 	switch r.spec {
-	case .Toml_1_0:
-		if lax {
-			return records_validate_as(r, out, .Toml_1_0, true, allocator)
-		}
-		return records_validate_as(r, out, .Toml_1_0, false, allocator)
-	case .Toml_1_1:
-		if lax {
-			return records_validate_as(r, out, .Toml_1_1, true, allocator)
-		}
-		return records_validate_as(r, out, .Toml_1_1, false, allocator)
+	case .Toml_1_0: return records_validate_as(r, out, .Toml_1_0, true, allocator) if lax else records_validate_as(r, out, .Toml_1_0, false, allocator)
+	case .Toml_1_1: return records_validate_as(r, out, .Toml_1_1, true, allocator) if lax else records_validate_as(r, out, .Toml_1_1, false, allocator)
 	}
 	return
 }
@@ -93,16 +85,8 @@ records_validate :: proc(r: ^Records, out: []tape.Record, allocator := context.a
 records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	lax := r.opts.budget.steps != 0
 	switch r.spec {
-	case .Toml_1_0:
-		if lax {
-			return records_find_as(r, path, out, answers, .Toml_1_0, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Toml_1_0, false, read, allocator)
-	case .Toml_1_1:
-		if lax {
-			return records_find_as(r, path, out, answers, .Toml_1_1, true, read, allocator)
-		}
-		return records_find_as(r, path, out, answers, .Toml_1_1, false, read, allocator)
+	case .Toml_1_0: return records_find_as(r, path, out, answers, .Toml_1_0, true, read, allocator) if lax else records_find_as(r, path, out, answers, .Toml_1_0, false, read, allocator)
+	case .Toml_1_1: return records_find_as(r, path, out, answers, .Toml_1_1, true, read, allocator) if lax else records_find_as(r, path, out, answers, .Toml_1_1, false, read, allocator)
 	}
 	return
 }
@@ -114,52 +98,30 @@ records_find :: proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers
 records_scan :: proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, read := tape.Read_Options{}, allocator := context.allocator) -> (n: int) {
 	lax := r.opts.budget.steps != 0
 	switch r.spec {
-	case .Toml_1_0:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Toml_1_0, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Toml_1_0, false, read, allocator)
-	case .Toml_1_1:
-		if lax {
-			return records_scan_as(r, demand, out, docs, .Toml_1_1, true, read, allocator)
-		}
-		return records_scan_as(r, demand, out, docs, .Toml_1_1, false, read, allocator)
+	case .Toml_1_0: return records_scan_as(r, demand, out, docs, .Toml_1_0, true, read, allocator) if lax else records_scan_as(r, demand, out, docs, .Toml_1_0, false, read, allocator)
+	case .Toml_1_1: return records_scan_as(r, demand, out, docs, .Toml_1_1, true, read, allocator) if lax else records_scan_as(r, demand, out, docs, .Toml_1_1, false, read, allocator)
 	}
 	return
 }
 
 @(private)
 records_validate_as :: #force_no_inline proc(r: ^Records, out: []tape.Record, $S: Spec, $LAX: bool, caller: runtime.Allocator) -> int {
-	frame :: #force_inline proc(r: ^tape.Records, _: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
-		return record_frame(container_of(r, Records, "records"), S)
-	}
-	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
-		return record_walk(container_of(r, Records, "records"), S, LAX, h, regs, a, ctx, hook.no_hook)
-	}
+	frame :: #force_inline proc(r: ^tape.Records, _: runtime.Allocator) -> (u64, u64, bool) { return record_frame(container_of(r, Records, "records"), S) }
+	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^hook.No_Hooks, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk { return record_walk(container_of(r, Records, "records"), S, LAX, h, regs, a, ctx, hook.no_hook) }
 	return build.records_validate(r, out, &FORMATS[S], &RULES, caller, frame, walk)
 }
 
 @(private)
 records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> int {
-	frame :: #force_inline proc(r: ^tape.Records, _: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
-		return record_frame(container_of(r, Records, "records"), S)
-	}
-	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
-		return record_walk(container_of(r, Records, "records"), S, LAX, h, regs, a, ctx, build.finder_key_skip_hook)
-	}
+	frame :: #force_inline proc(r: ^tape.Records, _: runtime.Allocator) -> (u64, u64, bool) { return record_frame(container_of(r, Records, "records"), S) }
+	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Finder, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk { return record_walk(container_of(r, Records, "records"), S, LAX, h, regs, a, ctx, build.finder_key_skip_hook) }
 	return build.records_find(r, path, out, answers, &FORMATS[S], &RULES, read, caller, respell, nil, frame, walk)
 }
 
 @(private)
 records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> int {
-	frame :: #force_inline proc(r: ^tape.Records, _: runtime.Allocator) -> (lo, cut: u64, ok: bool) {
-		return record_frame(container_of(r, Records, "records"), S)
-	}
-	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk {
-		// Records of a text in pieces hold the bytes they keep, which the walk gives out of text order.
-		h.scattered = true
-		return record_walk(container_of(r, Records, "records"), S, LAX, h, regs, a, ctx, build.scanner_key_skip_hook)
-	}
+	frame :: #force_inline proc(r: ^tape.Records, _: runtime.Allocator) -> (u64, u64, bool) { return record_frame(container_of(r, Records, "records"), S) }
+	walk :: #force_inline proc(r: ^tape.Records, lo, cut: u64, alone: bool, h: ^build.Scanner, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> build.Record_Walk { h.scattered = true; return record_walk(container_of(r, Records, "records"), S, LAX, h, regs, a, ctx, build.scanner_key_skip_hook) }
 	n := build.records_scan(r, demand, out, docs, &FORMATS[S], &RULES, read, caller, nil, node_bound, frame, walk)
 	for &doc in docs[:n] {
 		doc, _ = spelled_present(doc, nil)

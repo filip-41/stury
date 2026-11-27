@@ -2,12 +2,11 @@
 package schema
 
 import "base:runtime"
+import "core:slice"
 import "stury:lib/core/tape"
 import "stury:lib/schema/check"
 import "stury:lib/schema/rules"
 
-// Compiled plans for a root array whose rules apply per element (`items` + optional `minItems`/`maxItems`).
-// Allows checking individual array elements independently (e.g., streaming or parallel record workers).
 Elements :: struct {
 	item_plan:   check.Plan,
 	has_counts:  bool,
@@ -18,17 +17,11 @@ Elements :: struct {
 	allocator:   runtime.Allocator,
 }
 
-// Extracts a per-element `Elements` plan if `d`'s root is a pure `items`-only array (with optional min/maxItems),
-// or returns `nil` when the root has cross-element or non-array constraints.
 @(require_results)
 elements_of :: proc(d: ^rules.Description, allocator := context.allocator) -> ^Elements {
-	if d == nil {
-		return nil
-	}
+	if d == nil { return nil }
 	node, hops := rules.ref_end(d, d.root)
-	if node == rules.NONE {
-		return nil
-	}
+	if node == rules.NONE { return nil }
 	n := d.nodes[node]
 	counts := n.rules
 	counts.min_items, counts.max_items = 0, nil
@@ -42,48 +35,27 @@ elements_of :: proc(d: ^rules.Description, allocator := context.allocator) -> ^E
 		return nil
 	}
 	e, aerr := new(Elements, allocator)
-	if aerr != nil {
-		return nil
-	}
+	if aerr != nil { return nil }
 	e.allocator = allocator
 	view := d^
 	view.root = a.items
 	item_plan, ierr := check.compile(&view, allocator)
-	if ierr.kind != .None {
-		free(e, allocator)
-		return nil
-	}
-	e.item_plan = item_plan
-	e.min_items, e.max_items = n.rules.min_items, n.rules.max_items
+	if ierr.kind != .None { free(e, allocator); return nil }
+	e.item_plan, e.min_items, e.max_items = item_plan, n.rules.min_items, n.rules.max_items
 
 	if e.min_items > 0 || e.max_items != nil {
-		arrays, arr_err := make([dynamic]rules.Array, 0, len(d.arrays), allocator)
-		if arr_err != nil {
-			elements_destroy(e)
-			return nil
-		}
+		arrays, arr_err := slice.clone_to_dynamic(d.arrays[:], allocator)
+		if arr_err != nil { elements_destroy(e); return nil }
 		defer delete(arrays)
-		if _, app_err := append(&arrays, ..d.arrays[:]); app_err != nil {
-			elements_destroy(e)
-			return nil
-		}
 		arrays[n.array].items = rules.NONE
 		counted := d^
 		counted.arrays = arrays
 		cplan, cerr := check.compile(&counted, allocator)
-		if cerr.kind != .None {
-			elements_destroy(e)
-			return nil
-		}
-		e.counts_plan = cplan
-		e.has_counts = true
+		if cerr.kind != .None { elements_destroy(e); return nil }
+		e.counts_plan, e.has_counts = cplan, true
 	}
-
 	words, werr := make([]tape.Step, hops + 1, allocator)
-	if werr != nil {
-		elements_destroy(e)
-		return nil
-	}
+	if werr != nil { elements_destroy(e); return nil }
 	hop := d.root
 	for i in 0 ..< hops {
 		words[i] = tape.Name(rules.ref_keyword(&d.nodes[hop]))
@@ -94,16 +66,11 @@ elements_of :: proc(d: ^rules.Description, allocator := context.allocator) -> ^E
 	return e
 }
 
-// Frees `e` and its compiled plans.
 elements_destroy :: proc(e: ^Elements) {
-	if e == nil {
-		return
-	}
+	if e == nil { return }
 	a := e.allocator
 	check.plan_destroy(&e.item_plan)
-	if e.has_counts {
-		check.plan_destroy(&e.counts_plan)
-	}
+	if e.has_counts { check.plan_destroy(&e.counts_plan) }
 	delete(e.keyword_pfx, a)
 	free(e, a)
 }

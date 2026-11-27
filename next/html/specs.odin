@@ -21,12 +21,16 @@ ID :: tape.FORMAT_ID_HTML
 @(private)
 FACTS :: tape.COMMENTS + {.Doctype, .Attribute, .Instruction, .Instruction_Foot}
 
+// Format capabilities: HTML elements depend on tree-construction context, keys group by name, and inputs are UTF-8 text.
+CAPS :: tape.Caps{}
+
 @(private, rodata)
 FORMATS := [Spec]tape.Format {
 	.Html = {
 		name      = "html",
 		id        = ID,
 		facts     = FACTS,
+		caps      = CAPS,
 		options   = .Xml,
 		dups      = .Group,
 		refuses   = {.Invalid_Utf8},
@@ -45,6 +49,7 @@ FORMATS := [Spec]tape.Format {
 		name      = "html_fragment",
 		id        = ID + 1,
 		facts     = FACTS,
+		caps      = CAPS,
 		options   = .Xml,
 		dups      = .Group,
 		refuses   = {.Invalid_Utf8},

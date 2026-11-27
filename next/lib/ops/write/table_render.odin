@@ -200,51 +200,14 @@ emit_box_rule :: proc(out: ^Out, widths: []int, left, mid, right_edge, fill: str
 
 @(private = "file")
 cell_align_right :: #force_inline proc "contextless" (cell: Cell_Span, col_is_right: bool, align: Column_Align, is_header: bool) -> bool {
-	switch align {
-	case .Left:
-		return false
-	case .Right:
-		return true
-	case .Auto:
-		if !col_is_right {
-			return false
-		}
-		return is_header || .Numeric in cell.flags
-	}
-	return false
-}
-
-@(private = "file", cold)
-put_truncated_cell :: #force_no_inline proc(out: ^Out, s: string, col_width: int, align_right, pad_trailing: bool, max_width: int, ascii_ellipsis: bool) {
-	prefix, used, suffix := truncate_display(s, max_width, ascii_ellipsis)
-	pad := max(col_width - used, 0)
-	if align_right {
-		put_spaces(out, pad)
-		put_str(out, prefix)
-		put_str(out, suffix)
-	} else {
-		put_str(out, prefix)
-		put_str(out, suffix)
-		if pad_trailing {
-			put_spaces(out, pad)
-		}
-	}
+	return align == .Right || (align == .Auto && col_is_right && (is_header || .Numeric in cell.flags))
 }
 
 @(private = "file")
 put_aligned_cell :: #force_inline proc(out: ^Out, s: string, width, col_width: int, align_right, pad_trailing: bool, max_width: int, ascii_ellipsis: bool) {
+	prefix, suffix, used := s, "", width
 	if max_width > 0 && width > max_width {
-		put_truncated_cell(out, s, col_width, align_right, pad_trailing, max_width, ascii_ellipsis)
-		return
+		prefix, used, suffix = truncate_display(s, max_width, ascii_ellipsis)
 	}
-	pad := max(col_width - width, 0)
-	if align_right {
-		put_spaces(out, pad)
-		put_str(out, s)
-	} else {
-		put_str(out, s)
-		if pad_trailing {
-			put_spaces(out, pad)
-		}
-	}
+	put_padded_cell(out, prefix, suffix, max(col_width - used, 0), align_right, pad_trailing)
 }

@@ -23,8 +23,7 @@ error_value :: proc(m: ^Machine) -> (res: query.Value, status: query.Status) {
 	return query.text_value(h, string(out[:]))
 }
 
-// The message jq prints for error `e` when nothing catches it, without its `jq: error (at ...)` head: a raised string
-// as it is, any other raised value as JSON with " (not a string)" after it, the rest as jq words them.
+// The message jq prints for error `e` when nothing catches it, without its `jq: error (at ...)` head.
 error_message :: proc(h: ^query.Heap, e: ^query.Error, allocator := context.allocator) -> string {
 	out := make([dynamic]u8, allocator)
 	if e.kind == .Raised && !query.is_text(e.a) {
@@ -36,6 +35,13 @@ error_message :: proc(h: ^query.Heap, e: ^query.Error, allocator := context.allo
 	}
 	write_error(h, &out, e)
 	return string(out[:])
+}
+
+@(private)
+append_all_str :: proc(out: ^[dynamic]u8, parts: ..string) {
+	for p in parts {
+		append(out, p)
+	}
 }
 
 // Appends jq's words for error `e` to `out`.
@@ -73,34 +79,32 @@ write_error :: proc(h: ^query.Heap, out: ^[dynamic]u8, e: ^query.Error) {
 			pair(h, out, e, " cannot be divided (remainder)")
 		case .Contains:
 			pair(h, out, e, " cannot have their containment checked")
-		case .Negate:
+		case .Set:
+			pair(h, out, e, " cannot be combined as sets")
+		case .Negate, .Aggregate, .Keys, .Search:
 			typed(h, out, e.a)
-			append(out, " cannot be negated")
+			#partial switch e.op {
+			case .Negate:
+				append(out, " cannot be negated")
+			case .Aggregate:
+				append(out, " cannot be summarized")
+			case .Keys:
+				append(out, " has no keys")
+			case .Search:
+				append(out, " cannot be searched from")
+			}
 		case .Index:
 			if e.detail == "object key" {
 				append(out, "Object keys must be strings")
 				return
 			}
-			append(out, "Cannot index ")
-			append(out, type_name(e.a))
-			append(out, " with ")
+			append_all_str(out, "Cannot index ", type_name(e.a), " with ")
 			typed(h, out, e.b)
 		case .Slice:
 			append(out, "Array/string slice indices must be integers")
 		case .Iterate:
 			append(out, "Cannot iterate over ")
 			typed(h, out, e.a)
-		case .Aggregate:
-			typed(h, out, e.a)
-			append(out, " cannot be summarized")
-		case .Set:
-			pair(h, out, e, " cannot be combined as sets")
-		case .Keys:
-			typed(h, out, e.a)
-			append(out, " has no keys")
-		case .Search:
-			typed(h, out, e.a)
-			append(out, " cannot be searched from")
 		case .Reshape:
 			append(out, "melt and pivot take an array of keys and two strings")
 		case .Number_Format:
@@ -110,19 +114,13 @@ write_error :: proc(h: ^query.Heap, out: ^[dynamic]u8, e: ^query.Error) {
 			case "":
 				append(out, "Path must be specified as an array" if e.op != .Delete_Paths else "Paths must be specified as an array")
 			case "path":
-				append(out, "Path must be specified as array, not ")
-				append(out, type_name(e.a))
+				append_all_str(out, "Path must be specified as array, not ", type_name(e.a))
 			case "element of array":
-				append(out, "Cannot delete ")
-				append(out, type_name(e.b))
-				append(out, " element of array")
+				append_all_str(out, "Cannot delete ", type_name(e.b), " element of array")
 			case "fields from":
-				append(out, "Cannot delete fields from ")
-				append(out, type_name(e.a))
+				append_all_str(out, "Cannot delete fields from ", type_name(e.a))
 			case "field of object":
-				append(out, "Cannot delete ")
-				append(out, type_name(e.b))
-				append(out, " field of object")
+				append_all_str(out, "Cannot delete ", type_name(e.b), " field of object")
 			case:
 				append(out, e.detail)
 			}
@@ -170,33 +168,26 @@ write_error :: proc(h: ^query.Heap, out: ^[dynamic]u8, e: ^query.Error) {
 	}
 }
 
-// Appends jq's words for the engine's faults in the texts it reads: a URL, a logfmt line, an IP address, a pointer and
-// a number format. False for any other error.
 @(private)
 write_text_fault :: proc(h: ^query.Heap, out: ^[dynamic]u8, e: ^query.Error) -> bool {
 	#partial switch e.op {
 	case .Url, .Address:
 		typed(h, out, e.a)
-		append(out, " ")
-		append(out, e.detail)
+		append_all_str(out, " ", e.detail)
 	case .Logfmt:
 		line := query.text_of(e.a)
 		at := int(query.as_f64(e.b))
 		append(out, "logfmt: ")
 		if e.detail == "unexpected" {
-			append(out, "unexpected ")
-			append(out, line[at:at + 1])
-			append(out, " at byte ")
 			numeral: [20]u8
-			append(out, strconv.write_int(numeral[:], i64(at), 10))
+			append_all_str(out, "unexpected ", line[at:at + 1], " at byte ", strconv.write_int(numeral[:], i64(at), 10))
 			return true
 		}
 		end := at
 		for end < len(line) && line[end] != '=' {
 			end += 1
 		}
-		append(out, "unknown escape in the value of " if e.detail == "unknown escape" else "the quoted value of ")
-		append(out, line[at:end])
+		append_all_str(out, "unknown escape in the value of " if e.detail == "unknown escape" else "the quoted value of ", line[at:end])
 		if e.detail == "unclosed" {
 			append(out, " is not closed")
 		}
@@ -211,26 +202,21 @@ write_text_fault :: proc(h: ^query.Heap, out: ^[dynamic]u8, e: ^query.Error) -> 
 	case .Number_Format:
 		if e.kind == .Range {
 			append(out, "numfmt requires a finite number")
-			return true
+		} else {
+			append_all_str(out, `numfmt: invalid format "`, query.text_of(e.a), `"`)
 		}
-		append(out, `numfmt: invalid format "`)
-		append(out, query.text_of(e.a))
-		append(out, `"`)
 	case:
 		return false
 	}
 	return true
 }
 
-// `type (value)`, as jq names an operand.
 @(private)
 typed :: proc(h: ^query.Heap, out: ^[dynamic]u8, v: query.Value) {
-	append(out, type_name(v))
-	append(out, " (")
+	append_all_str(out, type_name(v), " (")
 	write_brief(h, out, v)
 	append(out, ")")
 }
-
 
 // jq's message for the time error `e` of builtin `name`.
 @(private)
@@ -238,22 +224,18 @@ write_time_error :: proc(out: ^[dynamic]u8, name: string, e: ^query.Error) {
 	arity1 := name == "strftime" || name == "strflocaltime" || name == "strptime"
 	switch e.detail {
 	case query.TIME_NUMBER:
-		append(out, name)
-		append(out, "() requires numeric inputs")
+		append_all_str(out, name, "() requires numeric inputs")
 	case query.TIME_ARRAY:
 		append(out, "mktime requires array inputs")
 	case query.TIME_DATETIME:
-		append(out, name)
-		append(out, "/1 requires parsed datetime inputs" if arity1 else " requires parsed datetime inputs")
+		append_all_str(out, name, "/1 requires parsed datetime inputs" if arity1 else " requires parsed datetime inputs")
 	case query.TIME_FORMAT:
-		append(out, name)
-		append(out, "/1 requires a string format")
+		append_all_str(out, name, "/1 requires a string format")
 	case query.TIME_STRINGS:
 		if name == "strptime" {
 			append(out, "strptime/1 requires string inputs and arguments")
 		} else {
-			append(out, name)
-			append(out, " requires string inputs")
+			append_all_str(out, name, " requires string inputs")
 		}
 	case query.TIME_RANGE:
 		append(out, "error converting number of seconds since epoch to datetime")
@@ -262,18 +244,11 @@ write_time_error :: proc(out: ^[dynamic]u8, name: string, e: ^query.Error) {
 	case query.TIME_UNSUPPORTED:
 		append(out, "mktime not supported on this platform")
 	case query.TIME_MISMATCH:
-		append(out, "date \"")
-		append(out, query.text_of(e.a))
-		append(out, "\" does not match format \"")
-		append(out, query.text_of(e.b))
-		append(out, "\"")
+		append_all_str(out, "date \"", query.text_of(e.a), "\" does not match format \"", query.text_of(e.b), "\"")
 	case query.TIME_FAILURE:
-		append(out, name)
-		append(out, "/1: unknown system failure")
+		append_all_str(out, name, "/1: unknown system failure")
 	case query.TIME_RFC3339:
-		append(out, "date \"")
-		append(out, query.text_of(e.a))
-		append(out, "\" is not an RFC 3339 date-time")
+		append_all_str(out, "date \"", query.text_of(e.a), "\" is not an RFC 3339 date-time")
 	case query.TIME_YEARS:
 		append(out, "torfc3339() input is outside the years 0000 to 9999")
 	}

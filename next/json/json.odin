@@ -28,7 +28,6 @@ Options :: tape.Options
 @(private)
 REWALK :: #config(JSON_REWALK, true)
 
-@(private)
 CAPS :: tape.Caps{.Rewalk} when REWALK else tape.Caps{}
 
 @(private, rodata)
@@ -62,21 +61,9 @@ validate :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, 
 	}
 	lax := build.read_lax(opts)
 	switch spec {
-	case .Json:
-		if lax {
-			return validate_as(src, .Json, true, opts, allocator)
-		}
-		return validate_as(src, .Json, false, opts, allocator)
-	case .Jsonc:
-		if lax {
-			return validate_as(src, .Jsonc, true, opts, allocator)
-		}
-		return validate_as(src, .Jsonc, false, opts, allocator)
-	case .Json5:
-		if lax {
-			return validate_as(src, .Json5, true, opts, allocator)
-		}
-		return validate_as(src, .Json5, false, opts, allocator)
+	case .Json:  return validate_as(src, .Json, true, opts, allocator) if lax else validate_as(src, .Json, false, opts, allocator)
+	case .Jsonc: return validate_as(src, .Jsonc, true, opts, allocator) if lax else validate_as(src, .Jsonc, false, opts, allocator)
+	case .Json5: return validate_as(src, .Json5, true, opts, allocator) if lax else validate_as(src, .Json5, false, opts, allocator)
 	}
 	runtime.panic_contextless("json: spec out of range")
 }
@@ -96,21 +83,9 @@ build :: #force_inline proc(src: []u8, spec := Spec.Json, opts := Options{}, all
 	}
 	lax := build.read_lax(opts)
 	switch spec {
-	case .Json:
-		if lax {
-			return build_as(src, .Json, true, opts, allocator)
-		}
-		return build_as(src, .Json, false, opts, allocator)
-	case .Jsonc:
-		if lax {
-			return build_as(src, .Jsonc, true, opts, allocator)
-		}
-		return build_as(src, .Jsonc, false, opts, allocator)
-	case .Json5:
-		if lax {
-			return build_as(src, .Json5, true, opts, allocator)
-		}
-		return build_as(src, .Json5, false, opts, allocator)
+	case .Json:  if lax { return build_as(src, .Json, true, opts, allocator) }; return build_as(src, .Json, false, opts, allocator)
+	case .Jsonc: if lax { return build_as(src, .Jsonc, true, opts, allocator) }; return build_as(src, .Jsonc, false, opts, allocator)
+	case .Json5: if lax { return build_as(src, .Json5, true, opts, allocator) }; return build_as(src, .Json5, false, opts, allocator)
 	}
 	panic("json: spec out of range")
 }
@@ -125,21 +100,9 @@ find :: #force_inline proc(src: []u8, path: []tape.Step, spec := Spec.Json, read
 	hook.probe_stack(READ_STACK)
 	lax := build.read_lax(opts)
 	switch spec {
-	case .Json:
-		if lax {
-			return find_as(src, path, .Json, true, read, opts, allocator)
-		}
-		return find_as(src, path, .Json, false, read, opts, allocator)
-	case .Jsonc:
-		if lax {
-			return find_as(src, path, .Jsonc, true, read, opts, allocator)
-		}
-		return find_as(src, path, .Jsonc, false, read, opts, allocator)
-	case .Json5:
-		if lax {
-			return find_as(src, path, .Json5, true, read, opts, allocator)
-		}
-		return find_as(src, path, .Json5, false, read, opts, allocator)
+	case .Json:  if lax { return find_as(src, path, .Json, true, read, opts, allocator) }; return find_as(src, path, .Json, false, read, opts, allocator)
+	case .Jsonc: if lax { return find_as(src, path, .Jsonc, true, read, opts, allocator) }; return find_as(src, path, .Jsonc, false, read, opts, allocator)
+	case .Json5: if lax { return find_as(src, path, .Json5, true, read, opts, allocator) }; return find_as(src, path, .Json5, false, read, opts, allocator)
 	}
 	panic("json: spec out of range")
 }
@@ -154,21 +117,9 @@ scan :: #force_inline proc(src: []u8, demand: ^tape.Demand, spec := Spec.Json, r
 	hook.probe_stack(READ_STACK)
 	lax := build.read_lax(opts)
 	switch spec {
-	case .Json:
-		if lax {
-			return scan_as(src, demand, .Json, true, read, opts, allocator)
-		}
-		return scan_as(src, demand, .Json, false, read, opts, allocator)
-	case .Jsonc:
-		if lax {
-			return scan_as(src, demand, .Jsonc, true, read, opts, allocator)
-		}
-		return scan_as(src, demand, .Jsonc, false, read, opts, allocator)
-	case .Json5:
-		if lax {
-			return scan_as(src, demand, .Json5, true, read, opts, allocator)
-		}
-		return scan_as(src, demand, .Json5, false, read, opts, allocator)
+	case .Json:  if lax { return scan_as(src, demand, .Json, true, read, opts, allocator) }; return scan_as(src, demand, .Json, false, read, opts, allocator)
+	case .Jsonc: if lax { return scan_as(src, demand, .Jsonc, true, read, opts, allocator) }; return scan_as(src, demand, .Jsonc, false, read, opts, allocator)
+	case .Json5: if lax { return scan_as(src, demand, .Json5, true, read, opts, allocator) }; return scan_as(src, demand, .Json5, false, read, opts, allocator)
 	}
 	panic("json: spec out of range")
 }

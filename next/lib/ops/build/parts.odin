@@ -185,7 +185,7 @@ parts_build :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, parts: 
 			doc.flags += {.Tolerated}
 		}
 	}
-	e := finish(&doc, segs, opts, data) if finish != nil else segments_dups_fast(&doc, segs, opts.dups, rules, opts.runner)
+	e := finish(&doc, segs, opts, data) if finish != nil else segments_dups(&doc, segs, opts.dups, rules, opts.runner)
 	if e != nil {
 		if _, refused := e.(runtime.Allocator_Error); refused {
 			return {}, nil, false

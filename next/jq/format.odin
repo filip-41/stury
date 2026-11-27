@@ -6,36 +6,16 @@ import "stury:lib/query"
 // jq's `@name` formats and the texts of values.
 
 @(private = "file", rodata)
-DIGIT_PAIRS := [200]u8 {
-	'0', '0', '0', '1', '0', '2', '0', '3', '0', '4', '0', '5', '0', '6', '0', '7', '0', '8', '0', '9',
-	'1', '0', '1', '1', '1', '2', '1', '3', '1', '4', '1', '5', '1', '6', '1', '7', '1', '8', '1', '9',
-	'2', '0', '2', '1', '2', '2', '2', '3', '2', '4', '2', '5', '2', '6', '2', '7', '2', '8', '2', '9',
-	'3', '0', '3', '1', '3', '2', '3', '3', '3', '4', '3', '5', '3', '6', '3', '7', '3', '8', '3', '9',
-	'4', '0', '4', '1', '4', '2', '4', '3', '4', '4', '4', '5', '4', '6', '4', '7', '4', '8', '4', '9',
-	'5', '0', '5', '1', '5', '2', '5', '3', '5', '4', '5', '5', '5', '6', '5', '7', '5', '8', '5', '9',
-	'6', '0', '6', '1', '6', '2', '6', '3', '6', '4', '6', '5', '6', '6', '6', '7', '6', '8', '6', '9',
-	'7', '0', '7', '1', '7', '2', '7', '3', '7', '4', '7', '5', '7', '6', '7', '7', '7', '8', '7', '9',
-	'8', '0', '8', '1', '8', '2', '8', '3', '8', '4', '8', '5', '8', '6', '8', '7', '8', '8', '8', '9',
-	'9', '0', '9', '1', '9', '2', '9', '3', '9', '4', '9', '5', '9', '6', '9', '7', '9', '8', '9', '9',
-}
+DIGIT_PAIRS := "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899"
 
 @(private = "file")
 dec_len_u64 :: #force_inline proc "contextless" (v: u64) -> int {
-	n := 1
-	x := v
+	n, x := 1, v
 	for {
-		if x < 10 {
-			return n
-		}
-		if x < 100 {
-			return n + 1
-		}
-		if x < 1000 {
-			return n + 2
-		}
-		if x < 10000 {
-			return n + 3
-		}
+		if x < 10 { return n }
+		if x < 100 { return n + 1 }
+		if x < 1000 { return n + 2 }
+		if x < 10000 { return n + 3 }
 		x /= 10000
 		n += 4
 	}
@@ -45,8 +25,7 @@ dec_len_u64 :: #force_inline proc "contextless" (v: u64) -> int {
 int_to_text :: proc(h: ^query.Heap, x: i64) -> (query.Value, query.Status) #no_bounds_check {
 	neg := x < 0
 	mag := u64(0) - u64(x) if neg else u64(x)
-	digits := dec_len_u64(mag)
-	total := digits + int(neg)
+	total := dec_len_u64(mag) + int(neg)
 	v, p, s := query.make_text(h, total)
 	if s != .Ok {
 		return query.NULL, s
@@ -60,13 +39,11 @@ int_to_text :: proc(h: ^query.Heap, x: i64) -> (query.Value, query.Status) #no_b
 		r := (mag - q * 100) * 2
 		mag = q
 		at -= 2
-		p[at] = DIGIT_PAIRS[r]
-		p[at + 1] = DIGIT_PAIRS[r + 1]
+		p[at], p[at + 1] = DIGIT_PAIRS[r], DIGIT_PAIRS[r + 1]
 	}
 	if mag >= 10 {
 		r := mag * 2
-		p[at - 2] = DIGIT_PAIRS[r]
-		p[at - 1] = DIGIT_PAIRS[r + 1]
+		p[at - 2], p[at - 1] = DIGIT_PAIRS[r], DIGIT_PAIRS[r + 1]
 	} else {
 		p[at - 1] = u8('0' + mag)
 	}
@@ -75,7 +52,7 @@ int_to_text :: proc(h: ^query.Heap, x: i64) -> (query.Value, query.Status) #no_b
 
 // `v` as JSON text, as jq's `tojson` writes it.
 @(private)
-to_json :: proc(h: ^query.Heap, v: query.Value) -> (res: query.Value, status: query.Status) {
+to_json :: proc(h: ^query.Heap, v: query.Value) -> (query.Value, query.Status) {
 	#partial switch v.kind {
 	case .Absent, .Null:
 		return query.text_borrowed("null"), .Ok
@@ -95,8 +72,7 @@ to_json_slow :: #force_no_inline proc(h: ^query.Heap, v: query.Value) -> (res: q
 		buf: [32]u8
 		return query.text_value(h, jq_double(buf[:], v.f))
 	}
-	alloc := query.heap_allocator(h)
-	out := make([dynamic]u8, alloc)
+	out := make([dynamic]u8, query.heap_allocator(h))
 	defer delete(out)
 	query.write_json(h, &out, v, {double = jq_double, too_deep = TOO_DEEP}) or_return
 	return query.text_value(h, string(out[:]))
@@ -104,7 +80,7 @@ to_json_slow :: #force_no_inline proc(h: ^query.Heap, v: query.Value) -> (res: q
 
 // `tostring`: a string as it is, anything else as JSON.
 @(private)
-to_text :: proc(h: ^query.Heap, v: query.Value) -> (res: query.Value, status: query.Status) {
+to_text :: proc(h: ^query.Heap, v: query.Value) -> (query.Value, query.Status) {
 	if query.is_text(v) {
 		return query.retain(v), .Ok
 	}
@@ -144,22 +120,16 @@ format_value :: proc(m: ^Machine, name: string, v: query.Value) -> (res: query.V
 	case "base32":
 		return query.encode_base(h, s, .Base32, true)
 	case "base64d", "base32d":
-		x, fault := query.decode_base(h, s, .Base64 if name == "base64d" else .Base32) or_return
+		is_64 := name == "base64d"
+		x, fault := query.decode_base(h, s, .Base64 if is_64 else .Base32) or_return
 		if fault != .None {
-			return query.NULL, cannot_decode(m, t, base_fault_text(fault, "base64" if name == "base64d" else "base32"))
+			return query.NULL, cannot_decode(m, t, base_fault_text(fault, "base64" if is_64 else "base32"))
 		}
 		return x, .Ok
 	}
-	out := make([dynamic]u8, h.allocator)
-	defer delete(out)
-	append(&out, name)
-	append(&out, " is not a valid format")
-	msg := query.text_value(h, string(out[:])) or_return
-	defer query.release(h, msg)
-	return query.NULL, raise(h, msg)
+	return query.NULL, raise_joined(m, name, " is not a valid format")
 }
 
-// What jq says is wrong with a base 64 or 32 text.
 @(private)
 base_fault_text :: proc(fault: query.Decode_Fault, base: string) -> string {
 	if fault == .Lone_Digit {
@@ -173,39 +143,26 @@ cannot_decode :: proc(m: ^Machine, t: query.Value, why: string) -> query.Status 
 	out := make([dynamic]u8, m.h.allocator)
 	defer delete(out)
 	typed(m.h, &out, t)
-	append(&out, " ")
-	append(&out, why)
-	msg, s := query.text_value(m.h, string(out[:]))
-	if s != .Ok {
-		return s
-	}
-	defer query.release(m.h, msg)
-	return raise(m.h, msg)
+	append_all_str(&out, " ", why)
+	return raise_owned_text(m, string(out[:]))
 }
 
 @(private)
-escape_html :: proc(h: ^query.Heap, s: string) -> (res: query.Value, status: query.Status) {
-	alloc := query.heap_allocator(h)
-	out, aerr := make([dynamic]u8, 0, len(s), alloc)
+escape_html :: proc(h: ^query.Heap, s: string) -> (query.Value, query.Status) {
+	out, aerr := make([dynamic]u8, 0, len(s), query.heap_allocator(h))
 	if aerr != nil {
 		return query.NULL, query.fail(h, .Memory, .None)
 	}
 	defer delete(out)
-	for i in 0 ..< len(s) {
+	for c in transmute([]u8)s {
 		err: runtime.Allocator_Error
-		switch s[i] {
-		case '<':
-			_, err = append(&out, "&lt;")
-		case '>':
-			_, err = append(&out, "&gt;")
-		case '&':
-			_, err = append(&out, "&amp;")
-		case '\'':
-			_, err = append(&out, "&apos;")
-		case '"':
-			_, err = append(&out, "&quot;")
-		case:
-			_, err = append(&out, s[i])
+		switch c {
+		case '<':  _, err = append(&out, "&lt;")
+		case '>':  _, err = append(&out, "&gt;")
+		case '&':  _, err = append(&out, "&amp;")
+		case '\'': _, err = append(&out, "&apos;")
+		case '"':  _, err = append(&out, "&quot;")
+		case:      _, err = append(&out, c)
 		}
 		if err != nil {
 			return query.NULL, query.fail(h, .Memory, .None)
@@ -223,8 +180,7 @@ format_row :: proc(m: ^Machine, v: query.Value, csv: bool) -> (res: query.Value,
 	}
 	a := query.built(h, v) or_return
 	defer query.release(h, a)
-	alloc := query.heap_allocator(h)
-	out := make([dynamic]u8, alloc)
+	out := make([dynamic]u8, query.heap_allocator(h))
 	defer delete(out)
 	for x, i in query.items_of(a) {
 		if i > 0 {
@@ -249,22 +205,16 @@ format_row :: proc(m: ^Machine, v: query.Value, csv: bool) -> (res: query.Value,
 					append(&out, c)
 				}
 				append(&out, '"')
-				break
-			}
-			for c in transmute([]u8)s {
-				switch c {
-				case '\\':
-					append(&out, `\\`)
-				case '\t':
-					append(&out, `\t`)
-				case '\n':
-					append(&out, `\n`)
-				case '\r':
-					append(&out, `\r`)
-				case 0:
-					append(&out, `\0`)
-				case:
-					append(&out, c)
+			} else {
+				for c in transmute([]u8)s {
+					switch c {
+					case '\\': append(&out, `\\`)
+					case '\t': append(&out, `\t`)
+					case '\n': append(&out, `\n`)
+					case '\r': append(&out, `\r`)
+					case 0:    append(&out, `\0`)
+					case:      append(&out, c)
+					}
 				}
 			}
 		case .Array, .Object:
@@ -286,8 +236,7 @@ format_shell :: proc(m: ^Machine, v: query.Value) -> (res: query.Value, status: 
 		a = query.built(h, v) or_return
 	}
 	defer query.release(h, a)
-	alloc := query.heap_allocator(h)
-	out := make([dynamic]u8, alloc)
+	out := make([dynamic]u8, query.heap_allocator(h))
 	defer delete(out)
 	for x, i in query.items_of(a) {
 		if i > 0 {
@@ -320,10 +269,5 @@ raise_typed :: proc(m: ^Machine, v: query.Value, why: string) -> query.Status {
 	defer delete(out)
 	typed(m.h, &out, v)
 	append(&out, why)
-	msg, s := query.text_value(m.h, string(out[:]))
-	if s != .Ok {
-		return s
-	}
-	defer query.release(m.h, msg)
-	return raise(m.h, msg)
+	return raise_owned_text(m, string(out[:]))
 }

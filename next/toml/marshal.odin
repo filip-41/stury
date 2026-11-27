@@ -14,15 +14,7 @@ import "stury:lib/ops/typed"
 // once, else nil. A `Raw` member or a `time.Time` outside years 0 to 9999 is `Bad_Option` naming it, and a value with no
 // TOML spelling, a null or a non-finite float, is `Refused`.
 marshal :: proc(value: ^$T, spec := Spec.Toml_1_0, opts := Write_Options{}, plan: ^Plan = nil, allocator := context.allocator) -> (text: []u8, err: Write_Error) {
-	w: Writer
-	if err = writer_start(&w, spec, opts, {}, allocator); err != nil {
-		return nil, err
-	}
-	if err = marshal_into(&w, value, T, plan, allocator); err != nil {
-		writer_drop(&w)
-		return nil, err
-	}
-	return writer_end(&w)
+	return marshal_run({}, value, T, spec, opts, plan, allocator)
 }
 
 // `marshal` into `sink`, through a buffer of `write.SINK_BYTES` from `allocator`. On a refusal or a failed sink the
@@ -31,16 +23,21 @@ marshal_to :: proc(sink: io.Writer, value: ^$T, spec := Spec.Toml_1_0, opts := W
 	if sink.procedure == nil {
 		return tape.Bad_Option{"sink"}
 	}
-	w: Writer
-	if err := writer_start(&w, spec, opts, sink, allocator); err != nil {
-		return err
-	}
-	if err := marshal_into(&w, value, T, plan, allocator); err != nil {
-		writer_drop(&w)
-		return err
-	}
-	_, err := writer_end(&w)
+	_, err := marshal_run(sink, value, T, spec, opts, plan, allocator)
 	return err
+}
+
+@(private)
+marshal_run :: proc(sink: io.Writer, value: rawptr, T: typeid, spec: Spec, opts: Write_Options, plan: ^Plan, allocator: runtime.Allocator) -> (text: []u8, err: Write_Error) {
+	w: Writer
+	if err = writer_start(&w, spec, opts, sink, allocator); err != nil {
+		return nil, err
+	}
+	if err = marshal_into(&w, value, T, plan, allocator); err != nil {
+		writer_drop(&w)
+		return nil, err
+	}
+	return writer_end(&w)
 }
 
 @(private)

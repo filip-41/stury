@@ -264,6 +264,14 @@ comment_token :: #force_inline proc "contextless" (c: Comment, role: tape.Role) 
 	return {c.lo, c.n, .Plain, role, tape.HASH_COMMENT}
 }
 
+@(private)
+give_inline :: #force_inline proc(w: ^Walk($H, $LAX, $C), hs: ^hook.Regs, c: Comment, $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action)) -> (hook.Walk_Result, bool) {
+	if c.n != 0 && give(w, hs, comment_token(c, .Comment_Inline), on) == .Stop {
+		return stopped(c.lo + u64(c.n)), true
+	}
+	return 0, false
+}
+
 // The `End` of the container the frame `f` holds: at its close for one in brackets or braces, at the text's end for
 // the root, and where its last member's value ends for any other.
 @(private)
@@ -395,8 +403,8 @@ run :: proc(w: ^Walk($H, $LAX, $C), floor: int, hs: ^hook.Regs, $on: proc "conte
 				return hook.walk_result(close.lo + u64(close.n), 0), close
 			}
 			w.frames[len(w.frames) - 1].end = close.lo + u64(close.n)
-			if c := notes_of(&p.tree, id).inline; c.n != 0 && give(w, hs, comment_token(c, .Comment_Inline), on) == .Stop {
-				return stopped(c.lo + u64(c.n)), {}
+			if res, stop := give_inline(w, hs, notes_of(&p.tree, id).inline, on); stop {
+				return res, {}
 			}
 			continue
 		}
@@ -414,10 +422,8 @@ run :: proc(w: ^Walk($H, $LAX, $C), floor: int, hs: ^hook.Regs, $on: proc "conte
 				p.tree.nodes[next].flags = {.Given}
 			}
 			switch give(w, hs, m.key, on) {
-			case .Stop:
-				return stopped(m.key.lo + u64(m.key.n)), {}
-			case .Skip:
-				pass = true
+			case .Stop: return stopped(m.key.lo + u64(m.key.n)), {}
+			case .Skip: pass = true
 			case .Next, .Rest, .Keep, .Keep_Stubs, .Grow:
 				when H == build.Builder {
 					w.styled = true
@@ -435,8 +441,8 @@ run :: proc(w: ^Walk($H, $LAX, $C), floor: int, hs: ^hook.Regs, $on: proc "conte
 			}
 			_, tail := bounds(p.src, m.value)
 			f.end = m.value.lo + u64(m.value.n) + u64(tail)
-			if x.inline.n != 0 && give(w, hs, comment_token(x.inline, .Comment_Inline), on) == .Stop {
-				return stopped(x.inline.lo + u64(x.inline.n)), {}
+			if res, stop := give_inline(w, hs, x.inline, on); stop {
+				return res, {}
 			}
 			continue
 		}
@@ -454,8 +460,8 @@ run :: proc(w: ^Walk($H, $LAX, $C), floor: int, hs: ^hook.Regs, $on: proc "conte
 				// takes its end from the tree, and the statements that later add to it are read when the walk needs the
 				// next member of the parent.
 				f.end = max(u64)
-				if x.inline.n != 0 && give(w, hs, comment_token(x.inline, .Comment_Inline), on) == .Stop {
-					return stopped(x.inline.lo + u64(x.inline.n)), {}
+				if res, stop := give_inline(w, hs, x.inline, on); stop {
+					return res, {}
 				}
 				continue
 			}
@@ -491,16 +497,11 @@ enter :: proc(w: ^Walk($H, $LAX, $C), hs: ^hook.Regs, a: hook.Action, t: tape.To
 	when .Skips in C {
 		w.floor = len(w.frames) - 1
 		#partial switch a {
-		case .Skip:
-			w.nest = .Pass if pass else .Skip
-		case .Rest:
-			w.nest = .Rest
-		case .Keep:
-			w.nest = .Keep
-		case .Keep_Stubs:
-			w.nest = .Keep_Stubs
-		case:
-			return stopped(t.lo), true
+		case .Skip:       w.nest = .Pass if pass else .Skip
+		case .Rest:       w.nest = .Rest
+		case .Keep:       w.nest = .Keep
+		case .Keep_Stubs: w.nest = .Keep_Stubs
+		case:             return stopped(t.lo), true
 		}
 		when .Keeps in C {
 			if w.nest == .Keep {
@@ -572,10 +573,7 @@ nested :: proc(w: ^Walk($H, $LAX, $C), hs: ^hook.Regs, $on: proc "contextless" (
 			return hook.walk_result(close.lo + u64(close.n), 0), true
 		}
 		w.frames[len(w.frames) - 1].end = close.lo + u64(close.n)
-		if c := notes_of(&w.p.tree, node).inline; c.n != 0 && give(w, hs, comment_token(c, .Comment_Inline), on) == .Stop {
-			return stopped(c.lo + u64(c.n)), true
-		}
-		return 0, false
+		return give_inline(w, hs, notes_of(&w.p.tree, node).inline, on)
 	} else {
 		return stopped(0), true
 	}

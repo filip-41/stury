@@ -25,6 +25,7 @@ Fact_Kind :: tape.Fact_Kind
 Facts :: tape.Facts
 
 // Types of a read's options.
+Dsv_Options :: tape.Dsv_Options
 Budget :: tape.Budget
 Budget_Kind :: tape.Budget_Kind
 Tolerance :: tape.Tolerance

@@ -85,43 +85,46 @@ datetime_starts :: proc "contextless" (src: []u8, i: int) -> bool #no_bounds_che
 	return ok && i + 2 < len(src) && src[i + 2] == ':'
 }
 
+// Judges `hh:mm` at `i`. Returns `i + 5` or the fault.
+@(private)
+scan_hhmm :: proc "contextless" (src: []u8, i: int) -> (end: int, v: Verdict) #no_bounds_check {
+	hour, ok := digits(src, i, 2)
+	if !ok || hour > 23 {
+		return i, bad(i, .Bad_Char, .Bad_Datetime)
+	}
+	if i + 2 >= len(src) || src[i + 2] != ':' {
+		return i + 2, bad(i + 2, .Bad_Char, .Bad_Datetime)
+	}
+	minute: int
+	if minute, ok = digits(src, i + 3, 2); !ok || minute > 59 {
+		return i + 3, bad(i + 3, .Bad_Char, .Bad_Datetime)
+	}
+	return i + 5, 0
+}
+
 // Judges the time at `i`. Seconds are optional from TOML 1.1 on. Returns the byte past it.
 @(private)
 scan_time :: proc "contextless" (src: []u8, i: int, v11: bool) -> (end: int, v: Verdict) #no_bounds_check {
-	fail :: proc "contextless" (at: int) -> Verdict {
-		return bad(at, .Bad_Char, .Bad_Datetime)
+	k: int
+	if k, v = scan_hhmm(src, i); v != 0 {
+		return k, v
 	}
-	hour, ok := digits(src, i, 2)
-	if !ok || hour > 23 {
-		return i, fail(i)
-	}
-	if i + 2 >= len(src) || src[i + 2] != ':' {
-		return i + 2, fail(i + 2)
-	}
-	minute: int
-	minute, ok = digits(src, i + 3, 2)
-	if !ok || minute > 59 {
-		return i + 3, fail(i + 3)
-	}
-	k := i + 5
 	if k < len(src) && src[k] == ':' {
-		second: int
-		second, ok = digits(src, k + 1, 2)
-		if !ok || second > 60 {
-			return k + 1, fail(k + 1)
+		if second, ok := digits(src, k + 1, 2); !ok || second > 60 {
+			return k + 1, bad(k + 1, .Bad_Char, .Bad_Datetime)
 		}
 		k += 3
 		if k < len(src) && src[k] == '.' {
 			k += 1
 			if _, has := digit(src, k); !has {
-				return k, fail(k)
+				return k, bad(k, .Bad_Char, .Bad_Datetime)
 			}
 			for _, has := digit(src, k); has; _, has = digit(src, k) {
 				k += 1
 			}
 		}
 	} else if !v11 {
-		return k, fail(k)
+		return k, bad(k, .Bad_Char, .Bad_Datetime)
 	}
 	return k, 0
 }
@@ -132,19 +135,7 @@ scan_offset :: proc "contextless" (src: []u8, i: int) -> (end: int, v: Verdict) 
 	if src[i] == 'Z' || src[i] == 'z' {
 		return i + 1, 0
 	}
-	hour, ok := digits(src, i + 1, 2)
-	if !ok || hour > 23 {
-		return i + 1, bad(i + 1, .Bad_Char, .Bad_Datetime)
-	}
-	if i + 3 >= len(src) || src[i + 3] != ':' {
-		return i + 3, bad(i + 3, .Bad_Char, .Bad_Datetime)
-	}
-	minute: int
-	minute, ok = digits(src, i + 4, 2)
-	if !ok || minute > 59 {
-		return i + 4, bad(i + 4, .Bad_Char, .Bad_Datetime)
-	}
-	return i + 6, 0
+	return scan_hhmm(src, i + 1)
 }
 
 // Judges the date-time at `i`, where `datetime_starts` holds. Returns the byte past it and its type.

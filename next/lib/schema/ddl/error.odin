@@ -6,7 +6,6 @@ import "base:runtime"
 import "core:strings"
 import "stury:lib/schema/check"
 
-// Why a DDL parse or compile operation failed.
 Error_Kind :: enum u8 {
 	None,
 	Syntax,
@@ -18,8 +17,6 @@ Error_Kind :: enum u8 {
 	No_Memory,
 }
 
-// Structured error with byte offset and 1-based line:col location.
-// Call `error_destroy` when finished (safe on zero/non-owned errors).
 Error :: struct {
 	kind:        Error_Kind,
 	offset:      u64,
@@ -33,16 +30,14 @@ Error :: struct {
 	allocator:   runtime.Allocator,
 }
 
-// Frees any heap-allocated strings owned by `e` and resets `e` to zero.
 error_destroy :: proc(e: ^Error) {
 	if e == nil {
 		return
 	}
 	if e.owned {
-		a := e.allocator
-		delete(e.message, a)
-		delete(e.table, a)
-		delete(e.column, a)
+		delete(e.message, e.allocator)
+		delete(e.table, e.allocator)
+		delete(e.column, e.allocator)
 	}
 	e^ = {}
 }
@@ -64,38 +59,18 @@ make_error :: proc(
 	if allocator.procedure == nil || (table == "" && column == "" && kind == .No_Memory) {
 		return {kind = kind, offset = offset, line = line, col = col, message = message}
 	}
-	msg, e1 := strings.clone(message, allocator)
-	if e1 != nil {
+	out := Error{kind = kind, offset = offset, line = line, col = col, owned = true, allocator = allocator}
+	e1, e2, e3: runtime.Allocator_Error
+	out.message, e1 = strings.clone(message, allocator)
+	if e1 == nil && table != "" {
+		out.table, e2 = strings.clone(table, allocator)
+	}
+	if e1 == nil && e2 == nil && column != "" {
+		out.column, e3 = strings.clone(column, allocator)
+	}
+	if e1 != nil || e2 != nil || e3 != nil {
+		error_destroy(&out)
 		return {kind = .No_Memory, offset = offset, line = line, col = col, message = "out of memory"}
 	}
-	tbl: string
-	if table != "" {
-		t, e2 := strings.clone(table, allocator)
-		if e2 != nil {
-			delete(msg, allocator)
-			return {kind = .No_Memory, offset = offset, line = line, col = col, message = "out of memory"}
-		}
-		tbl = t
-	}
-	cstr: string
-	if column != "" {
-		c, e3 := strings.clone(column, allocator)
-		if e3 != nil {
-			delete(msg, allocator)
-			delete(tbl, allocator)
-			return {kind = .No_Memory, offset = offset, line = line, col = col, message = "out of memory"}
-		}
-		cstr = c
-	}
-	return {
-		kind      = kind,
-		offset    = offset,
-		line      = line,
-		col       = col,
-		message   = msg,
-		table     = tbl,
-		column    = cstr,
-		owned     = true,
-		allocator = allocator,
-	}
+	return out
 }

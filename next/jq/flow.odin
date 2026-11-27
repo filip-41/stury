@@ -20,7 +20,6 @@ Step_Frame :: struct {
 eval_step :: proc(m: ^Machine, r: ^Regs) {
 	h := m.h
 	n := r.n
-	// A key or a bound that is not native runs first, into a `Key` frame for each: the first of them varies slowest.
 	if n.kind == .Index && .Native not_in n.b.flags || n.kind == .Slice && !native_bound(n.b) {
 		key_frame(m, r, n, n.b, 0, query.ABSENT)
 		return
@@ -55,7 +54,6 @@ native_bound :: #force_inline proc(b: ^Node) -> bool {
 	return b == nil || .Native in b.flags
 }
 
-// A slice bound's value, null for none written.
 @(private)
 bound_value :: proc(m: ^Machine, b: ^Node, input: query.Value, env: ^Env) -> (res: query.Value, found: bool, status: query.Status) {
 	if b == nil {
@@ -64,8 +62,7 @@ bound_value :: proc(m: ^Machine, b: ^Node, input: query.Value, env: ^Env) -> (re
 	return eval_native(m, b, query.retain(input), env)
 }
 
-// Runs `b`, key `stage` of step `n` (0 an index or a slice's start, 1 its end), into a `Key` frame holding `before`, the
-// start a slice's end follows.
+// Runs `b`, key `stage` of step `n` (0 an index or a slice's start, 1 its end), into a `Key` frame holding `before`.
 @(private)
 key_frame :: proc(m: ^Machine, r: ^Regs, n, b: ^Node, stage: int, before: query.Value) {
 	f := push_or_fail(m, r, Input_Frame, .Key)
@@ -78,7 +75,6 @@ key_frame :: proc(m: ^Machine, r: ^Regs, n, b: ^Node, stage: int, before: query.
 	r.n, r.k, r.track, r.path = b, f, false, query.ABSENT
 }
 
-// An output of a step's key or bound: the next bound, or the step on its target.
 @(private)
 emit_key :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame) {
 	h := m.h
@@ -108,7 +104,7 @@ emit_key :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame) {
 	step_on_target(m, r, n, query.ABSENT, x, to)
 }
 
-// Runs step `n` with its key and bounds, which it takes, on its target: the input itself, or each output of `n.a`.
+// Runs step `n` with its key and bounds, which it takes, on its target.
 @(private)
 step_on_target :: proc(m: ^Machine, r: ^Regs, n: ^Node, key, from, to: query.Value) {
 	if n.a.kind == .Identity {
@@ -128,8 +124,7 @@ step_on_target :: proc(m: ^Machine, r: ^Regs, n: ^Node, key, from, to: query.Val
 		return
 	}
 	f.track, f.n, f.key, f.from, f.to = r.track, n, key, from, to
-	r.n, r.k = n.a, f
-	r.mode = .Eval
+	r.n, r.k, r.mode = n.a, f, .Eval
 }
 
 // Step `n` applied to target `t` at path `tpath`, both taken: an output, an iteration, or none.
@@ -138,42 +133,34 @@ step_apply :: proc(m: ^Machine, r: ^Regs, n: ^Node, t, tpath: query.Value, key, 
 	h := m.h
 	env_release(m, r.env)
 	r.env = nil
-	if r.track && !is_path(tpath) {
-		s := invalid_step(m, n, t, tpath, key)
-		query.release(h, t)
-		query.release(h, tpath)
-		r.sig, r.mode = fail_status(s), .Ret
-		return
-	}
-	if r.track && path_ends_in_fact(h, tpath) {
-		s := query.fail_fact_msg(h, "A comment step must be the last step of a path")
-		query.release(h, t)
-		query.release(h, tpath)
-		r.sig, r.mode = fail_status(s), .Ret
-		return
+	if r.track {
+		if !is_path(tpath) || path_ends_in_fact(h, tpath) {
+			s := invalid_step(m, n, t, tpath, key) if !is_path(tpath) else query.fail_fact_msg(h, "A comment step must be the last step of a path")
+			query.release(h, t)
+			query.release(h, tpath)
+			r.sig, r.mode = fail_status(s), .Ret
+			return
+		}
 	}
 	if n.kind == .Iterate {
 		iterate(m, r, n, t, tpath)
 		return
 	}
-	v, found, s := apply_step(m, n, t, key, from, to)
-	if s != .Ok || !found {
+	defer {
 		query.release(h, t)
 		query.release(h, tpath)
+	}
+	v, found, s := apply_step(m, n, t, key, from, to)
+	if s != .Ok || !found {
 		r.sig, r.mode = fail_status(s), .Ret
 		return
 	}
 	if r.track {
-		step_key := key
-		if n.kind == .Field {
-			step_key = n.value
-		}
+		step_key := n.value if n.kind == .Field else key
 		if n.kind == .Slice {
 			ks: query.Status
 			step_key, ks = slice_key(m, from, to)
 			if ks != .Ok {
-				query.release(h, t)
-				query.release(h, tpath)
 				query.release(h, v)
 				r.sig, r.mode = .Fail, .Ret
 				return
@@ -183,16 +170,13 @@ step_apply :: proc(m: ^Machine, r: ^Regs, n: ^Node, t, tpath: query.Value, key, 
 		if n.kind == .Slice {
 			query.release(h, step_key)
 		}
-		query.release(h, tpath)
 		if ps != .Ok {
-			query.release(h, t)
 			query.release(h, v)
 			r.sig, r.mode = .Fail, .Ret
 			return
 		}
 		r.vpath = p
 	}
-	query.release(h, t)
 	r.v, r.mode = v, .Emit
 }
 
@@ -213,11 +197,10 @@ slice_key :: proc(m: ^Machine, from, to: query.Value) -> (res: query.Value, stat
 invalid_step :: proc(m: ^Machine, n: ^Node, t, tpath, key: query.Value) -> query.Status {
 	result := tpath
 	result.mark = 0
-	k := n.value if n.kind == .Field else key
 	if n.kind == .Iterate {
 		return raise_taken(m.h, path_error(m, "Invalid path expression near attempt to iterate through ", result, 30))
 	}
-	return raise_taken(m.h, step_path_error(m, result, k))
+	return raise_taken(m.h, step_path_error(m, result, n.value if n.kind == .Field else key))
 }
 
 // `.[]` of `t`, taken: its first child given now, the rest from an `Iter` frame.
@@ -226,10 +209,7 @@ iterate :: proc(m: ^Machine, r: ^Regs, n: ^Node, t, tpath: query.Value) {
 	h := m.h
 	tt := query.type_of(t)
 	if tt != .Array && tt != .Object {
-		s := query.Status.Ok
-		if .Opt not_in n.flags {
-			s = query.fail(h, .Types, .Iterate, t)
-		}
+		s := query.Status.Ok if .Opt in n.flags else query.fail(h, .Types, .Iterate, t)
 		query.release(h, t)
 		query.release(h, tpath)
 		r.sig, r.mode = fail_status(s), .Ret
@@ -278,8 +258,7 @@ next_child :: proc(m: ^Machine, r: ^Regs, f: ^Iter_Frame) {
 	k := f.k
 	r.vpath = query.ABSENT
 	if f.track {
-		step := key if key.kind != .Absent else query.int_value(f.i)
-		p, ps := path_append(m, f.path, step)
+		p, ps := path_append(m, f.path, key if key.kind != .Absent else query.int_value(f.i))
 		if ps != .Ok {
 			query.release(h, key)
 			query.release(h, v)
@@ -327,13 +306,11 @@ resume_range :: proc(m: ^Machine, r: ^Regs, f: ^Range_Frame) {
 		drop_range(m, f)
 		return
 	}
-	x := f.at
-	track := f.track
+	x, track, k := f.at, f.track, f.k
 	if x.kind == .Int && f.to.kind == .Int && (f.by.kind == .Absent || f.by.kind == .Int) {
 		by := f.by.i if f.by.kind == .Int else 1
 		if next, overflow := intrinsics.overflow_add(x.i, by); !overflow {
 			f.at = query.int_value(next)
-			k := f.k
 			if !(by > 0 && next < f.to.i || by < 0 && next > f.to.i) {
 				pop_frame(m)
 			}
@@ -343,11 +320,10 @@ resume_range :: proc(m: ^Machine, r: ^Regs, f: ^Range_Frame) {
 	}
 	step := f.by if f.by.kind != .Absent else query.int_value(1)
 	if f.to.kind == .Absent {
-		// The last output had no successor: the failed addition is raised now, after that output went out.
 		next, s := add_values(h, x, step)
 		query.release(h, next)
 		drop_range(m, f)
-		r.sig = .Fail if s != .Ok else .Go
+		r.sig = fail_status(s)
 		return
 	}
 	next, s := add_values(h, x, step)
@@ -356,7 +332,6 @@ resume_range :: proc(m: ^Machine, r: ^Regs, f: ^Range_Frame) {
 		r.sig = .Fail
 		return
 	}
-	k := f.k
 	if s != .Ok {
 		query.clear_error(h)
 		query.release(h, f.to)
@@ -391,10 +366,6 @@ drop_range :: proc(m: ^Machine, f: ^Range_Frame) {
 	pop_frame(m)
 }
 
-// Whether a range at `at` toward `to` by `by` has an output left. An absent `by` is range/1 and range/2: step one,
-// stop once `at` reaches `to`, which a NaN never does. range/3 is jq's `while` over its own comparisons, so the bounds
-// and the step are any values: a step above zero in jq's order runs while `at < to`, one below while `at > to`, and
-// NaN is below every value, itself included.
 @(private)
 range_goes_on :: proc(m: ^Machine, at, to, by: query.Value) -> (go: bool, status: query.Status) {
 	if at.kind == .Int && to.kind == .Int {
@@ -413,17 +384,13 @@ range_goes_on :: proc(m: ^Machine, at, to, by: query.Value) -> (go: bool, status
 		return false, .Ok
 	}
 	c := query.compare(m.h, at, to) or_return
-	if up > 0 {
-		return c < 0 || is_nan_number(at), .Ok
-	}
-	return c > 0, .Ok
+	return (c < 0 || is_nan_number(at)) if up > 0 else c > 0, .Ok
 }
 
 @(private)
 resume_try :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame) {
 	h := m.h
-	sig := r.sig
-	if sig != .Fail || m.through != nil || is_fatal_error(h) {
+	if r.sig != .Fail || m.through != nil || is_fatal_error(h) {
 		if m.through == f {
 			m.through = nil
 		}
@@ -472,8 +439,7 @@ emit_binary :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame) {
 			r.sig, r.mode = .Fail, .Ret
 			return
 		}
-		g.track = f.track
-		g.path = query.retain(f.path)
+		g.track, g.path = f.track, query.retain(f.path)
 		r.n, r.input, r.path, r.env, r.k, r.track, r.mode = n.b, query.retain(f.input), query.ABSENT, env_retain(f.env), g, false, .Eval
 		return
 	}
@@ -485,13 +451,9 @@ emit_binary :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame) {
 	give_value(m, r, f, v)
 }
 
-// Gives `v`, a value an operator made, to frame `f`'s `k`: in a path expression it is no path.
 @(private)
 give_value :: proc(m: ^Machine, r: ^Regs, f: ^Frame, v: query.Value) {
-	r.vpath = query.ABSENT
-	if f.track {
-		r.vpath = not_path_marker(m, v)
-	}
+	r.vpath = not_path_marker(m, v) if f.track else query.ABSENT
 	r.v, r.k, r.mode = v, f.k, .Emit
 }
 
@@ -529,23 +491,20 @@ Destruct_Frame :: struct {
 @(private)
 clone_env :: proc(m: ^Machine, src: ^Env) -> (e: ^Env, status: query.Status) {
 	e = new_env(m, src.parent, int(src.count), src.closures) or_return
-	dst_slots := env_slots(e)
-	src_slots := env_slots(src)
+	dst_slots, src_slots := env_slots(e), env_slots(src)
 	for i in 0 ..< int(src.count) {
 		dst_slots[i].value = query.retain(src_slots[i].value)
 	}
 	return e, .Ok
 }
 
-// Binds output `r.v` of a binding's source by its patterns and runs the body in the scope they make.
 @(private)
 emit_bind :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame) {
 	h := m.h
 	n := f.n
 	query.release(h, r.vpath)
-	r.vpath = query.ABSENT
 	x := r.v
-	r.v = query.ABSENT
+	r.v, r.vpath = query.ABSENT, query.ABSENT
 	if len(n.patterns) > 1 {
 		alternatives(m, r, f, x)
 		return
@@ -571,8 +530,6 @@ resume_bind :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame) {
 	pop_frame(m)
 }
 
-// `as p1 ?// p2 ...`: each pattern in turn, the next tried when destructuring or the body fails, every variable of
-// every pattern bound, null where its pattern does not bind it.
 @(private)
 alternatives :: proc(m: ^Machine, r: ^Regs, f: ^Input_Frame, x: query.Value) {
 	g, s := push(m, Input_Frame, .Alternative, f.k)
@@ -590,10 +547,7 @@ try_alternative :: proc(m: ^Machine, r: ^Regs, g: ^Input_Frame) {
 	h := m.h
 	n := g.n
 	is_fold := g.owner != nil
-	mode := Destruct_Mode.Bind
-	if is_fold {
-		mode = .Reduce if n.kind == .Reduce else .Foreach
-	}
+	mode := Destruct_Mode.Bind if !is_fold else (.Reduce if n.kind == .Reduce else .Foreach)
 	for {
 		e, s := new_env(m, g.env, int(n.slots), false)
 		if s != .Ok {
@@ -636,8 +590,26 @@ resume_alternative :: proc(m: ^Machine, r: ^Regs, g: ^Input_Frame) {
 	pop_frame(m)
 }
 
+// Validates object-pattern key and target and looks up `obj[key]`.
+@(private = "file")
+destruct_lookup_member :: proc(h: ^query.Heap, obj, key: query.Value) -> (query.Value, query.Status) {
+	t := query.type_of(obj)
+	if query.type_of(key) != .String || (t != .Object && t != .Null && t != .Absent) {
+		return query.NULL, query.fail(h, .Types, .Index, obj, key)
+	}
+	return query.get(h, obj, key)
+}
+
+@(private = "file")
+destruct_array_check :: proc(h: ^query.Heap, v: query.Value, n_elems: int) -> query.Status {
+	t := query.type_of(v)
+	if t != .Array && t != .Null && t != .Absent {
+		return query.fail(h, .Types, .Index, v, query.int_value(i64(n_elems - 1)))
+	}
+	return .Ok
+}
+
 // Binds `x` by pattern `p` into the slots of `e` synchronously (all key expressions must be `.Native`).
-// Returns `matched = false` with `.Ok` if a key expression yields empty.
 @(private)
 destructure_sync :: proc(m: ^Machine, p: ^Pattern, x: query.Value, e: ^Env, input: query.Value) -> (matched: bool, status: query.Status) {
 	h := m.h
@@ -646,11 +618,12 @@ destructure_sync :: proc(m: ^Machine, p: ^Pattern, x: query.Value, e: ^Env, inpu
 		return true, .Ok
 	}
 	inline_buf: [8]Destruct_Work
-	sp := 0
+	sp := 1
+	inline_buf[0] = {p = p, v = query.retain(x)}
 	dyn: [dynamic]Destruct_Work
 	defer {
-		for i in 0 ..< sp {
-			query.release(h, inline_buf[i].v)
+		for w in inline_buf[:sp] {
+			query.release(h, w.v)
 		}
 		for w in dyn {
 			query.release(h, w.v)
@@ -672,8 +645,6 @@ destructure_sync :: proc(m: ^Machine, p: ^Pattern, x: query.Value, e: ^Env, inpu
 		}
 		return .Ok
 	}
-	inline_buf[0] = Work_init(p, query.retain(x))
-	sp = 1
 	for sp > 0 || len(dyn) > 0 {
 		w: Destruct_Work
 		if len(dyn) > 0 {
@@ -687,33 +658,23 @@ destructure_sync :: proc(m: ^Machine, p: ^Pattern, x: query.Value, e: ^Env, inpu
 		case .Var:
 			env_set(m, e, w.p.slot, query.retain(w.v))
 		case .Array:
-			t := query.type_of(w.v)
-			if t != .Array && t != .Null && t != .Absent {
-				return false, query.fail(h, .Types, .Index, w.v, query.int_value(i64(len(w.p.elems) - 1)))
-			}
+			destruct_array_check(h, w.v, len(w.p.elems)) or_return
 			#reverse for sub, i in w.p.elems {
 				v := query.get(h, w.v, query.int_value(i64(i))) or_return
-				push_w(h, &inline_buf, &sp, &dyn, Destruct_Work{p = sub, v = v}) or_return
+				push_w(h, &inline_buf, &sp, &dyn, {p = sub, v = v}) or_return
 			}
 		case .Object:
 			for i in w.next ..< len(w.p.members) {
 				mem := w.p.members[i]
-				key, found, s := eval_native(m, mem.key, query.retain(input), e.parent)
-				if s != .Ok {
-					return false, s
-				}
+				key, found := eval_native(m, mem.key, query.retain(input), e.parent) or_return
 				if !found {
 					return false, .Ok
 				}
-				defer query.release(h, key)
-				if query.type_of(key) != .String {
-					return false, query.fail(h, .Types, .Index, w.v, key)
+				v, vs := destruct_lookup_member(h, w.v, key)
+				query.release(h, key)
+				if vs != .Ok {
+					return false, vs
 				}
-				t := query.type_of(w.v)
-				if t != .Object && t != .Null && t != .Absent {
-					return false, query.fail(h, .Types, .Index, w.v, key)
-				}
-				v := query.get(h, w.v, key) or_return
 				if mem.var != "" {
 					env_set(m, e, mem.slot, query.retain(v))
 				}
@@ -722,19 +683,14 @@ destructure_sync :: proc(m: ^Machine, p: ^Pattern, x: query.Value, e: ^Env, inpu
 					continue
 				}
 				if i + 1 < len(w.p.members) {
-					push_w(h, &inline_buf, &sp, &dyn, Destruct_Work{p = w.p, v = query.retain(w.v), next = i + 1}) or_return
+					push_w(h, &inline_buf, &sp, &dyn, {p = w.p, v = query.retain(w.v), next = i + 1}) or_return
 				}
-				push_w(h, &inline_buf, &sp, &dyn, Destruct_Work{p = mem.pattern, v = v}) or_return
+				push_w(h, &inline_buf, &sp, &dyn, {p = mem.pattern, v = v}) or_return
 				break
 			}
 		}
 	}
 	return true, .Ok
-}
-
-@(private = "file")
-Work_init :: #force_inline proc "contextless" (p: ^Pattern, v: query.Value) -> Destruct_Work {
-	return {p = p, v = v}
 }
 
 // Runs destructuring work `init` (takes ownership of `e` and all `.v` in `init`), pausing onto a `Destruct_Frame`
@@ -743,80 +699,64 @@ Work_init :: #force_inline proc "contextless" (p: ^Pattern, v: query.Value) -> D
 destructure_run :: proc(m: ^Machine, r: ^Regs, n: ^Node, e: ^Env, input, path: query.Value, k: ^Frame, track: bool, owner: ^Input_Frame, mode: Destruct_Mode, init: []Destruct_Work) {
 	h := m.h
 	stack := make([dynamic]Destruct_Work, 0, max(len(init), 4), h.allocator)
-	for w in init {
-		if _, err := append(&stack, w); err != nil {
+	finished := false
+	defer if !finished {
+		for w in stack {
 			query.release(h, w.v)
-			for rem in stack {
-				query.release(h, rem.v)
-			}
-			delete(stack)
-			env_release(m, e)
+		}
+		delete(stack)
+		env_release(m, e)
+	}
+	push_s :: proc(h: ^query.Heap, stack: ^[dynamic]Destruct_Work, w: Destruct_Work) -> bool {
+		if _, err := append(stack, w); err != nil {
+			query.release(h, w.v)
 			_ = query.fail(h, .Memory, .None)
+			return false
+		}
+		return true
+	}
+	for w in init {
+		if !push_s(h, &stack, w) {
 			r.sig, r.mode = .Fail, .Ret
 			return
 		}
 	}
-	release_all :: proc(m: ^Machine, stack: ^[dynamic]Destruct_Work, e: ^Env) {
-		for w in stack^ {
-			query.release(m.h, w.v)
-		}
-		delete(stack^)
-		env_release(m, e)
-	}
+	key_env := e if len(n.patterns) > 1 else e.parent
 	for len(stack) > 0 {
 		w := pop(&stack)
 		switch w.p.kind {
 		case .Var:
 			env_set(m, e, w.p.slot, w.v)
 		case .Array:
-			t := query.type_of(w.v)
-			if t != .Array && t != .Null && t != .Absent {
-				_ = query.fail(h, .Types, .Index, w.v, query.int_value(i64(len(w.p.elems) - 1)))
-				query.release(h, w.v)
-				release_all(m, &stack, e)
+			defer query.release(h, w.v)
+			if destruct_array_check(h, w.v, len(w.p.elems)) != .Ok {
 				r.sig, r.mode = .Fail, .Ret
 				return
 			}
-			ok := true
 			#reverse for sub, i in w.p.elems {
 				v, vs := query.get(h, w.v, query.int_value(i64(i)))
-				if vs != .Ok {
-					ok = false
-					break
+				if vs != .Ok || !push_s(h, &stack, {p = sub, v = v}) {
+					r.sig, r.mode = .Fail, .Ret
+					return
 				}
-				if _, err := append(&stack, Destruct_Work{p = sub, v = v}); err != nil {
-					query.release(h, v)
-					_ = query.fail(h, .Memory, .None)
-					ok = false
-					break
-				}
-			}
-			query.release(h, w.v)
-			if !ok {
-				release_all(m, &stack, e)
-				r.sig, r.mode = .Fail, .Ret
-				return
 			}
 		case .Object:
-			paused := false
 			for i in w.next ..< len(w.p.members) {
 				mem := w.p.members[i]
 				if .Native not_in mem.key.flags {
 					df, ps := push(m, Destruct_Frame, .Destruct, k)
 					if ps != .Ok {
 						query.release(h, w.v)
-						release_all(m, &stack, e)
 						r.sig, r.mode = .Fail, .Ret
 						return
 					}
 					rest: []Destruct_Work
 					if len(stack) > 0 {
-						err: runtime.Allocator_Error
-						rest, err = make([]Destruct_Work, len(stack), h.allocator)
-						if err != nil {
+						aerr: runtime.Allocator_Error
+						rest, aerr = make([]Destruct_Work, len(stack), h.allocator)
+						if aerr != nil {
 							pop_frame(m)
 							query.release(h, w.v)
-							release_all(m, &stack, e)
 							_ = query.fail(h, .Memory, .None)
 							r.sig, r.mode = .Fail, .Ret
 							return
@@ -824,50 +764,23 @@ destructure_run :: proc(m: ^Machine, r: ^Regs, n: ^Node, e: ^Env, input, path: q
 						copy(rest, stack[:])
 					}
 					delete(stack)
+					finished = true
 					df.track = track
 					df.n, df.env, df.input, df.path, df.owner, df.mode = n, e, query.retain(input), query.retain(path), owner, mode
 					df.cur_p, df.cur_v, df.cur_i, df.rest = w.p, w.v, i, rest
-					key_env := e if len(n.patterns) > 1 else e.parent
 					r.n, r.input, r.path, r.env, r.k, r.track, r.mode = mem.key, query.retain(input), query.ABSENT, env_retain(key_env), df, false, .Eval
-					paused = true
-					break
+					return
 				}
-				key_env := e if len(n.patterns) > 1 else e.parent
 				key, found, s := eval_native(m, mem.key, query.retain(input), key_env)
-				if s != .Ok {
+				if s != .Ok || !found {
 					query.release(h, w.v)
-					release_all(m, &stack, e)
-					r.sig, r.mode = .Fail, .Ret
+					r.sig, r.mode = fail_status(s), .Ret
 					return
 				}
-				if !found {
-					query.release(h, w.v)
-					release_all(m, &stack, e)
-					r.sig, r.mode = .Go, .Ret
-					return
-				}
-				if query.type_of(key) != .String {
-					_ = query.fail(h, .Types, .Index, w.v, key)
-					query.release(h, key)
-					query.release(h, w.v)
-					release_all(m, &stack, e)
-					r.sig, r.mode = .Fail, .Ret
-					return
-				}
-				t := query.type_of(w.v)
-				if t != .Object && t != .Null && t != .Absent {
-					_ = query.fail(h, .Types, .Index, w.v, key)
-					query.release(h, key)
-					query.release(h, w.v)
-					release_all(m, &stack, e)
-					r.sig, r.mode = .Fail, .Ret
-					return
-				}
-				v, vs := query.get(h, w.v, key)
+				v, vs := destruct_lookup_member(h, w.v, key)
 				query.release(h, key)
 				if vs != .Ok {
 					query.release(h, w.v)
-					release_all(m, &stack, e)
 					r.sig, r.mode = .Fail, .Ret
 					return
 				}
@@ -878,66 +791,44 @@ destructure_run :: proc(m: ^Machine, r: ^Regs, n: ^Node, e: ^Env, input, path: q
 					query.release(h, v)
 					continue
 				}
-				if i + 1 < len(w.p.members) {
-					if _, err := append(&stack, Destruct_Work{p = w.p, v = query.retain(w.v), next = i + 1}); err != nil {
-						query.release(h, v)
-						query.release(h, w.v)
-						release_all(m, &stack, e)
-						_ = query.fail(h, .Memory, .None)
-						r.sig, r.mode = .Fail, .Ret
-						return
-					}
-				}
-				if _, err := append(&stack, Destruct_Work{p = mem.pattern, v = v}); err != nil {
+				if i + 1 < len(w.p.members) && !push_s(h, &stack, {p = w.p, v = query.retain(w.v), next = i + 1}) {
 					query.release(h, v)
 					query.release(h, w.v)
-					release_all(m, &stack, e)
-					_ = query.fail(h, .Memory, .None)
+					r.sig, r.mode = .Fail, .Ret
+					return
+				}
+				if !push_s(h, &stack, {p = mem.pattern, v = v}) {
+					query.release(h, w.v)
 					r.sig, r.mode = .Fail, .Ret
 					return
 				}
 				break
 			}
-			if paused {
-				return
-			}
 			query.release(h, w.v)
 		}
 	}
 	delete(stack)
-	switch mode {
-	case .Bind:
+	finished = true
+	if mode == .Bind {
 		r.n, r.input, r.path, r.env, r.k, r.track, r.mode = n.b, query.retain(input), query.retain(path), e, k, track, .Eval
-	case .Reduce, .Foreach:
-		run := owner
-		if owner != nil && owner.kind == .Alternative {
-			owner.got = true
-			run = (^Input_Frame)(owner.owner)
-		}
-		run_fold_update(m, r, run, e)
+		return
 	}
+	run := owner
+	if owner != nil && owner.kind == .Alternative {
+		owner.got = true
+		run = (^Input_Frame)(owner.owner)
+	}
+	run_fold_update(m, r, run, e)
 }
 
 @(private)
 emit_destruct :: proc(m: ^Machine, r: ^Regs, df: ^Destruct_Frame) {
 	h := m.h
 	query.release(h, r.vpath)
-	r.vpath = query.ABSENT
 	key := r.v
-	r.v = query.ABSENT
+	r.v, r.vpath = query.ABSENT, query.ABSENT
 	defer query.release(h, key)
-	if query.type_of(key) != .String {
-		_ = query.fail(h, .Types, .Index, df.cur_v, key)
-		r.sig, r.mode = .Fail, .Ret
-		return
-	}
-	t := query.type_of(df.cur_v)
-	if t != .Object && t != .Null && t != .Absent {
-		_ = query.fail(h, .Types, .Index, df.cur_v, key)
-		r.sig, r.mode = .Fail, .Ret
-		return
-	}
-	v, vs := query.get(h, df.cur_v, key)
+	v, vs := destruct_lookup_member(h, df.cur_v, key)
 	if vs != .Ok {
 		r.sig, r.mode = .Fail, .Ret
 		return
@@ -952,14 +843,8 @@ emit_destruct :: proc(m: ^Machine, r: ^Regs, df: ^Destruct_Frame) {
 	if mem.var != "" {
 		env_set(m, e, mem.slot, query.retain(v))
 	}
-	extra := 0
-	if df.cur_i + 1 < len(df.cur_p.members) {
-		extra += 1
-	}
-	if mem.pattern != nil {
-		extra += 1
-	}
-	work, err := make([]Destruct_Work, len(df.rest) + extra, h.allocator)
+	has_next := df.cur_i + 1 < len(df.cur_p.members)
+	work, err := make([]Destruct_Work, len(df.rest) + int(has_next) + int(mem.pattern != nil), h.allocator)
 	if err != nil {
 		query.release(h, v)
 		env_release(m, e)
@@ -973,7 +858,7 @@ emit_destruct :: proc(m: ^Machine, r: ^Regs, df: ^Destruct_Frame) {
 		work[idx] = {p = w.p, v = query.retain(w.v), next = w.next}
 		idx += 1
 	}
-	if df.cur_i + 1 < len(df.cur_p.members) {
+	if has_next {
 		work[idx] = {p = df.cur_p, v = query.retain(df.cur_v), next = df.cur_i + 1}
 		idx += 1
 	}
@@ -1032,51 +917,34 @@ run_fold_update :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame, e: ^Env) {
 	h := m.h
 	n := run.n
 	upd := n.c
-	if n.kind == .Reduce {
+	is_reduce := n.kind == .Reduce
+	if is_reduce && .Native in upd.flags {
 		state := run.v
 		run.v = query.ABSENT
-		if .Native in upd.flags {
-			out, found, us := eval_native_maybe_origin(m, upd, state, e)
-			env_release(m, e)
-			if us != .Ok {
-				r.sig, r.mode = .Fail, .Ret
-				return
-			}
-			run.v = out if found else query.NULL
-			r.sig, r.mode = .Go, .Ret
-			return
-		}
-		u, ps := push(m, Input_Frame, .Reduce_Update, nil)
-		if ps != .Ok {
-			env_release(m, e)
-			query.release(h, state)
+		out, found, us := eval_native_maybe_origin(m, upd, state, e)
+		env_release(m, e)
+		if us != .Ok {
 			r.sig, r.mode = .Fail, .Ret
 			return
 		}
-		u.owner = run
-		if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(state) {
-			if os := push_origin(m, state, u); os != .Ok {
-				env_release(m, e)
-				query.release(h, state)
-				r.sig, r.mode = .Fail, .Ret
-				return
-			}
-		}
-		r.n, r.input, r.path, r.env, r.k, r.track, r.mode = upd, state, query.ABSENT, e, u, false, .Eval
+		run.v = out if found else query.NULL
+		r.sig, r.mode = .Go, .Ret
 		return
 	}
-	u, ps := push(m, Input_Frame, .Foreach_Update, nil)
+	u, ps := push(m, Input_Frame, .Reduce_Update if is_reduce else .Foreach_Update, nil)
 	if ps != .Ok {
 		env_release(m, e)
 		r.sig, r.mode = .Fail, .Ret
 		return
 	}
-	u.owner, u.env = run, env_retain(e)
-	// The state moves into the update: one that gives nothing leaves null, as jq's does.
 	state := run.v
-	run.v = query.NULL
+	run.v = query.ABSENT if is_reduce else query.NULL
+	u.owner = run
+	if !is_reduce {
+		u.env = env_retain(e)
+	}
 	if intrinsics.expect(m.track_origin, false) && query.has_doc_origin(state) {
-		if os := push_origin(m, state, u); os != .Ok {
+		if push_origin(m, state, u) != .Ok {
 			env_release(m, e)
 			query.release(h, state)
 			r.sig, r.mode = .Fail, .Ret
@@ -1086,25 +954,30 @@ run_fold_update :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame, e: ^Env) {
 	r.n, r.input, r.path, r.env, r.k, r.track, r.mode = upd, state, query.ABSENT, e, u, false, .Eval
 }
 
+@(private = "file")
+ensure_unique_fold_env :: proc(m: ^Machine, run: ^Input_Frame) -> query.Status {
+	if run.env.rc <= 1 {
+		return .Ok
+	}
+	e := new_env(m, run.env.parent, int(run.n.slots), false) or_return
+	env_release(m, run.env)
+	run.env = e
+	return .Ok
+}
+
 // An item of a fold's source: bound, then the update run on the state.
 @(private)
 emit_foreach_item :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame) {
 	h := m.h
 	query.release(h, r.vpath)
-	r.vpath = query.ABSENT
 	n := run.n
 	x := r.v
-	r.v = query.ABSENT
+	r.v, r.vpath = query.ABSENT, query.ABSENT
 	if len(n.patterns) == 1 && n.patterns[0].kind == .Var {
-		if run.env.rc > 1 {
-			e, s := new_env(m, run.env.parent, int(n.slots), false)
-			if s != .Ok {
-				query.release(h, x)
-				r.sig, r.mode = .Fail, .Ret
-				return
-			}
-			env_release(m, run.env)
-			run.env = e
+		if ensure_unique_fold_env(m, run) != .Ok {
+			query.release(h, x)
+			r.sig, r.mode = .Fail, .Ret
+			return
 		}
 		env_set(m, run.env, n.patterns[0].slot, x)
 		if n.kind == .Reduce && .Native in n.c.flags {
@@ -1151,27 +1024,20 @@ emit_foreach_item :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame) {
 		destructure_run(m, r, n, e, run.input, query.ABSENT, run.k, run.track, run, .Reduce if n.kind == .Reduce else .Foreach, init[:])
 		return
 	}
-	if run.env.rc > 1 {
-		// A closure of the last update still holds the scope: bind in a new one.
-		e, s := new_env(m, run.env.parent, int(n.slots), false)
-		if s != .Ok {
-			query.release(h, x)
-			r.sig, r.mode = .Fail, .Ret
-			return
-		}
-		env_release(m, run.env)
-		run.env = e
+	if ensure_unique_fold_env(m, run) != .Ok {
+		query.release(h, x)
+		r.sig, r.mode = .Fail, .Ret
+		return
 	}
 	matched, s := destructure_sync(m, n.patterns[0], x, run.env, run.input)
 	query.release(h, x)
 	if s != .Ok || !matched {
-		r.sig, r.mode = .Fail if s != .Ok else .Go, .Ret
+		r.sig, r.mode = fail_status(s), .Ret
 		return
 	}
 	run_fold_update(m, r, run, env_retain(run.env))
 }
 
-// The end of a fold's source: a reduce gives its state.
 @(private)
 resume_fold :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame) {
 	if r.sig == .Go && run.n.kind == .Reduce {
@@ -1186,7 +1052,6 @@ resume_fold :: proc(m: ^Machine, r: ^Regs, run: ^Input_Frame) {
 	pop_frame(m)
 }
 
-// An output of `limit`'s filter: the last one it lets through takes a cut, which breaks it once taken.
 @(private)
 emit_limit :: proc(m: ^Machine, r: ^Regs, f: ^Count_Frame) {
 	f.left -= 1

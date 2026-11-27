@@ -209,14 +209,10 @@ part_scan :: proc "contextless" (src: []u8, lo, hi: int, last: bool, locals: []P
 			above := max(u64) << pos
 			x: u64
 			switch mode {
-			case .Text:
-				x = lt & above
-			case .Tag:
-				x = (gt | dq | sq) & above
-			case .Quote:
-				x = (dq if quote == '"' else sq) & above
-			case .End:
-				x = gt & above
+			case .Text:  x = lt & above
+			case .Tag:   x = (gt | dq | sq) & above
+			case .Quote: x = (dq if quote == '"' else sq) & above
+			case .End:   x = gt & above
 			}
 			if x == 0 {
 				chars ||= mode == .Text && other & above != 0

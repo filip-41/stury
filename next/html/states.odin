@@ -1,195 +1,119 @@
 package html
 
-// The tokenizer's states, in the standard's order, each a procedure that tail-calls the next.
+// The tokenizer's states (HTML5 §13.2.5): hot loops share `#force_inline` templates inside thin `#force_no_inline`
+// state wrappers (preserving identical `#must_tail` signatures and zero-overhead codegen); cold multi-state chains
+// (script-escaped, comments, doctypes, CDATA, PIs) run iteratively and `#must_tail` back to hot states.
 
 @(private, enable_target_feature = STATE_FEATURES)
 st_data :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for {
-		q = stop_at(q, end, STOP_DATA)
-		if q >= end {
-			return finish(t, on, end, at(t, end))
-		}
-		switch q[0] {
-		case '<':
-			t.text_hi = at(t, q)
-			return #must_tail st_tag_open(q[1:], end, t, on)
-		case '&':
-			t.ret = .Data
-			return #must_tail st_char_ref(q, end, t, on)
-		case 0:
-			t.text_flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
-			q = q[1:]
-		case:
-			n, stop := judge(t, on, q, end, &t.text_flags)
-			if stop {
-				return halt(t, q)
-			}
-			q = q[n:]
-		}
-	}
+	q, act, res := text_loop(p, end, t, on, .Data)
+	if act == 1 { return #must_tail st_tag_open(q, end, t, on) }
+	if act == 2 { return #must_tail st_char_ref(q, end, t, on) }
+	return res
 }
-
 @(private, enable_target_feature = STATE_FEATURES)
 st_rcdata :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for {
-		q = stop_at(q, end, STOP_DATA)
-		if q >= end {
-			return finish(t, on, end, at(t, end))
-		}
-		switch q[0] {
-		case '<':
-			t.text_hi = at(t, q)
-			t.back = .Rcdata
-			return #must_tail st_text_lt(q[1:], end, t, on)
-		case '&':
-			t.ret = .Rcdata
-			return #must_tail st_char_ref(q, end, t, on)
-		case 0:
-			t.text_flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
-			q = q[1:]
-		case:
-			n, stop := judge(t, on, q, end, &t.text_flags)
-			if stop {
-				return halt(t, q)
-			}
-			q = q[n:]
-		}
-	}
+	q, act, res := text_loop(p, end, t, on, .Rcdata)
+	if act == 1 { return #must_tail st_text_end_open(q, end, t, on) }
+	if act == 2 { return #must_tail st_char_ref(q, end, t, on) }
+	return res
 }
-
 @(private, enable_target_feature = STATE_FEATURES)
 st_rawtext :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for {
-		q = stop_at(q, end, STOP_RAW)
-		if q >= end {
-			return finish(t, on, end, at(t, end))
-		}
-		switch q[0] {
-		case '<':
-			t.text_hi = at(t, q)
-			t.back = .Rawtext
-			return #must_tail st_text_lt(q[1:], end, t, on)
-		case 0:
-			t.text_flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
-			q = q[1:]
-		case:
-			n, stop := judge(t, on, q, end, &t.text_flags)
-			if stop {
-				return halt(t, q)
-			}
-			q = q[n:]
-		}
-	}
+	q, act, res := text_loop(p, end, t, on, .Rawtext)
+	if act == 1 { return #must_tail st_text_end_open(q, end, t, on) }
+	return res
 }
-
 @(private, enable_target_feature = STATE_FEATURES)
 st_script :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for {
-		q = stop_at(q, end, STOP_RAW)
-		if q >= end {
-			return finish(t, on, end, at(t, end))
-		}
-		switch q[0] {
-		case '<':
-			t.text_hi = at(t, q)
-			return #must_tail st_script_lt(q[1:], end, t, on)
-		case 0:
-			t.text_flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
-			q = q[1:]
-		case:
-			n, stop := judge(t, on, q, end, &t.text_flags)
-			if stop {
-				return halt(t, q)
-			}
-			q = q[n:]
-		}
-	}
+	q, act, res := text_loop(p, end, t, on, .Script_Data)
+	if act == 1 { return #must_tail st_script_lt(q, end, t, on) }
+	return res
 }
-
 @(private, enable_target_feature = STATE_FEATURES)
 st_plaintext :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
+	_, _, res := text_loop(p, end, t, on, .Plaintext)
+	return res
+}
+
+@(private = "file", enable_target_feature = STATE_FEATURES)
+text_loop :: #force_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, $K: Content) -> ([^]u8, u8, u64) {
 	q := p
 	for {
-		q = stop_at(q, end, STOP_PLAIN)
-		if q >= end {
-			return finish(t, on, end, at(t, end))
+		when K == .Data || K == .Rcdata {
+			q = stop_at(q, end, STOP_DATA)
+		} else when K == .Rawtext || K == .Script_Data {
+			q = stop_at(q, end, STOP_RAW)
+		} else {
+			q = stop_at(q, end, STOP_PLAIN)
 		}
-		if q[0] == 0 {
-			t.text_flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
+		if q >= end { return nil, 0, finish(t, on, end, at(t, end)) }
+		switch q[0] {
+		case '<':
+			when K == .Data {
+				t.text_hi = at(t, q)
+				return q[1:], 1, 0
+			} else when K == .Rcdata || K == .Rawtext {
+				t.text_hi = at(t, q)
+				q = q[1:]
+				if q < end && q[0] == '/' {
+					t.back = .Rcdata when K == .Rcdata else .Rawtext
+					return q[1:], 1, 0
+				}
+				continue
+			} else when K == .Script_Data {
+				t.text_hi = at(t, q)
+				return q[1:], 1, 0
 			}
+		case '&':
+			when K == .Data || K == .Rcdata {
+				t.ret = .Data when K == .Data else .Rcdata
+				return q, 2, 0
+			}
+		case 0:
+			t.text_flags += {.Nul}
+			if report(t, on, q, .Unexpected_Null_Character) { return nil, 0, halt(t, q) }
 			q = q[1:]
 			continue
 		}
 		n, stop := judge(t, on, q, end, &t.text_flags)
-		if stop {
-			return halt(t, q)
-		}
+		if stop { return nil, 0, halt(t, q) }
 		q = q[n:]
 	}
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
 st_tag_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_error(t, on, end, .Eof_Before_Tag_Name)
-	}
+	if p >= end { return eof_error(t, on, end, .Eof_Before_Tag_Name) }
 	c := p[0]
 	switch {
-	case c == '!':
-		return #must_tail st_markup_open(p[1:], end, t, on)
-	case c == '/':
-		return #must_tail st_end_tag_open(p[1:], end, t, on)
+	case c == '!': return #must_tail st_markup_open(p[1:], end, t, on)
+	case c == '/': return #must_tail st_end_tag_open(p[1:], end, t, on)
 	case CLASS[c] & C_ALPHA != 0:
 		open_tag(t, .Start_Tag, at(t, p) - 1, p)
 		return #must_tail st_tag_name(p, end, t, on)
 	case c == '?':
 		t.tok = Html_Token{kind = .Instruction, lo = at(t, p) - 1}
 		t.mark = at(t, p)
-		return #must_tail st_pi_open(p[1:], end, t, on)
+		return #must_tail st_pi(p[1:], end, t, on)
 	}
-	if judge_first(t, on, p, end) || report(t, on, p, .Invalid_First_Character_Of_Tag_Name) {
-		return halt(t, p)
-	}
+	if judge_first(t, on, p, end) || report(t, on, p, .Invalid_First_Character_Of_Tag_Name) { return halt(t, p) }
 	return #must_tail st_data(p, end, t, on)
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
 st_end_tag_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_error(t, on, end, .Eof_Before_Tag_Name)
-	}
+	if p >= end { return eof_error(t, on, end, .Eof_Before_Tag_Name) }
 	c := p[0]
 	if CLASS[c] & C_ALPHA != 0 {
 		open_tag(t, .End_Tag, at(t, p) - 2, p)
 		return #must_tail st_tag_name(p, end, t, on)
 	}
 	if c == '>' {
-		if report(t, on, p, .Missing_End_Tag_Name) || flush(t, on, t.text_hi, at(t, p) + 1) {
-			return halt(t, p[1:])
-		}
+		if report(t, on, p, .Missing_End_Tag_Name) || flush(t, on, t.text_hi, at(t, p) + 1) { return halt(t, p[1:]) }
 		return #must_tail st_data(p[1:], end, t, on)
 	}
-	if judge_first(t, on, p, end) || report(t, on, p, .Invalid_First_Character_Of_Tag_Name) {
-		return halt(t, p)
-	}
+	if judge_first(t, on, p, end) || report(t, on, p, .Invalid_First_Character_Of_Tag_Name) { return halt(t, p) }
 	open_comment(t, at(t, p) - 2, p)
 	return #must_tail st_bogus_comment(p, end, t, on)
 }
@@ -198,12 +122,8 @@ st_end_tag_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Token
 st_tag_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q := p
 	for {
-		for q < end && CLASS[q[0]] & (C_WS | C_UPPER | C_JUDGE | C_TAG_END) == 0 {
-			q = q[1:]
-		}
-		if q >= end {
-			return eof_in_tag(t, on, end)
-		}
+		for q < end && CLASS[q[0]] & (C_WS | C_UPPER | C_JUDGE | C_TAG_END) == 0 { q = q[1:] }
+		if q >= end { return eof_in_tag(t, on, end) }
 		c := q[0]
 		switch {
 		case CLASS[c] & C_WS != 0:
@@ -214,53 +134,30 @@ st_tag_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer
 			return #must_tail st_self_closing(q[1:], end, t, on)
 		case c == '>':
 			end_name(t, q)
-			if emit_tag(t, on, q) {
-				return halt(t, q[1:])
-			}
+			if emit_tag(t, on, q) { return halt(t, q[1:]) }
 			return #must_tail st_content(q[1:], end, t, on)
 		case c == 0:
 			t.flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Null_Character) { return halt(t, q) }
 			q = q[1:]
 		case CLASS[c] & C_UPPER != 0:
 			t.flags += {.Upper}
 			q = q[1:]
 		case:
 			n, stop := judge(t, on, q, end, &t.flags)
-			if stop {
-				return halt(t, q)
-			}
+			if stop { return halt(t, q) }
 			q = q[n:]
 		}
 	}
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
-st_text_lt :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end && p[0] == '/' {
-		return #must_tail st_text_end_open(p[1:], end, t, on)
-	}
-	return #must_tail st_back(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
 st_text_end_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end && CLASS[p[0]] & C_ALPHA != 0 {
-		open_tag(t, .End_Tag, at(t, p) - 2, p)
-		return #must_tail st_text_end_name(p, end, t, on)
-	}
-	return #must_tail st_back(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_text_end_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
+	if p >= end || CLASS[p[0]] & C_ALPHA == 0 { return #must_tail st_back(p, end, t, on) }
+	open_tag(t, .End_Tag, at(t, p) - 2, p)
 	q := p
 	for q < end && CLASS[q[0]] & C_ALPHA != 0 {
-		if CLASS[q[0]] & C_UPPER != 0 {
-			t.flags += {.Upper}
-		}
+		if CLASS[q[0]] & C_UPPER != 0 { t.flags += {.Upper} }
 		q = q[1:]
 	}
 	if q < end && appropriate(t, q) {
@@ -274,9 +171,7 @@ st_text_end_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Toke
 			return #must_tail st_self_closing(q[1:], end, t, on)
 		case c == '>':
 			end_name(t, q)
-			if emit_tag(t, on, q) {
-				return halt(t, q[1:])
-			}
+			if emit_tag(t, on, q) { return halt(t, q[1:]) }
 			return #must_tail st_content(q[1:], end, t, on)
 		}
 	}
@@ -286,29 +181,24 @@ st_text_end_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Toke
 @(private, enable_target_feature = STATE_FEATURES)
 st_script_lt :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	if p < end {
-		switch p[0] {
-		case '/':
+		if p[0] == '/' {
 			t.back = .Script
 			return #must_tail st_text_end_open(p[1:], end, t, on)
-		case '!':
-			return #must_tail st_script_escape_start(p[1:], end, t, on)
 		}
-	}
-	return #must_tail st_script(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_escape_start :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end && p[0] == '-' {
-		return #must_tail st_script_escape_start_dash(p[1:], end, t, on)
-	}
-	return #must_tail st_script(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_escape_start_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end && p[0] == '-' {
-		return #must_tail st_script_escaped_dash_dash(p[1:], end, t, on)
+		if p[0] == '!' {
+			q := p[1:]
+			if q < end && q[0] == '-' {
+				q = q[1:]
+				if q < end && q[0] == '-' {
+					q = q[1:]
+					for q < end && q[0] == '-' { q = q[1:] }
+					if q >= end { return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text) }
+					if q[0] == '>' { return #must_tail st_script(q[1:], end, t, on) }
+					return #must_tail st_script_escaped(q, end, t, on)
+				}
+			}
+			return #must_tail st_script(q, end, t, on)
+		}
 	}
 	return #must_tail st_script(p, end, t, on)
 }
@@ -316,199 +206,68 @@ st_script_escape_start_dash :: #force_no_inline proc "contextless" (p, end: [^]u
 @(private, enable_target_feature = STATE_FEATURES)
 st_script_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q := p
+	dbl := false
 	for {
 		q = stop_at(q, end, STOP_DASH)
-		if q >= end {
-			return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
-		}
+		if q >= end { return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text) }
 		switch q[0] {
 		case '-':
-			return #must_tail st_script_escaped_dash(q[1:], end, t, on)
+			q = q[1:]
+			if q >= end { return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text) }
+			if q[0] == '-' {
+				for q < end && q[0] == '-' { q = q[1:] }
+				if q >= end { return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text) }
+				if q[0] == '>' { return #must_tail st_script(q[1:], end, t, on) }
+			}
 		case '<':
-			t.text_hi = at(t, q)
-			return #must_tail st_script_escaped_lt(q[1:], end, t, on)
+			if !dbl {
+				t.text_hi = at(t, q)
+				q = q[1:]
+				if q < end && q[0] == '/' {
+					t.back = .Escaped
+					return #must_tail st_text_end_open(q[1:], end, t, on)
+				}
+				if q < end && CLASS[q[0]] & C_ALPHA != 0 {
+					t.mark = at(t, q)
+					for q < end && CLASS[q[0]] & C_ALPHA != 0 { q = q[1:] }
+					if q < end && (CLASS[q[0]] & C_WS != 0 || q[0] == '/' || q[0] == '>') {
+						if q[0] == '\r' { t.text_flags += {.Cr} }
+						if is_script(t, q) { dbl = true }
+						q = q[1:]
+					}
+				}
+			} else {
+				q = q[1:]
+				if q < end && q[0] == '/' {
+					q = q[1:]
+					t.mark = at(t, q)
+					for q < end && CLASS[q[0]] & C_ALPHA != 0 { q = q[1:] }
+					if q < end && (CLASS[q[0]] & C_WS != 0 || q[0] == '/' || q[0] == '>') {
+						if q[0] == '\r' { t.text_flags += {.Cr} }
+						if is_script(t, q) { dbl = false }
+						q = q[1:]
+					}
+				}
+			}
 		case 0:
 			t.text_flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Null_Character) { return halt(t, q) }
 			q = q[1:]
 		case:
 			n, stop := judge(t, on, q, end, &t.text_flags)
-			if stop {
-				return halt(t, q)
-			}
+			if stop { return halt(t, q) }
 			q = q[n:]
 		}
 	}
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_escaped_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
-	}
-	switch p[0] {
-	case '-':
-		return #must_tail st_script_escaped_dash_dash(p[1:], end, t, on)
-	case '<':
-		t.text_hi = at(t, p)
-		return #must_tail st_script_escaped_lt(p[1:], end, t, on)
-	}
-	return #must_tail st_script_escaped(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_escaped_dash_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for q < end && q[0] == '-' {
-		q = q[1:]
-	}
-	if q >= end {
-		return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
-	}
-	switch q[0] {
-	case '<':
-		t.text_hi = at(t, q)
-		return #must_tail st_script_escaped_lt(q[1:], end, t, on)
-	case '>':
-		return #must_tail st_script(q[1:], end, t, on)
-	}
-	return #must_tail st_script_escaped(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_escaped_lt :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end {
-		if p[0] == '/' {
-			t.back = .Escaped
-			return #must_tail st_text_end_open(p[1:], end, t, on)
-		}
-		if CLASS[p[0]] & C_ALPHA != 0 {
-			t.mark = at(t, p)
-			return #must_tail st_script_double_escape_start(p, end, t, on)
-		}
-	}
-	return #must_tail st_script_escaped(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_double_escape_start :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for q < end && CLASS[q[0]] & C_ALPHA != 0 {
-		q = q[1:]
-	}
-	if q < end && (CLASS[q[0]] & C_WS != 0 || q[0] == '/' || q[0] == '>') {
-		if q[0] == '\r' {
-			t.text_flags += {.Cr}
-		}
-		if is_script(t, q) {
-			return #must_tail st_script_double_escaped(q[1:], end, t, on)
-		}
-		return #must_tail st_script_escaped(q[1:], end, t, on)
-	}
-	return #must_tail st_script_escaped(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_double_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for {
-		q = stop_at(q, end, STOP_DASH)
-		if q >= end {
-			return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
-		}
-		switch q[0] {
-		case '-':
-			return #must_tail st_script_double_escaped_dash(q[1:], end, t, on)
-		case '<':
-			return #must_tail st_script_double_escaped_lt(q[1:], end, t, on)
-		case 0:
-			t.text_flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
-			q = q[1:]
-		case:
-			n, stop := judge(t, on, q, end, &t.text_flags)
-			if stop {
-				return halt(t, q)
-			}
-			q = q[n:]
-		}
-	}
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_double_escaped_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
-	}
-	switch p[0] {
-	case '-':
-		return #must_tail st_script_double_escaped_dash_dash(p[1:], end, t, on)
-	case '<':
-		return #must_tail st_script_double_escaped_lt(p[1:], end, t, on)
-	}
-	return #must_tail st_script_double_escaped(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_double_escaped_dash_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for q < end && q[0] == '-' {
-		q = q[1:]
-	}
-	if q >= end {
-		return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
-	}
-	switch q[0] {
-	case '<':
-		return #must_tail st_script_double_escaped_lt(q[1:], end, t, on)
-	case '>':
-		return #must_tail st_script(q[1:], end, t, on)
-	}
-	return #must_tail st_script_double_escaped(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_double_escaped_lt :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end && p[0] == '/' {
-		t.mark = at(t, p) + 1
-		return #must_tail st_script_double_escape_end(p[1:], end, t, on)
-	}
-	return #must_tail st_script_double_escaped(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_script_double_escape_end :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for q < end && CLASS[q[0]] & C_ALPHA != 0 {
-		q = q[1:]
-	}
-	if q < end && (CLASS[q[0]] & C_WS != 0 || q[0] == '/' || q[0] == '>') {
-		if q[0] == '\r' {
-			t.text_flags += {.Cr}
-		}
-		if is_script(t, q) {
-			return #must_tail st_script_escaped(q[1:], end, t, on)
-		}
-		return #must_tail st_script_double_escaped(q[1:], end, t, on)
-	}
-	return #must_tail st_script_double_escaped(q, end, t, on)
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
 st_before_attr_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q := skip_ws(p, end)
-	if q >= end || q[0] == '/' || q[0] == '>' {
-		return #must_tail st_after_attr_name(q, end, t, on)
-	}
+	if q >= end || q[0] == '/' || q[0] == '>' { return #must_tail st_after_attr_name(q, end, t, on) }
 	open_attr(t, q)
 	if q[0] == '=' {
-		if report(t, on, q, .Unexpected_Equals_Sign_Before_Attribute_Name) {
-			return halt(t, q)
-		}
+		if report(t, on, q, .Unexpected_Equals_Sign_Before_Attribute_Name) { return halt(t, q) }
 		return #must_tail st_attr_name(q[1:], end, t, on)
 	}
 	return #must_tail st_attr_name(q, end, t, on)
@@ -518,40 +277,28 @@ st_before_attr_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^T
 st_attr_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q := p
 	for {
-		for q < end && CLASS[q[0]] & (C_WS | C_UPPER | C_JUDGE | C_TAG_END | C_ATTR_END) == 0 {
-			q = q[1:]
-		}
+		for q < end && CLASS[q[0]] & (C_WS | C_UPPER | C_JUDGE | C_TAG_END | C_ATTR_END) == 0 { q = q[1:] }
 		c := q[0] if q < end else '>'
 		switch {
 		case q >= end || CLASS[c] & C_WS != 0 || c == '/' || c == '>':
-			if end_attr_name(t, on, q) {
-				return halt(t, q)
-			}
+			if end_attr_name(t, on, q) { return halt(t, q) }
 			return #must_tail st_after_attr_name(q, end, t, on)
 		case c == '=':
-			if end_attr_name(t, on, q) {
-				return halt(t, q)
-			}
+			if end_attr_name(t, on, q) { return halt(t, q) }
 			return #must_tail st_before_attr_value(q[1:], end, t, on)
 		case CLASS[c] & C_UPPER != 0:
 			t.flags += {.Upper}
 			q = q[1:]
 		case c == 0:
 			t.flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Null_Character) { return halt(t, q) }
 			q = q[1:]
 		case c == '"' || c == '\'' || c == '<':
-			if report(t, on, q, .Unexpected_Character_In_Attribute_Name) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Character_In_Attribute_Name) { return halt(t, q) }
 			q = q[1:]
 		case:
 			n, stop := judge(t, on, q, end, &t.flags)
-			if stop {
-				return halt(t, q)
-			}
+			if stop { return halt(t, q) }
 			q = q[n:]
 		}
 	}
@@ -560,18 +307,12 @@ st_attr_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenize
 @(private, enable_target_feature = STATE_FEATURES)
 st_after_attr_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q := skip_ws(p, end)
-	if q >= end {
-		return eof_in_tag(t, on, end)
-	}
+	if q >= end { return eof_in_tag(t, on, end) }
 	switch q[0] {
-	case '/':
-		return #must_tail st_self_closing(q[1:], end, t, on)
-	case '=':
-		return #must_tail st_before_attr_value(q[1:], end, t, on)
+	case '/': return #must_tail st_self_closing(q[1:], end, t, on)
+	case '=': return #must_tail st_before_attr_value(q[1:], end, t, on)
 	case '>':
-		if emit_tag(t, on, q) {
-			return halt(t, q[1:])
-		}
+		if emit_tag(t, on, q) { return halt(t, q[1:]) }
 		return #must_tail st_content(q[1:], end, t, on)
 	}
 	open_attr(t, q)
@@ -590,9 +331,7 @@ st_before_attr_value :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^
 			open_attr(t, q[1:])
 			return #must_tail st_attr_value_single(q[1:], end, t, on)
 		case '>':
-			if report(t, on, q, .Missing_Attribute_Value) || emit_tag(t, on, q) {
-				return halt(t, q[1:])
-			}
+			if report(t, on, q, .Missing_Attribute_Value) || emit_tag(t, on, q) { return halt(t, q[1:]) }
 			return #must_tail st_content(q[1:], end, t, on)
 		}
 	}
@@ -602,61 +341,39 @@ st_before_attr_value :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^
 
 @(private, enable_target_feature = STATE_FEATURES)
 st_attr_value_double :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for {
-		q = stop_at(q, end, STOP_DOUBLE)
-		if q >= end {
-			return eof_in_tag(t, on, end)
-		}
-		switch q[0] {
-		case '"':
-			end_value(t, q)
-			return #must_tail st_after_attr_value(q[1:], end, t, on)
-		case '&':
-			t.ret = .Double
-			return #must_tail st_char_ref(q, end, t, on)
-		case 0:
-			t.flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
-			q = q[1:]
-		case:
-			n, stop := judge(t, on, q, end, &t.flags)
-			if stop {
-				return halt(t, q)
-			}
-			q = q[n:]
-		}
-	}
+	q, act, res := attr_quoted_loop(p, end, t, on, '"')
+	if act == 1 { return #must_tail st_after_attr_value(q, end, t, on) }
+	if act == 2 { return #must_tail st_char_ref(q, end, t, on) }
+	return res
 }
-
 @(private, enable_target_feature = STATE_FEATURES)
 st_attr_value_single :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
+	q, act, res := attr_quoted_loop(p, end, t, on, '\'')
+	if act == 1 { return #must_tail st_after_attr_value(q, end, t, on) }
+	if act == 2 { return #must_tail st_char_ref(q, end, t, on) }
+	return res
+}
+
+@(private = "file", enable_target_feature = STATE_FEATURES)
+attr_quoted_loop :: #force_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, $Q: u8) -> ([^]u8, u8, u64) {
 	q := p
 	for {
-		q = stop_at(q, end, STOP_SINGLE)
-		if q >= end {
-			return eof_in_tag(t, on, end)
-		}
+		q = stop_at(q, end, STOP_DOUBLE when Q == '"' else STOP_SINGLE)
+		if q >= end { return nil, 0, eof_in_tag(t, on, end) }
 		switch q[0] {
-		case '\'':
+		case Q:
 			end_value(t, q)
-			return #must_tail st_after_attr_value(q[1:], end, t, on)
+			return q[1:], 1, 0
 		case '&':
-			t.ret = .Single
-			return #must_tail st_char_ref(q, end, t, on)
+			t.ret = .Double when Q == '"' else .Single
+			return q, 2, 0
 		case 0:
 			t.flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Null_Character) { return nil, 0, halt(t, q) }
 			q = q[1:]
 		case:
 			n, stop := judge(t, on, q, end, &t.flags)
-			if stop {
-				return halt(t, q)
-			}
+			if stop { return nil, 0, halt(t, q) }
 			q = q[n:]
 		}
 	}
@@ -666,9 +383,7 @@ st_attr_value_single :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^
 st_attr_value_unquoted :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q := p
 	for {
-		if q >= end {
-			return eof_in_tag(t, on, end)
-		}
+		if q >= end { return eof_in_tag(t, on, end) }
 		c := q[0]
 		switch {
 		case CLASS[c] & C_WS != 0:
@@ -679,26 +394,18 @@ st_attr_value_unquoted :: #force_no_inline proc "contextless" (p, end: [^]u8, t:
 			return #must_tail st_char_ref(q, end, t, on)
 		case c == '>':
 			end_value(t, q)
-			if emit_tag(t, on, q) {
-				return halt(t, q[1:])
-			}
+			if emit_tag(t, on, q) { return halt(t, q[1:]) }
 			return #must_tail st_content(q[1:], end, t, on)
 		case c == 0:
 			t.flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Null_Character) { return halt(t, q) }
 			q = q[1:]
 		case c == '"' || c == '\'' || c == '<' || c == '=' || c == '`':
-			if report(t, on, q, .Unexpected_Character_In_Unquoted_Attribute_Value) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Character_In_Unquoted_Attribute_Value) { return halt(t, q) }
 			q = q[1:]
 		case CLASS[c] & C_JUDGE != 0:
 			n, stop := judge(t, on, q, end, &t.flags)
-			if stop {
-				return halt(t, q)
-			}
+			if stop { return halt(t, q) }
 			q = q[n:]
 		case:
 			q = q[1:]
@@ -708,41 +415,27 @@ st_attr_value_unquoted :: #force_no_inline proc "contextless" (p, end: [^]u8, t:
 
 @(private, enable_target_feature = STATE_FEATURES)
 st_after_attr_value :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_tag(t, on, end)
-	}
+	if p >= end { return eof_in_tag(t, on, end) }
 	switch {
-	case CLASS[p[0]] & C_WS != 0:
-		return #must_tail st_before_attr_name(p[1:], end, t, on)
-	case p[0] == '/':
-		return #must_tail st_self_closing(p[1:], end, t, on)
+	case CLASS[p[0]] & C_WS != 0: return #must_tail st_before_attr_name(p[1:], end, t, on)
+	case p[0] == '/':             return #must_tail st_self_closing(p[1:], end, t, on)
 	case p[0] == '>':
-		if emit_tag(t, on, p) {
-			return halt(t, p[1:])
-		}
+		if emit_tag(t, on, p) { return halt(t, p[1:]) }
 		return #must_tail st_content(p[1:], end, t, on)
 	}
-	if judge_first(t, on, p, end) || report(t, on, p, .Missing_Whitespace_Between_Attributes) {
-		return halt(t, p)
-	}
+	if judge_first(t, on, p, end) || report(t, on, p, .Missing_Whitespace_Between_Attributes) { return halt(t, p) }
 	return #must_tail st_before_attr_name(p, end, t, on)
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
 st_self_closing :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_tag(t, on, end)
-	}
+	if p >= end { return eof_in_tag(t, on, end) }
 	if p[0] == '>' {
 		t.tok.flags += {.Self_Closing}
-		if emit_tag(t, on, p) {
-			return halt(t, p[1:])
-		}
+		if emit_tag(t, on, p) { return halt(t, p[1:]) }
 		return #must_tail st_content(p[1:], end, t, on)
 	}
-	if judge_first(t, on, p, end) || report(t, on, p, .Unexpected_Solidus_In_Tag) {
-		return halt(t, p)
-	}
+	if judge_first(t, on, p, end) || report(t, on, p, .Unexpected_Solidus_In_Tag) { return halt(t, p) }
 	return #must_tail st_before_attr_name(p, end, t, on)
 }
 
@@ -758,21 +451,15 @@ st_bogus_comment :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Toke
 		switch q[0] {
 		case '>':
 			t.tok.data = span_of(t, t.lo, at(t, q), .Raw, t.flags)
-			if emit(t, on, q[1:]) {
-				return halt(t, q[1:])
-			}
+			if emit(t, on, q[1:]) { return halt(t, q[1:]) }
 			return #must_tail st_content(q[1:], end, t, on)
 		case 0:
 			t.flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Null_Character) { return halt(t, q) }
 			q = q[1:]
 		case:
 			n, stop := judge(t, on, q, end, &t.flags)
-			if stop {
-				return halt(t, q)
-			}
+			if stop { return halt(t, q) }
 			q = q[n:]
 		}
 	}
@@ -784,7 +471,7 @@ st_markup_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokeni
 	lo := at(t, p) - 2
 	if left >= 2 && p[0] == '-' && p[1] == '-' {
 		open_comment(t, lo, p[2:])
-		return #must_tail st_comment_start(p[2:], end, t, on)
+		return #must_tail st_comment(p[2:], end, t, on)
 	}
 	if left >= 7 && fold_equal(p, transmute([]u8)string("doctype")) {
 		missing := Span{flags = {.Missing}}
@@ -792,455 +479,253 @@ st_markup_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokeni
 		return #must_tail st_doctype(p[7:], end, t, on)
 	}
 	if left >= 7 && string(p[:7]) == "[CDATA[" {
-		if flush(t, on, t.text_hi, at(t, p) + 7) {
-			return halt(t, p[7:])
-		}
+		if flush(t, on, t.text_hi, at(t, p) + 7) { return halt(t, p[7:]) }
 		if t.in_foreign {
 			t.text_mode = .Verbatim
 			return #must_tail st_cdata(p[7:], end, t, on)
 		}
-		if report(t, on, p[6:], .Cdata_In_Html_Content) {
-			return halt(t, p[7:])
-		}
+		if report(t, on, p[6:], .Cdata_In_Html_Content) { return halt(t, p[7:]) }
 		open_comment(t, lo, p)
 		return #must_tail st_bogus_comment(p[7:], end, t, on)
 	}
-	if judge_first(t, on, p, end) || report(t, on, p, .Incorrectly_Opened_Comment) {
-		return halt(t, p)
-	}
+	if judge_first(t, on, p, end) || report(t, on, p, .Incorrectly_Opened_Comment) { return halt(t, p) }
 	open_comment(t, lo, p)
 	return #must_tail st_bogus_comment(p, end, t, on)
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
-st_comment_start :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end {
-		switch p[0] {
-		case '-':
-			return #must_tail st_comment_start_dash(p[1:], end, t, on)
-		case '>':
-			return #must_tail st_empty_comment(p, end, t, on)
-		}
-	}
-	return #must_tail st_comment(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_comment_start_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		t.mark = t.lo
-		return eof_in_comment(t, on, end)
-	}
-	switch p[0] {
-	case '-':
-		t.mark = t.lo
-		return #must_tail st_comment_end(p[1:], end, t, on)
-	case '>':
-		return #must_tail st_empty_comment(p, end, t, on)
-	}
-	return #must_tail st_comment(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_empty_comment :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	t.tok.data = span_of(t, t.lo, t.lo, .Raw, {})
-	if report(t, on, p, .Abrupt_Closing_Of_Empty_Comment) || emit(t, on, p[1:]) {
-		return halt(t, p[1:])
-	}
-	return #must_tail st_content(p[1:], end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
 st_comment :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q := p
-	for {
-		q = stop_at(q, end, STOP_DASH)
-		if q >= end {
-			t.mark = at(t, end)
-			return eof_in_comment(t, on, end)
+	in_end := false
+	if q < end {
+		if q[0] == '>' {
+			t.tok.data = span_of(t, t.lo, t.lo, .Raw, {})
+			if report(t, on, q, .Abrupt_Closing_Of_Empty_Comment) || emit(t, on, q[1:]) { return halt(t, q[1:]) }
+			return #must_tail st_content(q[1:], end, t, on)
 		}
+		if q[0] == '-' {
+			q = q[1:]
+			if q >= end { t.mark = t.lo; return eof_in_comment(t, on, end) }
+			if q[0] == '>' {
+				t.tok.data = span_of(t, t.lo, t.lo, .Raw, {})
+				if report(t, on, q, .Abrupt_Closing_Of_Empty_Comment) || emit(t, on, q[1:]) { return halt(t, q[1:]) }
+				return #must_tail st_content(q[1:], end, t, on)
+			}
+			if q[0] == '-' { t.mark = t.lo; q = q[1:]; in_end = true }
+		}
+	}
+	for {
+		if in_end {
+			for q < end && q[0] == '-' { t.mark += 1; q = q[1:] }
+			if q >= end { return eof_in_comment(t, on, end) }
+			if q[0] == '>' {
+				t.tok.data = span_of(t, t.lo, t.mark, .Raw, t.flags)
+				if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+				return #must_tail st_content(q[1:], end, t, on)
+			}
+			if q[0] == '!' {
+				q = q[1:]
+				if q >= end { return eof_in_comment(t, on, end) }
+				if q[0] == '>' {
+					t.tok.data = span_of(t, t.lo, t.mark, .Raw, t.flags)
+					if report(t, on, q, .Incorrectly_Closed_Comment) || emit(t, on, q[1:]) { return halt(t, q[1:]) }
+					return #must_tail st_content(q[1:], end, t, on)
+				}
+				if q[0] == '-' {
+					t.mark = at(t, q)
+					q = q[1:]
+					if q >= end { return eof_in_comment(t, on, end) }
+					if q[0] == '-' { q = q[1:]; continue }
+				}
+			}
+			in_end = false
+			continue
+		}
+		q = stop_at(q, end, STOP_DASH)
+		if q >= end { t.mark = at(t, end); return eof_in_comment(t, on, end) }
 		switch q[0] {
 		case '<':
-			return #must_tail st_comment_lt(q[1:], end, t, on)
+			for q < end && q[0] == '<' { q = q[1:] }
+			if q < end && q[0] == '!' {
+				q = q[1:]
+				if q < end && q[0] == '-' {
+					q = q[1:]
+					if q < end && q[0] == '-' {
+						q = q[1:]
+						t.mark = at(t, q) - 2
+						if q < end && q[0] != '>' && (judge_first(t, on, q, end) || report(t, on, q, .Nested_Comment)) { return halt(t, q) }
+						in_end = true
+					} else {
+						t.mark = at(t, q) - 1
+						if q >= end { return eof_in_comment(t, on, end) }
+					}
+				}
+			}
 		case '-':
 			t.mark = at(t, q)
-			return #must_tail st_comment_end_dash(q[1:], end, t, on)
+			q = q[1:]
+			if q >= end { return eof_in_comment(t, on, end) }
+			if q[0] == '-' { q = q[1:]; in_end = true }
 		case 0:
 			t.flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Null_Character) { return halt(t, q) }
 			q = q[1:]
 		case:
 			n, stop := judge(t, on, q, end, &t.flags)
-			if stop {
-				return halt(t, q)
-			}
+			if stop { return halt(t, q) }
 			q = q[n:]
 		}
 	}
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_comment_lt :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for q < end && q[0] == '<' {
-		q = q[1:]
-	}
-	if q < end && q[0] == '!' {
-		return #must_tail st_comment_lt_bang(q[1:], end, t, on)
-	}
-	return #must_tail st_comment(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_comment_lt_bang :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end && p[0] == '-' {
-		return #must_tail st_comment_lt_bang_dash(p[1:], end, t, on)
-	}
-	return #must_tail st_comment(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_comment_lt_bang_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end && p[0] == '-' {
-		return #must_tail st_comment_lt_bang_dash_dash(p[1:], end, t, on)
-	}
-	t.mark = at(t, p) - 1
-	return #must_tail st_comment_end_dash(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_comment_lt_bang_dash_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	t.mark = at(t, p) - 2
-	if p < end && p[0] != '>' {
-		if judge_first(t, on, p, end) || report(t, on, p, .Nested_Comment) {
-			return halt(t, p)
-		}
-	}
-	return #must_tail st_comment_end(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_comment_end_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_comment(t, on, end)
-	}
-	if p[0] == '-' {
-		return #must_tail st_comment_end(p[1:], end, t, on)
-	}
-	return #must_tail st_comment(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_comment_end :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for q < end && q[0] == '-' {
-		t.mark += 1
-		q = q[1:]
-	}
-	if q >= end {
-		return eof_in_comment(t, on, end)
-	}
-	switch q[0] {
-	case '>':
-		t.tok.data = span_of(t, t.lo, t.mark, .Raw, t.flags)
-		if emit(t, on, q[1:]) {
-			return halt(t, q[1:])
-		}
-		return #must_tail st_content(q[1:], end, t, on)
-	case '!':
-		return #must_tail st_comment_end_bang(q[1:], end, t, on)
-	}
-	return #must_tail st_comment(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_comment_end_bang :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_comment(t, on, end)
-	}
-	switch p[0] {
-	case '-':
-		t.mark = at(t, p)
-		return #must_tail st_comment_end_dash(p[1:], end, t, on)
-	case '>':
-		t.tok.data = span_of(t, t.lo, t.mark, .Raw, t.flags)
-		if report(t, on, p, .Incorrectly_Closed_Comment) || emit(t, on, p[1:]) {
-			return halt(t, p[1:])
-		}
-		return #must_tail st_content(p[1:], end, t, on)
-	}
-	return #must_tail st_comment(p, end, t, on)
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
 st_doctype :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_doctype(t, on, end)
+	q := p
+	if q >= end { return eof_in_doctype(t, on, end) }
+	if CLASS[q[0]] & C_WS != 0 {
+		q = skip_ws(q[1:], end)
+	} else if q[0] != '>' && (judge_first(t, on, q, end) || report(t, on, q, .Missing_Whitespace_Before_Doctype_Name)) {
+		return halt(t, q)
 	}
-	if CLASS[p[0]] & C_WS != 0 {
-		return #must_tail st_before_doctype_name(p[1:], end, t, on)
-	}
-	if p[0] != '>' && (judge_first(t, on, p, end) || report(t, on, p, .Missing_Whitespace_Before_Doctype_Name)) {
-		return halt(t, p)
-	}
-	return #must_tail st_before_doctype_name(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_before_doctype_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := skip_ws(p, end)
-	if q >= end {
-		return eof_in_doctype(t, on, end)
-	}
+	if q >= end { return eof_in_doctype(t, on, end) }
 	if q[0] == '>' {
 		t.tok.flags += {.Force_Quirks}
-		if report(t, on, q, .Missing_Doctype_Name) || emit(t, on, q[1:]) {
-			return halt(t, q[1:])
-		}
+		if report(t, on, q, .Missing_Doctype_Name) || emit(t, on, q[1:]) { return halt(t, q[1:]) }
 		return #must_tail st_content(q[1:], end, t, on)
 	}
-	t.lo = at(t, q)
-	t.flags = {}
-	return #must_tail st_doctype_name(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_doctype_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
+	t.lo, t.flags = at(t, q), {}
 	for {
-		for q < end && CLASS[q[0]] & (C_WS | C_UPPER | C_JUDGE) == 0 && q[0] != '>' && q[0] != 0 {
-			q = q[1:]
-		}
-		if q >= end {
-			t.tok.name = span_of(t, t.lo, at(t, end), .Name, t.flags)
-			return eof_in_doctype(t, on, end)
-		}
+		for q < end && CLASS[q[0]] & (C_WS | C_UPPER | C_JUDGE) == 0 && q[0] != '>' && q[0] != 0 { q = q[1:] }
+		if q >= end { t.tok.name = span_of(t, t.lo, at(t, end), .Name, t.flags); return eof_in_doctype(t, on, end) }
 		c := q[0]
 		switch {
 		case CLASS[c] & C_WS != 0:
 			t.tok.name = span_of(t, t.lo, at(t, q), .Name, t.flags)
-			return #must_tail st_after_doctype_name(q[1:], end, t, on)
+			q = skip_ws(q[1:], end)
+			break
 		case c == '>':
 			t.tok.name = span_of(t, t.lo, at(t, q), .Name, t.flags)
-			if emit(t, on, q[1:]) {
-				return halt(t, q[1:])
-			}
+			if emit(t, on, q[1:]) { return halt(t, q[1:]) }
 			return #must_tail st_content(q[1:], end, t, on)
 		case c == 0:
 			t.flags += {.Nul}
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
-			}
+			if report(t, on, q, .Unexpected_Null_Character) { return halt(t, q) }
 			q = q[1:]
+			continue
 		case CLASS[c] & C_UPPER != 0:
 			t.flags += {.Upper}
 			q = q[1:]
+			continue
 		case:
 			n, stop := judge(t, on, q, end, &t.flags)
-			if stop {
-				return halt(t, q)
-			}
+			if stop { return halt(t, q) }
 			q = q[n:]
+			continue
 		}
+		break
 	}
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_after_doctype_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := skip_ws(p, end)
-	if q >= end {
-		return eof_in_doctype(t, on, end)
-	}
+	if q >= end { return eof_in_doctype(t, on, end) }
 	if q[0] == '>' {
-		return #must_tail st_doctype_close(q, end, t, on)
+		if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+		return #must_tail st_content(q[1:], end, t, on)
 	}
+	bogus := false
 	left := int(at(t, end) - at(t, q))
-	if left >= 6 && fold_equal(q, transmute([]u8)string("public")) {
-		t.system = false
-		return #must_tail st_after_doctype_keyword(q[6:], end, t, on)
-	}
-	if left >= 6 && fold_equal(q, transmute([]u8)string("system")) {
-		t.system = true
-		return #must_tail st_after_doctype_keyword(q[6:], end, t, on)
-	}
-	if doctype_error(t, on, q, end, .Invalid_Character_Sequence_After_Doctype_Name, true) {
-		return halt(t, q)
-	}
-	return #must_tail st_bogus_doctype(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_after_doctype_keyword :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_doctype(t, on, end)
-	}
-	switch {
-	case CLASS[p[0]] & C_WS != 0:
-		return #must_tail st_before_doctype_id(p[1:], end, t, on)
-	case p[0] == '"' || p[0] == '\'':
-		if report(t, on, p, .Missing_Whitespace_After_Doctype_System_Keyword if t.system else .Missing_Whitespace_After_Doctype_Public_Keyword) {
-			return halt(t, p)
+	if left >= 6 && (fold_equal(q, transmute([]u8)string("public")) || fold_equal(q, transmute([]u8)string("system"))) {
+		t.system = (q[0] | 0x20) == 's'
+		q = q[6:]
+		if q >= end { return eof_in_doctype(t, on, end) }
+		after_kw := true
+		for {
+			if after_kw {
+				after_kw = false
+				if CLASS[q[0]] & C_WS != 0 {
+					q = skip_ws(q[1:], end)
+					if q >= end { return eof_in_doctype(t, on, end) }
+				} else if q[0] == '"' || q[0] == '\'' {
+					if report(t, on, q, .Missing_Whitespace_After_Doctype_System_Keyword if t.system else .Missing_Whitespace_After_Doctype_Public_Keyword) { return halt(t, q) }
+				} else if q[0] == '>' {
+					if doctype_error(t, on, q, end, .Missing_Doctype_System_Identifier if t.system else .Missing_Doctype_Public_Identifier, false) { return halt(t, q) }
+					if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+					return #must_tail st_content(q[1:], end, t, on)
+				} else {
+					if doctype_error(t, on, q, end, .Missing_Quote_Before_Doctype_System_Identifier if t.system else .Missing_Quote_Before_Doctype_Public_Identifier, true) { return halt(t, q) }
+					bogus = true; break
+				}
+			}
+			if q[0] == '>' {
+				if doctype_error(t, on, q, end, .Missing_Doctype_System_Identifier if t.system else .Missing_Doctype_Public_Identifier, false) { return halt(t, q) }
+				if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+				return #must_tail st_content(q[1:], end, t, on)
+			}
+			if q[0] != '"' && q[0] != '\'' {
+				if doctype_error(t, on, q, end, .Missing_Quote_Before_Doctype_System_Identifier if t.system else .Missing_Quote_Before_Doctype_Public_Identifier, true) { return halt(t, q) }
+				bogus = true; break
+			}
+			open_id(t, q)
+			stop: bool
+			q, stop = doctype_id(t, on, q[1:], end)
+			if stop { return halt(t, q) }
+			id := span_of(t, t.lo, at(t, q), .Raw, t.flags)
+			if t.system { t.tok.system_id = id } else { t.tok.public_id = id }
+			if q >= end { return eof_in_doctype(t, on, end) }
+			if q[0] == '>' {
+				t.tok.flags += {.Force_Quirks}
+				if report(t, on, q, .Abrupt_Doctype_System_Identifier if t.system else .Abrupt_Doctype_Public_Identifier) { return halt(t, q) }
+				if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+				return #must_tail st_content(q[1:], end, t, on)
+			}
+			q = q[1:]
+			if t.system {
+				q = skip_ws(q, end)
+				if q >= end { return eof_in_doctype(t, on, end) }
+				if q[0] == '>' {
+					if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+					return #must_tail st_content(q[1:], end, t, on)
+				}
+				if judge_first(t, on, q, end) || report(t, on, q, .Unexpected_Character_After_Doctype_System_Identifier) { return halt(t, q) }
+				bogus = true; break
+			}
+			if q >= end { return eof_in_doctype(t, on, end) }
+			if CLASS[q[0]] & C_WS != 0 {
+				q = skip_ws(q[1:], end)
+				if q >= end { return eof_in_doctype(t, on, end) }
+				if q[0] == '>' {
+					if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+					return #must_tail st_content(q[1:], end, t, on)
+				}
+			} else if q[0] == '>' {
+				if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+				return #must_tail st_content(q[1:], end, t, on)
+			} else if q[0] == '"' || q[0] == '\'' {
+				if report(t, on, q, .Missing_Whitespace_Between_Doctype_Public_And_System_Identifiers) { return halt(t, q) }
+			}
+			t.system = true
 		}
-		open_id(t, p)
-		return #must_tail st_doctype_id(p[1:], end, t, on)
-	case p[0] == '>':
-		if doctype_error(t, on, p, end, .Missing_Doctype_System_Identifier if t.system else .Missing_Doctype_Public_Identifier, false) {
-			return halt(t, p)
-		}
-		return #must_tail st_doctype_close(p, end, t, on)
-	}
-	if doctype_error(t, on, p, end, .Missing_Quote_Before_Doctype_System_Identifier if t.system else .Missing_Quote_Before_Doctype_Public_Identifier, true) {
-		return halt(t, p)
-	}
-	return #must_tail st_bogus_doctype(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_before_doctype_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := skip_ws(p, end)
-	if q >= end {
-		return eof_in_doctype(t, on, end)
-	}
-	switch q[0] {
-	case '"', '\'':
-		open_id(t, q)
-		return #must_tail st_doctype_id(q[1:], end, t, on)
-	case '>':
-		if doctype_error(t, on, q, end, .Missing_Doctype_System_Identifier if t.system else .Missing_Doctype_Public_Identifier, false) {
-			return halt(t, q)
-		}
-		return #must_tail st_doctype_close(q, end, t, on)
-	}
-	if doctype_error(t, on, q, end, .Missing_Quote_Before_Doctype_System_Identifier if t.system else .Missing_Quote_Before_Doctype_Public_Identifier, true) {
-		return halt(t, q)
-	}
-	return #must_tail st_bogus_doctype(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_doctype_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q, stop := doctype_id(t, on, p, end)
-	if stop {
-		return halt(t, q)
-	}
-	id := span_of(t, t.lo, at(t, q), .Raw, t.flags)
-	if t.system {
-		t.tok.system_id = id
 	} else {
-		t.tok.public_id = id
+		if doctype_error(t, on, q, end, .Invalid_Character_Sequence_After_Doctype_Name, true) { return halt(t, q) }
+		bogus = true
 	}
-	if q >= end {
-		return eof_in_doctype(t, on, end)
-	}
-	if q[0] == '>' {
-		t.tok.flags += {.Force_Quirks}
-		if report(t, on, q, .Abrupt_Doctype_System_Identifier if t.system else .Abrupt_Doctype_Public_Identifier) {
-			return halt(t, q)
-		}
-		return #must_tail st_doctype_close(q, end, t, on)
-	}
-	if t.system {
-		return #must_tail st_after_doctype_system_id(q[1:], end, t, on)
-	}
-	return #must_tail st_after_doctype_public_id(q[1:], end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_after_doctype_public_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_doctype(t, on, end)
-	}
-	switch {
-	case CLASS[p[0]] & C_WS != 0:
-		return #must_tail st_between_doctype_ids(p[1:], end, t, on)
-	case p[0] == '>':
-		return #must_tail st_doctype_close(p, end, t, on)
-	case p[0] == '"' || p[0] == '\'':
-		if report(t, on, p, .Missing_Whitespace_Between_Doctype_Public_And_System_Identifiers) {
-			return halt(t, p)
-		}
-		open_id(t, p)
-		t.system = true
-		return #must_tail st_doctype_id(p[1:], end, t, on)
-	}
-	if doctype_error(t, on, p, end, .Missing_Quote_Before_Doctype_System_Identifier, true) {
-		return halt(t, p)
-	}
-	return #must_tail st_bogus_doctype(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_between_doctype_ids :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := skip_ws(p, end)
-	if q >= end {
-		return eof_in_doctype(t, on, end)
-	}
-	switch q[0] {
-	case '>':
-		return #must_tail st_doctype_close(q, end, t, on)
-	case '"', '\'':
-		open_id(t, q)
-		t.system = true
-		return #must_tail st_doctype_id(q[1:], end, t, on)
-	}
-	if doctype_error(t, on, q, end, .Missing_Quote_Before_Doctype_System_Identifier, true) {
-		return halt(t, q)
-	}
-	return #must_tail st_bogus_doctype(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_after_doctype_system_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := skip_ws(p, end)
-	if q >= end {
-		return eof_in_doctype(t, on, end)
-	}
-	if q[0] == '>' {
-		return #must_tail st_doctype_close(q, end, t, on)
-	}
-	if judge_first(t, on, q, end) || report(t, on, q, .Unexpected_Character_After_Doctype_System_Identifier) {
-		return halt(t, q)
-	}
-	return #must_tail st_bogus_doctype(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_bogus_doctype :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for {
-		for q < end && q[0] != '>' && q[0] != 0 && CLASS[q[0]] & C_JUDGE == 0 {
-			q = q[1:]
-		}
-		if q >= end {
-			return emit_at_end(t, on, end)
-		}
-		switch q[0] {
-		case '>':
-			return #must_tail st_doctype_close(q, end, t, on)
-		case 0:
-			if report(t, on, q, .Unexpected_Null_Character) {
-				return halt(t, q)
+	if bogus {
+		for {
+			for q < end && q[0] != '>' && q[0] != 0 && CLASS[q[0]] & C_JUDGE == 0 { q = q[1:] }
+			if q >= end { return emit_at_end(t, on, end) }
+			if q[0] == '>' {
+				if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+				return #must_tail st_content(q[1:], end, t, on)
 			}
-			q = q[1:]
-		case:
-			scratch: Span_Flags
-			n, stop := judge(t, on, q, end, &scratch)
-			if stop {
-				return halt(t, q)
+			if q[0] == 0 {
+				if report(t, on, q, .Unexpected_Null_Character) { return halt(t, q) }
+				q = q[1:]
+			} else {
+				scratch: Span_Flags
+				n, stop := judge(t, on, q, end, &scratch)
+				if stop { return halt(t, q) }
+				q = q[n:]
 			}
-			q = q[n:]
 		}
 	}
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_doctype_close :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if emit(t, on, p[1:]) {
-		return halt(t, p[1:])
-	}
-	return #must_tail st_content(p[1:], end, t, on)
+	return #must_tail st_content(q, end, t, on)
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
@@ -1248,174 +733,98 @@ st_cdata :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H
 	q := p
 	for {
 		q = stop_at(q, end, STOP_CDATA)
-		if q >= end {
-			return eof_error(t, on, end, .Eof_In_Cdata)
-		}
+		if q >= end { return eof_error(t, on, end, .Eof_In_Cdata) }
 		switch q[0] {
 		case ']':
 			t.mark = at(t, q)
-			return #must_tail st_cdata_bracket(q[1:], end, t, on)
+			q = q[1:]
+			if q < end && q[0] == ']' {
+				q = q[1:]
+				for q < end && q[0] == ']' { t.mark += 1; q = q[1:] }
+				if q < end && q[0] == '>' {
+					if flush(t, on, t.mark, at(t, q) + 1) { return halt(t, q[1:]) }
+					t.content, t.text_mode = .Data, .Data
+					return #must_tail st_data(q[1:], end, t, on)
+				}
+			}
 		case 0:
 			t.text_flags += {.Nul}
 			q = q[1:]
-			continue
-		}
-		n, stop := judge(t, on, q, end, &t.text_flags)
-		if stop {
-			return halt(t, q)
-		}
-		q = q[n:]
-	}
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_cdata_bracket :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end && p[0] == ']' {
-		return #must_tail st_cdata_end(p[1:], end, t, on)
-	}
-	return #must_tail st_cdata(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_cdata_end :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for q < end && q[0] == ']' {
-		t.mark += 1
-		q = q[1:]
-	}
-	if q < end && q[0] == '>' {
-		if flush(t, on, t.mark, at(t, q) + 1) {
-			return halt(t, q[1:])
-		}
-		t.content = .Data
-		t.text_mode = .Data
-		return #must_tail st_data(q[1:], end, t, on)
-	}
-	return #must_tail st_cdata(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_pi_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_pi(t, on, end)
-	}
-	if CLASS[p[0]] & C_ALPHA != 0 || p[0] == '_' {
-		t.lo = at(t, p)
-		return #must_tail st_pi_target(p, end, t, on)
-	}
-	if judge_first(t, on, p, end) || report(t, on, p, .Invalid_First_Character_Of_Processing_Instruction_Target) {
-		return halt(t, p)
-	}
-	open_comment(t, t.tok.lo, t.base[t.mark:])
-	return #must_tail st_bogus_comment(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_pi_target :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for q < end && (CLASS[q[0]] & C_ALNUM != 0 || q[0] == '-' || q[0] == '_') {
-		q = q[1:]
-	}
-	if q >= end {
-		return eof_in_pi(t, on, end)
-	}
-	c := q[0]
-	if CLASS[c] & C_WS != 0 || c == '?' || c == '>' {
-		n := int(at(t, q) - t.lo)
-		target := t.base[t.lo:]
-		if (n == 3 && fold_equal(target, transmute([]u8)string("xml"))) || (n == 14 && fold_equal(target, transmute([]u8)string("xml-stylesheet"))) {
-			if report(t, on, q, .Disallowed_Processing_Instruction_Target) {
-				return halt(t, q)
-			}
-			open_comment(t, t.tok.lo, t.base[t.mark:])
-			return #must_tail st_bogus_comment(q, end, t, on)
-		}
-		t.tok.name = span_of(t, t.lo, at(t, q), .Verbatim, {})
-		return #must_tail st_after_pi_target(q, end, t, on)
-	}
-	if judge_first(t, on, q, end) || report(t, on, q, .Invalid_Processing_Instruction_Target) {
-		return halt(t, q)
-	}
-	open_comment(t, t.tok.lo, t.base[t.mark:])
-	return #must_tail st_bogus_comment(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_after_pi_target :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := skip_ws(p, end)
-	t.lo = at(t, q)
-	t.flags = {}
-	return #must_tail st_pi_data(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_pi_data :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := p
-	for {
-		q = stop_at(q, end, STOP_PI)
-		if q >= end {
-			return eof_in_pi(t, on, end)
-		}
-		switch q[0] {
-		case '?':
-			t.mark = at(t, q)
-			return #must_tail st_pi_questionable(q[1:], end, t, on)
-		case '>':
-			t.tok.data = span_of(t, t.lo, at(t, q), .Verbatim, t.flags)
-			if emit(t, on, q[1:]) {
-				return halt(t, q[1:])
-			}
-			return #must_tail st_content(q[1:], end, t, on)
 		case:
-			n, stop := judge(t, on, q, end, &t.flags)
-			if stop {
-				return halt(t, q)
-			}
+			n, stop := judge(t, on, q, end, &t.text_flags)
+			if stop { return halt(t, q) }
 			q = q[n:]
 		}
 	}
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
-st_pi_questionable :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_pi(t, on, end)
+st_pi :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
+	if p >= end { return eof_in_pi(t, on, end) }
+	if CLASS[p[0]] & C_ALPHA == 0 && p[0] != '_' {
+		if judge_first(t, on, p, end) || report(t, on, p, .Invalid_First_Character_Of_Processing_Instruction_Target) { return halt(t, p) }
+		open_comment(t, t.tok.lo, t.base[t.mark:])
+		return #must_tail st_bogus_comment(p, end, t, on)
 	}
-	if p[0] == '>' {
-		t.tok.data = span_of(t, t.lo, t.mark, .Verbatim, t.flags)
-		if emit(t, on, p[1:]) {
-			return halt(t, p[1:])
+	t.lo = at(t, p)
+	q := p
+	for q < end && (CLASS[q[0]] & C_ALNUM != 0 || q[0] == '-' || q[0] == '_') { q = q[1:] }
+	if q >= end { return eof_in_pi(t, on, end) }
+	c := q[0]
+	if CLASS[c] & C_WS == 0 && c != '?' && c != '>' {
+		if judge_first(t, on, q, end) || report(t, on, q, .Invalid_Processing_Instruction_Target) { return halt(t, q) }
+		open_comment(t, t.tok.lo, t.base[t.mark:])
+		return #must_tail st_bogus_comment(q, end, t, on)
+	}
+	n := int(at(t, q) - t.lo)
+	target := t.base[t.lo:]
+	if (n == 3 && fold_equal(target, transmute([]u8)string("xml"))) || (n == 14 && fold_equal(target, transmute([]u8)string("xml-stylesheet"))) {
+		if report(t, on, q, .Disallowed_Processing_Instruction_Target) { return halt(t, q) }
+		open_comment(t, t.tok.lo, t.base[t.mark:])
+		return #must_tail st_bogus_comment(q, end, t, on)
+	}
+	t.tok.name = span_of(t, t.lo, at(t, q), .Verbatim, {})
+	q = skip_ws(q, end)
+	t.lo, t.flags = at(t, q), {}
+	for {
+		q = stop_at(q, end, STOP_PI)
+		if q >= end { return eof_in_pi(t, on, end) }
+		switch q[0] {
+		case '?':
+			t.mark = at(t, q)
+			q = q[1:]
+			if q >= end { return eof_in_pi(t, on, end) }
+			if q[0] == '>' {
+				t.tok.data = span_of(t, t.lo, t.mark, .Verbatim, t.flags)
+				if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+				return #must_tail st_content(q[1:], end, t, on)
+			}
+		case '>':
+			t.tok.data = span_of(t, t.lo, at(t, q), .Verbatim, t.flags)
+			if emit(t, on, q[1:]) { return halt(t, q[1:]) }
+			return #must_tail st_content(q[1:], end, t, on)
+		case:
+			step_n, stop := judge(t, on, q, end, &t.flags)
+			if stop { return halt(t, q) }
+			q = q[step_n:]
 		}
-		return #must_tail st_content(p[1:], end, t, on)
 	}
-	return #must_tail st_pi_data(p, end, t, on)
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
 st_char_ref :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	attr := t.ret >= .Double
 	r := read_ref(p, end, attr)
-	if attr {
-		t.flags += {.Ref}
-	} else {
-		t.text_flags += {.Ref}
-	}
+	if attr { t.flags += {.Ref} } else { t.text_flags += {.Ref} }
 	for i in 0 ..< 2 {
-		if r.errors[i] != .None && report(t, on, r.err_at[i], r.errors[i]) {
-			return halt(t, r.q)
-		}
+		if r.errors[i] != .None && report(t, on, r.err_at[i], r.errors[i]) { return halt(t, r.q) }
 	}
 	switch t.ret {
-	case .Data:
-		return #must_tail st_data(r.q, end, t, on)
-	case .Rcdata:
-		return #must_tail st_rcdata(r.q, end, t, on)
-	case .Double:
-		return #must_tail st_attr_value_double(r.q, end, t, on)
-	case .Single:
-		return #must_tail st_attr_value_single(r.q, end, t, on)
-	case .Unquoted:
-		return #must_tail st_attr_value_unquoted(r.q, end, t, on)
+	case .Data:     return #must_tail st_data(r.q, end, t, on)
+	case .Rcdata:   return #must_tail st_rcdata(r.q, end, t, on)
+	case .Double:   return #must_tail st_attr_value_double(r.q, end, t, on)
+	case .Single:   return #must_tail st_attr_value_single(r.q, end, t, on)
+	case .Unquoted: return #must_tail st_attr_value_unquoted(r.q, end, t, on)
 	}
 	return #must_tail st_data(r.q, end, t, on)
 }
@@ -1423,18 +832,12 @@ st_char_ref :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer
 @(private, enable_target_feature = STATE_FEATURES)
 st_content :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	switch t.content {
-	case .Data:
-		return #must_tail st_data(p, end, t, on)
-	case .Rcdata:
-		return #must_tail st_rcdata(p, end, t, on)
-	case .Rawtext:
-		return #must_tail st_rawtext(p, end, t, on)
-	case .Script_Data:
-		return #must_tail st_script(p, end, t, on)
-	case .Plaintext:
-		return #must_tail st_plaintext(p, end, t, on)
-	case .Cdata_Section:
-		return #must_tail st_cdata(p, end, t, on)
+	case .Data:          return #must_tail st_data(p, end, t, on)
+	case .Rcdata:        return #must_tail st_rcdata(p, end, t, on)
+	case .Rawtext:       return #must_tail st_rawtext(p, end, t, on)
+	case .Script_Data:   return #must_tail st_script(p, end, t, on)
+	case .Plaintext:     return #must_tail st_plaintext(p, end, t, on)
+	case .Cdata_Section: return #must_tail st_cdata(p, end, t, on)
 	}
 	return #must_tail st_data(p, end, t, on)
 }
@@ -1442,14 +845,10 @@ st_content :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer(
 @(private, enable_target_feature = STATE_FEATURES)
 st_back :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	switch t.back {
-	case .Rcdata:
-		return #must_tail st_rcdata(p, end, t, on)
-	case .Rawtext:
-		return #must_tail st_rawtext(p, end, t, on)
-	case .Script:
-		return #must_tail st_script(p, end, t, on)
-	case .Escaped:
-		return #must_tail st_script_escaped(p, end, t, on)
+	case .Rcdata:  return #must_tail st_rcdata(p, end, t, on)
+	case .Rawtext: return #must_tail st_rawtext(p, end, t, on)
+	case .Script:  return #must_tail st_script(p, end, t, on)
+	case .Escaped: return #must_tail st_script_escaped(p, end, t, on)
 	}
 	return #must_tail st_script_escaped(p, end, t, on)
 }

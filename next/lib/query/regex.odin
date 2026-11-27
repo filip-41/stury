@@ -99,8 +99,9 @@ regex_group_name :: proc "contextless" (re: ^Regex, g: int) -> string {
 
 // The first match of `re` in `s` at or after byte `at`, its bounds in `found`: two byte positions per group, the
 // whole match first, -1 for a group that took no part. `found` holds two ints for at most each group, or none to ask
-// only whether there is a match. A search that gives up fails with `.Pattern` and the matcher's message.
-regex_search :: proc(h: ^Heap, c: ^Regex_Cache, re: ^Regex, s: string, at: int, found: []int) -> (hit: bool, status: Status) {
+// only whether there is a match. When `steps > 0`, the search stops with `.Budget` (`.Steps`) after that many steps;
+// otherwise a search that gives up fails with `.Pattern` and the matcher's message.
+regex_search :: proc(h: ^Heap, c: ^Regex_Cache, re: ^Regex, s: string, at: int, found: []int, steps: u64 = 0) -> (hit: bool, status: Status) {
 	if c.scratch.held.gate == nil {
 		scratch, err := regex.scratch_make(heap_allocator(h))
 		if err.kind != .None {
@@ -109,8 +110,13 @@ regex_search :: proc(h: ^Heap, c: ^Regex_Cache, re: ^Regex, s: string, at: int, 
 		c.scratch = scratch
 	}
 	err: regex.Error
-	hit, err = regex.search(re, s, at, found, &c.scratch)
+	hit, err = regex.search(re, s, at, found, &c.scratch, steps)
 	if err.kind != .None {
+		if err.kind == .Steps && steps > 0 {
+			_ = fail(h, .Budget, .Match)
+			h.err.budget = .Steps
+			return false, .Error
+		}
 		return false, regex_failed(h, c, err)
 	}
 	return hit, .Ok

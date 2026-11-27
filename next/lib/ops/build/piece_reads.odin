@@ -40,21 +40,33 @@ build_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 	free(blk, allocator)
 }
 
+// Allocates and tracks the piece hook state block for the first window of a piece read. Returns `(nil, nil, true)` when
+// the read already finished on an earlier window.
+@(private = "file")
+piece_hook :: proc(p: ^tape.Pieces, s: ^hook.Piece_State, $T: typeid) -> (blk: ^T, fresh: bool, done: bool, err: runtime.Allocator_Error) {
+	blk = (^T)(s.hook)
+	if blk != nil {
+		return blk, false, false, nil
+	}
+	if s.started {
+		return nil, false, true, nil
+	}
+	blk = new(T, p.allocator) or_return
+	return blk, true, false, nil
+}
+
 // Builds a text in pieces. The document's nodes point into the text, so the build keeps every byte, and each window
 // starts at the text's start. `finish` settles the document once the last window ends it, as `read_build`'s does, and
 // `so_far`, when given, settles each document so far, and on an error destroys it.
 read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Builder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool), $finish: proc(doc: ^tape.Document, opts: tape.Options, rules: ^tape.Rules) -> tape.Error, so_far: proc(doc: ^tape.Document, opts: tape.Options, rules: ^tape.Rules) -> tape.Error = nil) -> (doc: tape.Document, err: tape.Error) {
-	if e := tape.options_refused(format, opts); e != nil {
-		return {}, e
-	}
+	tape.options_refused(format, opts) or_return
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return
-	blk := (^Build_Piece)(s.hook)
-	if blk == nil {
-		if s.started {
-			return {}, nil
-		}
-		blk = new(Build_Piece, p.allocator) or_return
+	blk, fresh, done := piece_hook(p, s, Build_Piece) or_return
+	if done {
+		return {}, nil
+	}
+	if fresh {
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
 		budget := &s.blocks if opts.budget.memory != 0 else nil
 		builder_start(&blk.b, src, format, max(len(src) / BUILD_BYTES_PER_NODE, SCAN_NODES), node_most(max(u64), opts), nil, allocator, budget = budget)
@@ -77,8 +89,7 @@ read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, o
 		if err == nil && so_far != nil {
 			err = so_far(&doc, opts, rules)
 		}
-		err = read_end(&doc, err, &s.blocks, tolerated, caller)
-		return
+		return doc, read_end(&doc, err, &s.blocks, tolerated, caller)
 	}
 	defer {
 		free(blk, p.allocator)
@@ -88,8 +99,7 @@ read_build_pieces :: proc(src: []u8, format: ^tape.Format, rules: ^tape.Rules, o
 	if err == nil {
 		err = finish(&doc, opts, rules)
 	}
-	err = read_end(&doc, err, &s.blocks, tolerated, caller)
-	return
+	return doc, read_end(&doc, err, &s.blocks, tolerated, caller)
 }
 
 // The find's hook state kept between windows.
@@ -109,18 +119,14 @@ find_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 // Returns the answer of a find over a text in pieces. Its bytes are copied out of the window it closes in into
 // `Pieces.text`. Until then the read keeps from its first byte, and from the first byte of each span its rings hold.
 read_find_pieces :: proc(src: []u8, path: []tape.Step, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, respell: proc "contextless" (src: []u8, lo, hi: u64) -> u16, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Finder, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (answer: tape.Span_Answer, err: tape.Error) {
-	steps, refused := find_path(format, opts, path)
-	if refused != nil {
-		return {}, refused
-	}
+	steps := find_path(format, opts, path) or_return
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return
-	blk := (^Find_Piece)(s.hook)
-	if blk == nil {
-		if s.started {
-			return {}, nil
-		}
-		blk = new(Find_Piece, p.allocator) or_return
+	blk, fresh, done := piece_hook(p, s, Find_Piece) or_return
+	if done {
+		return {}, nil
+	}
+	if fresh {
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
 		if e := finder_start(&blk.f, src, format, steps, opts.dups, read, respell, nil, &blk.room, allocator); e != nil {
 			free(blk, p.allocator)
@@ -185,17 +191,14 @@ scan_piece_free :: proc(held: rawptr, allocator: runtime.Allocator) {
 // ends, so the read keeps only what the walk needs, and the document is `.Held`. A walk that holds comments back past a
 // window's end keeps their bytes for a scan of facts, which copies them out in the window that gives them.
 read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, read: tape.Read_Options, opts: tape.Options, caller: runtime.Allocator, $P: typeid, $walk: proc(src: []u8, opts: tape.Options, h: ^Scanner, regs: ^hook.Regs, allocator: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool)) -> (doc: tape.Document, err: tape.Error) {
-	if e := scan_refused(format, opts, demand); e != nil {
-		return {}, e
-	}
+	scan_refused(format, opts, demand) or_return
 	p := opts.pieces
 	s := hook.piece_state(p, P) or_return
-	blk := (^Scan_Piece)(s.hook)
-	if blk == nil {
-		if s.started {
-			return {}, nil
-		}
-		blk = new(Scan_Piece, p.allocator) or_return
+	blk, fresh, done := piece_hook(p, s, Scan_Piece) or_return
+	if done {
+		return {}, nil
+	}
+	if fresh {
 		allocator := hook.piece_blocks(p, opts.budget.memory, caller)
 		budget := &s.blocks if opts.budget.memory != 0 else nil
 		if e := scanner_start(&blk.h, src, format, demand, opts.dups, read, nil, SCAN_NODES, node_most(max(u64), opts), nil, &blk.room, allocator, budget = budget); e != nil {
@@ -219,14 +222,12 @@ read_scan_pieces :: proc(src: []u8, demand: ^tape.Demand, format: ^tape.Format, 
 			return {}, nil
 		}
 		doc, err = scanner_so_far(&blk.h, regs, p.at, caller)
-		err = read_end(&doc, err, &s.blocks, tolerated, caller)
-		return
+		return doc, read_end(&doc, err, &s.blocks, tolerated, caller)
 	}
 	defer {
 		free(blk, p.allocator)
 		s.hook = nil
 	}
 	doc, err = scanner_end(&blk.h, regs, root_close, werr)
-	err = read_end(&doc, err, &s.blocks, tolerated, caller)
-	return
+	return doc, read_end(&doc, err, &s.blocks, tolerated, caller)
 }

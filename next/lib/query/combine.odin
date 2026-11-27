@@ -18,8 +18,7 @@ array_concat :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) {
 	}
 	own_array(h, &out, nb) or_return
 	if b.kind == .Array {
-		dst := (^Array_Block)(out.p)
-		src := (^Array_Block)(b.p)
+		dst, src := (^Array_Block)(out.p), (^Array_Block)(b.p)
 		items := array_items(src)
 		raw_dst := ([^]Value)(uintptr(dst) + size_of(Array_Block))
 		n := dst.len
@@ -52,10 +51,8 @@ object_merge :: proc(h: ^Heap, a, b: Value, deep: bool) -> (res: Value, status: 
 		return retain(b), .Ok
 	}
 	Merge :: struct {
-		into:   Value, // owned, the merge being made
-		over:   Value, // held, the object set over it
-		key:    Value, // held, where `into` goes in the merge below, `.Absent` for the outermost
-		c:      Cursor,
+		into, over, key: Value,
+		c:               Cursor,
 	}
 	stack := make([dynamic]Merge, 0, 4, h.allocator)
 	defer {
@@ -69,15 +66,13 @@ object_merge :: proc(h: ^Heap, a, b: Value, deep: bool) -> (res: Value, status: 
 	}
 	push :: proc(h: ^Heap, stack: ^[dynamic]Merge, a, b, key: Value) -> Status {
 		into, s := built(h, a)
-		if s != .Ok {
-			release(h, b)
-			release(h, key)
-			return s
-		}
 		c: Cursor
-		c, s = cursor_open(h, b)
+		if s == .Ok {
+			c, s = cursor_open(h, b)
+		}
 		if s == .Ok {
 			if _, err := append(stack, Merge{into = into, over = b, key = key, c = c}); err != nil {
+				cursor_close(&c)
 				s = fail_memory(h)
 			}
 		}
@@ -93,8 +88,7 @@ object_merge :: proc(h: ^Heap, a, b: Value, deep: bool) -> (res: Value, status: 
 		m := &stack[len(stack) - 1]
 		k, x, more := cursor_next(h, &m.c) or_return
 		if !more {
-			done := m.into
-			key := m.key
+			done, key := m.into, m.key
 			cursor_close(&m.c)
 			release(h, m.over)
 			pop(&stack)
@@ -106,13 +100,13 @@ object_merge :: proc(h: ^Heap, a, b: Value, deep: bool) -> (res: Value, status: 
 		}
 		if deep && type_of(x) == .Object {
 			mine := member(h, m.into, text_of(k)) or_return
-			if type_of(mine) == .Object && len(stack) > depth_limit(h) {
-				release(h, mine)
-				release(h, x)
-				release(h, k)
-				return NULL, fail(h, .Depth, .Merge)
-			}
 			if type_of(mine) == .Object {
+				if len(stack) > depth_limit(h) {
+					release(h, mine)
+					release(h, x)
+					release(h, k)
+					return NULL, fail(h, .Depth, .Merge)
+				}
 				s := push(h, &stack, mine, x, k)
 				release(h, mine)
 				s or_return
@@ -144,8 +138,7 @@ object_merge_into :: proc(h: ^Heap, acc: ^Value, b: Value) -> Status {
 // The elements of array `a` that equal no element of array `b`, in order.
 @(require_results)
 array_without :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) {
-	na := length_of(h, a)
-	nb := length_of(h, b)
+	na, nb := length_of(h, a), length_of(h, b)
 	if nb == 0 || na == 0 {
 		return built(h, a)
 	}
@@ -153,121 +146,85 @@ array_without :: proc(h: ^Heap, a, b: Value) -> (res: Value, status: Status) {
 	defer if status != .Ok {
 		release(h, out)
 	}
+	bv := built(h, b) or_return
+	defer release(h, bv)
+	bs := items_of(bv)
+
+	slots: []int
+	hashes: []u64
+	alloc := heap_allocator(h)
+	defer delete(slots, alloc)
+	defer delete(hashes, alloc)
+	mask := 0
 	if nb > 16 {
-		bv := built(h, b) or_return
-		defer release(h, bv)
-		bs := items_of(bv)
 		size := 32
 		for size < 2 * len(bs) {
 			size <<= 1
 		}
-		alloc := heap_allocator(h)
-		slots := make([]int, size, alloc)
-		defer delete(slots, alloc)
-		hashes := make([]u64, len(bs), alloc)
-		defer delete(hashes, alloc)
+		slots = make([]int, size, alloc)
+		hashes = make([]u64, len(bs), alloc)
 		if slots == nil || hashes == nil {
 			return NULL, fail_memory(h)
 		}
-		mask := size - 1
+		mask = size - 1
 		for y, i in bs {
 			hy := hash(h, y) or_return
 			hashes[i] = hy
-			at := int(hy) & mask
-			for {
+			for at := int(hy) & mask; ; at = (at + 1) & mask {
 				j := slots[at] - 1
 				if j < 0 {
 					slots[at] = i + 1
 					break
 				}
-				if hashes[j] == hy {
-					same := equal(h, bs[j], y) or_return
-					if same {
-						break
-					}
+				if hashes[j] == hy && (equal(h, bs[j], y) or_return) {
+					break
 				}
-				at = (at + 1) & mask
 			}
 		}
-		c := cursor_open(h, a) or_return
-		defer cursor_close(&c)
-		for {
-			_, x, more := cursor_next(h, &c) or_return
-			if !more {
-				return out, .Ok
-			}
-			hx, hs := hash(h, x)
-			if hs != .Ok {
-				release(h, x)
-				return NULL, hs
-			}
-			found := false
-			at := int(hx) & mask
-			for {
+	}
+
+	c := cursor_open(h, a) or_return
+	defer cursor_close(&c)
+	for {
+		_, x, more := cursor_next(h, &c) or_return
+		if !more {
+			return out, .Ok
+		}
+		found := false
+		s := Status.Ok
+		if slots != nil {
+			hx: u64
+			hx, s = hash(h, x)
+			for at := int(hx) & mask; s == .Ok; at = (at + 1) & mask {
 				j := slots[at] - 1
 				if j < 0 {
 					break
 				}
 				if hashes[j] == hx {
-					same, es := equal(h, x, bs[j])
-					if es != .Ok {
-						release(h, x)
-						return NULL, es
-					}
-					if same {
-						found = true
+					found, s = equal(h, x, bs[j])
+					if found {
 						break
 					}
 				}
-				at = (at + 1) & mask
 			}
-			if !found {
-				append_owned(h, &out, x) or_return
-			} else {
-				release(h, x)
-			}
-		}
-	}
-	c := cursor_open(h, a) or_return
-	defer cursor_close(&c)
-	for {
-		_, x, more, s := cursor_next(h, &c)
-		if s != .Ok {
-			return NULL, s
-		}
-		if !more {
-			return out, .Ok
-		}
-		found := false
-		d: Cursor
-		if d, s = cursor_open(h, b); s == .Ok {
-			for !found {
-				_, y, has, e := cursor_next(h, &d)
-				if e != .Ok || !has {
-					s = e
-					break
-				}
+		} else {
+			for y in bs {
 				found, s = equal(h, x, y)
-				release(h, y)
-				if s != .Ok {
+				if s != .Ok || found {
 					break
 				}
 			}
-			cursor_close(&d)
 		}
 		if s == .Ok && !found {
-			s = append_owned(h, &out, x)
+			append_owned(h, &out, x) or_return
 		} else {
 			release(h, x)
-		}
-		if s != .Ok {
-			return NULL, s
+			s or_return
 		}
 	}
 }
 
-// `v` as a constant: it and every block inside it held by no count, so no run frees or changes them. Its blocks stay in
-// the heap that made them, which outlives every run that reads it.
+// `v` as a constant: it and every block inside it held by no count, so no run frees or changes them.
 freeze :: proc(v: Value) -> Value {
 	if !v.held {
 		return v
@@ -283,12 +240,23 @@ freeze :: proc(v: Value) -> Value {
 	dyn: [dynamic]Value
 	defer delete(dyn)
 	block_of(v).rc = FROZEN_RC
-	push_c :: proc(buf: ^[32]Value, sp: ^int, dyn: ^[dynamic]Value, val: Value) {
-		if len(dyn^) == 0 && sp^ < len(buf) {
-			buf[sp^] = val
-			sp^ += 1
-		} else {
-			append(dyn, val)
+	freeze_child :: proc(slot: ^Value, buf: ^[32]Value, sp: ^int, dyn: ^[dynamic]Value) {
+		if !slot.held {
+			return
+		}
+		child := slot^
+		b := block_of(child)
+		slot.held = false
+		if b.rc != FROZEN_RC {
+			b.rc = FROZEN_RC
+			if child.kind == .Array || child.kind == .Object {
+				if len(dyn^) == 0 && sp^ < len(buf) {
+					buf[sp^] = child
+					sp^ += 1
+				} else {
+					append(dyn, child)
+				}
+			}
 		}
 	}
 	for sp > 0 || len(dyn) > 0 {
@@ -302,35 +270,14 @@ freeze :: proc(v: Value) -> Value {
 		if cur.kind == .Object {
 			for &e in object_entries((^Object_Block)(cur.p)) {
 				if e.key.held {
-					kb := block_of(e.key)
+					block_of(e.key).rc = FROZEN_RC
 					e.key.held = false
-					kb.rc = FROZEN_RC
 				}
-				if e.value.held {
-					child := e.value
-					b := block_of(child)
-					e.value.held = false
-					if b.rc != FROZEN_RC {
-						b.rc = FROZEN_RC
-						if child.kind == .Array || child.kind == .Object {
-							push_c(&stack_buf, &sp, &dyn, child)
-						}
-					}
-				}
+				freeze_child(&e.value, &stack_buf, &sp, &dyn)
 			}
 		} else {
 			for &x in array_items((^Array_Block)(cur.p)) {
-				if x.held {
-					child := x
-					b := block_of(child)
-					x.held = false
-					if b.rc != FROZEN_RC {
-						b.rc = FROZEN_RC
-						if child.kind == .Array || child.kind == .Object {
-							push_c(&stack_buf, &sp, &dyn, child)
-						}
-					}
-				}
+				freeze_child(&x, &stack_buf, &sp, &dyn)
 			}
 		}
 	}

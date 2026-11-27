@@ -346,41 +346,52 @@ exact :: #force_no_inline proc "contextless" (p, end: [^]u8, $M: Mode, $quote: u
 	return r
 }
 
+// Validates one non-ASCII UTF-8 character at `q`, rejecting XML noncharacters U+FFFE/U+FFFF.
+@(private)
+xml_utf8_step :: #force_inline proc "contextless" (q, end: [^]u8) -> (next: [^]u8, kind: tape.Fault_Kind, detail: Detail) #no_bounds_check {
+	r, k := spell.utf8_char(q, end)
+	if k == .Truncated {
+		return end, .Truncated, .None
+	}
+	if k != .None {
+		return q, .Bad_Char, .Invalid_Utf8
+	}
+	if q[0] == 0xef && non_char(q, end) {
+		return q, .Bad_Char, .Non_Char
+	}
+	return r, .None, .None
+}
+
 @(private)
 exact_run :: #force_inline proc "contextless" (p, end: [^]u8, $M: Mode, $quote: u8, dtd: ^Dtd) -> Run #no_bounds_check {
 	q := p
-	decode: bool
-	declared: bool
+	decode, declared: bool
 	for {
 		if q >= end {
 			return {end, decode, .Truncated, .None, declared, 0}
 		}
 		c := q[0]
 		if c >= 0x80 {
-			r, kind := spell.utf8_char(q, end)
-			if kind == .Truncated {
-				return {end, decode, .Truncated, .None, declared, 0}
-			}
+			r, kind, detail := xml_utf8_step(q, end)
 			if kind != .None {
-				return {q, decode, .Bad_Char, .Invalid_Utf8, declared, 0}
-			}
-			if c == 0xef && non_char(q, end) {
-				return {q, decode, .Bad_Char, .Non_Char, declared, 0}
+				return {r, decode, kind, detail, declared, 0}
 			}
 			q = r
 			continue
 		}
-		when M == .Text {
-			switch c {
-			case '<':
+		when M == .Text || M == .Attr {
+			if c == ('<' when M == .Text else quote) {
 				return {q, decode, .None, .None, declared, 0}
-			case '&':
+			}
+			if c == '&' {
 				n, kind, detail := reference(q, end)
 				if kind == .Bad_Char && detail == .Undeclared_Entity && dtd != nil {
 					entity: u32
-					n, kind, detail, entity = entity_reference(dtd, q, end, false)
-					if entity != 0 {
-						return {q = q, decode = decode, kind = .Bad_Char, dtd = declared, entity = entity}
+					n, kind, detail, entity = entity_reference(dtd, q, end, M == .Attr)
+					when M == .Text {
+						if entity != 0 {
+							return {q = q, decode = decode, kind = .Bad_Char, dtd = declared, entity = entity}
+						}
 					}
 					declared = true
 				}
@@ -390,77 +401,43 @@ exact_run :: #force_inline proc "contextless" (p, end: [^]u8, $M: Mode, $quote: 
 				decode = true
 				q = q[n:]
 				continue
-			case ']':
-				if intrinsics.ptr_sub(end, q) >= 3 && q[1] == ']' && q[2] == '>' {
+			}
+			when M == .Text {
+				if c == ']' && intrinsics.ptr_sub(end, q) >= 3 && q[1] == ']' && q[2] == '>' {
 					return {q, decode, .Bad_Char, .Cdata_End, declared, 0}
 				}
-			case '\r':
-				decode = true
-			case '\t', '\n':
-			case:
-				if c < 0x20 {
-					return {q, decode, .Bad_Char, .Control_Char, declared, 0}
+				if c == '\r' {
+					decode = true
 				}
-			}
-		} else when M == .Attr {
-			switch c {
-			case quote:
-				return {q, decode, .None, .None, declared, 0}
-			case '<':
-				return {q, decode, .Bad_Char, .Attribute_Lt, declared, 0}
-			case '&':
-				n, kind, detail := reference(q, end)
-				if kind == .Bad_Char && detail == .Undeclared_Entity && dtd != nil {
-					n, kind, detail, _ = entity_reference(dtd, q, end, true)
-					declared = true
+			} else {
+				if c == '<' {
+					return {q, decode, .Bad_Char, .Attribute_Lt, declared, 0}
 				}
-				if kind != .None {
-					return {q, decode, kind, detail, declared, 0}
-				}
-				decode = true
-				q = q[n:]
-				continue
-			case '\t', '\n', '\r':
-				decode = true
-			case:
-				if c < 0x20 {
-					return {q, decode, .Bad_Char, .Control_Char, declared, 0}
+				if c == '\t' || c == '\n' || c == '\r' {
+					decode = true
 				}
 			}
 		} else when M == .Cdata {
-			switch c {
-			case ']':
-				if intrinsics.ptr_sub(end, q) >= 3 && q[1] == ']' && q[2] == '>' {
-					return {q, decode, .None, .None, declared, 0}
-				}
-			case '\r':
+			if c == ']' && intrinsics.ptr_sub(end, q) >= 3 && q[1] == ']' && q[2] == '>' {
+				return {q, decode, .None, .None, declared, 0}
+			}
+			if c == '\r' {
 				decode = true
-			case '\t', '\n':
-			case:
-				if c < 0x20 {
-					return {q, decode, .Bad_Char, .Control_Char, declared, 0}
-				}
 			}
 		} else when M == .Comment {
 			if c == '-' && intrinsics.ptr_sub(end, q) >= 2 && q[1] == '-' {
 				if intrinsics.ptr_sub(end, q) < 3 {
 					return {end, decode, .Truncated, .None, declared, 0}
 				}
-				if q[2] == '>' {
-					return {q, decode, .None, .None, declared, 0}
-				}
-				return {q, decode, .Bad_Char, .Comment_Dashes, declared, 0}
-			}
-			if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
-				return {q, decode, .Bad_Char, .Control_Char, declared, 0}
+				return {q, decode, .None, .None, declared, 0} if q[2] == '>' else {q, decode, .Bad_Char, .Comment_Dashes, declared, 0}
 			}
 		} else {
 			if c == '?' && intrinsics.ptr_sub(end, q) >= 2 && q[1] == '>' {
 				return {q, decode, .None, .None, declared, 0}
 			}
-			if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
-				return {q, decode, .Bad_Char, .Control_Char, declared, 0}
-			}
+		}
+		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+			return {q, decode, .Bad_Char, .Control_Char, declared, 0}
 		}
 		q = q[1:]
 	}

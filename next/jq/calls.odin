@@ -6,8 +6,6 @@ import "stury:lib/query"
 // Calls: of a jq function, a filter argument, and a builtin, whose value arguments run first, each combination of
 // their outputs one call.
 
-// The values of a call's value arguments, a string's parts or an object's keys and values, gathered one level per
-// part: each output of a part that generates runs the parts after it, so the first part varies slowest.
 @(private)
 Args_Frame :: struct {
 	using frame: Frame,
@@ -62,7 +60,6 @@ eval_call :: proc(m: ^Machine, r: ^Regs) {
 		slots := env_slots(e)
 		for a, i in n.args {
 			if a.kind == .Call && a.ref.kind == .Param {
-				// A parameter passed on is its closure, so a recursion through parameters holds no chain of scopes.
 				src := env_slots(env_up(r.env, a.ref.hops))[a.ref.slot].closure
 				slots[i].closure = {src.node, env_retain(src.env)}
 			} else {
@@ -102,57 +99,47 @@ eval_call :: proc(m: ^Machine, r: ^Regs) {
 		start_builtin(m, r, n, nil)
 		return
 	}
-	vals: [MAX_ARGS]query.Value
 	all_native := true
 	for a, i in n.args {
 		if mask & (1 << uint(i)) != 0 && .Native not_in a.flags {
 			all_native = false
+			break
 		}
 	}
 	if all_native {
-		// The same order as `start_parts`: an argument that fails or generates nothing ends the call before the ones
-		// that come before it run.
+		vals: [MAX_ARGS]query.Value
+		defer for x in vals {
+			query.release(m.h, x)
+		}
 		for k in 0 ..< len(n.args) {
 			i := k if b.op != .None else len(n.args) - 1 - k
-			a := n.args[i]
 			if mask & (1 << uint(i)) == 0 {
 				continue
 			}
-			v, found, s := eval_native(m, a, query.retain(r.input), r.env)
+			v, found, s := eval_native(m, n.args[i], query.retain(r.input), r.env)
 			if s != .Ok || !found {
-				for x in vals {
-					query.release(m.h, x)
-				}
 				finish(m, r, fail_status(s))
 				return
 			}
 			vals[i] = v
 		}
 		start_builtin(m, r, n, vals[:len(n.args)])
-		for x in vals {
-			query.release(m.h, x)
-		}
 		return
 	}
 	start_parts(m, r, mask, b.op != .None)
 }
 
-// Which arguments of builtin `b` are values: each of a value builtin's, and those of a filter builtin jq declares
-// `$name`.
 @(private)
 value_args :: proc(b: ^Builtin, arity: int) -> u8 {
 	#partial switch b.op {
-	case .None:
+	case .None, .Range:
 		return u8(1 << uint(arity)) - 1
 	case .Error, .Getpath, .Halt_Error, .Limit, .Skip, .Css:
 		return 1 if arity > 0 else 0
-	case .Range:
-		return u8(1 << uint(arity)) - 1
 	}
 	return 0
 }
 
-// Gathers the parts of `r.n`, a call, a string or an object, in an `Args` frame.
 @(private)
 start_parts :: proc(m: ^Machine, r: ^Regs, mask: u8, first_slow: bool) {
 	h := m.h
@@ -179,34 +166,28 @@ start_parts :: proc(m: ^Machine, r: ^Regs, mask: u8, first_slow: bool) {
 	advance_parts(m, r, f, 0)
 }
 
-// The part level `level` of `f` stands for.
 @(private)
 part_at :: #force_inline proc(f: ^Args_Frame, level: int) -> int {
 	return level if f.first_slow else len(f.n.args) - 1 - level
 }
 
-// Runs the parts of `f` from `level` on: those that need no frame at once, and the next one that does into an `Arg`
-// frame. With every part valued, gives the call's, string's or object's value.
 @(private)
 advance_parts :: proc(m: ^Machine, r: ^Regs, f: ^Args_Frame, from: int) {
 	h := m.h
 	n := f.n
 	for level := from; level < len(n.args); level += 1 {
 		i := part_at(f, level)
-		if n.kind == .Call && f.mask & (1 << uint(i)) == 0 {
+		if (n.kind == .Call && f.mask & (1 << uint(i)) == 0) || n.args[i] == nil {
 			continue
 		}
 		part := n.args[i]
-		if part == nil {
-			continue
-		}
 		if part.kind == .Literal || .Native in part.flags {
 			v, found, s := eval_native(m, part, query.retain(f.input), f.env)
 			if s != .Ok || !found {
 				r.sig, r.mode = fail_status(s), .Ret
 				return
 			}
-			if s = query.array_put(h, &f.vals, i, v); s != .Ok {
+			if query.array_put(h, &f.vals, i, v) != .Ok {
 				r.sig, r.mode = .Fail, .Ret
 				return
 			}
@@ -218,25 +199,20 @@ advance_parts :: proc(m: ^Machine, r: ^Regs, f: ^Args_Frame, from: int) {
 			return
 		}
 		g.owner, g.i = f, level
-		node := part
-		if n.kind == .String && part.kind == .Format {
-			node = part.a
-		}
+		node := part.a if n.kind == .String && part.kind == .Format else part
 		r.n, r.input, r.path, r.env, r.k, r.track, r.mode = node, query.retain(f.input), query.ABSENT, env_retain(f.env), g, false, .Eval
 		return
 	}
 	parts_done(m, r, f)
 }
 
-// An output of a part that generates: its value, then the parts after it.
 @(private)
 emit_arg :: proc(m: ^Machine, r: ^Regs, g: ^Input_Frame) {
 	h := m.h
 	f := (^Args_Frame)(g.owner)
 	query.release(h, r.vpath)
-	r.vpath = query.ABSENT
 	v := r.v
-	r.v = query.ABSENT
+	r.v, r.vpath = query.ABSENT, query.ABSENT
 	i := part_at(f, g.i)
 	part := f.n.args[i]
 	if f.n.kind == .String && part.kind == .Format {
@@ -248,14 +224,13 @@ emit_arg :: proc(m: ^Machine, r: ^Regs, g: ^Input_Frame) {
 		}
 		v = t
 	}
-	if s := query.array_put(h, &f.vals, i, v); s != .Ok {
+	if query.array_put(h, &f.vals, i, v) != .Ok {
 		r.sig, r.mode = .Fail, .Ret
 		return
 	}
 	advance_parts(m, r, f, g.i + 1)
 }
 
-// Every part of `f` has a value: the string, the object, or the call with them.
 @(private)
 parts_done :: proc(m: ^Machine, r: ^Regs, f: ^Args_Frame) {
 	h := m.h
@@ -274,11 +249,9 @@ parts_done :: proc(m: ^Machine, r: ^Regs, f: ^Args_Frame) {
 	case .Object:
 		v, s = query.make_object(h, len(vals) / 2)
 		for i := 0; s == .Ok && i < len(vals); i += 2 {
-			val: query.Value
+			val := query.retain(vals[i + 1])
 			if n.args[i + 1] == nil {
 				val, s = query.get(h, f.input, vals[i])
-			} else {
-				val = query.retain(vals[i + 1])
 			}
 			if s == .Ok {
 				s = put_entry(h, &v, query.retain(vals[i]), val)
@@ -305,8 +278,6 @@ drop_args :: proc(m: ^Machine, f: ^Args_Frame) {
 	query.release(m.h, f.vals)
 }
 
-// Runs builtin call `n` on the registers' input, with its value arguments `vals` (by argument, the filters' slots
-// unused), its filter arguments in the registers' scope.
 @(private)
 start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 	h := m.h
@@ -326,13 +297,10 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 	case .Empty:
 		finish(m, r, .Go)
 	case .Select:
-		f := push_or_fail(m, r, Input_Frame, .Select)
-		if f == nil {
-			return
+		if f := push_or_fail(m, r, Input_Frame, .Select); f != nil {
+			f.input, f.path = r.input, r.path
+			r.input, r.path, r.n, r.k, r.track = query.retain(f.input), query.ABSENT, n.args[0], f, false
 		}
-		f.input, f.path = r.input, r.path
-		r.input, r.path = query.retain(f.input), query.ABSENT
-		r.n, r.k, r.track = n.args[0], f, false
 	case .Kind_Filter:
 		if query.type_of(r.input) in b.types {
 			give(m, r, query.retain(r.input))
@@ -340,17 +308,13 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 			finish(m, r, .Go)
 		}
 	case .Error:
-		x := vals[0] if len(vals) > 0 else r.input
-		raise(h, x)
+		raise(h, vals[0] if len(vals) > 0 else r.input)
 		finish(m, r, .Fail)
-	case .Path:
-		f := push_or_fail(m, r, Input_Frame, .Path)
-		if f == nil {
-			return
+	case .Path, .Isempty:
+		if f := push_or_fail(m, r, Input_Frame, .Path if b.op == .Path else .Isempty); f != nil {
+			query.release(h, r.path)
+			r.path, r.n, r.k, r.track = query.ABSENT, n.args[0], f, b.op == .Path
 		}
-		query.release(h, r.path)
-		r.path = query.ABSENT
-		r.n, r.k, r.track = n.args[0], f, true
 	case .Getpath:
 		v, s := query.get_path(h, r.input, vals[0])
 		if s == .Ok && r.track {
@@ -376,7 +340,6 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 	case .Limit, .Skip, .First:
 		count := 1.0
 		if b.op != .First {
-			// In jq's order a count below the numbers (null, a boolean, NaN) is negative, one above them is no count.
 			t := query.type_of(vals[0])
 			if t == .String || t == .Array || t == .Object {
 				raise_text(m, "Invalid limit: not a number")
@@ -395,37 +358,31 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 			return
 		}
 		body := n.args[len(n.args) - 1]
-		// A limit takes one value more for a fractional count, and a skip drops only the whole values of it.
 		whole := math.floor(count) if b.op == .Skip else math.ceil(count)
 		if whole <= 0 {
 			r.n = body
 			return
 		}
-		f := push_or_fail(m, r, Count_Frame, .Skip if b.op == .Skip else .Limit)
-		if f == nil {
-			return
+		if f := push_or_fail(m, r, Count_Frame, .Skip if b.op == .Skip else .Limit); f != nil {
+			f.left = i64(min(whole, 1e18))
+			r.n, r.k = body, f
 		}
-		f.left = i64(min(whole, 1e18))
-		r.n, r.k = body, f
 	case .Last:
-		f := push_or_fail(m, r, Input_Frame, .Last)
-		if f == nil {
-			return
+		if f := push_or_fail(m, r, Input_Frame, .Last); f != nil {
+			r.n, r.k = n.args[0], f
 		}
-		r.n, r.k = n.args[0], f
-	case .Isempty:
-		f := push_or_fail(m, r, Input_Frame, .Isempty)
-		if f == nil {
-			return
-		}
-		query.release(h, r.path)
-		r.path = query.ABSENT
-		r.n, r.k, r.track = n.args[0], f, false
 	case .Range:
 		start_range(m, r, vals)
-	case .Input:
+	case .Input, .Inputs:
 		if h.tainted {
 			finish(m, r, .Taint)
+			return
+		}
+		if b.op == .Inputs {
+			if f := push_or_fail(m, r, Frame, .Gen); f != nil {
+				finish(m, r, .Go)
+				resume_gen(m, r, f)
+			}
 			return
 		}
 		v, ok, s := next_input(m)
@@ -437,17 +394,6 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 			return
 		}
 		value_out(m, r, v)
-	case .Inputs:
-		if h.tainted {
-			finish(m, r, .Taint)
-			return
-		}
-		f := push_or_fail(m, r, Frame, .Gen)
-		if f == nil {
-			return
-		}
-		finish(m, r, .Go)
-		resume_gen(m, r, f)
 	case .Debug, .Stderr:
 		if h.tainted || query.value_has_partial(r.input) {
 			h.tainted = true
@@ -455,33 +401,27 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 			return
 		}
 		if m.hooks != nil {
-			hook := m.hooks.debug if b.op == .Debug else m.hooks.stderr
-			if hook != nil {
+			if hook := m.hooks.debug if b.op == .Debug else m.hooks.stderr; hook != nil {
 				hook(m.hooks.data, r.input, h)
 			}
 		}
 		give(m, r, query.retain(r.input))
-	case .Halt:
-		if h.tainted {
-			finish(m, r, .Taint)
-			return
-		}
-		query.release(h, m.halt.value)
-		m.halt = {halted = true}
-		finish(m, r, .Halt)
-	case .Halt_Error:
-		if h.tainted || query.value_has_partial(r.input) {
+	case .Halt, .Halt_Error:
+		if h.tainted || (b.op == .Halt_Error && query.value_has_partial(r.input)) {
 			h.tainted = true
 			finish(m, r, .Taint)
 			return
 		}
-		if query.type_of(vals[0]) != .Number {
+		if b.op == .Halt_Error && query.type_of(vals[0]) != .Number {
 			raise_text(m, "halt_error/1: number required")
 			finish(m, r, .Fail)
 			return
 		}
 		query.release(h, m.halt.value)
-		m.halt = {halted = true, code = int(query.trunc_i64(vals[0])), value = query.retain(r.input)}
+		m.halt = {halted = true}
+		if b.op == .Halt_Error {
+			m.halt.code, m.halt.value = int(query.trunc_i64(vals[0])), query.retain(r.input)
+		}
 		finish(m, r, .Halt)
 	case .Css:
 		start_css(m, r, vals[0])
@@ -490,16 +430,13 @@ start_builtin :: proc(m: ^Machine, r: ^Regs, n: ^Node, vals: []query.Value) {
 
 @(private)
 start_range :: proc(m: ^Machine, r: ^Regs, vals: []query.Value) {
-	from, to, by := query.int_value(0), query.int_value(0), query.int_value(1)
-	switch len(vals) {
-	case 1:
-		to = vals[0]
-	case 2:
+	from, to, by := query.int_value(0), vals[0], query.int_value(1)
+	if len(vals) >= 2 {
 		from, to = vals[0], vals[1]
-	case 3:
-		from, to, by = vals[0], vals[1], vals[2]
 	}
-	if len(vals) < 3 {
+	if len(vals) == 3 {
+		by = vals[2]
+	} else {
 		if query.type_of(from) != .Number || query.type_of(to) != .Number {
 			raise_text(m, "Range bounds must be numeric")
 			finish(m, r, .Fail)
@@ -509,15 +446,11 @@ start_range :: proc(m: ^Machine, r: ^Regs, vals: []query.Value) {
 			by = query.ABSENT
 		}
 	}
-	track := r.track
-	k := r.k
+	track, k := r.track, r.k
 	finish(m, r, .Go)
 	go, gs := range_goes_on(m, from, to, by)
-	if gs != .Ok {
-		r.sig = .Fail
-		return
-	}
-	if !go {
+	if gs != .Ok || !go {
+		r.sig = fail_status(gs)
 		return
 	}
 	f, s := push(m, Range_Frame, .Range, k)
@@ -529,9 +462,8 @@ start_range :: proc(m: ^Machine, r: ^Regs, vals: []query.Value) {
 	resume_range(m, r, f)
 }
 
-// The next input the hooks give, `ok` false at the end. With no hook it raises jq's library error, "break".
 @(private)
-next_input :: proc(m: ^Machine) -> (v: query.Value, ok: bool, status: query.Status) {
+next_input :: proc(m: ^Machine) -> (query.Value, bool, query.Status) {
 	if m.hooks == nil || m.hooks.input == nil {
 		return query.NULL, false, raise_text(m, "break")
 	}
@@ -556,7 +488,6 @@ resume_gen :: proc(m: ^Machine, r: ^Regs, f: ^Frame) {
 	give_value(m, r, f, v)
 }
 
-// Raises the message `text`, borrowed from the program's rodata, as jq raises an error of its own.
 @(private)
 raise_text :: proc(m: ^Machine, text: string) -> query.Status {
 	return query.fail(m.h, .Raised, .None, query.text_borrowed(text))

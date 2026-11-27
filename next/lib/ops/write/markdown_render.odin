@@ -115,18 +115,11 @@ emit_markdown_table :: proc(out: ^Out, grid: ^Render_Grid, opts: Markdown_Option
 emit_markdown_row :: proc(out: ^Out, buf: []u8, cells: []Cell_Span, widths: []int, right: []bool, compact: bool) {
 	for cell, c in cells {
 		put_str(out, "| ")
-		cell_bytes := buf[cell.lo:][:cell.n]
+		s := string(buf[cell.lo:][:cell.n])
 		if compact {
-			put(out, cell_bytes)
+			put_str(out, s)
 		} else {
-			pad := max(widths[c] - cell.width, 0)
-			if right[c] {
-				put_spaces(out, pad)
-				put(out, cell_bytes)
-			} else {
-				put(out, cell_bytes)
-				put_spaces(out, pad)
-			}
+			put_padded_cell(out, s, "", max(widths[c] - cell.width, 0), right[c], true)
 		}
 		put_byte(out, ' ')
 	}
