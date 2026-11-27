@@ -5,7 +5,6 @@ import "core:container/handle_map"
 import "core:slice"
 import "core:strings"
 import "stury:lib/base/kernel"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // Markup-family composer (XML 1.0 + Namespaces).
@@ -171,7 +170,7 @@ xml_comment_valid :: proc "contextless" (body: string) -> bool {
 
 @(private = "file")
 is_text_run :: proc "contextless" (doc: ^tape.Document, v: tape.Node_Index) -> bool {
-	return v != tape.ROOT && v > 0 && markup.is_text_key(doc.nodes[v - 1])
+	return v != tape.ROOT && v > 0 && tape.is_text_key(doc.nodes[v - 1])
 }
 
 @(private = "file")
@@ -238,7 +237,7 @@ compose_markup_walk :: proc(cx: ^Markup_Cx, root: Handle) -> Error {
 						break
 					}
 					is_txt := is_text_run(cx.doc, vn)
-					ename := markup.TEXT_KEY if is_txt else string(tape.span_bytes(cx.doc, cx.doc.nodes[kn].lo, cx.doc.nodes[kn].n))
+					ename := tape.TEXT_KEY if is_txt else string(tape.span_bytes(cx.doc, cx.doc.nodes[kn].lo, cx.doc.nodes[kn].n))
 					suppressed := false
 					if !is_txt {
 						for rep_name in array_replaced {
@@ -659,7 +658,7 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 				break
 			}
 			is_txt := is_text_run(cx.doc, vn)
-			name := markup.TEXT_KEY if is_txt else string(tape.span_bytes(cx.doc, cx.doc.nodes[kn].lo, cx.doc.nodes[kn].n))
+			name := tape.TEXT_KEY if is_txt else string(tape.span_bytes(cx.doc, cx.doc.nodes[kn].lo, cx.doc.nodes[kn].n))
 			lead, lo, hi := markup_extent(cx, vn)
 			head_lo, inline_hi := lo, hi
 			for f in tape.facts_of(cx.doc, vn) {
@@ -825,7 +824,7 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 				lead_sep := string(cx.src[it.lead:it.lo])
 				for ins_i in slot_ins {
 					ins := d.inserted_members[ins_i]
-					if ins.key != markup.TEXT_KEY && len(lead_sep) > 0 {
+					if ins.key != tape.TEXT_KEY && len(lead_sep) > 0 {
 						append(&b, lead_sep)
 					}
 					spell_markup_insert(cx, base_c, ins, &b) or_return
@@ -841,7 +840,7 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 				for ins_i in slot_ins {
 					ins := d.inserted_members[ins_i]
 					spell_markup_insert(cx, base_c, ins, &b) or_return
-					if ins.key != markup.TEXT_KEY && len(sep) > 0 {
+					if ins.key != tape.TEXT_KEY && len(sep) > 0 {
 						append(&b, sep)
 					}
 				}
@@ -872,7 +871,7 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 		pos := items[len(items) - 1].hi if len(items) > 0 else parent_el.close
 		for ins_i in tail_ins {
 			ins := d.inserted_members[ins_i]
-			if ins.key != markup.TEXT_KEY && len(items) > 0 && len(sep) > 0 {
+			if ins.key != tape.TEXT_KEY && len(items) > 0 && len(sep) > 0 {
 				append(&b, sep)
 			}
 			spell_markup_insert(cx, base_c, ins, &b) or_return
@@ -884,7 +883,7 @@ emit_markup_container_delta :: proc(cx: ^Markup_Cx, h: Handle, n: ^Edit_Node, st
 
 @(private = "file")
 spell_markup_insert :: proc(cx: ^Markup_Cx, base_c: tape.Node_Index, ins: Member_Insert, out: ^[dynamic]u8) -> Error {
-	if ins.key == markup.TEXT_KEY {
+	if ins.key == tape.TEXT_KEY {
 		if node_kind(cx.ov, ins.value) == .Array || node_kind(cx.ov, ins.value) == .Object {
 			return refuse(.Text_Markup, "cannot insert element or array as #text", base_c)
 		}

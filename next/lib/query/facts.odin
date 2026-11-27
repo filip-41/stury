@@ -1,7 +1,6 @@
 package query
 
 import "core:fmt"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // Fact reading and path-step helpers: `.@comment`, `.@tag`, `.@anchor`, `.@alias`, `.@style`,
@@ -583,7 +582,7 @@ read_element_name :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res:
 	}
 	key_idx := tape.NO_NODE
 	if prev := doc.nodes[at - 1]; prev.role == .Key {
-		if !markup.is_text_key(prev) {
+		if !tape.is_text_key(prev) {
 			key_idx = at - 1
 		}
 	} else if doc.format.options == .Xml {
@@ -592,7 +591,7 @@ read_element_name :: proc(h: ^Heap, d: ^Doc_Block, at: tape.Node_Index) -> (res:
 			if cand.kind > .Plain && i + int(cand.n) > int(at) {
 				if cand.kind == .Array && i > 0 {
 					k := doc.nodes[i - 1]
-					if k.role == .Key && !markup.is_text_key(k) {
+					if k.role == .Key && !tape.is_text_key(k) {
 						key_idx = tape.Node_Index(i - 1)
 					}
 				}
@@ -615,7 +614,7 @@ read_content :: proc(h: ^Heap, doc: ^tape.Document, at: tape.Node_Index) -> (res
 		h.tainted = true
 		return NULL, .Ok
 	}
-	text, ok := markup.content(doc, at, heap_allocator(h))
+	text, ok := tape.markup_content(doc, at, heap_allocator(h))
 	if !ok {
 		return NULL, fail_memory(h)
 	}

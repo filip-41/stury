@@ -4,7 +4,6 @@ import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // XML's walk: each grammar state is a procedure that tail-calls the next with `#must_tail`. A state reads the first
@@ -638,7 +637,7 @@ text_member :: #force_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "
 text_member_emit :: #force_no_inline proc "contextless" (w: ^Walk($H, $LAX), $on: proc "contextless" (h: ^H, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action), hs: ^hook.Regs, f: ^Frame, end_of_run: [^]u8) -> (result: u64, done: bool) {
 	lo := f.text_lo
 	n := int(at(w, end_of_run) - lo)
-	if r := emit(w, on, hs, .String, .Key, lo, 0, tape.SPELLING_DECODE | markup.SPELLING_TEXT_KEY); r != .Next {
+	if r := emit(w, on, hs, .String, .Key, lo, 0, tape.SPELLING_DECODE | tape.SPELLING_TEXT_KEY); r != .Next {
 		return refused(w, hs^, r, end_of_run), true
 	}
 	if r := emit_text(w, on, hs, f, lo, n, .Decode in f.flags); r != .Next {
@@ -771,7 +770,7 @@ st_attributes :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: 
 		}
 		value_end := r.q[1:]
 		when H != hook.No_Hooks {
-			spelling := markup.attribute_spelling(intrinsics.ptr_sub(v[1:], q), true) | (ATTRIBUTE_DTD if r.dtd else 0)
+			spelling := tape.attribute_spelling(intrinsics.ptr_sub(v[1:], q), true) | (ATTRIBUTE_DTD if r.dtd else 0)
 			if w.attr_dtd {
 				spelling |= tokenized_bit(w, e, q, name_n)
 			}

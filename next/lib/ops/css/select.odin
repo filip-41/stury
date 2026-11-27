@@ -2,7 +2,6 @@ package css
 
 import "base:runtime"
 import "stury:lib/base/kernel"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // Matching walks the elements of a markup document in preorder, keeping the chain of elements open above the one it is
@@ -323,7 +322,7 @@ same_type :: proc(m: ^Matcher, a, b: tape.Node_Index) -> bool {
 // Whether key `k` names an element, not a run of text.
 @(private)
 is_element :: #force_inline proc(doc: ^tape.Document, k: tape.Node_Index) -> bool {
-	return !markup.is_text_key(doc.nodes[k])
+	return !tape.is_text_key(doc.nodes[k])
 }
 
 // The members of the container at `at`, as written.

@@ -6,7 +6,6 @@ import "core:io"
 import "core:strings"
 import "core:unicode/utf8"
 import "stury:lib/base/spell"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import ops_write "stury:lib/ops/write"
 
@@ -560,7 +559,7 @@ holds_text :: proc(w: ^ops_write.Tree, at: tape.Node_Index, html: bool) -> bool 
 	end := tape.node_after(w.doc, at)
 	for k := at + 1; k < end; k = tape.node_after(w.doc, k + 1) {
 		if html {
-			if markup.is_text_key(w.nodes[k]) {
+			if tape.is_text_key(w.nodes[k]) {
 				return true
 			}
 			continue

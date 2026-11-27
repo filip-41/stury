@@ -7,7 +7,6 @@ import "core:strings"
 import "core:time"
 import "stury:lib/base/spell"
 import "stury:lib/core/hook"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import "stury:lib/ops/typed"
 
@@ -486,7 +485,7 @@ fill_struct :: proc(cx: ^Unmarshal_Cx, fr: ^Unmarshal_Frame, info: ^runtime.Type
 					continue
 				}
 				field_dst := rawptr(uintptr(fr.dst) + uintptr(info.offsets[fi]))
-				if name == markup.TEXT_KEY {
+				if name == tape.TEXT_KEY {
 					has_text = true
 					if err := fill_scalar(cx, v, field_dst, info.types[fi]); err != nil {
 						record_step(cx, tape.Step(tape.Name(info.names[fi])))

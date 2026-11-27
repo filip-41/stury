@@ -5,7 +5,6 @@ import "core:encoding/endian"
 import "core:math"
 import "core:strconv"
 import "stury:lib/base/spell"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // Generic rodata `tape.Format` attached to materialized documents when no format-specific `target_format` is passed.
@@ -293,7 +292,7 @@ materialize_subtree :: proc(
 							}
 							delete(vtmp, allocator)
 							append(src, '"') or_return
-							sp := markup.attribute_spelling(len(aname) + 2, true)
+							sp := tape.attribute_spelling(len(aname) + 2, true)
 							append(facts, tape.Fact{node = out_node, lo = flo, n = u32(u64(len(src)) - flo), kind = .Attribute, spelling = sp}) or_return
 							present^ += {.Attribute}
 							continue
@@ -350,7 +349,7 @@ materialize_subtree :: proc(
 						append(src, `="`) or_return
 						append_xml_escaped_bytes(src, transmute([]u8)fo.values[0]) or_return
 						append(src, '"') or_return
-						sp := markup.attribute_spelling(len(fo.attr) + 2, true)
+						sp := tape.attribute_spelling(len(fo.attr) + 2, true)
 						append(facts, tape.Fact{node = out_node, lo = flo, n = u32(u64(len(src)) - flo), kind = .Attribute, spelling = sp}) or_return
 						present^ += {.Attribute}
 					}
@@ -635,7 +634,7 @@ materialize_subtree :: proc(
 				kt := decode_node_text_tmp(ov.base, kn, allocator)
 				klo, klen := append_str(&src, kt.text) or_return
 				free_tmp_text(kt, allocator)
-				ksp := markup.SPELLING_TEXT_KEY if (opts.xml_attrs && markup.is_text_key(ov.base.nodes[kn])) else u16(0)
+				ksp := tape.SPELLING_TEXT_KEY if (opts.xml_attrs && tape.is_text_key(ov.base.nodes[kn])) else u16(0)
 				append(&nodes, tape.Node{lo = klo, n = klen, kind = .String, role = .Key, spelling = ksp}) or_return
 				emit_one(ov, NO_HANDLE, vn, .Value, &src, &nodes, &facts, &present, &stack, opts, "", false, allocator) or_return
 			} else {
@@ -658,7 +657,7 @@ materialize_subtree :: proc(
 			fr.idx += 1
 			fr.child_n += 1
 			klo, klen := append_str(&src, m.key) or_return
-			ksp := markup.SPELLING_TEXT_KEY if (opts.xml_attrs && m.key == markup.TEXT_KEY) else u16(0)
+			ksp := tape.SPELLING_TEXT_KEY if (opts.xml_attrs && m.key == tape.TEXT_KEY) else u16(0)
 			append(&nodes, tape.Node{lo = klo, n = klen, kind = .String, role = .Key, spelling = ksp}) or_return
 			emit_one(ov, m.handle, m.base_val, .Value, &src, &nodes, &facts, &present, &stack, opts, "", false, allocator) or_return
 		} else {

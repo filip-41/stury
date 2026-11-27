@@ -3,7 +3,6 @@ package html
 import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/base/spell"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // Format services for HTML5: token spelling bit layout, decoded text/key readers, packed `Doc_Ext` state
@@ -12,7 +11,7 @@ import "stury:lib/core/tape"
 // Spelling bits 11..15 (disjoint from `tape`'s 0..10):
 //
 // Keys (`role == .Key`):
-// - `t.spelling & markup.SPELLING_TEXT_KEY != 0` -> synthetic `#text` key (`n == 0`).
+// - `t.spelling & tape.SPELLING_TEXT_KEY != 0` -> synthetic `#text` key (`n == 0`).
 // - `t.n == 0` (and not text key) -> implied HTML element (`Namespace.Html`, always frozen):
 //   bits 12..14 = `Implied_Tag` (`KEY_IMPLIED_SHIFT :: 12`), bit 15 = `KEY_TABLE`.
 // - `t.n > 0`:
@@ -43,7 +42,7 @@ TEXT_FROZEN :: u16(1 << 15)
 
 #assert(((3 << KEY_NS_SHIFT) | KEY_FROZEN | KEY_TABLE) == 0xF000)
 #assert(((7 << KEY_IMPLIED_SHIFT) | KEY_TABLE) == 0xF000)
-#assert((0xF000 | markup.SPELLING_TEXT_KEY) & 0x07FF == 0)
+#assert((0xF000 | tape.SPELLING_TEXT_KEY) & 0x07FF == 0)
 #assert(((7 << TEXT_MODE_SHIFT) | TEXT_PIECES | TEXT_FROZEN) & 0x07FF == 0)
 
 @(private)
@@ -381,7 +380,7 @@ key_namespace :: #force_inline proc "contextless" (k: tape.Token) -> Namespace {
 
 @(private)
 key_is_frozen :: #force_inline proc "contextless" (k: tape.Token) -> bool {
-	if markup.is_text_key(k) {
+	if tape.is_text_key(k) {
 		return false
 	}
 	return k.n == 0 || k.spelling & KEY_FROZEN != 0
@@ -389,8 +388,8 @@ key_is_frozen :: #force_inline proc "contextless" (k: tape.Token) -> bool {
 
 @(private)
 table_key_text :: proc "contextless" (src: []u8, t: tape.Token) -> string {
-	if markup.is_text_key(t) {
-		return markup.TEXT_KEY
+	if tape.is_text_key(t) {
+		return tape.TEXT_KEY
 	}
 	if t.n == 0 {
 		return IMPLIED_TAG_NAMES[Implied_Tag((t.spelling >> KEY_IMPLIED_SHIFT) & 7)]
@@ -424,8 +423,8 @@ number_value :: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number {
 @(private)
 decode_room_node :: proc "contextless" (src: []u8, t: tape.Node, ext: ^tape.Format_Ext) -> int {
 	if t.role == .Key {
-		if markup.is_text_key(t) {
-			return len(markup.TEXT_KEY)
+		if tape.is_text_key(t) {
+			return len(tape.TEXT_KEY)
 		}
 		if t.n == 0 {
 			return len(IMPLIED_TAG_NAMES[Implied_Tag((t.spelling >> KEY_IMPLIED_SHIFT) & 7)])
@@ -810,7 +809,7 @@ attribute :: proc "contextless" (doc: ^tape.Document, f: tape.Fact) -> (name, va
 	}
 	lead, tail := tape.fact_lead(f.spelling), tape.fact_tail(f.spelling)
 	start := lead
-	if lead == markup.ATTRIBUTE_LEAD_MAX {
+	if lead == tape.ATTRIBUTE_LEAD_MAX {
 		start = q
 		for start < hi && is_space(src[start]) {
 			start += 1
@@ -842,7 +841,7 @@ namespace :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u
 		return "", .Missing
 	}
 	k := doc.nodes[at - 1]
-	if markup.is_text_key(k) {
+	if tape.is_text_key(k) {
 		return "", .Missing
 	}
 	return NAMESPACE_URIS[key_namespace(k)], .Found

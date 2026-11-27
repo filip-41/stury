@@ -4,7 +4,6 @@ import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import "stury:lib/core/hook"
 import "stury:lib/ops/build"
@@ -567,11 +566,11 @@ st_defaults :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^W
 		if !budget(t, a.size) {
 			return fault(w, hs, tag, EXPANSION)
 		}
-		spelling := markup.attribute_spelling(int(a.lead), true) | (ATTRIBUTE_DTD if dtd_decodes(t) else 0) | (ATTRIBUTE_TOKENIZED if a.tokenized else 0)
+		spelling := tape.attribute_spelling(int(a.lead), true) | (ATTRIBUTE_DTD if dtd_decodes(t) else 0) | (ATTRIBUTE_TOKENIZED if a.tokenized else 0)
 		if declares_ns(name, int(a.name_n)) {
 			spelling |= ATTRIBUTE_NS
 			fact_bytes := w.subset[a.fact_lo - t.subset_lo:][:a.fact_n] if w.subset != nil else t.src[a.fact_lo:][:a.fact_n]
-			_, value := markup.attribute_parts(fact_bytes, markup.attribute_spelling(int(a.lead), true))
+			_, value := attribute_parts(fact_bytes, spelling)
 			rule, no_memory := declare(w, name, int(a.name_n), value, e)
 			if no_memory {
 				return fault(w, hs, tag, NO_MEMORY)

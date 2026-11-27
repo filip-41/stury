@@ -1,7 +1,6 @@
 package html
 
 import "stury:lib/base/spell"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // The names an HTML user calls beside the reads, so a caller reading HTML needs no direct `core/tape` import.
@@ -83,5 +82,5 @@ text_is_ascii :: tape.text_is_ascii
 destroy :: tape.destroy
 records_window :: tape.records_window
 
-TEXT_KEY :: markup.TEXT_KEY
-content :: markup.content
+TEXT_KEY :: tape.TEXT_KEY
+content :: tape.markup_content

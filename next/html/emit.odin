@@ -3,7 +3,6 @@ package html
 import "base:intrinsics"
 import "stury:lib/base/kernel"
 import "stury:lib/core/hook"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // Emits an `Html_Tree` into any v2 hook (`Builder`, `Finder`, `Scanner`, `Checker`, `testkit.Probe`, etc.) in
@@ -215,7 +214,7 @@ emit_content :: proc(
 		return 0, true
 	}
 	if last_text != 0 {
-		if give(e, on, .String, .Key, tree_node(t, last_text).lo, 0, tape.SPELLING_DECODE | markup.SPELLING_TEXT_KEY) == .Stop {
+		if give(e, on, .String, .Key, tree_node(t, last_text).lo, 0, tape.SPELLING_DECODE | tape.SPELLING_TEXT_KEY) == .Stop {
 			return 0, true
 		}
 		if !text_value(e, on, from, end, 0, tree_node(t, parent).end if parent != top else max(u64)) {
@@ -774,11 +773,11 @@ attribute_fact :: proc "contextless" (src: []u8, a: Attribute) -> (lo, hi: u64, 
 	lo = a.name.lo
 	if a.value.lo == 0 {
 		hi = lo + u64(a.name.n)
-		return lo, hi, markup.attribute_spelling(int(hi - lo), false)
+		return lo, hi, tape.attribute_spelling(int(hi - lo), false)
 	}
 	quoted := src[a.value.lo - 1] == '"' || src[a.value.lo - 1] == '\''
 	hi = a.value.lo + u64(a.value.n) + (1 if quoted else 0)
-	return lo, hi, markup.attribute_spelling(int(a.value.lo - lo), quoted)
+	return lo, hi, tape.attribute_spelling(int(a.value.lo - lo), quoted)
 }
 
 @(private)

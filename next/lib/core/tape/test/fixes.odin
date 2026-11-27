@@ -7,6 +7,7 @@ import "stury:json"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:testkit"
+import "stury:xml"
 import "stury:yaml"
 
 @(test)
@@ -174,5 +175,102 @@ read_pieces_records_and_token_safety :: proc(t: ^testing.T) {
 	testing.expect(t, ok_b)
 	testing.expect_value(t, s, "a\nb")
 	delete(s, balloc)
+	testing.expect_value(t, mb.held, u64(0))
+}
+
+@(test)
+markup_content_bugs_and_fast_paths :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// 1. Empty Document{} and out-of-range Node_Index do not panic.
+	empty_doc := tape.Document{}
+	s0, ok0 := tape.markup_content(&empty_doc, tape.ROOT, context.allocator)
+	testing.expect(t, ok0 && s0 == "")
+	s1, ok1 := tape.markup_content(&empty_doc, tape.NO_NODE, context.allocator)
+	testing.expect(t, ok1 && s1 == "")
+	s2, ok2 := tape.markup_content(&empty_doc, tape.Node_Index(99), context.allocator)
+	testing.expect(t, ok2 && s2 == "")
+	trunc_nodes := [1]tape.Token{{kind = .Object, role = .Value, n = 100}}
+	trunc_doc := tape.Document{nodes = trunc_nodes[:]}
+	s3, ok3 := tape.markup_content(&trunc_doc, tape.ROOT, context.allocator)
+	testing.expect(t, ok3 && s3 == "")
+
+	// 2. mem.nil_allocator() returns ("", false) on non-empty content and ("", true) on empty element.
+	plain_src := transmute([]u8)string("<a>hello</a>")
+	plain_doc, plain_err := xml.build(plain_src, .Xml, {}, context.allocator)
+	testing.expect_value(t, plain_err, nil)
+	defer tape.destroy(&plain_doc)
+	a_val, a_pres := tape.member(tape.Reader{doc = &plain_doc}, tape.ROOT, "a")
+	testing.expect_value(t, a_pres, tape.Presence.Found)
+	s_nil, ok_nil := tape.markup_content(&plain_doc, a_val, mem.nil_allocator())
+	testing.expect(t, !ok_nil && s_nil == "")
+
+	null_src := transmute([]u8)string("<a/>")
+	null_doc, null_err := xml.build(null_src, .Xml, {}, context.allocator)
+	testing.expect_value(t, null_err, nil)
+	defer tape.destroy(&null_doc)
+	null_val, null_pres := tape.member(tape.Reader{doc = &null_doc}, tape.ROOT, "a")
+	testing.expect_value(t, null_pres, tape.Presence.Found)
+	s_empty, ok_empty := tape.markup_content(&null_doc, null_val, mem.nil_allocator())
+	testing.expect(t, ok_empty && s_empty == "" && raw_data(s_empty) == nil)
+
+	// 3. Empty decoded DTD entity frees its scratch buffer and returns ("", true) with nil pointer (zero leaks).
+	ent_src := transmute([]u8)string(`<!DOCTYPE a [<!ENTITY e "">]><a>&e;</a>`)
+	ent_doc, ent_err := xml.build(ent_src, .Xml, {}, context.allocator)
+	testing.expect_value(t, ent_err, nil)
+	defer tape.destroy(&ent_doc)
+	ent_val, ent_pres := tape.member(tape.Reader{doc = &ent_doc}, tape.ROOT, "a")
+	testing.expect_value(t, ent_pres, tape.Presence.Found)
+	mb := hook.Memory_Budget{backing = context.allocator, limit = 1024}
+	balloc := hook.memory_budget(&mb)
+	s_ent, ok_ent := tape.markup_content(&ent_doc, ent_val, balloc)
+	testing.expect(t, ok_ent && s_ent == "" && raw_data(s_ent) == nil)
+	testing.expect_value(t, mb.held, u64(0))
+
+	// 4. Signed int overflow in size accumulation returns ("", false) without wrapping or allocating.
+	ovf_fmt := tape.Format {
+		room = proc "contextless" (_: []u8, _: tape.Node, _: ^tape.Format_Ext) -> int {
+			return max(int)
+		},
+	}
+	ovf_nodes := [3]tape.Token {
+		{kind = .Object, role = .Value, n = 3},
+		{lo = 0, n = 1, kind = .String, role = .Value, spelling = tape.SPELLING_DECODE},
+		{lo = 0, n = 1, kind = .String, role = .Value, spelling = tape.SPELLING_DECODE},
+	}
+	ovf_src := []u8{'x'}
+	ovf_doc := tape.Document{src = ovf_src, nodes = ovf_nodes[:], format = &ovf_fmt}
+	s_ovf, ok_ovf := tape.markup_content(&ovf_doc, tape.ROOT, balloc)
+	testing.expect(t, !ok_ovf && s_ovf == "")
+	testing.expect_value(t, mb.held, u64(0))
+
+	// 5. Failed node_text decode frees its allocated buffer and returns ("", false).
+	fail_fmt := tape.Format {
+		room = proc "contextless" (_: []u8, _: tape.Node, _: ^tape.Format_Ext) -> int {
+			return 4
+		},
+		decode = proc "contextless" (_: []u8, _: tape.Node, _: []u8, _: ^tape.Format_Ext) -> (string, bool) {
+			return "", false
+		},
+	}
+	fail_nodes := [1]tape.Token {
+		{lo = 0, n = 1, kind = .String, role = .Value, spelling = tape.SPELLING_DECODE},
+	}
+	fail_doc := tape.Document{src = ovf_src, nodes = fail_nodes[:], format = &fail_fmt}
+	s_fail, ok_fail := tape.markup_content(&fail_doc, tape.ROOT, balloc)
+	testing.expect(t, !ok_fail && s_fail == "")
+	testing.expect_value(t, mb.held, u64(0))
+
+	// 6. Plain, decoded, and inferred scalars (numbers/booleans) concatenate cleanly in document order.
+	inf_src := transmute([]u8)string("<a><b>42</b><c>true</c><d>hi &amp; bye</d></a>")
+	inf_doc, inf_err := xml.build(inf_src, .Xml, {format = tape.Xml_Options{infer = true}}, context.allocator)
+	testing.expect_value(t, inf_err, nil)
+	defer tape.destroy(&inf_doc)
+	inf_val, inf_pres := tape.member(tape.Reader{doc = &inf_doc}, tape.ROOT, "a")
+	testing.expect_value(t, inf_pres, tape.Presence.Found)
+	s_inf, ok_inf := tape.markup_content(&inf_doc, inf_val, balloc)
+	testing.expect(t, ok_inf)
+	testing.expect_value(t, s_inf, "42truehi & bye")
+	delete(s_inf, balloc)
 	testing.expect_value(t, mb.held, u64(0))
 }

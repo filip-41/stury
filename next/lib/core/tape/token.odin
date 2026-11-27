@@ -108,6 +108,21 @@ SPELLING_SHARED :: u16(0x07FF) // bits 0..10 reserved across formats; bits 11..1
 SPELLING_CREDIT :: u16(0x1F << 6) // a credit of at most 31
 #assert((SPELLING_DECODE | SPELLING_QUOTED | SPELLING_LAX | SPELLING_PLACED | SPELLING_ASCII | SPELLING_CREDIT_EXACT | SPELLING_CREDIT) == SPELLING_SHARED)
 
+// The name of the member that holds the text between a markup element's children. No element of a markup format can
+// have it, since `#` starts no name.
+TEXT_KEY :: "#text"
+
+// In a key's spelling, beside `SPELLING_DECODE`, the key is a `#text` member's, which spans no byte of the text. Bit
+// 11 is the first a format owns, and every markup format gives it this meaning.
+SPELLING_TEXT_KEY :: u16(1 << 11)
+#assert(SPELLING_TEXT_KEY & SPELLING_SHARED == 0)
+
+// Whether key `t` is a `#text` member's.
+@(require_results)
+is_text_key :: #force_inline proc "contextless" (t: Token) -> bool {
+	return t.role == .Key && t.spelling & SPELLING_TEXT_KEY != 0
+}
+
 // Whether the text of scalar `t` is not its bytes in the text, so that `Format.decode` or `Format.same_text` reads it.
 // A number's spelling holds its number kind in the bit a text's holds this in, so a number reads as its bytes, except
 // a key, which a format spells through `same_text` whatever its number kind.

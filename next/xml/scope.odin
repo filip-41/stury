@@ -2,7 +2,6 @@ package xml
 
 import "base:intrinsics"
 import "stury:lib/base/kernel"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // Reads of a built document that need an element's place in it: an attribute's name and value, the namespace an
@@ -23,12 +22,33 @@ ATTRIBUTE_TOKENIZED :: u16(1 << 11)
 @(private)
 ATTRIBUTE_NS :: u16(1 << 10)
 
+// The name and value of XML attribute fact `span` with `spelling`, the value as written within its quotes. A name ends
+// at white space or `=`. A lead that saturated is a quoted value's, which starts past the nearest byte before its
+// closing quote that equals it, since a value holds no quote of its own kind.
+// Invariant: `span` is a validated quoted XML attribute fact (`len(span) >= 4`, closing quote at `hi`, matching
+// opening quote before `hi`).
+@(private, require_results)
+attribute_parts :: proc "contextless" (span: []u8, spelling: u16) -> (name, value: []u8) #no_bounds_check {
+	q := 0
+	for q < len(span) && !kernel.is_ws(span[q]) && span[q] != '=' {
+		q += 1
+	}
+	// The tail is the closing quote, a bit below the format's own.
+	hi := len(span) - int(spelling >> 8 & 1)
+	lead := int(tape.fact_lead(spelling))
+	if lead == tape.ATTRIBUTE_LEAD_MAX {
+		for lead = hi; span[lead - 1] != span[hi]; lead -= 1 {
+		}
+	}
+	return span[:q], span[min(lead, hi):hi]
+}
+
 // The name of attribute fact `f` of `doc` as a key token and its value as a string token, which `tape.node_text`
 // reads with the document: decoded as an attribute value is, and for a type the DTD declares
 // that is not `CDATA`, with its spaces collapsed.
 attribute :: proc "contextless" (doc: ^tape.Document, f: tape.Fact) -> (name, value: tape.Token) {
 	span := tape.span_bytes(doc, f.lo, f.n)
-	n, v := markup.attribute_parts(span, f.spelling)
+	n, v := attribute_parts(span, f.spelling)
 	name = {lo = f.lo, n = u32(len(n)), kind = .String, role = .Key}
 	value = {lo = f.lo + u64(intrinsics.ptr_sub(raw_data(v), raw_data(span))), n = u32(len(v)), kind = .String}
 	tokenized := f.spelling & ATTRIBUTE_TOKENIZED != 0
@@ -154,7 +174,7 @@ element_key_of :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) 
 		return tape.NO_NODE, false
 	}
 	if prev := doc.nodes[at - 1]; prev.role == .Key {
-		if markup.is_text_key(prev) {
+		if tape.is_text_key(prev) {
 			return tape.NO_NODE, false
 		}
 		return at - 1, true
@@ -165,7 +185,7 @@ element_key_of :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) 
 		if cand.kind > .Plain && i + int(cand.n) > int(at) {
 			if cand.kind == .Array && i > 0 {
 				k := doc.nodes[i - 1]
-				if k.role == .Key && !markup.is_text_key(k) {
+				if k.role == .Key && !tape.is_text_key(k) {
 					return tape.Node_Index(i - 1), true
 				}
 			}
@@ -224,7 +244,7 @@ namespace_for_key :: proc "contextless" (doc: ^tape.Document, ext: ^tape.Markup_
 			if f.kind != .Attribute {
 				continue
 			}
-			name, _ := markup.attribute_parts(tape.span_bytes(doc, f.lo, f.n), f.spelling)
+			name, _ := attribute_parts(tape.span_bytes(doc, f.lo, f.n), f.spelling)
 			if len(prefix) == 0 && string(name) == "xmlns" || len(prefix) > 0 && len(name) == len(prefix) + 6 && string(name[:6]) == "xmlns:" && string(name[6:]) == string(prefix) {
 				uri = declared_uri(doc, ext, f, u32(intrinsics.ptr_sub(raw_data(facts), raw_data(doc.facts)) + i))
 				// An empty default declaration undeclares the default namespace.
@@ -288,7 +308,7 @@ expanded_names :: proc "contextless" (doc: ^tape.Document, key: tape.Node_Index,
 	for close < len(name) && name[close] != '}' {
 		close += 1
 	}
-	if close == len(name) || markup.is_text_key(t) {
+	if close == len(name) || tape.is_text_key(t) {
 		return .Missing
 	}
 	written := tape.span_bytes(doc, t.lo, t.n)
@@ -338,7 +358,7 @@ close_end :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u
 	}
 	src := doc.src
 	if doc.nodes[at].kind == .Array {
-		is_text_arr := at > tape.ROOT && markup.is_text_key(doc.nodes[at - 1])
+		is_text_arr := at > tape.ROOT && tape.is_text_key(doc.nodes[at - 1])
 		end_idx := at + tape.Node_Index(doc.nodes[at].n)
 		max_end := u64(0)
 		for j := at + 1; j < end_idx; {
@@ -396,7 +416,7 @@ close_end :: proc "contextless" (doc: ^tape.Document, at: tape.Node_Index) -> (u
 	}
 	t := doc.nodes[last]
 	p := t.lo + u64(t.n)
-	if k := doc.nodes[last - 1]; k.role == .Key && !markup.is_text_key(k) {
+	if k := doc.nodes[last - 1]; k.role == .Key && !tape.is_text_key(k) {
 		if t.n == 0 && src[t.lo] == '/' {
 			p = t.lo + 2
 		} else {

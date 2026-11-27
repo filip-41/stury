@@ -4,7 +4,6 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:io"
 import "stury:lib/base/spell"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 
@@ -236,7 +235,7 @@ holds_text :: proc(w: ^write.Tree, at: tape.Node_Index, xml: bool) -> bool {
 	for k := at + 1; k < end; k = tape.node_after(w.doc, k + 1) {
 		// The reader marks the `#text` member of an XML document, whose text is no bytes of the source.
 		if xml {
-			if markup.is_text_key(w.nodes[k]) {
+			if tape.is_text_key(w.nodes[k]) {
 				return true
 			}
 			continue
@@ -431,7 +430,7 @@ put_attributes :: proc(s: ^Writing, facts: []tape.Fact) {
 		if f.kind != .Attribute {
 			continue
 		}
-		name, value := markup.attribute_parts(tape.span_bytes(doc, f.lo, f.n), f.spelling)
+		name, value := attribute_parts(tape.span_bytes(doc, f.lo, f.n), f.spelling)
 		quote := u8('"')
 		for c in value {
 			if c == '"' {

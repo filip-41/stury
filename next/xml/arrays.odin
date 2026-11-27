@@ -4,7 +4,6 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:slice"
 import "stury:lib/core/hook"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // Predicate deciding whether a single element at `path` (decoded element names from the document root, e.g.
@@ -192,7 +191,7 @@ normalize_arrays :: proc(
 			old_to_new[g.first_key] = new_key_idx
 			f.child_count += 1
 
-			is_text := markup.is_text_key(key_node)
+			is_text := tape.is_text_key(key_node)
 			pushed_seg := false
 			if need_path && !is_text {
 				if perr := push_path_key(doc, key_node, &path_text, &path_spans); perr != nil {
@@ -721,8 +720,8 @@ group_object_members :: proc(
 
 @(private = "file")
 norm_key_text :: proc(doc: ^tape.Document, k: tape.Node, buf: ^[dynamic]u8) -> (s: string, err: runtime.Allocator_Error) {
-	if markup.is_text_key(k) {
-		return markup.TEXT_KEY, nil
+	if tape.is_text_key(k) {
+		return tape.TEXT_KEY, nil
 	}
 	if k.spelling & tape.SPELLING_DECODE == 0 && (doc.format == nil || doc.format == &FORMATS[.Xml] || k.kind != .Number) {
 		return string(tape.span_bytes(doc, k.lo, k.n)), nil
@@ -757,8 +756,8 @@ push_path_key :: proc(
 	path_spans: ^[dynamic]Path_Span,
 ) -> runtime.Allocator_Error {
 	lo := len(path_text)
-	if markup.is_text_key(k) {
-		append(path_text, markup.TEXT_KEY) or_return
+	if tape.is_text_key(k) {
+		append(path_text, tape.TEXT_KEY) or_return
 	} else if k.spelling & tape.SPELLING_DECODE == 0 {
 		span := tape.span_bytes(doc, k.lo, k.n)
 		append(path_text, ..span) or_return

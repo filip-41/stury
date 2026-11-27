@@ -1,7 +1,6 @@
 package xml
 
 import "stury:lib/base/spell"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // The names an XML user calls beside the reads, so that a program reading XML imports this package alone. The rest of
@@ -94,5 +93,5 @@ records_window :: tape.records_window
 
 // The markup shape's readers: the name of a text member, and an element's string value. `attribute` and
 // `namespace` read an element's attributes and the namespace of its name.
-TEXT_KEY :: markup.TEXT_KEY
-content :: markup.content
+TEXT_KEY :: tape.TEXT_KEY
+content :: tape.markup_content

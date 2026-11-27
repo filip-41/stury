@@ -3,7 +3,6 @@ package html
 import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/core/hook"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import ops_build "stury:lib/ops/build"
 
@@ -198,7 +197,7 @@ html_record_frame :: proc(r: ^Records, $S: Spec, allocator: runtime.Allocator) -
 			n        = 0,
 			kind     = .String,
 			role     = .Key,
-			spelling = tape.SPELLING_DECODE | markup.SPELLING_TEXT_KEY,
+			spelling = tape.SPELLING_DECODE | tape.SPELLING_TEXT_KEY,
 		}
 		return val.lo, val.lo + u64(val.n), true
 	}

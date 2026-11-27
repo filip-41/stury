@@ -51,6 +51,17 @@ fact_tail :: #force_inline proc "contextless" (spelling: u16) -> u64 {
 	return u64(spelling >> 8)
 }
 
+// The longest lead an attribute fact's spelling holds. A fact whose value starts further in has this lead, and its
+// format finds the value from the name.
+ATTRIBUTE_LEAD_MAX :: 255
+
+// The spelling of an attribute fact whose value starts `lead` bytes past its name's first byte, saturated at
+// `ATTRIBUTE_LEAD_MAX`, with the closing quote as the tail when the value is `quoted`. Bits 9 to 15 are the format's.
+@(require_results)
+attribute_spelling :: #force_inline proc "contextless" (lead: int, quoted: bool) -> u16 {
+	return fact_spelling(u8(min(lead, ATTRIBUTE_LEAD_MAX)), 1 if quoted else 0)
+}
+
 // The facts of node `at` of `doc`, in source order.
 facts_of :: proc "contextless" (doc: ^Document, at: Node_Index) -> []Fact #no_bounds_check {
 	lo, hi := 0, len(doc.facts)

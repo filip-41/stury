@@ -348,3 +348,84 @@ text_is_ascii :: proc "contextless" (doc: ^Document, at: Node_Index, buf: []u8) 
 	}
 	return true, true
 }
+
+// The string value of the markup element whose value is node `at` of `doc`: the text of each of the scalars in its
+// subtree, in document order, made in `allocator`. Empty for `NO_NODE`, an out-of-range index, or a null; false when
+// memory is refused, the total size overflows `int`, or a node's text cannot be decoded.
+@(require_results)
+markup_content :: proc(doc: ^Document, at: Node_Index, allocator: runtime.Allocator) -> (text: string, ok: bool) {
+	if at == NO_NODE || u64(at) >= u64(len(doc.nodes)) {
+		return "", true
+	}
+	start := u64(at)
+	node := doc.nodes[start]
+	end := start + 1
+	if node.kind == .Object {
+		end = min(start + u64(node.n), u64(len(doc.nodes)))
+	}
+	nodes := doc.nodes[int(start):int(end)]
+	size: u64
+	for t in nodes {
+		if t.role != .Value || t.kind == .Null || t.kind > .Plain {
+			continue
+		}
+		add := u64(t.n)
+		if t.kind >= .Bytes && t.spelling & SPELLING_DECODE != 0 {
+			if doc.format == nil {
+				return "", false
+			}
+			room := text_room_token(doc, t)
+			if room < 0 {
+				return "", false
+			}
+			if u64(room) > add {
+				add = u64(room)
+			}
+			if size > u64(max(int)) || add > u64(max(int)) - size {
+				return "", false
+			}
+		}
+		size += add
+	}
+	if size > u64(max(int)) {
+		return "", false
+	}
+	if size == 0 {
+		return "", true
+	}
+	buf, err := runtime.mem_alloc_non_zeroed(int(size), 1, allocator)
+	if err != nil || len(buf) < int(size) || raw_data(buf) == nil {
+		return "", false
+	}
+	w := 0
+	for t in nodes {
+		if t.role != .Value || t.kind == .Null || t.kind > .Plain {
+			continue
+		}
+		dst := buf[w:]
+		if t.kind >= .Bytes && t.spelling & SPELLING_DECODE != 0 {
+			s, read_ok := node_text_token(doc, t, dst)
+			if !read_ok || len(s) > len(dst) {
+				delete(buf, allocator)
+				return "", false
+			}
+			if len(s) > 0 && raw_data(s) != raw_data(dst) {
+				copy(dst, s)
+			}
+			w += len(s)
+		} else {
+			// Undecoded text and inferred booleans/numbers read directly as their source bytes.
+			w += copy(dst, span_bytes(doc, t.lo, t.n))
+		}
+	}
+	if w == 0 {
+		delete(buf, allocator)
+		return "", true
+	}
+	if w < len(buf) {
+		if shrunk, rerr := runtime.mem_resize(raw_data(buf), len(buf), w, 1, allocator); rerr == nil && len(shrunk) == w {
+			buf = shrunk
+		}
+	}
+	return string(buf[:w]), true
+}

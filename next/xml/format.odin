@@ -3,7 +3,6 @@ package xml
 import "base:runtime"
 import "stury:lib/base/spell"
 import "stury:lib/core/hook"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 
 // The services of the XML spec beyond the node readers: the reads and records that `xml.reads` returns to a caller
@@ -22,7 +21,7 @@ SPELLING_ATTRIBUTE :: u16(1 << 14)
 @(private)
 SPELLING_TOKENIZED :: u16(1 << 15)
 
-#assert((SPELLING_DTD | SPELLING_ATTRIBUTE | SPELLING_TOKENIZED | markup.SPELLING_TEXT_KEY) & 0x7FF == 0)
+#assert((SPELLING_DTD | SPELLING_ATTRIBUTE | SPELLING_TOKENIZED | tape.SPELLING_TEXT_KEY) & 0x7FF == 0)
 
 // The reads of `spec`, for a caller that picks the format at run time, to use with the handle `as` returns. Nil for a
 // `spec` out of range.
@@ -48,11 +47,11 @@ number_value :: proc "contextless" (src: []u8, t: tape.Node) -> spell.Number {
 // `decode_room` gives, or for such a text read with no format data.
 @(private)
 text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, ext: ^tape.Format_Ext) -> (s: string, ok: bool) {
-	if markup.is_text_key(t) {
-		if len(buf) < len(markup.TEXT_KEY) {
+	if tape.is_text_key(t) {
+		if len(buf) < len(tape.TEXT_KEY) {
 			return "", false
 		}
-		return string(buf[:copy(buf, markup.TEXT_KEY)]), true
+		return string(buf[:copy(buf, tape.TEXT_KEY)]), true
 	}
 	span := src[t.lo:][:t.n]
 	dtd: ^Dtd_View
@@ -69,8 +68,8 @@ text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, ext: ^ta
 // it holds expand to, which the document's format data `ext` tells.
 @(private)
 decode_room :: proc "contextless" (src: []u8, t: tape.Node, ext: ^tape.Format_Ext) -> int {
-	if markup.is_text_key(t) {
-		return len(markup.TEXT_KEY)
+	if tape.is_text_key(t) {
+		return len(tape.TEXT_KEY)
 	}
 	dtd, read := dtd_of(ext)
 	if t.spelling & SPELLING_DTD == 0 || !read {
@@ -128,5 +127,5 @@ key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {
 // The text key `t` of `src` reads as.
 @(private)
 key_text :: #force_inline proc "contextless" (src: []u8, t: tape.Token) -> string {
-	return markup.TEXT_KEY if markup.is_text_key(t) else string(src[t.lo:][:t.n])
+	return tape.TEXT_KEY if tape.is_text_key(t) else string(src[t.lo:][:t.n])
 }

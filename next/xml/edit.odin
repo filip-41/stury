@@ -3,7 +3,6 @@ package xml
 import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/base/kernel"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import "stury:lib/ops/edit"
 import ops_write "stury:lib/ops/write"
@@ -293,7 +292,7 @@ xml_spell_content :: proc(data: rawptr, ov: ^Overlay, h: Handle, out: ^[dynamic]
 	for nd in tmp_doc.nodes {
 		if nd.role == .Key {
 			kname := tape.span_bytes(&tmp_doc, nd.lo, nd.n)
-			if string(kname) != markup.TEXT_KEY && !xml_is_name_bytes(kname) {
+			if string(kname) != tape.TEXT_KEY && !xml_is_name_bytes(kname) {
 				return edit.refuse(.Bad_Name, "invalid XML element name")
 			}
 		}

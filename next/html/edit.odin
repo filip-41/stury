@@ -7,7 +7,6 @@ import "core:container/xar"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import "stury:lib/ops/edit"
 
@@ -392,13 +391,13 @@ check_delta_edits :: proc(doc: ^tape.Document, container: tape.Node_Index, d: ^e
 			if is_constructed_node(doc, ch.v) {
 				return edit.refuse(.Invalid_Result, "cannot reorder container with constructed element", container)
 			}
-			if markup.is_text_key(doc.nodes[ch.k]) {
+			if tape.is_text_key(doc.nodes[ch.k]) {
 				return edit.refuse(.Layout_Reflow_Needed, "cannot reorder container holding #text", container)
 			}
 		}
 	}
 	for ins in d.inserted_members {
-		if ins.key != markup.TEXT_KEY && !html_is_name(ins.key) {
+		if ins.key != tape.TEXT_KEY && !html_is_name(ins.key) {
 			return edit.refuse(.Bad_Name, "invalid HTML element name", container)
 		}
 		if len(children) == 0 {
@@ -426,7 +425,7 @@ check_delta_edits :: proc(doc: ^tape.Document, container: tape.Node_Index, d: ^e
 		}
 	}
 	for r in d.renamed_members {
-		if r.new_key != markup.TEXT_KEY && !html_is_name(r.new_key) {
+		if r.new_key != tape.TEXT_KEY && !html_is_name(r.new_key) {
 			return edit.refuse(.Bad_Name, "invalid HTML element name", container)
 		}
 		for ch in children {
@@ -457,7 +456,7 @@ check_replaced_subtree :: proc(ov: ^Overlay, root_n: ^edit.Edit_Node) -> Edit_Er
 		if n.state == .Replaced {
 			if n.val.kind == .Object {
 				for m in n.members {
-					if m.key != markup.TEXT_KEY && !html_is_name(m.key) {
+					if m.key != tape.TEXT_KEY && !html_is_name(m.key) {
 						return edit.refuse(.Bad_Name, "invalid HTML element name", n.base)
 					}
 					append(&stack, m.value)
@@ -685,7 +684,7 @@ html_spell_content :: proc(data: rawptr, ov: ^Overlay, h: Handle, out: ^[dynamic
 			continue
 		}
 		kname := tape.span_bytes(&tmp_doc, nd.lo, nd.n)
-		if string(kname) != markup.TEXT_KEY && !is_html_name(string(kname)) {
+		if string(kname) != tape.TEXT_KEY && !is_html_name(string(kname)) {
 			// Allow mixed-case foreign SVG/MathML tags cloned from base doc inside a foreign context.
 			fi := foreign_of(raw_data(kname), u32(len(kname)))
 			if !(fi > 0 && FOREIGN_NAMES[fi].name == string(kname)) {
@@ -834,7 +833,7 @@ html_element_of :: proc "contextless" (doc: ^tape.Document, v_in: tape.Node_Inde
 	if last != tape.NO_NODE {
 		if doc.nodes[last].kind == .Object {
 			after, _ = close_end(doc, last)
-		} else if markup.is_text_key(doc.nodes[last - 1]) {
+		} else if tape.is_text_key(doc.nodes[last - 1]) {
 			ln := doc.nodes[last]
 			after = ln.lo + u64(ln.n)
 			if ln.kind == .Plain && ln.spelling & TEXT_PIECES != 0 {
@@ -997,7 +996,7 @@ collect_read_ons :: proc(ov: ^Overlay, allocator: runtime.Allocator) -> ([dynami
 		if !n.has_edits || n.state != .Replaced || n.base == tape.NO_NODE || n.base == tape.ROOT {
 			continue
 		}
-		if markup.is_text_key(doc.nodes[n.base - 1]) {
+		if tape.is_text_key(doc.nodes[n.base - 1]) {
 			continue
 		}
 		el := html_element_of(doc, n.base)
@@ -1363,7 +1362,7 @@ reread_verify :: proc(ov: ^Overlay, spec: Spec, build_opts: Options, out: []u8, 
 				simple = false
 				break
 			}
-			if markup.is_text_key(ov.base.nodes[n.base - 1]) {
+			if tape.is_text_key(ov.base.nodes[n.base - 1]) {
 				simple = false
 				break
 			}
@@ -1558,7 +1557,7 @@ verify_subtree_counts :: proc(ov: ^Overlay, built: ^tape.Document, a, b: tape.No
 		for cp in ca {
 			kn := scalar_alloc(ov.base, cp.k, allocator)
 			defer delete(kn, allocator)
-			is_txt := markup.is_text_key(ov.base.nodes[cp.k])
+			is_txt := tape.is_text_key(ov.base.nodes[cp.k])
 			if !is_txt && slice.contains(array_rep[:], kn) {
 				continue
 			}
@@ -1635,7 +1634,7 @@ verify_container_delta :: proc(
 	base_items := make([dynamic]Verify_Item, 0, len(ca), allocator)
 	defer delete(base_items)
 	for cp, idx in ca {
-		is_txt := markup.is_text_key(ov.base.nodes[cp.k])
+		is_txt := tape.is_text_key(ov.base.nodes[cp.k])
 		kname := scalar_alloc(ov.base, cp.k, allocator)
 		append(&owned_names, kname)
 		del := false
@@ -1694,7 +1693,7 @@ verify_container_delta :: proc(
 				append(&items, base_items[idx])
 			} else {
 				ins := d.inserted_members[idx - len(base_items)]
-				append(&items, Verify_Item{key_name = ins.key, is_text = ins.key == markup.TEXT_KEY, edit_h = ins.value, is_inserted = true})
+				append(&items, Verify_Item{key_name = ins.key, is_text = ins.key == tape.TEXT_KEY, edit_h = ins.value, is_inserted = true})
 			}
 		}
 	} else {
@@ -1712,7 +1711,7 @@ verify_container_delta :: proc(
 			}
 			append(&items, Verify_Item {
 				key_name    = ins.key,
-				is_text     = ins.key == markup.TEXT_KEY,
+				is_text     = ins.key == tape.TEXT_KEY,
 				src_lo      = pos_lo,
 				seq         = seq,
 				edit_h      = ins.value,
@@ -2034,7 +2033,7 @@ verify_replaced_content :: proc(built: ^tape.Document, b: tape.Node_Index, build
 	}
 	frag_txt := ""
 	has_frag_txt := false
-	if len(frag.nodes) == 3 && markup.is_text_key(frag.nodes[1]) {
+	if len(frag.nodes) == 3 && tape.is_text_key(frag.nodes[1]) {
 		frag_txt = scalar_alloc(&frag, 2, allocator)
 		has_frag_txt = true
 	} else if len(frag.nodes) > 1 {
@@ -2280,7 +2279,7 @@ count_elem_children :: proc "contextless" (doc: ^tape.Document, v: tape.Node_Ind
 	end := tape.node_after(doc, v)
 	for k := v + 1; k < end; {
 		val := tape.node_after(doc, k)
-		if !markup.is_text_key(doc.nodes[k]) {
+		if !tape.is_text_key(doc.nodes[k]) {
 			cnt += 1
 		}
 		k = tape.node_after(doc, val)
@@ -2349,7 +2348,7 @@ apply_delta_key_cases :: proc(ov: ^Overlay, allocator: runtime.Allocator) -> [dy
 						}
 					}
 				}
-				if kn != tape.NO_NODE && !markup.is_text_key(ov.base.nodes[kn]) {
+				if kn != tape.NO_NODE && !tape.is_text_key(ov.base.nodes[kn]) {
 					raw_span := string(tape.span_bytes(ov.base, ov.base.nodes[kn].lo, ov.base.nodes[kn].n))
 					if raw_span != r.old_key && strings.equal_fold(raw_span, r.old_key) {
 						cloned := strings.clone(raw_span, allocator)
@@ -2360,7 +2359,7 @@ apply_delta_key_cases :: proc(ov: ^Overlay, allocator: runtime.Allocator) -> [dy
 			}
 			for &dk in n.delta.deleted_keys {
 				for cp in ca {
-					if markup.is_text_key(ov.base.nodes[cp.k]) {
+					if tape.is_text_key(ov.base.nodes[cp.k]) {
 						continue
 					}
 					kstr := scalar_alloc(ov.base, cp.k, allocator)

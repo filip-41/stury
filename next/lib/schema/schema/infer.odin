@@ -9,7 +9,6 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 import "stury:lib/base/kernel"
-import "stury:lib/core/markup"
 import "stury:lib/core/tape"
 import "stury:lib/schema/rules"
 
@@ -538,7 +537,7 @@ infer_object_node :: proc(inf: ^Inferred, a: runtime.Allocator, p: ^Summary, ref
 		node := doc.nodes[ref.node]
 		if node.kind != .Object {
 			if node.kind != .Null && node.n != 0 {
-				m_sum := inf_member(inf, a, p, markup.TEXT_KEY, true, .Text)
+				m_sum := inf_member(inf, a, p, tape.TEXT_KEY, true, .Text)
 				infer_leaf(inf, a, m_sum, ref, text_buf)
 			}
 			return
