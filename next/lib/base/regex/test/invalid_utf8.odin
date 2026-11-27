@@ -108,3 +108,19 @@ test_invalid_utf8_gives_one_answer_by_every_path :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// `.Give_Back` and case-folded `backref` step single invalid UTF-8 bytes the same way `decode` does.
+@(test)
+test_invalid_utf8_give_back_and_folded_backref :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for text in ([?]string{"a\x80", "é\x80", "\xe2\x82"}) {
+		for linear in ([?]bool{false, true}) {
+			f := search(`^.*.$`, text, linear, {})
+			testing.expectf(t, f.err == "" && f.lo == 0 && f.hi == len(text), "linear=%v on %q: %v", linear, text, f)
+		}
+	}
+	same := search(`(?i)(.)\1`, "\x80\x80", false, {})
+	testing.expectf(t, same.err == "" && same.lo == 0 && same.hi == 2, "folded backref same: %v", same)
+	diff := search(`(?i)(.)\1`, "\x80\uFFFD", false, {})
+	testing.expectf(t, diff.err == "" && diff.lo < 0, "folded backref diff: %v", diff)
+}

@@ -57,3 +57,15 @@ test_regex_search_stops_at_the_callers_steps :: proc(t: ^testing.T) {
 	testing.expect_value(t, refused.kind, regex.Error_Kind.Steps)
 	testing.expect(t, spent_words > 1000)
 }
+
+// `.Rep` and `.Linebreak` charge the caller's step budget even when the backtrack stack stays empty.
+@(test)
+test_empty_stack_rep_and_linebreak_respect_steps :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	text := strings.repeat("b", 1000, context.temp_allocator)
+	for pattern in ([?]string{`ba{0,2}c`, `b\Rc`}) {
+		err, spent := steps_of(pattern, text, {}, 5)
+		testing.expect_value(t, err.kind, regex.Error_Kind.Steps)
+		testing.expectf(t, spent <= 6, "%q spent %d of 5", pattern, spent)
+	}
+}

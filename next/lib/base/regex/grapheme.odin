@@ -8,7 +8,6 @@ import "stury:lib/base/spell"
 
 // \X, an extended grapheme cluster by UAX #29's rules as Oniguruma 6.9.10 keeps them (no GB9c), over the
 // break classes its \X shows (unicode_tables.odin).
-@(private)
 grapheme :: proc(s: string, pos: int, behind: ^Grapheme_Behind) -> int {
 	if pos >= len(s) {
 		return -1
@@ -54,7 +53,6 @@ grapheme :: proc(s: string, pos: int, behind: ^Grapheme_Behind) -> int {
 // What Oniguruma's \X reads back over the text before `pos` (GB11, GB12/13): whether the characters before it end in
 // Extended_Pictographic Extend*, and in an odd run of regional indicators. It holds the answer for the last position
 // asked, where a later walk back stops, so positions searched in order walk back over the text once in all.
-@(private)
 Grapheme_Behind :: struct {
 	pos:             int, // 0 for none kept
 	emoji, regional: bool,

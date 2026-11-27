@@ -91,6 +91,9 @@ Pattern :: struct {
 
 new_node :: proc(kind: Node_Kind, kids: ..^Node) -> ^Node {
 	n := new(Node)
+	if n == nil {
+		return nil
+	}
 	n.kind = kind
 	append(&n.kids, ..kids)
 	return n

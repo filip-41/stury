@@ -19,7 +19,6 @@ package regex
 
 import "base:intrinsics"
 import "core:slice"
-import "core:strings"
 import "stury:lib/base/spell"
 
 // The repeats of an ECMA program that `counting_search` follows, kept behind a pointer since a Regex is copied.
@@ -32,6 +31,7 @@ Counting :: struct {
 
 // A counter loop, from its Count to its Count_Next, or a Rep's character, with its least and most counts (-1: no
 // bound) and the repeat around it, -1 for none.
+@(private = "file")
 Counted :: struct {
 	least, most, outer: int,
 	rep:                bool,
@@ -56,8 +56,14 @@ counting_of :: proc(insts: []Inst) -> ^Counting {
 		}
 	}
 	c := new(Counting)
+	if c == nil {
+		return nil
+	}
 	c.reach = reach
 	c.of = make([]i32, len(insts))
+	if len(c.of) < len(insts) {
+		return nil
+	}
 	slice.fill(c.of, -1)
 	repeats := make([dynamic]Counted)
 	for ins, pc in insts {
@@ -107,13 +113,12 @@ Threads :: struct {
 
 // The set words a search reads when its caller gives no step budget, past which it gives the search back to the
 // backtracker.
-@(private)
 COUNTING_WORK :: 1 << 28
 
 // Whether `re`'s program matches in `s` at or after byte `start`, its starts those `search` tries. `judged` is false
 // when the sets the text allows would pass COUNTED_BYTES, or the search would read more than `limit` set words. `work`
 // is the words it read.
-counting_search :: proc(
+counting_search :: #force_no_inline proc(
 	re: ^Regex,
 	s: string,
 	start: int,
@@ -129,60 +134,12 @@ counting_search :: proc(
 	}
 	st.windowed = st.high < st.last
 	st.end = st.at - 1 if st.windowed else st.last
-	c := re.counting
-	n, k, ring := len(re.insts), len(c.repeats), c.reach + 1
-	text := max(len(s) - start, 0)
-	flags := (n + 63) / 64
-	resize(&scratch.held.rows, 3 * k + 2 * (n + 1) + 2 * n + ring * n + ring)
-	rows := scratch.held.rows[:]
-	t := Threads{re = re}
-	cells: []int // the counts of a repeat and those around it, each kept whole
-	t.radix, rows = rows[:k], rows[k:]
-	t.slots, rows = rows[:k], rows[k:]
-	cells, rows = rows[:k], rows[k:]
-	t.words, rows = rows[:n + 1], rows[n + 1:]
-	t.blocks, rows = rows[:n + 1], rows[n + 1:]
-	t.live, rows = rows[:n], rows[n:]
-	t.stack, rows = rows[:n], rows[n:]
-	t.arrivals, t.arrived = rows[:ring * n], rows[ring * n:]
-	most_cells := COUNTED_BYTES * 8 + 1
-	for r, i in c.repeats {
-		bound := r.most if r.most >= 0 else r.least
-		t.radix[i] = min(bound, text + (0 if r.rep else r.least)) + 1
-		t.slots[i] = min(r.least, t.radix[i] - 1) + 1
-		cells[i] = min(t.radix[i] * (cells[r.outer] if r.outer >= 0 else 1), most_cells)
-	}
-	t.words[0], t.blocks[0] = 0, 0
-	widest := 1
-	for pc in 0 ..< n {
-		blocks, width := 1, 1
-		if k := c.of[pc]; k >= 0 {
-			outer := c.repeats[k].outer
-			blocks = cells[outer] if outer >= 0 else 1
-			width = min(blocks * t.slots[k], most_cells)
-		}
-		widest = max(widest, (width + 63) / 64)
-		t.words[pc + 1] = min(t.words[pc] + (width + 63) / 64, most_cells)
-		t.blocks[pc + 1] = min(t.blocks[pc] + blocks, most_cells)
-	}
-	words, blocks := t.words[n], t.blocks[n]
-	if ((2 + ring) * words + widest + (2 + ring) * flags + (1 + ring) * blocks) * size_of(u64) > COUNTED_BYTES {
+	t, fit := counting_init(re, max(len(s) - start, 0), scratch)
+	if !fit {
 		return false, false, 0
 	}
-	resize(&scratch.held.seen, (2 + ring) * words + widest + (2 + ring) * flags + (1 + ring) * blocks)
-	sets := scratch.held.seen[:]
-	slice.zero(sets)
-	slice.zero(t.arrived)
-	take :: proc(sets: ^[]u64, n: int) -> []u64 {
-		part := sets[:n]
-		sets^ = sets[n:]
-		return part
-	}
-	t.cur = {take(&sets, words), slice.reinterpret([]int, take(&sets, blocks))}
-	t.delta, t.tmp = take(&sets, words), take(&sets, widest)
-	t.live_set, t.queued = take(&sets, flags), take(&sets, flags)
-	t.touched = take(&sets, ring * flags)
-	t.ring = {take(&sets, ring * words), slice.reinterpret([]int, take(&sets, ring * blocks))}
+	n, ring := len(re.insts), re.counting.reach + 1
+	flags := (n + 63) / 64
 
 	m := Matcher{re = re, s = s, start = start, limit = len(s)}
 	next := next_start(&st, re, s)
@@ -229,6 +186,80 @@ counting_search :: proc(
 		}
 	}
 	return false, true, t.work
+}
+
+@(private = "file")
+take_words :: #force_inline proc(sets: ^[]u64, n: int) -> []u64 {
+	part := sets[:n]
+	sets^ = sets[n:]
+	return part
+}
+
+// Sizes and slices `scratch`'s buffers for `counting_search`, returning ok false past COUNTED_BYTES or on OOM.
+@(private = "file")
+counting_init :: proc(re: ^Regex, text: int, scratch: ^Scratch) -> (t: Threads, ok: bool) {
+	c := re.counting
+	n, k, ring := len(re.insts), len(c.repeats), c.reach + 1
+	flags := (n + 63) / 64
+	rows_len := u64(3) * u64(k) + u64(2) * u64(n + 1) + u64(2) * u64(n) + u64(ring) * u64(n) + u64(ring)
+	rows_bytes := rows_len * size_of(int)
+	if rows_bytes > COUNTED_BYTES {
+		return {}, false
+	}
+	resize(&scratch.held.rows, int(rows_len))
+	if scratch.held.gate.failed {
+		return {}, false
+	}
+	rows := scratch.held.rows[:]
+	t = Threads{re = re}
+	cells: []int // the counts of a repeat and those around it, each kept whole
+	t.radix, rows = rows[:k], rows[k:]
+	t.slots, rows = rows[:k], rows[k:]
+	cells, rows = rows[:k], rows[k:]
+	t.words, rows = rows[:n + 1], rows[n + 1:]
+	t.blocks, rows = rows[:n + 1], rows[n + 1:]
+	t.live, rows = rows[:n], rows[n:]
+	t.stack, rows = rows[:n], rows[n:]
+	t.arrivals, t.arrived = rows[:ring * n], rows[ring * n:]
+	most_cells := COUNTED_BYTES * 8 + 1
+	for r, i in c.repeats {
+		bound := r.most if r.most >= 0 else r.least
+		span := min(bound, text) if r.rep else (bound if text >= bound - r.least else r.least + text)
+		t.radix[i] = min(span, most_cells - 1) + 1
+		t.slots[i] = min(r.least, t.radix[i] - 1) + 1
+		cells[i] = min(sat_mul(t.radix[i], cells[r.outer] if r.outer >= 0 else 1), most_cells)
+	}
+	t.words[0], t.blocks[0] = 0, 0
+	widest := 1
+	for pc in 0 ..< n {
+		blocks, width := 1, 1
+		if k := c.of[pc]; k >= 0 {
+			outer := c.repeats[k].outer
+			blocks = cells[outer] if outer >= 0 else 1
+			width = min(sat_mul(blocks, t.slots[k]), most_cells)
+		}
+		widest = max(widest, (width + 63) / 64)
+		t.words[pc + 1] = min(t.words[pc] + (width + 63) / 64, most_cells)
+		t.blocks[pc + 1] = min(t.blocks[pc] + blocks, most_cells)
+	}
+	words, blocks := t.words[n], t.blocks[n]
+	sets_words := u64(2 + ring) * u64(words) + u64(widest) + u64(2 + ring) * u64(flags) + u64(1 + ring) * u64(blocks)
+	if rows_bytes + sets_words * size_of(u64) > COUNTED_BYTES {
+		return {}, false
+	}
+	resize(&scratch.held.seen, int(sets_words))
+	if scratch.held.gate.failed {
+		return {}, false
+	}
+	sets := scratch.held.seen[:]
+	slice.zero(sets)
+	slice.zero(t.arrived)
+	t.cur = {take_words(&sets, words), slice.reinterpret([]int, take_words(&sets, blocks))}
+	t.delta, t.tmp = take_words(&sets, words), take_words(&sets, widest)
+	t.live_set, t.queued = take_words(&sets, flags), take_words(&sets, flags)
+	t.touched = take_words(&sets, ring * flags)
+	t.ring = {take_words(&sets, ring * words), slice.reinterpret([]int, take_words(&sets, ring * blocks))}
+	return t, true
 }
 
 // Follows the threads at `pos` through the instructions that read nothing, true once one reaches Match.
@@ -461,18 +492,9 @@ next_start :: proc(st: ^Starts, re: ^Regex, s: string) -> int {
 			}
 			st.end = min(st.high, st.last)
 		}
-		at := st.at
-		#partial switch h := re.head; h.kind {
-		case .Exact:
-			k := strings.index(s[at:], h.exact)
-			if k < 0 {
-				return len(s) + 1
-			}
-			at += k
-		case .Map:
-			if at = next_head_byte(h, s, at); at < 0 {
-				return len(s) + 1
-			}
+		at := skip_head(re.head, s, st.at)
+		if at < 0 {
+			return len(s) + 1
 		}
 		st.at = at
 		if at <= st.end {

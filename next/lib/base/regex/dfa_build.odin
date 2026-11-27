@@ -8,47 +8,16 @@ package regex
 // character after its place, so closures are followed as the next symbol is read, whose class the table knows.
 //
 // Every step of the build is charged to a single budget (`Builder.work`) and the build gives up past DFA_MAX_WORK. So
-// its time and working memory are bounded by the budget and the program's length whatever the pattern. The working
-// memory is freed before the build returns and only the automaton is kept.
+// its time and working memory are bounded by the budget whatever the pattern. The working memory is freed before the
+// build returns and only the automaton is kept.
 
 import "core:mem"
 import "core:slice"
-import "core:unicode/utf8"
 
-Builder :: struct {
-	re:           ^Regex,
-	base:         []i32, // each instruction's first item, -1 for none
-	atoms:        [dynamic]Atom,
-	atom_ids:     map[string]i32, // each atom by the test it was made from
-	key:          [dynamic]u8,
-	item_pc:      [dynamic]i32,
-	item_k:       [dynamic]i32, // a Rep's count or the character within a Str
-	atom_of:      [dynamic]i32, // each item's atom, or MATCH_ITEM
-	after:        [][]u32, // each reading item's threads after it reads
-	// The items a thread at an instruction reaches before the next character, keyed by the instruction and the classes
-	// on either side. Match is one of the items.
-	closures:     map[u32][]u32,
-	lines:        bool, // the program has `^` or `$` of a line
-	word:         bool, // the program has `\b` or `\B` of Unicode word characters
-	ascii_word:   bool, // of ASCII ones
-	semi_end:     bool, // the program has `\Z`, or `$` outside a multiline pattern
-	empty_loops:  bool, // the program has a loop whose body can match empty
-	keeps:        bool, // the program has `\K`
-	asserts:      bool, // the program has an assertion, without which a closure reads no class
-	used:         [CLASSES]bool, // the classes a character after a place can have, the text's end among them
-	reads_before: bool, // an assertion past the text's start reads the class of the character before its place
-	restart_dies: bool, // a thread at the program's start reaches nothing past the text's start
-	looks:        [dynamic]Leading_Look, // the look-aheads the program begins with (`leading_looks`)
-	stamp:        u32,
-	in_set:       []u32, // the stamp of the set that last held each thread
-	walk:         u32,
-	pc_seen:      []u32, // the walk number of the closure that last reached each instruction
-	item_seen:    []u32, // the walk number of the closure that last took each item
-	todo:         [dynamic]int,
-	row_key:      [dynamic]u32,
-	work:         int,
-	gates:        [2]^Gate, // the allocators of the automaton and of the build
-}
+@(private = "file")
+DFA_MAX_STATES :: 1024
+@(private = "file")
+DFA_MAX_TABLE :: 1 << 18 // entries of the table, its rows times their stride
 
 // The states found so far. `ids` maps each state's key, its threads followed by the class before them, to its row.
 // `sets` holds the keys and `table` the transitions.
@@ -60,48 +29,9 @@ States :: struct {
 	stride: u32,
 }
 
-// What the automaton reads: the class of each symbol (`classes`) and of the text's end (`final`), which reads the
-// symbol of a newline (`newline_sym`) as the column past the symbols, and the symbols each atom takes.
-@(private = "file")
-Alphabet :: struct {
-	classes:     []u8,
-	final:       u8,
-	syms:        int,
-	newline_sym: int,
-	atom_syms:   [][4]u64,
-}
-
-// The symbol and class that column `col` of a row reads: the columns 0 to `syms` - 1 are the symbols, `syms` the text's
-// end.
-@(private = "file")
-column :: #force_inline proc(a: ^Alphabet, col: int) -> (sym, class: int) {
-	if col < a.syms {
-		return col, int(a.classes[col])
-	}
-	return a.newline_sym, int(a.final)
-}
-
-// A look-ahead the program begins with. The product runs an automaton of its body from the text's start.
-@(private = "file")
-Leading_Look :: struct {
-	body:     i32, // the body's first instruction
-	negative: bool,
-}
-
-// Whether an allocation of the build has failed, which leaves what it asked for empty.
-broke :: #force_inline proc(b: ^Builder) -> bool {
-	return b.gates[0].failed || b.gates[1].failed
-}
-
-// Adds `steps` to the build's work, false once it passes DFA_MAX_WORK.
-charge :: #force_inline proc(b: ^Builder, steps: int) -> bool {
-	b.work += steps
-	return b.work <= DFA_MAX_WORK && !broke(b)
-}
-
-// Returns the automaton for `re`, allocated in `allocator`, or nil when the program has an instruction it does not run
+// Returns the automaton for `re`, allocated through `out`, or nil when the program has an instruction it does not run
 // or a cap is passed. With `spans` it also builds `first` and `last` when the program allows. The build's working
-// memory comes from `scratch` and is freed before it returns. The build gives up when an allocation of either gate has
+// memory comes from `tmp` and is freed before it returns. The build gives up when an allocation of either gate has
 // failed, and the caller reads that.
 build_dfa :: proc(re: ^Regex, spans: bool, out, tmp: ^Gate) -> ^Dfa {
 	allocator, scratch := gate_allocator(out), gate_allocator(tmp)
@@ -110,64 +40,36 @@ build_dfa :: proc(re: ^Regex, spans: bool, out, tmp: ^Gate) -> ^Dfa {
 	defer mem.dynamic_arena_destroy(&arena)
 	context.allocator = mem.dynamic_arena_allocator(&arena)
 
-	b := Builder{re = re, gates = {out, tmp}}
+	b := Builder{atoms_ctx = {re = re, gates = {out, tmp}}}
 	if !leading_looks(&b) || !enumerate_items(&b) {
 		return nil
 	}
-	n := len(b.atom_of)
+	n := len(b.items)
 	b.pc_seen = make([]u32, len(re.insts))
 	b.item_seen = make([]u32, n)
 	b.in_set = make([]u32, n + len(re.insts))
 	b.after = make([][]u32, n)
-	if broke(&b) {
+	if !charge(&b, 0) {
 		return nil
 	}
 	for i in 0 ..< n {
-		if b.atom_of[i] != MATCH_ITEM {
+		if b.items[i].atom != MATCH_ITEM {
 			b.after[i] = after_read(&b, i)
 		}
 	}
-	// The atoms of the classes the assertions read, which split the alphabet as an item's atom does.
 	ok := charge(&b, n)
-	newline, word := i32(-1), i32(-1)
-	if ok && b.lines {
-		newline, ok = rune_atom(&b, '\n')
-	}
-	if ok && (b.word || b.ascii_word) {
-		word, ok = word_atom(&b, b.ascii_word)
-	}
-	ascii: [128]u8
-	bounds: []rune
-	symbols: []u8
-	atom_syms: [][4]u64
+	alphabet: Alphabet
 	if ok {
-		ascii, bounds, symbols, atom_syms, ok = alphabet(&b)
+		alphabet, ok = build_alphabet(&b, b.lines, b.word, b.ascii_word, b.semi_end)
 	}
 	if !ok {
 		return nil
 	}
-	syms := 0
-	for s in symbols {
-		syms = max(syms, int(s) + 1)
-	}
-	for s in ascii {
-		syms = max(syms, int(s) + 1)
-	}
-	classes := make([]u8, syms)
-	for &c, s in classes {
-		takes :: proc(atom_syms: [][4]u64, atom: i32, s: int) -> bool {
-			return atom >= 0 && has_bit(atom_syms[atom][:], s)
-		}
-		c = NEWLINE if takes(atom_syms, newline, s) else WORD if takes(atom_syms, word, s) else OTHER
-	}
-	newline_sym := int(ascii['\n'])
-	final := u8(FINAL) if b.lines || b.semi_end else classes[newline_sym]
-	b.used[EDGE], b.used[final] = true, true
-	for c in classes {
+	b.used[EDGE], b.used[alphabet.final] = true, true
+	for c in alphabet.classes {
 		b.used[c] = true
 	}
-	alphabet := Alphabet{classes, final, syms, newline_sym, atom_syms}
-	stride := u32(syms + 2)
+	stride := u32(alphabet.syms + 2)
 	// A search starts with one thread at the program's start and adds another after each character it reads.
 	restart := u32(n)
 	b.restart_dies = true
@@ -198,7 +100,7 @@ build_dfa :: proc(re: ^Regex, spans: bool, out, tmp: ^Gate) -> ^Dfa {
 	// record. The threads of a leading look-ahead's product are not ordered.
 	has_first := spans && !b.empty_loops && !b.keeps && len(b.looks) == 0
 	if has_first {
-		first, first_starts, first_end, has_first = build_rows(&b, u32(len(b.atom_of)), true, true, &alphabet)
+		first, first_starts, first_end, has_first = build_rows(&b, u32(len(b.items)), true, true, &alphabet)
 	}
 	if has_first {
 		last, last_starts, has_first = build_last(&b, &alphabet)
@@ -207,17 +109,17 @@ build_dfa :: proc(re: ^Regex, spans: bool, out, tmp: ^Gate) -> ^Dfa {
 	context.allocator = allocator
 	d := new(Dfa)
 	d^ = {
-		table   = slice.clone(st.table[:]),
-		stride  = stride,
-		starts  = starts,
-		ascii   = ascii,
-		bounds  = slice.clone(bounds),
-		symbols = slice.clone(symbols),
-		classes = slice.clone(classes),
-		final   = final,
+		table     = slice.clone(st.table[:]),
+		stride    = stride,
+		starts    = starts,
+		ascii     = alphabet.ascii,
+		bounds    = slice.clone(alphabet.bounds),
+		symbols   = slice.clone(alphabet.symbols),
+		classes   = slice.clone(alphabet.classes),
+		final     = alphabet.final,
 		start_end = start_end,
-		head    = re.head^,
-		anchored = b.restart_dies,
+		head      = re.head,
+		anchored  = b.restart_dies,
 	}
 	if has_first {
 		d.first, d.first_starts, d.first_end = slice.clone(first.table[:]), first_starts, first_end
@@ -228,30 +130,48 @@ build_dfa :: proc(re: ^Regex, spans: bool, out, tmp: ^Gate) -> ^Dfa {
 	if d.head.kind == .None {
 		d.start_end, d.first_end = 0, 0
 	}
-	reps := make([dynamic]i32)
-	loops: for ins, pc in re.insts {
-		#partial switch ins.op {
-		case .Split, .Split_Head:
-			if int(ins.a) < pc || int(ins.b) < pc {
-				d.choices = -1
+	if !re.ecma && !re.linear {
+		reps := make([dynamic]i32, mem.dynamic_arena_allocator(&arena))
+		loops: for ins, pc in re.insts {
+			#partial switch ins.op {
+			case .Split:
+				if int(ins.a) <= pc || int(ins.b) <= pc {
+					d.splits = -1
+					break loops
+				}
+				d.splits += 1
+			case .Split_Head:
+				d.splits = -1
 				break loops
-			}
-			d.choices += 1
-			d.splits += 1
-		case .Jmp:
-			if int(ins.a) < pc {
-				d.choices = -1
-				break loops
-			}
-		case .Rep, .Rep_Lazy:
-			if ins.a != ins.b {
-				d.choices += 1
-				append(&reps, -1 if ins.b < 0 else ins.b - ins.a + 1)
+			case .Jmp:
+				if int(ins.a) <= pc {
+					d.splits = -1
+					break loops
+				}
+			case .Rep, .Rep_Lazy:
+				if ins.a != ins.b {
+					append(&reps, -1 if ins.b < 0 else ins.b - ins.a + 1)
+				}
 			}
 		}
+		if d.splits >= 0 && len(reps) > 0 {
+			d.reps = slice.clone(reps[:])
+		}
 	}
-	d.reps = reps[:]
 	return d
+}
+
+// Initializes a state table with row 0 as DEAD and, with `with_matched`, row 1 as MATCHED.
+@(private = "file")
+init_states :: proc(b: ^Builder, stride: u32, with_matched: bool) -> (st: States, ok: bool) {
+	st.stride = stride
+	head := 2 if with_matched else 1
+	resize(&st.table, head * int(stride))
+	charge(b, 0) or_return
+	if with_matched {
+		slice.fill(st.table[stride:2 * stride], MATCHED * stride)
+	}
+	return st, true
 }
 
 // Sets `bucket` to the threads the items `reached` go on to after reading the symbol `sym`, in their order.
@@ -261,7 +181,7 @@ step_bucket :: proc(b: ^Builder, bucket: ^[dynamic]u32, reached: []u32, sym: int
 	b.stamp += 1
 	clear(bucket)
 	for it in reached {
-		if !has_bit(a.atom_syms[b.atom_of[it]][:], sym) {
+		if !has_bit(a.atom_syms[b.items[it].atom][:], sym) {
 			continue
 		}
 		charge(b, len(b.after[it])) or_return
@@ -294,35 +214,27 @@ build_rows :: proc(
 	start_end: u32,
 	ok: bool,
 ) {
-	n := len(b.atom_of)
+	n := len(b.items)
 	stride := u32(a.syms + 2)
-	st.stride = stride
-	// Row 0 is the dead state. In the whether automaton row 1 is the matched state, which every character leads back
-	// to.
 	head := 1 if first else 2
-	resize(&st.table, head * int(stride))
-	if !first {
-		for k in 0 ..< int(stride) {
-			st.table[int(stride) + k] = MATCHED * stride
-		}
-	}
+	st = init_states(b, stride, !first) or_return
 	for c in 0 ..< CLASSES {
 		starts[c] = first_row(b, &st, {start}, c, false) or_return
 	}
 	start_end = u32(len(st.table))
 	matched_row := FIRST_ENDS if first else MATCHED * stride
 	bucket := make([dynamic]u32)
+	reached: [CLASSES][dynamic]u32
 	for k := 0; k < len(st.sets); k += 1 {
 		set := st.sets[k]
 		threads, before, ended := set[:len(set) - 1], int(set[len(set) - 1] & 0xFF), set[len(set) - 1] >> 8 != 0
 		at := (head + k) * int(stride)
-		reached: [CLASSES][]u32
 		matched: [CLASSES]bool
 		for c in 0 ..< CLASSES {
 			if !b.used[c] {
 				continue
 			}
-			reached[c], matched[c] = expand(b, threads, before, c, first) or_return
+			matched[c] = expand(b, &reached[c], threads, before, c, first) or_return
 		}
 		for col in 0 ..= a.syms {
 			sym, c := column(a, col)
@@ -330,9 +242,9 @@ build_rows :: proc(
 				st.table[at + col] = matched_row
 				continue
 			}
-			step_bucket(b, &bucket, reached[c], sym, a) or_return
+			step_bucket(b, &bucket, reached[c][:], sym, a) or_return
 			now_ended := ended || matched[c]
-			if restart && !now_ended {
+			if restart && !b.restart_dies && !now_ended {
 				add_item(b, &bucket, u32(n))
 			}
 			// With `$first` the threads keep the backtracker's order. Without it they are a set and are sorted.
@@ -363,20 +275,17 @@ build_product :: proc(
 	starts: [CLASSES]u32,
 	ok: bool,
 ) {
-	n := len(b.atom_of)
+	n := len(b.items)
 	parts := make([]States, 1 + len(b.looks))
 	part_starts := make([][CLASSES]u32, len(parts))
+	rows := make([]u32, len(parts))
+	charge(b, 0) or_return
 	parts[0], part_starts[0] = main, main_starts
 	for look, k in b.looks {
 		parts[1 + k], part_starts[1 + k], _ = build_rows(b, u32(n + int(look.body)), false, false, a) or_return
 	}
 	stride := main.stride
-	st.stride = stride
-	resize(&st.table, 2 * int(stride))
-	for k in 0 ..< int(stride) {
-		st.table[int(stride) + k] = MATCHED * stride
-	}
-	rows := make([]u32, len(parts))
+	st = init_states(b, stride, true) or_return
 	for c in 0 ..< CLASSES {
 		for &r, k in rows {
 			r = part_starts[k][c]
@@ -397,8 +306,8 @@ build_product :: proc(
 	return st, starts, true
 }
 
-// Returns the row of the state with the sorted `key`. A new state is queued for its transitions when none has the key.
-// False past a cap.
+// Returns the row of the state with `key`. A new state is queued for its transitions when none has the key. False past
+// a cap.
 @(private = "file")
 intern_row :: proc(b: ^Builder, st: ^States, key: []u32) -> (row: u32, ok: bool) {
 	if known, seen := st.ids[string(slice.to_bytes(key))]; seen {
@@ -417,7 +326,7 @@ intern_row :: proc(b: ^Builder, st: ^States, key: []u32) -> (row: u32, ok: bool)
 		reserve(&st.table, max(2 * cap(st.table), len(st.table) + stride))
 	}
 	resize(&st.table, len(st.table) + stride)
-	return row, true
+	return row, charge(b, 0)
 }
 
 // Returns the row of the state whose parts are in `rows`. A new state is queued when none has them. False past a cap.
@@ -448,7 +357,7 @@ product_row :: proc(b: ^Builder, st: ^States, rows: []u32) -> (row: u32, ok: boo
 @(private = "file")
 first_row :: proc(b: ^Builder, st: ^States, threads: []u32, read: int, ended: bool) -> (row: u32, ok: bool) {
 	before := seen_class(b, read)
-	n := len(b.atom_of)
+	n := len(b.items)
 	clear(&b.row_key)
 	for x in threads {
 		if int(x) >= n && (int(x) > n || b.restart_dies) {
@@ -467,8 +376,7 @@ first_row :: proc(b: ^Builder, st: ^States, threads: []u32, read: int, ended: bo
 		return DEAD, true
 	}
 	append(&b.row_key, u32(before) | u32(ended) << 8)
-	key := b.row_key[:]
-	return intern_row(b, st, key)
+	return intern_row(b, st, b.row_key[:])
 }
 
 // Builds the automaton read backwards from a match's end. A state is the items that, at the place it has read back to,
@@ -477,13 +385,12 @@ first_row :: proc(b: ^Builder, st: ^States, threads: []u32, read: int, ended: bo
 // starts at a place when the program's start reaches one of the state's items there.
 @(private = "file")
 build_last :: proc(b: ^Builder, a: ^Alphabet) -> (st: States, starts: [CLASSES]u32, ok: bool) {
-	n := len(b.atom_of)
+	n := len(b.items)
 	stride := u32(a.syms + 2)
-	st.stride = stride
-	resize(&st.table, int(stride))
+	st = init_states(b, stride, false) or_return
 	ends := make([dynamic]u32)
 	for it in 0 ..< n {
-		if b.atom_of[it] == MATCH_ITEM {
+		if b.items[it].atom == MATCH_ITEM {
 			append(&ends, u32(it))
 		}
 	}
@@ -491,6 +398,7 @@ build_last :: proc(b: ^Builder, a: ^Alphabet) -> (st: States, starts: [CLASSES]u
 		starts[c] = last_row(b, &st, ends[:], c) or_return
 	}
 	bucket := make([dynamic]u32)
+	reading: [CLASSES][dynamic]u32
 	for k := 0; k < len(st.sets); k += 1 {
 		set := st.sets[k]
 		items, after := set[:len(set) - 1], int(set[len(set) - 1])
@@ -502,15 +410,15 @@ build_last :: proc(b: ^Builder, a: ^Alphabet) -> (st: States, starts: [CLASSES]u
 		mark := b.stamp
 		// For each class of the character read back, the items whose next threads reach the state, and whether the
 		// program's start does.
-		reading: [CLASSES][]u32
-		starts_here: [CLASSES + 1]bool
+		starts_here: [CLASSES]bool
 		for c in 0 ..< CLASSES {
 			if !b.used[c] {
 				continue
 			}
-			found := make([dynamic]u32)
+			found := &reading[c]
+			clear(found)
 			for it in 0 ..< n {
-				if b.atom_of[it] == MATCH_ITEM {
+				if b.items[it].atom == MATCH_ITEM {
 					continue
 				}
 				charge(b, 1 + len(b.after[it])) or_return
@@ -532,13 +440,15 @@ build_last :: proc(b: ^Builder, a: ^Alphabet) -> (st: States, starts: [CLASSES]u
 					}
 				}
 				if hit {
-					append(&found, u32(it))
+					append(found, u32(it))
 				}
 			}
-			reading[c] = found[:]
 			reach := closure_of(b, 0, c, after) or_return
 			for y in reach {
-				starts_here[c] ||= b.in_set[y] == mark
+				if b.in_set[y] == mark {
+					starts_here[c] = true
+					break
+				}
 			}
 		}
 		for col in 0 ..= a.syms {
@@ -546,7 +456,7 @@ build_last :: proc(b: ^Builder, a: ^Alphabet) -> (st: States, starts: [CLASSES]u
 			charge(b, 1 + len(reading[c])) or_return
 			clear(&bucket)
 			for it in reading[c] {
-				if has_bit(a.atom_syms[b.atom_of[it]][:], sym) {
+				if has_bit(a.atom_syms[b.items[it].atom][:], sym) {
 					append(&bucket, it)
 				}
 			}
@@ -568,341 +478,10 @@ last_row :: proc(b: ^Builder, st: ^States, items: []u32, after: int) -> (row: u3
 	clear(&b.row_key)
 	append(&b.row_key, ..items)
 	append(&b.row_key, u32(after))
-	key := b.row_key[:]
-	return intern_row(b, st, key)
+	return intern_row(b, st, b.row_key[:])
 }
 
-// Returns class `c` of the character before a place, reduced to the classes the program's assertions read. A class
-// none of them reads becomes OTHER, and EDGE stays.
-@(private = "file")
-seen_class :: proc(b: ^Builder, c: int) -> int {
-	switch {
-	case c == EDGE:
-		return EDGE
-	case !b.reads_before, c == NEWLINE && !b.lines, c == FINAL && !b.lines, c == WORD && !b.word && !b.ascii_word:
-		return OTHER
-	}
-	return c
-}
-
-// Collects the look-aheads an ECMA program begins with after `^` into `b.looks`. False for a program with a look-around
-// anywhere else. Anchored at the text's start, each look-ahead tests a prefix of the text, which a product of automata
-// runs. The program's own automaton skips them.
-@(private = "file")
-leading_looks :: proc(b: ^Builder) -> bool {
-	insts := b.re.insts
-	anchored := false
-	pc := 0
-	lead: for ; pc < len(insts); pc += 1 {
-		ins := insts[pc]
-		#partial switch ins.op {
-		case .Save, .Set, .Unset:
-		case .Assert:
-			if Assert_Kind(ins.a) != .Begin_Buf {
-				break lead
-			}
-			anchored = true
-		case .Look:
-			kind := Look_Kind(ins.a)
-			if !b.re.ecma || !anchored || kind != .Ahead && kind != .Not_Ahead || len(b.looks) == DFA_MAX_LOOKS {
-				return false
-			}
-			for body in pc + 1 ..< int(ins.b) {
-				if insts[body].op == .Look {
-					return false
-				}
-			}
-			append(&b.looks, Leading_Look{i32(pc + 1), kind == .Not_Ahead})
-			pc = int(ins.b)
-		case:
-			break lead
-		}
-	}
-	for ; pc < len(insts); pc += 1 {
-		if insts[pc].op == .Look {
-			return false
-		}
-	}
-	return true
-}
-
-// Creates an item for each place where the program reads a character: one per character of a Str, one per
-// one-character test, one per count a Rep can read at, and one for Match or Look_End. For an unbounded Rep every count
-// past the minimum is treated as the minimum. False for a program the automaton does not run.
-@(private = "file")
-enumerate_items :: proc(b: ^Builder) -> bool {
-	re := b.re
-	insts := re.insts
-	b.base = make([]i32, len(insts))
-	slice.fill(b.base, -1)
-	if broke(b) {
-		return false
-	}
-	rep_body := false
-	for ins, pc in insts {
-		if rep_body {
-			rep_body = false
-			continue
-		}
-		first := i32(len(b.atom_of))
-		#partial switch ins.op {
-		case .Match:
-			add_items(b, pc, 1, MATCH_ITEM)
-		case .Assert:
-			b.asserts = true
-			#partial switch Assert_Kind(ins.a) {
-			case .Begin_Buf, .End_Buf:
-			case .Semi_End_Buf:
-				b.semi_end = true
-			case .Begin_Line, .End_Line:
-				b.lines, b.reads_before = true, true
-			case .Word_Boundary, .Not_Word_Boundary:
-				b.word, b.reads_before = true, true
-			case .Ascii_Boundary, .Not_Ascii_Boundary:
-				b.ascii_word, b.reads_before = true, true
-			case:
-				return false
-			}
-			continue
-		case .Str:
-			lit := re.bytes[ins.a:][:ins.b]
-			if len(lit) > DFA_MAX_ITEMS * utf8.UTF_MAX {
-				return false
-			}
-			k := 0
-			for r in lit {
-				atom := rune_atom(b, r) or_return
-				add_items(b, pc, 1, atom, k)
-				k += 1
-			}
-		case .Class, .Any, .Any_All, .Char_Fold:
-			atom := inst_atom(b, ins) or_return
-			add_items(b, pc, 1, atom)
-		case .Rep, .Rep_Lazy:
-			atom := inst_atom(b, insts[pc + 1]) or_return
-			count := int(ins.a) + 1 if ins.b < 0 else int(ins.b)
-			if count > DFA_MAX_ITEMS {
-				return false
-			}
-			add_items(b, pc, count, atom)
-			rep_body = true
-		case .Check:
-			b.empty_loops = true
-			continue
-		case .Save:
-			b.keeps ||= ins.a == 0
-			continue
-		case .Look_End:
-			add_items(b, pc, 1, MATCH_ITEM)
-		case .Split, .Split_Head, .Jmp, .Set, .Unset, .Look:
-			continue
-		case:
-			return false
-		}
-		b.base[pc] = first
-		if len(b.atom_of) > DFA_MAX_ITEMS {
-			return false
-		}
-	}
-	return !(b.word && b.ascii_word)
-}
-
-@(private = "file")
-add_items :: proc(b: ^Builder, pc, count: int, atom: i32, k := 0) {
-	for j in 0 ..< count {
-		append(&b.item_pc, i32(pc))
-		append(&b.item_k, i32(k + j))
-		append(&b.atom_of, atom)
-	}
-}
-
-@(private = "file")
-add_item :: #force_inline proc(b: ^Builder, set: ^[dynamic]u32, it: u32) {
-	if b.in_set[it] != b.stamp {
-		b.in_set[it] = b.stamp
-		append(set, it)
-	}
-}
-
-// Whether assertion `kind` holds between a character of class `before` and one of class `after`.
-@(private = "file")
-holds :: proc(kind: Assert_Kind, before, after: int) -> bool {
-	#partial switch kind {
-	case .Begin_Buf:
-		return before == EDGE
-	case .End_Buf:
-		return after == EDGE
-	case .Semi_End_Buf:
-		return after == EDGE || after == FINAL
-	case .Begin_Line:
-		// Oniguruma's `^` does not hold after a newline that ends the text.
-		return before == EDGE || before == NEWLINE
-	case .End_Line:
-		return after == EDGE || after == NEWLINE || after == FINAL
-	case .Word_Boundary, .Ascii_Boundary:
-		return (before == WORD) != (after == WORD)
-	case .Not_Word_Boundary, .Not_Ascii_Boundary:
-		return (before == WORD) == (after == WORD)
-	}
-	return false
-}
-
-// Returns the items, Match among them, that a thread at instruction `pc` reaches through instructions that read
-// nothing, between a character of class `before` and one of class `after`. Each visited instruction is charged. The
-// result is cached in `b.closures`.
-@(private = "file")
-closure_of :: proc(b: ^Builder, pc, before, after: int) -> ([]u32, bool) {
-	before, after := before, after
-	if !b.asserts {
-		before, after = 0, 0
-	}
-	key := u32((pc * CLASSES + before) * CLASSES + after)
-	if reach, seen := b.closures[key]; seen {
-		return reach, true
-	}
-	insts := b.re.insts
-	b.walk += 1
-	set := make([dynamic]u32)
-	take :: #force_inline proc(b: ^Builder, set: ^[dynamic]u32, it: i32) {
-		if b.item_seen[it] != b.walk {
-			b.item_seen[it] = b.walk
-			append(set, u32(it))
-		}
-	}
-	// The instructions are visited in the order of their alternatives, so the items come out in that order. An entry
-	// past the program is a lazy Rep's first item, taken after its exit.
-	clear(&b.todo)
-	append(&b.todo, pc)
-	for len(b.todo) > 0 {
-		at := pop(&b.todo)
-		if at >= len(insts) {
-			take(b, &set, b.base[at - len(insts)])
-			continue
-		}
-		if b.pc_seen[at] == b.walk {
-			continue
-		}
-		b.pc_seen[at] = b.walk
-		if !charge(b, 1) {
-			return nil, false
-		}
-		ins := insts[at]
-		#partial switch ins.op {
-		case .Match, .Str, .Class, .Any, .Any_All, .Char_Fold:
-			take(b, &set, b.base[at])
-		case .Assert:
-			if holds(Assert_Kind(ins.a), before, after) {
-				append(&b.todo, at + 1)
-			}
-		case .Split:
-			append(&b.todo, int(ins.b), int(ins.a))
-		case .Split_Head:
-			append(&b.todo, int(ins.b), at + 1)
-		case .Jmp:
-			append(&b.todo, int(ins.a))
-		case .Look:
-			// Only a leading look-ahead reaches here. Its body is a part of the product, so the thread skips it.
-			append(&b.todo, int(ins.b) + 1)
-		case .Look_End:
-			take(b, &set, b.base[at])
-		case .Save, .Set, .Unset, .Check:
-			// An empty iteration that Check ends or fails is a path the loop's exit already takes.
-			append(&b.todo, at + 1)
-		case .Rep:
-			if ins.b != 0 {
-				take(b, &set, b.base[at])
-			}
-			if ins.a == 0 {
-				append(&b.todo, at + 2)
-			}
-		case .Rep_Lazy:
-			if ins.b != 0 {
-				append(&b.todo, len(insts) + at)
-			}
-			if ins.a == 0 {
-				append(&b.todo, at + 2)
-			}
-		}
-	}
-	b.closures[key] = set[:]
-	return set[:], true
-}
-
-// Returns the reading items `threads` reach, in order, between a character of class `before` and one of class `after`,
-// and whether Match is among what they reach. With `$stop` the reach ends at the first Match, since the threads after
-// it are ones the backtracker would try only if that match failed.
-@(private = "file")
-expand :: proc(
-	b: ^Builder,
-	threads: []u32,
-	before, after: int,
-	$stop: bool,
-) -> (
-	items: []u32,
-	matched: bool,
-	ok: bool,
-) {
-	n := len(b.atom_of)
-	b.stamp += 1
-	set := make([dynamic]u32)
-	walk: for x in threads {
-		if int(x) < n {
-			add_item(b, &set, x)
-			continue
-		}
-		reach := closure_of(b, int(x) - n, before, after) or_return
-		charge(b, len(reach)) or_return
-		for it in reach {
-			if b.atom_of[it] == MATCH_ITEM {
-				matched = true
-				when stop {
-					break walk
-				}
-			} else {
-				add_item(b, &set, it)
-			}
-		}
-	}
-	return set[:], matched, true
-}
-
-// Returns the threads after reading item `it`'s character, in the order of their alternatives: the next item of the
-// same instruction, or a thread at the instruction that follows.
-@(private = "file")
-after_read :: proc(b: ^Builder, it: int) -> []u32 {
-	n := len(b.atom_of)
-	pc, k := int(b.item_pc[it]), int(b.item_k[it])
-	ins := b.re.insts[pc]
-	out := make([dynamic]u32, 0, 2)
-	#partial switch ins.op {
-	case .Str:
-		if it + 1 < n && int(b.item_pc[it + 1]) == pc {
-			append(&out, u32(it + 1))
-		} else {
-			append(&out, u32(n + pc + 1))
-		}
-	case .Rep, .Rep_Lazy:
-		count := k + 1
-		if ins.b < 0 {
-			count = min(count, int(ins.a))
-		}
-		if ins.b < 0 || count < int(ins.b) {
-			append(&out, u32(int(b.base[pc]) + count))
-		}
-		if count >= int(ins.a) {
-			append(&out, u32(n + pc + 2))
-			if ins.op == .Rep_Lazy && len(out) == 2 {
-				out[0], out[1] = out[1], out[0]
-			}
-		}
-	case:
-		append(&out, u32(n + pc + 1))
-	}
-	return out[:]
-}
-
-// Sorts the items of a thread set. Most hold a few items, which an insertion sort orders faster than the general sort
-// starts.
+// Sorts the items of a thread set. Most hold a few items, which an insertion sort orders faster than `_smoothsort`.
 @(private = "file")
 sort_items :: proc(items: []u32) {
 	if len(items) > 32 {

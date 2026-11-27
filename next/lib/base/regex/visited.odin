@@ -42,9 +42,13 @@ counted_rows :: proc(re: ^Regex, places: int, scratch: ^Scratch) -> (rows, radix
 	v := re.visited
 	n := len(re.insts)
 	resize(&scratch.held.rows, n + 1 + len(v.counters))
+	if scratch.held.gate.failed {
+		return nil, nil, 0
+	}
 	rows, radix = scratch.held.rows[:n + 1], scratch.held.rows[n + 1:]
 	for c, k in v.counters {
-		radix[k] = min(c.most, c.least + places) + 1
+		bound := c.most if places >= c.most - c.least else c.least + places
+		radix[k] = min(bound, MAX_ROWS - 1) + 1
 	}
 	lay_out_rows(v, rows, radix)
 	for block in v.block {
@@ -88,6 +92,7 @@ row_of :: #force_inline proc(m: ^Matcher, pc, pos: int) -> int {
 }
 
 // Which block of rows the counts of the counter loops around `pc` give it, the innermost count the lowest digit.
+@(private = "file")
 counts_block :: proc(m: ^Matcher, v: ^Visited, pc: int) -> int {
 	block, times := 0, 1
 	for l := int(v.counter_of[pc]); l >= 0; l = v.counters[l].outer {
@@ -117,6 +122,8 @@ first_visit :: #force_inline proc(m: ^Matcher, row, pos: int) -> bool {
 	}
 	add_bit(m.seen, bit)
 	if m.looking > 0 {
+		// `owner != nil` caps `seen` at MAX_BYTES / 2, so `bit < MAX_BYTES * 4 <= max(u32)`.
+		#assert(MAX_BYTES * 4 <= max(u32))
 		append(m.log, u32(bit))
 	}
 	return true
@@ -153,6 +160,7 @@ lay_out_rows :: proc(v: ^Visited, rows: []int, radix: []int) {
 }
 
 // More rows than a visited set within MAX_BYTES holds over one place.
+@(private = "file")
 MAX_ROWS :: MAX_BYTES * 8 + 1
 
 // `a` times `b`, held at the largest int.
@@ -224,6 +232,9 @@ look_owners :: proc(insts: []Inst) -> []i32 {
 		}
 		if owner == nil {
 			owner = make([]i32, len(insts))
+			if len(owner) < len(insts) {
+				return nil
+			}
 			slice.fill(owner, -1)
 		}
 		for k in i + 1 ..= int(ins.b) {

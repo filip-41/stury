@@ -293,3 +293,89 @@ test_regex_allocates_only_from_the_callers_allocators :: proc(t: ^testing.T) {
 	_, err := regex.sample(`[a-c]{2}x+`, &state, 3, 5, allocator, scratch_allocator)
 	testing.expect_value(t, err, regex.Error{})
 }
+
+// Larger patterns (> 8 KiB spare), subroutines, `.Split_Head`, and `sample` survive failing and nil allocators cleanly.
+@(test)
+test_large_oom_and_sample_survive_failing_allocator :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Nil allocator must cleanly report `.Memory` without crashing.
+	{
+		_, err := regex.compile(`(?:ab)*`, .Oniguruma, {}, mem.nil_allocator(), mem.nil_allocator())
+		testing.expect_value(t, err.kind, regex.Error_Kind.Memory)
+		state := u64(7)
+		_, serr := regex.sample(`[a-z]+`, &state, 3, 4, mem.nil_allocator(), mem.nil_allocator())
+		testing.expect_value(t, serr.kind, regex.Error_Kind.Memory)
+	}
+	// Failing compile on > 8 KiB DFA, `.Split_Head`, `\Q...\E`, wide class, pipe run, quantifier run.
+	patterns := [?]struct {
+		pattern: string,
+		mode:    Mode,
+	}{
+		{`(?:ab)*`, {}},
+		{`(a|b)*a(a|b){9}`, {ecma = true}},
+		{strings.concatenate({`\Q`, strings.repeat("a", 500, context.temp_allocator), `\E`}, context.temp_allocator), {}},
+		{strings.concatenate({"[", strings.repeat("a", 2000, context.temp_allocator), "]*"}, context.temp_allocator), {}},
+		{strings.repeat("|", 100, context.temp_allocator), {}},
+		{strings.concatenate({"a", strings.repeat("*", 100, context.temp_allocator)}, context.temp_allocator), {}},
+	}
+	for p in patterns {
+		syntax, flags := split(p.mode)
+		for side in 0 ..< 2 {
+			for at in 1 ..= 16 {
+				fails: [2]Failing
+				for &f in fails {
+					f.inner = context.allocator
+				}
+				fails[side].fail_at, fails[side].sticky = at, true
+				a, b: virtual.Arena
+				_, err := regex.compile(p.pattern, syntax, flags, failing_over(&fails[0], &a), failing_over(&fails[1], &b))
+				testing.expectf(t, err.kind == .None || err.kind == .Memory, "%q side=%d at=%d: %v", p.pattern[:min(len(p.pattern), 24)], side, at, err)
+				virtual.arena_destroy(&a)
+				virtual.arena_destroy(&b)
+			}
+		}
+	}
+	// Subroutine call search must survive OOM without trapping on missing `.Call_Frame`.
+	{
+		arena: virtual.Arena
+		allocator := growing(&arena)
+		re, err := regex.compile(`(?<a>x\g<a>|y)`, .Oniguruma, {}, allocator, allocator)
+		testing.expect_value(t, err, regex.Error{})
+		text := strings.concatenate({strings.repeat("x", 60, context.temp_allocator), "y"}, context.temp_allocator)
+		for at in 1 ..= 12 {
+			fail := Failing{inner = allocator, fail_at = at, sticky = true}
+			scratch, serr := regex.scratch_make(failing_allocator(&fail))
+			if serr.kind != .None {
+				testing.expect_value(t, serr.kind, regex.Error_Kind.Memory)
+				continue
+			}
+			caps: [4]int
+			_, rerr := regex.search(&re, text, 0, caps[:], &scratch)
+			regex.scratch_destroy(&scratch)
+			testing.expectf(t, rerr.kind == .None || rerr.kind == .Memory, "call OOM at=%d: %v", at, rerr)
+		}
+	}
+	// `sample` under tracking + failing allocators (padded & unpadded) must never leak or crash.
+	for least in ([?]int{0, 12}) {
+		for side in 0 ..< 2 {
+			for at in 0 ..= 10 {
+				track: mem.Tracking_Allocator
+				mem.tracking_allocator_init(&track, context.allocator)
+				defer mem.tracking_allocator_destroy(&track)
+				fails := [2]Failing{{inner = mem.tracking_allocator(&track)}, {inner = mem.tracking_allocator(&track)}}
+				if at > 0 {
+					fails[side].fail_at, fails[side].sticky = at, true
+				}
+				state := u64(19)
+				drawn, serr := regex.sample(`^[a-z]{2,4}[0-9]+`, &state, 3, least, failing_allocator(&fails[0]), failing_allocator(&fails[1]))
+				if serr.kind == .None {
+					delete(drawn, failing_allocator(&fails[0]))
+				} else {
+					testing.expect_value(t, serr.kind, regex.Error_Kind.Memory)
+				}
+				testing.expect_value(t, len(track.allocation_map), 0)
+				testing.expect_value(t, len(track.bad_free_array), 0)
+			}
+		}
+	}
+}

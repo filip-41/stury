@@ -77,7 +77,7 @@ BUDGET_OUT :: Error{.Steps, "search work limit over"}
 MEMORY_OUT :: Error{.Memory, MEMORY_ERROR}
 
 @(private)
-Op :: enum u8 {
+Op :: enum u32 {
 	Match,
 	Str, // the literal bytes[a:][:b]
 	Char_Fold, // a rune whose fold is a
@@ -109,7 +109,6 @@ Op :: enum u8 {
 	Count_Lazy, // the same, as few times as can
 	Count_Next, // slot a += 1, then to the loop's Count at b
 	Count_Check, // as Check under ECMA, failing only once the loop whose Count is at b has run its least count
-	Seen, // a pair a linear search has been to: fails (match.odin)
 	// Call and the ops after it are a call's or an absent operator's, which `Regex.calls_or_limits` tells of.
 	Call, // the group at a, which returns to pc+1. b: its number
 	Return,
@@ -126,38 +125,34 @@ Inst :: struct {
 	op:   Op,
 	a, b: i32,
 }
+#assert(size_of(Inst) == 12)
 
 // A compiled pattern, which `search` runs.
 Regex :: struct {
-	using program: Program,
-}
-
-@(private)
-Program :: struct {
-	insts:    []Inst,
-	bytes:    string,
-	classes:  []^Class,
-	refs:     [][]int,
-	callouts: []^Callout, // those that keep data, each at its index
-	names:    []string, // group n's name at n, "" for none. Index 0 is the whole match
-	slots:    int, // two per group with the whole match, then a mark per loop that can match empty
-	// what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
-	opt:      ^Search_Opt,
-	visited:  ^Visited, // under `linear`, what the visited set needs of the program
-	dfa:      ^Dfa, // the automaton that answers a search that reads no bounds, or nil (dfa.odin)
+	dfa:             ^Dfa, // the automaton that answers a search that reads no bounds, or nil (dfa.odin)
 	// under ECMA, the counted repeats a search that reads no bounds follows in one pass, or nil (counting.odin)
-	counting: ^Counting,
+	counting:        ^Counting,
+	// what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
+	opt:             ^Search_Opt,
 	// What every match starts with, at distance 0: the literal it begins with, or one of the bytes it can begin with.
-	head:      ^Search_Opt,
-	longest:   bool, // Flags.longest
-	not_empty: bool, // Flags.not_empty
-	calls_or_limits: bool, // holds a subexpression call or an absent operator, whose tracking the match then runs
-	narrowed:  bool, // `opt` bounds the starts the search tries
-	ecma:      bool, // compiled under `Flags.ecma`, whose search refuses a text too long for the visited set
+	head:            ^Search_Opt,
+	visited:         ^Visited, // under `linear`, what the visited set needs of the program
+	insts:           []Inst,
+	ecma:            bool, // compiled under `Syntax.Ecma`, whose search refuses a text too long for the visited set
 	// A program with choices whose outcome at an instruction and a position does not depend on the way there: the
 	// search keeps the pairs it has been to, so no pair runs twice. The ECMA programs `linear_ops` allows, and the jq
 	// ones.
-	linear:    bool,
+	linear:          bool,
+	narrowed:        bool, // `opt` bounds the starts the search tries
+	longest:         bool, // Flags.longest
+	not_empty:       bool, // Flags.not_empty
+	calls_or_limits: bool, // holds a subexpression call or an absent operator, whose tracking the match then runs
+	bytes:           string,
+	classes:         []^Class,
+	refs:            [][]int,
+	callouts:        []^Callout, // those that keep data, each at its index
+	names:           []string, // group n's name at n, "" for none. Index 0 is the whole match
+	slots:           int, // two per group with the whole match, then a mark per loop that can match empty
 }
 
 // Each group's name at its number, "" for a group with none. The whole match is group 0.

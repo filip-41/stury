@@ -29,9 +29,10 @@ multi_fold :: proc(r: rune) -> (runes: []u32, ok: bool) {
 }
 
 // Returns the rune whose `multi_fold` is the fold of each of `runes` (two or three), or false when there is none.
+@(private = "file")
 unfold :: proc(runes: []rune) -> (r: rune, ok: bool) {
 	next: for &f in MULTI_FOLDS {
-		if (f[3] == 0) != (len(runes) == 2) {
+		if len(runes) != (2 if f[3] == 0 else 3) {
 			continue
 		}
 		for x, i in runes {
@@ -57,11 +58,12 @@ fold_order :: proc(f: u64, c: u64) -> slice.Ordering {
 
 // Whether `r` folds alike with other runes and `r` or one of them is 0x80 or above.
 folds_outside :: proc(r: rune) -> bool {
-	outside := r >= 0x80
 	for f := fold_next(r); f != r; f = fold_next(f) {
-		outside ||= f >= 0x80
+		if r >= 0x80 || f >= 0x80 {
+			return true
+		}
 	}
-	return outside && fold_next(r) != r
+	return false
 }
 
 // Oniguruma's multi-character case folds (expand_case_fold_string, and a class's strings): under (?i) a character
@@ -82,73 +84,63 @@ expand_folds :: proc(n: ^Node, behind := false) -> ^Node {
 		}
 		return n
 	case .Class:
-		strs := class_strings(n.class)
-		if len(strs) == 0 {
+		if !n.class.fold || n.class.negated {
 			return n
 		}
-		alt := new_node(.Alt, n)
-		for s in strs {
+		alt: ^Node
+		seen: [dynamic][]u32
+		next: for &f in MULTI_FOLDS {
+			if !class_match_slow(n.class, rune(f[0])) {
+				continue
+			}
+			s := f[1:3 if f[3] == 0 else 4]
+			for t in seen {
+				if slice.equal(s, t) {
+					continue next
+				}
+			}
+			append(&seen, s)
+			if alt == nil {
+				alt = new_node(.Alt, n)
+			}
 			append(&alt.kids, fold_string(s))
 		}
-		return alt
+		return alt if alt != nil else n
 	case .Cat:
 		if behind {
 			break
 		}
-		kids := make([dynamic]^Node, 0, len(n.kids))
+		w := 0
 		for i := 0; i < len(n.kids); {
 			run := 0
 			for i + run < len(n.kids) && run < 3 && n.kids[i + run].kind == .Char && n.kids[i + run].fold {
 				run += 1
 			}
 			width := 1
-			for w := run; w >= 2 && width == 1; w -= 1 {
+			for k := run; k >= 2 && width == 1; k -= 1 {
 				runes: [3]rune
-				for k in 0 ..< w {
-					runes[k] = n.kids[i + k].r
+				for j in 0 ..< k {
+					runes[j] = n.kids[i + j].r
 				}
-				if r, ok := unfold(runes[:w]); ok {
+				if r, ok := unfold(runes[:k]); ok {
 					one := new_node(.Char)
 					one.r, one.fold = r, true
-					append(&kids, new_node(.Alt, new_node(.Cat, ..n.kids[i:i + w]), one))
-					width = w
+					n.kids[w] = new_node(.Alt, new_node(.Cat, ..n.kids[i:i + k]), one)
+					width = k
 				}
 			}
 			if width == 1 {
-				append(&kids, expand_folds(n.kids[i]))
+				n.kids[w] = expand_folds(n.kids[i])
 			}
-			i += width
+			w, i = w + 1, i + width
 		}
-		n.kids = kids
+		resize(&n.kids, w)
 		return n
 	}
 	for &k in n.kids {
 		k = expand_folds(k, behind)
 	}
 	return n
-}
-
-// The strings, folded, a (?i) class that is not negated matches besides its characters: those its
-// characters fold to, each once.
-@(private = "file")
-class_strings :: proc(cls: ^Class) -> [dynamic][]u32 {
-	out := make([dynamic][]u32)
-	if !cls.fold || cls.negated {
-		return out
-	}
-	next: for &f in MULTI_FOLDS {
-		if !class_match_slow(cls, rune(f[0])) {
-			continue
-		}
-		s, _ := multi_fold(rune(f[0]))
-		for t in out {
-			if slice.equal(s, t) {
-				continue next
-			}
-		}
-		append(&out, s)
-	}
-	return out
 }
 
 @(private = "file")

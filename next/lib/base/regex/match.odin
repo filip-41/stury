@@ -1,19 +1,18 @@
+#+private
 package regex
 
 // The backtracking matcher. It tries a program's alternatives in order as Oniguruma does, so its matches and captures
 // are Oniguruma's. Its stack is capped, where Oniguruma's grows without bound. search.odin runs it.
 
+import "base:runtime"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
 import "stury:lib/base/spell"
 
-@(private)
-MAX_STACK :: 1 << 23 // entries, 24 bytes each
-@(private)
-MAX_CALL_NEST :: 20 // Oniguruma's subexp_call_nest_counter limit as jq builds it, a group in place counted
+@(private = "file")
+MAX_STACK :: 1 << 23 when size_of(int) == 8 else 1 << 21 // entries (24 B on 64-bit, 16 B on 32-bit)
 
-@(private)
 Entry_Kind :: enum u8 {
 	Branch, // resume at pc, position a
 	Restore, // slot a had value b
@@ -32,7 +31,6 @@ Entry_Kind :: enum u8 {
 @(private = "file")
 KEPT :: bit_set[Entry_Kind]{.Restore, .Retract, .Call_Frame, .Return, .Mem_Start, .Mem_End, .Limit}
 
-@(private)
 Entry :: struct {
 	kind: Entry_Kind,
 	pc:   i32,
@@ -41,7 +39,6 @@ Entry :: struct {
 
 // Returns the character at `pos` and its width. A byte below 0xC0 is read as the code point of its value, as Oniguruma
 // reads a continuation byte where jq's global search starts inside a character.
-@(private)
 decode :: #force_inline proc(s: string, pos: int) -> (rune, int) {
 	if s[pos] < 0xC0 {
 		return rune(s[pos]), 1
@@ -50,7 +47,6 @@ decode :: #force_inline proc(s: string, pos: int) -> (rune, int) {
 }
 
 // Returns the position after what the Str, Any, Any_All, Class or Char_Fold instruction `ins` matches at `pos`, or -1.
-@(private)
 step :: #force_inline proc(re: ^Regex, ins: Inst, s: string, pos: int) -> int {
 	if pos >= len(s) {
 		return -1
@@ -59,13 +55,10 @@ step :: #force_inline proc(re: ^Regex, ins: Inst, s: string, pos: int) -> int {
 	case .Str:
 		lit := re.bytes[ins.a:][:ins.b]
 		return pos + len(lit) if strings.has_prefix(s[pos:], lit) else -1
-	case .Any:
-		if s[pos] == '\n' {
+	case .Any, .Any_All:
+		if ins.op == .Any && s[pos] == '\n' {
 			return -1
 		}
-		_, w := decode(s, pos)
-		return pos + w
-	case .Any_All:
 		_, w := decode(s, pos)
 		return pos + w
 	case .Class:
@@ -83,33 +76,82 @@ step :: #force_inline proc(re: ^Regex, ins: Inst, s: string, pos: int) -> int {
 	return -1
 }
 
-@(private = "file")
-push :: #force_inline proc(m: ^Matcher, e: Entry) {
-	append(m.stack, e)
+// Pushes an entry onto the match stack. Growth goes through `grow_stack`, which enforces `MAX_STACK` / `m.room` and
+// reports allocator failure with `MEMORY_OUT`.
+push :: #force_inline proc(m: ^Matcher, e: Entry, $SET: bool) -> bool {
+	raw := (^runtime.Raw_Dynamic_Array)(m.stack)
+	if raw.len >= raw.cap {
+		grow_stack(m, SET) or_return
+	}
+	#no_bounds_check ([^]Entry)(raw.data)[raw.len] = e
+	raw.len += 1
+	return true
 }
 
-// Pushes an alternative. At MAX_STACK entries it sets Oniguruma's error and returns false. With `$SET` it sets the
-// memory error instead once the stack and the log may take `m.room` bytes, the room beside the sets. An array's
-// capacity is at most twice its length, and the log grows by at most a program's length between two pushes.
-@(private)
-push_branch :: #force_inline proc(m: ^Matcher, e: Entry, $SET: bool) -> bool {
+@(private = "file")
+grow_stack :: #force_no_inline proc(m: ^Matcher, $SET: bool) -> bool {
+	limit := MAX_STACK
 	when SET {
 		if 2 * (len(m.stack) * size_of(Entry) + len(m.log) * size_of(u32)) >= m.room {
 			m.err = MEMORY_OUT
 			return false
 		}
+		limit = max(m.room / (2 * size_of(Entry)), 1)
 	} else {
 		if len(m.stack) >= MAX_STACK {
 			m.err = {.Memory, "match-stack limit over"}
 			return false
 		}
 	}
-	append(m.stack, e)
+	next_cap := min(max(cap(m.stack) * 2, 8), limit)
+	if err := non_zero_reserve(m.stack, max(next_cap, len(m.stack) + 1)); err != nil {
+		m.err = MEMORY_OUT
+		return false
+	}
+	return true
+}
+
+save_slot :: #force_inline proc(m: ^Matcher, slot, val: int, $SET: bool) -> bool {
+	push(m, {kind = .Restore, a = slot, b = m.slots[slot]}, SET) or_return
+	m.slots[slot] = val
+	return true
+}
+
+// Pushes an alternative. At MAX_STACK entries it sets Oniguruma's error and returns false. With `$SET` it sets the
+// memory error instead once the stack and the log may take `m.room` bytes, the room beside the sets.
+push_branch :: #force_inline proc(m: ^Matcher, e: Entry, $SET: bool) -> bool {
+	when SET {
+		if 2 * (len(m.stack) * size_of(Entry) + len(m.log) * size_of(u32)) >= m.room {
+			m.err = MEMORY_OUT
+			return false
+		}
+	}
+	return push(m, e, SET)
+}
+
+@(private = "file")
+branch :: #force_inline proc(m: ^Matcher, target: i32, pos: int, $SET: bool) -> bool {
+	return push_branch(m, {kind = .Branch, pc = target, a = pos, b = len(m.log) when SET else 0}, SET)
+}
+
+@(private = "file")
+charge_retry :: #force_inline proc(m: ^Matcher, $SET: bool) -> bool {
+	when SET {
+		if m.limited && over_budget(m) {
+			return false
+		}
+		m.retries += 1
+	} else {
+		m.retries += 1
+		if m.retries > m.retry_cap {
+			m.err = STEPS_OUT
+			return false
+		}
+	}
 	return true
 }
 
 // Runs the program from `at`: true on a match (written to m.caps), false on none or on an error in m.err.
-@(private)
 run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 	re, s := m.re, m.s
 	insts := re.insts
@@ -126,10 +168,12 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 		m.looking = 0
 	} else {
 		if m.retries != 0 {
-			m.earlier += m.retries
+			m.earlier += u64(m.retries)
 			m.retries = 0
 			if m.limited {
-				m.retry_cap = m.allowed - m.earlier
+				allowed := u64(m.allowed)
+				left := allowed - m.earlier if m.earlier < allowed else 0
+				m.retry_cap = min(m.retry_cap, int(left))
 			}
 		}
 	}
@@ -146,291 +190,281 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 				// A pair that a look-ahead's body is known to match from continues at the body's end. When the caller
 				// reads groups and the body holds some, the path is run again instead, since the groups it sets are the
 				// result. The pairs on it are all known by then.
-				ins = {op = .Seen}
 				if m.good != nil && in_good(m, row, pos) {
 					look := int(re.visited.owner[pc])
 					if insts[look + 1].op != .Unset || len(m.caps) <= 2 {
 						pc = int(insts[look].b)
+						ins = insts[pc]
 					}
-					ins = insts[pc]
+				} else {
+					ok = false
 				}
 			}
 		}
-		switch ins.op {
-		case .Seen:
-			ok = false
-		case .Match:
-			if re.not_empty && pos == at {
-				ok = false
-				break
-			}
-			// A \K in a look-ahead may keep past the end, where Oniguruma starts the match at its end.
-			if !re.longest {
-				if len(m.caps) > 0 {
-					copy(m.caps, slots[:len(m.caps)])
-					m.caps[0], m.caps[1] = min(m.caps[0], pos), pos
-				}
-				return true
-			}
-			// Oniguruma uses the latest \K on the stack, or where the last match at this start kept from when
-			// there is none (UPDATE_VAR_KEEP_FROM_STACK_LAST), as it backtracks for a longer match.
-			kept := slots[0] != at || m.keep == at
-			for k := len(m.stack) - 1; !kept && k >= 0; k -= 1 {
-				kept = m.stack[k].kind == .Restore && m.stack[k].a == 0
-			}
-			if kept {
-				m.keep = slots[0]
-			}
-			if pos - at > m.best_len {
-				m.best_len = pos - at
-				if len(m.caps) > 0 {
-					copy(m.caps, slots[:len(m.caps)])
-					m.caps[0], m.caps[1] = min(m.keep, pos), pos
-				}
-			}
-			ok = false
-		case .Str:
-			if ins.b == 1 {
-				ok = pos < len(s) && s[pos] == re.bytes[ins.a]
-				pos += 1
-			} else {
-				lit := re.bytes[ins.a:][:ins.b]
-				ok = strings.has_prefix(s[pos:], lit)
-				pos += len(lit)
-			}
-			pc += 1
-		case .Any, .Any_All, .Class, .Char_Fold:
-			next := step(re, ins, s, pos)
-			ok = next >= 0
-			pos = next
-			pc += 1
-		case .Split:
-			push_branch(m, {kind = .Branch, pc = ins.b, a = pos, b = len(m.log) when SET else 0}, SET) or_return
-			pc = int(ins.a)
-		case .Split_Head:
-			if pos >= len(s) || s[pos] != byte(ins.a) {
-				pc = int(ins.b)
-				continue
-			}
-			push_branch(m, {kind = .Branch, pc = ins.b, a = pos, b = len(m.log) when SET else 0}, SET) or_return
-			pc += 1
-		case .Jmp:
-			pc = int(ins.a)
-		case .Save:
-			push(m, {kind = .Restore, a = int(ins.a), b = slots[ins.a]})
-			slots[ins.a] = pos
-			if ins.b != 0 {
-				// Oniguruma pushes a referenced group's start (OP_MEM_START_PUSH), which unsets its end until
-				// the group closes again. A backreference or condition inside the group sees it unset, and never
-				// a start past the last iteration's end.
-				push(m, {kind = .Restore, a = int(ins.a) + 1, b = slots[ins.a + 1]})
-				slots[ins.a + 1] = -1
-			}
-			pc += 1
-		case .Set:
-			slots[ins.a] = pos
-			pc += 1
-		case .Assert:
-			kind := Assert_Kind(ins.a)
-			if kind == .Mismatch {
-				return false
-			}
-			if kind == .Skip {
-				m.skip = max(m.skip, pos)
-			}
-			if kind < .Error {
-				ok = assert_at(m, kind, pos)
-			} else {
-				end: bool
-				ok, end = callout(m, int(ins.b))
-				if end {
-					return false
-				}
-			}
-			pc += 1
-		case .Backref:
-			next := backref(m, ins, pos)
-			ok = next >= 0
-			pos = next
-			pc += 1
-		case .Look:
-			push(m, {kind = .Barrier, pc = i32(pc), a = pos, b = len(m.log) when SET else 0})
-			when SET {
-				m.looking += 1
-			}
-			pc += 1
-		case .Look_End:
-			k := len(m.stack) - 1
-			for k >= 0 && m.stack[k].kind != .Barrier {
-				k -= 1
-			}
-			if k < 0 { // the push of the Barrier failed
-				m.err = MEMORY_OUT
-				return false
-			}
-			bar := m.stack[k]
-			when SET {
-				settle(m, bar)
-			}
-			switch Look_Kind(insts[bar.pc].a) {
-			case .Not_Ahead, .Not_Behind:
-				// The body matched, so the assertion fails: undo the body and fail past it.
-				for len(m.stack) > k {
-					undo(m, pop(m.stack), EXT)
-				}
-				ok = false
-			case .Ahead, .Behind, .Atomic:
-				// Drops the body's alternatives and keeps what it captured, which is undone when the match backs past
-				// it.
-				w := k
-				for j in k + 1 ..< len(m.stack) {
-					if m.stack[j].kind in KEPT {
-						m.stack[w] = m.stack[j]
-						w += 1
-					}
-				}
-				resize(m.stack, w)
-				// A look-behind continues where its body ends. Oniguruma's look-behind of one length does not
-				// restore the position, which leaves it where it began, or past that when it began within a
-				// character. ECMA's matches leftwards, so it is restored.
-				if kind := Look_Kind(insts[bar.pc].a); kind == .Ahead || kind == .Behind && re.ecma {
-					pos = bar.a
-				}
-				pc += 1
-			}
-		case .Back:
-			for _ in 0 ..< ins.a {
-				if pos == 0 {
+		if ok {
+			switch ins.op {
+			case .Match:
+				if re.not_empty && pos == at {
 					ok = false
 					break
 				}
-				pos = spell.char_start(s, pos - 1)
-			}
-			pc += 1
-		case .Check:
-			if slots[ins.a] != pos {
+				// A \K in a look-ahead may keep past the end, where Oniguruma starts the match at its end.
+				if !re.longest {
+					if len(m.caps) > 0 {
+						copy(m.caps, slots[:len(m.caps)])
+						m.caps[0], m.caps[1] = min(m.caps[0], pos), pos
+					}
+					return true
+				}
+				// Oniguruma uses the latest \K on the stack, or where the last match at this start kept from when
+				// there is none (UPDATE_VAR_KEEP_FROM_STACK_LAST), as it backtracks for a longer match.
+				kept := slots[0] != at || m.keep == at
+				for k := len(m.stack) - 1; !kept && k >= 0; k -= 1 {
+					kept = m.stack[k].kind == .Restore && m.stack[k].a == 0
+				}
+				if kept {
+					m.keep = slots[0]
+				}
+				if pos - at > m.best_len {
+					m.best_len = pos - at
+					if len(m.caps) > 0 {
+						copy(m.caps, slots[:len(m.caps)])
+						m.caps[0], m.caps[1] = min(m.keep, pos), pos
+					}
+				}
+				ok = false
+			case .Str:
+				if ins.b == 1 {
+					ok = pos < len(s) && s[pos] == re.bytes[ins.a]
+					pos += 1
+				} else {
+					lit := re.bytes[ins.a:][:ins.b]
+					ok = strings.has_prefix(s[pos:], lit)
+					pos += len(lit)
+				}
 				pc += 1
-			} else if ins.b >= 0 {
-				pc = int(ins.b)
-			} else {
-				ok = false
-			}
-		case .Unset:
-			unset_slots(m, ins)
-			pc += 1
-		case .Cond:
-			pc = pc + 1 if slots[2 * ins.a + 1] >= 0 else int(ins.b)
-		case .Linebreak:
-			// Oniguruma's \R is (?>\r\n|[\n\v\f\r\x{85}\x{2028}\x{2029}]), whose second alternative costs a retry.
-			next := linebreak(s, pos)
-			if next != pos + 2 || s[pos] != '\r' {
-				m.retries += 1
-			}
-			ok = next >= 0
-			pos = next
-			pc += 1
-		case .Grapheme:
-			next := grapheme(s, pos, &m.behind)
-			ok = next >= 0
-			pos = next
-			pc += 1
-		case .Rep, .Rep_Lazy:
-			one := insts[pc + 1]
-			count, p := 0, pos
-			for count < int(ins.a) {
-				if p = step(re, one, s, p); p < 0 {
-					break
+			case .Any, .Any_All, .Class, .Char_Fold:
+				next := step(re, ins, s, pos)
+				ok = next >= 0
+				pos = next
+				pc += 1
+			case .Split:
+				branch(m, ins.b, pos, SET) or_return
+				pc = int(ins.a)
+			case .Split_Head:
+				if pos >= len(s) || s[pos] != byte(ins.a) {
+					pc = int(ins.b)
+					continue
 				}
-				count += 1
-			}
-			if p < 0 {
-				ok = false
-				break
-			}
-			if ins.op == .Rep_Lazy {
-				if ins.b < 0 || count < int(ins.b) {
-					push(m, {kind = .Take_More, pc = i32(pc), a = p, b = count})
+				branch(m, ins.b, pos, SET) or_return
+				pc += 1
+			case .Jmp:
+				pc = int(ins.a)
+			case .Save:
+				save_slot(m, int(ins.a), pos, SET) or_return
+				if ins.b != 0 {
+					// Oniguruma pushes a referenced group's start (OP_MEM_START_PUSH), which unsets its end until
+					// the group closes again. A backreference or condition inside the group sees it unset, and never
+					// a start past the last iteration's end.
+					save_slot(m, int(ins.a) + 1, -1, SET) or_return
 				}
-			} else {
-				lo := p
-				// With `$SET` an unbounded repeat marks each stop past where it began in its body's row, which `run`
-				// never visits. It walks no further than a stop an earlier walk marked, because that walk tries the
-				// stops from there. Past where it began, no loop iteration has matched nothing, so the row is the
-				// first.
-				row := stop_row(m, pc) if SET else 0
-				_ = row
+				pc += 1
+			case .Set:
+				slots[ins.a] = pos
+				pc += 1
+			case .Assert:
+				kind := Assert_Kind(ins.a)
+				if kind == .Mismatch {
+					return false
+				}
+				if kind == .Skip {
+					m.skip = max(m.skip, pos)
+				}
+				if kind < .Error {
+					ok = assert_at(m, kind, pos)
+				} else {
+					end: bool
+					ok, end = callout(m, int(ins.b))
+					if end {
+						return false
+					}
+				}
+				pc += 1
+			case .Backref:
+				next := backref(m, ins.a, ins.b, pos)
+				ok = next >= 0
+				pos = next
+				pc += 1
+			case .Look:
+				push(m, {kind = .Barrier, pc = i32(pc), a = pos, b = len(m.log) when SET else 0}, SET) or_return
 				when SET {
-					if ins.b < 0 && p > pos && !first_visit(m, row, p) {
+					m.looking += 1
+				}
+				pc += 1
+			case .Look_End:
+				k := len(m.stack) - 1
+				for k >= 0 && m.stack[k].kind != .Barrier {
+					k -= 1
+				}
+				if k < 0 { // the push of the Barrier failed
+					m.err = MEMORY_OUT
+					return false
+				}
+				bar := m.stack[k]
+				when SET {
+					settle(m, bar)
+				}
+				switch kind := Look_Kind(insts[bar.pc].a); kind {
+				case .Not_Ahead, .Not_Behind:
+					// The body matched, so the assertion fails: undo the body and fail past it.
+					for len(m.stack) > k {
+						undo(m, pop(m.stack), EXT)
+					}
+					ok = false
+				case .Ahead, .Behind, .Atomic:
+					// Drops the body's alternatives and keeps what it captured, which is undone when the match backs past
+					// it.
+					w := k
+					for j in k + 1 ..< len(m.stack) {
+						if m.stack[j].kind in KEPT {
+							m.stack[w] = m.stack[j]
+							w += 1
+						}
+					}
+					resize(m.stack, w)
+					// A look-behind continues where its body ends. Oniguruma's look-behind of one length does not
+					// restore the position, which leaves it where it began, or past that when it began within a
+					// character. ECMA's matches leftwards, so it is restored.
+					if kind == .Ahead || kind == .Behind && re.ecma {
+						pos = bar.a
+					}
+					pc += 1
+				}
+			case .Back:
+				for _ in 0 ..< ins.a {
+					if pos == 0 {
 						ok = false
 						break
 					}
+					pos = spell.char_start(s, pos - 1)
 				}
-				for ins.b < 0 || count < int(ins.b) {
-					next := step(re, one, s, p)
-					if next < 0 {
+				pc += 1
+			case .Check:
+				if slots[ins.a] != pos {
+					pc += 1
+				} else if ins.b >= 0 {
+					pc = int(ins.b)
+				} else {
+					ok = false
+				}
+			case .Unset:
+				unset_slots(m, ins.a, ins.b, SET) or_return
+				pc += 1
+			case .Cond:
+				pc = pc + 1 if slots[2 * ins.a + 1] >= 0 else int(ins.b)
+			case .Linebreak:
+				// Oniguruma's \R is (?>\r\n|[\n\v\f\r\x{85}\x{2028}\x{2029}]), whose second alternative costs a retry.
+				next := linebreak(s, pos)
+				if next != pos + 2 || s[pos] != '\r' {
+					charge_retry(m, SET) or_return
+				}
+				ok = next >= 0
+				pos = next
+				pc += 1
+			case .Grapheme:
+				next := grapheme(s, pos, &m.behind)
+				ok = next >= 0
+				pos = next
+				pc += 1
+			case .Rep, .Rep_Lazy:
+				one := insts[pc + 1]
+				count, p := 0, pos
+				for count < int(ins.a) {
+					if p = step(re, one, s, p); p < 0 {
 						break
 					}
+					count += 1
+				}
+				if p < 0 {
+					ok = false
+					break
+				}
+				if ins.op == .Rep_Lazy {
+					if ins.b < 0 || count < int(ins.b) {
+						push(m, {kind = .Take_More, pc = i32(pc), a = p, b = count}, SET) or_return
+					}
+				} else {
+					lo := p
+					// With `$SET` an unbounded repeat marks each stop past where it began in its body's row, which `run`
+					// never visits. It walks no further than a stop an earlier walk marked, because that walk tries the
+					// stops from there. Past where it began, no loop iteration has matched nothing, so the row is the
+					// first.
 					when SET {
-						if ins.b < 0 && !first_visit(m, row, next) {
+						row := stop_row(m, pc)
+						if ins.b < 0 && p > pos && !first_visit(m, row, p) {
+							ok = false
 							break
 						}
 					}
-					p = next
-					count += 1
+					for ins.b < 0 || count < int(ins.b) {
+						next := step(re, one, s, p)
+						if next < 0 {
+							break
+						}
+						when SET {
+							if ins.b < 0 && !first_visit(m, row, next) {
+								break
+							}
+						}
+						p = next
+						count += 1
+					}
+					if p > lo {
+						push(m, {kind = .Give_Back, pc = i32(pc), a = p, b = lo}, SET) or_return
+					}
+					if count < int(ins.b) {
+						// Oniguruma keeps an alternative for each optional copy it tries, so the copy that does
+						// not match costs it a retry.
+						charge_retry(m, SET) or_return
+					}
 				}
-				if p > lo {
-					push(m, {kind = .Give_Back, pc = i32(pc), a = p, b = lo})
-				}
-				if count < int(ins.b) {
-					// Oniguruma keeps an alternative for each optional copy it tries, so the copy that does
-					// not match costs it a retry.
-					m.retries += 1
-				}
-			}
-			pos = p
-			pc += 2
-		case .Count_Reset:
-			push(m, {kind = .Restore, a = int(ins.a), b = slots[ins.a]})
-			slots[ins.a] = 0
-			pc += 1
-		case .Count, .Count_Lazy:
-			k, bounds := slots[ins.a], insts[pc + 1]
-			if k < int(bounds.a) {
+				pos = p
 				pc += 2
-				break
-			}
-			if k >= int(bounds.b) {
-				pc = int(ins.b)
-				break
-			}
-			push_branch(
-				m,
-				{
-					kind = .Branch,
-					pc = ins.b if ins.op == .Count else i32(pc + 2),
-					a = pos,
-					b = len(m.log) when SET else 0,
-				},
-				SET,
-			) or_return
-			pc = pc + 2 if ins.op == .Count else int(ins.b)
-		case .Count_Next:
-			push(m, {kind = .Restore, a = int(ins.a), b = slots[ins.a]})
-			slots[ins.a] += 1
-			pc = int(ins.b)
-		case .Count_Check:
-			loop := insts[ins.b]
-			if slots[ins.a] != pos || slots[loop.a] < int(insts[ins.b + 1].a) {
+			case .Count_Reset:
+				save_slot(m, int(ins.a), 0, SET) or_return
 				pc += 1
-			} else {
-				ok = false
-			}
-		case .Call, .Return, .Mem_Start, .Mem_End, .Limit_Save, .Limit_Cut, .Limit_Restore, .Limit_Clear:
-			when EXT {
-				ok = call_or_limit(m, ins, &pc, pos)
-				s = m.s[:m.limit]
-			} else {
-				unreachable()
+			case .Count, .Count_Lazy:
+				k, bounds := slots[ins.a], insts[pc + 1]
+				if k < int(bounds.a) {
+					pc += 2
+					break
+				}
+				if k >= int(bounds.b) {
+					pc = int(ins.b)
+					break
+				}
+				branch(m, ins.b if ins.op == .Count else i32(pc + 2), pos, SET) or_return
+				pc = pc + 2 if ins.op == .Count else int(ins.b)
+			case .Count_Next:
+				save_slot(m, int(ins.a), slots[ins.a] + 1, SET) or_return
+				pc = int(ins.b)
+			case .Count_Check:
+				loop := insts[ins.b]
+				if slots[ins.a] != pos || slots[loop.a] < int(insts[ins.b + 1].a) {
+					pc += 1
+				} else {
+					ok = false
+				}
+			case .Call, .Return, .Mem_Start, .Mem_End, .Limit_Save, .Limit_Cut, .Limit_Restore, .Limit_Clear:
+				when EXT {
+					ok = call_or_limit(m, ins.op, ins.a, &pc, pos)
+					if !ok && m.err.kind != .None {
+						return false
+					}
+					s = m.s[:m.limit]
+				} else {
+					unreachable()
+				}
 			}
 		}
 		if !ok {
@@ -442,86 +476,6 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 			}
 		}
 	}
-}
-
-@(private = "file")
-unset_slots :: proc(m: ^Matcher, ins: Inst) {
-	for k in ins.a ..< ins.b {
-		if m.slots[k] >= 0 {
-			push(m, {kind = .Restore, a = int(k), b = m.slots[k]})
-			m.slots[k] = -1
-		}
-	}
-}
-
-// Executes the ops of subexpression calls and the absent operator. They are kept out of `run`'s loop so that patterns
-// without them (`Regex.calls_or_limits` false) run with no tracking for them.
-@(private = "file")
-call_or_limit :: #force_no_inline proc(m: ^Matcher, ins: Inst, pc: ^int, pos: int) -> bool {
-	slots := m.slots
-	#partial switch ins.op {
-	case .Call:
-		if m.depth >= MAX_CALL_NEST {
-			return false
-		}
-		m.depth += 1
-		push(m, {kind = .Call_Frame, pc = i32(pc^ + 1)})
-		pc^ = int(ins.a)
-	case .Return:
-		pc^ = int(latest_open(m.stack[:], .Call_Frame, .Return, 0).pc)
-		m.depth -= 1
-		push(m, {kind = .Return})
-	case .Mem_Start:
-		g := int(ins.a)
-		push(m, {kind = .Restore, a = 2 * g, b = slots[2 * g]})
-		push(m, {kind = .Restore, a = 2 * g + 1, b = slots[2 * g + 1]})
-		slots[2 * g], slots[2 * g + 1] = pos, -1
-		push(m, {kind = .Mem_Start, a = g, b = pos})
-		pc^ += 1
-	case .Mem_End:
-		// The start of this group's own run, skipping the starts and ends of runs it called.
-		g := int(ins.a)
-		start := latest_open(m.stack[:], .Mem_Start, .Mem_End, g).b
-		push(m, {kind = .Restore, a = 2 * g, b = slots[2 * g]})
-		push(m, {kind = .Restore, a = 2 * g + 1, b = slots[2 * g + 1]})
-		slots[2 * g], slots[2 * g + 1] = start, pos
-		push(m, {kind = .Mem_End, a = g})
-		pc^ += 1
-	case .Limit_Save:
-		push(m, {kind = .Restore, a = int(ins.a), b = slots[ins.a]})
-		slots[ins.a] = m.limit
-		push(m, {kind = .Limit, a = m.limit})
-		pc^ += 1
-	case .Limit_Cut:
-		m.limit = slots[ins.a]
-		pc^ += 1
-	case .Limit_Restore, .Limit_Clear:
-		push(m, {kind = .Limit, a = m.limit})
-		m.limit = max(slots[ins.a], pos) if ins.op == .Limit_Restore else len(m.s)
-		pc^ += 1
-	}
-	return true
-}
-
-// Returns the latest `open` entry of group `g` (0 for a call) that no `close` entry has closed. Each `close` skips the
-// `open` it closes.
-@(private = "file")
-latest_open :: proc(stack: []Entry, open, close: Entry_Kind, g: int) -> Entry {
-	level := 0
-	#reverse for e in stack {
-		if e.a != g {
-			continue
-		}
-		if e.kind == close {
-			level += 1
-		} else if e.kind == open {
-			if level == 0 {
-				return e
-			}
-			level -= 1
-		}
-	}
-	unreachable()
 }
 
 // Undoes entry `e`, which is not an alternative or a barrier, as the match backs past it.
@@ -589,18 +543,20 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 					return false
 				}
 			}
-			// Gives back a character, but a repeat that began inside a character stepped a byte at a time until the
-			// next character began, as Oniguruma steps.
+			// Gives back a character, checking that the preceding lead actually decodes to `e.a` so lone continuation
+			// bytes in invalid UTF-8 (and repeats started inside a character) step back one byte at a time.
 			p := e.a - 1
-			q := p
-			for q > e.b && spell.is_continuation(m.s[q]) {
-				q -= 1
-			}
-			if q > e.b || !spell.is_continuation(m.s[q]) {
-				p = q
+			if spell.is_continuation(m.s[p]) {
+				q := p
+				for q > e.b && spell.is_continuation(m.s[q]) {
+					q -= 1
+				}
+				if _, w := decode(m.s, q); q + w == e.a {
+					p = q
+				}
 			}
 			if p > e.b {
-				push(m, {kind = .Give_Back, pc = e.pc, a = p, b = e.b})
+				push(m, {kind = .Give_Back, pc = e.pc, a = p, b = e.b}, SET) or_return
 			}
 			pc^, pos^ = int(e.pc) + 2, p
 		case .Take_More:
@@ -621,7 +577,7 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 				}
 			}
 			if rep.b < 0 || e.b + 1 < int(rep.b) {
-				push(m, {kind = .Take_More, pc = e.pc, a = next, b = e.b + 1})
+				push(m, {kind = .Take_More, pc = e.pc, a = next, b = e.b + 1}, SET) or_return
 			}
 			pc^, pos^ = int(e.pc) + 2, next
 		case:
@@ -638,113 +594,4 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 		return true
 	}
 	return false
-}
-
-@(private)
-assert_at :: proc(m: ^Matcher, kind: Assert_Kind, pos: int) -> bool {
-	s := m.s
-	switch kind {
-	case .Begin_Buf:
-		return pos == 0
-	case .End_Buf:
-		return pos == len(s)
-	case .Semi_End_Buf:
-		return pos == len(s) || (pos == len(s) - 1 && s[pos] == '\n')
-	case .Begin_Line:
-		return pos == 0 || (s[pos - 1] == '\n' && pos < len(s))
-	case .End_Line:
-		return pos == len(s) || s[pos] == '\n'
-	case .Word_Boundary, .Not_Word_Boundary:
-		before, after := false, false
-		if pos > 0 { 	// the character before, whole even when `pos` is inside it, as Oniguruma finds it
-			r := rune(s[pos - 1])
-			if r >= 0x80 {
-				r, _ = decode(s, spell.char_start(s, pos - 1))
-			}
-			before = is_word(r)
-		}
-		// At position 0 Oniguruma reads the character after it only short of an absent operator's limit
-		// (DATA_ENSURE), and at other positions up to the text's end.
-		if pos < (m.limit if pos == 0 else len(s)) {
-			r, _ := decode(s, pos)
-			after = is_word(r)
-		}
-		return (before != after) == (kind == .Word_Boundary)
-	case .Ascii_Boundary, .Not_Ascii_Boundary:
-		before := pos > 0 && s[pos - 1] < 0x80 && is_word(rune(s[pos - 1]))
-		after := pos < len(s) && s[pos] < 0x80 && is_word(rune(s[pos]))
-		return (before != after) == (kind == .Ascii_Boundary)
-	case .Search_Start:
-		return pos == m.start
-	case .Skip:
-		return true
-	case .Fail, .Mismatch, .Error, .Count, .Total_Count, .Max, .Cmp:
-	}
-	return false
-}
-
-// Returns the position after the text of the latest of the backreference's groups that matches at `pos`, or -1. Under
-// ECMA a group that has not matched matches the empty string, and in a look-behind the text is read leftwards, ending
-// at `pos`.
-@(private = "file")
-backref :: proc(m: ^Matcher, ins: Inst, pos: int) -> int {
-	s := m.s[:m.limit] // the group's text may lie past the limit, but the match reads only up to it
-	groups := m.re.refs[ins.a]
-	#reverse for g in groups {
-		lo, hi := m.slots[2 * g], m.slots[2 * g + 1]
-		if lo < 0 || hi < 0 {
-			if m.re.ecma {
-				return pos
-			}
-			continue
-		}
-		text := m.s[lo:hi]
-		if ins.b == 0 {
-			if strings.has_prefix(s[pos:], text) {
-				return pos + len(text)
-			}
-			continue
-		}
-		if m.re.ecma {
-			return pos - len(text) if strings.has_suffix(s[:pos], text) else -1
-		}
-		p := pos
-		matched := true
-		for want in text {
-			if p >= len(s) {
-				matched = false
-				break
-			}
-			r, w := decode(s, p)
-			if fold(r) != fold(want) {
-				matched = false
-				break
-			}
-			p += w
-		}
-		if matched {
-			return p
-		}
-	}
-	return -1
-}
-
-// \R: "\r\n", or one of "\n" "\v" "\f" "\r" U+0085 U+2028 U+2029.
-@(private = "file")
-linebreak :: proc(s: string, pos: int) -> int {
-	if pos >= len(s) {
-		return -1
-	}
-	if strings.has_prefix(s[pos:], "\r\n") {
-		return pos + 2
-	}
-	if spell.is_continuation(s[pos]) {
-		return -1 // inside a character: U+0085 is not its trailing byte
-	}
-	r, w := decode(s, pos)
-	switch r {
-	case '\n', '\v', '\f', '\r', 0x85, 0x2028, 0x2029:
-		return pos + w
-	}
-	return -1
 }

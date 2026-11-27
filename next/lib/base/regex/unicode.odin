@@ -5,7 +5,6 @@ package regex
 // its own tables, and its simple case folding (unicode_tables.odin).
 
 import "core:strings"
-import "core:unicode"
 
 // A character type: a property table, or every character outside it.
 Prop_Item :: struct {
@@ -57,19 +56,20 @@ is_word :: proc(r: rune) -> bool {
 
 // `\p{name}`'s type: a name compared as Oniguruma compares them, without case, spaces, `_` or `-`.
 named_prop :: proc(name: string) -> (it: Prop_Item, ok: bool) {
-	buf: [64]byte // no property name is longer
-	b := strings.builder_from_bytes(buf[:])
-	for c in name {
+	buf: [64]byte // no property name is longer; all entries are lowercase ASCII
+	n := 0
+	for c in transmute([]byte)name {
 		if c != ' ' && c != '_' && c != '-' {
-			strings.write_rune(&b, unicode.to_lower(c))
+			if c >= 0x80 || n >= len(buf) {
+				return
+			}
+			buf[n] = c | 0x20 if c >= 'A' && c <= 'Z' else c
+			n += 1
 		}
-	}
-	if len(name) > len(buf) {
-		return
 	}
 	names, k := PROPERTY_NAMES, 0
 	for each in strings.split_iterator(&names, "\x00") {
-		if each == strings.to_string(b) {
+		if each == string(buf[:n]) {
 			return {table = PROPERTY_NAME_TABLES[k]}, true
 		}
 		k += 1
@@ -116,5 +116,5 @@ ecma_identifier :: proc(name: string) -> bool {
 			return false
 		}
 	}
-	return true
+	return name != ""
 }

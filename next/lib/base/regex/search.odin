@@ -9,13 +9,13 @@ import "core:slice"
 import "core:strings"
 import "stury:lib/base/spell"
 
-@(private)
+@(private = "file")
 MAX_RETRIES :: 10_000_000 // ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH
-@(private)
+@(private = "file")
 KEEP_BYTES :: 1 << 20 // scratch grown past this is freed after the search rather than kept
 
-// What a `Scratch` keeps between searches, behind `Scratch`'s one public field.
-@(private)
+// What a `Scratch` keeps between searches.
+@(private = "file")
 Held :: struct {
 	gate:   ^Gate,
 	stack:  [dynamic]Entry,
@@ -74,8 +74,7 @@ Matcher :: struct {
 	stack:       ^[dynamic]Entry,
 	retries:     int, // the alternatives resumed, at this start, or in all under `Regex.linear`
 	retry_cap:   int, // the most retries the run at this start may take
-	earlier:     int, // the retries of the runs before this start
-	limited:     bool, // the caller gave `steps`
+	earlier:     u64, // the retries of the runs before this start
 	allowed:     int, // under `limited`, the retries the runs may take in all
 	err:         Error,
 	caps:        []int,
@@ -93,10 +92,10 @@ Matcher :: struct {
 	log:         ^[dynamic]u32,
 	looking:     int, // the look-aheads being matched, under `Regex.linear`
 	room:        int, // under `Regex.linear`, the bytes the stack and the log may take beside the sets
-	gate:        ^Gate,
 	// Under `Regex.linear`, the sets hold the places from `lo` on, `width` places a row. `first_start` and `last_start`
 	// are the first and last start a match can have.
 	lo, width, first_start, last_start: int,
+	limited:     bool, // the caller gave `steps`
 }
 
 // Finds the first match of `re` in `s` at or after byte `start`. `caps` receives the groups' byte bounds, 2 per group
@@ -118,23 +117,22 @@ search :: proc(
 	steps: u64 = 0,
 ) -> (found: bool, err: Error) {
 	ensure(scratch.held.gate != nil, "regex.search needs a Scratch from scratch_make")
+	ensure(start >= 0, "regex.search: start must not be negative")
 	ensure(
-		len(caps) == 0 || 2 <= len(caps) && len(caps) <= 2 * len(re.names),
+		len(caps) == 0 || 2 <= len(caps) && len(caps) <= 2 * len(re.names) && len(caps) & 1 == 0,
 		"regex.search: caps hold 2 ints for at most each group",
 	)
-	gate := scratch.held.gate
-	gate.failed = false
-	context.allocator = gate_allocator(gate)
 	scratch.spent = 0
-	found, err = search_in(re, s, start, caps, scratch, int(min(steps, u64(max(int)))))
-	if gate.failed {
-		return false, MEMORY_OUT
+	if len(caps) == 0 && re.dfa != nil && re.ecma {
+		if hit, judged := dfa_search(re.dfa, s, start); judged {
+			return hit, {}
+		}
 	}
-	return
+	return search_slow(re, s, start, caps, scratch, int(min(steps, u64(max(int)))))
 }
 
 @(private = "file")
-search_in :: proc(
+search_slow :: #force_no_inline proc(
 	re: ^Regex,
 	s: string,
 	start: int,
@@ -143,34 +141,19 @@ search_in :: proc(
 	steps: int,
 ) -> (found: bool, err: Error) {
 	limited := steps > 0
-	left := steps
-	jq_automaton, from, ok := automaton_start(re, s, start, len(caps) > 0, steps if limited else MAX_RETRIES)
+	jq_automaton, from, ok := automaton_start(re, s, start, steps if limited else MAX_RETRIES)
 	if !ok {
 		return false, {}
 	}
-	if len(caps) == 0 && re.dfa != nil && (re.ecma || jq_automaton) && from >= 0 {
+	if len(caps) == 0 && jq_automaton && from >= 0 {
 		if hit, judged := dfa_search(re.dfa, s, from); judged {
 			return hit, {}
-		}
-	}
-	counted, decided, work := false, false, 0
-	if re.counting != nil {
-		counted, decided, work = count_search(re, s, start, caps, scratch, false, left if limited else COUNTING_WORK)
-	}
-	used := work
-	scratch.spent = u64(used)
-	if decided {
-		return counted, {}
-	}
-	if limited {
-		if left -= work; left <= 0 {
-			return false, STEPS_OUT
 		}
 	}
 	// The automata give where the match ends and starts and how far a search reads. The backtracker then runs only at
 	// that start, for the groups, and its visited set covers only that range.
 	lo, width, first_start, last_start := 0, len(s) + 1, 0, len(s)
-	if len(caps) > 0 && (jq_automaton || re.ecma && re.dfa != nil) && re.dfa.first != nil && from >= 0 {
+	if len(caps) > 0 && re.dfa != nil && re.dfa.first != nil && (jq_automaton || re.ecma) && from >= 0 {
 		if end, reach, thread, judged := dfa_first(re.dfa, s, from); judged {
 			if end < 0 {
 				return false, {}
@@ -185,8 +168,41 @@ search_in :: proc(
 			}
 		}
 	}
+	gate := scratch.held.gate
+	gate.failed = false
+	context.allocator = gate_allocator(gate)
+	found, err = search_in(re, s, start, caps, scratch, steps, lo, width, first_start, last_start)
+	if gate.failed {
+		return false, MEMORY_OUT
+	}
+	return
+}
+
+@(private = "file")
+search_in :: proc(
+	re: ^Regex,
+	s: string,
+	start: int,
+	caps: []int,
+	scratch: ^Scratch,
+	steps, lo, width, first_start, last_start: int,
+) -> (found: bool, err: Error) {
+	limited := steps > 0
+	left := steps
+	counted, decided, work := count_search(re, s, start, caps, scratch, false, left if limited else COUNTING_WORK)
+	used := work
+	scratch.spent = u64(used)
+	if decided {
+		return counted, {}
+	}
+	if limited {
+		if left -= work; left <= 0 {
+			return false, STEPS_OUT
+		}
+	}
 	h := &scratch.held
 	defer shrink(&h.stack)
+	defer shrink(&h.rows)
 	resize(&h.slots, re.slots)
 	resize(&h.counts, len(re.callouts))
 	if h.gate.failed {
@@ -209,56 +225,18 @@ search_in :: proc(
 		limited     = limited,
 		allowed     = left,
 		retry_cap   = left if limited else MAX_RETRIES,
-		gate        = h.gate,
 	}
 	slice.zero(m.counts)
 	// The visited set is bounded by the text, so the memory cap replaces the retry limit and the jq stack cap. The set
 	// persists across starts, so a search where a pair's outcome depends on the start (`longest`, `not_empty`) runs
 	// without it, and so does a jq program whose set would pass the cap.
 	linear := re.linear && !re.longest && !re.not_empty
-	words: int
 	if linear {
-		m.rows, m.radix = re.visited.rows, nil
-		plain, most := total_rows(re, m.rows), MAX_BYTES
-		if re.visited.counters != nil {
-			m.rows, m.radix, plain = counted_rows(re, len(s) + 1, scratch)
-			most = COUNTED_BYTES
-		}
-		switch {
-		case limited:
-			m.budget = left
-		case re.ecma:
-			m.budget = max(SEARCH_RESUMES, sat_mul(sat_mul(SEARCH_WORK, plain), width))
-		case:
-			m.budget = max(int)
-		}
-		rows := total_rows(re, m.rows)
-		words = set_words(rows, width)
-		m.room = visited_room(re, rows, len(s) + 1, most)
-		if m.room < 0 && re.ecma {
-			counted, decided, work = count_search(re, s, start, caps, scratch, true, left if limited else COUNTING_WORK)
-			scratch.spent = u64(used + work)
-			if decided {
-				return counted, {}
-			}
-			return false, MEMORY_OUT
+		fallback, hit, done := setup_visited(&m, scratch, &used, left, limited)
+		if done {
+			return hit, fallback
 		}
 		linear = m.room >= 0
-	}
-	if linear {
-		resize(&h.seen, words)
-		slice.zero(h.seen[:])
-		m.seen = h.seen[:]
-		if re.visited.owner != nil {
-			resize(&h.good, words)
-			slice.zero(h.good[:])
-			m.good = h.good[:]
-		}
-		clear(&h.log)
-		m.log = &h.log
-		if h.gate.failed {
-			return false, {}
-		}
 	}
 	defer if linear {
 		shrink(&h.seen)
@@ -268,28 +246,87 @@ search_in :: proc(
 	switch {
 	case re.calls_or_limits:
 		found = try_starts(&m, true, false)
-		scratch.spent = u64(used + m.earlier + m.retries)
-		return found, m.err
 	case linear:
 		found = try_starts(&m, false, true)
 	case:
 		found = try_starts(&m, false, false)
 	}
 	err = m.err
-	scratch.spent = u64(used + m.earlier + m.retries)
-	if err.kind != .None && err.kind != .Callout {
+	scratch.spent = u64(used) + m.earlier + u64(m.retries)
+	if !h.gate.failed && re.counting != nil && err.kind != .None && err.kind != .Callout {
 		// What the counting search may still read is what the backtracker left of the limit, none of it when spent.
-		remaining := left - m.earlier - m.retries if limited else COUNTING_WORK
+		remaining := left - int(m.earlier) - m.retries if limited else COUNTING_WORK
 		if remaining > 0 {
 			counted, decided, work = count_search(re, s, start, caps, scratch, true, remaining)
 			used += work
-			scratch.spent = u64(used + m.earlier + m.retries)
+			scratch.spent = u64(used) + m.earlier + u64(m.retries)
 			if decided {
 				return counted, {}
+			}
+			if limited && work >= remaining {
+				return false, STEPS_OUT
 			}
 		}
 	}
 	return found, err
+}
+
+// Sizes and allocates the visited sets for a linear search, or resolves an oversized ECMA search through `count_search`.
+@(private = "file")
+setup_visited :: proc(
+	m: ^Matcher,
+	scratch: ^Scratch,
+	used: ^int,
+	left: int,
+	limited: bool,
+) -> (err: Error, hit, done: bool) {
+	re, s, h := m.re, m.s, &scratch.held
+	m.rows, m.radix = re.visited.rows, nil
+	plain, most := total_rows(re, m.rows), MAX_BYTES
+	if re.visited.counters != nil {
+		m.rows, m.radix, plain = counted_rows(re, len(s) + 1, scratch)
+		if h.gate.failed {
+			return {}, false, true
+		}
+		most = COUNTED_BYTES
+	}
+	switch {
+	case limited:
+		m.budget = left
+	case re.ecma:
+		m.budget = max(SEARCH_RESUMES, sat_mul(sat_mul(SEARCH_WORK, plain), m.width))
+	case:
+		m.budget = max(int)
+	}
+	rows := total_rows(re, m.rows)
+	words := set_words(rows, m.width)
+	m.room = visited_room(re, rows, m.width, most)
+	if m.room < 0 {
+		if !re.ecma {
+			return {}, false, false
+		}
+		counted, decided, work := count_search(re, s, m.start, m.caps, scratch, true, left if limited else COUNTING_WORK)
+		used^ += work
+		scratch.spent = u64(used^)
+		if decided {
+			return {}, counted, true
+		}
+		return STEPS_OUT if limited && work >= left else MEMORY_OUT, false, true
+	}
+	resize(&h.seen, words)
+	slice.zero(h.seen[:])
+	m.seen = h.seen[:]
+	if re.visited.owner != nil {
+		resize(&h.good, words)
+		slice.zero(h.good[:])
+		m.good = h.good[:]
+	}
+	clear(&h.log)
+	m.log = &h.log
+	if h.gate.failed {
+		return {}, false, true
+	}
+	return {}, false, false
 }
 
 // Whether the automaton of dfa.odin may answer a jq search, and from where it reads. Oniguruma's search gives up past
@@ -303,7 +340,6 @@ automaton_start :: #force_inline proc(
 	re: ^Regex,
 	s: string,
 	start: int,
-	reads_bounds: bool,
 	retries: int,
 ) -> (
 	jq_automaton: bool,
@@ -319,7 +355,7 @@ automaton_start :: #force_inline proc(
 		}
 	}
 	from = start
-	if re.narrowed && start <= len(s) && jq_automaton {
+	if jq_automaton && re.narrowed && start <= len(s) {
 		first, last, _, high, found := search_starts(re.opt, s, start)
 		if !found {
 			return jq_automaton, from, false
@@ -334,7 +370,7 @@ automaton_start :: #force_inline proc(
 // up. `judged` is false when it does not run or does not decide. `work` is the set words it read, which it holds to
 // `limit`, above 0.
 @(private = "file")
-count_search :: proc(
+count_search :: #force_inline proc(
 	re: ^Regex,
 	s: string,
 	start: int,
@@ -348,6 +384,7 @@ count_search :: proc(
 	}
 	found, judged, work = counting_search(re, s, start, scratch, limit)
 	shrink(&scratch.held.seen)
+	shrink(&scratch.held.rows)
 	return
 }
 
@@ -360,6 +397,16 @@ shrink :: proc(a: ^[dynamic]$T) {
 		a^ = nil
 		a.allocator = allocator
 	}
+}
+
+// The next byte at or after `at` where a match of head `h` can start, or -1 for none.
+@(private)
+skip_head :: #force_inline proc(h: ^Search_Opt, s: string, at: int) -> int {
+	if h.kind == .Exact {
+		k := strings.index(s[at:], h.exact)
+		return at + k if k >= 0 else -1
+	}
+	return next_head_byte(h, s, at) if h.kind == .Map else at
 }
 
 @(private = "file")
@@ -386,17 +433,8 @@ try_starts :: proc(m: ^Matcher, $EXT, $SET: bool) -> bool {
 			end = min(high, last)
 		}
 		for at <= end {
-			#partial switch h := re.head; h.kind {
-			case .Exact:
-				k := strings.index(s[at:], h.exact)
-				if k < 0 {
-					break starts
-				}
-				at += k
-			case .Map:
-				if at = next_head_byte(h, s, at); at < 0 {
-					break starts
-				}
+			if at = skip_head(re.head, s, at); at < 0 {
+				break starts
 			}
 			if at > end {
 				break

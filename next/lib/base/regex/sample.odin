@@ -12,20 +12,14 @@ SAMPLE_MAX :: 1 << 12
 @(private = "file")
 CHOICES :: 128
 
-// The next number of the splitmix64 generator whose state is `state`.
+// A number of the splitmix64 generator below `n` (above 0), advancing `state`.
 @(private = "file")
-random_next :: proc(state: ^u64) -> u64 {
+random_below :: proc(state: ^u64, n: int) -> int {
 	state^ += 0x9e3779b97f4a7c15
 	z := state^
 	z = (z ~ (z >> 30)) * 0xbf58476d1ce4e5b9
 	z = (z ~ (z >> 27)) * 0x94d049bb133111eb
-	return z ~ (z >> 31)
-}
-
-// A number of the generator below `n`, which is above 0.
-@(private = "file")
-random_below :: proc(state: ^u64, n: int) -> int {
-	return int(random_next(state) % u64(max(n, 1)))
+	return int((z ~ (z >> 31)) % u64(max(n, 1)))
 }
 
 @(private = "file")
@@ -49,14 +43,13 @@ sample :: proc(
 	allocator,
 	scratch: mem.Allocator,
 ) -> (text: string, err: Error) {
-	spare, spare_scratch: [SPARE_BYTES]byte
-	out := Gate{inner = allocator, spare = spare[:]}
-	tmp := Gate{inner = scratch, spare = spare_scratch[:]}
+	spare: [SPARE_BYTES]byte = ---
 	arena: mem.Dynamic_Arena
-	mem.dynamic_arena_init(&arena, gate_allocator(&tmp), gate_allocator(&tmp))
+	mem.dynamic_arena_init(&arena, scratch, scratch, block_size = 4096, out_band_size = 1024)
 	defer mem.dynamic_arena_destroy(&arena)
-	text, err = sample_in(pattern, state, extra, least, gate_allocator(&out), mem.dynamic_arena_allocator(&arena))
-	if out.failed || tmp.failed {
+	tmp := Gate{inner = mem.dynamic_arena_allocator(&arena), spare = spare[:]}
+	text, err = sample_in(pattern, state, extra, least, allocator, gate_allocator(&tmp))
+	if tmp.failed {
 		return "", MEMORY_OUT
 	}
 	return
@@ -76,29 +69,32 @@ sample_in :: proc(
 	if message != "" {
 		return "", {.Syntax, message}
 	}
-	s := Sampler {
-		out   = strings.builder_make(allocator),
-		state = state,
-		extra = extra,
-	}
+	s := Sampler{out = strings.builder_make(tree), state = state, extra = extra}
 	if !walk(&s, pat.root) {
-		strings.builder_destroy(&s.out)
 		return "", {.Syntax, "pattern cannot be sampled"}
 	}
-	text = strings.to_string(s.out)
-	if missing := least - utf8.rune_count_in_string(text); missing > 0 {
-		pad := make([]u8, missing, tree)
-		for &c in pad {
-			c = u8('a' + random_below(state, 26))
-		}
-		switch {
-		case !anchors(pat.root, last = true):
-			text = strings.concatenate({text, string(pad)}, allocator)
-		case !anchors(pat.root, last = false):
-			text = strings.concatenate({string(pad), text}, allocator)
-		}
+	if gate_failed(tree) {
+		return "", MEMORY_OUT
 	}
-	return text, {}
+	raw := strings.to_string(s.out)
+	pad_len := max(least - utf8.rune_count_in_string(raw), 0)
+	off := 0
+	if pad_len > 0 && anchors(pat.root, last = true) {
+		off = 0 if anchors(pat.root, last = false) else pad_len
+		pad_len = off
+	}
+	if pad_len > max(int) - len(raw) {
+		return "", MEMORY_OUT
+	}
+	buf, aerr := make([]u8, len(raw) + pad_len, allocator)
+	if aerr != nil || len(raw) + pad_len > 0 && buf == nil {
+		return "", MEMORY_OUT
+	}
+	copy(buf[off:], raw)
+	for &c in (buf[:off] if off > 0 else buf[len(raw):]) {
+		c = u8('a' + random_below(state, 26))
+	}
+	return string(buf), {}
 }
 
 // Whether the first (or `last`) thing the pattern `n` matches is a start (or end) of the text.
@@ -155,9 +151,10 @@ walk :: proc(s: ^Sampler, n: ^Node) -> bool {
 	case .Group:
 		return walk(s, n.kids[0])
 	case .Repeat:
+		lo := min(n.min, SAMPLE_MAX)
 		span := s.extra if n.max < 0 else min(n.max - n.min, s.extra)
 		// An iteration that wrote nothing can be taken for each one left, so a repeat of an empty body ends at once.
-		for _ in 0 ..< min(n.min + random_below(s.state, max(span, 0) + 1), SAMPLE_MAX) {
+		for _ in 0 ..< lo + random_below(s.state, min(max(span, 0), SAMPLE_MAX - lo) + 1) {
 			at := strings.builder_len(s.out)
 			if !walk(s, n.kids[0]) {
 				return false
@@ -175,7 +172,7 @@ walk :: proc(s: ^Sampler, n: ^Node) -> bool {
 // A character of `cls`: one of the printable ASCII it holds, then the ends of its ranges, and failing both the first
 // characters of the planes below U+3000.
 @(private = "file")
-class_rune :: proc(s: ^Sampler, cls: ^Class) -> (rune, bool) {
+class_rune :: #force_no_inline proc(s: ^Sampler, cls: ^Class) -> (rune, bool) {
 	choices: [CHOICES]rune
 	n := 0
 	for r in rune(0x20) ..= rune(0x7e) {

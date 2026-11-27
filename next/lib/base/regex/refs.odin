@@ -100,20 +100,16 @@ parse_backref_name :: proc(p: ^Parser) -> ^Node {
 	n := new_node(.Backref)
 	n.fold = p.flags.fold
 	switch name[0] {
-	case '0' ..= '9', '-', '+':
-		num, rel := 0, name[0] == '-'
-		digits := name[1:] if name[0] == '-' || name[0] == '+' else name
-		if name[0] == '+' || digits == "" {
-			return fail(p, "invalid backref number/name")
+	case '+':
+		return fail(p, "invalid backref number/name")
+	case '0' ..= '9', '-':
+		rel := name[0] == '-'
+		j := int(rel)
+		num, digits := number(name, &j, MAX_BACKREF + 1)
+		if digits == 0 || j < len(name) || rel && num == 0 {
+			return fail(p, strings.concatenate({"invalid group name <", name, ">"}))
 		}
-		j := 0
-		if num, _ = number(digits, &j, MAX_BACKREF + 1); j < len(digits) {
-			return fail(p, "invalid backref number/name")
-		}
-		if rel {
-			num = len(p.names) - num
-		}
-		if num <= 0 {
+		if num = len(p.names) - num if rel else num; num <= 0 {
 			return fail(p, "invalid backref number/name")
 		}
 		append(&n.refs, num)

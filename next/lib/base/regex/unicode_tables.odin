@@ -19,6 +19,7 @@ TABLE_GCB_ALONE :: 718
 TABLE_GRAPHEME_EXTEND :: 90
 
 RANGE_SPAN_BITS :: 11
+#assert(ODIN_ENDIAN == .Little, "regex tables are little-endian")
 @(rodata) PROPERTY_RANGES := #load("tables/ranges.bin", []u32)
 @(rodata) PROPERTY_TABLES := #load("tables/tables.bin", []u16)
 

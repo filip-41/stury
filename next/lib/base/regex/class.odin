@@ -10,11 +10,11 @@ import "core:unicode/utf8"
 
 // A bracket class, or one of the escapes \w \d \s \p{...} as a class of one property.
 Class :: struct {
+	ascii:   [2]u64, // bit r is set when the class matches ASCII rune r, filled in by the compiler
 	ranges:  [dynamic][2]rune,
 	props:   [dynamic]Prop_Item,
 	negated: bool,
 	fold:    bool,
-	ascii:   [2]u64, // bit r is set when the class matches ASCII rune r, filled in by the compiler
 	slot:    int, // 1 + the index the compiler last gave it among its classes, 0 before
 }
 
@@ -110,6 +110,9 @@ parse_class :: proc(p: ^Parser) -> ^Node {
 		if at_end(p) {
 			return fail(p, "premature end of char-class")
 		}
+		if gate_failed(context.allocator) {
+			return fail(p, MEMORY_ERROR)
+		}
 		c := peek(p)
 		if c == ']' && !leading {
 			p.i += 1
@@ -141,8 +144,6 @@ parse_class :: proc(p: ^Parser) -> ^Node {
 				return fail(p, "empty range in char class")
 			}
 			hi, hi_lone = hi_r, hi_r_lone
-		} else if peek(p) == '-' && p.i + 1 >= len(p.src) {
-			return fail(p, "premature end of char-class")
 		}
 		// A lone byte against a character past ASCII keeps the range (`[\x80-\x{10ffff}]`), as Oniguruma reads it.
 		// A range whose ends are each ASCII or a lone byte is cut at 0x7F, since a lone byte matches no character of
@@ -169,7 +170,7 @@ parse_posix :: proc(p: ^Parser) -> (it: Prop_Item, matched: bool) {
 	for j < len(p.src) && (p.src[j] | 0x20) >= 'a' && (p.src[j] | 0x20) <= 'z' {
 		j += 1
 	}
-	if !strings.has_prefix(p.src[j:], ":]") {
+	if (!neg && j == start) || !strings.has_prefix(p.src[j:], ":]") {
 		return {}, false
 	}
 	k, found := slice.linear_search(POSIX_NAMES[:], p.src[start:j])
@@ -236,6 +237,7 @@ add_ecma_set :: proc(ranges: ^[dynamic][2]rune, c: byte) {
 		return
 	}
 	rest := complement_runs(set, 0)
+	defer delete(rest)
 	append(ranges, ..rest[:])
 }
 
@@ -325,9 +327,12 @@ ascii_only :: proc(cls: ^Class) -> bool {
 // Whether a rune below 0x80 in the ranges of `cls` folds under (?i) to a non-ASCII rune, as k to the Kelvin sign and s
 // to the long s.
 folds_out_of_ascii :: proc(cls: ^Class) -> bool {
+	if !cls.fold {
+		return false
+	}
 	for x in cls.ranges {
 		for r in x[0] ..= min(x[1], 0x7F) {
-			if cls.fold && folds_outside(r) {
+			if folds_outside(r) {
 				return true
 			}
 		}
@@ -338,6 +343,9 @@ folds_out_of_ascii :: proc(cls: ^Class) -> bool {
 // Sorts `runs` and joins the runs that overlap or touch, in place. Returns the shortened slice.
 merge_runs :: proc(runs: [][2]rune) -> [][2]rune {
 	keys := make([]u64, len(runs))
+	if len(keys) != len(runs) {
+		return nil
+	}
 	for g, i in runs {
 		keys[i] = u64(g[0]) << 32 | u64(g[1])
 	}
@@ -347,7 +355,7 @@ merge_runs :: proc(runs: [][2]rune) -> [][2]rune {
 	}
 	n := 0
 	for g in runs {
-		if n > 0 && g[0] <= runs[n - 1][1] + 1 {
+		if n > 0 && (runs[n - 1][1] == max(rune) || g[0] <= runs[n - 1][1] + 1) {
 			runs[n - 1][1] = max(runs[n - 1][1], g[1])
 			continue
 		}
@@ -362,8 +370,14 @@ complement_runs :: proc(runs: [][2]rune, floor: rune) -> [dynamic][2]rune {
 	out := make([dynamic][2]rune, 0, len(runs) + 1)
 	lo := floor
 	for g in runs {
+		if g[0] > utf8.MAX_RUNE {
+			break
+		}
 		if g[0] > lo {
 			append(&out, [2]rune{lo, g[0] - 1})
+		}
+		if g[1] >= utf8.MAX_RUNE {
+			return out
 		}
 		lo = max(lo, g[1] + 1)
 	}

@@ -55,6 +55,9 @@ parse_escape :: proc(p: ^Parser) -> ^Node {
 		end := strings.index(p.src[p.i:], `\E`)
 		lit := p.src[p.i:] if end < 0 else p.src[p.i:][:end]
 		for r in lit {
+			if gate_failed(context.allocator) {
+				return fail(p, MEMORY_ERROR)
+			}
 			append(&cat.kids, char_node(p, r))
 		}
 		p.i += len(lit) if end < 0 else end + 2
@@ -104,7 +107,7 @@ ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
 			p.i -= 1
 			num, _ := number(p.src, &p.i, MAX_CAPTURES + 1)
 			append(&n.refs, num)
-		} else if at_end(p) || peek(p) != '<' {
+		} else if peek(p) != '<' {
 			return fail(p, "invalid named reference")
 		} else {
 			p.i += 1
@@ -154,12 +157,12 @@ ecma_char :: proc(p: ^Parser, c: byte) -> (r: rune, ok: bool) {
 				return rune(v), true
 			}
 		} else if v, n := number(p.src, &p.i, 0xFFFF, 16, 4); n == 4 {
-			j := p.i + 2
-			low, m := number(p.src, &j, 0xFFFF, 16, 4)
-			pair := peek(p) == '\\' && peek(p, 1) == 'u' && m == 4
-			if spell.high_surrogate(u32(v)) && pair && spell.low_surrogate(u32(low)) {
-				p.i = j
-				v = int(spell.surrogate_pair(u32(v), u32(low)))
+			if spell.high_surrogate(u32(v)) && peek(p) == '\\' && peek(p, 1) == 'u' {
+				j := p.i + 2
+				if low, m := number(p.src, &j, 0xFFFF, 16, 4); m == 4 && spell.low_surrogate(u32(low)) {
+					p.i = j
+					v = int(spell.surrogate_pair(u32(v), u32(low)))
+				}
 			}
 			return rune(v), true
 		}
@@ -195,13 +198,13 @@ parse_char_escape :: proc(p: ^Parser, in_class: bool) -> (r: rune, lone: bool, o
 		return 0, false, false
 	}
 	if b < 0xC0 || b > 0xF7 {
-		return b, true, true
+		return b if in_class else utf8.MAX_RUNE + 1, true, true
 	}
 	need := 1 if b < 0xE0 else 2 if b < 0xF0 else 3
 	buf: [4]byte
 	buf[0] = byte(b)
 	for k in 1 ..= need {
-		if peek(p) != '\\' || at_end(p) {
+		if peek(p) != '\\' {
 			fail(p, "too short multibyte code string")
 			return 0, false, false
 		}
@@ -215,7 +218,14 @@ parse_char_escape :: proc(p: ^Parser, in_class: bool) -> (r: rune, lone: bool, o
 		}
 		buf[k] = byte(next)
 	}
-	r, _ = utf8.decode_rune(buf[:need + 1])
+	w: int
+	if r, w = utf8.decode_rune(buf[:need + 1]); w != need + 1 {
+		if b > 0xF4 && !in_class {
+			fail(p, "invalid code point value")
+			return 0, false, false
+		}
+		return utf8.MAX_RUNE + 1, false, true
+	}
 	return r, false, true
 }
 
@@ -240,16 +250,17 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 	case 'x':
 		if peek(p) == '{' && spell.HEX_NIBBLE[peek(p, 1)] < 16 {
 			p.i += 1
+			start := p.i
 			v, n := number(p.src, &p.i, max(int), 16)
 			if n > 8 {
 				fail(p, "too long wide-char value")
 				return 0, false, false
 			}
-			if v > int(max(i32)) || size_of(int) < 8 && v == max(int) {
+			if v > int(max(i32)) || size_of(int) < 8 && n == 8 && p.src[start] >= '8' {
 				fail(p, "too big wide-char value")
 				return 0, false, false
 			}
-			if at_end(p) || peek(p) != '}' {
+			if peek(p) != '}' {
 				fail(p, "invalid code point value")
 				return 0, false, false
 			}
@@ -261,8 +272,13 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 	case 'o':
 		if peek(p) == '{' {
 			p.i += 1
-			v, _ := number(p.src, &p.i, 0x7FFFFFFF, 8)
-			if at_end(p) || peek(p) != '}' {
+			start := p.i
+			v, n := number(p.src, &p.i, max(int), 8)
+			if n > 11 || v > int(max(i32)) || size_of(int) < 8 && n == 11 && p.src[start] >= '2' {
+				fail(p, "too big number")
+				return 0, false, false
+			}
+			if peek(p) != '}' {
 				fail(p, "invalid code point value")
 				return 0, false, false
 			}
@@ -278,8 +294,7 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 			fail(p, "end pattern at control")
 			return 0, false, false
 		}
-		x := peek(p)
-		p.i += 1
+		x := next_rune(p)
 		return 0x7F if x == '?' else rune(x & 0x1F), false, true
 	}
 	p.i -= 1
@@ -289,6 +304,7 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 // Builds a class node of one property item. \w and \W (TABLE_WORD) keep their negation in the item, as Oniguruma's word
 // type. For any other item (\d \s \p{...}) the class itself is negated as a whole, which shows at a lone continuation
 // byte.
+@(private = "file")
 prop_node :: proc(it: Prop_Item) -> ^Node {
 	n := new_node(.Class)
 	n.class = new(Class)

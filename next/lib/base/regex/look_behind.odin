@@ -16,46 +16,49 @@ tune_behind :: proc(body: ^Node, negative: bool) -> (^Node, string) {
 	if !behind_allows(body, negative, &keeps) {
 		return body, "invalid pattern in look-behind"
 	}
-	alt := body.kind == .Alt && !body.bag
-	branches := make([dynamic]^Node, 0, len(body.kids))
-	for k in (body.kids[:] if alt else []^Node{body}) {
-		cut, ok := reduce_branch(k)
-		if !ok {
-			// Oniguruma returns the cut's "all removed" result as an error code.
-			return body, "undefined error code"
+	out: ^Node
+	if body.kind == .Alt && !body.bag {
+		branches := make([dynamic]^Node, 0, len(body.kids))
+		if gate_failed(context.allocator) {
+			return body, MEMORY_ERROR
 		}
-		append(&branches, cut)
-	}
-	out := branches[0]
-	if alt {
+		for k in body.kids {
+			cut, ok := reduce_branch(k)
+			if !ok {
+				// Oniguruma returns the cut's "all removed" result as an error code.
+				return body, "undefined error code"
+			}
+			append(&branches, cut)
+			if gate_failed(context.allocator) {
+				return body, MEMORY_ERROR
+			}
+		}
 		out = new(Node)
+		if out == nil {
+			return body, MEMORY_ERROR
+		}
 		out^ = body^
 		out.kids = branches
+	} else {
+		ok: bool
+		if out, ok = reduce_branch(body); !ok {
+			return body, "undefined error code"
+		}
+		if gate_failed(context.allocator) {
+			return body, MEMORY_ERROR
+		}
 	}
 	// Oniguruma tunes the body before checking it, so a look-behind inside the body is measured here too, and one of no
 	// fixed length fails.
-	if least, sure := min_length(out); least == 0 && sure && !keeps && !holds_behind(out) {
+	if least, sure := min_length(out); least == 0 && sure && !keeps {
 		return new_node(.Empty), ""
 	}
 	return out, ""
 }
 
-@(private = "file")
-holds_behind :: proc(n: ^Node) -> bool {
-	if n.kind == .Look && (n.look == .Behind || n.look == .Not_Behind) {
-		return true
-	}
-	for k in n.kids {
-		if holds_behind(k) {
-			return true
-		}
-	}
-	return false
-}
-
 // Oniguruma's check_node_in_look_behind: no end-of-text anchor or look-ahead in either kind, no negative look-behind
-// in a positive one, and no capture in a negative one. `keeps` is set when the body holds \K or a group that something
-// reads (Oniguruma's `used`).
+// in a positive one, and no capture in a negative one. `keeps` is set when the body holds \K, a group that something
+// reads (Oniguruma's `used`), or a nested look-behind.
 @(private = "file")
 behind_allows :: proc(n: ^Node, negative: bool, keeps: ^bool) -> bool {
 	#partial switch n.kind {
@@ -72,6 +75,7 @@ behind_allows :: proc(n: ^Node, negative: bool, keeps: ^bool) -> bool {
 		if n.look == .Ahead || n.look == .Not_Ahead || (n.look == .Not_Behind && !negative) {
 			return false
 		}
+		keeps^ ||= n.look == .Behind || n.look == .Not_Behind
 	case .Absent:
 		if len(n.kids) < 2 { // a stopper changes where the text ends for what follows the look-behind
 			return false
@@ -112,11 +116,11 @@ reduce_branch :: proc(n: ^Node) -> (^Node, bool) {
 			break
 		}
 	}
-	if i == len(n.kids) && lead == nil {
-		return n, false
-	}
 	if i == 0 {
 		return n, true
+	}
+	if i == len(n.kids) && lead == nil {
+		return n, false
 	}
 	cat := new(Node)
 	cat^ = n^
@@ -248,11 +252,10 @@ folded_string :: proc(n: ^Node) -> bool {
 
 @(private = "file")
 least_count :: proc(n: ^Node) -> ^Node {
-	cut := new(Node)
 	if n.min == 0 {
-		cut.kind = .Empty
-		return cut
+		return new_node(.Empty)
 	}
+	cut := new(Node)
 	cut^ = n^
 	cut.max = cut.min
 	return cut
@@ -273,7 +276,7 @@ min_length :: proc(n: ^Node) -> (least: int, sure: bool) {
 		sure = true
 		for k in n.kids {
 			l, s := min_length(k)
-			least += l
+			least = max(int) if least > max(int) - l else least + l
 			sure &&= s
 		}
 		return
@@ -309,7 +312,7 @@ min_length :: proc(n: ^Node) -> (least: int, sure: bool) {
 			return 0, true
 		}
 		least, sure = min_length(n.kids[0])
-		return n.min * least, sure
+		return sat_mul(n.min, least), sure
 	case .Look:
 		#partial switch n.look {
 		case .Atomic:
@@ -323,25 +326,20 @@ min_length :: proc(n: ^Node) -> (least: int, sure: bool) {
 	case .Call:
 		return 0, false
 	case .Absent:
-		// Oniguruma finds the absent with a repeat of exp's single character when exp is one, or of any. That repeat
-		// may stop at once, so the fewest is 0 for a stopper and for such an exp. Otherwise it is exp's fewest.
-		if len(n.kids) < 2 || simple_repeat_exp(n.kids[1]) {
+		// Oniguruma finds the absent with a repeat of exp's single character when exp is one (is_simple_one_char_repeat),
+		// or of any. That repeat may stop at once, so the fewest is 0 for a stopper and for such an exp.
+		if len(n.kids) < 2 {
 			return 0, true
 		}
-		return min_length(n.kids[1])
+		e := n.kids[1]
+		if e.kind == .Repeat && e.greedy && !e.bag {
+			if x := e.kids[0]; !x.bag && (x.kind == .Char || x.kind == .Class && !word_type(x.class)) {
+				return 0, true
+			}
+		}
+		return min_length(e)
 	}
 	return 0, true
-}
-
-// Oniguruma's is_simple_one_char_repeat: whether `n` is a greedy repeat, possessive or not, of one character or class
-// (\w and `.` are types, not classes).
-@(private = "file")
-simple_repeat_exp :: proc(n: ^Node) -> bool {
-	if n.kind != .Repeat || !n.greedy || n.bag {
-		return false
-	}
-	x := n.kids[0]
-	return !x.bag && (x.kind == .Char || x.kind == .Class && !word_type(x.class))
 }
 
 // Returns the number of runes `n` always matches, as a look-behind needs it, and whether that is fixed. A group that a
@@ -363,7 +361,7 @@ fixed_length :: proc(c: ^Compiler, n: ^Node, referred := false, untuned := false
 		sum := 0
 		for k in n.kids {
 			l, ok := fixed_length(c, k, referred, untuned)
-			if !ok {
+			if !ok || sum > int(max(i32)) - l {
 				return 0, false
 			}
 			sum += l
@@ -390,7 +388,10 @@ fixed_length :: proc(c: ^Compiler, n: ^Node, referred := false, untuned := false
 			return 0, true
 		}
 		l, ok := fixed_length(c, n.kids[0], referred, untuned)
-		return l * n.min, ok && n.max > 0 && (l == 0 || n.min == n.max)
+		if !ok || n.max <= 0 || (l != 0 && (n.min != n.max || n.min > int(max(i32)) / l)) {
+			return 0, false
+		}
+		return l * n.min, true
 	case .Assert:
 		#partial switch n.assert {
 		case .End_Buf, .Semi_End_Buf:

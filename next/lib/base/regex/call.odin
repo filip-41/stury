@@ -7,19 +7,19 @@ package regex
 // which calls it again, or calls it before reading a byte (infinite_recursive_call_check_trav).
 
 @(private = "file")
-EXIST: int : 1
+Rec_Flag :: enum u8 { Exist, Must, Infinite }
 @(private = "file")
-MUST: int : 2
-@(private = "file")
-INFINITE: int : 4
+Rec :: bit_set[Rec_Flag; u8]
 
+@(private = "file")
+Group_Flag :: enum u8 { Mark1, Mark2, Measured, Empty } // MARK1/MARK2, FIXED_MIN measured and empty
+
+@(private = "file")
 Calls :: struct {
-	groups:       []^Node,
-	called:       []bool,
-	recursive:    []bool,
-	mark1, mark2: []bool, // Oniguruma's MARK1 (the group being checked) and MARK2 (a group on the way)
-	measured:     []bool, // a group's least byte length, as node_min_byte_len caches it (FIXED_MIN)
-	empty:        []bool, // that length is 0
+	groups:    []^Node,
+	called:    []bool,
+	recursive: []bool,
+	state:     []bit_set[Group_Flag; u8],
 }
 
 // Fills `called` and `recursive` by group number for the calls in `root`, each resolved to its group in `groups` by
@@ -29,10 +29,10 @@ check_calls :: proc(root: ^Node, groups: []^Node, called, recursive: []bool) -> 
 		groups    = groups,
 		called    = called,
 		recursive = recursive,
-		mark1     = make([]bool, len(groups)),
-		mark2     = make([]bool, len(groups)),
-		measured  = make([]bool, len(groups)),
-		empty     = make([]bool, len(groups)),
+		state     = make([]bit_set[Group_Flag; u8], len(groups)),
+	}
+	if gate_failed(context.allocator) {
+		return MEMORY_ERROR
 	}
 	reach(&r, root, true)
 	return "never ending recursion" if find_recursion(&r, root, false) else ""
@@ -61,12 +61,12 @@ find_recursion :: proc(r: ^Calls, n: ^Node, in_recursion: bool) -> (never_ends: 
 	in_recursion := in_recursion
 	if n.kind == .Group {
 		g := n.group
-		r.mark1[g] = true
+		r.state[g] += {.Mark1}
 		if (r.called[g] || in_recursion) && !r.recursive[g] {
-			r.recursive[g] = recursion_of(r, n.kids[0], false, true) & EXIST != 0
+			r.recursive[g] = .Exist in recursion_of(r, n.kids[0], false, true)
 		}
-		never_ends = r.recursive[g] && r.called[g] && recursion_of(r, n.kids[0], true) & (MUST | INFINITE) != 0
-		r.mark1[g] = false
+		never_ends = r.recursive[g] && r.called[g] && recursion_of(r, n.kids[0], true) & {.Must, .Infinite} != {}
+		r.state[g] -= {.Mark1}
 		in_recursion ||= r.recursive[g]
 	}
 	for k in n.kids {
@@ -75,79 +75,69 @@ find_recursion :: proc(r: ^Calls, n: ^Node, in_recursion: bool) -> (never_ends: 
 	return
 }
 
-// How `n` reaches the group marked mark1: EXIST on some path, MUST on every path, INFINITE before a byte is
+// How `n` reaches the group marked Mark1: Exist on some path, Must on every path, Infinite before a byte is
 // read (`head`). A repeat of none reaches nothing, but `in_none` for whether a group's body calls itself.
 @(private = "file")
-recursion_of :: proc(r: ^Calls, n: ^Node, head: bool, in_none := false) -> int {
+recursion_of :: proc(r: ^Calls, n: ^Node, head: bool, in_none := false) -> Rec {
 	#partial switch n.kind {
 	case .Cat:
 		head := head
-		out := 0
+		out: Rec
 		for k in n.kids {
 			ret := recursion_of(r, k, head, in_none)
-			if ret & INFINITE != 0 {
+			if .Infinite in ret {
 				return ret
 			}
-			out |= ret
+			out += ret
 			head &&= can_be_empty(k, r)
 		}
 		return out
-	case .Alt:
-		out, must := 0, MUST
+	case .Alt, .Cond:
+		out, must := Rec{}, Rec{.Must}
 		for k in n.kids {
 			ret := recursion_of(r, k, head, in_none)
-			if ret & INFINITE != 0 {
+			if .Infinite in ret {
 				return ret
 			}
-			out |= ret & EXIST
+			out += ret & {.Exist}
 			must &= ret
 		}
 		return out | must
-	case .Cond:
-		yes := recursion_of(r, n.kids[0], head, in_none)
-		if yes & INFINITE != 0 {
-			return yes
-		}
-		no := recursion_of(r, n.kids[1], head, in_none)
-		if no & INFINITE != 0 {
-			return no
-		}
-		return yes | no & EXIST if no & MUST != 0 else (yes | no) & EXIST
 	case .Repeat:
 		if n.max == 0 && !in_none {
-			return 0
+			return {}
 		}
 		ret := recursion_of(r, n.kids[0], head, in_none)
-		return ret & ~MUST if n.min == 0 else ret
+		return ret - {.Must} if n.min == 0 else ret
 	case .Look:
 		return recursion_of(r, n.kids[0], head, in_none)
 	case .Call:
 		return recursion_of(r, n.target, head, in_none)
 	case .Group:
 		g := n.group
-		if r.mark2[g] {
-			return 0
+		if .Mark2 in r.state[g] {
+			return {}
 		}
-		if r.mark1[g] {
-			return EXIST | MUST | INFINITE if head else EXIST | MUST
+		if .Mark1 in r.state[g] {
+			return {.Exist, .Must, .Infinite} if head else {.Exist, .Must}
 		}
-		r.mark2[g] = true
+		r.state[g] += {.Mark2}
 		ret := recursion_of(r, n.kids[0], head, in_none)
-		r.mark2[g] = false
+		r.state[g] -= {.Mark2}
 		return ret
 	case .Absent:
 		// Oniguruma looks for the absent in a repeat that may stop at once, and runs exp after it.
 		if len(n.kids) == 0 {
-			return 0
+			return {}
 		}
 		out := recursion_of(r, n.kids[0], head, in_none)
-		if out & INFINITE != 0 || len(n.kids) == 1 {
-			return out & ~MUST
+		if .Infinite in out || len(n.kids) == 1 {
+			return out - {.Must}
 		}
 		ret := recursion_of(r, n.kids[1], head, in_none)
-		return ret if ret & INFINITE != 0 else out & ~MUST | ret
+		return ret if .Infinite in ret else (out - {.Must}) | ret
 	}
-	return 0
+	return {}
 }
 
 // Whether `n` can match without a byte. With `r`, as Oniguruma's node_min_byte_len counts while it checks
@@ -198,15 +188,15 @@ can_be_empty :: proc(n: ^Node, r: ^Calls = nil) -> bool {
 @(private = "file")
 group_empty :: proc(r: ^Calls, n: ^Node) -> bool {
 	g := n.group
-	if r.measured[g] {
-		return r.empty[g]
+	if .Measured in r.state[g] {
+		return .Empty in r.state[g]
 	}
-	if r.mark1[g] {
+	if .Mark1 in r.state[g] {
 		return true
 	}
-	r.mark1[g] = true
+	r.state[g] += {.Mark1}
 	empty := can_be_empty(n.kids[0], r)
-	r.mark1[g] = false
-	r.empty[g], r.measured[g] = empty, true
+	r.state[g] -= {.Mark1}
+	r.state[g] += {.Measured, .Empty} if empty else {.Measured}
 	return empty
 }

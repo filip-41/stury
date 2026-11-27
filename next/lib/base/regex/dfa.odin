@@ -12,17 +12,10 @@ package regex
 // path through the program reaches Match, and the rule that an iteration may not match empty removes only paths that
 // a path without that iteration reproduces at the same position.
 
+import "base:intrinsics"
 import "core:strings"
 import "core:unicode/utf8"
 import "stury:lib/base/spell"
-
-// Limits on the automaton and its build. A program past any of them gets no automaton and the visited set answers.
-DFA_MAX_ITEMS :: 2048
-DFA_MAX_STATES :: 1024
-DFA_MAX_SYMBOLS :: 255
-DFA_MAX_TABLE :: 1 << 18 // entries of the table, its rows times their stride
-DFA_MAX_WORK :: 1 << 18 // instructions visited, set entries moved, ranges and cuts swept
-DFA_MAX_LOOKS :: 8 // leading look-aheads, each a component of the product's states
 
 // Rows of the state with no match left and of the state with a match found. A search stops at either.
 DEAD :: 0
@@ -43,17 +36,17 @@ Dfa :: struct {
 	// that ends the text, then for the text's end, where a state that matches there goes to the matched row.
 	table:   []u32,
 	stride:  u32,
-	starts:  [CLASSES]u32, // the row a search starts in, by the class of the character before its start
-	ascii:   [128]u8, // each ASCII character's symbol
-	bounds:  []rune, // the first of each run of non-ASCII characters that share a symbol, from 0x80
-	symbols: []u8, // the symbol of each run
-	classes: []u8, // each symbol's class
-	final:   u8, // the class of a newline that ends the text
 	// The rows before `start_end` are the start rows, those of the thread at the program's start alone. There a search
 	// may skip to the next place a match can start, the next first byte of `head`. 0 when `head` is not known.
 	start_end: u32,
-	head:      Search_Opt,
+	starts:    [CLASSES]u32, // the row a search starts in, by the class of the character before its start
+	final:     u8, // the class of a newline that ends the text
 	anchored:  bool, // a start row is read only where a search starts, so a skip tests that byte and does not scan on
+	head:      ^Search_Opt,
+	ascii:     [128]u8, // each ASCII character's symbol
+	bounds:    []rune, // the first of each run of non-ASCII characters that share a symbol, from 0x80
+	symbols:   []u8, // the symbol of each run
+	classes:   []u8, // each symbol's class
 	// The automaton that finds where the first match in the backtracker's order ends. Its rows have the same stride,
 	// and an entry has FIRST_ENDS set when a match ends before the character it reads. Nil when it is not built.
 	first:        []u32,
@@ -64,12 +57,13 @@ Dfa :: struct {
 	// character it reads. `last_starts` is indexed by the class of the character after the end. Nil when `first` is.
 	last:        []u32,
 	last_starts: [CLASSES]u32,
-	// For a program with no loop except Reps: at most `choices` alternatives are tried for each way through its
-	// `splits` two-way choices and its Reps' counts, so a backtracker's retries at one start are bounded by the text
-	// left. -1 for a program with a loop.
-	choices, splits: int,
-	reps:            []i32, // each Rep's maximum count, -1 for unbounded
+	// For a program with no loop except Reps: its `splits` two-way choices and its Reps' counts bound a backtracker's
+	// retries at one start by the text left. -1 for a program with a loop.
+	splits: i32,
+	reps:   []i32, // each Rep's maximum count, -1 for unbounded
 }
+
+#assert(size_of(int) != 8 || size_of(Dfa) == 328)
 
 // Set on an entry of `Dfa.first` when a match ends where the character the entry reads begins. `Dfa.last` sets it when
 // a match starts after the character.
@@ -214,11 +208,11 @@ dfa_first :: proc(d: ^Dfa, s: string, start: int) -> (end, reach, first: int, ju
 dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bool) {
 	after := EDGE
 	if end < len(s) {
-		r, w := decode(s, end)
-		if w == 1 && s[end] >= 0x80 || spell.is_continuation(s[end]) {
+		r, w := utf8.decode_rune_in_string(s[end:])
+		if w == 1 && s[end] >= 0x80 {
 			return -1, false
 		}
-		after = int(d.classes[symbol_of(d, r)])
+		after = int(d.classes[d.ascii[r] if r < 0x80 else rune_symbol(d, r)])
 		if end == len(s) - 1 && r == '\n' {
 			after = int(d.final)
 		}
@@ -237,7 +231,7 @@ dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bo
 		if w == 1 && s[p - 1] >= 0x80 {
 			return -1, false
 		}
-		col := u32(symbol_of(d, r))
+		col := u32(d.ascii[r] if r < 0x80 else rune_symbol(d, r))
 		if p == len(s) && r == '\n' {
 			col = d.stride - 2
 		}
@@ -254,23 +248,20 @@ dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bo
 	return start, start >= 0
 }
 
-// Returns the next place from `i` where a match can start, `i` itself when `head` gives no first byte, or -1 for none.
-// Only a program that cannot match empty has a head.
+// Returns the next place from `i` where a match can start, or -1 for none. Only a program with a known head enters a
+// start row (`start_end` / `first_end` is 0 otherwise).
 @(private = "file")
 skip_to_lead :: #force_inline proc(d: ^Dfa, s: string, i: int) -> int {
-	h := &d.head
+	h := d.head
 	if d.anchored {
-		lead := h.exact[0] == s[i] if h.kind == .Exact else h.kind == .None || has_bit(h.set[:], int(s[i]))
+		lead := h.exact[0] == s[i] if h.kind == .Exact else has_bit(h.set[:], int(s[i]))
 		return i if lead else -1
 	}
-	#partial switch h.kind {
-	case .Exact:
+	if h.kind == .Exact {
 		k := strings.index_byte(s[i:], h.exact[0])
 		return i + k if k >= 0 else -1
-	case .Map:
-		return next_head_byte(h, s, i)
 	}
-	return i
+	return next_head_byte(h, s, i)
 }
 
 // Returns the class of the character before byte `i` of `s`, EDGE at 0. `valid` is false when the bytes before `i` do
@@ -294,19 +285,13 @@ start_class :: proc(d: ^Dfa, s: string, start: int) -> (before: int, ok: bool) {
 	if start == 0 {
 		return EDGE, true
 	}
-	r, w := utf8.decode_last_rune_in_string(s[:start])
-	if w == 1 && s[start - 1] >= 0x80 || start < len(s) && spell.is_continuation(s[start]) {
+	if start < len(s) && spell.is_continuation(s[start]) {
 		return 0, false
 	}
-	if start == len(s) && r == '\n' {
+	if start == len(s) && s[start - 1] == '\n' {
 		return int(d.final), true
 	}
-	return int(d.classes[symbol_of(d, r)]), true
-}
-
-@(private = "file")
-symbol_of :: #force_inline proc(d: ^Dfa, r: rune) -> u8 {
-	return d.ascii[r] if r < 0x80 else rune_symbol(d, r)
+	return class_before(d, s, start)
 }
 
 @(private = "file")
@@ -322,19 +307,26 @@ rune_symbol :: #force_inline proc(d: ^Dfa, r: rune) -> u8 {
 
 // Whether a backtracker's search of `d`'s program over `left` bytes stays within `limit` retries at each start.
 retries_bounded :: proc(d: ^Dfa, left, limit: int) -> bool {
-	if d.choices < 0 {
+	if d.splits < 0 || limit < 0 {
 		return false
 	}
-	bound := max(d.choices, 1)
-	for _ in 0 ..< d.splits {
-		if bound *= 2; bound > limit {
-			return false
-		}
+	most, bound := uint(limit), uint(max(int(d.splits) + len(d.reps), 1))
+	if bound > most {
+		return false
 	}
-	for r in d.reps {
-		if bound *= left + 1 if r < 0 else min(int(r), left + 1); bound > limit {
+	for _ in 0 ..< d.splits {
+		if bound > most >> 1 {
 			return false
 		}
+		bound *= 2
+	}
+	span := uint(left) + 1
+	for r in d.reps {
+		next, overflow := intrinsics.overflow_mul(bound, span if r < 0 else min(uint(r), span))
+		if overflow || next > most {
+			return false
+		}
+		bound = next
 	}
 	return true
 }
