@@ -158,8 +158,9 @@ next_window :: #force_no_inline proc(o: ^Search_Opt, s: string, at, limit: int, 
 		}
 		p += k
 	} else {
-		for p < limit && !has_bit(o.set[:], int(s[p])) {
-			p += spell.lead_width(s[p])
+		p = next_head_byte(o, s[:limit], p)
+		if p < 0 {
+			return -1
 		}
 	}
 	if p >= limit {

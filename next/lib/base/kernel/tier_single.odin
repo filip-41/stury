@@ -22,9 +22,30 @@ VECTOR_BYTES :: [Tier]int {
 	.Base = 16,
 }
 
+// Individual target SIMD capabilities on non-x86 targets, matching the `caps()` surface of `tier_amd64.odin`.
+Cap :: enum u8 {
+	Neon,
+	Pmull,
+	Simd128,
+}
+
+Caps :: bit_set[Cap; u32]
+#assert(size_of(Caps) == 4)
+
 @(require_results)
 tier :: #force_inline proc "contextless" () -> Tier {
 	return .Base
+}
+
+@(require_results)
+caps :: #force_inline proc "contextless" () -> Caps {
+	when ODIN_ARCH == .arm64 {
+		return {.Neon, .Pmull} when PMULL else {.Neon}
+	} else when IS_WASM && !SCALAR_WASM {
+		return {.Simd128}
+	} else {
+		return {}
+	}
 }
 
 // Lane j is `t[i[j]]`, for indices below 16. WebAssembly without `simd128` has no variable shuffle to lower

@@ -1,6 +1,7 @@
 package engine
 
 import "base:runtime"
+import "core:compress"
 import "core:strings"
 import "core:unicode/utf8"
 import "stury:cbor"
@@ -21,10 +22,12 @@ Compression_Kind :: enum u8 {
 	None,
 	Gzip,
 	Zstd,
+	Zlib,
 	Bzip2,
 	Xz,
 	Lz4,
 	Brotli,
+	Lzma,
 }
 
 @(private = "file")
@@ -36,7 +39,25 @@ Comp_Suffix :: struct {
 @(private = "file", rodata)
 COMP_SUFFIXES := [?]Comp_Suffix {
 	{"gz", .Gzip}, {"gzip", .Gzip}, {"zst", .Zstd}, {"zstd", .Zstd},
-	{"bz2", .Bzip2}, {"xz", .Xz}, {"lz4", .Lz4}, {"br", .Brotli},
+	{"zlib", .Zlib}, {"bz2", .Bzip2}, {"xz", .Xz}, {"lz4", .Lz4},
+	{"br", .Brotli}, {"lzma", .Lzma},
+}
+
+// Detects the compression container of `data` from magic bytes using `core:compress.which` plus RFC 8878 Zstd framing.
+detect_compression :: proc "contextless" (data: []u8) -> Compression_Kind {
+	if len(data) >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD {
+		return .Zstd
+	}
+	switch compress.which(data) {
+	case .Gzip:       return .Gzip
+	case .Zlib:       return .Zlib
+	case .BZip2:      return .Bzip2
+	case .LZ4_Frame:  return .Lz4
+	case .XZ:         return .Xz
+	case .LZMA_Alone: return .Lzma
+	case .Unknown:
+	}
+	return .None
 }
 
 @(private = "file")

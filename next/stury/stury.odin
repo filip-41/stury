@@ -13,11 +13,13 @@ import ddl_pkg "stury:lib/schema/ddl"
 import schema_pkg "stury:lib/schema/schema"
 
 // Clean universal v2 facade over all registered formats, backed by `stury:engine`, `stury:lib/core/tape`,
-// `stury:lib/ops/{write,edit,diff,css}`, `stury:lib/schema/{check,ddl,schema}`, `stury:jq`, and `stury:jsonpath`.
+// `stury:lib/ops/{write,edit,diff,css,typed}`, `stury:lib/schema/{check,ddl,schema}`, `stury:jq`, and `stury:jsonpath`.
 //
 // Design invariants:
 // - ONE concrete, non-generic `Document` across every format (JSON, TOML, XML, DSV, CBOR, YAML, HTML, MessagePack).
 // - Facts belong to the document, not its format: `doc_facts`, `comments`, and `attributes` inspect any document.
+// - Per-spec dead-stripping works via direct format packages (e.g. `json.build`, `cbor.unmarshal`), whereas `stury.*`
+//   routes dynamically through the `engine` registry across all registered formats.
 // - Zero global mutable state, zero `core:os`, zero `core:mem/virtual`, zero `context.temp_allocator`, WASM-clean.
 
 // Core document, overlay, and error types.
@@ -35,6 +37,11 @@ scan :: engine.scan
 write :: proc {
 	engine.write,
 	engine.write_to,
+}
+unmarshal :: engine.unmarshal
+marshal :: proc {
+	engine.marshal,
+	engine.marshal_to,
 }
 write_table :: engine.write_table
 write_markdown :: engine.write_markdown

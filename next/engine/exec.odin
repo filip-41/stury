@@ -55,6 +55,7 @@ Pred_Doc_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta)
 Count_Doc_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta) -> (count: u64, err: Exec_Error)
 Emit_Total_Proc :: #type proc(ctx: rawptr, total: u64, emit: Emitter) -> Exec_Error
 Spine_Collect_Proc :: #type proc(ctx: rawptr, doc: ^tape.Document, item_outputs: [][]u8, emit: Emitter) -> Exec_Error
+Spine_Reduce_Proc :: Spine_Collect_Proc
 Bad_Record_Proc :: #type proc(ctx: rawptr, bad: tape.Bad_Record) -> bool
 
 Fast_Json_Mode :: enum u8 {
@@ -91,6 +92,7 @@ Exec_Options :: struct {
 	pred_eval:               Pred_Doc_Proc,
 	pred_ctx:                rawptr,
 	spine_collect:           Spine_Collect_Proc,
+	spine_reduce:            Spine_Reduce_Proc,
 	on_bad_record:           Bad_Record_Proc,
 	bad_ctx:                 rawptr,
 	workers:                 Worker_Hooks,

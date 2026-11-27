@@ -560,7 +560,7 @@ step_tick :: #force_inline proc(m: ^Machine) -> bool {
 	if m.steps < 0 {
 		return true
 	}
-	if m.steps == 0 {
+	if m.steps == 0 && !step_refill(m, &m.steps) {
 		_ = fail_budget(m)
 		return false
 	}

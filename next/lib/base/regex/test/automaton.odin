@@ -445,6 +445,36 @@ test_head_skip_steps_over_the_bytes_a_lead_byte_claims :: proc(t: ^testing.T) {
 	}
 }
 
+// Window-based `.Map` prefiltering (`next_window`) scans long ASCII spans via `kernel.index_set` and steps over
+// invalid UTF-8 lead-claimed bytes without false hits.
+@(test)
+test_window_map_prefilter_uses_lead_skip :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for gap in ([?]int{0, 5, 16, 128, 300}) {
+		filler := strings.repeat("a", gap, context.temp_allocator)
+		// Bounded distance (`dist_min = 2, dist_max = 16`): `next_window` finds `[xy]` via SIMD `index_set`.
+		bounded_hit := strings.concatenate({filler, "bbx"}, context.temp_allocator)
+		bounded_miss := strings.concatenate({filler, "bbb"}, context.temp_allocator)
+		bounded_claimed := strings.concatenate({filler, "bb\xE2xy"}, context.temp_allocator)
+		for linear in ([?]bool{false, true}) {
+			r := search(`.{2,4}[xy]`, bounded_hit, linear, Mode{}, false)
+			testing.expectf(t, r.err == "" && r.lo == max(0, gap - 2), "bounded hit gap=%d linear=%v got=%d", gap, linear, r.lo)
+			r = search(`.{2,4}[xy]`, bounded_miss, linear, Mode{}, false)
+			testing.expectf(t, r.err == "" && r.lo == -1, "bounded miss gap=%d linear=%v got=%d", gap, linear, r.lo)
+			r = search(`.{2,4}[xy]`, bounded_claimed, linear, Mode{}, false)
+			testing.expectf(t, r.err == "" && r.lo == -1, "bounded claimed gap=%d linear=%v got=%d", gap, linear, r.lo)
+
+			// Unbounded distance (`dist_min = 1, dist_max = INFINITE_LEN`): `search_starts` probes `next_window`.
+			r = search(`.+[xy]`, bounded_hit, linear, Mode{}, false)
+			testing.expectf(t, r.err == "" && r.lo == 0, "unbounded hit gap=%d linear=%v got=%d", gap, linear, r.lo)
+			r = search(`.+[xy]`, bounded_miss, linear, Mode{}, false)
+			testing.expectf(t, r.err == "" && r.lo == -1, "unbounded miss gap=%d linear=%v got=%d", gap, linear, r.lo)
+			r = search(`.+[xy]`, bounded_claimed, linear, Mode{}, false)
+			testing.expectf(t, r.err == "" && r.lo == -1, "unbounded claimed gap=%d linear=%v got=%d", gap, linear, r.lo)
+		}
+	}
+}
+
 // A search over text that is not valid UTF-8 gives the same answer with or without caps, with or without the automata,
 // and the same span from the backtracker and from the automaton that finds spans.
 @(test)

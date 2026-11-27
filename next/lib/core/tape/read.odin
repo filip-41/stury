@@ -333,7 +333,14 @@ number_exact :: proc "contextless" (doc: ^Document, at: Node_Index) -> (i: i64, 
 // as `node_text` does. False for `ok` as `node_text` gives it.
 @(require_results)
 text_is_ascii :: proc "contextless" (doc: ^Document, at: Node_Index, buf: []u8) -> (ascii, ok: bool) #no_bounds_check {
-	s := node_text_in(doc, at, buf) or_return
+	if at == NO_NODE {
+		return false, false
+	}
+	t := doc.nodes[at]
+	if u8(t.kind) - u8(Kind.String) <= 1 && t.spelling & SPELLING_ASCII != 0 {
+		return true, true
+	}
+	s := node_text_token(doc, t, buf) or_return
 	p, n := raw_data(s), len(s)
 	i := 0
 	for ; i + 8 <= n; i += 8 {

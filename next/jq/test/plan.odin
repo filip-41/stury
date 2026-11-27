@@ -647,6 +647,37 @@ regression_used_globals_iterative_deep_filter :: proc(t: ^testing.T) {
 	testing.expect_value(t, cplan.sources[.Main].mode, query.Demand_Mode.Whole)
 }
 
+@(test)
+plan_wide_75_field_projection_stays_partial :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	arena: virtual.Arena
+	testing.expect(t, suite_arena(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+
+	sb := strings.builder_make()
+	strings.write_byte(&sb, '{')
+	for i in 0 ..< 75 {
+		if i > 0 {
+			strings.write_string(&sb, ", ")
+		}
+		fmt.sbprintf(&sb, "f%d: .f%d", i, i)
+	}
+	strings.write_byte(&sb, '}')
+
+	prog, plan := analyze_src(t, strings.to_string(sb))
+	defer jq.destroy_program(prog)
+	defer jq.destroy_plan(&plan)
+
+	s := &plan.sources[.Main]
+	testing.expect_value(t, s.mode, query.Demand_Mode.Partial)
+	testing.expect_value(t, len(s.paths), 75)
+	testing.expect_value(t, plan.hints.projection.shape, query.Projection_Shape.Object)
+	testing.expect_value(t, len(plan.hints.projection.fields), 75)
+	testing.expect(t, has_path(s, {tape.Name("f0")}, .Whole))
+	testing.expect(t, has_path(s, {tape.Name("f74")}, .Whole))
+}
+
 @(private = "file")
 read_owned_json :: proc(h: ^query.Heap, text: string) -> (query.Value, bool) {
 	src := transmute([]u8)strings.clone(text)

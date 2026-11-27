@@ -1,6 +1,7 @@
 package hook_test
 
 import "base:runtime"
+import "core:mem"
 import "core:testing"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
@@ -104,4 +105,70 @@ piece_path_clears_open_on_oom :: proc(t: ^testing.T) {
 	err := hook.piece_path(&p, src, &fmt)
 	testing.expect_value(t, err, runtime.Allocator_Error.Out_Of_Memory)
 	testing.expect(t, p.open == nil)
+}
+
+// `piece_levels` strictly uses `frames.allocator` (never falling back to the global heap), enforces `Memory_Budget`,
+// rejects size overflow and nil/failing allocators cleanly, and preserves existing contents on OOM.
+@(test)
+piece_levels_budget_and_oom_safety :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Level :: struct {
+		a, b: u64,
+	}
+	levels := [4]Level{{1, 2}, {3, 4}, {5, 6}, {7, 8}}
+
+	// Zero-length copy succeeds even with a nil allocator; non-zero copy with nil allocator fails cleanly.
+	uninit: [dynamic]u8
+	testing.expect(t, hook.piece_levels(&uninit, raw_data(levels[:]), 0))
+	testing.expect_value(t, len(uninit), 0)
+	testing.expect(t, !hook.piece_levels(&uninit, raw_data(levels[:]), 1))
+	testing.expect(t, uninit.allocator.procedure == nil && raw_data(uninit) == nil)
+
+	// Explicit `mem.nil_allocator()` fails cleanly without panicking.
+	nil_frames: [dynamic]u8
+	nil_frames.allocator = mem.nil_allocator()
+	testing.expect(t, !hook.piece_levels(&nil_frames, raw_data(levels[:]), 1))
+
+	// Byte-size overflow is rejected before touching the allocator.
+	ovf_frames: [dynamic]u8
+	ovf_frames.allocator = context.allocator
+	testing.expect(t, !hook.piece_levels(&ovf_frames, raw_data(levels[:]), u64(max(int) / size_of(Level)) + 1))
+	testing.expect(t, raw_data(ovf_frames) == nil)
+
+	// Budgeted allocator enforces `Budget.memory`, records `refused`, and frees back to zero held bytes.
+	mb := hook.Memory_Budget{backing = context.allocator, limit = 2 * size_of(Level)}
+	frames: [dynamic]u8
+	frames.allocator = hook.memory_budget(&mb)
+	defer {
+		delete(frames)
+		testing.expect_value(t, mb.held, u64(0))
+	}
+
+	testing.expect(t, hook.piece_levels(&frames, raw_data(levels[:]), 2))
+	testing.expect_value(t, len(frames), 2 * size_of(Level))
+	testing.expect_value(t, mb.held, u64(2 * size_of(Level)))
+	got := ([^]Level)(raw_data(frames))[:2]
+	testing.expect_value(t, got[0], levels[0])
+	testing.expect_value(t, got[1], levels[1])
+
+	// Growing past `mb.limit` fails cleanly, sets `mb.refused`, and preserves prior contents.
+	testing.expect(t, !hook.piece_levels(&frames, raw_data(levels[:]), 3))
+	testing.expect(t, mb.refused)
+	testing.expect_value(t, len(frames), 2 * size_of(Level))
+	testing.expect_value(t, ([^]Level)(raw_data(frames))[1], levels[1])
+
+	// Shrinking within existing capacity needs no allocation and copies the requested prefix.
+	testing.expect(t, hook.piece_levels(&frames, raw_data(levels[2:]), 1))
+	testing.expect_value(t, len(frames), size_of(Level))
+	testing.expect_value(t, ([^]Level)(raw_data(frames))[0], levels[2])
+
+	// Failing backing allocator returns false without leaking or corrupting.
+	fa := testkit.Failing{backing = context.allocator, fail_at = 1, sticky = true}
+	fframes: [dynamic]u8
+	fframes.allocator = testkit.failing_allocator(&fa)
+	defer delete(fframes)
+	testing.expect(t, hook.piece_levels(&fframes, raw_data(levels[:]), 1))
+	testing.expect(t, !hook.piece_levels(&fframes, raw_data(levels[:]), 4))
+	testing.expect_value(t, len(fframes), size_of(Level))
+	testing.expect_value(t, ([^]Level)(raw_data(fframes))[0], levels[0])
 }

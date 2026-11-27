@@ -198,14 +198,47 @@ nest_of :: #force_inline proc "contextless" (a: Action) -> Nest {
 	return .None
 }
 
-// Copies `d` levels of `stack` into `frames` (using `frames`'s own allocator).
+// Copies `d` levels of `stack` into `frames` using `frames.allocator` (never falling back to the global heap).
+// Returns false on byte-size overflow, nil allocator when growth is needed, or allocation failure.
 piece_levels :: proc "contextless" (frames: ^[dynamic]u8, stack: [^]$L, d: u64) -> bool {
-	context = runtime.default_context()
+	when size_of(L) > 0 {
+		if d > u64(max(int) / size_of(L)) {
+			return false
+		}
+	}
 	size := int(d) * size_of(L)
-	if resize(frames, size) != nil {
+	raw := (^runtime.Raw_Dynamic_Array)(frames)
+	if size > raw.cap {
+		alloc := frames.allocator
+		if alloc.procedure == nil {
+			return false
+		}
+		if !piece_levels_grow(raw, size, alloc) {
+			return false
+		}
+	}
+	raw.len = size
+	if size > 0 {
+		intrinsics.mem_copy_non_overlapping(raw.data, stack, size)
+	}
+	return true
+}
+
+@(private = "file", cold)
+piece_levels_grow :: #force_no_inline proc "contextless" (raw: ^runtime.Raw_Dynamic_Array, size: int, alloc: runtime.Allocator) -> bool {
+	context = runtime.Context{allocator = alloc}
+	block: []u8
+	err: runtime.Allocator_Error
+	if raw.data == nil || raw.cap == 0 {
+		block, err = runtime.mem_alloc_non_zeroed(size, align_of(u8), alloc)
+	} else {
+		block, err = runtime.non_zero_mem_resize(raw.data, raw.cap, size, align_of(u8), alloc)
+	}
+	if err != nil || len(block) < size || raw_data(block) == nil {
 		return false
 	}
-	intrinsics.mem_copy_non_overlapping(raw_data(frames^), stack, size)
+	raw.data = raw_data(block)
+	raw.cap = size
 	return true
 }
 

@@ -226,4 +226,21 @@ object_put_short_long_keys_partial_taint_numbers_and_shallow_all_plan :: proc(t:
 
 	d_lim := query.finalize_source_demand(mk_paths(five[:], limit = 10), false, context.temp_allocator)
 	testing.expect_value(t, d_lim.mode, query.Demand_Mode.Partial)
+
+	// Wide static projection (75 paths) stays `.Partial` rather than degrading at v1's 64-path cap.
+	{
+		name_buf: [75][3]u8
+		wide_paths: [75]query.Demand_Path
+		wide_steps: [75][1]tape.Step
+		for i in 0 ..< 75 {
+			name_buf[i] = {'c', u8('0' + i / 10), u8('0' + i % 10)}
+			wide_steps[i][0] = tape.Name(string(name_buf[i][:]))
+			wide_paths[i] = {steps = wide_steps[i][:], grain = .Whole}
+		}
+		d_75 := query.finalize_source_demand(wide_paths[:], false, context.allocator)
+		defer query.destroy_source_demand(&d_75)
+		testing.expect_value(t, d_75.mode, query.Demand_Mode.Partial)
+		testing.expect_value(t, len(d_75.paths), 75)
+		testing.expect_value(t, len(d_75.demand.nodes), 76)
+	}
 }

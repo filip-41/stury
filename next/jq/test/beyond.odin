@@ -252,6 +252,12 @@ false`},
 	{`try (253402300800 | torfc3339) catch .`, "null", `"torfc3339() input is outside the years 0000 to 9999"`},
 	{`try ("x" | torfc3339) catch .`, "null", `"torfc3339() requires numeric inputs"`},
 	{`[builtins | index("fromrfc3339/0"), index("torfc3339/0")] | map(. != null)`, "null", "[true,true]"},
+	{`"" | [grapheme_length, graphemes, grapheme_slice(0; 1)]`, "null", `[0,[],""]`},
+	{`"hello" | [grapheme_length, graphemes, grapheme_slice(1; 4), grapheme_slice(2), grapheme_slice(-2; null)]`, "null", `[5,["h","e","l","l","o"],"ell","llo","lo"]`},
+	{`"cafe\u0301" | [length, grapheme_length, graphemes, grapheme_slice(3; 4)]`, "null", `[5,4,["c","a","f","é"],"é"]`},
+	{`"a👨‍👩‍👧‍👦🇵🇱b" | [grapheme_length, graphemes, grapheme_slice(1; 3), grapheme_slice(null; 2), grapheme_slice(-2; -1)]`, "null", `[4,["a","👨‍👩‍👧‍👦","🇵🇱","b"],"👨‍👩‍👧‍👦🇵🇱","a👨‍👩‍👧‍👦","🇵🇱"]`},
+	{`try (1 | graphemes) catch ., try (1 | grapheme_length) catch ., try (1 | grapheme_slice(0; 1)) catch .`, "null", `"graphemes input must be a string"` + "\n" + `"grapheme_length input must be a string"` + "\n" + `"grapheme_slice input must be a string"`},
+	{`try ("abc" | grapheme_slice("x"; 1)) catch .`, "null", `"grapheme_slice bounds must be integers or null"`},
 }
 
 @(test)

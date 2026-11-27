@@ -1,5 +1,6 @@
 package jq
 
+import "core:math"
 import "stury:lib/query"
 
 // stury's builtins beyond jq on texts: digests, codes, identifiers, URLs, query strings, logfmt, number formats, IP
@@ -149,4 +150,73 @@ v_pointer :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value)
 		return query.int_value(i), .Ok
 	}
 	return query.NULL, .Ok
+}
+
+// graphemes, grapheme_length, grapheme_slice(from) and grapheme_slice(from; to).
+@(private)
+v_grapheme :: proc(m: ^Machine, b: ^Builtin, x: query.Value, args: []query.Value) -> (res: query.Value, status: query.Status) {
+	if !query.is_text(x) {
+		return query.NULL, raise_joined(m, b.name, " input must be a string")
+	}
+	s := query.text_of(x)
+	switch b.name {
+	case "grapheme_length":
+		return query.int_value(i64(query.grapheme_count(s))), .Ok
+	case "graphemes":
+		v, ok := query.grapheme_split(m.h, s)
+		if !ok {
+			return query.NULL, .Error
+		}
+		return v, .Ok
+	}
+	// grapheme_slice(from) / grapheme_slice(from; to)
+	lo, ok_lo := grapheme_bound(args[0], 0, false)
+	if !ok_lo {
+		return query.NULL, raise_text(m, "grapheme_slice bounds must be integers or null")
+	}
+	hi := max(int)
+	if len(args) == 2 {
+		ok_hi: bool
+		hi, ok_hi = grapheme_bound(args[1], max(int), true)
+		if !ok_hi {
+			return query.NULL, raise_text(m, "grapheme_slice bounds must be integers or null")
+		}
+	}
+	sub := query.grapheme_slice(s, lo, hi)
+	if len(sub) == len(s) {
+		return query.retain(x), .Ok
+	}
+	return query.text_value(m.h, sub)
+}
+
+@(private = "file")
+grapheme_bound :: proc(v: query.Value, def: int, is_hi: bool) -> (int, bool) {
+	t := query.type_of(v)
+	if t == .Null || t == .Absent {
+		return def, true
+	}
+	if t != .Number {
+		return 0, false
+	}
+	if i, ok := query.as_i64(v); ok {
+		if i < i64(min(int)) {
+			return min(int), true
+		}
+		if i > i64(max(int)) {
+			return max(int), true
+		}
+		return int(i), true
+	}
+	f := query.as_f64(v)
+	if math.is_nan(f) {
+		return def, true
+	}
+	r := math.ceil(f) if is_hi else math.floor(f)
+	if r <= f64(min(int) / 2) {
+		return min(int), true
+	}
+	if r >= f64(max(int) / 2) {
+		return max(int), true
+	}
+	return int(r), true
 }

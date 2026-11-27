@@ -4,7 +4,8 @@ itself, lib/ops only lib/core and lib/base and never another lib/ops package, li
 and nothing under lib/ imports a package above lib/ or testkit. Above lib/: every top-level package that TOP_EDGES
 does not name is a format, and a format and host import only the layers below, a format never another package above
 lib/. The named packages (the facade, the registry, the query frontends, the C ABI, the CLI) may import the formats,
-host and each other as TOP_EDGES says, so cli uses engine like any library caller. Test packages and tools may import
+host and each other as TOP_EDGES says — except cli, which is restricted to engine, host, query frontends, and the
+minimal documented CLI_ALLOWED_LIB set (never formats, lib/base/*, or lib/ops/*). Test packages and tools may import
 anything inside next/. An import that leaves next/ fails everywhere."""
 
 import pathlib
@@ -21,6 +22,14 @@ TOP_EDGES = {
     "engine": set(),
     "cli": {"engine", "host", "jq", "jsonpath"},
     "capi": {"stury", "engine"},
+}
+# Thin-shell seam for `cli`: explicitly forbids format packages (`json`, `yaml`, ...), `lib/base/*`, and `lib/ops/*`.
+CLI_ALLOWED_LIB = {
+    "lib/core/tape",
+    "lib/query",
+    "lib/schema/schema",
+    "lib/schema/ddl",
+    "lib/schema/model",
 }
 HOST = "host"
 IMPORT = re.compile(r'^\s*import\s+(?:\w+\s+)?"([^"]+)"|^\s*(?:\w+\s+)?"(stury:[^"]+)"', re.M)
@@ -55,6 +64,8 @@ def allowed(src: str, dst: str) -> bool:
         return d < s or d == s and LAYERS[s] != "lib/ops"
     if src in QUERY_FRONTENDS:
         return d < len(LAYERS)
+    if src == "cli":
+        return dst in TOP_EDGES["cli"] or dst in CLI_ALLOWED_LIB
     if src in TOP_EDGES:
         return d < len(LAYERS) or dst == HOST or dst in TOP_EDGES[src] or is_format(dst)
     # A format or host: only the layers below lib/query.

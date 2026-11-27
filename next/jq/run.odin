@@ -1,5 +1,6 @@
 package jq
 
+import "base:intrinsics"
 import "base:runtime"
 import "stury:lib/core/tape"
 import "stury:lib/ops/css"
@@ -50,16 +51,41 @@ Run_End :: enum u8 {
 	Tainted, // a read reached a value a partial document did not keep (uncatchable)
 }
 
+Run_Options :: struct {
+	hooks:  ^Hooks, // optional host callbacks
+	steps:  int,    // evaluations each `run_value` may take, 0 for no bound
+	cancel: ^u32,   // optional external cancellation flag; non-zero aborts uncatchably
+}
+
 // Prepares a run of `prog` over heap `h`, its variables `globals` by slot of `Program.globals`, a missing one null.
-// The run borrows the globals, the hooks and the program.
+// The run borrows the globals, the hooks, the cancel flag and the program.
 // `steps` bounds the evaluations of each `run_value`, 0 for no bound.
-run_init :: proc(run: ^Run, prog: ^Program, h: ^query.Heap, globals: []query.Value, hooks: ^Hooks = nil, steps := 0) {
-	run.m = {h = h, prog = prog, hooks = hooks, empty = prog.empty, budget = steps}
+run_init_steps :: proc(run: ^Run, prog: ^Program, h: ^query.Heap, globals: []query.Value, hooks: ^Hooks = nil, steps := 0, cancel: ^u32 = nil) {
+	run.m = {h = h, prog = prog, hooks = hooks, empty = prog.empty, budget = steps, cancel = cancel}
 	g := make([]query.Value, len(prog.globals), h.allocator)
 	for &x, i in g {
 		x = query.retain(globals[i]) if i < len(globals) else query.NULL
 	}
 	run.m.globals = g
+}
+
+run_init_opts :: proc(run: ^Run, prog: ^Program, h: ^query.Heap, globals: []query.Value, opts: Run_Options) {
+	run_init_steps(run, prog, h, globals, opts.hooks, opts.steps, opts.cancel)
+}
+
+run_init_hooks_opts :: proc(run: ^Run, prog: ^Program, h: ^query.Heap, globals: []query.Value, hooks: ^Hooks, opts: Run_Options) {
+	run_init_steps(run, prog, h, globals, hooks if hooks != nil else opts.hooks, opts.steps, opts.cancel)
+}
+
+run_init :: proc {
+	run_init_steps,
+	run_init_opts,
+	run_init_hooks_opts,
+}
+
+// Whether the last run was aborted by its external cancellation flag.
+run_cancelled :: proc "contextless" (run: ^Run) -> bool {
+	return run.m.cancelled
 }
 
 // Runs the program on `input`, which it takes, each output to `out`, which takes it.
@@ -85,8 +111,26 @@ run_exec :: proc(run: ^Run, input: query.Value, out: Output, data: rawptr, count
 	m.out, m.out_data = out, data
 	m.count_mode = count_only
 	m.out_count = 0
-	m.brk, m.through, m.over = nil, nil, false
-	m.steps = m.budget if m.budget > 0 else -1
+	m.brk, m.through, m.over, m.cancelled = nil, nil, false, false
+	if m.cancel != nil {
+		if intrinsics.atomic_load_explicit(m.cancel, .Relaxed) != 0 {
+			m.cancelled = true
+			query.release(m.h, input)
+			_ = fail_budget(m)
+			return 0, .Failed
+		}
+		if m.budget > 0 {
+			chunk := min(m.budget, CANCEL_CHECK_CHUNK)
+			m.steps = chunk
+			m.steps_rem = m.budget - chunk
+		} else {
+			m.steps = CANCEL_CHECK_CHUNK
+			m.steps_rem = -1
+		}
+	} else {
+		m.steps = m.budget if m.budget > 0 else -1
+		m.steps_rem = 0
+	}
 	m.track_origin = m.prog.uses_where || (m.hooks != nil && m.hooks.place != nil)
 	prev_keep := m.h.keep_origins
 	if m.track_origin {
@@ -94,6 +138,7 @@ run_exec :: proc(run: ^Run, input: query.Value, out: Output, data: rawptr, count
 		m.origin = query.retain(input) if query.has_doc_origin(input) else query.ABSENT
 	}
 	defer {
+		m.out, m.out_data = nil, nil
 		m.count_mode = false
 		if m.track_origin {
 			query.release(m.h, m.origin)

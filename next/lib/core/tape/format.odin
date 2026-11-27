@@ -63,7 +63,40 @@ Options :: struct {
 	// takes the runtime's default heap, so a read into an arena keeps only its result, or the read's allocator on a
 	// build with no heap (a freestanding target). Pass the read's allocator here to keep every block in it. Counted
 	// against `Budget.memory` with the read's own blocks.
-	scratch:  runtime.Allocator,
+	scratch:    runtime.Allocator,
+	// Optional cross-thread cancellation flag checked via relaxed atomic load, nil when unused. A non-zero value
+	// cancels the operation cleanly without changing `Budget`'s ABI layout.
+	cancel:     ^u32,
+	// Optional structural hint carried across repeated reads of similarly shaped inputs, nil when unused.
+	shape_hint: ^Shape_Hint,
+}
+
+// Structural properties a caller or prior read may record in a `Shape_Hint`.
+Shape_Flag :: enum u8 {
+	Flat,         // shallow / non-nested record structure
+	Uniform_Keys, // objects share a repeating key order
+	Ascii_Text,   // strings and keys are predominantly unescaped ASCII
+	Homogeneous,  // array elements share a uniform shape
+}
+
+Shape_Flags :: bit_set[Shape_Flag; u16]
+
+// Compact structural hint carried across repeated reads or queries of similarly shaped inputs to guide buffer
+// pre-sizing and speculative key prediction. Zero value means no hint.
+Shape_Hint :: struct {
+	schema: u64, // structural key-set / shape fingerprint, 0 if unknown
+	nodes:  u32, // expected node count, 0 if unknown
+	flags:  Shape_Flags,
+	depth:  u8, // expected maximum nesting depth (saturated at 255), 0 if unknown
+	keys:   u8, // typical object member count (saturated at 255), 0 if unknown
+}
+
+#assert(size_of(Shape_Hint) == 16)
+
+// Returns whether the optional cross-thread cancellation flag is set, false when `flag == nil`.
+@(require_results)
+is_canceled :: #force_inline proc "contextless" (flag: ^u32) -> bool {
+	return flag != nil && intrinsics.atomic_load_explicit(flag, .Relaxed) != 0
 }
 
 // The options of a read that one format family alone has, an arm per family. The union is closed and frozen before the C

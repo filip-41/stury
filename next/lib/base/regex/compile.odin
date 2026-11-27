@@ -199,6 +199,10 @@ program :: proc(pattern: string, syntax: Syntax, flags: Flags, allocator: mem.Al
 		// Upper 128 bytes stay set so SIMD head skipping stops at UTF-8 lead bytes (optimize.odin).
 		h.lead = kernel.byte_set([4]u64{h.set[0], h.set[1], max(u64), max(u64)})
 	}
+	if o.kind == .Map {
+		// Upper 128 bytes stay set so SIMD window skipping stops at UTF-8 lead bytes (skip.odin).
+		o.lead = kernel.byte_set([4]u64{o.set[0], o.set[1], max(u64), max(u64)})
+	}
 	re.narrowed = o.kind != .None || o.anchored || o.end != .None || o.threshold > 0
 	for ins in re.insts {
 		re.calls_or_limits ||= ins.op >= .Call

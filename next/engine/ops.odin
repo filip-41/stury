@@ -9,6 +9,7 @@ import "stury:lib/core/tape"
 import "stury:lib/ops/css"
 import "stury:lib/ops/diff"
 import "stury:lib/ops/edit"
+import ops_typed "stury:lib/ops/typed"
 import ops_write "stury:lib/ops/write"
 import "stury:lib/query"
 import schema_check "stury:lib/schema/check"
@@ -168,6 +169,76 @@ write_to :: proc(sink: io.Writer, doc: ^tape.Document, to: Spec, opts := ops_wri
 	case nil:
 	}
 	return {}, tape.Bad_Option{"to"}
+}
+
+@(require_results)
+unmarshal :: proc(
+	src: []u8,
+	target: ^$T,
+	spec: Spec,
+	read := ops_typed.Unmarshal_Options{},
+	opts := tape.Options{},
+	allocator := context.allocator,
+) -> tape.Error {
+	switch s in spec {
+	case json.Spec:    return json.unmarshal(src, target, s, read, opts, allocator)
+	case toml.Spec:    return toml.unmarshal(src, target, s, read, opts, allocator)
+	case dsv.Spec:     return dsv.unmarshal(src, target, s, read, opts, allocator)
+	case cbor.Spec:    return cbor.unmarshal(src, target, s, read, opts, allocator)
+	case yaml.Spec:    return yaml.unmarshal(src, target, s, read, opts, allocator)
+	case html.Spec:    return html.unmarshal(src, target, s, read, opts, allocator)
+	case msgpack.Spec: return msgpack.unmarshal(src, target, s, read, opts, allocator)
+	case xml.Spec, nil:
+	}
+	return tape.Bad_Option{"spec"}
+}
+
+@(require_results)
+marshal :: proc(
+	value: ^$T,
+	to: Spec,
+	opts := ops_write.Options{},
+	plan: ^ops_typed.Plan = nil,
+	allocator := context.allocator,
+) -> (
+	text: []u8,
+	err: ops_write.Error,
+) {
+	switch s in to {
+	case json.Spec:    return json.marshal(value, opts, plan, allocator)
+	case toml.Spec:    return toml.marshal(value, s, opts, plan, allocator)
+	case xml.Spec:     return xml.marshal(value, s, opts, plan, allocator)
+	case dsv.Spec:     return dsv.marshal(value, s, opts, plan, allocator)
+	case cbor.Spec:    return cbor.marshal(value, s, opts, plan, allocator)
+	case yaml.Spec:    return yaml.marshal(value, s, opts, plan, allocator)
+	case html.Spec:    return html.marshal(value, s, opts, plan, allocator)
+	case msgpack.Spec: return msgpack.marshal(value, s, opts, plan, allocator)
+	case nil:
+	}
+	return nil, tape.Bad_Option{"to"}
+}
+
+@(require_results)
+marshal_to :: proc(
+	sink: io.Writer,
+	value: ^$T,
+	to: Spec,
+	opts := ops_write.Options{},
+	plan: ^ops_typed.Plan = nil,
+	allocator := context.allocator,
+) -> ops_write.Error {
+	switch s in to {
+	case json.Spec:    return json.marshal_to(sink, value, opts, plan, allocator)
+	case toml.Spec:    return toml.marshal_to(sink, value, s, opts, plan, allocator)
+	case xml.Spec:     return xml.marshal_to(sink, value, s, opts, plan, allocator)
+	case dsv.Spec:     return dsv.marshal_to(sink, value, s, opts, plan, allocator)
+	case cbor.Spec:    return cbor.marshal_to(sink, value, s, opts, plan, allocator)
+	case yaml.Spec:    return yaml.marshal_to(sink, value, s, opts, plan, allocator)
+	case html.Spec:    return html.marshal_to(sink, value, s, opts, plan, allocator)
+	case msgpack.Spec: return msgpack.marshal_to(sink, value, s, opts, plan, allocator)
+	case nil:
+	}
+	return tape.Bad_Option{"to"}
 }
 
 @(require_results)

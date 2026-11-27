@@ -27,6 +27,38 @@ VECTOR_BYTES :: [Tier]int {
 	.V3 = 32,
 }
 
+// Individual x86-64 ISA capabilities, queried non-monotonically via `caps()` alongside the linear `Tier`.
+Cap :: enum u8 {
+	Ssse3,
+	Sse41,
+	Sse42,
+	Popcnt,
+	Pclmul,
+	Avx,
+	Avx2,
+	Bmi1,
+	Bmi2,
+	Avx512f,
+	Avx512bw,
+	Avx512vl,
+	Avx512_Vbmi2,
+	Vpclmul,
+}
+
+Caps :: bit_set[Cap; u32]
+#assert(size_of(Caps) == 4)
+#assert(len(Cap) < 32)
+
+@(private = "file")
+TIER_CAPS :: [Tier]Caps {
+	.V2 = {.Ssse3, .Sse41, .Sse42, .Popcnt},
+	.V3 = {.Ssse3, .Sse41, .Sse42, .Popcnt, .Pclmul, .Avx, .Avx2, .Bmi1, .Bmi2},
+}
+
+// Sentinel bit in `cached_caps` marking that CPUID/XGETBV has run (0 = unset).
+@(private = "file")
+CAPS_CACHED :: u32(1 << 31)
+
 @(private = "file")
 FORCED :: #config(TIER, -1)
 #assert(FORCED >= -1 && FORCED < len(Tier), "-define:TIER names no tier")
@@ -34,6 +66,10 @@ FORCED :: #config(TIER, -1)
 // 0 = unset, 1 = .V2, 2 = .V3.
 @(private = "file")
 cached_tier: u8
+
+// 0 = unset, else `CAPS_CACHED | transmute(u32)detected_caps`.
+@(private = "file")
+cached_caps: u32
 
 // The highest tier this CPU supports, or `Tier(TIER)` when `-define:TIER=<n>` is set (default -1, runtime detection).
 // Runtime detection probes CPUID and `xgetbv(0)` for OS-saved YMM state once via `detect_tier` and caches the result.
@@ -49,31 +85,99 @@ tier :: #force_inline proc "contextless" () -> Tier {
 	return Tier(c - 1)
 }
 
-// Probes CPUID and `xgetbv(0)`, caches `u8(tier) + 1`, and returns that cached encoding (1 = .V2, 2 = .V3).
+// Non-monotonic ISA capabilities supported by this CPU and OS, or the tier's fixed capability set when `-define:TIER=<n>`
+// is set. Runtime detection probes CPUID and `xgetbv(0)` once and caches the result atomically.
+@(require_results)
+caps :: #force_inline proc "contextless" () -> Caps {
+	when FORCED >= 0 {
+		return TIER_CAPS[Tier(FORCED)]
+	}
+	raw := intrinsics.atomic_load_explicit(&cached_caps, .Relaxed)
+	if intrinsics.unlikely(raw == 0) {
+		raw = detect_caps()
+	}
+	return transmute(Caps)(raw &~ CAPS_CACHED)
+}
+
+// Probes CPUID and `xgetbv(0)` once, populates both `cached_caps` and `cached_tier`, and returns `cached_caps`.
 @(private = "file", require_results)
-detect_tier :: #force_no_inline proc "contextless" () -> u8 {
-	t := Tier.V2
+detect_caps :: #force_no_inline proc "contextless" () -> u32 {
+	detected: Caps
 	max_id, _, _, _ := intrinsics.x86_cpuid(0, 0)
-	if max_id >= 7 {
-		// Leaf 1 ECX: PCLMULQDQ (1), SSSE3 (9), SSE4.1 (19), SSE4.2 (20), POPCNT (23), XSAVE (26), OSXSAVE (27), AVX (28).
-		// Both XSAVE and OSXSAVE must be set before `xgetbv(0)` to avoid trapping on hypervisors that expose only one.
-		ECX1_V3 :: u32(1 << 1 | 1 << 9 | 1 << 19 | 1 << 20 | 1 << 23 | 1 << 26 | 1 << 27 | 1 << 28)
-		// Leaf 7 subleaf 0 EBX: BMI1 (3), AVX2 (5), BMI2 (8).
-		EBX7_V3 :: u32(1 << 3 | 1 << 5 | 1 << 8)
+	if max_id >= 1 {
 		_, _, ecx1, _ := intrinsics.x86_cpuid(1, 0)
-		if ecx1 & ECX1_V3 == ECX1_V3 {
+		if ecx1 & (1 << 1) != 0 {
+			detected += {.Pclmul}
+		}
+		if ecx1 & (1 << 9) != 0 {
+			detected += {.Ssse3}
+		}
+		if ecx1 & (1 << 19) != 0 {
+			detected += {.Sse41}
+		}
+		if ecx1 & (1 << 20) != 0 {
+			detected += {.Sse42}
+		}
+		if ecx1 & (1 << 23) != 0 {
+			detected += {.Popcnt}
+		}
+		// Both XSAVE (26) and OSXSAVE (27) must be set before `xgetbv(0)` to avoid trapping on hypervisors exposing one.
+		XSAVE_OSXSAVE :: u32(1 << 26 | 1 << 27)
+		ymm_os, zmm_os := false, false
+		if ecx1 & XSAVE_OSXSAVE == XSAVE_OSXSAVE {
 			xcr0, _ := intrinsics.x86_xgetbv(0)
-			if xcr0 & 0x6 == 0x6 {
-				_, ebx7, _, _ := intrinsics.x86_cpuid(7, 0)
-				if ebx7 & EBX7_V3 == EBX7_V3 {
-					t = .V3
+			ymm_os = (xcr0 & 0x6) == 0x6
+			zmm_os = (xcr0 & 0xE6) == 0xE6
+		}
+		if ymm_os && ecx1 & (1 << 28) != 0 {
+			detected += {.Avx}
+		}
+		if max_id >= 7 {
+			_, ebx7, ecx7, _ := intrinsics.x86_cpuid(7, 0)
+			if ebx7 & (1 << 3) != 0 {
+				detected += {.Bmi1}
+			}
+			if ebx7 & (1 << 8) != 0 {
+				detected += {.Bmi2}
+			}
+			if .Avx in detected {
+				if ebx7 & (1 << 5) != 0 {
+					detected += {.Avx2}
+				}
+				if ecx7 & (1 << 10) != 0 {
+					detected += {.Vpclmul}
+				}
+			}
+			if zmm_os && .Avx in detected {
+				if ebx7 & (1 << 16) != 0 {
+					detected += {.Avx512f}
+				}
+				if ebx7 & (1 << 30) != 0 {
+					detected += {.Avx512bw}
+				}
+				if ebx7 & (1 << 31) != 0 {
+					detected += {.Avx512vl}
+				}
+				if ecx7 & (1 << 6) != 0 {
+					detected += {.Avx512_Vbmi2}
 				}
 			}
 		}
 	}
-	c := u8(t) + 1
-	intrinsics.atomic_store_explicit(&cached_tier, c, .Relaxed)
-	return c
+	raw := transmute(u32)detected | CAPS_CACHED
+	t: Tier = .V3 if TIER_CAPS[.V3] <= detected else .V2
+	intrinsics.atomic_store_explicit(&cached_caps, raw, .Relaxed)
+	intrinsics.atomic_store_explicit(&cached_tier, u8(t) + 1, .Relaxed)
+	return raw
+}
+
+// Probes CPUID and `xgetbv(0)`, caches `u8(tier) + 1`, and returns that cached encoding (1 = .V2, 2 = .V3).
+@(private = "file", require_results)
+detect_tier :: #force_no_inline proc "contextless" () -> u8 {
+	raw := detect_caps()
+	detected := transmute(Caps)(raw &~ CAPS_CACHED)
+	t: Tier = .V3 if TIER_CAPS[.V3] <= detected else .V2
+	return u8(t) + 1
 }
 
 @(private = "file")

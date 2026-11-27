@@ -149,7 +149,7 @@ write_error :: proc(h: ^query.Heap, out: ^[dynamic]u8, e: ^query.Error) {
 	case .Memory:
 		append(out, "Out of memory")
 	case .Budget:
-		append(out, "Budget exceeded")
+		append(out, e.detail if e.detail != "" else "Budget exceeded")
 	case .Depth:
 		#partial switch e.op {
 		case .Get_Path, .Set_Path, .Delete_Paths:

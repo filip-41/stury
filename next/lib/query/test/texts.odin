@@ -449,3 +449,70 @@ base_decoding_names_the_first_fault_jq_would :: proc(t: ^testing.T) {
 	v, s = query.encode_base(h, "", .Base64_Url, true)
 	testing.expect_value(t, text_answer(&x, t, v, s), `""`)
 }
+
+@(test)
+grapheme_clusters_count_slice_and_split :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	x: Test_Heap
+	heap_start(&x)
+	defer heap_done(t, &x)
+	h := &x.h
+
+	// Empty and plain ASCII.
+	testing.expect_value(t, query.grapheme_count(""), 0)
+	testing.expect_value(t, query.grapheme_count("hello"), 5)
+	testing.expect_value(t, query.grapheme_slice("hello", 1, 4), "ell")
+	testing.expect_value(t, query.grapheme_slice("hello", -2, 5), "lo")
+	testing.expect_value(t, query.grapheme_slice("hello", 3, 2), "")
+	testing.expect_value(t, query.grapheme_slice("hello", 0, 99), "hello")
+	testing.expect_value(t, query.grapheme_slice("hello", min(int), 2), "he")
+
+	// Combining mark: "e\u0301" is 2 code points, 1 grapheme cluster.
+	accented := "cafe\u0301"
+	testing.expect_value(t, query.codepoint_count(accented), 5)
+	testing.expect_value(t, query.grapheme_count(accented), 4)
+	testing.expect_value(t, query.grapheme_slice(accented, 3, 4), "e\u0301")
+	testing.expect_value(t, query.grapheme_slice(accented, -1, 4), "e\u0301")
+
+	// ZWJ emoji sequence: family (7 code points, 1 grapheme cluster).
+	FAMILY :: "👨‍👩‍👧‍👦"
+	testing.expect_value(t, query.grapheme_count(FAMILY), 1)
+	testing.expect_value(t, query.grapheme_count("a👨‍👩‍👧‍👦b"), 3)
+	testing.expect_value(t, query.grapheme_slice("a👨‍👩‍👧‍👦b", 1, 2), FAMILY)
+
+	// Regional indicator flags: Poland (2 code points, 1 grapheme) and two adjacent flags (2 graphemes).
+	FLAG_PL :: "🇵🇱"
+	testing.expect_value(t, query.grapheme_count(FLAG_PL), 1)
+	testing.expect_value(t, query.grapheme_count("🇵🇱🇺🇸"), 2)
+	testing.expect_value(t, query.grapheme_slice("🇵🇱🇺🇸", 0, 1), FLAG_PL)
+	testing.expect_value(t, query.grapheme_slice("🇵🇱🇺🇸", 1, 2), "🇺🇸")
+
+	// Mixed string split.
+	MIXED :: "A" + "e\u0301" + FAMILY + FLAG_PL + "Z"
+	testing.expect_value(t, query.grapheme_count(MIXED), 5)
+	testing.expect_value(t, query.grapheme_slice(MIXED, 1, 4), "e\u0301" + FAMILY + FLAG_PL)
+	testing.expect_value(t, query.grapheme_slice(MIXED, -2, -1), FLAG_PL)
+	testing.expect_value(t, query.grapheme_slice(MIXED, 10, 20), "")
+
+	v, ok := query.grapheme_split(h, MIXED)
+	testing.expect(t, ok)
+	testing.expect_value(t, text_answer(&x, t, v, .Ok), `["A","é","👨‍👩‍👧‍👦","🇵🇱","Z"]`)
+
+	ve, oke := query.grapheme_split(h, "")
+	testing.expect(t, oke)
+	testing.expect_value(t, text_answer(&x, t, ve, .Ok), `[]`)
+
+	va, oka := query.grapheme_split(h, "abc")
+	testing.expect(t, oka)
+	testing.expect_value(t, text_answer(&x, t, va, .Ok), `["a","b","c"]`)
+
+	// OOM-safety: tight heap budget returns `(NULL, false)` and leaks zero bytes.
+	tight: Test_Heap
+	heap_start(&tight)
+	tight.h.limit = 64
+	defer heap_done(t, &tight)
+	_, ok_oom := query.grapheme_split(&tight.h, "abcdefghij")
+	testing.expect(t, !ok_oom)
+	testing.expect_value(t, tight.h.err.kind, query.Error_Kind.Memory)
+	query.clear_error(&tight.h)
+}

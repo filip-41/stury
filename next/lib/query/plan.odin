@@ -11,8 +11,8 @@ import "stury:lib/core/tape"
 // execution hints (`Per_Element_Split`, `Projection_Template`, `Conditional_Whole`), and `--explain` formatting.
 
 // Caps past which a demand degrades to `.Whole` so planning and scanning stay bounded.
-MAX_DEMAND_PATHS :: 64
-MAX_DEMAND_NODES :: 128
+MAX_DEMAND_PATHS :: 1024
+MAX_DEMAND_NODES :: 4096
 
 // Which input source a `Source_Demand` describes.
 Source_Kind :: enum u8 {

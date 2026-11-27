@@ -1,6 +1,7 @@
 #+feature dynamic-literals
 package jq_tests
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:mem/virtual"
 import "core:strings"
@@ -288,6 +289,125 @@ perf_paths_negative_zero_c1_and_partial_doc_parity :: proc(t: ^testing.T) {
 		scan_out := run_doc(t, prog, &h, sdoc)
 		testing.expect_value(t, whole_out, want)
 		testing.expect_value(t, scan_out, want)
+		testing.expect_value(t, query.heap_live(&h), u64(0))
+	}
+}
+
+@(test)
+cancel_flag_aborts_uncatchably_and_preserves_steps :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	arena: virtual.Arena
+	testing.expect(t, suite_arena(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+
+	// 1. Pre-set cancel flag immediately aborts infinite `repeat(.)` and cannot be caught by `try`, `?`, or `//`.
+	for src in ([3]string{`repeat(.)`, `try (repeat(.)) catch "caught"`, `(repeat(.)?) // "fallback"`}) {
+		prog, errs := jq.compile(src)
+		testing.expect_value(t, len(errs), 0)
+		defer jq.destroy_program(prog)
+
+		h: query.Heap
+		query.heap_init(&h, runtime.heap_allocator())
+		defer query.heap_destroy(&h)
+
+		flag: u32 = 1
+		run: jq.Run
+		jq.run_init(&run, prog, &h, nil, jq.Run_Options{cancel = &flag})
+
+		outs := Outputs{h = &h}
+		defer delete(outs.vals)
+		end := jq.run_value(&run, query.int_value(1), collect, &outs)
+		testing.expect_value(t, end, jq.Run_End.Failed)
+		testing.expect(t, jq.run_cancelled(&run))
+		testing.expect_value(t, len(outs.vals), 0)
+		e := query.take_error(&h)
+		testing.expect_value(t, e.kind, query.Error_Kind.Budget)
+		testing.expect_value(t, jq.error_message(&h, &e), "Cancelled")
+		query.destroy_error(&h, &e)
+		jq.run_destroy(&run)
+		testing.expect_value(t, query.heap_live(&h), u64(0))
+	}
+
+	// 2. Flipping cancel flag mid-run stops `try (repeat(.)) catch "caught"` uncatchably within a chunk.
+	{
+		prog, errs := jq.compile(`try (repeat(.)) catch "caught"`)
+		testing.expect_value(t, len(errs), 0)
+		defer jq.destroy_program(prog)
+
+		h: query.Heap
+		query.heap_init(&h, runtime.heap_allocator())
+		defer query.heap_destroy(&h)
+
+		Mid_Ctx :: struct {
+			flag:  ^u32,
+			count: int,
+		}
+		on_out :: proc(data: rawptr, v: query.Value, hp: ^query.Heap) -> bool {
+			c := (^Mid_Ctx)(data)
+			query.release(hp, v)
+			c.count += 1
+			if c.count == 3 {
+				intrinsics.atomic_store_explicit(c.flag, 1, .Relaxed)
+			}
+			return true
+		}
+
+		flag: u32 = 0
+		ctx := Mid_Ctx{flag = &flag}
+		run: jq.Run
+		jq.run_init(&run, prog, &h, nil, jq.Run_Options{cancel = &flag})
+
+		end := jq.run_value(&run, query.int_value(7), on_out, &ctx)
+		testing.expect_value(t, end, jq.Run_End.Failed)
+		testing.expect(t, jq.run_cancelled(&run))
+		testing.expect(t, ctx.count >= 3 && ctx.count <= 300)
+		e := query.take_error(&h)
+		testing.expect_value(t, e.kind, query.Error_Kind.Budget)
+		query.destroy_error(&h, &e)
+		jq.run_destroy(&run)
+		testing.expect_value(t, query.heap_live(&h), u64(0))
+	}
+
+	// 3. Unset cancel flag (`0`) allows multi-chunk completion AND still honors explicit step budgets.
+	{
+		prog, errs := jq.compile(`[range(600)] | length`)
+		testing.expect_value(t, len(errs), 0)
+		defer jq.destroy_program(prog)
+
+		h: query.Heap
+		query.heap_init(&h, runtime.heap_allocator())
+		defer query.heap_destroy(&h)
+
+		flag: u32 = 0
+		run: jq.Run
+		jq.run_init(&run, prog, &h, nil, jq.Run_Options{cancel = &flag})
+		outs := Outputs{h = &h}
+		end := jq.run_value(&run, query.NULL, collect, &outs)
+		testing.expect_value(t, end, jq.Run_End.Done)
+		testing.expect(t, !jq.run_cancelled(&run))
+		testing.expect_value(t, len(outs.vals), 1)
+		testing.expect_value(t, outs.vals[0].i, i64(600))
+		query.release(&h, outs.vals[0])
+		delete(outs.vals)
+		jq.run_destroy(&run)
+
+		// With explicit step budget of 300 (crossing a 256-step chunk) and unset cancel flag -> fails as budget, not cancelled.
+		run2: jq.Run
+		jq.run_init(&run2, prog, &h, nil, jq.Run_Options{steps = 300, cancel = &flag})
+		outs2 := Outputs{h = &h}
+		end2 := jq.run_value(&run2, query.NULL, collect, &outs2)
+		testing.expect_value(t, end2, jq.Run_End.Failed)
+		testing.expect(t, !jq.run_cancelled(&run2))
+		e2 := query.take_error(&h)
+		testing.expect_value(t, e2.kind, query.Error_Kind.Budget)
+		testing.expect_value(t, jq.error_message(&h, &e2), "Budget exceeded")
+		query.destroy_error(&h, &e2)
+		for v in outs2.vals {
+			query.release(&h, v)
+		}
+		delete(outs2.vals)
+		jq.run_destroy(&run2)
 		testing.expect_value(t, query.heap_live(&h), u64(0))
 	}
 }

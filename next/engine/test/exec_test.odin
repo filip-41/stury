@@ -867,6 +867,214 @@ exec_spine_parallel_hint1_parity :: proc(t: ^testing.T) {
 }
 
 @(test)
+exec_spine_parallel_hint1_reduce_parity :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	pool: host.Pool
+	testing.expect(t, host.pool_init(&pool, 4) == nil)
+	defer host.pool_destroy(&pool)
+	runner := &pool.runner
+
+	reduce_items_with_jq :: proc(reduce_expr: string, item_outputs: [][]u8, emit: engine.Emitter) -> engine.Exec_Error {
+		ab := strings.builder_make()
+		defer strings.builder_destroy(&ab)
+		strings.write_byte(&ab, '[')
+		for item, idx in item_outputs {
+			if idx > 0 {
+				strings.write_byte(&ab, ',')
+			}
+			strings.write_bytes(&ab, item)
+		}
+		strings.write_byte(&ab, ']')
+
+		adoc, berr := json.build(transmute([]u8)strings.to_string(ab), .Json)
+		if berr != nil {
+			return .Read_Error
+		}
+		defer tape.destroy(&adoc)
+
+		p_red, errs := jq.compile(reduce_expr)
+		if len(errs) != 0 {
+			return .Failed
+		}
+		defer jq.destroy_program(p_red)
+		st: Jq_Eval_State
+		eval_state_init(&st, p_red, false)
+		defer eval_state_destroy(&st)
+		return jq_doc_eval(&st, &adoc, {}, emit)
+	}
+
+	reduce_sum_cb :: proc(_: rawptr, _: ^tape.Document, item_outputs: [][]u8, emit: engine.Emitter) -> engine.Exec_Error {
+		return reduce_items_with_jq(`reduce .[] as $x (0; . + $x)`, item_outputs, emit)
+	}
+	reduce_ordered_cb :: proc(_: rawptr, _: ^tape.Document, item_outputs: [][]u8, emit: engine.Emitter) -> engine.Exec_Error {
+		return reduce_items_with_jq(`reduce .[] as $x (0; (. * 7 + $x) % 1000003)`, item_outputs, emit)
+	}
+
+	// Build both a small JSON document (batch path) and a large JSON document (>= 4 KiB coarse 3-wave SIMD path).
+	sb_small := strings.builder_make()
+	defer strings.builder_destroy(&sb_small)
+	strings.write_string(&sb_small, `{"items":[`)
+	for i in 0 ..< 40 {
+		if i > 0 {
+			strings.write_byte(&sb_small, ',')
+		}
+		fmt.sbprintf(&sb_small, "{{\"id\":%d,\"pad\":\"x\"}}", i)
+	}
+	strings.write_string(&sb_small, `]}`)
+	small_bytes := transmute([]u8)strings.to_string(sb_small)
+
+	min_big := max(int(engine.SPINE_PARALLEL_FROM), 32 * 1024)
+	sb_big := strings.builder_make()
+	defer strings.builder_destroy(&sb_big)
+	strings.write_string(&sb_big, `{"items":[`)
+	for i := 0; strings.builder_len(sb_big) < min_big || i < 400; i += 1 {
+		if i > 0 {
+			strings.write_byte(&sb_big, ',')
+		}
+		fmt.sbprintf(&sb_big, "{{\"id\":%d,\"payload\":\"row_%d_padding_0123456789abcdef\"}}", i, i)
+	}
+	strings.write_string(&sb_big, `]}`)
+	big_bytes := transmute([]u8)strings.to_string(sb_big)
+
+	prog_sum, e1 := jq.compile(`reduce .items[] as $x (0; . + $x.id)`)
+	testing.expect_value(t, len(e1), 0)
+	defer jq.destroy_program(prog_sum)
+	plan_sum := jq.analyze(prog_sum)
+	defer jq.destroy_plan(&plan_sum)
+	testing.expect_value(t, plan_sum.hints.split.kind, query.Split_Kind.Reduce)
+
+	prog_each, e2 := jq.compile(`.id`)
+	testing.expect_value(t, len(e2), 0)
+	defer jq.destroy_program(prog_each)
+
+	each_st, full_st: Jq_Eval_State
+	eval_state_init(&each_st, prog_each, false)
+	defer eval_state_destroy(&each_st)
+	eval_state_init(&full_st, prog_sum, false)
+	defer eval_state_destroy(&full_st)
+
+	// 1. Small & large JSON (`reduce .items[] as $x (0; . + $x.id)`) route through `.Spine_Parallel` and match `.Whole`.
+	for input in ([?][]u8{small_bytes, big_bytes}) {
+		dec := engine.decide(&plan_sum.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(input)})
+		testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
+		testing.expect_value(t, dec.active_hint, engine.Active_Hint.Spine_Split)
+
+		lb_sp := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_sp)
+		res_sp := engine.execute(&plan_sum.contract, &dec, input, {
+			eval          = jq_doc_eval,
+			eval_ctx      = &full_st,
+			eval_each     = jq_doc_eval,
+			eval_each_ctx = &each_st,
+			spine_reduce  = reduce_sum_cb,
+			workers       = {init = worker_eval_init, fini = worker_eval_fini},
+			runner        = runner,
+			emit          = {fn = lines_emit, data = &lb_sp},
+		})
+		testing.expect_value(t, res_sp.err, engine.Exec_Error.None)
+		testing.expect_value(t, len(lb_sp.lines), 1)
+
+		_, _, lb_w := run_jq_engine(t, `reduce .items[] as $x (0; . + $x.id)`, json.Spec.Json, .Single, input, {force_whole = true})
+		defer destroy_lines(&lb_w)
+		testing.expect_value(t, len(lb_w.lines), 1)
+		testing.expect_value(t, lb_sp.lines[0], lb_w.lines[0])
+	}
+
+	// 2. Order-sensitive non-associative reduce on large JSON preserves exact single-thread determinism.
+	{
+		q_ord := `reduce .items[] as $x (0; (. * 7 + $x.id) % 1000003)`
+		prog_ord, eo := jq.compile(q_ord)
+		testing.expect_value(t, len(eo), 0)
+		defer jq.destroy_program(prog_ord)
+		plan_ord := jq.analyze(prog_ord)
+		defer jq.destroy_plan(&plan_ord)
+		testing.expect_value(t, plan_ord.hints.split.kind, query.Split_Kind.Reduce)
+
+		ord_full_st: Jq_Eval_State
+		eval_state_init(&ord_full_st, prog_ord, false)
+		defer eval_state_destroy(&ord_full_st)
+
+		dec := engine.decide(&plan_ord.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(big_bytes)})
+		testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
+
+		lb_sp := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_sp)
+		res_sp := engine.execute(&plan_ord.contract, &dec, big_bytes, {
+			eval          = jq_doc_eval,
+			eval_ctx      = &ord_full_st,
+			eval_each     = jq_doc_eval,
+			eval_each_ctx = &each_st,
+			spine_reduce  = reduce_ordered_cb,
+			workers       = {init = worker_eval_init, fini = worker_eval_fini},
+			runner        = runner,
+			emit          = {fn = lines_emit, data = &lb_sp},
+		})
+		testing.expect_value(t, res_sp.err, engine.Exec_Error.None)
+
+		_, _, lb_w := run_jq_engine(t, q_ord, json.Spec.Json, .Single, big_bytes, {force_whole = true})
+		defer destroy_lines(&lb_w)
+		testing.expect_value(t, len(lb_sp.lines), 1)
+		testing.expect_value(t, lb_sp.lines[0], lb_w.lines[0])
+	}
+
+	// 3. Empty array returns init (`0`), non-array matches `.Whole` error, and nil `spine_reduce` falls back cleanly.
+	{
+		empty_arr := transmute([]u8)string(`{"items":[]}`)
+		dec := engine.decide(&plan_sum.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(empty_arr)})
+		testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
+
+		lb_empty := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_empty)
+		r_empty := engine.execute(&plan_sum.contract, &dec, empty_arr, {
+			eval          = jq_doc_eval,
+			eval_ctx      = &full_st,
+			eval_each     = jq_doc_eval,
+			eval_each_ctx = &each_st,
+			spine_reduce  = reduce_sum_cb,
+			workers       = {init = worker_eval_init, fini = worker_eval_fini},
+			runner        = runner,
+			emit          = {fn = lines_emit, data = &lb_empty},
+		})
+		testing.expect_value(t, r_empty.err, engine.Exec_Error.None)
+		testing.expect_value(t, len(lb_empty.lines), 1)
+		testing.expect_value(t, lb_empty.lines[0], "0")
+
+		bad_arr := transmute([]u8)string(`{"items":123}`)
+		dec_bad := engine.decide(&plan_sum.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(bad_arr)})
+		lb_bad := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_bad)
+		r_bad := engine.execute(&plan_sum.contract, &dec_bad, bad_arr, {
+			eval          = jq_doc_eval,
+			eval_ctx      = &full_st,
+			eval_each     = jq_doc_eval,
+			eval_each_ctx = &each_st,
+			spine_reduce  = reduce_sum_cb,
+			workers       = {init = worker_eval_init, fini = worker_eval_fini},
+			runner        = runner,
+			emit          = {fn = lines_emit, data = &lb_bad},
+		})
+		testing.expect_value(t, r_bad.err, engine.Exec_Error.Failed)
+
+		// Without `spine_reduce`/`spine_collect`, engine falls back cleanly to `opts.eval` and matches `780`.
+		dec_fb := engine.decide(&plan_sum.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(small_bytes)})
+		lb_fb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_fb)
+		r_fb := engine.execute(&plan_sum.contract, &dec_fb, small_bytes, {
+			eval          = jq_doc_eval,
+			eval_ctx      = &full_st,
+			eval_each     = jq_doc_eval,
+			eval_each_ctx = &each_st,
+			runner        = runner,
+			emit          = {fn = lines_emit, data = &lb_fb},
+		})
+		testing.expect_value(t, r_fb.err, engine.Exec_Error.None)
+		testing.expect_value(t, len(lb_fb.lines), 1)
+		testing.expect_value(t, lb_fb.lines[0], "780")
+	}
+}
+
+@(test)
 exec_files_parallel_order_and_errors :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 

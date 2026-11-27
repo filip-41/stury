@@ -406,7 +406,18 @@ finish_spine_length :: proc(total_count: u64, opts: ^Exec_Options, res: ^Exec_Re
 }
 
 @(private = "file")
-finish_spine_collect :: proc(dec: ^Decision, src: []u8, item_outputs: [][]u8, opts: ^Exec_Options, res: ^Exec_Result) {
+spine_gather_cb :: proc "contextless" (kind: query.Split_Kind, opts: ^Exec_Options) -> Spine_Collect_Proc {
+	if kind == .Reduce {
+		return opts.spine_reduce if opts.spine_reduce != nil else opts.spine_collect
+	}
+	if kind == .Collect {
+		return opts.spine_collect
+	}
+	return nil
+}
+
+@(private = "file")
+finish_spine_gather :: proc(dec: ^Decision, src: []u8, item_outputs: [][]u8, cb: Spine_Collect_Proc, opts: ^Exec_Options, res: ^Exec_Result) {
 	doc_w: tape.Document
 	doc_ptr: ^tape.Document = nil
 	has_doc := false
@@ -423,7 +434,7 @@ finish_spine_collect :: proc(dec: ^Decision, src: []u8, item_outputs: [][]u8, op
 		tape.destroy(&doc_w)
 	}
 	g := Guard_Emit{inner = opts.emit}
-	cerr := opts.spine_collect(opts.eval_ctx, doc_ptr, item_outputs, Emitter{fn = guard_emit_fn, data = &g})
+	cerr := cb(opts.eval_ctx, doc_ptr, item_outputs, Emitter{fn = guard_emit_fn, data = &g})
 	res.emitted += g.emitted
 	if g.stopped && cerr == .None {
 		cerr = .Stopped
@@ -432,16 +443,19 @@ finish_spine_collect :: proc(dec: ^Decision, src: []u8, item_outputs: [][]u8, op
 }
 
 // Hint 1: `.Spine_Parallel` splits array elements reached by `prefix` across `opts.runner`,
-// preserving strict element order cleanly.
+// preserving strict element order cleanly (`.Stream`, `.Collect`, `.Reduce`, `.Length`).
 @(private)
 exec_spine_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: ^Exec_Options) -> Exec_Result {
 	sp := &plan.hints.split
 	is_length := sp.kind == .Length && sp.has_each
+	is_gather := sp.kind == .Collect || sp.kind == .Reduce
+	gather_cb := spine_gather_cb(sp.kind, opts)
 	if dups_needs_build(dec.entry, opts.read.dups) || opts.eval_each == nil {
 		return spine_fallback_whole(dec, src, opts)
 	}
 	if opts.runner == nil || opts.runner.threads <= 0 || len(src) < SPINE_PARALLEL_FROM ||
-	   (sp.kind == .Collect && opts.spine_collect == nil && !opts.spine_collect_compact) ||
+	   (sp.kind == .Collect && gather_cb == nil && !opts.spine_collect_compact) ||
+	   (sp.kind == .Reduce && gather_cb == nil) ||
 	   (is_length && (opts.eval_each_count == nil || opts.emit_spine_length == nil)) {
 		return spine_fallback(plan, dec, src, opts)
 	}
@@ -453,7 +467,7 @@ exec_spine_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: 
 			return cres
 		}
 	}
-	if sp.kind == .Collect && opts.spine_collect == nil {
+	if is_gather && gather_cb == nil {
 		return spine_fallback(plan, dec, src, opts)
 	}
 
@@ -474,7 +488,7 @@ exec_spine_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: 
 
 	collected: [dynamic][]u8
 	collected.allocator = opts.allocator
-	defer if sp.kind == .Collect {
+	defer if is_gather {
 		for item in collected {
 			delete(item, opts.allocator)
 		}
@@ -505,7 +519,7 @@ exec_spine_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: 
 	each_opts := opts^
 	each_opts.eval, each_opts.eval_ctx = opts.eval_each, opts.eval_each_ctx
 	ce := Collect_Emit{list = &collected, alloc = opts.allocator}
-	if sp.kind == .Collect {
+	if is_gather {
 		each_opts.emit = Emitter{fn = collect_emit_fn, data = &ce}
 	}
 
@@ -591,8 +605,8 @@ exec_spine_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8, opts: 
 	}
 	if is_length {
 		finish_spine_length(length_total, opts, &res)
-	} else if sp.kind == .Collect && opts.spine_collect != nil {
-		finish_spine_collect(dec, src, collected[:], opts, &res)
+	} else if is_gather && gather_cb != nil {
+		finish_spine_gather(dec, src, collected[:], gather_cb, opts, &res)
 	}
 	return res
 }
@@ -1445,8 +1459,9 @@ exec_spine_coarse_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8,
 	}
 
 	is_length := sp.kind == .Length && sp.has_each
-	is_collect := sp.kind == .Collect
-	collect_compact := is_collect && opts.spine_collect_compact && !sp.has_tail
+	is_gather := sp.kind == .Collect || sp.kind == .Reduce
+	gather_cb := spine_gather_cb(sp.kind, opts)
+	collect_compact := sp.kind == .Collect && opts.spine_collect_compact && !sp.has_tail
 
 	Spine_Eval_Job :: struct {
 		dec:             ^Decision,
@@ -1458,7 +1473,7 @@ exec_spine_coarse_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8,
 		parts:           []Spine_Part,
 		slots:           []Coarse_Chunk_Slot,
 		is_length:       bool,
-		is_collect:      bool,
+		is_gather:       bool,
 		collect_compact: bool,
 		alloc_wrap:      Locked_Allocator,
 	}
@@ -1473,7 +1488,7 @@ exec_spine_coarse_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8,
 		parts           = parts[:np],
 		slots           = slots,
 		is_length       = is_length,
-		is_collect      = is_collect,
+		is_gather       = is_gather,
 		collect_compact = collect_compact,
 	}
 	locked_alloc_init(&job.alloc_wrap, opts.allocator)
@@ -1521,7 +1536,7 @@ exec_spine_coarse_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8,
 		slot := &j.slots[k]
 		p := j.parts[k]
 		plen := p.hi - p.lo
-		store_slices := (j.is_collect && !j.collect_compact) || (!j.is_length && !j.is_collect && !j.opts.coalesce_emit)
+		store_slices := (j.is_gather && !j.collect_compact) || (!j.is_length && !j.is_gather && !j.opts.coalesce_emit)
 		if !j.is_length {
 			slot.out_buf = make([dynamic]u8, 0, max(plen * (2 if j.opts.fast_json_each == .Pretty2 else 1), 256), lalloc)
 		}
@@ -1577,7 +1592,7 @@ exec_spine_coarse_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8,
 					if j.collect_compact && slot.item_count > 0 {
 						append(&slot.out_buf, ',')
 					}
-					if append_fast_json_doc(&slot.out_buf, &docs[i], .Compact if j.is_collect else j.opts.fast_json_each, !j.is_collect) {
+					if append_fast_json_doc(&slot.out_buf, &docs[i], .Compact if j.is_gather else j.opts.fast_json_each, !j.is_gather) {
 						if j.collect_compact {
 							slot.item_count += 1
 						} else if store_slices && !slot_push_slice(slot, off, len(slot.out_buf) - off) {
@@ -1642,7 +1657,7 @@ exec_spine_coarse_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8,
 		}
 	}
 
-	if is_length || is_collect {
+	if is_length || is_gather {
 		total_count := u64(0)
 		total_items := 0
 		for &slot in slots {
@@ -1655,7 +1670,7 @@ exec_spine_coarse_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8,
 				return res, true
 			}
 			total_count += slot.item_count
-			if is_collect && !collect_compact {
+			if is_gather && !collect_compact {
 				total_items += len(slot.offs)
 			}
 		}
@@ -1701,7 +1716,7 @@ exec_spine_coarse_parallel :: proc(plan: ^query.Plan, dec: ^Decision, src: []u8,
 				idx += 1
 			}
 		}
-		finish_spine_collect(dec, src, item_outputs, opts, &res)
+		finish_spine_gather(dec, src, item_outputs, gather_cb, opts, &res)
 		return res, true
 	}
 

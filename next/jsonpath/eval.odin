@@ -1,5 +1,6 @@
 package jsonpath
 
+import "base:intrinsics"
 import "core:math"
 import "core:mem"
 import "core:strings"
@@ -20,6 +21,7 @@ Run_End :: enum u8 {
 Eval_Options :: struct {
 	want_paths: bool,        // compute RFC 9535 §2.7 normalized paths lazily when true
 	budget:     tape.Budget, // steps (0 = unlimited), depth (0 = tape.DEFAULT_DEPTH)
+	cancel:     ^u32,        // optional external cancellation flag; non-zero aborts with .Exceeded
 }
 
 // Output callback. Receives an owned `value` and a borrowed `norm_path`. Return false to stop early.
@@ -83,24 +85,46 @@ eval :: proc(prog: ^Program, h: ^query.Heap, root: query.Value, emit: Emit_Proc,
 	return run_value(&run, root, emit, data)
 }
 
+@(private = "file")
+CANCEL_CHECK_CHUNK :: u64(256)
+
 run_value :: proc(run: ^Run, root: query.Value, emit: Emit_Proc, data: rawptr) -> Run_End {
 	h := run.h
 	if h.tainted {
 		return .Tainted
 	}
+	if run.opts.cancel != nil && intrinsics.atomic_load_explicit(run.opts.cancel, .Relaxed) != 0 {
+		return .Exceeded
+	}
 	defer cleanup_eval_state(run)
 
 	raw_depth := u64(run.opts.budget.depth) if run.opts.budget.depth > 0 else u64(query.depth_limit(h))
+	has_steps := run.opts.budget.steps > 0 || run.opts.cancel != nil
+	steps_left := run.opts.budget.steps
+	steps_rem := u64(0)
+	steps_unlimited := false
+	if run.opts.cancel != nil {
+		if run.opts.budget.steps > 0 {
+			steps_left = min(run.opts.budget.steps, CANCEL_CHECK_CHUNK)
+			steps_rem = run.opts.budget.steps - steps_left
+		} else {
+			steps_left = CANCEL_CHECK_CHUNK
+			steps_unlimited = true
+		}
+	}
 	m := Machine {
-		run        = run,
-		h          = h,
-		root       = root,
-		emit       = emit,
-		emit_data  = data,
-		want_paths = run.opts.want_paths,
-		max_frames = max(int(min(raw_depth, u64(1_000_000))) * 4, 4),
-		has_steps  = run.opts.budget.steps > 0,
-		steps_left = run.opts.budget.steps,
+		run             = run,
+		h               = h,
+		root            = root,
+		emit            = emit,
+		emit_data       = data,
+		want_paths      = run.opts.want_paths,
+		max_frames      = max(int(min(raw_depth, u64(1_000_000))) * 4, 4),
+		has_steps       = has_steps,
+		steps_left      = steps_left,
+		steps_rem       = steps_rem,
+		steps_unlimited = steps_unlimited,
+		cancel          = run.opts.cancel,
 	}
 	defer query.release(h, m.res_val)
 
@@ -112,7 +136,7 @@ run_value :: proc(run: ^Run, root: query.Value, emit: Emit_Proc, data: rawptr) -
 			return .Tainted
 		}
 		if m.has_steps {
-			if m.steps_left == 0 {
+			if m.steps_left == 0 && !refill_steps(&m) {
 				return .Exceeded
 			}
 			m.steps_left -= 1
@@ -179,19 +203,42 @@ Eval_Frame :: struct {
 
 @(private = "file")
 Machine :: struct {
-	run:        ^Run,
-	h:          ^query.Heap,
-	root:       query.Value,
-	emit:       Emit_Proc,
-	emit_data:  rawptr,
-	want_paths: bool,
-	max_frames: int,
-	has_steps:  bool,
-	steps_left: u64,
-	res_bool:   bool,
-	res_val:    query.Value,
-	abort:      bool,
-	end:        Run_End,
+	run:             ^Run,
+	h:               ^query.Heap,
+	root:            query.Value,
+	emit:            Emit_Proc,
+	emit_data:       rawptr,
+	want_paths:      bool,
+	max_frames:      int,
+	has_steps:       bool,
+	steps_left:      u64,
+	steps_rem:       u64,
+	steps_unlimited: bool,
+	cancel:          ^u32,
+	res_bool:        bool,
+	res_val:         query.Value,
+	abort:           bool,
+	end:             Run_End,
+}
+
+@(private = "file", cold)
+refill_steps :: proc(m: ^Machine) -> bool {
+	if m.cancel != nil {
+		if intrinsics.atomic_load_explicit(m.cancel, .Relaxed) != 0 {
+			return false
+		}
+		if m.steps_unlimited {
+			m.steps_left = CANCEL_CHECK_CHUNK
+			return true
+		}
+		if m.steps_rem > 0 {
+			chunk := min(m.steps_rem, CANCEL_CHECK_CHUNK)
+			m.steps_rem -= chunk
+			m.steps_left = chunk
+			return true
+		}
+	}
+	return false
 }
 
 @(private = "file")

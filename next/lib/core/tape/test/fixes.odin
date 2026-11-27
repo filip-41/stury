@@ -275,17 +275,44 @@ markup_content_bugs_and_fast_paths :: proc(t: ^testing.T) {
 	testing.expect_value(t, mb.held, u64(0))
 }
 
-// The entries of every list a `Document`, its `Partial` and its `Doc_Ext` hold are offsets, indexes and plain values, with no address,
+// The entries of every list a `Document`, its `Partial` and its `Doc_Ext` (including all `Doc_Ext.format` union arms
+// such as `Tabular_Ext`, `Markup_Ext`, and `Markup_Dtd`) hold are offsets, indexes and plain values, with no address,
 // so a document's lists can be written to a file and read back.
 @(test)
 document_entries_hold_no_address :: proc(t: ^testing.T) {
 	testkit.deadline(t)
+	checked := 0
 	for holder in ([]^runtime.Type_Info{type_info_of(tape.Document), type_info_of(tape.Partial), type_info_of(tape.Doc_Ext)}) {
-		s := runtime.type_info_base(holder).variant.(^runtime.Type_Info_Struct)
-		for i in 0 ..< s.field_count {
-			if list, ok := runtime.type_info_base(s.types[i]).variant.(^runtime.Type_Info_Slice); ok {
-				testing.expectf(t, holds_no_address(list.elem), "%v.%s holds an address", holder, s.names[i])
+		check_holder_lists(t, holder, holder != type_info_of(tape.Document), &checked)
+	}
+	// Document (4) + Partial (5) + Doc_Ext (1) + Tabular_Ext (3) + Markup_Ext (3) + Markup_Dtd (4) = 20 lists.
+	testing.expect(t, checked >= 20)
+}
+
+// Walks structs and unions inside a document holder, verifying every slice element holds no address; when
+// `check_scalars` is true (`Partial` and `Doc_Ext`, including all extension union arms), also verifies non-slice
+// fields hold no raw pointer, string, map, or procedure.
+@(private = "file")
+check_holder_lists :: proc(t: ^testing.T, info: ^runtime.Type_Info, check_scalars: bool, checked: ^int) {
+	#partial switch v in runtime.type_info_base(info).variant {
+	case ^runtime.Type_Info_Struct:
+		for i in 0 ..< v.field_count {
+			ft := v.types[i]
+			#partial switch fv in runtime.type_info_base(ft).variant {
+			case ^runtime.Type_Info_Slice:
+				checked^ += 1
+				testing.expectf(t, holds_no_address(fv.elem), "%v.%s holds an address", info, v.names[i])
+			case ^runtime.Type_Info_Struct, ^runtime.Type_Info_Union:
+				check_holder_lists(t, ft, check_scalars, checked)
+			case:
+				if check_scalars {
+					testing.expectf(t, holds_no_address(ft), "%v.%s holds an address", info, v.names[i])
+				}
 			}
+		}
+	case ^runtime.Type_Info_Union:
+		for arm in v.variants {
+			check_holder_lists(t, arm, check_scalars, checked)
 		}
 	}
 }
@@ -301,6 +328,13 @@ holds_no_address :: proc(info: ^runtime.Type_Info) -> bool {
 			}
 		}
 		return true
+	case ^runtime.Type_Info_Union:
+		for arm in v.variants {
+			if !holds_no_address(arm) {
+				return false
+			}
+		}
+		return true
 	case ^runtime.Type_Info_Array:
 		return holds_no_address(v.elem)
 	case ^runtime.Type_Info_Enumerated_Array:
@@ -311,10 +345,70 @@ holds_no_address :: proc(info: ^runtime.Type_Info) -> bool {
 	return false
 }
 
+// `text_is_ascii` short-circuits in O(1) on `SPELLING_ASCII` for `.String` and `.Plain` without scanning source bytes,
+// never falsely short-circuits on non-string kinds whose spelling bits overlap bit 4, and `Options` exposes the v2
+// `cancel` and `shape_hint` seams with zero-initialized defaults.
+@(test)
+text_is_ascii_fast_path_and_options_seams :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Non-ASCII bytes in `src` prove the `SPELLING_ASCII` branch returns immediately without scanning.
+	non_ascii := []u8{0xC3, 0xA9, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'}
+	nodes := [?]tape.Token {
+		{lo = 0, n = u32(len(non_ascii)), kind = .String, role = .Value, spelling = tape.SPELLING_ASCII},
+		{lo = 0, n = u32(len(non_ascii)), kind = .Plain, role = .Value, spelling = tape.SPELLING_ASCII},
+		{lo = 0, n = u32(len(non_ascii)), kind = .String, role = .Value, spelling = 0},
+		{lo = 2, n = 8, kind = .String, role = .Value, spelling = 0},
+		// Number with `int_digits == 1` has bit 4 (`1 << 4 == SPELLING_ASCII`) set; must not take string fast path.
+		{lo = 0, n = 2, kind = .Number, role = .Value, spelling = tape.number_spelling(0, 1, 0)},
+		// Null with bit 4 set must still report `ok = false`.
+		{lo = 0, n = 4, kind = .Null, role = .Value, spelling = tape.SPELLING_ASCII},
+	}
+	fmt := tape.Format{}
+	doc := tape.Document{src = non_ascii, nodes = nodes[:], format = &fmt}
+
+	// Short-circuit on `.String` and `.Plain` with `SPELLING_ASCII` (even without touching `src`).
+	ascii, ok := tape.text_is_ascii(&doc, 0, nil)
+	testing.expect(t, ok && ascii)
+	ascii, ok = tape.text_is_ascii(&doc, 1, nil)
+	testing.expect(t, ok && ascii)
+
+	// Unflagged `.String` scans source bytes accurately (non-ASCII vs ASCII).
+	ascii, ok = tape.text_is_ascii(&doc, 2, nil)
+	testing.expect(t, ok && !ascii)
+	ascii, ok = tape.text_is_ascii(&doc, 3, nil)
+	testing.expect(t, ok && ascii)
+
+	// `.Number` with bit 4 set still scans via `node_text_token` (sees non-ASCII bytes -> false, true).
+	ascii, ok = tape.text_is_ascii(&doc, 4, nil)
+	testing.expect(t, ok && !ascii)
+
+	// `.Null` and `NO_NODE` return `(false, false)`.
+	ascii, ok = tape.text_is_ascii(&doc, 5, nil)
+	testing.expect(t, !ok && !ascii)
+	ascii, ok = tape.text_is_ascii(&doc, tape.NO_NODE, nil)
+	testing.expect(t, !ok && !ascii)
+
+	// Reserved v2 seams on `Options` default to nil and `is_canceled` reads relaxed atomics cleanly.
+	def_opts := tape.Options{}
+	testing.expect(t, def_opts.cancel == nil && def_opts.shape_hint == nil)
+	testing.expect(t, !tape.is_canceled(nil))
+	flag: u32 = 0
+	testing.expect(t, !tape.is_canceled(&flag))
+	flag = 1
+	testing.expect(t, tape.is_canceled(&flag))
+	hint := tape.Shape_Hint{schema = 0x1234, nodes = 64, flags = {.Flat, .Ascii_Text}, depth = 2, keys = 4}
+	opts := tape.Options{cancel = &flag, shape_hint = &hint}
+	testing.expect(t, tape.is_canceled(opts.cancel))
+	testing.expect_value(t, opts.shape_hint.nodes, u32(64))
+}
+
 // Layout sizes, which change only on purpose.
 @(test)
 layout_sizes :: proc(t: ^testing.T) {
 	testkit.deadline(t)
+	testing.expect_value(t, size_of(tape.Budget), 32)
+	testing.expect_value(t, size_of(tape.Caps), 4)
+	testing.expect_value(t, size_of(tape.Shape_Hint), 16)
 	testing.expect_value(t, size_of(tape.Token), 16)
 	testing.expect_value(t, size_of(tape.Fact), 24)
 	testing.expect_value(t, size_of(tape.Table), 32)

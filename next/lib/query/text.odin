@@ -200,6 +200,127 @@ codepoint_offset :: proc "contextless" (s: string, k: int) -> int {
 	return i
 }
 
+// Whether every byte of `s` is printable ASCII (0x20..0x7E), where every byte is one grapheme cluster.
+@(private = "file")
+is_plain_ascii :: #force_inline proc "contextless" (s: string) -> bool {
+	for b in transmute([]u8)s {
+		if b < 0x20 || b >= 0x7F {
+			return false
+		}
+	}
+	return true
+}
+
+// The extended grapheme clusters of `s` per UAX #29.
+grapheme_count :: proc(s: string) -> int {
+	if len(s) == 0 {
+		return 0
+	}
+	if is_plain_ascii(s) {
+		return len(s)
+	}
+	it := utf8.decode_grapheme_iterator_make(s)
+	n := 0
+	for _, _ in utf8.decode_grapheme_iterate(&it) {
+		n += 1
+	}
+	return n
+}
+
+// The substring of `s` from extended grapheme cluster `lo` up to before `hi`.
+// Negative indices count back from the grapheme count; out-of-range bounds clamp to `[0, count]`,
+// and `lo >= hi` yields `""`.
+grapheme_slice :: proc(s: string, lo, hi: int) -> string {
+	if len(s) == 0 {
+		return ""
+	}
+	if is_plain_ascii(s) {
+		n := len(s)
+		a := (0 if lo <= -n else lo + n) if lo < 0 else min(lo, n)
+		b := (0 if hi <= -n else hi + n) if hi < 0 else min(hi, n)
+		return s[a:b] if a < b else ""
+	}
+	a, b := lo, hi
+	if a < 0 || b < 0 {
+		n := grapheme_count(s)
+		if a < 0 {
+			a = 0 if a <= -n else a + n
+		}
+		if b < 0 {
+			b = 0 if b <= -n else b + n
+		}
+	}
+	if b <= a {
+		return ""
+	}
+	it := utf8.decode_grapheme_iterator_make(s)
+	idx := 0
+	start_byte := -1
+	end_byte := len(s)
+	for _, g in utf8.decode_grapheme_iterate(&it) {
+		if idx == a {
+			start_byte = g.byte_index
+		}
+		if idx == b {
+			end_byte = g.byte_index
+			break
+		}
+		idx += 1
+	}
+	if start_byte < 0 {
+		return ""
+	}
+	return s[start_byte:end_byte]
+}
+
+// The extended grapheme clusters of `s` per UAX #29 as an array of strings.
+// Returns `(NULL, false)` on allocation failure (recording `.Memory` on `h`).
+@(require_results)
+grapheme_split :: proc(h: ^Heap, s: string) -> (res: Value, ok: bool) {
+	if len(s) == 0 {
+		a, st := make_array(h, 0)
+		if st != .Ok {
+			return NULL, false
+		}
+		return a, true
+	}
+	if is_plain_ascii(s) {
+		a, st := make_array(h, len(s))
+		if st != .Ok {
+			return NULL, false
+		}
+		for i in 0 ..< len(s) {
+			part, pst := text_value(h, s[i:i + 1])
+			if pst != .Ok {
+				release(h, a)
+				return NULL, false
+			}
+			if ast := append_owned(h, &a, part); ast != .Ok {
+				release(h, a)
+				return NULL, false
+			}
+		}
+		return a, true
+	}
+	a, st := make_array(h, 0)
+	if st != .Ok {
+		return NULL, false
+	}
+	it := utf8.decode_grapheme_iterator_make(s)
+	for cluster, _ in utf8.decode_grapheme_iterate(&it) {
+		part, pst := text_value(h, cluster)
+		if pst != .Ok {
+			release(h, a)
+			return NULL, false
+		}
+		if ast := append_owned(h, &a, part); ast != .Ok {
+			release(h, a)
+			return NULL, false
+		}
+	}
+	return a, true
+}
+
 // The code points of `s`, ill-formed bytes read as U+FFFD, as an array of integers.
 @(require_results)
 explode :: proc(h: ^Heap, s: string) -> (res: Value, status: Status) {

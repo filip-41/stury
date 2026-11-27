@@ -35,9 +35,12 @@ Machine :: struct {
 	out_data: rawptr,
 	halt:     Halt_State,
 	empty:    query.Value, // the program's empty array
-	over:     bool, // the run ended as the step budget ran out
-	budget:   int, // the evaluations a run may take, 0 for any
-	steps:    int, // the evaluations left before the step budget runs out, negative for no budget
+	over:         bool, // the run ended as the step budget or cancellation ran out
+	cancelled:    bool, // the run ended because `cancel` became non-zero
+	budget:       int, // the evaluations a run may take, 0 for any
+	steps:        int, // the evaluations left before the step budget or cancel safepoint runs out, negative for no budget
+	steps_rem:    int, // remaining evaluations past the current cancel-check chunk (-1 for unlimited)
+	cancel:       ^u32, // optional external cancellation flag checked on chunk refill
 	regexes:      query.Regex_Cache, // the patterns this run compiled
 	css:          Selector_Cache, // the CSS selectors this run compiled
 	origin:       query.Value, // retained nearest document-origin value along active pipes (`track_origin` only)
@@ -138,6 +141,9 @@ Origin_Frame :: struct {
 @(private)
 MAX_ARGS :: 4
 
+@(private)
+CANCEL_CHECK_CHUNK :: 256
+
 // Runs `root` on `input`, which it takes, in `env`, its outputs to `m.out`, with no recursion past `eval_native`'s.
 @(private)
 drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal {
@@ -152,7 +158,7 @@ drive :: proc(m: ^Machine, root: ^Node, input: query.Value, env: ^Env) -> Signal
 				taint_abort(m, &r)
 				continue
 			}
-			if steps == 0 {
+			if steps == 0 && !step_refill(m, &steps) {
 				over_budget(m, &r)
 				continue
 			}
@@ -217,10 +223,34 @@ taint_abort :: proc(m: ^Machine, r: ^Regs) {
 	finish(m, r, .Taint)
 }
 
-// Ends the run as the step budget ran out: no `try` catches it.
+// Refills `steps` from `m.steps_rem` at a cancellation safepoint, returning false if cancelled or out of budget.
+@(private, cold)
+step_refill :: proc(m: ^Machine, steps: ^int) -> bool {
+	if m.cancel != nil {
+		if intrinsics.atomic_load_explicit(m.cancel, .Relaxed) != 0 {
+			m.cancelled = true
+			return false
+		}
+		if m.steps_rem < 0 {
+			steps^ = CANCEL_CHECK_CHUNK
+			m.steps = CANCEL_CHECK_CHUNK
+			return true
+		}
+		if m.steps_rem > 0 {
+			chunk := min(m.steps_rem, CANCEL_CHECK_CHUNK)
+			m.steps_rem -= chunk
+			steps^ = chunk
+			m.steps = chunk
+			return true
+		}
+	}
+	return false
+}
+
+// Ends the run as the step budget ran out or cancellation was signalled: no `try` catches it.
 @(private, cold)
 over_budget :: proc(m: ^Machine, r: ^Regs) {
-	query.fail(m.h, .Budget, .None)
+	query.fail(m.h, .Budget, .None, detail = "Cancelled" if m.cancelled else "")
 	m.h.err.budget = .Steps
 	query.release(m.h, m.halt.value)
 	m.halt = {}
@@ -231,10 +261,10 @@ over_budget :: proc(m: ^Machine, r: ^Regs) {
 	finish(m, r, .Halt)
 }
 
-// Sets the step budget error for a loop inside a native builtin.
+// Sets the step budget or cancellation error for a loop inside a native builtin.
 @(private, cold)
 fail_budget :: proc(m: ^Machine) -> query.Status {
-	query.fail(m.h, .Budget, .None)
+	query.fail(m.h, .Budget, .None, detail = "Cancelled" if m.cancelled else "")
 	m.h.err.budget = .Steps
 	query.release(m.h, m.halt.value)
 	m.halt = {}
@@ -302,7 +332,7 @@ step_eval :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 			taint_abort(m, r)
 			return
 		}
-		if steps^ == 0 {
+		if steps^ == 0 && !step_refill(m, steps) {
 			over_budget(m, r)
 			return
 		}
@@ -705,7 +735,7 @@ step_emit :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 		p.v, p.got, r.v, r.vpath = r.v, true, query.ABSENT, query.ABSENT
 		r.sig, r.mode = .Go, .Ret
 	case .Foreach:
-		if steps^ == 0 {
+		if steps^ == 0 && !step_refill(m, steps) {
 			over_budget(m, r)
 			return
 		}
@@ -839,7 +869,7 @@ step_ret :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 		}
 	case .Iter:
 		if sig == .Go {
-			if steps^ == 0 {
+			if steps^ == 0 && !step_refill(m, steps) {
 				over_budget(m, r)
 				return
 			}
@@ -848,7 +878,7 @@ step_ret :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 		resume_iter(m, r, (^Iter_Frame)(f))
 	case .Range:
 		if sig == .Go {
-			if steps^ == 0 {
+			if steps^ == 0 && !step_refill(m, steps) {
 				over_budget(m, r)
 				return
 			}
@@ -893,7 +923,7 @@ step_ret :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 		pop_frame(m)
 	case .Gen:
 		if sig == .Go {
-			if steps^ == 0 {
+			if steps^ == 0 && !step_refill(m, steps) {
 				over_budget(m, r)
 				return
 			}
@@ -902,7 +932,7 @@ step_ret :: #force_inline proc(m: ^Machine, r: ^Regs, steps: ^int) {
 		resume_gen(m, r, f)
 	case .Css:
 		if sig == .Go {
-			if steps^ == 0 {
+			if steps^ == 0 && !step_refill(m, steps) {
 				over_budget(m, r)
 				return
 			}

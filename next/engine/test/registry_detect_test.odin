@@ -180,6 +180,52 @@ detect_paths_and_compression :: proc(t: ^testing.T) {
 	testing.expect_value(t, s4, ".hidden.json")
 	testing.expect_value(t, c4, engine.Compression_Kind.None)
 
+	s5, c5 := engine.strip_compression_suffix("payload.json.zlib")
+	testing.expect_value(t, s5, "payload.json")
+	testing.expect_value(t, c5, engine.Compression_Kind.Zlib)
+
+	s6, c6 := engine.strip_compression_suffix("archive.toml.lzma")
+	testing.expect_value(t, s6, "archive.toml")
+	testing.expect_value(t, c6, engine.Compression_Kind.Lzma)
+
+	// Magic-byte compression detection via `core:compress.which` + RFC 8878 Zstd.
+	Comp_Case :: struct {
+		name: string,
+		data: []u8,
+		want: engine.Compression_Kind,
+	}
+	gzip_hdr := []u8{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00}
+	zstd_hdr := []u8{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x58}
+	zlib_def := []u8{0x78, 0x9c, 0x03, 0x00}
+	zlib_no  := []u8{0x78, 0x01, 0x01, 0x00}
+	zlib_max := []u8{0x78, 0xda, 0x03, 0x00}
+	bz2_hdr  := []u8{'B', 'Z', 'h', '9', 0x31, 0x41}
+	xz_hdr   := []u8{0xfd, '7', 'z', 'X', 'Z', 0x00, 0x00}
+	lz4_hdr  := []u8{0x04, 0x22, 0x4d, 0x18, 0x64, 0x40}
+	lzma_hdr := []u8{0x5d, 0x00, 0x00, 0x80, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	bad_zlib := []u8{0x78, 0x00, 0x00, 0x00}
+	bad_bz2  := []u8{'B', 'Z', 'h', '0', 0x00}
+	bad_gzip := []u8{0x1f, 0x8b, 0x09}
+	for cc in ([?]Comp_Case{
+		{"gzip", gzip_hdr, .Gzip},
+		{"zstd", zstd_hdr, .Zstd},
+		{"zlib default", zlib_def, .Zlib},
+		{"zlib store", zlib_no, .Zlib},
+		{"zlib best", zlib_max, .Zlib},
+		{"bzip2", bz2_hdr, .Bzip2},
+		{"xz", xz_hdr, .Xz},
+		{"lz4", lz4_hdr, .Lz4},
+		{"lzma", lzma_hdr, .Lzma},
+		{"empty", nil, .None},
+		{"one byte", []u8{0x1f}, .None},
+		{"json text", transmute([]u8)string(`{"a":1}`), .None},
+		{"bad zlib checksum", bad_zlib, .None},
+		{"bad bzip2 level", bad_bz2, .None},
+		{"bad gzip method", bad_gzip, .None},
+	}) {
+		testing.expectf(t, engine.detect_compression(cc.data) == cc.want, "detect_compression(%s) = %v, want %v", cc.name, engine.detect_compression(cc.data), cc.want)
+	}
+
 	Path_Case :: struct {
 		path:    string,
 		id:      engine.Format_Id,

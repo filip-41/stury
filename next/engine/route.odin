@@ -357,7 +357,7 @@ can_use_spine_parallel :: proc "contextless" (plan: ^query.Plan, entry: Format_E
 		return false
 	}
 	sp := &plan.hints.split
-	if sp.kind != .Stream && sp.kind != .Collect && !(sp.kind == .Length && sp.has_each) {
+	if sp.kind != .Stream && sp.kind != .Collect && sp.kind != .Reduce && !(sp.kind == .Length && sp.has_each) {
 		return false
 	}
 	if !has_runner || parallel_blocked {

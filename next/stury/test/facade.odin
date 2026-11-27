@@ -522,3 +522,87 @@ audit_regressions_facade :: proc(t: ^testing.T) {
 	// Finding #7: large `u32` depth budget clamps safely without sign overflow.
 	expect_jp(t, "$.items[*]", items_json, json.Spec.Json, nil, nil, {budget = {depth = max(u32)}}, 0, .None, 3, true)
 }
+
+@(test)
+universal_marshal_and_unmarshal_all_formats :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	User :: struct {
+		name:   string `stury:"name"`,
+		age:    int    `stury:"age"`,
+		active: bool   `stury:"active"`,
+	}
+	want := User{name = "ada", age = 36, active = true}
+
+	// Round-trip `marshal` (buffer + `io.Writer` sink) and `unmarshal` across JSON, CBOR, TOML, YAML, and MessagePack.
+	for spec in ([?]stury.Spec{
+		json.Spec.Json,
+		cbor.Spec.Cbor,
+		toml.Spec.Toml_1_0,
+		yaml.Spec.Yaml_1_2,
+		msgpack.Spec.Compact,
+	}) {
+		encoded, merr := stury.marshal(&want, spec)
+		testing.expectf(t, merr == nil, "marshal %v err: %v", spec, merr)
+		defer delete(encoded)
+		testing.expect(t, len(encoded) > 0)
+
+		got: User
+		uerr := stury.unmarshal(encoded, &got, spec)
+		testing.expectf(t, uerr == nil, "unmarshal %v err: %v", spec, uerr)
+		defer delete(got.name)
+		testing.expect_value(t, got, want)
+
+		// Streaming `marshal` into `io.Writer` produces identical bytes.
+		buf: bytes.Buffer
+		bytes.buffer_init_allocator(&buf, 0, 64)
+		defer bytes.buffer_destroy(&buf)
+		serr := stury.marshal(bytes.buffer_to_stream(&buf), &want, spec)
+		testing.expectf(t, serr == nil, "marshal_to %v err: %v", spec, serr)
+		testing.expect_value(t, string(bytes.buffer_to_bytes(&buf)), string(encoded))
+	}
+
+	// DSV (CSV & TSV) typed round-trip over slice of structs.
+	rows_in := [?]User{
+		{name = "ada", age = 36, active = true},
+		{name = "bob", age = 42, active = false},
+	}
+	rows_slice := rows_in[:]
+	for dspec in ([?]stury.Spec{dsv.Spec.Csv, dsv.Spec.Tsv}) {
+		encoded, merr := stury.marshal(&rows_slice, dspec)
+		testing.expectf(t, merr == nil, "marshal %v err: %v", dspec, merr)
+		defer delete(encoded)
+
+		rows_out: []User
+		uerr := stury.unmarshal(encoded, &rows_out, dspec)
+		testing.expectf(t, uerr == nil, "unmarshal %v err: %v", dspec, uerr)
+		defer {
+			for r in rows_out {
+				delete(r.name)
+			}
+			delete(rows_out)
+		}
+		testing.expect_value(t, len(rows_out), len(rows_in))
+		for r, i in rows_out {
+			testing.expect_value(t, r, rows_in[i])
+		}
+	}
+
+	// XML marshal succeeds on single-root struct; XML unmarshal and nil specs return `Bad_Option`.
+	Xml_Doc :: struct {
+		user: User `xml:"user"`,
+	}
+	xdoc_val := Xml_Doc{user = want}
+	xbytes, xmerr := stury.marshal(&xdoc_val, xml.Spec.Xml)
+	testing.expect_value(t, xmerr, stury.Write_Error(nil))
+	defer delete(xbytes)
+	testing.expect(t, strings.contains(string(xbytes), "<user>") && strings.contains(string(xbytes), "<name>ada</name>"))
+
+	dummy: User
+	xml_uerr := stury.unmarshal(xbytes, &dummy, xml.Spec.Xml)
+	testing.expect_value(t, xml_uerr, stury.Error(tape.Bad_Option{"spec"}))
+	nil_uerr := stury.unmarshal(xbytes, &dummy, nil)
+	testing.expect_value(t, nil_uerr, stury.Error(tape.Bad_Option{"spec"}))
+	_, nil_merr := stury.marshal(&want, nil)
+	testing.expect_value(t, nil_merr, stury.Write_Error(tape.Bad_Option{"to"}))
+}

@@ -493,4 +493,20 @@ route_projection_direct_parallel_and_length_each :: proc(t: ^testing.T) {
 		testing.expect_value(t, d_len.kind, engine.Route_Kind.Spine_Parallel)
 		testing.expect(t, d_len.parallel)
 	}
+
+	{
+		prog, plan := plan_for(t, `reduce .items[] as $x (0; . + $x.id)`)
+		defer jq.destroy_program(prog)
+		defer jq.destroy_plan(&plan)
+
+		testing.expect_value(t, plan.hints.split.kind, query.Split_Kind.Reduce)
+		d_red := engine.decide(&plan.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = 1 << 20})
+		testing.expect_value(t, d_red.kind, engine.Route_Kind.Spine_Parallel)
+		testing.expect_value(t, d_red.active_hint, engine.Active_Hint.Spine_Split)
+		testing.expect_value(t, d_red.primary_why, engine.Route_Why.Spine_Split_Hit)
+		testing.expect(t, d_red.parallel)
+
+		d_no_pool := engine.decide(&plan.contract, json.Spec.Json, .Single)
+		testing.expect_value(t, d_no_pool.kind, engine.Route_Kind.Scan)
+	}
 }

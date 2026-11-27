@@ -1,10 +1,12 @@
 package jsonpath_tests
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:strings"
 import "core:testing"
 import "stury:json"
 import "stury:jsonpath"
+import "stury:lib/core/tape"
 import "stury:lib/query"
 import "stury:testkit"
 
@@ -418,6 +420,78 @@ budgets_and_early_stop :: proc(t: ^testing.T) {
 		col, end := eval_json(t, `$..v`, deep_obj, {budget = {depth = 2}})
 		defer destroy_collected(&col)
 		testing.expect_value(t, end, jsonpath.Run_End.Exceeded)
+	}
+
+	// External cancellation (`cancel: ^u32`): pre-set flag aborts immediately, mid-run flag aborts within a chunk,
+	// and unset flag preserves full evaluation and explicit `budget.steps`.
+	{
+		flag_set: u32 = 1
+		col1, end1 := eval_json(t, `$..*`, `{"a":{"b":{"c":[1,2,3]}}}`, {cancel = &flag_set})
+		defer destroy_collected(&col1)
+		testing.expect_value(t, end1, jsonpath.Run_End.Exceeded)
+		testing.expect_value(t, len(col1.vals), 0)
+
+		// Build a 600-element array to exercise multiple 256-step safepoint chunks.
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+		strings.write_byte(&sb, '[')
+		for i in 0 ..< 600 {
+			if i > 0 {
+				strings.write_byte(&sb, ',')
+			}
+			strings.write_byte(&sb, '1')
+		}
+		strings.write_byte(&sb, ']')
+		big_arr := strings.to_string(sb)
+
+		// Unset flag completes normally across multiple chunks.
+		flag_zero: u32 = 0
+		col2, end2 := eval_json(t, `$[*]`, big_arr, {cancel = &flag_zero})
+		defer destroy_collected(&col2)
+		testing.expect_value(t, end2, jsonpath.Run_End.Done)
+		testing.expect_value(t, len(col2.vals), 600)
+
+		// Unset flag still respects explicit `budget.steps` across chunks.
+		col3, end3 := eval_json(t, `$[*]`, big_arr, {budget = {steps = 300}, cancel = &flag_zero})
+		defer destroy_collected(&col3)
+		testing.expect_value(t, end3, jsonpath.Run_End.Exceeded)
+
+		// Mid-run cancel triggered during emit aborts cleanly with zero leaks.
+		prog, perr := jsonpath.compile(`$[*]`)
+		testing.expect_value(t, perr.kind, jsonpath.Error_Kind.None)
+		defer jsonpath.destroy_program(prog)
+
+		doc, derr := json.build(transmute([]u8)big_arr, .Json)
+		testing.expect(t, derr == nil)
+		defer tape.destroy(&doc)
+
+		h: query.Heap
+		query.heap_init(&h, context.allocator)
+		defer query.heap_destroy(&h)
+		root, rst := query.document_value(&h, doc, false)
+		testing.expect_value(t, rst, query.Status.Ok)
+		defer query.release(&h, root)
+
+		Mid_Cancel :: struct {
+			h:     ^query.Heap,
+			flag:  ^u32,
+			count: int,
+		}
+		emit_cb :: proc(data: rawptr, v: query.Value, _: string) -> bool {
+			c := (^Mid_Cancel)(data)
+			query.release(c.h, v)
+			c.count += 1
+			if c.count == 2 {
+				intrinsics.atomic_store_explicit(c.flag, 1, .Relaxed)
+			}
+			return true
+		}
+
+		mid_flag: u32 = 0
+		mc := Mid_Cancel{h = &h, flag = &mid_flag}
+		end4 := jsonpath.eval(prog, &h, root, emit_cb, &mc, {cancel = &mid_flag})
+		testing.expect_value(t, end4, jsonpath.Run_End.Exceeded)
+		testing.expect(t, mc.count >= 2 && mc.count < 600)
 	}
 }
 

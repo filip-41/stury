@@ -65,6 +65,8 @@ member :: proc(r: Reader, at: Node_Index, name: string, dups := Duplicates.Defau
 // LLVM tail-calls all of them (`b`) and keeps `member` a leaf procedure on the common unescaped-key path.
 @(private = "file", require_results)
 member_plain :: #force_inline proc(r: Reader, at: Node_Index, node: Node, name: string, dups: Duplicates) -> (Node_Index, Presence) #no_bounds_check {
+	#assert(size_of(Token) == 16 && offset_of(Token, n) == 8)
+	#assert(offset_of(Token, kind) == 12 && offset_of(Token, role) == 13 && offset_of(Token, spelling) == 14)
 	doc := r.doc
 	if intrinsics.expect(names_expanded(doc, name), false) {
 		return member_expanded(r, at, name, dups)

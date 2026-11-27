@@ -270,6 +270,7 @@ execute_with_sources :: proc(
 		adapter^ = {
 			user_workers       = opts.exec.workers,
 			user_spine_collect = opts.exec.spine_collect,
+			user_spine_reduce  = opts.exec.spine_reduce,
 			user_spine_ctx     = eval_parent,
 			alloc              = alloc,
 			eval_slot          = {hdr = {aux = &aux_set, user_ctx = eval_parent, aux_eval = opts.aux_eval}, adapter = adapter, parent_ctx = eval_parent, use_workers = has_workers, raw_eval = opts.exec.eval},
@@ -295,6 +296,9 @@ execute_with_sources :: proc(
 		}
 		if opts.exec.spine_collect != nil && eff.eval_ctx == &adapter.eval_slot {
 			eff.spine_collect = join_spine_collect_bridge
+		}
+		if opts.exec.spine_reduce != nil && eff.eval_ctx == &adapter.eval_slot {
+			eff.spine_reduce = join_spine_reduce_bridge
 		}
 	}
 	defer if adapter != nil {
@@ -339,6 +343,7 @@ Join_Exec_Adapter :: struct {
 	pred_slot:          Bridge_Slot,
 	user_workers:       Worker_Hooks,
 	user_spine_collect: Spine_Collect_Proc,
+	user_spine_reduce:  Spine_Reduce_Proc,
 	user_spine_ctx:     rawptr,
 	alloc:              runtime.Allocator,
 }
@@ -447,6 +452,18 @@ join_spine_collect_bridge :: proc(ctx: rawptr, doc: ^tape.Document, item_outputs
 		return .Unsupported
 	}
 	return slot.adapter.user_spine_collect(slot.adapter.user_spine_ctx, doc, item_outputs, emit)
+}
+
+@(private = "file")
+join_spine_reduce_bridge :: proc(ctx: rawptr, doc: ^tape.Document, item_outputs: [][]u8, emit: Emitter) -> Exec_Error {
+	if ctx == nil {
+		return .Unsupported
+	}
+	slot := (^Bridge_Slot)(ctx)
+	if slot.adapter == nil || slot.adapter.user_spine_reduce == nil {
+		return .Unsupported
+	}
+	return slot.adapter.user_spine_reduce(slot.adapter.user_spine_ctx, doc, item_outputs, emit)
 }
 
 // ---- Private loading helpers
