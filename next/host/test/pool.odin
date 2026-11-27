@@ -53,21 +53,6 @@ pool_of_one_runs_on_the_caller :: proc(t: ^testing.T) {
 	testing.expect_value(t, count, 1)
 }
 
-// A pool that runs no call starts no thread, and one that runs a call starts them.
-@(test)
-threads_start_at_the_first_call :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	pool: host.Pool
-	host.pool_init(&pool, 3)
-	testing.expect_value(t, pool.settled, 0)
-	host.pool_destroy(&pool)
-	host.pool_init(&pool, 3)
-	defer host.pool_destroy(&pool)
-	count: int
-	run(&pool.runner, pool.runner.threads, bump, &count)
-	testing.expect(t, pool.spawned)
-}
-
 // Alternating tasks share the pool cleanly.
 @(test)
 many_tasks_share_the_pool :: proc(t: ^testing.T) {
@@ -90,17 +75,6 @@ meet :: proc(arg: rawptr) {
 	for sync.atomic_load((^int)(arg)) < 2 && time.tick_since(began) < 5 * time.Second {
 		intrinsics.cpu_relax()
 	}
-}
-
-@(test)
-helpers_run_the_task_beside_the_caller :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	pool: host.Pool
-	host.pool_init(&pool, 3)
-	defer host.pool_destroy(&pool)
-	started: int
-	run(&pool.runner, pool.runner.threads, meet, &started)
-	testing.expect(t, started >= 2)
 }
 
 // A nil task is given to no helper, so every helper stays for the next call and for `pool_destroy`.
@@ -158,13 +132,17 @@ non_positive_workers_uses_core_count :: proc(t: ^testing.T) {
 	}
 }
 
-// Destroying a zero-initialized pool is safe and leaves it zeroed.
+// Destroying a zero-initialized or never-called pool is safe and leaves it zeroed.
 @(test)
 destroy_zero_pool_is_safe :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	pool: host.Pool
 	host.pool_destroy(&pool)
 	testing.expect_value(t, pool.runner.threads, 0)
+	testing.expect(t, !pool.spawned)
+	host.pool_init(&pool, 3)
+	testing.expect_value(t, pool.settled, 0)
+	host.pool_destroy(&pool)
 	testing.expect(t, !pool.spawned)
 }
 

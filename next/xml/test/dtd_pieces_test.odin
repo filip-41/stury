@@ -164,7 +164,7 @@ piece_reads_release_bytes_after_internal_dtd_subset :: proc(t: ^testing.T) {
 			testing.expect(t, ok)
 			testing.expect_value(t, presence, tape.Presence.Found)
 			if ok {
-				testing.expect_value(t, text_of(&piece_doc, node), c.want_find)
+				testing.expect_value(t, testkit.scalar_text(&piece_doc, node), c.want_find)
 			}
 			testing.expectf(t, max_keep > subset_end + 16_000, "%s scan: keep did not advance past DTD (%d)", c.name, max_keep)
 			testing.expectf(t, max_win <= MAX_WINDOW, "%s scan: window grew to %d bytes", c.name, max_win)

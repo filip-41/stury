@@ -5,6 +5,7 @@ import "core:mem"
 import "core:mem/virtual"
 import "core:strings"
 import "core:testing"
+import regex "stury:lib/base/regex"
 import "stury:testkit"
 
 // The automaton answers each of these on a long text in one pass, where a backtracker without the visited set takes
@@ -372,4 +373,194 @@ test_ecma_set_prefilter_keeps_the_answers :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+// A search takes no caps, the match's own two, or two for every group, and a Scratch from `scratch_make`, which one
+// search may use after another. A zero Scratch and caps of another length are refused with an `ensure`, which names
+// `scratch_make` and the groups.
+@(test)
+test_search_takes_the_caps_it_documents :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	arena: virtual.Arena
+	allocator := growing(&arena)
+	re, message := compile(`(a)(?<n>b)?c`, {ecma = true}, allocator, allocator, spans = true)
+	testing.expect_value(t, message, "")
+	scratch := scratch_of(allocator)
+	defer regex.scratch_destroy(&scratch)
+	for _ in 0 ..< 2 {
+		found, err := regex.search(&re, "xabc", 0, nil, &scratch)
+		testing.expect_value(t, err, regex.Error{})
+		testing.expect(t, found)
+		own: [2]int
+		found, err = regex.search(&re, "xabc", 0, own[:], &scratch)
+		testing.expect(t, found && err == {})
+		testing.expect_value(t, own, [2]int{1, 4})
+		every: [6]int
+		found, err = regex.search(&re, "xabc", 0, every[:], &scratch)
+		testing.expect(t, found && err == {})
+		testing.expect_value(t, every, [6]int{1, 4, 1, 2, 2, 3})
+	}
+}
+
+// Over invalid UTF-8 a search steps over the bytes a lead byte claims, so a candidate inside them is not a start, at
+// any distance from the search's start, whether the backtracker or the automaton answers. A search that reads bounds
+// goes to the automaton only with the visited set off.
+@(test)
+test_head_skip_steps_over_the_bytes_a_lead_byte_claims :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Way :: struct {
+		linear, whether: bool,
+	}
+	for gap in ([?]int{0, 1, 5, 7, 8, 9, 40, 200}) {
+		filler := strings.repeat("a", gap, context.temp_allocator)
+		claimed := strings.concatenate({filler, "\xE2xy"}, context.temp_allocator)
+		then := strings.concatenate({claimed, "x"}, context.temp_allocator)
+		clean := strings.concatenate({filler, "x"}, context.temp_allocator)
+		for way in ([?]Way{{false, false}, {false, true}, {true, true}}) {
+			// A search that reads no bounds gives 0 for a match.
+			at_then, at_clean := 0 if way.whether else gap + 3, 0 if way.whether else gap
+			found := search(`[xy]`, claimed, way.linear, Mode{}, way.whether)
+			testing.expectf(t, found.err == "" && found.lo == -1, "gap %d, %v: %d, not none", gap, way, found.lo)
+			found = search(`[xy]`, then, way.linear, Mode{}, way.whether)
+			testing.expectf(
+				t,
+				found.err == "" && found.lo == at_then,
+				"gap %d, %v: %d, not %d",
+				gap,
+				way,
+				found.lo,
+				at_then,
+			)
+			found = search(`[xy]`, clean, way.linear, Mode{}, way.whether)
+			testing.expectf(
+				t,
+				found.err == "" && found.lo == at_clean,
+				"gap %d, %v: %d, not %d",
+				gap,
+				way,
+				found.lo,
+				at_clean,
+			)
+		}
+	}
+}
+
+// A search over text that is not valid UTF-8 gives the same answer with or without caps, with or without the automata,
+// and the same span from the backtracker and from the automaton that finds spans.
+@(test)
+test_invalid_utf8_gives_one_answer_by_every_path :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	state: rand.Default_Random_State
+	context.random_generator = testkit.seeded(t, &state, 7)
+	patterns := [?]string {
+		`[xy]`,
+		`x`,
+		`xy`,
+		`[a-c]+d`,
+		`é|a`,
+		`[^a]b`,
+		`\d+`,
+		`(?<=a)b`,
+		`a|b`,
+		`\p{L}`,
+		`x*y`,
+		`[xyé]z`,
+		`(a|x)(y|b)`,
+		`[\x80-\xff]a`,
+		`.x`,
+		`\Ax`,
+		`y$`,
+		`\bx`,
+	}
+	pieces := [?]string{
+		"a",
+		"b",
+		"x",
+		"y",
+		"d",
+		"z",
+		"1",
+		"é",
+		"😀",
+		"\xE2",
+		"\xE2\x82",
+		"\xF0\x9F",
+		"\x80",
+		"\xff",
+		"\xC3",
+	}
+	for pattern in patterns {
+		for mode in ([?]Mode{{}, {ecma = true}}) {
+			for _ in 0 ..< testkit.rounds(300) {
+				b := strings.builder_make(context.temp_allocator)
+				for _ in 0 ..< rand.int_max(24) {
+					strings.write_string(&b, pieces[rand.int_max(len(pieces))])
+				}
+				text := strings.to_string(b)
+				// A long clean stretch makes the kernel's scan the one that looks.
+				if rand.int_max(3) == 0 {
+					text = strings.concatenate(
+						{strings.repeat("a", 130, context.temp_allocator), text},
+						context.temp_allocator,
+					)
+				}
+				plain := search(pattern, text, false, mode, true)
+				bounds := search(pattern, text, false, mode)
+				automaton := search(pattern, text, true, mode, true)
+				spans := search(pattern, text, true, mode)
+				if plain.err != "" || bounds.err != "" || automaton.err != "" || spans.err != "" {
+					continue
+				}
+				found := bounds.lo >= 0
+				testing.expectf(
+					t,
+					(plain.lo >= 0) == found,
+					"%q %v on %q: whether %v, bounds %v",
+					pattern,
+					mode,
+					text,
+					plain.lo >= 0,
+					found,
+				)
+				testing.expectf(
+					t,
+					(automaton.lo >= 0) == found,
+					"%q %v on %q: automaton %v, backtracker %v",
+					pattern,
+					mode,
+					text,
+					automaton.lo >= 0,
+					found,
+				)
+				testing.expectf(
+					t,
+					spans.lo == bounds.lo && spans.hi == bounds.hi,
+					"%q %v on %q: spans %d..%d, backtracker %d..%d",
+					pattern,
+					mode,
+					text,
+					spans.lo,
+					spans.hi,
+					bounds.lo,
+					bounds.hi,
+				)
+			}
+		}
+	}
+}
+
+// `.Give_Back` and case-folded `backref` step single invalid UTF-8 bytes the same way `decode` does.
+@(test)
+test_invalid_utf8_give_back_and_folded_backref :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for text in ([?]string{"a\x80", "é\x80", "\xe2\x82"}) {
+		for linear in ([?]bool{false, true}) {
+			f := search(`^.*.$`, text, linear, {})
+			testing.expectf(t, f.err == "" && f.lo == 0 && f.hi == len(text), "linear=%v on %q: %v", linear, text, f)
+		}
+	}
+	same := search(`(?i)(.)\1`, "\x80\x80", false, {})
+	testing.expectf(t, same.err == "" && same.lo == 0 && same.hi == 2, "folded backref same: %v", same)
+	diff := search(`(?i)(.)\1`, "\x80\uFFFD", false, {})
+	testing.expectf(t, diff.err == "" && diff.lo < 0, "folded backref diff: %v", diff)
 }

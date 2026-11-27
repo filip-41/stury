@@ -49,7 +49,7 @@ edited :: proc(src: string, fn: Edit_Callback, spec := html.Spec.Fragment, opts 
 
 @(private = "file")
 at_node :: proc(doc: ^html.Document, path: ..string) -> html.Node_Index {
-	node, _ := member_at(doc, path, .First)
+	node, _ := testkit.member_at(doc, path, .First)
 	return node
 }
 
@@ -244,7 +244,7 @@ read_on_whitespace_past_ignored_tags :: proc(t: ^testing.T) {
 		testing.expect_value(t, ferr, nil)
 		read_doc, rerr := html.build(res.bytes, .Html, {}, context.temp_allocator)
 		testing.expect_value(t, rerr, nil)
-		testing.expectf(t, ans.outcome == .Found && token_text(&read_doc, html.answer_node(ans)) == c.value, "%q reads back other than %q", string(res.bytes), c.value)
+		testing.expectf(t, ans.outcome == .Found && testkit.token_text(&read_doc, html.answer_node(ans)) == c.value, "%q reads back other than %q", string(res.bytes), c.value)
 	}
 }
 
@@ -297,7 +297,7 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 			if p != .Found {
 				break
 			}
-			append(into, text_of(doc, kn))
+			append(into, testkit.scalar_text(doc, kn))
 			names(doc, child_v, into)
 		}
 	}
@@ -312,7 +312,7 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 			if p != .Found {
 				break
 			}
-			if text_of(doc, kn) != html.TEXT_KEY {
+			if testkit.scalar_text(doc, kn) != html.TEXT_KEY {
 				append(into, child_v)
 			}
 			members(doc, child_v, into)
@@ -373,7 +373,7 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 		elements := make([dynamic]html.Node_Index, context.temp_allocator)
 		members(&doc, html.ROOT, &elements)
 		for v in elements {
-			key := text_of(&doc, v - 1)
+			key := testkit.scalar_text(&doc, v - 1)
 			if key == "html" || key == "body" || key == "head" {
 				continue
 			}
@@ -400,7 +400,7 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 				}
 				read_doc, rerr := html.build(out, .Html, {}, context.temp_allocator)
 				testing.expect_value(t, rerr, nil)
-				testing.expectf(t, text_of(&read_doc, follow(&read_doc, idxs[:])) == value, "%q: setting %s to %q reads back other in %q", src, key, value, string(out))
+				testing.expectf(t, testkit.scalar_text(&read_doc, follow(&read_doc, idxs[:])) == value, "%q: setting %s to %q reads back other in %q", src, key, value, string(out))
 				if value != "Z" {
 					continue
 				}
@@ -649,13 +649,13 @@ commit_document_splices_accurately :: proc(t: ^testing.T) {
 	defer edit.destroy_commit_result(&res)
 	defer html.destroy(&new_doc)
 
-	p_txt, p_kind := text_at(&new_doc, "html", "body", "div", "p")
+	p_txt, p_kind := testkit.text_at(&new_doc, "html", "body", "div", "p")
 	testing.expect_value(t, p_kind, tape.Kind.Plain)
 	testing.expect_value(t, p_txt, "updated & clean")
-	s_txt, _ := text_at(&new_doc, "html", "body", "div", "span")
+	s_txt, _ := testkit.text_at(&new_doc, "html", "body", "div", "span")
 	testing.expect_value(t, s_txt, "keep")
-	div_node, _ := member_at(&new_doc, {"html", "body", "div"})
-	kv, has_k := attribute_value(&new_doc, div_node, "k")
+	div_node, _ := testkit.member_at(&new_doc, {"html", "body", "div"})
+	kv, has_k := testkit.attribute_value(&new_doc, div_node, "k")
 	testing.expect(t, has_k && kv == "9")
 }
 
@@ -796,9 +796,9 @@ inferred_budget_cuts_splices_and_base_ref_deltas :: proc(t: ^testing.T) {
 		defer edit.destroy_commit_result(&res)
 		defer html.destroy(&new_doc)
 		testing.expect_value(t, string(res.bytes), "<p><a>42</a><b>true</b><c>false</c></p>")
-		a_n, a_ok := member_at(&new_doc, {"html", "body", "p", "a"})
-		b_n, b_ok := member_at(&new_doc, {"html", "body", "p", "b"})
-		c_n, c_ok := member_at(&new_doc, {"html", "body", "p", "c"})
+		a_n, a_ok := testkit.member_at(&new_doc, {"html", "body", "p", "a"})
+		b_n, b_ok := testkit.member_at(&new_doc, {"html", "body", "p", "b"})
+		c_n, c_ok := testkit.member_at(&new_doc, {"html", "body", "p", "c"})
 		testing.expect(t, a_ok && b_ok && c_ok)
 		testing.expect_value(t, new_doc.nodes[a_n].kind, tape.Kind.Number)
 		testing.expect_value(t, new_doc.nodes[b_n].kind, tape.Kind.True)
@@ -851,7 +851,7 @@ inferred_budget_cuts_splices_and_base_ref_deltas :: proc(t: ^testing.T) {
 			cur2 = next_div
 		}
 		p2, _ := tape.member(r2, cur2, "p", .First)
-		testing.expect_value(t, text_of(&new_doc, p2), "after")
+		testing.expect_value(t, testkit.scalar_text(&new_doc, p2), "after")
 	}
 
 	// 3. `apply_read_on_cuts` preserves splice alignment, updates `res.splices`, and `commit_document` succeeds + preserves context.
@@ -912,8 +912,8 @@ inferred_budget_cuts_splices_and_base_ref_deltas :: proc(t: ^testing.T) {
 		tr_nd := at_node(&nd2, "html", "body", "table", "tbody", "tr")
 		nd_td0, _ := nth_member(&nd2, tr_nd, "td", 0)
 		nd_td1, _ := nth_member(&nd2, tr_nd, "td", 1)
-		testing.expect_value(t, text_of(&nd2, nd_td0), "X")
-		testing.expect_value(t, text_of(&nd2, nd_td1), "ZZZ")
+		testing.expect_value(t, testkit.scalar_text(&nd2, nd_td0), "X")
+		testing.expect_value(t, testkit.scalar_text(&nd2, nd_td1), "ZZZ")
 	}
 
 	// 4. `.Base_Ref` container deltas & fact checks via `edit.node_base_container(n)`.
@@ -944,8 +944,8 @@ inferred_budget_cuts_splices_and_base_ref_deltas :: proc(t: ^testing.T) {
 		defer edit.destroy_commit_result(&res)
 		defer html.destroy(&nd)
 		testing.expect_value(t, string(res.bytes), `<div K=1><p>orig</p><span>stay</span></div><section K="9"><p>copied</p><span>stay</span></section>`)
-		op, _ := text_at(&nd, "div", "p")
-		cp, _ := text_at(&nd, "section", "p")
+		op, _ := testkit.text_at(&nd, "div", "p")
+		cp, _ := testkit.text_at(&nd, "section", "p")
 		testing.expect_value(t, op, "orig")
 		testing.expect_value(t, cp, "copied")
 

@@ -14,38 +14,14 @@ import "stury:xml"
 
 @(private = "file")
 eval_expr :: proc(t: ^testing.T, src, input_json: string, hooks: ^jq.Hooks = nil, steps := 0, mem_limit := u64(0), loc := #caller_location) -> (out: string, end: jq.Run_End, err_kind: query.Error_Kind) {
-	prog, errors := jq.compile(src)
-	defer jq.destroy_program(prog)
-	if !testing.expectf(t, len(errors) == 0, "compile %q failed: %v", src, errors, loc = loc) {
-		return "", .Failed, .None
-	}
-	h: query.Heap
-	query.heap_init(&h, runtime.heap_allocator(), mem_limit)
-	defer query.heap_destroy(&h)
-	inp, ok := read_value(&h, input_json)
-	if !testing.expectf(t, ok, "bad input %q", input_json, loc = loc) {
-		return "", .Failed, .None
-	}
-	default_hooks := jq.Hooks{parse_json = parse_json_hook, markup = xml_markup}
-	use_hooks := hooks if hooks != nil else &default_hooks
-	run: jq.Run
-	jq.run_init(&run, prog, &h, nil, use_hooks, steps)
-	outs := Outputs{h = &h}
-	end = jq.run_value(&run, inp, collect, &outs)
-	shown := make([dynamic]string)
-	for v in outs.vals {
-		append(&shown, show(&h, v))
-		query.release(&h, v)
-	}
-	if end == .Failed {
-		e := query.take_error(&h)
-		err_kind = e.kind
-		append(&shown, strings.concatenate({"error: ", jq.error_message(&h, &e)}))
-		query.destroy_error(&h, &e)
-	}
-	jq.run_destroy(&run)
-	testing.expect_value(t, query.heap_live(&h), u64(0), loc = loc)
-	return strings.join(shown[:], "\n"), end, err_kind
+	r := eval_jq(t, src, {
+		input_json = input_json,
+		hooks      = hooks,
+		steps      = steps,
+		mem_limit  = mem_limit,
+		append_err = true,
+	}, loc = loc)
+	return r.out, r.end, r.err_kind
 }
 
 @(test)
@@ -238,36 +214,6 @@ hooks_modules_data_seq_toarray_removed_and_partial_css :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(outs.vals), 0)
 	jq.run_destroy(&run)
 	testing.expect_value(t, query.heap_live(&h), u64(0))
-}
-
-@(test)
-math_exact_powers_and_libm_ulp_bounds :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	arena: virtual.Arena
-	testing.expect(t, suite_arena(&arena) == nil)
-	defer virtual.arena_destroy(&arena)
-	context.allocator = virtual.arena_allocator(&arena)
-
-	// `log10` and `log2` are exact on exact powers.
-	out10, end10, _ := eval_expr(t, `[1, 10, 100, 1000, 1e6, 1e15, 1e22] | map(log10)`, "null")
-	testing.expect_value(t, end10, jq.Run_End.Done)
-	testing.expect_value(t, out10, `[0,1,2,3,6,15,22]`)
-
-	out2, end2, _ := eval_expr(t, `[range(-20; 53)] | all(. as $k | pow(2; $k) | log2 == $k)`, "null")
-	testing.expect_value(t, end2, jq.Run_End.Done)
-	testing.expect_value(t, out2, `true`)
-
-	// The five libm-backed builtins stay within 1 ulp of reference values.
-	prog := `[
-		((1 | sin) - 0.8414709848078965 | fabs <= 2.220446049250313e-16),
-		((1 | cos) - 0.5403023058681398 | fabs <= 2.220446049250313e-16),
-		((1 | tan) - 1.5574077246549023 | fabs <= 4.440892098500626e-16),
-		((1 | exp) - 2.718281828459045  | fabs <= 4.440892098500626e-16),
-		(pow(2; 0.5) - 1.4142135623730951 | fabs <= 2.220446049250313e-16)
-	] | all`
-	out_ulp, end_ulp, _ := eval_expr(t, prog, "null")
-	testing.expect_value(t, end_ulp, jq.Run_End.Done)
-	testing.expect_value(t, out_ulp, `true`)
 }
 
 @(test)

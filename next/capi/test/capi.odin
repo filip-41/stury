@@ -37,6 +37,18 @@ capi_arena_format_lookup_detect_and_caps :: proc(t: ^testing.T) {
 	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Csv))
 	p, n = c_slice("cbor")
 	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Cbor))
+	p, n = c_slice("yaml")
+	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Yaml))
+	p, n = c_slice("yaml:merge")
+	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Yaml_Merge))
+	p, n = c_slice("html")
+	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Html))
+	p, n = c_slice("html:fragment")
+	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Html_Fragment))
+	p, n = c_slice("msgpack")
+	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Msgpack))
+	p, n = c_slice("msgpack:compact")
+	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Msgpack_Compact))
 	p, n = c_slice("nope")
 	testing.expect_value(t, capi.stury_format_by_name(p, n), capi.FORMAT_UNKNOWN)
 
@@ -45,6 +57,12 @@ capi_arena_format_lookup_detect_and_caps :: proc(t: ^testing.T) {
 	testing.expect_value(t, capi.stury_format_of_path(p, n), u32(engine.Format_Id.Json))
 	p, n = c_slice("data.cbor")
 	testing.expect_value(t, capi.stury_format_of_path(p, n), u32(engine.Format_Id.Cbor))
+	p, n = c_slice("config.yml")
+	testing.expect_value(t, capi.stury_format_of_path(p, n), u32(engine.Format_Id.Yaml))
+	p, n = c_slice("index.html")
+	testing.expect_value(t, capi.stury_format_of_path(p, n), u32(engine.Format_Id.Html))
+	p, n = c_slice("data.mpk")
+	testing.expect_value(t, capi.stury_format_of_path(p, n), u32(engine.Format_Id.Msgpack))
 	p, n = c_slice("noext")
 	testing.expect_value(t, capi.stury_format_of_path(p, n), capi.FORMAT_UNKNOWN)
 
@@ -55,12 +73,21 @@ capi_arena_format_lookup_detect_and_caps :: proc(t: ^testing.T) {
 	testing.expect_value(t, capi.stury_format_detect(p, n), u32(engine.Format_Id.Xml))
 	cbor_bytes := [?]u8{0xA1, 0x61, 'k', 0x05}
 	testing.expect_value(t, capi.stury_format_detect(&cbor_bytes[0], len(cbor_bytes)), u32(engine.Format_Id.Cbor))
+	p, n = c_slice("---\nname: ada\n")
+	testing.expect_value(t, capi.stury_format_detect(p, n), u32(engine.Format_Id.Yaml))
+	p, n = c_slice("<!DOCTYPE html><html><body><p>ok</p></body></html>")
+	testing.expect_value(t, capi.stury_format_detect(p, n), u32(engine.Format_Id.Html))
+	mp_sample := [?]u8{0x81, 0xA1, 'k', 0x05}
+	testing.expect_value(t, capi.stury_format_detect(&mp_sample[0], len(mp_sample)), u32(engine.Format_Id.Msgpack))
 
 	// Capabilities & facts bitmasks.
 	cbor_caps := capi.stury_format_caps(u32(engine.Format_Id.Cbor))
 	testing.expect(t, cbor_caps & (u32(1) << u32(tape.Cap.Binary)) != 0)
+	testing.expect(t, capi.stury_format_caps(u32(engine.Format_Id.Msgpack)) & (u32(1) << u32(tape.Cap.Binary)) != 0)
 	xml_facts := capi.stury_format_facts(u32(engine.Format_Id.Xml))
 	testing.expect(t, xml_facts & (u16(1) << u16(tape.Fact_Kind.Attribute)) != 0)
+	testing.expect(t, capi.stury_format_facts(u32(engine.Format_Id.Html)) & (u16(1) << u16(tape.Fact_Kind.Attribute)) != 0)
+	testing.expect(t, capi.stury_format_facts(u32(engine.Format_Id.Yaml)) & (u16(1) << u16(tape.Fact_Kind.Comment)) != 0)
 	json_facts := capi.stury_format_facts(u32(engine.Format_Id.Json))
 	testing.expect_value(t, json_facts, u16(0))
 	testing.expect_value(t, capi.stury_format_caps(capi.FORMAT_UNKNOWN), u32(0))
@@ -125,6 +152,30 @@ capi_build_write_convert_and_dropped_facts :: proc(t: ^testing.T) {
 	testing.expect_value(t, serr.code, capi.Err_Code.Syntax)
 	testing.expect(t, serr.at != tape.NO_BYTE)
 	testing.expect(t, serr.message != nil && len(serr.message) > 0)
+
+	// YAML validate + convert -> JSON (dropped `.Comment`) -> MessagePack_Compact -> JSON, and HTML validate + convert -> JSON.
+	yml := "# hdr\nname: ada\nage: 36\n"
+	yp, yn := c_slice(yml)
+	testing.expect_value(t, capi.stury_validate(a, yp, yn, u32(engine.Format_Id.Yaml), nil).code, capi.Err_Code.Ok)
+	testing.expect_value(t, capi.stury_convert(a, yp, yn, u32(engine.Format_Id.Yaml), u32(engine.Format_Id.Json), nil, &out_p, &out_n, &dropped).code, capi.Err_Code.Ok)
+	testing.expect_value(t, string(out_p[:out_n]), `{"name":"ada","age":36}`)
+	testing.expect(t, dropped & (u16(1) << u16(tape.Fact_Kind.Comment)) != 0)
+
+	mp_p: [^]u8
+	mp_n: c.size_t
+	testing.expect_value(t, capi.stury_convert(a, out_p, out_n, u32(engine.Format_Id.Json), u32(engine.Format_Id.Msgpack_Compact), nil, &mp_p, &mp_n, nil).code, capi.Err_Code.Ok)
+	testing.expect(t, mp_n > 0)
+	testing.expect_value(t, capi.stury_validate(a, mp_p, mp_n, u32(engine.Format_Id.Msgpack_Compact), nil).code, capi.Err_Code.Ok)
+	testing.expect_value(t, capi.stury_convert(a, mp_p, mp_n, u32(engine.Format_Id.Msgpack), u32(engine.Format_Id.Json), nil, &back_p, &back_n, nil).code, capi.Err_Code.Ok)
+	testing.expect_value(t, string(back_p[:back_n]), `{"name":"ada","age":36}`)
+
+	html_src := `<!DOCTYPE html><html><body><p>ada</p></body></html>`
+	hp, hn := c_slice(html_src)
+	testing.expect_value(t, capi.stury_validate(a, hp, hn, u32(engine.Format_Id.Html), nil).code, capi.Err_Code.Ok)
+	h_out_p: [^]u8
+	h_out_n: c.size_t
+	testing.expect_value(t, capi.stury_convert(a, hp, hn, u32(engine.Format_Id.Html), u32(engine.Format_Id.Json), nil, &h_out_p, &h_out_n, nil).code, capi.Err_Code.Ok)
+	testing.expect(t, strings.contains(string(h_out_p[:h_out_n]), `"ada"`))
 }
 
 @(test)
@@ -341,6 +392,28 @@ capi_jq_and_jsonpath_eval :: proc(t: ^testing.T) {
 	jbe := capi.stury_jsonpath_compile(a, bjpp, bjpn, &bad_jp)
 	testing.expect_value(t, jbe.code, capi.Err_Code.Syntax)
 	testing.expect(t, bad_jp == nil && jbe.message != nil)
+
+	// jq query over YAML and MessagePack.
+	np, nn := c_slice(".name")
+	name_jqp: ^stury.Jq_Program
+	testing.expect_value(t, capi.stury_jq_compile(a, np, nn, &name_jqp).code, capi.Err_Code.Ok)
+	defer capi.stury_jq_free(name_jqp)
+
+	yp, yn := c_slice("# hdr\nname: ada\nage: 36\n")
+	col_y := C_Emit_Collector{ctx = context}
+	defer free_c_collector(&col_y)
+	testing.expect_value(t, capi.stury_jq_eval(a, name_jqp, yp, yn, u32(engine.Format_Id.Yaml), nil, c_jq_cb, &col_y).code, capi.Err_Code.Ok)
+	testing.expect_value(t, len(col_y.values), 1)
+	testing.expect_value(t, col_y.values[0], `"ada"`)
+
+	mp_p: [^]u8
+	mp_n: c.size_t
+	testing.expect_value(t, capi.stury_convert(a, yp, yn, u32(engine.Format_Id.Yaml), u32(engine.Format_Id.Msgpack_Compact), nil, &mp_p, &mp_n, nil).code, capi.Err_Code.Ok)
+	col_m := C_Emit_Collector{ctx = context}
+	defer free_c_collector(&col_m)
+	testing.expect_value(t, capi.stury_jq_eval(a, name_jqp, mp_p, mp_n, u32(engine.Format_Id.Msgpack), nil, c_jq_cb, &col_m).code, capi.Err_Code.Ok)
+	testing.expect_value(t, len(col_m.values), 1)
+	testing.expect_value(t, col_m.values[0], `"ada"`)
 }
 
 @(test)
@@ -494,95 +567,4 @@ capi_doc_survives_arena_reset_across_overlay_commits :: proc(t: ^testing.T) {
 	capi.stury_overlay_free(ov)
 	capi.stury_arena_reset(a)
 	capi.stury_doc_free(doc)
-}
-
-@(test)
-capi_yaml_html_and_msgpack :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-
-	a := capi.stury_arena_new()
-	testing.expect(t, a != nil)
-	defer capi.stury_arena_free(a)
-
-	// Name, path, detection, caps, and facts for YAML, HTML, and MessagePack.
-	p, n := c_slice("yaml")
-	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Yaml))
-	p, n = c_slice("yaml:merge")
-	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Yaml_Merge))
-	p, n = c_slice("html")
-	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Html))
-	p, n = c_slice("html:fragment")
-	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Html_Fragment))
-	p, n = c_slice("msgpack")
-	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Msgpack))
-	p, n = c_slice("msgpack:compact")
-	testing.expect_value(t, capi.stury_format_by_name(p, n), u32(engine.Format_Id.Msgpack_Compact))
-
-	p, n = c_slice("config.yml")
-	testing.expect_value(t, capi.stury_format_of_path(p, n), u32(engine.Format_Id.Yaml))
-	p, n = c_slice("index.html")
-	testing.expect_value(t, capi.stury_format_of_path(p, n), u32(engine.Format_Id.Html))
-	p, n = c_slice("data.mpk")
-	testing.expect_value(t, capi.stury_format_of_path(p, n), u32(engine.Format_Id.Msgpack))
-
-	p, n = c_slice("---\nname: ada\n")
-	testing.expect_value(t, capi.stury_format_detect(p, n), u32(engine.Format_Id.Yaml))
-	p, n = c_slice("<!DOCTYPE html><html><body><p>ok</p></body></html>")
-	testing.expect_value(t, capi.stury_format_detect(p, n), u32(engine.Format_Id.Html))
-	mp_sample := [?]u8{0x81, 0xA1, 'k', 0x05}
-	testing.expect_value(t, capi.stury_format_detect(&mp_sample[0], len(mp_sample)), u32(engine.Format_Id.Msgpack))
-
-	testing.expect(t, capi.stury_format_caps(u32(engine.Format_Id.Msgpack)) & (u32(1) << u32(tape.Cap.Binary)) != 0)
-	testing.expect(t, capi.stury_format_facts(u32(engine.Format_Id.Html)) & (u16(1) << u16(tape.Fact_Kind.Attribute)) != 0)
-	testing.expect(t, capi.stury_format_facts(u32(engine.Format_Id.Yaml)) & (u16(1) << u16(tape.Fact_Kind.Comment)) != 0)
-
-	// YAML validate, build, convert -> JSON -> MessagePack -> JSON.
-	yml := "# hdr\nname: ada\nage: 36\n"
-	yp, yn := c_slice(yml)
-	testing.expect_value(t, capi.stury_validate(a, yp, yn, u32(engine.Format_Id.Yaml), nil).code, capi.Err_Code.Ok)
-
-	out_p: [^]u8
-	out_n: c.size_t
-	dropped: u16
-	testing.expect_value(t, capi.stury_convert(a, yp, yn, u32(engine.Format_Id.Yaml), u32(engine.Format_Id.Json), nil, &out_p, &out_n, &dropped).code, capi.Err_Code.Ok)
-	testing.expect_value(t, string(out_p[:out_n]), `{"name":"ada","age":36}`)
-	testing.expect(t, dropped & (u16(1) << u16(tape.Fact_Kind.Comment)) != 0)
-
-	mp_p: [^]u8
-	mp_n: c.size_t
-	testing.expect_value(t, capi.stury_convert(a, out_p, out_n, u32(engine.Format_Id.Json), u32(engine.Format_Id.Msgpack_Compact), nil, &mp_p, &mp_n, nil).code, capi.Err_Code.Ok)
-	testing.expect(t, mp_n > 0)
-	testing.expect_value(t, capi.stury_validate(a, mp_p, mp_n, u32(engine.Format_Id.Msgpack_Compact), nil).code, capi.Err_Code.Ok)
-
-	back_p: [^]u8
-	back_n: c.size_t
-	testing.expect_value(t, capi.stury_convert(a, mp_p, mp_n, u32(engine.Format_Id.Msgpack), u32(engine.Format_Id.Json), nil, &back_p, &back_n, nil).code, capi.Err_Code.Ok)
-	testing.expect_value(t, string(back_p[:back_n]), `{"name":"ada","age":36}`)
-
-	// HTML validate + write -> JSON.
-	html_src := `<!DOCTYPE html><html><body><p>ada</p></body></html>`
-	hp, hn := c_slice(html_src)
-	testing.expect_value(t, capi.stury_validate(a, hp, hn, u32(engine.Format_Id.Html), nil).code, capi.Err_Code.Ok)
-	h_out_p: [^]u8
-	h_out_n: c.size_t
-	testing.expect_value(t, capi.stury_convert(a, hp, hn, u32(engine.Format_Id.Html), u32(engine.Format_Id.Json), nil, &h_out_p, &h_out_n, nil).code, capi.Err_Code.Ok)
-	testing.expect(t, strings.contains(string(h_out_p[:h_out_n]), `"ada"`))
-
-	// jq query over YAML, HTML, and MessagePack.
-	qp, qn := c_slice(".name")
-	jqp: ^stury.Jq_Program
-	testing.expect_value(t, capi.stury_jq_compile(a, qp, qn, &jqp).code, capi.Err_Code.Ok)
-	defer capi.stury_jq_free(jqp)
-
-	col_y := C_Emit_Collector{ctx = context}
-	defer free_c_collector(&col_y)
-	testing.expect_value(t, capi.stury_jq_eval(a, jqp, yp, yn, u32(engine.Format_Id.Yaml), nil, c_jq_cb, &col_y).code, capi.Err_Code.Ok)
-	testing.expect_value(t, len(col_y.values), 1)
-	testing.expect_value(t, col_y.values[0], `"ada"`)
-
-	col_m := C_Emit_Collector{ctx = context}
-	defer free_c_collector(&col_m)
-	testing.expect_value(t, capi.stury_jq_eval(a, jqp, mp_p, mp_n, u32(engine.Format_Id.Msgpack), nil, c_jq_cb, &col_m).code, capi.Err_Code.Ok)
-	testing.expect_value(t, len(col_m.values), 1)
-	testing.expect_value(t, col_m.values[0], `"ada"`)
 }

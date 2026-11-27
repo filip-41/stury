@@ -220,7 +220,7 @@ Refusing_Loader :: struct {
 
 // Generic streaming runner called by format packages (`json.load`, etc.).
 @(require_results)
-load_stream :: proc(
+load_stream :: #force_inline proc(
 	m: ^Model($T),
 	src: []u8,
 	format: ^tape.Format,
@@ -233,18 +233,38 @@ load_stream :: proc(
 	$walk: proc "contextless" (src: []u8, opts: WOpts, h: ^H, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool),
 	$build_fallback: proc(src: []u8, opts: WOpts, a: runtime.Allocator) -> (tape.Document, tape.Error),
 ) -> Error {
-	if m == nil || format == nil || out == nil || len(m.plan.nodes) == 0 {
+	if m == nil || out == nil { return Model_Error{kind = .Bad_Option, want = {text = "target"}} }
+	return load_stream_raw(model_view(m), src, format, rawptr(out), sink, opts, walk_opts, allocator, H, walk, build_fallback)
+}
+
+// Type-erased streaming runner so format walks instantiate once per `(Spec, LAX, REFUSE)` instead of per `$T`.
+@(require_results)
+load_stream_raw :: proc(
+	mv: Model_View,
+	src: []u8,
+	format: ^tape.Format,
+	out: rawptr,
+	sink: ^Sink,
+	opts: Load_Opts,
+	walk_opts: $WOpts,
+	allocator: runtime.Allocator,
+	$H: typeid,
+	$walk: proc "contextless" (src: []u8, opts: WOpts, h: ^H, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool),
+	$build_fallback: proc(src: []u8, opts: WOpts, a: runtime.Allocator) -> (tape.Document, tape.Error),
+) -> Error {
+	plan, judging, out_ti := mv.plan, mv.judging, mv.ti
+	if plan == nil || format == nil || out == nil || out_ti == nil || len(plan.nodes) == 0 {
 		return Model_Error{kind = .Bad_Option, want = {text = "target"}}
 	}
 	policy, ok := resolve_dups(opts.dups, format)
 	if !ok {
 		return Model_Error{kind = .Bad_Option, want = {text = "dups"}}
 	}
-	if !m.plan.can_stream || policy == .Group {
-		return load_via_build(m, src, out, sink, opts, walk_opts, policy, allocator, build_fallback)
+	if !plan.can_stream || policy == .Group {
+		return load_via_build_raw(plan, judging, src, out, out_ti, sink, opts, walk_opts, policy, allocator, build_fallback)
 	}
 
-	mem.zero(out, size_of(T))
+	mem.zero(out, out_ti.size)
 
 	rb: hook.Read_Budget; mb: hook.Memory_Budget
 	rb_p, mb_p := (^hook.Read_Budget)(rawptr(&rb)), (^hook.Memory_Budget)(rawptr(&mb))
@@ -272,9 +292,9 @@ load_stream :: proc(
 	h.base, h.src_len = raw_data(src), u64(len(src))
 	h.frames, h.home = raw_data(frames[:]), raw_data(frames[:])
 	h.sp, h.room = 1, STREAM_INLINE_FRAMES
-	h.plan, h.format, h.sink, h.validators, h.policy = &m.plan, format, sink, opts.validators, policy
+	h.plan, h.format, h.sink, h.validators, h.policy = plan, format, sink, opts.validators, policy
 	h.first.kind, h.first.owned = .None, false
-	h.oom, h.fallback, h.wrote_alloc, h.re_ready, h.rep_ready, h.has_val = false, false, false, false, false, m.plan.has_validators
+	h.oom, h.fallback, h.wrote_alloc, h.re_ready, h.rep_ready, h.has_val = false, false, false, false, false, plan.has_validators
 	h.fail_count = 0
 	budget_init(&h.budget, opts.budget)
 	h.re_spill, h.allocator, h.scratch = &re_spill, out_alloc, scr_alloc
@@ -288,7 +308,7 @@ load_stream :: proc(
 		hk.saved_b, hk.done_saved_b, hk.passing, hk.done_sp, hk.mode = 0, 0, 0, 0, .Active
 	}
 
-	regs := hook.Regs{STREAM_NO_LIMIT, u64(uintptr(&m.plan.root_field) + size_of(Stream_Field)), u64(uintptr(out))}
+	regs := hook.Regs{STREAM_NO_LIMIT, u64(uintptr(&plan.root_field) + size_of(Stream_Field)), u64(uintptr(out))}
 	_, walk_err, _ := walk(src, walk_opts, hk, &regs, scr_alloc, &h.ctx)
 
 	when H == Refusing_Loader {
@@ -298,40 +318,40 @@ load_stream :: proc(
 	}
 	if h.sp > 1 || h.frames != h.home || h.rep_ready || (h.re_ready && h.re_spill.spilled) { stream_cleanup(h) }
 
-	rollback :: #force_no_inline proc(h: ^Stream_Loader, out: ^T, sink: ^Sink, from: int, saved_trunc: bool, out_alloc: runtime.Allocator, trunc_sink: bool) {
+	rollback :: #force_no_inline proc(h: ^Stream_Loader, out: rawptr, out_ti: ^runtime.Type_Info, sink: ^Sink, from: int, saved_trunc: bool, out_alloc: runtime.Allocator, trunc_sink: bool) {
 		if trunc_sink && sink != nil { if len(sink.entries) > from { resize(&sink.entries, from) }; sink.truncated = saved_trunc }
 		error_destroy(h.first, out_alloc)
-		if h.wrote_alloc { free_value(out, type_info_of(T), out_alloc) } else { mem.zero(out, size_of(T)) }
+		if h.wrote_alloc { free_value(out, out_ti, out_alloc) } else { mem.zero(out, out_ti.size) }
 	}
-	if h.fallback { rollback(h, out, sink, from, saved_truncated, out_alloc, true); return load_via_build(m, src, out, sink, opts, walk_opts, policy, allocator, build_fallback) }
+	if h.fallback { rollback(h, out, out_ti, sink, from, saved_truncated, out_alloc, true); return load_via_build_raw(plan, judging, src, out, out_ti, sink, opts, walk_opts, policy, allocator, build_fallback) }
 	when H == Refusing_Loader {
-		if dup_oom { rollback(h, out, sink, from, saved_truncated, out_alloc, true); return stream_oom_error(&rb, &mb, opts.budget.memory) }
+		if dup_oom { rollback(h, out, out_ti, sink, from, saved_truncated, out_alloc, true); return stream_oom_error(&rb, &mb, opts.budget.memory) }
 		if dup_at != NO_REPEAT {
 			if f, is_f := walk_err.(tape.Fault); walk_err == nil || (is_f && f.at > dup_at) {
-				rollback(h, out, sink, from, saved_truncated, out_alloc, true)
+				rollback(h, out, out_ti, sink, from, saved_truncated, out_alloc, true)
 				if sink != nil { _ = sink_push(sink, allocator, .Duplicate_Key, dup_at, nil) }
 				return Model_Error{kind = .Duplicate_Key, at = dup_at}
 			}
 		}
 	}
 	if walk_err != nil {
-		rollback(h, out, sink, from, saved_truncated, out_alloc, true)
+		rollback(h, out, out_ti, sink, from, saved_truncated, out_alloc, true)
 		if _, is_oom := walk_err.(runtime.Allocator_Error); is_oom && opts.budget.memory > 0 { return stream_oom_error(&rb, &mb, opts.budget.memory) }
 		return walk_err
 	}
 	if sink != nil && len(sink.entries) - from > 1 { order_sink(sink, from) }
-	if h.budget.exceeded.kind != .None { rollback(h, out, sink, from, saved_truncated, out_alloc, false); return tape.Error(h.budget.exceeded) }
-	if h.oom { rollback(h, out, sink, from, saved_truncated, out_alloc, false); return stream_oom_error(&rb, &mb, opts.budget.memory) }
+	if h.budget.exceeded.kind != .None { rollback(h, out, out_ti, sink, from, saved_truncated, out_alloc, false); return tape.Error(h.budget.exceeded) }
+	if h.oom { rollback(h, out, out_ti, sink, from, saved_truncated, out_alloc, false); return stream_oom_error(&rb, &mb, opts.budget.memory) }
 	if h.first.kind != .None {
-		if h.wrote_alloc && out_alloc.procedure != mem.arena_allocator_proc { free_value(out, type_info_of(T), out_alloc) } else { mem.zero(out, size_of(T)) }
+		if h.wrote_alloc && out_alloc.procedure != mem.arena_allocator_proc { free_value(out, out_ti, out_alloc) } else { mem.zero(out, out_ti.size) }
 		return h.first
 	}
 	return nil
 }
 
 @(private, cold)
-load_via_build :: #force_no_inline proc(
-	m: ^Model($T), src: []u8, out: ^T, sink: ^Sink, opts: Load_Opts, walk_opts: $WOpts, policy: tape.Duplicates,
+load_via_build_raw :: #force_no_inline proc(
+	plan: ^Type_Plan, judging: ^Applied, src: []u8, out: rawptr, out_ti: ^runtime.Type_Info, sink: ^Sink, opts: Load_Opts, walk_opts: $WOpts, policy: tape.Duplicates,
 	allocator: runtime.Allocator,
 	$build_fallback: proc(src: []u8, opts: WOpts, a: runtime.Allocator) -> (tape.Document, tape.Error),
 ) -> Error {
@@ -340,7 +360,9 @@ load_via_build :: #force_no_inline proc(
 	doc, berr := build_fallback(src, b_opts, sc.scratch)
 	if berr != nil { return map_build_fault(berr, sink, allocator) }
 	defer tape.destroy(&doc)
-	return load_document(m, &doc, out, sink, opts, allocator)
+	if len(doc.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "document"}} }
+	if doc.partial != nil { return Model_Error{kind = .Unsupported, want = {text = "partial"}} }
+	return load_value_raw(plan, judging, rules.Node_Ref{doc = &doc, node = tape.ROOT}, out, out_ti, sink, opts, allocator)
 }
 
 @(private)
@@ -985,27 +1007,7 @@ stream_store_int :: #force_inline proc "contextless" (dest: uintptr, v: u64, kin
 
 @(private)
 stream_copy_short :: #force_inline proc "contextless" (dst, src: [^]u8, n: int) #no_bounds_check {
-	switch {
-	case n > 32:
-		intrinsics.mem_copy_non_overlapping(dst, src, n)
-	case n >= 16:
-		a := intrinsics.unaligned_load((^[16]u8)(src))
-		b := intrinsics.unaligned_load((^[16]u8)(src[n - 16:]))
-		intrinsics.unaligned_store((^[16]u8)(dst), a)
-		intrinsics.unaligned_store((^[16]u8)(dst[n - 16:]), b)
-	case n >= 8:
-		a := intrinsics.unaligned_load((^u64)(src))
-		b := intrinsics.unaligned_load((^u64)(src[n - 8:]))
-		intrinsics.unaligned_store((^u64)(dst), a)
-		intrinsics.unaligned_store((^u64)(dst[n - 8:]), b)
-	case n >= 4:
-		a := intrinsics.unaligned_load((^u32)(src))
-		b := intrinsics.unaligned_load((^u32)(src[n - 4:]))
-		intrinsics.unaligned_store((^u32)(dst), a)
-		intrinsics.unaligned_store((^u32)(dst[n - 4:]), b)
-	case:
-		for i in 0 ..< n { dst[i] = src[i] }
-	}
+	kernel.copy_short(dst, src, n)
 }
 
 // Fast contextless bump allocation when `h.allocator` is a `mem.Arena`; falls back to generic allocator proc otherwise.
@@ -1074,33 +1076,6 @@ stream_string_regex_and_copy :: #force_no_inline proc "contextless" (h: ^Stream_
 @(private)
 stream_copy_string :: #force_inline proc "contextless" (h: ^Stream_Loader, dest: uintptr, lo: u64, n: u32) -> bool #no_bounds_check {
 	return stream_alloc_str(h, dest, h.base[lo:], int(n))
-}
-
-@(private)
-stream_check_string :: #force_inline proc "contextless" (h: ^Stream_Loader, sf: ^Stream_Field, s: string, ascii: bool, at: u64) -> bool #no_bounds_check {
-	leaf := &h.plan.leaves[sf.rule_idx - 1]
-	fails: rules.Failures
-	if leaf.min_length > 0 || leaf.max_length < max(u64) {
-		n := u64(len(s)) if ascii else u64(kernel.count_chars(transmute([]u8)s))
-		if n < leaf.min_length { fails += {.Too_Short} }
-		if n > leaf.max_length { fails += {.Too_Long} }
-	}
-	if leaf.pattern != nil {
-		found, undecided := stream_match_regex(h, leaf.pattern, s)
-		if undecided { fails += {.Pattern_Undecided} } else if !found { fails += {.No_Match} }
-	}
-	if leaf.formats != {} || fails != {} {
-		return stream_check_string_report(h, sf, leaf, s, fails, at)
-	}
-	return true
-}
-
-@(private)
-stream_match_regex :: #force_no_inline proc "contextless" (h: ^Stream_Loader, re: ^regex.Regex, s: string) -> (found, undecided: bool) {
-	context = h.ctx
-	if !stream_ensure_re(h) { return false, false }
-	f, rerr := regex.search(re, s, 0, nil, &h.re_scratch, 0)
-	return f, rerr.kind != .None
 }
 
 // ============================================================================

@@ -73,10 +73,10 @@ entity_text_reads_as_its_replacement :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	s, k := text_at(&doc, "a", "b")
+	s, k := testkit.text_at(&doc, "a", "b")
 	testing.expect_value(t, s, "x & y!")
 	testing.expect_value(t, k, tape.Kind.String)
-	s, _ = text_at(&doc, "a", "c")
+	s, _ = testkit.text_at(&doc, "a", "c")
 	testing.expect_value(t, s, "&")
 }
 
@@ -87,14 +87,14 @@ markup_in_replacement_text_builds_elements :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	s, _ := text_at(&doc, "a", "b")
+	s, _ := testkit.text_at(&doc, "a", "b")
 	testing.expect_value(t, s, "1")
-	s, _ = text_at(&doc, "a", "d")
+	s, _ = testkit.text_at(&doc, "a", "d")
 	testing.expect_value(t, s, "2")
-	a, _ := member_at(&doc, {"a"})
-	c, found := member_at(&doc, {"a", "c"})
+	a, _ := testkit.member_at(&doc, {"a"})
+	c, found := testkit.member_at(&doc, {"a", "c"})
 	testing.expect(t, found)
-	v, has := attribute_value(&doc, c, "k")
+	v, has := testkit.attribute_value(&doc, c, "k")
 	testing.expect_value(t, has, true)
 	testing.expect_value(t, v, "v")
 	n, _, _ := tape.length(reader(&doc), a, context.temp_allocator)
@@ -108,7 +108,7 @@ a_parameter_entity_declares_what_follows :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	s, _ := text_at(&doc, "a")
+	s, _ := testkit.text_at(&doc, "a")
 	testing.expect_value(t, s, "from %")
 }
 
@@ -119,10 +119,10 @@ the_first_binding_of_a_name_wins :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	s, _ := text_at(&doc, "a")
+	s, _ := testkit.text_at(&doc, "a")
 	testing.expect_value(t, s, "1")
-	a, _ := member_at(&doc, {"a"})
-	v, has := attribute_value(&doc, a, "k")
+	a, _ := testkit.member_at(&doc, {"a"})
+	v, has := testkit.attribute_value(&doc, a, "k")
 	testing.expect_value(t, has, true)
 	testing.expect_value(t, v, "x")
 }
@@ -135,13 +135,13 @@ declared_defaults_fill_absent_attributes :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	r, _ := member_at(&doc, {"r"})
-	want := [2][]Attribute{{{"q", "1"}, {"d", "dx"}, {"f", "fx"}}, {{"q", "2"}, {"d", "own"}, {"f", "fx"}}}
+	r, _ := testkit.member_at(&doc, {"r"})
+	want := [2][]testkit.Attribute{{{"q", "1"}, {"d", "dx"}, {"f", "fx"}}, {{"q", "2"}, {"d", "own"}, {"f", "fx"}}}
 	c, _ := xml.named(reader(&doc), r, "e")
 	for row in want {
 		_, e, p := xml.next_child(reader(&doc), &c)
 		testing.expect_value(t, p, tape.Presence.Found)
-		got := attributes_of(&doc, e)
+		got := testkit.attributes_of(&doc, e)
 		testing.expectf(t, len(got) == len(row), "%v, want %v", got, row)
 		for w, i in row {
 			testing.expectf(t, i < len(got) && got[i] == w, "attribute %d: %v, want %v", i, got, w)
@@ -157,9 +157,9 @@ attribute_values_are_normalized_by_their_type :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"a"})
-	for w in ([]Attribute{{"t", "one two"}, {"c", " p q\t z"}, {"u", "a\nb"}, {"d", "  x y  "}}) {
-		v, has := attribute_value(&doc, a, w.name)
+	a, _ := testkit.member_at(&doc, {"a"})
+	for w in ([]testkit.Attribute{{"t", "one two"}, {"c", " p q\t z"}, {"u", "a\nb"}, {"d", "  x y  "}}) {
+		v, has := testkit.attribute_value(&doc, a, w.name)
 		testing.expect_value(t, has, true)
 		testing.expect_value(t, v, w.value)
 	}
@@ -175,7 +175,7 @@ an_entity_text_decodes_by_the_dtd_its_document_holds :: proc(t: ^testing.T) {
 	doc, err := xml.build(src)
 	defer xml.destroy(&doc)
 	testing.expect_value(t, err, nil)
-	a, _ := member_at(&doc, {"a"})
+	a, _ := testkit.member_at(&doc, {"a"})
 	buf: [16]u8
 	text, ok := xml.node_text(&doc, a, buf[:])
 	testing.expect(t, ok && text == "xyzxyz")
@@ -201,7 +201,7 @@ a_default_declares_a_namespace :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"p:a"})
+	a, _ := testkit.member_at(&doc, {"p:a"})
 	uri, _ := xml.namespace(&doc, a)
 	testing.expect_value(t, uri, "urn:p")
 	testing.expect_value(t, refusal("<!DOCTYPE p:a [<!ATTLIST p:a xmlns:q CDATA #FIXED 'urn:q'>]><p:a/>"), "unbound_prefix@60")
@@ -229,7 +229,7 @@ billion_laughs_is_refused_by_the_budget :: proc(t: ^testing.T) {
 	}
 	strings.write_string(&b, "]><a>&l9;</a>")
 	err := xml.validate(b.buf[:], .Xml)
-	testing.expect_value(t, code_of(err), "exceeded Expansion")
+	testing.expect_value(t, testkit.code_of(err), "exceeded Expansion")
 }
 
 @(test)
@@ -239,7 +239,7 @@ quadratic_blowup_is_refused_by_the_budget :: proc(t: ^testing.T) {
 	refs := strings.repeat("&e;", 4_000, context.temp_allocator)
 	text := strings.concatenate({"<!DOCTYPE a [<!ENTITY e '", big, "'>]><a b='", refs, "'>", refs, "</a>"}, context.temp_allocator)
 	err := xml.validate(transmute([]u8)text, .Xml)
-	testing.expect_value(t, code_of(err), "exceeded Expansion")
+	testing.expect_value(t, testkit.code_of(err), "exceeded Expansion")
 	testing.expect_value(t, xml.validate(transmute([]u8)text, .Xml, {budget = {expansion = 1 << 30}}), nil)
 }
 
@@ -252,10 +252,10 @@ an_unread_parameter_entity_stops_the_declarations :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"a"})
-	_, has := attribute_value(&doc, a, "k")
+	a, _ := testkit.member_at(&doc, {"a"})
+	_, has := testkit.attribute_value(&doc, a, "k")
 	testing.expect_value(t, has, false)
-	testing.expect_value(t, text_of(&doc, a), "&e;")
+	testing.expect_value(t, testkit.scalar_text(&doc, a), "&e;")
 	testing.expect_value(t, refusal("<!DOCTYPE a [<!ENTITY e 'x'>]><a>&e;</a>"), "")
 }
 
@@ -271,8 +271,8 @@ an_external_subset_leaves_undeclared_names_unread :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"a"})
-	testing.expect_value(t, text_of(&doc, a), "&e;")
+	a, _ := testkit.member_at(&doc, {"a"})
+	testing.expect_value(t, testkit.scalar_text(&doc, a), "&e;")
 	f, ferr := xml.find(transmute([]u8)unread, {xml.Name("a")}, opts = {tolerate = {.Unread_Entity}})
 	testing.expect_value(t, ferr, nil)
 	read, read_ok := xml.node_text_read(xml.as(.Xml), transmute([]u8)unread, xml.answer_node(f), context.temp_allocator)
@@ -294,7 +294,7 @@ html_names_read_under_an_xhtml_public_id :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	s, _ := text_at(&doc, "html")
+	s, _ := testkit.text_at(&doc, "html")
 	testing.expect_value(t, s, " é")
 }
 
@@ -307,11 +307,11 @@ replacement_nodes_are_views_of_the_subset :: proc(t: ^testing.T) {
 		return
 	}
 	subset_hi := u64(strings.index(text, "]>"))
-	b, _ := member_at(&doc, {"a", "b"})
-	c, _ := member_at(&doc, {"a", "c"})
+	b, _ := testkit.member_at(&doc, {"a", "b"})
+	c, _ := testkit.member_at(&doc, {"a", "c"})
 	testing.expect(t, doc.nodes[b].lo < subset_hi)
 	testing.expect(t, doc.nodes[c].lo > subset_hi)
-	v, found := attribute_value(&doc, c, "k")
+	v, found := testkit.attribute_value(&doc, c, "k")
 	testing.expect(t, found)
 	testing.expect_value(t, v, "v")
 }
@@ -323,7 +323,7 @@ a_namespace_is_read_as_its_normalized_value :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, found := member_at(&doc, {"p:a"})
+	a, found := testkit.member_at(&doc, {"p:a"})
 	testing.expect(t, found)
 	uri, p := xml.namespace(&doc, a)
 	testing.expect_value(t, p, tape.Presence.Found)

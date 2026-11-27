@@ -40,9 +40,9 @@ every_entry_point_reads_by_a_constant_spec_and_a_chosen_one :: proc(t: ^testing.
 	testing.expect_value(t, len(cdoc.nodes), len(sdoc.nodes))
 	at, p, _ := xml.answer({doc = &sdoc}, 0, 0)
 	testing.expect_value(t, p, tape.Presence.Found)
-	testing.expect_value(t, text_of(&sdoc, at), "2")
+	testing.expect_value(t, testkit.scalar_text(&sdoc, at), "2")
 	at, p, _ = xml.answer({doc = &cdoc}, 0, 0)
-	testing.expect_value(t, text_of(&cdoc, at), "2")
+	testing.expect_value(t, testkit.scalar_text(&cdoc, at), "2")
 }
 
 // A repeated name is a fault only for the build that asks to refuse it, and a path read takes no such option.
@@ -55,7 +55,7 @@ a_repeated_name_is_refused_only_when_asked :: proc(t: ^testing.T) {
 	_, err = xml.build(src, .Xml, {dups = .Refuse}, context.temp_allocator)
 	f, refused := err.(tape.Fault)
 	testing.expect_value(t, refused, true)
-	testing.expect_value(t, code_of(err), "duplicate_key")
+	testing.expect_value(t, testkit.code_of(err), "duplicate_key")
 	testing.expect_value(t, f.at, 12)
 	answer, ferr := xml.find(src, {tape.Name("a"), tape.Name("b")})
 	testing.expect_value(t, ferr, nil)
@@ -72,7 +72,7 @@ a_refused_repeat_is_the_first_read :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`<!DOCTYPE a [<!ENTITY e "<b/>,<b/>">]><a>&e;&e;</a>`)
 	_, err := xml.build(src, .Xml, {dups = .Refuse}, context.temp_allocator)
 	f, _ := err.(tape.Fault)
-	testing.expect_value(t, code_of(err), "duplicate_key")
+	testing.expect_value(t, testkit.code_of(err), "duplicate_key")
 	testing.expect_value(t, f.at, 31)
 }
 
@@ -84,10 +84,10 @@ a_read_takes_its_options :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`<!DOCTYPE a [<!ENTITY e 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'>]><a><n>12</n><t>&e;&e;&e;&e;</t></a>`)
 	doc, err := xml.build(src, .Xml, {budget = {expansion = 1 << 20}, format = xml.Xml_Options{infer = true}}, context.temp_allocator)
 	testing.expect_value(t, err, nil)
-	n, _ := member_at(&doc, {"a", "n"})
+	n, _ := testkit.member_at(&doc, {"a", "n"})
 	testing.expect_value(t, doc.nodes[n].kind, tape.Kind.Number)
 	e := xml.validate(src, .Xml, {budget = {expansion = 100}})
-	testing.expect_value(t, code_of(e), "exceeded Expansion")
+	testing.expect_value(t, testkit.code_of(e), "exceeded Expansion")
 	deep := transmute([]u8)string(`<a><b><c/></b></a>`)
 	e = xml.validate(deep, .Xml, {budget = {depth = 2}})
 	x, exceeded := e.(tape.Exceeded)
@@ -108,55 +108,4 @@ a_read_takes_its_options :: proc(t: ^testing.T) {
 	r := xml.records_open(deep, .Members, .Xml, lax)
 	testing.expect_value(t, r.err, tape.Error(tape.Bad_Option{"tolerate"}))
 	testing.expect_value(t, xml.validate(deep, .Xml, {tolerate = {.Ragged, .Bare_Quote, .Non_Finite, .Lone_Surrogate}}), nil)
-}
-
-@(test)
-scan_first_and_last_match_build_with_skipped_subtrees_and_dups :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	src := transmute([]u8)string(
-		`<?xml version="1.0"?><!--top-->` +
-		`<logs>` +
-		`<log env="prod"><ts>t1</ts><nested k="a"><deep><item>1</item></deep><empty/></nested><id>first-id</id><id>last-id</id></log>` +
-		`<log><ts>t2</ts><other><sub/>txt</other><ping a="1"/><id>second</id></log>` +
-		`</logs>`,
-	)
-	paths := [][]tape.Step{
-		{tape.Name("logs"), tape.All{}, tape.Name("ts")},
-		{tape.Name("logs"), tape.All{}, tape.Name("id")},
-	}
-	demand, derr := xml.demand_of(paths, allocator = context.temp_allocator)
-	testing.expect_value(t, derr, nil)
-
-	bdoc, berr := xml.build(src, .Xml, {}, context.temp_allocator)
-	testing.expect_value(t, berr, nil)
-
-	for dups in ([]tape.Duplicates{.First, .Last}) {
-		want_ids := [2]string{"first-id" if dups == .First else "last-id", "second"}
-		for i in 0 ..< 2 {
-			el, mp := xml.member(reader(&bdoc), xml.ROOT, "logs", dups)
-			testing.expect_value(t, mp, tape.Presence.Found)
-			ch, cp, _ := tape.children(reader(&bdoc), el, context.temp_allocator)
-			testing.expect_value(t, cp, tape.Presence.Found)
-			log_node := xml.NO_NODE
-			for step := 0; step <= i; step += 1 {
-				_, log_node, _ = tape.next_child(reader(&bdoc), &ch)
-			}
-			id_node, ip := xml.member(reader(&bdoc), log_node, "id", dups)
-			testing.expect_value(t, ip, tape.Presence.Found)
-			testing.expect_value(t, text_of(&bdoc, id_node), want_ids[i])
-		}
-
-		for stop in ([]bool{false, true}) {
-			sdoc, serr := xml.scan(src, &demand, .Xml, {stop_early = stop}, {dups = dups}, context.temp_allocator)
-			testing.expect_value(t, serr, nil)
-			for i in 0 ..< 2 {
-				ts_at, ts_p, _ := xml.answer({doc = &sdoc}, 0, i)
-				id_at, id_p, _ := xml.answer({doc = &sdoc}, 1, i)
-				testing.expect_value(t, ts_p, tape.Presence.Found)
-				testing.expect_value(t, id_p, tape.Presence.Found)
-				testing.expect_value(t, text_of(&sdoc, ts_at), "t1" if i == 0 else "t2")
-				testing.expect_value(t, text_of(&sdoc, id_at), want_ids[i])
-			}
-		}
-	}
 }

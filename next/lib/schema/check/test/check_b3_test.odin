@@ -20,66 +20,9 @@ import "stury:toml"
 import "stury:xml"
 
 @(private = "file")
-expect_b3_json :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want_valid: bool, opts := check.Options{}, check_doc := true, loc := #caller_location) {
-	src := transmute([]u8)input
-
-	r_verdict := json.check(src, plan, .Json, opts)
-	defer check.result_destroy(&r_verdict)
-	testing.expectf(t, r_verdict.valid == want_valid, "verdict mismatch on %s: got=%v err=%v want=%v", input, r_verdict.valid, r_verdict.err, want_valid, loc = loc)
-
-	sink_stream: check.Sink
-	check.sink_init(&sink_stream)
-	defer check.sink_destroy(&sink_stream)
-	r_sink := json.check(src, plan, .Json, opts, &sink_stream)
-	defer check.result_destroy(&r_sink)
-	testing.expectf(t, r_sink.valid == want_valid, "sink mismatch on %s: got=%v want=%v", input, r_sink.valid, want_valid, loc = loc)
-	if want_valid {
-		testing.expect_value(t, len(sink_stream.entries), 0, loc = loc)
-	} else if r_sink.walk_err == nil && r_sink.err.kind != .Exceeded {
-		testing.expectf(t, len(sink_stream.entries) > 0, "expected sink entries on invalid %s", input, loc = loc)
-	}
-
-	if check_doc && opts.dups != .Refuse && opts.budget == {} {
-		bopts := tape.Options{dups = opts.dups}
-		doc, berr := json.build(src, .Json, bopts)
-		testing.expect_value(t, berr, nil, loc = loc)
-		defer tape.destroy(&doc)
-
-		r_doc := check.check_document(&doc, plan, opts)
-		defer check.result_destroy(&r_doc)
-		testing.expect_value(t, r_doc.valid, want_valid, loc = loc)
-
-		sink_doc: check.Sink
-		check.sink_init(&sink_doc)
-		defer check.sink_destroy(&sink_doc)
-		r_ds := check.check_document(&doc, plan, opts, &sink_doc)
-		defer check.result_destroy(&r_ds)
-		testing.expect_value(t, r_ds.valid, want_valid, loc = loc)
-		expect_sink_entries_equal(t, sink_stream.entries[:], sink_doc.entries[:], input, loc = loc)
-	}
-}
-
-@(private = "file")
-expect_sink_entries_equal :: proc(t: ^testing.T, a, b: []check.Check_Error, label: string, compare_at := false, loc := #caller_location) {
-	testing.expectf(t, len(a) == len(b), "%s: sink len mismatch stream=%d doc=%d", label, len(a), len(b), loc = loc)
-	if len(a) != len(b) {
-		return
-	}
-	for i in 0 ..< len(a) {
-		ea, eb := a[i], b[i]
-		testing.expectf(t, ea.kind == eb.kind && ea.keyword == eb.keyword && ea.expected == eb.expected && ea.instance_location == eb.instance_location && ea.keyword_location == eb.keyword_location,
-			"%s[%d] mismatch:\n  a=%v kw=%q exp=%q inst=%q kwloc=%q at=%d\n  b=%v kw=%q exp=%q inst=%q kwloc=%q at=%d",
-			label, i, ea.kind, ea.keyword, ea.expected, ea.instance_location, ea.keyword_location, ea.at,
-			eb.kind, eb.keyword, eb.expected, eb.instance_location, eb.keyword_location, eb.at, loc = loc)
-		if compare_at {
-			testing.expectf(t, ea.at == eb.at, "%s[%d] byte offset mismatch: a=%d b=%d", label, i, ea.at, eb.at, loc = loc)
-		}
-	}
-}
-
-@(private = "file")
 compile_b3_json :: proc(t: ^testing.T, schema_text: string, opts := schema.Options{}, loc := #caller_location) -> ^schema.Compiled {
 	c, cerr := schema.compile_json(transmute([]u8)schema_text, opts)
+	defer schema.error_destroy(&cerr)
 	testing.expectf(t, cerr.kind == .None, "schema compile failed: %v", cerr, loc = loc)
 	return c
 }
@@ -150,8 +93,8 @@ wave_b3_dynamic_ref_and_components_test :: proc(t: ^testing.T) {
 		defer schema.destroy(c)
 		testing.expect(t, .Factored in c.plan.records[0].flags)
 
-		expect_b3_json(t, &c.plan, `{"foo":"pass","bar":{"baz":{"foo":"pass"}}}`, true)
-		expect_b3_json(t, &c.plan, `{"foo":"pass","bar":{"baz":{"foo":"fail"}}}`, false)
+		expect_json(t, &c.plan, `{"foo":"pass","bar":{"baz":{"foo":"pass"}}}`, true)
+		expect_json(t, &c.plan, `{"foo":"pass","bar":{"baz":{"foo":"fail"}}}`, false)
 
 		sink: check.Sink
 		check.sink_init(&sink)
@@ -217,11 +160,11 @@ wave_b3_dynamic_ref_and_components_test :: proc(t: ^testing.T) {
 		unfac := clone_unfactored_plan(&c.plan)
 		defer destroy_cloned_plan(&unfac)
 
-		expect_b3_json(t, &c.plan, `{"components":{"schemas":{"User":{"type":"object"}},"x-vendor":"ok"}}`, true)
-		expect_b3_json(t, &c.plan, `{"components":{"schemas":{"Bad-Name":{"type":"object"}}}}`, false)
-		expect_b3_json(t, &c.plan, `{"components":{"schemas":{"User":{"type":"bogus"}}}}`, false)
-		expect_b3_json(t, &c.plan, `{"components":{"x-vendor":123}}`, false)
-		expect_b3_json(t, &c.plan, `{"components":{"unknown":true}}`, false)
+		expect_json(t, &c.plan, `{"components":{"schemas":{"User":{"type":"object"}},"x-vendor":"ok"}}`, true)
+		expect_json(t, &c.plan, `{"components":{"schemas":{"Bad-Name":{"type":"object"}}}}`, false)
+		expect_json(t, &c.plan, `{"components":{"schemas":{"User":{"type":"bogus"}}}}`, false)
+		expect_json(t, &c.plan, `{"components":{"x-vendor":123}}`, false)
+		expect_json(t, &c.plan, `{"components":{"unknown":true}}`, false)
 
 		bad := `{"components":{"schemas":{"1bad":{"type":"nope"}},"x-v":9,"extra":1}}`
 		s_fac, s_unfac: check.Sink
@@ -266,9 +209,9 @@ wave_b3_dynamic_ref_and_components_test :: proc(t: ^testing.T) {
 		unfac := clone_unfactored_plan(&c.plan)
 		defer destroy_cloned_plan(&unfac)
 
-		expect_b3_json(t, &c.plan, `{"meta":{"v":1,"ok":2}}`, true)
+		expect_json(t, &c.plan, `{"meta":{"v":1,"ok":2}}`, true)
 		bad := `{"meta":{"BAD":1,"v":"nope"}}`
-		expect_b3_json(t, &c.plan, bad, false)
+		expect_json(t, &c.plan, bad, false)
 
 		s_fac, s_unfac: check.Sink
 		check.sink_init(&s_fac)
@@ -306,8 +249,8 @@ wave_b3_dynamic_ref_and_components_test :: proc(t: ^testing.T) {
 		c := compile_b3_json(t, sch)
 		defer schema.destroy(c)
 		testing.expect(t, .Factored in c.plan.records[0].flags)
-		expect_b3_json(t, &c.plan, `{"tag":"outer","child":{"tag":"outer","child":{"tag":"outer"}}}`, true)
-		expect_b3_json(t, &c.plan, `{"tag":"outer","child":{"tag":"wrong"}}`, false)
+		expect_json(t, &c.plan, `{"tag":"outer","child":{"tag":"outer","child":{"tag":"outer"}}}`, true)
+		expect_json(t, &c.plan, `{"tag":"outer","child":{"tag":"wrong"}}`, false)
 	}
 }
 
@@ -351,10 +294,10 @@ wave_b3_dependent_required_test :: proc(t: ^testing.T) {
 		unfac := clone_unfactored_plan(&c.plan)
 		defer destroy_cloned_plan(&unfac)
 
-		expect_b3_json(t, &c.plan, `{"card":"4111","billing":"1 St","cvv":123,"a\"b":1,"c\nd":2}`, true)
-		expect_b3_json(t, &c.plan, `{"card":"4111","billing":"1 St","cvv":123,"a\"b":1,"token":"ok"}`, true)
-		expect_b3_json(t, &c.plan, `{"card":"4111","billing":"1 St"}`, false)
-		expect_b3_json(t, &c.plan, `{"a\"b":1}`, false)
+		expect_json(t, &c.plan, `{"card":"4111","billing":"1 St","cvv":123,"a\"b":1,"c\nd":2}`, true)
+		expect_json(t, &c.plan, `{"card":"4111","billing":"1 St","cvv":123,"a\"b":1,"token":"ok"}`, true)
+		expect_json(t, &c.plan, `{"card":"4111","billing":"1 St"}`, false)
+		expect_json(t, &c.plan, `{"a\"b":1}`, false)
 
 		for bad in ([?]string{`{"card":"4111"}`, `{"a\"b":1}`}) {
 			s_fac, s_unfac: check.Sink
@@ -391,9 +334,9 @@ wave_b3_dependent_required_test :: proc(t: ^testing.T) {
 		unfac := clone_unfactored_plan(&c.plan)
 		defer destroy_cloned_plan(&unfac)
 
-		expect_b3_json(t, &c.plan, `{"foo":1,"bar":2}`, true)
-		expect_b3_json(t, &c.plan, `{"foo":1}`, true)
-		expect_b3_json(t, &c.plan, `{"bar":2}`, false)
+		expect_json(t, &c.plan, `{"foo":1,"bar":2}`, true)
+		expect_json(t, &c.plan, `{"foo":1}`, true)
+		expect_json(t, &c.plan, `{"bar":2}`, false)
 
 		s_fac, s_unfac: check.Sink
 		check.sink_init(&s_fac)
@@ -449,11 +392,11 @@ wave_b3_factored_arrays_test :: proc(t: ^testing.T) {
 		}
 		testing.expect(t, found_fac)
 
-		expect_b3_json(t, &c.plan, `{"tags":["alpha","urgent"]}`, true)
-		expect_b3_json(t, &c.plan, `{"tags":["urgent","beta"]}`, false) // index 1 `"beta"` unevaluated -> invalid
-		expect_b3_json(t, &c.plan, `{"tags":["urgent","urgent"]}`, false) // duplicate + 2 urgent
-		expect_b3_json(t, &c.plan, `{"tags":["urgent"]}`, false) // minItems 2
-		expect_b3_json(t, &c.plan, `{"tags":["alpha","beta"]}`, false) // contains missing + idx 1 unevaluated
+		expect_json(t, &c.plan, `{"tags":["alpha","urgent"]}`, true)
+		expect_json(t, &c.plan, `{"tags":["urgent","beta"]}`, false) // index 1 `"beta"` unevaluated -> invalid
+		expect_json(t, &c.plan, `{"tags":["urgent","urgent"]}`, false) // duplicate + 2 urgent
+		expect_json(t, &c.plan, `{"tags":["urgent"]}`, false) // minItems 2
+		expect_json(t, &c.plan, `{"tags":["alpha","beta"]}`, false) // contains missing + idx 1 unevaluated
 
 		for bad in ([?]string{`{"tags":["urgent","beta"]}`, `{"tags":["urgent","urgent"]}`, `{"tags":["urgent"]}`, `{"tags":["alpha","beta"]}`}) {
 			s_fac, s_unfac: check.Sink
@@ -498,7 +441,7 @@ wave_b3_factored_arrays_test :: proc(t: ^testing.T) {
 			strings.write_byte(&sb, '"')
 		}
 		strings.write_byte(&sb, ']')
-		expect_b3_json(t, &c.plan, strings.to_string(sb), true)
+		expect_json(t, &c.plan, strings.to_string(sb), true)
 
 		strings.builder_reset(&sb)
 		strings.write_byte(&sb, '[')
@@ -509,14 +452,14 @@ wave_b3_factored_arrays_test :: proc(t: ^testing.T) {
 			strings.write_byte(&sb, '"')
 		}
 		strings.write_string(&sb, `,"\u006b0"]`)
-		expect_b3_json(t, &c.plan, strings.to_string(sb), false)
+		expect_json(t, &c.plan, strings.to_string(sb), false)
 
 		// Canonical number equality + nested unique array conflict (`[1, 2]` vs `[1.0, 2]`).
-		expect_b3_json(t, &c.plan, `[1, 2, "1"]`, true)
-		expect_b3_json(t, &c.plan, `[1, 1.0]`, false)
-		expect_b3_json(t, &c.plan, `[[1, 2], [2, 1]]`, true)
-		expect_b3_json(t, &c.plan, `[[1, 1.0]]`, false) // inner array fails uniqueItems
-		expect_b3_json(t, &c.plan, `[[1, 2], [1.0, 2]]`, false) // outer array fails uniqueItems on containers
+		expect_json(t, &c.plan, `[1, 2, "1"]`, true)
+		expect_json(t, &c.plan, `[1, 1.0]`, false)
+		expect_json(t, &c.plan, `[[1, 2], [2, 1]]`, true)
+		expect_json(t, &c.plan, `[[1, 1.0]]`, false) // inner array fails uniqueItems
+		expect_json(t, &c.plan, `[[1, 2], [1.0, 2]]`, false) // outer array fails uniqueItems on containers
 	}
 
 	// 3. Array `anyOf`/`oneOf`/`not`/`if` + `minItems`/`maxItems` + `const`/`enum` + contradictory `minContains`/`maxContains`.
@@ -534,12 +477,12 @@ wave_b3_factored_arrays_test :: proc(t: ^testing.T) {
 		unfac := clone_unfactored_plan(&c.plan)
 		defer destroy_cloned_plan(&unfac)
 
-		expect_b3_json(t, &c.plan, `[1, 2]`, true)
-		expect_b3_json(t, &c.plan, `["a", "b", "c"]`, true)
-		expect_b3_json(t, &c.plan, `[true, false]`, true)
-		expect_b3_json(t, &c.plan, `[1, 3]`, false)
-		expect_b3_json(t, &c.plan, `["a", "b"]`, false)
-		expect_b3_json(t, &c.plan, `["a", "b", 3]`, false)
+		expect_json(t, &c.plan, `[1, 2]`, true)
+		expect_json(t, &c.plan, `["a", "b", "c"]`, true)
+		expect_json(t, &c.plan, `[true, false]`, true)
+		expect_json(t, &c.plan, `[1, 3]`, false)
+		expect_json(t, &c.plan, `["a", "b"]`, false)
+		expect_json(t, &c.plan, `["a", "b", 3]`, false)
 
 		for bad in ([?]string{`[1, 3]`, `["a", "b"]`, `["a", "b", 3]`}) {
 			s_fac, s_unfac: check.Sink
@@ -651,13 +594,13 @@ wave_b3_part_counts_and_const_enum_test :: proc(t: ^testing.T) {
 	unfac := clone_unfactored_plan(&c.plan)
 	defer destroy_cloned_plan(&unfac)
 
-	expect_b3_json(t, &c.plan, `{"kind":"empty"}`, true)
-	expect_b3_json(t, &c.plan, `{"kind":"single"}`, true)
-	expect_b3_json(t, &c.plan, `{"kind":"pair","v":7}`, true)
-	expect_b3_json(t, &c.plan, `{"kind":"pair","v":7,"extra":1}`, true)
-	expect_b3_json(t, &c.plan, `{"kind":"pair","v":7,"e1":1,"e2":2}`, false) // inner maxProperties 3 fails (outer maxProperties 4 passes!)
-	expect_b3_json(t, &c.plan, `{"kind":"pair","v":7,"e1":1,"e2":2,"e3":3}`, false) // outer maxProperties 4 + inner maxProperties 3 fail
-	expect_b3_json(t, &c.plan, `{}`, false) // all 3 branches fail
+	expect_json(t, &c.plan, `{"kind":"empty"}`, true)
+	expect_json(t, &c.plan, `{"kind":"single"}`, true)
+	expect_json(t, &c.plan, `{"kind":"pair","v":7}`, true)
+	expect_json(t, &c.plan, `{"kind":"pair","v":7,"extra":1}`, true)
+	expect_json(t, &c.plan, `{"kind":"pair","v":7,"e1":1,"e2":2}`, false) // inner maxProperties 3 fails (outer maxProperties 4 passes!)
+	expect_json(t, &c.plan, `{"kind":"pair","v":7,"e1":1,"e2":2,"e3":3}`, false) // outer maxProperties 4 + inner maxProperties 3 fail
+	expect_json(t, &c.plan, `{}`, false) // all 3 branches fail
 
 	for bad in ([?]string{`{"kind":"pair","v":7,"e1":1,"e2":2}`, `{"kind":"pair","v":7,"e1":1,"e2":2,"e3":3}`, `{}`}) {
 		s_fac, s_unfac: check.Sink
@@ -743,7 +686,7 @@ wave_b3_single_pass_errors_and_repeated_keys_test :: proc(t: ^testing.T) {
 		defer destroy_cloned_plan(&unfac)
 
 		input := `{"ok_head":"bad_head","spec_obj":{"a":"nope"},"conj_obj":{"y":99,"z":true},"tail":"bad_tail"}`
-		expect_b3_json(t, &c.plan, input, false)
+		expect_json(t, &c.plan, input, false)
 
 		s_fac, s_unfac: check.Sink
 		check.sink_init(&s_fac)
@@ -841,8 +784,8 @@ wave_b3_single_pass_errors_and_repeated_keys_test :: proc(t: ^testing.T) {
 		}
 
 		// Under `.Refuse`: duplicate key refuses with `.Duplicate_Key`.
-		expect_b3_json(t, &c.plan, dup_mode_1_then_2, false, opts = {dups = .Refuse}, check_doc = false)
-		expect_b3_json(t, &c.plan, dup_go, false, opts = {dups = .Refuse}, check_doc = false)
+		expect_json(t, &c.plan, dup_mode_1_then_2, false, opts = {dups = .Refuse}, check_doc = false)
+		expect_json(t, &c.plan, dup_go, false, opts = {dups = .Refuse}, check_doc = false)
 	}
 
 	// 3. Lone-`if` annotation regression (`collect_evaluates` stack overflow fix) + `Budget` guards.
@@ -854,8 +797,8 @@ wave_b3_single_pass_errors_and_repeated_keys_test :: proc(t: ^testing.T) {
 		}`
 		c := compile_b3_json(t, sch)
 		defer schema.destroy(c)
-		expect_b3_json(t, &c.plan, `{"foo":1}`, true)
-		expect_b3_json(t, &c.plan, `{"bar":1}`, false)
+		expect_json(t, &c.plan, `{"foo":1}`, true)
+		expect_json(t, &c.plan, `{"bar":1}`, false)
 	}
 
 	// 4. `dsv` and `cbor` parity on factored array (`uniqueItems` + `items`).
@@ -992,8 +935,8 @@ wave_b3_neon_regressions_test :: proc(t: ^testing.T) {
 		unfac := clone_unfactored_plan(&c.plan)
 		defer destroy_cloned_plan(&unfac)
 
-		expect_b3_json(t, &c.plan, `{"": 1}`, false)
-		expect_b3_json(t, &c.plan, `{"a": 1, "": {"nested": true}}`, false)
+		expect_json(t, &c.plan, `{"": 1}`, false)
+		expect_json(t, &c.plan, `{"a": 1, "": {"nested": true}}`, false)
 
 		for bad in ([?]string{`{"": 1}`, `{"a": 1, "": {"nested": true}}`}) {
 			s_fac, s_unfac: check.Sink
@@ -1025,7 +968,7 @@ wave_b3_neon_regressions_test :: proc(t: ^testing.T) {
 		}`
 		ce := compile_b3_json(t, sch_empty_prop)
 		defer schema.destroy(ce)
-		expect_b3_json(t, &ce.plan, `{"":{"nested":"bad"}}`, false)
+		expect_json(t, &ce.plan, `{"":{"nested":"bad"}}`, false)
 		r_emp := json.check(transmute([]u8)string(`{"":{"nested":"bad"}}`), &ce.plan, .Json)
 		defer check.result_destroy(&r_emp)
 		testing.expect_value(t, r_emp.err.instance_location, "//nested")
@@ -1044,7 +987,7 @@ wave_b3_neon_regressions_test :: proc(t: ^testing.T) {
 			defer destroy_cloned_plan(&unfac)
 
 			bad := `{"a": {"BAD": 1}}`
-			expect_b3_json(t, &c.plan, bad, false)
+			expect_json(t, &c.plan, bad, false)
 
 			s_fac, s_unfac: check.Sink
 			check.sink_init(&s_fac)
@@ -1095,10 +1038,10 @@ wave_b3_neon_regressions_test :: proc(t: ^testing.T) {
 		unfac_min := clone_unfactored_plan(&c_min.plan)
 		defer destroy_cloned_plan(&unfac_min)
 
-		expect_b3_json(t, &c_min.plan, `{"obj": {"a": 1, "b": 2}}`, true)
-		expect_b3_json(t, &c_min.plan, `{"obj": {"a": 1}}`, false)
+		expect_json(t, &c_min.plan, `{"obj": {"a": 1, "b": 2}}`, true)
+		expect_json(t, &c_min.plan, `{"obj": {"a": 1}}`, false)
 		// Repeated unnamed key `"a"` collapses to 1 member under JSON `.Last`, failing `minProperties: 2`!
-		expect_b3_json(t, &c_min.plan, `{"obj": {"a": 1, "a": 2}}`, false, opts = {dups = .Last})
+		expect_json(t, &c_min.plan, `{"obj": {"a": 1, "a": 2}}`, false, opts = {dups = .Last})
 
 		for bad in ([?]string{`{"obj": {"a": 1}}`, `{"obj": {"a": 1, "a": 2}}`}) {
 			s_fac, s_unfac: check.Sink
@@ -1126,8 +1069,8 @@ wave_b3_neon_regressions_test :: proc(t: ^testing.T) {
 		unfac_max := clone_unfactored_plan(&c_max.plan)
 		defer destroy_cloned_plan(&unfac_max)
 
-		expect_b3_json(t, &c_max.plan, `{"obj": {"a": 1}}`, true)
-		expect_b3_json(t, &c_max.plan, `{"obj": {"a": 1, "b": 2}}`, false)
+		expect_json(t, &c_max.plan, `{"obj": {"a": 1}}`, true)
+		expect_json(t, &c_max.plan, `{"obj": {"a": 1, "b": 2}}`, false)
 
 		rv_max := json.check(transmute([]u8)string(`{"obj": {"a": 1, "b": 2}}`), &c_max.plan, .Json)
 		defer check.result_destroy(&rv_max)

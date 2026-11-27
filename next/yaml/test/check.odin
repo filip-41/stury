@@ -49,24 +49,25 @@ yaml_check_matches_document_check :: proc(t: ^testing.T) {
 	defer check.plan_destroy(&plan)
 
 	Case :: struct {
-		input: string,
-		valid: bool,
-		dups:  tape.Duplicates,
+		input:    string,
+		valid:    bool,
+		dups:     tape.Duplicates,
+		walk_err: check.Error_Kind,
 	}
 	cases := [?]Case {
-		{"name: web\nport: 0x1F\nratio: .5\ntags: [a, 'b']\nhome: ~\n", true, .Default},
-		{"{name: 'yes', port: !!int \"7\", tags: &t [x], home: /srv}\n", true, .Default},
-		{"# head\nport: 8080 # inline\nname: |\n  block\n", true, .Default},
-		{"name: web\nport: 0o17\n\"1\": ignored_num_is_diff_wait\n", false, .Default},
-		{"name: \"x\"\nport: 70000\ntags: [a, 3]\nextra: ~\n", false, .Default},
-		{"name: yes\nport: 1.5\n", false, .Default},
-		{"port: 1\ntags: [a, a]\n", false, .Default},
-		{"- name\n- port\n", false, .Default},
-		{"name: &n 5\nport: *n\nhome: *n\n", false, .Default},
-		{"name: \"ab\"\nname: web\nport: 80\n", false, .Refuse},
-		{"name: \"x\"\nname: web\nport: 80\n", true, .Last},
-		{"name: web\nname: \"x\"\nport: 80\n", true, .First},
-		{"name: [unclosed\n", false, .Default},
+		{"name: web\nport: 0x1F\nratio: .5\ntags: [a, 'b']\nhome: ~\n", true, .Default, .None},
+		{"{name: 'yes', port: !!int \"7\", tags: &t [x], home: /srv}\n", true, .Default, .None},
+		{"# head\nport: 8080 # inline\nname: |\n  block\n", true, .Default, .None},
+		{"name: web\nport: 0o17\n\"1\": ignored_num_is_diff_wait\n", false, .Default, .None},
+		{"name: \"x\"\nport: 70000\ntags: [a, 3]\nextra: ~\n", false, .Default, .None},
+		{"name: yes\nport: 1.5\n", false, .Default, .None},
+		{"port: 1\ntags: [a, a]\n", false, .Default, .None},
+		{"- name\n- port\n", false, .Default, .None},
+		{"name: &n 5\nport: *n\nhome: *n\n", false, .Default, .None},
+		{"name: \"ab\"\nname: web\nport: 80\n", false, .Refuse, .Duplicate_Key},
+		{"name: \"x\"\nname: web\nport: 80\n", true, .Last, .None},
+		{"name: web\nname: \"x\"\nport: 80\n", true, .First, .None},
+		{"name: [unclosed\n", false, .Default, .Walk},
 	}
 
 	for c in cases {
@@ -74,34 +75,20 @@ yaml_check_matches_document_check :: proc(t: ^testing.T) {
 		opts := check.Options{dups = c.dups}
 
 		r_stream := yaml.check(src, &plan, .Yaml_1_2, opts)
-		defer check.result_destroy(&r_stream)
-		testing.expectf(t, r_stream.valid == c.valid, "%q: stream valid=%v want %v", c.input, r_stream.valid, c.valid)
-
 		sink_s: check.Sink
 		check.sink_init(&sink_s)
-		defer check.sink_destroy(&sink_s)
 		r_ss := yaml.check(src, &plan, .Yaml_1_2, opts, &sink_s)
-		defer check.result_destroy(&r_ss)
-		testing.expect_value(t, r_ss.valid, c.valid)
 
-		doc, berr := yaml.build(src, .Yaml_1_2, {dups = c.dups})
-		defer yaml.destroy(&doc)
-		if berr != nil {
-			want_err := check.Error_Kind.Duplicate_Key if c.dups == .Refuse else check.Error_Kind.Walk
-			testing.expectf(t, !r_ss.valid && r_ss.err.kind == want_err, "%q: got err %v want %v", c.input, r_ss.err.kind, want_err)
+		if c.walk_err != .None {
+			testing.expectf(t, !r_stream.valid && r_stream.err.kind == c.walk_err, "%q: got err %v want %v", c.input, r_stream.err.kind, c.walk_err)
+			testing.expectf(t, !r_ss.valid && r_ss.err.kind == c.walk_err, "%q: got err %v want %v", c.input, r_ss.err.kind, c.walk_err)
+			check.result_destroy(&r_stream)
+			check.result_destroy(&r_ss)
+			check.sink_destroy(&sink_s)
 			continue
 		}
 
-		sink_d: check.Sink
-		check.sink_init(&sink_d)
-		defer check.sink_destroy(&sink_d)
-		r_doc := check.check_document(&doc, &plan, opts, &sink_d)
-		defer check.result_destroy(&r_doc)
-		testing.expect_value(t, r_ss.valid, r_doc.valid)
-		testing.expect_value(t, len(sink_s.entries), len(sink_d.entries))
-		for k in 0 ..< min(len(sink_s.entries), len(sink_d.entries)) {
-			testing.expect_value(t, sink_s.entries[k].kind, sink_d.entries[k].kind)
-		}
+		testkit.check_parity(t, &plan, yaml.reads(.Yaml_1_2), yaml.as(.Yaml_1_2), src, c.valid, r_stream, r_ss, &sink_s, opts, {dups = c.dups})
 	}
 
 	// Merge keys schema parity.

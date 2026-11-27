@@ -48,34 +48,27 @@ nested_text :: proc(depth: int, nesting: Nesting) -> []u8 {
 @(private = "file")
 read_nested :: proc(read: int, text: []u8) -> bool {
 	opts := toml.Options{budget = {depth = 200_000}}
-	if read >= 6 {
-		// The steps to the innermost container of each `nested_text`, from its length.
-		arrays, inline := text[4] == '[', text[4] == '{'
-		steps := (len(text) - 6) / 2 if arrays else (len(text) - 6) / 4 if inline else (len(text) - 2) / 2 - 1 if text[0] == '[' else (len(text) - 4) / 2 - 1
-		at := make([]tape.Step, steps, context.temp_allocator)
-		for &step, k in at {
-			step = tape.Index(0) if arrays && k > 0 else tape.Name("a")
+	if read < testkit.DEEP_CORE_READS {
+		arrays := text[4] == '['
+		at: []tape.Step
+		if read == 6 {
+			// The steps to the innermost container of each `nested_text`, from its length.
+			inline := text[4] == '{'
+			steps := (len(text) - 6) / 2 if arrays else (len(text) - 6) / 4 if inline else (len(text) - 2) / 2 - 1 if text[0] == '[' else (len(text) - 4) / 2 - 1
+			at = make([]tape.Step, steps, context.temp_allocator)
+			for &step, k in at {
+				step = tape.Index(0) if arrays && k > 0 else tape.Name("a")
+			}
 		}
-		paths := [][]tape.Step{{tape.Descend{}, tape.Index(0)}, {tape.Descend{}, tape.Name("a")}}
-		return testkit.deep_read(read - 6, toml.reads(.Toml_1_0), toml.as(.Toml_1_0), text, opts, paths, .Elements if arrays else .Members, at)
+		return testkit.deep_core_read(
+			read, toml.reads(.Toml_1_0), toml.as(.Toml_1_0), text, opts,
+			{tape.Name("a")}, {{tape.Name("a")}},
+			{{tape.Descend{}, tape.Index(0)}, {tape.Descend{}, tape.Name("a")}},
+			.Elements if arrays else .Members, at,
+		)
 	}
-	switch read {
+	switch read - testkit.DEEP_CORE_READS {
 	case 0:
-		return toml.validate(text, opts = opts) == nil
-	case 1:
-		doc, err := toml.build(text, opts = opts)
-		tape.destroy(&doc)
-		return err == nil
-	case 2:
-		answer, err := toml.find(text, {tape.Name("a")}, opts = opts)
-		return err == nil && answer.outcome == .Found
-	case 3:
-		d, _ := tape.demand_of({{tape.Name("a")}})
-		r, err := toml.scan(text, &d, opts = opts)
-		tape.destroy(&r)
-		tape.destroy(&d)
-		return err == nil
-	case 5:
 		v: testkit.Value_Table
 		err := toml.unmarshal(text, &v, opts = opts)
 		testkit.value_free(v)
@@ -108,7 +101,7 @@ reads_nest_100000_levels_in_one_mib :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	for nesting in Nesting {
 		text := nested_text(100_000, nesting)
-		testkit.expect_reads_on_thread(t, 1 << 20, 6 + testkit.DEEP_READS, text, fmt.tprint(nesting), read_nested)
+		testkit.expect_reads_on_thread(t, 1 << 20, testkit.DEEP_CORE_READS + 2, text, fmt.tprint(nesting), read_nested)
 		free_all(context.temp_allocator)
 	}
 }

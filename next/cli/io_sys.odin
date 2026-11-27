@@ -20,15 +20,6 @@ EXIT_COMPILE :: 3
 EXIT_NO_OUTPUT :: 4
 EXIT_RUNTIME :: 5
 
-Input_File :: struct {
-	path:    string,
-	display: string,
-	bytes:   []u8,
-	spec:    engine.Spec,
-	framing: engine.Framing,
-	owned:   bool,
-}
-
 // Buffered streaming sink writing in fixed 64 KiB (`write.SINK_BYTES`) chunks with `--unbuffered`,
 // `--each` line prefixing (with optional color), and write/flush error tracking.
 Out_Stream :: struct {

@@ -61,7 +61,7 @@ write_reads_back_as_written :: proc(t: ^testing.T) {
 		node := html.ROOT
 		if len(c.at) > 0 {
 			found: bool
-			node, found = member_at(&doc, c.at)
+			node, found = testkit.member_at(&doc, c.at)
 			testing.expect(t, found)
 		}
 		opts := html.Write_Options{node = node}
@@ -287,7 +287,7 @@ token_writer_and_refusals :: proc(t: ^testing.T) {
 	src := `{"r": {"ul": {"li": /* l */ [1, 2] // t` + "\n}}}"
 	jdoc, jerr := json.build(transmute([]u8)src, .Jsonc, {}, context.temp_allocator)
 	testing.expect_value(t, jerr, nil)
-	rnode, found := member_at(&jdoc, {"r"})
+	rnode, found := testkit.member_at(&jdoc, {"r"})
 	testing.expect(t, found)
 	jout, _, jwerr := html.write(&jdoc, .Html, {node = rnode}, context.temp_allocator)
 	testing.expect_value(t, jwerr, nil)
@@ -333,7 +333,7 @@ write_dsv_cells_and_dropped_facts :: proc(t: ^testing.T) {
 
 	xdoc, xerr := xml.build(transmute([]u8)string(`<r><br><!--foot--></br></r>`), .Xml, {}, context.temp_allocator)
 	testing.expect_value(t, xerr, nil)
-	rnode, rfound := member_at(&xdoc, {"r"})
+	rnode, rfound := testkit.member_at(&xdoc, {"r"})
 	testing.expect(t, rfound)
 	xout, xdrop, xwerr := html.write(&xdoc, .Fragment, {node = rnode}, context.temp_allocator)
 	testing.expect_value(t, xwerr, nil)

@@ -310,21 +310,29 @@ records_find_as :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []
 }
 
 @(private)
-records_find_parallel :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, cap: int, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (int, bool) {
-	chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk = ---
-	nc := cut_json_chunks(r, chunks[:])
+prepare_delim_chunks :: proc(r: ^Records, cap: int, $S: Spec, chunks: ^[build.MAX_RECORD_CHUNKS]build.Record_Chunk) -> (nc: int, has_c0: bool, ok: bool) {
+	nc = cut_json_chunks(r, chunks[:])
 	if nc < 2 {
-		return 0, false
+		return 0, false, false
 	}
-	has_c0 := false
 	// Only probe chunk 0 when `cap` could possibly fit in it (`>= 2` bytes per non-empty delimited JSON record, `- 1` at EOF), avoiding redundant scan on huge batches and saving the count so chunk 0 is never counted twice.
 	if chunks[0].hi - chunks[0].lo >= u64(cap) * 2 - 1 {
 		c0 := count_delim_records_up_to(r.src, chunks[0].lo, chunks[0].hi, r.framing, S, u64(cap))
 		if c0 >= u64(cap) {
-			return 0, false
+			return 0, false, false
 		}
 		chunks[0].count = c0
 		has_c0 = true
+	}
+	return nc, has_c0, true
+}
+
+@(private)
+records_find_parallel :: #force_no_inline proc(r: ^Records, path: []tape.Step, out: []tape.Record, answers: []tape.Span_Answer, cap: int, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (int, bool) {
+	chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk = ---
+	nc, has_c0, ok := prepare_delim_chunks(r, cap, S, &chunks)
+	if !ok {
+		return 0, false
 	}
 	Find_Data :: struct {
 		ctx:     Chunk_Context,
@@ -394,18 +402,9 @@ records_scan_as :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out:
 @(private)
 records_scan_parallel :: #force_no_inline proc(r: ^Records, demand: ^tape.Demand, out: []tape.Record, docs: []tape.Document, cap: int, $S: Spec, $LAX: bool, read: tape.Read_Options, caller: runtime.Allocator) -> (int, bool) {
 	chunks: [build.MAX_RECORD_CHUNKS]build.Record_Chunk = ---
-	nc := cut_json_chunks(r, chunks[:])
-	if nc < 2 {
+	nc, has_c0, ok := prepare_delim_chunks(r, cap, S, &chunks)
+	if !ok {
 		return 0, false
-	}
-	has_c0 := false
-	if chunks[0].hi - chunks[0].lo >= u64(cap) * 2 - 1 {
-		c0 := count_delim_records_up_to(r.src, chunks[0].lo, chunks[0].hi, r.framing, S, u64(cap))
-		if c0 >= u64(cap) {
-			return 0, false
-		}
-		chunks[0].count = c0
-		has_c0 = true
 	}
 	Scan_Data :: struct {
 		ctx:    Chunk_Context,

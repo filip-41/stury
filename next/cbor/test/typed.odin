@@ -15,7 +15,7 @@ import "stury:testkit"
 holding :: proc(item: string) -> []u8 {
 	out := make([dynamic]u8, context.temp_allocator)
 	append(&out, 0xa1, 0x61, 'v')
-	append(&out, ..hex(item))
+	append(&out, ..testkit.hex(item))
 	return out[:]
 }
 
@@ -55,10 +55,10 @@ raw_values_hold_their_items :: proc(t: ^testing.T) {
 		{"a1 6161 82 01 02", "a1 6161 82 01 02"},
 	}
 	for r in items {
-		want := hex(r.raw)
+		want := testkit.hex(r.raw)
 		src := make([dynamic]u8, context.temp_allocator)
 		append(&src, 0xa1, 0x63, 'r', 'a', 'w')
-		append(&src, ..hex(r.item))
+		append(&src, ..testkit.hex(r.item))
 		for borrow in ([]bool{true, false}) {
 			got: Whole
 			e := cbor.unmarshal(src[:], &got, .Cbor, {borrow_strings = borrow}, allocator = context.temp_allocator)
@@ -108,7 +108,7 @@ refuse_duplicates_refuses_as_a_build :: proc(t: ^testing.T) {
 		dups = .Refuse,
 	}
 	for item in ([]string{"a2 6161 01 6161 02", "a2 6161 01 617a a2 01 01 01 02", "a1 6161 01"}) {
-		src := hex(item)
+		src := testkit.hex(item)
 		_, built := cbor.build(src, opts = opts, allocator = context.temp_allocator)
 		got: S
 		e := cbor.unmarshal(src, &got, .Cbor, opts = opts, allocator = context.temp_allocator)
@@ -122,16 +122,16 @@ raw_items_nest_in_lists_and_roots :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
 	whole: cbor.Raw
-	src := hex("9f 01 82 02 03 ff")
+	src := testkit.hex("9f 01 82 02 03 ff")
 	testing.expect_value(t, cbor.unmarshal(src, &whole, .Cbor, allocator = context.temp_allocator), nil)
 	testing.expect_value(t, string(whole), string(src))
 	list: []cbor.Raw
-	src = hex("83 01 9f ff 61 61")
+	src = testkit.hex("83 01 9f ff 61 61")
 	testing.expect_value(t, cbor.unmarshal(src, &list, .Cbor, allocator = context.temp_allocator), nil)
 	if testing.expect_value(t, len(list), 3) {
-		testing.expect_value(t, string(list[0]), string(hex("01")))
-		testing.expect_value(t, string(list[1]), string(hex("9fff")))
-		testing.expect_value(t, string(list[2]), string(hex("6161")))
+		testing.expect_value(t, string(list[0]), string(testkit.hex("01")))
+		testing.expect_value(t, string(list[1]), string(testkit.hex("9fff")))
+		testing.expect_value(t, string(list[2]), string(testkit.hex("6161")))
 	}
 }
 
@@ -145,7 +145,7 @@ a_raw_item_is_judged :: proc(t: ^testing.T) {
 	}
 	// A text string that is not UTF-8, a reserved head and a cut item.
 	for bad in ([]string{"a1 63 726177 62 c328", "a1 63 726177 1c", "a1 63 726177 82 01", "a1 63 726177 7f 61 61"}) {
-		src := hex(bad)
+		src := testkit.hex(bad)
 		got: Holder
 		e := cbor.unmarshal(src, &got, .Cbor, allocator = context.temp_allocator)
 		testing.expectf(t, e != nil && e == cbor.validate(src, .Cbor), "%s: %v, validate %v", bad, e, cbor.validate(src, .Cbor))
@@ -342,7 +342,7 @@ tags_read_as_the_item_they_hold :: proc(t: ^testing.T) {
 	}
 	// tag 100 on a number, tag 37 on a text, tag 55799 on a list.
 	got: Plain
-	e := cbor.unmarshal(hex("a3 616e d864 07 6173 d825 62 6869 616c d9d9f7 83 01 02 03"), &got, .Cbor, allocator = context.temp_allocator)
+	e := cbor.unmarshal(testkit.hex("a3 616e d864 07 6173 d825 62 6869 616c d9d9f7 83 01 02 03"), &got, .Cbor, allocator = context.temp_allocator)
 	testing.expect_value(t, e, nil)
 	testing.expect_value(t, got.n, 7)
 	testing.expect_value(t, got.s, "hi")
@@ -406,20 +406,20 @@ unions_pick_their_arm_by_class :: proc(t: ^testing.T) {
 		shape:  Shape,
 	}
 	got: Holder
-	e := cbor.unmarshal(hex("a2 66 7363616c6172 187b 65 7368617065 a1 61 72 f93e00"), &got, .Cbor, allocator = context.temp_allocator)
+	e := cbor.unmarshal(testkit.hex("a2 66 7363616c6172 187b 65 7368617065 a1 61 72 f93e00"), &got, .Cbor, allocator = context.temp_allocator)
 	testing.expect_value(t, e, nil)
 	testing.expect_value(t, got.scalar.(i64), 123)
 	testing.expect_value(t, got.shape.(Circle).r, 1.5)
 	got = {}
-	e = cbor.unmarshal(hex("a2 66 7363616c6172 62 6869 65 7368617065 82 01 02"), &got, .Cbor, allocator = context.temp_allocator)
+	e = cbor.unmarshal(testkit.hex("a2 66 7363616c6172 62 6869 65 7368617065 82 01 02"), &got, .Cbor, allocator = context.temp_allocator)
 	testing.expect_value(t, e, nil)
 	testing.expect_value(t, got.scalar.(string), "hi")
 	testing.expect_value(t, len(got.shape.([]i64)), 2)
 	got = {}
-	testing.expect_value(t, cbor.unmarshal(hex("a1 66 7363616c6172 f5"), &got, .Cbor, allocator = context.temp_allocator), nil)
+	testing.expect_value(t, cbor.unmarshal(testkit.hex("a1 66 7363616c6172 f5"), &got, .Cbor, allocator = context.temp_allocator), nil)
 	testing.expect_value(t, got.scalar.(bool), true)
 	// A value of a class no arm takes is refused.
-	expect_refusal_of(t, cbor.unmarshal(hex("a1 65 7368617065 f5"), &got, .Cbor, allocator = context.temp_allocator), .No_Arm, "bool for a shape")
+	expect_refusal_of(t, cbor.unmarshal(testkit.hex("a1 65 7368617065 f5"), &got, .Cbor, allocator = context.temp_allocator), .No_Arm, "bool for a shape")
 	// A union with nil takes a null, and an absent member leaves the union as it was.
 	Optional :: union {
 		Square,
@@ -429,10 +429,10 @@ unions_pick_their_arm_by_class :: proc(t: ^testing.T) {
 		o: Optional,
 	}
 	n := Nilable{Square{4}}
-	testing.expect_value(t, cbor.unmarshal(hex("a1 616f f6"), &n, .Cbor, allocator = context.temp_allocator), nil)
+	testing.expect_value(t, cbor.unmarshal(testkit.hex("a1 616f f6"), &n, .Cbor, allocator = context.temp_allocator), nil)
 	testing.expect(t, n.o == nil, "null reads as nil")
 	n = {Square{4}}
-	testing.expect_value(t, cbor.unmarshal(hex("a0"), &n, .Cbor, allocator = context.temp_allocator), nil)
+	testing.expect_value(t, cbor.unmarshal(testkit.hex("a0"), &n, .Cbor, allocator = context.temp_allocator), nil)
 	testing.expect_value(t, n.o.(Square).side, 4)
 }
 
@@ -451,7 +451,7 @@ unions_in_lists_and_pointers :: proc(t: ^testing.T) {
 		note:   Maybe(string),
 	}
 	got: Drawing
-	src := hex("a3 66 736861706573 83 a1 6172 f93e00 f93c00 a1 6172 01 6462657374 a1 6473696465 09 646e6f7465 f6")
+	src := testkit.hex("a3 66 736861706573 83 a1 6172 f93e00 f93c00 a1 6172 01 6462657374 a1 6473696465 09 646e6f7465 f6")
 	e := cbor.unmarshal(src, &got, .Cbor, allocator = context.temp_allocator)
 	testing.expect_value(t, e, nil)
 	if testing.expect_value(t, len(got.shapes), 3) {
@@ -507,30 +507,27 @@ an_array_reads_into_a_struct_by_position :: proc(t: ^testing.T) {
 			a = 5,
 			p = {6, 9},
 		}
-		e := cbor.unmarshal(hex(r.hex), &got, .Cbor, allocator = context.temp_allocator)
+		e := cbor.unmarshal(testkit.hex(r.hex), &got, .Cbor, allocator = context.temp_allocator)
 		testing.expectf(t, e == nil, "%s: %v", r.hex, e)
 		testing.expectf(t, got.a == r.want.a && got.p == r.want.p && len(got.l) == len(r.want.l) && (got.q^ if got.q != nil else Point{}) == r.q, "%s: %v", r.hex, got)
 	}
 	got: Row
-	testing.expect_value(t, cbor.unmarshal(hex("84 01 82 02 03 80 a1 6178 04"), &got, .Cbor, allocator = context.temp_allocator), nil)
+	testing.expect_value(t, cbor.unmarshal(testkit.hex("84 01 82 02 03 80 a1 6178 04"), &got, .Cbor, allocator = context.temp_allocator), nil)
 	testing.expect(t, got.q != nil && got.q.x == 4)
 	list: []Point
-	testing.expect_value(t, cbor.unmarshal(hex("82 82 01 02 a2 6178 03 6179 04"), &list, .Cbor, allocator = context.temp_allocator), nil)
+	testing.expect_value(t, cbor.unmarshal(testkit.hex("82 82 01 02 a2 6178 03 6179 04"), &list, .Cbor, allocator = context.temp_allocator), nil)
 	testing.expect(t, len(list) == 2 && list[0] == {1, 2} && list[1] == {3, 4})
 	path := make([dynamic]tape.Step, context.temp_allocator)
-	e := cbor.unmarshal(hex("82 01 82 02 6178"), &got, .Cbor, {path = &path}, allocator = context.temp_allocator)
+	e := cbor.unmarshal(testkit.hex("82 01 82 02 6178"), &got, .Cbor, {path = &path}, allocator = context.temp_allocator)
 	expect_refusal_of(t, e, .Expected_Integer, "text for an integer")
-	if testing.expect_value(t, len(path), 2) {
-		testing.expect_value(t, path[0], tape.Step(tape.Index(1)))
-		testing.expect_value(t, path[1], tape.Step(tape.Index(1)))
-	}
+	testkit.expect_path(t, path[:], {1, 1})
 	Must :: struct {
 		a: i64,
 		b: i64 `cbor:",required"`,
 	}
 	must: Must
-	expect_refusal_of(t, cbor.unmarshal(hex("81 01"), &must, .Cbor, allocator = context.temp_allocator), .Missing_Field, "a missing member")
-	testing.expect_value(t, cbor.unmarshal(hex("82 01 02"), &must, .Cbor, allocator = context.temp_allocator), nil)
+	expect_refusal_of(t, cbor.unmarshal(testkit.hex("81 01"), &must, .Cbor, allocator = context.temp_allocator), .Missing_Field, "a missing member")
+	testing.expect_value(t, cbor.unmarshal(testkit.hex("82 01 02"), &must, .Cbor, allocator = context.temp_allocator), nil)
 	testing.expect_value(t, must, Must{1, 2})
 }
 
@@ -544,18 +541,12 @@ a_refusal_names_its_path_and_byte :: proc(t: ^testing.T) {
 	Table :: struct {
 		rows: []Row,
 	}
-	src := hex("a1 64 726f7773 83 a1 6269 64 01 a1 6269 64 02 a1 6269 64 61 78")
+	src := testkit.hex("a1 64 726f7773 83 a1 6269 64 01 a1 6269 64 02 a1 6269 64 61 78")
 	path := make([dynamic]tape.Step, context.temp_allocator)
 	got: Table
 	e := cbor.unmarshal(src, &got, .Cbor, {path = &path}, allocator = context.temp_allocator)
-	expect_refusal_of(t, e, .Expected_Integer, "text for an integer")
-	f, _ := e.(tape.Fault)
-	testing.expect_value(t, f.at, u64(len(src) - 2))
-	if testing.expect_value(t, len(path), 3) {
-		testing.expect_value(t, path[0], tape.Step(tape.Name("rows")))
-		testing.expect_value(t, path[1], tape.Step(tape.Index(2)))
-		testing.expect_value(t, path[2], tape.Step(tape.Name("id")))
-	}
+	testkit.expect_typed_refusal(t, e, .Expected_Integer, u64(len(src) - 2))
+	testkit.expect_path(t, path[:], {"rows", 2, "id"})
 }
 
 // The typed read law over random items in every spec and their mutations, and the rows of Appendix A: a read into a
@@ -581,8 +572,7 @@ unmarshal_agrees_with_the_build :: proc(t: ^testing.T) {
 		for spec in cbor.Spec {
 			testkit.unmarshal_agrees(t, cbor.reads(spec), cbor.as(spec), read_value, src, {}, "generated", &a)
 		}
-		bad := mutated(src)
-		defer delete(bad)
+		bad := testkit.mutate(src)
 		testkit.unmarshal_agrees(t, cbor.reads(.Cbor), cbor.as(.Cbor), read_value, bad, {}, "mutated", &a)
 	}
 	rows := [?]string {
@@ -591,7 +581,7 @@ unmarshal_agrees_with_the_build :: proc(t: ^testing.T) {
 		"83018202039f0405ff", "83019f0203ff820405", "bf61610161629f0203ffff", "826161bf61626163ff", "bf6346756ef563416d7421ff",
 	}
 	for r in rows {
-		testkit.unmarshal_agrees(t, cbor.reads(.Cbor), cbor.as(.Cbor), read_value, hex(r), {}, r, &a)
+		testkit.unmarshal_agrees(t, cbor.reads(.Cbor), cbor.as(.Cbor), read_value, testkit.hex(r), {}, r, &a)
 	}
 	testing.expectf(t, a.read > 50 && a.refused > 50, "%v", a)
 }

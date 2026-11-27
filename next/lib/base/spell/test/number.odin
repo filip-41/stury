@@ -1,5 +1,6 @@
 package spell_tests
 
+import "core:math"
 import "core:strconv"
 import "core:strings"
 import "core:testing"
@@ -278,16 +279,49 @@ number_int_across_fold_words_boundary :: proc(t: ^testing.T) {
 	}
 }
 
+@(private = "file")
+Digit_Case :: struct {
+	text:                 string,
+	int_digits, frac_dig: int,
+}
+
+@(private = "file")
+expect_fold_sweep :: proc(
+	t: ^testing.T,
+	cases: []Digit_Case,
+	prefixes, tails: []int,
+	odd_fill: u8,
+	read: proc "contextless" (src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> spell.Number,
+	loc := #caller_location,
+) {
+	for prefix_len in prefixes {
+		for tail_len in tails {
+			for c in cases {
+				buf := make([]u8, prefix_len + len(c.text) + tail_len, context.temp_allocator)
+				for i in 0 ..< prefix_len {
+					buf[i] = 0xFF if i & 1 == 0 else odd_fill
+				}
+				copy(buf[prefix_len:], c.text)
+				for i in prefix_len + len(c.text) ..< len(buf) {
+					buf[i] = ','
+				}
+				lo := u64(prefix_len)
+				hi := u64(prefix_len + len(c.text))
+				want, valid := spell.number_strict(buf, lo, hi)
+				got := read(buf, lo, hi, c.int_digits, c.frac_dig)
+				testing.expectf(t, valid && got == want, "prefix=%d tail=%d %s: %v %x, want %v %x", prefix_len, tail_len, c.text, got.kind, got.bits, want.kind, want.bits, loc = loc)
+			}
+		}
+	}
+}
+
 // `number_fraction` agrees with `number_strict` across the `FOLD_WORDS_FROM + 19` (43) threshold, covering the
 // merged-word (`<= 7`), Clinger (`8..15`), fast-float (`16..19`), and long-decimal (`> 19`) paths.
 @(test)
 number_fraction_across_fold_words_boundary :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
-	cases := []struct {
-		text:                string,
-		int_digits, frac_dig: int,
-	} {
+	cases := []Digit_Case {
 		{"0.0", 1, 1},
 		{"-0.0", 1, 1},
 		{"1.5", 1, 1},
@@ -307,25 +341,16 @@ number_fraction_across_fold_words_boundary :: proc(t: ^testing.T) {
 		{"12345678901234567890.12345678901234567890", 20, 20},
 	}
 	// Sweep `prefix_len` and `tail_len` so `hi` sits below, at, and above `43` and `start + 8` crosses `len(src)`.
-	for prefix_len in ([]int{0, 10, 24, 35, 40, 42, 43, 44, 50}) {
-		for tail_len in ([]int{0, 8}) {
-			for c in cases {
-				buf := make([]u8, prefix_len + len(c.text) + tail_len, context.temp_allocator)
-				for i in 0 ..< prefix_len {
-					buf[i] = 0xFF if i & 1 == 0 else ','
-				}
-				copy(buf[prefix_len:], c.text)
-				for i in prefix_len + len(c.text) ..< len(buf) {
-					buf[i] = ','
-				}
-				lo := u64(prefix_len)
-				hi := u64(prefix_len + len(c.text))
-				want, valid := spell.number_strict(buf, lo, hi)
-				got := spell.number_fraction(buf, lo, hi, c.int_digits, c.frac_dig)
-				testing.expectf(t, valid && got == want, "prefix=%d tail=%d %s: %v %x, want %v %x", prefix_len, tail_len, c.text, got.kind, got.bits, want.kind, want.bits)
-			}
-		}
-	}
+	expect_fold_sweep(
+		t,
+		cases,
+		[]int{0, 10, 24, 35, 40, 42, 43, 44, 50},
+		[]int{0, 8},
+		',',
+		proc "contextless" (s: []u8, lo, hi: u64, id, fd: int) -> spell.Number {
+			return spell.number_fraction(s, lo, hi, id, fd)
+		},
+	)
 }
 
 // `number_exponent` agrees with `number_strict` across `FOLD_WORDS_FROM` (24), both <= 19 and > 19 digits, and falls
@@ -334,10 +359,7 @@ number_fraction_across_fold_words_boundary :: proc(t: ^testing.T) {
 number_exponent_across_fold_words_boundary :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
-	cases := []struct {
-		text:                 string,
-		int_digits, frac_dig: int,
-	} {
+	cases := []Digit_Case {
 		{"0e0", 1, 0},
 		{"-0e0", 1, 0},
 		{"1e5", 1, 0},
@@ -355,23 +377,16 @@ number_exponent_across_fold_words_boundary :: proc(t: ^testing.T) {
 		{"12.34e5", 1, 2},
 		{"1234e5", 4, 1},
 	}
-	for prefix_len in ([]int{0, 8, 16, 22, 23, 24, 25, 32}) {
-		for c in cases {
-			buf := make([]u8, prefix_len + len(c.text) + 4, context.temp_allocator)
-			for i in 0 ..< prefix_len {
-				buf[i] = 0xFF if i & 1 == 0 else ' '
-			}
-			copy(buf[prefix_len:], c.text)
-			for i in prefix_len + len(c.text) ..< len(buf) {
-				buf[i] = ','
-			}
-			lo := u64(prefix_len)
-			hi := u64(prefix_len + len(c.text))
-			want, valid := spell.number_strict(buf, lo, hi)
-			got := spell.number_exponent(buf, lo, hi, c.int_digits, c.frac_dig)
-			testing.expectf(t, valid && got == want, "prefix=%d %s: %v %x, want %v %x", prefix_len, c.text, got.kind, got.bits, want.kind, want.bits)
-		}
-	}
+	expect_fold_sweep(
+		t,
+		cases,
+		[]int{0, 8, 16, 22, 23, 24, 25, 32},
+		[]int{4},
+		' ',
+		proc "contextless" (s: []u8, lo, hi: u64, id, fd: int) -> spell.Number {
+			return spell.number_exponent(s, lo, hi, id, fd)
+		},
+	)
 }
 
 // `number_strict` handles `i64` extremes (`min(i64)`, `max(i64)`, `min(i64) - 1`) and never mistakes high-bit
@@ -544,4 +559,68 @@ oob_spans_and_slack_boundaries :: proc(t: ^testing.T) {
 	short_pad := transmute([]u8)string("1.5,,,,,,,,,,,,")
 	_, ok_short_pad := spell.float_short(short_pad, 0, 3)
 	testing.expectf(t, !ok_short_pad, "float_short padded 15: expected reject")
+}
+
+@(test)
+decimal_parts_and_plain_int_dec :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	neg, dig := spell.decimal_parts("0")
+	testing.expect(t, !neg && dig == "0")
+	neg, dig = spell.decimal_parts("-0")
+	testing.expect(t, !neg && dig == "0")
+	neg, dig = spell.decimal_parts("-000")
+	testing.expect(t, !neg && dig == "0")
+	neg, dig = spell.decimal_parts("00042")
+	testing.expect(t, !neg && dig == "42")
+	neg, dig = spell.decimal_parts("-00042")
+	testing.expect(t, neg && dig == "42")
+
+	testing.expect(t, spell.is_plain_int_dec("0"))
+	testing.expect(t, spell.is_plain_int_dec("-0"))
+	testing.expect(t, spell.is_plain_int_dec("123456789012345678901234567890"))
+	testing.expect(t, spell.is_plain_int_dec("-999999999999999999999999"))
+	testing.expect(t, !spell.is_plain_int_dec(""))
+	testing.expect(t, !spell.is_plain_int_dec("-"))
+	testing.expect(t, !spell.is_plain_int_dec("+1"))
+	testing.expect(t, !spell.is_plain_int_dec("1.0"))
+	testing.expect(t, !spell.is_plain_int_dec("1e5"))
+	testing.expect(t, !spell.is_plain_int_dec("12a"))
+}
+
+@(test)
+wide_double_long_and_boundary_cases :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+
+	// >4096-digit decimals whose order is finite MUST NOT return +Inf.
+	long_one := strings.concatenate({"1.", strings.repeat("0", 4100, context.temp_allocator), "1"}, context.temp_allocator)
+	testing.expect_value(t, spell.wide_double(transmute([]u8)long_one), f64(1.0))
+
+	neg_long_one := strings.concatenate({"-", long_one}, context.temp_allocator)
+	testing.expect_value(t, spell.wide_double(transmute([]u8)neg_long_one), f64(-1.0))
+
+	long_scaled := strings.concatenate({"0.", strings.repeat("0", 4100, context.temp_allocator), "1e4101"}, context.temp_allocator)
+	testing.expect_value(t, spell.wide_double(transmute([]u8)long_scaled), f64(1.0))
+
+	// Overflow with negative exponent MUST return ±Inf, not 0.0.
+	over_neg_exp := strings.concatenate({"1", strings.repeat("0", 400, context.temp_allocator), "e-1"}, context.temp_allocator)
+	f_over := spell.wide_double(transmute([]u8)over_neg_exp)
+	testing.expect(t, math.is_inf(f_over, 1))
+
+	neg_over_neg_exp := strings.concatenate({"-", over_neg_exp}, context.temp_allocator)
+	f_nover := spell.wide_double(transmute([]u8)neg_over_neg_exp)
+	testing.expect(t, math.is_inf(f_nover, -1))
+
+	// Underflow preserves sign bit.
+	under := strings.concatenate({"-0.", strings.repeat("0", 4100, context.temp_allocator), "1"}, context.temp_allocator)
+	f_under := spell.wide_double(transmute([]u8)under)
+	testing.expect_value(t, transmute(u64)f_under, u64(1) << 63)
+
+	// Near binary64 max & min subnormal boundaries.
+	testing.expect_value(t, transmute(u64)spell.wide_double(transmute([]u8)string("1.7976931348623157e308")), u64(0x7FEF_FFFF_FFFF_FFFF))
+	testing.expect(t, math.is_inf(spell.wide_double(transmute([]u8)string("1.7976931348623159e308")), 1))
+	testing.expect(t, math.is_inf(spell.wide_double(transmute([]u8)string("-1.7976931348623159e308")), -1))
+	testing.expect_value(t, transmute(u64)spell.wide_double(transmute([]u8)string("4.9e-324")), u64(1))
+	testing.expect_value(t, transmute(u64)spell.wide_double(transmute([]u8)string("-2.4e-324")), u64(1) << 63)
 }

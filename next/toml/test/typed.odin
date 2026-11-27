@@ -13,34 +13,6 @@ import "stury:toml"
 // Typed reads of TOML texts: tables into structs, arrays of tables into slices, a table defined in pieces, date-times,
 // numbers in every spelling and the refusals with their places.
 
-// Expects `e` to be a refusal `want` at byte `at`.
-expect_refusal :: proc(t: ^testing.T, e: tape.Error, want: toml.Typed_Refusal, at: u64, loc := #caller_location) {
-	f, is_fault := e.(tape.Fault)
-	if !testing.expectf(t, is_fault && f.kind == .Refused, "got %v, wanted a refusal %v", e, want, loc = loc) {
-		return
-	}
-	testing.expect_value(t, toml.Typed_Refusal(f.detail), want, loc)
-	testing.expect_value(t, f.at, at, loc)
-}
-
-// Expects `steps` to be the path `want`, a name for a string and an index for an int.
-expect_path :: proc(t: ^testing.T, steps: []tape.Step, want: []union {
-		int,
-		string,
-	}, loc := #caller_location) {
-	if !testing.expect_value(t, len(steps), len(want), loc) {
-		return
-	}
-	for w, i in want {
-		switch v in w {
-		case int:
-			testing.expect_value(t, steps[i], tape.Step(tape.Index(v)), loc)
-		case string:
-			testing.expect_value(t, steps[i], tape.Step(tape.Name(v)), loc)
-		}
-	}
-}
-
 Server :: struct {
 	host: string,
 	port: u16,
@@ -242,9 +214,9 @@ clock = 07:32:00
 		f, is_fault := e.(tape.Fault)
 		testing.expectf(t, is_fault && f.kind == .Refused, "%q: %v", text, e)
 	}
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = true\n"), &only_time, allocator = context.temp_allocator), .Expected_Date_Time, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = true\n"), &only_time, allocator = context.temp_allocator), .Expected_Date_Time, 4)
 	// A number names no instant either.
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = 86400\n"), &only_time, allocator = context.temp_allocator), .Expected_Date_Time, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = 86400\n"), &only_time, allocator = context.temp_allocator), .Expected_Date_Time, 4)
 	// Space-separated timestamps longer than 64 bytes read cleanly.
 	long_src := "v = 2024-01-01 00:00:00.000000000000000000000000000000000000000000000Z\n"
 	testing.expect_value(t, toml.unmarshal(transmute([]u8)long_src, &only_time, allocator = context.temp_allocator), nil)
@@ -256,7 +228,7 @@ clock = 07:32:00
 	testing.expect_value(t, toml.unmarshal(transmute([]u8)string("a = 1979-05-27T07:32Z\nb = 1979-05-27 07:32+01:00\n"), &short_times, .Toml_1_1, allocator = context.temp_allocator), nil)
 	testing.expect_value(t, time.to_unix_nanoseconds(short_times.a), 296_638_320_000_000_000)
 	testing.expect_value(t, time.to_unix_nanoseconds(short_times.b), 296_634_720_000_000_000)
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = \"1979-05-27T07:32Z\"\n"), &only_time, .Toml_1_0, allocator = context.temp_allocator), .Bad_Date_Time, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = \"1979-05-27T07:32Z\"\n"), &only_time, .Toml_1_0, allocator = context.temp_allocator), .Bad_Date_Time, 4)
 }
 
 @(test)
@@ -286,10 +258,10 @@ integers_read_in_every_radix :: proc(t: ^testing.T) {
 	one: struct {
 		v: i8,
 	}
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = 0x80\n"), &one, allocator = context.temp_allocator), .Above_Maximum, 4)
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = -129\n"), &one, allocator = context.temp_allocator), .Below_Minimum, 4)
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = 1.0\n"), &one, allocator = context.temp_allocator), .Expected_Integer, 4)
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = \"1\"\n"), &one, allocator = context.temp_allocator), .Expected_Integer, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = 0x80\n"), &one, allocator = context.temp_allocator), .Above_Maximum, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = -129\n"), &one, allocator = context.temp_allocator), .Below_Minimum, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = 1.0\n"), &one, allocator = context.temp_allocator), .Expected_Integer, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = \"1\"\n"), &one, allocator = context.temp_allocator), .Expected_Integer, 4)
 	// An integer past 64 bits is the walk's fault, which TOML's grammar gives, so no type holds it.
 	big := transmute([]u8)string("v = 0xffff_ffff_ffff_ffff\n")
 	wide: struct {
@@ -325,12 +297,12 @@ floats_read_with_their_infinities :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, toml.unmarshal(transmute([]u8)string("v = -nan\n"), &nan, allocator = context.temp_allocator), nil)
 	testing.expect(t, math.is_nan(nan.v))
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = 1e400\n"), &nan, allocator = context.temp_allocator), .Above_Maximum, 4)
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = true\n"), &nan, allocator = context.temp_allocator), .Expected_Number, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = 1e400\n"), &nan, allocator = context.temp_allocator), .Above_Maximum, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = true\n"), &nan, allocator = context.temp_allocator), .Expected_Number, 4)
 	narrow: struct {
 		v: f32,
 	}
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("v = 1e300\n"), &narrow, allocator = context.temp_allocator), .Above_Maximum, 4)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("v = 1e300\n"), &narrow, allocator = context.temp_allocator), .Above_Maximum, 4)
 }
 
 @(test)
@@ -357,8 +329,8 @@ strings_and_booleans_read_their_text :: proc(t: ^testing.T) {
 		testing.expect_value(t, got.quoted, "found")
 		testing.expect_value(t, got.skipped, "")
 	}
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("ok = 1\n"), &got, allocator = context.temp_allocator), .Expected_Bool, 5)
-	expect_refusal(t, toml.unmarshal(transmute([]u8)string("basic = 1\n"), &got, allocator = context.temp_allocator), .Expected_String, 8)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("ok = 1\n"), &got, allocator = context.temp_allocator), .Expected_Bool, 5)
+	testkit.expect_typed_refusal(t, toml.unmarshal(transmute([]u8)string("basic = 1\n"), &got, allocator = context.temp_allocator), .Expected_String, 8)
 }
 
 // A refused value names the tables and elements around it, through an array of tables.
@@ -370,17 +342,17 @@ a_refusal_names_its_path_through_an_array_of_tables :: proc(t: ^testing.T) {
 	got: Config
 	path := make([dynamic]tape.Step, context.temp_allocator)
 	e := toml.unmarshal(transmute([]u8)string(src), &got, read = {path = &path}, allocator = context.temp_allocator)
-	expect_refusal(t, e, .Expected_Integer, u64(len(src) - 4))
-	expect_path(t, path[:], {"servers", 2, "port"})
+	testkit.expect_typed_refusal(t, e, .Expected_Integer, u64(len(src) - 4))
+	testkit.expect_path(t, path[:], {"servers", 2, "port"})
 	// A map's key and a nested table name their places too.
 	path2 := make([dynamic]tape.Step, context.temp_allocator)
 	e = toml.unmarshal(transmute([]u8)string("[limits]\nrows = 1\nbytes = 1.5\n"), &got, read = {path = &path2}, allocator = context.temp_allocator)
-	expect_refusal(t, e, .Expected_Integer, 26)
-	expect_path(t, path2[:], {"limits", "bytes"})
+	testkit.expect_typed_refusal(t, e, .Expected_Integer, 26)
+	testkit.expect_path(t, path2[:], {"limits", "bytes"})
 	path3 := make([dynamic]tape.Step, context.temp_allocator)
 	e = toml.unmarshal(transmute([]u8)string("[owner]\nname = 1\n"), &got, read = {path = &path3}, allocator = context.temp_allocator)
-	expect_refusal(t, e, .Expected_String, 15)
-	expect_path(t, path3[:], {"owner", "name"})
+	testkit.expect_typed_refusal(t, e, .Expected_String, 15)
+	testkit.expect_path(t, path3[:], {"owner", "name"})
 }
 
 // A key a text repeats is the walk's fault, so the read gives the error `validate` gives, with no policy to choose.
@@ -424,11 +396,11 @@ absent_and_unknown_members_follow_the_options :: proc(t: ^testing.T) {
 	testing.expect_value(t, got, Row{7, "kept", 3})
 	path := make([dynamic]tape.Step, context.temp_allocator)
 	e = toml.unmarshal(transmute([]u8)string("c = 3\nzz = 1\n"), &got, read = {refuse_unknown = true, path = &path}, allocator = context.temp_allocator)
-	expect_refusal(t, e, .Unknown_Field, 6)
-	expect_path(t, path[:], {"zz"})
+	testkit.expect_typed_refusal(t, e, .Unknown_Field, 6)
+	testkit.expect_path(t, path[:], {"zz"})
 	e = toml.unmarshal(transmute([]u8)string("a = 1\n"), &got, read = {path = &path}, allocator = context.temp_allocator)
-	expect_refusal(t, e, .Missing_Field, 6)
-	expect_path(t, path[:], {"c"})
+	testkit.expect_typed_refusal(t, e, .Missing_Field, 6)
+	testkit.expect_path(t, path[:], {"c"})
 }
 
 // The 1.1 spelling of a text reads as 1.0's does.

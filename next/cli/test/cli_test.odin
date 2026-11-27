@@ -500,60 +500,65 @@ engine_fast_paths_spine_pred_proj_files :: proc(t: ^testing.T) {
 	testing.expect_value(t, rfp.stdout, "1\n2\n3\n4\n5\n")
 }
 
+@(private = "file")
+Fail_Sink :: struct {
+	fail_write: bool,
+	fail_flush: bool,
+	writes:     int,
+	flushes:    int,
+	out:        [dynamic]u8,
+}
+
+@(private = "file")
+fail_sink_writer :: proc(fs: ^Fail_Sink) -> io.Writer {
+	p :: proc(d: rawptr, mode: io.Stream_Mode, buf: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
+		s := (^Fail_Sink)(d)
+		#partial switch mode {
+		case .Query:
+			return io.query_utility({.Write, .Flush})
+		case .Write:
+			s.writes += 1
+			if s.fail_write {
+				return 0, .Unknown
+			}
+			append(&s.out, ..buf)
+			return i64(len(buf)), .None
+		case .Flush:
+			s.flushes += 1
+			if s.fail_flush {
+				return 0, .Unknown
+			}
+			return 0, .None
+		}
+		return 0, .Empty
+	}
+	return io.Writer{procedure = p, data = fs}
+}
+
 @(test)
 stdout_errors_unbuffered_and_one_doc :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-
-	Fail_Sink :: struct {
-		fail_write: bool,
-		fail_flush: bool,
-		flushes:    int,
-		out:        [dynamic]u8,
-	}
-	sink_writer :: proc(fs: ^Fail_Sink) -> io.Writer {
-		p :: proc(d: rawptr, mode: io.Stream_Mode, buf: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
-			s := (^Fail_Sink)(d)
-			#partial switch mode {
-			case .Query:
-				return io.query_utility({.Write, .Flush})
-			case .Write:
-				if s.fail_write {
-					return 0, .Unknown
-				}
-				append(&s.out, ..buf)
-				return i64(len(buf)), .None
-			case .Flush:
-				s.flushes += 1
-				if s.fail_flush {
-					return 0, .Unknown
-				}
-				return 0, .None
-			}
-			return 0, .Empty
-		}
-		return io.Writer{procedure = p, data = fs}
-	}
 
 	// Failing stdout exits 2 across query and verbs.
 	{
 		fs := Fail_Sink{fail_write = true, out = make([dynamic]u8)}
 		defer delete(fs.out)
 		eb := strings.builder_make(); defer strings.builder_destroy(&eb)
-		c := cli.run_cli({"-c", "."}, transmute([]u8)string(`{"a":1}`), sink_writer(&fs), strings.to_writer(&eb), false, false)
+		c := cli.run_cli({"-c", "."}, transmute([]u8)string(`{"a":1}`), fail_sink_writer(&fs), strings.to_writer(&eb), false, false)
 		testing.expect_value(t, c, 2)
 	}
 	{
 		fs := Fail_Sink{fail_flush = true, out = make([dynamic]u8)}
 		defer delete(fs.out)
 		eb := strings.builder_make(); defer strings.builder_destroy(&eb)
-		c := cli.run_cli({"fmt", "-c"}, transmute([]u8)string(`{"a": 1}`), sink_writer(&fs), strings.to_writer(&eb), false, false)
+		c := cli.run_cli({"fmt", "-c"}, transmute([]u8)string(`{"a": 1}`), fail_sink_writer(&fs), strings.to_writer(&eb), false, false)
 		testing.expect_value(t, c, 2)
 	}
 	{
 		fs := Fail_Sink{fail_write = true, out = make([dynamic]u8)}
 		defer delete(fs.out)
 		eb := strings.builder_make(); defer strings.builder_destroy(&eb)
-		c := cli.run_cli({"edit", ".a=2"}, transmute([]u8)string(`{"a":1}`), sink_writer(&fs), strings.to_writer(&eb), false, false)
+		c := cli.run_cli({"edit", ".a=2"}, transmute([]u8)string(`{"a":1}`), fail_sink_writer(&fs), strings.to_writer(&eb), false, false)
 		testing.expect_value(t, c, 2)
 	}
 
@@ -561,13 +566,13 @@ stdout_errors_unbuffered_and_one_doc :: proc(t: ^testing.T) {
 	{
 		fs_u := Fail_Sink{out = make([dynamic]u8)}; defer delete(fs_u.out)
 		eb_u := strings.builder_make(); defer strings.builder_destroy(&eb_u)
-		cu := cli.run_cli({"--unbuffered", "-c", ".[]"}, transmute([]u8)string("[1,2,3]"), sink_writer(&fs_u), strings.to_writer(&eb_u), false, false)
+		cu := cli.run_cli({"--unbuffered", "-c", ".[]"}, transmute([]u8)string("[1,2,3]"), fail_sink_writer(&fs_u), strings.to_writer(&eb_u), false, false)
 		testing.expect_value(t, cu, 0)
 		testing.expect(t, fs_u.flushes >= 3, fmt.tprintf("expected >=3 flushes, got %d", fs_u.flushes))
 
 		fs_b := Fail_Sink{out = make([dynamic]u8)}; defer delete(fs_b.out)
 		eb_b := strings.builder_make(); defer strings.builder_destroy(&eb_b)
-		cb := cli.run_cli({"-c", ".[]"}, transmute([]u8)string("[1,2,3]"), sink_writer(&fs_b), strings.to_writer(&eb_b), false, false)
+		cb := cli.run_cli({"-c", ".[]"}, transmute([]u8)string("[1,2,3]"), fail_sink_writer(&fs_b), strings.to_writer(&eb_b), false, false)
 		testing.expect_value(t, cb, 0)
 		testing.expect_value(t, fs_b.flushes, 1)
 	}
@@ -810,21 +815,8 @@ reaudit_parallel_streaming_and_seq_fixes :: proc(t: ^testing.T) {
 		testing.expect_value(t, rr2.code, 0); testing.expect_value(t, rr2.stdout, "[[\"a\",1],[\"b\",2],[\"c\",2]]\n")
 
 		// Failing `stdout_w` must return EXIT_USAGE (2) everywhere, never 0, and avoid double-write in `write_value_as_format`.
-		Fail_Sink :: struct {
-			writes: int,
-		}
-		fs := Fail_Sink{}
-		fail_proc :: proc(data: rawptr, mode: io.Stream_Mode, _: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
-			#partial switch mode {
-			case .Query:
-				return io.query_utility({.Write})
-			case .Write:
-				(^Fail_Sink)(data).writes += 1
-				return 0, .Unexpected_EOF
-			}
-			return 0, .None
-		}
-		fail_w := io.Writer{procedure = fail_proc, data = &fs}
+		fs := Fail_Sink{fail_write = true}
+		fail_w := fail_sink_writer(&fs)
 		eb := strings.builder_make(); defer strings.builder_destroy(&eb)
 		big_pad2 := strings.repeat("z", 70 * 1024); defer delete(big_pad2)
 		big_json := strings.concatenate({`{"big":"`, big_pad2, `"}`}); defer delete(big_json)

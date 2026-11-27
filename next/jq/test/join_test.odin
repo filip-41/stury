@@ -9,19 +9,6 @@ import "stury:lib/core/tape"
 import "stury:lib/query"
 import "stury:testkit"
 
-@(private = "file")
-has_aux_path :: proc(s: ^query.Source_Demand, want_steps: []tape.Step, want_grain := tape.Grain.Whole) -> bool {
-	if s == nil {
-		return false
-	}
-	for p in s.paths {
-		if p.grain == want_grain && query.steps_equal(p.steps, want_steps) {
-			return true
-		}
-	}
-	return false
-}
-
 @(test)
 analyze_with_vars_prunes_per_source_demand :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -42,12 +29,12 @@ analyze_with_vars_prunes_per_source_demand :: proc(t: ^testing.T) {
 
 		main := &plan.sources[.Main]
 		testing.expect_value(t, main.mode, query.Demand_Mode.Partial)
-		testing.expect(t, has_aux_path(main, {tape.Name("user_id")}))
+		testing.expect(t, has_path(main, {tape.Name("user_id")}))
 
 		ud, uok := query.aux_demand_for(&plan, "users")
 		testing.expect(t, uok && ud != nil)
 		testing.expect_value(t, ud.mode, query.Demand_Mode.Partial)
-		testing.expect(t, has_aux_path(ud, {tape.All{}, tape.Name("name")}))
+		testing.expect(t, has_path(ud, {tape.All{}, tape.Name("name")}))
 	}
 
 	// 2. Binding `$row` before lookup: `$users[$row.uid].name` + `[].email` from array iteration.
@@ -61,14 +48,14 @@ analyze_with_vars_prunes_per_source_demand :: proc(t: ^testing.T) {
 		defer query.destroy_plan(&plan)
 
 		testing.expect_value(t, plan.sources[.Main].mode, query.Demand_Mode.Partial)
-		testing.expect(t, has_aux_path(&plan.sources[.Main], {tape.Name("uid")}))
+		testing.expect(t, has_path(&plan.sources[.Main], {tape.Name("uid")}))
 
 		ud, uok := query.aux_demand_for(&plan, "users")
 		testing.expect(t, uok)
 		testing.expect_value(t, ud.mode, query.Demand_Mode.Partial)
-		testing.expect(t, has_aux_path(ud, {tape.All{}, tape.Name("name")}))
-		testing.expect(t, has_aux_path(ud, {tape.All{}, tape.Name("active")}, .Exists))
-		testing.expect(t, has_aux_path(ud, {tape.All{}, tape.Name("email")}))
+		testing.expect(t, has_path(ud, {tape.All{}, tape.Name("name")}))
+		testing.expect(t, has_path(ud, {tape.All{}, tape.Name("active")}, .Exists))
+		testing.expect(t, has_path(ud, {tape.All{}, tape.Name("email")}))
 
 		un_d, un_ok := query.aux_demand_for(&plan, "unused")
 		testing.expect(t, un_ok)
@@ -85,11 +72,11 @@ analyze_with_vars_prunes_per_source_demand :: proc(t: ^testing.T) {
 		testing.expect(t, ok)
 		defer query.destroy_plan(&plan)
 
-		testing.expect(t, has_aux_path(&plan.sources[.Main], {tape.Name("id")}))
+		testing.expect(t, has_path(&plan.sources[.Main], {tape.Name("id")}))
 		ud, uok := query.aux_demand_for(&plan, "users")
 		testing.expect(t, uok)
 		testing.expect_value(t, ud.mode, query.Demand_Mode.Partial)
-		testing.expect(t, has_aux_path(ud, {tape.Name("by_id")}))
+		testing.expect(t, has_path(ud, {tape.Name("by_id")}))
 	}
 
 	// 4. Whole/dynamic usage of `$users` does NOT degrade `.Main`!
@@ -103,7 +90,7 @@ analyze_with_vars_prunes_per_source_demand :: proc(t: ^testing.T) {
 		defer jq.destroy_plan(&plan)
 
 		testing.expect_value(t, plan.sources[.Main].mode, query.Demand_Mode.Partial)
-		testing.expect(t, has_aux_path(&plan.sources[.Main], {tape.Name("id")}))
+		testing.expect(t, has_path(&plan.sources[.Main], {tape.Name("id")}))
 
 		ud, uok := query.aux_demand_for(&plan, "users")
 		testing.expect(t, uok)
@@ -128,7 +115,7 @@ analyze_with_vars_prunes_per_source_demand :: proc(t: ^testing.T) {
 		ud, uok := query.aux_demand_for(&plan, "users")
 		testing.expect(t, uok)
 		testing.expect_value(t, ud.mode, query.Demand_Mode.Partial)
-		testing.expect(t, has_aux_path(ud, nil, .Keys))
+		testing.expect(t, has_path(ud, nil, .Keys))
 	}
 
 	// 6. Zero-arg function called from multiple callsites collects ALL aux demands.
@@ -143,8 +130,8 @@ analyze_with_vars_prunes_per_source_demand :: proc(t: ^testing.T) {
 
 		ud, _ := query.aux_demand_for(&plan, "users")
 		testing.expect_value(t, ud.mode, query.Demand_Mode.Partial)
-		testing.expect(t, has_aux_path(ud, {tape.All{}, tape.Name("a")}))
-		testing.expect(t, has_aux_path(ud, {tape.All{}, tape.Name("b")}))
+		testing.expect(t, has_path(ud, {tape.All{}, tape.Name("a")}))
+		testing.expect(t, has_path(ud, {tape.All{}, tape.Name("b")}))
 	}
 
 	// 7. Nil program safely returns `false`.
@@ -153,46 +140,16 @@ analyze_with_vars_prunes_per_source_demand :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
-run_join_expr :: proc(t: ^testing.T, src, input_json: string, vars: []string = nil, global_jsons: []string = nil) -> string {
-	prog, errs := jq.compile_with_joins(src, {variables = vars})
-	testing.expectf(t, len(errs) == 0, "compile_with_joins %q failed: %v", src, errs)
-	defer jq.destroy_program(prog)
-
-	h: query.Heap
-	query.heap_init(&h, context.allocator)
-	defer query.heap_destroy(&h)
-
-	parts := make([dynamic]string)
-	{
-		vals := make([]query.Value, 2 + len(global_jsons))
-		vals[0], vals[1] = query.NULL, query.NULL
-		for gj, i in global_jsons {
-			v, ok := read_value(&h, gj)
-			testing.expect(t, ok)
-			vals[2 + i] = v
-		}
-		defer for v in vals {
-			query.release(&h, v)
-		}
-
-		inp, ok := read_value(&h, input_json)
-		testing.expect(t, ok)
-
-		run: jq.Run
-		jq.run_init(&run, prog, &h, vals)
-		outs := Outputs{h = &h}
-		end := jq.run_value(&run, inp, collect, &outs)
-		testing.expect_value(t, end, jq.Run_End.Done)
-		jq.run_destroy(&run)
-
-		for v in outs.vals {
-			append(&parts, show(&h, v))
-			query.release(&h, v)
-		}
-		delete(outs.vals)
-	}
-	testing.expect_value(t, query.heap_live(&h), u64(0))
-	return strings.join(parts[:], "\n")
+run_join_expr :: proc(t: ^testing.T, src, input_json: string, vars: []string = nil, global_jsons: []string = nil, loc := #caller_location) -> string {
+	r := eval_jq(t, src, {
+		input_json  = input_json,
+		variables   = vars,
+		globals     = global_jsons,
+		prepend_env = true,
+		with_joins  = true,
+	}, loc = loc)
+	testing.expect_value(t, r.end, jq.Run_End.Done, loc = loc)
+	return r.out
 }
 
 @(test)

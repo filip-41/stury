@@ -1,7 +1,5 @@
 package msgpack
 
-import "base:intrinsics"
-import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
 // Streaming piece-by-piece decoder of MessagePack scalar text: tolerated UTF-8 replacement (`U+FFFD`),
@@ -24,9 +22,6 @@ Text_Run :: struct {
 	scratch:  [TIMESTAMP_TEXT_ROOM]u8,
 	given:    bool,
 }
-
-@(private, rodata)
-BASE64_ALPHABET := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 // Initializes a streaming text reader for token `t` of `src`.
 @(private)
@@ -76,11 +71,7 @@ text_next :: proc "contextless" (r: ^Text_Run) -> ([]u8, bool) #no_bounds_check 
 			r.pos += 1
 			k += 1
 		}
-		g := u32(group[0]) << 16 | u32(group[1]) << 8 | u32(group[2])
-		r.scratch[0], r.scratch[1] = BASE64_ALPHABET[g >> 18], BASE64_ALPHABET[g >> 12 & 63]
-		r.scratch[2] = BASE64_ALPHABET[g >> 6 & 63] if k > 1 else '='
-		r.scratch[3] = BASE64_ALPHABET[g & 63] if k > 2 else '='
-		return r.scratch[:4], true
+		return tape.base64_encode_group(group, k, r.scratch[:]), true
 	case .Bytes:
 		if r.pos >= r.end {
 			return nil, false
@@ -92,28 +83,7 @@ text_next :: proc "contextless" (r: ^Text_Run) -> ([]u8, bool) #no_bounds_check 
 		if r.pos >= r.end {
 			return nil, false
 		}
-		base := raw_data(r.src)
-		end := base[r.end:]
-		q := r.pos
-		for q < r.end {
-			if r.src[q] < 0x80 {
-				q += 1
-				continue
-			}
-			next, kind := spell.utf8_char(base[q:], end)
-			if kind != .None {
-				break
-			}
-			q = u64(intrinsics.ptr_sub(next, base))
-		}
-		if q > r.pos {
-			piece := r.src[r.pos:q]
-			r.pos = q
-			return piece, true
-		}
-		r.pos = u64(intrinsics.ptr_sub(spell.utf8_subpart(base[q:], end), base))
-		r.scratch[0], r.scratch[1], r.scratch[2] = spell.REPLACEMENT[0], spell.REPLACEMENT[1], spell.REPLACEMENT[2]
-		return r.scratch[:3], true
+		return tape.lax_utf8_piece(r.src, &r.pos, r.end, r.scratch[:]), true
 	}
 	return nil, false
 }
@@ -128,14 +98,7 @@ text_decoded :: proc "contextless" (src: []u8, t: tape.Node, buf: []u8, _: ^tape
 		return timestamp_text(src[t.lo:t.lo + u64(t.n)], buf)
 	}
 	r := text_run(src, t)
-	w := 0
-	for piece in text_next(&r) {
-		if w + len(piece) > len(buf) {
-			return "", false
-		}
-		w += copy(buf[w:], piece)
-	}
-	return string(buf[:w]), true
+	return tape.stream_text_decoded(&r, buf, text_next)
 }
 
 // Buffer size guaranteed to hold `text_decoded` of scalar `t`.
@@ -156,41 +119,12 @@ decode_room :: proc "contextless" (src: []u8, t: tape.Node, _: ^tape.Format_Ext)
 
 // Compares the decoded text of scalar `t` of `src` and scalar `o` of `other`.
 @(private)
-same_text :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool #no_bounds_check {
-	if !tape.text_decodes(t) && !tape.text_decodes(o) {
-		return t.n == o.n && string(src[t.lo:][:t.n]) == string(other[o.lo:][:o.n])
-	}
-	a, b := text_run(src, t), text_run(other, o)
-	x, x_ok := text_next(&a)
-	y, y_ok := text_next(&b)
-	for x_ok && y_ok {
-		k := min(len(x), len(y))
-		if string(x[:k]) != string(y[:k]) {
-			return false
-		}
-		x, y = x[k:], y[k:]
-		if len(x) == 0 {
-			x, x_ok = text_next(&a)
-		}
-		if len(y) == 0 {
-			y, y_ok = text_next(&b)
-		}
-	}
-	return !x_ok && !y_ok
+same_text :: proc "contextless" (src: []u8, t: tape.Token, other: []u8, o: tape.Token) -> bool {
+	return tape.stream_same_text(src, t, other, o, text_run, text_next)
 }
 
 // Computes `tape.text_hash` of the decoded text of key `t` in `src`.
 @(private)
 key_hash :: proc "contextless" (src: []u8, t: tape.Token) -> u32 {
-	if !tape.text_decodes(t) {
-		return tape.text_hash(src[t.lo:][:t.n])
-	}
-	r := text_run(src, t)
-	x := tape.text_hasher()
-	for piece in text_next(&r) {
-		for b in piece {
-			tape.text_hash_byte(&x, b)
-		}
-	}
-	return tape.text_hasher_end(&x)
+	return tape.stream_key_hash(src, t, text_run, text_next)
 }

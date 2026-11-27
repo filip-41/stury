@@ -1195,39 +1195,8 @@ struct_field_name :: proc(info: ^runtime.Type_Info_Struct, idx: int) -> (name: s
 }
 
 @(private)
-tag_value :: proc "contextless" (tag, key: string) -> (string, bool) {
-	t := tag
-	for len(t) > 0 {
-		i := 0
-		for i < len(t) && t[i] == ' ' {
-			i += 1
-		}
-		t = t[i:]
-		k := 0
-		for k < len(t) && t[k] > ' ' && t[k] != ':' && t[k] != '"' {
-			k += 1
-		}
-		if k == 0 || k + 1 >= len(t) || t[k] != ':' || t[k + 1] != '"' {
-			return "", false
-		}
-		name := t[:k]
-		t = t[k + 2:]
-		e := 0
-		for e < len(t) && t[e] != '"' {
-			if t[e] == '\\' {
-				e += 1
-			}
-			e += 1
-		}
-		if e >= len(t) {
-			return "", false
-		}
-		if name == key {
-			return t[:e], true
-		}
-		t = t[e + 1:]
-	}
-	return "", false
+tag_value :: #force_inline proc "contextless" (tag, key: string) -> (string, bool) {
+	return typed.tag_lookup(tag, key)
 }
 
 @(private)

@@ -131,6 +131,19 @@ Compile_Options :: struct {
 
 Model :: struct($T: typeid) { plan: Type_Plan, tag: string, judging: ^Applied, constants: mem.Dynamic_Arena, const_ready: bool, allocator: runtime.Allocator }
 
+// Type-erased view of a compiled `Model(T)` so format streaming/dumping entrypoints instantiate once per format mode
+// instead of once per `$T`.
+Model_View :: struct {
+	plan:    ^Type_Plan,
+	judging: ^Applied,
+	ti:      ^runtime.Type_Info,
+}
+
+model_view :: #force_inline proc "contextless" (m: ^Model($T)) -> Model_View {
+	if m == nil { return {} }
+	return {plan = &m.plan, judging = m.judging, ti = type_info_of(T)}
+}
+
 @(require_results)
 compile :: proc(reg: ^Registry, $T: typeid, tag := "json", allocator := context.allocator) -> (m: Model(T), err: Error) {
 	return compile_with_opts(reg, T, Compile_Options{tag = tag if tag != "" else "stury"}, allocator)

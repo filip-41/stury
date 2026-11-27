@@ -14,29 +14,16 @@ SEAM_LEVELS :: WALK_LEVELS - 1
 
 // Where a part starts: the walk's `d` levels there, from `Part_Plan.levels[at:]`, and its innermost frame `top`.
 @(private)
-Seam :: struct {
-	d, top: u64,
-	at:     int,
-}
+Seam :: build.Binary_Seam
 
 // The parts of a text, where each starts, and the kinds of the containers open at each seam.
 @(private)
-Part_Plan :: struct {
-	want:   int, // the parts the text is cut into, at most
-	parts:  [dynamic]build.Part,
-	seams:  [dynamic]Seam,
-	levels: [dynamic]Level(.Length_First), // sized for the widest `Level`, read back as the spec's own
-	kinds:  [dynamic]tape.Kind,
-}
+Part_Plan :: build.Binary_Plan(Level(.Length_First))
 
 // What a pass over the heads ended at: its stop, a head the walk refuses or the end of the item, or memory or a nest
 // the plan is refused.
 @(private)
-Pass_End :: enum u8 {
-	Stopped,
-	Ended,
-	Failed,
-}
+Pass_End :: build.Binary_Pass_End
 
 // A pass over the heads of a text, its state between calls of `plan_run`: the position, the open levels as the walk
 // holds them, and the count of open containers. A pass of the text from its start is absolute and is the plan's. A
@@ -409,129 +396,28 @@ guess_start :: proc(src: []u8, $S: Spec, sm: ^Pass(S, true), cut, stop: u64) -> 
 // memory is refused or the text nests past `SEAM_LEVELS`.
 @(private)
 plan_chunks :: proc(src: []u8, $S: Spec, want: int, plan: ^Part_Plan, runner: ^tape.Runner) -> bool {
-	Job :: struct {
-		src:    []u8,
-		want:   int,
-		sums:   []Pass(S, true),
-		starts: []u64,
-		ends:   []Pass_End,
-	}
-	n := len(src)
-	allocator := plan.parts.allocator
-	sums, serr := make([]Pass(S, true), want, allocator)
-	starts, terr := make([]u64, want, allocator)
-	ends, eerr := make([]Pass_End, want, allocator)
-	defer {
-		delete(sums, allocator)
-		delete(starts, allocator)
-		delete(ends, allocator)
-	}
-	if serr != nil || terr != nil || eerr != nil {
-		return false
-	}
-	job := Job {
-		src    = src,
-		want   = want,
-		sums   = sums,
-		starts = starts,
-		ends   = ends,
-	}
-	read_chunk :: proc(arg: rawptr, k: int) {
-		j := (^Job)(arg)
-		cut := u64(len(j.src) / j.want * k)
-		stop := u64(len(j.src) / j.want * (k + 1)) if k + 1 < j.want else u64(len(j.src))
-		sm := &j.sums[k]
-		if k > 0 {
-			j.starts[k] = guess_start(j.src, S, sm, cut, stop)
-			if j.starts[k] == 0 {
-				return
-			}
-		}
-		pass_start(sm, j.starts[k])
-		j.ends[k] = plan_run(j.src, S, true, sm, stop, nil)
-	}
-	tape.fan_each(runner, want, read_chunk, &job)
-	st: Pass(S, false) = ---
-	pass_start(&st, 0)
-	chunks: for k := 0; k < want; k += 1 {
-		if k == 0 || starts[k] != 0 {
-			if st.i < starts[k] {
-				switch plan_run(src, S, false, &st, starts[k], plan) {
-				case .Failed:
-					return false
-				case .Ended:
-					break chunks
-				case .Stopped:
-				}
-			}
-			if st.i == starts[k] {
-				if ends[k] == .Failed {
-					return false
-				}
-				ok, ended := plan_carry(plan, S, &st, &sums[k])
-				if !ok {
-					return false
-				}
-				if ended || ends[k] == .Ended {
-					break chunks
-				}
-				continue
-			}
-		}
-		stop := u64(n / want * (k + 1)) if k + 1 < want else u64(n)
-		if st.i < stop {
-			switch plan_run(src, S, false, &st, stop, plan) {
-			case .Failed:
-				return false
-			case .Ended:
-				break chunks
-			case .Stopped:
-			}
-		}
-	}
-	return true
+	start_rel :: proc "contextless" (st: ^Pass(S, true), i: u64) { pass_start(st, i) }
+	start_abs :: proc "contextless" (st: ^Pass(S, false), i: u64) { pass_start(st, i) }
+	guess :: proc(src: []u8, st: ^Pass(S, true), cut, stop: u64) -> u64 { return guess_start(src, S, st, cut, stop) }
+	run_rel :: proc(src: []u8, st: ^Pass(S, true), stop: u64) -> Pass_End { return plan_run(src, S, true, st, stop, nil) }
+	run_abs :: proc(src: []u8, st: ^Pass(S, false), stop: u64, plan: ^Part_Plan) -> Pass_End { return plan_run(src, S, false, st, stop, plan) }
+	carry :: proc(plan: ^Part_Plan, st: ^Pass(S, false), sm: ^Pass(S, true)) -> (bool, bool) { return plan_carry(plan, S, st, sm) }
+	return build.binary_plan_chunks(src, want, plan, runner, Pass(S, true), Pass(S, false), start_rel, start_abs, guess, run_rel, run_abs, carry)
 }
 
 // Plans up to `want` parts of `src` into `plan`, each counted for the nodes, facts and levels its walk stores. False
 // when memory is refused or the text nests past `SEAM_LEVELS`.
 @(private)
 plan_parts :: proc(src: []u8, $S: Spec, want: int, plan: ^Part_Plan, runner: ^tape.Runner) -> bool {
-	plan.want = want
-	if _, e := append(&plan.parts, build.Part{}); e != nil {
-		return false
+	chunks :: proc(src: []u8, want: int, plan: ^Part_Plan, runner: ^tape.Runner) -> bool {
+		return plan_chunks(src, S, want, plan, runner)
 	}
-	if _, e := append(&plan.seams, Seam{}); e != nil {
-		return false
-	}
-	if !plan_chunks(src, S, want, plan, runner) {
-		return false
-	}
-	plan.parts[len(plan.parts) - 1].to = len(src)
-	build.parts_opens(plan.parts[:], plan.kinds[:])
-	return true
+	return build.binary_plan_parts(src, want, plan, runner, chunks)
 }
 
 // Ends the last part of `plan` at `i` and starts the next one there, in the walk's levels `stack` whose innermost frame
 // is `top` and in which `c` containers are open.
 @(private)
 plan_seam :: proc(plan: ^Part_Plan, i, top: u64, c: int, stack: []Level($S)) -> bool {
-	at := len(plan.levels)
-	if resize(&plan.levels, at + len(stack)) != nil {
-		return false
-	}
-	intrinsics.mem_copy_non_overlapping(&plan.levels[at], raw_data(stack), len(stack) * size_of(Level(S)))
-	kinds := len(plan.kinds)
-	for m in 1 ..= len(stack) {
-		frame := stack[m].frame if m < len(stack) else top
-		if frame & FLAG_TAG == 0 {
-			if _, e := append(&plan.kinds, tape.Kind.Object if frame & FLAG_OBJECT != 0 else .Array); e != nil {
-				return false
-			}
-		}
-	}
-	if _, e := append(&plan.seams, Seam{d = u64(len(stack)), top = top, at = at}); e != nil {
-		return false
-	}
-	_, e := append(&plan.parts, build.Part{from = int(i), opens_at = kinds, opens_n = len(plan.kinds) - kinds, levels = c})
-	return e == nil
+	return build.binary_plan_seam(plan, i, top, c, stack, FLAG_OBJECT, FLAG_TAG)
 }

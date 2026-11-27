@@ -42,7 +42,7 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, html.records_scan(&s, &demand, out[:], docs[:], {}, context.temp_allocator), 1)
 	at, p, _ := html.answer({doc = &docs[0]}, 0, 0)
 	testing.expect_value(t, p, tape.Presence.Found)
-	testing.expect_value(t, text_of(&docs[0], at), "x")
+	testing.expect_value(t, testkit.scalar_text(&docs[0], at), "x")
 	testing.expect_value(t, s.err, nil)
 
 	chosen, err := html.reads(.Html).records(html.as(.Html), src, .Concatenated, {}, nil, context.allocator)
@@ -82,7 +82,7 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	testing.expect_value(t, html.records_validate(&b, out[:]), 1)
 	f, faulted := out[0].err.(tape.Fault)
 	testing.expect_value(t, faulted, true)
-	testing.expect_value(t, code_of(out[0].err), "encoding")
+	testing.expect_value(t, testkit.code_of(out[0].err), "encoding")
 	testing.expect_value(t, f.at, 14)
 
 	big := strings.builder_make(context.temp_allocator)
@@ -131,13 +131,13 @@ member_lines :: proc(src: string, spec := html.Spec.Fragment, opts := html.Optio
 		n := html.records_scan(&r, &whole, out[:], docs[:], {}, context.temp_allocator)
 		for rec, k in out[:n] {
 			key := "#text" if rec.key.n == 0 else src[rec.key.lo:][:rec.key.n]
-			fmt.sbprintf(&b, "%d-%d %s %s%s\n", rec.lo, rec.hi, key, testkit.render_doc(&docs[k]), code_of(rec.err))
+			fmt.sbprintf(&b, "%d-%d %s %s%s\n", rec.lo, rec.hi, key, testkit.render_doc(&docs[k]), testkit.code_of(rec.err))
 		}
 		if n < len(out) {
 			break
 		}
 	}
-	fmt.sbprintf(&b, "end %s", code_of(r.err))
+	fmt.sbprintf(&b, "end %s", testkit.code_of(r.err))
 	return strings.to_string(b)
 }
 

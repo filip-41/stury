@@ -4,6 +4,7 @@ package html_tests
 import "core:strings"
 import "core:testing"
 import "stury:html"
+import "stury:lib/core/tape"
 import "stury:testkit"
 
 @(private = "file")
@@ -23,23 +24,17 @@ nested_text :: proc(depth: int) -> []u8 {
 @(private = "file")
 read_nested :: proc(read: int, text: []u8) -> bool {
 	opts := html.Options{budget = {depth = 200_000}}
-	switch read {
+	if read < testkit.DEEP_CORE_READS {
+		return testkit.deep_core_read(
+			read, html.reads(.Fragment), html.as(.Fragment), text, opts,
+			{tape.Name("div"), tape.Name("div")},
+			{{tape.Name("div"), tape.Name("div")}},
+			{{tape.Descend{}, tape.Name("div")}},
+			.Concatenated, nil,
+		)
+	}
+	switch read - testkit.DEEP_CORE_READS {
 	case 0:
-		return html.validate(text, .Fragment, opts) == nil
-	case 1:
-		doc, err := html.build(text, .Fragment, opts)
-		defer html.destroy(&doc)
-		return err == nil
-	case 2:
-		answer, err := html.find(text, {html.Name("div"), html.Name("div")}, .Fragment, {}, opts)
-		return err == nil && answer.outcome == .Found
-	case 3:
-		d, _ := html.demand_of({{html.Name("div"), html.Name("div")}})
-		defer html.destroy(&d)
-		r, err := html.scan(text, &d, .Fragment, {}, opts)
-		defer html.destroy(&r)
-		return err == nil
-	case 4:
 		doc, err := html.build(text, .Fragment, opts)
 		defer html.destroy(&doc)
 		d, _ := html.member({&doc, nil}, html.ROOT, "div")
@@ -61,6 +56,6 @@ read_nested :: proc(read: int, text: []u8) -> bool {
 @(test)
 reads_nest_100000_levels_in_one_mib :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	testkit.expect_reads_on_thread(t, 1 << 20, 6, nested_text(100_000), "html_elements", read_nested)
+	testkit.expect_reads_on_thread(t, 1 << 20, testkit.DEEP_CORE_READS + 2, nested_text(100_000), "html_elements", read_nested)
 	free_all(context.temp_allocator)
 }

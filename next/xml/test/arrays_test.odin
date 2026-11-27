@@ -134,8 +134,8 @@ xml_arrays_preserves_facts_attributes_dtd_and_namespaces :: proc(t: ^testing.T) 
 	el1, e1 := xml.element(r, items_arr, 1)
 	testing.expect(t, e0 == .Found && e1 == .Found)
 
-	id0, has_id0 := attribute_value(&doc, el0, "id")
-	id1, has_id1 := attribute_value(&doc, el1, "id")
+	id0, has_id0 := testkit.attribute_value(&doc, el0, "id")
+	id1, has_id1 := testkit.attribute_value(&doc, el1, "id")
 	testing.expect(t, has_id0 && id0 == "1")
 	testing.expect(t, has_id1 && id1 == "2")
 

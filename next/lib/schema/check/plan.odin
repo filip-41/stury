@@ -1205,25 +1205,12 @@ record_accepts_kind :: proc(p: ^Plan, rec_idx: i32, kind: rules.Kind, depth: int
 // Names with `"`, `\`, or control chars `< 0x20` get `NO_KEY` so they always go through `check_key`.
 @(private)
 key_of :: proc "contextless" (r: ^Record, name: string) {
-	n := len(name)
-	for c in transmute([]u8)name {
-		if c == '"' || c == '\\' || c < 0x20 {
-			r.word = NO_KEY
-			return
-		}
-	}
-	r.word = tape.key_word(u64(n))
-	r.head, r.tail = 0, 0
-	for i in 0 ..< min(n, 8) {
-		r.head |= u64(name[i]) << (8 * uint(i))
-	}
-	if n <= 8 {
-		r.tail = ~u64(0) >> (64 - 8 * uint(n)) if n > 0 else 0
+	word, head, tail, ok := tape.expected_key(name)
+	if !ok {
+		r.word = NO_KEY
 		return
 	}
-	for i in 0 ..< 8 {
-		r.tail |= u64(name[n - 8 + i]) << (8 * uint(i))
-	}
+	r.word, r.head, r.tail = word, head, tail
 }
 
 // 1-bit bloom hash over a non-empty key name (matching v1 `name_bit`).

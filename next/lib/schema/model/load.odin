@@ -102,12 +102,18 @@ load :: proc(
 load_document :: proc(m: ^Model($T), doc: ^tape.Document, out: ^T, sink: ^Sink = nil, opts := Load_Opts{}, allocator := context.allocator) -> Error {
 	if m == nil || doc == nil || out == nil || len(doc.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "document"}} }
 	if doc.partial != nil { return Model_Error{kind = .Unsupported, want = {text = "partial"}} }
-	return load_value(m, rules.Node_Ref{doc = doc, node = tape.ROOT}, out, sink, opts, allocator)
+	return load_value_raw(&m.plan, m.judging, rules.Node_Ref{doc = doc, node = tape.ROOT}, rawptr(out), type_info_of(T), sink, opts, allocator)
 }
 
 @(require_results)
 load_value :: proc(m: ^Model($T), v: rules.Value, out: ^T, sink: ^Sink = nil, opts := Load_Opts{}, allocator := context.allocator) -> Error {
-	if m == nil || out == nil || len(m.plan.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "target"}} }
+	if m == nil || out == nil { return Model_Error{kind = .Bad_Option, want = {text = "target"}} }
+	return load_value_raw(&m.plan, m.judging, v, rawptr(out), type_info_of(T), sink, opts, allocator)
+}
+
+@(private, require_results)
+load_value_raw :: proc(plan: ^Type_Plan, judging: ^Applied, v: rules.Value, out: rawptr, ti: ^runtime.Type_Info, sink: ^Sink, opts: Load_Opts, allocator: runtime.Allocator) -> Error {
+	if plan == nil || out == nil || len(plan.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "target"}} }
 	fmt: ^tape.Format
 	if ref, is_ref := v.(rules.Node_Ref); is_ref && ref.doc != nil { fmt = ref.doc.format }
 	policy, ok := resolve_dups(opts.dups, fmt)
@@ -115,21 +121,27 @@ load_value :: proc(m: ^Model($T), v: rules.Value, out: ^T, sink: ^Sink = nil, op
 	sc: Scratch_Scope
 	sp := (^Scratch_Scope)(rawptr(&sc))
 	scratch_begin(sp, opts, allocator); defer scratch_end(sp)
-	return load_value_scoped(m, v, out, sink, opts, policy, sp)
+	return load_value_scoped_raw(plan, judging, v, out, ti, sink, opts, policy, sp)
 }
 
 @(private)
 load_value_scoped :: proc(m: ^Model($T), v: rules.Value, out: ^T, sink: ^Sink, opts: Load_Opts, policy: tape.Duplicates, sc: ^Scratch_Scope) -> Error {
-	if m == nil || out == nil || len(m.plan.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "target"}} }
-	mem.zero(out, size_of(T))
+	if m == nil || out == nil { return Model_Error{kind = .Bad_Option, want = {text = "target"}} }
+	return load_value_scoped_raw(&m.plan, m.judging, v, rawptr(out), type_info_of(T), sink, opts, policy, sc)
+}
+
+@(private)
+load_value_scoped_raw :: proc(plan: ^Type_Plan, judging: ^Applied, v: rules.Value, out: rawptr, ti: ^runtime.Type_Info, sink: ^Sink, opts: Load_Opts, policy: tape.Duplicates, sc: ^Scratch_Scope) -> Error {
+	if plan == nil || out == nil || len(plan.nodes) == 0 { return Model_Error{kind = .Bad_Option, want = {text = "target"}} }
+	mem.zero(out, ti.size)
 	from := len(sink.entries) if sink != nil else 0
-	l, lerr := loader_make(&m.plan, m.judging, policy, opts.budget, sink, sc.out, sc.scratch, validators = opts.validators)
+	l, lerr := loader_make(plan, judging, policy, opts.budget, sink, sc.out, sc.scratch, validators = opts.validators)
 	if lerr != nil { return scratch_oom_error(sc) }
 	defer loader_cleanup(&l)
 
-	decode_loop(&l, m.plan.root, v, rawptr(out), nil, nil)
+	decode_loop(&l, plan.root, v, out, nil, nil)
 	if sink != nil { order_sink(sink, from) }
-	if err := loader_result_err(&l, sc); err != nil { free_value(out, type_info_of(T), sc.out); return err }
+	if err := loader_result_err(&l, sc); err != nil { free_value(out, ti, sc.out); return err }
 	return nil
 }
 

@@ -861,3 +861,268 @@ records_in_pieces_keep_only_the_child_a_window_cuts :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, r.err == nil && r.index == 3 && records == 0 && kept < WINDOW, "%d records, %v, kept %d", r.index, r.err, kept)
 }
+
+@(test)
+records_seq_rfc7464_semantics :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Empty RS runs are skipped; leading bytes before first RS are `unframed`; top-level numbers without trailing
+	// whitespace are `cut_number`; multi-line JSON values inside RS are valid; faults do not stop later records.
+	src := "\x1e{\"a\":1}\n\x1e\x1e  \n\x1e{\n\"a\": 2\n}\x1e123\n\x1e456\x1e{\"a\":bad}\x1e{\"a\":3}\n"
+	path := []tape.Step{tape.Name("a")}
+	demand, _ := tape.demand_of({path})
+	defer tape.destroy_demand(&demand)
+
+	for spec in json.Spec {
+		r := json.records_open(transmute([]u8)src, .Seq, spec)
+		defer tape.destroy_records(&r)
+		out: [16]tape.Record
+		ans: [16]tape.Span_Answer
+		n := json.records_find(&r, path, out[:], ans[:], {stop_early = true})
+		testing.expectf(t, n == 6 && r.err == nil && r.index == 6, "%v seq count=%d err=%v idx=%d", spec, n, r.err, r.index)
+		testing.expectf(t, out[0].err == nil && ans[0].outcome == .Found, "%v rec0: %v %v", spec, out[0], ans[0])
+		testing.expectf(t, out[1].err == nil && ans[1].outcome == .Found, "%v rec1: %v %v", spec, out[1], ans[1])
+		testing.expectf(t, out[2].err == nil, "%v rec2 (123\\n): %v", spec, out[2])
+		// rec3 is `456` with no whitespace before 0x1E -> cut_number
+		f3, ok3 := out[3].err.(tape.Fault)
+		testing.expectf(t, ok3 && f3.kind == .Bad_Number && tape.fault_rule(f3).code == "cut_number", "%v rec3: %v", spec, out[3].err)
+		// rec4 is `{"a":bad}` -> fault
+		testing.expectf(t, out[4].err != nil && ans[4].outcome == .Missing, "%v rec4: %v %v", spec, out[4], ans[4])
+		// rec5 is `{"a":3}\n` -> valid after fault
+		testing.expectf(t, out[5].err == nil && ans[5].outcome == .Found, "%v rec5: %v %v", spec, out[5], ans[5])
+
+		// Validate returns only the 2 bad records (rec3 and rec4).
+		rv := json.records_open(transmute([]u8)src, .Seq, spec)
+		defer tape.destroy_records(&rv)
+		bad: [8]tape.Record
+		nv := json.records_validate(&rv, bad[:])
+		testing.expectf(t, nv == 2 && rv.index == 6 && rv.err == nil, "%v seq validate: nv=%d idx=%d err=%v", spec, nv, rv.index, rv.err)
+		testing.expectf(t, bad[0] == out[3] && bad[1] == out[4], "%v seq validate mismatch: %v vs %v", spec, bad[:nv], out[3:5])
+
+		// Scan agrees with find.
+		rs := json.records_open(transmute([]u8)src, .Seq, spec)
+		defer tape.destroy_records(&rs)
+		sout: [16]tape.Record
+		docs: [16]tape.Document
+		ns := json.records_scan(&rs, &demand, sout[:], docs[:])
+		testing.expectf(t, ns == 6 && rs.err == nil, "%v seq scan: ns=%d err=%v", spec, ns, rs.err)
+		for i in 0 ..< ns {
+			testing.expectf(t, sout[i] == out[i], "%v seq scan rec %d: %v vs %v", spec, i, sout[i], out[i])
+		}
+	}
+
+	// Unframed bytes before first 0x1E -> `unframed`, then framed record succeeds.
+	unframed := " {\"x\":1}\x1e{\"x\":2}\n"
+	ru := json.records_open(transmute([]u8)unframed, .Seq, .Json)
+	defer tape.destroy_records(&ru)
+	uout: [4]tape.Record
+	uans: [4]tape.Span_Answer
+	nu := json.records_find(&ru, {tape.Name("x")}, uout[:], uans[:])
+	testing.expectf(t, nu == 2 && ru.err == nil, "unframed: nu=%d err=%v", nu, ru.err)
+	fu, oku := uout[0].err.(tape.Fault)
+	testing.expectf(t, oku && fu.kind == .Bad_Char && tape.fault_rule(fu).code == "unframed" && fu.at == 1, "unframed err: %v", uout[0].err)
+	testing.expectf(t, uout[1].err == nil && uans[1].outcome == .Found, "after unframed: %v %v", uout[1], uans[1])
+
+	// Pieces agreement across chunk sizes for `.Seq`.
+	for step in ([]int{1, 3, 7, 19}) {
+		p: tape.Pieces
+		defer tape.destroy(&p)
+		bs := transmute([]u8)src
+		p.last = step >= len(bs)
+		rp := json.records_open(bs[:min(step, len(bs))], .Seq, .Json, {pieces = &p})
+		defer tape.destroy_records(&rp)
+		got := make([dynamic]tape.Record, context.temp_allocator)
+		for {
+			buf: [4]tape.Record
+			ans_buf: [4]tape.Span_Answer
+			k := json.records_find(&rp, path, buf[:], ans_buf[:])
+			for i in 0 ..< k {
+				append(&got, buf[i])
+			}
+			if !p.more {
+				break
+			}
+			p.from = p.keep
+			next_to := min(int(p.at) + step, len(bs))
+			p.last = next_to == len(bs)
+			werr := tape.records_window(&rp, bs[p.from:next_to])
+			testing.expectf(t, werr == nil, "seq pieces step=%d window err=%v", step, werr)
+		}
+		testing.expectf(t, len(got) == 6 && rp.err == nil, "seq pieces step=%d len=%d err=%v", step, len(got), rp.err)
+	}
+}
+
+@(test)
+records_concatenated_and_skip_quarantine :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Concatenated values: self-delimiting + whitespace separated + comments in JSONC.
+	src := `{"a":1}{"a":2} [3] "hi" 42 true false null`
+	r := json.records_open(transmute([]u8)src, .Concatenated, .Json)
+	defer tape.destroy_records(&r)
+	out: [16]tape.Record
+	ans: [16]tape.Span_Answer
+	n := json.records_find(&r, {tape.Name("a")}, out[:], ans[:])
+	testing.expectf(t, n == 8 && r.err == nil, "concat n=%d err=%v", n, r.err)
+	testing.expectf(t, string(src[out[0].lo:out[0].hi]) == `{"a":1}` && ans[0].outcome == .Found, "c0")
+	testing.expectf(t, string(src[out[1].lo:out[1].hi]) == `{"a":2}` && ans[1].outcome == .Found, "c1")
+	testing.expectf(t, string(src[out[4].lo:out[4].hi]) == `42`, "c4")
+	testing.expectf(t, string(src[out[7].lo:out[7].hi]) == `null`, "c7")
+
+	// `runs_on`: `1x` and `1,2` fault at the offending byte rather than yielding `1`.
+	for bad_src in ([]string{"1x", "1,2", "truefalse", "1/2"}) {
+		rb := json.records_open(transmute([]u8)bad_src, .Concatenated, .Json)
+		defer tape.destroy_records(&rb)
+		bout: [4]tape.Record
+		bans: [4]tape.Span_Answer
+		nb := json.records_find(&rb, nil, bout[:], bans[:])
+		f, is_f := rb.err.(tape.Fault)
+		testing.expectf(t, nb == 0 && is_f && tape.fault_rule(f).code == "trailing", "%q: nb=%d err=%v", bad_src, nb, rb.err)
+	}
+
+	// `records_skip` on `.Concatenated` resumes at next line (and on fault's own line when fault starts a fresh line).
+	dirty := "{\"a\":1}\n{bad}\n{\"a\":2}\n123\n{\"a\":3}\n"
+	rs := json.records_open(transmute([]u8)dirty, .Concatenated, .Json)
+	defer tape.destroy_records(&rs)
+	rs.skip_bad = true
+	vbad: [8]tape.Record
+	nv := json.records_validate(&rs, vbad[:])
+	testing.expectf(t, nv == 1 && rs.err == nil && rs.index == 5, "concat skip_bad validate: nv=%d idx=%d err=%v", nv, rs.index, rs.err)
+	testing.expectf(t, string(dirty[vbad[0].lo:vbad[0].hi]) == "{bad}", "skipped text=%q", dirty[vbad[0].lo:vbad[0].hi])
+
+	// Quarantine sink on `.Lines`, `.Seq`, and `.Concatenated` yields ONLY valid records in `out`/`answers`.
+	for tc in ([]struct{ text: string, framing: tape.Framing }{
+		{"{\"a\":1}\n{bad}\n{\"a\":2}\n", .Lines},
+		{"\x1e{\"a\":1}\n\x1e{bad}\n\x1e{\"a\":2}\n", .Seq},
+		{"{\"a\":1}\n{bad}\n{\"a\":2}\n", .Concatenated},
+	}) {
+		q := make([dynamic]tape.Bad_Record)
+		defer delete(q)
+		rq := json.records_open(transmute([]u8)tc.text, tc.framing, .Json)
+		defer tape.destroy_records(&rq)
+		rq.quarantine = &q
+		qout: [8]tape.Record
+		qans: [8]tape.Span_Answer
+		nq := json.records_find(&rq, {tape.Name("a")}, qout[:], qans[:])
+		testing.expectf(t, nq == 2 && len(q) == 1 && rq.err == nil, "%v quarantine: nq=%d bad=%d err=%v", tc.framing, nq, len(q), rq.err)
+		testing.expectf(t, qout[0].err == nil && qout[1].err == nil && qans[0].outcome == .Found && qans[1].outcome == .Found, "%v valid outputs", tc.framing)
+		testing.expectf(t, strings.trim_space(string(q[0].text)) == "{bad}" && q[0].err != nil, "%v bad entry: %q %v", tc.framing, q[0].text, q[0].err)
+	}
+
+	// `records_skip` returns false on `.Elements` (non-resumable framing).
+	re := json.records_open(transmute([]u8)string("[1, bad, 2]"), .Elements, .Json)
+	defer tape.destroy_records(&re)
+	eout: [4]tape.Record
+	_ = json.records_validate(&re, eout[:])
+	_, skipped := tape.records_skip(&re)
+	testing.expectf(t, !skipped && re.err != nil, "elements must not skip")
+}
+
+@(test)
+records_max_bytes_limit :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	// Whole-text max_bytes: first record fits (8 bytes), second exceeds (20 bytes) -> Too_Wide (`records.too_long`).
+	src := "{\"a\":1}\n{\"a\":\"0123456789abcdef\"}\n{\"a\":2}\n"
+	r := json.records_open(transmute([]u8)src, .Lines, .Json)
+	defer tape.destroy_records(&r)
+	r.max_bytes = 12
+	out: [8]tape.Record
+	ans: [8]tape.Span_Answer
+	n := json.records_find(&r, {tape.Name("a")}, out[:], ans[:])
+	f, is_f := r.err.(tape.Fault)
+	testing.expectf(t, n == 1 && is_f && f.kind == .Too_Wide && tape.fault_rule(f).code == "too_long", "max_bytes whole: n=%d err=%v", n, r.err)
+
+	// Streaming pieces max_bytes: unbounded record without newline triggers Too_Wide once unread window > max_bytes.
+	stream := fmt.tprintf("{{\"a\":1}}\n%s", strings.repeat("x", 64, context.temp_allocator))
+	bs := transmute([]u8)stream
+	p: tape.Pieces
+	defer tape.destroy(&p)
+	rp := json.records_open(bs[:16], .Lines, .Json, {pieces = &p})
+	defer tape.destroy_records(&rp)
+	rp.max_bytes = 24
+	k1 := json.records_find(&rp, {tape.Name("a")}, out[:], ans[:])
+	testing.expectf(t, k1 == 1 && rp.err == nil && p.more, "stream rec1: k1=%d err=%v more=%v", k1, rp.err, p.more)
+	// Feed window holding 40 unread bytes (> 24) still with no newline.
+	p.from = p.keep
+	p.last = false
+	_ = tape.records_window(&rp, bs[p.from:p.from + 40])
+	k2 := json.records_find(&rp, {tape.Name("a")}, out[:], ans[:])
+	f2, is_f2 := rp.err.(tape.Fault)
+	testing.expectf(t, k2 == 0 && is_f2 && f2.kind == .Too_Wide && tape.fault_rule(f2).code == "too_long" && !p.more, "stream too_long: k2=%d err=%v more=%v", k2, rp.err, p.more)
+}
+
+@(test)
+json_spine_finds_bulk_array :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	big := strings.repeat("1,", 3000, context.temp_allocator)
+	// Root array
+	at, levels, ok := json.spine(transmute([]u8)string("[1,2,3]"))
+	testing.expectf(t, ok && at == 0 && levels == 0, "root: %v %v %v", at, levels, ok)
+	// Nested spine past small side members
+	nested := fmt.tprintf(`{{"meta":{{"v":1}},"items":[%s0]}}`, big)
+	at, levels, ok = json.spine(transmute([]u8)nested)
+	testing.expectf(t, ok && levels == 1 && nested[at] == '[', "nested: at=%d levels=%d ok=%v", at, levels, ok)
+	// Small array inside object (< SIDE_BYTES) has no spine
+	_, _, ok = json.spine(transmute([]u8)string(`{"a":[1]}`))
+	testing.expectf(t, !ok, "small nested should not be spine")
+	// Scalar root has no spine
+	_, _, ok = json.spine(transmute([]u8)string(`42`))
+	testing.expectf(t, !ok, "scalar should not be spine")
+	// JSONC with comments
+	commented := fmt.tprintf(`/* hdr */ {{"k":"v", /* c */ "rows":[%s0]}}`, big)
+	at, levels, ok = json.spine(transmute([]u8)commented, .Jsonc)
+	testing.expectf(t, ok && levels == 1 && commented[at] == '[', "jsonc spine: %v %v %v", at, levels, ok)
+}
+
+// Verifies runtime-selected `spec` and `lax` (`len(path) < 8` fast path vs `len(path) >= 8` `frame_init`) in `records_open`.
+@(test)
+perf4_records_dynamic_spec_and_path_lengths :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	line_src := "{\"k\":\"v1\"}\n{\"k\":\"v2\"}\n"
+	short_path := [2]tape.Step{tape.Name("wrap"), tape.Name("items")}
+	long_path := [9]tape.Step{
+		tape.Name("a"), tape.Name("b"), tape.Name("c"), tape.Name("d"),
+		tape.Name("e"), tape.Name("f"), tape.Name("g"), tape.Name("h"), tape.Name("k"),
+	}
+	nested_elem := `[{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"k":1}}}}}}}}},{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"k":2}}}}}}}}}]`
+	nested_long_elem := `{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"k":[10,20]}}}}}}}}}`
+
+	for spec in ([]json.Spec{.Json, .Jsonc, .Json5}) {
+		for max_depth in ([]u32{0, 32}) {
+			opts := json.Options{budget = {depth = max_depth}}
+			// Validate with runtime `spec` and `opts`.
+			rv := json.records_open(transmute([]u8)line_src, .Lines, spec, opts)
+			defer tape.destroy_records(&rv)
+			out: [4]tape.Record
+			n := json.records_validate(&rv, out[:])
+			testing.expectf(t, n == 0 && rv.index == 2 && rv.err == nil, "spec=%v depth=%d validate n=%d idx=%d err=%v", spec, max_depth, n, rv.index, rv.err)
+
+			// `.Elements` with `len(path) < 8` (`2` steps, hitting the no-`frame_init` fast path).
+			elem_src := `{"wrap":{"items":[{"k":"a"},{"k":"b"}]}}`
+			re := json.records_open(transmute([]u8)elem_src, .Elements, spec, opts, short_path[:])
+			defer tape.destroy_records(&re)
+			eout: [4]tape.Record
+			eans: [4]tape.Span_Answer
+			ne := json.records_find(&re, []tape.Step{tape.Name("k")}, eout[:], eans[:])
+			testing.expectf(t, ne == 2 && re.err == nil && eans[0].outcome == .Found && eans[1].outcome == .Found, "short path elements spec=%v: ne=%d err=%v", spec, ne, re.err)
+
+			// `.Elements` with `len(path) >= 8` (hitting `build.frame_init`) via `records_scan`.
+			dem, derr := tape.demand_of({{}})
+			defer tape.destroy_demand(&dem)
+			testing.expect_value(t, derr, nil)
+			rl := json.records_open(transmute([]u8)nested_long_elem, .Elements, spec, opts, long_path[:])
+			defer tape.destroy_records(&rl)
+			sout: [4]tape.Record
+			sdocs: [4]tape.Document
+			ns := json.records_scan(&rl, &dem, sout[:], sdocs[:])
+			testing.expectf(t, ns == 2 && rl.err == nil, "long path elements scan spec=%v: ns=%d err=%v", spec, ns, rl.err)
+
+			// Root `.Elements` with `records_find` traversing a 9-step path inside each record.
+			rlong := json.records_open(transmute([]u8)nested_elem, .Elements, spec, opts)
+			defer tape.destroy_records(&rlong)
+			lout: [4]tape.Record
+			lans: [4]tape.Span_Answer
+			nl := json.records_find(&rlong, long_path[:], lout[:], lans[:])
+			testing.expectf(t, nl == 2 && lans[0].outcome == .Found && lans[1].outcome == .Found, "long path find spec=%v nl=%d", spec, nl)
+		}
+	}
+}

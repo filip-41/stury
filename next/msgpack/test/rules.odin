@@ -15,7 +15,7 @@ Case :: struct {
 }
 
 expect_refused :: proc(t: ^testing.T, c: Case, spec := msgpack.Spec.Msgpack, opts := msgpack.Options{}, loc := #caller_location) {
-	src := hex(c.hex)
+	src := testkit.hex(c.hex)
 	err := msgpack.validate(src, spec, opts)
 	if !testing.expectf(t, err != nil, "%s was accepted under %v", c.hex, spec, loc = loc) {
 		return
@@ -30,7 +30,7 @@ expect_refused :: proc(t: ^testing.T, c: Case, spec := msgpack.Spec.Msgpack, opt
 }
 
 expect_read :: proc(t: ^testing.T, text: string, spec := msgpack.Spec.Msgpack, opts := msgpack.Options{}, loc := #caller_location) {
-	err := msgpack.validate(hex(text), spec, opts)
+	err := msgpack.validate(testkit.hex(text), spec, opts)
 	testing.expectf(t, err == nil, "%s under %v: %v", text, spec, err, loc = loc)
 }
 
@@ -143,7 +143,7 @@ utf8_validation_and_tolerance :: proc(t: ^testing.T) {
 		expect_refused(t, {s, "invalid_utf8"})
 	}
 	lax := msgpack.Options{tolerate = {.Invalid_Utf8}}
-	doc, err := msgpack.build(hex("a2 c3 28"), .Msgpack, lax)
+	doc, err := msgpack.build(testkit.hex("a2 c3 28"), .Msgpack, lax)
 	testing.expect_value(t, err, nil)
 	defer msgpack.destroy(&doc)
 	testing.expect(t, .Tolerated in doc.flags)
@@ -197,7 +197,7 @@ budgets_and_oom_are_enforced :: proc(t: ^testing.T) {
 	testing.expect(t, is_ex && ex.kind == .Depth)
 
 	// Steps limit across validate/build/find/scan
-	src := hex("83 a1 61 92 81 a1 62 01 81 a1 62 02 a1 63 81 a1 64 91 03 a1 65 04")
+	src := testkit.hex("83 a1 61 92 81 a1 62 01 81 a1 62 02 a1 63 81 a1 64 91 03 a1 65 04")
 	CONTAINERS :: 6
 	path := []tape.Step{tape.Name("e")}
 	for steps in u64(1) ..= CONTAINERS + 1 {
@@ -231,7 +231,7 @@ budgets_and_oom_are_enforced :: proc(t: ^testing.T) {
 
 	// Early finds still judge skipped bytes
 	for c in MALFORMED {
-		msrc := hex(c.hex)
+		msrc := testkit.hex(c.hex)
 		want := msgpack.validate(msrc)
 		for p in ([][]tape.Step{{tape.Name("a")}, {tape.Index(0)}}) {
 			_, err := msgpack.find(msrc, p, .Msgpack, {stop_early = true})

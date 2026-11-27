@@ -12,21 +12,16 @@ import "stury:testkit"
 
 // Paths into the texts: the root, elements and members by name and index, from either end, and every child.
 @(private = "file")
-piece_paths :: proc() -> [][]cbor.Step {
-	paths := make([dynamic][]cbor.Step, context.temp_allocator)
-	add :: proc(paths: ^[dynamic][]cbor.Step, steps: ..cbor.Step) {
-		append(paths, slice.clone(steps, context.temp_allocator))
-	}
-	add(&paths)
-	add(&paths, cbor.Index(0))
-	add(&paths, cbor.Index(-1))
-	add(&paths, cbor.Index(2), cbor.Index(0))
-	add(&paths, cbor.All{})
-	add(&paths, cbor.Name("a"))
-	add(&paths, cbor.Name("b"), cbor.Name("d"))
-	add(&paths, cbor.Name("1"), cbor.Name("x"))
-	add(&paths, cbor.All{}, cbor.Index(-1))
-	return paths[:]
+PIECE_PATHS := [?][]cbor.Step {
+	{},
+	{cbor.Index(0)},
+	{cbor.Index(-1)},
+	{cbor.Index(2), cbor.Index(0)},
+	{cbor.All{}},
+	{cbor.Name("a")},
+	{cbor.Name("b"), cbor.Name("d")},
+	{cbor.Name("1"), cbor.Name("x")},
+	{cbor.All{}, cbor.Index(-1)},
 }
 
 // A text with no byte, read in an empty window and a last one, ends its read with the fault `validate` gives.
@@ -46,10 +41,10 @@ pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	options := []cbor.Options{{}, {tolerate = {.Invalid_Utf8}}, {budget = {steps = 3}}, {budget = {depth = 2}}, {dups = .First}}
 	for h in PIECE_HEX {
-		src := hex(h)
+		src := testkit.hex(h)
 		for spec in cbor.Spec {
 			for opts in options {
-				if !testkit.agree_in_pieces(t, cbor.reads(spec), cbor.as(spec), src, opts, piece_paths(), h) {
+				if !testkit.agree_in_pieces(t, cbor.reads(spec), cbor.as(spec), src, opts, PIECE_PATHS[:], h) {
 					return
 				}
 			}
@@ -64,23 +59,24 @@ pieces_agree_on_generated_items :: proc(t: ^testing.T) {
 	state: rand.Default_Random_State
 	context.random_generator = testkit.seeded(t, &state, 0xcb2)
 	for _ in 0 ..< testkit.rounds(12) {
-		paths := piece_paths()
 		src := random_item()
 		defer delete(src)
-		bad := mutated(src)
-		defer delete(bad)
+		bad := testkit.mutate(src)
 		for text in ([2][]u8{src, bad}) {
 			step := max(1, len(text) / 24)
+			singles := make([dynamic]int, 0, 26, context.temp_allocator)
 			for k := 0; k <= len(text); k += step {
-				cuts := [1]int{k}
-				if !testkit.pieces_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), text, {}, cuts[:], paths, fmt.tprintf("generated %x", text), framing = .Concatenated, containers = true) {
-					return
-				}
+				append(&singles, k)
+			}
+			cuts_list := make([dynamic][]int, 0, len(singles) + 3, context.temp_allocator)
+			for i in 0 ..< len(singles) {
+				append(&cuts_list, singles[i:i + 1])
 			}
 			for size in ([]int{1, 3, 16}) {
-				if !testkit.pieces_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), text, {}, testkit.cuts_by(len(text), size), paths, fmt.tprintf("generated %x", text), framing = .Concatenated, containers = true) {
-					return
-				}
+				append(&cuts_list, testkit.cuts_by(len(text), size))
+			}
+			if !testkit.pieces_agree_cuts(t, cbor.reads(.Cbor), cbor.as(.Cbor), text, {}, cuts_list[:], PIECE_PATHS[:], fmt.tprintf("generated %x", text), framing = .Concatenated, containers = true) {
+				return
 			}
 		}
 		free_all(context.temp_allocator)
@@ -91,7 +87,7 @@ pieces_agree_on_generated_items :: proc(t: ^testing.T) {
 @(test)
 pieces_keep_the_cut_item :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("a2 61 61 01 61 62 82 01 63 636363")
+	src := testkit.hex("a2 61 61 01 61 62 82 01 63 636363")
 	p := cbor.Pieces{allocator = context.allocator}
 	defer cbor.destroy(&p)
 	testing.expect_value(t, cbor.validate(src[:10], .Cbor, {pieces = &p}), nil)
@@ -115,13 +111,13 @@ sequence_texts :: proc() -> [][]u8 {
 	texts := make([dynamic][]u8, context.temp_allocator)
 	valid := make([dynamic]u8, context.temp_allocator)
 	for h in PIECE_HEX[:5] {
-		append(&valid, ..hex(h))
+		append(&valid, ..testkit.hex(h))
 	}
 	append(&texts, valid[:])
 	for h in PIECE_HEX[5:] {
 		text := make([dynamic]u8, context.temp_allocator)
-		append(&text, ..hex(PIECE_HEX[0]))
-		append(&text, ..hex(h))
+		append(&text, ..testkit.hex(PIECE_HEX[0]))
+		append(&text, ..testkit.hex(h))
 		append(&texts, text[:])
 	}
 	deep := make([dynamic]u8, context.temp_allocator)
@@ -130,7 +126,7 @@ sequence_texts :: proc() -> [][]u8 {
 		append(&deep, 0x81)
 	}
 	append(&deep, 0x9f, 0x7f, 0x61, 0x61, 0xff, 0xff, 0x02)
-	append(&texts, deep[:], hex("01 82 01 ff 02"), hex("01 9b 0000000000000100 01 02 03"), hex("01 bf 61 61 01 ff a1 61"))
+	append(&texts, deep[:], testkit.hex("01 82 01 ff 02"), testkit.hex("01 9b 0000000000000100 01 02 03"), testkit.hex("01 bf 61 61 01 ff a1 61"))
 	return texts[:]
 }
 
@@ -140,25 +136,24 @@ sequence_texts :: proc() -> [][]u8 {
 records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
-	paths := piece_paths()
+	paths := PIECE_PATHS[:]
 	d, _ := cbor.demand_of(paths, allocator = context.temp_allocator)
 	options := []cbor.Options{{}, {tolerate = {.Invalid_Utf8}}, {budget = {steps = 3}}, {budget = {depth = 2}}}
 	for src in sequence_texts() {
+		singles := make([]int, len(src) + 1, context.temp_allocator)
+		cuts_list := make([dynamic][]int, 0, len(src) + 1 + 40, context.temp_allocator)
+		for k in 0 ..= len(src) {
+			singles[k] = k
+			append(&cuts_list, singles[k:k + 1])
+		}
+		for size in 1 ..= 40 {
+			append(&cuts_list, testkit.cuts_by(len(src), size))
+		}
 		for spec in cbor.Spec {
 			for opts in options {
 				run := testkit.Piece_Run{src, cbor.reads(spec), cbor.as(spec), opts, nil}
-				for k in 0 ..= len(src) {
-					cuts := [1]int{k}
-					run.cuts = cuts[:]
-					if !testkit.records_pieces_agree(t, run, .Concatenated, paths, &d, "sequence") {
-						return
-					}
-				}
-				for size in 1 ..= 40 {
-					run.cuts = testkit.cuts_by(len(src), size)
-					if !testkit.records_pieces_agree(t, run, .Concatenated, paths, &d, "sequence") {
-						return
-					}
+				if !testkit.records_pieces_agree_cuts(t, run, cuts_list[:], .Concatenated, paths, &d, "sequence") {
+					return
 				}
 			}
 		}
@@ -171,7 +166,7 @@ records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
 container_records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
-	paths := piece_paths()
+	paths := PIECE_PATHS[:]
 	d, _ := cbor.demand_of(paths, allocator = context.temp_allocator)
 	texts := []string {
 		"83 01 82 02 03 a1 61 61 04",
@@ -196,24 +191,23 @@ container_records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
 	ats := [][]tape.Step{nil, {tape.Name("a")}, {tape.Index(0)}, {tape.Name("a"), tape.Index(1)}, {tape.Index(1), tape.Name("b")}}
 	options := []cbor.Options{{}, {tolerate = {.Invalid_Utf8}}, {budget = {steps = 3}}, {budget = {depth = 2}}}
 	for h in texts {
-		src := hex(h)
+		src := testkit.hex(h)
+		singles := make([]int, len(src) + 1, context.temp_allocator)
+		cuts_list := make([dynamic][]int, 0, len(src) + 1 + 12, context.temp_allocator)
+		for k in 0 ..= len(src) {
+			singles[k] = k
+			append(&cuts_list, singles[k:k + 1])
+		}
+		for size in 1 ..= 12 {
+			append(&cuts_list, testkit.cuts_by(len(src), size))
+		}
 		for spec in cbor.Spec {
 			for opts in options {
 				run := testkit.Piece_Run{src, cbor.reads(spec), cbor.as(spec), opts, nil}
 				for at in ats {
 					for framing in ([]cbor.Framing{.Elements, .Members}) {
-						for k in 0 ..= len(src) {
-							cuts := [1]int{k}
-							run.cuts = cuts[:]
-							if !testkit.records_pieces_agree(t, run, framing, paths, &d, h, at) {
-								return
-							}
-						}
-						for size in 1 ..= 12 {
-							run.cuts = testkit.cuts_by(len(src), size)
-							if !testkit.records_pieces_agree(t, run, framing, paths, &d, h, at) {
-								return
-							}
+						if !testkit.records_pieces_agree_cuts(t, run, cuts_list[:], framing, paths, &d, h, at) {
+							return
 						}
 					}
 				}
@@ -289,7 +283,7 @@ so_far_drops_facts_past_cut :: proc(t: ^testing.T) {
 		{"81 c0 01", 2},
 	}
 	for c in cases {
-		src := hex(c.full)
+		src := testkit.hex(c.full)
 		p := tape.Pieces{so_far = true, allocator = context.allocator}
 		defer cbor.destroy(&p)
 		doc, err := cbor.build(src[:c.cut], .Cbor, {pieces = &p})

@@ -139,22 +139,6 @@ random_item :: proc() -> []u8 {
 	return b[:]
 }
 
-// `src` with a byte changed, a byte left out, or cut short, in the context's allocator.
-mutated :: proc(src: []u8) -> []u8 {
-	b := make([dynamic]u8, len(src))
-	copy(b[:], src)
-	at := rand.int_max(len(src))
-	switch rand.int_max(3) {
-	case 0:
-		b[at] = u8(rand.int_max(256))
-	case 1:
-		ordered_remove(&b, at)
-	case:
-		resize(&b, at)
-	}
-	return b[:]
-}
-
 // Items whose windows end inside each kind of item: a head, a string's payload, a float, a tag and its folded number,
 // a date text, an indefinite string's chunks, nested and indefinite containers, a sorted map's keys, and the faults a
 // window may cut: a count past the text's end, bad UTF-8, a break out of place, bytes past the item, a cut item.

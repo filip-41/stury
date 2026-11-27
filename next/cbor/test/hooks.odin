@@ -55,11 +55,11 @@ walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 		delete(texts)
 	}
 	for h in PROTOCOL_HEX {
-		append(&texts, strings.clone(string(hex(h))))
+		append(&texts, strings.clone(string(testkit.hex(h))))
 	}
 	testkit.hook_protocol(t, walk_of(.Cbor), texts[:])
 	testkit.hook_inner_rooms(t, bare_walk_of(.Cbor), texts[:])
-	deterministic := strings.clone(string(hex("a2 61 61 01 61 62 82 a1 01 02 80")))
+	deterministic := strings.clone(string(testkit.hex("a2 61 61 01 61 62 82 a1 01 02 80")))
 	defer delete(deterministic)
 	testkit.hook_protocol(t, walk_of(.Deterministic), {deterministic})
 }
@@ -69,9 +69,9 @@ walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 walk_cancels_through_a_flag :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	b := strings.builder_make(context.temp_allocator)
-	strings.write_bytes(&b, hex("99 00c8"))
+	strings.write_bytes(&b, testkit.hex("99 00c8"))
 	for _ in 0 ..< 200 {
-		strings.write_bytes(&b, hex("a1 61 61 83 01 02 a1 61 62 61 63"))
+		strings.write_bytes(&b, testkit.hex("a1 61 61 83 01 02 a1 61 62 61 63"))
 	}
 	testkit.hook_cancel(t, walk_of(.Cbor), strings.to_string(b), 300)
 }
@@ -142,7 +142,7 @@ walk_tokens :: proc(t: ^testing.T) {
 		h := Recorder {
 			skip = .End,
 		}
-		src := hex(r.hex)
+		src := testkit.hex(r.hex)
 		at, err, _ := cbor.walk(src, .Cbor, {}, &h, &hook.Regs{}, recorded)
 		testing.expectf(t, err == nil && at == u64(len(src)), "%s: %v %d", r.hex, err, at)
 		got := string(h.out[:h.size])
@@ -152,21 +152,29 @@ walk_tokens :: proc(t: ^testing.T) {
 	h := Recorder {
 		skip = .Array,
 	}
-	_, err, _ := cbor.walk(hex("82 81 01 02"), .Cbor, {}, &h, &hook.Regs{}, recorded)
+	_, err, _ := cbor.walk(testkit.hex("82 81 01 02"), .Cbor, {}, &h, &hook.Regs{}, recorded)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(h.out[:h.size]), "Array End ")
 	// A skipped value is still judged.
 	h = Recorder {
 		skip = .Array,
 	}
-	_, err, _ = cbor.walk(hex("82 81 62 c3 28 01"), .Cbor, {}, &h, &hook.Regs{}, recorded)
+	_, err, _ = cbor.walk(testkit.hex("82 81 62 c3 28 01"), .Cbor, {}, &h, &hook.Regs{}, recorded)
 	testing.expect(t, err != nil)
 	// Stop ends the read with no fault, and the text past it is not read.
 	h = Recorder {
 		skip = .End,
 		stop = 2,
 	}
-	_, err, _ = cbor.walk(hex("83 01 02 ff"), .Cbor, {}, &h, &hook.Regs{}, recorded)
+	_, err, _ = cbor.walk(testkit.hex("83 01 02 ff"), .Cbor, {}, &h, &hook.Regs{}, recorded)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(h.out[:h.size]), "Array Number ")
+}
+
+// `Budget.steps` counts the containers a build, scan or find opens, those it passes included, and refuses one past it.
+@(test)
+reads_keep_the_steps_budget :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := testkit.hex("a3 61 61 82 a1 61 62 01 a1 61 62 02 61 63 a1 61 64 81 03 61 65 04")
+	testkit.steps_budget_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), src, {tape.Name("e")}, 6)
 }

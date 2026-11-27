@@ -1,5 +1,6 @@
 package write_tests
 
+import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math/rand"
@@ -10,6 +11,7 @@ import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 import "stury:testkit"
+import "stury:yaml"
 
 // The delimited writer: a table built from a text of each spec under each option set writes as a text of that spec
 // and options that reads back as the same table, a table writes in another spec where its cells allow, and JSON writes
@@ -291,4 +293,126 @@ tables_write_what_the_read_kept :: proc(t: ^testing.T) {
 	back, _ := dsv.build(text, .Csv, {format = dsv.Dsv_Options{no_header = true}})
 	defer dsv.destroy(&back)
 	testing.expectf(t, herr == nil && back.nodes[0].n == 1, "a header alone under no_header: %q %v", text, herr)
+}
+
+@(test)
+table_bug_regressions :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// P16 Bug 1 (HIGH SEGFAULT): empty column-0 header with `comment != 0` and >= 2 columns.
+	jdoc, jerr := json.build(transmute([]u8)string(`[{"":1,"b":2}]`))
+	defer json.destroy(&jdoc)
+	testing.expect_value(t, jerr, nil)
+	jcsv, _, jwerr := dsv.write(&jdoc, .Csv, {format = dsv.Dsv_Options{comment = '#'}})
+	defer delete(jcsv)
+	testing.expectf(t, jwerr == nil && string(jcsv) == ",b\n1,2\n", "empty col-0 header json: %q %v", jcsv, jwerr)
+
+	w: dsv.Writer
+	testing.expect_value(t, dsv.writer_start(&w, .Csv, {header = {"", "b"}, format = dsv.Dsv_Options{comment = '#'}}), nil)
+	testing.expect_value(t, dsv.token(&w, .Object), nil)
+	testing.expect_value(t, dsv.token(&w, .Key, ""), nil)
+	testing.expect_value(t, dsv.token(&w, .Number, "1"), nil)
+	testing.expect_value(t, dsv.token(&w, .Key, "b"), nil)
+	testing.expect_value(t, dsv.token(&w, .Number, "2"), nil)
+	testing.expect_value(t, dsv.token(&w, .Close), nil)
+	wcsv, wwerr := dsv.writer_end(&w)
+	defer delete(wcsv)
+	testing.expectf(t, wwerr == nil && string(wcsv) == ",b\n1,2\n", "empty col-0 header writer: %q %v", wcsv, wwerr)
+
+	// P16 Bug 2 (HIGH OOB panic): `dsv.write(&csv_doc, .Csv, {node = row0})` on odd- and even-width Tabular_Ext rows.
+	for c in ([?]struct{ src, want: string }{
+		{"a,b,c\n1,2,3\n4,5,6\n", "a,b,c\n1,2,3\n"},
+		{"a,b\n1,2\n3,4\n", "a,b\n1,2\n"},
+	}) {
+		cdoc, cerr := dsv.build(transmute([]u8)c.src, .Csv)
+		defer dsv.destroy(&cdoc)
+		testing.expect_value(t, cerr, nil)
+		row0, p := dsv.element({&cdoc, nil}, dsv.ROOT, 0)
+		testing.expect_value(t, p, tape.Presence.Found)
+		out, _, werr := dsv.write(&cdoc, .Csv, {node = row0})
+		defer delete(out)
+		testing.expectf(t, werr == nil && string(out) == c.want, "single tabular row %q -> %q (%v)", c.src, out, werr)
+	}
+
+	// P16 Bug 3 (HIGH blank-line data loss): duplicate header collapsed to 1 column whose kept cell is `.Null`.
+	for c in ([?]struct{ src: string, dups: tape.Duplicates }{
+		{"a,a\n1,\n", .Last},
+		{"a,a\n,1\n", .First},
+	}) {
+		cdoc, cerr := dsv.build(transmute([]u8)c.src, .Csv, {dups = c.dups})
+		defer dsv.destroy(&cdoc)
+		testing.expect_value(t, cerr, nil)
+		out, _, werr := dsv.write(&cdoc, .Csv)
+		delete(out)
+		r, refused := werr.(write.Refused)
+		testing.expectf(t, refused && r.why == .No_Spelling, "dup single null %q %v: %q %v", c.src, c.dups, out, werr)
+	}
+
+	// P16 Bug 4: `same_key` does not conflate `.Null` key with empty `.String` key.
+	ydoc, yerr := yaml.build(transmute([]u8)string("- null: 1\n  \"\": 2\n"))
+	defer yaml.destroy(&ydoc)
+	testing.expect_value(t, yerr, nil)
+	ycsv, _, ywerr := dsv.write(&ydoc, .Csv)
+	defer delete(ycsv)
+	testing.expectf(t, ywerr == nil && string(ycsv) == "null,\n1,2\n", "yaml null vs empty key: %q %v", ycsv, ywerr)
+
+	// P16 Bug 6: `table_writer_start` rejects non-zero `opts.node`, `indent`, `ascii`, out-of-range `framing`.
+	bad_w: dsv.Writer
+	testing.expect_value(t, dsv.writer_start(&bad_w, .Csv, {node = 1}), dsv.Write_Error(tape.Bad_Option{"node"}))
+	testing.expect_value(t, dsv.writer_start(&bad_w, .Csv, {indent = 2}), dsv.Write_Error(tape.Bad_Option{"indent"}))
+	testing.expect_value(t, dsv.writer_start(&bad_w, .Csv, {ascii = true}), dsv.Write_Error(tape.Bad_Option{"ascii"}))
+	testing.expect_value(t, dsv.writer_start(&bad_w, .Csv, {framing = write.Record_Framing(9)}), dsv.Write_Error(tape.Bad_Option{"framing"}))
+
+	// P16 Bug 7: short ragged delimited rows under `sort_keys` and `dups = .Last`.
+	rag1, r1err := dsv.build(transmute([]u8)string("b,a\n1\n"), .Csv, {tolerate = {.Ragged}})
+	defer dsv.destroy(&rag1)
+	testing.expect_value(t, r1err, nil)
+	rag1_out, _, rag1_werr := dsv.write(&rag1, .Csv, {sort_keys = true})
+	defer delete(rag1_out)
+	testing.expectf(t, rag1_werr == nil && string(rag1_out) == "a,b\n,1\n", "short ragged sort_keys: %q %v", rag1_out, rag1_werr)
+
+	rag2, r2err := dsv.build(transmute([]u8)string("a,b,a\n1,2\n"), .Csv, {dups = .Last, tolerate = {.Ragged}})
+	defer dsv.destroy(&rag2)
+	testing.expect_value(t, r2err, nil)
+	rag2_out, _, rag2_werr := dsv.write(&rag2, .Csv)
+	defer delete(rag2_out)
+	testing.expectf(t, rag2_werr == nil && string(rag2_out) == "b,a\n2,1\n", "short ragged dup .Last: %q %v", rag2_out, rag2_werr)
+
+	// P16 Bug 5: `Table_Writer` OOM sweep across explicit header, streaming header, and `grow_header`.
+	for mode in 0 ..< 3 {
+		m := mode
+		s := testkit.sweep_failures(proc(data: rawptr, a: runtime.Allocator) {
+			mode := (^int)(data)^
+			opts: dsv.Write_Options
+			switch mode {
+			case 0:
+				opts = {header = {"a", "b"}}
+			case 1:
+				opts = {}
+			case 2:
+				opts = {grow_header = true}
+			}
+			tw: dsv.Writer
+			if err := dsv.writer_start(&tw, .Csv, opts, {}, a); err != nil {
+				_ = err.(runtime.Allocator_Error)
+				return
+			}
+			for step in ([?]struct{ kind: write.Token_Kind, text: string }{
+				{.Array, ""}, {.Object, ""}, {.Key, "a"}, {.String, "1"}, {.Key, "b"}, {.String, "2"}, {.Close, ""}, {.Close, ""},
+			}) {
+				if err := dsv.token(&tw, step.kind, step.text); err != nil {
+					_ = err.(runtime.Allocator_Error)
+					dsv.writer_drop(&tw)
+					return
+				}
+			}
+			out, eerr := dsv.writer_end(&tw)
+			if eerr == nil {
+				delete(out, a)
+			} else {
+				_ = eerr.(runtime.Allocator_Error)
+			}
+		}, &m)
+		testing.expectf(t, s.bad == 0 && s.refused >= 1, "Table_Writer mode %d oom sweep: %v", mode, s)
+	}
 }

@@ -43,20 +43,9 @@ PROTOCOL_TEXTS := [?]string {
 @(test)
 toml_walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	// The protocol frees the temporary allocator after each text, so the texts are in the context's allocator.
-	texts := make([]string, len(PROTOCOL_TEXTS))
-	defer {
-		for text in texts {
-			delete(text)
-		}
-		delete(texts)
-	}
-	for text, i in PROTOCOL_TEXTS {
-		texts[i] = strings.clone(text)
-	}
-	testkit.hook_protocol(t, walk_of(.Toml_1_0), texts)
-	testkit.hook_protocol(t, walk_of(.Toml_1_1), texts)
-	testkit.hook_inner_rooms(t, bare_walk_of(.Toml_1_0), texts)
+	testkit.hook_protocol(t, walk_of(.Toml_1_0), PROTOCOL_TEXTS[:])
+	testkit.hook_protocol(t, walk_of(.Toml_1_1), PROTOCOL_TEXTS[:])
+	testkit.hook_inner_rooms(t, bare_walk_of(.Toml_1_0), PROTOCOL_TEXTS[:])
 }
 
 // A hook stops a walk from another thread through a flag.
@@ -209,25 +198,8 @@ random_text :: proc() -> string {
 	return strings.to_string(b)
 }
 
-// `src` with a byte changed, a byte left out, or cut short, in the context's allocator.
 @(private)
-mutated :: proc(src: string) -> []u8 {
-	b := make([dynamic]u8, len(src))
-	copy(b[:], src)
-	if len(src) == 0 {
-		return b[:]
-	}
-	at := rand.int_max(len(src))
-	switch rand.int_max(3) {
-	case 0:
-		b[at] = rand.choice([]u8{'[', ']', '=', '.', '"', '\'', '\n', ',', '{', '}', '#', 'a', '1'})
-	case 1:
-		ordered_remove(&b, at)
-	case:
-		resize(&b, at)
-	}
-	return b[:]
-}
+TOML_MUTATE_ALPHABET :: "[]=.\"\'\n,{}#a1"
 
 // The readers law and the refusal law over random texts, as each spec reads them, and their mutations.
 @(test)
@@ -245,10 +217,10 @@ reads_agree_on_generated_texts :: proc(t: ^testing.T) {
 			testkit.readers_agree(t, toml.reads(spec), toml.as(spec), src, {}, "generated", &a)
 		}
 		for _ in 0 ..< 3 {
-			bad := mutated(text)
-			defer delete(bad)
+			bad := testkit.mutate(src, TOML_MUTATE_ALPHABET)
 			testkit.readers_agree(t, toml.reads(.Toml_1_1), toml.as(.Toml_1_1), bad, {}, "mutated", &a)
 		}
+		free_all(context.temp_allocator)
 	}
 	testkit.expect_agreement(t, &a, {texts = 60, refused = 30, scans = 10_000, on_path = 10_000, shapes = 20})
 }
@@ -258,16 +230,5 @@ reads_agree_on_generated_texts :: proc(t: ^testing.T) {
 reads_keep_the_steps_budget :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string("a = [1, {b = 2}]\n[t]\nc = {}\n[[l]]\n")
-	CONTAINERS :: 7
-	for steps in 1 ..= CONTAINERS + 1 {
-		opts := toml.Options{budget = {steps = u64(steps)}}
-		want := toml.validate(src, opts = opts)
-		x, over := want.(tape.Exceeded)
-		testing.expectf(t, (steps < CONTAINERS) == (over && x.kind == .Steps), "%d steps: %v", steps, want)
-		doc, err := toml.build(src, opts = opts)
-		toml.destroy(&doc)
-		testing.expectf(t, testkit.same_refusal(err, want), "%d steps: build %v, validate %v", steps, err, want)
-		_, ferr := toml.find(src, {tape.Name("t"), tape.Name("c")}, opts = opts)
-		testing.expectf(t, testkit.same_refusal(ferr, want), "%d steps: find %v, validate %v", steps, ferr, want)
-	}
+	testkit.steps_budget_agree(t, toml.reads(.Toml_1_1), toml.as(.Toml_1_1), src, {tape.Name("t"), tape.Name("c")}, 7)
 }

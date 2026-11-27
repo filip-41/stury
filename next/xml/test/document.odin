@@ -15,14 +15,14 @@ elements_build_values_by_their_name :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	s, k := text_at(&doc, "a", "b")
+	s, k := testkit.text_at(&doc, "a", "b")
 	testing.expect_value(t, s, "x & y")
 	testing.expect_value(t, k, tape.Kind.String)
-	_, k = text_at(&doc, "a", "c")
+	_, k = testkit.text_at(&doc, "a", "c")
 	testing.expect_value(t, k, tape.Kind.Null)
-	s, _ = text_at(&doc, "a", "d")
+	s, _ = testkit.text_at(&doc, "a", "d")
 	testing.expect_value(t, s, "<z>")
-	s, _ = text_at(&doc, "a", "e")
+	s, _ = testkit.text_at(&doc, "a", "e")
 	testing.expect_value(t, s, "12")
 }
 
@@ -33,9 +33,9 @@ line_ends_in_white_space_text_read_as_lf :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	s, _ := text_at(&doc, "r", "a")
+	s, _ := testkit.text_at(&doc, "r", "a")
 	testing.expect_value(t, s, "\n")
-	s, _ = text_at(&doc, "r", "b")
+	s, _ = testkit.text_at(&doc, "r", "b")
 	testing.expect_value(t, s, " \n \n")
 }
 
@@ -47,7 +47,7 @@ text_between_children_is_the_text_member :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	r, _ := member_at(&doc, {"r"})
+	r, _ := testkit.member_at(&doc, {"r"})
 	testing.expect_value(t, int(doc.nodes[r].spelling & tape.MAX_CHILDREN), 3)
 	n, p, err := tape.length(reader(&doc), r, context.temp_allocator)
 	testing.expect_value(t, err, nil)
@@ -55,13 +55,13 @@ text_between_children_is_the_text_member :: proc(t: ^testing.T) {
 	testing.expect_value(t, n, 2)
 	hash, found := xml.member(reader(&doc), r, xml.TEXT_KEY)
 	testing.expect_value(t, found, tape.Presence.Found)
-	testing.expect_value(t, text_of(&doc, hash), "t")
+	testing.expect_value(t, testkit.scalar_text(&doc, hash), "t")
 	hash, found = xml.member(reader(&doc), r, xml.TEXT_KEY, .First)
 	testing.expect_value(t, found, tape.Presence.Found)
-	testing.expect_value(t, text_of(&doc, hash), "t")
+	testing.expect_value(t, testkit.scalar_text(&doc, hash), "t")
 	hash, found = xml.member(reader(&doc), r, xml.TEXT_KEY, .Last)
 	testing.expect_value(t, found, tape.Presence.Found)
-	testing.expect_value(t, text_of(&doc, hash), "u\nv")
+	testing.expect_value(t, testkit.scalar_text(&doc, hash), "u\nv")
 	c, _ := xml.named(reader(&doc), r, xml.TEXT_KEY)
 	runs := make([dynamic]string, context.temp_allocator)
 	for {
@@ -69,7 +69,7 @@ text_between_children_is_the_text_member :: proc(t: ^testing.T) {
 		if more != .Found {
 			break
 		}
-		append(&runs, text_of(&doc, v))
+		append(&runs, testkit.scalar_text(&doc, v))
 	}
 	testing.expect_value(t, len(runs), 2)
 	testing.expect(t, len(runs) == 2 && runs[0] == "t" && runs[1] == "u\nv")
@@ -80,18 +80,18 @@ inference_types_a_text_value_only_when_asked :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	text := `<a><n>12</n><t>true</t><s> 1</s><e><!--x--></e></a>`
 	plain, _ := built(t, text)
-	_, k := text_at(&plain, "a", "n")
+	_, k := testkit.text_at(&plain, "a", "n")
 	testing.expect_value(t, k, tape.Kind.String)
-	_, k = text_at(&plain, "a", "e")
+	_, k = testkit.text_at(&plain, "a", "e")
 	testing.expect_value(t, k, tape.Kind.Null)
 	inferred, _ := built(t, text, {format = xml.Xml_Options{infer = true}})
-	_, k = text_at(&inferred, "a", "n")
+	_, k = testkit.text_at(&inferred, "a", "n")
 	testing.expect_value(t, k, tape.Kind.Number)
-	_, k = text_at(&inferred, "a", "t")
+	_, k = testkit.text_at(&inferred, "a", "t")
 	testing.expect_value(t, k, tape.Kind.True)
-	_, k = text_at(&inferred, "a", "s")
+	_, k = testkit.text_at(&inferred, "a", "s")
 	testing.expect_value(t, k, tape.Kind.String)
-	n, _ := member_at(&inferred, {"a", "n"})
+	n, _ := testkit.member_at(&inferred, {"a", "n"})
 	num, ok := xml.node_number(&inferred, n)
 	testing.expect_value(t, ok, true)
 	testing.expect_value(t, num, xml.Number{12, .Int})
@@ -108,16 +108,16 @@ a_decoded_number_stays_a_string :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	s, k := text_at(&doc, "a", "d")
+	s, k := testkit.text_at(&doc, "a", "d")
 	testing.expect_value(t, s, "12")
 	testing.expect_value(t, k, tape.Kind.String)
-	s, k = text_at(&doc, "a", "p")
+	s, k = testkit.text_at(&doc, "a", "p")
 	testing.expect_value(t, s, "7.5")
 	testing.expect_value(t, k, tape.Kind.String)
 	plain, _ := built(t, "<a><d>12</d><p>7.5</p></a>", {format = xml.Xml_Options{infer = true}})
-	_, k = text_at(&plain, "a", "d")
+	_, k = testkit.text_at(&plain, "a", "d")
 	testing.expect_value(t, k, tape.Kind.Number)
-	p, _ := member_at(&plain, {"a", "p"})
+	p, _ := testkit.member_at(&plain, {"a", "p"})
 	num, _ := xml.node_number(&plain, p)
 	testing.expect_value(t, num.kind, xml.Number_Kind.Float)
 	testing.expect_value(t, transmute(f64)num.bits, 7.5)
@@ -130,19 +130,19 @@ attributes_are_facts_of_the_element :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"a"})
+	a, _ := testkit.member_at(&doc, {"a"})
 	n, _, _ := tape.length(reader(&doc), a, context.temp_allocator)
 	testing.expect_value(t, n, 1)
-	got := attributes_of(&doc, a)
-	want := [?]Attribute{{"x", "1 & 2"}, {"y", "b\nc\n"}, {"z", "t u"}}
+	got := testkit.attributes_of(&doc, a)
+	want := [?]testkit.Attribute{{"x", "1 & 2"}, {"y", "b\nc\n"}, {"z", "t u"}}
 	testing.expect_value(t, len(got), len(want))
 	for w, i in want {
 		testing.expectf(t, i < len(got) && got[i] == w, "attribute %d: %v, want %v", i, got, w)
 	}
-	v, has := attribute_value(&doc, a, "y")
+	v, has := testkit.attribute_value(&doc, a, "y")
 	testing.expect_value(t, has, true)
 	testing.expect_value(t, v, "b\nc\n")
-	_, has = attribute_value(&doc, a, "w")
+	_, has = testkit.attribute_value(&doc, a, "w")
 	testing.expect_value(t, has, false)
 }
 
@@ -153,9 +153,9 @@ names_and_content_are_facts :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"a"})
-	b, _ := member_at(&doc, {"a", "b"})
-	testing.expect_value(t, text_of(&doc, b - 1), "b")
+	a, _ := testkit.member_at(&doc, {"a"})
+	b, _ := testkit.member_at(&doc, {"a", "b"})
+	testing.expect_value(t, testkit.scalar_text(&doc, b - 1), "b")
 	ns, p := xml.namespace(&doc, b)
 	testing.expect_value(t, p, tape.Presence.Found)
 	testing.expect_value(t, ns, "u")
@@ -178,14 +178,14 @@ a_name_reads_as_written_and_its_namespace_by_place :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	feed, _ := member_at(&doc, {"feed"})
+	feed, _ := testkit.member_at(&doc, {"feed"})
 	r := reader(&doc)
 	got, found := xml.member(r, feed, "x:entry")
 	testing.expect_value(t, found, tape.Presence.Found)
-	testing.expect_value(t, text_of(&doc, got), "2")
+	testing.expect_value(t, testkit.scalar_text(&doc, got), "2")
 	got, found = xml.member(r, feed, "{http://x}entry")
 	testing.expect_value(t, found, tape.Presence.Found)
-	testing.expect_value(t, text_of(&doc, got), "2")
+	testing.expect_value(t, testkit.scalar_text(&doc, got), "2")
 	c, _ := xml.named(r, feed, "entry")
 	want := [?]struct {
 		text, uri: string,
@@ -194,7 +194,7 @@ a_name_reads_as_written_and_its_namespace_by_place :: proc(t: ^testing.T) {
 		_, v, p := xml.next_child(r, &c)
 		testing.expect_value(t, p, tape.Presence.Found)
 		uri, in_ns := xml.namespace(&doc, v)
-		testing.expect_value(t, text_of(&doc, v), w.text)
+		testing.expect_value(t, testkit.scalar_text(&doc, v), w.text)
 		testing.expect_value(t, uri, w.uri)
 		testing.expect_value(t, in_ns, tape.Presence.Found if len(w.uri) > 0 else .Missing)
 	}
@@ -274,8 +274,8 @@ an_expanded_name_reads_an_element_by_its_namespace :: proc(t: ^testing.T) {
 		return
 	}
 	rd := reader(&doc)
-	r, _ := member_at(&doc, {"r"})
-	b, _ := member_at(&doc, {"r", "b"})
+	r, _ := testkit.member_at(&doc, {"r"})
+	b, _ := testkit.member_at(&doc, {"r", "b"})
 	Want :: struct {
 		at:   tape.Node_Index,
 		name: string,
@@ -283,7 +283,8 @@ an_expanded_name_reads_an_element_by_its_namespace :: proc(t: ^testing.T) {
 	}
 	for w in ([]Want{{r, "{urn:p}a", "1"}, {r, "{}a", "3"}, {r, "{urn:other}a", "5"}, {b, "{urn:u}a", "4"}, {r, "{urn:u}b", ""}}) {
 		got, p := xml.member(rd, w.at, w.name)
-		testing.expectf(t, p == .Found && text_of(&doc, got) == w.text, "%s: %v", w.name, p)
+		ok_text := p == .Found && (w.text == "" && doc.nodes[got].kind > .Plain || doc.nodes[got].kind <= .Plain && testkit.scalar_text(&doc, got) == w.text)
+		testing.expectf(t, ok_text, "%s: %v", w.name, p)
 	}
 	_, p := xml.member(rd, r, "{urn:q}a")
 	testing.expect_value(t, p, tape.Presence.Missing)
@@ -301,7 +302,7 @@ an_expanded_name_reads_an_element_by_its_namespace :: proc(t: ^testing.T) {
 		if vp != .Found {
 			break
 		}
-		append(&texts, text_of(&doc, v))
+		append(&texts, testkit.scalar_text(&doc, v))
 	}
 	testing.expect_value(t, strings.join(texts[:], " ", context.temp_allocator), "1 2")
 	src := transmute([]u8)text
@@ -309,11 +310,11 @@ an_expanded_name_reads_an_element_by_its_namespace :: proc(t: ^testing.T) {
 		d, _ := xml.demand_of({{xml.Name("r")}}, facts = facts, allocator = context.temp_allocator)
 		scanned, err := xml.scan(src, &d)
 		testing.expect_value(t, err, nil)
-		sr, _ := member_at(&scanned, {"r"})
+		sr, _ := testkit.member_at(&scanned, {"r"})
 		got, sp := xml.member(reader(&scanned), sr, "{urn:p}a")
 		testing.expect_value(t, sp, tape.Presence.Found if facts else .Not_Loaded)
 		if facts {
-			testing.expect_value(t, text_of(&scanned, got), "1")
+			testing.expect_value(t, testkit.scalar_text(&scanned, got), "1")
 		}
 		xml.destroy(&scanned)
 	}
@@ -339,9 +340,9 @@ a_container_ends_at_its_end_tag :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"a"})
-	b, _ := member_at(&doc, {"a", "b"})
-	d, _ := member_at(&doc, {"a", "d"})
+	a, _ := testkit.member_at(&doc, {"a"})
+	b, _ := testkit.member_at(&doc, {"a", "b"})
+	d, _ := testkit.member_at(&doc, {"a", "d"})
 	span :: proc(doc: ^tape.Document, at: tape.Node_Index) -> string {
 		end, ok := doc.format.close_end(doc, at)
 		return string(doc.src[doc.nodes[at].lo:end]) if ok else "?"
@@ -366,10 +367,10 @@ a_scan_answers_one_path_without_building_the_rest :: proc(t: ^testing.T) {
 	testing.expect_value(t, serr, nil)
 	at, p, _ := xml.answer({doc = &doc}, 0, 0)
 	testing.expect_value(t, p, tape.Presence.Found)
-	testing.expect_value(t, text_of(&doc, at), "z")
+	testing.expect_value(t, testkit.scalar_text(&doc, at), "z")
 	bad := `<a><d>z</d><e></f></a>`
 	_, err = xml.find(transmute([]u8)bad, path)
-	testing.expect_value(t, code_of(err), "mismatched_tag")
+	testing.expect_value(t, testkit.code_of(err), "mismatched_tag")
 }
 
 // An attribute fact's span runs from its name through its closing quote, its body is its value as written, and its name
@@ -381,7 +382,7 @@ an_attribute_fact_holds_its_value_between_its_markers :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"a"})
+	a, _ := testkit.member_at(&doc, {"a"})
 	bodies := make([dynamic]string, context.temp_allocator)
 	values := make([dynamic]tape.Token, context.temp_allocator)
 	for f in xml.facts_of(&doc, a) {
@@ -404,7 +405,7 @@ an_attribute_fact_holds_its_value_between_its_markers :: proc(t: ^testing.T) {
 	testing.expect(t, values[0].spelling & tape.SPELLING_DECODE != 0)
 	testing.expect_value(t, values[1].spelling, 0)
 	testing.expect_value(t, string(doc.src[values[1].lo:values[1].lo + u64(values[1].n)]), "b")
-	testing.expect_value(t, text_of(&doc, a - 1), "a")
+	testing.expect_value(t, testkit.scalar_text(&doc, a - 1), "a")
 }
 
 // A value that starts more than 255 bytes past its name's first byte is past what the fact's lead holds.
@@ -423,8 +424,8 @@ an_attribute_far_from_its_name_is_read :: proc(t: ^testing.T) {
 			if !ok {
 				continue
 			}
-			a, _ := member_at(&doc, {"a"})
-			got := attributes_of(&doc, a)
+			a, _ := testkit.member_at(&doc, {"a"})
+			got := testkit.attributes_of(&doc, a)
 			if !testing.expect_value(t, len(got), 1) {
 				continue
 			}
@@ -437,8 +438,8 @@ an_attribute_far_from_its_name_is_read :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"a"})
-	v, has := attribute_value(&doc, a, "k")
+	a, _ := testkit.member_at(&doc, {"a"})
+	v, has := testkit.attribute_value(&doc, a, "k")
 	testing.expect(t, has)
 	testing.expect_value(t, v, "y")
 }
@@ -452,7 +453,7 @@ a_repeated_name_reads_as_a_group_of_its_elements :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	r, _ := member_at(&doc, {"r"})
+	r, _ := testkit.member_at(&doc, {"r"})
 	reads := reader(&doc)
 	testing.expect_value(t, int(doc.nodes[r].spelling & tape.MAX_CHILDREN), 5)
 	n, _, _ := tape.length(reads, r, context.temp_allocator)
@@ -465,7 +466,7 @@ a_repeated_name_reads_as_a_group_of_its_elements :: proc(t: ^testing.T) {
 			if p != .Found {
 				break
 			}
-			strings.write_string(&b, text_of(doc, v))
+			strings.write_string(&b, testkit.scalar_text(doc, v))
 			strings.write_byte(&b, '|')
 		}
 		return strings.to_string(b)
@@ -482,12 +483,12 @@ a_repeated_name_reads_as_a_group_of_its_elements :: proc(t: ^testing.T) {
 		if p != .Found {
 			break
 		}
-		append(&keys, text_of(&doc, k))
+		append(&keys, testkit.scalar_text(&doc, k))
 	}
 	testing.expect_value(t, strings.join(keys[:], ",", context.temp_allocator), "#text,b,#text,b,c")
 	last, p := xml.member(reads, r, "b", .Last)
 	testing.expect_value(t, p, tape.Presence.Found)
-	testing.expect_value(t, text_of(&doc, last), "x")
+	testing.expect_value(t, testkit.scalar_text(&doc, last), "x")
 }
 
 // An instruction after an element's last child is the element's foot, as a comment there is, one before an element
@@ -499,8 +500,8 @@ an_instruction_after_the_last_child_is_its_elements_foot :: proc(t: ^testing.T) 
 	if !ok {
 		return
 	}
-	a, _ := member_at(&doc, {"r", "a"})
-	c, _ := member_at(&doc, {"r", "c"})
+	a, _ := testkit.member_at(&doc, {"r", "a"})
+	c, _ := testkit.member_at(&doc, {"r", "c"})
 	b := strings.builder_make(context.temp_allocator)
 	for f in doc.facts {
 		node := "a" if f.node == a else "c" if f.node == c else "root" if f.node == xml.ROOT else "other"

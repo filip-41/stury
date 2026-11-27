@@ -3,10 +3,34 @@ package jsonpath_tests
 import "core:testing"
 import "stury:json"
 import "stury:jsonpath"
+import "stury:lib/core/tape"
 import "stury:lib/query"
 import "stury:testkit"
 import "stury:toml"
 import "stury:xml"
+
+@(private = "file")
+eval_doc_expect :: proc(t: ^testing.T, prog: ^jsonpath.Program, doc: tape.Document, want_vals: []string, want_paths: []string = nil, loc := #caller_location) {
+	h: query.Heap
+	query.heap_init(&h, context.allocator)
+	defer {
+		testing.expect_value(t, query.heap_live(&h), u64(0), loc = loc)
+		query.heap_destroy(&h)
+	}
+	root, _ := query.document_value(&h, doc, true)
+	defer query.release(&h, root)
+	col := Collected{h = &h, vals = make([dynamic]string), paths = make([dynamic]string), alloc = context.allocator}
+	defer destroy_collected(&col)
+	end := jsonpath.eval(prog, &h, root, collect_cb, &col, {want_paths = true})
+	testing.expect_value(t, end, jsonpath.Run_End.Done, loc = loc)
+	testing.expect_value(t, len(col.vals), len(want_vals), loc = loc)
+	for i in 0 ..< min(len(col.vals), len(want_vals)) {
+		testing.expect_value(t, col.vals[i], want_vals[i], loc = loc)
+	}
+	for i in 0 ..< min(len(col.paths), len(want_paths)) {
+		testing.expect_value(t, col.paths[i], want_paths[i], loc = loc)
+	}
+}
 
 // Multi-format independence test: the exact same compiled JSONPath runs over JSON, TOML, and XML documents
 // strictly through `stury:lib/query` (zero format imports in `next/jsonpath`).
@@ -22,22 +46,7 @@ multi_format_json_toml_xml :: proc(t: ^testing.T) {
 	{
 		doc, err := json.build(transmute([]u8)string(`{"server":[{"host":"a.local","port":80},{"host":"b.local","port":8080},{"host":"c.local","port":9000}]}`), .Json)
 		testing.expect(t, err == nil)
-		h: query.Heap
-		query.heap_init(&h, context.allocator)
-		defer {
-			testing.expect_value(t, query.heap_live(&h), u64(0))
-			query.heap_destroy(&h)
-		}
-		root, _ := query.document_value(&h, doc, true)
-		defer query.release(&h, root)
-		col := Collected{h = &h, vals = make([dynamic]string), paths = make([dynamic]string), alloc = context.allocator}
-		defer destroy_collected(&col)
-		end := jsonpath.eval(prog, &h, root, collect_cb, &col, {want_paths = true})
-		testing.expect_value(t, end, jsonpath.Run_End.Done)
-		testing.expect_value(t, len(col.vals), 2)
-		testing.expect_value(t, col.vals[0], `"b.local"`)
-		testing.expect_value(t, col.vals[1], `"c.local"`)
-		testing.expect_value(t, col.paths[0], `$['server'][1]['host']`)
+		eval_doc_expect(t, prog, doc, {`"b.local"`, `"c.local"`}, {`$['server'][1]['host']`})
 	}
 
 	// 2. TOML
@@ -57,21 +66,7 @@ port = 9000
 `
 		doc, err := toml.build(transmute([]u8)toml_src)
 		testing.expect(t, err == nil)
-		h: query.Heap
-		query.heap_init(&h, context.allocator)
-		defer {
-			testing.expect_value(t, query.heap_live(&h), u64(0))
-			query.heap_destroy(&h)
-		}
-		root, _ := query.document_value(&h, doc, true)
-		defer query.release(&h, root)
-		col := Collected{h = &h, vals = make([dynamic]string), paths = make([dynamic]string), alloc = context.allocator}
-		defer destroy_collected(&col)
-		end := jsonpath.eval(prog, &h, root, collect_cb, &col, {want_paths = true})
-		testing.expect_value(t, end, jsonpath.Run_End.Done)
-		testing.expect_value(t, len(col.vals), 2)
-		testing.expect_value(t, col.vals[0], `"b.local"`)
-		testing.expect_value(t, col.vals[1], `"c.local"`)
+		eval_doc_expect(t, prog, doc, {`"b.local"`, `"c.local"`})
 	}
 
 	// 3. XML
@@ -83,20 +78,7 @@ port = 9000
 
 		doc, err := xml.build(transmute([]u8)xml_src)
 		testing.expect(t, err == nil)
-		h: query.Heap
-		query.heap_init(&h, context.allocator)
-		defer {
-			testing.expect_value(t, query.heap_live(&h), u64(0))
-			query.heap_destroy(&h)
-		}
-		root, _ := query.document_value(&h, doc, true)
-		defer query.release(&h, root)
-		col := Collected{h = &h, vals = make([dynamic]string), paths = make([dynamic]string), alloc = context.allocator}
-		defer destroy_collected(&col)
-		end := jsonpath.eval(xprog, &h, root, collect_cb, &col, {want_paths = true})
-		testing.expect_value(t, end, jsonpath.Run_End.Done)
-		testing.expect_value(t, len(col.vals), 1)
-		testing.expect_value(t, col.vals[0], `"8080"`)
+		eval_doc_expect(t, xprog, doc, {`"8080"`})
 	}
 }
 

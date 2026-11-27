@@ -471,6 +471,50 @@ hook_inner_rooms :: proc(t: ^testing.T, walk: Bare_Walk, texts: []string) {
 	}
 }
 
+// Checks `hook_protocol` with `walk` fed each text in two pieces, cut at its midpoint.
+hook_protocol_in_pieces :: proc(t: ^testing.T, walk: Probe_Walk, texts: []string) {
+	saved := context.user_ptr
+	w := walk
+	context.user_ptr = &w
+	defer context.user_ptr = saved
+	wrapper :: proc(src: []u8, opts: tape.Options, h: ^Probe, regs: ^hook.Regs) -> (u64, tape.Error) {
+		inner := (^Probe_Walk)(context.user_ptr)^
+		p := tape.Pieces{allocator = context.allocator}
+		defer tape.destroy(&p)
+		o := opts
+		o.pieces = &p
+		at, err := inner(src[:len(src) / 2], o, h, regs)
+		if err != nil || !p.more {
+			return at, err
+		}
+		p.from, p.last = p.keep, true
+		return inner(src[p.keep:], o, h, regs)
+	}
+	hook_protocol(t, wrapper, texts)
+}
+
+// Checks `hook_inner_rooms` with `walk` fed each text in two pieces, cut at its midpoint.
+hook_inner_rooms_in_pieces :: proc(t: ^testing.T, walk: Bare_Walk, texts: []string) {
+	saved := context.user_ptr
+	w := walk
+	context.user_ptr = &w
+	defer context.user_ptr = saved
+	wrapper :: proc(src: []u8, opts: tape.Options, h: ^Probe_Bare, regs: ^hook.Regs) -> (u64, tape.Error) {
+		inner := (^Bare_Walk)(context.user_ptr)^
+		p := tape.Pieces{allocator = context.allocator}
+		defer tape.destroy(&p)
+		o := opts
+		o.pieces = &p
+		at, err := inner(src[:len(src) / 2], o, h, regs)
+		if err != nil || !p.more {
+			return at, err
+		}
+		p.from, p.last = p.keep, true
+		return inner(src[p.keep:], o, h, regs)
+	}
+	hook_inner_rooms(t, wrapper, texts)
+}
+
 // Checks that a hook stops `walk` through a flag another thread sets, as a cancel or a deadline does, at the token it
 // reads it at.
 hook_cancel :: proc(t: ^testing.T, walk: Probe_Walk, text: string, at: int) {

@@ -69,7 +69,6 @@ JSON_COMPACT_SLOP :: JSON_MEMBER_ROOM
 JSON_PRETTY_SLOP :: JSON_PRETTY_CLOSE_ROOM
 
 // CBOR headroom guaranteed ahead of `p` when `uintptr(p) <= uintptr(limit)`.
-CBOR_LEAF_ROOM :: 64
 CBOR_SLOP :: 512
 
 // How sorted CBOR map and struct entries order keys (`Text` for `.Cbor`/`.Preferred` `sort_keys`, `Written` for
@@ -924,8 +923,8 @@ fill_sorted_json_map_key :: proc(plan: ^Plan, m: ^Meta, key: uintptr, se: ^Sorte
 }
 
 @(private)
-push_fast_frame :: #force_inline proc(frames: ^[^]Fast_Frame, top, cap_frames: ^int, frame: Fast_Frame, allocator: runtime.Allocator, err: ^tape.Error) -> bool #no_bounds_check {
-	if top^ == cap_frames^ && !grow_fast_frames(frames, cap_frames, allocator, err) {
+push_frame_generic :: #force_inline proc(frames: ^[^]$F, top, cap_frames: ^int, frame: F, allocator: runtime.Allocator, err: ^tape.Error) -> bool #no_bounds_check {
+	if top^ == cap_frames^ && !grow_frames_generic(frames, cap_frames, allocator, err) {
 		return false
 	}
 	frames^[top^] = frame
@@ -934,20 +933,25 @@ push_fast_frame :: #force_inline proc(frames: ^[^]Fast_Frame, top, cap_frames: ^
 }
 
 @(private, cold)
-grow_fast_frames :: #force_no_inline proc(frames: ^[^]Fast_Frame, cap_frames: ^int, allocator: runtime.Allocator, err: ^tape.Error) -> bool {
+grow_frames_generic :: #force_no_inline proc(frames: ^[^]$F, cap_frames: ^int, allocator: runtime.Allocator, err: ^tape.Error) -> bool {
 	next_cap := cap_frames^ * 2
-	raw, aerr := runtime.mem_alloc_non_zeroed(next_cap * size_of(Fast_Frame), align_of(Fast_Frame), allocator)
+	raw, aerr := runtime.mem_alloc_non_zeroed(next_cap * size_of(F), align_of(F), allocator)
 	if aerr != nil || raw_data(raw) == nil {
 		err^ = aerr if aerr != nil else runtime.Allocator_Error.Out_Of_Memory
 		return false
 	}
-	grown := ([^]Fast_Frame)(raw_data(raw))
-	intrinsics.mem_copy_non_overlapping(grown, frames^, cap_frames^ * size_of(Fast_Frame))
+	grown := ([^]F)(raw_data(raw))
+	intrinsics.mem_copy_non_overlapping(grown, frames^, cap_frames^ * size_of(F))
 	if cap_frames^ > INLINE_FRAMES {
-		runtime.mem_free_with_size(frames^, cap_frames^ * size_of(Fast_Frame), allocator)
+		runtime.mem_free_with_size(frames^, cap_frames^ * size_of(F), allocator)
 	}
 	frames^, cap_frames^ = grown, next_cap
 	return true
+}
+
+@(private)
+push_fast_frame :: #force_inline proc(frames: ^[^]Fast_Frame, top, cap_frames: ^int, frame: Fast_Frame, allocator: runtime.Allocator, err: ^tape.Error) -> bool #no_bounds_check {
+	return push_frame_generic(frames, top, cap_frames, frame, allocator, err)
 }
 
 @(private, cold)
@@ -3526,29 +3530,7 @@ marshal_cbor :: proc(
 
 @(private)
 cbor_push_frame :: #force_inline proc(frames: ^[^]Cbor_Frame, top, cap_frames: ^int, frame: Cbor_Frame, allocator: runtime.Allocator, err: ^tape.Error) -> bool #no_bounds_check {
-	if top^ == cap_frames^ && !cbor_grow_frames(frames, cap_frames, allocator, err) {
-		return false
-	}
-	frames^[top^] = frame
-	top^ += 1
-	return true
-}
-
-@(private, cold)
-cbor_grow_frames :: #force_no_inline proc(frames: ^[^]Cbor_Frame, cap_frames: ^int, allocator: runtime.Allocator, err: ^tape.Error) -> bool {
-	next_cap := cap_frames^ * 2
-	raw, aerr := runtime.mem_alloc_non_zeroed(next_cap * size_of(Cbor_Frame), align_of(Cbor_Frame), allocator)
-	if aerr != nil || raw_data(raw) == nil {
-		err^ = aerr if aerr != nil else runtime.Allocator_Error.Out_Of_Memory
-		return false
-	}
-	grown := ([^]Cbor_Frame)(raw_data(raw))
-	intrinsics.mem_copy_non_overlapping(grown, frames^, cap_frames^ * size_of(Cbor_Frame))
-	if cap_frames^ > INLINE_FRAMES {
-		runtime.mem_free_with_size(frames^, cap_frames^ * size_of(Cbor_Frame), allocator)
-	}
-	frames^, cap_frames^ = grown, next_cap
-	return true
+	return push_frame_generic(frames, top, cap_frames, frame, allocator, err)
 }
 
 @(private, cold)
@@ -3995,29 +3977,7 @@ marshal :: proc(value: rawptr, T: typeid, tag_key: string, plan: ^Plan, w: ^$W, 
 
 @(private)
 push_frame :: #force_inline proc(frames: ^[^]Write_Frame, sp, cap_frames: ^int, frame: Write_Frame, allocator: runtime.Allocator, err: ^tape.Error) -> bool #no_bounds_check {
-	if sp^ == cap_frames^ && !grow_frames(frames, cap_frames, allocator, err) {
-		return false
-	}
-	frames^[sp^] = frame
-	sp^ += 1
-	return true
-}
-
-@(private, cold)
-grow_frames :: #force_no_inline proc(frames: ^[^]Write_Frame, cap_frames: ^int, allocator: runtime.Allocator, err: ^tape.Error) -> bool {
-	next_cap := cap_frames^ * 2
-	raw, aerr := runtime.mem_alloc_non_zeroed(next_cap * size_of(Write_Frame), align_of(Write_Frame), allocator)
-	if aerr != nil || raw_data(raw) == nil {
-		err^ = aerr if aerr != nil else runtime.Allocator_Error.Out_Of_Memory
-		return false
-	}
-	grown := ([^]Write_Frame)(raw_data(raw))
-	intrinsics.mem_copy_non_overlapping(grown, frames^, cap_frames^ * size_of(Write_Frame))
-	if cap_frames^ > INLINE_FRAMES {
-		runtime.mem_free_with_size(frames^, cap_frames^ * size_of(Write_Frame), allocator)
-	}
-	frames^, cap_frames^ = grown, next_cap
-	return true
+	return push_frame_generic(frames, sp, cap_frames, frame, allocator, err)
 }
 
 // The record a list's, map's, pointer's or `Maybe`'s `first` reads its element by, which lies before it.

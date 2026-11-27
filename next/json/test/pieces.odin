@@ -539,32 +539,30 @@ long_text :: proc(src, body: string, n: int) -> []u8 {
 	return out[:]
 }
 
-// A `LONG` string, with its escapes and UTF-8 sequences at every place a window ends, and a long key.
+// A `LONG` JSON and JSON5 string, with escapes, UTF-8 sequences, and JSON5 line continuations at every place a window
+// ends, and a long key.
 @(test)
-pieces_read_a_long_json_string_once :: proc(t: ^testing.T) {
+pieces_read_a_long_string_once :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := long_text(`{"s": "*", "n": 1}`, `abc\néé€😀😀\\\"xy/ `, LONG)
-	long_token_agrees(t, src, .Json, {{tape.Name("s")}}, '\n', "string")
-	delete(src)
+	cases := [?]struct {
+		spec:          json.Spec,
+		str_tmpl:      string,
+		str_body:      string,
+		key_tmpl:      string,
+	}{
+		{.Json, `{"s": "*", "n": 1}`, `abc\néé€😀😀\\\"xy/ `, `{"*": [1]}`},
+		{.Json5, `{s: '*', n: 1,}`, "abc\\x41\\0z\\'\"é€😀\\ud83d\\ude00\\\\\\\r\n\\\nxy ", `{'*': [1]}`},
+	}
 	key := strings.repeat("k", 1 << 20)
 	defer delete(key)
-	src = long_text(`{"*": [1]}`, key, len(key))
-	long_token_agrees(t, src, .Json, {{tape.Name(key), tape.Index(0)}}, '\n', "key")
-	delete(src)
-}
-
-// A `LONG` JSON5 string, with JSON5's escapes as well, a line continuation's CR LF among them, and a long key.
-@(test)
-pieces_read_a_long_json5_string_once :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	src := long_text(`{s: '*', n: 1,}`, "abc\\x41\\0z\\'\"é€😀\\ud83d\\ude00\\\\\\\r\n\\\nxy ", LONG)
-	long_token_agrees(t, src, .Json5, {{tape.Name("s")}}, '\n', "string")
-	delete(src)
-	key := strings.repeat("k", 1 << 20)
-	defer delete(key)
-	src = long_text(`{'*': [1]}`, key, len(key))
-	long_token_agrees(t, src, .Json5, {{tape.Name(key), tape.Index(0)}}, '\n', "key")
-	delete(src)
+	for c in cases {
+		src := long_text(c.str_tmpl, c.str_body, LONG)
+		long_token_agrees(t, src, c.spec, {{tape.Name("s")}}, '\n', "string")
+		delete(src)
+		src = long_text(c.key_tmpl, key, len(key))
+		long_token_agrees(t, src, c.spec, {{tape.Name(key), tape.Index(0)}}, '\n', "key")
+		delete(src)
+	}
 }
 
 // Numbers of a few MiB of digits, with a fraction and an exponent, and JSON5's forms.

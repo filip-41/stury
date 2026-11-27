@@ -1,4 +1,4 @@
-// Carriers, customs, enums, unions (Tag / First_Match / One_Match), before coercions,
+// Carriers, customs, enums, bit_sets, unions (Tag / First_Match / One_Match), before coercions,
 // field/struct validators, schema applicators, duplicate key policy, and concurrent shared Model.
 package model_test
 
@@ -41,7 +41,7 @@ builtin_carriers_time_uuid_email_base64_hex_decimal :: proc(t: ^testing.T) {
 		v: Payload
 		defer model.free_value(&v, type_info_of(Payload), a)
 		src := `{"at":"1996-12-19T16:39:57-08:00","id":"F81D4FAE-7DEC-11D0-A765-00a0c91e6bf6","mail":"ada@example.org","blob":"Zm9vYmFy","hash":"DEADBEEF","price":"123.450"}`
-		testing.expect_value(t, model.load(&m, transmute([]u8)src, json.as(.Json), json.reads(.Json), &v, allocator = a), nil)
+		testing.expect_value(t, load_json(&m, src, &v, allocator = a), nil)
 		testing.expect_value(t, string(([]u8)(v.blob)), "foobar")
 		testing.expect_value(t, len(v.hash), 4)
 		testing.expect(t, v.hash[0] == 0xDE && v.hash[1] == 0xAD && v.hash[2] == 0xBE && v.hash[3] == 0xEF)
@@ -71,7 +71,7 @@ builtin_carriers_time_uuid_email_base64_hex_decimal :: proc(t: ^testing.T) {
 	for src in bad_cases {
 		v: Payload
 		defer model.free_value(&v, type_info_of(Payload), context.allocator)
-		berr := model.load(&m, transmute([]u8)src, json.as(.Json), json.reads(.Json), &v)
+		berr := load_json(&m, src, &v)
 		defer model.error_destroy(berr)
 		testing.expectf(t, berr != nil, "should fail: %s", src)
 	}
@@ -127,7 +127,7 @@ custom_carrier_and_discriminated_and_oneof_unions :: proc(t: ^testing.T) {
 	testing.expect_value(t, cerr, nil)
 
 	h: Holder
-	testing.expect_value(t, model.load(&m, transmute([]u8)string(`{"cost":1.5,"shape":{"kind":"Box","side":2}}`), json.as(.Json), json.reads(.Json), &h), nil)
+	testing.expect_value(t, load_json(&m, `{"cost":1.5,"shape":{"kind":"Box","side":2}}`, &h), nil)
 	testing.expect_value(t, h.cost, Milli(1500))
 	testing.expect_value(t, h.shape.(Box).side, f64(2))
 	testing.expect(t, h.spare == nil)
@@ -146,7 +146,7 @@ custom_carrier_and_discriminated_and_oneof_unions :: proc(t: ^testing.T) {
 	testing.expect_value(t, aerr, nil)
 
 	w: Wrap
-	both_err := model.load(&am, transmute([]u8)string(`{"a":{"x":1}}`), json.as(.Json), json.reads(.Json), &w)
+	both_err := load_json(&am, `{"a":{"x":1}}`, &w)
 	defer model.error_destroy(both_err)
 	me, ok := both_err.(model.Model_Error)
 	testing.expect(t, ok && me.kind == .Many_Arms)
@@ -157,7 +157,7 @@ custom_carrier_and_discriminated_and_oneof_unions :: proc(t: ^testing.T) {
 	defer model.destroy(&am2)
 	testing.expect_value(t, aerr2, nil)
 	w2: Wrap
-	testing.expect_value(t, model.load(&am2, transmute([]u8)string(`{"a":{"x":1,"y":2}}`), json.as(.Json), json.reads(.Json), &w2), nil)
+	testing.expect_value(t, load_json(&am2, `{"a":{"x":1,"y":2}}`, &w2), nil)
 	testing.expect_value(t, w2.a.(Overlap_B).y, 2)
 }
 
@@ -219,7 +219,7 @@ before_coercions_and_after_and_struct_validators :: proc(t: ^testing.T) {
 	// Coercions succeed: trims spaces and parses string "5" as int 5!
 	o: Order
 	defer model.free_value(&o, type_info_of(Order), context.allocator)
-	testing.expect_value(t, model.load(&m, transmute([]u8)string(`{"code":"  AB ","qty":"5","span":{"low":1,"high":3}}`), json.as(.Json), json.reads(.Json), &o), nil)
+	testing.expect_value(t, load_json(&m, `{"code":"  AB ","qty":"5","span":{"low":1,"high":3}}`, &o), nil)
 	testing.expect(t, o.code == "AB" && o.qty == 5 && o.span.low == 1 && o.span.high == 3)
 
 	// Before failure reports on `/code`.
@@ -227,14 +227,14 @@ before_coercions_and_after_and_struct_validators :: proc(t: ^testing.T) {
 	defer model.destroy(&sink)
 	o2: Order
 	defer model.free_value(&o2, type_info_of(Order), context.allocator)
-	testing.expect(t, model.load(&m, transmute([]u8)string(`{"code":" ROOT ","qty":1,"span":{"low":1,"high":2}}`), json.as(.Json), json.reads(.Json), &o2, &sink) != nil)
+	testing.expect(t, load_json(&m, `{"code":" ROOT ","qty":1,"span":{"low":1,"high":2}}`, &o2, &sink) != nil)
 	testing.expect(t, len(sink.entries) == 1 && sink.entries[0].kind == .Custom && sink.entries[0].pointer == "/code" && sink.entries[0].want.text == "forbidden code")
 
 	// Struct validator `fail_at` reports on `/span/high`, and suppresses outer validator when inner fails.
 	model.sink_clear(&sink)
 	o3: Order
 	defer model.free_value(&o3, type_info_of(Order), context.allocator)
-	testing.expect(t, model.load(&m, transmute([]u8)string(`{"code":"BAD","qty":1,"span":{"low":9,"high":2}}`), json.as(.Json), json.reads(.Json), &o3, &sink) != nil)
+	testing.expect(t, load_json(&m, `{"code":"BAD","qty":1,"span":{"low":9,"high":2}}`, &o3, &sink) != nil)
 	testing.expect(t, len(sink.entries) == 1 && sink.entries[0].kind == .Custom && sink.entries[0].pointer == "/span/high")
 	// Failed load rolls back and zeroes `o3`.
 	testing.expect(t, o3 == {})
@@ -250,9 +250,9 @@ before_coercions_and_after_and_struct_validators :: proc(t: ^testing.T) {
 schema_applicators_and_unique_items :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	Payment :: struct {
-		kind:  string,
-		card:  Maybe(string) `model:"optional"`,
-		tags:  []string `model:"unique,optional"`,
+		kind: string,
+		card: Maybe(string) `model:"optional"`,
+		tags: []string `model:"unique,optional"`,
 	}
 
 	// Build a `rules.Description` fragment: if `kind == "card"` then `card` is required!
@@ -263,15 +263,10 @@ schema_applicators_and_unique_items :: proc(t: ^testing.T) {
 	frag.names = make(map[rules.Node_Index]string)
 	defer rules.description_destroy(&frag)
 
-	// Node 0: root with if/then
 	append(&frag.nodes, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, cond = {test = 1, then = 2}})
-	// Node 1: `if`: { properties: { kind: { const: "card" } }, required: ["kind"] }
 	append(&frag.nodes, rules.Node{kinds = {.Object}, array = -1, object = 0})
-	// Node 2: `then`: { required: ["card"] }
 	append(&frag.nodes, rules.Node{kinds = {.Object}, array = -1, object = 1})
-	// Node 3: `{ const: "card" }`
 	append(&frag.nodes, rules.Node{kinds = rules.EVERY_KIND, const_of = rules.Value("card"), array = -1, object = -1})
-	// Node 4: `{ type: "string" }` (non-null)
 	append(&frag.nodes, rules.Node{kinds = {.String}, array = -1, object = -1})
 
 	m0 := make([]rules.Member, 1)
@@ -290,16 +285,14 @@ schema_applicators_and_unique_items :: proc(t: ^testing.T) {
 	defer model.destroy(&m)
 	testing.expect_value(t, cerr, nil)
 
-	// Valid cash payment without card.
 	p1: Payment
 	defer model.free_value(&p1, type_info_of(Payment), context.allocator)
-	testing.expect_value(t, model.load(&m, transmute([]u8)string(`{"kind":"cash","tags":["a","b"]}`), json.as(.Json), json.reads(.Json), &p1), nil)
+	testing.expect_value(t, load_json(&m, `{"kind":"cash","tags":["a","b"]}`, &p1), nil)
 	testing.expect_value(t, model.validate(&m, &p1), nil)
 
-	// Invalid card payment missing `card` (caught in both load and validate!).
 	p2: Payment
 	defer model.free_value(&p2, type_info_of(Payment), context.allocator)
-	p2_lerr := model.load(&m, transmute([]u8)string(`{"kind":"card"}`), json.as(.Json), json.reads(.Json), &p2)
+	p2_lerr := load_json(&m, `{"kind":"card"}`, &p2)
 	defer model.error_destroy(p2_lerr)
 	testing.expect(t, p2_lerr != nil)
 	p2_in := Payment{kind = "card"}
@@ -307,12 +300,11 @@ schema_applicators_and_unique_items :: proc(t: ^testing.T) {
 	defer model.error_destroy(p2_verr)
 	testing.expect(t, p2_verr != nil)
 
-	// Duplicate items in `tags` caught by `unique` in both load and validate!
 	p3: Payment
 	defer model.free_value(&p3, type_info_of(Payment), context.allocator)
 	sink: model.Sink
 	defer model.destroy(&sink)
-	testing.expect(t, model.load(&m, transmute([]u8)string(`{"kind":"cash","tags":["x","x"]}`), json.as(.Json), json.reads(.Json), &p3, &sink) != nil)
+	testing.expect(t, load_json(&m, `{"kind":"cash","tags":["x","x"]}`, &p3, &sink) != nil)
 	testing.expect(t, len(sink.entries) == 1 && sink.entries[0].kind == .Not_Unique && sink.entries[0].pointer == "/tags")
 
 	model.sink_clear(&sink)
@@ -337,11 +329,9 @@ consistent_default_duplicate_policy_across_all_entrypoints :: proc(t: ^testing.T
 	sink: model.Sink
 	defer model.destroy(&sink)
 
-	// `.Default` refuses duplicates in `load`.
 	err := model.load(&m, dup_json, json.as(.Json), json.reads(.Json), &v, &sink)
 	testing.expect(t, err != nil && len(sink.entries) == 1 && sink.entries[0].kind == .Duplicate_Key)
 
-	// `.Default` refuses duplicates in `load_document` (even on a doc built with `.All`!).
 	doc, berr := json.build(dup_json, .Json, {dups = .All})
 	defer tape.destroy(&doc)
 	testing.expect_value(t, berr, nil)
@@ -349,29 +339,25 @@ consistent_default_duplicate_policy_across_all_entrypoints :: proc(t: ^testing.T
 	err = model.load_document(&m, &doc, &v, &sink)
 	testing.expect(t, err != nil && len(sink.entries) == 1 && sink.entries[0].kind == .Duplicate_Key)
 
-	// `.Default` refuses duplicates in `load_value` (programmatic `[]rules.Member_Value`).
 	mv := []rules.Member_Value{{"n", i64(1)}, {"n", i64(2)}}
 	model.sink_clear(&sink)
 	err = model.load_value(&m, mv, &v, &sink)
 	testing.expect(t, err != nil && len(sink.entries) == 1 && sink.entries[0].kind == .Duplicate_Key)
 
-	// `.Default` refuses duplicates in `patch` and `patch_document`.
 	existing := Item{n = 10}
 	model.sink_clear(&sink)
 	err = model.patch(&m, &existing, dup_json, json.as(.Json), json.reads(.Json), &sink)
 	testing.expect(t, err != nil && len(sink.entries) == 1 && sink.entries[0].kind == .Duplicate_Key)
 	testing.expect_value(t, existing.n, 10)
 
-	// `.Last` and `.First` pick the winning value and judge ONLY the winner!
 	v = {}
-	testing.expect_value(t, model.load(&m, transmute([]u8)string(`{"n":-5,"n":7}`), json.as(.Json), json.reads(.Json), &v, nil, {dups = .Last}), nil)
+	testing.expect_value(t, load_json(&m, `{"n":-5,"n":7}`, &v, opts = {dups = .Last}), nil)
 	testing.expect_value(t, v.n, 7)
 
 	v = {}
-	testing.expect_value(t, model.load(&m, transmute([]u8)string(`{"n":7,"n":-5}`), json.as(.Json), json.reads(.Json), &v, nil, {dups = .First}), nil)
+	testing.expect_value(t, load_json(&m, `{"n":7,"n":-5}`, &v, opts = {dups = .First}), nil)
 	testing.expect_value(t, v.n, 7)
 
-	// `.All` is `.Bad_Option`.
 	bad := model.load(&m, dup_json, json.as(.Json), json.reads(.Json), &v, nil, {dups = .All})
 	me, ok := bad.(model.Model_Error)
 	testing.expect(t, ok && me.kind == .Bad_Option)
@@ -400,7 +386,7 @@ shared_model_is_thread_safe :: proc(t: ^testing.T) {
 			w := (^Worker)(data)
 			for iter in 0 ..< 50 {
 				v: Msg
-				err := model.load(w.m, transmute([]u8)string(`{"user":"ada","seq":42}`), json.as(.Json), json.reads(.Json), &v)
+				err := load_json(w.m, `{"user":"ada","seq":42}`, &v)
 				if err != nil || v.user != "ada" || v.seq != 42 {
 					w.ok = false
 				}
@@ -419,4 +405,57 @@ shared_model_is_thread_safe :: proc(t: ^testing.T) {
 	for w in workers {
 		testing.expect(t, w.ok)
 	}
+}
+
+@(test)
+enum_rules_bit_sets_and_extra_collision :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	Color :: enum u8 {
+		Red,
+		Dark_Green,
+		Blue,
+	}
+	Status :: enum i16 {
+		Ok  = 200,
+		Bad = 400,
+	}
+	Flags :: bit_set[Color]
+	Item :: struct {
+		color:  Color,
+		status: Status,
+		flags:  Flags `model:"len>=1,optional"`,
+		extra:  map[string]int `json:",unknown"`,
+	}
+
+	reg: model.Registry
+	defer model.destroy(&reg)
+	_ = model.register(&reg, model.Naming{enum_members = .Kebab})
+	_ = model.register(&reg, model.Enum_Rule{type = Color, renames = {{member = "Red", name = "crimson"}}})
+	_ = model.register(&reg, model.Enum_Rule{type = Status, by_number = true})
+
+	m, cerr := model.compile(&reg, Item)
+	defer model.destroy(&m)
+	testing.expect_value(t, cerr, nil)
+
+	v: Item
+	defer model.free_value(&v, type_info_of(Item), context.allocator)
+	src := `{"color":"crimson","status":200,"flags":["dark-green","blue"],"bonus":9}`
+	testing.expect_value(t, load_json(&m, src, &v), nil)
+	testing.expect(t, v.color == .Red && v.status == .Ok && v.flags == {.Dark_Green, .Blue} && v.extra["bonus"] == 9)
+
+	dumped, derr := model.dump(&m, &v, write_json_default, {check = true})
+	defer delete(dumped)
+	testing.expect_value(t, derr, nil)
+	testing.expect_value(t, string(dumped), src)
+
+	// Colliding extra key is refused on both `validate` and `dump`.
+	v.extra["color"] = 1
+	defer delete_key(&v.extra, "color")
+	verr := model.validate(&m, &v)
+	defer model.error_destroy(verr)
+	testing.expect(t, verr != nil)
+	d2, derr2 := model.dump(&m, &v, write_json_default)
+	defer delete(d2)
+	defer model.error_destroy(derr2)
+	testing.expect(t, derr2 != nil)
 }

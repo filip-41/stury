@@ -284,32 +284,7 @@ step_close :: #force_inline proc(out: ^write.Out, w: ^write.Tree, l: ^Layout, s:
 // A line end and the indent of `depth` levels.
 @(private)
 line_indent :: #force_inline proc(out: ^write.Out, l: ^Layout, depth: int) #no_bounds_check {
-	n := depth * l.width
-	if n + 9 > write.ROOM_MAX {
-		line_indent_long(out, l, n)
-		return
-	}
-	// `room` gives `n + 9` bytes, so the last eight-byte store ends inside it.
-	p := write.room(out, n + 9)
-	p[0] = '\n'
-	for k := 0; k < n; k += 8 {
-		intrinsics.unaligned_store((^u64)(p[1 + k:]), l.fill)
-	}
-	out.cursor += n + 1
-}
-
-@(private, cold)
-line_indent_long :: #force_no_inline proc(out: ^write.Out, l: ^Layout, n: int) {
-	write.put_byte(out, '\n')
-	for left := n; left > 0; {
-		k := min(left, write.ROOM_MAX - 8)
-		p := write.room(out, k + 8)
-		for i := 0; i < k; i += 8 {
-			intrinsics.unaligned_store((^u64)(p[i:]), l.fill)
-		}
-		out.cursor += k
-		left -= k
-	}
+	write.line_indent(out, l.width, l.fill, depth)
 }
 
 // The word of each literal's bytes, which `false`'s five take eight bytes of.

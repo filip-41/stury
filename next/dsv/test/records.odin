@@ -865,18 +865,17 @@ records_in_pieces_agree_at_every_window_and_cut :: proc(t: ^testing.T) {
 	for _ in 0 ..< testkit.rounds(40) {
 		src, spec, opts := random_text()
 		run := testkit.Piece_Run{src, dsv.reads(spec), dsv.as(spec), opts, nil}
+		singles := make([]int, len(src) + 1, context.temp_allocator)
+		cuts_list := make([dynamic][]int, 0, 2 * len(src) + 1, context.temp_allocator)
 		for k in 0 ..= len(src) {
-			cuts := [1]int{k}
-			run.cuts = cuts[:]
-			if !testkit.records_pieces_agree(t, run, .Lines, paths, &demand, string(src)) {
-				return
-			}
+			singles[k] = k
+			append(&cuts_list, singles[k:k + 1])
 		}
 		for size in 1 ..< len(src) {
-			run.cuts = testkit.cuts_by(len(src), size)
-			if !testkit.records_pieces_agree(t, run, .Lines, paths, &demand, string(src)) {
-				return
-			}
+			append(&cuts_list, testkit.cuts_by(len(src), size))
+		}
+		if !testkit.records_pieces_agree_cuts(t, run, cuts_list[:], .Lines, paths, &demand, string(src)) {
+			return
 		}
 	}
 }
@@ -948,4 +947,29 @@ records_in_pieces_give_a_header_fault_where_the_header_ends :: proc(t: ^testing.
 	testing.expect_value(t, tape.records_window(&r, src[p.from:]), nil)
 	n = dsv.records_validate(&r, out[:])
 	testing.expectf(t, n == 0 && r.err == whole.err, "%v %v, whole %v", n, r.err, whole.err)
+}
+
+@(test)
+dsv_records_quarantine_and_max_bytes :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := "a,b\n1,2\n3\n4,5\n"
+	q := make([dynamic]tape.Bad_Record)
+	defer delete(q)
+	r := dsv.records_open(transmute([]u8)src, .Lines, .Csv)
+	defer tape.destroy_records(&r)
+	r.quarantine = &q
+	out: [8]tape.Record
+	ans: [8]tape.Span_Answer
+	n := dsv.records_find(&r, {tape.Name("b")}, out[:], ans[:])
+	testing.expectf(t, n == 2 && len(q) == 1 && r.err == nil, "dsv quarantine: n=%d bad=%d err=%v", n, len(q), r.err)
+	testing.expectf(t, string(q[0].text) == "3" && q[0].err != nil, "dsv bad: %q %v", q[0].text, q[0].err)
+
+	// max_bytes on DSV
+	wide_src := "a,b\n1,2\n1234567890,abcdefghij\n3,4\n"
+	rm := dsv.records_open(transmute([]u8)wide_src, .Lines, .Csv)
+	defer tape.destroy_records(&rm)
+	rm.max_bytes = 8
+	nm := dsv.records_find(&rm, {tape.Name("a")}, out[:], ans[:])
+	f, is_f := rm.err.(tape.Fault)
+	testing.expectf(t, nm == 1 && is_f && f.kind == .Too_Wide && tape.fault_rule(f).code == "too_long", "dsv max_bytes: nm=%d err=%v", nm, rm.err)
 }

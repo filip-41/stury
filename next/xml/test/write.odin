@@ -1,5 +1,8 @@
 package xml_tests
 
+import "core:fmt"
+import "core:log"
+import "core:os"
 import "core:strings"
 import "core:testing"
 import "stury:json"
@@ -180,4 +183,173 @@ xml_write_hardening_and_consistency :: proc(t: ^testing.T) {
 	rout, _, rwerr := xml.write(&rdoc)
 	defer delete(rout)
 	testing.expectf(t, rwerr == nil && string(rout) == raw_src && xml.validate(rout) == nil, "raw > consistency: %v\n%s", rwerr, rout)
+}
+
+@(test)
+xml_indent_two_is_v1s_text :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, err := json.build(transmute([]u8)string(`{"r":{"a":1,"b":["x","y"],"c":{"d":true},"e":null}}`))
+	defer json.destroy(&doc)
+	testing.expect(t, err == nil)
+	text, _, werr := xml.write(&doc, .Xml, {indent = 2})
+	defer delete(text)
+	want := "<r>\n  <a>1</a>\n  <b>x</b>\n  <b>y</b>\n  <c>\n    <d>true</d>\n  </c>\n  <e/>\n</r>\n"
+	testing.expectf(t, werr == nil && string(text) == want, "%v\n%s", werr, text)
+}
+
+@(private = "file")
+FACT_TEXTS := [?]string{
+	`<?xml version="1.0"?><!DOCTYPE r><!-- c1 --><r a="1"><!-- c2 --><x>1</x><!-- c3 --><y/>text<?pi z?><!-- c4 --></r><!-- end -->`,
+	`<r><a>1</a><!-- after a -->
+<b>2</b><!-- foot --></r>`,
+	`<r><a>1</a><a>2<!-- in --></a><?go on?></r>`,
+}
+
+// A description of the facts of `doc`: each node's facts' kinds and texts.
+describe :: proc(doc: ^tape.Document) -> string {
+	b: strings.Builder
+	for _, i in doc.nodes {
+		at := tape.Node_Index(i)
+		fmt.sbprintf(&b, "%d", i)
+		for f in tape.facts_of(doc, at) {
+			fmt.sbprintf(&b, " %v:%q", f.kind, string(tape.span_bytes(doc, f.lo, f.n)))
+		}
+		strings.write_byte(&b, '\n')
+	}
+	return strings.to_string(b)
+}
+
+@(test)
+xml_facts_are_written_and_read_back :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for src, k in FACT_TEXTS {
+		doc, err := xml.build(transmute([]u8)src)
+		defer xml.destroy(&doc)
+		testing.expectf(t, err == nil, "%d: %v", k, err)
+		text, dropped, werr := xml.write(&doc)
+		defer delete(text)
+		testing.expectf(t, werr == nil && dropped == {}, "%d: %v %v\n%s", k, werr, dropped, text)
+		back, berr := xml.build(text)
+		defer xml.destroy(&back)
+		testing.expectf(t, berr == nil, "%d: %v\n%s", k, berr, text)
+		want, got := describe(&doc), describe(&back)
+		defer delete(want)
+		defer delete(got)
+		testing.expectf(t, want == got, "%d: facts differ\n%s\n%s\nwant\n%s\ngot\n%s", k, src, text, want, got)
+	}
+}
+
+@(test)
+indented_text_reads_back_as_the_same_values :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := `<r a="1"><!-- lead --><x><y>1</y><y>2</y></x><z>text<b/>more</z><w/><!-- tail --></r>`
+	doc, err := xml.build(transmute([]u8)src)
+	defer xml.destroy(&doc)
+	testing.expect(t, err == nil)
+	text, _, werr := xml.write(&doc, .Xml, {indent = 2})
+	defer delete(text)
+	want := "<r a=\"1\">\n  <!-- lead -->\n  <x>\n    <y>1</y>\n    <y>2</y>\n  </x>\n  <z>text<b/>more</z>\n  <w/><!-- tail -->\n</r>\n"
+	testing.expectf(t, werr == nil && string(text) == want, "%v\n%s", werr, text)
+	back, berr := xml.build(text)
+	defer xml.destroy(&back)
+	testing.expect(t, berr == nil)
+	want_facts, got_facts := describe(&doc), describe(&back)
+	defer delete(want_facts)
+	defer delete(got_facts)
+	testing.expectf(t, want_facts == got_facts && len(doc.nodes) == len(back.nodes), "facts differ\n%s\n%s", want_facts, got_facts)
+}
+
+@(test)
+comments_of_other_formats_are_written :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, err := json.build(transmute([]u8)string(`{"r":{"a":1, /* a tail */ "b":2}}`), .Jsonc)
+	defer json.destroy(&doc)
+	testing.expect(t, err == nil)
+	text, dropped, werr := xml.write(&doc)
+	defer delete(text)
+	testing.expectf(t, werr == nil && dropped == {} && string(text) == "<r><a>1</a><!-- a tail --><b>2</b></r>", "%v %v\n%s", werr, dropped, text)
+}
+
+// What the writer reads back: the facts the writer holds.
+@(private = "file")
+KEPT :: tape.Facts{.Comment, .Comment_Inline, .Comment_Foot, .Instruction, .Instruction_Foot, .Attribute}
+
+// The documents whose text reads back as other values: an entity that expands to nothing reads as an empty string, which
+// is written as an empty element, and that reads as null.
+@(private = "file")
+EMPTY_ENTITY := [?]string{"xmltest/valid/sa/023.xml", "xmltest/valid/sa/085.xml", "xmltest/valid/sa/086.xml"}
+
+// The documents whose comment stands apart from the root element by a blank line, which makes it the document's, and
+// a text written with none between them reads it as the element's.
+@(private = "file")
+APART := [?]string{"ibm/valid/P18/ibm18v01.xml", "ibm/valid/P20/ibm20v01.xml", "ibm/valid/P20/ibm20v02.xml", "ibm/valid/P21/ibm21v01.xml"}
+
+// The document whose default attribute holds a parameter entity's reference, which a read of the text reads as the
+// reference and the first read as the first byte (a reader fault the writer does not make).
+@(private = "file")
+DEFAULT_PE := "xmltest/valid/sa/094.xml"
+
+@(test)
+suite_documents_write_and_read_back :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	if !os.exists(strings.concatenate({SUITE_DIR, "files"}, context.temp_allocator)) {
+		log.info("the suite is not fetched: run python3 next/xml/test/conformance/fetch.py")
+		return
+	}
+	read, written, failures := 0, 0, 0
+	rest := CASES
+	suite: for line in strings.split_lines_iterator(&rest) {
+		fields := strings.split(line, "\t", context.temp_allocator)
+		kind, path, entities := fields[0], fields[1], fields[2]
+		if kind != "valid" {
+			continue
+		}
+		src, rerr := os.read_entire_file_from_path(strings.concatenate({SUITE_DIR, "files/", path}, context.temp_allocator), context.temp_allocator)
+		if rerr != nil {
+			continue
+		}
+		opts: xml.Options
+		if entities != "none" {
+			opts.tolerate = {.Unread_Entity}
+		}
+		doc, err := xml.build(src, .Xml, opts, context.temp_allocator)
+		if err != nil {
+			continue
+		}
+		read += 1
+		text, _, werr := xml.write(&doc, .Xml, {}, context.temp_allocator)
+		if werr != nil {
+			continue
+		}
+		written += 1
+		back, berr := xml.build(text, .Xml, opts, context.temp_allocator)
+		if berr != nil {
+			failures += 1
+			fmt.eprintfln("%s: the text written does not read: %s\n%s", path, testkit.code_of(berr), text)
+			continue
+		}
+		for known in EMPTY_ENTITY {
+			if known == path {
+				continue suite
+			}
+		}
+		for known in APART {
+			if known == path {
+				continue suite
+			}
+		}
+		if path == DEFAULT_PE {
+			continue
+		}
+		// The attributes a document type gives an element, and the comments in the subset a text with external parts
+		// leaves unread, are not the writer's to keep.
+		same := tape.Facts{} if entities != "none" else KEPT
+		if !testkit.values_agree(t, &doc, tape.ROOT, &back, tape.ROOT, {facts = same}, path) {
+			failures += 1
+		}
+	}
+	log.infof("%d valid documents read, %d written", read, written)
+	testing.expect(t, read > 100 && written > 100)
+	testing.expectf(t, failures == 0, "%d documents", failures)
 }

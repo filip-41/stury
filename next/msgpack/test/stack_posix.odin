@@ -12,35 +12,24 @@ import "stury:testkit"
 
 read_nested :: proc(read: int, text: []u8) -> bool {
 	opts := msgpack.Options{budget = {depth = 200_000}}
-	if read >= 5 {
-		at := make([]tape.Step, len(text) - 2, context.temp_allocator)
-		for &step in at {
-			step = tape.Index(0)
+	if read < testkit.DEEP_CORE_READS {
+		at: []tape.Step
+		if read == 6 {
+			at = make([]tape.Step, len(text) - 2, context.temp_allocator)
+			for &step in at {
+				step = tape.Index(0)
+			}
 		}
-		return testkit.deep_read(read - 5, msgpack.reads(.Compact), msgpack.as(.Compact), text, opts, {{tape.Descend{}, tape.Index(0)}}, .Elements, at)
+		return testkit.deep_core_read(
+			read, msgpack.reads(.Compact), msgpack.as(.Compact), text, opts,
+			{tape.Index(0)}, {{tape.Index(0)}, {tape.Index(0), tape.Index(0)}},
+			{{tape.Descend{}, tape.Index(0)}}, .Elements, at,
+		)
 	}
-	switch read {
-	case 0:
-		return msgpack.validate(text, opts = opts) == nil
-	case 1:
-		doc, err := msgpack.build(text, opts = opts)
-		tape.destroy(&doc)
-		return err == nil
-	case 2:
-		answer, err := msgpack.find(text, {tape.Index(0)}, opts = opts)
-		return err == nil && answer.outcome == .Found
-	case 3:
-		d, _ := tape.demand_of({{tape.Index(0)}, {tape.Index(0), tape.Index(0)}})
-		r, err := msgpack.scan(text, &d, opts = opts)
-		tape.destroy(&r)
-		tape.destroy(&d)
-		return err == nil
-	case:
-		v: testkit.Value
-		err := msgpack.unmarshal(text, &v, opts = opts)
-		testkit.value_free(v)
-		return err == nil
-	}
+	v: testkit.Value
+	err := msgpack.unmarshal(text, &v, opts = opts)
+	testkit.value_free(v)
+	return err == nil
 }
 
 expect_nested_reads_on_thread :: proc(t: ^testing.T, stack: uint, depth: int) {
@@ -48,7 +37,7 @@ expect_nested_reads_on_thread :: proc(t: ^testing.T, stack: uint, depth: int) {
 	for i in 0 ..< depth {
 		text[i] = 0x91 // fixarray of 1 element
 	}
-	testkit.expect_reads_on_thread(t, stack, 5 + testkit.DEEP_READS, text, fmt.tprintf("depth %d", depth), read_nested)
+	testkit.expect_reads_on_thread(t, stack, testkit.DEEP_CORE_READS + 1, text, fmt.tprintf("depth %d", depth), read_nested)
 }
 
 @(test)

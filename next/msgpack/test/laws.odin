@@ -21,10 +21,10 @@ reads_agree_on_generated_items :: proc(t: ^testing.T) {
 			testkit.readers_agree(t, msgpack.reads(spec), msgpack.as(spec), src, {}, "generated", &a)
 		}
 		for _ in 0 ..< 4 {
-			bad := mutated(src)
-			defer delete(bad)
+			bad := testkit.mutate(src)
 			testkit.readers_agree(t, msgpack.reads(.Msgpack), msgpack.as(.Msgpack), bad, {}, "mutated", &a)
 		}
+		free_all(context.temp_allocator)
 	}
 	testkit.expect_agreement(t, &a, {texts = 60, refused = 60, scans = 10_000, on_path = 10_000, shapes = 20})
 }
@@ -42,10 +42,10 @@ records_at_a_path_agree_with_the_build :: proc(t: ^testing.T) {
 			read += testkit.records_at_agree(t, msgpack.reads(spec), msgpack.as(spec), src, {}, "generated")
 		}
 		for _ in 0 ..< 4 {
-			bad := mutated(src)
-			defer delete(bad)
+			bad := testkit.mutate(src)
 			read += testkit.records_at_agree(t, msgpack.reads(.Msgpack), msgpack.as(.Msgpack), bad, {}, "mutated")
 		}
+		free_all(context.temp_allocator)
 	}
 	testing.expectf(t, read > 100, "%d containers read", read)
 }

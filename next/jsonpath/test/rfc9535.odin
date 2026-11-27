@@ -51,18 +51,18 @@ eval_json :: proc(
 	opts := jsonpath.Eval_Options{},
 	stop_at := 0,
 	loc := #caller_location,
-) -> (vals: [dynamic]string, paths: [dynamic]string, end: jsonpath.Run_End) {
+) -> (col: Collected, end: jsonpath.Run_End) {
 	prog, cerr := jsonpath.compile(qsrc)
 	testing.expectf(t, cerr.kind == .None, "compile %q failed at %d: %s", qsrc, cerr.offset, cerr.message, loc = loc)
 	if cerr.kind != .None {
-		return nil, nil, .Failed
+		return {}, .Failed
 	}
 	defer jsonpath.destroy_program(prog)
 
 	doc, jerr := json.build(transmute([]u8)jsrc, .Json)
 	testing.expectf(t, jerr == nil, "json.build failed: %v", jerr, loc = loc)
 	if jerr != nil {
-		return nil, nil, .Failed
+		return {}, .Failed
 	}
 
 	h: query.Heap
@@ -75,7 +75,7 @@ eval_json :: proc(
 	testing.expect_value(t, st, query.Status.Ok, loc = loc)
 	defer query.release(&h, root)
 
-	col := Collected{
+	col = Collected{
 		h       = &h,
 		vals    = make([dynamic]string, context.allocator),
 		paths   = make([dynamic]string, context.allocator),
@@ -83,50 +83,27 @@ eval_json :: proc(
 		stop_at = stop_at,
 	}
 	end = jsonpath.eval(prog, &h, root, collect_cb, &col, opts)
-	return col.vals, col.paths, end
+	col.h = nil
+	return col, end
+}
+
+@(private)
+expect_vals_and_paths :: proc(t: ^testing.T, qsrc, jsrc: string, want_vals: []string, want_paths: []string = nil, loc := #caller_location) {
+	col, end := eval_json(t, qsrc, jsrc, {want_paths = len(want_paths) > 0}, 0, loc)
+	defer destroy_collected(&col)
+	testing.expect_value(t, end, jsonpath.Run_End.Done, loc = loc)
+	testing.expectf(t, len(col.vals) == len(want_vals), "%q: got %d values %v, want %d %v", qsrc, len(col.vals), col.vals[:], len(want_vals), want_vals, loc = loc)
+	for i in 0 ..< min(len(col.vals), len(want_vals)) {
+		testing.expectf(t, col.vals[i] == want_vals[i], "%q val[%d]: got %s, want %s", qsrc, i, col.vals[i], want_vals[i], loc = loc)
+	}
+	for i in 0 ..< min(len(col.paths), len(want_paths)) {
+		testing.expectf(t, col.paths[i] == want_paths[i], "%q path[%d]: got %q, want %q", qsrc, i, col.paths[i], want_paths[i], loc = loc)
+	}
 }
 
 @(private)
 expect_vals :: proc(t: ^testing.T, qsrc, jsrc: string, want: []string, loc := #caller_location) {
-	vals, paths, end := eval_json(t, qsrc, jsrc, {}, 0, loc)
-	defer {
-		for s in vals {
-			delete(s)
-		}
-		delete(vals)
-		for p in paths {
-			delete(p)
-		}
-		delete(paths)
-	}
-	testing.expect_value(t, end, jsonpath.Run_End.Done, loc = loc)
-	testing.expectf(t, len(vals) == len(want), "%q: got %d values %v, want %d %v", qsrc, len(vals), vals[:], len(want), want, loc = loc)
-	for i in 0 ..< min(len(vals), len(want)) {
-		testing.expectf(t, vals[i] == want[i], "%q[%d]: got %s, want %s", qsrc, i, vals[i], want[i], loc = loc)
-	}
-}
-
-@(private)
-expect_vals_and_paths :: proc(t: ^testing.T, qsrc, jsrc: string, want_vals, want_paths: []string, loc := #caller_location) {
-	vals, paths, end := eval_json(t, qsrc, jsrc, {want_paths = true}, 0, loc)
-	defer {
-		for s in vals {
-			delete(s)
-		}
-		delete(vals)
-		for p in paths {
-			delete(p)
-		}
-		delete(paths)
-	}
-	testing.expect_value(t, end, jsonpath.Run_End.Done, loc = loc)
-	testing.expectf(t, len(vals) == len(want_vals), "%q: got %d values %v, want %d %v", qsrc, len(vals), vals[:], len(want_vals), want_vals, loc = loc)
-	for i in 0 ..< min(len(vals), len(want_vals)) {
-		testing.expectf(t, vals[i] == want_vals[i], "%q val[%d]: got %s, want %s", qsrc, i, vals[i], want_vals[i], loc = loc)
-	}
-	for i in 0 ..< min(len(paths), len(want_paths)) {
-		testing.expectf(t, paths[i] == want_paths[i], "%q path[%d]: got %q, want %q", qsrc, i, paths[i], want_paths[i], loc = loc)
-	}
+	expect_vals_and_paths(t, qsrc, jsrc, want, nil, loc)
 }
 
 @(private)
@@ -411,36 +388,18 @@ budgets_and_early_stop :: proc(t: ^testing.T) {
 
 	// Early stop after 3 values.
 	{
-		vals, paths, end := eval_json(t, `$[*]`, arr, {want_paths = true}, stop_at = 3)
-		defer {
-			for s in vals {
-				delete(s)
-			}
-			delete(vals)
-			for p in paths {
-				delete(p)
-			}
-			delete(paths)
-		}
+		col, end := eval_json(t, `$[*]`, arr, {want_paths = true}, stop_at = 3)
+		defer destroy_collected(&col)
 		testing.expect_value(t, end, jsonpath.Run_End.Stopped)
-		testing.expect_value(t, len(vals), 3)
-		testing.expect_value(t, vals[2], "3")
-		testing.expect_value(t, paths[2], `$[2]`)
+		testing.expect_value(t, len(col.vals), 3)
+		testing.expect_value(t, col.vals[2], "3")
+		testing.expect_value(t, col.paths[2], `$[2]`)
 	}
 
 	// Step budget exhaustion.
 	{
-		vals, paths, end := eval_json(t, `$[*]`, arr, {budget = {steps = 5}})
-		defer {
-			for s in vals {
-				delete(s)
-			}
-			delete(vals)
-			for p in paths {
-				delete(p)
-			}
-			delete(paths)
-		}
+		col, end := eval_json(t, `$[*]`, arr, {budget = {steps = 5}})
+		defer destroy_collected(&col)
 		testing.expect_value(t, end, jsonpath.Run_End.Exceeded)
 	}
 
@@ -456,17 +415,8 @@ budgets_and_early_stop :: proc(t: ^testing.T) {
 	// Small explicit runtime `budget.depth` is enforced (not floored to 256).
 	{
 		deep_obj := `{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"v":1}}}}}}}}}}}`
-		vals, paths, end := eval_json(t, `$..v`, deep_obj, {budget = {depth = 2}})
-		defer {
-			for s in vals {
-				delete(s)
-			}
-			delete(vals)
-			for p in paths {
-				delete(p)
-			}
-			delete(paths)
-		}
+		col, end := eval_json(t, `$..v`, deep_obj, {budget = {depth = 2}})
+		defer destroy_collected(&col)
 		testing.expect_value(t, end, jsonpath.Run_End.Exceeded)
 	}
 }

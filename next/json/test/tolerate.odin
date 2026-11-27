@@ -52,18 +52,21 @@ lax_texts :: proc(body: string) -> [4]string {
 	return {text(`["`, body, `"]`), text(`["`, long, `"]`), text(`{"`, body, `":1}`), text(`{"`, long, `":1}`)}
 }
 
-// Each class of ill-formed UTF-8 is refused by a strict read and taken under `.Invalid_Utf8`, in a value and in a key,
-// as a string marked `SPELLING_LAX` that decodes to U+FFFD per maximal subpart.
-@(test)
-tolerate_invalid_utf8 :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	for c in LAX_STRINGS {
+@(private = "file")
+check_tolerated_strings :: proc(t: ^testing.T, cases: []Lax_String, opts: json.Options, want_strict_kind: tape.Fault_Kind = .None) {
+	for c in cases {
 		for src, i in lax_texts(c.bytes) {
 			want := c.text if i % 2 == 0 else strings.concatenate({strings.repeat("x", 80, context.temp_allocator), c.text}, context.temp_allocator)
 			for spec in ([]json.Spec{.Json, .Jsonc, .Json5}) {
-				testing.expectf(t, json.validate(transmute([]u8)src, spec) != nil, "%v accepted %q", spec, src)
-				testing.expectf(t, json.validate(transmute([]u8)src, spec, LAX) == nil, "%v refused %q", spec, src)
-				doc, err := json.build(transmute([]u8)src, spec, LAX)
+				strict := json.validate(transmute([]u8)src, spec)
+				if want_strict_kind != .None {
+					f, is_fault := strict.(tape.Fault)
+					testing.expectf(t, is_fault && f.kind == want_strict_kind, "%v strict %q: %v", spec, src, strict)
+				} else {
+					testing.expectf(t, strict != nil, "%v accepted %q", spec, src)
+				}
+				testing.expectf(t, json.validate(transmute([]u8)src, spec, opts) == nil, "%v refused %q", spec, src)
+				doc, err := json.build(transmute([]u8)src, spec, opts)
 				defer tape.destroy(&doc)
 				if !testing.expectf(t, err == nil, "%v %q: %v", spec, src, err) {
 					continue
@@ -79,6 +82,42 @@ tolerate_invalid_utf8 :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+@(private = "file")
+check_tolerated_keys_by_name :: proc(t: ^testing.T, bad_seq: string, opts: json.Options, specs: []json.Spec, check_stop_early: bool) {
+	long := strings.repeat("k", 70, context.temp_allocator)
+	for prefix in ([]string{"", long}) {
+		for spec in specs {
+			src := strings.concatenate({`{"a":0,"`, prefix, bad_seq, `z":[1,2],"b\u00e9":3}`}, context.temp_allocator)
+			name := strings.concatenate({prefix, FFFD, "z"}, context.temp_allocator)
+			path := []tape.Step{tape.Name(name), tape.Index(1)}
+			_, serr := json.find(transmute([]u8)src, path, spec)
+			testing.expect(t, serr != nil)
+			f, err := json.find(transmute([]u8)src, path, spec, opts = opts)
+			testing.expectf(t, err == nil && f.outcome == .Found && src[f.lo:f.hi] == "2" && f.tolerated, "%q: %v %v", src, f, err)
+			if check_stop_early {
+				plain, _ := json.find(transmute([]u8)src, {tape.Name("a")}, spec, opts = {tolerate = opts.tolerate, dups = .First}, read = {stop_early = true})
+				testing.expect(t, plain.outcome == .Found && !plain.tolerated)
+			}
+
+			d, _ := tape.demand_of([][]tape.Step{path, {tape.Name("bé")}})
+			defer tape.destroy(&d)
+			r, rerr := json.scan(transmute([]u8)src, &d, spec, opts = opts)
+			defer tape.destroy(&r)
+			testing.expect_value(t, rerr, nil)
+			testing.expect(t, .Tolerated in r.flags)
+			testing.expect_value(t, testkit.render_answers(&r), `0=2 1=3`)
+		}
+	}
+}
+
+// Each class of ill-formed UTF-8 is refused by a strict read and taken under `.Invalid_Utf8`, in a value and in a key,
+// as a string marked `SPELLING_LAX` that decodes to U+FFFD per maximal subpart.
+@(test)
+tolerate_invalid_utf8 :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	check_tolerated_strings(t, LAX_STRINGS, LAX)
 }
 
 // A JSON5 string in single quotes takes the tolerance as a double-quoted one does, and an escaped character past
@@ -116,26 +155,7 @@ tolerate_invalid_utf8_not_an_open_string :: proc(t: ^testing.T) {
 @(test)
 tolerate_invalid_utf8_keys_by_name :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	long := strings.repeat("k", 70, context.temp_allocator)
-	for prefix in ([]string{"", long}) {
-		src := strings.concatenate({`{"a":0,"`, prefix, "\xFFz", `":[1,2],"b\u00e9":3}`}, context.temp_allocator)
-		name := strings.concatenate({prefix, FFFD, "z"}, context.temp_allocator)
-		path := []tape.Step{tape.Name(name), tape.Index(1)}
-		_, serr := json.find(transmute([]u8)src, path)
-		testing.expect(t, serr != nil)
-		f, err := json.find(transmute([]u8)src, path, opts = LAX)
-		testing.expectf(t, err == nil && f.outcome == .Found && src[f.lo:f.hi] == "2" && f.tolerated, "%q: %v %v", src, f, err)
-		plain, _ := json.find(transmute([]u8)src, {tape.Name("a")}, opts = {tolerate = LAX.tolerate, dups = .First}, read = {stop_early = true})
-		testing.expect(t, plain.outcome == .Found && !plain.tolerated)
-
-		d, _ := tape.demand_of([][]tape.Step{path, {tape.Name("bé")}})
-		defer tape.destroy(&d)
-		r, rerr := json.scan(transmute([]u8)src, &d, opts = LAX)
-		defer tape.destroy(&r)
-		testing.expect_value(t, rerr, nil)
-		testing.expect(t, .Tolerated in r.flags)
-		testing.expect_value(t, testkit.render_answers(&r), `0=2 1=3`)
-	}
+	check_tolerated_keys_by_name(t, "\xFF", LAX, {.Json}, true)
 }
 
 @(private = "file")
@@ -164,30 +184,7 @@ LONE_STRINGS := []Lax_String {
 @(test)
 tolerate_lone_surrogate :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	for c in LONE_STRINGS {
-		for src, i in lax_texts(c.bytes) {
-			want := c.text if i % 2 == 0 else strings.concatenate({strings.repeat("x", 80, context.temp_allocator), c.text}, context.temp_allocator)
-			for spec in ([]json.Spec{.Json, .Jsonc, .Json5}) {
-				strict := json.validate(transmute([]u8)src, spec)
-				f, is_fault := strict.(tape.Fault)
-				testing.expectf(t, is_fault && f.kind == .Bad_Escape, "%v strict %q: %v", spec, src, strict)
-				testing.expectf(t, json.validate(transmute([]u8)src, spec, LONE) == nil, "%v refused %q", spec, src)
-				doc, err := json.build(transmute([]u8)src, spec, LONE)
-				defer tape.destroy(&doc)
-				if !testing.expectf(t, err == nil, "%v %q: %v", spec, src, err) {
-					continue
-				}
-				testing.expectf(t, .Tolerated in doc.flags, "%q not flagged", src)
-				n := doc.nodes[1]
-				testing.expect(t, n.kind == .String && n.spelling & tape.SPELLING_LAX != 0 && n.spelling & tape.SPELLING_DECODE != 0)
-				buf := make([]u8, tape.text_room(&doc, 1), context.temp_allocator)
-				text, ok := tape.node_text(&doc, 1, buf)
-				testing.expectf(t, ok && text == want, "%v %q reads %q", spec, src, text)
-				_, short := tape.node_text(&doc, 1, buf[:len(buf) - 1])
-				testing.expect(t, !short)
-			}
-		}
-	}
+	check_tolerated_strings(t, LONE_STRINGS, LONE, .Bad_Escape)
 }
 
 // Each tolerance takes only its own text, and a lone half's refusal is the fault of a strict read.
@@ -243,26 +240,7 @@ tolerate_lone_surrogate_pair_unaffected :: proc(t: ^testing.T) {
 @(test)
 tolerate_lone_surrogate_keys_by_name :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	long := strings.repeat("k", 70, context.temp_allocator)
-	for prefix in ([]string{"", long}) {
-		for spec in ([]json.Spec{.Json, .Jsonc, .Json5}) {
-			src := strings.concatenate({`{"a":0,"`, prefix, `\ud800z":[1,2],"b\u00e9":3}`}, context.temp_allocator)
-			name := strings.concatenate({prefix, FFFD, "z"}, context.temp_allocator)
-			path := []tape.Step{tape.Name(name), tape.Index(1)}
-			_, serr := json.find(transmute([]u8)src, path, spec)
-			testing.expect(t, serr != nil)
-			f, err := json.find(transmute([]u8)src, path, spec, opts = LONE)
-			testing.expectf(t, err == nil && f.outcome == .Found && src[f.lo:f.hi] == "2" && f.tolerated, "%q: %v %v", src, f, err)
-
-			d, _ := tape.demand_of([][]tape.Step{path, {tape.Name("bé")}})
-			defer tape.destroy(&d)
-			r, rerr := json.scan(transmute([]u8)src, &d, spec, opts = LONE)
-			defer tape.destroy(&r)
-			testing.expect_value(t, rerr, nil)
-			testing.expect(t, .Tolerated in r.flags)
-			testing.expect_value(t, testkit.render_answers(&r), `0=2 1=3`)
-		}
-	}
+	check_tolerated_keys_by_name(t, `\ud800`, LONE, {.Json, .Jsonc, .Json5}, false)
 }
 
 // A non-finite number and its value, whose bits are binary64's.

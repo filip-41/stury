@@ -7,7 +7,6 @@ import "base:runtime"
 import "core:mem"
 import "core:strconv"
 import "core:strings"
-import "core:unicode/utf8"
 import "stury:lib/core/tape"
 import "stury:lib/ops/edit"
 import "stury:lib/ops/write"
@@ -16,6 +15,9 @@ import jschema "stury:lib/schema/schema"
 
 @(private)
 VALIDATOR_WALK_LIMIT :: 65536
+
+@(private = "file")
+_ :: write.Token_Tape
 
 // One instance-path binding of declarative named validators (`x-stury-validators`).
 Validator_Binding :: struct {
@@ -291,13 +293,15 @@ schema_json :: proc(m: ^Model($T), direction := Direction.Load, wopts := jschema
 	scratch := mem.dynamic_arena_allocator(&scratch_arena)
 
 	tt: write.Token_Tape
-	base_doc, pok := parse_schema_json_to_tape(raw, &tt, scratch)
+	base_doc, pok := jschema.parse_json_to_tape(raw, &tt, scratch)
 	if !pok { return nil, Model_Error{kind = .Walk, want = {text = "schema json"}} }
 	defer write.token_tape_drop(&tt)
 
 	annotated := annotate_schema_document(m, &base_doc, direction, scratch) or_return
 	defer tape.destroy(&annotated)
-	return write_tape_json(&annotated, wopts, allocator)
+	out, werr := jschema.tape_to_json(&annotated, wopts, allocator, scratch)
+	if werr != nil { return nil, werr }
+	return out, nil
 }
 
 @(private)
@@ -941,302 +945,4 @@ run_binding_on_doc :: proc(
 			}
 		}
 	}
-}
-
-// ============================================================================
-// Minimal layer-3 RFC 8259 JSON <-> `tape.Document` for `schema_json`
-// ============================================================================
-
-@(private)
-parse_schema_json_to_tape :: proc(src: []u8, tt: ^write.Token_Tape, allocator: runtime.Allocator) -> (doc: tape.Document, ok: bool) {
-	if write.token_tape_start(tt, false, 0, allocator) != nil { return {}, false }
-	p := Schema_Json_Parser{src = src, tt = tt, allocator = allocator}
-	p.buf.allocator = allocator
-	defer delete(p.buf)
-	if !sjp_value(&p) { write.token_tape_drop(tt); return {}, false }
-	sjp_ws(&p)
-	if p.i != len(p.src) { write.token_tape_drop(tt); return {}, false }
-	d, derr := write.token_tape_document(tt)
-	if derr != nil { write.token_tape_drop(tt); return {}, false }
-	return d, true
-}
-
-@(private = "file")
-Schema_Json_Parser :: struct {
-	src:       []u8,
-	i:         int,
-	tt:        ^write.Token_Tape,
-	buf:       [dynamic]u8,
-	allocator: runtime.Allocator,
-}
-
-@(private = "file")
-sjp_ws :: proc "contextless" (p: ^Schema_Json_Parser) {
-	for p.i < len(p.src) {
-		switch p.src[p.i] {
-		case ' ', '\t', '\r', '\n': p.i += 1
-		case: return
-		}
-	}
-}
-
-@(private = "file")
-sjp_value :: proc(p: ^Schema_Json_Parser) -> bool {
-	Kind :: enum u8 { Array, Object }
-	stack, serr := make([dynamic]Kind, 0, 16, p.allocator)
-	if serr != nil { return false }
-	defer delete(stack)
-
-	want := true
-	for {
-		sjp_ws(p)
-		if want {
-			if p.i >= len(p.src) { return false }
-			switch p.src[p.i] {
-			case '{':
-				p.i += 1
-				if write.token_tape_take(p.tt, .Object, "") != nil { return false }
-				sjp_ws(p)
-				if p.i < len(p.src) && p.src[p.i] == '}' {
-					p.i += 1
-					if write.token_tape_take(p.tt, .Close, "") != nil { return false }
-					want = false
-				} else {
-					if _, aerr := append(&stack, Kind.Object); aerr != nil { return false }
-					k, kok := sjp_string(p); if !kok { return false }
-					if write.token_tape_take(p.tt, .Key, k) != nil { return false }
-					sjp_ws(p)
-					if p.i >= len(p.src) || p.src[p.i] != ':' { return false }
-					p.i += 1
-				}
-			case '[':
-				p.i += 1
-				if write.token_tape_take(p.tt, .Array, "") != nil { return false }
-				sjp_ws(p)
-				if p.i < len(p.src) && p.src[p.i] == ']' {
-					p.i += 1
-					if write.token_tape_take(p.tt, .Close, "") != nil { return false }
-					want = false
-				} else {
-					if _, aerr := append(&stack, Kind.Array); aerr != nil { return false }
-				}
-			case '"':
-				s, sok := sjp_string(p); if !sok { return false }
-				if write.token_tape_take(p.tt, .String, s) != nil { return false }
-				want = false
-			case 't':
-				if p.i + 4 > len(p.src) || string(p.src[p.i:p.i + 4]) != "true" { return false }
-				p.i += 4
-				if write.token_tape_take(p.tt, .True, "") != nil { return false }
-				want = false
-			case 'f':
-				if p.i + 5 > len(p.src) || string(p.src[p.i:p.i + 5]) != "false" { return false }
-				p.i += 5
-				if write.token_tape_take(p.tt, .False, "") != nil { return false }
-				want = false
-			case 'n':
-				if p.i + 4 > len(p.src) || string(p.src[p.i:p.i + 4]) != "null" { return false }
-				p.i += 4
-				if write.token_tape_take(p.tt, .Null, "") != nil { return false }
-				want = false
-			case '-', '0' ..= '9':
-				start := p.i
-				for p.i < len(p.src) {
-					c := p.src[p.i]
-					if (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' { p.i += 1 } else { break }
-				}
-				if write.token_tape_take(p.tt, .Number, string(p.src[start:p.i])) != nil { return false }
-				want = false
-			case: return false
-			}
-			continue
-		}
-		if len(stack) == 0 { return true }
-		top := stack[len(stack) - 1]
-		if p.i >= len(p.src) { return false }
-		if top == .Array {
-			if p.src[p.i] == ',' { p.i += 1; want = true; continue }
-			if p.src[p.i] == ']' { p.i += 1; pop(&stack); if write.token_tape_take(p.tt, .Close, "") != nil { return false }; continue }
-			return false
-		}
-		if p.src[p.i] == ',' {
-			p.i += 1; sjp_ws(p)
-			k, kok := sjp_string(p); if !kok { return false }
-			if write.token_tape_take(p.tt, .Key, k) != nil { return false }
-			sjp_ws(p)
-			if p.i >= len(p.src) || p.src[p.i] != ':' { return false }
-			p.i += 1; want = true
-			continue
-		}
-		if p.src[p.i] == '}' { p.i += 1; pop(&stack); if write.token_tape_take(p.tt, .Close, "") != nil { return false }; continue }
-		return false
-	}
-}
-
-@(private = "file")
-sjp_string :: proc(p: ^Schema_Json_Parser) -> (string, bool) {
-	if p.i >= len(p.src) || p.src[p.i] != '"' { return "", false }
-	p.i += 1
-	start := p.i
-	has_esc := false
-	for p.i < len(p.src) {
-		c := p.src[p.i]
-		if c == '"' {
-			raw := string(p.src[start:p.i])
-			p.i += 1
-			if !has_esc { return raw, true }
-			return sjp_unescape(p, raw)
-		}
-		if c == '\\' { has_esc = true; p.i += 2 } else { p.i += 1 }
-	}
-	return "", false
-}
-
-@(private = "file")
-sjp_unescape :: proc(p: ^Schema_Json_Parser, raw: string) -> (string, bool) {
-	clear(&p.buf)
-	for i := 0; i < len(raw); {
-		c := raw[i]
-		if c != '\\' { if _, err := append(&p.buf, c); err != nil { return "", false }; i += 1; continue }
-		if i + 1 >= len(raw) { return "", false }
-		switch raw[i + 1] {
-		case '"', '\\', '/': if _, err := append(&p.buf, raw[i + 1]); err != nil { return "", false }; i += 2
-		case 'b': if _, err := append(&p.buf, '\b'); err != nil { return "", false }; i += 2
-		case 'f': if _, err := append(&p.buf, '\f'); err != nil { return "", false }; i += 2
-		case 'n': if _, err := append(&p.buf, '\n'); err != nil { return "", false }; i += 2
-		case 'r': if _, err := append(&p.buf, '\r'); err != nil { return "", false }; i += 2
-		case 't': if _, err := append(&p.buf, '\t'); err != nil { return "", false }; i += 2
-		case 'u':
-			if i + 6 > len(raw) { return "", false }
-			cp, ok := strconv.parse_u64_of_base(raw[i + 2:i + 6], 16)
-			if !ok { return "", false }
-			i += 6
-			r := rune(cp)
-			if cp >= 0xD800 && cp <= 0xDBFF && i + 6 <= len(raw) && raw[i] == '\\' && raw[i + 1] == 'u' {
-				lo, lok := strconv.parse_u64_of_base(raw[i + 2:i + 6], 16)
-				if lok && lo >= 0xDC00 && lo <= 0xDFFF {
-					r = rune(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00))
-					i += 6
-				}
-			}
-			enc, n := utf8.encode_rune(r)
-			if _, err := append(&p.buf, ..enc[:n]); err != nil { return "", false }
-		case: return "", false
-		}
-	}
-	return string(p.buf[:]), true
-}
-
-// OOM-safe iterative JSON serializer for `tape.Document`: propagates every allocator failure cleanly.
-@(private)
-write_tape_json :: proc(doc: ^tape.Document, wopts: jschema.Write_Options, allocator: runtime.Allocator) -> (text: []u8, err: Error) {
-	buf := make([dynamic]u8, 0, 512, allocator) or_return
-	defer if err != nil { delete(buf) }
-
-	put_byte :: proc(b: ^[dynamic]u8, c: u8) -> write.Error {
-		if _, aerr := append(b, c); aerr != nil { return aerr }
-		return nil
-	}
-	put_str :: proc(b: ^[dynamic]u8, s: string) -> write.Error {
-		if len(s) == 0 { return nil }
-		if _, aerr := append(b, ..transmute([]u8)s); aerr != nil { return aerr }
-		return nil
-	}
-	write_indent :: proc(b: ^[dynamic]u8, depth: int, wopts: jschema.Write_Options) -> write.Error {
-		put_byte(b, '\n') or_return
-		if wopts.tab {
-			for _ in 0 ..< depth { put_byte(b, '\t') or_return }
-		} else {
-			for _ in 0 ..< depth * int(wopts.indent) { put_byte(b, ' ') or_return }
-		}
-		return nil
-	}
-	write_json_str :: proc(b: ^[dynamic]u8, s: string) -> write.Error {
-		put_byte(b, '"') or_return
-		hex := "0123456789abcdef"
-		for c in transmute([]u8)s {
-			switch c {
-			case '"':  put_str(b, `\"`) or_return
-			case '\\': put_str(b, `\\`) or_return
-			case '\b': put_str(b, `\b`) or_return
-			case '\f': put_str(b, `\f`) or_return
-			case '\n': put_str(b, `\n`) or_return
-			case '\r': put_str(b, `\r`) or_return
-			case '\t': put_str(b, `\t`) or_return
-			case:
-				if c < 0x20 {
-					put_str(b, `\u00`) or_return
-					put_byte(b, hex[c >> 4]) or_return
-					put_byte(b, hex[c & 0xF]) or_return
-				} else {
-					put_byte(b, c) or_return
-				}
-			}
-		}
-		return put_byte(b, '"')
-	}
-
-	Frame :: struct { is_obj: bool, count: int }
-	stack := make([dynamic]Frame, 0, 16, allocator) or_return
-	defer delete(stack)
-
-	scratch_arena: mem.Dynamic_Arena
-	mem.dynamic_arena_init(&scratch_arena, allocator, allocator)
-	defer mem.dynamic_arena_destroy(&scratch_arena)
-	scratch := mem.dynamic_arena_allocator(&scratch_arena)
-
-	Ctx :: struct {
-		b:         ^[dynamic]u8,
-		stack:     ^[dynamic]Frame,
-		wopts:     jschema.Write_Options,
-		pretty:    bool,
-		after_key: bool,
-	}
-	ctx := Ctx{b = &buf, stack = &stack, wopts = wopts, pretty = wopts.indent > 0 || wopts.tab}
-	take :: proc(c: ^Ctx, kind: write.Token_Kind, tok_text: string) -> write.Error {
-		if kind == .Close {
-			fr := pop(c.stack)
-			if c.pretty && fr.count > 0 { write_indent(c.b, len(c.stack), c.wopts) or_return }
-			put_byte(c.b, '}' if fr.is_obj else ']') or_return
-			c.after_key = false
-			return nil
-		}
-		if kind == .Key {
-			fr := &c.stack[len(c.stack) - 1]
-			if fr.count > 0 { put_byte(c.b, ',') or_return }
-			fr.count += 1
-			if c.pretty { write_indent(c.b, len(c.stack), c.wopts) or_return }
-			write_json_str(c.b, tok_text) or_return
-			put_str(c.b, ": " if c.pretty else ":") or_return
-			c.after_key = true
-			return nil
-		}
-		if !c.after_key && len(c.stack) > 0 {
-			fr := &c.stack[len(c.stack) - 1]
-			if !fr.is_obj {
-				if fr.count > 0 { put_byte(c.b, ',') or_return }
-				fr.count += 1
-				if c.pretty { write_indent(c.b, len(c.stack), c.wopts) or_return }
-			}
-		}
-		c.after_key = false
-		#partial switch kind {
-		case .Object:
-			put_byte(c.b, '{') or_return
-			if _, aerr := append(c.stack, Frame{is_obj = true}); aerr != nil { return aerr }
-		case .Array:
-			put_byte(c.b, '[') or_return
-			if _, aerr := append(c.stack, Frame{is_obj = false}); aerr != nil { return aerr }
-		case .String: write_json_str(c.b, tok_text) or_return
-		case .Number: put_str(c.b, tok_text) or_return
-		case .True:   put_str(c.b, "true") or_return
-		case .False:  put_str(c.b, "false") or_return
-		case .Null:   put_str(c.b, "null") or_return
-		}
-		return nil
-	}
-	if werr := write.tokens_of(doc, tape.ROOT, &ctx, take, scratch); werr != nil {
-		return nil, werr
-	}
-	return buf[:], nil
 }

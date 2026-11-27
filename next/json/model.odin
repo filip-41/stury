@@ -33,28 +33,39 @@ load :: #force_inline proc(
 	m: ^model.Model($T), src: []u8, out: ^T, spec := Spec.Json,
 	sink: ^model.Sink = nil, opts := model.Load_Opts{}, allocator := context.allocator,
 ) -> model.Error {
+	if m == nil || out == nil { return model.Model_Error{kind = .Bad_Option, want = {text = "target"}} }
+	return load_raw(model.model_view(m), src, rawptr(out), spec, sink, opts, allocator)
+}
+
+@(private)
+load_raw :: proc(
+	mv: model.Model_View, src: []u8, out: rawptr,
+	spec: Spec, sink: ^model.Sink, opts: model.Load_Opts, allocator: runtime.Allocator,
+) -> model.Error {
 	model_probe_stack()
 	if spec > .Json5 { return model.Model_Error{kind = .Bad_Option, want = {text = "spec"}} }
 	lax, refuse := opts.budget.steps != 0, opts.dups == .Default || opts.dups == .Refuse
 	#partial switch spec {
-	case .Json:  return load_as(m, src, out, .Json, lax, refuse, sink, opts, allocator)
-	case .Jsonc: return load_as(m, src, out, .Jsonc, lax, refuse, sink, opts, allocator)
-	case .Json5: return load_as(m, src, out, .Json5, lax, refuse, sink, opts, allocator)
+	case .Json:  return load_as(mv, src, out, .Json, lax, refuse, sink, opts, allocator)
+	case .Jsonc: return load_as(mv, src, out, .Jsonc, lax, refuse, sink, opts, allocator)
+	case .Json5: return load_as(mv, src, out, .Json5, lax, refuse, sink, opts, allocator)
 	}
 	return model.Model_Error{kind = .Bad_Option, want = {text = "spec"}}
 }
 
 @(private)
 load_as :: #force_inline proc(
-	m: ^model.Model($T), src: []u8, out: ^T, $S: Spec, lax, refuse: bool, sink: ^model.Sink, opts: model.Load_Opts, allocator: runtime.Allocator,
+	mv: model.Model_View, src: []u8, out: rawptr,
+	$S: Spec, lax, refuse: bool, sink: ^model.Sink, opts: model.Load_Opts, allocator: runtime.Allocator,
 ) -> model.Error {
-	if refuse { return load_run(m, src, out, S, true, true, sink, opts, allocator) if lax else load_run(m, src, out, S, false, true, sink, opts, allocator) }
-	return load_run(m, src, out, S, true, false, sink, opts, allocator) if lax else load_run(m, src, out, S, false, false, sink, opts, allocator)
+	if refuse { return load_run(mv, src, out, S, true, true, sink, opts, allocator) if lax else load_run(mv, src, out, S, false, true, sink, opts, allocator) }
+	return load_run(mv, src, out, S, true, false, sink, opts, allocator) if lax else load_run(mv, src, out, S, false, false, sink, opts, allocator)
 }
 
 @(private)
 load_run :: #force_no_inline proc(
-	m: ^model.Model($T), src: []u8, out: ^T, $S: Spec, $LAX, $REFUSE: bool, sink: ^model.Sink, opts: model.Load_Opts, allocator: runtime.Allocator,
+	mv: model.Model_View, src: []u8, out: rawptr,
+	$S: Spec, $LAX, $REFUSE: bool, sink: ^model.Sink, opts: model.Load_Opts, allocator: runtime.Allocator,
 ) -> model.Error {
 	walk_opts := Options{dups = opts.dups, budget = opts.budget, scratch = opts.scratch}
 	build_fb :: proc(src: []u8, opts: Options, a: runtime.Allocator) -> (tape.Document, tape.Error) { return build(src, S, opts, a) }
@@ -63,13 +74,13 @@ load_run :: #force_no_inline proc(
 			on :: #force_inline proc "contextless" (h: ^model.Refusing_Loader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) { return model.refusing_loader_hook(h, s, t, number_value) }
 			return walk_text(src, S, LAX, opts, h, regs, a, ctx, on)
 		}
-		return model.load_stream(m, src, &FORMATS[S], out, sink, opts, walk_opts, allocator, model.Refusing_Loader, walk, build_fb)
+		return model.load_stream_raw(mv, src, &FORMATS[S], out, sink, opts, walk_opts, allocator, model.Refusing_Loader, walk, build_fb)
 	} else {
 		walk :: #force_inline proc "contextless" (src: []u8, opts: Options, h: ^model.Stream_Loader, regs: ^hook.Regs, a: runtime.Allocator, ctx: ^runtime.Context) -> (u64, tape.Error, bool) {
 			on :: #force_inline proc "contextless" (h: ^model.Stream_Loader, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) { return model.stream_loader_hook(h, s, t, number_value) }
 			return walk_text(src, S, LAX, opts, h, regs, a, ctx, on)
 		}
-		return model.load_stream(m, src, &FORMATS[S], out, sink, opts, walk_opts, allocator, model.Stream_Loader, walk, build_fb)
+		return model.load_stream_raw(mv, src, &FORMATS[S], out, sink, opts, walk_opts, allocator, model.Stream_Loader, walk, build_fb)
 	}
 }
 
@@ -84,41 +95,59 @@ load_run :: #force_no_inline proc(
 // Dumps `v` according to model `m` directly to JSON bytes owned by `allocator`,
 // bypassing `Token_Tape`, `tape.Document`, and per-record arenas with zero double-copy.
 @(require_results)
-dump :: proc(
+dump :: #force_inline proc(
 	m: ^model.Model($T), v: ^T, opts := model.Dump_Opts{}, wopts := Write_Options{}, sink: ^model.Sink = nil, allocator := context.allocator,
 ) -> (text: []u8, err: model.Error) {
+	if m == nil || v == nil { return nil, model.Model_Error{kind = .Bad_Option, want = {text = "value"}} }
+	return dump_raw(model.model_view(m), rawptr(v), model.dump_size_hint(m), opts, wopts, sink, allocator)
+}
+
+@(private)
+dump_raw :: proc(
+	mv: model.Model_View, v: rawptr, hint: int,
+	opts: model.Dump_Opts, wopts: Write_Options, sink: ^model.Sink, allocator: runtime.Allocator,
+) -> (text: []u8, err: model.Error) {
 	if werr := check_marshal_opts(wopts); werr != nil { return nil, werr }
-	min_room := model.JSON_PRETTY_CLOSE_ROOM if !write.compact(wopts) else max(512, model.dump_size_hint(m) * 2)
+	min_room := model.JSON_PRETTY_CLOSE_ROOM if !write.compact(wopts) else max(512, hint * 2)
 	raw, aerr := runtime.mem_alloc_non_zeroed(min_room, 1, allocator)
 	if aerr != nil || raw_data(raw) == nil || len(raw) < min_room { return nil, runtime.Allocator_Error.Out_Of_Memory }
 	fj := Fast_Json{out = {buf = raw_data(raw), size = min_room, allocator = allocator}}
-	return dump_run(&fj, m, v, opts, wopts, sink, allocator)
+	return dump_run(&fj, mv, v, opts, wopts, sink, allocator)
 }
 
 // Dumps `v` according to model `m` directly as JSON into streaming `io.Writer` `w`.
 @(require_results)
-dump_to :: proc(
+dump_to :: #force_inline proc(
 	w: io.Writer, m: ^model.Model($T), v: ^T, opts := model.Dump_Opts{}, wopts := Write_Options{}, sink: ^model.Sink = nil, allocator := context.allocator,
 ) -> model.Error {
 	if w.procedure == nil { return model_bad_sink() }
+	if m == nil || v == nil { return model.Model_Error{kind = .Bad_Option, want = {text = "value"}} }
+	return dump_to_raw(w, model.model_view(m), rawptr(v), opts, wopts, sink, allocator)
+}
+
+@(private)
+dump_to_raw :: proc(
+	w: io.Writer, mv: model.Model_View, v: rawptr,
+	opts: model.Dump_Opts, wopts: Write_Options, sink: ^model.Sink, allocator: runtime.Allocator,
+) -> model.Error {
 	if werr := check_marshal_opts(wopts); werr != nil { return werr }
 	fj: Fast_Json
 	if e := write.out_start(&fj.out, allocator, w, 0); e != nil { return e }
-	_, err := dump_run(&fj, m, v, opts, wopts, sink, allocator)
+	_, err := dump_run(&fj, mv, v, opts, wopts, sink, allocator)
 	return err
 }
 
 @(private)
-dump_run :: proc(fj: ^Fast_Json, m: ^model.Model($T), v: ^T, opts: model.Dump_Opts, wopts: Write_Options, sink: ^model.Sink, allocator: runtime.Allocator) -> ([]u8, model.Error) {
+dump_run :: proc(fj: ^Fast_Json, mv: model.Model_View, v: rawptr, opts: model.Dump_Opts, wopts: Write_Options, sink: ^model.Sink, allocator: runtime.Allocator) -> ([]u8, model.Error) {
 	fj.fill = u64(0x0909_0909_0909_0909) if wopts.tab else u64(0x2020_2020_2020_2020)
 	fj.width = 1 if wopts.tab else int(wopts.indent)
 	if wopts.framing == .Seq { model_fast_room(fj, 1)[0] = RECORD_SEPARATOR; fj.out.cursor += 1 }
 	pretty, err := !write.compact(wopts), model.Error(nil)
 	switch {
-	case !pretty && !wopts.ascii: err = dump_mode(fj, m, v, opts, sink, false, false, allocator)
-	case pretty && !wopts.ascii:  err = dump_mode(fj, m, v, opts, sink, true, false, allocator)
-	case !pretty && wopts.ascii:  err = dump_mode(fj, m, v, opts, sink, false, true, allocator)
-	case:                         err = dump_mode(fj, m, v, opts, sink, true, true, allocator)
+	case !pretty && !wopts.ascii: err = dump_mode(fj, mv, v, opts, sink, false, false, allocator)
+	case pretty && !wopts.ascii:  err = dump_mode(fj, mv, v, opts, sink, true, false, allocator)
+	case !pretty && wopts.ascii:  err = dump_mode(fj, mv, v, opts, sink, false, true, allocator)
+	case:                         err = dump_mode(fj, mv, v, opts, sink, true, true, allocator)
 	}
 	if fj.out.err != nil { model.error_destroy(err, allocator); write.out_drop(&fj.out); return nil, fj.out.err }
 	if err != nil { write.out_drop(&fj.out); return nil, err }
@@ -129,11 +158,11 @@ dump_run :: proc(fj: ^Fast_Json, m: ^model.Model($T), v: ^T, opts: model.Dump_Op
 }
 
 @(private)
-dump_mode :: #force_no_inline proc(fj: ^Fast_Json, m: ^model.Model($T), v: ^T, opts: model.Dump_Opts, sink: ^model.Sink, $PRETTY, $ASCII: bool, allocator: runtime.Allocator) -> model.Error {
+dump_mode :: #force_no_inline proc(fj: ^Fast_Json, mv: model.Model_View, v: rawptr, opts: model.Dump_Opts, sink: ^model.Sink, $PRETTY, $ASCII: bool, allocator: runtime.Allocator) -> model.Error {
 	when ASCII {
-		return model.dump_json(m, v, opts, sink, fj, PRETTY, model_fast_room, model_fast_cursor, fast_has_err, model_put_string_ascii, model_fast_put_line, allocator)
+		return model.dump_json_raw(mv, v, opts, sink, fj, PRETTY, model_fast_room, model_fast_cursor, fast_has_err, model_put_string_ascii, model_fast_put_line, allocator)
 	} else {
-		return model.dump_json(m, v, opts, sink, fj, PRETTY, model_fast_room, model_fast_cursor, fast_has_err, model_put_string_utf8, model_fast_put_line, allocator)
+		return model.dump_json_raw(mv, v, opts, sink, fj, PRETTY, model_fast_room, model_fast_cursor, fast_has_err, model_put_string_utf8, model_fast_put_line, allocator)
 	}
 }
 

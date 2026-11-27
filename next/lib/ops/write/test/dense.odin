@@ -96,14 +96,11 @@ dense_string_edges :: proc(t: ^testing.T) {
 	}
 }
 
-// A backslash run ends at each offset around the end of the writer's first 2 KB, whose escape state the next 2 KB take,
-// and of later segments, which are written blind while no space shows. A newline after the value is dropped.
-@(test)
-dense_segment_edges :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	for start in ([]int{2030, 2078, 4126, 8222}) {
-		for n in start ..< start + 30 {
-			for piece in ([]string{`\" ", " "`, `\\", " "`, `\\\" ", " "`, `é", " "`, `\\\\", " "`}) {
+@(private = "file")
+dense_sweep_piece :: proc(t: ^testing.T, starts: []int, lo_off, hi_off: int, pieces: []string, suffix: string, trail_nl: bool, loc := #caller_location) -> bool {
+	for base in starts {
+		for n in base + lo_off ..< base + hi_off {
+			for piece in pieces {
 				b: strings.Builder
 				defer strings.builder_destroy(&b)
 				strings.write_byte(&b, '"')
@@ -111,43 +108,31 @@ dense_segment_edges :: proc(t: ^testing.T) {
 					strings.write_byte(&b, 'a')
 				}
 				strings.write_string(&b, piece)
+				strings.write_string(&b, suffix)
 				src: [dynamic]u8
 				defer delete(src)
 				dense_text(&src, transmute([]u8)strings.to_string(b))
-				append(&src, '\n')
-				if !dense_agrees(t, src[:]) {
-					return
+				if trail_nl {
+					append(&src, '\n')
+				}
+				if !dense_agrees(t, src[:], loc = loc) {
+					return false
 				}
 			}
 		}
 	}
+	return true
 }
 
-// A string, an escape or a surrogate pair that a segment's end cuts reads on in the next: each at every offset around
-// the end of each of the first segments.
+// Backslash runs, escapes, and multibyte characters at each offset around the end of the writer's 2 KB segments,
+// including a trailing newline after the value.
 @(test)
-dense_escapes_cut_by_a_segment :: proc(t: ^testing.T) {
+dense_segment_edges :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	for end in ([]int{2048, 4096, 6144}) {
-		for n in end - 16 ..< end + 4 {
-			for escape in ([]string{`😀`, `é`, `\/`, `\\`, `\"`}) {
-				b: strings.Builder
-				defer strings.builder_destroy(&b)
-				strings.write_byte(&b, '"')
-				for _ in 0 ..< n {
-					strings.write_byte(&b, 'a')
-				}
-				strings.write_string(&b, escape)
-				strings.write_string(&b, `bc"`)
-				src: [dynamic]u8
-				defer delete(src)
-				dense_text(&src, transmute([]u8)strings.to_string(b))
-				if !dense_agrees(t, src[:]) {
-					return
-				}
-			}
-		}
+	if !dense_sweep_piece(t, []int{2030, 2078, 4126, 8222}, 0, 30, []string{`\" ", " "`, `\\", " "`, `\\\" ", " "`, `é", " "`, `\\\\", " "`}, "", true) {
+		return
 	}
+	dense_sweep_piece(t, []int{2048, 4096, 6144}, -16, 4, []string{`😀`, `é`, `\/`, `\\`, `\"`}, `bc"`, false)
 }
 
 // A document read tolerating ill-formed UTF-8 is written as it decodes, which the dense route does not do.
@@ -188,29 +173,41 @@ dense_leaves_other_layouts_to_the_walk :: proc(t: ^testing.T) {
 	}
 }
 
-// Texts of 8 to 25 bytes per node, which the dense route writes unless the first 2 KB hold blanks outside strings.
-// Either way the text is the rows'.
+@(private = "file")
+dense_repeated_strings_agree :: proc(t: ^testing.T, count: int, blank, unit: string, width, bound: int, loc := #caller_location) -> bool {
+	src: [dynamic]u8
+	defer delete(src)
+	append(&src, '[')
+	for i in 0 ..< count {
+		if i > 0 {
+			append(&src, ',')
+			append(&src, ..transmute([]u8)blank)
+		}
+		append(&src, '"')
+		for _ in 0 ..< width {
+			append(&src, ..transmute([]u8)unit)
+		}
+		append(&src, '"')
+	}
+	append(&src, ']')
+	return dense_agrees(t, src[:], bound, loc)
+}
+
+// Texts of 8 to 25 bytes per node and long strings with and without escapes, written by the dense route or by rows
+// depending on blanks in the first 2 KB: either way the text is one.
 @(test)
-dense_sampled_route :: proc(t: ^testing.T) {
+dense_sampled_and_long_strings :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	for blank in ([?]string{"", " ", "\n\t", "    "}) {
 		for width in ([?]int{4, 8, 14, 18}) {
-			src: [dynamic]u8
-			defer delete(src)
-			append(&src, '[')
-			for i in 0 ..< 400 {
-				if i > 0 {
-					append(&src, ',')
-					append(&src, ..transmute([]u8)blank)
-				}
-				append(&src, '"')
-				for _ in 0 ..< width {
-					append(&src, 'k')
-				}
-				append(&src, '"')
+			if !dense_repeated_strings_agree(t, 400, blank, "k", width, 26) {
+				return
 			}
-			append(&src, ']')
-			if !dense_agrees(t, src[:]) {
+		}
+	}
+	for spelling in ([?]string{"x", "x y", `x\n`, `x \"y\"`, `xé`, `x\/`}) {
+		for width in ([?]int{20, 60, 100}) {
+			if !dense_repeated_strings_agree(t, 40, "", spelling, width, 0) {
 				return
 			}
 		}
@@ -242,34 +239,6 @@ dense_escapes_before_blanks :: proc(t: ^testing.T) {
 		strings.write_byte(&src, ']')
 		if !dense_agrees(t, src.buf[:], bound = 0) {
 			return
-		}
-	}
-}
-
-// Texts of long strings with escapes and without, which the dense route writes when the first 2 KB hold few blanks outside
-// strings and the rows write when they hold more. Either way the text is the same.
-@(test)
-dense_long_strings :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	for spelling in ([?]string{"x", "x y", `x\n`, `x \"y\"`, `xé`, `x\/`}) {
-		for width in ([?]int{20, 60, 100}) {
-			src: [dynamic]u8
-			defer delete(src)
-			append(&src, '[')
-			for i in 0 ..< 40 {
-				if i > 0 {
-					append(&src, ',')
-				}
-				append(&src, '"')
-				for _ in 0 ..< width {
-					append(&src, ..transmute([]u8)spelling)
-				}
-				append(&src, '"')
-			}
-			append(&src, ']')
-			if !dense_agrees(t, src[:], 0) {
-				return
-			}
 		}
 	}
 }

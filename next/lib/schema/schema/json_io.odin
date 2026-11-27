@@ -18,7 +18,6 @@ import "stury:lib/schema/rules"
 
 // Parses RFC 8259 JSON `src` into a `write.Token_Tape` and returns its `tape.Document`.
 // The returned `tape` owns the document's backing storage; call `write.token_tape_drop(tt)` when done.
-@(private)
 parse_json_to_tape :: proc(src: []u8, tt: ^write.Token_Tape, allocator: runtime.Allocator) -> (doc: tape.Document, ok: bool) {
 	if write.token_tape_start(tt, false, 0, allocator) != nil {
 		return {}, false
@@ -797,4 +796,21 @@ value_to_json :: proc(v: rules.Value, indent: u8 = 0, tab := false, allocator :=
 		return nil, false
 	}
 	return jw_finish(&jw)
+}
+
+// Serializes `doc` to compact (or indented) RFC 8259 JSON bytes allocated from `allocator`.
+tape_to_json :: proc(doc: ^tape.Document, wopts := Write_Options{}, allocator := context.allocator, scratch := context.allocator) -> (text: []u8, err: write.Error) {
+	jw: Json_Writer
+	if !jw_init(&jw, wopts.indent, wopts.tab, allocator) {
+		return nil, runtime.Allocator_Error.Out_Of_Memory
+	}
+	if werr := write.tokens_of(doc, tape.ROOT, &jw, jw_take_token, scratch); werr != nil {
+		jw_drop(&jw)
+		return nil, werr
+	}
+	bytes, ok := jw_finish(&jw)
+	if !ok {
+		return nil, runtime.Allocator_Error.Out_Of_Memory
+	}
+	return bytes, nil
 }

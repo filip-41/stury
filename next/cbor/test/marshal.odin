@@ -3,6 +3,7 @@ package cbor_tests
 import "base:runtime"
 import "core:bytes"
 import "core:math"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import "core:time"
@@ -73,45 +74,6 @@ Many_Fields :: struct {
 	f40, f41, f42, f43, f44, f45, f46, f47, f48, f49: i64,
 	f50, f51, f52, f53, f54, f55, f56, f57, f58, f59: i64,
 	f60, f61, f62, f63, f64, f65, f66, f67, f68, f69: string,
-}
-
-@(private = "file")
-Fixed_Buf :: struct {
-	bytes: []u8,
-	used:  int,
-}
-
-@(private = "file")
-fixed_buf_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, align: int, old: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
-	f := (^Fixed_Buf)(data)
-	#partial switch mode {
-	case .Alloc, .Alloc_Non_Zeroed:
-		a := max(align, 1)
-		base := uintptr(raw_data(f.bytes))
-		cur := base + uintptr(f.used)
-		aligned := (cur + uintptr(a - 1)) &~ uintptr(a - 1)
-		off := int(aligned - base)
-		if off + size > len(f.bytes) {
-			return nil, .Out_Of_Memory
-		}
-		f.used = off + size
-		return f.bytes[off:off + size], nil
-	case .Resize, .Resize_Non_Zeroed:
-		a := max(align, 1)
-		base := uintptr(raw_data(f.bytes))
-		cur := base + uintptr(f.used)
-		aligned := (cur + uintptr(a - 1)) &~ uintptr(a - 1)
-		off := int(aligned - base)
-		if off + size > len(f.bytes) {
-			return nil, .Out_Of_Memory
-		}
-		if old != nil && old_size > 0 {
-			runtime.mem_copy_non_overlapping(raw_data(f.bytes[off:]), old, min(old_size, size))
-		}
-		f.used = off + size
-		return f.bytes[off:off + size], nil
-	}
-	return nil, nil
 }
 
 @(test)
@@ -193,18 +155,19 @@ cbor_marshal_specs_roundtrip_and_order :: proc(t: ^testing.T) {
 
 	fixed_backing := make([]u8, 256 * 1024, heap_alloc)
 	defer delete(fixed_backing, heap_alloc)
-	fb := Fixed_Buf{bytes = fixed_backing}
-	fixed_alloc := runtime.Allocator{fixed_buf_proc, &fb}
+	arena: mem.Arena
+	mem.arena_init(&arena, fixed_backing)
+	fixed_alloc := mem.arena_allocator(&arena)
 
 	for spec in cbor.Spec {
 		for sort_k in ([?]bool{false, true}) {
-			fb.used = 0
+			mem.arena_free_all(&arena)
 			out, ferr := cbor.marshal(&v, spec, {sort_keys = sort_k}, &plan, fixed_alloc)
 			testing.expectf(t, ferr == nil, "Fixed_Output %v sort=%v: %v", spec, sort_k, ferr)
 			testing.expectf(t, cbor.validate(out, spec) == nil, "Fixed_Output validate %v sort=%v", spec, sort_k)
 		}
 	}
-	fb.used = 0
+	mem.arena_free_all(&arena)
 	out_np, ferr_np := cbor.marshal(&v, .Preferred, {}, nil, fixed_alloc)
 	testing.expectf(t, ferr_np == nil && cbor.validate(out_np, .Preferred) == nil, "Fixed_Output nil-plan Preferred: %v", ferr_np)
 	testing.expect_value(t, tf.count, 0)

@@ -488,3 +488,92 @@ wide_double :: #force_no_inline proc "contextless" (text: []u8) -> f64 {
 	sign := u64(neg) << 63
 	return transmute(f64)(F64_INF_BITS | sign) if big_order else transmute(f64)sign
 }
+
+// The shortest decimal text of finite `f` that reads back as `f` as binary64, in jq's layout: plain for a decimal
+// point of 0.0001 to 10^15 past the digits and an exponent of two digits at least otherwise, with `.0` on whole
+// numbers. NaN and infinities have empty text. Caller guarantees `buf` holds at least 32 bytes.
+@(cold)
+float64_text :: proc "contextless" (f: f64, buf: []u8) -> (string, bool) #no_bounds_check {
+	if f - f != 0 {
+		return "", true
+	}
+	// A contextless proc needs a context for `strconv`, whose allocator it does not use.
+	context = runtime.default_context()
+	scratch: [32]u8
+	shortest := strconv.write_float(scratch[:], f, 'e', -1, 64, {})
+	at := 0
+	negative := shortest[0] == '-'
+	if negative {
+		at = 1
+	}
+	digits: [20]u8
+	k := 0
+	for ; at < len(shortest) && shortest[at] != 'e'; at += 1 {
+		if shortest[at] != '.' {
+			digits[k] = shortest[at]
+			k += 1
+		}
+	}
+	e := 0
+	for c in shortest[at + 2:] {
+		e = e * 10 + int(c - '0')
+	}
+	if shortest[at + 1] == '-' {
+		e = -e
+	}
+	for k > 0 && digits[k - 1] == '0' {
+		k -= 1
+	}
+	n := e + 1
+	w := 0
+	put :: proc "contextless" (buf: []u8, w: ^int, c: u8) {
+		buf[w^] = c
+		w^ += 1
+	}
+	if negative {
+		put(buf, &w, '-')
+	}
+	switch {
+	case k == 0:
+		put(buf, &w, '0')
+	case n + 3 >= 0 && n <= k + 15:
+		if n <= 0 {
+			put(buf, &w, '0')
+			put(buf, &w, '.')
+			for _ in 0 ..< -n {
+				put(buf, &w, '0')
+			}
+		}
+		for c, j in digits[:k] {
+			if j == n && n > 0 {
+				put(buf, &w, '.')
+			}
+			put(buf, &w, c)
+		}
+		for _ in k ..< n {
+			put(buf, &w, '0')
+		}
+	case:
+		put(buf, &w, digits[0])
+		if k > 1 {
+			put(buf, &w, '.')
+			for c in digits[1:k] {
+				put(buf, &w, c)
+			}
+		}
+		put(buf, &w, 'e')
+		put(buf, &w, '+' if n - 1 >= 0 else '-')
+		x := abs(n - 1)
+		if x >= 100 {
+			put(buf, &w, u8('0' + x / 100))
+		}
+		put(buf, &w, u8('0' + x / 10 % 10))
+		put(buf, &w, u8('0' + x % 10))
+		return string(buf[:w]), true
+	}
+	if k <= n || k == 0 {
+		put(buf, &w, '.')
+		put(buf, &w, '0')
+	}
+	return string(buf[:w]), true
+}

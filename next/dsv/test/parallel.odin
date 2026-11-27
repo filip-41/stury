@@ -1,9 +1,11 @@
 package dsv_tests
 
+import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math/rand"
 import "core:mem"
+import "core:mem/virtual"
 import "core:slice"
 import "core:strings"
 import "core:testing"
@@ -14,13 +16,6 @@ import "stury:lib/ops/build"
 import "stury:testkit"
 
 // Builds of delimited texts on a runner's threads against the build on one thread.
-
-// A runner whose `start` counts its calls and runs none, so a build that joins its parts starts a task more than one
-// that falls back to one thread.
-@(private = "file")
-counting_runner :: proc(threads: int, starts: ^int) -> tape.Runner {
-	return {threads = threads, start = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) { (^int)(data)^ += 1 }, finish = proc(data: rawptr) {}, data = starts}
-}
 
 // The thread counts every text is built on, and for a short text the counts that cut it at each of its LFs.
 @(private = "file")
@@ -85,16 +80,8 @@ seam_text :: proc(spec: dsv.Spec, rows, width: int, comments, ragged: bool) -> [
 	return transmute([]u8)strings.to_string(b)
 }
 
-// Replaces one byte of `src` or cuts it short.
 @(private = "file")
-spoil :: proc(src: []u8) -> []u8 {
-	if len(src) == 0 || rand.int_max(4) == 0 {
-		return src[:rand.int_max(len(src) + 1)]
-	}
-	bytes := [?]u8{'"', ',', '\t', '\n', '\r', '\\', '#', 'x', 0xff, 0xc3}
-	src[rand.int_max(len(src))] = bytes[rand.int_max(len(bytes))]
-	return src
-}
+DSV_MUTATE_ALPHABET :: "\",\t\n\r\\#x\xff\xc3"
 
 // The option sets the texts are built under: each tolerance, each `Dsv_Options` field, the budgets and the policies.
 @(private = "file")
@@ -123,37 +110,14 @@ parallel_options :: proc(spec: dsv.Spec) -> []dsv.Options {
 	)
 }
 
-// Whether two documents of one text hold the same table.
-@(private = "file")
-same_table :: proc(a, b: ^dsv.Document) -> bool {
-	if (a.ext == nil) != (b.ext == nil) {
-		return false
-	}
-	if a.ext == nil {
-		return true
-	}
-	x, y := a.ext.format.(tape.Tabular_Ext), b.ext.format.(tape.Tabular_Ext)
-	return slice.equal(x.tables, y.tables) && slice.equal(x.slots, y.slots) && x.dups == y.dups && x.options == y.options
-}
-
-// The thread law over `src`, with the tables compared too. Under a memory budget the law is the one-thread document or a
-// refusal of the budget.
+// The thread law over `src`, with the tables compared too (via `testkit.same_documents`). Under a memory budget the
+// law is the one-thread document or a refusal of the budget.
 @(private = "file")
 agree :: proc(t: ^testing.T, spec: dsv.Spec, src: []u8, opts: dsv.Options, runner: ^tape.Runner, name: string) -> (ok, built: bool) {
 	if opts.budget.memory != 0 {
 		return testkit.threads_fit(t, dsv.reads(spec), dsv.as(spec), src, opts, runner, name), false
 	}
-	if ok, built = testkit.threads_agree(t, dsv.reads(spec), dsv.as(spec), src, opts, runner, name); !ok {
-		return
-	}
-	one, _ := dsv.build(src, spec, opts)
-	defer dsv.destroy(&one)
-	wide := opts
-	wide.runner = runner
-	many, _ := dsv.build(src, spec, wide)
-	defer dsv.destroy(&many)
-	ok = testing.expectf(t, same_table(&one, &many), "%s %v %v on %d threads: the tables differ", name, spec, opts, runner.threads)
-	return
+	return testkit.threads_agree(t, dsv.reads(spec), dsv.as(spec), src, opts, runner, name)
 }
 
 // Over texts whose chunks start inside quoted cells with LFs and `""`, past CR LFs, before characters of several bytes,
@@ -173,7 +137,7 @@ parts_build_what_one_thread_builds :: proc(t: ^testing.T) {
 			width := 1 + rand.int_max(5) if round % 4 != 3 else 150 + rand.int_max(60)
 			// Ragged records that no tolerance takes fault at the first record of another width.
 			src := seam_text(spec, 4 + rand.int_max(30), width, o.comment != 0, .Ragged in opts.tolerate || rand.int_max(4) == 0)
-			texts := [?][]u8{src, spoil(slice.clone(src, context.temp_allocator))}
+			texts := [?][]u8{src, testkit.mutate(src, DSV_MUTATE_ALPHABET)}
 			for text, i in texts {
 				for threads in threads_of(len(text)) {
 					r := testkit.serial_runner(threads)
@@ -211,12 +175,11 @@ parts_join_with_no_build_on_one_thread :: proc(t: ^testing.T) {
 			opts := dsv.Options{format = dsv.Dsv_Options{comment = '#' if comments else 0}}
 			for threads in ([]int{3, 17, 70}) {
 				starts := 0
-				r := counting_runner(threads, &starts)
+				r := testkit.counting_runner(threads, &starts)
 				if ok, built := agree(t, spec, src, opts, &r, "joined"); !ok || !testing.expect(t, built) {
 					return
 				}
-				// `agree` builds on the runner twice.
-				testing.expectf(t, starts == 2 * (3 if comments else 2), "%v comments %v on %d threads: %d tasks", spec, comments, threads, starts)
+				testing.expectf(t, starts == (3 if comments else 2), "%v comments %v on %d threads: %d tasks", spec, comments, threads, starts)
 			}
 		}
 	}
@@ -313,7 +276,7 @@ parts_free_what_they_take :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	for spec in dsv.Spec {
 		src := seam_text(spec, 200, 3, true, false)
-		bad := spoil(slice.clone(src, context.temp_allocator))
+		bad := testkit.mutate(src, DSV_MUTATE_ALPHABET)
 		r := testkit.serial_runner(9)
 		for text in ([][]u8{src, bad}) {
 			for opts in parallel_options(spec) {
@@ -329,7 +292,7 @@ parts_free_what_they_take :: proc(t: ^testing.T) {
 }
 
 // A memory budget the build on one thread fits gives, at every thread count, the document of that build or the refusal of
-// the budget, never another document. The build on one thread under a budget gives the same answer every time.
+// the budget, never another document.
 @(test)
 memory_budget_gives_the_one_thread_document_or_a_refusal :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -337,52 +300,329 @@ memory_budget_gives_the_one_thread_document_or_a_refusal :: proc(t: ^testing.T) 
 	context.random_generator = testkit.seeded(t, &state, 0xb0da)
 	defer free_all(context.temp_allocator)
 	one, many := testkit.serial_runner(3), testkit.serial_runner(17)
-	builds :: proc(src: []u8, spec: dsv.Spec, opts: dsv.Options, memory: u64) -> bool {
-		wide := opts
-		wide.budget.memory = memory
-		doc, err := dsv.build(src, spec, wide)
-		dsv.destroy(&doc)
-		return err == nil
-	}
+	runners := [2]^tape.Runner{&one, &many}
 	for spec in dsv.Spec {
 		for opts in ([]dsv.Options{{}, {format = dsv.Dsv_Options{comment = '#'}}, {tolerate = {.Ragged}}, {format = dsv.Dsv_Options{no_header = true}}}) {
 			d, _ := opts.format.(dsv.Dsv_Options)
 			src := seam_text(spec, 300, 3, d.comment != 0, .Ragged in opts.tolerate)
-			// The least budget that builds the text, found by bisection from the first doubling that does.
-			hi := u64(len(src))
-			for hi < 64 * u64(len(src)) && !builds(src, spec, opts, hi) {
-				hi *= 2
+			if !testkit.threads_fit_budget_sweep(t, dsv.reads(spec), dsv.as(spec), src, opts, runners[:], false, "budget") {
+				return
 			}
-			if !testing.expectf(t, builds(src, spec, opts, hi), "%v %v: no budget up to 64 times the text builds it", spec, opts) {
+		}
+	}
+}
+
+@(private = "file")
+Csv_Row :: struct {
+	id:    i64    `csv:"id"`,
+	name:  string `csv:"name"`,
+	score: f64    `csv:"score"`,
+	ok:    bool   `csv:"ok"`,
+	note:  string `csv:"note"`,
+}
+
+@(private = "file")
+make_large_dsv :: proc(rows: int, spec: dsv.Spec, dirty: bool, unclosed_quote: bool, allocator := context.allocator) -> []u8 {
+	sep := "\t" if spec == .Tsv else ","
+	b := strings.builder_make(0, rows * 64, allocator)
+	fmt.sbprintf(&b, "id%sname%sscore%sok%snote\n", sep, sep, sep, sep)
+	for i in 0 ..< rows {
+		if dirty && (i == 7 || i == rows / 2 || i == rows - 5) {
+			// Bad width (too few fields)
+			fmt.sbprintf(&b, "%d%srow-%d\n", i, sep, i)
+		} else if unclosed_quote && spec == .Csv && i == rows / 3 {
+			// Unclosed quote in CSV (triggers astray serial fallback)
+			fmt.sbprintf(&b, "%d,\"unclosed,1.5,true,bad\n", i)
+		} else if spec == .Csv && i % 17 == 0 {
+			// Multi-line quoted CSV cell with escaped quote
+			fmt.sbprintf(&b, "%d,\"row \"\"%d\"\"\",%d.25,%v,\"line1\nline2\"\n", i, i, i % 100, i % 2 == 0)
+		} else {
+			fmt.sbprintf(&b, "%d%srow-%d%s%d.5%s%v%snote-%d\n", i, sep, i, sep, i % 100, sep, i % 2 == 0, sep, i)
+		}
+	}
+	return transmute([]u8)strings.to_string(b)
+}
+
+@(test)
+parallel_dsv_validate_equals_serial :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for spec in dsv.Spec {
+		for dirty in ([]bool{false, true}) {
+			src := make_large_dsv(12000, spec, dirty, false)
+			defer delete(src)
+			want := dsv.validate(src, spec)
+			testing.expectf(t, (want == nil) == !dirty, "%v dirty=%v serial=%v", spec, dirty, want)
+			for workers in ([]int{1, 2, 4, 18}) {
+				pool: host.Pool
+				_ = host.pool_init(&pool, workers)
+				defer host.pool_destroy(&pool)
+				got := dsv.validate(src, spec, {runner = &pool.runner})
+				testing.expectf(t, got == want, "%v dirty=%v w=%d: got=%v want=%v", spec, dirty, workers, got, want)
+			}
+		}
+	}
+	// CSV with unclosed quote in middle -> parallel detects astray and returns exact serial fault.
+	uq := make_large_dsv(12000, .Csv, false, true)
+	defer delete(uq)
+	want_uq := dsv.validate(uq, .Csv)
+	pool: host.Pool
+	_ = host.pool_init(&pool, 4)
+	defer host.pool_destroy(&pool)
+	got_uq := dsv.validate(uq, .Csv, {runner = &pool.runner})
+	testing.expectf(t, got_uq == want_uq && got_uq != nil, "csv unclosed quote: got=%v want=%v", got_uq, want_uq)
+}
+
+@(test)
+parallel_dsv_records_equal_serial :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	path := []tape.Step{tape.Name("score")}
+	demand, _ := tape.demand_of({path, {tape.Name("name")}})
+	defer tape.destroy_demand(&demand)
+
+	for spec in ([]dsv.Spec{.Csv, .Tsv, .Plain}) {
+		for mode in ([]int{0, 1, 2}) {
+			if mode == 2 && spec != .Csv {
 				continue
 			}
-			lo := u64(0)
-			for hi - lo > 1 {
-				mid := lo + (hi - lo) / 2
-				if builds(src, spec, opts, mid) {
-					hi = mid
-				} else {
-					lo = mid
+			src := make_large_dsv(4500, spec, mode == 1, mode == 2)
+			defer delete(src)
+
+			// Serial validate
+			rs := dsv.records_open(src, .Lines, spec)
+			defer tape.destroy_records(&rs)
+			sbad: [16]tape.Record
+			sn := dsv.records_validate(&rs, sbad[:])
+
+			// Serial find
+			rfs := dsv.records_open(src, .Lines, spec)
+			defer tape.destroy_records(&rfs)
+			sfout := make([]tape.Record, 4600)
+			defer delete(sfout)
+			sfans := make([]tape.Span_Answer, 4600)
+			defer delete(sfans)
+			sfn := dsv.records_find(&rfs, path, sfout, sfans)
+
+			// Serial scan
+			rss := dsv.records_open(src, .Lines, spec)
+			defer tape.destroy_records(&rss)
+			ssout := make([]tape.Record, 4600)
+			defer delete(ssout)
+			ssdocs := make([]tape.Document, 4600)
+			defer delete(ssdocs)
+			ssn := dsv.records_scan(&rss, &demand, ssout, ssdocs)
+
+			for workers in ([]int{1, 2, 4, 18}) {
+				pool: host.Pool
+				_ = host.pool_init(&pool, workers)
+				defer host.pool_destroy(&pool)
+
+				// Validate
+				rp := dsv.records_open(src, .Lines, spec, {runner = &pool.runner})
+				defer tape.destroy_records(&rp)
+				pbad: [16]tape.Record
+				pn := dsv.records_validate(&rp, pbad[:])
+				testing.expectf(t, pn == sn && rp.index == rs.index && rp.err == rs.err, "%v mode=%d w=%d validate: pn=%d/%d idx=%d/%d", spec, mode, workers, pn, sn, rp.index, rs.index)
+				for i in 0 ..< min(pn, sn) {
+					testing.expectf(t, pbad[i] == sbad[i], "%v mode=%d w=%d bad[%d]: %v vs %v", spec, mode, workers, i, pbad[i], sbad[i])
 				}
-			}
-			least := hi
-			testing.expect(t, builds(src, spec, opts, least) == builds(src, spec, opts, least), "one thread answers a budget the same each time")
-			for memory in max(least, 12) - 12 ..= least + 12 {
-				for runner in ([]^tape.Runner{&one, &many}) {
-					wide := opts
-					wide.budget.memory = memory
-					if !testkit.threads_fit(t, dsv.reads(spec), dsv.as(spec), src, wide, runner, "budget near the least") {
-						return
-					}
+
+				// Find
+				rfp := dsv.records_open(src, .Lines, spec, {runner = &pool.runner})
+				defer tape.destroy_records(&rfp)
+				pfout := make([]tape.Record, 4600)
+				defer delete(pfout)
+				pfans := make([]tape.Span_Answer, 4600)
+				defer delete(pfans)
+				pfn := dsv.records_find(&rfp, path, pfout, pfans)
+				testing.expectf(t, pfn == sfn && rfp.index == rfs.index && rfp.err == rfs.err, "%v mode=%d w=%d find n=%d/%d", spec, mode, workers, pfn, sfn)
+				for i in 0 ..< min(pfn, sfn) {
+					testing.expectf(t, pfout[i] == sfout[i] && pfans[i] == sfans[i], "%v mode=%d w=%d find[%d]", spec, mode, workers, i)
 				}
-			}
-			for memory := u64(1); memory < 4 * u64(len(src)); memory += 1 + memory / 3 {
-				wide := opts
-				wide.budget.memory = memory
-				if !testkit.threads_fit(t, dsv.reads(spec), dsv.as(spec), src, wide, &many, "budget") {
-					return
+
+				// Scan
+				rsp := dsv.records_open(src, .Lines, spec, {runner = &pool.runner})
+				defer tape.destroy_records(&rsp)
+				psout := make([]tape.Record, 4600)
+				defer delete(psout)
+				psdocs := make([]tape.Document, 4600)
+				defer delete(psdocs)
+				psn := dsv.records_scan(&rsp, &demand, psout, psdocs)
+				testing.expectf(t, psn == ssn && rsp.index == rss.index && rsp.err == rss.err, "%v mode=%d w=%d scan n=%d/%d", spec, mode, workers, psn, ssn)
+				for i in 0 ..< min(psn, ssn) {
+					testing.expectf(t, psout[i] == ssout[i] && len(psdocs[i].nodes) == len(ssdocs[i].nodes), "%v mode=%d w=%d scan[%d]", spec, mode, workers, i)
 				}
 			}
 		}
+	}
+}
+
+@(test)
+parallel_dsv_typed_unmarshal :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for spec in dsv.Spec {
+		src := make_large_dsv(14000, spec, false, false)
+		defer delete(src)
+
+		va_ref: virtual.Arena
+		_ = virtual.arena_init_growing(&va_ref)
+		defer virtual.arena_destroy(&va_ref)
+		want: []Csv_Row
+		testing.expect(t, dsv.unmarshal(src, &want, spec, allocator = virtual.arena_allocator(&va_ref)) == nil)
+		testing.expectf(t, len(want) == 14000, "%v want len=%d", spec, len(want))
+
+		for workers in ([]int{1, 2, 4, 18}) {
+			pool: host.Pool
+			_ = host.pool_init(&pool, workers)
+			defer host.pool_destroy(&pool)
+
+			for borrow in ([]bool{false, true}) {
+				// Arena (`.Blocks`)
+				va: virtual.Arena
+				_ = virtual.arena_init_growing(&va)
+				defer virtual.arena_destroy(&va)
+				got: []Csv_Row
+				err := dsv.unmarshal(src, &got, spec, {borrow_strings = borrow}, {runner = &pool.runner}, virtual.arena_allocator(&va))
+				testing.expectf(t, err == nil && len(got) == len(want), "%v w=%d borrow=%v arena err=%v len=%d", spec, workers, borrow, err, len(got))
+				for i in 0 ..< min(len(got), len(want)) {
+					if got[i] != want[i] {
+						testing.expectf(t, false, "%v w=%d row[%d]: %v vs %v", spec, workers, i, got[i], want[i])
+						break
+					}
+				}
+			}
+		}
+
+		// Heap (`.Direct`) + Tracking_Allocator (fallback to serial)
+		pool: host.Pool
+		_ = host.pool_init(&pool, 4)
+		defer host.pool_destroy(&pool)
+		heap := runtime.heap_allocator()
+		hgot: []Csv_Row
+		herr := dsv.unmarshal(src, &hgot, spec, {borrow_strings = false}, {runner = &pool.runner}, heap)
+		testing.expectf(t, herr == nil && len(hgot) == len(want), "%v heap err=%v", spec, herr)
+		for row in hgot {
+			delete(row.name, heap)
+			delete(row.note, heap)
+		}
+		delete(hgot, heap)
+
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, heap)
+		defer mem.tracking_allocator_destroy(&track)
+		ta := mem.tracking_allocator(&track)
+		tgot: []Csv_Row
+		terr := dsv.unmarshal(src, &tgot, spec, {borrow_strings = false}, {runner = &pool.runner}, ta)
+		testing.expectf(t, terr == nil && len(tgot) == len(want), "%v tracking err=%v", spec, terr)
+		for row in tgot {
+			delete(row.name, ta)
+			delete(row.note, ta)
+		}
+		delete(tgot, ta)
+		testing.expectf(t, len(track.allocation_map) == 0 && len(track.bad_free_array) == 0, "%v tracking leaks=%d bad=%d", spec, len(track.allocation_map), len(track.bad_free_array))
+	}
+
+	// Faulty CSV typed unmarshal falls back cleanly to serial with zero leaks.
+	bad_csv := make_large_dsv(14000, .Csv, true, false)
+	defer delete(bad_csv)
+	pool: host.Pool
+	_ = host.pool_init(&pool, 4)
+	defer host.pool_destroy(&pool)
+	va_s, va_p: virtual.Arena
+	_ = virtual.arena_init_growing(&va_s)
+	_ = virtual.arena_init_growing(&va_p)
+	defer virtual.arena_destroy(&va_s)
+	defer virtual.arena_destroy(&va_p)
+	srows, prows: []Csv_Row
+	serr := dsv.unmarshal(bad_csv, &srows, .Csv, allocator = virtual.arena_allocator(&va_s))
+	perr := dsv.unmarshal(bad_csv, &prows, .Csv, {}, {runner = &pool.runner}, virtual.arena_allocator(&va_p))
+	testing.expectf(t, perr == serr && perr != nil, "dsv bad parallel typed: perr=%v serr=%v", perr, serr)
+}
+
+// Regression tests for Phase 1B adversarial review findings in DSV:
+// - H4: `dsv.records_scan` under `no_header` when record 0 has a fault (`Lone_Cr` / `Invalid_Utf8`) and a different
+//   column count than rows 1..N must match serial bit-for-bit without corrupting `r.width`.
+// - C2: parallel `dsv.records_scan` with a shared non-thread-safe `opts.scratch` arena is data-race-free.
+@(test)
+parallel_dsv_review_regressions :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	pool: host.Pool
+	_ = host.pool_init(&pool, 4)
+	defer host.pool_destroy(&pool)
+
+	// H4: `no_header` CSV & TSV where record 0 faults (2 cells) and rows 1..400 are valid (3 cells).
+	for spec in ([]dsv.Spec{.Csv, .Tsv}) {
+		sep := "\t" if spec == .Tsv else ","
+		for fault_row in ([]string{
+			fmt.tprintf("bad\rcell%ssecond\n", sep), // Lone_Cr, 2 columns
+			fmt.tprintf("bad\xffcell%ssecond\n", sep), // Invalid_Utf8, 2 columns
+		}) {
+			b := strings.builder_make()
+			defer strings.builder_destroy(&b)
+			strings.write_string(&b, fault_row)
+			for i in 1 ..= 400 {
+				fmt.sbprintf(&b, "%d%sname-%05d-padding-payload%sok\n", i, sep, i, sep)
+			}
+			src := transmute([]u8)strings.to_string(b)
+
+			demand, derr := tape.demand_of({[]tape.Step{tape.Index(0)}, []tape.Step{tape.Index(2)}})
+			testing.expect(t, derr == nil)
+			defer tape.destroy_demand(&demand)
+
+			opts_s := dsv.Options{format = tape.Dsv_Options{no_header = true}}
+			opts_p := dsv.Options{format = tape.Dsv_Options{no_header = true}, runner = &pool.runner}
+			rs := dsv.records_open(src, .Lines, spec, opts_s)
+			rp := dsv.records_open(src, .Lines, spec, opts_p)
+			defer tape.destroy_records(&rs)
+			defer tape.destroy_records(&rp)
+
+			out_s := make([]tape.Record, 512)
+			docs_s := make([]tape.Document, 512)
+			out_p := make([]tape.Record, 512)
+			docs_p := make([]tape.Document, 512)
+			defer delete(out_s)
+			defer delete(docs_s)
+			defer delete(out_p)
+			defer delete(docs_p)
+
+			ns := dsv.records_scan(&rs, &demand, out_s, docs_s)
+			np := dsv.records_scan(&rp, &demand, out_p, docs_p)
+			testing.expectf(t, ns == np && rs.err == rp.err && rs.width == rp.width && rs.width == 3,
+				"H4 %v: ns=%d np=%d width s=%d p=%d err s=%v p=%v", spec, ns, np, rs.width, rp.width, rs.err, rp.err)
+			for i in 0 ..< min(ns, np) {
+				if out_s[i] != out_p[i] {
+					testing.expectf(t, false, "H4 %v rec[%d]: got=%v want=%v", spec, i, out_p[i], out_s[i])
+					break
+				}
+			}
+		}
+	}
+
+	// C2: Shared non-thread-safe `mem.Arena` as `opts.scratch` under parallel `dsv.records_scan` (TSan-verified).
+	{
+		src := make_large_dsv(2000, .Csv, false, false)
+		defer delete(src)
+		scratch_buf := make([]u8, 2 << 20)
+		defer delete(scratch_buf)
+		arena: mem.Arena
+		mem.arena_init(&arena, scratch_buf)
+		demand, _ := tape.demand_of({[]tape.Step{tape.Name("name")}, []tape.Step{tape.Name("score")}})
+		defer tape.destroy_demand(&demand)
+
+		rp := dsv.records_open(src, .Lines, .Csv, {runner = &pool.runner, scratch = mem.arena_allocator(&arena)})
+		defer tape.destroy_records(&rp)
+		out := make([]tape.Record, 512)
+		docs := make([]tape.Document, 512)
+		defer delete(out)
+		defer delete(docs)
+		total := 0
+		for {
+			n := dsv.records_scan(&rp, &demand, out, docs)
+			total += n
+			if n < len(out) {
+				break
+			}
+		}
+		testing.expectf(t, total == 2000 && rp.err == nil, "C2 dsv scan: total=%d err=%v", total, rp.err)
 	}
 }

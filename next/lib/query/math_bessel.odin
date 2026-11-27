@@ -820,9 +820,6 @@ J1_QS2 := [6]f64{
 }
 
 @(private = "file")
-J1_INVSQRTPI :: 5.64189583547756279280e-01
-
-@(private = "file")
 J1_TPI :: 6.36619772367581382433e-01
 
 @(private = "file")

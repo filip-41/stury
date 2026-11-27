@@ -1,7 +1,5 @@
 package jq_tests
 
-import "core:mem/virtual"
-import "core:strings"
 import "core:testing"
 import "stury:testkit"
 
@@ -259,12 +257,5 @@ false`},
 @(test)
 builtins_beyond_jq_give_their_documented_answers :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	arena: virtual.Arena
-	testing.expect(t, suite_arena(&arena) == nil)
-	defer virtual.arena_destroy(&arena)
-	context.allocator = virtual.arena_allocator(&arena)
-	for c, i in BEYOND {
-		k := Case{file = "beyond", line = i, prog = c[0], input = c[1], want = strings.split(c[2], "\n")}
-		testing.expectf(t, run_case(k, true) == .Pass, "%s", c[0])
-	}
+	run_case_table(t, "beyond", BEYOND[:])
 }

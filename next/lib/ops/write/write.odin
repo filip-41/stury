@@ -263,6 +263,55 @@ put_byte :: #force_inline proc(out: ^Out, c: u8) #no_bounds_check {
 	out.cursor += 1
 }
 
+// Writes a line end followed by `level * width` indent bytes filled from the repeated-byte word `fill`.
+line_indent :: #force_inline proc(out: ^Out, width: int, fill: u64, level: int) #no_bounds_check {
+	n := level * width
+	if n + 9 > ROOM_MAX {
+		line_indent_long(out, fill, n)
+		return
+	}
+	p := room(out, n + 9)
+	p[0] = '\n'
+	for k := 0; k < n; k += 8 {
+		intrinsics.unaligned_store((^u64)(p[1 + k:]), fill)
+	}
+	out.cursor += n + 1
+}
+
+@(private = "file", cold)
+line_indent_long :: #force_no_inline proc(out: ^Out, fill: u64, n: int) {
+	put_byte(out, '\n')
+	for left := n; left > 0; {
+		k := min(left, ROOM_MAX - 8)
+		p := room(out, k + 8)
+		for i := 0; i < k; i += 8 {
+			intrinsics.unaligned_store((^u64)(p[i:]), fill)
+		}
+		out.cursor += k
+		left -= k
+	}
+}
+
+// Whether the object at `at` holds a `#text` member, so that no whitespace may be added between its children.
+holds_text :: proc(w: ^Tree, at: tape.Node_Index, markup: bool, text_key := "#text") -> bool {
+	end := tape.node_after(w.doc, at)
+	for k := at + 1; k < end; k = tape.node_after(w.doc, k + 1) {
+		if markup {
+			if tape.is_text_key(w.nodes[k]) {
+				return true
+			}
+			continue
+		}
+		if t := w.nodes[k]; t.spelling & tape.SPELLING_DECODE == 0 && int(t.n) != len(text_key) {
+			continue
+		}
+		if name, ok := text_of(w, k); ok && name == text_key {
+			return true
+		}
+	}
+	return false
+}
+
 // Writes what a sink output holds to the sink now, so a writer that sizes its runs by the room left starts them in a
 // whole buffer. A buffer output is untouched.
 drain :: proc(out: ^Out) {

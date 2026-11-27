@@ -5,6 +5,7 @@ package testkit
 import "base:runtime"
 import "core:fmt"
 import "core:log"
+import "core:math/rand"
 import "core:mem"
 import "core:slice"
 import "core:strings"
@@ -172,14 +173,6 @@ answers_match :: proc(doc, r: ^tape.Document, path: int, want: []Ref_Answer, lim
 	}
 	_, _, more := tape.answer({doc = r}, path, n)
 	return !more
-}
-
-// Whether the answers of path `path` of the scan `r` are the reference's over the build `doc`, its first `limit` for a
-// limit past 0, their outcomes and found values in document order.
-answers_agree :: proc(doc, r: ^tape.Document, path: int, steps: []tape.Step, dups: tape.Duplicates, limit: int) -> bool {
-	want := make([dynamic]Ref_Answer, context.temp_allocator)
-	reference_answers(doc, steps, dups, &want)
-	return answers_match(doc, r, path, want[:], limit)
 }
 
 // Whether two errors of reads of one text are the same: the same fault at the same byte, or the same other error.
@@ -452,6 +445,20 @@ same_documents :: proc(a, b: tape.Document) -> bool {
 			return false
 		}
 	}
+	ax, bx: tape.Tabular_Ext
+	aok, bok: bool
+	if a.ext != nil {
+		ax, aok = a.ext.format.(tape.Tabular_Ext)
+	}
+	if b.ext != nil {
+		bx, bok = b.ext.format.(tape.Tabular_Ext)
+	}
+	if aok != bok {
+		return false
+	}
+	if aok && (!same(ax.tables, bx.tables) || !same(ax.slots, bx.slots) || ax.dups != bx.dups || ax.options != bx.options) {
+		return false
+	}
 	if (a.partial == nil) != (b.partial == nil) {
 		return false
 	}
@@ -460,6 +467,192 @@ same_documents :: proc(a, b: tape.Document) -> bool {
 	}
 	x, y := a.partial, b.partial
 	return same(x.answers, y.answers) && same(x.starts, y.starts) && same(x.kept, y.kept) && same(x.missing, y.missing) && same(x.names, y.names) && x.dups == y.dups
+}
+
+// Returns a copy of `src` with one random mutation: a byte replaced from `alphabet` (or random byte when empty),
+// a byte dropped, a byte inserted, or a random tail truncated.
+mutate :: proc(src: []u8, alphabet := "", allocator := context.temp_allocator) -> []u8 {
+	out := make([dynamic]u8, len(src), allocator)
+	copy(out[:], src)
+	pick :: proc(alphabet: string) -> u8 {
+		return alphabet[rand.int_max(len(alphabet))] if len(alphabet) > 0 else u8(rand.int_max(256))
+	}
+	if len(out) == 0 {
+		append(&out, pick(alphabet))
+		return out[:]
+	}
+	at := rand.int_max(len(out))
+	switch rand.int_max(4) {
+	case 0:
+		out[at] = pick(alphabet)
+	case 1:
+		ordered_remove(&out, at)
+	case 2:
+		inject_at(&out, at, pick(alphabet))
+	case 3:
+		resize(&out, at)
+	}
+	return out[:]
+}
+
+// Sweeps memory budgets on `src` across `runners`: bisects the least budget that builds `src`, then checks `threads_fit`
+// over a geometric sweep and around the least budget.
+threads_fit_budget_sweep :: proc(
+	t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, base_opts: tape.Options,
+	runners: []^tape.Runner, allow_unbuilt: bool, name: string, loc := #caller_location,
+) -> bool {
+	builds :: proc(reads: ^tape.Reads, f: ^tape.Format, src: []u8, base_opts: tape.Options, memory: u64) -> bool {
+		o := base_opts
+		o.budget.memory = memory
+		doc, err := reads.build(f, src, o, context.allocator)
+		tape.destroy(&doc)
+		return err == nil
+	}
+	hi := u64(max(len(src), 1))
+	for hi < 8 * u64(max(len(src), 1)) && !builds(reads, f, src, base_opts, hi) {
+		hi *= 2
+	}
+	least := u64(0)
+	if builds(reads, f, src, base_opts, hi) {
+		lo := u64(0)
+		for hi - lo > 1 {
+			mid := lo + (hi - lo) / 2
+			if builds(reads, f, src, base_opts, mid) {
+				hi = mid
+			} else {
+				lo = mid
+			}
+		}
+		least = hi
+	}
+	testing.expectf(t, least != 0 || allow_unbuilt, "%s: no budget up to eight times the text builds it", name, loc = loc)
+	for memory := u64(1); memory < 8 * u64(max(len(src), 1)); memory += 1 + memory / 5 {
+		if !sampled(8) {
+			continue
+		}
+		o := base_opts
+		o.budget.memory = memory
+		for runner in runners {
+			if !threads_fit(t, reads, f, src, o, runner, name) {
+				return false
+			}
+		}
+	}
+	for memory in max(least, 12) - 12 ..= least + 12 {
+		if (memory + 1 < least || memory > least + 1) && !sampled(8) {
+			continue
+		}
+		o := base_opts
+		o.budget.memory = memory
+		for runner in runners {
+			if !threads_fit(t, reads, f, src, o, runner, name) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Checks that `Budget.steps` counts the `containers` opened by `build`, `scan`, `find`, and `validate` on `src`,
+// refusing every budget below `containers` with `Exceeded{.Steps}` and succeeding at `containers` and above.
+steps_budget_agree :: proc(
+	t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, path: []tape.Step, containers: u64,
+	want_lo: u64 = max(u64), loc := #caller_location,
+) {
+	paths := [][]tape.Step{path}
+	for steps in u64(1) ..= containers + 1 {
+		opts := tape.Options{budget = {steps = steps}}
+		over := steps < containers
+		doc, err := reads.build(f, src, opts, context.allocator)
+		x, exceeded := err.(tape.Exceeded)
+		testing.expectf(t, over == (exceeded && x.kind == .Steps), "build, %d steps: %v", steps, err, loc = loc)
+		tape.destroy(&doc)
+		demand, derr := tape.demand_of(paths)
+		testing.expect(t, derr == nil, loc = loc)
+		part, serr := reads.scan(f, src, &demand, {}, opts, context.allocator)
+		x, exceeded = serr.(tape.Exceeded)
+		testing.expectf(t, over == (exceeded && x.kind == .Steps), "scan, %d steps: %v", steps, serr, loc = loc)
+		tape.destroy(&part)
+		tape.destroy_demand(&demand)
+		answer, ferr := reads.find(f, src, path, {}, opts, context.allocator)
+		x, exceeded = ferr.(tape.Exceeded)
+		testing.expectf(t, over == (exceeded && x.kind == .Steps), "find, %d steps: %v", steps, ferr, loc = loc)
+		if want_lo != max(u64) {
+			testing.expect(t, over || answer.lo == want_lo, loc = loc)
+		}
+		verr := reads.validate(f, src, opts, context.allocator)
+		x, exceeded = verr.(tape.Exceeded)
+		testing.expectf(t, over == (exceeded && x.kind == .Steps), "validate, %d steps: %v", steps, verr, loc = loc)
+	}
+}
+
+// The records of a binary text under `framing`, read with every record operation: their spans, decoded keys, and error.
+Binary_Records_Read :: struct {
+	spans: [][2]u64,
+	keys:  []string,
+	err:   tape.Error,
+}
+
+// Reads records of `src` under `framing` (optionally at container path `at`), verifying agreement across
+// `records_validate`, `records_find`, and `records_scan` against `reads.build`.
+read_binary_records :: proc(
+	t: ^testing.T, reads: ^tape.Reads, f: ^tape.Format, src: []u8, framing: tape.Framing,
+	opts := tape.Options{}, at: []tape.Step = nil, loc := #caller_location,
+) -> (got: Binary_Records_Read) {
+	spans := make([dynamic][2]u64, context.temp_allocator)
+	keys := make([dynamic]string, context.temp_allocator)
+	r, rerr := reads.records(f, src, framing, opts, at, context.allocator)
+	if rerr != nil {
+		return {nil, nil, rerr}
+	}
+	defer tape.destroy_records(r)
+	out: [2]tape.Record
+	every: [2]tape.Span_Answer
+	for {
+		n := tape.records_find(r, nil, out[:], every[:])
+		for rec in out[:n] {
+			testing.expectf(t, rec.err == nil, "record at %d: %v", rec.lo, rec.err, loc = loc)
+			append(&spans, [2]u64{rec.lo, rec.hi})
+			if framing == .Members {
+				buf: [64]u8
+				key, _ := tape.node_text(f, src, rec.key, buf[:])
+				append(&keys, strings.clone(key, context.temp_allocator))
+			}
+		}
+		if n < len(out) {
+			break
+		}
+	}
+	got = {spans[:], keys[:], r.err}
+	v, verr := reads.records(f, src, framing, opts, at, context.allocator)
+	testing.expect(t, verr == nil, loc = loc)
+	defer tape.destroy_records(v)
+	testing.expectf(t, tape.records_validate(v, out[:]) == 0 && v.err == r.err && v.index == u64(len(spans)), "validate: %v records, %v", v.index, v.err, loc = loc)
+	fr, ferr := reads.records(f, src, framing, opts, at, context.allocator)
+	testing.expect(t, ferr == nil, loc = loc)
+	defer tape.destroy_records(fr)
+	answers: [1]tape.Span_Answer
+	fout: [1]tape.Record
+	k := 0
+	for tape.records_find(fr, {}, fout[:], answers[:]) == 1 {
+		testing.expectf(t, k < len(spans) && fout[0].lo == spans[k][0] && fout[0].hi == spans[k][1], "find record %d: %v", k, fout[0], loc = loc)
+		testing.expectf(t, answers[0].lo == fout[0].lo && answers[0].hi == fout[0].hi, "find answer %d: %v", k, answers[0], loc = loc)
+		k += 1
+	}
+	testing.expectf(t, k == len(spans) && same_refusal(fr.err, r.err), "find: %d records, %v", k, fr.err, loc = loc)
+	demand, _ := tape.demand_of([][]tape.Step{{}}, allocator = context.temp_allocator)
+	sr, serr := reads.records(f, src, framing, opts, at, context.allocator)
+	testing.expect(t, serr == nil, loc = loc)
+	defer tape.destroy_records(sr)
+	docs: [1]tape.Document
+	k = 0
+	for tape.records_scan(sr, &demand, fout[:], docs[:], {}, context.temp_allocator) == 1 {
+		whole, _ := reads.build(f, src[fout[0].lo:fout[0].hi], opts, context.temp_allocator)
+		testing.expectf(t, len(docs[0].nodes) == len(whole.nodes), "scan record %d: %d nodes, %d", k, len(docs[0].nodes), len(whole.nodes), loc = loc)
+		k += 1
+	}
+	testing.expectf(t, k == len(spans) && same_refusal(sr.err, r.err), "scan: %d records, %v", k, sr.err, loc = loc)
+	return
 }
 
 // `pieces_agree_cuts` over `src` cut in two at every byte, in three at a sample of pairs, and in windows of every size

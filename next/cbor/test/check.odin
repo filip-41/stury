@@ -3,7 +3,6 @@ package cbor_tests
 
 import "core:testing"
 import "stury:cbor"
-import "stury:lib/core/tape"
 import "stury:lib/schema/check"
 import "stury:lib/schema/rules"
 import "stury:testkit"
@@ -75,31 +74,10 @@ test_cbor_check_parity :: proc(t: ^testing.T) {
 	for c in cases {
 		for spec in ([?]cbor.Spec{.Cbor, .Preferred}) {
 			r_s := cbor.check(c.bytes, &plan, spec)
-			defer check.result_destroy(&r_s)
-			testing.expectf(t, r_s.valid == c.valid, "cbor stream %v: got %v want %v", spec, r_s.valid, c.valid)
-
 			sink_s: check.Sink
 			check.sink_init(&sink_s)
-			defer check.sink_destroy(&sink_s)
 			r_ss := cbor.check(c.bytes, &plan, spec, {}, &sink_s)
-			defer check.result_destroy(&r_ss)
-			testing.expect_value(t, r_ss.valid, c.valid)
-
-			doc, berr := cbor.build(c.bytes, spec)
-			testing.expect_value(t, berr, nil)
-			defer tape.destroy(&doc)
-
-			r_d := check.check_document(&doc, &plan)
-			defer check.result_destroy(&r_d)
-			testing.expect_value(t, r_d.valid, c.valid)
-
-			sink_d: check.Sink
-			check.sink_init(&sink_d)
-			defer check.sink_destroy(&sink_d)
-			r_ds := check.check_document(&doc, &plan, {}, &sink_d)
-			defer check.result_destroy(&r_ds)
-			testing.expect_value(t, r_ds.valid, c.valid)
-			testing.expect_value(t, len(sink_s.entries), len(sink_d.entries))
+			testkit.check_parity(t, &plan, cbor.reads(spec), cbor.as(spec), c.bytes, c.valid, r_s, r_ss, &sink_s)
 		}
 	}
 }

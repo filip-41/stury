@@ -223,17 +223,6 @@ implode :: proc(h: ^Heap, cps: []i64) -> (v: Value, bad: int, s: Status) {
 	return v, -1, .Ok
 }
 
-// Whether every byte of `s` is below 0x80.
-@(private)
-is_ascii :: proc "contextless" (s: string) -> bool {
-	for c in transmute([]u8)s {
-		if c >= 0x80 {
-			return false
-		}
-	}
-	return true
-}
-
 // `s` with ASCII letters made lower case, or upper with `upper`, other bytes as they are.
 @(require_results)
 ascii_case :: proc(h: ^Heap, v: Value, upper: bool) -> (res: Value, status: Status) {
@@ -292,20 +281,6 @@ text_repeat :: proc(h: ^Heap, v: Value, n: int) -> (res: Value, status: Status) 
 		runtime.mem_copy_non_overlapping(p[i * len(s):], raw_data(s), len(s))
 	}
 	return w, .Ok
-}
-
-// The byte offsets where `sep`, not empty, starts in `s`, overlapping ones included.
-@(private)
-text_find_all :: proc(s, sep: string, into: ^[dynamic]int) -> runtime.Allocator_Error {
-	if len(sep) == 0 || len(sep) > len(s) {
-		return nil
-	}
-	for i := 0; i + len(sep) <= len(s); i += 1 {
-		if s[i] == sep[0] && s[i:i + len(sep)] == sep {
-			append(into, i) or_return
-		}
-	}
-	return nil
 }
 
 // The parts of string `v` between the occurrences of `sep`, as an array of strings, an empty `sep` splitting it into

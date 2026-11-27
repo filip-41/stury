@@ -3,7 +3,6 @@ package typed_tests
 import "base:intrinsics"
 import "core:math"
 import "core:testing"
-import "stury:lib/core/tape"
 import "stury:lib/ops/typed"
 import "stury:lib/ops/write"
 import "stury:testkit"
@@ -43,16 +42,21 @@ json_put_inline :: #force_inline proc "contextless" (p: [^]u8, s: string) -> int
 }
 
 @(private = "file")
-json_put_sync :: #force_no_inline proc(w: ^Direct_Out, buf, p: [^]u8, s: string, slop: int) -> ([^]u8, [^]u8, [^]u8, bool) #no_bounds_check {
-	w.out.cursor = int(intrinsics.ptr_sub(p, buf))
-	write.put_byte(&w.out, '"')
-	write.put(&w.out, transmute([]u8)s)
-	write.put_byte(&w.out, '"')
+direct_sync_slop :: #force_inline proc(w: ^Direct_Out, slop: int) -> ([^]u8, [^]u8, [^]u8, bool) #no_bounds_check {
 	o := &w.out
 	if o.size - o.cursor < slop && o.err == nil {
 		_ = write.room(o, slop)
 	}
 	return o.buf, o.buf[o.cursor:], o.buf[max(o.size - slop, 0):], true
+}
+
+@(private = "file")
+json_put_sync :: #force_no_inline proc(w: ^Direct_Out, buf, p: [^]u8, s: string, slop: int) -> ([^]u8, [^]u8, [^]u8, bool) #no_bounds_check {
+	w.out.cursor = int(intrinsics.ptr_sub(p, buf))
+	write.put_byte(&w.out, '"')
+	write.put(&w.out, transmute([]u8)s)
+	write.put_byte(&w.out, '"')
+	return direct_sync_slop(w, slop)
 }
 
 @(private = "file")
@@ -65,11 +69,7 @@ cbor_put_sync :: #force_no_inline proc(w: ^Direct_Out, buf, p: [^]u8, s: string,
 	w.out.cursor = int(intrinsics.ptr_sub(p, buf))
 	write.put_byte(&w.out, 0x60 | u8(min(len(s), 23)))
 	write.put(&w.out, transmute([]u8)s)
-	o := &w.out
-	if o.size - o.cursor < slop && o.err == nil {
-		_ = write.room(o, slop)
-	}
-	return o.buf, o.buf[o.cursor:], o.buf[max(o.size - slop, 0):], true
+	return direct_sync_slop(w, slop)
 }
 
 @(test)
@@ -134,6 +134,4 @@ typed_fast_marshal_guards_and_lists :: proc(t: ^testing.T) {
 	cb, cferr := write.out_finish(&wc.out)
 	testing.expect(t, cferr == nil && len(cb) > 10)
 	defer delete(cb)
-
-	_ = tape.Node{}
 }

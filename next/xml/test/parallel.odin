@@ -92,13 +92,12 @@ parts_build_what_one_thread_builds :: proc(t: ^testing.T) {
 	state: rand.Default_Random_State
 	context.random_generator = testkit.seeded(t, &state, 0x8a7)
 	builds, valid := 0, 0
-	for round in 0 ..< testkit.rounds(24) {
+	for round in 0 ..< testkit.rounds(26) {
 		src := seam_document(2 + rand.int_max(12)) if round % 3 != 2 else random_document()
-		texts := [2][]u8{src, mutated(src)}
+		texts := [2][]u8{src, testkit.mutate(src, XML_MUTATE_ALPHABET)}
 		defer if round % 3 == 2 {
 			delete(src)
 		}
-		defer delete(texts[1])
 		for text, i in texts {
 			opts: tape.Options
 			switch rand.int_max(5) {

@@ -11,38 +11,24 @@ import "stury:testkit"
 // `testkit.deep_read`'s ways, which take the records of the innermost container.
 read_nested :: proc(read: int, text: []u8) -> bool {
 	opts := json.Options{budget = {depth = 200_000}}
-	if read >= 5 {
+	if read < testkit.DEEP_CORE_READS {
 		objects := text[1] == '{'
-		at := make([]tape.Step, ((len(text) + 1) / 6 if objects else (len(text) - 3) / 2) - 1, context.temp_allocator)
-		for &step, k in at {
-			step = tape.Name("a") if objects && k > 0 else tape.Index(0)
+		at: []tape.Step
+		if read == 6 {
+			at = make([]tape.Step, ((len(text) + 1) / 6 if objects else (len(text) - 3) / 2) - 1, context.temp_allocator)
+			for &step, k in at {
+				step = tape.Name("a") if objects && k > 0 else tape.Index(0)
+			}
 		}
-		paths := [][]tape.Step{{tape.Descend{}, tape.Index(0)}, {tape.Descend{}, tape.Name("a")}}
-		return testkit.deep_read(read - 5, json.reads(.Json), json.as(.Json), text, opts, paths, .Members if objects else .Elements, at)
+		find_path := [1]tape.Step{tape.Index(-2)}
+		scan_paths := [2][]tape.Step{{tape.Index(-2)}, {tape.All{}}}
+		deep_paths := [2][]tape.Step{{tape.Descend{}, tape.Index(0)}, {tape.Descend{}, tape.Name("a")}}
+		return testkit.deep_core_read(read, json.reads(.Json), json.as(.Json), text, opts, find_path[:], scan_paths[:], deep_paths[:], .Members if objects else .Elements, at)
 	}
-	switch read {
-	case 0:
-		return json.validate(text, opts = opts) == nil
-	case 1:
-		doc, err := json.build(text, opts = opts)
-		tape.destroy(&doc)
-		return err == nil
-	case 2:
-		answer, err := json.find(text, {tape.Index(-2)}, opts = opts)
-		return err == nil && answer.outcome == .Found
-	case 3:
-		d, _ := tape.demand_of({{tape.Index(-2)}, {tape.All{}}})
-		r, err := json.scan(text, &d, opts = opts)
-		ok := err == nil && answered(&r) == 3
-		tape.destroy(&r)
-		tape.destroy(&d)
-		return ok
-	case:
-		v: testkit.Value
-		err := json.unmarshal(text, &v, opts = opts)
-		testkit.value_free(v)
-		return err == nil
-	}
+	v: testkit.Value
+	err := json.unmarshal(text, &v, opts = opts)
+	testkit.value_free(v)
+	return err == nil
 }
 
 // Runs each read on a thread of `stack` bytes over a text nesting `depth` levels, in arrays and in objects, and a value
@@ -50,7 +36,7 @@ read_nested :: proc(read: int, text: []u8) -> bool {
 expect_nested_reads_on_thread :: proc(t: ^testing.T, stack: uint, depth: int) {
 	for objects in ([]bool{false, true}) {
 		text := transmute([]u8)nested_in_root(depth, objects)
-		testkit.expect_reads_on_thread(t, stack, 5 + testkit.DEEP_READS, text, fmt.tprintf("objects %v depth %d", objects, depth), read_nested)
+		testkit.expect_reads_on_thread(t, stack, testkit.DEEP_CORE_READS + 1, text, fmt.tprintf("objects %v depth %d", objects, depth), read_nested)
 	}
 }
 

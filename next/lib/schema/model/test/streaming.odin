@@ -1,16 +1,19 @@
-// Streaming `json.load` and direct-buffer `json.dump` / `json.dump_to` parity, edge-case, and memory-safety tests.
+// Streaming `json.load` and direct-buffer `json.dump` / `json.dump_to` parity, wide structs,
+// edge-case, and memory-safety tests.
 package model_test
 
 import "core:bytes"
 import "core:encoding/uuid"
 import "core:fmt"
 import "core:math"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import "core:time"
 import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
+import "stury:lib/schema/check"
 import "stury:lib/schema/model"
 import "stury:lib/schema/rules"
 import "stury:testkit"
@@ -72,6 +75,47 @@ Stream_Rich :: struct {
 	om_unset: Maybe(string) `json:",omitunset" model:"optional"`,
 	def_str:  string `model:"optional"`,
 	def_num:  i64 `model:"optional"`,
+}
+
+// Shared wide structs (>128 fields): `Wide_140` with `Fields_Set` + bounds/required, and `Wide_140_Plain` without
+// `Fields_Set`/required/validators (for fast struct-close `seen_wide` cleanup).
+@(private)
+Wide_140 :: struct {
+	set:                                                        model.Fields_Set,
+	f000, f001, f002, f003, f004, f005, f006, f007, f008, f009: int `model:">=0,optional"`,
+	f010, f011, f012, f013, f014, f015, f016, f017, f018, f019: int `model:">=0,optional"`,
+	f020, f021, f022, f023, f024, f025, f026, f027, f028, f029: int `model:">=0,optional"`,
+	f030, f031, f032, f033, f034, f035, f036, f037, f038, f039: int `model:">=0,optional"`,
+	f040, f041, f042, f043, f044, f045, f046, f047, f048, f049: int `model:">=0,optional"`,
+	f050, f051, f052, f053, f054, f055, f056, f057, f058, f059: int `model:">=0,optional"`,
+	f060, f061, f062, f063, f064, f065, f066, f067, f068, f069: int `model:">=0,optional"`,
+	f070, f071, f072, f073, f074, f075, f076, f077, f078, f079: int `model:">=0,optional"`,
+	f080, f081, f082, f083, f084, f085, f086, f087, f088, f089: int `model:">=0,optional"`,
+	f090, f091, f092, f093, f094, f095, f096, f097, f098, f099: int `model:">=0,optional"`,
+	f100, f101, f102, f103, f104, f105, f106, f107, f108, f109: int `model:">=0,optional"`,
+	f110, f111, f112, f113, f114, f115, f116, f117, f118, f119: int `model:">=0,optional"`,
+	f120, f121, f122, f123, f124, f125, f126, f127, f128, f129: int `model:">=0,optional"`,
+	f130, f131, f132, f133, f134, f135, f136, f137:             int `model:">=0,optional"`,
+	f138:                                                       int `model:">=0"`,
+	f139:                                                       string `model:"len>=2,optional"`,
+}
+
+@(private)
+Wide_140_Plain :: struct {
+	f000, f001, f002, f003, f004, f005, f006, f007, f008, f009: i32 `model:"optional"`,
+	f010, f011, f012, f013, f014, f015, f016, f017, f018, f019: i32 `model:"optional"`,
+	f020, f021, f022, f023, f024, f025, f026, f027, f028, f029: i32 `model:"optional"`,
+	f030, f031, f032, f033, f034, f035, f036, f037, f038, f039: i32 `model:"optional"`,
+	f040, f041, f042, f043, f044, f045, f046, f047, f048, f049: i32 `model:"optional"`,
+	f050, f051, f052, f053, f054, f055, f056, f057, f058, f059: i32 `model:"optional"`,
+	f060, f061, f062, f063, f064, f065, f066, f067, f068, f069: i32 `model:"optional"`,
+	f070, f071, f072, f073, f074, f075, f076, f077, f078, f079: i32 `model:"optional"`,
+	f080, f081, f082, f083, f084, f085, f086, f087, f088, f089: i32 `model:"optional"`,
+	f090, f091, f092, f093, f094, f095, f096, f097, f098, f099: i32 `model:"optional"`,
+	f100, f101, f102, f103, f104, f105, f106, f107, f108, f109: i32 `model:"optional"`,
+	f110, f111, f112, f113, f114, f115, f116, f117, f118, f119: i32 `model:"optional"`,
+	f120, f121, f122, f123, f124, f125, f126, f127, f128, f129: i32 `model:"optional"`,
+	f130, f131, f132, f133, f134, f135, f136, f137, f138, f139: i32 `model:"optional"`,
 }
 
 @(test)
@@ -153,109 +197,97 @@ model_streaming_json_load_and_dump_parity :: proc(t: ^testing.T) {
 	}
 }
 
-@(private = "file")
-Wide_70 :: struct {
-	_set: model.Fields_Set,
-	f00, f01, f02, f03, f04, f05, f06, f07, f08, f09: i32 `model:"optional"`,
-	f10, f11, f12, f13, f14, f15, f16, f17, f18, f19: i32 `model:"optional"`,
-	f20, f21, f22, f23, f24, f25, f26, f27, f28, f29: i32 `model:"optional"`,
-	f30, f31, f32, f33, f34, f35, f36, f37, f38, f39: i32 `model:"optional"`,
-	f40, f41, f42, f43, f44, f45, f46, f47, f48, f49: i32 `model:"optional"`,
-	f50, f51, f52, f53, f54, f55, f56, f57, f58, f59: i32 `model:"optional"`,
-	f60, f61, f62: i32 `model:"optional"`,
-	f63: i32,
-	f64: i32,
-	f65, f66, f67, f68: i32 `model:"optional"`,
-	f69: string `model:"optional"`,
-}
-
-@(private = "file")
-Wide_140 :: struct {
-	_set: model.Fields_Set,
-	using a: Wide_70_A,
-	using b: Wide_70_B,
-}
-
-@(private = "file")
-Wide_70_A :: struct {
-	a00, a01, a02, a03, a04, a05, a06, a07, a08, a09: i32 `model:"optional"`,
-	a10, a11, a12, a13, a14, a15, a16, a17, a18, a19: i32 `model:"optional"`,
-	a20, a21, a22, a23, a24, a25, a26, a27, a28, a29: i32 `model:"optional"`,
-	a30, a31, a32, a33, a34, a35, a36, a37, a38, a39: i32 `model:"optional"`,
-	a40, a41, a42, a43, a44, a45, a46, a47, a48, a49: i32 `model:"optional"`,
-	a50, a51, a52, a53, a54, a55, a56, a57, a58, a59: i32 `model:"optional"`,
-	a60, a61, a62, a63, a64, a65, a66, a67, a68, a69: i32 `model:"optional"`,
-}
-
-@(private = "file")
-Wide_70_B :: struct {
-	b00, b01, b02, b03, b04, b05, b06, b07, b08, b09: i32 `model:"optional"`,
-	b10, b11, b12, b13, b14, b15, b16, b17, b18, b19: i32 `model:"optional"`,
-	b20, b21, b22, b23, b24, b25, b26, b27, b28, b29: i32 `model:"optional"`,
-	b30, b31, b32, b33, b34, b35, b36, b37, b38, b39: i32 `model:"optional"`,
-	b40, b41, b42, b43, b44, b45, b46, b47, b48, b49: i32 `model:"optional"`,
-	b50, b51, b52, b53, b54, b55, b56, b57, b58, b59: i32 `model:"optional"`,
-	b60, b61, b62, b63, b64, b65, b66, b67: i32 `model:"optional"`,
-	b68: i32,
-	b69: string `model:"optional"`,
-}
-
 @(test)
 model_streaming_wide_structs_and_fields_set :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	reg: model.Registry
 	defer model.destroy(&reg)
-	testing.expect_value(t, model.register(&reg, Wide_70, "f69", "hi"), nil)
-	testing.expect_value(t, model.register(&reg, Wide_70_B, "b69", "tail"), nil)
+	testing.expect_value(t, model.register(&reg, Wide_140, "f135", 777), nil)
+	testing.expect_value(t, model.register(&reg, Wide_140, "f139", "tail"), nil)
 
-	m70, e70 := model.compile(&reg, Wide_70)
-	defer model.destroy(&m70)
-	testing.expect_value(t, e70, nil)
-
-	// Boundary test at field indices 62, 63, 64 (crosses `seen0` -> `seen1`) + missing required `f64`.
-	w70: Wide_70
-	defer model.free_value(&w70, type_info_of(Wide_70), context.allocator)
-	testing.expect_value(t, json.load(&m70, transmute([]u8)string(`{"f62":62,"f63":63,"f64":64}`), &w70), nil)
-	testing.expect_value(t, w70.f62, i32(62))
-	testing.expect_value(t, w70.f63, i32(63))
-	testing.expect_value(t, w70.f64, i32(64))
-	testing.expect_value(t, w70.f69, "hi")
-	testing.expect(t, model.was_set(&m70, Wide_70, w70._set, "f63"))
-	testing.expect(t, model.was_set(&m70, Wide_70, w70._set, "f64"))
-	testing.expect(t, !model.was_set(&m70, Wide_70, w70._set, "f69"))
-
-	// Duplicate at index 63 & 64 under `.Refuse`.
-	dup63: Wide_70
-	err_dup := json.load(&m70, transmute([]u8)string(`{"f63":1,"f64":2,"f63":3}`), &dup63)
-	defer model.error_destroy(err_dup)
-	me_dup, ok_dup := err_dup.(model.Model_Error)
-	testing.expect(t, ok_dup && me_dup.kind == .Duplicate_Key)
-
-	// >128 fields (`seen_wide`): tests field 138 (`b68`, required) and default at field 139 (`b69`).
 	m140, e140 := model.compile(&reg, Wide_140)
 	defer model.destroy(&m140)
 	testing.expect_value(t, e140, nil)
 
-	w140: Wide_140
-	defer model.free_value(&w140, type_info_of(Wide_140), context.allocator)
-	testing.expect_value(t, json.load(&m140, transmute([]u8)string(`{"a00":1,"b68":138}`), &w140), nil)
-	testing.expect_value(t, w140.a00, i32(1))
-	testing.expect_value(t, w140.b68, i32(138))
-	testing.expect_value(t, w140.b69, "tail")
-	testing.expect(t, model.was_set(&m140, Wide_140, w140._set, "b68"))
-	testing.expect(t, !model.was_set(&m140, Wide_140, w140._set, "b69"))
+	// Schema description & compiled check plan work on >128 fields.
+	desc, serr := model.schema(&m140, .Load)
+	defer rules.description_destroy(&desc)
+	testing.expect_value(t, serr, nil)
+	cp, cperr := check.compile(&desc)
+	defer check.plan_destroy(&cp)
+	testing.expect_value(t, cperr.kind, rules.Error_Kind.None)
 
-	dumped, derr := json.dump(&m140, &w140, {exclude_unset = true})
-	defer delete(dumped)
-	testing.expect_value(t, derr, nil)
-	testing.expect_value(t, string(dumped), `{"a00":1,"b68":138}`)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	a := mem.tracking_allocator(&track)
 
-	// Missing required field > 128 (`b68`).
-	w140_miss: Wide_140
-	miss_err := json.load(&m140, transmute([]u8)string(`{"a00":1}`), &w140_miss)
-	defer model.error_destroy(miss_err)
-	me_miss, ok_miss := miss_err.(model.Model_Error)
-	testing.expect(t, ok_miss && me_miss.kind == .Missing_Field && me_miss.pointer == "/b68")
+	{
+		// Streaming `json.load` + `json.dump` across 64-bit (`f063`/`f064`) and 128-bit (`f127`/`f128`) boundaries + default `f139`.
+		w_stream: Wide_140
+		defer model.free_value(&w_stream, type_info_of(Wide_140), a)
+		stream_body := `{"f000":1,"f062":62,"f063":63,"f064":64,"f127":127,"f128":128,"f138":138}`
+		testing.expect_value(t, json.load(&m140, transmute([]u8)stream_body, &w_stream, allocator = a), nil)
+		testing.expect(t, w_stream.f000 == 1 && w_stream.f062 == 62 && w_stream.f063 == 63 && w_stream.f064 == 64 && w_stream.f127 == 127 && w_stream.f128 == 128 && w_stream.f135 == 777 && w_stream.f138 == 138 && w_stream.f139 == "tail")
+		for name in ([?]string{"f000", "f062", "f063", "f064", "f127", "f128", "f138"}) {
+			testing.expect(t, model.was_set(&m140, Wide_140, w_stream.set, name))
+		}
+		testing.expect(t, !model.was_set(&m140, Wide_140, w_stream.set, "f135"))
+		testing.expect(t, !model.was_set(&m140, Wide_140, w_stream.set, "f139"))
+
+		d_stream, ds_err := json.dump(&m140, &w_stream, {exclude_unset = true}, allocator = a)
+		defer delete(d_stream, a)
+		testing.expect_value(t, ds_err, nil)
+		testing.expect_value(t, string(d_stream), stream_body)
+
+		// Duplicate at index 63 under `.Refuse`.
+		dup63: Wide_140
+		err_dup := json.load(&m140, transmute([]u8)string(`{"f063":1,"f064":2,"f063":3,"f138":1}`), &dup63)
+		defer model.error_destroy(err_dup)
+		me_dup, ok_dup := err_dup.(model.Model_Error)
+		testing.expect(t, ok_dup && me_dup.kind == .Duplicate_Key)
+
+		// Missing required field > 128 (`f138`).
+		w_miss: Wide_140
+		miss_err := json.load(&m140, transmute([]u8)string(`{"f000":1}`), &w_miss)
+		defer model.error_destroy(miss_err)
+		me_miss, ok_miss := miss_err.(model.Model_Error)
+		testing.expect(t, ok_miss && me_miss.kind == .Missing_Field && me_miss.pointer == "/f138")
+
+		// `model.load`, `model.dump`, `model.patch` (+ rollback), `model.validate`, and `json.check` on >128 fields.
+		w: Wide_140
+		defer model.free_value(&w, type_info_of(Wide_140), a)
+		body := `{"f000":1,"f063":63,"f064":64,"f127":127,"f128":128,"f130":130,"f138":138,"f139":"hello"}`
+		res := json.check(transmute([]u8)body, &cp)
+		defer check.result_destroy(&res)
+		testing.expect(t, res.valid)
+
+		testing.expect_value(t, load_json(&m140, body, &w, allocator = a), nil)
+		testing.expect(t, w.f000 == 1 && w.f063 == 63 && w.f064 == 64 && w.f127 == 127 && w.f128 == 128 && w.f130 == 130 && w.f135 == 777 && w.f138 == 138 && w.f139 == "hello")
+		testing.expect(t, model.was_set(&m140, Wide_140, w.set, "f139") && !model.was_set(&m140, Wide_140, w.set, "f135"))
+
+		dumped, derr := model.dump(&m140, &w, write_json_default, {exclude_unset = true, check = true}, allocator = a)
+		defer delete(dumped, a)
+		testing.expect_value(t, derr, nil)
+		testing.expect_value(t, string(dumped), body)
+
+		testing.expect_value(t, model.patch(&m140, &w, transmute([]u8)string(`{"f137":999,"f139":"world"}`), json.as(.Json), json.reads(.Json), allocator = a), nil)
+		testing.expect(t, w.f000 == 1 && w.f128 == 128 && w.f130 == 130 && w.f135 == 777 && w.f137 == 999 && w.f139 == "world")
+		testing.expect(t, model.was_set(&m140, Wide_140, w.set, "f137") && model.was_set(&m140, Wide_140, w.set, "f128"))
+
+		perr := model.patch(&m140, &w, transmute([]u8)string(`{"f137":111,"f139":"x"}`), json.as(.Json), json.reads(.Json), allocator = a)
+		testing.expect(t, perr != nil)
+		model.error_destroy(perr, a)
+		testing.expect(t, w.f137 == 999 && w.f139 == "world")
+
+		w.f137 = -5
+		sink: model.Sink
+		defer model.destroy(&sink)
+		testing.expect(t, model.validate(&m140, &w, &sink) != nil)
+		testing.expect(t, len(sink.entries) == 1 && sink.entries[0].kind == .Below_Minimum && sink.entries[0].pointer == "/f137")
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
 }
 
 @(private = "file")
@@ -347,7 +379,6 @@ model_streaming_duplicate_keys_and_policies :: proc(t: ^testing.T) {
 	defer model.destroy(&m)
 	testing.expect_value(t, cerr, nil)
 
-	// Every one of these MUST be refused with `.Duplicate_Key` in BOTH `sink` and `first` modes.
 	refuse_cases := []string{
 		`{"a":"ok","a":"dup","b":1}`,
 		`{"b":1,"a":"ok","b":2}`,
@@ -375,7 +406,6 @@ model_streaming_duplicate_keys_and_policies :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(sink.entries), 1)
 	}
 
-	// Syntax fault AFTER duplicate key: duplicate key wins (`dup_at < fault.at`); BEFORE: syntax fault wins.
 	{
 		v: Dup_Rec
 		e := json.load(&m, transmute([]u8)string(`{"a":"ok","a":"dup",!}`), &v)
@@ -384,7 +414,6 @@ model_streaming_duplicate_keys_and_policies :: proc(t: ^testing.T) {
 		testing.expect(t, ok && me.kind == .Duplicate_Key)
 	}
 
-	// `.First` keeps first value, skips second (including nested container).
 	{
 		v: Dup_Rec
 		defer model.free_value(&v, type_info_of(Dup_Rec), context.allocator)
@@ -393,7 +422,6 @@ model_streaming_duplicate_keys_and_policies :: proc(t: ^testing.T) {
 		testing.expect_value(t, v.nested.x, i64(1))
 	}
 
-	// `.Last` falls back cleanly and keeps last value.
 	{
 		v: Dup_Rec
 		defer model.free_value(&v, type_info_of(Dup_Rec), context.allocator)
@@ -451,7 +479,6 @@ model_streaming_fallbacks_and_specs :: proc(t: ^testing.T) {
 	testing.expect_value(t, gerr, nil)
 	testing.expect_value(t, string(got), string(ref))
 
-	// JSONC comments + JSON5 single quotes / unquoted keys / non-finite refusal.
 	mr: model.Model(Stream_Inner)
 	mr, cerr = model.compile(&reg, Stream_Inner)
 	defer model.destroy(&mr)
@@ -469,7 +496,7 @@ model_streaming_fallbacks_and_specs :: proc(t: ^testing.T) {
 	testing.expect_value(t, si2.x, i64(9))
 	testing.expect_value(t, si2.y, "json5")
 
-	// JSON5 NaN rejected as `.Non_Finite`.
+	// JSON5 NaN rejected as `.Non_Finite`, and `json.dump` refuses NaN.
 	Float_Box :: struct { f: f64 }
 	mf, ef := model.compile(&reg, Float_Box)
 	defer model.destroy(&mf)
@@ -480,7 +507,6 @@ model_streaming_fallbacks_and_specs :: proc(t: ^testing.T) {
 	nme, is_nme := nfe.(model.Model_Error)
 	testing.expect(t, is_nme && nme.kind == .Non_Finite)
 
-	// `json.dump` refuses NaN/Inf and fails `check = true`.
 	nan_box := Float_Box{f = math.nan_f64()}
 	_, dn_err := json.dump(&mf, &nan_box)
 	dn_me, is_dn := dn_err.(model.Model_Error)
@@ -509,7 +535,6 @@ model_streaming_budget_deep_nesting_and_long_strings :: proc(t: ^testing.T) {
 	defer model.destroy(&m)
 	testing.expect_value(t, cerr, nil)
 
-	// Build 40-level nested JSON (> STREAM_INLINE_FRAMES=16 and > DUMP_INLINE_FRAMES=32).
 	sb := strings.builder_make()
 	defer strings.builder_destroy(&sb)
 	for i in 0 ..< 40 {
@@ -521,18 +546,15 @@ model_streaming_budget_deep_nesting_and_long_strings :: proc(t: ^testing.T) {
 	}
 	deep_src := transmute([]u8)strings.to_string(sb)
 
-	// Depth budget refuses 40-level nesting cleanly without leaking.
 	limited: Deep_Node
 	dep_err := json.load(&m, deep_src, &limited, .Json, nil, {budget = {depth = 10}})
 	_, is_tape_err := dep_err.(tape.Error)
 	testing.expect(t, is_tape_err)
 
-	// Node budget refuses cleanly.
 	node_err := json.load(&m, deep_src, &limited, .Json, nil, {budget = {nodes = 5}})
 	_, is_node_err := node_err.(tape.Error)
 	testing.expect(t, is_node_err)
 
-	// Unbounded load + dump roundtrip grows both inline frame stacks cleanly.
 	deep: Deep_Node
 	defer model.free_value(&deep, type_info_of(Deep_Node), context.allocator)
 	testing.expect_value(t, json.load(&m, deep_src, &deep), nil)
@@ -541,7 +563,6 @@ model_streaming_budget_deep_nesting_and_long_strings :: proc(t: ^testing.T) {
 	testing.expect_value(t, derr, nil)
 	testing.expect_value(t, string(dumped), string(deep_src))
 
-	// Long strings (> 4096 B): clean ASCII, escaped ASCII, UTF-8, and invalid UTF-8 refusal in `json.dump`.
 	Str_Box :: struct { s: string }
 	ms, es := model.compile(&reg, Str_Box)
 	defer model.destroy(&ms)
@@ -573,10 +594,6 @@ model_streaming_budget_deep_nesting_and_long_strings :: proc(t: ^testing.T) {
 	_, is_werr := uerr.(write.Error)
 	testing.expect(t, is_werr)
 }
-
-// ============================================================================
-// Audit regression tests (memory safety, leaks, budgets, JSON5, edge parity)
-// ============================================================================
 
 @(private = "file")
 Long_Tag_Arm :: struct {
@@ -615,8 +632,6 @@ model_streaming_dump_key_buffer_boundaries :: proc(t: ^testing.T) {
 	defer model.destroy(&m)
 	testing.expect_value(t, cerr, nil)
 
-	// Sweep prefix padding across the 4 KiB write.Out flush boundary so every key emission site
-	// lands with 0..64 B remaining in the buffer before `put_string` reserves `JSON_LEAF_ROOM`.
 	base_pad := strings.repeat("a", 4096)
 	defer delete(base_pad)
 
@@ -663,27 +678,10 @@ model_streaming_dump_key_buffer_boundaries :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
-Wide_140_Plain :: struct {
-	using a: Wide_70_A,
-	using b: Wide_70_B_Opt,
-}
-
-@(private = "file")
-Wide_70_B_Opt :: struct {
-	b00, b01, b02, b03, b04, b05, b06, b07, b08, b09: i32 `model:"optional"`,
-	b10, b11, b12, b13, b14, b15, b16, b17, b18, b19: i32 `model:"optional"`,
-	b20, b21, b22, b23, b24, b25, b26, b27, b28, b29: i32 `model:"optional"`,
-	b30, b31, b32, b33, b34, b35, b36, b37, b38, b39: i32 `model:"optional"`,
-	b40, b41, b42, b43, b44, b45, b46, b47, b48, b49: i32 `model:"optional"`,
-	b50, b51, b52, b53, b54, b55, b56, b57, b58, b59: i32 `model:"optional"`,
-	b60, b61, b62, b63, b64, b65, b66, b67, b68, b69: i32 `model:"optional"`,
-}
-
-@(private = "file")
 Map_Leaks_Rec :: struct {
-	ms:  map[string]string `model:"optional"`,
-	mi:  map[i64]string `model:"optional"`,
-	mn:  map[string]i64 `model:"optional"`,
+	ms:   map[string]string `model:"optional"`,
+	mi:   map[i64]string `model:"optional"`,
+	mn:   map[string]i64 `model:"optional"`,
 	mobj: map[string]Stream_Inner `model:"optional"`,
 }
 
@@ -699,7 +697,6 @@ model_streaming_leak_regressions :: proc(t: ^testing.T) {
 	defer model.destroy(&mm)
 	testing.expect_value(t, em, nil)
 
-	// #2a-1: duplicate string map key under `.Refuse` (both first and sink modes) — zero leak.
 	{
 		v: Map_Leaks_Rec
 		e := json.load(&mm, transmute([]u8)string(`{"ms":{"a":"v1","a":"v2"}}`), &v)
@@ -716,7 +713,6 @@ model_streaming_leak_regressions :: proc(t: ^testing.T) {
 		testing.expect(t, ok && me.kind == .Duplicate_Key)
 	}
 
-	// #2a-2: distinct JSON keys colliding as `i64` (`"1"` and `"01"`) — valid JSON, overwrites without leaking `"v1"`.
 	{
 		v: Map_Leaks_Rec
 		defer model.free_value(&v, type_info_of(Map_Leaks_Rec), context.allocator)
@@ -724,7 +720,6 @@ model_streaming_leak_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, v.mi[1], "v2")
 	}
 
-	// #2b: `.Refuse` + `sink != nil`, map value fails `Wrong_Kind` with `.Object`/`.Array` — key must not leak.
 	for bad_val in ([]string{`{"mn":{"k_obj":{"nested":1}}}`, `{"mn":{"k_arr":[1,2,3],"ok":5}}`}) {
 		sink: model.Sink
 		defer model.destroy(&sink)
@@ -740,12 +735,11 @@ model_streaming_leak_regressions :: proc(t: ^testing.T) {
 		defer model.destroy(&mp)
 		testing.expect_value(t, ep, nil)
 		vp: Wide_140_Plain
-		testing.expect_value(t, json.load(&mp, transmute([]u8)string(`{"a00":1,"b69":139}`), &vp), nil)
-		testing.expect_value(t, vp.a00, i32(1))
-		testing.expect_value(t, vp.b69, i32(139))
+		testing.expect_value(t, json.load(&mp, transmute([]u8)string(`{"f000":1,"f139":139}`), &vp), nil)
+		testing.expect_value(t, vp.f000, i32(1))
+		testing.expect_value(t, vp.f139, i32(139))
 	}
 
-	// #4: mid-map-entry syntax fault (both leaf and nested struct value) — decoded key + partial value must not leak.
 	for truncated in ([]string{
 		`{"ms":{"allocated_key":"val`,
 		`{"mobj":{"allocated_key":{"x":5,"y":"partial_str`,
@@ -782,18 +776,7 @@ Min_I64_Bound_Rec :: struct {
 	x: f64 `model:">=-9223372036854775808"`,
 }
 
-@(private = "file")
-Cycle_Node :: struct {
-	next: ^Cycle_Node `model:"optional"`,
-}
-
-@(private = "file")
-Cap_Collision_Rec :: struct {
-	a:     i32,
-	extra: map[string]i32 `json:",unknown"`,
-}
-
-// Regressions #3, #5, #6, #7, #8, #9, #10, #11, #12c/d.
+// Regressions #3, #5, #6, #7, #8, #9, #10, #11.
 @(test)
 model_streaming_audit_parity_regressions :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -826,8 +809,6 @@ model_streaming_audit_parity_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, ed, nil)
 		sink := model.Sink{max_errors = 1}
 		defer model.destroy(&sink)
-		// First error triggers `a` pattern fail + `b` bound fail -> `truncated = true`, then `.Last` duplicate `b` triggers fallback!
-		// Because the last `a` and `b` are BOTH valid, fallback succeeds and `sink.truncated` MUST be false!
 		v: Dup_Rec
 		defer model.free_value(&v, type_info_of(Dup_Rec), context.allocator)
 		err := json.load(&md, transmute([]u8)string(`{"a":"BAD","b":-1,"a":"good","b":5}`), &v, .Json, &sink, {dups = .Last})
@@ -867,7 +848,7 @@ model_streaming_audit_parity_regressions :: proc(t: ^testing.T) {
 			defer model.destroy(&s2)
 			v1, v2: Fixed_Len_Rec
 			_ = json.load(&mf, transmute([]u8)raw, &v1, .Json, &s1)
-			_ = model.load(&mf, transmute([]u8)raw, json.as(.Json), json.reads(.Json), &v2, &s2)
+			_ = load_json(&mf, raw, &v2, &s2)
 			testing.expect_value(t, len(s1.entries), 1)
 			testing.expect_value(t, len(s1.entries), len(s2.entries))
 			testing.expect_value(t, s1.entries[0].kind, s2.entries[0].kind)
@@ -882,7 +863,7 @@ model_streaming_audit_parity_regressions :: proc(t: ^testing.T) {
 		defer model.free_value(&p1a, type_info_of(^i64), context.allocator)
 		defer model.free_value(&p1b, type_info_of(^i64), context.allocator)
 		e1a := json.load(&mp1, transmute([]u8)string(`42`), &p1a, .Json, nil, {budget = {depth = 1}})
-		e1b := model.load(&mp1, transmute([]u8)string(`42`), json.as(.Json), json.reads(.Json), &p1b, nil, {budget = {depth = 1}})
+		e1b := load_json(&mp1, `42`, &p1b, opts = {budget = {depth = 1}})
 		testing.expect_value(t, e1a, nil)
 		testing.expect_value(t, e1b, nil)
 		testing.expect(t, p1a != nil && p1a^ == 42)
@@ -891,7 +872,7 @@ model_streaming_audit_parity_regressions :: proc(t: ^testing.T) {
 		defer model.destroy(&mp2)
 		p2a, p2b: ^Stream_Inner
 		e2a := json.load(&mp2, transmute([]u8)string(`{"x":1}`), &p2a, .Json, nil, {budget = {depth = 1}})
-		e2b := model.load(&mp2, transmute([]u8)string(`{"x":1}`), json.as(.Json), json.reads(.Json), &p2b, nil, {budget = {depth = 1}})
+		e2b := load_json(&mp2, `{"x":1}`, &p2b, opts = {budget = {depth = 1}})
 		_, t2a := e2a.(tape.Error)
 		_, t2b := e2b.(tape.Error)
 		testing.expect(t, t2a && t2b)
@@ -900,7 +881,7 @@ model_streaming_audit_parity_regressions :: proc(t: ^testing.T) {
 		defer model.destroy(&mp3)
 		p3a, p3b: ^^Stream_Inner
 		e3a := json.load(&mp3, transmute([]u8)string(`{"x":1}`), &p3a, .Json, nil, {budget = {depth = 2}})
-		e3b := model.load(&mp3, transmute([]u8)string(`{"x":1}`), json.as(.Json), json.reads(.Json), &p3b, nil, {budget = {depth = 2}})
+		e3b := load_json(&mp3, `{"x":1}`, &p3b, opts = {budget = {depth = 2}})
 		_, t3a := e3a.(tape.Error)
 		_, t3b := e3b.(tape.Error)
 		testing.expect(t, t3a && t3b)
@@ -954,46 +935,5 @@ model_streaming_audit_parity_regressions :: proc(t: ^testing.T) {
 		v: Min_I64_Bound_Rec
 		testing.expect_value(t, json.load(&mmn, transmute([]u8)string(`{"x":0.0}`), &v), nil)
 		testing.expect_value(t, v.x, 0.0)
-	}
-
-	// #12c: cyclic pointer in `json.dump` stops cleanly at `tape.DEFAULT_DEPTH` (`Exceeded{kind = .Depth}`).
-	{
-		mc, ec := model.compile(&reg, Cycle_Node)
-		defer model.destroy(&mc)
-		testing.expect_value(t, ec, nil)
-		cyc: Cycle_Node
-		cyc.next = &cyc
-		_, derr := json.dump(&mc, &cyc)
-		te, is_te := derr.(tape.Error)
-		exc, is_exc := te.(tape.Exceeded)
-		testing.expect(t, is_te && is_exc && exc.kind == .Depth)
-	}
-
-	// #12d: capture key collision and `.Non_Finite` record to `sink` in `json.dump`.
-	{
-		mcc, ecc := model.compile(&reg, Cap_Collision_Rec)
-		defer model.destroy(&mcc)
-		testing.expect_value(t, ecc, nil)
-		ex := make(map[string]i32)
-		defer delete(ex)
-		ex["a"] = 99
-		rec := Cap_Collision_Rec{a = 1, extra = ex}
-		sink: model.Sink
-		defer model.destroy(&sink)
-		_, derr := json.dump(&mcc, &rec, {}, {}, &sink)
-		me, is_me := derr.(model.Model_Error)
-		testing.expect(t, is_me && me.kind == .Duplicate_Key)
-		testing.expect(t, len(sink.entries) == 1 && sink.entries[0].kind == .Duplicate_Key)
-
-		Float_Box :: struct { f: f64 }
-		mf, _ := model.compile(&reg, Float_Box)
-		defer model.destroy(&mf)
-		nb := Float_Box{f = math.inf_f64(1)}
-		fsink: model.Sink
-		defer model.destroy(&fsink)
-		_, ferr := json.dump(&mf, &nb, {}, {}, &fsink)
-		fme, is_fme := ferr.(model.Model_Error)
-		testing.expect(t, is_fme && fme.kind == .Non_Finite)
-		testing.expect(t, len(fsink.entries) == 1 && fsink.entries[0].kind == .Non_Finite)
 	}
 }

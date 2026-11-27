@@ -74,6 +74,13 @@ programs_nest_100000_levels_in_one_mib :: proc(t: ^testing.T) {
 	testkit.expect_reads_on_thread(t, 1 << 20, DEEP_SHAPES, nil, "program", proc(shape: int, _: []u8) -> bool {
 		src := deep_program(shape)
 		defer delete(src)
+		if shape == 0 {
+			p_def, errs_def := jq.compile(src)
+			jq.destroy_program(p_def)
+			if len(errs_def) == 0 {
+				return false
+			}
+		}
 		prog, errors := jq.compile(src, {max_depth = 8 * DEEP})
 		defer jq.destroy_program(prog)
 		return len(errors) == 0

@@ -11,6 +11,37 @@ serial_runner :: proc(threads: int) -> tape.Runner {
 	return {threads = threads, start = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {}, finish = proc(data: rawptr) {}}
 }
 
+// A serial runner of `threads` threads that counts every `start` call into `starts`.
+counting_runner :: proc(threads: int, starts: ^int) -> tape.Runner {
+	return {
+		data    = starts,
+		threads = threads,
+		start   = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
+			(^int)(data)^ += 1
+		},
+		finish  = proc(data: rawptr) {},
+	}
+}
+
+// Decodes a string of hex byte pairs, ignoring spaces, into `allocator`.
+hex :: proc(text: string, allocator := context.temp_allocator) -> []u8 {
+	out := make([dynamic]u8, 0, len(text) / 2, allocator)
+	hi := -1
+	for c in text {
+		if c == ' ' || c == '\t' || c == '\n' {
+			continue
+		}
+		v := int(c - '0') if c >= '0' && c <= '9' else int(c - 'a' + 10) if c >= 'a' && c <= 'f' else int(c - 'A' + 10)
+		if hi < 0 {
+			hi = v
+		} else {
+			append(&out, u8(hi << 4 | v))
+			hi = -1
+		}
+	}
+	return out[:]
+}
+
 // An allocator that counts the calls made on a thread other than the one that made it, which a read promises to make
 // none from.
 Caller_Only :: struct {

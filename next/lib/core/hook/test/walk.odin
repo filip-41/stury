@@ -9,24 +9,47 @@ import "stury:testkit"
 // `Open_Level.name` is widened to `int` so open-path offsets never wrap negative at 2 GiB.
 #assert(type_of(hook.Open_Level{}.name) == int)
 
-// A failing allocator that lets `allow` allocations/resizes succeed and refuses the next one with `.Out_Of_Memory`.
 @(private = "file")
-Fail_After :: struct {
-	backing: runtime.Allocator,
-	allow:   int,
+Dummy_Walk :: struct {
+	stack:     [^]u64,
+	depth:     u64,
+	limit:     u64,
+	room:      u64,
+	owned:     bool,
+	allocator: runtime.Allocator,
+	ctx:       ^runtime.Context,
+	hooks:     ^hook.No_Hooks,
+	rooms:     uintptr,
 }
 
-@(private = "file")
-fail_after_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
-	f := (^Fail_After)(data)
-	#partial switch mode {
-	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
-		if f.allow <= 0 {
-			return nil, .Out_Of_Memory
-		}
-		f.allow -= 1
+// `levels_room` rejects `want` whose byte size would overflow `int`, and `deepen` rejects `want` whose sum with `held`
+// would overflow `int`, both without allocating or wrapping.
+@(test)
+levels_guards_int_overflow :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	ctx := context
+	frame: [4]u64
+	h: hook.No_Hooks
+	w := Dummy_Walk{
+		stack     = raw_data(frame[:]),
+		depth     = 4,
+		limit     = max(u64),
+		room      = len(frame),
+		allocator = context.allocator,
+		ctx       = &ctx,
+		hooks     = &h,
 	}
-	return f.backing.procedure(f.backing.data, mode, size, alignment, old_memory, old_size, loc)
+
+	// `levels_room` rejects `want > max(int) / size_of(u64)`.
+	too_many := u64(max(int) / size_of(u64)) + 1
+	testing.expect(t, !hook.levels_room(&w, too_many))
+	testing.expect(t, !w.owned && w.room == len(frame))
+
+	// `deepen` rejects `want > max(int) - held` before `held + int(want)` can wrap.
+	regs: hook.Regs
+	testing.expect_value(t, hook.deepen(&w, &regs, max(int) - 1, 0), hook.WALK_NO_MEMORY)
+	testing.expect_value(t, w.depth, u64(4))
+	testing.expect(t, !w.owned)
 }
 
 // When `piece_path` fails with OOM after an earlier window populated `p.open`, `p.open` is cleared to nil instead of
@@ -74,8 +97,8 @@ piece_path_clears_open_on_oom :: proc(t: ^testing.T) {
 
 	// Route `s.steps_buf` through an allocator that immediately refuses growth so loop 2 writes into existing slots
 	// and then OOMs on the growth append while `names` is freed by `defer`.
-	fa := Fail_After{backing = context.allocator, allow = 0}
-	s.steps_buf.allocator = {fail_after_proc, &fa}
+	fa := testkit.Failing{backing = context.allocator, fail_at = 0, sticky = true}
+	s.steps_buf.allocator = testkit.failing_allocator(&fa)
 	defer s.steps_buf.allocator = p.allocator
 
 	err := hook.piece_path(&p, src, &fmt)

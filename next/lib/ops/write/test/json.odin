@@ -9,8 +9,10 @@ import "core:math/rand"
 import "core:os"
 import "core:strings"
 import "core:testing"
+import "stury:cbor"
 import "stury:dsv"
 import "stury:json"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
 import "stury:testkit"
@@ -785,4 +787,142 @@ random_string :: proc(b: ^strings.Builder) {
 		strings.write_string(b, rand.choice([]string{"a", "é", "😀", "\\n", "\\\"", "\\\\", "\\/", "\\u0000", "\\u001F", "\\u00e9", "\\ud83d\\ude00", "\\u2028", "\\t", "/*", "*/", "//", " ", "\x7f"}))
 	}
 	strings.write_byte(b, '"')
+}
+
+// The numbers JSON5 spells that RFC 8259 does not, written into JSON by their value.
+@(private = "file")
+Number_Case :: struct {
+	json5: string,
+	json:  string,
+}
+
+@(private = "file")
+NUMBER_CASES := []Number_Case {
+	{"+1", "1"},
+	{"+1.5e3", "1.5e3"},
+	{"-1.5", "-1.5"},
+	{".5", "0.5"},
+	{"-.5", "-0.5"},
+	{"+.5e2", "0.5e2"},
+	{"5.", "5.0"},
+	{"5.e3", "5.0e3"},
+	{"0x0", "0"},
+	{"0x1d9", "473"},
+	{"-0xFF", "-255"},
+	{"+0x7f", "127"},
+	{"0xfffffffffffffff", "1152921504606846975"},
+	{"0x1000000000000000", "1152921504606846976"},
+	{"0xffffffffffffffffffff", "1208925819614629174706175"},
+	{"-0x1000000000000000000", "-4722366482869645213696"},
+}
+
+@(test)
+json5_numbers_into_json :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for c in NUMBER_CASES {
+		doc, err := json.build(transmute([]u8)c.json5, .Json5)
+		if !testing.expectf(t, err == nil, "%q: %v", c.json5, err) {
+			continue
+		}
+		defer json.destroy(&doc)
+		text, _, werr := json.write(&doc, .Json)
+		testing.expectf(t, werr == nil && string(text) == c.json, "%q: %q, %v, want %q", c.json5, text, werr, c.json)
+		delete(text)
+	}
+}
+
+@(test)
+text_cbor_unspellable_and_json5_number_edges :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// P12: CBOR unspellable bigfloat (`c5 82 19 13 89 01`) returns `.No_Spelling` instead of leaking raw wire bytes.
+	raw := []u8{0xC5, 0x82, 0x19, 0x13, 0x89, 0x01}
+	cdoc, cerr := cbor.build(raw)
+	defer cbor.destroy(&cdoc)
+	testing.expect_value(t, cerr, nil)
+	jout, _, jerr := json.write(&cdoc, .Json)
+	delete(jout)
+	r, refused := jerr.(write.Refused)
+	testing.expectf(t, refused && r.why == .No_Spelling, "unspellable cbor bigfloat: %q %v", jout, jerr)
+
+	// P12: JSON5 negative-zero hex consistency (`-0x0` == `-0x0000000000000000` == `"0"`) and leading-zero fast path.
+	for c in ([?]struct{ src, want: string }{
+		{"-0x0", "0"},
+		{"-0x0000000000000000", "0"},
+		{"-0x00000000000000000000", "0"},
+		{"0x00000000000000000001", "1"},
+		{"-0x00000000000000000001", "-1"},
+	}) {
+		j5, err := json.build(transmute([]u8)c.src, .Json5)
+		defer json.destroy(&j5)
+		testing.expect_value(t, err, nil)
+		out, _, werr := json.write(&j5, .Json)
+		defer delete(out)
+		testing.expectf(t, werr == nil && string(out) == c.want, "%s -> %q (%v), want %q", c.src, out, werr, c.want)
+	}
+
+	// P12: Synthetic multi-dot / digitless JSON5 decimals do not overflow or turn into `"0.0"` / `"0.0e5"`.
+	wide_fmt := tape.Format{
+		name = "test",
+		number = proc "contextless" (src: []u8, t: tape.Node) -> spell.Number {
+			return {kind = .Wide}
+		},
+	}
+	for bad in ([?]string{"1.2.3", ".", ".e5", "........................................"}) {
+		nodes := [?]tape.Node{{kind = .Number, role = .Value, lo = 0, n = u32(len(bad))}}
+		syn := tape.Document{src = transmute([]u8)bad, nodes = nodes[:], format = &wide_fmt}
+		wt: write.Tree
+		testing.expect_value(t, write.tree_start(&wt, &syn, {}, {}, context.allocator), nil)
+		defer write.tree_end(&wt)
+		buf: [write.NUMBER_ROOM]u8
+		s, ok := write.number_text(&wt, 0, &buf)
+		testing.expectf(t, !ok, "bad decimal %q unexpectedly spelled as %q", bad, s)
+	}
+}
+
+@(test)
+tree_sort_keys_oom_and_no_dups_container_key :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// P14: `sort_keys = true` OOM sweep (including escaped keys cloned out of `w.scratch`).
+	src := `{"b\n1":1,"a\u00e9":2,"c":3,"d\t4":{"z\n":9,"a\n":8}}`
+	doc, err := json.build(transmute([]u8)src)
+	defer json.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	Sort_Run :: struct {
+		doc: ^json.Document,
+	}
+	run := Sort_Run{&doc}
+	s := testkit.sweep_failures(proc(data: rawptr, a: runtime.Allocator) {
+		r := (^Sort_Run)(data)
+		text, _, werr := json.write(r.doc, .Json, {sort_keys = true}, a)
+		if werr == nil {
+			delete(text, a)
+		} else {
+			_ = werr.(runtime.Allocator_Error)
+		}
+	}, &run)
+	testing.expectf(t, s.bad == 0 && s.refused >= 1, "sort_keys oom sweep: %v", s)
+
+	// P14: Container key between duplicate `""` keys does not mask `no_dups` in `sort_members`.
+	syn_src := "123"
+	syn_nodes := [?]tape.Node{
+		{kind = .Object, role = .Value, n = 8, spelling = 3},
+		{kind = .String, role = .Key, lo = 0, n = 0},
+		{kind = .Number, role = .Value, lo = 0, n = 1},
+		{kind = .Array, role = .Key, n = 2, spelling = 1},
+		{kind = .Number, role = .Value, lo = 1, n = 1},
+		{kind = .Number, role = .Value, lo = 1, n = 1},
+		{kind = .String, role = .Key, lo = 0, n = 0},
+		{kind = .Number, role = .Value, lo = 2, n = 1},
+	}
+	syn_doc := tape.Document{src = transmute([]u8)syn_src, nodes = syn_nodes[:], format = json.as(.Json)}
+	wt: write.Tree
+	testing.expect_value(t, write.tree_start(&wt, &syn_doc, {sort_keys = true}, {}, context.allocator), nil)
+	defer write.tree_end(&wt)
+	wt.no_dups = true
+	step := write.tree_next(&wt, false, false)
+	testing.expect(t, step.kind == .Done)
+	r, refused := wt.err.(write.Refused)
+	testing.expectf(t, refused && r.why == .No_Spelling, "dup empty key masked by container key: %v", wt.err)
 }

@@ -73,31 +73,10 @@ test_html_check_parity :: proc(t: ^testing.T) {
 	for c in cases {
 		src := transmute([]u8)c.input
 		rs := html.check(src, &plan)
-		defer check.result_destroy(&rs)
-		testing.expectf(t, rs.valid == c.valid, "html stream %q: got %v want %v", c.input, rs.valid, c.valid)
-
 		sink_s: check.Sink
 		check.sink_init(&sink_s)
-		defer check.sink_destroy(&sink_s)
 		rss := html.check(src, &plan, .Html, {}, &sink_s)
-		defer check.result_destroy(&rss)
-		testing.expect_value(t, rss.valid, c.valid)
-
-		doc, berr := html.build(src)
-		testing.expect_value(t, berr, nil)
-		defer html.destroy(&doc)
-
-		rd := check.check_document(&doc, &plan)
-		defer check.result_destroy(&rd)
-		testing.expect_value(t, rd.valid, c.valid)
-
-		sink_d: check.Sink
-		check.sink_init(&sink_d)
-		defer check.sink_destroy(&sink_d)
-		rds := check.check_document(&doc, &plan, {}, &sink_d)
-		defer check.result_destroy(&rds)
-		testing.expect_value(t, rds.valid, c.valid)
-		testing.expect_value(t, len(sink_s.entries), len(sink_d.entries))
+		testkit.check_parity(t, &plan, html.reads(.Html), html.as(.Html), src, c.valid, rs, rss, &sink_s)
 	}
 }
 

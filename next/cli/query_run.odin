@@ -2471,53 +2471,38 @@ drop_render_writer :: proc(rtw: ^Render_Table_Writer, alloc: runtime.Allocator) 
 }
 
 @(private = "file")
-finish_jq_writers :: proc(w: ^Jq_Worker, osink: ^Out_Stream, stderr_w: io.Writer, alloc: runtime.Allocator, flush_render := true) -> int {
+finish_query_writers :: proc(tw: ^^write.Table_Writer, rtw: ^^Render_Table_Writer, osink: ^Out_Stream, stderr_w: io.Writer, alloc: runtime.Allocator, flush_render := true) -> int {
 	code := EXIT_OK
-	if w.tw != nil {
-		tcode := finish_tab_writer(w.tw, osink, stderr_w, alloc)
-		w.tw = nil
+	if tw^ != nil {
+		tcode := finish_tab_writer(tw^, osink, stderr_w, alloc)
+		tw^ = nil
 		if tcode != EXIT_OK {
 			code = tcode
 		}
 	}
-	if w.rtw != nil {
+	if rtw^ != nil {
 		if flush_render {
-			rcode := finish_render_writer(w.rtw, osink, stderr_w, alloc)
-			w.rtw = nil
+			rcode := finish_render_writer(rtw^, osink, stderr_w, alloc)
+			rtw^ = nil
 			if rcode != EXIT_OK && code == EXIT_OK {
 				code = rcode
 			}
 		} else {
-			drop_render_writer(w.rtw, alloc)
-			w.rtw = nil
+			drop_render_writer(rtw^, alloc)
+			rtw^ = nil
 		}
 	}
 	return code
 }
 
 @(private = "file")
+finish_jq_writers :: proc(w: ^Jq_Worker, osink: ^Out_Stream, stderr_w: io.Writer, alloc: runtime.Allocator, flush_render := true) -> int {
+	return finish_query_writers(&w.tw, &w.rtw, osink, stderr_w, alloc, flush_render)
+}
+
+@(private = "file")
 finish_jp_writers :: proc(w: ^Jp_Worker, osink: ^Out_Stream, stderr_w: io.Writer, alloc: runtime.Allocator, flush_render := true) -> int {
-	code := EXIT_OK
-	if w.tw != nil {
-		tcode := finish_tab_writer(w.tw, osink, stderr_w, alloc)
-		w.tw = nil
-		if tcode != EXIT_OK {
-			code = tcode
-		}
-	}
-	if w.rtw != nil {
-		if flush_render {
-			rcode := finish_render_writer(w.rtw, osink, stderr_w, alloc)
-			w.rtw = nil
-			if rcode != EXIT_OK && code == EXIT_OK {
-				code = rcode
-			}
-		} else {
-			drop_render_writer(w.rtw, alloc)
-			w.rtw = nil
-		}
-	}
-	return code
+	return finish_query_writers(&w.tw, &w.rtw, osink, stderr_w, alloc, flush_render)
 }
 
 @(private = "file")

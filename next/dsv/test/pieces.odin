@@ -140,27 +140,31 @@ piece_paths :: proc(keys: []string, no_header: bool) -> [][]tape.Step {
 agree_in_pieces :: proc(t: ^testing.T, spec: dsv.Spec, src: []u8, opts: tape.Options, paths: [][]tape.Step, name: string) -> bool {
 	reads, f := dsv.reads(spec), dsv.as(spec)
 	step := max(1, len(src) / testkit.rounds(8))
+	singles := make([dynamic]int, 0, testkit.rounds(8) + 4, context.temp_allocator)
 	for k := rand.int_max(step); k < len(src); k += step {
-		cuts := [1]int{k}
-		testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, name) or_return
+		append(&singles, k)
 	}
-	for k in ([]int{0, len(src)}) {
-		cuts := [1]int{k}
-		testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, name) or_return
-	}
+	append(&singles, 0, len(src))
+	pairs := make([dynamic][2]int, 0, testkit.rounds(2), context.temp_allocator)
 	if len(src) >= 8 {
 		for _ in 0 ..< testkit.rounds(2) {
 			i := rand.int_max(len(src))
 			j := i + 1 + rand.int_max(len(src) - i)
-			cuts := [2]int{i, j}
-			testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, name) or_return
+			append(&pairs, [2]int{i, j})
 		}
 	}
 	sizes := []int{1, 64, 65} if testkit.ROUNDS < 16 else []int{1, 2, 3, 7, 63, 64, 65, 67, 100}
-	for size in sizes {
-		testkit.pieces_agree(t, reads, f, src, opts, testkit.cuts_by(len(src), size), paths, name) or_return
+	cuts_list := make([dynamic][]int, 0, len(singles) + len(pairs) + len(sizes), context.temp_allocator)
+	for i in 0 ..< len(singles) {
+		append(&cuts_list, singles[i:i + 1])
 	}
-	return true
+	for i in 0 ..< len(pairs) {
+		append(&cuts_list, pairs[i][:])
+	}
+	for size in sizes {
+		append(&cuts_list, testkit.cuts_by(len(src), size))
+	}
+	return testkit.pieces_agree_cuts(t, reads, f, src, opts, cuts_list[:], paths, name)
 }
 
 // Every text of every spec under every option set, read in pieces cut at a sample of bytes and in windows down to one
@@ -242,17 +246,16 @@ pieces_carry_each_state_across_a_window :: proc(t: ^testing.T) {
 		keys := [2]string{"a", "b"}
 		paths := piece_paths(keys[:], d.no_header)
 		reads, f := dsv.reads(c.spec), dsv.as(c.spec)
+		singles := make([]int, len(src) + 1, context.temp_allocator)
+		cuts_list := make([dynamic][]int, 0, len(src) + 1 + len(sizes), context.temp_allocator)
 		for k in 0 ..= len(src) {
-			cuts := [1]int{k}
-			if !testkit.pieces_agree(t, reads, f, src, c.opts, cuts[:], paths, c.name) {
-				break
-			}
+			singles[k] = k
+			append(&cuts_list, singles[k:k + 1])
 		}
 		for size in sizes {
-			if !testkit.pieces_agree(t, reads, f, src, c.opts, testkit.cuts_by(len(src), size), paths, c.name) {
-				break
-			}
+			append(&cuts_list, testkit.cuts_by(len(src), size))
 		}
+		testkit.pieces_agree_cuts(t, reads, f, src, c.opts, cuts_list[:], paths, c.name)
 	}
 }
 
@@ -427,21 +430,12 @@ validates_in_two_windows_as_the_whole_text :: proc(t: ^testing.T) {
 	}
 }
 
-// The walk of a text in two pieces, cut in its middle, the second window from the first read's `keep`.
 @(private = "file")
-walk_in_pieces_of :: proc($S: dsv.Spec, $NO_HEADER: bool) -> testkit.Probe_Walk {
+walk_with_opts :: proc($S: dsv.Spec, $NO_HEADER: bool) -> testkit.Probe_Walk {
 	return proc(src: []u8, opts: tape.Options, h: ^testkit.Probe, regs: ^hook.Regs) -> (u64, tape.Error) {
-		p := tape.Pieces{allocator = context.allocator}
-		defer tape.destroy(&p)
 		o := opts
 		o.format = dsv.Dsv_Options{no_header = NO_HEADER, comment = '#'}
-		o.pieces = &p
-		at, err, _ := dsv.walk(src[:len(src) / 2], S, o, h, regs, testkit.probe_hook)
-		if err != nil || !p.more {
-			return at, err
-		}
-		p.from, p.last = p.keep, true
-		at, err, _ = dsv.walk(src[p.keep:], S, o, h, regs, testkit.probe_hook)
+		at, err, _ := dsv.walk(src, S, o, h, regs, testkit.probe_hook)
 		return at, err
 	}
 }
@@ -456,10 +450,10 @@ walks_in_pieces_keep_the_hook_protocol :: proc(t: ^testing.T) {
 		"a,b\r\n1,2\r\n3,4\r\n5,6\r\n7,8\r\n9,10\r\n11,12\r\n13,14\r\n15,16\r\n17,18\r\n19,20\r\n21,22",
 		"#head\nheader,which,is,long,enough,to,end,past,a,block,of,sixty,four\n1,2,3,4,5,6,7,8,9,10,11,12,13\n",
 	}
-	testkit.hook_protocol(t, walk_in_pieces_of(.Csv, false), texts)
-	testkit.hook_protocol(t, walk_in_pieces_of(.Csv, true), texts)
-	testkit.hook_protocol(t, walk_in_pieces_of(.Tsv, false), {"a\tb\n1\t\\t\n2\t3\n4\t5\n6\t7\n8\t9\n10\t11\n12\t13\n14\t15\n16\t17\n18\t19\n"})
-	testkit.hook_protocol(t, walk_in_pieces_of(.Plain, false), {"a,b\n1,2\n3,4\n5,6\n7,8\n9,10\n11,12\n13,14\n15,16\n17,18\n19,20\n21,22\n23,24"})
+	testkit.hook_protocol_in_pieces(t, walk_with_opts(.Csv, false), texts)
+	testkit.hook_protocol_in_pieces(t, walk_with_opts(.Csv, true), texts)
+	testkit.hook_protocol_in_pieces(t, walk_with_opts(.Tsv, false), {"a\tb\n1\t\\t\n2\t3\n4\t5\n6\t7\n8\t9\n10\t11\n12\t13\n14\t15\n16\t17\n18\t19\n"})
+	testkit.hook_protocol_in_pieces(t, walk_with_opts(.Plain, false), {"a,b\n1,2\n3,4\n5,6\n7,8\n9,10\n11,12\n13,14\n15,16\n17,18\n19,20\n21,22\n23,24"})
 }
 
 // A build in pieces gives the document so far: the rows read whole, the row the window ends inside with its cells so
@@ -554,11 +548,14 @@ pieces_refuse_a_repeated_header_name_before_a_later_fault :: proc(t: ^testing.T)
 			tape.destroy(&whole)
 			fault, _ := werr.(tape.Fault)
 			testing.expectf(t, fault.kind == .Duplicate_Key, "%q %v: whole %v", text, spec, werr)
+			singles := make([]int, len(src) + 1, context.temp_allocator)
+			cuts_list := make([][]int, len(src) + 1, context.temp_allocator)
 			for k in 0 ..= len(src) {
-				cuts := [1]int{k}
-				if !testkit.pieces_agree(t, reads, f, src, opts, cuts[:], paths, text) {
-					return
-				}
+				singles[k] = k
+				cuts_list[k] = singles[k:k + 1]
+			}
+			if !testkit.pieces_agree_cuts(t, reads, f, src, opts, cuts_list, paths, text) {
+				return
 			}
 		}
 	}

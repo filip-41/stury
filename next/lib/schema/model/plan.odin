@@ -544,13 +544,9 @@ is_clean_ascii_key :: proc "contextless" (name: string) -> bool {
 
 @(private)
 set_expected_key :: proc "contextless" (e: ^hook.Expected_Key, name: string) {
-	n := len(name)
-	for c in transmute([]u8)name { if c == '"' || c == '\\' || c < 0x20 { e^ = {word = NO_KEY}; return } }
-	e.word = tape.key_word(u64(n))
-	e.head, e.tail = 0, 0
-	for i in 0 ..< min(n, 8) { e.head |= u64(name[i]) << (8 * uint(i)) }
-	if n <= 8 { e.tail = ~u64(0) >> (64 - 8 * uint(n)) if n > 0 else 0; return }
-	for i in 0 ..< 8 { e.tail |= u64(name[n - 8 + i]) << (8 * uint(i)) }
+	word, head, tail, ok := tape.expected_key(name)
+	if !ok { e^ = {word = NO_KEY}; return }
+	e^ = {word = word, head = head, tail = tail}
 }
 
 @(private)

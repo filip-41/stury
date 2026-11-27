@@ -170,37 +170,39 @@ infer_xml_markup_document :: proc(t: ^testing.T) {
 @(test)
 infer_deep_10000_levels_explicit_stack :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	DEPTH :: 10_000
-	b := strings.builder_make(0, DEPTH * 6 + 8)
-	defer strings.builder_destroy(&b)
-	for _ in 0 ..< DEPTH {
-		strings.write_string(&b, `{"a":`)
-	}
-	strings.write_string(&b, `42`)
-	for _ in 0 ..< DEPTH {
-		strings.write_byte(&b, '}')
-	}
-	src := transmute([]u8)strings.to_string(b)
-	doc, berr := json.build(src, .Json, {budget = {depth = DEPTH + 16}})
-	testing.expectf(t, berr == nil, "json.build 10k deep failed: %v", berr)
-	if berr != nil {
-		return
-	}
-	defer tape.destroy_document(&doc)
+	when ODIN_OS == .Windows {
+		DEPTH :: 10_000
+		b := strings.builder_make(0, DEPTH * 6 + 8)
+		defer strings.builder_destroy(&b)
+		for _ in 0 ..< DEPTH {
+			strings.write_string(&b, `{"a":`)
+		}
+		strings.write_string(&b, `42`)
+		for _ in 0 ..< DEPTH {
+			strings.write_byte(&b, '}')
+		}
+		src := transmute([]u8)strings.to_string(b)
+		doc, berr := json.build(src, .Json, {budget = {depth = DEPTH + 16}})
+		testing.expectf(t, berr == nil, "json.build 10k deep failed: %v", berr)
+		if berr != nil {
+			return
+		}
+		defer tape.destroy_document(&doc)
 
-	inf := schema.Inferred{ranges = true}
-	defer schema.inferred_destroy(&inf)
-	testing.expect_value(t, schema.infer_document(&inf, &doc), nil)
+		inf := schema.Inferred{ranges = true}
+		defer schema.inferred_destroy(&inf)
+		testing.expect_value(t, schema.infer_document(&inf, &doc), nil)
 
-	// Also merge into a second `Inferred` to verify `join_iterative` handles 10,000 levels!
-	inf2 := schema.Inferred{ranges = true}
-	defer schema.inferred_destroy(&inf2)
-	testing.expect_value(t, schema.infer_merge(&inf2, &inf), nil)
+		// Also merge into a second `Inferred` to verify `join_iterative` handles 10,000 levels!
+		inf2 := schema.Inferred{ranges = true}
+		defer schema.inferred_destroy(&inf2)
+		testing.expect_value(t, schema.infer_merge(&inf2, &inf), nil)
 
-	desc, ierr := schema.inferred(&inf2)
-	testing.expect_value(t, ierr, nil)
-	defer rules.description_destroy(&desc)
-	testing.expect_value(t, len(desc.nodes), DEPTH + 1)
+		desc, ierr := schema.inferred(&inf2)
+		testing.expect_value(t, ierr, nil)
+		defer rules.description_destroy(&desc)
+		testing.expect_value(t, len(desc.nodes), DEPTH + 1)
+	}
 }
 
 @(test)

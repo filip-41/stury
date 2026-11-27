@@ -2,7 +2,6 @@ package jq_tests
 
 import "base:runtime"
 import "core:mem/virtual"
-import "core:strings"
 import "core:testing"
 import "stury:cbor"
 import "stury:jq"
@@ -12,44 +11,21 @@ import "stury:lib/query"
 import "stury:testkit"
 
 @(private = "file")
-where_parse_json :: proc(data: rawptr, src: []u8, budget: tape.Budget, allocator: runtime.Allocator) -> (tape.Document, tape.Error) {
-	return json.build(src, .Json, {budget = budget}, allocator)
-}
-
-@(private = "file")
 eval_where :: proc(
 	t: ^testing.T,
 	expr: string,
 	doc: ^tape.Document,
 	filename := "",
 	hooks_override: ^jq.Hooks = nil,
+	loc := #caller_location,
 ) -> (out: string, end: jq.Run_End, tainted: bool) {
-	prog, perrs := jq.compile(expr)
-	defer jq.destroy_program(prog)
-	testing.expectf(t, len(perrs) == 0, "compile %q failed: %v", expr, perrs)
-	if len(perrs) > 0 {
-		return "", .Failed, false
-	}
-	h: query.Heap
-	query.heap_init(&h, runtime.heap_allocator())
-	defer query.heap_destroy(&h)
-
-	inp: query.Value
-	if doc != nil {
-		is: query.Status
-		inp, is = query.document_value(&h, doc^, false)
-		testing.expect_value(t, is, query.Status.Ok)
-	} else {
-		inp = query.NULL
-	}
-
 	File_Data :: struct {
 		name: string,
 	}
 	fdata := File_Data{name = filename}
 	hooks := jq.Hooks{
 		data       = &fdata,
-		parse_json = where_parse_json,
+		parse_json = parse_json_hook,
 	}
 	if filename != "" {
 		hooks.input_filename = proc(data: rawptr, h: ^query.Heap) -> (query.Value, query.Status) {
@@ -57,23 +33,8 @@ eval_where :: proc(
 		}
 	}
 	use_hooks := hooks_override if hooks_override != nil else &hooks
-
-	run: jq.Run
-	jq.run_init(&run, prog, &h, nil, use_hooks)
-	defer jq.run_destroy(&run)
-	outs := Outputs{h = &h}
-	defer delete(outs.vals)
-	end = jq.run_value(&run, inp, collect, &outs)
-	tainted = h.tainted
-	b := strings.builder_make()
-	for v, i in outs.vals {
-		if i > 0 {
-			strings.write_byte(&b, '\n')
-		}
-		strings.write_string(&b, show(&h, v))
-		query.release(&h, v)
-	}
-	return strings.to_string(b), end, tainted
+	r := eval_jq(t, expr, {doc = doc, hooks = use_hooks}, loc = loc)
+	return r.out, r.end, r.tainted
 }
 
 @(test)

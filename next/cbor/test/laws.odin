@@ -23,10 +23,10 @@ reads_agree_on_generated_items :: proc(t: ^testing.T) {
 			testkit.readers_agree(t, cbor.reads(spec), cbor.as(spec), src, {}, "generated", &a)
 		}
 		for _ in 0 ..< 4 {
-			bad := mutated(src)
-			defer delete(bad)
+			bad := testkit.mutate(src)
 			testkit.readers_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), bad, {}, "mutated", &a)
 		}
+		free_all(context.temp_allocator)
 	}
 	testkit.expect_agreement(t, &a, {texts = 60, refused = 60, scans = 20_000, on_path = 20_000, shapes = 30})
 }
@@ -43,7 +43,7 @@ reads_agree_on_the_appendix :: proc(t: ^testing.T) {
 		"83018202039f0405ff", "83019f0203ff820405", "bf61610161629f0203ffff", "826161bf61626163ff", "bf6346756ef563416d7421ff",
 	}
 	for r in rows {
-		src := hex(r)
+		src := testkit.hex(r)
 		held := make([]u8, len(src))
 		defer delete(held)
 		copy(held, src)
@@ -67,10 +67,10 @@ records_at_a_path_agree_with_the_build :: proc(t: ^testing.T) {
 			read += testkit.records_at_agree(t, cbor.reads(spec), cbor.as(spec), src, {}, "generated")
 		}
 		for _ in 0 ..< 4 {
-			bad := mutated(src)
-			defer delete(bad)
+			bad := testkit.mutate(src)
 			read += testkit.records_at_agree(t, cbor.reads(.Cbor), cbor.as(.Cbor), bad, {}, "mutated")
 		}
+		free_all(context.temp_allocator)
 	}
 	testing.expectf(t, read > 100, "%d containers read", read)
 }

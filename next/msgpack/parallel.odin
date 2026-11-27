@@ -10,13 +10,6 @@ import "stury:lib/ops/typed"
 // Multi-threaded `validate`, `build`, and root-array `unmarshal` over `Part_Plan`.
 
 @(private)
-Validate_Job :: struct {
-	src:  []u8,
-	plan: ^Part_Plan,
-	opts: Options,
-}
-
-@(private)
 validate_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> tape.Error {
 	err, done := validate_parts(src, S, opts, caller)
 	if done {
@@ -29,69 +22,20 @@ validate_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Al
 
 @(private)
 plan_parallel :: proc(src: []u8, want: int, opts: Options, backing: runtime.Allocator, plan: ^Part_Plan, m: ^hook.Memory_Budget) -> (allocator: runtime.Allocator, ok: bool) {
-	if want < 2 {
-		return {}, false
-	}
-	allocator = build.read_allocator(m, opts, backing)
-	plan^ = {
-		parts  = make([dynamic]build.Part, allocator),
-		seams  = make([dynamic]Seam, allocator),
-		levels = make([dynamic]Level, allocator),
-		kinds  = make([dynamic]tape.Kind, allocator),
-	}
-	if !plan_parts(src, want, plan, opts.runner) || len(plan.parts) < 2 {
-		destroy_plan(plan)
-		return allocator, false
-	}
-	return allocator, true
+	return build.binary_plan_parallel(src, want, opts, backing, plan, m, plan_parts)
 }
 
 @(private)
-destroy_plan :: proc(plan: ^Part_Plan) {
-	delete(plan.parts)
-	delete(plan.seams)
-	delete(plan.levels)
-	delete(plan.kinds)
+destroy_plan :: #force_inline proc(plan: ^Part_Plan) {
+	build.binary_plan_destroy(plan)
 }
 
 @(private)
 validate_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (err: tape.Error, done: bool) {
-	m: hook.Memory_Budget
-	plan: Part_Plan
-	_, ok := plan_parallel(src, build.chunk_count(opts.runner, len(src)), opts, caller, &plan, &m)
-	if !ok {
-		return nil, false
+	walk_fn :: proc "contextless" (src: []u8, from, to: int, opts: Options, plan: ^Part_Plan, k: int, h: ^hook.No_Hooks, regs: ^hook.Regs) -> (hook.Walk_Result, bool) {
+		return walk_part(src, from, to, S, opts, plan, k, h, regs, hook.no_hook)
 	}
-	defer destroy_plan(&plan)
-	task :: proc(arg: rawptr, k: int) {
-		j := (^Validate_Job)(arg)
-		p := &j.plan.parts[k]
-		h: hook.No_Hooks
-		regs: hook.Regs
-		r, took := walk_part(j.src, p.from, p.to, S, j.opts, j.plan, k, &h, &regs, hook.no_hook)
-		if k == len(j.plan.parts) - 1 && u8(r) == 0 && u64(r) >> 16 < u64(len(j.src)) {
-			r = fault(u64(r) >> 16, .Bad_Char, .Trailing)
-		}
-		p.close, p.err, _ = hook.walk_error(r, &RULES)
-		p.tolerated = took
-		if k < len(j.plan.parts) - 1 {
-			build.part_cut_short(p)
-		}
-	}
-	vj := Validate_Job{src = src, plan = &plan, opts = opts}
-	tape.fan_each(opts.runner, len(plan.parts), task, &vj)
-	for p in plan.parts {
-		if p.astray {
-			return nil, false
-		}
-		if p.err != nil {
-			if _, is_oom := p.err.(runtime.Allocator_Error); is_oom {
-				return nil, false
-			}
-			return p.err, true
-		}
-	}
-	return nil, true
+	return build.binary_validate_parts(src, opts, &RULES, caller, Level, plan_parallel, walk_fn, u8(Detail.Trailing))
 }
 
 @(private)
@@ -110,29 +54,10 @@ build_parallel :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Alloc
 
 @(private)
 build_parts :: proc(src: []u8, $S: Spec, opts: Options, caller: runtime.Allocator) -> (doc: tape.Document, err: tape.Error, built: bool) {
-	if opts.budget.steps != 0 {
-		return {}, nil, false
+	walk_fn :: proc "contextless" (src: []u8, from, to: int, opts: Options, plan: ^Part_Plan, k: int, h: ^build.Builder, regs: ^hook.Regs) -> (hook.Walk_Result, bool) {
+		return walk_part(src, from, to, S, opts, plan, k, h, regs, build.builder_hook_facts)
 	}
-	m: hook.Memory_Budget
-	plan: Part_Plan
-	allocator, ok := plan_parallel(src, build.chunk_count(opts.runner, len(src)), opts, caller, &plan, &m)
-	if !ok {
-		return {}, nil, false
-	}
-	defer destroy_plan(&plan)
-	walk_fn :: proc(src: []u8, parts: []build.Part, k: int, s: ^build.Segment, opts: Options, data: rawptr) {
-		p := &parts[k]
-		r, took := walk_part(src, p.from, p.to, S, opts, (^Part_Plan)(data), k, &s.b, &s.regs, build.builder_hook_facts)
-		if k == len(parts) - 1 && u8(r) == 0 && u64(r) >> 16 < u64(len(src)) {
-			r = fault(u64(r) >> 16, .Bad_Char, .Trailing)
-		}
-		p.close, p.err, _ = hook.walk_error(r, &RULES)
-		p.tolerated = took
-		if k < len(parts) - 1 {
-			build.part_cut_short(p)
-		}
-	}
-	return build.parts_build(src, &FORMATS[S], &RULES, plan.parts[:], opts, 0, allocator, caller, walk_fn, nil, &plan)
+	return build.binary_build_parts(src, &FORMATS[S], &RULES, opts, caller, Level, plan_parallel, walk_fn, u8(Detail.Trailing))
 }
 
 @(private)

@@ -1,6 +1,7 @@
 // The tokens a walk passes and the faults it returns, for small texts.
 package xml_tests
 
+import "core:fmt"
 import "core:strings"
 import "core:testing"
 import "stury:lib/core/tape"
@@ -185,4 +186,150 @@ nesting_past_the_limit_is_refused :: proc(t: ^testing.T) {
 	e, bad := err.(tape.Exceeded)
 	testing.expect_value(t, bad, true)
 	testing.expect_value(t, e.kind, tape.Budget_Kind.Depth)
+}
+
+@(test)
+a_declared_prefix_is_accepted_wherever_its_scope_reaches :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for text in ([]string {
+			`<p:a xmlns:p="u"/>`,
+			`<a xmlns:p="u"><p:b p:c="1"/></a>`,
+			`<p:a p:b="1" xmlns:p="u"/>`,
+			`<a xmlns:p="u"><b xmlns:p="v"><p:c/></b><p:d/></a>`,
+			`<a xmlns="u"><b xmlns=""><c/></b></a>`,
+			`<xml:a xml:lang="en"/>`,
+			`<a xmlns:xml="http://www.w3.org/XML/1998/namespace"/>`,
+			`<a xmlns:p="u" xmlns:q="u" p:x="1" y="2"/>`,
+			`<a xmlns:p="u" xmlns:q="v" p:x="1" q:x="2"/>`,
+			`<r><a xmlns:p="u&#32;v"><p:b/></a><a xmlns:p="w"><p:b/></a></r>`,
+		}) {
+		testing.expect_value(t, refusal(text), "")
+	}
+}
+
+@(test)
+a_prefix_with_no_declaration_in_scope_is_refused :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	testing.expect_value(t, refusal(`<p:a/>`), "unbound_prefix@0")
+	testing.expect_value(t, refusal(`<a p:b="1"/>`), "unbound_prefix@0")
+	testing.expect_value(t, refusal(`<a><b xmlns:p="u"/><p:c/></a>`), "unbound_prefix@19")
+	testing.expect_value(t, refusal(`<a xmlns:p="u"><b xmlns:p="v"/><p:c p:d="1" q:e="2"/></a>`), "unbound_prefix@31")
+}
+
+@(test)
+a_name_that_is_no_qualified_name_is_refused :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for text in ([]string{`<:a/>`, `<a:/>`, `<a:b:c xmlns:a="u"/>`, `<a:1 xmlns:a="u"/>`, `<a xmlns:p="u" p:/>`, `<a xmlns:p:q="u"/>`, `<a xmlns:="u"/>`}) {
+		testing.expect(t, refusal(text) != "", text)
+	}
+	testing.expect_value(t, refusal(`<?a:b c?><a/>`), "qualified_name@2")
+}
+
+@(test)
+the_reserved_prefixes_and_uris_are_kept :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	testing.expect_value(t, refusal(`<a xmlns:xmlns="u"/>`), "reserved_prefix@3")
+	testing.expect_value(t, refusal(`<a xmlns:xml="u"/>`), "reserved_prefix@3")
+	testing.expect_value(t, refusal(`<xmlns:a/>`), "reserved_prefix@0")
+	testing.expect_value(t, refusal(`<a xmlns:p="http://www.w3.org/XML/1998/namespace"/>`), "reserved_namespace@3")
+	testing.expect_value(t, refusal(`<a xmlns="http://www.w3.org/2000/xmlns/"/>`), "reserved_namespace@3")
+	testing.expect_value(t, refusal(`<a xmlns:p=""/>`), "empty_binding@3")
+}
+
+@(test)
+two_attributes_of_one_expanded_name_are_refused :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	testing.expect_value(t, refusal(`<a xmlns:p="u" xmlns:q="u" p:x="1" q:x="2"/>`), "duplicate_expanded@0")
+	testing.expect_value(t, refusal(`<a xmlns:p="u" p:x="1" p:x="2"/>`), "duplicate_attribute@23")
+	testing.expect_value(t, refusal(`<a xmlns:p="u v" xmlns:q="u&#32;v"><b p:x="1" q:x="2"/></a>`), "duplicate_expanded@35")
+	testing.expect_value(t, refusal(`<a xmlns:p="u v" xmlns:q="u&#9;v"><b p:x="1" q:x="2"/></a>`), "")
+	tokenized := `<!DOCTYPE a [<!ATTLIST a xmlns:q NMTOKEN #IMPLIED>]><a xmlns:p="u" xmlns:q=" u "><b p:x="1" q:x="2"/></a>`
+	testing.expect_value(t, refusal(tokenized), "duplicate_expanded@81")
+}
+
+@(test)
+a_fault_is_found_at_every_offset_across_blocks :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	pads := [?]string{"a", "é", "中", "\U0001F600", " ", "&amp;", "\n"}
+	for pad in pads {
+		for n in 0 ..< 200 {
+			body := strings.repeat(pad, n, context.temp_allocator)
+			whole := fmt.tprintf("<r>%s</r>", body)
+			testing.expect_value(t, refusal(whole), "")
+			whole = fmt.tprintf("<r a='%s'>%s</r>", body, body)
+			testing.expect_value(t, refusal(whole), "")
+			bad := fmt.tprintf("<r>%s\x01</r>", body)
+			testing.expect_value(t, refusal(bad), fmt.tprintf("control_char@%d", 3 + n * len(pad)))
+			bad = fmt.tprintf("<r a='%s<'/>", body)
+			testing.expect_value(t, refusal(bad), fmt.tprintf("attribute_lt@%d", 6 + n * len(pad)))
+			bad = fmt.tprintf("<r>%s\xff</r>", body)
+			testing.expect_value(t, refusal(bad), fmt.tprintf("invalid_utf8@%d", 3 + n * len(pad)))
+		}
+	}
+}
+
+@(test)
+a_truncated_multibyte_rune_is_refused_at_its_head :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	for n in 0 ..< 130 {
+		body := strings.repeat("a", n, context.temp_allocator)
+		for tail in ([]string{"\xe4\xb8", "\xf0\x9f\x98", "\xc3"}) {
+			text := fmt.tprintf("<r>%s%s</r>", body, tail)
+			testing.expect_value(t, refusal(text), fmt.tprintf("invalid_utf8@%d", 3 + n))
+		}
+	}
+}
+
+@(test)
+many_attributes_are_checked_for_repeats :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	for count in ([]int{15, 16, 17, 40, 300}) {
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, "<r")
+		for i in 0 ..< count {
+			fmt.sbprintf(&b, " n%d='v'", i)
+		}
+		plain := fmt.tprintf("%s/>", strings.to_string(b))
+		testing.expect_value(t, refusal(plain), "")
+		for again in ([]int{0, count / 2, count - 1}) {
+			twice := fmt.tprintf("%s n%d='w'/>", strings.to_string(b), again)
+			got := refusal(twice)
+			testing.expectf(t, strings.has_prefix(got, "duplicate_attribute@"), "%d attributes, repeat of %d: %s", count, again, got)
+		}
+	}
+}
+
+@(test)
+deep_nesting_grows_the_frame_stack :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	for depth in ([]int{2, 63, 64, 65, 1000, 1024, 1025, 20000}) {
+		b := strings.builder_make(context.temp_allocator)
+		for _ in 0 ..< depth {
+			strings.write_string(&b, "<a x='1'>")
+		}
+		strings.write_string(&b, "t")
+		for _ in 0 ..< depth {
+			strings.write_string(&b, "</a>")
+		}
+		src := transmute([]u8)strings.to_string(b)
+		testing.expect_value(t, xml.validate(src, .Xml, {budget = {depth = u32(depth)}}), nil)
+		testing.expect(t, xml.validate(src, .Xml, {budget = {depth = u32(depth - 1)}}) != nil)
+	}
+}
+
+@(test)
+a_name_of_the_fifth_edition_is_accepted :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for text in ([]string{"<\U00010000z/>", "<a\xdb\xa9/>", "<a\xef\xbb\xbf/>", "<a\xc2\xb7/>", "<_/>"}) {
+		testing.expect_value(t, refusal(text), "")
+	}
+	for text in ([]string{"<\xc2\xb7a/>", "<-a/>", "<.a/>", "<\xcc\x80a/>"}) {
+		testing.expect_value(t, refusal(text), "name@1")
+	}
+	testing.expect_value(t, refusal("<a\xc3\x97/>"), "space@2")
+	testing.expect_value(t, refusal("<:a/>"), "qualified_name@0")
 }

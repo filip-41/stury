@@ -752,8 +752,7 @@ member_tag :: proc(b: ^Builder, name, tag: string) -> (t: Member_Tag, ok: bool) 
 }
 
 // The value of key `key` in the struct tag `tag`, written `key:"value"`, with a backslash escaping the byte after it.
-@(private)
-tag_lookup :: proc(tag, key: string) -> (string, bool) {
+tag_lookup :: proc "contextless" (tag, key: string) -> (string, bool) {
 	t := tag
 	for len(t) > 0 {
 		i := 0
@@ -959,25 +958,12 @@ is_clean_ascii_key :: proc "contextless" (name: string) -> bool {
 // an expected key by its bytes never takes an escape for it.
 @(private)
 key_of :: proc "contextless" (r: ^Record, name: string) {
-	n := len(name)
-	for c in transmute([]u8)name {
-		if c == '"' || c == '\\' || c < 0x20 {
-			r.word = NO_KEY
-			return
-		}
-	}
-	r.word = tape.key_word(u64(n))
-	r.head, r.tail = 0, 0
-	for i in 0 ..< min(n, 8) {
-		r.head |= u64(name[i]) << (8 * uint(i))
-	}
-	if n <= 8 {
-		r.tail = ~u64(0) >> (64 - 8 * uint(n)) if n > 0 else 0
+	word, head, tail, ok := tape.expected_key(name)
+	if !ok {
+		r.word = NO_KEY
 		return
 	}
-	for i in 0 ..< 8 {
-		r.tail |= u64(name[n - 8 + i]) << (8 * uint(i))
-	}
+	r.word, r.head, r.tail = word, head, tail
 }
 
 // The integer bounds of the integer kinds, by kind.

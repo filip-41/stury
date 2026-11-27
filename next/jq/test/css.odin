@@ -76,14 +76,7 @@ true`},
 @(test)
 css_selects_elements_of_xml_input_as_a_path_expression :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	arena: virtual.Arena
-	testing.expect(t, suite_arena(&arena) == nil)
-	defer virtual.arena_destroy(&arena)
-	context.allocator = virtual.arena_allocator(&arena)
-	for c, i in CSS {
-		k := Case{file = "css", line = i, prog = c[0], input = c[1], want = strings.split(c[2], "\n")}
-		testing.expectf(t, run_case(k, true) == .Pass, "%s", c[0])
-	}
+	run_case_table(t, "css", CSS[:])
 }
 
 // A document 10,000 levels deep, each element the only child of the one around it.

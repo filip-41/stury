@@ -62,16 +62,6 @@ expect_refusal :: proc(t: ^testing.T, e: tape.Error, want: json.Typed_Refusal, l
 }
 
 @(private = "file")
-expect_path :: proc(t: ^testing.T, path: [dynamic]tape.Step, want: ..tape.Step, loc := #caller_location) {
-	if !testing.expectf(t, len(path) == len(want), "path %v, want %v", path[:], want, loc = loc) {
-		return
-	}
-	for step, i in want {
-		testing.expectf(t, path[i] == step, "path %v, want %v", path[:], want, loc = loc)
-	}
-}
-
-@(private = "file")
 path_in :: proc() -> [dynamic]tape.Step {
 	return make([dynamic]tape.Step, context.temp_allocator)
 }
@@ -627,7 +617,7 @@ members_past_the_tracked_word :: proc(t: ^testing.T) {
 	path := path_in()
 	e := read(`{"f0":1,"last":{}}`, &w, r = {path = &path})
 	expect_refusal(t, e, .Missing_Field)
-	expect_path(t, path, tape.Name("tail"))
+	testkit.expect_path(t, path[:], {"tail"})
 }
 
 @(test)
@@ -730,17 +720,15 @@ refusal_names_the_value_and_its_path :: proc(t: ^testing.T) {
 	s: S
 	path := path_in()
 	e := read(`{"l":[{"x":1},{"y":"no"}]}`, &s, r = {path = &path})
-	expect_refusal(t, e, .Expected_Integer)
-	testing.expect_value(t, at_of(e), 19)
-	expect_path(t, path, tape.Name("l"), tape.Index(1), tape.Name("y"))
+	testkit.expect_typed_refusal(t, e, .Expected_Integer, 19)
+	testkit.expect_path(t, path[:], {"l", 1, "y"})
 
 	src := `{"m":{"key":{"x":300000000000}}}`
 	s = {}
 	clear(&path)
 	e = read(src, &s, r = {path = &path})
-	expect_refusal(t, e, .Above_Maximum)
-	testing.expect_value(t, at_of(e), 17)
-	expect_path(t, path, tape.Name("m"), tape.Name("key"), tape.Name("x"))
+	testkit.expect_typed_refusal(t, e, .Above_Maximum, 17)
+	testkit.expect_path(t, path[:], {"m", "key", "x"})
 	buf: [128]u8
 	testing.expect_value(t, tape.error_message(buf[:], e, transmute([]u8)src), "1:18: Number above the type's maximum")
 }
@@ -761,7 +749,7 @@ a_refusal_inside_a_struct_in_a_list_in_a_map_has_the_whole_path :: proc(t: ^test
 	path := path_in()
 	e := read(text, &bag, r = {path = &path})
 	expect_refusal(t, e, .Too_Few)
-	expect_path(t, path, tape.Name("by_name"), tape.Name("bé"), tape.Index(1), tape.Name("tags"))
+	testkit.expect_path(t, path[:], {"by_name", "bé", 1, "tags"})
 	// Too few elements are known at the array's close, which is where the refusal is.
 	testing.expect_value(t, text[at_of(e)], u8(']'))
 	// A read that refuses nothing leaves the path empty.
@@ -871,8 +859,7 @@ lists_arrays_and_their_lengths :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(s.f), 3)
 	one: [1]string
 	e := read(`["a","b"]`, &one)
-	expect_refusal(t, e, .Too_Many)
-	testing.expect_value(t, at_of(e), 5)
+	testkit.expect_typed_refusal(t, e, .Too_Many, 5)
 	Weekday :: enum u8 {
 		Mon,
 		Tue,
@@ -1049,7 +1036,7 @@ refuse_unknown_refuses_a_key_no_member_names :: proc(t: ^testing.T) {
 	path := path_in()
 	e := read(`{"x":1,"nope":2}`, &p, r = {refuse_unknown = true, path = &path})
 	expect_refusal(t, e, .Unknown_Field)
-	expect_path(t, path, tape.Name("nope"))
+	testkit.expect_path(t, path[:], {"nope"})
 	expect_refusal(t, read(`{"":1}`, &p, r = {refuse_unknown = true}), .Unknown_Field)
 	// A key spelled with an escape is matched by what it decodes to.
 	expect_nil(t, read(`{"x":5}`, &p, r = {refuse_unknown = true}))
@@ -1065,7 +1052,7 @@ refuse_unknown_refuses_a_key_no_member_names :: proc(t: ^testing.T) {
 	l: []Point
 	clear(&path)
 	expect_refusal(t, read(`[{"x":1},{"z":1}]`, &l, r = {refuse_unknown = true, path = &path}), .Unknown_Field)
-	expect_path(t, path, tape.Index(1), tape.Name("z"))
+	testkit.expect_path(t, path[:], {1, "z"})
 }
 
 @(test)
@@ -1318,7 +1305,7 @@ recursive_types_through_slices_and_pointers :: proc(t: ^testing.T) {
 	bad: Tree
 	e := read(`{"kids":[{"v":1},{"next":{"kids":[{"v":"no"}]}}]}`, &bad, r = {path = &path})
 	expect_refusal(t, e, .Expected_Integer)
-	expect_path(t, path, tape.Name("kids"), tape.Index(1), tape.Name("next"), tape.Name("kids"), tape.Index(0), tape.Name("v"))
+	testkit.expect_path(t, path[:], {"kids", 1, "next", "kids", 0, "v"})
 	// A plan of a recursive type is made once and shared.
 	plan, err := json.plan_make(Tree, allocator = context.temp_allocator)
 	expect_nil(t, err)
@@ -1369,7 +1356,7 @@ a_value_a_wrapper_refuses_has_the_wrappers_path :: proc(t: ^testing.T) {
 		path := path_in()
 		e := read(strings.concatenate({`{"`, name, `":1.5}`}, context.temp_allocator), &s, r = {path = &path, plan = &plan})
 		testing.expect_value(t, refusal_of(e) != .None, true)
-		expect_path(t, path, tape.Name(name))
+		testkit.expect_path(t, path[:], {name})
 	}
 	l: []^i32
 	path := path_in()
@@ -1377,7 +1364,7 @@ a_value_a_wrapper_refuses_has_the_wrappers_path :: proc(t: ^testing.T) {
 	expect_nil(t, list_err)
 	e := read(`[1,2,1.5]`, &l, r = {path = &path, plan = &list_plan})
 	expect_refusal(t, e, .Expected_Integer)
-	expect_path(t, path, tape.Index(2))
+	testkit.expect_path(t, path[:], {2})
 }
 
 @(test)
@@ -1491,10 +1478,9 @@ a_missing_member_keeps_the_path_to_its_struct :: proc(t: ^testing.T) {
 	text := `{"a":{}}`
 	path := path_in()
 	e := read(text, &s, r = {path = &path})
-	expect_refusal(t, e, .Missing_Field)
-	expect_path(t, path, tape.Name("a"), tape.Name("b"))
 	// The place is the close of the struct that lacks the member.
-	testing.expect_value(t, at_of(e), 6)
+	testkit.expect_typed_refusal(t, e, .Missing_Field, 6)
+	testkit.expect_path(t, path[:], {"a", "b"})
 }
 
 @(test)
@@ -1618,7 +1604,7 @@ a_one_shot_read_names_a_spelled_member_by_its_field :: proc(t: ^testing.T) {
 	path := path_in()
 	e := json.unmarshal(transmute([]u8)string(`{"alpha":"x"}`), &s, read = {path = &path}, allocator = poisoned)
 	expect_refusal(t, e, .Expected_Integer)
-	expect_path(t, path, tape.Name("a"))
+	testkit.expect_path(t, path[:], {"a"})
 }
 
 // Numbers read into f32 with one rounding. The cases sit on or next to an f32 midpoint where the binary64 lands on
@@ -1724,7 +1710,7 @@ required_members_read_in_any_order_past_the_63rd_bit :: proc(t: ^testing.T) {
 	path := path_in()
 	e := read(missing, &w, r = {path = &path})
 	expect_refusal(t, e, .Missing_Field)
-	expect_path(t, path, tape.Name("m69"))
+	testkit.expect_path(t, path[:], {"m69"})
 	// A middle member absent past the 63rd bit, and the first one.
 	for name in ([]string{"m64", "m0"}) {
 		// The last member in the text has no comma after it.
@@ -1733,7 +1719,7 @@ required_members_read_in_any_order_past_the_63rd_bit :: proc(t: ^testing.T) {
 		without := strings.concatenate({text[:at], text[at + len(needle):]}, context.temp_allocator)
 		clear(&path)
 		expect_refusal(t, read(without, &w, r = {path = &path}), .Missing_Field)
-		expect_path(t, path, tape.Name(name))
+		testkit.expect_path(t, path[:], {name})
 	}
 	// A repeat of a required member satisfies it once and the later value wins.
 	again: Many_Required
@@ -1763,13 +1749,13 @@ a_required_struct_inside_a_list_inside_a_required_struct :: proc(t: ^testing.T) 
 	path := path_in()
 	e := read(`{"mids":[{"leaves":[{"x":1},{}]}]}`, &w, r = {path = &path})
 	expect_refusal(t, e, .Missing_Field)
-	expect_path(t, path, tape.Name("mids"), tape.Index(0), tape.Name("leaves"), tape.Index(1), tape.Name("x"))
+	testkit.expect_path(t, path[:], {"mids", 0, "leaves", 1, "x"})
 	clear(&path)
 	expect_refusal(t, read(`{"mids":[{"tag":"a"}]}`, &w, r = {path = &path}), .Missing_Field)
-	expect_path(t, path, tape.Name("mids"), tape.Index(0), tape.Name("leaves"))
+	testkit.expect_path(t, path[:], {"mids", 0, "leaves"})
 	clear(&path)
 	expect_refusal(t, read(`{}`, &w, r = {path = &path}), .Missing_Field)
-	expect_path(t, path, tape.Name("mids"))
+	testkit.expect_path(t, path[:], {"mids"})
 }
 
 @(test)

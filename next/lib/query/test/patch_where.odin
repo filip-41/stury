@@ -13,19 +13,6 @@ import "stury:lib/query"
 import "stury:testkit"
 import "stury:xml"
 
-@(private = "file")
-parse_val :: proc(t: ^testing.T, h: ^query.Heap, src: string) -> query.Value {
-	alloc := runtime.heap_allocator()
-	buf := make([]u8, len(src), alloc)
-	copy(buf, src)
-	doc, err := json.build(buf, .Json, {}, alloc)
-	testing.expectf(t, err == nil, "parse %q failed: %v", src, err)
-	doc.flags += {.Owns_Src}
-	v, s := query.document_value(h, doc, true)
-	testing.expect_value(t, s, query.Status.Ok)
-	return v
-}
-
 @(test)
 value_place_doc_scalars_partial_and_cbor :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -104,9 +91,9 @@ rfc6902_apply_patch_all_ops_errors_and_atomic_rollback :: proc(t: ^testing.T) {
 
 	// 1. All 6 ops: add (object, array insert, `-` append), remove, replace, move, copy, test (1 == 1.0).
 	{
-		tgt := parse_val(t, &h, `{"a":1,"arr":[10,30],"obj":{"x":"hi","y":"drop"},"a/b":"slash","m~n":"tilde"}`)
+		tgt := read_json(t, &h, `{"a":1,"arr":[10,30],"obj":{"x":"hi","y":"drop"},"a/b":"slash","m~n":"tilde"}`)
 		defer query.release(&h, tgt)
-		patch := parse_val(t, &h, `[
+		patch := read_json(t, &h, `[
 			{"op":"test","path":"/a","value":1.0},
 			{"op":"add","path":"/arr/1","value":20},
 			{"op":"add","path":"/arr/-","value":40},
@@ -117,7 +104,7 @@ rfc6902_apply_patch_all_ops_errors_and_atomic_rollback :: proc(t: ^testing.T) {
 			{"op":"test","path":"/arr","value":[10,20,30,40]}
 		]`)
 		defer query.release(&h, patch)
-		want := parse_val(t, &h, `{"a":1,"arr":[10,20,30,40],"obj":{"x":"hi"},"a/b":"updated","moved":"tilde","copied":"hi"}`)
+		want := read_json(t, &h, `{"a":1,"arr":[10,20,30,40],"obj":{"x":"hi"},"a/b":"updated","moved":"tilde","copied":"hi"}`)
 		defer query.release(&h, want)
 
 		got, s := query.apply_patch(&h, tgt, patch)
@@ -129,15 +116,15 @@ rfc6902_apply_patch_all_ops_errors_and_atomic_rollback :: proc(t: ^testing.T) {
 
 	// 2. Atomic rollback on failed `test` after prior mutating ops: shared `tgt` MUST remain completely untouched.
 	{
-		tgt := parse_val(t, &h, `{"a":1,"nested":{"k":[1,2,3]}}`)
+		tgt := read_json(t, &h, `{"a":1,"nested":{"k":[1,2,3]}}`)
 		defer query.release(&h, tgt)
 		// Convert to built mutable object so we also prove COW rollback on heap-owned containers.
 		built_tgt, _ := query.built(&h, tgt)
 		defer query.release(&h, built_tgt)
-		snap := parse_val(t, &h, `{"a":1,"nested":{"k":[1,2,3]}}`)
+		snap := read_json(t, &h, `{"a":1,"nested":{"k":[1,2,3]}}`)
 		defer query.release(&h, snap)
 
-		patch := parse_val(t, &h, `[
+		patch := read_json(t, &h, `[
 			{"op":"replace","path":"/a","value":99},
 			{"op":"add","path":"/nested/k/-","value":4},
 			{"op":"remove","path":"/nested/k/0"},
@@ -156,7 +143,7 @@ rfc6902_apply_patch_all_ops_errors_and_atomic_rollback :: proc(t: ^testing.T) {
 
 	// 3. Move cycle rejection (proper prefix), self-move identical path, and strict pointer errors.
 	{
-		tgt := parse_val(t, &h, `{"a":{"b":{"c":1}},"arr":[1,2]}`)
+		tgt := read_json(t, &h, `{"a":{"b":{"c":1}},"arr":[1,2]}`)
 		defer query.release(&h, tgt)
 
 		bad_patches := [?]string{
@@ -174,7 +161,7 @@ rfc6902_apply_patch_all_ops_errors_and_atomic_rollback :: proc(t: ^testing.T) {
 			`[{"op":"remove","path":""}]`,                     // cannot remove root
 		}
 		for bp in bad_patches {
-			pv := parse_val(t, &h, bp)
+			pv := read_json(t, &h, bp)
 			got, s := query.apply_patch(&h, tgt, pv)
 			testing.expectf(t, s == .Error, "expected error for %s", bp)
 			query.clear_error(&h)
@@ -183,7 +170,7 @@ rfc6902_apply_patch_all_ops_errors_and_atomic_rollback :: proc(t: ^testing.T) {
 		}
 
 		// Identical path move `/a/b` -> `/a/b` succeeds as no-op.
-		noop := parse_val(t, &h, `[{"op":"move","from":"/a/b","path":"/a/b"}]`)
+		noop := read_json(t, &h, `[{"op":"move","from":"/a/b","path":"/a/b"}]`)
 		defer query.release(&h, noop)
 		got, s := query.apply_patch(&h, tgt, noop)
 		testing.expect_value(t, s, query.Status.Ok)
@@ -192,7 +179,7 @@ rfc6902_apply_patch_all_ops_errors_and_atomic_rollback :: proc(t: ^testing.T) {
 		testing.expect(t, eq)
 
 		// Non-prefix `/a` -> `/ab` succeeds!
-		non_prefix := parse_val(t, &h, `[{"op":"move","from":"/a","path":"/ab"}]`)
+		non_prefix := read_json(t, &h, `[{"op":"move","from":"/a","path":"/ab"}]`)
 		defer query.release(&h, non_prefix)
 		got2, s2 := query.apply_patch(&h, tgt, non_prefix)
 		testing.expect_value(t, s2, query.Status.Ok)
@@ -277,7 +264,7 @@ rfc6902_diff_to_patch_roundtrip :: proc(t: ^testing.T) {
 		diff.destroy_patch(&patch)
 		tape.destroy_document(&doc_b)
 
-		vb_fresh := parse_val(t, &h, str_b)
+		vb_fresh := read_json(t, &h, str_b)
 		eq, _ := query.equal(&h, patched, vb_fresh)
 		testing.expectf(t, eq, "seed %d roundtrip mismatch: %s -> %s", seed, str_a, str_b)
 
@@ -319,9 +306,9 @@ rfc7396_merge_patch_appendix_a_and_diff :: proc(t: ^testing.T) {
 	}
 
 	for tc, i in vectors {
-		tgt := parse_val(t, &h, tc.target)
-		pat := parse_val(t, &h, tc.patch)
-		want := parse_val(t, &h, tc.want)
+		tgt := read_json(t, &h, tc.target)
+		pat := read_json(t, &h, tc.patch)
+		want := read_json(t, &h, tc.want)
 		got, s := query.apply_merge_patch(&h, tgt, pat)
 		testing.expectf(t, s == .Ok, "vector %d status %v", i, s)
 		eq, _ := query.equal(&h, got, want)
@@ -334,8 +321,8 @@ rfc7396_merge_patch_appendix_a_and_diff :: proc(t: ^testing.T) {
 
 	// diff_merge_patch -> apply_merge_patch roundtrip.
 	{
-		a := parse_val(t, &h, `{"title":"Goodbye!","author":{"givenName":"John","familyName":"Doe"},"tags":["example","sample"],"content":"This will be unchanged"}`)
-		b := parse_val(t, &h, `{"title":"Hello!","phoneNumber":"+01-123-456-7890","author":{"givenName":"John"},"tags":["example"],"content":"This will be unchanged"}`)
+		a := read_json(t, &h, `{"title":"Goodbye!","author":{"givenName":"John","familyName":"Doe"},"tags":["example","sample"],"content":"This will be unchanged"}`)
+		b := read_json(t, &h, `{"title":"Hello!","phoneNumber":"+01-123-456-7890","author":{"givenName":"John"},"tags":["example"],"content":"This will be unchanged"}`)
 		defer query.release(&h, a)
 		defer query.release(&h, b)
 
@@ -413,7 +400,7 @@ patch_xml_group_roundtrip_and_partial_doc_taint :: proc(t: ^testing.T) {
 		diff.destroy_patch(&p)
 		tape.destroy_document(&xb)
 
-		want := parse_val(t, &h, tc[2])
+		want := read_json(t, &h, tc[2])
 		eq, _ := query.equal(&h, patched, want)
 		testing.expectf(t, eq, "XML patch roundtrip failed for %s -> %s", tc[0], tc[1])
 
@@ -434,11 +421,11 @@ patch_xml_group_roundtrip_and_partial_doc_taint :: proc(t: ^testing.T) {
 
 		pv, _ := query.document_value(&h, pdoc, false)
 		defer query.release(&h, pv)
-		full := parse_val(t, &h, `{"a":1}`)
+		full := read_json(t, &h, `{"a":1}`)
 		defer query.release(&h, full)
-		empty_patch := parse_val(t, &h, `[]`)
+		empty_patch := read_json(t, &h, `[]`)
 		defer query.release(&h, empty_patch)
-		merge_obj := parse_val(t, &h, `{"a":2}`)
+		merge_obj := read_json(t, &h, `{"a":2}`)
 		defer query.release(&h, merge_obj)
 
 		h.tainted = false

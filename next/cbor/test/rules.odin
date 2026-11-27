@@ -15,7 +15,7 @@ Case :: struct {
 
 // Every read of the text of `c`, as `spec`, refuses it with one fault, of rule `c.code`.
 expect_refused :: proc(t: ^testing.T, c: Case, spec := cbor.Spec.Cbor, opts := cbor.Options{}, loc := #caller_location) {
-	src := hex(c.hex)
+	src := testkit.hex(c.hex)
 	err := cbor.validate(src, spec, opts)
 	if !testing.expectf(t, err != nil, "%s is read", c.hex, loc = loc) {
 		return
@@ -30,7 +30,7 @@ expect_refused :: proc(t: ^testing.T, c: Case, spec := cbor.Spec.Cbor, opts := c
 }
 
 expect_read :: proc(t: ^testing.T, text: string, spec := cbor.Spec.Cbor, opts := cbor.Options{}, loc := #caller_location) {
-	err := cbor.validate(hex(text), spec, opts)
+	err := cbor.validate(testkit.hex(text), spec, opts)
 	testing.expectf(t, err == nil, "%s: %v", text, err, loc = loc)
 }
 
@@ -300,13 +300,13 @@ text_must_be_utf8 :: proc(t: ^testing.T) {
 	}
 	lax := cbor.Options{tolerate = {.Invalid_Utf8}}
 	expect_read(t, "62 c3 28", opts = lax)
-	doc, err := cbor.build(hex("62 c3 28"), .Cbor, lax)
+	doc, err := cbor.build(testkit.hex("62 c3 28"), .Cbor, lax)
 	testing.expect_value(t, err, nil)
 	defer cbor.destroy(&doc)
 	testing.expect(t, .Tolerated in doc.flags)
 	s, _ := text_of(&doc, cbor.ROOT)
 	testing.expect_value(t, s, "�(")
-	testing.expect_value(t, dumped(hex("7f 61 c3 62 61 80 ff"), opts = lax), `"�a�"`)
+	testing.expect_value(t, dumped(testkit.hex("7f 61 c3 62 61 80 ff"), opts = lax), `"�a�"`)
 	// A byte string holds any bytes.
 	expect_read(t, "42 c3 28")
 }
@@ -315,20 +315,20 @@ text_must_be_utf8 :: proc(t: ^testing.T) {
 @(test)
 chunks_join :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	testing.expect_value(t, dumped(hex("7f 62 68 69 63 e2 82 ac ff")), `"hi€"`)
-	testing.expect_value(t, dumped(hex("a1 7f 61 6b 61 79 ff 01")), `{"ky":i:1}`)
+	testing.expect_value(t, dumped(testkit.hex("7f 62 68 69 63 e2 82 ac ff")), `"hi€"`)
+	testing.expect_value(t, dumped(testkit.hex("a1 7f 61 6b 61 79 ff 01")), `{"ky":i:1}`)
 }
 
 // The message of a fault names its rule and its place, a byte offset in a binary text.
 @(test)
 faults_have_messages :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("82 01 61 80")
+	src := testkit.hex("82 01 61 80")
 	err := cbor.validate(src, .Cbor)
 	buf: [64]u8
 	testing.expect_value(t, tape.error_message(buf[:], err, src, cbor.as(.Cbor)), "byte 3: Text string is not UTF-8 byte 0x80")
-	testing.expect_value(t, tape.error_message(buf[:], cbor.validate(hex("ff"), .Cbor), hex("ff"), cbor.as(.Cbor)), "byte 0: Break outside an indefinite item")
-	lines := hex("0a 0a 61 80")
+	testing.expect_value(t, tape.error_message(buf[:], cbor.validate(testkit.hex("ff"), .Cbor), testkit.hex("ff"), cbor.as(.Cbor)), "byte 0: Break outside an indefinite item")
+	lines := testkit.hex("0a 0a 61 80")
 	testing.expect_value(t, tape.error_message(buf[:], tape.Exceeded{at = 3, kind = .Depth}, lines, cbor.as(.Deterministic)), "byte 3: Exceeds the depth limit")
 	// A message that names no format places the fault by line and column, as in a text format.
 	testing.expect_value(t, tape.error_message(buf[:], err, src), "1:4: Text string is not UTF-8 byte 0x80")
@@ -341,20 +341,20 @@ limits_and_repeats_come_first :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	for text in ([]string{"81 98 01 00", "81 9f ff", "81 99 ffff 00", "81 bf ff"}) {
 		for spec in ([]cbor.Spec{.Preferred, .Deterministic, .Length_First}) {
-			err := cbor.validate(hex(text), spec, {budget = {depth = 1}})
+			err := cbor.validate(testkit.hex(text), spec, {budget = {depth = 1}})
 			testing.expectf(t, testkit.code_of(err) == "exceeded Depth", "%s as %v: %s", text, spec, testkit.code_of(err))
 		}
 	}
 	for spec in ([]cbor.Spec{.Preferred, .Deterministic, .Length_First}) {
-		testing.expect_value(t, testkit.code_of(cbor.validate(hex("c0 7f 61 78 ff"), spec)), "not_preferred")
-		testing.expect_value(t, testkit.code_of(cbor.validate(hex("c0 ff"), spec)), "bad_tag_content")
+		testing.expect_value(t, testkit.code_of(cbor.validate(testkit.hex("c0 7f 61 78 ff"), spec)), "not_preferred")
+		testing.expect_value(t, testkit.code_of(cbor.validate(testkit.hex("c0 ff"), spec)), "bad_tag_content")
 	}
 	for spec in ([]cbor.Spec{.Deterministic, .Length_First}) {
-		err := cbor.validate(hex("a2 00 01 00 02"), spec)
+		err := cbor.validate(testkit.hex("a2 00 01 00 02"), spec)
 		testing.expectf(t, testkit.code_of(err) == "key_order", "%v: %s", spec, testkit.code_of(err))
-		_, err = cbor.build(hex("a2 00 01 00 02"), spec, {dups = .Refuse}, context.temp_allocator)
+		_, err = cbor.build(testkit.hex("a2 00 01 00 02"), spec, {dups = .Refuse}, context.temp_allocator)
 		testing.expectf(t, testkit.code_of(err) == "duplicate_key", "%v refusing repeats: %s", spec, testkit.code_of(err))
-		err = cbor.validate(hex("a2 01 01 00 02"), spec)
+		err = cbor.validate(testkit.hex("a2 01 01 00 02"), spec)
 		testing.expectf(t, testkit.code_of(err) == "key_order", "%v: %s", spec, testkit.code_of(err))
 	}
 }
@@ -366,7 +366,7 @@ early_finds_judge_the_bytes_they_read :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	paths := [][]tape.Step{{tape.Name("a")}, {tape.Index(0)}, {tape.Index(1)}, {tape.Index(0), tape.Index(0)}}
 	for c in MALFORMED {
-		src := hex(c.hex)
+		src := testkit.hex(c.hex)
 		for spec in cbor.Spec {
 			want := cbor.validate(src, spec)
 			for path in paths {
@@ -393,9 +393,9 @@ a_repeat_before_a_fault_comes_first :: proc(t: ^testing.T) {
 		{"a1 61 61 01 00", "trailing", "trailing"},
 	}
 	for c in cases {
-		_, err := cbor.build(hex(c.text), .Cbor, {dups = .Refuse}, context.temp_allocator)
+		_, err := cbor.build(testkit.hex(c.text), .Cbor, {dups = .Refuse}, context.temp_allocator)
 		testing.expectf(t, testkit.code_of(err) == c.refusing, "%s refusing repeats: %s", c.text, testkit.code_of(err))
-		_, err = cbor.build(hex(c.text), .Cbor, {dups = .Last}, context.temp_allocator)
+		_, err = cbor.build(testkit.hex(c.text), .Cbor, {dups = .Last}, context.temp_allocator)
 		testing.expectf(t, testkit.code_of(err) == c.other, "%s: %s", c.text, testkit.code_of(err))
 	}
 }

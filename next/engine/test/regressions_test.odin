@@ -17,27 +17,6 @@ import "stury:testkit"
 import "stury:xml"
 
 @(private = "file")
-Reg_Lines :: struct {
-	lines: [dynamic]string,
-	alloc: runtime.Allocator,
-}
-
-@(private = "file")
-reg_lines_emit :: proc(data: rawptr, bytes: []u8) -> bool {
-	rl := (^Reg_Lines)(data)
-	append(&rl.lines, strings.clone(string(bytes), rl.alloc))
-	return true
-}
-
-@(private = "file")
-reg_lines_destroy :: proc(rl: ^Reg_Lines) {
-	for s in rl.lines {
-		delete(s, rl.alloc)
-	}
-	delete(rl.lines)
-}
-
-@(private = "file")
 Stateful_Eval_Ctx :: struct {
 	calls: int,
 }
@@ -87,13 +66,13 @@ regression_parallel_unsync_ctx_and_shared_scratch_tsan :: proc(t: ^testing.T) {
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Records_Parallel)
 
 		ctx: Stateful_Eval_Ctx
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, ndjson, {
 			eval     = stateful_inc_eval,
 			eval_ctx = &ctx,
 			runner   = runner,
-			emit     = {fn = reg_lines_emit, data = &lb},
+			emit     = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, ctx.calls, 64)
@@ -124,15 +103,15 @@ regression_parallel_unsync_ctx_and_shared_scratch_tsan :: proc(t: ^testing.T) {
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
 
 		ctx: Stateful_Eval_Ctx
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, arr_json, {
 			eval          = stateful_inc_eval,
 			eval_ctx      = &ctx,
 			eval_each     = stateful_inc_eval,
 			eval_each_ctx = &ctx,
 			runner        = runner,
-			emit          = {fn = reg_lines_emit, data = &lb},
+			emit          = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, ctx.calls, 40)
@@ -153,13 +132,13 @@ regression_parallel_unsync_ctx_and_shared_scratch_tsan :: proc(t: ^testing.T) {
 			{"d.json", transmute([]u8)string(`{"x":4}`), json.Spec.Json, .Single},
 		}
 		ctx: Stateful_Eval_Ctx
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute_files(&plan.contract, files[:], {runner = runner}, {
 			eval     = stateful_inc_eval,
 			eval_ctx = &ctx,
 			runner   = runner,
-			emit     = {fn = reg_lines_emit, data = &lb},
+			emit     = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, ctx.calls, 4)
@@ -206,13 +185,13 @@ regression_parallel_unsync_ctx_and_shared_scratch_tsan :: proc(t: ^testing.T) {
 			return .None
 		}
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute_files(&plan.contract, files[:], {runner = runner}, {
 			eval   = no_op_eval, // nil eval_ctx is thread-safe, exercising shared `read.scratch` concurrently
 			read   = {budget = {depth = 1200}, scratch = mem.arena_allocator(&scratch_arena)},
 			runner = runner,
-			emit   = {fn = reg_lines_emit, data = &lb},
+			emit   = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, res.emitted, u64(6))
@@ -261,84 +240,16 @@ regression_taint_multibatch_and_collect :: proc(t: ^testing.T) {
 			parallel    = true,
 		}
 
-		// Minimal custom per-worker evaluator running `prog_actual` over scanned doc.
-		Batch_State :: struct {
-			prog:  ^jq.Program,
-			h:     query.Heap,
-			run:   jq.Run,
-			alloc: runtime.Allocator,
-		}
-		init_bs :: proc(parent: rawptr, idx: int, alloc: runtime.Allocator) -> rawptr {
-			_ = idx
-			p := (^Batch_State)(parent)
-			w := new(Batch_State, alloc)
-			w.prog = p.prog
-			w.alloc = alloc
-			query.heap_init(&w.h, alloc)
-			jq.run_init(&w.run, p.prog, &w.h, nil)
-			return w
-		}
-		fini_bs :: proc(parent: rawptr, idx: int, wptr: rawptr) {
-			_ = parent
-			_ = idx
-			w := (^Batch_State)(wptr)
-			if w != nil {
-				jq.run_destroy(&w.run)
-				query.heap_destroy(&w.h)
-				free(w, w.alloc)
-			}
-		}
-		eval_bs :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
-			_ = meta
-			w := (^Batch_State)(ctx)
-			w.h.tainted = false
-			query.clear_error(&w.h)
-			inp, st := query.document_value(&w.h, doc^, owned = false)
-			if st != .Ok {
-				return .Failed
-			}
-			Cap :: struct {
-				h:    ^query.Heap,
-				emit: engine.Emitter,
-				buf:  [dynamic]u8,
-				err:  engine.Exec_Error,
-			}
-			on_v :: proc(d: rawptr, v: query.Value, h: ^query.Heap) -> bool {
-				c := (^Cap)(d)
-				defer query.release(h, v)
-				clear(&c.buf)
-				if query.write_json(h, &c.buf, v) != .Ok {
-					c.err = .Tainted if h.tainted else .Write_Error
-					return false
-				}
-				if !engine.emit_bytes(c.emit, c.buf[:]) {
-					c.err = .Stopped
-					return false
-				}
-				return true
-			}
-			cap := Cap{h = &w.h, emit = emit, buf = make([dynamic]u8, w.alloc)}
-			defer delete(cap.buf)
-			end := jq.run_value(&w.run, inp, on_v, &cap)
-			if cap.err != .None {
-				return cap.err
-			}
-			if w.h.tainted || end == .Tainted {
-				return .Tainted
-			}
-			return .None
-		}
-
-		parent_bs := Batch_State{prog = prog_actual}
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		parent_bs := Jq_Eval_State{prog = prog_actual}
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&under_plan.contract, &dec, ndjson, {
-			eval                 = eval_bs,
+			eval                 = jq_doc_eval,
 			eval_ctx             = &parent_bs,
-			workers              = {init = init_bs, fini = fini_bs},
+			workers              = {init = worker_eval_init, fini = worker_eval_fini},
 			runner               = runner,
 			rerun_whole_on_taint = true,
-			emit                 = {fn = reg_lines_emit, data = &lb},
+			emit                 = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.Tainted)
 		testing.expect(t, res.tainted)
@@ -389,15 +300,15 @@ regression_taint_multibatch_and_collect :: proc(t: ^testing.T) {
 			return .None
 		}
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, arr_src, {
 			eval                 = whole_ok,
 			eval_each            = each_taint_on_3,
 			spine_collect        = noop_collect,
 			runner               = runner,
 			rerun_whole_on_taint = true,
-			emit                 = {fn = reg_lines_emit, data = &lb},
+			emit                 = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect(t, res.reran_whole)
@@ -447,14 +358,14 @@ regression_spine_nil_eval_each_fallback :: proc(t: ^testing.T) {
 	}
 
 	probe: Whole_Probe
-	lb := Reg_Lines{alloc = context.allocator}
-	defer reg_lines_destroy(&lb)
+	lb := Lines_Buf{alloc = context.allocator}
+	defer destroy_lines(&lb)
 	res_ok := engine.execute(&plan.contract, &dec, src, {
 		eval      = probe_eval,
 		eval_ctx  = &probe,
 		eval_each = nil,
 		runner    = runner,
-		emit      = {fn = reg_lines_emit, data = &lb},
+		emit      = {fn = lines_emit, data = &lb},
 	})
 	testing.expect_value(t, res_ok.err, engine.Exec_Error.None)
 	testing.expect_value(t, probe.calls, 1)
@@ -462,11 +373,11 @@ regression_spine_nil_eval_each_fallback :: proc(t: ^testing.T) {
 	testing.expect_value(t, lb.lines[0], "whole")
 
 	// When BOTH `eval_each == nil` AND `eval == nil`, must return `.Failed` (not emit raw document).
-	lb_fail := Reg_Lines{alloc = context.allocator}
-	defer reg_lines_destroy(&lb_fail)
+	lb_fail := Lines_Buf{alloc = context.allocator}
+	defer destroy_lines(&lb_fail)
 	res_fail := engine.execute(&plan.contract, &dec, src, {
 		runner = runner,
-		emit   = {fn = reg_lines_emit, data = &lb_fail},
+		emit   = {fn = lines_emit, data = &lb_fail},
 	})
 	testing.expect_value(t, res_fail.err, engine.Exec_Error.Failed)
 	testing.expect_value(t, len(lb_fail.lines), 0)
@@ -486,23 +397,23 @@ regression_projection_direct_parity_and_headers :: proc(t: ^testing.T) {
 		defer jq.destroy_plan(&plan)
 
 		dec_json := engine.decide(&plan.contract, json.Spec.Json, .Single)
-		lb1 := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb1)
+		lb1 := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb1)
 		r1 := engine.execute(&plan.contract, &dec_json, transmute([]u8)string(`{broken`), {
 			direct_out        = .Csv,
 			direct_csv_header = true,
-			emit              = {fn = reg_lines_emit, data = &lb1},
+			emit              = {fn = lines_emit, data = &lb1},
 		})
 		testing.expect_value(t, r1.err, engine.Exec_Error.Read_Error)
 		testing.expect_value(t, len(lb1.lines), 0)
 
 		dec_csv := engine.decide(&plan.contract, dsv.Spec.Csv, .Lines)
-		lb2 := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb2)
+		lb2 := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb2)
 		r2 := engine.execute(&plan.contract, &dec_csv, transmute([]u8)string("name,age\n"), {
 			direct_out        = .Csv,
 			direct_csv_header = true,
-			emit              = {fn = reg_lines_emit, data = &lb2},
+			emit              = {fn = lines_emit, data = &lb2},
 		})
 		testing.expect_value(t, r2.err, engine.Exec_Error.None)
 		testing.expect_value(t, len(lb2.lines), 0)
@@ -517,12 +428,12 @@ regression_projection_direct_parity_and_headers :: proc(t: ^testing.T) {
 		dec := engine.decide(&plan.contract, json.Spec.Json, .Single)
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Projection_Direct)
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, transmute([]u8)string(`[10, 20, 30]`), {
 			direct_out        = .Csv,
 			direct_csv_header = true,
-			emit              = {fn = reg_lines_emit, data = &lb},
+			emit              = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, len(lb.lines), 2)
@@ -541,21 +452,21 @@ regression_projection_direct_parity_and_headers :: proc(t: ^testing.T) {
 		j5_dec := engine.decide(&plan.contract, json.Spec.Json5, .Single)
 		j5_src := transmute([]u8)string(`{x: 0x10, y: .5}`)
 
-		lb_json := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb_json)
+		lb_json := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_json)
 		r_j := engine.execute(&plan.contract, &j5_dec, j5_src, {
 			direct_out = .Json,
-			emit       = {fn = reg_lines_emit, data = &lb_json},
+			emit       = {fn = lines_emit, data = &lb_json},
 		})
 		testing.expect_value(t, r_j.err, engine.Exec_Error.None)
 		testing.expect_value(t, lb_json.lines[0], `{"x":16,"y":0.5}`)
 
-		lb_csv := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb_csv)
+		lb_csv := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_csv)
 		r_c := engine.execute(&plan.contract, &j5_dec, j5_src, {
 			direct_out        = .Csv,
 			direct_csv_header = true,
-			emit              = {fn = reg_lines_emit, data = &lb_csv},
+			emit              = {fn = lines_emit, data = &lb_csv},
 		})
 		testing.expect_value(t, r_c.err, engine.Exec_Error.None)
 		testing.expect_value(t, lb_csv.lines[0], "x,y")
@@ -565,23 +476,23 @@ regression_projection_direct_parity_and_headers :: proc(t: ^testing.T) {
 		j_dec := engine.decide(&plan.contract, json.Spec.Json, .Single)
 		nan_src := transmute([]u8)string(`{"x":NaN,"y":1}`)
 
-		lb_nan_json := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb_nan_json)
+		lb_nan_json := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_nan_json)
 		r_nj := engine.execute(&plan.contract, &j_dec, nan_src, {
 			direct_out = .Json,
 			read       = {tolerate = {.Non_Finite}},
-			emit       = {fn = reg_lines_emit, data = &lb_nan_json},
+			emit       = {fn = lines_emit, data = &lb_nan_json},
 		})
 		testing.expect_value(t, r_nj.err, engine.Exec_Error.Write_Error)
 		testing.expect_value(t, len(lb_nan_json.lines), 0)
 
-		lb_nan_csv := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb_nan_csv)
+		lb_nan_csv := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_nan_csv)
 		r_nc := engine.execute(&plan.contract, &j_dec, nan_src, {
 			direct_out        = .Csv,
 			direct_csv_header = true,
 			read              = {tolerate = {.Non_Finite}},
-			emit              = {fn = reg_lines_emit, data = &lb_nan_csv},
+			emit              = {fn = lines_emit, data = &lb_nan_csv},
 		})
 		testing.expect_value(t, r_nc.err, engine.Exec_Error.Write_Error)
 		testing.expect_value(t, len(lb_nan_csv.lines), 0) // no header leaked!
@@ -596,11 +507,11 @@ regression_projection_direct_parity_and_headers :: proc(t: ^testing.T) {
 		dec := engine.decide(&plan.contract, json.Spec.Json, .Single)
 
 		src := transmute([]u8)string(`{"s":"a\u0000b"}`)
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, src, {
 			direct_out = .Tsv,
-			emit       = {fn = reg_lines_emit, data = &lb},
+			emit       = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, lb.lines[0], `a\0b`)
@@ -621,12 +532,12 @@ regression_exec_dups_all_and_refuse_framed :: proc(t: ^testing.T) {
 
 	// `dups = .Refuse` catches Duplicate_Key on record #1 instead of failing with `Bad_Option{"dups"}`!
 	dec_ref := engine.decide(&plan.contract, json.Spec.Json, .Lines, {dups = .Refuse})
-	lb_ref := Reg_Lines{alloc = context.allocator}
-	defer reg_lines_destroy(&lb_ref)
+	lb_ref := Lines_Buf{alloc = context.allocator}
+	defer destroy_lines(&lb_ref)
 	res_ref := engine.execute(&plan.contract, &dec_ref, ndjson, {
 		eval = nil,
 		read = {dups = .Refuse},
-		emit = {fn = reg_lines_emit, data = &lb_ref},
+		emit = {fn = lines_emit, data = &lb_ref},
 	})
 	testing.expect_value(t, res_ref.err, engine.Exec_Error.Read_Error)
 	f_err, is_fault := res_ref.read_err.(tape.Fault)
@@ -636,12 +547,12 @@ regression_exec_dups_all_and_refuse_framed :: proc(t: ^testing.T) {
 
 	// `dups = .All` builds whole record preserving duplicate keys cleanly.
 	dec_all := engine.decide(&plan.contract, json.Spec.Json, .Lines, {dups = .All})
-	lb_all := Reg_Lines{alloc = context.allocator}
-	defer reg_lines_destroy(&lb_all)
+	lb_all := Lines_Buf{alloc = context.allocator}
+	defer destroy_lines(&lb_all)
 	res_all := engine.execute(&plan.contract, &dec_all, ndjson, {
 		eval = nil,
 		read = {dups = .All},
-		emit = {fn = reg_lines_emit, data = &lb_all},
+		emit = {fn = lines_emit, data = &lb_all},
 	})
 	testing.expect_value(t, res_all.err, engine.Exec_Error.None)
 	testing.expect_value(t, len(lb_all.lines), 2)
@@ -672,13 +583,13 @@ regression_exec_dups_all_and_refuse_framed :: proc(t: ^testing.T) {
 			return .None
 		}
 
-		lb_par := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb_par)
+		lb_par := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_par)
 		res_par := engine.execute(&plan.contract, &dec_par, par_ndjson, {
 			eval   = emit_doc_compact,
 			runner = runner,
 			read   = {dups = .All},
-			emit   = {fn = reg_lines_emit, data = &lb_par},
+			emit   = {fn = lines_emit, data = &lb_par},
 		})
 		testing.expect_value(t, res_par.err, engine.Exec_Error.None)
 		testing.expect_value(t, len(lb_par.lines), 3)
@@ -702,11 +613,11 @@ regression_conditional_whole_fixes :: proc(t: ^testing.T) {
 		dec := engine.decide(&plan.contract, json.Spec.Json, .Single)
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Conditional_Whole)
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, transmute([]u8)string(`{"a":5}`), {
 			eval = nil,
-			emit = {fn = reg_lines_emit, data = &lb},
+			emit = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.Failed)
 		testing.expect_value(t, len(lb.lines), 0)
@@ -740,13 +651,13 @@ regression_conditional_whole_fixes :: proc(t: ^testing.T) {
 			_ = engine.emit_bytes(emit, txt)
 			return .None
 		}
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec_csv, transmute([]u8)string("status,n\nok,1\n"), {
 			eval                 = eval_echo,
 			pred_eval            = pred_taint,
 			rerun_whole_on_taint = true,
-			emit                 = {fn = reg_lines_emit, data = &lb},
+			emit                 = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect(t, res.reran_whole)
@@ -766,12 +677,12 @@ regression_conditional_whole_fixes :: proc(t: ^testing.T) {
 			entry       = engine.entry_of(engine.Format_Id.Xml) or_else engine.Format_Entry{},
 			framing     = .Concatenated,
 		}
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, transmute([]u8)string(`<r><flag>true</flag></r>`), {
 			eval = nil,
 			read = {format = tape.Xml_Options{infer = true}},
-			emit = {fn = reg_lines_emit, data = &lb},
+			emit = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, lb.lines[0], `{"r":{"flag":true}}`)
@@ -831,13 +742,13 @@ regression_spine_errors_oom_budget_and_emitted_counts :: proc(t: ^testing.T) {
 			_ = engine.emit_bytes(emit, transmute([]u8)string("item"))
 			return .None
 		}
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, src, {
 			eval_each = each_fn,
 			eval      = each_fn,
 			runner    = runner,
-			emit      = {fn = reg_lines_emit, data = &lb},
+			emit      = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.Read_Error)
 		testing.expect_value(t, res.emitted, u64(2))
@@ -879,15 +790,15 @@ regression_spine_errors_oom_budget_and_emitted_counts :: proc(t: ^testing.T) {
 			return .None
 		}
 		saw_doc := true
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, src, {
 			eval          = each_el,
 			eval_ctx      = &saw_doc,
 			eval_each     = each_el,
 			spine_collect = collect_check_nil,
 			runner        = runner,
-			emit          = {fn = reg_lines_emit, data = &lb},
+			emit          = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect(t, !saw_doc)
@@ -895,8 +806,8 @@ regression_spine_errors_oom_budget_and_emitted_counts :: proc(t: ^testing.T) {
 
 		// Opt-in `spine_collect_needs_doc = true` passes non-nil root `doc`.
 		saw_doc = false
-		lb_doc := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb_doc)
+		lb_doc := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_doc)
 		res_doc := engine.execute(&plan.contract, &dec, src, {
 			eval                    = each_el,
 			eval_ctx                = &saw_doc,
@@ -904,7 +815,7 @@ regression_spine_errors_oom_budget_and_emitted_counts :: proc(t: ^testing.T) {
 			spine_collect           = collect_check_nil,
 			spine_collect_needs_doc = true,
 			runner                  = runner,
-			emit                    = {fn = reg_lines_emit, data = &lb_doc},
+			emit                    = {fn = lines_emit, data = &lb_doc},
 		})
 		testing.expect_value(t, res_doc.err, engine.Exec_Error.None)
 		testing.expect(t, saw_doc)
@@ -920,13 +831,13 @@ regression_spine_errors_oom_budget_and_emitted_counts :: proc(t: ^testing.T) {
 		defer jq.destroy_plan(&plan)
 		dec := engine.decide(&plan.contract, json.Spec.Json, .Lines)
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, ndjson, {
 			eval     = nil,
 			skip_bad = true,
 			read     = {budget = {steps = 2}},
-			emit     = {fn = reg_lines_emit, data = &lb},
+			emit     = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.Read_Error)
 		_, is_ex := res.read_err.(tape.Exceeded)
@@ -1040,12 +951,12 @@ regression_dsv_dups_same_arena_ctx_gates_and_direct_oom :: proc(t: ^testing.T) {
 		dec := engine.decide(&plan.contract, dsv.Spec.Csv, .Lines, {dups = .All})
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Whole)
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, csv_dups, {
 			eval = nil,
 			read = {dups = .All},
-			emit = {fn = reg_lines_emit, data = &lb},
+			emit = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, lb.lines[0], `[{"a":"1","a":"2"}]`)
@@ -1057,12 +968,12 @@ regression_dsv_dups_same_arena_ctx_gates_and_direct_oom :: proc(t: ^testing.T) {
 			entry   = engine.entry_of(engine.Format_Id.Csv) or_else engine.Format_Entry{},
 			framing = .Lines,
 		}
-		lb2 := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb2)
+		lb2 := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb2)
 		res2 := engine.execute(&plan.contract, &dec_recs, csv_dups, {
 			eval = nil,
 			read = {dups = .All},
-			emit = {fn = reg_lines_emit, data = &lb2},
+			emit = {fn = lines_emit, data = &lb2},
 		})
 		testing.expect_value(t, res2.err, engine.Exec_Error.None)
 		testing.expect_value(t, lb2.lines[0], `[{"a":"1","a":"2"}]`)
@@ -1102,14 +1013,14 @@ regression_dsv_dups_same_arena_ctx_gates_and_direct_oom :: proc(t: ^testing.T) {
 			return .None
 		}
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute_files(nil, files[:], {runner = runner}, {
 			eval      = emit_one,
 			runner    = runner,
 			read      = {budget = {depth = 1200}, scratch = shared_alloc},
 			allocator = shared_alloc,
-			emit      = {fn = reg_lines_emit, data = &lb},
+			emit      = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, res.emitted, u64(6))
@@ -1153,15 +1064,15 @@ regression_dsv_dups_same_arena_ctx_gates_and_direct_oom :: proc(t: ^testing.T) {
 		}
 
 		pred_state: Stateful_Eval_Ctx
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute_files(&plan.contract, files[:], {runner = runner}, {
 			eval      = pass_eval,
 			pred_eval = pred_inc,
 			pred_ctx  = &pred_state,
 			workers   = {init = init_noop},
 			runner    = runner,
-			emit      = {fn = reg_lines_emit, data = &lb},
+			emit      = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, pred_state.calls, 4)
@@ -1191,12 +1102,12 @@ regression_dsv_dups_same_arena_ctx_gates_and_direct_oom :: proc(t: ^testing.T) {
 		d_dir := engine.decide(&pl_dir.contract, json.Spec.Json, .Single)
 		testing.expect_value(t, d_dir.kind, engine.Route_Kind.Projection_Direct)
 
-		lb1 := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb1)
+		lb1 := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb1)
 		r1 := engine.execute(&pl_dir.contract, &d_dir, dup_json, {
 			eval = emit_all_doc,
 			read = {dups = .All},
-			emit = {fn = reg_lines_emit, data = &lb1},
+			emit = {fn = lines_emit, data = &lb1},
 		})
 		testing.expect_value(t, r1.err, engine.Exec_Error.None)
 		testing.expect_value(t, lb1.lines[0], `{"a":1,"a":2}`)
@@ -1208,12 +1119,12 @@ regression_dsv_dups_same_arena_ctx_gates_and_direct_oom :: proc(t: ^testing.T) {
 		d_cw := engine.decide(&pl_cw.contract, json.Spec.Json, .Single)
 		testing.expect_value(t, d_cw.kind, engine.Route_Kind.Conditional_Whole)
 
-		lb2 := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb2)
+		lb2 := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb2)
 		r2 := engine.execute(&pl_cw.contract, &d_cw, dup_json, {
 			eval = emit_all_doc,
 			read = {dups = .All},
-			emit = {fn = reg_lines_emit, data = &lb2},
+			emit = {fn = lines_emit, data = &lb2},
 		})
 		testing.expect_value(t, r2.err, engine.Exec_Error.None)
 		testing.expect_value(t, lb2.lines[0], `{"a":1,"a":2}`)
@@ -1230,14 +1141,14 @@ regression_dsv_dups_same_arena_ctx_gates_and_direct_oom :: proc(t: ^testing.T) {
 			framing     = .Single,
 			parallel    = true,
 		}
-		lb3 := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb3)
+		lb3 := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb3)
 		r3 := engine.execute(&pl_sp.contract, &d_sp, transmute([]u8)string(`{"items":[{"a":1,"a":2}]}`), {
 			eval      = emit_all_doc,
 			eval_each = emit_all_doc,
 			runner    = runner,
 			read      = {dups = .All},
-			emit      = {fn = reg_lines_emit, data = &lb3},
+			emit      = {fn = lines_emit, data = &lb3},
 		})
 		testing.expect_value(t, r3.err, engine.Exec_Error.None)
 		testing.expect_value(t, lb3.lines[0], `{"items":[{"a":1,"a":2}]}`)
@@ -1274,12 +1185,12 @@ regression_dsv_dups_same_arena_ctx_gates_and_direct_oom :: proc(t: ^testing.T) {
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Projection_Direct)
 
 		fs := Fail_Size{backing = context.allocator, target = 73}
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&plan.contract, &dec, transmute([]u8)strings.to_string(payload), {
 			direct_out = .Csv,
 			allocator  = runtime.Allocator{procedure = fail_size_proc, data = &fs},
-			emit       = {fn = reg_lines_emit, data = &lb},
+			emit       = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.No_Memory)
 	}
@@ -1327,14 +1238,14 @@ regression_fast_json_canonical_and_spine_coarse_fallbacks :: proc(t: ^testing.T)
 		defer jq.destroy_plan(&pl)
 		dec := engine.decide(&pl.contract, json.Spec.Json, .Single)
 
-		st: Reg_Lines
+		st: Lines_Buf
 		st = {alloc = context.allocator}
-		defer reg_lines_destroy(&st)
+		defer destroy_lines(&st)
 
 		res := engine.execute(&pl.contract, &dec, transmute([]u8)bad_doc, {
 			eval      = eval_norm,
 			fast_json = .Compact,
-			emit      = {fn = reg_lines_emit, data = &st},
+			emit      = {fn = lines_emit, data = &st},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, len(st.lines), 1)
@@ -1368,13 +1279,13 @@ regression_fast_json_canonical_and_spine_coarse_fallbacks :: proc(t: ^testing.T)
 		dec := engine.decide(&pl.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(corrupt)})
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
 
-		st: Reg_Lines = {alloc = context.allocator}
-		defer reg_lines_destroy(&st)
+		st: Lines_Buf = {alloc = context.allocator}
+		defer destroy_lines(&st)
 		res := engine.execute(&pl.contract, &dec, corrupt, {
 			eval      = eval_norm,
 			eval_each = eval_norm,
 			runner    = runner,
-			emit      = {fn = reg_lines_emit, data = &st},
+			emit      = {fn = lines_emit, data = &st},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.Read_Error)
 		testing.expect(t, len(st.lines) > 0)
@@ -1424,12 +1335,12 @@ regression_coarse_record_index_counts_seq_tail_and_guards :: proc(t: ^testing.T)
 		dec := engine.decide(&pl.contract, json.Spec.Json, .Lines, {runner = runner, input_bytes = len(nd)})
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Records_Parallel)
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&pl.contract, &dec, nd, {
 			eval   = emit_rec_index,
 			runner = runner,
-			emit   = {fn = reg_lines_emit, data = &lb},
+			emit   = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, res.records, u64(n_recs))
@@ -1461,12 +1372,12 @@ regression_coarse_record_index_counts_seq_tail_and_guards :: proc(t: ^testing.T)
 		dec := engine.decide(&pl.contract, json.Spec.Json, .Seq, {runner = runner, input_bytes = len(seq_src)})
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Records_Parallel)
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&pl.contract, &dec, seq_src, {
 			eval   = emit_rec_index,
 			runner = runner,
-			emit   = {fn = reg_lines_emit, data = &lb},
+			emit   = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, res.records, u64(n_recs))
@@ -1492,13 +1403,13 @@ regression_coarse_record_index_counts_seq_tail_and_guards :: proc(t: ^testing.T)
 			return .None if engine.emit_bytes(emit, transmute([]u8)s) else .Stopped
 		}
 
-		lb_t := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb_t)
+		lb_t := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb_t)
 		res_t := engine.execute(&pl.contract, &dec, seq_src, {
 			eval                 = eval_seq_taint,
 			runner               = runner,
 			rerun_whole_on_taint = true,
-			emit                 = {fn = reg_lines_emit, data = &lb_t},
+			emit                 = {fn = lines_emit, data = &lb_t},
 		})
 		testing.expect_value(t, res_t.err, engine.Exec_Error.None)
 		testing.expect(t, res_t.reran_whole)
@@ -1534,13 +1445,13 @@ regression_coarse_record_index_counts_seq_tail_and_guards :: proc(t: ^testing.T)
 		dec := engine.decide(&pl.contract, json.Spec.Json, .Single, {runner = runner, input_bytes = len(sp_src)})
 		testing.expect_value(t, dec.kind, engine.Route_Kind.Spine_Parallel)
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&pl.contract, &dec, sp_src, {
 			eval      = emit_rec_index,
 			eval_each = emit_rec_index,
 			runner    = runner,
-			emit      = {fn = reg_lines_emit, data = &lb},
+			emit      = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, res.records, u64(n_elems))
@@ -1595,15 +1506,15 @@ regression_coarse_record_index_counts_seq_tail_and_guards :: proc(t: ^testing.T)
 		}
 
 		wc := Wrong_Ctx{}
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&pl.contract, &dec, dir_src, {
 			eval          = eval_wrong,
 			eval_ctx      = &wc,
 			skip_bad      = true,
 			on_bad_record = bad_skip,
 			runner        = runner,
-			emit          = {fn = reg_lines_emit, data = &lb},
+			emit          = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, res.bad_records, u64(1))
@@ -1658,13 +1569,13 @@ regression_coarse_record_index_counts_seq_tail_and_guards :: proc(t: ^testing.T)
 			return .None if engine.emit_bytes(emit, buf[:]) else .Stopped
 		}
 
-		lb := Reg_Lines{alloc = context.allocator}
-		defer reg_lines_destroy(&lb)
+		lb := Lines_Buf{alloc = context.allocator}
+		defer destroy_lines(&lb)
 		res := engine.execute(&pl_id.contract, &dec, transmute([]u8)string(`{"a":1,"a":2}`), {
 			eval      = eval_jq_ident,
 			fast_json = .Compact,
 			read      = {dups = .All},
-			emit      = {fn = reg_lines_emit, data = &lb},
+			emit      = {fn = lines_emit, data = &lb},
 		})
 		testing.expect_value(t, res.err, engine.Exec_Error.None)
 		testing.expect_value(t, len(lb.lines), 1)

@@ -1,8 +1,7 @@
 package msgpack
 
 import "base:intrinsics"
-import "base:runtime"
-import "core:strconv"
+import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
 // Text rendering for MessagePack binary number nodes (`node_text`) and MessagePack Timestamp `ext -1` payloads.
@@ -44,88 +43,7 @@ integer_text :: proc "contextless" (span: []u8, buf: []u8) -> string {
 // The shortest decimal text of a `float32` or `float64` node, with `.0` for whole numbers and empty text for NaN/Inf.
 @(private, cold)
 float_text :: proc "contextless" (span: []u8, buf: []u8) -> (string, bool) {
-	f := transmute(f64)float_bits(span)
-	if f - f != 0 {
-		return "", true
-	}
-	context = runtime.default_context()
-	scratch: [32]u8
-	shortest := strconv.write_float(scratch[:], f, 'e', -1, 64, {})
-	at := 0
-	negative := shortest[0] == '-'
-	if negative {
-		at = 1
-	}
-	digits: [20]u8
-	k := 0
-	for ; at < len(shortest) && shortest[at] != 'e'; at += 1 {
-		if shortest[at] != '.' {
-			digits[k] = shortest[at]
-			k += 1
-		}
-	}
-	e := 0
-	for c in shortest[at + 2:] {
-		e = e * 10 + int(c - '0')
-	}
-	if shortest[at + 1] == '-' {
-		e = -e
-	}
-	for k > 0 && digits[k - 1] == '0' {
-		k -= 1
-	}
-	n := e + 1
-	w := 0
-	put :: proc "contextless" (buf: []u8, w: ^int, c: u8) {
-		buf[w^] = c
-		w^ += 1
-	}
-	if negative {
-		put(buf, &w, '-')
-	}
-	switch {
-	case k == 0:
-		put(buf, &w, '0')
-	case n + 3 >= 0 && n <= k + 15:
-		if n <= 0 {
-			put(buf, &w, '0')
-			put(buf, &w, '.')
-			for _ in 0 ..< -n {
-				put(buf, &w, '0')
-			}
-		}
-		for c, j in digits[:k] {
-			if j == n && n > 0 {
-				put(buf, &w, '.')
-			}
-			put(buf, &w, c)
-		}
-		for _ in k ..< n {
-			put(buf, &w, '0')
-		}
-	case:
-		put(buf, &w, digits[0])
-		if k > 1 {
-			put(buf, &w, '.')
-			for c in digits[1:k] {
-				put(buf, &w, c)
-			}
-		}
-		put(buf, &w, 'e')
-		put(buf, &w, '+' if n - 1 >= 0 else '-')
-		x := abs(n - 1)
-		if x >= 100 {
-			put(buf, &w, u8('0' + x / 100))
-		}
-		put(buf, &w, u8('0' + x / 10 % 10))
-		put(buf, &w, u8('0' + x % 10))
-		return string(buf[:w]), true
-	}
-	if k <= n || k == 0 {
-		put(buf, &w, '.')
-		put(buf, &w, '0')
-	}
-	return string(buf[:w]), true
+	return spell.float64_text(transmute(f64)float_bits(span), buf)
 }
 
 // The decimal text of number node `t` of `src` into `buf`.

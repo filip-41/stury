@@ -2158,12 +2158,14 @@ compile_table_check :: proc(c: ^Compiler, root: Expr_Index) -> (node: rules.Node
 }
 
 @(private = "file")
-combine_all_of :: proc(c: ^Compiler, a, b: rules.Node_Index) -> rules.Node_Index {
+combine_logic :: proc(c: ^Compiler, a, b: rules.Node_Index, is_all: bool) -> rules.Node_Index {
 	na := &c.d.nodes[a]
 	nb := &c.d.nodes[b]
-	a_flat := is_pure_all_of(na)
-	b_flat := is_pure_all_of(nb)
-	total := (len(na.all_of) if a_flat else 1) + (len(nb.all_of) if b_flat else 1)
+	a_flat := is_pure_all_of(na) if is_all else is_pure_any_of(na)
+	b_flat := is_pure_all_of(nb) if is_all else is_pure_any_of(nb)
+	a_list := na.all_of if is_all else na.any_of
+	b_list := nb.all_of if is_all else nb.any_of
+	total := (len(a_list) if a_flat else 1) + (len(b_list) if b_flat else 1)
 	list, err := make([]rules.Node_Index, total, c.allocator)
 	if err != nil {
 		c.oom = true
@@ -2171,18 +2173,24 @@ combine_all_of :: proc(c: ^Compiler, a, b: rules.Node_Index) -> rules.Node_Index
 	}
 	pos := 0
 	if a_flat {
-		copy(list[pos:], na.all_of)
-		pos += len(na.all_of)
+		copy(list[pos:], a_list)
+		pos += len(a_list)
 	} else {
 		list[pos] = a
 		pos += 1
 	}
 	if b_flat {
-		copy(list[pos:], nb.all_of)
+		copy(list[pos:], b_list)
 	} else {
 		list[pos] = b
 	}
-	nid := c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, all_of = list})
+	node := rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1}
+	if is_all {
+		node.all_of = list
+	} else {
+		node.any_of = list
+	}
+	nid := c_add_node(c, node)
 	if c.oom {
 		return rules.NONE
 	}
@@ -2190,35 +2198,13 @@ combine_all_of :: proc(c: ^Compiler, a, b: rules.Node_Index) -> rules.Node_Index
 }
 
 @(private = "file")
+combine_all_of :: proc(c: ^Compiler, a, b: rules.Node_Index) -> rules.Node_Index {
+	return combine_logic(c, a, b, true)
+}
+
+@(private = "file")
 combine_any_of :: proc(c: ^Compiler, a, b: rules.Node_Index) -> rules.Node_Index {
-	na := &c.d.nodes[a]
-	nb := &c.d.nodes[b]
-	a_flat := is_pure_any_of(na)
-	b_flat := is_pure_any_of(nb)
-	total := (len(na.any_of) if a_flat else 1) + (len(nb.any_of) if b_flat else 1)
-	list, err := make([]rules.Node_Index, total, c.allocator)
-	if err != nil {
-		c.oom = true
-		return rules.NONE
-	}
-	pos := 0
-	if a_flat {
-		copy(list[pos:], na.any_of)
-		pos += len(na.any_of)
-	} else {
-		list[pos] = a
-		pos += 1
-	}
-	if b_flat {
-		copy(list[pos:], nb.any_of)
-	} else {
-		list[pos] = b
-	}
-	nid := c_add_node(c, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, any_of = list})
-	if c.oom {
-		return rules.NONE
-	}
-	return nid
+	return combine_logic(c, a, b, false)
 }
 
 @(private = "file")

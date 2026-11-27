@@ -3,18 +3,29 @@ package testkit
 import "base:runtime"
 import "core:mem"
 
-// An allocator over `backing` that refuses its `fail_at`th allocation, counting from 0, with `.Out_Of_Memory`. A
-// negative `fail_at` refuses none. `count` is the allocations asked for, and `failed` whether one was refused, so a
-// sweep over `fail_at` ends at the first run that refuses none.
+// An allocator over `backing` that refuses its `fail_at`th allocation, counting from 0, with `.Out_Of_Memory` (and every
+// subsequent allocation when `sticky` is true). A negative `fail_at` refuses none. `count` is the allocations asked for,
+// and `failed` whether one was refused, so a sweep over `fail_at` ends at the first run that refuses none.
 Failing :: struct {
 	backing: runtime.Allocator,
 	count:   int,
 	fail_at: int,
 	failed:  bool,
+	sticky:  bool,
 }
 
 failing_allocator :: proc(f: ^Failing) -> runtime.Allocator {
 	return {failing_proc, f}
+}
+
+// An allocator that refuses every mode with `.Mode_Not_Implemented`, for testing fallback paths.
+unknown_allocator :: proc() -> runtime.Allocator {
+	return {unknown_alloc_proc, nil}
+}
+
+@(private)
+unknown_alloc_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+	return nil, .Mode_Not_Implemented
 }
 
 @(private)
@@ -23,7 +34,8 @@ failing_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment
 	#partial switch mode {
 	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
 		f.count += 1
-		if f.count - 1 == f.fail_at {
+		hit := f.fail_at >= 0 && (f.count - 1 >= f.fail_at if f.sticky else f.count - 1 == f.fail_at)
+		if hit {
 			f.failed = true
 			return nil, .Out_Of_Memory
 		}

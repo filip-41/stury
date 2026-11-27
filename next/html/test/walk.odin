@@ -103,10 +103,10 @@ a_build_refuses_only_what_no_tree_holds :: proc(t: ^testing.T) {
 
 	_, err = html.build(transmute([]u8)string("<meta charset=latin2><p>caf\xe9"), .Html, {}, context.temp_allocator)
 	f, bad := err.(tape.Fault)
-	testing.expect(t, bad && code_of(err) == "encoding" && f.at == 14)
+	testing.expect(t, bad && testkit.code_of(err) == "encoding" && f.at == 14)
 
-	_, werr, _ := html.walk(transmute([]u8)string("\xfe\xffx"), .Html, {}, &Token_Log{ctx = context}, &{}, log_token, context.temp_allocator)
-	testing.expect(t, werr != nil && code_of(werr) == "encoding")
+	_, werr, _ := html.walk(transmute([]u8)string("\xfe\xffx"), .Html, {}, &testkit.Token_Log{ctx = context}, &{}, testkit.log_token, context.temp_allocator)
+	testing.expect(t, werr != nil && testkit.code_of(werr) == "encoding")
 }
 
 @(test)
@@ -168,8 +168,8 @@ walk_keep_stop_on_end_and_sparse_scan_state :: proc(t: ^testing.T) {
 		context.temp_allocator,
 	)
 	testing.expect_value(t, serr, nil)
-	bnode, bfound := member_at(&sdoc, {"div", "b"})
-	cnode, cfound := member_at(&sdoc, {"div", "b", "c"})
+	bnode, bfound := testkit.member_at(&sdoc, {"div", "b"})
+	cnode, cfound := testkit.member_at(&sdoc, {"div", "b", "c"})
 	testing.expect(t, bfound && cfound)
 	testing.expect_value(t, sdoc.nodes[cnode].kind, tape.Kind.Number)
 	bend, has_end := sdoc.format.close_end(&sdoc, bnode)

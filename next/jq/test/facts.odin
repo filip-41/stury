@@ -15,42 +15,10 @@ import "stury:toml"
 import "stury:xml"
 
 @(private = "file")
-eval_doc :: proc(t: ^testing.T, expr: string, doc: tape.Document, owned := true, write_fn: query.Fact_Writer = nil, write_data: rawptr = nil) -> (out: string, end: jq.Run_End, err_msg: string, tainted: bool) {
-	prog, perrs := jq.compile(expr)
-	defer jq.destroy_program(prog)
-	testing.expectf(t, len(perrs) == 0, "compile %q failed: %v", expr, perrs)
-	if len(perrs) > 0 {
-		return "", .Failed, "", false
-	}
-	h: query.Heap
-	query.heap_init(&h, runtime.heap_allocator())
-	defer query.heap_destroy(&h)
-	h.write_fact = write_fn
-	h.write_fact_data = write_data
-
-	inp, is := query.document_value(&h, doc, owned)
-	testing.expect_value(t, is, query.Status.Ok)
-	run: jq.Run
-	jq.run_init(&run, prog, &h, nil)
-	defer jq.run_destroy(&run)
-	outs := Outputs{h = &h}
-	defer delete(outs.vals)
-	end = jq.run_value(&run, inp, collect, &outs)
-	tainted = h.tainted
-	if end == .Failed {
-		e := query.take_error(&h)
-		err_msg = jq.error_message(&h, &e)
-		query.destroy_error(&h, &e)
-	}
-	b := strings.builder_make()
-	for v, i in outs.vals {
-		if i > 0 {
-			strings.write_byte(&b, '\n')
-		}
-		strings.write_string(&b, show(&h, v))
-		query.release(&h, v)
-	}
-	return strings.to_string(b), end, err_msg, tainted
+eval_doc :: proc(t: ^testing.T, expr: string, doc: tape.Document, write_fn: query.Fact_Writer = nil, write_data: rawptr = nil, loc := #caller_location) -> (out: string, end: jq.Run_End, err_msg: string, tainted: bool) {
+	d := doc
+	r := eval_jq(t, expr, {doc = &d, write_fact = write_fn, write_fact_data = write_data}, loc = loc)
+	return r.out, r.end, r.err_msg, r.tainted
 }
 
 @(test)
@@ -68,7 +36,7 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		testing.expect(t, err == nil)
 		defer tape.destroy_document(&doc)
 
-		out, end, _, _ := eval_doc(t, `[.@comment, .@comment_head, .a.@comment, .a.@comment_inline, .b.@comment_foot, .@comment_inline]`, doc, false)
+		out, end, _, _ := eval_doc(t, `[.@comment, .@comment_head, .a.@comment, .a.@comment_inline, .b.@comment_foot, .@comment_inline]`, doc)
 		testing.expect_value(t, end, jq.Run_End.Done)
 		testing.expect_value(t, out, `[["head"],["head"],["lead a","in"],["trail a"],["foot b"],["end"]]`)
 	}
@@ -80,7 +48,7 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		testing.expect(t, err == nil)
 		defer tape.destroy_document(&doc)
 
-		out, end, _, _ := eval_doc(t, `[.name.@comment, .name.@style, .hex.@style, .d.@tag, .sec.@style, .sec.t.@tag]`, doc, false)
+		out, end, _, _ := eval_doc(t, `[.name.@comment, .name.@style, .hex.@style, .d.@tag, .sec.@style, .sec.t.@tag]`, doc)
 		testing.expect_value(t, end, jq.Run_End.Done)
 		testing.expect_value(t, out, `[["top"],"literal","hex","date-local","header","datetime"]`)
 	}
@@ -92,7 +60,7 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		testing.expect(t, err == nil)
 		defer tape.destroy_document(&doc)
 
-		out, end, _, _ := eval_doc(t, `[., .@tag]`, doc, false)
+		out, end, _, _ := eval_doc(t, `[., .@tag]`, doc)
 		testing.expect_value(t, end, jq.Run_End.Done)
 		testing.expect_value(t, out, `[42,1]`)
 	}
@@ -104,7 +72,7 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		testing.expect(t, err == nil)
 		defer tape.destroy_document(&doc)
 
-		out, end, _, _ := eval_doc(t, `[.r."x:a".&href, .r."x:a".&"xml:lang", .r."x:a".@attrs, .r."x:a".@name, .r."x:a".@namespace, .r."x:a".@content, .r.@comment, .@pi, .@doctype]`, doc, false)
+		out, end, _, _ := eval_doc(t, `[.r."x:a".&href, .r."x:a".&"xml:lang", .r."x:a".@attrs, .r."x:a".@name, .r."x:a".@namespace, .r."x:a".@content, .r.@comment, .@pi, .@doctype]`, doc)
 		testing.expect_value(t, end, jq.Run_End.Done)
 		testing.expect_value(t, out, `["https://example.com","en",{"href":"https://example.com","xml:lang":"en"},"x:a","urn:x","hi there",["root"],["xml-stylesheet type=\"text/css\""],"<!DOCTYPE r>"]`)
 	}
@@ -117,7 +85,7 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		testing.expect(t, err == nil)
 		defer tape.destroy_document(&doc)
 
-		out, end, _, _ := eval_doc(t, `[.@comment, .[0].@comment]`, doc, false)
+		out, end, _, _ := eval_doc(t, `[.@comment, .[0].@comment]`, doc)
 		testing.expect_value(t, end, jq.Run_End.Done)
 		testing.expect_value(t, out, `[["header comment"],["row1 comment"]]`)
 	}
@@ -130,7 +98,7 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		testing.expect(t, xerr == nil)
 		defer tape.destroy_document(&xdoc)
 
-		out, end, _, _ := eval_doc(t, `[.r.a.&k, .r.a.@name, .r.b.&attr, .r.b.@name, .r.b.@content, .r.@pi, .@pi]`, xdoc, false)
+		out, end, _, _ := eval_doc(t, `[.r.a.&k, .r.a.@name, .r.b.&attr, .r.b.@name, .r.b.@content, .r.@pi, .@pi]`, xdoc)
 		testing.expect_value(t, end, jq.Run_End.Done)
 		testing.expect_value(t, out, `["1","a","x&y","b","hi & bye",["p foot"],["z end"]]`)
 
@@ -140,7 +108,7 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		testing.expect(t, jerr == nil)
 		defer tape.destroy_document(&jdoc)
 
-		jout, jend, _, _ := eval_doc(t, `[.a.@comment, .b.@comment, .s.@comment]`, jdoc, false)
+		jout, jend, _, _ := eval_doc(t, `[.a.@comment, .b.@comment, .s.@comment]`, jdoc)
 		testing.expect_value(t, jend, jq.Run_End.Done)
 		testing.expect_value(t, jout, `[["n"],["b"],["s"]]`)
 
@@ -151,10 +119,10 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		testing.expect(t, perr == nil)
 		defer tape.destroy_document(&pdoc)
 
-		_, te1, _, tt1 := eval_doc(t, `try .b.@comment catch "no"`, pdoc, false)
+		_, te1, _, tt1 := eval_doc(t, `try .b.@comment catch "no"`, pdoc)
 		testing.expect_value(t, te1, jq.Run_End.Tainted)
 		testing.expect(t, tt1)
-		_, te2, _, tt2 := eval_doc(t, `try .s.@comment catch "no"`, pdoc, false)
+		_, te2, _, tt2 := eval_doc(t, `try .s.@comment catch "no"`, pdoc)
 		testing.expect_value(t, te2, jq.Run_End.Tainted)
 		testing.expect(t, tt2)
 
@@ -163,7 +131,7 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		cb1, ce1 := cbor.build(cbor_bool, .Cbor, {}, runtime.heap_allocator())
 		testing.expect(t, ce1 == nil)
 		defer tape.destroy_document(&cb1)
-		co1, cend1, _, _ := eval_doc(t, `[., .@tag]`, cb1, false)
+		co1, cend1, _, _ := eval_doc(t, `[., .@tag]`, cb1)
 		testing.expect_value(t, cend1, jq.Run_End.Done)
 		testing.expect_value(t, co1, `[true,99]`)
 
@@ -171,7 +139,7 @@ facts_read_across_formats :: proc(t: ^testing.T) {
 		cb2, ce2 := cbor.build(cbor_bytes, .Cbor, {}, runtime.heap_allocator())
 		testing.expect(t, ce2 == nil)
 		defer tape.destroy_document(&cb2)
-		co2, cend2, _, _ := eval_doc(t, `[., .@tag]`, cb2, false)
+		co2, cend2, _, _ := eval_doc(t, `[., .@tag]`, cb2)
 		testing.expect_value(t, cend2, jq.Run_End.Done)
 		testing.expect_value(t, co2, `["A",24]`)
 
@@ -199,23 +167,23 @@ facts_computed_paths_demands_and_write_seam :: proc(t: ^testing.T) {
 		testing.expect(t, err == nil)
 		defer tape.destroy_document(&doc)
 
-		out, end, _, _ := eval_doc(t, `[path(.a.@comment), path(.a.@("com" + "ment")), path(.a.@("comment_head")), path(.a.&k), path(.a.&["xml:lang"]), .@("com" + "ment")]`, doc, false)
+		out, end, _, _ := eval_doc(t, `[path(.a.@comment), path(.a.@("com" + "ment")), path(.a.@("comment_head")), path(.a.&k), path(.a.&["xml:lang"]), .@("com" + "ment")]`, doc)
 		testing.expect_value(t, end, jq.Run_End.Done)
 		testing.expect_value(t, out, `[["a",{"fact":"comment"}],["a",{"fact":"comment"}],["a",{"fact":"comment"}],["a",{"fact":"attribute","name":"k"}],["a",{"fact":"attribute","name":"xml:lang"}],["hi"]]`)
 
-		_, end_bad, msg_bad, _ := eval_doc(t, `path(.a.@comment[0])`, doc, false)
+		_, end_bad, msg_bad, _ := eval_doc(t, `path(.a.@comment[0])`, doc)
 		testing.expect_value(t, end_bad, jq.Run_End.Failed)
 		testing.expect_value(t, msg_bad, "A comment step must be the last step of a path")
 
-		_, end_unk, msg_unk, _ := eval_doc(t, `.a.@("nope")`, doc, false)
+		_, end_unk, msg_unk, _ := eval_doc(t, `.a.@("nope")`, doc)
 		testing.expect_value(t, end_unk, jq.Run_End.Failed)
 		testing.expect(t, strings.has_prefix(msg_unk, "unknown fact .@nope, the facts are "))
 
-		_, end_num, msg_num, _ := eval_doc(t, `.a.@(123)`, doc, false)
+		_, end_num, msg_num, _ := eval_doc(t, `.a.@(123)`, doc)
 		testing.expect_value(t, end_num, jq.Run_End.Failed)
 		testing.expect(t, strings.has_prefix(msg_num, "a fact name is a string, not number"))
 
-		_, end_attr, msg_attr, _ := eval_doc(t, `.a.&[123]`, doc, false)
+		_, end_attr, msg_attr, _ := eval_doc(t, `.a.&[123]`, doc)
 		testing.expect_value(t, end_attr, jq.Run_End.Failed)
 		testing.expect(t, strings.has_prefix(msg_attr, "an attribute name is a string, not number"))
 
@@ -242,7 +210,7 @@ facts_computed_paths_demands_and_write_seam :: proc(t: ^testing.T) {
 		testing.expect(t, perr == nil)
 		defer tape.destroy_document(&pdoc)
 
-		out, end, _, tainted := eval_doc(t, `.a.@comment`, pdoc, false)
+		out, end, _, tainted := eval_doc(t, `.a.@comment`, pdoc)
 		testing.expect_value(t, end, jq.Run_End.Done)
 		testing.expect(t, !tainted)
 		testing.expect_value(t, out, `["note"]`)
@@ -255,7 +223,7 @@ facts_computed_paths_demands_and_write_seam :: proc(t: ^testing.T) {
 		testing.expect(t, nerr == nil)
 		defer tape.destroy_document(&ndoc)
 
-		_, tend, _, ttainted := eval_doc(t, `try .a.@comment catch "nope"`, ndoc, false)
+		_, tend, _, ttainted := eval_doc(t, `try .a.@comment catch "nope"`, ndoc)
 		testing.expect_value(t, tend, jq.Run_End.Tainted)
 		testing.expect(t, ttainted)
 	}
@@ -286,32 +254,32 @@ facts_computed_paths_demands_and_write_seam :: proc(t: ^testing.T) {
 		defer tape.destroy_document(&doc)
 
 		// Validation rejections before hook is even reached.
-		_, e1, m1, _ := eval_doc(t, `.a.@name = "x"`, doc, false)
+		_, e1, m1, _ := eval_doc(t, `.a.@name = "x"`, doc)
 		testing.expect_value(t, e1, jq.Run_End.Failed)
 		testing.expect(t, strings.contains(m1, "cannot be written"))
 
-		_, e2, m2, _ := eval_doc(t, `.a.@comment = 123`, doc, false)
+		_, e2, m2, _ := eval_doc(t, `.a.@comment = 123`, doc)
 		testing.expect_value(t, e2, jq.Run_End.Failed)
 		testing.expect_value(t, m2, "a comment is a string, an array of strings, or null")
 
-		_, e3, m3, _ := eval_doc(t, `.a.&k = 123`, doc, false)
+		_, e3, m3, _ := eval_doc(t, `.a.&k = 123`, doc)
 		testing.expect_value(t, e3, jq.Run_End.Failed)
 		testing.expect_value(t, m3, "an attribute is a string or null")
 
-		_, e4, m4, _ := eval_doc(t, `.a.@anchor = 123`, doc, false)
+		_, e4, m4, _ := eval_doc(t, `.a.@anchor = 123`, doc)
 		testing.expect_value(t, e4, jq.Run_End.Failed)
 		testing.expect(t, strings.contains(m4, "a tag, an anchor, an alias or a style"))
 
 		// Valid write and delete dispatch cleanly through the Overlay hook seam.
 		rec: Write_Record
-		out_w, ew, _, _ := eval_doc(t, `.a.@comment = "hi"`, doc, false, hook_writer, &rec)
+		out_w, ew, _, _ := eval_doc(t, `.a.@comment = "hi"`, doc, hook_writer, &rec)
 		testing.expect_value(t, ew, jq.Run_End.Done)
 		testing.expect_value(t, out_w, `{"a":1}`)
 		testing.expect_value(t, rec.calls, 1)
 		testing.expect_value(t, rec.kind, tape.Fact_Kind.Comment)
 		testing.expect_value(t, rec.val, "hi")
 
-		out_d, ed, _, _ := eval_doc(t, `del(.a.&href)`, doc, false, hook_writer, &rec)
+		out_d, ed, _, _ := eval_doc(t, `del(.a.&href)`, doc, hook_writer, &rec)
 		testing.expect_value(t, ed, jq.Run_End.Done)
 		testing.expect_value(t, out_d, `{"a":1}`)
 		testing.expect_value(t, rec.calls, 2)

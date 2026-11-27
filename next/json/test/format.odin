@@ -5,6 +5,7 @@ import "core:strings"
 import "core:testing"
 import "stury:json"
 import "stury:lib/core/tape"
+import "stury:lib/ops/write"
 import "stury:testkit"
 
 // Every read of a spec, through its handle and its reads table alone, gives what the spec's own call gives.
@@ -201,4 +202,219 @@ format_close_ends_follow_line_comments :: proc(t: ^testing.T) {
 		end, ok := doc.format.close_end(&doc, 1)
 		testing.expect(t, ok && end == u64(strings.index(c.src, "], 2]") + 1))
 	}
+}
+
+// A text written token by token into a sink is the text `write` makes of the document, whatever the layout.
+@(test)
+tokens_into_a_sink_are_the_text_of_the_document :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := `{"a":[1,2.5,{"b":null}],"c":"x\ny","d":{},"e":[]}`
+	doc, err := json.build(transmute([]u8)src)
+	defer json.destroy(&doc)
+	testing.expect(t, err == nil)
+	for opts in ([?]json.Write_Options{{}, {indent = 2}, {tab = true}, {ascii = true}}) {
+		want, _, werr := json.write(&doc, .Json, opts)
+		defer delete(want)
+		testing.expect(t, werr == nil)
+		sink: strings.Builder
+		defer strings.builder_destroy(&sink)
+		w: json.Writer
+		testing.expect(t, json.writer_start(&w, opts, strings.to_writer(&sink)) == nil)
+		steps := [?]struct {
+			kind: write.Token_Kind,
+			text: string,
+		}{{.Object, ""}, {.Key, "a"}, {.Array, ""}, {.Number, "1"}, {.Number, "2.5"}, {.Object, ""}, {.Key, "b"}, {.Null, ""}, {.Close, ""}, {.Close, ""}, {.Key, "c"}, {.String, "x\ny"}, {.Key, "d"}, {.Object, ""}, {.Close, ""}, {.Key, "e"}, {.Array, ""}, {.Close, ""}, {.Close, ""}}
+		for step in steps {
+			testing.expect(t, json.token(&w, step.kind, step.text) == nil)
+		}
+		_, eerr := json.writer_end(&w)
+		testing.expect(t, eerr == nil)
+		testing.expectf(t, strings.to_string(sink) == string(want), "%v: %s\nwant %s", opts, strings.to_string(sink), want)
+	}
+}
+
+// Deep nesting past `ROW_LEVELS` (64) must grow the `write_rows` container stack cleanly across compact, indented,
+// tabbed, ASCII, and comment-preserving JSON/JSONC/JSON5 modes, matching sink output byte for byte.
+@(test)
+perf4_write_rows_deep_nesting_past_stack_limit :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	depth :: 150
+	b := strings.builder_make(context.temp_allocator)
+	for lvl in 0 ..< depth {
+		if lvl % 2 == 0 {
+			strings.write_string(&b, `{"k":`)
+		} else {
+			strings.write_byte(&b, '[')
+		}
+	}
+	strings.write_string(&b, `"leaf"`)
+	for lvl := depth - 1; lvl >= 0; lvl -= 1 {
+		if lvl % 2 == 0 {
+			strings.write_byte(&b, '}')
+		} else {
+			strings.write_byte(&b, ']')
+		}
+	}
+	src := strings.to_string(b)
+	doc, berr := json.build(transmute([]u8)src)
+	defer tape.destroy(&doc)
+	testing.expect_value(t, berr, nil)
+
+	for spec in ([]json.Spec{.Json, .Jsonc, .Json5}) {
+		for opts in ([]json.Write_Options{{}, {indent = 2}, {tab = true}, {indent = 2, ascii = true}, {tab = true, ascii = true}}) {
+			out, _, werr := json.write(&doc, spec, opts)
+			defer delete(out)
+			testing.expectf(t, werr == nil, "spec=%v opts=%v err=%v", spec, opts, werr)
+
+			sink: strings.Builder
+			defer strings.builder_destroy(&sink)
+			_, serr := json.write_to(strings.to_writer(&sink), &doc, spec, opts)
+			testing.expectf(t, serr == nil, "sink spec=%v opts=%v err=%v", spec, opts, serr)
+			testing.expectf(t, strings.to_string(sink) == string(out), "sink mismatch spec=%v opts=%v", spec, opts)
+
+			round, rerr := json.build(out, spec)
+			defer tape.destroy(&round)
+			testing.expectf(t, rerr == nil && len(round.nodes) == len(doc.nodes), "roundtrip spec=%v err=%v", spec, rerr)
+		}
+	}
+
+	// Same deep nesting with comments so `rows_fact_value` and `rows_fact_close` also exercise stack growth past 64.
+	bc := strings.builder_make(context.temp_allocator)
+	strings.write_string(&bc, "/* lead */\n")
+	for lvl in 0 ..< depth {
+		if lvl % 2 == 0 {
+			strings.write_string(&bc, `{"k":`)
+		} else {
+			strings.write_byte(&bc, '[')
+		}
+	}
+	strings.write_string(&bc, `"leaf" // inline`)
+	strings.write_byte(&bc, '\n')
+	for lvl := depth - 1; lvl >= 0; lvl -= 1 {
+		if lvl % 2 == 0 {
+			strings.write_byte(&bc, '}')
+		} else {
+			strings.write_byte(&bc, ']')
+		}
+	}
+	csrc := strings.to_string(bc)
+	cdoc, cberr := json.build(transmute([]u8)csrc, .Jsonc)
+	defer tape.destroy(&cdoc)
+	testing.expect_value(t, cberr, nil)
+	for opts in ([]json.Write_Options{{}, {indent = 2}, {tab = true}}) {
+		cout, cdropped, cwerr := json.write(&cdoc, .Jsonc, opts)
+		defer delete(cout)
+		testing.expectf(t, cwerr == nil && cdropped == {}, "jsonc deep opts=%v dropped=%v err=%v", opts, cdropped, cwerr)
+		cround, crerr := json.build(cout, .Jsonc)
+		defer tape.destroy(&cround)
+		testing.expectf(t, crerr == nil && len(cround.nodes) == len(cdoc.nodes), "jsonc roundtrip opts=%v err=%v", opts, crerr)
+	}
+}
+
+// Exercises `doc_span` / `doc_span_held` on `.Held` windowed documents (`records_scan` over pieces), JSON5
+// non-finite numbers in `put_number`, ASCII/astral escapes in `put_ascii`, and comment fallbacks in
+// `inline_comments` / `put_comment`.
+@(test)
+perf4_write_held_span_ascii_and_comments :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+
+	// Single `.Json5` record holding strings, comments, bare keys, astral runes, and non-finite numbers, streamed in pieces so `.Held` is set.
+	rec_src := "{bare_key:\"é😀\",'sq':'a\\vb',inf:Infinity,ninf:-Infinity,nan:NaN,num:42} // c1\n"
+	p: tape.Pieces
+	defer tape.destroy(&p)
+	bs := transmute([]u8)rec_src
+	step :: 7
+	p.last = step >= len(bs)
+	demand, derr := tape.demand_of({{tape.Name("bare_key")}, {tape.Name("sq")}, {tape.Name("inf")}, {tape.Name("ninf")}, {tape.Name("nan")}, {tape.Name("num")}})
+	defer tape.destroy_demand(&demand)
+	testing.expect_value(t, derr, nil)
+
+	r := json.records_open(bs[:min(step, len(bs))], .Lines, .Json5, json.Options{pieces = &p})
+	defer tape.destroy_records(&r)
+	recs: [4]tape.Record
+	docs: [4]tape.Document
+	got := 0
+	for {
+		chunk := json.records_scan(&r, &demand, recs[got:], docs[got:])
+		got += chunk
+		if !p.more {
+			break
+		}
+		p.from = p.keep
+		next_to := min(int(p.at) + step, len(bs))
+		p.last = next_to == len(bs)
+		werr := tape.records_window(&r, bs[p.from:next_to])
+		testing.expect_value(t, werr, nil)
+	}
+	testing.expectf(t, got == 1 && recs[0].err == nil, "scan got=%d err=%v", got, recs[0].err)
+	testing.expect(t, .Held in docs[0].flags, "expected .Held flag on windowed scan document")
+
+	// Writing held doc as `.Json5` keeps non-finite numbers via `doc_span_held`.
+	out5, _, w5err := json.write(&docs[0], .Json5, {indent = 2, ascii = true})
+	defer delete(out5)
+	testing.expect_value(t, w5err, nil)
+	s5 := string(out5)
+	testing.expectf(t, strings.contains(s5, "Infinity") && strings.contains(s5, "NaN") && strings.contains(s5, `\u00e9\ud83d\ude00`), "unexpected json5 out: %s", s5)
+
+	// Writing the same `.Held` doc as strict `.Json` refuses `Infinity` (`No_Spelling`).
+	outj, _, wjerr := json.write(&docs[0], .Json)
+	defer delete(outj)
+	ref, is_ref := wjerr.(write.Refused)
+	testing.expectf(t, is_ref && ref.why == .No_Spelling, "expected No_Spelling refusal on Infinity->Json, got %v", wjerr)
+
+	// Exercise `inline_comments` and `put_comment`: JSONC holds two inline comments where the first contains U+2028
+	// (not a line terminator in JSONC); writing to JSON5 drops that first inline comment before emitting the second.
+	c5_src := "{/* lead */\n\"a\":1 /* b1 \xe2\x80\xa8 */ /* b2 */ // l */ tail\n, \"b\": /* has */ \"x\\n\\u0001é😀\"\n}"
+	c5_doc, c5_err := json.build(transmute([]u8)c5_src, .Jsonc)
+	defer tape.destroy(&c5_doc)
+	testing.expect_value(t, c5_err, nil)
+	c5_out, c5_dropped, c5_werr := json.write(&c5_doc, .Json5, {ascii = true})
+	defer delete(c5_out)
+	testing.expect_value(t, c5_werr, nil)
+	testing.expect(t, .Comment_Inline in c5_dropped, "expected U+2028 block inline comment before second inline comment to be dropped")
+	c5_back, c5_berr := json.build(c5_out, .Json5)
+	defer tape.destroy(&c5_back)
+	testing.expectf(t, c5_berr == nil, "ascii json5 comments did not roundtrip: %v in %s", c5_berr, c5_out)
+}
+
+// Verifies `write_as`'s pre-Tree `dense_route` fast bypass and non-bypass edge cases (partial, cut, sub-node, key node).
+@(test)
+perf4_write_dense_bypass_and_refusals :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	defer free_all(context.temp_allocator)
+	src := `{"a":[1,2,3],"b":{"nested":"val"},"c":"plain"}`
+	doc, err := json.build(transmute([]u8)src)
+	defer tape.destroy(&doc)
+	testing.expect_value(t, err, nil)
+
+	// Dense fast path matches compact text exactly.
+	compact, dropped, cerr := json.write(&doc, .Json)
+	defer delete(compact)
+	testing.expectf(t, cerr == nil && dropped == {} && string(compact) == src, "dense bypass mismatch: %s %v", compact, cerr)
+
+	// Key node (`opts.node = 1`) must return `Bad_Option{"node"}`.
+	bad_out, _, bad_err := json.write(&doc, .Json, {node = 1})
+	defer delete(bad_out)
+	bo, is_bo := bad_err.(tape.Bad_Option)
+	testing.expectf(t, is_bo && bo.option == "node", "expected Bad_Option node, got %v", bad_err)
+
+	// Sub-node (`opts.node = 2`, the `[1,2,3]` array) writes only that subtree cleanly.
+	sub_out, _, sub_err := json.write(&doc, .Json, {node = 2})
+	defer delete(sub_out)
+	testing.expectf(t, sub_err == nil && string(sub_out) == "[1,2,3]", "sub-node mismatch: %s %v", sub_out, sub_err)
+
+	// `.Cut` partial read must return `Refused{0, .Partial}` via `write_as` / `write_walked`.
+	cut_p := tape.Pieces{so_far = true, allocator = context.allocator}
+	defer tape.destroy(&cut_p)
+	cut_src := `{"a":[1,2`
+	cut_doc, cut_err := json.build(transmute([]u8)cut_src, .Json, {pieces = &cut_p})
+	defer tape.destroy(&cut_doc)
+	testing.expect_value(t, cut_err, nil)
+	testing.expect(t, .Cut in cut_doc.flags, "expected .Cut flag")
+	cout, _, cwerr := json.write(&cut_doc, .Json)
+	defer delete(cout)
+	cref, is_cref := cwerr.(write.Refused)
+	testing.expectf(t, is_cref && cref.why == .Partial, "expected Partial refusal on .Cut doc, got %v", cwerr)
 }

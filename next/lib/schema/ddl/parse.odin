@@ -1880,7 +1880,7 @@ parse_predicate_rhs :: proc(p: ^Parser, lhs: Expr_Index) -> Expr_Index {
 			l, lok := try_parse_literal(p)
 			if !lok {
 				unsupported = true
-				skip_until_comma_or_rparen(p)
+				skip_constraint_tail(p)
 			} else {
 				skip_pg_cast(p)
 				if _, aerr := append(&lits, l); aerr != nil {
@@ -2072,24 +2072,6 @@ skip_unsupported_atom :: proc(p: ^Parser) {
 			continue
 		}
 		if depth == 0 && (p_is_kw(p, "AND") || p_is_kw(p, "OR")) {
-			return
-		}
-		p_advance(p)
-	}
-}
-
-@(private = "file")
-skip_until_comma_or_rparen :: proc(p: ^Parser) {
-	depth := 0
-	for p.cur.kind != .Eof && p.err.kind == .None {
-		if p.cur.kind == .LParen {
-			depth += 1
-		} else if p.cur.kind == .RParen {
-			if depth == 0 {
-				return
-			}
-			depth -= 1
-		} else if p.cur.kind == .Comma && depth == 0 {
 			return
 		}
 		p_advance(p)

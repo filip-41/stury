@@ -62,6 +62,29 @@ key_word :: #force_inline proc "contextless" (n: u64) -> u64 {
 	return n | u64(Kind.String) << 32 | u64(Role.Key) << 40
 }
 
+// Encodes `name` into `(word, head, tail)` for fast unescaped key matching during a walk. Returns `ok = false`
+// when `name` contains a byte a JSON string must escape (`"`, `\`, or control `< 0x20`).
+expected_key :: proc "contextless" (name: string) -> (word, head, tail: u64, ok: bool) {
+	n := len(name)
+	for c in transmute([]u8)name {
+		if c == '"' || c == '\\' || c < 0x20 {
+			return 0, 0, 0, false
+		}
+	}
+	word = key_word(u64(n))
+	for i in 0 ..< min(n, 8) {
+		head |= u64(name[i]) << (8 * uint(i))
+	}
+	if n <= 8 {
+		tail = ~u64(0) >> (64 - 8 * uint(n)) if n > 0 else 0
+		return word, head, tail, true
+	}
+	for i in 0 ..< 8 {
+		tail |= u64(name[n - 8 + i]) << (8 * uint(i))
+	}
+	return word, head, tail, true
+}
+
 // An index into `Document.nodes`. A build refuses a text that makes `NO_NODE` nodes.
 Node_Index :: distinct u32
 

@@ -434,24 +434,24 @@ step_bracket :: proc(p: ^Parser, f: ^Parse_Frame) {
 // ---- Filter Expression Parsing ----
 
 @(private = "file")
-step_or_expr :: proc(p: ^Parser, f: ^Parse_Frame) {
+step_logical_expr :: proc(p: ^Parser, f: ^Parse_Frame, $child: Frame_Kind, $op_ch: u8, $kind: Expr_Kind, $err_msg: string) {
 	switch f.stage {
 	case 0:
 		f.stage = 1
-		push_frame(p, {kind = .And_Expr, allow_bare_value = f.allow_bare_value})
+		push_frame(p, {kind = child, allow_bare_value = f.allow_bare_value})
 	case 1:
 		f.lhs = p.result_expr
 		saved := p.i
 		skip_s(p)
-		if p.i + 1 < len(p.src) && p.src[p.i] == '|' && p.src[p.i + 1] == '|' {
+		if p.i + 1 < len(p.src) && p.src[p.i] == op_ch && p.src[p.i + 1] == op_ch {
 			if !is_logical_or_nodes(f.lhs) {
-				fail(p, .Type, saved, "ValueType expression cannot be operand of '||'")
+				fail(p, .Type, saved, err_msg)
 				return
 			}
 			p.i += 2
 			skip_s(p)
 			f.stage = 2
-			push_frame(p, {kind = .And_Expr, allow_bare_value = false})
+			push_frame(p, {kind = child, allow_bare_value = false})
 			return
 		}
 		p.i = saved
@@ -459,17 +459,17 @@ step_or_expr :: proc(p: ^Parser, f: ^Parse_Frame) {
 		pop_frame(p)
 	case 2:
 		rhs := p.result_expr
-		node := alloc_expr(p, {kind = .Or, type = .Logical, a = f.lhs, b = rhs})
+		node := alloc_expr(p, {kind = kind, type = .Logical, a = f.lhs, b = rhs})
 		if node == nil {
 			return
 		}
 		f.lhs = node
 		saved := p.i
 		skip_s(p)
-		if p.i + 1 < len(p.src) && p.src[p.i] == '|' && p.src[p.i + 1] == '|' {
+		if p.i + 1 < len(p.src) && p.src[p.i] == op_ch && p.src[p.i + 1] == op_ch {
 			p.i += 2
 			skip_s(p)
-			push_frame(p, {kind = .And_Expr, allow_bare_value = false})
+			push_frame(p, {kind = child, allow_bare_value = false})
 			return
 		}
 		p.i = saved
@@ -479,48 +479,13 @@ step_or_expr :: proc(p: ^Parser, f: ^Parse_Frame) {
 }
 
 @(private = "file")
+step_or_expr :: proc(p: ^Parser, f: ^Parse_Frame) {
+	step_logical_expr(p, f, .And_Expr, '|', .Or, "ValueType expression cannot be operand of '||'")
+}
+
+@(private = "file")
 step_and_expr :: proc(p: ^Parser, f: ^Parse_Frame) {
-	switch f.stage {
-	case 0:
-		f.stage = 1
-		push_frame(p, {kind = .Basic_Expr, allow_bare_value = f.allow_bare_value})
-	case 1:
-		f.lhs = p.result_expr
-		saved := p.i
-		skip_s(p)
-		if p.i + 1 < len(p.src) && p.src[p.i] == '&' && p.src[p.i + 1] == '&' {
-			if !is_logical_or_nodes(f.lhs) {
-				fail(p, .Type, saved, "ValueType expression cannot be operand of '&&'")
-				return
-			}
-			p.i += 2
-			skip_s(p)
-			f.stage = 2
-			push_frame(p, {kind = .Basic_Expr, allow_bare_value = false})
-			return
-		}
-		p.i = saved
-		p.result_expr = f.lhs
-		pop_frame(p)
-	case 2:
-		rhs := p.result_expr
-		node := alloc_expr(p, {kind = .And, type = .Logical, a = f.lhs, b = rhs})
-		if node == nil {
-			return
-		}
-		f.lhs = node
-		saved := p.i
-		skip_s(p)
-		if p.i + 1 < len(p.src) && p.src[p.i] == '&' && p.src[p.i + 1] == '&' {
-			p.i += 2
-			skip_s(p)
-			push_frame(p, {kind = .Basic_Expr, allow_bare_value = false})
-			return
-		}
-		p.i = saved
-		p.result_expr = f.lhs
-		pop_frame(p)
-	}
+	step_logical_expr(p, f, .Basic_Expr, '&', .And, "ValueType expression cannot be operand of '&&'")
 }
 
 @(private = "file")

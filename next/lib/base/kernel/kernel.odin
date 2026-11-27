@@ -138,6 +138,33 @@ store16 :: #force_inline proc "contextless" (p: [^]u8, v: V) {
 	intrinsics.unaligned_store((^V)(p), v)
 }
 
+// Copies `n` bytes from `src` to `dst`, a short run in overlapping loads of its first and last bytes.
+copy_short :: #force_inline proc "contextless" (dst, src: [^]u8, n: int) #no_bounds_check {
+	switch {
+	case n > 32:
+		intrinsics.mem_copy_non_overlapping(dst, src, n)
+	case n >= 16:
+		a := intrinsics.unaligned_load((^[16]u8)(src))
+		b := intrinsics.unaligned_load((^[16]u8)(src[n - 16:]))
+		intrinsics.unaligned_store((^[16]u8)(dst), a)
+		intrinsics.unaligned_store((^[16]u8)(dst[n - 16:]), b)
+	case n >= 8:
+		a := intrinsics.unaligned_load((^u64)(src))
+		b := intrinsics.unaligned_load((^u64)(src[n - 8:]))
+		intrinsics.unaligned_store((^u64)(dst), a)
+		intrinsics.unaligned_store((^u64)(dst[n - 8:]), b)
+	case n >= 4:
+		a := intrinsics.unaligned_load((^u32)(src))
+		b := intrinsics.unaligned_load((^u32)(src[n - 4:]))
+		intrinsics.unaligned_store((^u32)(dst), a)
+		intrinsics.unaligned_store((^u32)(dst[n - 4:]), b)
+	case:
+		for i in 0 ..< n {
+			dst[i] = src[i]
+		}
+	}
+}
+
 // The lanes of `v` holding a control byte or a byte past 0x7F, and DEL too when `del`.
 @(require_results)
 control_or_high16 :: #force_inline proc "contextless" (v: V, $del: bool) -> V {

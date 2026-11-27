@@ -218,25 +218,6 @@ random_item :: proc() -> []u8 {
 	return b[:]
 }
 
-mutated :: proc(src: []u8) -> []u8 {
-	b := make([dynamic]u8, len(src))
-	copy(b[:], src)
-	if len(b) == 0 {
-		append(&b, 0xc1)
-		return b[:]
-	}
-	at := rand.int_max(len(src))
-	switch rand.int_max(3) {
-	case 0:
-		b[at] = u8(rand.int_max(256))
-	case 1:
-		ordered_remove(&b, at)
-	case:
-		resize(&b, at)
-	}
-	return b[:]
-}
-
 // Representative MessagePack wire items (valid and invalid) for piece, record, and thread laws.
 PIECE_HEX := [?]string {
 	"83 a1 61 01 a3 626262 92 ca 3f800000 cb 3ff8000000000000 a3 636363 81 01 d6 ff 514b67b0",

@@ -2,7 +2,6 @@
 package toml_tests
 
 import "core:testing"
-import "stury:lib/core/tape"
 import "stury:lib/schema/check"
 import "stury:lib/schema/rules"
 import "stury:testkit"
@@ -57,31 +56,10 @@ test_toml_check_parity :: proc(t: ^testing.T) {
 	for c in cases {
 		src := transmute([]u8)c.input
 		r_s := toml.check(src, &plan, c.spec)
-		defer check.result_destroy(&r_s)
-		testing.expectf(t, r_s.valid == c.valid, "toml stream %v: got %v want %v", c.spec, r_s.valid, c.valid)
-
 		sink_s: check.Sink
 		check.sink_init(&sink_s)
-		defer check.sink_destroy(&sink_s)
 		r_ss := toml.check(src, &plan, c.spec, {}, &sink_s)
-		defer check.result_destroy(&r_ss)
-		testing.expect_value(t, r_ss.valid, c.valid)
-
-		doc, berr := toml.build(src, c.spec)
-		testing.expect_value(t, berr, nil)
-		defer tape.destroy(&doc)
-
-		r_d := check.check_document(&doc, &plan)
-		defer check.result_destroy(&r_d)
-		testing.expect_value(t, r_d.valid, c.valid)
-
-		sink_d: check.Sink
-		check.sink_init(&sink_d)
-		defer check.sink_destroy(&sink_d)
-		r_ds := check.check_document(&doc, &plan, {}, &sink_d)
-		defer check.result_destroy(&r_ds)
-		testing.expect_value(t, r_ds.valid, c.valid)
-		testing.expect_value(t, len(sink_s.entries), len(sink_d.entries))
+		testkit.check_parity(t, &plan, toml.reads(c.spec), toml.as(c.spec), src, c.valid, r_s, r_ss, &sink_s)
 	}
 }
 
@@ -89,38 +67,13 @@ test_toml_check_parity :: proc(t: ^testing.T) {
 test_toml_check_held_applicators_parity :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 
-	expect_parity :: proc(t: ^testing.T, plan: ^check.Plan, spec: toml.Spec, input: string, want_valid: bool) {
+	expect_parity :: proc(t: ^testing.T, plan: ^check.Plan, spec: toml.Spec, input: string, want_valid: bool, loc := #caller_location) {
 		src := transmute([]u8)input
 		r_s := toml.check(src, plan, spec)
-		defer check.result_destroy(&r_s)
-		testing.expectf(t, r_s.valid == want_valid, "toml stream %v: got %v want %v", spec, r_s.valid, want_valid)
-
 		sink_s: check.Sink
 		check.sink_init(&sink_s)
-		defer check.sink_destroy(&sink_s)
 		r_ss := toml.check(src, plan, spec, {}, &sink_s)
-		defer check.result_destroy(&r_ss)
-		testing.expect_value(t, r_ss.valid, want_valid)
-
-		doc, berr := toml.build(src, spec)
-		testing.expect_value(t, berr, nil)
-		defer tape.destroy(&doc)
-
-		r_d := check.check_document(&doc, plan)
-		defer check.result_destroy(&r_d)
-		testing.expect_value(t, r_d.valid, want_valid)
-
-		sink_d: check.Sink
-		check.sink_init(&sink_d)
-		defer check.sink_destroy(&sink_d)
-		r_ds := check.check_document(&doc, plan, {}, &sink_d)
-		defer check.result_destroy(&r_ds)
-		testing.expect_value(t, r_ds.valid, want_valid)
-		testing.expect_value(t, len(sink_s.entries), len(sink_d.entries))
-		if !want_valid {
-			testing.expect_value(t, r_s.err.kind, r_d.err.kind)
-			testing.expect_value(t, r_s.err.keyword, r_d.err.keyword)
-		}
+		testkit.check_parity(t, plan, toml.reads(spec), toml.as(spec), src, want_valid, r_s, r_ss, &sink_s, check_err = true, loc = loc)
 	}
 
 	// 1. `contains` + `uniqueItems`

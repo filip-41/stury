@@ -7,39 +7,6 @@ import "core:testing"
 import regex "stury:lib/base/regex"
 import "stury:testkit"
 
-// An allocator that fails the `fail_at`th allocation through it, and every later one when `sticky`. `fail_at` 0 never
-// fails. `count` is the allocations asked so far.
-Failing :: struct {
-	inner:   mem.Allocator,
-	fail_at: int,
-	sticky:  bool,
-	count:   int,
-}
-
-failing_allocator :: proc(f: ^Failing) -> mem.Allocator {
-	return {procedure = failing_proc, data = f}
-}
-
-failing_proc :: proc(
-	data: rawptr,
-	mode: mem.Allocator_Mode,
-	size,
-	alignment: int,
-	old_ptr: rawptr,
-	old_size: int,
-	loc := #caller_location,
-) -> ([]byte, mem.Allocator_Error) {
-	f := (^Failing)(data)
-	#partial switch mode {
-	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
-		f.count += 1
-		if f.fail_at != 0 && (f.count == f.fail_at || f.sticky && f.count > f.fail_at) {
-			return nil, .Out_Of_Memory
-		}
-	}
-	return f.inner.procedure(f.inner.data, mode, size, alignment, old_ptr, old_size, loc)
-}
-
 // A pattern, the syntax it is read under, and a text to search that makes the search grow its scratch.
 Subject :: struct {
 	pattern: string,
@@ -88,10 +55,7 @@ test_compile_survives_a_failing_allocator :: proc(t: ^testing.T) {
 		syntax, flags := split(subject.mode)
 		for spans in ([?]bool{false, true}) {
 			// The allocations of a compile that does not fail, which are those of the result and those of the scratch.
-			counted: [2]Failing
-			for &c in counted {
-				c.inner = context.allocator
-			}
+			counted := [2]testkit.Failing{{fail_at = -1}, {fail_at = -1}}
 			arena, scratch_arena: virtual.Arena
 			ok_re, ok_err := regex.compile(
 				subject.pattern,
@@ -105,11 +69,8 @@ test_compile_survives_a_failing_allocator :: proc(t: ^testing.T) {
 			baseline := run_search(&ok_re, subject.text)
 			for side in 0 ..< 2 {
 				for sticky in ([?]bool{false, true}) {
-					for at in 1 ..= counted[side].count {
-						fails: [2]Failing
-						for &f in fails {
-							f.inner = context.allocator
-						}
+					for at in 0 ..< counted[side].count {
+						fails := [2]testkit.Failing{{fail_at = -1}, {fail_at = -1}}
 						fails[side].fail_at, fails[side].sticky = at, sticky
 						a, b: virtual.Arena
 						re, err := regex.compile(
@@ -126,7 +87,7 @@ test_compile_survives_a_failing_allocator :: proc(t: ^testing.T) {
 								run_search(&re, subject.text) == baseline,
 								"%q, allocation %d of %d failed, answers differ",
 								subject.pattern,
-								at,
+								at + 1,
 								side,
 							)
 						} else {
@@ -135,7 +96,7 @@ test_compile_survives_a_failing_allocator :: proc(t: ^testing.T) {
 								err.kind == .Memory,
 								"%q, allocation %d of %d failed: %v",
 								subject.pattern,
-								at,
+								at + 1,
 								side,
 								err,
 							)
@@ -152,10 +113,10 @@ test_compile_survives_a_failing_allocator :: proc(t: ^testing.T) {
 }
 
 // An allocator that counts and fails through `f`, over a growing arena kept in `arena`, which the caller destroys.
-failing_over :: proc(f: ^Failing, arena: ^virtual.Arena) -> mem.Allocator {
+failing_over :: proc(f: ^testkit.Failing, arena: ^virtual.Arena) -> mem.Allocator {
 	ensure(virtual.arena_init_growing(arena) == nil)
-	f.inner = virtual.arena_allocator(arena)
-	return failing_allocator(f)
+	f.backing = virtual.arena_allocator(arena)
+	return testkit.failing_allocator(f)
 }
 
 Answer :: struct {
@@ -183,8 +144,8 @@ test_search_survives_a_failing_allocator :: proc(t: ^testing.T) {
 		re, err := regex.compile(subject.pattern, syntax, flags, allocator, allocator)
 		testing.expect_value(t, err, regex.Error{})
 		baseline := run_search(&re, subject.text)
-		counted := Failing{inner = allocator}
-		counting, make_err := regex.scratch_make(failing_allocator(&counted))
+		counted := testkit.Failing{backing = allocator, fail_at = -1}
+		counting, make_err := regex.scratch_make(testkit.failing_allocator(&counted))
 		testing.expect_value(t, make_err, regex.Error{})
 		for _ in 0 ..< 2 {
 			answer: Answer
@@ -194,9 +155,9 @@ test_search_survives_a_failing_allocator :: proc(t: ^testing.T) {
 		regex.scratch_destroy(&counting)
 		for caps in ([?]bool{true, false}) {
 			for sticky in ([?]bool{false, true}) {
-				for at in 1 ..= counted.count {
-					fail := Failing{inner = allocator, fail_at = at, sticky = sticky}
-					scratch, scratch_err := regex.scratch_make(failing_allocator(&fail))
+				for at in 0 ..< counted.count {
+					fail := testkit.Failing{backing = allocator, fail_at = at, sticky = sticky}
+					scratch, scratch_err := regex.scratch_make(testkit.failing_allocator(&fail))
 					if scratch_err.kind != .None {
 						testing.expect_value(t, scratch_err.kind, regex.Error_Kind.Memory)
 						continue
@@ -218,7 +179,7 @@ test_search_survives_a_failing_allocator :: proc(t: ^testing.T) {
 								answer == baseline,
 								"%q, allocation %d failed, answers differ",
 								subject.pattern,
-								at,
+								at + 1,
 							)
 						} else {
 							testing.expectf(
@@ -226,7 +187,7 @@ test_search_survives_a_failing_allocator :: proc(t: ^testing.T) {
 								answer.found == baseline.found,
 								"%q, allocation %d failed, answers differ",
 								subject.pattern,
-								at,
+								at + 1,
 							)
 						}
 					} else {
@@ -235,7 +196,7 @@ test_search_survives_a_failing_allocator :: proc(t: ^testing.T) {
 							answer.err.kind == .Memory,
 							"%q, allocation %d failed: %v",
 							subject.pattern,
-							at,
+							at + 1,
 							answer.err,
 						)
 					}
@@ -321,15 +282,12 @@ test_large_oom_and_sample_survive_failing_allocator :: proc(t: ^testing.T) {
 	for p in patterns {
 		syntax, flags := split(p.mode)
 		for side in 0 ..< 2 {
-			for at in 1 ..= 16 {
-				fails: [2]Failing
-				for &f in fails {
-					f.inner = context.allocator
-				}
+			for at in 0 ..< 16 {
+				fails := [2]testkit.Failing{{fail_at = -1}, {fail_at = -1}}
 				fails[side].fail_at, fails[side].sticky = at, true
 				a, b: virtual.Arena
 				_, err := regex.compile(p.pattern, syntax, flags, failing_over(&fails[0], &a), failing_over(&fails[1], &b))
-				testing.expectf(t, err.kind == .None || err.kind == .Memory, "%q side=%d at=%d: %v", p.pattern[:min(len(p.pattern), 24)], side, at, err)
+				testing.expectf(t, err.kind == .None || err.kind == .Memory, "%q side=%d at=%d: %v", p.pattern[:min(len(p.pattern), 24)], side, at + 1, err)
 				virtual.arena_destroy(&a)
 				virtual.arena_destroy(&b)
 			}
@@ -342,9 +300,9 @@ test_large_oom_and_sample_survive_failing_allocator :: proc(t: ^testing.T) {
 		re, err := regex.compile(`(?<a>x\g<a>|y)`, .Oniguruma, {}, allocator, allocator)
 		testing.expect_value(t, err, regex.Error{})
 		text := strings.concatenate({strings.repeat("x", 60, context.temp_allocator), "y"}, context.temp_allocator)
-		for at in 1 ..= 12 {
-			fail := Failing{inner = allocator, fail_at = at, sticky = true}
-			scratch, serr := regex.scratch_make(failing_allocator(&fail))
+		for at in 0 ..< 12 {
+			fail := testkit.Failing{backing = allocator, fail_at = at, sticky = true}
+			scratch, serr := regex.scratch_make(testkit.failing_allocator(&fail))
 			if serr.kind != .None {
 				testing.expect_value(t, serr.kind, regex.Error_Kind.Memory)
 				continue
@@ -352,24 +310,25 @@ test_large_oom_and_sample_survive_failing_allocator :: proc(t: ^testing.T) {
 			caps: [4]int
 			_, rerr := regex.search(&re, text, 0, caps[:], &scratch)
 			regex.scratch_destroy(&scratch)
-			testing.expectf(t, rerr.kind == .None || rerr.kind == .Memory, "call OOM at=%d: %v", at, rerr)
+			testing.expectf(t, rerr.kind == .None || rerr.kind == .Memory, "call OOM at=%d: %v", at + 1, rerr)
 		}
 	}
 	// `sample` under tracking + failing allocators (padded & unpadded) must never leak or crash.
 	for least in ([?]int{0, 12}) {
 		for side in 0 ..< 2 {
-			for at in 0 ..= 10 {
+			for at in -1 ..< 10 {
 				track: mem.Tracking_Allocator
 				mem.tracking_allocator_init(&track, context.allocator)
 				defer mem.tracking_allocator_destroy(&track)
-				fails := [2]Failing{{inner = mem.tracking_allocator(&track)}, {inner = mem.tracking_allocator(&track)}}
-				if at > 0 {
+				ta := mem.tracking_allocator(&track)
+				fails := [2]testkit.Failing{{backing = ta, fail_at = -1}, {backing = ta, fail_at = -1}}
+				if at >= 0 {
 					fails[side].fail_at, fails[side].sticky = at, true
 				}
 				state := u64(19)
-				drawn, serr := regex.sample(`^[a-z]{2,4}[0-9]+`, &state, 3, least, failing_allocator(&fails[0]), failing_allocator(&fails[1]))
+				drawn, serr := regex.sample(`^[a-z]{2,4}[0-9]+`, &state, 3, least, testkit.failing_allocator(&fails[0]), testkit.failing_allocator(&fails[1]))
 				if serr.kind == .None {
-					delete(drawn, failing_allocator(&fails[0]))
+					delete(drawn, testkit.failing_allocator(&fails[0]))
 				} else {
 					testing.expect_value(t, serr.kind, regex.Error_Kind.Memory)
 				}

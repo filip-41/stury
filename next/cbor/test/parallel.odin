@@ -1,7 +1,9 @@
 package cbor_tests
 
+import "base:runtime"
 import "core:math/rand"
 import "core:mem"
+import "core:mem/virtual"
 import "core:testing"
 import "stury:cbor"
 import "stury:host"
@@ -9,19 +11,6 @@ import "stury:lib/core/tape"
 import "stury:testkit"
 
 // The build of a CBOR text on the threads of a runner.
-
-// A runner that counts its `start` calls into `calls` and runs none of them, so the caller builds every part.
-@(private = "file")
-counting_runner :: proc(calls: ^int) -> tape.Runner {
-	return {
-		threads = 3,
-		data = calls,
-		start = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
-			(^int)(data)^ += 1
-		},
-		finish = proc(data: rawptr) {},
-	}
-}
 
 // A build under `Budget.memory` runs on the runner's threads whatever the text holds: a tag, a repeated key under a
 // policy past `.Default`, or neither.
@@ -38,7 +27,7 @@ memory_budget_builds_on_the_runner :: proc(t: ^testing.T) {
 	append(&items, 0xff)
 	for opts in ([]cbor.Options{{budget = {memory = 1 << 20}}, {budget = {memory = 1 << 20}, dups = .First}, {budget = {memory = 1 << 20}, dups = .All}}) {
 		calls := 0
-		runner := counting_runner(&calls)
+		runner := testkit.counting_runner(3, &calls)
 		wide := opts
 		wide.runner = &runner
 		doc, err := cbor.build(items[:], .Cbor, wide)
@@ -58,7 +47,7 @@ builds_on_threads_agree_on_every_prefix :: proc(t: ^testing.T) {
 			"a4 61 61 fb 3ff0000000000000 61 62 fa 3fc00000 61 63 f9 3c00 61 64 f8 20 a1 61 65 82 fb 3ff8000000000000 f8 21",
 			"85 a0 82 d9d9f7 a3 40 1a00016053 60 6178 4263 62 a5 2a 198b4b 3835 198dd2 38b8 d9d9f7 82 c4 82 21 196ab3 1933 f8",
 		}) {
-		whole := hex(text)
+		whole := testkit.hex(text)
 		for n in 0 ..= len(whole) {
 			for spec in cbor.Spec {
 				r := testkit.serial_runner(17)
@@ -94,13 +83,13 @@ builds_on_threads_agree :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	texts := make([dynamic][]u8, context.temp_allocator)
 	for h in PIECE_HEX {
-		append(&texts, hex(h))
+		append(&texts, testkit.hex(h))
 	}
 	{
 		context.allocator = context.temp_allocator
 		for _ in 0 ..< testkit.rounds(30) {
 			src := random_item()
-			append(&texts, src, mutated(src))
+			append(&texts, src, testkit.mutate(src))
 		}
 	}
 	for text in texts {
@@ -140,7 +129,7 @@ builds_on_long_texts_agree :: proc(t: ^testing.T) {
 			src := long_text(kind, testkit.rounds(1500)) if kind < 5 else sorted_text(kind - 5, testkit.rounds(1500))
 			append(&texts, src)
 			for _ in 0 ..< 3 {
-				append(&texts, mutated(src))
+				append(&texts, testkit.mutate(src))
 			}
 		}
 	}
@@ -208,7 +197,7 @@ builds_on_pools_agree :: proc(t: ^testing.T) {
 	defer delete(b)
 	append(&b, 0x9f)
 	for k := 0; len(b) < POOL_TEXT; k += 1 {
-		append(&b, ..hex(PIECE_HEX[k % 5]))
+		append(&b, ..testkit.hex(PIECE_HEX[k % 5]))
 		item := random_item()
 		if cbor.validate(item) == nil {
 			append(&b, ..item)
@@ -234,5 +223,117 @@ builds_on_pools_agree :: proc(t: ^testing.T) {
 				}
 			}
 		}
+	}
+}
+
+@(private = "file")
+Cbor_Item :: struct {
+	id:   i64    `cbor:"id"`,
+	name: string `cbor:"name"`,
+	ok:   bool   `cbor:"ok"`,
+}
+
+@(private = "file")
+make_large_cbor_array :: proc(count: int, allocator := context.allocator) -> []u8 {
+	// Marshal an array of `count` structs (~600 KiB for 18000 items) so it exceeds `PARALLEL_FROM`.
+	items := make([]Cbor_Item, count, context.temp_allocator)
+	for &it, i in items {
+		it = {id = i64(i), name = "item-payload-value-0123456789", ok = i % 2 == 0}
+	}
+	out, err := cbor.marshal(&items, .Cbor, allocator = allocator)
+	assert(err == nil)
+	return out
+}
+
+@(test)
+parallel_cbor_validate_and_typed :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := make_large_cbor_array(14000)
+	defer delete(src)
+
+	// Parallel validate across specs and thread counts
+	for spec in cbor.Spec {
+		want := cbor.validate(src, spec)
+		for workers in ([]int{1, 2, 4, 18}) {
+			pool: host.Pool
+			_ = host.pool_init(&pool, workers)
+			defer host.pool_destroy(&pool)
+			got := cbor.validate(src, spec, {runner = &pool.runner})
+			testing.expectf(t, got == want, "%v w=%d validate: got=%v want=%v", spec, workers, got, want)
+		}
+	}
+
+	// Faulty CBOR validate matches serial
+	bad := make([]u8, len(src))
+	defer delete(bad)
+	copy(bad, src)
+	bad[len(bad) / 2] = 0xff // unexpected break
+	want_bad := cbor.validate(bad, .Cbor)
+	pool: host.Pool
+	_ = host.pool_init(&pool, 4)
+	defer host.pool_destroy(&pool)
+	got_bad := cbor.validate(bad, .Cbor, {runner = &pool.runner})
+	testing.expectf(t, got_bad == want_bad && want_bad != nil, "cbor bad validate: got=%v want=%v", got_bad, want_bad)
+
+	// Parallel typed unmarshal (arena, heap, tracking)
+	va_ref: virtual.Arena
+	_ = virtual.arena_init_growing(&va_ref)
+	defer virtual.arena_destroy(&va_ref)
+	want_items: []Cbor_Item
+	testing.expect(t, cbor.unmarshal(src, &want_items, .Cbor, allocator = virtual.arena_allocator(&va_ref)) == nil)
+	testing.expectf(t, len(want_items) == 14000, "cbor want len=%d", len(want_items))
+
+	for workers in ([]int{1, 2, 4, 18}) {
+		p: host.Pool
+		_ = host.pool_init(&p, workers)
+		defer host.pool_destroy(&p)
+		for borrow in ([]bool{false, true}) {
+			va: virtual.Arena
+			_ = virtual.arena_init_growing(&va)
+			defer virtual.arena_destroy(&va)
+			got: []Cbor_Item
+			err := cbor.unmarshal(src, &got, .Cbor, {borrow_strings = borrow}, {runner = &p.runner}, virtual.arena_allocator(&va))
+			testing.expectf(t, err == nil && len(got) == len(want_items), "cbor w=%d borrow=%v err=%v len=%d", workers, borrow, err, len(got))
+			for i in 0 ..< min(len(got), len(want_items)) {
+				if got[i] != want_items[i] {
+					testing.expectf(t, false, "cbor w=%d item[%d]: %v vs %v", workers, i, got[i], want_items[i])
+					break
+				}
+			}
+		}
+	}
+
+	// Heap (`.Direct`) + Tracking_Allocator
+	heap := runtime.heap_allocator()
+	hgot: []Cbor_Item
+	testing.expect(t, cbor.unmarshal(src, &hgot, .Cbor, {borrow_strings = false}, {runner = &pool.runner}, heap) == nil)
+	for it in hgot {
+		delete(it.name, heap)
+	}
+	delete(hgot, heap)
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, heap)
+	defer mem.tracking_allocator_destroy(&track)
+	ta := mem.tracking_allocator(&track)
+	tgot: []Cbor_Item
+	testing.expect(t, cbor.unmarshal(src, &tgot, .Cbor, {borrow_strings = false}, {runner = &pool.runner}, ta) == nil)
+	for it in tgot {
+		delete(it.name, ta)
+	}
+	delete(tgot, ta)
+	testing.expectf(t, len(track.allocation_map) == 0 && len(track.bad_free_array) == 0, "cbor tracking leaks=%d", len(track.allocation_map))
+
+	// M7: Budget.memory respected by `cbor.unmarshal` parallel plan_parts and matches serial behavior.
+	for lim in ([]u64{1024, 64 << 10, 64 << 20}) {
+		va_s, va_p: virtual.Arena
+		_ = virtual.arena_init_growing(&va_s)
+		_ = virtual.arena_init_growing(&va_p)
+		defer virtual.arena_destroy(&va_s)
+		defer virtual.arena_destroy(&va_p)
+		s_got, p_got: []Cbor_Item
+		serr := cbor.unmarshal(src, &s_got, .Cbor, {}, {budget = {memory = lim}}, virtual.arena_allocator(&va_s))
+		perr := cbor.unmarshal(src, &p_got, .Cbor, {}, {budget = {memory = lim}, runner = &pool.runner}, virtual.arena_allocator(&va_p))
+		testing.expectf(t, perr == serr, "cbor budget %d: perr=%v serr=%v", lim, perr, serr)
 	}
 }

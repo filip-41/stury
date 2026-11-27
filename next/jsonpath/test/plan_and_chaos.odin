@@ -155,21 +155,13 @@ plan_demands_and_hints :: proc(t: ^testing.T) {
 @(private = "file")
 Snapshot :: struct {
 	end:     jsonpath.Run_End,
-	vals:    []string,
-	paths:   []string,
+	col:     Collected,
 	tainted: bool,
 }
 
 @(private = "file")
 destroy_snapshot :: proc(s: ^Snapshot) {
-	for v in s.vals {
-		delete(v)
-	}
-	delete(s.vals)
-	for p in s.paths {
-		delete(p)
-	}
-	delete(s.paths)
+	destroy_collected(&s.col)
 }
 
 @(private = "file")
@@ -191,21 +183,21 @@ run_doc_snapshot :: proc(prog: ^jsonpath.Program, doc: tape.Document, want_paths
 		alloc = context.allocator,
 	}
 	end := jsonpath.eval(prog, &h, root, collect_cb, &col, {want_paths = want_paths})
+	col.h = nil
 	return {
 		end     = end,
-		vals    = col.vals[:],
-		paths   = col.paths[:],
+		col     = col,
 		tainted = h.tainted,
 	}
 }
 
 @(private = "file")
 snapshots_equal :: proc(a, b: Snapshot) -> bool {
-	if a.end != b.end || len(a.vals) != len(b.vals) || len(a.paths) != len(b.paths) {
+	if a.end != b.end || len(a.col.vals) != len(b.col.vals) || len(a.col.paths) != len(b.col.paths) {
 		return false
 	}
-	for i in 0 ..< len(a.vals) {
-		if a.vals[i] != b.vals[i] || a.paths[i] != b.paths[i] {
+	for i in 0 ..< len(a.col.vals) {
+		if a.col.vals[i] != b.col.vals[i] || a.col.paths[i] != b.col.paths[i] {
 			return false
 		}
 	}
@@ -391,11 +383,11 @@ chaos_demand_never_gives_wrong_answer :: proc(t: ^testing.T) {
 
 			if res.end == .Tainted {
 				taint_count += 1
-				testing.expectf(t, len(res.vals) <= len(whole.vals), "chaos[%d] %q emitted %d > whole %d", si, qsrc, len(res.vals), len(whole.vals))
-				for k in 0 ..< min(len(res.vals), len(whole.vals)) {
-					testing.expectf(t, res.vals[k] == whole.vals[k] && res.paths[k] == whole.paths[k],
+				testing.expectf(t, len(res.col.vals) <= len(whole.col.vals), "chaos[%d] %q emitted %d > whole %d", si, qsrc, len(res.col.vals), len(whole.col.vals))
+				for k in 0 ..< min(len(res.col.vals), len(whole.col.vals)) {
+					testing.expectf(t, res.col.vals[k] == whole.col.vals[k] && res.col.paths[k] == whole.col.paths[k],
 						"chaos[%d] %q emitted wrong pre-taint output[%d]: got (%s, %s), whole (%s, %s)",
-						si, qsrc, k, res.vals[k], res.paths[k], whole.vals[k], whole.paths[k])
+						si, qsrc, k, res.col.vals[k], res.col.paths[k], whole.col.vals[k], whole.col.paths[k])
 				}
 			} else {
 				match_count += 1

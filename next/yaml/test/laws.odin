@@ -39,19 +39,9 @@ PROTOCOL_TEXTS := [?]string {
 @(test)
 yaml_walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	texts := make([]string, len(PROTOCOL_TEXTS))
-	defer {
-		for text in texts {
-			delete(text)
-		}
-		delete(texts)
-	}
-	for text, i in PROTOCOL_TEXTS {
-		texts[i] = strings.clone(text)
-	}
-	testkit.hook_protocol(t, walk_of(.Yaml_1_2), texts)
-	testkit.hook_protocol(t, walk_of(.Yaml_Merge), texts)
-	testkit.hook_inner_rooms(t, bare_walk_of(.Yaml_1_2), texts)
+	testkit.hook_protocol(t, walk_of(.Yaml_1_2), PROTOCOL_TEXTS[:])
+	testkit.hook_protocol(t, walk_of(.Yaml_Merge), PROTOCOL_TEXTS[:])
+	testkit.hook_inner_rooms(t, bare_walk_of(.Yaml_1_2), PROTOCOL_TEXTS[:])
 }
 
 @(test)
@@ -171,25 +161,6 @@ random_yaml :: proc() -> string {
 	return strings.to_string(b)
 }
 
-@(private = "file")
-mutated :: proc(src: string) -> []u8 {
-	b := make([dynamic]u8, len(src))
-	copy(b[:], src)
-	if len(src) == 0 {
-		return b[:]
-	}
-	at := rand.int_max(len(src))
-	switch rand.int_max(3) {
-	case 0:
-		b[at] = rand.choice([]u8{'[', ']', ':', '-', '"', '\'', '\n', ',', '{', '}', '#', '*', '&', '!', 'a', '1'})
-	case 1:
-		ordered_remove(&b, at)
-	case:
-		resize(&b, at)
-	}
-	return b[:]
-}
-
 @(test)
 reads_agree_on_generated_and_mutated_texts :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -205,12 +176,12 @@ reads_agree_on_generated_and_mutated_texts :: proc(t: ^testing.T) {
 			testkit.readers_agree(t, yaml.reads(spec), yaml.as(spec), src, {}, "generated", &a)
 		}
 		for _ in 0 ..< 2 {
-			bad := mutated(text)
-			defer delete(bad)
+			bad := testkit.mutate(src, "[]:-\"'\n,{}#*&!a1")
 			if !check_single_doc_refusal(t, bad, "mutated", &a) {
 				testkit.readers_agree(t, yaml.reads(.Yaml_1_2), yaml.as(.Yaml_1_2), bad, {}, "mutated", &a)
 			}
 		}
+		free_all(context.temp_allocator)
 	}
 	testkit.expect_agreement(t, &a, {texts = 40, refused = 15, scans = 5000, on_path = 5000, shapes = 15})
 }

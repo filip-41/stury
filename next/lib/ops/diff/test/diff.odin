@@ -712,32 +712,6 @@ diff_patch_limits_and_empty_containers_at_max_depth :: proc(t: ^testing.T) {
 	}
 }
 
-@(private = "file")
-Budget_Allocator :: struct {
-	backing: runtime.Allocator,
-	left:    int,
-}
-
-@(private = "file")
-budget_alloc_proc :: proc(
-	data: rawptr,
-	mode: runtime.Allocator_Mode,
-	size, alignment: int,
-	old_ptr: rawptr,
-	old_size: int,
-	loc := #caller_location,
-) -> ([]byte, runtime.Allocator_Error) {
-	ba := (^Budget_Allocator)(data)
-	#partial switch mode {
-	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
-		if ba.left <= 0 {
-			return nil, .Out_Of_Memory
-		}
-		ba.left -= 1
-	}
-	return ba.backing.procedure(ba.backing.data, mode, size, alignment, old_ptr, old_size, loc)
-}
-
 @(test)
 diff_long_escaped_object_keys :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -1004,8 +978,8 @@ diff_oom_and_nil_allocator :: proc(t: ^testing.T) {
 		mem.tracking_allocator_init(&track, alloc)
 		defer mem.tracking_allocator_destroy(&track)
 
-		ba := Budget_Allocator{backing = mem.tracking_allocator(&track), left = budget}
-		falloc := runtime.Allocator{procedure = budget_alloc_proc, data = &ba}
+		fa := testkit.Failing{backing = mem.tracking_allocator(&track), fail_at = budget, sticky = true}
+		falloc := testkit.failing_allocator(&fa)
 
 		r, err := diff.diff_documents(&a, &b, {}, falloc)
 		if err != nil {
@@ -1015,7 +989,8 @@ diff_oom_and_nil_allocator :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(track.allocation_map), 0)
 		testing.expect_value(t, len(track.bad_free_array), 0)
 
-		ba.left = budget
+		fa.count = 0
+		fa.failed = false
 		p, perr := diff.diff_to_patch(&a, &b, {}, falloc)
 		if perr != nil {
 			testing.expect(t, perr == .Out_Of_Memory && p.arena == nil)

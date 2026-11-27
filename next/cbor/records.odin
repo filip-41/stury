@@ -50,21 +50,8 @@ records_open :: proc(src: []u8, framing := tape.Framing.Concatenated, spec := Sp
 	if spec > max(Spec) {
 		panic("cbor: spec out of range")
 	}
-	r.src, r.framing, r.spec, r.opts, r.steps = src, framing, spec, opts, steps_of(opts)
-	if opts.pieces != nil {
-		r.src = tape.piece_src(src, opts.pieces.from)
-	}
-	r.path = path
-	if err := tape.options_refused(&FORMATS[spec], opts); err != nil {
-		r.err, r.at = err, .Done
-	} else if err = build.records_path_refused(&FORMATS[spec], framing, path, opts); err != nil {
-		r.err, r.at = err, .Done
-	} else if framing == .Lines || framing == .Seq {
-		r.err, r.at = tape.Bad_Option{"framing"}, .Done
-	} else if e := build.frame_init(&r.frame, path); e != nil {
-		r.err, r.at = e, .Done
-	}
-	r.release = records_release
+	r.spec, r.steps = spec, steps_of(opts)
+	build.binary_records_init(&r.records, &r.frame, src, framing, &FORMATS[spec], opts, path, records_release)
 	return
 }
 
@@ -390,22 +377,7 @@ frame_tail :: proc(r: ^Records) -> build.Frame_Step {
 // at it, or at the head of the outermost container whose claim the text does not reach, which comes first.
 @(private, cold)
 item_refused :: proc "contextless" (r: ^Records, res: hook.Walk_Result) -> build.Frame_Step {
-	if window_more(r) && u8(res) == u8(tape.Fault_Kind.Truncated) {
-		return .Wait
-	}
-	res := res
-	for k in 0 ..< r.frame.depth {
-		if lv := build.frame_level(&r.frame, k); lv.need > u64(len(r.src)) {
-			if window_more(r) {
-				return .Wait
-			}
-			res = fault(lv.head, .Truncated, .Count_Too_Large)
-			break
-		}
-	}
-	_, r.err, _ = hook.walk_error(res, &RULES)
-	r.at = .Done
-	return .Fault
+	return build.binary_item_refused(&r.records, &r.frame, res, &RULES, u8(Detail.Count_Too_Large))
 }
 
 // Whether more bytes follow the window of a text in pieces.

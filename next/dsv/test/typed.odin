@@ -43,35 +43,6 @@ read_rows :: proc(src: string, target: ^$T, read := dsv.Unmarshal_Options{}, opt
 	return dsv.unmarshal(transmute([]u8)src, target, spec, read, opts, context.temp_allocator)
 }
 
-// Expects `e` to be a refusal `want` at byte `at`.
-expect_refusal :: proc(t: ^testing.T, e: tape.Error, want: dsv.Typed_Refusal, at: u64, loc := #caller_location) -> (path_ok: bool) {
-	f, is_fault := e.(tape.Fault)
-	if !testing.expectf(t, is_fault && f.kind == .Refused, "got %v, wanted a refusal %v", e, want, loc = loc) {
-		return false
-	}
-	testing.expect_value(t, dsv.Typed_Refusal(f.detail), want, loc)
-	testing.expect_value(t, f.at, at, loc)
-	return true
-}
-
-// Expects `steps` to be the path `want`, a name for a string and an index for an int.
-expect_path :: proc(t: ^testing.T, steps: []tape.Step, want: []union {
-		int,
-		string,
-	}, loc := #caller_location) {
-	if !testing.expect_value(t, len(steps), len(want), loc) {
-		return
-	}
-	for w, i in want {
-		switch v in w {
-		case int:
-			testing.expect_value(t, steps[i], tape.Step(tape.Index(v)), loc)
-		case string:
-			testing.expect_value(t, steps[i], tape.Step(tape.Name(v)), loc)
-		}
-	}
-}
-
 // U+FFFD spells three bytes for the one it replaces, so the decode outgrows the cell.
 @(test)
 tolerated_ill_formed_cell_outgrows_its_span :: proc(t: ^testing.T) {
@@ -110,7 +81,7 @@ cells_read_by_their_field :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.color, Cell_Color.Blue)
 	// A number cell spells a JSON number, so a leading plus is no integer.
 	small: []Cell_Row
-	expect_refusal(t, read_rows("small\n+7\n", &small), .Expected_Integer, 6)
+	testkit.expect_typed_refusal(t, read_rows("small\n+7\n", &small), .Expected_Integer, 6)
 }
 
 @(test)
@@ -211,7 +182,7 @@ repeated_and_unknown_columns :: proc(t: ^testing.T) {
 		case i64:
 			testing.expectf(t, e == nil && len(rows) == 1 && rows[0].a == w, "%q: %v, %v", c.src, e, rows)
 		case dsv.Typed_Refusal:
-			expect_refusal(t, e, w, c.at)
+			testkit.expect_typed_refusal(t, e, w, c.at)
 		}
 	}
 	// A repeated header column is a fault of the build under `.Refuse`.
@@ -281,7 +252,7 @@ a_wide_record_names_its_cells_by_position :: proc(t: ^testing.T) {
 	testing.expect(t, rows[0] == {1, 3} && rows[1] == {4, 0} && rows[2] == {5, 7})
 	// A cell no field names is refused when the read asks for it.
 	e := read_rows("a\n1,2\n", &rows, {refuse_unknown = true}, opts)
-	expect_refusal(t, e, .Unknown_Field, 2)
+	testkit.expect_typed_refusal(t, e, .Unknown_Field, 2)
 	// A header cell of that name repeats the position, so the duplicate policy decides the wide record's cell.
 	src := "3,a\n1,2\n4,5,6\n"
 	testing.expect_value(t, read_rows(src, &rows, opts = opts), nil)
@@ -293,7 +264,7 @@ a_wide_record_names_its_cells_by_position :: proc(t: ^testing.T) {
 	// A refused cell of a wide record names the position as the field.
 	maps: []map[string]i64
 	e = read_rows("rap\r\n1,x\r\n", &maps, opts = opts)
-	expect_refusal(t, e, .Expected_Integer, 7)
+	testkit.expect_typed_refusal(t, e, .Expected_Integer, 7)
 }
 
 @(test)
@@ -309,16 +280,16 @@ refusals_name_the_row_and_the_field :: proc(t: ^testing.T) {
 	rows: []Row
 	path := make([dynamic]tape.Step, context.temp_allocator)
 	e := read_rows("a,b\n1,true\nx,true\n", &rows, {path = &path})
-	expect_refusal(t, e, .Expected_Integer, 11)
-	expect_path(t, path[:], {1, "a"})
-	expect_refusal(t, read_rows("a\n128\n", &rows), .Above_Maximum, 2)
-	expect_refusal(t, read_rows("a\n-129\n", &rows), .Below_Minimum, 2)
-	expect_refusal(t, read_rows("b\nTrue\n", &rows), .Expected_Bool, 2)
-	expect_refusal(t, read_rows("c\n1e\n", &rows), .Expected_Number, 2)
-	expect_refusal(t, read_rows("c\n1e400\n", &rows), .Above_Maximum, 2)
-	expect_refusal(t, read_rows("c\nNaN\n", &rows), .Expected_Number, 2)
-	expect_refusal(t, read_rows("c\nInfinity\n", &rows), .Expected_Number, 2)
-	expect_refusal(t, read_rows("d\nPurple\n", &rows), .Not_A_Member, 2)
+	testkit.expect_typed_refusal(t, e, .Expected_Integer, 11)
+	testkit.expect_path(t, path[:], {1, "a"})
+	testkit.expect_typed_refusal(t, read_rows("a\n128\n", &rows), .Above_Maximum, 2)
+	testkit.expect_typed_refusal(t, read_rows("a\n-129\n", &rows), .Below_Minimum, 2)
+	testkit.expect_typed_refusal(t, read_rows("b\nTrue\n", &rows), .Expected_Bool, 2)
+	testkit.expect_typed_refusal(t, read_rows("c\n1e\n", &rows), .Expected_Number, 2)
+	testkit.expect_typed_refusal(t, read_rows("c\n1e400\n", &rows), .Above_Maximum, 2)
+	testkit.expect_typed_refusal(t, read_rows("c\nNaN\n", &rows), .Expected_Number, 2)
+	testkit.expect_typed_refusal(t, read_rows("c\nInfinity\n", &rows), .Expected_Number, 2)
+	testkit.expect_typed_refusal(t, read_rows("d\nPurple\n", &rows), .Not_A_Member, 2)
 	// A short row is the walk's fault, which the read gives as `validate` does.
 	e = read_rows("a,b\n1\n", &rows)
 	f, is_fault := e.(tape.Fault)
@@ -350,8 +321,8 @@ a_refused_cell_deep_in_the_text_names_its_row :: proc(t: ^testing.T) {
 	rows: []Row
 	path := make([dynamic]tape.Step, context.temp_allocator)
 	e := read_rows(strings.to_string(b), &rows, {path = &path})
-	expect_refusal(t, e, .Expected_Integer, u64(bad + 4))
-	expect_path(t, path[:], {499, "field"})
+	testkit.expect_typed_refusal(t, e, .Expected_Integer, u64(bad + 4))
+	testkit.expect_path(t, path[:], {499, "field"})
 }
 
 @(test)
@@ -361,16 +332,16 @@ a_required_field_refuses_at_the_header_or_the_cell :: proc(t: ^testing.T) {
 	rows: []Required_Row
 	path := make([dynamic]tape.Step, context.temp_allocator)
 	e := read_rows("b\nx\n", &rows, {path = &path})
-	expect_refusal(t, e, .Missing_Field, 3)
-	expect_path(t, path[:], {0, "a"})
+	testkit.expect_typed_refusal(t, e, .Missing_Field, 3)
+	testkit.expect_path(t, path[:], {0, "a"})
 	// A required column's absence is judged before the fault in the first record.
 	e = read_rows("b\n\"", &rows)
 	f, is_fault := e.(tape.Fault)
 	testing.expectf(t, is_fault && f.kind != .Refused, "got %v", e)
 	// An empty cell of a required column is absent.
 	e = read_rows("b,a\nx,1\ny,\n", &rows, {path = &path})
-	expect_refusal(t, e, .Missing_Field, 10)
-	expect_path(t, path[:], {1, "a"})
+	testkit.expect_typed_refusal(t, e, .Missing_Field, 10)
+	testkit.expect_path(t, path[:], {1, "a"})
 	// In either order of the columns a present cell reads.
 	testing.expect_value(t, read_rows("b,a\ny,\"2\"\n", &rows), nil)
 	if testing.expect_value(t, len(rows), 1) {
@@ -406,8 +377,8 @@ list_and_map_rows :: proc(t: ^testing.T) {
 	ints: []map[string]i64
 	path := make([dynamic]tape.Step, context.temp_allocator)
 	e := read_rows("\"a\"\nx\n", &ints, {path = &path})
-	expect_refusal(t, e, .Expected_Integer, 4)
-	expect_path(t, path[:], {0, "a"})
+	testkit.expect_typed_refusal(t, e, .Expected_Integer, 4)
+	testkit.expect_path(t, path[:], {0, "a"})
 }
 
 @(test)
@@ -457,9 +428,9 @@ no_header_reads_each_record_as_a_list :: proc(t: ^testing.T) {
 		testing.expect_value(t, rows[0], Row{1, "x", 3})
 		testing.expect_value(t, rows[1], Row{2, "y", 4})
 	}
-	expect_refusal(t, read_rows("1,x\n", &rows, opts = no_header), .Missing_Field, 3)
+	testkit.expect_typed_refusal(t, read_rows("1,x\n", &rows, opts = no_header), .Missing_Field, 3)
 	maps: []map[string]i64
-	expect_refusal(t, read_rows("1\n", &maps, opts = no_header), .Expected_Object, 0)
+	testkit.expect_typed_refusal(t, read_rows("1\n", &maps, opts = no_header), .Expected_Object, 0)
 }
 
 // A list of rows that are lists reads every record, the header's line as the first, and a target that is one row reads
@@ -486,7 +457,7 @@ the_header_is_a_list_rows_first_and_one_row_takes_one_record :: proc(t: ^testing
 	testing.expect_value(t, row, Row{7, "kept"})
 	testing.expect_value(t, read_rows("b,a\nx,1\n", &row), nil)
 	testing.expect_value(t, row, Row{1, "x"})
-	expect_refusal(t, read_rows("a,b\n1,x\n2,y\n", &row), .Too_Many, 8)
+	testkit.expect_typed_refusal(t, read_rows("a,b\n1,x\n2,y\n", &row), .Too_Many, 8)
 	testing.expect_value(t, read_rows("1,x\n", &row, opts = {format = dsv.Dsv_Options{no_header = true}}), nil)
 	testing.expect_value(t, row, Row{1, "x"})
 	m: map[string]string
@@ -526,11 +497,11 @@ an_absent_cell_leaves_no_entry_and_fails_a_required_column :: proc(t: ^testing.T
 	rows: []Required_Row
 	path := make([dynamic]tape.Step, context.temp_allocator)
 	e := read_rows("b,a\nx,\ny,1\n", &rows, {path = &path})
-	expect_refusal(t, e, .Missing_Field, 6)
-	expect_path(t, path[:], {0, "a"})
+	testkit.expect_typed_refusal(t, e, .Missing_Field, 6)
+	testkit.expect_path(t, path[:], {0, "a"})
 	e = read_rows("a,b\n1,x\n,y\n", &rows, {path = &path})
-	expect_refusal(t, e, .Missing_Field, 8)
-	expect_path(t, path[:], {1, "a"})
+	testkit.expect_typed_refusal(t, e, .Missing_Field, 8)
+	testkit.expect_path(t, path[:], {1, "a"})
 }
 
 @(test)
@@ -565,7 +536,7 @@ a_refusal_leaves_what_it_allocated_with_the_target :: proc(t: ^testing.T) {
 	rows: []Row
 	src := "name,n\n\"a\"\"b\",1\ncopy,2\nz,x\n"
 	e := dsv.unmarshal(transmute([]u8)src, &rows, .Csv, allocator = alloc)
-	expect_refusal(t, e, .Expected_Integer, u64(len(src) - 2))
+	testkit.expect_typed_refusal(t, e, .Expected_Integer, u64(len(src) - 2))
 	for r in rows {
 		delete(r.name, alloc)
 	}

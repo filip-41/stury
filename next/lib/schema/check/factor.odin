@@ -1017,11 +1017,12 @@ gather :: proc(fb: ^Factor_Build, node: rules.Node_Index, edge: rules.Rules, dep
 	return res
 }
 
-@(private = "file")
-gather_const_objects :: proc(fb: ^Factor_Build, n: ^rules.Node, depth: int, site: []tape.Step) -> i16 {
+@(private)
+gather_const_container :: proc(fb: ^Factor_Build, n: ^rules.Node, site: []tape.Step, $is_array: bool) -> i16 {
 	b := fb.b
 	c := n.const_of.?
-	if rules.value_kind(c) != .Object {
+	want: rules.Value_Kind = .Array if is_array else .Object
+	if rules.value_kind(c) != want {
 		return add_const_fail_part(fb, .Const, site)
 	}
 	cloned := clone_value(b, c, fb.arena, fb.tables)
@@ -1029,42 +1030,56 @@ gather_const_objects :: proc(fb: ^Factor_Build, n: ^rules.Node, depth: int, site
 		fb.ok = false
 		return -1
 	}
-	mv, is_obj := cloned.([]rules.Member_Value)
-	if !is_obj {
-		fb.ok = false
-		return -1
+	part := Part_Info {
+		node       = rules.NONE,
+		obj        = -1,
+		arr        = -1,
+		scope      = b.scope,
+		site       = site,
+		const_kind = .Const,
+		add_node   = rules.NONE,
+		keys_node  = rules.NONE,
+		no_eval    = true,
+		is_const   = true,
+	}
+	when is_array {
+		av, ok := cloned.([]rules.Value)
+		if !ok {
+			fb.ok = false
+			return -1
+		}
+		part.min_members = u64(len(av))
+		part.max_members = u64(len(av))
+		part.const_arr = av
+	} else {
+		mv, ok := cloned.([]rules.Member_Value)
+		if !ok {
+			fb.ok = false
+			return -1
+		}
+		part.min_members = u64(len(mv))
+		part.max_members = u64(len(mv))
+		part.const_vals = mv
 	}
 	if len(fb.parts) >= MAX_FACTOR_PARTS {
 		fb.ok = false
 		return -1
 	}
 	bit := u8(len(fb.parts))
-	append(&fb.parts, Part_Info{
-		node = rules.NONE,
-		obj = -1,
-		arr = -1,
-		scope = b.scope,
-		site = site,
-		const_kind = .Const,
-		min_members = u64(len(mv)),
-		max_members = u64(len(mv)),
-		add_node = rules.NONE,
-		keys_node = rules.NONE,
-		no_eval = true,
-		is_const = true,
-		const_vals = mv,
-	})
+	append(&fb.parts, part)
 	op_idx := i16(len(fb.ops))
 	append(&fb.ops, Factor_Op{kind = .Part, bit = bit})
 	return op_idx
 }
 
-@(private = "file")
-gather_enum_objects :: proc(fb: ^Factor_Build, n: ^rules.Node, depth: int, site: []tape.Step) -> i16 {
+@(private)
+gather_enum_container :: proc(fb: ^Factor_Build, n: ^rules.Node, site: []tape.Step, $is_array: bool) -> i16 {
 	b := fb.b
-	cands := make([dynamic][]rules.Member_Value, fb.tables)
+	want: rules.Value_Kind = .Array if is_array else .Object
+	Elem :: []rules.Value when is_array else []rules.Member_Value
+	cands := make([dynamic]Elem, fb.tables)
 	for ev in n.enum_of {
-		if rules.value_kind(ev) != .Object {
+		if rules.value_kind(ev) != want {
 			continue
 		}
 		if len(cands) >= 16 {
@@ -1076,40 +1091,55 @@ gather_enum_objects :: proc(fb: ^Factor_Build, n: ^rules.Node, depth: int, site:
 			fb.ok = false
 			return -1
 		}
-		if mv, is_obj := cloned.([]rules.Member_Value); is_obj {
-			append(&cands, mv)
+		if v, ok := cloned.(Elem); ok {
+			append(&cands, v)
 		}
 	}
 	if len(cands) == 0 {
 		return add_const_fail_part(fb, .Enum, site)
 	}
 	mask := u64(0)
-	for mv in cands {
+	for v in cands {
 		if len(fb.parts) >= MAX_FACTOR_PARTS {
 			fb.ok = false
 			return -1
 		}
 		bit := u8(len(fb.parts))
-		append(&fb.parts, Part_Info{
-			node = rules.NONE,
-			obj = -1,
-			arr = -1,
-			scope = b.scope,
-			site = site,
-			const_kind = .Enum,
-			min_members = u64(len(mv)),
-			max_members = u64(len(mv)),
-			add_node = rules.NONE,
-			keys_node = rules.NONE,
-			no_eval = true,
-			is_const = true,
-			const_vals = mv,
-		})
+		part := Part_Info {
+			node        = rules.NONE,
+			obj         = -1,
+			arr         = -1,
+			scope       = b.scope,
+			site        = site,
+			const_kind  = .Enum,
+			min_members = u64(len(v)),
+			max_members = u64(len(v)),
+			add_node    = rules.NONE,
+			keys_node   = rules.NONE,
+			no_eval     = true,
+			is_const    = true,
+		}
+		when is_array {
+			part.const_arr = v
+		} else {
+			part.const_vals = v
+		}
+		append(&fb.parts, part)
 		mask |= u64(1) << bit
 	}
 	op_idx := i16(len(fb.ops))
 	append(&fb.ops, Factor_Op{kind = .Any_Mask, mask = mask, is_enum = true, site = site})
 	return op_idx
+}
+
+@(private = "file")
+gather_const_objects :: proc(fb: ^Factor_Build, n: ^rules.Node, depth: int, site: []tape.Step) -> i16 {
+	return gather_const_container(fb, n, site, false)
+}
+
+@(private = "file")
+gather_enum_objects :: proc(fb: ^Factor_Build, n: ^rules.Node, depth: int, site: []tape.Step) -> i16 {
+	return gather_enum_container(fb, n, site, false)
 }
 
 @(private)

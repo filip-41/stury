@@ -218,7 +218,7 @@ dump_check_value :: proc(plan: ^Type_Plan, judging: ^Applied, val_ptr: rawptr, o
 
 // Writes `v` directly as JSON into `w` via format callbacks, avoiding `Token_Tape`, `tape.Document`, and per-call arenas.
 // Fast path (`REDACT == false`) compiles with zero redaction branches when `!opts.redact` (or no `secret` fields) and `len(opts.redact_paths) == 0`.
-dump_json :: proc(
+dump_json :: #force_inline proc(
 	m: ^Model($T),
 	v: ^T,
 	opts: Dump_Opts,
@@ -232,19 +232,40 @@ dump_json :: proc(
 	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
 	allocator := context.allocator,
 ) -> Error {
-	if m == nil || v == nil || len(m.plan.nodes) == 0 {
+	if m == nil || v == nil { return Model_Error{kind = .Bad_Option, want = {text = "value"}} }
+	return dump_json_raw(model_view(m), rawptr(v), opts, sink, w, PRETTY, room, cursor_of, has_err, put_string, put_line, allocator)
+}
+
+// Type-erased direct-buffer JSON dumper so `dump_json_core` instantiates once per `(PRETTY, ASCII, REDACT)` instead of per `$T`.
+dump_json_raw :: proc(
+	mv: Model_View,
+	v: rawptr,
+	opts: Dump_Opts,
+	sink: ^Sink,
+	w: ^$W,
+	$PRETTY: bool,
+	$room: proc(w: ^W, n: int) -> [^]u8,
+	$cursor_of: proc "contextless" (w: ^W) -> ^int,
+	$has_err: proc "contextless" (w: ^W) -> bool,
+	$put_string: proc(w: ^W, p: [^]u8, s: string) -> bool,
+	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
+	allocator := context.allocator,
+) -> Error {
+	plan, judging := mv.plan, mv.judging
+	if plan == nil || v == nil || len(plan.nodes) == 0 {
 		return Model_Error{kind = .Bad_Option, want = {text = "value"}}
 	}
-	if (opts.redact && m.plan.has_secrets) || len(opts.redact_paths) > 0 {
-		return dump_json_core(m, v, opts, sink, w, PRETTY, true, room, cursor_of, has_err, put_string, put_line, allocator)
+	if (opts.redact && plan.has_secrets) || len(opts.redact_paths) > 0 {
+		return dump_json_core(plan, judging, v, opts, sink, w, PRETTY, true, room, cursor_of, has_err, put_string, put_line, allocator)
 	}
-	return dump_json_core(m, v, opts, sink, w, PRETTY, false, room, cursor_of, has_err, put_string, put_line, allocator)
+	return dump_json_core(plan, judging, v, opts, sink, w, PRETTY, false, room, cursor_of, has_err, put_string, put_line, allocator)
 }
 
 @(private)
 dump_json_core :: proc(
-	m: ^Model($T),
-	v: ^T,
+	plan: ^Type_Plan,
+	judging: ^Applied,
+	v: rawptr,
 	opts: Dump_Opts,
 	sink: ^Sink,
 	w: ^$W,
@@ -257,12 +278,11 @@ dump_json_core :: proc(
 	$put_line: proc(w: ^W, p: [^]u8, depth: int, after: int) -> [^]u8,
 	allocator := context.allocator,
 ) -> Error #no_bounds_check {
-	plan := &m.plan
 	ls := Lazy_Scratch{backing = allocator}
 	defer lazy_scratch_end(&ls)
 
 	if opts.check {
-		dump_check_value(plan, m.judging, rawptr(v), opts, sink, allocator, &ls) or_return
+		dump_check_value(plan, judging, v, opts, sink, allocator, &ls) or_return
 	}
 
 	omit_state := Dump_Omit{plan = plan, opts = opts}

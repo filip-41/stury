@@ -199,13 +199,23 @@ addresses_are_read_classed_and_written_canonically :: proc(t: ^testing.T) {
 	heap_start(&x)
 	defer heap_done(t, &x)
 	h := &x.h
-	valid := [?]string{"1.2.3.4", "::ffff:1.2.3.4", "2001:db8::", "::", "1:2:3:4:5:6:7:8", "255.255.255.255"}
-	invalid := [?]string{"01.2.3.4", "1.2.3", "::1::", "fe80::1%eth0", "1.2.3.256", "", "1:2:3:4:5:6:7:8:9", "12345::", "[::1]"}
+	valid := [?]string{"1.2.3.4", "::ffff:1.2.3.4", "2001:db8::", "::", "::1", "1:2:3:4:5:6:7:8", "255.255.255.255"}
+	invalid := [?]string{
+		"01.2.3.4", "1.2.3", "::1::", "fe80::1%eth0", "1.2.3.256", "", "1:2:3:4:5:6:7:8:9", "12345::", "[::1]",
+		"1.2.3.4.", "1.2.3.", "::ffff:1.2.3.4.", "::1.2.3.", "::1.", "1:2:3:4:5:6:7:8.", ".",
+		"1.2.3.4:", "::1:", "1::2:", "1:2:3:4:5:6:7:8:", "1:2:3:4:5:6:7:", "1:2:3:4:5:6:1.2.3.4:",
+		":1::", ":1:2:3:4:5:6:7", ":", ":::", "1:::", ":::1",
+		":::1:2:3:4:1.2.3.4", "::1::2:3:4:1.2.3.4", "::1:2:3:4:5:6:1.2.3.4",
+		"::1:2:3:4:5:01.2.3.4", "::1:2:3:4:5:1.2.3.", "::1:2:3:4:5:1.2.3.4.",
+	}
 	for s in valid {
 		testing.expect(t, query.ip_valid(query.text_borrowed(s)), s)
 	}
 	for s in invalid {
 		testing.expect(t, !query.ip_valid(query.text_borrowed(s)), s)
+		_, cs := query.ip_canonical(h, query.text_borrowed(s))
+		testing.expectf(t, cs == .Error, "expected canonical error for %q", s)
+		query.clear_error(h)
 	}
 	testing.expect(t, !query.ip_valid(query.int_value(1)))
 	classes := [?][2]string {
@@ -275,15 +285,63 @@ a_network_holds_the_addresses_under_its_prefix :: proc(t: ^testing.T) {
 		{"10.1.2.3", "::/0", false},
 		{"10.1.2.3", "0.0.0.0/0", true},
 		{"10.1.2.3", "10.1.2.3/32", true},
+		{"10.0.0.2", "10.0.0.1/32", false},
+		{"::1", "::/0", true},
+		{"::1", "::1/128", true},
+		{"::2", "::1/128", false},
 		{"2001:db8::5", "2001:db8::/32", true},
 		{"2001:db9::5", "2001:db8::/32", false},
+		{"::192.0.2.1", "::192.0.2.1/96", true},
+		{"::192.0.2.99", "::192.0.2.0/120", true},
+		{"::192.0.3.1", "::192.0.2.0/120", false},
+		{"::ffff:192.0.2.1", "::ffff:192.0.2.1/96", true},
+		{"::ffff:192.0.2.42", "::ffff:192.0.2.0/120", true},
+		{"::ffff:192.0.3.1", "::ffff:192.0.2.0/120", false},
+		{"::1:2:3:4:5:192.0.2.7", "::1:2:3:4:5:192.0.2.0/120", true},
+		{"0:1:2:3:4:5:c000:207", "::1:2:3:4:5:192.0.2.0/120", true},
+		{"::1:2:3:4:5:192.0.3.7", "::1:2:3:4:5:192.0.2.0/120", false},
+		{"1::2:3:4:5:192.0.2.7", "1::2:3:4:5:192.0.2.0/120", true},
+		{"1:2:3:4:5::192.0.2.7", "1:2:3:4:5::192.0.2.0/120", true},
+		{"192.0.2.1", "::192.0.2.0/120", false},
+		{"192.0.2.1", "::ffff:192.0.2.0/120", false},
 	}
 	for c in cases {
 		in_network, s := query.ip_in_cidr(h, query.text_borrowed(c.address), query.text_borrowed(c.cidr))
 		testing.expect_value(t, s, query.Status.Ok)
 		testing.expectf(t, in_network == c.inside, "%s in %s", c.address, c.cidr)
 	}
-	for bad in ([]query.Value{query.text_borrowed("10.0.0.0/33"), query.text_borrowed("10.0.0.0"), query.text_borrowed("10.0.0.0/"), query.int_value(1)}) {
+	bad_cidrs := [?]query.Value{
+		query.text_borrowed("10.0.0.0/33"),
+		query.text_borrowed("10.0.0.0"),
+		query.text_borrowed("10.0.0.0/"),
+		query.int_value(1),
+		query.text_borrowed("10.0.0.0./8"),
+		query.text_borrowed("10.0.0./8"),
+		query.text_borrowed("10.0.0.0:/8"),
+		query.text_borrowed("::1:/128"),
+		query.text_borrowed("1::2:/64"),
+		query.text_borrowed("1:2:3:4:5:6:7:8:/128"),
+		query.text_borrowed(":1::/64"),
+		query.text_borrowed(":::/0"),
+		query.text_borrowed("10.0.0.0/08"),
+		query.text_borrowed("10.0.0.0/00"),
+		query.text_borrowed("10.0.0.0/008"),
+		query.text_borrowed("10.0.0.0/032"),
+		query.text_borrowed("::1/08"),
+		query.text_borrowed("::1/00"),
+		query.text_borrowed("::1/0128"),
+		query.text_borrowed("10.0.0.0/+8"),
+		query.text_borrowed("10.0.0.0/-1"),
+		query.text_borrowed("10.0.0.0/8/8"),
+		query.text_borrowed("::1/129"),
+		query.text_borrowed(":::1:2:3:4:1.2.3.4"),
+		query.text_borrowed("::1::2:3:4:1.2.3.4"),
+		query.text_borrowed("::1:2:3:4:5:6:1.2.3.4"),
+		query.text_borrowed("::1:2:3:4:5:01.2.3.4"),
+		query.text_borrowed("::1:2:3:4:5:1.2.3."),
+		query.text_borrowed("::1:2:3:4:5:1.2.3.4."),
+	}
+	for bad in bad_cidrs {
 		_, s := query.ip_in_cidr(h, query.text_borrowed("10.1.2.3"), bad)
 		testing.expect_value(t, s, query.Status.Error)
 		testing.expect_value(t, h.err.detail, "is not a CIDR network")

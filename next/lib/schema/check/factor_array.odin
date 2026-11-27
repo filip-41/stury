@@ -478,97 +478,12 @@ gather_array :: proc(fb: ^Factor_Build, node: rules.Node_Index, edge: rules.Rule
 
 @(private = "file")
 gather_const_arrays :: proc(fb: ^Factor_Build, n: ^rules.Node, depth: int, site: []tape.Step) -> i16 {
-	b := fb.b
-	c := n.const_of.?
-	if rules.value_kind(c) != .Array {
-		return add_const_fail_part(fb, .Const, site)
-	}
-	cloned := clone_value(b, c, fb.arena, fb.tables)
-	if b.err.kind != .None {
-		fb.ok = false
-		return -1
-	}
-	av, is_arr := cloned.([]rules.Value)
-	if !is_arr {
-		fb.ok = false
-		return -1
-	}
-	if len(fb.parts) >= MAX_FACTOR_PARTS {
-		fb.ok = false
-		return -1
-	}
-	bit := u8(len(fb.parts))
-	append(&fb.parts, Part_Info{
-		node = rules.NONE,
-		obj = -1,
-		arr = -1,
-		scope = b.scope,
-		site = site,
-		const_kind = .Const,
-		min_members = u64(len(av)),
-		max_members = u64(len(av)),
-		add_node = rules.NONE,
-		keys_node = rules.NONE,
-		no_eval = true,
-		is_const = true,
-		const_arr = av,
-	})
-	op_idx := i16(len(fb.ops))
-	append(&fb.ops, Factor_Op{kind = .Part, bit = bit})
-	return op_idx
+	return gather_const_container(fb, n, site, true)
 }
 
 @(private = "file")
 gather_enum_arrays :: proc(fb: ^Factor_Build, n: ^rules.Node, depth: int, site: []tape.Step) -> i16 {
-	b := fb.b
-	cands := make([dynamic][]rules.Value, fb.tables)
-	for ev in n.enum_of {
-		if rules.value_kind(ev) != .Array {
-			continue
-		}
-		if len(cands) >= 16 {
-			fb.ok = false
-			return -1
-		}
-		cloned := clone_value(b, ev, fb.arena, fb.tables)
-		if b.err.kind != .None {
-			fb.ok = false
-			return -1
-		}
-		if av, is_arr := cloned.([]rules.Value); is_arr {
-			append(&cands, av)
-		}
-	}
-	if len(cands) == 0 {
-		return add_const_fail_part(fb, .Enum, site)
-	}
-	mask := u64(0)
-	for av in cands {
-		if len(fb.parts) >= MAX_FACTOR_PARTS {
-			fb.ok = false
-			return -1
-		}
-		bit := u8(len(fb.parts))
-		append(&fb.parts, Part_Info{
-			node = rules.NONE,
-			obj = -1,
-			arr = -1,
-			scope = b.scope,
-			site = site,
-			const_kind = .Enum,
-			min_members = u64(len(av)),
-			max_members = u64(len(av)),
-			add_node = rules.NONE,
-			keys_node = rules.NONE,
-			no_eval = true,
-			is_const = true,
-			const_arr = av,
-		})
-		mask |= u64(1) << bit
-	}
-	op_idx := i16(len(fb.ops))
-	append(&fb.ops, Factor_Op{kind = .Any_Mask, mask = mask, is_enum = true, site = site})
-	return op_idx
+	return gather_enum_container(fb, n, site, true)
 }
 
 @(private = "file")

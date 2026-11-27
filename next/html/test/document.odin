@@ -55,7 +55,7 @@ names_read_as_the_standard_reads_them :: proc(t: ^testing.T) {
 	testing.expect_value(t, shape(t, `<IMAGE src=x>`), `{"img": (@src="x" null)}`)
 	doc, ok := built(t, `<image src=x>`, .Fragment)
 	if ok {
-		_, found := member_at(&doc, {"img"})
+		_, found := testkit.member_at(&doc, {"img"})
 		testing.expect(t, found)
 	}
 	// A name with U+0000 reads it as U+FFFD.
@@ -70,12 +70,12 @@ a_path_matches_names_as_they_read :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	s, k := text_at(&doc, "html", "body", "div", "svg", "foreignObject")
+	s, k := testkit.text_at(&doc, "html", "body", "div", "svg", "foreignObject")
 	testing.expect_value(t, s, "x")
 	testing.expect_value(t, k, tape.Kind.Plain)
-	_, found := member_at(&doc, {"html", "body", "DIV"})
+	_, found := testkit.member_at(&doc, {"html", "body", "DIV"})
 	testing.expect(t, !found)
-	_, found = member_at(&doc, {"html", "body", "div", "svg", "foreignobject"})
+	_, found = testkit.member_at(&doc, {"html", "body", "div", "svg", "foreignobject"})
 	testing.expect(t, !found)
 }
 
@@ -89,8 +89,8 @@ attributes_read_as_facts_whatever_their_quotes :: proc(t: ^testing.T) {
 		return
 	}
 	p, _ := html.member(reader(&doc), html.ROOT, "p", .First)
-	got := attributes_of(&doc, p)
-	want := [?]Attribute{{"a", "1"}, {"b", "two"}, {"c", "3 & 4"}, {"d", ""}, {"e", "<x"}, {"f", "café"}, {"g", ""}}
+	got := testkit.attributes_of(&doc, p)
+	want := [?]testkit.Attribute{{"a", "1"}, {"b", "two"}, {"c", "3 & 4"}, {"d", ""}, {"e", "<x"}, {"f", "café"}, {"g", ""}}
 	testing.expect_value(t, len(got), len(want))
 	for w, idx in want {
 		testing.expectf(t, idx < len(got) && got[idx] == w, "attr %d: got %v want %v", idx, got, w)
@@ -111,7 +111,7 @@ attributes_read_as_facts_whatever_their_quotes :: proc(t: ^testing.T) {
 	}
 	// Long attribute past inline lead finds its value from its name.
 	second, _ := html.member(reader(&doc), html.ROOT, "p", .Last)
-	attrs2 := attributes_of(&doc, second)
+	attrs2 := testkit.attributes_of(&doc, second)
 	testing.expect_value(t, len(attrs2), 2)
 	if len(attrs2) == 2 {
 		testing.expect_value(t, len(attrs2[0].name), len(LONG) - len("<p  = 'w' b>x</p>"))
@@ -130,17 +130,17 @@ text_reads_as_the_tokenizer_read_it :: proc(t: ^testing.T) {
 		return
 	}
 	first, _ := html.member(reader(&doc), html.ROOT, "p", .First)
-	testing.expect_value(t, text_of(&doc, first), "ab \u226b\u20d2 A&")
-	s, _ := text_at(&doc, "textarea")
+	testing.expect_value(t, testkit.scalar_text(&doc, first), "ab \u226b\u20d2 A&")
+	s, _ := testkit.text_at(&doc, "textarea")
 	testing.expect_value(t, s, "x < y\n")
-	s, _ = text_at(&doc, "script")
+	s, _ = testkit.text_at(&doc, "script")
 	testing.expect_value(t, s, "if (a < b && c) {}")
-	s, _ = text_at(&doc, "style")
+	s, _ = testkit.text_at(&doc, "style")
 	testing.expect_value(t, s, "&amp;")
-	s, _ = text_at(&doc, "pre")
+	s, _ = testkit.text_at(&doc, "pre")
 	testing.expect_value(t, s, "line")
 	last, _ := html.member(reader(&doc), html.ROOT, "p", .Last)
-	testing.expect_value(t, text_of(&doc, last), "caf\uFFFD")
+	testing.expect_value(t, testkit.scalar_text(&doc, last), "caf\uFFFD")
 }
 
 @(test)
@@ -158,7 +158,7 @@ moved_and_merged_text_reads_whole :: proc(t: ^testing.T) {
 	testing.expect_value(t, cerr, nil)
 	txt, found := html.member(reader(&clone), html.ROOT, "#text")
 	testing.expect_value(t, found, tape.Presence.Found)
-	testing.expect_value(t, text_of(&clone, txt), "ab")
+	testing.expect_value(t, testkit.scalar_text(&clone, txt), "ab")
 }
 
 @(test)
@@ -167,22 +167,22 @@ inference_types_a_text_value_only_when_asked :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	text := `<a><n>12</n><t>true</t><s> 1</s><e><!--x--></e><d>&#49;&#50;</d></a>`
 	plain, _ := built(t, text, .Fragment)
-	_, k := text_at(&plain, "a", "n")
+	_, k := testkit.text_at(&plain, "a", "n")
 	testing.expect_value(t, k, tape.Kind.Plain)
-	_, k = text_at(&plain, "a", "e")
+	_, k = testkit.text_at(&plain, "a", "e")
 	testing.expect_value(t, k, tape.Kind.Null)
 
 	inferred, _ := built(t, text, .Fragment, {format = html.Xml_Options{infer = true}})
-	_, k = text_at(&inferred, "a", "n")
+	_, k = testkit.text_at(&inferred, "a", "n")
 	testing.expect_value(t, k, tape.Kind.Number)
-	_, k = text_at(&inferred, "a", "t")
+	_, k = testkit.text_at(&inferred, "a", "t")
 	testing.expect_value(t, k, tape.Kind.True)
-	_, k = text_at(&inferred, "a", "s")
+	_, k = testkit.text_at(&inferred, "a", "s")
 	testing.expect_value(t, k, tape.Kind.Plain)
-	s_d, k_d := text_at(&inferred, "a", "d")
+	s_d, k_d := testkit.text_at(&inferred, "a", "d")
 	testing.expect_value(t, s_d, "12")
 	testing.expect_value(t, k_d, tape.Kind.Plain)
-	n, _ := member_at(&inferred, {"a", "n"})
+	n, _ := testkit.member_at(&inferred, {"a", "n"})
 	v, num := html.node_number(&inferred, n)
 	testing.expect_value(t, num, true)
 	testing.expect_value(t, v, html.Number{12, .Int})
@@ -196,8 +196,8 @@ an_element_names_its_namespace_and_content :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	p, _ := member_at(&doc, {"p"})
-	testing.expect_value(t, text_of(&doc, p - 1), "p")
+	p, _ := testkit.member_at(&doc, {"p"})
+	testing.expect_value(t, testkit.scalar_text(&doc, p - 1), "p")
 	content_str, has_content := html.content(&doc, p, context.temp_allocator)
 	testing.expect(t, has_content)
 	testing.expect_value(t, content_str, "abcd")
@@ -205,13 +205,13 @@ an_element_names_its_namespace_and_content :: proc(t: ^testing.T) {
 	testing.expect_value(t, has_ns, tape.Presence.Found)
 	testing.expect_value(t, ns, "http://www.w3.org/1999/xhtml")
 
-	fo, _ := member_at(&doc, {"svg", "foreignObject"})
-	testing.expect_value(t, text_of(&doc, fo - 1), "foreignObject")
+	fo, _ := testkit.member_at(&doc, {"svg", "foreignObject"})
+	testing.expect_value(t, testkit.scalar_text(&doc, fo - 1), "foreignObject")
 	ns, has_ns = doc.format.namespace(&doc, fo)
 	testing.expect_value(t, has_ns, tape.Presence.Found)
 	testing.expect_value(t, ns, "http://www.w3.org/2000/svg")
 
-	mi, _ := member_at(&doc, {"math", "mi"})
+	mi, _ := testkit.member_at(&doc, {"math", "mi"})
 	ns, has_ns = doc.format.namespace(&doc, mi)
 	testing.expect_value(t, has_ns, tape.Presence.Found)
 	testing.expect_value(t, ns, "http://www.w3.org/1998/Math/MathML")
@@ -231,11 +231,11 @@ a_template_and_element_spans :: proc(t: ^testing.T) {
 	if !ok {
 		return
 	}
-	div, _ := member_at(&doc, {"div"})
+	div, _ := testkit.member_at(&doc, {"div"})
 	end, has_end := doc.format.close_end(&doc, div)
 	testing.expect(t, has_end)
 	testing.expect_value(t, string(doc.src[doc.nodes[div].lo:end]), "<div id=a><p>x</p><p>y</div>")
-	p, _ := member_at(&doc, {"div", "p"})
+	p, _ := testkit.member_at(&doc, {"div", "p"})
 	testing.expect_value(t, string(html.span_bytes(&doc, doc.nodes[p].lo, doc.nodes[p].n)), "x")
 }
 
@@ -276,22 +276,22 @@ every_entry_point_and_fragment_options :: proc(t: ^testing.T) {
 	no_src := transmute([]u8)string("<body><noscript><p>12</p></noscript><n>12</n>")
 	d_plain, err1 := html.build(no_src, .Html, {format = html.Xml_Options{infer = true}}, context.temp_allocator)
 	testing.expect_value(t, err1, nil)
-	n_node, _ := member_at(&d_plain, {"html", "body", "n"})
+	n_node, _ := testkit.member_at(&d_plain, {"html", "body", "n"})
 	testing.expect_value(t, d_plain.nodes[n_node].kind, tape.Kind.Number)
-	_, has_np := member_at(&d_plain, {"html", "body", "noscript", "p"})
+	_, has_np := testkit.member_at(&d_plain, {"html", "body", "noscript", "p"})
 	testing.expect(t, has_np)
 
 	d_frag, err2 := html.build_fragment(transmute([]u8)string("<p>12</p>"), {context_name = "noscript", scripting = true}, {}, context.temp_allocator)
 	testing.expect_value(t, err2, nil)
-	txt, has_t := member_at(&d_frag, {"#text"})
+	txt, has_t := testkit.member_at(&d_frag, {"#text"})
 	testing.expect(t, has_t)
-	testing.expect_value(t, text_of(&d_frag, txt), "<p>12</p>")
+	testing.expect_value(t, testkit.scalar_text(&d_frag, txt), "<p>12</p>")
 
 	// `dups = .Refuse` on repeated siblings.
 	rep := transmute([]u8)string("<a>1</a><a>2</a>")
 	_, dup_err := html.build(rep, .Fragment, {dups = .Refuse}, context.temp_allocator)
 	f_dup, is_fault := dup_err.(tape.Fault)
-	testing.expect(t, is_fault && code_of(dup_err) == "duplicate_key" && f_dup.at > 0)
+	testing.expect(t, is_fault && testkit.code_of(dup_err) == "duplicate_key" && f_dup.at > 0)
 
 	// Invalid options are refused consistently.
 	testing.expect_value(t, html.validate(rep, .Fragment, {format = tape.Dsv_Options{}}), html.Error(html.Bad_Option{"format"}))

@@ -4,23 +4,10 @@ import "core:math/rand"
 import "core:mem"
 import "core:testing"
 import "stury:host"
-import "stury:lib/core/tape"
 import "stury:msgpack"
 import "stury:testkit"
 
 // Multi-threaded runner tests for `validate`, `build`, and parallel root-array `unmarshal`.
-
-@(private = "file")
-counting_runner :: proc(calls: ^int) -> tape.Runner {
-	return {
-		threads = 3,
-		data = calls,
-		start = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
-			(^int)(data)^ += 1
-		},
-		finish = proc(data: rawptr) {},
-	}
-}
 
 @(test)
 memory_budget_builds_on_the_runner :: proc(t: ^testing.T) {
@@ -34,7 +21,7 @@ memory_budget_builds_on_the_runner :: proc(t: ^testing.T) {
 	}
 	for opts in ([]msgpack.Options{{budget = {memory = 1 << 20}}, {budget = {memory = 1 << 20}, dups = .First}, {budget = {memory = 1 << 20}, dups = .All}}) {
 		calls := 0
-		runner := counting_runner(&calls)
+		runner := testkit.counting_runner(3, &calls)
 		wide := opts
 		wide.runner = &runner
 		doc, err := msgpack.build(items[:], .Msgpack, wide)
@@ -60,13 +47,13 @@ builds_on_threads_agree :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	texts := make([dynamic][]u8, context.temp_allocator)
 	for h in PIECE_HEX {
-		append(&texts, hex(h))
+		append(&texts, testkit.hex(h))
 	}
 	{
 		context.allocator = context.temp_allocator
 		for _ in 0 ..< testkit.rounds(25) {
 			src := random_item()
-			append(&texts, src, mutated(src))
+			append(&texts, src, testkit.mutate(src))
 		}
 	}
 	for text in texts {

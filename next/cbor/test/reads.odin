@@ -14,7 +14,7 @@ import "stury:testkit"
 @(test)
 tags_are_facts_of_their_values :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("a2 61 61 d9 d9f7 c1 1a 514b67b0 61 62 c2 49 010000000000000000")
+	src := testkit.hex("a2 61 61 d9 d9f7 c1 1a 514b67b0 61 62 c2 49 010000000000000000")
 	doc, err := cbor.build(src, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(doc.facts), 3)
@@ -42,7 +42,7 @@ tags_are_facts_of_their_values :: proc(t: ^testing.T) {
 @(test)
 answers_span_their_items :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("84 63 616263 5f 41 01 ff 9f 01 ff 18 64")
+	src := testkit.hex("84 63 616263 5f 41 01 ff 9f 01 ff 18 64")
 	for c in ([?]struct {
 			index:          int,
 			lo, hi:         u64,
@@ -64,7 +64,7 @@ answers_span_their_items :: proc(t: ^testing.T) {
 @(test)
 containers_keep_their_style :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("82 9f 01 bf 61 61 80 ff ff a0")
+	src := testkit.hex("82 9f 01 bf 61 61 80 ff ff a0")
 	doc, err := cbor.build(src, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	ends := [?]struct {
@@ -81,7 +81,7 @@ containers_keep_their_style :: proc(t: ^testing.T) {
 @(test)
 reads_refuse_options_they_cannot_take :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("01")
+	src := testkit.hex("01")
 	other := tape.Error(tape.Bad_Option{"format"})
 	testing.expect_value(t, cbor.validate(src, .Cbor, {format = tape.Dsv_Options{}}), other)
 	_, berr := cbor.build(src, .Cbor, {format = tape.Dsv_Options{}}, context.temp_allocator)
@@ -108,7 +108,7 @@ tag_facts_give_the_tag_numbers :: proc(t: ^testing.T) {
 		{"db ffffffffffffffff 01", {max(u64)}},
 	}
 	for c in cases {
-		doc, err := cbor.build(hex(c.text))
+		doc, err := cbor.build(testkit.hex(c.text))
 		defer cbor.destroy(&doc)
 		if !testing.expectf(t, err == nil, "%s: %v", c.text, err) {
 			continue
@@ -129,7 +129,7 @@ tag_facts_give_the_tag_numbers :: proc(t: ^testing.T) {
 @(test)
 skipping_reads_the_answer :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("a3 61 62 82 01 02 61 61 a1 01 f5 61 63 7f 61 78 ff")
+	src := testkit.hex("a3 61 62 82 01 02 61 61 a1 01 f5 61 63 7f 61 78 ff")
 	path := []tape.Step{tape.Name("a"), tape.Name("1")}
 	answer, err := cbor.find(src, path, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
@@ -140,14 +140,14 @@ skipping_reads_the_answer :: proc(t: ^testing.T) {
 	testing.expect_value(t, serr, nil)
 	testing.expect(t, len(doc.nodes) < 8, "the passed values are not nodes")
 
-	tail := hex("82 01 ff")
+	tail := testkit.hex("82 01 ff")
 	early, early_err := cbor.find(tail, {tape.Index(0)}, .Cbor, {stop_early = true})
 	testing.expect_value(t, early_err, nil)
 	testing.expect_value(t, early.outcome, tape.Presence.Found)
 	_, whole_err := cbor.find(tail, {tape.Index(0)})
 	testing.expect(t, whole_err != nil, "without stop_early the bytes past the answer are judged")
 
-	bad := hex("a2 61 62 61 c3 61 61 01")
+	bad := testkit.hex("a2 61 62 61 c3 61 61 01")
 	_, bad_err := cbor.find(bad, {tape.Name("a")})
 	testing.expect(t, bad_err != nil)
 	_, cut_err := cbor.find(bad[:3], {tape.Name("b")}, .Cbor, {stop_early = true})

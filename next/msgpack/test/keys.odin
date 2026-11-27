@@ -10,7 +10,7 @@ import "stury:testkit"
 @(test)
 integer_keys_read_as_their_digits :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("83 01 a1 78 d0 9c a1 79 cf ffffffffffffffff a1 7a")
+	src := testkit.hex("83 01 a1 78 d0 9c a1 79 cf ffffffffffffffff a1 7a")
 	for c in ([?]struct {
 		name, want: string,
 	}{{"1", "x"}, {"-100", "y"}, {"18446744073709551615", "z"}}) {
@@ -38,13 +38,13 @@ integer_keys_read_as_their_digits :: proc(t: ^testing.T) {
 @(test)
 bin_keys_read_as_base64 :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("82 c4 03 010203 01 c4 01 ff 03")
+	src := testkit.hex("82 c4 03 010203 01 c4 01 ff 03")
 	testing.expect_value(t, dumped(src), `{"AQID":i:1,"/w==":i:3}`)
 	a, _ := msgpack.find(src, {tape.Name("/w==")})
 	testing.expect_value(t, a.outcome, msgpack.Presence.Found)
 	testing.expect_value(t, src[a.lo], 0x03)
 
-	dup_bin := hex("82 c4 03 010203 01 c4 03 010203 02")
+	dup_bin := testkit.hex("82 c4 03 010203 01 c4 03 010203 02")
 	_, err := msgpack.build(dup_bin, .Msgpack, {dups = .Refuse}, context.temp_allocator)
 	testing.expect_value(t, testkit.code_of(err), "duplicate_key")
 }
@@ -53,7 +53,7 @@ bin_keys_read_as_base64 :: proc(t: ^testing.T) {
 keys_of_two_kinds_are_two_keys :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	// Key 1 (fixint) and "1" (fixstr) are distinct keys.
-	src := hex("82 01 a1 78 a1 31 a1 79")
+	src := testkit.hex("82 01 a1 78 a1 31 a1 79")
 	doc, err := msgpack.build(src, .Msgpack, {dups = .Refuse}, context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(doc.nodes), 5)
@@ -75,7 +75,7 @@ find_and_member_agree_on_keys_of_two_kinds :: proc(t: ^testing.T) {
 		"81 01 a1 61",
 	}) {
 		for spec in msgpack.Spec {
-			if !testkit.find_agrees_with_member(t, msgpack.reads(spec), msgpack.as(spec), hex(text), names, text) {
+			if !testkit.find_agrees_with_member(t, msgpack.reads(spec), msgpack.as(spec), testkit.hex(text), names, text) {
 				return
 			}
 		}

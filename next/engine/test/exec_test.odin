@@ -15,7 +15,7 @@ import "stury:lib/query"
 import "stury:testkit"
 import "stury:xml"
 
-@(private = "file")
+@(private)
 Jq_Eval_State :: struct {
 	prog:       ^jq.Program,
 	h:          query.Heap,
@@ -27,7 +27,7 @@ Jq_Eval_State :: struct {
 	alloc:      runtime.Allocator,
 }
 
-@(private = "file")
+@(private)
 Eval_Hook_Data :: struct {
 	meta: engine.Record_Meta,
 }
@@ -44,7 +44,7 @@ hook_input_line_number :: proc(data: rawptr) -> i64 {
 	return i64(hd.meta.record_index) + 1
 }
 
-@(private = "file")
+@(private)
 eval_state_init :: proc(st: ^Jq_Eval_State, prog: ^jq.Program, keep_orig: bool, alloc := context.allocator) {
 	st^ = {
 		prog      = prog,
@@ -61,14 +61,14 @@ eval_state_init :: proc(st: ^Jq_Eval_State, prog: ^jq.Program, keep_orig: bool, 
 	jq.run_init(&st.run, prog, &st.h, nil, &st.hooks)
 }
 
-@(private = "file")
+@(private)
 eval_state_destroy :: proc(st: ^Jq_Eval_State) {
 	jq.run_destroy(&st.run)
 	query.heap_destroy(&st.h)
 	st^ = {}
 }
 
-@(private = "file")
+@(private)
 worker_eval_init :: proc(parent_ctx: rawptr, worker_idx: int, alloc: runtime.Allocator) -> rawptr {
 	_ = worker_idx
 	parent := (^Jq_Eval_State)(parent_ctx)
@@ -77,7 +77,7 @@ worker_eval_init :: proc(parent_ctx: rawptr, worker_idx: int, alloc: runtime.All
 	return ws
 }
 
-@(private = "file")
+@(private)
 worker_eval_fini :: proc(parent_ctx: rawptr, worker_idx: int, worker_ctx: rawptr) {
 	_ = parent_ctx
 	_ = worker_idx
@@ -89,36 +89,24 @@ worker_eval_fini :: proc(parent_ctx: rawptr, worker_idx: int, worker_ctx: rawptr
 	}
 }
 
-@(private = "file")
-jq_doc_eval :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
-	st := (^Jq_Eval_State)(ctx)
-	st.eval_count += 1
-	st.hook_data.meta = meta
-	st.h.keep_origins = st.keep_orig
-	st.h.tainted = false
-	query.clear_error(&st.h)
-
-	inp, status := query.document_value(&st.h, doc^, owned = false)
-	if status != .Ok {
-		return .Failed
-	}
-
+@(private)
+jq_run_emit :: proc(run: ^jq.Run, h: ^query.Heap, inp: query.Value, emit: engine.Emitter, alloc: runtime.Allocator) -> engine.Exec_Error {
 	Out_Bridge :: struct {
-		h:       ^query.Heap,
-		emit:    engine.Emitter,
-		buf:     [dynamic]u8,
-		err:     engine.Exec_Error,
-		alloc:   runtime.Allocator,
+		h:     ^query.Heap,
+		emit:  engine.Emitter,
+		buf:   [dynamic]u8,
+		err:   engine.Exec_Error,
+		alloc: runtime.Allocator,
 	}
-	on_val :: proc(data: rawptr, v: query.Value, h: ^query.Heap) -> bool {
+	on_val :: proc(data: rawptr, v: query.Value, hp: ^query.Heap) -> bool {
 		b := (^Out_Bridge)(data)
-		defer query.release(h, v)
+		defer query.release(hp, v)
 		clear(&b.buf)
-		if query.write_json(h, &b.buf, v) != .Ok {
-			if h.tainted {
+		if query.write_json(hp, &b.buf, v) != .Ok {
+			if hp.tainted {
 				b.err = .Tainted
 			} else {
-				query.clear_error(h)
+				query.clear_error(hp)
 				b.err = .Write_Error
 			}
 			return false
@@ -131,18 +119,18 @@ jq_doc_eval :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, 
 	}
 
 	br := Out_Bridge{
-		h     = &st.h,
+		h     = h,
 		emit  = emit,
-		buf   = make([dynamic]u8, 0, 128, st.alloc),
-		alloc = st.alloc,
+		buf   = make([dynamic]u8, 0, 128, alloc),
+		alloc = alloc,
 	}
 	defer delete(br.buf)
 
-	end := jq.run_value(&st.run, inp, on_val, &br)
+	end := jq.run_value(run, inp, on_val, &br)
 	if br.err != .None {
 		return br.err
 	}
-	if st.h.tainted || end == .Tainted {
+	if h.tainted || end == .Tainted {
 		return .Tainted
 	}
 	switch end {
@@ -155,7 +143,23 @@ jq_doc_eval :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, 
 	return .None
 }
 
-@(private = "file")
+@(private)
+jq_doc_eval :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta, emit: engine.Emitter) -> engine.Exec_Error {
+	st := (^Jq_Eval_State)(ctx)
+	st.eval_count += 1
+	st.hook_data.meta = meta
+	st.h.keep_origins = st.keep_orig
+	st.h.tainted = false
+	query.clear_error(&st.h)
+
+	inp, status := query.document_value(&st.h, doc^, owned = false)
+	if status != .Ok {
+		return .Failed
+	}
+	return jq_run_emit(&st.run, &st.h, inp, emit, st.alloc)
+}
+
+@(private)
 jq_doc_pred :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta) -> (matched: bool, err: engine.Exec_Error) {
 	st := (^Jq_Eval_State)(ctx)
 	st.hook_data.meta = meta
@@ -194,20 +198,20 @@ jq_doc_pred :: proc(ctx: rawptr, doc: ^tape.Document, meta: engine.Record_Meta) 
 	return false, .None
 }
 
-@(private = "file")
+@(private)
 Lines_Buf :: struct {
 	lines: [dynamic]string,
 	alloc: runtime.Allocator,
 }
 
-@(private = "file")
+@(private)
 lines_emit :: proc(data: rawptr, bytes: []u8) -> bool {
 	lb := (^Lines_Buf)(data)
 	append(&lb.lines, strings.clone(string(bytes), lb.alloc))
 	return true
 }
 
-@(private = "file")
+@(private)
 destroy_lines :: proc(lb: ^Lines_Buf) {
 	for s in lb.lines {
 		delete(s, lb.alloc)

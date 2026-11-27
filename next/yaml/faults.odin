@@ -98,9 +98,4 @@ bad :: #force_inline proc "contextless" (at: int, kind: tape.Fault_Kind, detail:
 }
 
 @(private)
-verdict_fault :: #force_inline proc "contextless" (v: Verdict) -> (at: u64, kind: tape.Fault_Kind, detail: Detail) {
-	return u64(v) >> 16, tape.Fault_Kind(u8(v)), Detail(u8(v >> 8))
-}
-
-@(private)
 _ :: runtime.Allocator

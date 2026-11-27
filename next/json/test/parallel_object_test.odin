@@ -11,18 +11,6 @@ import "stury:lib/ops/build"
 import "stury:testkit"
 
 @(private = "file")
-counting_runner :: proc(threads: int, tasks: ^int) -> tape.Runner {
-	return {
-		threads = threads,
-		start = proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
-			(^int)(data)^ += 1
-		},
-		finish = proc(data: rawptr) {},
-		data = tasks,
-	}
-}
-
-@(private = "file")
 build_large_flat_object :: proc(min_bytes: int, spec: json.Spec, allocator := context.allocator) -> []u8 {
 	b := strings.builder_make(0, max(min_bytes, 4096), allocator)
 	strings.write_byte(&b, '{')
@@ -104,7 +92,7 @@ parallel_object_shapes_and_pool_sizes :: proc(t: ^testing.T) {
 			src:  []u8,
 		}{{"flat", flat}, {"nested", nested}}) {
 			tasks := 0
-			cr := counting_runner(4, &tasks)
+			cr := testkit.counting_runner(4, &tasks)
 			ok_fan, built_fan := testkit.threads_agree(t, json.reads(spec), json.as(spec), pair.src, {}, &cr, pair.name)
 			testing.expectf(t, ok_fan && built_fan, "%s %v failed agree", pair.name, spec)
 			testing.expectf(t, tasks >= 2, "%s %v did not run in parallel: tasks=%d", pair.name, spec, tasks)
@@ -297,7 +285,7 @@ parallel_object_deep_opens_and_budgets :: proc(t: ^testing.T) {
 	deep_src := transmute([]u8)strings.to_string(db)
 
 	tasks := 0
-	cr := counting_runner(4, &tasks)
+	cr := testkit.counting_runner(4, &tasks)
 	ok_deep, built_deep := testkit.threads_agree(t, json.reads(.Json), json.as(.Json), deep_src, {}, &cr, "deep_75")
 	testing.expect(t, ok_deep && built_deep)
 	testing.expectf(t, tasks >= 2, "> SEAM_OPENS object fell back to 1 thread: tasks=%d", tasks)

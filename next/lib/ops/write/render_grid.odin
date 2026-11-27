@@ -72,6 +72,22 @@ render_emit :: proc(out: ^Out, grid: ^Render_Grid, target: Render_Target, alloca
 	return nil
 }
 
+@(private = "file", require_results)
+render_grid_emit :: proc(grid: ^Render_Grid, target: Render_Target, sink: io.Writer, hint: int, allocator: runtime.Allocator) -> (text: []u8, err: Error) {
+	if render_grid_empty(grid, target) {
+		return nil, nil
+	}
+	out: Out
+	if e := out_start(&out, allocator, sink, hint); e != nil {
+		return nil, e
+	}
+	if err = render_emit(&out, grid, target, allocator); err != nil {
+		out_drop(&out)
+		return nil, err
+	}
+	return out_finish(&out)
+}
+
 @(private, require_results)
 render_doc :: proc(doc: ^tape.Document, target: Render_Target, allocator: runtime.Allocator) -> (text: []u8, err: Error) {
 	ext := render_extract_from_target(target) or_return
@@ -81,18 +97,7 @@ render_doc :: proc(doc: ^tape.Document, target: Render_Target, allocator: runtim
 	grid: Render_Grid
 	defer grid_destroy(&grid)
 	grid_build_doc(&grid, doc, ext, allocator) or_return
-	if render_grid_empty(&grid, target) {
-		return nil, nil
-	}
-	out: Out
-	if e := out_start(&out, allocator, {}, max(len(doc.src), ROOM_MAX)); e != nil {
-		return nil, e
-	}
-	if err = render_emit(&out, &grid, target, allocator); err != nil {
-		out_drop(&out)
-		return nil, err
-	}
-	return out_finish(&out)
+	return render_grid_emit(&grid, target, {}, max(len(doc.src), ROOM_MAX), allocator)
 }
 
 @(private, require_results)
@@ -107,18 +112,7 @@ render_doc_to :: proc(sink: io.Writer, doc: ^tape.Document, target: Render_Targe
 	grid: Render_Grid
 	defer grid_destroy(&grid)
 	grid_build_doc(&grid, doc, ext, allocator) or_return
-	if render_grid_empty(&grid, target) {
-		return nil
-	}
-	out: Out
-	if e := out_start(&out, allocator, sink, 0); e != nil {
-		return e
-	}
-	if err := render_emit(&out, &grid, target, allocator); err != nil {
-		out_drop(&out)
-		return err
-	}
-	_, err := out_finish(&out)
+	_, err := render_grid_emit(&grid, target, sink, 0, allocator)
 	return err
 }
 
@@ -131,18 +125,7 @@ render_docs :: proc(docs: []tape.Document, target: Render_Target, allocator: run
 	grid: Render_Grid
 	defer grid_destroy(&grid)
 	grid_build_docs(&grid, docs, ext, allocator) or_return
-	if render_grid_empty(&grid, target) {
-		return nil, nil
-	}
-	out: Out
-	if e := out_start(&out, allocator, {}, max(len(grid.text_buf), ROOM_MAX)); e != nil {
-		return nil, e
-	}
-	if err = render_emit(&out, &grid, target, allocator); err != nil {
-		out_drop(&out)
-		return nil, err
-	}
-	return out_finish(&out)
+	return render_grid_emit(&grid, target, {}, max(len(grid.text_buf), ROOM_MAX), allocator)
 }
 
 // ---------------------------------------------------------------------------

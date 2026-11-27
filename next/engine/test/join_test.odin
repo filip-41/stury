@@ -154,66 +154,7 @@ eval_with_multi_worker :: proc(w: ^Multi_Jq_Worker, doc: ^tape.Document, emit: e
 			return .Failed
 		}
 	}
-
-	Out_State :: struct {
-		h:     ^query.Heap,
-		emit:  engine.Emitter,
-		buf:   [dynamic]u8,
-		err:   engine.Exec_Error,
-		alloc: runtime.Allocator,
-	}
-	on_val :: proc(data: rawptr, v: query.Value, h: ^query.Heap) -> bool {
-		st := (^Out_State)(data)
-		defer query.release(h, v)
-		clear(&st.buf)
-		if query.write_json(h, &st.buf, v) != .Ok {
-			st.err = .Tainted if h.tainted else .Write_Error
-			return false
-		}
-		if !engine.emit_bytes(st.emit, st.buf[:]) {
-			st.err = .Stopped
-			return false
-		}
-		return true
-	}
-
-	os := Out_State{h = &w.h, emit = emit, buf = make([dynamic]u8, 0, 128, w.alloc), alloc = w.alloc}
-	defer delete(os.buf)
-	end := jq.run_value(&w.run, inp, on_val, &os)
-	if os.err != .None {
-		return os.err
-	}
-	if w.h.tainted || end == .Tainted {
-		return .Tainted
-	}
-	#partial switch end {
-	case .Done:    return .None
-	case .Stopped: return .Stopped
-	case .Halted:  return .Halted
-	case .Failed:  return .Failed
-	}
-	return .None
-}
-
-@(private = "file")
-Join_Line_Sink :: struct {
-	lines: [dynamic]string,
-	alloc: runtime.Allocator,
-}
-
-@(private = "file")
-push_join_line :: proc(data: rawptr, bytes: []u8) -> bool {
-	s := (^Join_Line_Sink)(data)
-	append(&s.lines, strings.clone(string(bytes), s.alloc))
-	return true
-}
-
-@(private = "file")
-free_join_sink :: proc(s: ^Join_Line_Sink) {
-	for l in s.lines {
-		delete(l, s.alloc)
-	}
-	delete(s.lines)
+	return jq_run_emit(&w.run, &w.h, inp, emit, w.alloc)
 }
 
 @(test)
@@ -281,9 +222,9 @@ cross_format_joins_and_partial_pruning :: proc(t: ^testing.T) {
 		}
 
 		// Execute end-to-end streaming CSV primary against indexed JSON aux source.
-		sink := Join_Line_Sink{alloc = context.allocator}
+		sink := Lines_Buf{alloc = context.allocator}
 		sink.lines.allocator = context.allocator
-		defer free_join_sink(&sink)
+		defer destroy_lines(&sink)
 		mctx := Multi_Jq_Ctx{prog = prog, alloc = context.allocator}
 
 		exec_res, load_err := engine.execute_with_sources(
@@ -294,7 +235,7 @@ cross_format_joins_and_partial_pruning :: proc(t: ^testing.T) {
 			aux,
 			{
 				exec = {
-					emit      = {fn = push_join_line, data = &sink},
+					emit      = {fn = lines_emit, data = &sink},
 					allocator = context.allocator,
 				},
 				aux_eval = eval_multi_serial,
@@ -322,9 +263,9 @@ cross_format_joins_and_partial_pruning :: proc(t: ^testing.T) {
 		testing.expect(t, ok)
 		defer query.destroy_plan(&plan)
 
-		sink := Join_Line_Sink{alloc = context.allocator}
+		sink := Lines_Buf{alloc = context.allocator}
 		sink.lines.allocator = context.allocator
-		defer free_join_sink(&sink)
+		defer destroy_lines(&sink)
 		mctx := Multi_Jq_Ctx{prog = prog, alloc = context.allocator}
 
 		res, lres := engine.execute_with_sources(
@@ -334,7 +275,7 @@ cross_format_joins_and_partial_pruning :: proc(t: ^testing.T) {
 			.Lines,
 			{{name = "cfg", src = toml_cfg, spec = toml.Spec.Toml_1_0, framing = .Single}},
 			{
-				exec     = {emit = {fn = push_join_line, data = &sink}, allocator = context.allocator},
+				exec     = {emit = {fn = lines_emit, data = &sink}, allocator = context.allocator},
 				aux_eval = eval_multi_serial,
 				aux_ctx  = &mctx,
 			},
@@ -383,9 +324,9 @@ cross_format_joins_and_partial_pruning :: proc(t: ^testing.T) {
 		testing.expect(t, uok && ub.kind == .None)
 		engine.destroy_aux_set(&set)
 
-		sink := Join_Line_Sink{alloc = context.allocator}
+		sink := Lines_Buf{alloc = context.allocator}
 		sink.lines.allocator = context.allocator
-		defer free_join_sink(&sink)
+		defer destroy_lines(&sink)
 		mctx := Multi_Jq_Ctx{prog = prog, alloc = context.allocator}
 
 		res, _ := engine.execute_with_sources(
@@ -395,7 +336,7 @@ cross_format_joins_and_partial_pruning :: proc(t: ^testing.T) {
 			.Single,
 			aux,
 			{
-				exec     = {emit = {fn = push_join_line, data = &sink}, allocator = context.allocator},
+				exec     = {emit = {fn = lines_emit, data = &sink}, allocator = context.allocator},
 				aux_eval = eval_multi_serial,
 				aux_ctx  = &mctx,
 			},
@@ -492,9 +433,9 @@ streaming_large_primary_with_indexed_aux_parallel_and_oom :: proc(t: ^testing.T)
 	testing.expect(t, host.pool_init(&pool, 2) == nil)
 	defer host.pool_destroy(&pool)
 
-	sink := Join_Line_Sink{alloc = context.allocator}
+	sink := Lines_Buf{alloc = context.allocator}
 	sink.lines.allocator = context.allocator
-	defer free_join_sink(&sink)
+	defer destroy_lines(&sink)
 	mctx := Multi_Jq_Ctx{prog = prog, alloc = context.allocator}
 
 	aux := []engine.Aux_Source{
@@ -509,7 +450,7 @@ streaming_large_primary_with_indexed_aux_parallel_and_oom :: proc(t: ^testing.T)
 		aux,
 		{
 			exec = {
-				emit      = {fn = push_join_line, data = &sink},
+				emit      = {fn = lines_emit, data = &sink},
 				runner    = &pool.runner,
 				workers   = {init = multi_worker_init, fini = multi_worker_fini},
 				allocator = context.allocator,
@@ -638,9 +579,9 @@ prepare_single_aux_demand_non_zero_path_and_conditional_whole_workers :: proc(t:
 		query.release(&h, data_v)
 
 		// Full end-to-end execution of `{meta: $aux.m, item: $aux.data.rows[.id].name}` without index_by_key.
-		sink := Join_Line_Sink{alloc = context.allocator}
+		sink := Lines_Buf{alloc = context.allocator}
 		sink.lines.allocator = context.allocator
-		defer free_join_sink(&sink)
+		defer destroy_lines(&sink)
 		mctx := Multi_Jq_Ctx{prog = prog, alloc = context.allocator}
 		aux_direct := []engine.Aux_Source{
 			{name = "aux", src = aux_json, spec = json.Spec.Json, framing = .Single},
@@ -652,7 +593,7 @@ prepare_single_aux_demand_non_zero_path_and_conditional_whole_workers :: proc(t:
 			.Single,
 			aux_direct,
 			{
-				exec = {emit = {fn = push_join_line, data = &sink}, allocator = context.allocator},
+				exec = {emit = {fn = lines_emit, data = &sink}, allocator = context.allocator},
 				aux_eval = eval_multi_serial,
 				aux_ctx  = &mctx,
 			},
@@ -741,9 +682,9 @@ prepare_single_aux_demand_non_zero_path_and_conditional_whole_workers :: proc(t:
 		}
 
 		// Case (i): shared `workers.init` (`exec.pred_ctx == nil`).
-		sink1 := Join_Line_Sink{alloc = context.allocator}
+		sink1 := Lines_Buf{alloc = context.allocator}
 		sink1.lines.allocator = context.allocator
-		defer free_join_sink(&sink1)
+		defer destroy_lines(&sink1)
 		mctx1 := Multi_Jq_Ctx{prog = prog, alloc = context.allocator}
 
 		r1, lr1 := engine.execute_with_sources(
@@ -754,7 +695,7 @@ prepare_single_aux_demand_non_zero_path_and_conditional_whole_workers :: proc(t:
 			aux,
 			{
 				exec = {
-					emit      = {fn = push_join_line, data = &sink1},
+					emit      = {fn = lines_emit, data = &sink1},
 					runner    = &pool.runner,
 					workers   = {init = multi_worker_init, fini = multi_worker_fini},
 					allocator = context.allocator,
@@ -798,9 +739,9 @@ prepare_single_aux_demand_non_zero_path_and_conditional_whole_workers :: proc(t:
 		}
 
 		pc := Pred_Counter{magic = 0xCAFE_1234}
-		sink2 := Join_Line_Sink{alloc = context.allocator}
+		sink2 := Lines_Buf{alloc = context.allocator}
 		sink2.lines.allocator = context.allocator
-		defer free_join_sink(&sink2)
+		defer destroy_lines(&sink2)
 		mctx2 := Multi_Jq_Ctx{prog = prog, alloc = context.allocator}
 
 		r2, lr2 := engine.execute_with_sources(
@@ -812,7 +753,7 @@ prepare_single_aux_demand_non_zero_path_and_conditional_whole_workers :: proc(t:
 			{
 				exec = {
 					pred_ctx  = &pc,
-					emit      = {fn = push_join_line, data = &sink2},
+					emit      = {fn = lines_emit, data = &sink2},
 					runner    = &pool.runner,
 					workers   = {init = multi_worker_init, fini = multi_worker_fini},
 					allocator = context.allocator,
@@ -936,9 +877,9 @@ spine_parallel_collect_with_aux_and_workers :: proc(t: ^testing.T) {
 		return .None
 	}
 
-	sink := Join_Line_Sink{alloc = context.allocator}
+	sink := Lines_Buf{alloc = context.allocator}
 	sink.lines.allocator = context.allocator
-	defer free_join_sink(&sink)
+	defer destroy_lines(&sink)
 
 	aux := []engine.Aux_Source{
 		{name = "users", src = users_src, spec = json.Spec.Json, framing = .Single, index_by_key = "uid"},
@@ -959,7 +900,7 @@ spine_parallel_collect_with_aux_and_workers :: proc(t: ^testing.T) {
 				spine_collect = collect_with_full,
 				workers       = {init = multi_worker_init, fini = multi_worker_fini},
 				runner        = &pool.runner,
-				emit          = {fn = push_join_line, data = &sink},
+				emit          = {fn = lines_emit, data = &sink},
 				allocator     = context.allocator,
 			},
 			route    = {runner = &pool.runner},
@@ -978,9 +919,9 @@ spine_parallel_collect_with_aux_and_workers :: proc(t: ^testing.T) {
 	// Case (B): `aux_eval == nil` (`eval_ctx == &cstate` passed directly to `collect_sum`) with
 	// `aux_each != nil` + `workers.init != nil`.
 	cstate := Collect_State{magic = 0x51C0_BEEF}
-	sink_b := Join_Line_Sink{alloc = context.allocator}
+	sink_b := Lines_Buf{alloc = context.allocator}
 	sink_b.lines.allocator = context.allocator
-	defer free_join_sink(&sink_b)
+	defer destroy_lines(&sink_b)
 	res_b, lres_b := engine.execute_with_sources(
 		&plan_full.contract,
 		doc_bytes,
@@ -994,7 +935,7 @@ spine_parallel_collect_with_aux_and_workers :: proc(t: ^testing.T) {
 				spine_collect = collect_sum,
 				workers       = {init = multi_worker_init, fini = multi_worker_fini},
 				runner        = &pool.runner,
-				emit          = {fn = push_join_line, data = &sink_b},
+				emit          = {fn = lines_emit, data = &sink_b},
 				allocator     = context.allocator,
 			},
 			route    = {runner = &pool.runner},

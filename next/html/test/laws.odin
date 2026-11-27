@@ -3,7 +3,6 @@ package html_tests
 
 import "core:fmt"
 import "core:math/rand"
-import "core:slice"
 import "core:strings"
 import "core:testing"
 import "stury:host"
@@ -14,8 +13,6 @@ import "stury:testkit"
 
 @(private = "file")
 NAMES := [?]string{"div", "p", "span", "ul", "li", "b", "section"}
-@(private = "file")
-ATTRS := [?]string{"id", "class", "data-x", "lang"}
 
 @(private = "file")
 put_html_text :: proc(b: ^strings.Builder) {
@@ -81,23 +78,6 @@ random_html_document :: proc() -> []u8 {
 	return b.buf[:]
 }
 
-@(private = "file")
-mutated_html :: proc(src: []u8) -> []u8 {
-	b := make([dynamic]u8, len(src))
-	copy(b[:], src)
-	at := rand.int_max(len(src))
-	switch rand.int_max(3) {
-	case 0:
-		bytes := "<>&;/=\"' !?-]div"
-		b[at] = bytes[rand.int_max(len(bytes))]
-	case 1:
-		ordered_remove(&b, at)
-	case:
-		resize(&b, at)
-	}
-	return b[:]
-}
-
 @(test)
 reads_agree_on_generated_documents :: proc(t: ^testing.T) {
 	testkit.deadline(t)
@@ -113,13 +93,13 @@ reads_agree_on_generated_documents :: proc(t: ^testing.T) {
 		testkit.readers_agree(t, html.reads(.Fragment), html.as(.Fragment), src, infer, "frag-infer", &a)
 		testkit.readers_agree(t, html.reads(.Html), html.as(.Html), src, {}, "html", &a)
 		// HTML5 recovers syntax mutations, so also verify agreement on mutated inputs and hard refusal laws (budget & encoding).
-		bad := mutated_html(src)
-		defer delete(bad)
+		bad := testkit.mutate(src, "<>&;/=\"' !?-]div")
 		testkit.readers_agree(t, html.reads(.Fragment), html.as(.Fragment), bad, {}, "mutated", &a)
 		tight := html.Options{budget = {depth = 1 + u32(round % 2), steps = 1 + u64(round % 3)}}
 		testkit.readers_agree(t, html.reads(.Html), html.as(.Html), src, tight, "budget", &a)
 		enc_bad := "<meta charset=latin2><p>caf\xe9"
 		testkit.readers_agree(t, html.reads(.Html), html.as(.Html), transmute([]u8)enc_bad, {}, "encoding", &a)
+		free_all(context.temp_allocator)
 	}
 	testkit.expect_agreement(t, &a, {texts = 60, refused = 60, scans = 20_000, on_path = 20_000, shapes = 30})
 }
@@ -140,21 +120,6 @@ builds_on_threads_agree :: proc(t: ^testing.T) {
 	}
 }
 
-@(private = "file")
-piece_paths :: proc() -> [][]html.Step {
-	paths := make([dynamic][]html.Step, context.temp_allocator)
-	add :: proc(paths: ^[dynamic][]html.Step, steps: ..html.Step) {
-		append(paths, slice.clone(steps, context.temp_allocator))
-	}
-	add(&paths)
-	add(&paths, html.Name("div"))
-	add(&paths, html.Name("div"), html.Name("p"))
-	add(&paths, html.Name("html"), html.Name("body"), html.Name("table"), html.Name("tbody"))
-	add(&paths, html.Name("div"), html.All{})
-	add(&paths, html.Name("table"), html.Name("tbody"), html.Name("tr"), html.Name("td"))
-	return paths[:]
-}
-
 @(rodata, private = "file")
 PIECE_TEXTS := [?]string {
 	"",
@@ -172,13 +137,21 @@ PIECE_TEXTS := [?]string {
 pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
+	paths := [][]html.Step {
+		{},
+		{html.Name("div")},
+		{html.Name("div"), html.Name("p")},
+		{html.Name("html"), html.Name("body"), html.Name("table"), html.Name("tbody")},
+		{html.Name("div"), html.All{}},
+		{html.Name("table"), html.Name("tbody"), html.Name("tr"), html.Name("td")},
+	}
 	options := [?]tape.Options{{}, {format = html.Xml_Options{infer = true}}, {budget = {steps = 3}}, {budget = {depth = 2}}}
 	for text in PIECE_TEXTS {
 		for opts in options {
-			if !testkit.agree_in_pieces(t, html.reads(.Fragment), html.as(.Fragment), transmute([]u8)text, opts, piece_paths(), text) {
+			if !testkit.agree_in_pieces(t, html.reads(.Fragment), html.as(.Fragment), transmute([]u8)text, opts, paths, text) {
 				return
 			}
-			if !testkit.agree_in_pieces(t, html.reads(.Html), html.as(.Html), transmute([]u8)text, opts, piece_paths(), text) {
+			if !testkit.agree_in_pieces(t, html.reads(.Html), html.as(.Html), transmute([]u8)text, opts, paths, text) {
 				return
 			}
 		}
@@ -203,36 +176,6 @@ probe_walk_doc :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe, regs: ^
 	return at, err
 }
 
-@(private = "file")
-probe_walk_in_pieces :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe, regs: ^hook.Regs) -> (u64, tape.Error) {
-	p := tape.Pieces{allocator = context.allocator}
-	defer tape.destroy(&p)
-	o := opts
-	o.pieces = &p
-	at, err, _ := html.walk(src[:len(src) / 2], .Fragment, o, h, regs, testkit.probe_hook)
-	if err != nil || !p.more {
-		return at, err
-	}
-	p.from, p.last = p.keep, true
-	at, err, _ = html.walk(src[p.keep:], .Fragment, o, h, regs, testkit.probe_hook)
-	return at, err
-}
-
-@(private = "file")
-bare_walk_in_pieces :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe_Bare, regs: ^hook.Regs) -> (u64, tape.Error) {
-	p := tape.Pieces{allocator = context.allocator}
-	defer tape.destroy(&p)
-	o := opts
-	o.pieces = &p
-	at, err, _ := html.walk(src[:len(src) / 2], .Fragment, o, h, regs, testkit.bare_hook)
-	if err != nil || !p.more {
-		return at, err
-	}
-	p.from, p.last = p.keep, true
-	at, err, _ = html.walk(src[p.keep:], .Fragment, o, h, regs, testkit.bare_hook)
-	return at, err
-}
-
 @(rodata, private = "file")
 PROTOCOL_TEXTS := [?]string {
 	"<div></div>",
@@ -247,21 +190,11 @@ PROTOCOL_TEXTS := [?]string {
 @(test)
 html_walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	texts := make([dynamic]string)
-	defer {
-		for text in texts {
-			delete(text)
-		}
-		delete(texts)
-	}
-	for s in PROTOCOL_TEXTS {
-		append(&texts, strings.clone(s))
-	}
-	testkit.hook_protocol(t, probe_walk, texts[:])
-	testkit.hook_inner_rooms(t, bare_walk, texts[:])
-	testkit.hook_protocol(t, probe_walk_doc, texts[:])
-	testkit.hook_protocol(t, probe_walk_in_pieces, texts[:])
-	testkit.hook_inner_rooms(t, bare_walk_in_pieces, texts[:])
+	testkit.hook_protocol(t, probe_walk, PROTOCOL_TEXTS[:])
+	testkit.hook_inner_rooms(t, bare_walk, PROTOCOL_TEXTS[:])
+	testkit.hook_protocol(t, probe_walk_doc, PROTOCOL_TEXTS[:])
+	testkit.hook_protocol_in_pieces(t, probe_walk, PROTOCOL_TEXTS[:])
+	testkit.hook_inner_rooms_in_pieces(t, bare_walk, PROTOCOL_TEXTS[:])
 }
 
 @(test)

@@ -43,7 +43,7 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, xml.records_scan(&s, &demand, out[:], docs[:], {}, context.temp_allocator), 1)
 	at, p, _ := xml.answer({doc = &docs[0]}, 0, 0)
 	testing.expect_value(t, p, tape.Presence.Found)
-	testing.expect_value(t, text_of(&docs[0], at), "1")
+	testing.expect_value(t, testkit.scalar_text(&docs[0], at), "1")
 	testing.expect_value(t, s.err, nil)
 
 	chosen, err := xml.reads(.Xml).records(xml.as(.Xml), src, .Concatenated, {}, nil, context.allocator)
@@ -80,7 +80,7 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	testing.expect_value(t, xml.records_validate(&b, out[:]), 1)
 	f, faulted := out[0].err.(tape.Fault)
 	testing.expect_value(t, faulted, true)
-	testing.expect_value(t, code_of(out[0].err), "mismatched_tag")
+	testing.expect_value(t, testkit.code_of(out[0].err), "mismatched_tag")
 	testing.expect_value(t, f.at, 8)
 
 	big := strings.builder_make(context.temp_allocator)
@@ -129,13 +129,13 @@ member_lines :: proc(src: string, opts := xml.Options{}, path: []tape.Step = nil
 		n := xml.records_scan(&r, &whole, out[:], docs[:], {}, context.temp_allocator)
 		for rec, k in out[:n] {
 			key := "#text" if rec.key.n == 0 else src[rec.key.lo:][:rec.key.n]
-			fmt.sbprintf(&b, "%d-%d %s %s%s\n", rec.lo, rec.hi, key, testkit.render_doc(&docs[k]), code_of(rec.err))
+			fmt.sbprintf(&b, "%d-%d %s %s%s\n", rec.lo, rec.hi, key, testkit.render_doc(&docs[k]), testkit.code_of(rec.err))
 		}
 		if n < len(out) {
 			break
 		}
 	}
-	fmt.sbprintf(&b, "end %s", code_of(r.err))
+	fmt.sbprintf(&b, "end %s", testkit.code_of(r.err))
 	return strings.to_string(b)
 }
 
@@ -169,8 +169,7 @@ members_agree_with_the_whole_document :: proc(t: ^testing.T) {
 	for _ in 0 ..< testkit.rounds(40) {
 		src := random_document()
 		defer delete(src)
-		texts := [2][]u8{src, mutated(src)}
-		defer delete(texts[1])
+		texts := [2][]u8{src, testkit.mutate(src, XML_MUTATE_ALPHABET)}
 		for text in texts {
 			doc, berr := xml.build(text, .Xml, {}, context.temp_allocator)
 			r := xml.records_open(text, .Members)
@@ -183,7 +182,7 @@ members_agree_with_the_whole_document :: proc(t: ^testing.T) {
 				continue
 			}
 			testing.expectf(t, r.err == nil, "%q: records end %v", text, r.err)
-			root, _ := member_at(&doc, {"r"})
+			root, _ := testkit.member_at(&doc, {"r"})
 			k := 0
 			for at := int(root) + 1; doc.nodes[root].kind == .Object && at < int(root) + int(doc.nodes[root].n); k += 1 {
 				key := doc.nodes[at]
@@ -320,7 +319,7 @@ members_at_a_path_agree_in_pieces :: proc(t: ^testing.T) {
 				for {
 					n := xml.records_scan(&r, &whole, out[:], docs[:], {}, context.temp_allocator)
 					for rec, k in out[:n] {
-						fmt.sbprintf(&b, "%d-%d %s %s%s\n", rec.lo, rec.hi, c.text[rec.key.lo:][:rec.key.n] if rec.key.n > 0 else "#text", testkit.render_doc(&docs[k]), code_of(rec.err))
+						fmt.sbprintf(&b, "%d-%d %s %s%s\n", rec.lo, rec.hi, c.text[rec.key.lo:][:rec.key.n] if rec.key.n > 0 else "#text", testkit.render_doc(&docs[k]), testkit.code_of(rec.err))
 					}
 					if n < len(out) {
 						break
@@ -338,7 +337,7 @@ members_at_a_path_agree_in_pieces :: proc(t: ^testing.T) {
 					return
 				}
 			}
-			fmt.sbprintf(&b, "end %s", code_of(r.err))
+			fmt.sbprintf(&b, "end %s", testkit.code_of(r.err))
 			tape.destroy_records(&r)
 			got := strings.to_string(b)
 			testing.expectf(t, got == want, "%q window %d: %q, whole %q", c.text, window, got, want)

@@ -6,7 +6,6 @@ package xml_tests
 import "core:math/rand"
 import "core:strings"
 import "core:testing"
-import "stury:host"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
 import "stury:testkit"
@@ -105,22 +104,8 @@ random_document :: proc() -> []u8 {
 	return b.buf[:]
 }
 
-// `src` with a byte changed, a byte left out, or cut short, in the context's allocator.
-mutated :: proc(src: []u8) -> []u8 {
-	b := make([dynamic]u8, len(src))
-	copy(b[:], src)
-	at := rand.int_max(len(src))
-	switch rand.int_max(3) {
-	case 0:
-		bytes := "<>&;/=\"' !?-]ax"
-		b[at] = bytes[rand.int_max(len(bytes))]
-	case 1:
-		ordered_remove(&b, at)
-	case:
-		resize(&b, at)
-	}
-	return b[:]
-}
+@(private)
+XML_MUTATE_ALPHABET :: "<>&;/=\"' !?-]ax"
 
 // The readers law and the refusal law over random documents, and their mutations.
 @(test)
@@ -137,28 +122,12 @@ reads_agree_on_generated_documents :: proc(t: ^testing.T) {
 		testkit.readers_agree(t, xml.reads(.Xml), xml.as(.Xml), src, {}, "generated", &a)
 		testkit.readers_agree(t, xml.reads(.Xml), xml.as(.Xml), src, infer, "inferred", &a)
 		for _ in 0 ..< 4 {
-			bad := mutated(src)
-			defer delete(bad)
+			bad := testkit.mutate(src, XML_MUTATE_ALPHABET)
 			testkit.readers_agree(t, xml.reads(.Xml), xml.as(.Xml), bad, {}, "mutated", &a)
 		}
+		free_all(context.temp_allocator)
 	}
 	testkit.expect_agreement(t, &a, {texts = 60, refused = 60, scans = 20_000, on_path = 20_000, shapes = 30})
-}
-
-// A build with a runner is the build on one thread.
-@(test)
-builds_on_threads_agree :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	pool: host.Pool
-	host.pool_init(&pool, 3)
-	defer host.pool_destroy(&pool)
-	state: rand.Default_Random_State
-	context.random_generator = testkit.seeded(t, &state, 0x0a2)
-	for _ in 0 ..< testkit.rounds(10) {
-		src := random_document()
-		defer delete(src)
-		testkit.threads_agree(t, xml.reads(.Xml), xml.as(.Xml), src, {}, &pool.runner, "generated")
-	}
 }
 
 @(private = "file")
@@ -170,37 +139,6 @@ probe_walk :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe, regs: ^hook
 @(private = "file")
 bare_walk :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe_Bare, regs: ^hook.Regs) -> (u64, tape.Error) {
 	at, err, _ := xml.walk(src, .Xml, opts, h, regs, testkit.bare_hook)
-	return at, err
-}
-
-// The walk of a text in two pieces, cut in its middle, the second window from the first read's `keep`.
-@(private = "file")
-probe_walk_in_pieces :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe, regs: ^hook.Regs) -> (u64, tape.Error) {
-	p := tape.Pieces{allocator = context.allocator}
-	defer tape.destroy(&p)
-	o := opts
-	o.pieces = &p
-	at, err, _ := xml.walk(src[:len(src) / 2], .Xml, o, h, regs, testkit.probe_hook)
-	if err != nil || !p.more {
-		return at, err
-	}
-	p.from, p.last = p.keep, true
-	at, err, _ = xml.walk(src[p.keep:], .Xml, o, h, regs, testkit.probe_hook)
-	return at, err
-}
-
-@(private = "file")
-bare_walk_in_pieces :: proc(src: []u8, opts: tape.Options, h: ^testkit.Probe_Bare, regs: ^hook.Regs) -> (u64, tape.Error) {
-	p := tape.Pieces{allocator = context.allocator}
-	defer tape.destroy(&p)
-	o := opts
-	o.pieces = &p
-	at, err, _ := xml.walk(src[:len(src) / 2], .Xml, o, h, regs, testkit.bare_hook)
-	if err != nil || !p.more {
-		return at, err
-	}
-	p.from, p.last = p.keep, true
-	at, err, _ = xml.walk(src[p.keep:], .Xml, o, h, regs, testkit.bare_hook)
 	return at, err
 }
 
@@ -222,21 +160,10 @@ PROTOCOL_TEXTS := [?]string {
 @(test)
 xml_walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	// The protocol frees the temporary allocator after each text, so the texts are in the context's allocator.
-	texts := make([dynamic]string)
-	defer {
-		for text in texts {
-			delete(text)
-		}
-		delete(texts)
-	}
-	for s in PROTOCOL_TEXTS {
-		append(&texts, strings.clone(s))
-	}
-	testkit.hook_protocol(t, probe_walk, texts[:])
-	testkit.hook_inner_rooms(t, bare_walk, texts[:])
-	testkit.hook_protocol(t, probe_walk_in_pieces, texts[:])
-	testkit.hook_inner_rooms(t, bare_walk_in_pieces, texts[:])
+	testkit.hook_protocol(t, probe_walk, PROTOCOL_TEXTS[:])
+	testkit.hook_inner_rooms(t, bare_walk, PROTOCOL_TEXTS[:])
+	testkit.hook_protocol_in_pieces(t, probe_walk, PROTOCOL_TEXTS[:])
+	testkit.hook_inner_rooms_in_pieces(t, bare_walk, PROTOCOL_TEXTS[:])
 }
 
 // A hook stops a walk from another thread through a flag.

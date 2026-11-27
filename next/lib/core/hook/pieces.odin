@@ -176,3 +176,80 @@ piece_path :: proc(p: ^tape.Pieces, src: []u8, f: ^tape.Format) -> runtime.Alloc
 	return nil
 }
 
+// Where a binary walk of a text in pieces resumes: at byte `i`, `d` levels deep with innermost frame `top`,
+// and `passing` true when skipping the value of a skipped key.
+Piece_Cut :: struct {
+	i, d, top: u64,
+	passing:   bool,
+}
+
+// Maps a container hook action to the `Nest` mode carried across piece boundaries.
+nest_of :: #force_inline proc "contextless" (a: Action) -> Nest {
+	#partial switch a {
+	case .Skip:
+		return .Skip
+	case .Keep:
+		return .Keep
+	case .Keep_Stubs:
+		return .Keep_Stubs
+	case .Rest:
+		return .Rest
+	}
+	return .None
+}
+
+// Copies `d` levels of `stack` into `frames` (using `frames`'s own allocator).
+piece_levels :: proc "contextless" (frames: ^[dynamic]u8, stack: [^]$L, d: u64) -> bool {
+	context = runtime.default_context()
+	size := int(d) * size_of(L)
+	if resize(frames, size) != nil {
+		return false
+	}
+	intrinsics.mem_copy_non_overlapping(raw_data(frames^), stack, size)
+	return true
+}
+
+// Records a container open/close token in `s.opened` for `Pieces.open`, setting `refused^` on OOM.
+piece_track_container :: #force_no_inline proc "contextless" (ctx: ^runtime.Context, s: ^Piece_State, refused: ^bool, t: tape.Token) -> bool #no_bounds_check {
+	n := len(s.opened)
+	if t.kind == .End {
+		pop_safe(&s.opened)
+		if n > 1 {
+			s.opened[n - 2].key.kind = .End
+		}
+		return true
+	}
+	if n > 0 && t.role == .Value {
+		s.opened[n - 1].count += 1
+	}
+	level := Open_Level{key = {kind = .End}, object = t.kind == .Object, name = -1}
+	if n < cap(s.opened) {
+		raw := (^runtime.Raw_Dynamic_Array)(&s.opened)
+		([^]Open_Level)(raw.data)[n] = level
+		raw.len = n + 1
+		return true
+	}
+	return piece_open_grow(ctx, s, refused, level)
+}
+
+@(private = "file", cold)
+piece_open_grow :: #force_no_inline proc "contextless" (ctx: ^runtime.Context, s: ^Piece_State, refused: ^bool, level: Open_Level) -> bool {
+	context = ctx^
+	if _, e := append(&s.opened, level); e != nil {
+		refused^ = true
+		return false
+	}
+	return true
+}
+
+// Drops claims whose required byte offset has been reached by `to`.
+piece_claims_prune :: proc(claims: ^[dynamic][2]u64, to: u64) {
+	for k := 0; k < len(claims); {
+		if claims[k][1] <= to {
+			ordered_remove(claims, k)
+		} else {
+			k += 1
+		}
+	}
+}
+

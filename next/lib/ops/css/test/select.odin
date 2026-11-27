@@ -6,6 +6,7 @@ import "base:runtime"
 import "core:strings"
 import "core:testing"
 import "stury:lib/core/tape"
+import "stury:lib/ops/build"
 import "stury:lib/ops/css"
 import "stury:testkit"
 import "stury:xml"
@@ -20,14 +21,6 @@ document :: proc(t: ^testing.T, text: string, loc := #caller_location) -> (doc: 
 	d, err := xml.build(transmute([]u8)text, .Xml, {}, context.temp_allocator)
 	testing.expectf(t, err == nil, "%v", err, loc = loc)
 	return d, err == nil
-}
-
-// The text of token `t` of `doc`.
-@(private)
-token_text :: proc(doc: ^tape.Document, t: tape.Token) -> string {
-	buf := make([]u8, max(tape.text_room(doc, t), int(t.n)), context.temp_allocator)
-	s, _ := tape.node_text(doc, t, buf)
-	return s
 }
 
 // The elements `selector` selects below node `from` of `doc`, as their names with `#` and their id when they have one.
@@ -46,15 +39,15 @@ described :: proc(t: ^testing.T, doc: ^tape.Document, selector: string, from: ta
 		if i > 0 {
 			strings.write_byte(&b, ' ')
 		}
-		strings.write_string(&b, token_text(doc, doc.nodes[match.value - 1]))
+		strings.write_string(&b, testkit.token_text(doc, doc.nodes[match.value - 1]))
 		for f in tape.facts_of(doc, match.value) {
 			if f.kind != .Attribute {
 				continue
 			}
 			name, value := xml.attribute(doc, f)
-			if token_text(doc, name) == "id" {
+			if testkit.token_text(doc, name) == "id" {
 				strings.write_byte(&b, '#')
-				strings.write_string(&b, token_text(doc, value))
+				strings.write_string(&b, testkit.token_text(doc, value))
 			}
 		}
 	}
@@ -88,78 +81,75 @@ refused :: proc(t: ^testing.T, selector: string, detail: css.Detail, at: u64, lo
 BOOK :: `<lib><book id="a" lang="en-GB" class="new  old"><title>A</title><note/></book><mag id="b"/><book id="c" lang="en"><title>C</title></book><book id="d" lang="fr" data-x="a b"/><!--c--><mag id="e">text</mag></lib>`
 
 @(test)
-types_ids_and_classes :: proc(t: ^testing.T) {
+book_selectors :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	testing.expect_value(t, matched(t, BOOK, "book"), "book#a book#c book#d")
-	testing.expect_value(t, matched(t, BOOK, "*"), "lib book#a title note mag#b book#c title book#d mag#e")
-	testing.expect_value(t, matched(t, BOOK, "#c"), "book#c")
-	testing.expect_value(t, matched(t, BOOK, "book#c, mag#b"), "mag#b book#c")
-	testing.expect_value(t, matched(t, BOOK, ".old"), "book#a")
-	testing.expect_value(t, matched(t, BOOK, ".new.old"), "book#a")
-	testing.expect_value(t, matched(t, BOOK, ".ne"), "")
-	testing.expect_value(t, matched(t, BOOK, "Book"), "")
-}
-
-@(test)
-attributes_by_each_operator :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	testing.expect_value(t, matched(t, BOOK, "[lang]"), "book#a book#c book#d")
-	testing.expect_value(t, matched(t, BOOK, "[lang=en]"), "book#c")
-	testing.expect_value(t, matched(t, BOOK, `[lang="EN" i]`), "book#c")
-	testing.expect_value(t, matched(t, BOOK, `[lang="EN" s]`), "")
-	testing.expect_value(t, matched(t, BOOK, "[lang|=en]"), "book#a book#c")
-	testing.expect_value(t, matched(t, BOOK, "[lang^=en]"), "book#a book#c")
-	testing.expect_value(t, matched(t, BOOK, "[lang$='GB']"), "book#a")
-	testing.expect_value(t, matched(t, BOOK, "[lang*=n-]"), "book#a")
-	testing.expect_value(t, matched(t, BOOK, "[data-x~=b]"), "book#d")
-	testing.expect_value(t, matched(t, BOOK, "[data-x~='a b']"), "")
-	testing.expect_value(t, matched(t, BOOK, "[lang^='']"), "")
-	testing.expect_value(t, matched(t, BOOK, `[id="\61"]`), "book#a")
-}
-
-@(test)
-combinators_relate_elements :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	testing.expect_value(t, matched(t, BOOK, "lib title"), "title title")
-	testing.expect_value(t, matched(t, BOOK, "lib > title"), "")
-	testing.expect_value(t, matched(t, BOOK, "#a > *"), "title note")
-	testing.expect_value(t, matched(t, BOOK, "book + mag"), "mag#b mag#e")
-	testing.expect_value(t, matched(t, BOOK, "mag + book"), "book#c")
-	testing.expect_value(t, matched(t, BOOK, "#b ~ *"), "book#c book#d mag#e")
-	testing.expect_value(t, matched(t, BOOK, "lib>book~book title"), "title")
-}
-
-@(test)
-logical_pseudo_classes :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	testing.expect_value(t, matched(t, BOOK, "book:not(#a, [lang=fr])"), "book#c")
-	testing.expect_value(t, matched(t, BOOK, ":is(mag, #a) > title, :where(#d)"), "title book#d")
-	testing.expect_value(t, matched(t, BOOK, "book:has(> title)"), "book#a book#c")
-	testing.expect_value(t, matched(t, BOOK, "lib:has(note)"), "lib")
-	testing.expect_value(t, matched(t, BOOK, "*:has(+ mag)"), "book#a book#d")
-	testing.expect_value(t, matched(t, BOOK, "*:has(~ #e)"), "book#a mag#b book#c book#d")
-	testing.expect_value(t, matched(t, BOOK, "book:has(title + note)"), "book#a")
-	testing.expect_value(t, matched(t, BOOK, "book:not(:has(*))"), "book#d")
-}
-
-@(test)
-structural_pseudo_classes :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	testing.expect_value(t, matched(t, BOOK, ":root"), "lib")
-	testing.expect_value(t, matched(t, BOOK, "lib > :first-child, lib > :last-child"), "book#a mag#e")
-	testing.expect_value(t, matched(t, BOOK, ":only-child"), "lib title")
-	testing.expect_value(t, matched(t, BOOK, "lib > :first-of-type"), "book#a mag#b")
-	testing.expect_value(t, matched(t, BOOK, "lib > :last-of-type"), "book#d mag#e")
-	testing.expect_value(t, matched(t, BOOK, ":only-of-type"), "lib title note title")
-	testing.expect_value(t, matched(t, BOOK, "lib > :nth-child(2n+1)"), "book#a book#c mag#e")
-	testing.expect_value(t, matched(t, BOOK, "lib > :nth-child(even)"), "mag#b book#d")
-	testing.expect_value(t, matched(t, BOOK, "lib > :nth-child(-n+2)"), "book#a mag#b")
-	testing.expect_value(t, matched(t, BOOK, "lib > :nth-last-child(2)"), "book#d")
-	testing.expect_value(t, matched(t, BOOK, "book:nth-of-type(2)"), "book#c")
-	testing.expect_value(t, matched(t, BOOK, "book:nth-last-of-type(n+2)"), "book#a book#c")
-	testing.expect_value(t, matched(t, BOOK, ":nth-child(2 of [lang])"), "book#c")
-	testing.expect_value(t, matched(t, BOOK, ":nth-last-child(1 of book)"), "book#d")
-	testing.expect_value(t, matched(t, BOOK, ":empty"), "note mag#b book#d")
+	doc, ok := document(t, BOOK)
+	if !ok {
+		return
+	}
+	Case :: struct {
+		sel, want: string,
+	}
+	cases := [?]Case{
+		// Types, ids, and classes.
+		{"book", "book#a book#c book#d"},
+		{"*", "lib book#a title note mag#b book#c title book#d mag#e"},
+		{"#c", "book#c"},
+		{"book#c, mag#b", "mag#b book#c"},
+		{".old", "book#a"},
+		{".new.old", "book#a"},
+		{".ne", ""},
+		{"Book", ""},
+		// Attributes by each operator.
+		{"[lang]", "book#a book#c book#d"},
+		{"[lang=en]", "book#c"},
+		{`[lang="EN" i]`, "book#c"},
+		{`[lang="EN" s]`, ""},
+		{"[lang|=en]", "book#a book#c"},
+		{"[lang^=en]", "book#a book#c"},
+		{"[lang$='GB']", "book#a"},
+		{"[lang*=n-]", "book#a"},
+		{"[data-x~=b]", "book#d"},
+		{"[data-x~='a b']", ""},
+		{"[lang^='']", ""},
+		{`[id="\61"]`, "book#a"},
+		// Combinators.
+		{"lib title", "title title"},
+		{"lib > title", ""},
+		{"#a > *", "title note"},
+		{"book + mag", "mag#b mag#e"},
+		{"mag + book", "book#c"},
+		{"#b ~ *", "book#c book#d mag#e"},
+		{"lib>book~book title", "title"},
+		// Logical pseudo-classes.
+		{"book:not(#a, [lang=fr])", "book#c"},
+		{":is(mag, #a) > title, :where(#d)", "title book#d"},
+		{"book:has(> title)", "book#a book#c"},
+		{"lib:has(note)", "lib"},
+		{"*:has(+ mag)", "book#a book#d"},
+		{"*:has(~ #e)", "book#a mag#b book#c book#d"},
+		{"book:has(title + note)", "book#a"},
+		{"book:not(:has(*))", "book#d"},
+		// Structural pseudo-classes.
+		{":root", "lib"},
+		{"lib > :first-child, lib > :last-child", "book#a mag#e"},
+		{":only-child", "lib title"},
+		{"lib > :first-of-type", "book#a mag#b"},
+		{"lib > :last-of-type", "book#d mag#e"},
+		{":only-of-type", "lib title note title"},
+		{"lib > :nth-child(2n+1)", "book#a book#c mag#e"},
+		{"lib > :nth-child(even)", "mag#b book#d"},
+		{"lib > :nth-child(-n+2)", "book#a mag#b"},
+		{"lib > :nth-last-child(2)", "book#d"},
+		{"book:nth-of-type(2)", "book#c"},
+		{"book:nth-last-of-type(n+2)", "book#a book#c"},
+		{":nth-child(2 of [lang])", "book#c"},
+		{":nth-last-child(1 of book)", "book#d"},
+		{":empty", "note mag#b book#d"},
+	}
+	for c in cases {
+		testing.expect_value(t, described(t, &doc, c.sel, tape.ROOT), c.want)
+	}
 }
 
 @(test)
@@ -251,7 +241,7 @@ paths :: proc(t: ^testing.T, text, selector: string, loc := #caller_location) ->
 		}
 		for step in css.steps_of(&found, match) {
 			strings.write_byte(&b, '/')
-			strings.write_string(&b, token_text(&doc, doc.nodes[step.key]))
+			strings.write_string(&b, testkit.token_text(&doc, doc.nodes[step.key]))
 			if step.index >= 0 {
 				strings.write_byte(&b, '[')
 				strings.write_int(&b, int(step.index))
@@ -374,5 +364,92 @@ a_refused_allocation_leaves_nothing_behind :: proc(t: ^testing.T) {
 		job := Select_Job{&doc, selector}
 		sweep := testkit.sweep_failures(select_with, &job)
 		testing.expectf(t, sweep.bad == 0 && sweep.refused > 0, "%q: %v", selector, sweep)
+	}
+}
+
+@(test)
+nil_attribute_reader_does_not_crash :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, ok := document(t, `<root><a id="1"/><b/></root>`)
+	if !ok {
+		return
+	}
+	sel, err := css.compile("a[id]")
+	testing.expect(t, err == nil)
+	defer css.destroy(&sel)
+	found, serr := css.select(&doc, tape.ROOT, &sel, {})
+	testing.expect(t, serr == nil)
+	defer css.destroy_found(&found)
+	testing.expect_value(t, len(found.matches), 0)
+	testing.expect(t, !found.partial)
+}
+
+@(test)
+of_type_respects_fold_option :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, ok := document(t, `<root><DIV id="1"/><div id="2"/><span id="3"/><DIV id="4"/></root>`)
+	if !ok {
+		return
+	}
+	fold_opts := css.Options{attribute = xml.attribute, fold = true}
+	testing.expect_value(t, described(t, &doc, "div:nth-of-type(2)", tape.ROOT, fold_opts), "div#2")
+	testing.expect_value(t, described(t, &doc, "div:first-of-type", tape.ROOT, fold_opts), "DIV#1")
+	testing.expect_value(t, described(t, &doc, "div:last-of-type", tape.ROOT, fold_opts), "DIV#4")
+}
+
+@(test)
+partial_document_sets_found_partial_flag :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, ok := document(t, `<root><a id="1"/></root>`)
+	if !ok {
+		return
+	}
+	part: tape.Partial
+	doc.partial = &part
+	sel, err := css.compile("a")
+	testing.expect(t, err == nil)
+	defer css.destroy(&sel)
+	found, serr := css.select(&doc, tape.ROOT, &sel, OPTIONS)
+	testing.expect(t, serr == nil)
+	defer css.destroy_found(&found)
+	testing.expect(t, found.partial)
+	testing.expect_value(t, len(found.matches), 0)
+}
+
+@(test)
+cut_doc_is_partial_and_borrowed_query_doc_is_complete :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, ok := document(t, `<root><DIV id="1"/><div id="2"/><DIV id="3"/></root>`)
+	if !ok {
+		return
+	}
+	// A `.Cut` document with `doc.partial == nil` must report `found.partial = true`.
+	cut_doc := doc
+	cut_doc.flags += {.Cut}
+	sel, err := css.compile("div")
+	testing.expect(t, err == nil)
+	defer css.destroy(&sel)
+	cut_found, cerr := css.select(&cut_doc, tape.ROOT, &sel, {attribute = xml.attribute, fold = true})
+	testing.expect(t, cerr == nil)
+	defer css.destroy_found(&cut_found)
+	testing.expect(t, cut_found.partial)
+
+	// A complete `build.query` result (`.Borrowed` with `doc.partial != nil` and no `CONTAINER_PARTIAL`) selects normally.
+	paths := [][]tape.Step{{tape.Name("root")}}
+	dm, derr := tape.demand_of(paths)
+	testing.expect(t, derr == nil)
+	defer tape.destroy(&dm)
+	qdoc, qerr := build.query({&doc, nil}, &dm)
+	testing.expect(t, qerr == nil)
+	defer tape.destroy(&qdoc)
+	qfound, qserr := css.select(&qdoc, tape.ROOT, &sel, {attribute = xml.attribute, fold = true})
+	testing.expect(t, qserr == nil)
+	defer css.destroy_found(&qfound)
+	testing.expect(t, !qfound.partial)
+	testing.expect_value(t, len(qfound.matches), 3)
+	// Folded group indices must treat `<DIV>` and `<div>` as one sibling group (0, 1, 2).
+	for m, i in qfound.matches {
+		steps := qfound.steps[m.lo:][:m.n]
+		testing.expect_value(t, steps[len(steps) - 1].index, i32(i))
 	}
 }

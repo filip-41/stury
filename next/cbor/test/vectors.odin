@@ -91,7 +91,7 @@ appendix_a_decoded_values :: proc(t: ^testing.T) {
 	compared := 0
 	for row in rows {
 		entry := row.(json.Object)
-		input := hex(entry["hex"].(json.String))
+		input := testkit.hex(entry["hex"].(json.String))
 		if entry["hex"].(json.String) == SIMPLE_24 {
 			continue
 		}
@@ -118,7 +118,7 @@ appendix_a_decoded_values :: proc(t: ^testing.T) {
 @(test)
 appendix_a_simple_24_is_refused :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	testing.expect_value(t, testkit.code_of(cbor.validate(hex(SIMPLE_24), .Cbor)), "bad_simple")
+	testing.expect_value(t, testkit.code_of(cbor.validate(testkit.hex(SIMPLE_24), .Cbor)), "bad_simple")
 }
 
 // The rows the table gives only a diagnostic notation for: the value each one reads as.
@@ -152,7 +152,7 @@ appendix_a_diagnostic_rows :: proc(t: ^testing.T) {
 		{"5f42010243030405ff", "h:0102030405"},
 	}
 	for r in rows {
-		got := dumped(hex(r.hex))
+		got := dumped(testkit.hex(r.hex))
 		testing.expectf(t, got == r.want, "%s: want %s, got %s", r.hex, r.want, got)
 	}
 }
@@ -168,7 +168,7 @@ appendix_a_reads_through_finds_and_scans :: proc(t: ^testing.T) {
 		if text == SIMPLE_24 {
 			continue
 		}
-		src := hex(text)
+		src := testkit.hex(text)
 		for path in ([][]tape.Step{{tape.Name("a")}, {tape.Index(0)}, {tape.Index(0), tape.Name("a")}}) {
 			_, err := cbor.find(src, path, .Cbor, {stop_early = true}, allocator = context.temp_allocator)
 			testing.expectf(t, err == nil, "%s: find %v", text, err)
@@ -205,7 +205,7 @@ the_stock_decoder_agrees_on_the_appendices :: proc(t: ^testing.T) {
 		if text == SIMPLE_24 {
 			continue
 		}
-		_, err := stock.decode_from_string(string(hex(text)), allocator = context.temp_allocator)
+		_, err := stock.decode_from_string(string(testkit.hex(text)), allocator = context.temp_allocator)
 		testing.expectf(t, err == nil, "%s: the stock decoder gives %v", text, err)
 	}
 	for c in MALFORMED {
@@ -213,7 +213,7 @@ the_stock_decoder_agrees_on_the_appendices :: proc(t: ^testing.T) {
 		if c.code == "trailing" || c.code == "bad_simple" || c.hex == "9f ff ff" {
 			continue
 		}
-		_, err := stock.decode_from_string(string(hex(c.hex)), allocator = context.temp_allocator)
+		_, err := stock.decode_from_string(string(testkit.hex(c.hex)), allocator = context.temp_allocator)
 		testing.expectf(t, err != nil, "%s: the stock decoder reads it", c.hex)
 	}
 }

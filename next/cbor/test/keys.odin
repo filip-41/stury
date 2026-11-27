@@ -11,7 +11,7 @@ import "stury:testkit"
 @(test)
 integer_keys_read_as_their_digits :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("a3 01 61 78 38 63 61 79 1b ffffffffffffffff 61 7a")
+	src := testkit.hex("a3 01 61 78 38 63 61 79 1b ffffffffffffffff 61 7a")
 	for c in ([?]struct {
 			name, want: string,
 		}{{"1", "x"}, {"-100", "y"}, {"18446744073709551615", "z"}}) {
@@ -42,7 +42,7 @@ integer_keys_read_as_their_digits :: proc(t: ^testing.T) {
 @(test)
 byte_string_keys_read_as_base64 :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("a3 43 010203 01 5f 41 01 42 0203 ff 02 41 ff 03")
+	src := testkit.hex("a3 43 010203 01 5f 41 01 42 0203 ff 02 41 ff 03")
 	testing.expect_value(t, dumped(src), `{"AQID":i:1,"AQID":i:2,"/w==":i:3}`)
 	a, _ := cbor.find(src, {tape.Name("/w==")})
 	testing.expect_value(t, a.outcome, cbor.Presence.Found)
@@ -58,7 +58,7 @@ byte_string_keys_read_as_base64 :: proc(t: ^testing.T) {
 @(test)
 keys_of_two_kinds_are_two_keys :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("a2 01 61 78 61 31 61 79")
+	src := testkit.hex("a2 01 61 78 61 31 61 79")
 	doc, err := cbor.build(src, .Cbor, {dups = .Refuse}, context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(doc.nodes), 5)
@@ -82,7 +82,7 @@ find_and_member_agree_on_keys_of_two_kinds :: proc(t: ^testing.T) {
 			"a1 01 61 61",
 		}) {
 		for spec in cbor.Spec {
-			if !testkit.find_agrees_with_member(t, cbor.reads(spec), cbor.as(spec), hex(text), names, text) {
+			if !testkit.find_agrees_with_member(t, cbor.reads(spec), cbor.as(spec), testkit.hex(text), names, text) {
 				return
 			}
 		}

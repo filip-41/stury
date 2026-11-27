@@ -18,6 +18,157 @@ import "stury:xml"
 // The corpus run through the library: each program on its input, its outputs equal to the expected ones as jq's
 // run-tests compares them, by value, and every block the run took given back.
 
+DEBUG_CASES :: #config(DEBUG_CASES, false)
+
+// The message jq prints last for a program that does not compile: its last error's first line.
+last_message :: proc(errors: []jq.Compile_Error) -> string {
+	located := jq.locate(errors[len(errors) - 1])
+	first, _, _ := strings.partition(located, "\n")
+	return strings.concatenate({"jq: error: ", first})
+}
+
+// Why compiling case `c`'s program gave `errors` and not what jq gives, "" when it did: no error for a program that
+// compiles, an error for one that must not, and jq's message where the case has one.
+compile_mismatch :: proc(c: Case, errors: []jq.Compile_Error) -> string {
+	switch {
+	case c.fail == .None && len(errors) > 0:
+		return last_message(errors)
+	case c.fail != .None && len(errors) == 0:
+		return "compiled"
+	case c.fail == .Message && last_message(errors) != c.msg:
+		return fmt.aprintf("%q, want %q", last_message(errors), c.msg)
+	}
+	return ""
+}
+
+Eval_Options :: struct {
+	input_json:        string,
+	doc:               ^tape.Document,
+	modules:           jq.Modules,
+	variables:         []string,
+	globals:           []string,
+	prepend_env:       bool,
+	with_joins:        bool,
+	hooks:             ^jq.Hooks,
+	steps:             int,
+	mem_limit:         u64,
+	write_fact:        query.Fact_Writer,
+	write_fact_data:   rawptr,
+	sep:               string,
+	allow_compile_err: bool,
+	append_err:        bool,
+}
+
+Eval_Result :: struct {
+	out:         string,
+	end:         jq.Run_End,
+	err_kind:    query.Error_Kind,
+	err_msg:     string,
+	compile_err: string,
+	tainted:     bool,
+}
+
+// Shared jq evaluator for tests running under a suite arena: compiles `src`, binds any globals and input (from `doc`,
+// `input_json`, or null), runs with `opts`, verifies zero heap leaks on `runtime.heap_allocator()`, and joins outputs.
+eval_jq :: proc(t: ^testing.T, src: string, opts := Eval_Options{}, loc := #caller_location) -> Eval_Result {
+	compile_opts := jq.Compile_Options{modules = opts.modules, variables = opts.variables}
+	prog: ^jq.Program
+	errors: []jq.Compile_Error
+	if opts.with_joins {
+		prog, errors = jq.compile_with_joins(src, compile_opts)
+	} else {
+		prog, errors = jq.compile(src, compile_opts)
+	}
+	defer jq.destroy_program(prog)
+	if len(errors) > 0 {
+		msg := last_message(errors)
+		if !opts.allow_compile_err {
+			testing.expectf(t, false, "compile %q failed: %s", src, msg, loc = loc)
+		}
+		return {end = .Failed, compile_err = msg}
+	}
+
+	h: query.Heap
+	query.heap_init(&h, runtime.heap_allocator(), opts.mem_limit)
+	defer query.heap_destroy(&h)
+	h.write_fact = opts.write_fact
+	h.write_fact_data = opts.write_fact_data
+
+	res: Eval_Result
+	shown := make([dynamic]string)
+	{
+		vals: []query.Value
+		if len(opts.globals) > 0 || opts.prepend_env {
+			base := 2 if opts.prepend_env else 0
+			vals = make([]query.Value, base + len(opts.globals))
+			for i in 0 ..< base {
+				vals[i] = query.NULL
+			}
+			for text, i in opts.globals {
+				v, ok := read_value(&h, text)
+				if !testing.expectf(t, ok, "bad global %q", text, loc = loc) {
+					return {end = .Failed}
+				}
+				vals[base + i] = v
+			}
+		}
+		defer for v in vals {
+			query.release(&h, v)
+		}
+
+		inp := query.NULL
+		if opts.doc != nil {
+			is: query.Status
+			inp, is = query.document_value(&h, opts.doc^, false)
+			testing.expect_value(t, is, query.Status.Ok, loc = loc)
+		} else if opts.input_json != "" {
+			ok: bool
+			inp, ok = read_value(&h, opts.input_json)
+			if !testing.expectf(t, ok, "bad input %q", opts.input_json, loc = loc) {
+				return {end = .Failed}
+			}
+		}
+
+		default_hooks := jq.Hooks{parse_json = parse_json_hook, markup = xml_markup}
+		use_hooks := opts.hooks if opts.hooks != nil else &default_hooks
+		run: jq.Run
+		jq.run_init(&run, prog, &h, vals, use_hooks, opts.steps)
+		outs := Outputs{h = &h}
+		res.end = jq.run_value(&run, inp, collect, &outs)
+		res.tainted = h.tainted
+		for v in outs.vals {
+			append(&shown, show(&h, v))
+			query.release(&h, v)
+		}
+		delete(outs.vals)
+		if res.end == .Failed {
+			e := query.take_error(&h)
+			res.err_kind = e.kind
+			res.err_msg = jq.error_message(&h, &e)
+			if opts.append_err {
+				append(&shown, strings.concatenate({"error: ", res.err_msg}))
+			}
+			query.destroy_error(&h, &e)
+		}
+		jq.run_destroy(&run)
+	}
+	testing.expect_value(t, query.heap_live(&h), u64(0), loc = loc)
+	sep := opts.sep if opts.sep != "" else "\n"
+	res.out = strings.join(shown[:], sep)
+	return res
+}
+
+run_case_table :: proc(t: ^testing.T, file: string, cases: [][3]string, loc := #caller_location) {
+	arena: virtual.Arena
+	testing.expect(t, suite_arena(&arena) == nil, loc = loc)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+	for c, i in cases {
+		k := Case{file = file, line = i, prog = c[0], input = c[1], want = strings.split(c[2], "\n")}
+		testing.expectf(t, run_case(k, true) == .Pass, "%s", c[0], loc = loc)
+	}
+}
+
 Outputs :: struct {
 	h:    ^query.Heap,
 	vals: [dynamic]query.Value,

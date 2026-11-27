@@ -139,31 +139,7 @@ begin :: #force_inline proc(s: ^Writing, level: int, pretty: bool) {
 // A line end and the indent of `level` levels, written in eight-byte stores.
 @(private)
 line_indent :: #force_inline proc(out: ^write.Out, s: ^Writing, level: int) #no_bounds_check {
-	n := level * s.width
-	if n + 9 > write.ROOM_MAX {
-		line_indent_long(out, s, n)
-		return
-	}
-	p := write.room(out, n + 9)
-	p[0] = '\n'
-	for k := 0; k < n; k += 8 {
-		intrinsics.unaligned_store((^u64)(p[1 + k:]), s.fill)
-	}
-	out.cursor += n + 1
-}
-
-@(private, cold)
-line_indent_long :: #force_no_inline proc(out: ^write.Out, s: ^Writing, n: int) {
-	write.put_byte(out, '\n')
-	for left := n; left > 0; {
-		k := min(left, write.ROOM_MAX - 8)
-		p := write.room(out, k + 8)
-		for i := 0; i < k; i += 8 {
-			intrinsics.unaligned_store((^u64)(p[i:]), s.fill)
-		}
-		out.cursor += k
-		left -= k
-	}
+	write.line_indent(out, s.width, s.fill, level)
 }
 
 // Writes the facts among `facts` of the kinds `kinds`, each on a line at `level` when `pretty`: a comment as XML spells
@@ -231,24 +207,7 @@ comment_holds :: proc "contextless" (body: []u8) -> bool #no_bounds_check {
 // Whether the object at `at` holds a `#text` member, so that no whitespace may be added between its children.
 @(private)
 holds_text :: proc(w: ^write.Tree, at: tape.Node_Index, xml: bool) -> bool {
-	end := tape.node_after(w.doc, at)
-	for k := at + 1; k < end; k = tape.node_after(w.doc, k + 1) {
-		// The reader marks the `#text` member of an XML document, whose text is no bytes of the source.
-		if xml {
-			if tape.is_text_key(w.nodes[k]) {
-				return true
-			}
-			continue
-		}
-		// A key with no escape has the length of its text.
-		if t := w.nodes[k]; t.spelling & tape.SPELLING_DECODE == 0 && int(t.n) != len(TEXT_KEY) {
-			continue
-		}
-		if name, ok := write.text_of(w, k); ok && name == TEXT_KEY {
-			return true
-		}
-	}
-	return false
+	return write.holds_text(w, at, xml, TEXT_KEY)
 }
 
 // Whether `facts` hold a comment or instruction that ends its element.

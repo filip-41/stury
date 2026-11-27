@@ -58,30 +58,9 @@ test_dsv_check_parity :: proc(t: ^testing.T) {
 	for c in cases {
 		src := transmute([]u8)c.input
 		r_s := dsv.check(src, &plan, c.spec, {}, nil, context.allocator, dsv_opts)
-		defer check.result_destroy(&r_s)
-		testing.expectf(t, r_s.valid == c.valid, "dsv stream %v on %q: got %v want %v", c.spec, c.input, r_s.valid, c.valid)
-
 		sink_s: check.Sink
 		check.sink_init(&sink_s)
-		defer check.sink_destroy(&sink_s)
 		r_ss := dsv.check(src, &plan, c.spec, {}, &sink_s, context.allocator, dsv_opts)
-		defer check.result_destroy(&r_ss)
-		testing.expect_value(t, r_ss.valid, c.valid)
-
-		doc, berr := dsv.build(src, c.spec, {format = dsv_opts})
-		testing.expect_value(t, berr, nil)
-		defer tape.destroy(&doc)
-
-		r_d := check.check_document(&doc, &plan)
-		defer check.result_destroy(&r_d)
-		testing.expect_value(t, r_d.valid, c.valid)
-
-		sink_d: check.Sink
-		check.sink_init(&sink_d)
-		defer check.sink_destroy(&sink_d)
-		r_ds := check.check_document(&doc, &plan, {}, &sink_d)
-		defer check.result_destroy(&r_ds)
-		testing.expect_value(t, r_ds.valid, c.valid)
-		testing.expect_value(t, len(sink_s.entries), len(sink_d.entries))
+		testkit.check_parity(t, &plan, dsv.reads(c.spec), dsv.as(c.spec), src, c.valid, r_s, r_ss, &sink_s, {}, {format = dsv_opts})
 	}
 }

@@ -87,7 +87,7 @@ wire_all_format_tags_roundtrip :: proc(t: ^testing.T) {
 		{"cf ffffffffffffffff", .Uint, max(u64)},
 	}
 	for c in uint_cases {
-		doc, err := msgpack.build(hex(c.hex), .Compact, allocator = context.temp_allocator)
+		doc, err := msgpack.build(testkit.hex(c.hex), .Compact, allocator = context.temp_allocator)
 		testing.expectf(t, err == nil, "%s: %v", c.hex, err)
 		n, ok := msgpack.node_number(&doc, msgpack.ROOT)
 		testing.expectf(t, ok && n.kind == c.kind && n.bits == c.bits, "%s: got %v", c.hex, n)
@@ -106,7 +106,7 @@ wire_all_format_tags_roundtrip :: proc(t: ^testing.T) {
 		{"d3 8000000000000000", min(i64)},
 	}
 	for c in int_cases {
-		doc, err := msgpack.build(hex(c.hex), .Compact, allocator = context.temp_allocator)
+		doc, err := msgpack.build(testkit.hex(c.hex), .Compact, allocator = context.temp_allocator)
 		testing.expectf(t, err == nil, "%s: %v", c.hex, err)
 		n, ok := msgpack.node_number(&doc, msgpack.ROOT)
 		testing.expectf(t, ok && n.kind == .Int && i64(n.bits) == c.val, "%s: got %v", c.hex, n)
@@ -114,14 +114,14 @@ wire_all_format_tags_roundtrip :: proc(t: ^testing.T) {
 
 	// 5. Float32 (0xca) and Float64 (0xcb): NaN, +Inf, -Inf, -0.0, subnormals, precision-requiring f64
 	float_bytes := [?][]u8{
-		hex("ca 80000000"),                   // -0.0 f32
-		hex("ca 7f800000"),                   // +Inf f32
-		hex("ca ff800000"),                   // -Inf f32
-		hex("ca 7fc00000"),                   // qNaN f32
-		hex("ca 00000001"),                   // subnormal f32
-		hex("cb 3ff199999999999a"),          // 1.1 f64
-		hex("cb 7ff0000000000001"),          // signalling/payload NaN f64
-		hex("cb 0000000000000001"),          // subnormal f64
+		testkit.hex("ca 80000000"),                   // -0.0 f32
+		testkit.hex("ca 7f800000"),                   // +Inf f32
+		testkit.hex("ca ff800000"),                   // -Inf f32
+		testkit.hex("ca 7fc00000"),                   // qNaN f32
+		testkit.hex("ca 00000001"),                   // subnormal f32
+		testkit.hex("cb 3ff199999999999a"),          // 1.1 f64
+		testkit.hex("cb 7ff0000000000001"),          // signalling/payload NaN f64
+		testkit.hex("cb 0000000000000001"),          // subnormal f64
 	}
 	for fb in float_bytes {
 		doc, err := msgpack.build(fb, .Compact, allocator = context.temp_allocator)
@@ -129,7 +129,7 @@ wire_all_format_tags_roundtrip :: proc(t: ^testing.T) {
 		n, ok := msgpack.node_number(&doc, msgpack.ROOT)
 		testing.expect(t, ok && n.kind == .Float)
 	}
-	neg_zero_doc, _ := msgpack.build(hex("ca 80000000"), .Compact, allocator = context.temp_allocator)
+	neg_zero_doc, _ := msgpack.build(testkit.hex("ca 80000000"), .Compact, allocator = context.temp_allocator)
 	neg_zero_n, _ := msgpack.node_number(&neg_zero_doc, msgpack.ROOT)
 	testing.expect(t, math.sign_bit(transmute(f64)neg_zero_n.bits))
 
@@ -253,7 +253,7 @@ wire_ext_and_timestamps :: proc(t: ^testing.T) {
 		{"c7 0c ff 00000000 fffffff1868b83ff", "-0001-12-31T23:59:59Z"},
 	}
 	for c in ts_cases {
-		src := hex(c.hex)
+		src := testkit.hex(c.hex)
 		doc, err := msgpack.build(src, .Compact, allocator = context.temp_allocator)
 		testing.expectf(t, err == nil && doc.nodes[0].kind == .String, "%s: %v", c.hex, err)
 		got, gok := text_of(&doc, msgpack.ROOT)

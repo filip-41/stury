@@ -6,6 +6,7 @@ import "core:testing"
 import "stury:cbor"
 import "stury:dsv"
 import "stury:engine"
+import "stury:html"
 import "stury:jq"
 import "stury:json"
 import "stury:lib/core/tape"
@@ -15,9 +16,11 @@ import "stury:lib/ops/write"
 import "stury:lib/query"
 import "stury:lib/schema/check"
 import "stury:lib/schema/schema"
+import "stury:msgpack"
 import "stury:testkit"
 import "stury:toml"
 import "stury:xml"
+import "stury:yaml"
 
 @(test)
 ops_validate_build_find_scan_records_all_formats :: proc(t: ^testing.T) {
@@ -28,38 +31,67 @@ ops_validate_build_find_scan_records_all_formats :: proc(t: ^testing.T) {
 	xml_src := transmute([]u8)string(`<root><user><name>ada</name></user></root>`)
 	csv_src := transmute([]u8)string("name,id\nada,7\n")
 	cbor_src := []u8{0xA1, 0x64, 'u', 's', 'e', 'r', 0xA2, 0x64, 'n', 'a', 'm', 'e', 0x63, 'a', 'd', 'a', 0x62, 'i', 'd', 0x07}
+	yaml_src := transmute([]u8)string("user:\n  name: ada\n  id: 7\n")
+	html_src := transmute([]u8)string(`<!DOCTYPE html><html><body><p id="p1">ada</p></body></html>`)
+	mp_src := []u8{0x81, 0xA4, 'u', 's', 'e', 'r', 0x82, 0xA4, 'n', 'a', 'm', 'e', 0xA3, 'a', 'd', 'a', 0xA2, 'i', 'd', 0x07}
 
-	specs := [?]engine.Spec {
-		json.Spec.Json,
-		toml.Spec.Toml_1_0,
-		xml.Spec.Xml,
-		dsv.Spec.Csv,
-		cbor.Spec.Cbor,
+	Format_Case :: struct {
+		name: string,
+		spec: engine.Spec,
+		src:  []u8,
+		path: []tape.Step,
 	}
-	inputs := [?][]u8 {
-		json_src,
-		toml_src,
-		xml_src,
-		csv_src,
-		cbor_src,
+	user_name := [?]tape.Step{tape.Name("user"), tape.Name("name")}
+	xml_path := [?]tape.Step{tape.Name("root"), tape.Name("user"), tape.Name("name")}
+	csv_path := [?]tape.Step{tape.Index(0), tape.Name("name")}
+	html_path := [?]tape.Step{tape.Name("html"), tape.Name("body"), tape.Name("p")}
+
+	cases := [?]Format_Case {
+		{"json", json.Spec.Json, json_src, user_name[:]},
+		{"toml", toml.Spec.Toml_1_0, toml_src, user_name[:]},
+		{"xml", xml.Spec.Xml, xml_src, xml_path[:]},
+		{"csv", dsv.Spec.Csv, csv_src, csv_path[:]},
+		{"cbor", cbor.Spec.Cbor, cbor_src, user_name[:]},
+		{"yaml", yaml.Spec.Yaml_1_2, yaml_src, user_name[:]},
+		{"html", html.Spec.Html, html_src, html_path[:]},
+		{"msgpack", msgpack.Spec.Msgpack, mp_src, user_name[:]},
 	}
 
-	for s, i in specs {
-		testing.expect_value(t, engine.validate(inputs[i], s), tape.Error(nil))
-		doc, berr := engine.build(inputs[i], s)
-		testing.expect_value(t, berr, tape.Error(nil))
-		testing.expect(t, len(doc.nodes) > 0)
-		tape.destroy(&doc)
+	for c in cases {
+		testing.expectf(t, engine.validate(c.src, c.spec) == nil, "%s validate failed", c.name)
+		doc, berr := engine.build(c.src, c.spec)
+		testing.expectf(t, berr == nil && len(doc.nodes) > 0, "%s build failed: %v", c.name, berr)
+		defer tape.destroy(&doc)
+
+		own_bytes, _, werr := engine.write(&doc, c.spec)
+		testing.expectf(t, werr == nil && len(own_bytes) > 0, "%s write failed: %v", c.name, werr)
+		delete(own_bytes)
+
+		buf: bytes.Buffer
+		bytes.buffer_init_allocator(&buf, 0, 64)
+		_, wterr := engine.write_to(bytes.buffer_to_stream(&buf), &doc, json.Spec.Json)
+		testing.expectf(t, wterr == nil && bytes.buffer_length(&buf) > 0, "%s write_to json failed: %v", c.name, wterr)
+		bytes.buffer_destroy(&buf)
+
+		ans, ferr := engine.find(c.src, c.path, c.spec)
+		testing.expectf(t, ferr == nil && ans.outcome == .Found, "%s find failed: %v %v", c.name, ferr, ans.outcome)
+
+		cpaths := [?][]tape.Step{c.path}
+		cdem, cderr := tape.demand_of(cpaths[:])
+		testing.expect_value(t, cderr, nil)
+		defer tape.destroy_demand(&cdem)
+		csdoc, cserr := engine.scan(c.src, &cdem, c.spec)
+		testing.expectf(t, cserr == nil, "%s scan failed: %v", c.name, cserr)
+		tape.destroy(&csdoc)
 	}
 
-	// Find & Scan across formats supporting path queries.
-	path := [?]tape.Step{tape.Name("user"), tape.Name("name")}
+	// Verify exact find kind and scan answer contents.
+	path := user_name
 	ans, ferr := engine.find(cbor_src, path[:], cbor.Spec.Cbor)
 	testing.expect_value(t, ferr, tape.Error(nil))
 	testing.expect_value(t, ans.outcome, tape.Presence.Found)
 	testing.expect_value(t, ans.kind, tape.Kind.String)
 
-	// Build a narrow partial demand `.user.name`.
 	paths := [?][]tape.Step{path[:]}
 	tdem, tderr := tape.demand_of(paths[:])
 	testing.expect_value(t, tderr, nil)
@@ -151,6 +183,57 @@ ops_write_and_format_dropped_facts :: proc(t: ^testing.T) {
 	testing.expect_value(t, cbor_werr, write.Error(nil))
 	defer delete(cbor_bytes)
 	testing.expect_value(t, engine.validate(cbor_bytes, cbor.Spec.Cbor), tape.Error(nil))
+
+	// Table and Markdown writers.
+	tbl, tbl_err := engine.write_table(&row_doc)
+	testing.expect_value(t, tbl_err, write.Error(nil))
+	defer delete(tbl)
+	testing.expect(t, strings.contains(string(tbl), "name") && strings.contains(string(tbl), "ada"))
+
+	md, mderr := engine.write_markdown(&row_doc)
+	testing.expect_value(t, mderr, write.Error(nil))
+	defer delete(md)
+	testing.expect(t, strings.contains(string(md), "| name") && strings.contains(string(md), "---:"))
+
+	// Cross-format conversions: YAML_MERGE -> JSON, JSON <-> YAML, JSON <-> MessagePack <-> CBOR, HTML <-> JSON.
+	yaml_merge_src := transmute([]u8)string("base: &b\n  x: 1\n  y: 2\nchild:\n  <<: *b\n  y: 9\n")
+	ym_json, _, ym_err := engine.format(yaml_merge_src, yaml.Spec.Yaml_Merge, json.Spec.Json)
+	testing.expect_value(t, ym_err, engine.Format_Error(nil))
+	defer delete(ym_json)
+	testing.expect(t, strings.contains(string(ym_json), `"x":1`) && strings.contains(string(ym_json), `"y":9`))
+
+	j_src := transmute([]u8)string(`{"a":1,"b":"hi"}`)
+	j_yaml, _, jy_err := engine.format(j_src, json.Spec.Json, yaml.Spec.Yaml_1_2, opts = {indent = 2})
+	testing.expect_value(t, jy_err, engine.Format_Error(nil))
+	defer delete(j_yaml)
+	y_back, _, yb_err := engine.format(j_yaml, yaml.Spec.Yaml_1_2, json.Spec.Json)
+	testing.expect_value(t, yb_err, engine.Format_Error(nil))
+	defer delete(y_back)
+	testing.expect_value(t, string(y_back), string(j_src))
+
+	j_mp, _, jmp_err := engine.format(j_src, json.Spec.Json, msgpack.Spec.Compact)
+	testing.expect_value(t, jmp_err, engine.Format_Error(nil))
+	defer delete(j_mp)
+	mp_cbor, _, mc_err := engine.format(j_mp, msgpack.Spec.Compact, cbor.Spec.Deterministic)
+	testing.expect_value(t, mc_err, engine.Format_Error(nil))
+	defer delete(mp_cbor)
+	cbor_mp, _, cm_err := engine.format(mp_cbor, cbor.Spec.Deterministic, msgpack.Spec.Msgpack)
+	testing.expect_value(t, cm_err, engine.Format_Error(nil))
+	defer delete(cbor_mp)
+	mp_json, _, mj_err := engine.format(cbor_mp, msgpack.Spec.Msgpack, json.Spec.Json)
+	testing.expect_value(t, mj_err, engine.Format_Error(nil))
+	defer delete(mp_json)
+	testing.expect_value(t, string(mp_json), string(j_src))
+
+	html_src := transmute([]u8)string(`<!DOCTYPE html><html><body><p>hello</p></body></html>`)
+	h_json, _, hj_err := engine.format(html_src, html.Spec.Html, json.Spec.Json)
+	testing.expect_value(t, hj_err, engine.Format_Error(nil))
+	defer delete(h_json)
+	testing.expect(t, strings.contains(string(h_json), `"hello"`))
+	j_html, _, jh_err := engine.format(h_json, json.Spec.Json, html.Spec.Html)
+	testing.expect_value(t, jh_err, engine.Format_Error(nil))
+	defer delete(j_html)
+	testing.expect(t, strings.contains(string(j_html), "<p>hello</p>"))
 }
 
 @(test)
@@ -222,6 +305,30 @@ ops_check_schema_and_document :: proc(t: ^testing.T) {
 	rdoc := engine.check_document(&doc, &sc.plan)
 	defer check.result_destroy(&rdoc)
 	testing.expect(t, rdoc.valid)
+
+	// Streaming `check_schema` on YAML (Core + `.Failsafe` dialect), MessagePack, and HTML.
+	valid_yaml := transmute([]u8)string("name: ada\ncount: 3\n")
+	ry := engine.check_schema(valid_yaml, yaml.Spec.Yaml_1_2, &sc.plan)
+	defer check.result_destroy(&ry)
+	testing.expect(t, ry.valid)
+
+	ry_fs := engine.check_schema(valid_yaml, yaml.Spec.Yaml_1_2, &sc.plan, yaml_opts = {dialect = .Failsafe})
+	defer check.result_destroy(&ry_fs)
+	testing.expect(t, !ry_fs.valid)
+
+	valid_mp, _, mp_ferr := engine.format(valid_json, json.Spec.Json, msgpack.Spec.Compact)
+	testing.expect_value(t, mp_ferr, engine.Format_Error(nil))
+	defer delete(valid_mp)
+	rmp := engine.check_schema(valid_mp, msgpack.Spec.Msgpack, &sc.plan)
+	defer check.result_destroy(&rmp)
+	testing.expect(t, rmp.valid)
+
+	html_sc, hscerr := schema.compile_json(transmute([]u8)string(`{"type":"object","required":["html"]}`))
+	testing.expect_value(t, hscerr.kind, schema.Error_Kind.None)
+	defer schema.destroy(html_sc)
+	rhtml := engine.check_schema(transmute([]u8)string(`<!DOCTYPE html><html><body><p>hello</p></body></html>`), html.Spec.Html, &html_sc.plan)
+	defer check.result_destroy(&rhtml)
+	testing.expect(t, rhtml.valid)
 }
 
 @(test)
@@ -251,6 +358,16 @@ ops_diff_cross_format_and_documents :: proc(t: ^testing.T) {
 	defer diff.destroy_result(&fdres)
 	testing.expect(t, len(fdres.changes) >= 1)
 	testing.expect_value(t, fdres.changes[0].op, diff.Op.Fact)
+
+	// Cross-format diff: YAML vs MessagePack yields zero changes for identical content.
+	y_src := transmute([]u8)string("a: 1\nb: hi\n")
+	mp_src, _, mp_err := engine.format(transmute([]u8)string(`{"a":1,"b":"hi"}`), json.Spec.Json, msgpack.Spec.Compact)
+	testing.expect_value(t, mp_err, engine.Format_Error(nil))
+	defer delete(mp_src)
+	ym_dres, ym_derr := engine.diff_bytes(y_src, yaml.Spec.Yaml_1_2, mp_src, msgpack.Spec.Msgpack)
+	testing.expect_value(t, ym_derr, engine.Diff_Error(nil))
+	defer diff.destroy_result(&ym_dres)
+	testing.expect_value(t, len(ym_dres.changes), 0)
 }
 
 @(test)
@@ -339,84 +456,113 @@ ops_edit_commit_reflow :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(with_reflow.bytes), `{"a":5}`)
 }
 
+@(private = "file")
+Cap_Out :: struct {
+	val: query.Value,
+	has: bool,
+}
+
+@(private = "file")
+cap_first_out :: proc(data: rawptr, v: query.Value, h: ^query.Heap) -> bool {
+	c := (^Cap_Out)(data)
+	if !c.has {
+		c.val = v
+		c.has = true
+	} else {
+		query.release(h, v)
+	}
+	return false
+}
+
+@(private = "file")
+eval_first_overlay :: proc(t: ^testing.T, h: ^query.Heap, ov: ^edit.Overlay, expr: string, loc := #caller_location) -> query.Value {
+	prog, perrs := jq.compile(expr)
+	testing.expect_value(t, len(perrs), 0, loc = loc)
+	defer jq.destroy_program(prog)
+	inp, ist := query.overlay_value(h, ov)
+	testing.expect_value(t, ist, query.Status.Ok, loc = loc)
+	cap_out: Cap_Out
+	run: jq.Run
+	jq.run_init(&run, prog, h, nil)
+	defer jq.run_destroy(&run)
+	end := jq.run_value(&run, inp, cap_first_out, &cap_out)
+	testing.expect_value(t, end, jq.Run_End.Stopped, loc = loc)
+	testing.expect(t, cap_out.has, loc = loc)
+	return cap_out.val
+}
+
 @(test)
 ops_edit_reconcile_jq :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 
-	// 3. Real jq provenance mutation -> `engine.reconcile_edit` preserves formatting/comments outside mutated field.
-	jq_src := transmute([]u8)string("{\n  // keep spacing\n  \"a\": { \"x\" :  1 },\n  \"b\": 2\n}\n")
-	jq_doc, jq_berr := engine.build(jq_src, json.Spec.Jsonc)
-	testing.expect_value(t, jq_berr, tape.Error(nil))
-	defer tape.destroy(&jq_doc)
-
-	jq_ov: edit.Overlay
-	testing.expect(t, edit.init(&jq_ov, &jq_doc) == nil)
-	defer edit.destroy(&jq_ov)
-
-	prog, perrs := jq.compile(`{a: .a, b: (.b + 10)}`)
-	testing.expect_value(t, len(perrs), 0)
-	defer jq.destroy_program(prog)
-
 	h: query.Heap
 	query.heap_init(&h, context.allocator)
 	defer query.heap_destroy(&h)
-	inp, ist := query.overlay_value(&h, &jq_ov)
-	testing.expect_value(t, ist, query.Status.Ok)
 
-	Cap_Out :: struct {
-		h:   ^query.Heap,
-		val: query.Value,
-		has: bool,
+	// 1. Real jq provenance mutation -> `engine.reconcile_edit` preserves formatting/comments outside mutated field.
+	{
+		jq_src := transmute([]u8)string("{\n  // keep spacing\n  \"a\": { \"x\" :  1 },\n  \"b\": 2\n}\n")
+		jq_doc, jq_berr := engine.build(jq_src, json.Spec.Jsonc)
+		testing.expect_value(t, jq_berr, tape.Error(nil))
+		defer tape.destroy(&jq_doc)
+
+		jq_ov: edit.Overlay
+		testing.expect(t, edit.init(&jq_ov, &jq_doc) == nil)
+		defer edit.destroy(&jq_ov)
+
+		val := eval_first_overlay(t, &h, &jq_ov, `{a: .a, b: (.b + 10)}`)
+		defer query.release(&h, val)
+
+		rres, rerr := engine.reconcile_edit(&h, &jq_ov, val)
+		testing.expect(t, rerr == nil)
+		defer edit.destroy_commit_result(&rres)
+		testing.expect_value(t, string(rres.bytes), "{\n  // keep spacing\n  \"a\": { \"x\" :  1 },\n  \"b\": 12\n}\n")
 	}
-	on_out :: proc(data: rawptr, v: query.Value, heap_ptr: ^query.Heap) -> bool {
-		c := (^Cap_Out)(data)
-		if !c.has {
-			c.val = v
-			c.has = true
-		} else {
-			query.release(heap_ptr, v)
-		}
-		return false
+
+	// 2. XML `reconcile_edit_document`: jq update reconciled onto overlay -> spliced document + bytes.
+	{
+		xdoc, xberr := engine.build(transmute([]u8)string(`<r><a>1</a><b>2</b></r>`), xml.Spec.Xml)
+		testing.expect_value(t, xberr, tape.Error(nil))
+		defer tape.destroy(&xdoc)
+		xov: edit.Overlay
+		testing.expect(t, edit.init(&xov, &xdoc) == nil)
+		defer edit.destroy(&xov)
+
+		xval := eval_first_overlay(t, &h, &xov, `.r.b = "9"`)
+		defer query.release(&h, xval)
+
+		xspliced, xres, xcerr := engine.reconcile_edit_document(&h, &xov, xval)
+		testing.expect(t, xcerr == nil)
+		defer tape.destroy(&xspliced)
+		defer edit.destroy_commit_result(&xres)
+		testing.expect_value(t, string(xres.bytes), `<r><a>1</a><b>9</b></r>`)
 	}
-	cap_out := Cap_Out{h = &h}
-	run: jq.Run
-	jq.run_init(&run, prog, &h, nil)
-	defer jq.run_destroy(&run)
-	end := jq.run_value(&run, inp, on_out, &cap_out)
-	testing.expect_value(t, end, jq.Run_End.Stopped)
-	testing.expect(t, cap_out.has)
-	defer query.release(&h, cap_out.val)
 
-	rres, rerr := engine.reconcile_edit(&h, &jq_ov, cap_out.val)
-	testing.expect(t, rerr == nil)
-	defer edit.destroy_commit_result(&rres)
-	testing.expect_value(t, string(rres.bytes), "{\n  // keep spacing\n  \"a\": { \"x\" :  1 },\n  \"b\": 12\n}\n")
+	// 3. `reconcile_edit_document` forwards `Yaml_Options` (`.Failsafe`).
+	{
+		yaml_src := transmute([]u8)string("a: 1\n")
+		fs_opts := tape.Yaml_Options{dialect = .Failsafe}
+		ydoc, yerr := engine.build(yaml_src, yaml.Spec.Yaml_1_2, {format = fs_opts})
+		testing.expect_value(t, yerr, tape.Error(nil))
+		defer tape.destroy(&ydoc)
 
-	// XML `reconcile_edit_document`: jq update reconciled onto overlay -> spliced document + bytes.
-	xdoc, xberr := engine.build(transmute([]u8)string(`<r><a>1</a><b>2</b></r>`), xml.Spec.Xml)
-	testing.expect_value(t, xberr, tape.Error(nil))
-	defer tape.destroy(&xdoc)
-	xov: edit.Overlay
-	testing.expect(t, edit.init(&xov, &xdoc) == nil)
-	defer edit.destroy(&xov)
-	xprog, xperrs := jq.compile(`.r.b = "9"`)
-	testing.expect_value(t, len(xperrs), 0)
-	defer jq.destroy_program(xprog)
-	xinp, xist := query.overlay_value(&h, &xov)
-	testing.expect_value(t, xist, query.Status.Ok)
-	xcap := Cap_Out{h = &h}
-	xrun: jq.Run
-	jq.run_init(&xrun, xprog, &h, nil)
-	defer jq.run_destroy(&xrun)
-	xend := jq.run_value(&xrun, xinp, on_out, &xcap)
-	testing.expect_value(t, xend, jq.Run_End.Stopped)
-	testing.expect(t, xcap.has)
-	defer query.release(&h, xcap.val)
-	xspliced, xres, xcerr := engine.reconcile_edit_document(&h, &xov, xcap.val)
-	testing.expect(t, xcerr == nil)
-	defer tape.destroy(&xspliced)
-	defer edit.destroy_commit_result(&xres)
-	testing.expect_value(t, string(xres.bytes), `<r><a>1</a><b>9</b></r>`)
+		yov: edit.Overlay
+		testing.expect_value(t, edit.init(&yov, &ydoc), edit.Error(nil))
+		defer edit.destroy(&yov)
+
+		yval := eval_first_overlay(t, &h, &yov, `.b = "01"`)
+		defer query.release(&h, yval)
+
+		sdoc, cres, cerr := engine.reconcile_edit_document(&h, &yov, yval, yaml.Spec.Yaml_1_2, {}, context.allocator, fs_opts)
+		testing.expect_value(t, cerr, edit.Error(nil))
+		defer tape.destroy(&sdoc)
+		defer edit.destroy_commit_result(&cres)
+
+		out_json, _, werr := engine.write(&sdoc, json.Spec.Json)
+		testing.expect_value(t, werr, write.Error(nil))
+		defer delete(out_json)
+		testing.expect_value(t, string(out_json), `{"a":"1","b":"01"}`)
+	}
 }
 
 @(test)
@@ -461,6 +607,62 @@ ops_edit_commit_toml_xml_cbor :: proc(t: ^testing.T) {
 	testing.expect(t, cc_err == nil)
 	defer edit.destroy_commit_result(&cc)
 	testing.expect(t, bytes.equal(cc.bytes, []u8{0xA1, 0x61, 'a', 0x09}))
+
+	// 5. YAML, HTML, and MessagePack `edit_commit_document` dispatch via engine.
+	{
+		ydoc, yerr := engine.build(transmute([]u8)string("# keep\na: 1\nb: old\n"), yaml.Spec.Yaml_1_2)
+		testing.expect_value(t, yerr, tape.Error(nil))
+		defer tape.destroy(&ydoc)
+		ov: edit.Overlay
+		testing.expect_value(t, engine.edit_init(&ov, &ydoc), edit.Error(nil))
+		defer edit.destroy(&ov)
+		st := [?]tape.Step{tape.Name("b")}
+		_, serr := edit.set_path(&ov, st[:], edit.val_string("new"))
+		testing.expect_value(t, serr, edit.Error(nil))
+		sdoc, cres, cerr := engine.edit_commit_document(&ov)
+		testing.expect_value(t, cerr, edit.Error(nil))
+		defer tape.destroy(&sdoc)
+		defer edit.destroy_commit_result(&cres)
+		testing.expect(t, strings.contains(string(cres.bytes), "# keep") && strings.contains(string(cres.bytes), "new"))
+	}
+	{
+		hdoc, herr := engine.build(transmute([]u8)string(`<html><body><p>old</p></body></html>`), html.Spec.Html)
+		testing.expect_value(t, herr, tape.Error(nil))
+		defer tape.destroy(&hdoc)
+		ov: edit.Overlay
+		testing.expect_value(t, engine.edit_init(&ov, &hdoc), edit.Error(nil))
+		defer edit.destroy(&ov)
+		st := [?]tape.Step{tape.Name("html"), tape.Name("body"), tape.Name("p")}
+		_, serr := edit.set_path(&ov, st[:], edit.val_string("updated"))
+		testing.expect_value(t, serr, edit.Error(nil))
+		sdoc, cres, cerr := engine.edit_commit_document(&ov, html.Spec.Html)
+		testing.expect_value(t, cerr, edit.Error(nil))
+		defer tape.destroy(&sdoc)
+		defer edit.destroy_commit_result(&cres)
+		testing.expect(t, strings.contains(string(cres.bytes), "<p>updated</p>"))
+	}
+	{
+		j_mp, _, jmp_err := engine.format(transmute([]u8)string(`{"a":1,"b":"hi"}`), json.Spec.Json, msgpack.Spec.Compact)
+		testing.expect_value(t, jmp_err, engine.Format_Error(nil))
+		defer delete(j_mp)
+		mdoc, merr := engine.build(j_mp, msgpack.Spec.Msgpack)
+		testing.expect_value(t, merr, tape.Error(nil))
+		defer tape.destroy(&mdoc)
+		ov: edit.Overlay
+		testing.expect_value(t, engine.edit_init(&ov, &mdoc), edit.Error(nil))
+		defer edit.destroy(&ov)
+		st := [?]tape.Step{tape.Name("a")}
+		_, serr := edit.set_path(&ov, st[:], edit.val_int(99))
+		testing.expect_value(t, serr, edit.Error(nil))
+		sdoc, cres, cerr := engine.edit_commit_document(&ov, msgpack.Spec.Compact)
+		testing.expect_value(t, cerr, edit.Error(nil))
+		defer tape.destroy(&sdoc)
+		defer edit.destroy_commit_result(&cres)
+		as_json, _, ferr := engine.write(&sdoc, json.Spec.Json)
+		testing.expect_value(t, ferr, write.Error(nil))
+		defer delete(as_json)
+		testing.expect_value(t, string(as_json), `{"a":99,"b":"hi"}`)
+	}
 }
 
 @(test)

@@ -260,3 +260,43 @@ deep_copies_read_no_document :: proc(t: ^testing.T) {
 	scalar := query.built_deep(h, query.int_value(3)) or_else query.NULL
 	testing.expect_value(t, as_json(h, scalar), "3")
 }
+
+// A custom `query.Collation` (e.g. SQL NULLS LAST) orders values consistently across `compare`, `sort_values`,
+// `sort_by`, and `extreme_by`.
+@(test)
+custom_collation_orders_nulls_last :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	x: Test_Heap
+	heap_start(&x)
+	defer heap_done(t, &x)
+	h := &x.h
+
+	SQL_ORDER :: query.Collation {
+		rank = {.False = 0, .True = 1, .Number = 2, .String = 3, .Array = 4, .Object = 5, .Null = 6, .Absent = 6},
+	}
+
+	c_null, _ := query.compare(h, query.int_value(9), query.NULL, SQL_ORDER)
+	testing.expect(t, c_null < 0)
+	c_abs, _ := query.compare(h, query.NULL, query.ABSENT, SQL_ORDER)
+	testing.expect_value(t, c_abs, 0)
+
+	vals := read_json(t, h, `[null, {"a":1}, [2], "z", 1, true, false, null]`)
+	defer query.release(h, vals)
+
+	sorted, st := query.sort_by(h, vals, query.ABSENT, SQL_ORDER)
+	testing.expect_value(t, st, query.Status.Ok)
+	defer query.release(h, sorted)
+	testing.expect_value(t, as_json(h, sorted), `[false,true,1,"z",[2],{"a":1},null,null]`)
+
+	desc_arr, _ := query.built(h, vals)
+	defer query.release(h, desc_arr)
+	testing.expect_value(t, query.sort_values(h, query.items_of(desc_arr), nil, SQL_ORDER, true), query.Status.Ok)
+	testing.expect_value(t, as_json(h, desc_arr), `[null,null,{"a":1},[2],"z",1,true,false]`)
+
+	lo, _ := query.extreme_by(h, vals, query.ABSENT, false, SQL_ORDER)
+	hi, _ := query.extreme_by(h, vals, query.ABSENT, true, SQL_ORDER)
+	defer query.release(h, lo)
+	defer query.release(h, hi)
+	testing.expect_value(t, as_json(h, lo), "false")
+	testing.expect_value(t, as_json(h, hi), "null")
+}

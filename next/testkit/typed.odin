@@ -167,7 +167,7 @@ value_of :: proc(doc: ^tape.Document, at: tape.Node_Index, dups: tape.Duplicates
 		return nil, .No_Arm
 	case .Number:
 		n, _ := tape.node_number(doc, at)
-		text := text_at(doc, at, allocator)
+		text := typed_text_at(doc, at, allocator)
 		switch n.kind {
 		case .Int:
 			// `-0` is the integer 0, and a float keeps its sign.
@@ -214,13 +214,42 @@ value_of :: proc(doc: ^tape.Document, at: tape.Node_Index, dups: tape.Duplicates
 		}
 		return table, .None
 	}
-	return text_at(doc, at, allocator), .None
+	return typed_text_at(doc, at, allocator), .None
 }
 
 // The text of scalar node `at` of `doc`, decoded.
 @(private)
-text_at :: proc(doc: ^tape.Document, at: tape.Node_Index, allocator: runtime.Allocator) -> string {
+typed_text_at :: proc(doc: ^tape.Document, at: tape.Node_Index, allocator: runtime.Allocator) -> string {
 	buf := make([]u8, max(tape.text_room(doc, at), 64), allocator)
 	s, _ := tape.node_text(doc, at, buf)
 	return strings.clone(s, allocator)
+}
+
+// Expects `e` to be a typed refusal `want` at byte `at`.
+expect_typed_refusal :: proc(t: ^testing.T, e: tape.Error, want: typed.Typed_Refusal, at: u64, loc := #caller_location) -> bool {
+	f, is_fault := e.(tape.Fault)
+	if !testing.expectf(t, is_fault && f.kind == .Refused, "got %v, wanted a refusal %v", e, want, loc = loc) {
+		return false
+	}
+	testing.expect_value(t, typed.Typed_Refusal(f.detail), want, loc)
+	testing.expect_value(t, f.at, at, loc)
+	return true
+}
+
+// Expects `steps` to be the path `want`, a name for a string and an index for an int.
+expect_path :: proc(t: ^testing.T, steps: []tape.Step, want: []union {
+		int,
+		string,
+	}, loc := #caller_location) {
+	if !testing.expect_value(t, len(steps), len(want), loc) {
+		return
+	}
+	for w, i in want {
+		switch v in w {
+		case int:
+			testing.expect_value(t, steps[i], tape.Step(tape.Index(v)), loc)
+		case string:
+			testing.expect_value(t, steps[i], tape.Step(tape.Name(v)), loc)
+		}
+	}
 }

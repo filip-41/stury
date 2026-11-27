@@ -6,34 +6,7 @@ import "stury:cbor"
 import "stury:lib/core/tape"
 import "stury:testkit"
 
-// Helpers the CBOR tests share: hex input and a neutral dump of a document.
-
-// The bytes of hex text, ignoring spaces, in the temporary allocator.
-hex :: proc(text: string) -> []u8 {
-	out := make([dynamic]u8, 0, len(text) / 2, context.temp_allocator)
-	high := -1
-	for c in transmute([]u8)text {
-		v := -1
-		switch c {
-		case '0' ..= '9':
-			v = int(c - '0')
-		case 'a' ..= 'f':
-			v = int(c - 'a' + 10)
-		case 'A' ..= 'F':
-			v = int(c - 'A' + 10)
-		}
-		if v < 0 {
-			continue
-		}
-		if high < 0 {
-			high = v
-		} else {
-			append(&out, u8(high << 4 | v))
-			high = -1
-		}
-	}
-	return out[:]
-}
+// Helpers the CBOR tests share: a neutral dump of a document.
 
 // The text of node `at` of `doc`, read with a buffer `text_room` sizes.
 text_of :: proc(doc: ^tape.Document, at: tape.Node_Index) -> (string, bool) {

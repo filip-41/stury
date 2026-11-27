@@ -151,6 +151,64 @@ uuid_text :: proc(h: ^Heap, random: [16]u8, unix_ms := i64(-1)) -> (res: Value, 
 	return v, .Ok
 }
 
+// ---- Shared Merkle-Damgard streaming update & padding
+
+@(private = "file")
+digest_update :: proc "contextless" (s: ^$S, data: []u8, $BLOCK: int, $compress: proc "contextless" (s: ^S, blk: []u8)) {
+	s.total += u64(len(data))
+	p := data
+	if s.n > 0 {
+		take := min(len(p), BLOCK - s.n)
+		copy(s.buf[s.n:], p[:take])
+		s.n += take
+		p = p[take:]
+		if s.n == BLOCK {
+			compress(s, s.buf[:])
+			s.n = 0
+		}
+	}
+	for len(p) >= BLOCK {
+		compress(s, p[:BLOCK])
+		p = p[BLOCK:]
+	}
+	if len(p) > 0 {
+		copy(s.buf[:], p)
+		s.n = len(p)
+	}
+}
+
+@(private = "file")
+digest_final :: proc "contextless" (s: ^$S, out: []u8, $BLOCK, $PAD_END: int, $ORDER: endian.Byte_Order, $compress: proc "contextless" (s: ^S, blk: []u8)) {
+	s.buf[s.n] = 0x80
+	s.n += 1
+	if s.n > PAD_END {
+		for i in s.n ..< BLOCK {
+			s.buf[i] = 0
+		}
+		compress(s, s.buf[:])
+		s.n = 0
+	}
+	for i in s.n ..< PAD_END {
+		s.buf[i] = 0
+	}
+	when BLOCK == 128 {
+		endian.put_u64(s.buf[112:], ORDER, s.total >> 61)
+		endian.put_u64(s.buf[120:], ORDER, s.total << 3)
+	} else {
+		endian.put_u64(s.buf[56:], ORDER, s.total * 8)
+	}
+	compress(s, s.buf[:])
+	when size_of(s.h[0]) == 8 {
+		for i in 0 ..< len(s.h) {
+			endian.put_u64(out[i * 8:], ORDER, s.h[i])
+		}
+	} else {
+		for i in 0 ..< len(s.h) {
+			endian.put_u32(out[i * 4:], ORDER, s.h[i])
+		}
+	}
+}
+
 // ---- MD5 (RFC 1321)
 
 @(private = "file")
@@ -219,47 +277,12 @@ md5_block :: proc "contextless" (s: ^Md5_State, blk: []u8) #no_bounds_check {
 
 @(private = "file")
 md5_update :: proc "contextless" (s: ^Md5_State, data: []u8) {
-	s.total += u64(len(data))
-	p := data
-	if s.n > 0 {
-		take := min(len(p), 64 - s.n)
-		copy(s.buf[s.n:], p[:take])
-		s.n += take
-		p = p[take:]
-		if s.n == 64 {
-			md5_block(s, s.buf[:])
-			s.n = 0
-		}
-	}
-	for len(p) >= 64 {
-		md5_block(s, p[:64])
-		p = p[64:]
-	}
-	if len(p) > 0 {
-		copy(s.buf[:], p)
-		s.n = len(p)
-	}
+	digest_update(s, data, 64, md5_block)
 }
 
 @(private = "file")
 md5_final :: proc "contextless" (s: ^Md5_State, out: []u8) {
-	s.buf[s.n] = 0x80
-	s.n += 1
-	if s.n > 56 {
-		for i in s.n ..< 64 {
-			s.buf[i] = 0
-		}
-		md5_block(s, s.buf[:])
-		s.n = 0
-	}
-	for i in s.n ..< 56 {
-		s.buf[i] = 0
-	}
-	endian.put_u64(s.buf[56:], .Little, s.total * 8)
-	md5_block(s, s.buf[:])
-	for i in 0 ..< 4 {
-		endian.put_u32(out[i * 4:], .Little, s.h[i])
-	}
+	digest_final(s, out, 64, 56, .Little, md5_block)
 }
 
 // ---- SHA-1 (FIPS 180-4)
@@ -315,47 +338,12 @@ sha1_block :: proc "contextless" (s: ^Sha1_State, blk: []u8) #no_bounds_check {
 
 @(private = "file")
 sha1_update :: proc "contextless" (s: ^Sha1_State, data: []u8) {
-	s.total += u64(len(data))
-	p := data
-	if s.n > 0 {
-		take := min(len(p), 64 - s.n)
-		copy(s.buf[s.n:], p[:take])
-		s.n += take
-		p = p[take:]
-		if s.n == 64 {
-			sha1_block(s, s.buf[:])
-			s.n = 0
-		}
-	}
-	for len(p) >= 64 {
-		sha1_block(s, p[:64])
-		p = p[64:]
-	}
-	if len(p) > 0 {
-		copy(s.buf[:], p)
-		s.n = len(p)
-	}
+	digest_update(s, data, 64, sha1_block)
 }
 
 @(private = "file")
 sha1_final :: proc "contextless" (s: ^Sha1_State, out: []u8) {
-	s.buf[s.n] = 0x80
-	s.n += 1
-	if s.n > 56 {
-		for i in s.n ..< 64 {
-			s.buf[i] = 0
-		}
-		sha1_block(s, s.buf[:])
-		s.n = 0
-	}
-	for i in s.n ..< 56 {
-		s.buf[i] = 0
-	}
-	endian.put_u64(s.buf[56:], .Big, s.total * 8)
-	sha1_block(s, s.buf[:])
-	for i in 0 ..< 5 {
-		endian.put_u32(out[i * 4:], .Big, s.h[i])
-	}
+	digest_final(s, out, 64, 56, .Big, sha1_block)
 }
 
 // ---- SHA-256 (FIPS 180-4)
@@ -435,47 +423,12 @@ sha256_block :: proc "contextless" (s: ^Sha256_State, blk: []u8) #no_bounds_chec
 
 @(private = "file")
 sha256_update :: proc "contextless" (s: ^Sha256_State, data: []u8) {
-	s.total += u64(len(data))
-	p := data
-	if s.n > 0 {
-		take := min(len(p), 64 - s.n)
-		copy(s.buf[s.n:], p[:take])
-		s.n += take
-		p = p[take:]
-		if s.n == 64 {
-			sha256_block(s, s.buf[:])
-			s.n = 0
-		}
-	}
-	for len(p) >= 64 {
-		sha256_block(s, p[:64])
-		p = p[64:]
-	}
-	if len(p) > 0 {
-		copy(s.buf[:], p)
-		s.n = len(p)
-	}
+	digest_update(s, data, 64, sha256_block)
 }
 
 @(private = "file")
 sha256_final :: proc "contextless" (s: ^Sha256_State, out: []u8) {
-	s.buf[s.n] = 0x80
-	s.n += 1
-	if s.n > 56 {
-		for i in s.n ..< 64 {
-			s.buf[i] = 0
-		}
-		sha256_block(s, s.buf[:])
-		s.n = 0
-	}
-	for i in s.n ..< 56 {
-		s.buf[i] = 0
-	}
-	endian.put_u64(s.buf[56:], .Big, s.total * 8)
-	sha256_block(s, s.buf[:])
-	for i in 0 ..< 8 {
-		endian.put_u32(out[i * 4:], .Big, s.h[i])
-	}
+	digest_final(s, out, 64, 56, .Big, sha256_block)
 }
 
 // ---- SHA-512 (FIPS 180-4)
@@ -562,46 +515,10 @@ sha512_block :: proc "contextless" (s: ^Sha512_State, blk: []u8) #no_bounds_chec
 
 @(private = "file")
 sha512_update :: proc "contextless" (s: ^Sha512_State, data: []u8) {
-	s.total += u64(len(data))
-	p := data
-	if s.n > 0 {
-		take := min(len(p), 128 - s.n)
-		copy(s.buf[s.n:], p[:take])
-		s.n += take
-		p = p[take:]
-		if s.n == 128 {
-			sha512_block(s, s.buf[:])
-			s.n = 0
-		}
-	}
-	for len(p) >= 128 {
-		sha512_block(s, p[:128])
-		p = p[128:]
-	}
-	if len(p) > 0 {
-		copy(s.buf[:], p)
-		s.n = len(p)
-	}
+	digest_update(s, data, 128, sha512_block)
 }
 
 @(private = "file")
 sha512_final :: proc "contextless" (s: ^Sha512_State, out: []u8) {
-	s.buf[s.n] = 0x80
-	s.n += 1
-	if s.n > 112 {
-		for i in s.n ..< 128 {
-			s.buf[i] = 0
-		}
-		sha512_block(s, s.buf[:])
-		s.n = 0
-	}
-	for i in s.n ..< 112 {
-		s.buf[i] = 0
-	}
-	endian.put_u64(s.buf[112:], .Big, s.total >> 61)
-	endian.put_u64(s.buf[120:], .Big, s.total << 3)
-	sha512_block(s, s.buf[:])
-	for i in 0 ..< 8 {
-		endian.put_u64(out[i * 8:], .Big, s.h[i])
-	}
+	digest_final(s, out, 128, 112, .Big, sha512_block)
 }

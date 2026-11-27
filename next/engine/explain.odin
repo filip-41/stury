@@ -3,6 +3,8 @@ package engine
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
+import "stury:json"
+import "stury:lib/core/tape"
 import "stury:lib/query"
 
 // Human-readable `--explain` formatting for `Decision` and its `query.Plan`.
@@ -164,19 +166,9 @@ destroy_plan_pin :: proc(pin: ^Plan_Pin, allocator := context.allocator) {
 // Writes the canonical deterministic JSON representation of `pin` into `b` (WASM-clean, no `core:os`).
 explain_pin_json_to :: proc(b: ^strings.Builder, decision: ^Decision) {
 	pin := plan_pin_of(decision)
-	strings.write_string(b, `{"route":`)
-	write_pin_json_str(b, pin.route)
-	strings.write_string(b, `,"framing":`)
-	write_pin_json_str(b, pin.framing)
-	strings.write_string(b, `,"parallel":`)
-	strings.write_string(b, "true" if pin.parallel else "false")
-	strings.write_string(b, `,"hint":`)
-	write_pin_json_str(b, pin.hint)
-	strings.write_string(b, `,"demand_kind":`)
-	write_pin_json_str(b, pin.demand_kind)
-	strings.write_string(b, `,"format":`)
-	write_pin_json_str(b, pin.format)
-	strings.write_string(b, "}\n")
+	alloc := b.buf.allocator if b.buf.allocator.procedure != nil else context.allocator
+	_ = json.marshal_to(strings.to_writer(b), &pin, allocator = alloc)
+	strings.write_byte(b, '\n')
 }
 
 // Renders the canonical deterministic JSON plan pin as a newly allocated string owned by the caller.
@@ -192,11 +184,15 @@ explain_pin_json :: proc(decision: ^Decision, allocator := context.allocator) ->
 // Free the returned `Plan_Pin` with `destroy_plan_pin(pin, allocator)` when `ok` is true.
 @(require_results)
 parse_plan_pin_json :: proc(src: string, allocator := context.allocator) -> (pin: Plan_Pin, ok: bool) {
-	p := Pin_Json_Parser{src = src}
-	pin_skip_ws(&p)
-	if !pin_take(&p, '{') {
+	doc, berr := json.build(transmute([]u8)src, .Json, {dups = .Refuse}, allocator)
+	if berr != nil {
 		return {}, false
 	}
+	defer tape.destroy(&doc)
+	if len(doc.nodes) == 0 || doc.nodes[tape.ROOT].kind != .Object {
+		return {}, false
+	}
+
 	Field_Bit :: enum u8 {
 		Route,
 		Framing,
@@ -212,100 +208,55 @@ parse_plan_pin_json :: proc(src: string, allocator := context.allocator) -> (pin
 		destroy_plan_pin(&res, allocator)
 	}
 
-	pin_skip_ws(&p)
-	if pin_take(&p, '}') {
-		return {}, false
+	read_str :: proc(doc: ^tape.Document, v: tape.Node_Index, allocator: runtime.Allocator) -> (string, bool) {
+		node := doc.nodes[v]
+		if node.kind != .String {
+			return "", false
+		}
+		return tape.node_text_read(doc.format, doc.src, node, allocator)
 	}
-	for {
-		key, kok := pin_read_string(&p, allocator)
+
+	end := tape.node_after(&doc, tape.ROOT)
+	kbuf: [32]u8
+	for k := tape.ROOT + 1; k < end; k = tape.node_after(&doc, k + 1) {
+		v := k + 1
+		key, kok := tape.node_text(&doc, k, kbuf[:])
 		if !kok {
 			return {}, false
 		}
-		defer delete(key, allocator)
-		pin_skip_ws(&p)
-		if !pin_take(&p, ':') {
-			return {}, false
-		}
-		pin_skip_ws(&p)
-
 		switch key {
 		case "route":
-			if .Route in seen {
-				return {}, false
-			}
-			v, vok := pin_read_string(&p, allocator)
-			if !vok {
-				return {}, false
-			}
-			res.route = v
+			if .Route in seen { return {}, false }
+			res.route = read_str(&doc, v, allocator) or_return
 			seen += {.Route}
 		case "framing":
-			if .Framing in seen {
-				return {}, false
-			}
-			v, vok := pin_read_string(&p, allocator)
-			if !vok {
-				return {}, false
-			}
-			res.framing = v
+			if .Framing in seen { return {}, false }
+			res.framing = read_str(&doc, v, allocator) or_return
 			seen += {.Framing}
 		case "parallel":
-			if .Parallel in seen {
-				return {}, false
-			}
-			bval, bok := pin_read_bool(&p)
-			if !bok {
-				return {}, false
-			}
-			res.parallel = bval
+			if .Parallel in seen { return {}, false }
+			vk := doc.nodes[v].kind
+			if vk != .True && vk != .False { return {}, false }
+			res.parallel = vk == .True
 			seen += {.Parallel}
 		case "hint":
-			if .Hint in seen {
-				return {}, false
-			}
-			v, vok := pin_read_string(&p, allocator)
-			if !vok {
-				return {}, false
-			}
-			res.hint = v
+			if .Hint in seen { return {}, false }
+			res.hint = read_str(&doc, v, allocator) or_return
 			seen += {.Hint}
 		case "demand_kind":
-			if .Demand_Kind in seen {
-				return {}, false
-			}
-			v, vok := pin_read_string(&p, allocator)
-			if !vok {
-				return {}, false
-			}
-			res.demand_kind = v
+			if .Demand_Kind in seen { return {}, false }
+			res.demand_kind = read_str(&doc, v, allocator) or_return
 			seen += {.Demand_Kind}
 		case "format":
-			if .Format in seen {
-				return {}, false
-			}
-			v, vok := pin_read_string(&p, allocator)
-			if !vok {
-				return {}, false
-			}
-			res.format = v
+			if .Format in seen { return {}, false }
+			res.format = read_str(&doc, v, allocator) or_return
 			seen += {.Format}
 		case:
 			return {}, false
 		}
-
-		pin_skip_ws(&p)
-		if pin_take(&p, ',') {
-			pin_skip_ws(&p)
-			continue
-		}
-		if pin_take(&p, '}') {
-			break
-		}
-		return {}, false
 	}
 
-	pin_skip_ws(&p)
-	if p.pos != len(p.src) || seen != {.Route, .Framing, .Parallel, .Hint, .Demand_Kind, .Format} {
+	if seen != {.Route, .Framing, .Parallel, .Hint, .Demand_Kind, .Format} {
 		return {}, false
 	}
 	ok_parse = true
@@ -348,202 +299,4 @@ compare_plan_pin :: proc(expected, actual: Plan_Pin, diff_out: ^strings.Builder 
 	check_str(diff_out, &matched, "demand_kind", expected.demand_kind, actual.demand_kind)
 	check_str(diff_out, &matched, "format", expected.format, actual.format)
 	return matched
-}
-
-@(private = "file")
-write_pin_json_str :: proc(b: ^strings.Builder, s: string) {
-	strings.write_byte(b, '"')
-	for c in transmute([]u8)s {
-		switch c {
-		case '"':
-			strings.write_string(b, `\"`)
-		case '\\':
-			strings.write_string(b, `\\`)
-		case '\n':
-			strings.write_string(b, `\n`)
-		case '\r':
-			strings.write_string(b, `\r`)
-		case '\t':
-			strings.write_string(b, `\t`)
-		case:
-			if c < 0x20 {
-				fmt.sbprintf(b, "\\u%04x", c)
-			} else {
-				strings.write_byte(b, c)
-			}
-		}
-	}
-	strings.write_byte(b, '"')
-}
-
-@(private = "file")
-Pin_Json_Parser :: struct {
-	src: string,
-	pos: int,
-}
-
-@(private = "file")
-pin_skip_ws :: proc "contextless" (p: ^Pin_Json_Parser) {
-	for p.pos < len(p.src) {
-		switch p.src[p.pos] {
-		case ' ', '\t', '\r', '\n':
-			p.pos += 1
-		case:
-			return
-		}
-	}
-}
-
-@(private = "file")
-pin_take :: proc "contextless" (p: ^Pin_Json_Parser, ch: u8) -> bool {
-	if p.pos < len(p.src) && p.src[p.pos] == ch {
-		p.pos += 1
-		return true
-	}
-	return false
-}
-
-@(private = "file")
-pin_read_bool :: proc "contextless" (p: ^Pin_Json_Parser) -> (val: bool, ok: bool) {
-	rest := p.src[p.pos:]
-	if len(rest) >= 4 && rest[:4] == "true" {
-		p.pos += 4
-		return true, true
-	}
-	if len(rest) >= 5 && rest[:5] == "false" {
-		p.pos += 5
-		return false, true
-	}
-	return false, false
-}
-
-@(private = "file")
-pin_read_hex4 :: proc "contextless" (p: ^Pin_Json_Parser) -> (val: u16, ok: bool) {
-	if p.pos + 4 > len(p.src) {
-		return 0, false
-	}
-	v: u16
-	for k in 0 ..< 4 {
-		c := p.src[p.pos + k]
-		d: u16
-		switch c {
-		case '0' ..= '9':
-			d = u16(c - '0')
-		case 'a' ..= 'f':
-			d = u16(c - 'a' + 10)
-		case 'A' ..= 'F':
-			d = u16(c - 'A' + 10)
-		case:
-			return 0, false
-		}
-		v = (v << 4) | d
-	}
-	p.pos += 4
-	return v, true
-}
-
-@(private = "file")
-pin_encode_rune :: proc "contextless" (r: rune) -> (enc: [4]u8, n: int) {
-	u := u32(r)
-	switch {
-	case u < 0x80:
-		enc[0] = u8(u)
-		return enc, 1
-	case u < 0x800:
-		enc[0] = 0xC0 | u8(u >> 6)
-		enc[1] = 0x80 | u8(u & 0x3F)
-		return enc, 2
-	case u < 0x10000:
-		enc[0] = 0xE0 | u8(u >> 12)
-		enc[1] = 0x80 | u8((u >> 6) & 0x3F)
-		enc[2] = 0x80 | u8(u & 0x3F)
-		return enc, 3
-	case:
-		enc[0] = 0xF0 | u8(u >> 18)
-		enc[1] = 0x80 | u8((u >> 12) & 0x3F)
-		enc[2] = 0x80 | u8((u >> 6) & 0x3F)
-		enc[3] = 0x80 | u8(u & 0x3F)
-		return enc, 4
-	}
-}
-
-@(private = "file")
-pin_read_string :: proc(p: ^Pin_Json_Parser, allocator: runtime.Allocator) -> (s: string, ok: bool) {
-	if !pin_take(p, '"') {
-		return "", false
-	}
-	buf, berr := make([dynamic]u8, 0, 32, allocator)
-	if berr != nil {
-		return "", false
-	}
-	for p.pos < len(p.src) {
-		c := p.src[p.pos]
-		p.pos += 1
-		if c == '"' {
-			return string(buf[:]), true
-		}
-		if c < 0x20 {
-			delete(buf)
-			return "", false
-		}
-		if c != '\\' {
-			if _, aerr := append(&buf, c); aerr != nil {
-				delete(buf)
-				return "", false
-			}
-			continue
-		}
-		if p.pos >= len(p.src) {
-			delete(buf)
-			return "", false
-		}
-		esc := p.src[p.pos]
-		p.pos += 1
-		werr: runtime.Allocator_Error
-		switch esc {
-		case '"', '\\', '/':
-			_, werr = append(&buf, esc)
-		case 'b':
-			_, werr = append(&buf, '\b')
-		case 'f':
-			_, werr = append(&buf, '\f')
-		case 'n':
-			_, werr = append(&buf, '\n')
-		case 'r':
-			_, werr = append(&buf, '\r')
-		case 't':
-			_, werr = append(&buf, '\t')
-		case 'u':
-			hi, ok_hi := pin_read_hex4(p)
-			if !ok_hi || (0xDC00 <= hi && hi <= 0xDFFF) {
-				delete(buf)
-				return "", false
-			}
-			r := rune(hi)
-			if 0xD800 <= hi && hi <= 0xDBFF {
-				if p.pos + 2 > len(p.src) || p.src[p.pos] != '\\' || p.src[p.pos + 1] != 'u' {
-					delete(buf)
-					return "", false
-				}
-				p.pos += 2
-				lo, ok_lo := pin_read_hex4(p)
-				if !ok_lo || lo < 0xDC00 || lo > 0xDFFF {
-					delete(buf)
-					return "", false
-				}
-				r = rune(0x10000 + ((u32(hi - 0xD800) << 10) | u32(lo - 0xDC00)))
-			}
-			enc, n := pin_encode_rune(r)
-			_, werr = append(&buf, ..enc[:n])
-		case:
-			delete(buf)
-			return "", false
-		}
-		if werr != nil {
-			delete(buf)
-			return "", false
-		}
-	}
-	delete(buf)
-	return "", false
 }

@@ -25,41 +25,6 @@ bare_walk_of :: proc($S: json.Spec) -> testkit.Bare_Walk {
 }
 
 @(private = "file")
-bare_walk_in_pieces_of :: proc($S: json.Spec) -> testkit.Bare_Walk {
-	return proc(src: []u8, opts: tape.Options, h: ^testkit.Probe_Bare, regs: ^hook.Regs) -> (u64, tape.Error) {
-		p := tape.Pieces{allocator = context.allocator}
-		defer tape.destroy(&p)
-		o := opts
-		o.pieces = &p
-		at, err, _ := json.walk(src[:len(src) / 2], S, o, h, regs, testkit.bare_hook)
-		if err != nil || !p.more {
-			return at, err
-		}
-		p.from, p.last = p.keep, true
-		at, err, _ = json.walk(src[p.keep:], S, o, h, regs, testkit.bare_hook)
-		return at, err
-	}
-}
-
-// The walk of a text in two pieces, cut in its middle, the second window from the first read's `keep`.
-@(private = "file")
-walk_in_pieces_of :: proc($S: json.Spec) -> testkit.Probe_Walk {
-	return proc(src: []u8, opts: tape.Options, h: ^testkit.Probe, regs: ^hook.Regs) -> (u64, tape.Error) {
-		p := tape.Pieces{allocator = context.allocator}
-		defer tape.destroy(&p)
-		o := opts
-		o.pieces = &p
-		at, err, _ := json.walk(src[:len(src) / 2], S, o, h, regs, testkit.probe_hook)
-		if err != nil || !p.more {
-			return at, err
-		}
-		p.from, p.last = p.keep, true
-		at, err, _ = json.walk(src[p.keep:], S, o, h, regs, testkit.probe_hook)
-		return at, err
-	}
-}
-
-@(private = "file")
 PROTOCOL_TEXTS := [?]string{
 	`1`,
 	`[]`,
@@ -83,9 +48,9 @@ COMMENT_TEXTS := [?]string{
 json_walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	testkit.hook_protocol(t, walk_of(.Json), PROTOCOL_TEXTS[:])
-	testkit.hook_protocol(t, walk_in_pieces_of(.Json), PROTOCOL_TEXTS[:])
-	testkit.hook_protocol(t, walk_in_pieces_of(.Jsonc), COMMENT_TEXTS[:])
-	testkit.hook_protocol(t, walk_in_pieces_of(.Json5), COMMENT_TEXTS[:])
+	testkit.hook_protocol_in_pieces(t, walk_of(.Json), PROTOCOL_TEXTS[:])
+	testkit.hook_protocol_in_pieces(t, walk_of(.Jsonc), COMMENT_TEXTS[:])
+	testkit.hook_protocol_in_pieces(t, walk_of(.Json5), COMMENT_TEXTS[:])
 	testkit.hook_protocol(t, walk_of(.Jsonc), PROTOCOL_TEXTS[:])
 	testkit.hook_protocol(t, walk_of(.Jsonc), COMMENT_TEXTS[:])
 	testkit.hook_protocol(t, walk_of(.Json5), PROTOCOL_TEXTS[:])
@@ -97,9 +62,9 @@ json_walks_keep_the_hook_protocol :: proc(t: ^testing.T) {
 json_walks_check_the_inner_room :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	testkit.hook_inner_rooms(t, bare_walk_of(.Json), PROTOCOL_TEXTS[:])
-	testkit.hook_inner_rooms(t, bare_walk_in_pieces_of(.Json), PROTOCOL_TEXTS[:])
-	testkit.hook_inner_rooms(t, bare_walk_in_pieces_of(.Jsonc), COMMENT_TEXTS[:])
-	testkit.hook_inner_rooms(t, bare_walk_in_pieces_of(.Json5), COMMENT_TEXTS[:])
+	testkit.hook_inner_rooms_in_pieces(t, bare_walk_of(.Json), PROTOCOL_TEXTS[:])
+	testkit.hook_inner_rooms_in_pieces(t, bare_walk_of(.Jsonc), COMMENT_TEXTS[:])
+	testkit.hook_inner_rooms_in_pieces(t, bare_walk_of(.Json5), COMMENT_TEXTS[:])
 	testkit.hook_inner_rooms(t, bare_walk_of(.Jsonc), COMMENT_TEXTS[:])
 	testkit.hook_inner_rooms(t, bare_walk_of(.Json5), COMMENT_TEXTS[:])
 }
@@ -117,31 +82,7 @@ json_walk_cancels_through_a_flag :: proc(t: ^testing.T) {
 reads_keep_the_steps_budget :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	src := transmute([]u8)string(`{"a":[{"b":1},{"b":2}],"c":{"d":[3]},"e":4}`)
-	CONTAINERS :: 6
-	path := []tape.Step{tape.Name("e")}
-	paths := [][]tape.Step{path}
-	for steps in u64(1) ..= CONTAINERS + 1 {
-		opts := json.Options{budget = {steps = steps}}
-		over := steps < CONTAINERS
-		doc, err := json.build(src, .Json, opts)
-		x, exceeded := err.(tape.Exceeded)
-		testing.expectf(t, over == (exceeded && x.kind == .Steps), "build, %d steps: %v", steps, err)
-		tape.destroy(&doc)
-		demand, derr := tape.demand_of(paths)
-		testing.expect(t, derr == nil)
-		part, serr := json.scan(src, &demand, .Json, {}, opts)
-		x, exceeded = serr.(tape.Exceeded)
-		testing.expectf(t, over == (exceeded && x.kind == .Steps), "scan, %d steps: %v", steps, serr)
-		tape.destroy(&part)
-		tape.destroy_demand(&demand)
-		answer, ferr := json.find(src, path, .Json, {}, opts)
-		x, exceeded = ferr.(tape.Exceeded)
-		testing.expectf(t, over == (exceeded && x.kind == .Steps), "find, %d steps: %v", steps, ferr)
-		testing.expect(t, over || answer.lo == 41)
-		verr := json.validate(src, .Json, opts)
-		x, exceeded = verr.(tape.Exceeded)
-		testing.expectf(t, over == (exceeded && x.kind == .Steps), "validate, %d steps: %v", steps, verr)
-	}
+	testkit.steps_budget_agree(t, json.reads(.Json), json.as(.Json), src, {tape.Name("e")}, 6, 41)
 }
 
 // The levels a read grows past its frame are allocated in the caller's context.

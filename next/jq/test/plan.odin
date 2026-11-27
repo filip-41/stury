@@ -17,8 +17,11 @@ analyze_src :: proc(t: ^testing.T, src: string, opts := jq.Analyze_Options{}) ->
 	return prog, jq.analyze(prog, opts)
 }
 
-@(private = "file")
+@(private)
 has_path :: proc(s: ^query.Source_Demand, want_steps: []tape.Step, want_grain := tape.Grain.Whole, want_limit := 0) -> bool {
+	if s == nil {
+		return false
+	}
 	for p in s.paths {
 		if p.grain == want_grain && p.limit == want_limit && query.steps_equal(p.steps, want_steps) {
 			return true

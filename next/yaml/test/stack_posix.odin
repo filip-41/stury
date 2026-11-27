@@ -41,33 +41,25 @@ nested_block_seq :: proc(levels: int, leaf: string) -> []u8 {
 @(private = "file")
 read_deep_flow :: proc(read: int, text: []u8) -> bool {
 	opts := yaml.Options{budget = {depth = 200_000}}
-	if read >= 6 {
-		n := (len(text) - 5) / 2
-		at := make([]tape.Step, n, context.temp_allocator)
-		at[0] = tape.Name("a")
-		for k in 1 ..< n {
-			at[k] = tape.Index(0)
+	if read < testkit.DEEP_CORE_READS {
+		at: []tape.Step
+		if read == 6 {
+			n := (len(text) - 5) / 2
+			at = make([]tape.Step, n, context.temp_allocator)
+			at[0] = tape.Name("a")
+			for k in 1 ..< n {
+				at[k] = tape.Index(0)
+			}
 		}
-		paths := [][]tape.Step{{tape.Descend{}, tape.Index(0)}, {tape.Descend{}, tape.Name("a")}}
-		return testkit.deep_read(read - 6, yaml.reads(.Yaml_1_2), yaml.as(.Yaml_1_2), text, opts, paths, .Elements, at)
+		return testkit.deep_core_read(
+			read, yaml.reads(.Yaml_1_2), yaml.as(.Yaml_1_2), text, opts,
+			{tape.Name("a")}, {{tape.Name("a")}},
+			{{tape.Descend{}, tape.Index(0)}, {tape.Descend{}, tape.Name("a")}},
+			.Elements, at,
+		)
 	}
-	switch read {
+	switch read - testkit.DEEP_CORE_READS {
 	case 0:
-		return yaml.validate(text, .Yaml_1_2, opts) == nil
-	case 1:
-		doc, err := yaml.build(text, .Yaml_1_2, opts)
-		yaml.destroy(&doc)
-		return err == nil
-	case 2:
-		ans, err := yaml.find(text, {tape.Name("a")}, .Yaml_1_2, {}, opts)
-		return err == nil && ans.outcome == .Found
-	case 3:
-		d, _ := yaml.demand_of({{tape.Name("a")}})
-		s, err := yaml.scan(text, &d, .Yaml_1_2, {}, opts)
-		yaml.destroy(&s)
-		yaml.destroy(&d)
-		return err == nil
-	case 5:
 		v: testkit.Value_Table
 		err := yaml.unmarshal(text, &v, .Yaml_1_2, {}, opts)
 		testkit.value_free(v)
@@ -141,7 +133,7 @@ read_deep_block_and_ops :: proc(read: int, text: []u8) -> bool {
 reads_nest_100000_levels_in_one_mib :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	text := nested_flow_arr(100_000, "7")
-	testkit.expect_reads_on_thread(t, 1 << 20, 6 + testkit.DEEP_READS, text, "yaml flow 100k", read_deep_flow)
+	testkit.expect_reads_on_thread(t, 1 << 20, testkit.DEEP_CORE_READS + 2, text, "yaml flow 100k", read_deep_flow)
 	free_all(context.temp_allocator)
 }
 

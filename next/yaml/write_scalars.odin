@@ -105,16 +105,6 @@ printable :: #force_inline proc "contextless" (r: rune) -> bool {
 }
 
 @(private)
-printable_ascii :: proc "contextless" (s: string) -> bool #no_bounds_check {
-	for c in transmute([]u8)s {
-		if c < 0x20 || c > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
-@(private)
 facts_of_text :: proc "contextless" (s: string, ascii: bool) -> (f: Text_Facts) #no_bounds_check {
 	for i := 0; i < len(s); {
 		c := s[i]

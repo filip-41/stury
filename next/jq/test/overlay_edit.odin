@@ -13,24 +13,39 @@ import "stury:testkit"
 import "stury:toml"
 import "stury:xml"
 
-@(test)
-jq_fact_writes_jsonc :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	alloc := runtime.heap_allocator()
-	src := transmute([]u8)string("{\n  // old note\n  \"a\": 1,\n  \"b\": 2\n}\n")
-	doc, err := json.build(src, .Jsonc, {}, alloc)
-	testing.expect(t, err == nil)
+@(private = "file")
+Overlay_Format :: enum {
+	Json,
+	Jsonc,
+	Xml,
+	Toml,
+	Cbor,
+}
 
-	prog, perrs := jq.compile(`.a = 42 | .a.@comment = "new note" | .b.@comment_inline = "side"`)
+@(private = "file")
+expect_jq_overlay_commit :: proc(t: ^testing.T, kind: Overlay_Format, src: []u8, expr: string, want: []u8, loc := #caller_location) {
+	alloc := runtime.heap_allocator()
+	doc: tape.Document
+	err: tape.Error
+	switch kind {
+	case .Json:  doc, err = json.build(src, .Json, {}, alloc)
+	case .Jsonc: doc, err = json.build(src, .Jsonc, {}, alloc)
+	case .Xml:   doc, err = xml.build(src, .Xml, {}, alloc)
+	case .Toml:  doc, err = toml.build(src, .Toml_1_0, {}, alloc)
+	case .Cbor:  doc, err = cbor.build(src, .Cbor, {}, alloc)
+	}
+	testing.expectf(t, err == nil, "build %v failed: %v", kind, err, loc = loc)
+
+	prog, perrs := jq.compile(expr)
 	defer jq.destroy_program(prog)
-	testing.expect_value(t, len(perrs), 0)
+	testing.expect_value(t, len(perrs), 0, loc = loc)
 
 	h: query.Heap
 	query.heap_init(&h, alloc)
 	defer query.heap_destroy(&h)
 
 	inp, _, st := query.overlay_from_doc(&h, doc, doc_owned = true)
-	testing.expect_value(t, st, query.Status.Ok)
+	testing.expect_value(t, st, query.Status.Ok, loc = loc)
 
 	run: jq.Run
 	jq.run_init(&run, prog, &h, nil)
@@ -39,140 +54,60 @@ jq_fact_writes_jsonc :: proc(t: ^testing.T) {
 	defer delete(outs.vals)
 
 	end := jq.run_value(&run, inp, collect, &outs)
-	testing.expect_value(t, end, jq.Run_End.Done)
-	testing.expect_value(t, len(outs.vals), 1)
+	testing.expect_value(t, end, jq.Run_End.Done, loc = loc)
+	testing.expect_value(t, len(outs.vals), 1, loc = loc)
 	defer for v in outs.vals {
 		query.release(&h, v)
 	}
 
 	out_ov, _, ok := query.overlay_handle(outs.vals[0])
-	testing.expect(t, ok)
-	res, cerr := json.commit(out_ov, .Jsonc, {}, alloc)
-	testing.expect(t, cerr == nil)
-	defer edit.destroy_commit_result(&res)
-	testing.expect_value(t, string(res.bytes), "{\n  // new note\n  \"a\": 42,\n  \"b\": 2 // side\n}\n")
-}
-
-@(test)
-jq_fact_writes_xml_attributes_and_comments :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	alloc := runtime.heap_allocator()
-	src := transmute([]u8)string(`<r><a old="drop" keep='yes'>hi</a></r>`)
-	doc, err := xml.build(src, .Xml, {}, alloc)
-	testing.expect(t, err == nil)
-
-	prog, perrs := jq.compile(`.r.a.&id = "x" | del(.r.a.&old)`)
-	defer jq.destroy_program(prog)
-	testing.expect_value(t, len(perrs), 0)
-
-	h: query.Heap
-	query.heap_init(&h, alloc)
-	defer query.heap_destroy(&h)
-
-	inp, _, st := query.overlay_from_doc(&h, doc, doc_owned = true)
-	testing.expect_value(t, st, query.Status.Ok)
-
-	run: jq.Run
-	jq.run_init(&run, prog, &h, nil)
-	defer jq.run_destroy(&run)
-	outs := Outputs{h = &h}
-	defer delete(outs.vals)
-
-	end := jq.run_value(&run, inp, collect, &outs)
-	testing.expect_value(t, end, jq.Run_End.Done)
-	testing.expect_value(t, len(outs.vals), 1)
-	defer for v in outs.vals {
-		query.release(&h, v)
+	testing.expect(t, ok, loc = loc)
+	res: edit.Commit_Result
+	cerr: edit.Error
+	switch kind {
+	case .Json:  res, cerr = json.commit(out_ov, .Json, {}, alloc)
+	case .Jsonc: res, cerr = json.commit(out_ov, .Jsonc, {}, alloc)
+	case .Xml:   res, cerr = xml.commit(out_ov, {}, alloc)
+	case .Toml:  res, cerr = toml.commit(out_ov, .Toml_1_0, {}, alloc)
+	case .Cbor:  res, cerr = cbor.commit(out_ov, .Cbor, {}, alloc)
 	}
-
-	out_ov, _, ok := query.overlay_handle(outs.vals[0])
-	testing.expect(t, ok)
-	res, cerr := xml.commit(out_ov, {}, alloc)
-	testing.expectf(t, cerr == nil, "cerr = %v", cerr)
+	testing.expectf(t, cerr == nil, "commit %v %q failed: %v", kind, expr, cerr, loc = loc)
 	defer edit.destroy_commit_result(&res)
-	testing.expect_value(t, string(res.bytes), `<r><a keep='yes' id="x">hi</a></r>`)
-}
-
-@(test)
-jq_fact_writes_toml_style_and_comment :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	alloc := runtime.heap_allocator()
-	src := transmute([]u8)string("name = \"hello\"\ncount = 1\n")
-	doc, err := toml.build(src, .Toml_1_0, {}, alloc)
-	testing.expect(t, err == nil)
-
-	prog, perrs := jq.compile(`.name.@style = "literal" | .name.@comment = "top" | .count = 7`)
-	defer jq.destroy_program(prog)
-	testing.expect_value(t, len(perrs), 0)
-
-	h: query.Heap
-	query.heap_init(&h, alloc)
-	defer query.heap_destroy(&h)
-
-	inp, _, st := query.overlay_from_doc(&h, doc, doc_owned = true)
-	testing.expect_value(t, st, query.Status.Ok)
-
-	run: jq.Run
-	jq.run_init(&run, prog, &h, nil)
-	defer jq.run_destroy(&run)
-	outs := Outputs{h = &h}
-	defer delete(outs.vals)
-
-	end := jq.run_value(&run, inp, collect, &outs)
-	testing.expect_value(t, end, jq.Run_End.Done)
-	testing.expect_value(t, len(outs.vals), 1)
-	defer for v in outs.vals {
-		query.release(&h, v)
+	if kind == .Cbor {
+		testing.expectf(t, bytes.equal(res.bytes, want), "got %x, want %x", res.bytes, want, loc = loc)
+	} else {
+		testing.expect_value(t, string(res.bytes), string(want), loc = loc)
 	}
-
-	out_ov, _, ok := query.overlay_handle(outs.vals[0])
-	testing.expect(t, ok)
-	res, cerr := toml.commit(out_ov, .Toml_1_0, {}, alloc)
-	testing.expect(t, cerr == nil)
-	defer edit.destroy_commit_result(&res)
-	testing.expect_value(t, string(res.bytes), "# top\nname = 'hello'\ncount = 7\n")
 }
 
 @(test)
-jq_fact_writes_cbor_tag :: proc(t: ^testing.T) {
+jq_fact_writes_across_formats :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	alloc := runtime.heap_allocator()
+	expect_jq_overlay_commit(
+		t, .Jsonc,
+		transmute([]u8)string("{\n  // old note\n  \"a\": 1,\n  \"b\": 2\n}\n"),
+		`.a = 42 | .a.@comment = "new note" | .b.@comment_inline = "side"`,
+		transmute([]u8)string("{\n  // new note\n  \"a\": 42,\n  \"b\": 2 // side\n}\n"),
+	)
+	expect_jq_overlay_commit(
+		t, .Xml,
+		transmute([]u8)string(`<r><a old="drop" keep='yes'>hi</a></r>`),
+		`.r.a.&id = "x" | del(.r.a.&old)`,
+		transmute([]u8)string(`<r><a keep='yes' id="x">hi</a></r>`),
+	)
+	expect_jq_overlay_commit(
+		t, .Toml,
+		transmute([]u8)string("name = \"hello\"\ncount = 1\n"),
+		`.name.@style = "literal" | .name.@comment = "top" | .count = 7`,
+		transmute([]u8)string("# top\nname = 'hello'\ncount = 7\n"),
+	)
 	// {"a": h'05'} — tag 24 (embedded CBOR) applies to a byte string.
-	src := []u8{0xa1, 0x61, 'a', 0x41, 0x05}
-	doc, err := cbor.build(src, .Cbor, {}, alloc)
-	testing.expect(t, err == nil)
-
-	prog, perrs := jq.compile(`.a.@tag = 24`)
-	defer jq.destroy_program(prog)
-	testing.expect_value(t, len(perrs), 0)
-
-	h: query.Heap
-	query.heap_init(&h, alloc)
-	defer query.heap_destroy(&h)
-
-	inp, _, st := query.overlay_from_doc(&h, doc, doc_owned = true)
-	testing.expect_value(t, st, query.Status.Ok)
-
-	run: jq.Run
-	jq.run_init(&run, prog, &h, nil)
-	defer jq.run_destroy(&run)
-	outs := Outputs{h = &h}
-	defer delete(outs.vals)
-
-	end := jq.run_value(&run, inp, collect, &outs)
-	testing.expect_value(t, end, jq.Run_End.Done)
-	testing.expect_value(t, len(outs.vals), 1)
-	defer for v in outs.vals {
-		query.release(&h, v)
-	}
-
-	out_ov, _, ok := query.overlay_handle(outs.vals[0])
-	testing.expect(t, ok)
-	res, cerr := cbor.commit(out_ov, .Cbor, {}, alloc)
-	testing.expect(t, cerr == nil)
-	defer edit.destroy_commit_result(&res)
-	want := []u8{0xa1, 0x61, 'a', 0xd8, 0x18, 0x41, 0x05}
-	testing.expectf(t, bytes.equal(res.bytes, want), "got %x, want %x", res.bytes, want)
+	expect_jq_overlay_commit(
+		t, .Cbor,
+		[]u8{0xa1, 0x61, 'a', 0x41, 0x05},
+		`.a.@tag = 24`,
+		[]u8{0xa1, 0x61, 'a', 0xd8, 0x18, 0x41, 0x05},
+	)
 }
 
 @(test)
@@ -270,43 +205,12 @@ jq_overlay_cow_aliasing_backtracking_css_u64_tag_and_group1 :: proc(t: ^testing.
 	}
 
 	// 2. Large `u64` CBOR tag (`> max(i64)`) via `.a.@tag = 18446744073709551615`!
-	{
-		src := []u8{0xa1, 0x61, 'a', 0x05}
-		doc, err := cbor.build(src, .Cbor, {}, alloc)
-		testing.expect(t, err == nil)
-
-		prog, perrs := jq.compile(`.a.@tag = 18446744073709551615`)
-		defer jq.destroy_program(prog)
-		testing.expect_value(t, len(perrs), 0)
-
-		h: query.Heap
-		query.heap_init(&h, alloc)
-		defer query.heap_destroy(&h)
-
-		inp, _, st := query.overlay_from_doc(&h, doc, doc_owned = true)
-		testing.expect_value(t, st, query.Status.Ok)
-
-		run: jq.Run
-		jq.run_init(&run, prog, &h, nil)
-		defer jq.run_destroy(&run)
-		outs := Outputs{h = &h}
-		defer delete(outs.vals)
-
-		end := jq.run_value(&run, inp, collect, &outs)
-		testing.expect_value(t, end, jq.Run_End.Done)
-		testing.expect_value(t, len(outs.vals), 1)
-		defer for v in outs.vals {
-			query.release(&h, v)
-		}
-
-		out_ov, _, ok := query.overlay_handle(outs.vals[0])
-		testing.expect(t, ok)
-		res, cerr := cbor.commit(out_ov, .Cbor, {}, alloc)
-		testing.expect(t, cerr == nil)
-		defer edit.destroy_commit_result(&res)
-		want := []u8{0xa1, 0x61, 'a', 0xdb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x05}
-		testing.expectf(t, bytes.equal(res.bytes, want), "got %x, want %x", res.bytes, want)
-	}
+	expect_jq_overlay_commit(
+		t, .Cbor,
+		[]u8{0xa1, 0x61, 'a', 0x05},
+		`.a.@tag = 18446744073709551615`,
+		[]u8{0xa1, 0x61, 'a', 0xdb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x05},
+	)
 
 	// 3. `css` on XML `.Overlay` and XML `.Group` after `.Container_Delta`!
 	{
@@ -490,84 +394,31 @@ jq_overlay_same_ov_cow_facts_decode_css_and_reconcile_regressions :: proc(t: ^te
 			testing.expectf(t, got == c[2], "%s: got %s, want %s", c[1], got, c[2])
 		}
 
-		// Commit JSONC `.b = 99 | .b.@comment = "note"` to verify comment lands in serialized JSONC output!
-		jdoc, _ := json.build(transmute([]u8)string("{\n  \"a\": 1\n}\n"), .Jsonc, {}, alloc)
-		prog, _ := jq.compile(`.b = 99 | .b.@comment = "note"`)
-		defer jq.destroy_program(prog)
-		h: query.Heap
-		query.heap_init(&h, alloc)
-		defer query.heap_destroy(&h)
-		inp, _, _ := query.overlay_from_doc(&h, jdoc, doc_owned = true)
-		run: jq.Run
-		jq.run_init(&run, prog, &h, nil)
-		defer jq.run_destroy(&run)
-		outs := Outputs{h = &h}
-		defer delete(outs.vals)
-		_ = jq.run_value(&run, inp, collect, &outs)
-		defer for v in outs.vals {
-			query.release(&h, v)
-		}
-		testing.expect_value(t, len(outs.vals), 1)
-		out_ov, _, ok := query.overlay_handle(outs.vals[0])
-		testing.expect(t, ok)
-		res, cerr := json.commit(out_ov, .Jsonc, {}, alloc)
-		testing.expect(t, cerr == nil)
-		defer edit.destroy_commit_result(&res)
-		testing.expect_value(t, string(res.bytes), "{\n  \"a\": 1,\n  // note\n  \"b\": 99\n}\n")
-
-		// Bug #1 + #2 commit checks: `.a = .` on JSON and `.b = 99 | .b.@comment = "note"` on TOML, plus COW `[., del(.a)]`!
-		jdoc2, _ := json.build(transmute([]u8)string(`{"a":1,"b":2}`), .Json, {}, alloc)
-		p2, _ := jq.compile(`.a = .`)
-		defer jq.destroy_program(p2)
-		h2: query.Heap
-		query.heap_init(&h2, alloc)
-		defer query.heap_destroy(&h2)
-		inp2, _, _ := query.overlay_from_doc(&h2, jdoc2, doc_owned = true)
-		run2: jq.Run
-		jq.run_init(&run2, p2, &h2, nil)
-		defer jq.run_destroy(&run2)
-		outs2 := Outputs{h = &h2}
-		defer delete(outs2.vals)
-		_ = jq.run_value(&run2, inp2, collect, &outs2)
-		defer for v in outs2.vals {
-			query.release(&h2, v)
-		}
-		testing.expect_value(t, len(outs2.vals), 1)
-		ov2, _, ok2 := query.overlay_handle(outs2.vals[0])
-		testing.expect(t, ok2)
-		res2, cerr2 := json.commit(ov2, .Json, {}, alloc)
-		testing.expect(t, cerr2 == nil)
-		defer edit.destroy_commit_result(&res2)
-		testing.expect_value(t, string(res2.bytes), `{"a":{"a":1,"b":2},"b":2}`)
+		// Commit JSONC `.b = 99 | .b.@comment = "note"`, JSON `.a = .`, TOML `.b = 99 | .b.@comment = "note"`, plus COW `[., del(.a)]`!
+		expect_jq_overlay_commit(
+			t, .Jsonc,
+			transmute([]u8)string("{\n  \"a\": 1\n}\n"),
+			`.b = 99 | .b.@comment = "note"`,
+			transmute([]u8)string("{\n  \"a\": 1,\n  // note\n  \"b\": 99\n}\n"),
+		)
+		expect_jq_overlay_commit(
+			t, .Json,
+			transmute([]u8)string(`{"a":1,"b":2}`),
+			`.a = .`,
+			transmute([]u8)string(`{"a":{"a":1,"b":2},"b":2}`),
+		)
 
 		cow_del_doc, _ := json.build(transmute([]u8)string(`{"a":1,"b":2}`), .Json, {}, alloc)
 		cow_del := eval_jq_overlay_json(t, nil, cow_del_doc, true, `[., del(.a)]`)
 		defer delete(cow_del, alloc)
 		testing.expect_value(t, cow_del, `[{"a":1,"b":2},{"b":2}]`)
 
-		tdoc, _ := toml.build(transmute([]u8)string("a = 1\n"), .Toml_1_0, {}, alloc)
-		tp, _ := jq.compile(`.b = 99 | .b.@comment = "note"`)
-		defer jq.destroy_program(tp)
-		th: query.Heap
-		query.heap_init(&th, alloc)
-		defer query.heap_destroy(&th)
-		tinp, _, _ := query.overlay_from_doc(&th, tdoc, doc_owned = true)
-		trun: jq.Run
-		jq.run_init(&trun, tp, &th, nil)
-		defer jq.run_destroy(&trun)
-		touts := Outputs{h = &th}
-		defer delete(touts.vals)
-		_ = jq.run_value(&trun, tinp, collect, &touts)
-		defer for v in touts.vals {
-			query.release(&th, v)
-		}
-		testing.expect_value(t, len(touts.vals), 1)
-		tov, _, tok := query.overlay_handle(touts.vals[0])
-		testing.expect(t, tok)
-		tres, tcerr := toml.commit(tov, .Toml_1_0, {}, alloc)
-		testing.expect(t, tcerr == nil)
-		defer edit.destroy_commit_result(&tres)
-		testing.expect_value(t, string(tres.bytes), "a = 1\n# note\nb = 99\n")
+		expect_jq_overlay_commit(
+			t, .Toml,
+			transmute([]u8)string("a = 1\n"),
+			`.b = 99 | .b.@comment = "note"`,
+			transmute([]u8)string("a = 1\n# note\nb = 99\n"),
+		)
 	}
 
 	// Bug #5: `text_of` on `.Overlay` wrapping `SPELLING_DECODE` base scalar!

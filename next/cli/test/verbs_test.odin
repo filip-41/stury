@@ -91,11 +91,13 @@ fmt_pretty_compact_in_place_and_convert :: proc(t: ^testing.T) {
 		r := invoke_str({"fmt", "--from", "toml", "--to", "xml"}, "[root]\nmsg = \"ok\"\n"); defer run_out_destroy(&r)
 		testing.expect_value(t, r.code, 0)
 		testing.expect(t, strings.contains(r.stdout, "<root>") && strings.contains(r.stdout, "<msg>ok</msg>"), r.stdout)
+		testing.expect(t, !strings.has_suffix(r.stdout, "\n\n"), r.stdout)
 	}
 	{
 		rt := invoke_str({"fmt", "--from", "json", "--to", "toml"}, `{"x":{"y":1}}`); defer run_out_destroy(&rt)
 		testing.expect_value(t, rt.code, 0)
 		testing.expect(t, strings.contains(rt.stdout, "[x]") && strings.contains(rt.stdout, "y = 1"), rt.stdout)
+		testing.expect(t, !strings.has_suffix(rt.stdout, "\n\n"), rt.stdout)
 	}
 	{
 		rcsv := invoke_str({"fmt", "--from", "json", "--to", "csv"}, `[{"k":1,"v":"a"}]`); defer run_out_destroy(&rcsv)
@@ -278,15 +280,6 @@ fmt_edit_diff_and_schema_ref_audit_fixes :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	dir := make_tmp_dir(t); defer drop_tmp_dir(dir)
 
-	// No double trailing newline when `fmt` converts to XML or TOML.
-	{
-		rx := invoke_str({"fmt", "--from", "toml", "--to", "xml"}, "[root]\nmsg = \"ok\"\n"); defer run_out_destroy(&rx)
-		testing.expect_value(t, rx.code, 0)
-		testing.expect(t, !strings.has_suffix(rx.stdout, "\n\n"), rx.stdout)
-		rt := invoke_str({"fmt", "--from", "json", "--to", "toml"}, `{"x":{"y":1}}`); defer run_out_destroy(&rt)
-		testing.expect_value(t, rt.code, 0)
-		testing.expect(t, !strings.has_suffix(rt.stdout, "\n\n"), rt.stdout)
-	}
 	// `edit` handles record-dropping and multi-output filters cleanly on NDJSON.
 	{
 		rf := invoke_str({"edit", "--from", "ndjson", "select(.a > 1) | .a += 10"}, "{\"a\":1}\n{\"a\":2}\n"); defer run_out_destroy(&rf)

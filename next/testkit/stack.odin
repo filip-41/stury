@@ -95,3 +95,35 @@ deep_read :: proc(read: int, reads: ^tape.Reads, f: ^tape.Format, text: []u8, op
 }
 
 DEEP_READS :: 4
+
+// Runs the 4 basic reads (0: validate, 1: build, 2: find `find_path`, 3: scan `scan_paths`) followed by
+// `deep_read` (4..7: query, scan `deep_paths`, records at `at`, clone).
+deep_core_read :: proc(
+	read: int, reads: ^tape.Reads, f: ^tape.Format, text: []u8, opts: tape.Options,
+	find_path: []tape.Step, scan_paths, deep_paths: [][]tape.Step, framing: tape.Framing, at: []tape.Step,
+) -> bool {
+	switch read {
+	case 0:
+		return reads.validate(f, text, opts, context.allocator) == nil
+	case 1:
+		doc, err := reads.build(f, text, opts, context.allocator)
+		tape.destroy(&doc)
+		return err == nil
+	case 2:
+		answer, err := reads.find(f, text, find_path, {}, opts, context.allocator)
+		return err == nil && answer.outcome == .Found
+	case 3:
+		d, derr := tape.demand_of(scan_paths)
+		defer tape.destroy(&d)
+		if derr != nil {
+			return false
+		}
+		r, err := reads.scan(f, text, &d, {}, opts, context.allocator)
+		tape.destroy(&r)
+		return err == nil
+	case:
+		return deep_read(read - 4, reads, f, text, opts, deep_paths, framing, at)
+	}
+}
+
+DEEP_CORE_READS :: 4 + DEEP_READS

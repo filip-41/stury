@@ -72,89 +72,23 @@ case_data :: proc(name: string) -> (data: []u8, ok: bool) {
 	return nil, false
 }
 
-// A hook that writes each token it is given into `out`, skips the container whose key is `skip` and stops after
-// token `stop` when it is not 0.
-@(private)
-Token_Log :: struct {
-	text:     []u8,
-	out:      strings.Builder,
-	skip:     string,
-	stop:     int,
-	given:    int,
-	skipping: bool,
-	protocol: hook.Protocol(hook.Capabilities{.Skips}, hook.Unused, hook.Unused, hook.Unused),
-}
-
-@(private)
-ROLE_NAMES := [tape.Role]string {
-	.Value            = "",
-	.Key              = "Key:",
-	.Comment          = "Comment:",
-	.Comment_Inline   = "Inline:",
-	.Comment_Foot     = "Foot:",
-	.Tag              = "Tag:",
-	.Anchor           = "Anchor:",
-	.Alias            = "Alias:",
-	.Instruction      = "Instruction:",
-	.Instruction_Foot = "Instruction_Foot:",
-	.Doctype          = "Doctype:",
-	.Directive        = "Directive:",
-	.Attribute        = "Attribute:",
-}
-
-@(private)
-log_token :: proc "contextless" (h: ^Token_Log, s: hook.Regs, t: tape.Token) -> (hook.Regs, hook.Action) {
-	context = runtime.default_context()
-	if h.out.buf != nil && len(h.out.buf) > 0 {
-		strings.write_byte(&h.out, ' ')
-	}
-	h.given += 1
-	switch {
-	case t.role != .Value:
-		fmt.sbprintf(&h.out, "%s%s", ROLE_NAMES[t.role], string(h.text[t.lo:][:t.n]))
-	case t.kind > .Plain:
-		fmt.sbprintf(&h.out, "%v", t.kind)
-		if t.kind == .End {
-			break
-		}
-		// The style bits of an inline container and of a dotted table.
-		switch t.spelling & tape.CONTAINER_STYLE >> 13 {
-		case 1:
-			strings.write_string(&h.out, "~")
-		case 2:
-			strings.write_string(&h.out, ".")
-		}
-	case:
-		fmt.sbprintf(&h.out, "%v:%s", t.kind, string(h.text[t.lo:][:t.n]))
-	}
-	a := hook.Action.Next
-	if h.skipping && t.kind > .Plain && t.kind != .End {
-		h.skipping, a = false, .Skip
-	}
-	if t.role == .Key && string(h.text[t.lo:][:t.n]) == h.skip && h.skip != "" {
-		h.skipping = true
-	}
-	if h.stop != 0 && h.given == h.stop {
-		a = .Stop
-	}
-	return s, a
-}
-
 // The tokens a walk of `text` gives, written one after another, where the walk ended and its error.
 @(private)
 tokens_of :: proc(text: string, spec := toml.Spec.Toml_1_1, skip := "", stop := 0, opts := toml.Options{}) -> (tokens: string, hi: u64, err: tape.Error) {
-	r := Token_Log {
+	r := testkit.Token_Log {
 		text = transmute([]u8)text,
 		skip = skip,
 		stop = stop,
+		mode = .Toml,
+		ctx  = context,
 	}
 	strings.builder_init(&r.out, context.temp_allocator)
 	regs: hook.Regs
 	switch spec {
 	case .Toml_1_0:
-		hi, err, _ = toml.walk(r.text, .Toml_1_0, opts, &r, &regs, log_token)
+		hi, err, _ = toml.walk(r.text, .Toml_1_0, opts, &r, &regs, testkit.log_token)
 	case .Toml_1_1:
-		hi, err, _ = toml.walk(r.text, .Toml_1_1, opts, &r, &regs, log_token)
+		hi, err, _ = toml.walk(r.text, .Toml_1_1, opts, &r, &regs, testkit.log_token)
 	}
 	return strings.to_string(r.out), hi, err
 }

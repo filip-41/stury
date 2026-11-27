@@ -107,47 +107,94 @@ db_vals :: proc(b: ^Desc_Builder, vals: ..rules.Value) -> []rules.Value {
 	return out
 }
 
-// Verifies BOTH streaming `json.check` AND `check.check_document(json.build)` agree on verdict,
-// both without sink and with sink!
-@(private = "file")
-expect_json :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want_valid: bool, opts := check.Options{}, loc := #caller_location) {
+@(private)
+expect_sink_entries_equal :: proc(t: ^testing.T, a, b: []check.Check_Error, label: string, compare_at := false, loc := #caller_location) {
+	testing.expectf(t, len(a) == len(b), "%s: sink len mismatch stream=%d doc=%d", label, len(a), len(b), loc = loc)
+	if len(a) != len(b) {
+		return
+	}
+	for i in 0 ..< len(a) {
+		ea, eb := a[i], b[i]
+		testing.expectf(t, ea.kind == eb.kind && ea.keyword == eb.keyword && ea.expected == eb.expected && ea.instance_location == eb.instance_location && ea.keyword_location == eb.keyword_location,
+			"%s[%d] mismatch:\n  a=%v kw=%q exp=%q inst=%q kwloc=%q at=%d\n  b=%v kw=%q exp=%q inst=%q kwloc=%q at=%d",
+			label, i, ea.kind, ea.keyword, ea.expected, ea.instance_location, ea.keyword_location, ea.at,
+			eb.kind, eb.keyword, eb.expected, eb.instance_location, eb.keyword_location, eb.at, loc = loc)
+		if compare_at {
+			testing.expectf(t, ea.at == eb.at, "%s[%d] byte offset mismatch: a=%d b=%d", label, i, ea.at, eb.at, loc = loc)
+		}
+	}
+}
+
+// Verifies BOTH streaming `json.check` AND `check.check_document(json.build)` agree on verdict and sink entries.
+@(private)
+expect_json :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want_valid: bool, opts := check.Options{}, check_doc := true, loc := #caller_location) {
 	src := transmute([]u8)input
 
-	// 1. Streaming verdict-only
-	r1 := json.check(src, plan, .Json, opts)
-	defer check.result_destroy(&r1)
-	testing.expectf(t, r1.valid == want_valid, "stream verdict mismatch on %q: got valid=%v (err=%v), want %v", input, r1.valid, r1.err.kind, want_valid, loc = loc)
+	r_verdict := json.check(src, plan, .Json, opts)
+	defer check.result_destroy(&r_verdict)
+	testing.expectf(t, r_verdict.valid == want_valid, "stream verdict mismatch on %q: got valid=%v (err=%v), want %v", input, r_verdict.valid, r_verdict.err.kind, want_valid, loc = loc)
 
-	// 2. Streaming with sink
-	sink1: check.Sink
-	check.sink_init(&sink1)
-	defer check.sink_destroy(&sink1)
-	r2 := json.check(src, plan, .Json, opts, &sink1)
-	defer check.result_destroy(&r2)
-	testing.expectf(t, r2.valid == want_valid, "stream sink mismatch on %q: got valid=%v (entries=%d), want %v", input, r2.valid, len(sink1.entries), want_valid, loc = loc)
-	if !want_valid && r2.walk_err == nil && r2.err.kind != .Exceeded {
-		testing.expectf(t, len(sink1.entries) > 0, "expected sink entries on invalid %q", input, loc = loc)
+	sink_stream: check.Sink
+	check.sink_init(&sink_stream)
+	defer check.sink_destroy(&sink_stream)
+	r_sink := json.check(src, plan, .Json, opts, &sink_stream)
+	defer check.result_destroy(&r_sink)
+	testing.expectf(t, r_sink.valid == want_valid, "stream sink mismatch on %q: got valid=%v (entries=%d), want %v", input, r_sink.valid, len(sink_stream.entries), want_valid, loc = loc)
+	if want_valid {
+		testing.expect_value(t, len(sink_stream.entries), 0, loc = loc)
+	} else if r_sink.walk_err == nil && r_sink.err.kind != .Exceeded {
+		testing.expectf(t, len(sink_stream.entries) > 0, "expected sink entries on invalid %q", input, loc = loc)
 	}
 
-	// 3. Document check parity (when build succeeds under same dups/budget)
-	if opts.dups != .Refuse && opts.budget == {} {
+	if check_doc && opts.dups != .Refuse && opts.budget == {} {
 		bopts := tape.Options{dups = opts.dups}
 		doc, berr := json.build(src, .Json, bopts)
 		if berr == nil {
 			defer tape.destroy(&doc)
-			r3 := check.check_document(&doc, plan, opts)
-			defer check.result_destroy(&r3)
-			testing.expectf(t, r3.valid == want_valid, "doc verdict mismatch on %q: got valid=%v, want %v", input, r3.valid, want_valid, loc = loc)
+			r_doc := check.check_document(&doc, plan, opts)
+			defer check.result_destroy(&r_doc)
+			testing.expectf(t, r_doc.valid == want_valid, "doc verdict mismatch on %q: got valid=%v, want %v", input, r_doc.valid, want_valid, loc = loc)
 
-			sink2: check.Sink
-			check.sink_init(&sink2)
-			defer check.sink_destroy(&sink2)
-			r4 := check.check_document(&doc, plan, opts, &sink2)
-			defer check.result_destroy(&r4)
-			testing.expectf(t, r4.valid == want_valid, "doc sink mismatch on %q: got valid=%v, want %v", input, r4.valid, want_valid, loc = loc)
-			testing.expectf(t, len(sink1.entries) == len(sink2.entries), "sink count parity mismatch on %q: stream=%d doc=%d", input, len(sink1.entries), len(sink2.entries), loc = loc)
+			sink_doc: check.Sink
+			check.sink_init(&sink_doc)
+			defer check.sink_destroy(&sink_doc)
+			r_ds := check.check_document(&doc, plan, opts, &sink_doc)
+			defer check.result_destroy(&r_ds)
+			testing.expectf(t, r_ds.valid == want_valid, "doc sink mismatch on %q: got valid=%v, want %v", input, r_ds.valid, want_valid, loc = loc)
+			expect_sink_entries_equal(t, sink_stream.entries[:], sink_doc.entries[:], input, loc = loc)
 		}
 	}
+}
+
+// Verifies streaming `xml.check` and `check.check_document(xml.build)` agree on verdict and sink counts.
+@(private)
+expect_xml :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want_valid: bool, loc := #caller_location) {
+	src := transmute([]u8)input
+	rs := xml.check(src, plan, .Xml)
+	defer check.result_destroy(&rs)
+	testing.expectf(t, rs.valid == want_valid, "xml stream verdict mismatch on %q: got %v (%v), want %v", input, rs.valid, rs.err.kind, want_valid, loc = loc)
+
+	sink_s: check.Sink
+	check.sink_init(&sink_s)
+	defer check.sink_destroy(&sink_s)
+	rss := xml.check(src, plan, .Xml, {}, &sink_s)
+	defer check.result_destroy(&rss)
+	testing.expectf(t, rss.valid == want_valid, "xml stream sink mismatch on %q: got %v, want %v", input, rss.valid, want_valid, loc = loc)
+
+	doc, berr := xml.build(src)
+	testing.expect_value(t, berr, nil, loc = loc)
+	defer tape.destroy(&doc)
+	rd := check.check_document(&doc, plan)
+	defer check.result_destroy(&rd)
+	testing.expectf(t, rd.valid == want_valid, "xml doc verdict mismatch on %q: got %v (%v), want %v", input, rd.valid, rd.err.kind, want_valid, loc = loc)
+
+	sink_d: check.Sink
+	check.sink_init(&sink_d)
+	defer check.sink_destroy(&sink_d)
+	rds := check.check_document(&doc, plan, {}, &sink_d)
+	defer check.result_destroy(&rds)
+	testing.expectf(t, rds.valid == want_valid, "xml doc sink mismatch on %q: got %v, want %v", input, rds.valid, want_valid, loc = loc)
+	testing.expect_value(t, len(sink_s.entries), len(sink_d.entries), loc = loc)
 }
 
 @(test)
@@ -1435,35 +1482,14 @@ test_phase2_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, err.kind, check.Error_Kind.None)
 		defer check.plan_destroy(&plan)
 
-		check_xml_case :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want: bool, loc := #caller_location) {
-			src := transmute([]u8)input
-			r1 := xml.check(src, plan)
-			defer check.result_destroy(&r1)
-			testing.expectf(t, r1.valid == want, "xml stream verdict mismatch on %q: got %v (%v), want %v", input, r1.valid, r1.err.kind, want, loc = loc)
-
-			sink: check.Sink
-			check.sink_init(&sink)
-			defer check.sink_destroy(&sink)
-			r2 := xml.check(src, plan, .Xml, {}, &sink)
-			defer check.result_destroy(&r2)
-			testing.expectf(t, r2.valid == want, "xml stream errors mismatch on %q: got %v, want %v", input, r2.valid, want, loc = loc)
-
-			doc, derr := xml.build(src)
-			testing.expect(t, derr == nil, loc = loc)
-			defer tape.destroy(&doc)
-			r3 := check.check_document(&doc, plan)
-			defer check.result_destroy(&r3)
-			testing.expectf(t, r3.valid == want, "xml doc verdict mismatch on %q: got %v, want %v", input, r3.valid, want, loc = loc)
-		}
-
 		// Contiguous repeated `<a>` elements
-		check_xml_case(t, &plan, `<r><a>1</a><a>2</a><b>hi</b></r>`, true)
+		expect_xml(t, &plan, `<r><a>1</a><a>2</a><b>hi</b></r>`, true)
 		// Non-contiguous repeated `<a>` elements interleaved with `<b>`
-		check_xml_case(t, &plan, `<r><a>1</a><b>hi</b><a>2</a></r>`, true)
+		expect_xml(t, &plan, `<r><a>1</a><b>hi</b><a>2</a></r>`, true)
 		// Only 1 `<a>` fails `minItems: 2`
-		check_xml_case(t, &plan, `<r><a>1</a><b>hi</b></r>`, false)
+		expect_xml(t, &plan, `<r><a>1</a><b>hi</b></r>`, false)
 		// Invalid element type in second `<a>`
-		check_xml_case(t, &plan, `<r><a>1</a><b>hi</b><a>bad</a></r>`, false)
+		expect_xml(t, &plan, `<r><a>1</a><b>hi</b><a>bad</a></r>`, false)
 	}
 
 	// 7. Disjoint-kind `oneOf` container/scalar redirect parity (`pulumi` `runtime`/`config`)!
@@ -1501,34 +1527,6 @@ test_phase2_regressions :: proc(t: ^testing.T) {
 test_audit_regressions :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 
-	check_xml_all :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want: bool, loc := #caller_location) {
-		src := transmute([]u8)input
-		r1 := xml.check(src, plan)
-		defer check.result_destroy(&r1)
-		testing.expectf(t, r1.valid == want, "xml stream verdict mismatch on %q: got %v (%v), want %v", input, r1.valid, r1.err.kind, want, loc = loc)
-
-		sink: check.Sink
-		check.sink_init(&sink)
-		defer check.sink_destroy(&sink)
-		r2 := xml.check(src, plan, .Xml, {}, &sink)
-		defer check.result_destroy(&r2)
-		testing.expectf(t, r2.valid == want, "xml stream errors mismatch on %q: got %v, want %v", input, r2.valid, want, loc = loc)
-
-		doc, derr := xml.build(src)
-		testing.expect(t, derr == nil, loc = loc)
-		defer tape.destroy(&doc)
-		r3 := check.check_document(&doc, plan)
-		defer check.result_destroy(&r3)
-		testing.expectf(t, r3.valid == want, "xml doc verdict mismatch on %q: got %v (%v), want %v", input, r3.valid, r3.err.kind, want, loc = loc)
-
-		sink2: check.Sink
-		check.sink_init(&sink2)
-		defer check.sink_destroy(&sink2)
-		r4 := check.check_document(&doc, plan, {}, &sink2)
-		defer check.result_destroy(&r4)
-		testing.expectf(t, r4.valid == want, "xml doc errors mismatch on %q: got %v, want %v", input, r4.valid, want, loc = loc)
-	}
-
 	// Audit #1: Repeated unnamed XML elements under `.Group` must NEVER silently return `valid = true`!
 	{
 		b := db_init()
@@ -1550,11 +1548,11 @@ test_audit_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, err.kind, check.Error_Kind.None)
 		defer check.plan_destroy(&plan)
 
-		check_xml_all(t, &plan, `<r><x>123</x></r>`, true)
-		check_xml_all(t, &plan, `<r><x>bad</x></r>`, false)
+		expect_xml(t, &plan, `<r><x>123</x></r>`, true)
+		expect_xml(t, &plan, `<r><x>bad</x></r>`, false)
 		// Repeated `<x>` forms an array -> must FAIL `{type: "string", pattern: "^[0-9]+$"}`!
-		check_xml_all(t, &plan, `<r><x>1</x><x>bad</x></r>`, false)
-		check_xml_all(t, &plan, `<r><x>1</x><x>2</x></r>`, false)
+		expect_xml(t, &plan, `<r><x>1</x><x>bad</x></r>`, false)
+		expect_xml(t, &plan, `<r><x>1</x><x>2</x></r>`, false)
 	}
 	{
 		// Missing `required` field after repeated unnamed `<x>` must FAIL!
@@ -1578,7 +1576,7 @@ test_audit_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, err.kind, check.Error_Kind.None)
 		defer check.plan_destroy(&plan)
 
-		check_xml_all(t, &plan, `<r><x>1</x><x>2</x></r>`, false)
+		expect_xml(t, &plan, `<r><x>1</x><x>2</x></r>`, false)
 	}
 
 	// Audit #2: Deep nested factored objects (`h.nf > INLINE_FACTORED == 4`) growing `h.pool.factored` across `subcheck_node` (ASan UAF test)!
@@ -1838,10 +1836,10 @@ test_audit_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, err.kind, check.Error_Kind.None)
 		defer check.plan_destroy(&plan)
 
-		check_xml_all(t, &plan, `<r><a>1</a><a>2</a></r>`, true)
-		check_xml_all(t, &plan, `<r><a>1</a><b>ok</b><a>2</a></r>`, true)
-		check_xml_all(t, &plan, `<r><a>1</a></r>`, false)
-		check_xml_all(t, &plan, `<r><a>1</a><a>bad</a></r>`, false)
+		expect_xml(t, &plan, `<r><a>1</a><a>2</a></r>`, true)
+		expect_xml(t, &plan, `<r><a>1</a><b>ok</b><a>2</a></r>`, true)
+		expect_xml(t, &plan, `<r><a>1</a></r>`, false)
+		expect_xml(t, &plan, `<r><a>1</a><a>bad</a></r>`, false)
 	}
 	{
 		// 4b. Multi-kind `{type: ["array", "string"]}` + `items: {pattern: "^[0-9]+$"}`
@@ -1867,9 +1865,9 @@ test_audit_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, err.kind, check.Error_Kind.None)
 		defer check.plan_destroy(&plan)
 
-		check_xml_all(t, &plan, `<r><a>hello</a></r>`, true)
-		check_xml_all(t, &plan, `<r><a>1</a><a>2</a></r>`, true)
-		check_xml_all(t, &plan, `<r><a>1</a><a>bad</a></r>`, false)
+		expect_xml(t, &plan, `<r><a>hello</a></r>`, true)
+		expect_xml(t, &plan, `<r><a>1</a><a>2</a></r>`, true)
+		expect_xml(t, &plan, `<r><a>1</a><a>bad</a></r>`, false)
 	}
 	{
 		// 4c. `.Factored` object under XML `.Group` with repeated sibling array member!
@@ -1904,9 +1902,9 @@ test_audit_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, err.kind, check.Error_Kind.None)
 		defer check.plan_destroy(&plan)
 
-		check_xml_all(t, &plan, `<r><a>1</a><a>2</a></r>`, true)
-		check_xml_all(t, &plan, `<r><a>1</a><a>bad</a></r>`, false)
-		check_xml_all(t, &plan, `<r><b>hi</b></r>`, true)
+		expect_xml(t, &plan, `<r><a>1</a><a>2</a></r>`, true)
+		expect_xml(t, &plan, `<r><a>1</a><a>bad</a></r>`, false)
+		expect_xml(t, &plan, `<r><b>hi</b></r>`, true)
 	}
 	{
 		// 4d. `minProperties`/`maxProperties` counts distinct XML tag names (NOT repeated sibling count)!
@@ -1932,9 +1930,9 @@ test_audit_regressions :: proc(t: ^testing.T) {
 		defer check.plan_destroy(&plan)
 
 		// Two `<x>` siblings group into 1 member `"x"` -> passes `maxProperties: 1`!
-		check_xml_all(t, &plan, `<r><x>1</x><x>2</x></r>`, true)
+		expect_xml(t, &plan, `<r><x>1</x><x>2</x></r>`, true)
 		// Two distinct tags `<x>` and `<y>` -> 2 members -> fails `maxProperties: 1`!
-		check_xml_all(t, &plan, `<r><x>1</x><y>2</y></r>`, false)
+		expect_xml(t, &plan, `<r><x>1</x><y>2</y></r>`, false)
 	}
 	{
 		// 4e. Named unconstrained member (`collects_markup == false`) with `minProperties: 2`:
@@ -1959,8 +1957,8 @@ test_audit_regressions :: proc(t: ^testing.T) {
 		testing.expect_value(t, err.kind, check.Error_Kind.None)
 		defer check.plan_destroy(&plan)
 
-		check_xml_all(t, &plan, `<r><x>1</x><x>2</x></r>`, false)
-		check_xml_all(t, &plan, `<r><x>1</x><y>2</y></r>`, true)
+		expect_xml(t, &plan, `<r><x>1</x><x>2</x></r>`, false)
+		expect_xml(t, &plan, `<r><x>1</x><y>2</y></r>`, true)
 	}
 
 	// Audit #5: `scalar_passes_leaf` must return `false` when `h.fatal != .None` (no bogus `.Not_Allowed` in `sink.entries`)!
@@ -1991,35 +1989,6 @@ test_audit_regressions :: proc(t: ^testing.T) {
 @(test)
 polish_b_regression_tests :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-
-	expect_xml :: proc(t: ^testing.T, plan: ^check.Plan, input: string, want_valid: bool, loc := #caller_location) {
-		src := transmute([]u8)input
-		rs := xml.check(src, plan, .Xml)
-		defer check.result_destroy(&rs)
-		testing.expectf(t, rs.valid == want_valid, "xml stream: got %v want %v for %s", rs.valid, want_valid, input, loc = loc)
-
-		sink_s: check.Sink
-		check.sink_init(&sink_s)
-		defer check.sink_destroy(&sink_s)
-		rss := xml.check(src, plan, .Xml, {}, &sink_s)
-		defer check.result_destroy(&rss)
-		testing.expect_value(t, rss.valid, want_valid, loc = loc)
-
-		doc, berr := xml.build(src)
-		testing.expect_value(t, berr, nil, loc = loc)
-		defer tape.destroy(&doc)
-		rd := check.check_document(&doc, plan)
-		defer check.result_destroy(&rd)
-		testing.expect_value(t, rd.valid, want_valid, loc = loc)
-
-		sink_d: check.Sink
-		check.sink_init(&sink_d)
-		defer check.sink_destroy(&sink_d)
-		rds := check.check_document(&doc, plan, {}, &sink_d)
-		defer check.result_destroy(&rds)
-		testing.expect_value(t, rds.valid, want_valid, loc = loc)
-		testing.expect_value(t, len(sink_s.entries), len(sink_d.entries), loc = loc)
-	}
 
 	// 1. [HIGH] Combined `const` + `enum` with container operands: `{const: {"a": 1}, enum: [{"a": 1}, {"b": 2}]}`.
 	{

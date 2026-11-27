@@ -20,10 +20,7 @@ import "stury:lib/ops/build"
 // Where a walk of a text in pieces goes on: at the item at `i`, in the levels `d` deep whose innermost frame is `top`,
 // and with `passing` the value of a key the hook skipped.
 @(private)
-Cut :: struct {
-	i, d, top: u64,
-	passing:   bool,
-}
+Cut :: hook.Piece_Cut
 
 // What a CBOR walk keeps from one piece to the next.
 @(private)
@@ -141,32 +138,14 @@ piece_cut :: #force_no_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), i,
 	return hook.walk_result(i, hook.WALK_MORE)
 }
 
-// Copies the `d` levels of `stack` into `frames`.
 @(private)
-piece_levels :: proc "contextless" (frames: ^[dynamic]u8, stack: [^]Level($S), d: u64) -> bool {
-	context = runtime.default_context()
-	size := int(d) * size_of(Level(S))
-	if resize(frames, size) != nil {
-		return false
-	}
-	intrinsics.mem_copy_non_overlapping(raw_data(frames^), stack, size)
-	return true
+piece_levels :: #force_inline proc "contextless" (frames: ^[dynamic]u8, stack: [^]Level($S), d: u64) -> bool {
+	return hook.piece_levels(frames, stack, d)
 }
 
-// How a walk in pieces goes on inside a container the hook answered `a` for.
 @(private)
 nest_of :: #force_inline proc "contextless" (a: hook.Action) -> hook.Nest {
-	#partial switch a {
-	case .Skip:
-		return .Skip
-	case .Keep:
-		return .Keep
-	case .Keep_Stubs:
-		return .Keep_Stubs
-	case .Rest:
-		return .Rest
-	}
-	return .None
+	return hook.nest_of(a)
 }
 
 // The result `r` of the inner walk of the container at `start` that the hook answered for with `nest`, or of the value
@@ -206,7 +185,7 @@ piece_track :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), s: 
 		return true
 	}
 	if t.kind > .Plain || t.kind == .End {
-		return piece_track_container(w.ctx, s, t)
+		return hook.piece_track_container(w.ctx, &s.state, &s.refused, t)
 	}
 	n := len(s.opened)
 	if t.role == .Key {
@@ -216,39 +195,6 @@ piece_track :: #force_inline proc "contextless" (w: ^Walk($S, $H, $LAX, $C), s: 
 	if n > 0 {
 		s.opened[n - 1].count += 1
 		s.opened[n - 1].key.kind = .End
-	}
-	return true
-}
-
-@(private)
-piece_track_container :: #force_no_inline proc "contextless" (ctx: ^runtime.Context, s: ^Piece, t: tape.Token) -> bool #no_bounds_check {
-	n := len(s.opened)
-	if t.kind == .End {
-		pop_safe(&s.opened)
-		if n > 1 {
-			s.opened[n - 2].key.kind = .End
-		}
-		return true
-	}
-	if n > 0 && t.role == .Value {
-		s.opened[n - 1].count += 1
-	}
-	level := hook.Open_Level{key = {kind = .End}, object = t.kind == .Object, name = -1}
-	if n < cap(s.opened) {
-		raw := (^runtime.Raw_Dynamic_Array)(&s.opened)
-		([^]hook.Open_Level)(raw.data)[n] = level
-		raw.len = n + 1
-		return true
-	}
-	return piece_open_grow(ctx, s, level)
-}
-
-@(private, cold)
-piece_open_grow :: #force_no_inline proc "contextless" (ctx: ^runtime.Context, s: ^Piece, level: hook.Open_Level) -> bool {
-	context = ctx^
-	if _, e := append(&s.opened, level); e != nil {
-		s.refused = true
-		return false
 	}
 	return true
 }
@@ -283,44 +229,10 @@ piece_read :: proc(src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^hook.Regs,
 	case:
 		r = piece_walk(text, S, opts, h, regs, allocator, ctx, on, s)
 	}
-	if s.refused {
-		r = hook.walk_result(to, hook.WALK_NO_MEMORY)
+	keep_fn :: proc "contextless" (s: ^Piece, to: u64) -> u64 {
+		return piece_keep(s, S, to)
 	}
-	for k := 0; k < len(s.claims); {
-		if s.claims[k][1] <= to {
-			ordered_remove(&s.claims, k)
-		} else {
-			k += 1
-		}
-	}
-	if len(s.claims) > 0 {
-		if !s.more {
-			r = fault(s.claims[0][0], .Truncated, .Count_Too_Large)
-		} else if u8(r) != hook.WALK_MORE {
-			s.holding, s.held, r = true, u64(r), hook.walk_result(to, hook.WALK_MORE)
-		}
-	} else if s.holding {
-		s.holding = false
-	}
-	if u8(r) == 0 && !s.holding {
-		if end := u64(r) >> 16; end < to {
-			r = fault(end, .Bad_Char, .Trailing)
-		} else if s.more {
-			s.ended, s.cut.i, r = true, end, hook.walk_result(to, hook.WALK_MORE)
-		}
-	}
-	tolerated = s.tolerated
-	if u8(r) == hook.WALK_MORE {
-		s.regs = regs^
-		p.more, p.at, p.keep = true, to, piece_keep(s, S, to)
-		if e := hook.piece_path(p, text, &FORMATS[S]); e != nil {
-			return 0, e, tolerated
-		}
-		return 0, nil, tolerated
-	}
-	p.more, p.open = false, nil
-	root_close, err, _ = hook.walk_error(r, &RULES)
-	return root_close, err, tolerated
+	return build.binary_piece_finish(p, s, text, to, r, regs, &FORMATS[S], &RULES, u8(Detail.Count_Too_Large), u8(Detail.Trailing), keep_fn)
 }
 
 // The walk of a window from where the last one stopped, which leaves in `s` where the next goes on.

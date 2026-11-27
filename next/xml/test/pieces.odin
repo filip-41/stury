@@ -4,7 +4,6 @@ package xml_tests
 import "core:fmt"
 import "core:math/rand"
 import "core:os"
-import "core:slice"
 import "core:strings"
 import "core:testing"
 import "stury:lib/core/tape"
@@ -12,19 +11,14 @@ import "stury:testkit"
 import "stury:xml"
 
 @(private = "file")
-piece_paths :: proc() -> [][]xml.Step {
-	paths := make([dynamic][]xml.Step, context.temp_allocator)
-	add :: proc(paths: ^[dynamic][]xml.Step, steps: ..xml.Step) {
-		append(paths, slice.clone(steps, context.temp_allocator))
-	}
-	add(&paths)
-	add(&paths, xml.Name("r"))
-	add(&paths, xml.Name("r"), xml.Name("a"))
-	add(&paths, xml.Name("r"), xml.Name("b"), xml.Index(-1))
-	add(&paths, xml.Name("r"), xml.All{}, xml.Name("c"))
-	add(&paths, xml.Name("r"), xml.Name("p:d"), xml.Name("#text"))
-	add(&paths, xml.Name("r"), xml.All{})
-	return paths[:]
+PIECE_PATHS := [?][]xml.Step {
+	{},
+	{xml.Name("r")},
+	{xml.Name("r"), xml.Name("a")},
+	{xml.Name("r"), xml.Name("b"), xml.Index(-1)},
+	{xml.Name("r"), xml.All{}, xml.Name("c")},
+	{xml.Name("r"), xml.Name("p:d"), xml.Name("#text")},
+	{xml.Name("r"), xml.All{}},
 }
 
 // Texts of every construct a window may cut: the declaration, the DTD with entities and defaults, comments and
@@ -70,7 +64,7 @@ pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 	options := [?]tape.Options{{}, {format = xml.Xml_Options{infer = true}}, {budget = {steps = 3}}, {budget = {depth = 2}}}
 	for text in PIECE_TEXTS {
 		for opts in options {
-			if !testkit.agree_in_pieces(t, xml.reads(.Xml), xml.as(.Xml), transmute([]u8)text, opts, piece_paths(), text, containers = true) {
+			if !testkit.agree_in_pieces(t, xml.reads(.Xml), xml.as(.Xml), transmute([]u8)text, opts, PIECE_PATHS[:], text, containers = true) {
 				return
 			}
 		}
@@ -86,23 +80,23 @@ pieces_agree_on_generated_documents :: proc(t: ^testing.T) {
 	for _ in 0 ..< testkit.rounds(12) {
 		src := random_document()
 		defer delete(src)
-		texts := [2][]u8{src, mutated(src)}
-		defer delete(texts[1])
+		texts := [2][]u8{src, testkit.mutate(src, XML_MUTATE_ALPHABET)}
 		for text in texts {
 			name := fmt.tprintf("generated %q", text)
+			cuts_list := make([dynamic][]int, 0, 12, context.temp_allocator)
+			singles: [6]int
 			for k in 0 ..< 6 {
-				cuts := [1]int{rand.int_max(len(text) + 1)}
-				_ = k
-				if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), text, {}, cuts[:], piece_paths(), name, framing = .Concatenated, containers = true) {
-					return
-				}
+				singles[k] = rand.int_max(len(text) + 1)
+				append(&cuts_list, singles[k:k + 1])
 			}
 			for size in ([]int{1, 2, 3, 7, 16, 61}) {
-				if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), text, {}, testkit.cuts_by(len(text), size), piece_paths(), name, framing = .Concatenated, containers = true) {
-					return
-				}
+				append(&cuts_list, testkit.cuts_by(len(text), size))
+			}
+			if !testkit.pieces_agree_cuts(t, xml.reads(.Xml), xml.as(.Xml), text, {}, cuts_list[:], PIECE_PATHS[:], name, framing = .Concatenated, containers = true) {
+				return
 			}
 		}
+		free_all(context.temp_allocator)
 	}
 }
 
@@ -125,16 +119,20 @@ pieces_agree_on_the_conformance_cases :: proc(t: ^testing.T) {
 			return
 		}
 		step := max(1, len(data) / 5)
+		singles := make([dynamic]int, 0, 8, context.temp_allocator)
 		for at := 0; at <= len(data); at += step {
-			cuts := [1]int{at}
-			if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), data, {}, cuts[:], piece_paths(), path, framing = .Concatenated, containers = true) {
-				return
-			}
+			append(&singles, at)
 		}
-		for size in ([]int{5, 29}) {
-			if !testkit.pieces_agree(t, xml.reads(.Xml), xml.as(.Xml), data, {}, testkit.cuts_by(len(data), size), piece_paths(), path, framing = .Concatenated) {
-				return
-			}
+		cuts_list := make([dynamic][]int, 0, len(singles), context.temp_allocator)
+		for k in 0 ..< len(singles) {
+			append(&cuts_list, singles[k:k + 1])
+		}
+		if !testkit.pieces_agree_cuts(t, xml.reads(.Xml), xml.as(.Xml), data, {}, cuts_list[:], PIECE_PATHS[:], path, framing = .Concatenated, containers = true) {
+			return
+		}
+		sizes := [2][]int{testkit.cuts_by(len(data), 5), testkit.cuts_by(len(data), 29)}
+		if !testkit.pieces_agree_cuts(t, xml.reads(.Xml), xml.as(.Xml), data, {}, sizes[:], PIECE_PATHS[:], path, framing = .Concatenated) {
+			return
 		}
 	}
 }

@@ -2,7 +2,6 @@ package toml_tests
 
 import "core:fmt"
 import "core:math/rand"
-import "core:slice"
 import "core:strings"
 import "core:testing"
 import "stury:lib/core/tape"
@@ -12,21 +11,16 @@ import "stury:toml"
 // Reads of a TOML text in pieces, each window starting at the read's `keep`, against reads of the whole text.
 
 // Paths into the texts: the root, members by name and index, from either end, and every child.
-@(private)
-piece_paths :: proc() -> [][]toml.Step {
-	paths := make([dynamic][]toml.Step, context.temp_allocator)
-	add :: proc(paths: ^[dynamic][]toml.Step, steps: ..toml.Step) {
-		append(paths, slice.clone(steps, context.temp_allocator))
-	}
-	add(&paths)
-	add(&paths, toml.Name("a"))
-	add(&paths, toml.Name("t"), toml.Name("b"))
-	add(&paths, toml.Name("l"), toml.Index(0), toml.Name("n"))
-	add(&paths, toml.Name("l"), toml.Index(-1))
-	add(&paths, toml.Name("u"), toml.Name("v"), toml.Name("c"))
-	add(&paths, toml.All{})
-	add(&paths, toml.Name("t"), toml.All{})
-	return paths[:]
+@(private = "file")
+PIECE_PATHS := [?][]toml.Step {
+	{},
+	{toml.Name("a")},
+	{toml.Name("t"), toml.Name("b")},
+	{toml.Name("l"), toml.Index(0), toml.Name("n")},
+	{toml.Name("l"), toml.Index(-1)},
+	{toml.Name("u"), toml.Name("v"), toml.Name("c")},
+	{toml.All{}},
+	{toml.Name("t"), toml.All{}},
 }
 
 // Texts of tables written apart, arrays of tables, strings that run over lines, comments of every role and faults.
@@ -60,7 +54,7 @@ pieces_agree_with_whole_reads :: proc(t: ^testing.T) {
 	for text in PIECE_TEXTS {
 		for spec in toml.Spec {
 			for opts in options {
-				if !testkit.agree_in_pieces(t, toml.reads(spec), toml.as(spec), transmute([]u8)text, opts, piece_paths(), text) {
+				if !testkit.agree_in_pieces(t, toml.reads(spec), toml.as(spec), transmute([]u8)text, opts, PIECE_PATHS[:], text) {
 					return
 				}
 			}
@@ -88,16 +82,19 @@ pieces_agree_on_the_conformance_cases :: proc(t: ^testing.T) {
 			continue
 		}
 		step := max(1, len(data) / 6)
+		singles := make([dynamic]int, 0, 8, context.temp_allocator)
 		for at := 0; at <= len(data); at += step {
-			cuts := [1]int{at}
-			if !testkit.pieces_agree(t, toml.reads(.Toml_1_1), toml.as(.Toml_1_1), data, {}, cuts[:], piece_paths(), name, framing = .Concatenated) {
-				return
-			}
+			append(&singles, at)
+		}
+		cuts_list := make([dynamic][]int, 0, len(singles) + 3, context.temp_allocator)
+		for i in 0 ..< len(singles) {
+			append(&cuts_list, singles[i:i + 1])
 		}
 		for size in ([]int{1, 5, 29}) {
-			if !testkit.pieces_agree(t, toml.reads(.Toml_1_1), toml.as(.Toml_1_1), data, {}, testkit.cuts_by(len(data), size), piece_paths(), name, framing = .Concatenated) {
-				return
-			}
+			append(&cuts_list, testkit.cuts_by(len(data), size))
+		}
+		if !testkit.pieces_agree_cuts(t, toml.reads(.Toml_1_1), toml.as(.Toml_1_1), data, {}, cuts_list[:], PIECE_PATHS[:], name, framing = .Concatenated) {
+			return
 		}
 		free_all(context.temp_allocator)
 	}
@@ -112,20 +109,23 @@ pieces_agree_on_generated_texts :: proc(t: ^testing.T) {
 	for _ in 0 ..< testkit.rounds(12) {
 		src := random_text()
 		defer delete(src)
-		bad := mutated(src)
-		defer delete(bad)
-		for text in ([2][]u8{transmute([]u8)src, bad}) {
+		raw := transmute([]u8)src
+		bad := testkit.mutate(raw, TOML_MUTATE_ALPHABET)
+		for text in ([2][]u8{raw, bad}) {
 			step := max(1, len(text) / 24)
+			singles := make([dynamic]int, 0, 26, context.temp_allocator)
 			for k := 0; k <= len(text); k += step {
-				cuts := [1]int{k}
-				if !testkit.pieces_agree(t, toml.reads(.Toml_1_1), toml.as(.Toml_1_1), text, {}, cuts[:], piece_paths(), fmt.tprintf("generated %q", text), framing = .Concatenated) {
-					return
-				}
+				append(&singles, k)
+			}
+			cuts_list := make([dynamic][]int, 0, len(singles) + 3, context.temp_allocator)
+			for i in 0 ..< len(singles) {
+				append(&cuts_list, singles[i:i + 1])
 			}
 			for size in ([]int{1, 3, 16}) {
-				if !testkit.pieces_agree(t, toml.reads(.Toml_1_1), toml.as(.Toml_1_1), text, {}, testkit.cuts_by(len(text), size), piece_paths(), fmt.tprintf("generated %q", text), framing = .Concatenated) {
-					return
-				}
+				append(&cuts_list, testkit.cuts_by(len(text), size))
+			}
+			if !testkit.pieces_agree_cuts(t, toml.reads(.Toml_1_1), toml.as(.Toml_1_1), text, {}, cuts_list[:], PIECE_PATHS[:], fmt.tprintf("generated %q", text), framing = .Concatenated) {
+				return
 			}
 		}
 		free_all(context.temp_allocator)
@@ -161,24 +161,23 @@ pieces_keep_the_cut_statement :: proc(t: ^testing.T) {
 records_in_pieces_agree_with_whole_records :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	defer free_all(context.temp_allocator)
-	paths := piece_paths()
+	paths := PIECE_PATHS[:]
 	d, _ := toml.demand_of(paths, allocator = context.temp_allocator)
 	for text in PIECE_TEXTS {
 		src := transmute([]u8)text
+		singles := make([]int, len(src) + 1, context.temp_allocator)
+		cuts_list := make([dynamic][]int, 0, len(src) + 1 + 20, context.temp_allocator)
+		for k in 0 ..= len(src) {
+			singles[k] = k
+			append(&cuts_list, singles[k:k + 1])
+		}
+		for size in 1 ..= 20 {
+			append(&cuts_list, testkit.cuts_by(len(src), size))
+		}
 		for spec in toml.Spec {
 			run := testkit.Piece_Run{src, toml.reads(spec), toml.as(spec), {}, nil}
-			for k in 0 ..= len(src) {
-				cuts := [1]int{k}
-				run.cuts = cuts[:]
-				if !testkit.records_pieces_agree(t, run, .Concatenated, paths, &d, text) {
-					return
-				}
-			}
-			for size in 1 ..= 20 {
-				run.cuts = testkit.cuts_by(len(src), size)
-				if !testkit.records_pieces_agree(t, run, .Concatenated, paths, &d, text) {
-					return
-				}
+			if !testkit.records_pieces_agree_cuts(t, run, cuts_list[:], .Concatenated, paths, &d, text) {
+				return
 			}
 		}
 	}

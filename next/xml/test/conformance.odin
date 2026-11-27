@@ -236,9 +236,9 @@ canonical_members :: proc(b: ^strings.Builder, doc: ^tape.Document, obj: tape.No
 		if p != .Found {
 			break
 		}
-		name := text_of(doc, key)
+		name := testkit.scalar_text(doc, key)
 		if name == xml.TEXT_KEY {
-			strings.write_string(&run, text_of(doc, val))
+			strings.write_string(&run, testkit.scalar_text(doc, val))
 		} else {
 			flush(b, &run)
 			canonical_element(b, doc, name, val)
@@ -249,8 +249,8 @@ canonical_members :: proc(b: ^strings.Builder, doc: ^tape.Document, obj: tape.No
 
 @(private = "file")
 canonical_element :: proc(b: ^strings.Builder, doc: ^tape.Document, name: string, val: tape.Node_Index) {
-	attrs := slice.clone_to_dynamic(attributes_of(doc, val), context.temp_allocator)
-	slice.sort_by(attrs[:], proc(x, y: Attribute) -> bool {return x.name < y.name})
+	attrs := slice.clone_to_dynamic(testkit.attributes_of(doc, val), context.temp_allocator)
+	slice.sort_by(attrs[:], proc(x, y: testkit.Attribute) -> bool {return x.name < y.name})
 	fmt.sbprintf(b, "<%s", name)
 	for a in attrs {
 		fmt.sbprintf(b, " %s=\"", a.name)
@@ -263,7 +263,7 @@ canonical_element :: proc(b: ^strings.Builder, doc: ^tape.Document, name: string
 		canonical_members(b, doc, val)
 	case .Null:
 	case .False, .True, .Number, .Bytes, .String, .Plain, .Array, .End:
-		escaped(b, text_of(doc, val))
+		escaped(b, testkit.scalar_text(doc, val))
 	}
 	fmt.sbprintf(b, "</%s>", name)
 }

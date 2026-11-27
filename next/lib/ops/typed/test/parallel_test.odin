@@ -327,15 +327,6 @@ make_cbor_rows :: proc(count: int, spec: cbor.Spec, allocator := context.allocat
 	return out
 }
 
-@(private = "file")
-unknown_alloc_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]u8, runtime.Allocator_Error) {
-	if mode == .Query_Features {
-		return nil, .Mode_Not_Implemented
-	}
-	backing := (^runtime.Allocator)(data)^
-	return backing.procedure(backing.data, mode, size, alignment, old_memory, old_size, loc)
-}
-
 // Verifies JSON / JSONC / JSON5 parallel typed unmarshal across thread counts {1, 2, 4, 18}, root & nested spine,
 // dynamic arrays, pre-made vs one-shot plans, borrow/copy, and all duplicate policies.
 @(test)
@@ -616,7 +607,9 @@ typed_parallel_ruling8_allocators_and_shared_scratch :: proc(t: ^testing.T) {
 	mem.mutex_allocator_init(&mtx, heap)
 	testing.expect(t, typed.parallel_alloc_class(mem.mutex_allocator(&mtx), {}) == .Serial)
 
-	ua := runtime.Allocator{unknown_alloc_proc, &heap}
+	testing.expect(t, typed.parallel_alloc_class(testkit.unknown_allocator(), {}) == .Serial)
+	uf := testkit.Failing{backing = heap, fail_at = -1}
+	ua := testkit.failing_allocator(&uf)
 	testing.expect(t, typed.parallel_alloc_class(ua, {}) == .Serial)
 
 	// Build a payload combining:

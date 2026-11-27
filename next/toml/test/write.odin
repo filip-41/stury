@@ -1,5 +1,7 @@
 package toml_tests
 
+import "core:fmt"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "stury:json"
@@ -203,4 +205,162 @@ toml_write_partial_dups_v11_utf8_and_deep_dotted :: proc(t: ^testing.T) {
 	deep_out, _, deep_werr := toml.write(&deep_doc, .Toml_1_0)
 	defer delete(deep_out)
 	testing.expectf(t, deep_werr == nil && string(deep_out) == string(deep_src), "deep write: %v len=%d", deep_werr, len(deep_out))
+}
+
+@(test)
+toml_is_v1s_text :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, err := json.build(transmute([]u8)string(`{"a":1,"b":"x\ny","c":[1,2.5],"d":{"e":true},"f":[{"g":1},{"g":2}]}`))
+	defer json.destroy(&doc)
+	testing.expect(t, err == nil)
+	text, _, werr := toml.write(&doc)
+	defer delete(text)
+	want := "a = 1\nb = \"x\\ny\"\nc = [1, 2.5]\n\n[d]\ne = true\n\n[[f]]\ng = 1\n\n[[f]]\ng = 2\n"
+	testing.expectf(t, werr == nil && string(text) == want, "%v\n%s", werr, text)
+}
+
+@(test)
+a_header_under_dotted_keys_is_written_as_a_header :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := "[fruit]\napple.color = \"red\"\n\n[fruit.apple.texture]\nsmooth = true\n\n[[fruit.apple.seeds]]\nsize = 2\n"
+	doc, err := toml.build(transmute([]u8)src, .Toml_1_1)
+	defer toml.destroy(&doc)
+	testing.expect(t, err == nil)
+	text, _, werr := toml.write(&doc, .Toml_1_1)
+	defer delete(text)
+	testing.expectf(t, werr == nil && string(text) == src, "%v\n%s", werr, text)
+}
+
+@(test)
+a_table_in_braces_keeps_its_comments_in_toml_1_1 :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	src := "a = {# lead\n\tb = 1, # one\n\tc = 2,\n\t# foot\n}\n"
+	doc, err := toml.build(transmute([]u8)src, .Toml_1_1)
+	defer toml.destroy(&doc)
+	testing.expect(t, err == nil)
+	text, dropped, werr := toml.write(&doc, .Toml_1_1)
+	defer delete(text)
+	testing.expectf(t, werr == nil && dropped & tape.COMMENTS == {} && string(text) == "a = {\n# lead\nb = 1, # one\nc = 2,\n# foot\n}\n", "%v %v\n%s", werr, dropped, text)
+	// A text of 1.0 cannot break a table in braces, so its comments are reported.
+	text10, dropped10, werr10 := toml.write(&doc, .Toml_1_0)
+	defer delete(text10)
+	testing.expectf(t, werr10 == nil && dropped10 & tape.COMMENTS != {} && string(text10) == "a = {b = 1, c = 2}\n", "%v %v\n%s", werr10, dropped10, text10)
+}
+
+@(private = "file")
+FACT_TEXTS := [?]string{
+	"# head\n\na = 1 # one\nb = 0xFF\nc = 1.0\nd = 'lit'\ne = \"\"\"\nml\nx\"\"\"\nf = '''\nmlit\n'''\ng = 1979-05-27T07:32:00Z\n# lead t\n[t] # on t\nx = [1, 2] # xs\n# foot t\n\n[t.u]\ny = {p = 1, q = 2}\n\n[[arr]]\nk = 1\n\n# second\n[[arr]]\nk = 2\n",
+	"a.b = 1\na.c = 2\n\"quoted key\" = 3\n'lit key' = 4\n[x.y.z]\nv = true\n",
+	"[t]\nx = 1\n# end of t\n\n[u]\ny = 1\n# file end\n",
+	"i = inf\nn = nan\nm = -inf\no = 0o17\nb = 0b101\n",
+}
+
+// A description of the facts of `doc`: each node's style and tag names and each fact's kind and text.
+describe :: proc(doc: ^tape.Document, unordered := false) -> string {
+	b: strings.Builder
+	lines := make([dynamic]string, context.temp_allocator)
+	for _, i in doc.nodes {
+		at := tape.Node_Index(i)
+		style, _ := tape.fact_name(doc, at, .Style)
+		tag, _ := tape.fact_name(doc, at, .Tag)
+		line: strings.Builder
+		strings.builder_init(&line, context.temp_allocator)
+		fmt.sbprintf(&line, "%d %q %q", 0 if unordered else i, style, tag)
+		for f in tape.facts_of(doc, at) {
+			fmt.sbprintf(&line, " %v:%q", f.kind, string(tape.span_bytes(doc, f.lo, f.n)))
+		}
+		append(&lines, strings.to_string(line))
+	}
+	if unordered {
+		slice.sort(lines[:])
+	}
+	for line in lines {
+		strings.write_string(&b, line)
+		strings.write_byte(&b, '\n')
+	}
+	return strings.to_string(b)
+}
+
+@(test)
+toml_facts_are_written_and_read_back :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	for src, k in FACT_TEXTS {
+		doc, err := toml.build(transmute([]u8)src)
+		defer toml.destroy(&doc)
+		testing.expectf(t, err == nil, "%d: %v", k, err)
+		text, dropped, werr := toml.write(&doc)
+		defer delete(text)
+		testing.expectf(t, werr == nil && dropped == {}, "%d: %v %v\n%s", k, werr, dropped, text)
+		back, berr := toml.build(text)
+		defer toml.destroy(&back)
+		testing.expectf(t, berr == nil, "%d: %v\n%s", k, berr, text)
+		want, got := describe(&doc), describe(&back)
+		defer delete(want)
+		defer delete(got)
+		testing.expectf(t, want == got, "%d: facts differ\n%s\nwant\n%s\ngot\n%s", k, text, want, got)
+	}
+}
+
+@(test)
+comments_of_other_formats_are_written :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, err := json.build(transmute([]u8)string("// head\n{\n// lead a\n\"a\": 1, // tail a\n\"b\": {\"c\": 2}\n}\n"), .Jsonc)
+	defer json.destroy(&doc)
+	testing.expect(t, err == nil)
+	text, dropped, werr := toml.write(&doc)
+	defer delete(text)
+	want := "# head\n\n# lead a\na = 1 # tail a\n\n[b]\nc = 2\n"
+	testing.expectf(t, werr == nil && dropped == {} && string(text) == want, "%v %v\n%s", werr, dropped, text)
+}
+
+@(test)
+indent_and_sorted_keys :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	doc, _ := json.build(transmute([]u8)string(`{"b":1,"a":{"z":1,"y":{"q":[{"k":1}]}},"c":{"w":2,"v":3}}`))
+	defer json.destroy(&doc)
+	text, _, err := toml.write(&doc, .Toml_1_0, {indent = 2, sort_keys = true})
+	defer delete(text)
+	want := "b = 1\n\n[a]\n  z = 1\n\n  [a.y]\n\n    [[a.y.q]]\n      k = 1\n\n[c]\n  v = 3\n  w = 2\n"
+	testing.expectf(t, err == nil && string(text) == want, "%v\n%s", err, text)
+	back, berr := toml.build(text)
+	defer toml.destroy(&back)
+	testing.expect(t, berr == nil)
+}
+
+@(test)
+suite_texts_write_and_read_back_with_their_facts :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+	written := 0
+	for dir in SUITE {
+		if !strings.has_prefix(dir.prefix, "valid/") {
+			continue
+		}
+		for file in dir.files {
+			if !strings.has_suffix(file.name, ".toml") {
+				continue
+			}
+			doc, err := toml.build(file.data, .Toml_1_1)
+			defer toml.destroy(&doc)
+			if err != nil {
+				continue
+			}
+			text, _, werr := toml.write(&doc, .Toml_1_1)
+			defer delete(text)
+			if werr != nil {
+				// A TOML text holds no null, but a value past 64 bits or a key that is a container is refused too.
+				continue
+			}
+			written += 1
+			// Known gaps: a comment inside an inline table, and tables a header made under a table of dotted keys, are not
+			// written as they were.
+			back, berr := toml.build(text, .Toml_1_1)
+			defer toml.destroy(&back)
+			testing.expectf(t, berr == nil, "%s%s: %v\n%s", dir.prefix, file.name, berr, text)
+			want, got := describe(&doc, true), describe(&back, true)
+			defer delete(want)
+			defer delete(got)
+			testing.expectf(t, berr == nil && want == got, "%s%s: facts differ\n%s\nwant\n%s\ngot\n%s", dir.prefix, file.name, text, want, got)
+		}
+	}
+	testing.expect(t, written > 100)
 }

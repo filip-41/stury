@@ -39,7 +39,7 @@ json_and_cbor_documents_write_as_msgpack :: proc(t: ^testing.T) {
 	}
 
 	// CBOR tag 0 (RFC3339), CBOR tag 1 (epoch), and binary strings convert cleanly into MessagePack timestamps & bin.
-	cbor_src := hex("83 d8 18 43 010203 c0 74 323031332d30332d32315432303a30343a30305a c1 1a 514b67b0")
+	cbor_src := testkit.hex("83 d8 18 43 010203 c0 74 323031332d30332d32315432303a30343a30305a c1 1a 514b67b0")
 	cdoc, cerr := cbor.build(cbor_src, allocator = context.temp_allocator)
 	testing.expect_value(t, cerr, nil)
 	mp_bytes, dropped, mwerr := msgpack.write(&cdoc, .Compact, allocator = context.temp_allocator)
@@ -60,7 +60,7 @@ write_canonical_sort_keys_and_options :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	// Non-compact MessagePack compacted by `.Compact` write, keeping ext/timestamps and sorting keys.
-	non_compact := hex("83 a2 6262 cc 01 a1 61 cb 3ff8000000000000 a1 74 c7 0c ff 00000000 00000000514b67b0")
+	non_compact := testkit.hex("83 a2 6262 cc 01 a1 61 cb 3ff8000000000000 a1 74 c7 0c ff 00000000 00000000514b67b0")
 	doc, err := msgpack.build(non_compact, .Msgpack, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 
@@ -69,7 +69,7 @@ write_canonical_sort_keys_and_options :: proc(t: ^testing.T) {
 	testing.expect_value(t, dropped, msgpack.Facts{})
 	testing.expect_value(t, msgpack.validate(out, .Compact), nil)
 	// Sorted key order: "a" (1.5 f32), "bb" (fixint 1), "t" (TS32 0x514b67b0).
-	want := hex("83 a1 61 ca 3fc00000 a2 6262 01 a1 74 d6 ff 514b67b0")
+	want := testkit.hex("83 a1 61 ca 3fc00000 a2 6262 01 a1 74 d6 ff 514b67b0")
 	testing.expectf(t, bytes.equal(out, want), "got %x want %x", out, want)
 
 	// Refusals on invalid options / unspellable JSON number.
@@ -164,7 +164,7 @@ token_writer_and_chunked_sink :: proc(t: ^testing.T) {
 @(test)
 write_oom_sweep :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	src := hex("83 a1 61 92 01 02 a1 62 a5 68656c6c6f a1 74 d6 ff 514b67b0")
+	src := testkit.hex("83 a1 61 92 01 02 a1 62 a5 68656c6c6f a1 74 d6 ff 514b67b0")
 	doc, err := msgpack.build(src, .Msgpack)
 	testing.expect_value(t, err, nil)
 	defer msgpack.destroy(&doc)

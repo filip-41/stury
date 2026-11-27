@@ -190,35 +190,27 @@ out_sink_writes_a_short_text_once :: proc(t: ^testing.T) {
 	testing.expect_value(t, none.writes, 0)
 }
 
-// A sink that refuses part of the text leaves the prefix it took and gives its error.
+// A sink that refuses part of the text — mid-stream or on the final flush — leaves the prefix it took and reports its error.
 @(test)
-out_failing_sink_leaves_a_prefix :: proc(t: ^testing.T) {
+out_failing_sink_reports_error_and_keeps_prefix :: proc(t: ^testing.T) {
 	testkit.deadline(t)
 	doc := tiny_doc()
 	defer json.destroy(&doc)
-	pieces := Pieces{count = 3000, size = 100}
-	context.user_ptr = &pieces
-	sink := Recorder{room = 100_000, per_write = max(int), names_error = true}
-	defer delete(sink.took)
-	_, err := write.to_sink(recorder_sink(&sink), &doc, 0, {}, context.allocator, pieces_writer)
-	testing.expect_value(t, err, write.Error(io.Error.Short_Write))
-	testing.expect_value(t, len(sink.took), 100_000)
-	testing.expect(t, pieces_match(sink.took[:], 1000, 100))
-}
-
-// A sink that refuses the last flush, which a text shorter than the buffer is written by, is reported.
-@(test)
-out_sink_refusing_the_final_flush_is_reported :: proc(t: ^testing.T) {
-	testkit.deadline(t)
-	doc := tiny_doc()
-	defer json.destroy(&doc)
-	pieces := Pieces{count = 1, size = 50}
-	context.user_ptr = &pieces
-	sink := Recorder{room = 10, per_write = max(int), names_error = true}
-	defer delete(sink.took)
-	_, err := write.to_sink(recorder_sink(&sink), &doc, 0, {}, context.allocator, pieces_writer)
-	testing.expect_value(t, err, write.Error(io.Error.Short_Write))
-	testing.expect_value(t, len(sink.took), 10)
+	for tc in ([]struct { count, size, room, want_pieces: int }{
+		{3000, 100, 100_000, 1000},
+		{1, 50, 10, 0},
+	}) {
+		pieces := Pieces{count = tc.count, size = tc.size}
+		context.user_ptr = &pieces
+		sink := Recorder{room = tc.room, per_write = max(int), names_error = true}
+		defer delete(sink.took)
+		_, err := write.to_sink(recorder_sink(&sink), &doc, 0, {}, context.allocator, pieces_writer)
+		testing.expect_value(t, err, write.Error(io.Error.Short_Write))
+		testing.expect_value(t, len(sink.took), tc.room)
+		if tc.want_pieces > 0 {
+			testing.expect(t, pieces_match(sink.took[:], tc.want_pieces, tc.size))
+		}
+	}
 }
 
 // A sink that names no error and takes nothing is a short write, and one that takes a few bytes at a time is written
@@ -353,4 +345,45 @@ out_sink_and_buffer_agree :: proc(t: ^testing.T) {
 	_, serr := write.to_sink(bytes.buffer_to_stream(&sink), &doc, 0, {}, context.allocator, pieces_writer)
 	testing.expect_value(t, serr, nil)
 	testing.expect(t, string(bytes.buffer_to_bytes(&sink)) == string(text))
+}
+
+@(test)
+out_empty_buffer_finish_and_compact_and_size_hint :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// P9: `out_finish` on 0-byte buffer write frees its backing block and returns `nil, nil`.
+	out: write.Out
+	testing.expect_value(t, write.out_start(&out, context.allocator, {}, write.ROOM_MAX), nil)
+	text, err := write.out_finish(&out)
+	testing.expect_value(t, err, nil)
+	testing.expect(t, text == nil && len(text) == 0)
+	// Safe to call `out_drop` after `out_finish` because `out^` was zeroed.
+	write.out_drop(&out)
+
+	// P9: `out_start` with zero or nil allocator fails cleanly with `.Out_Of_Memory`.
+	for bad in ([?]runtime.Allocator{{}, mem.nil_allocator()}) {
+		o: write.Out
+		testing.expect_value(t, write.out_start(&o, bad, {}, write.ROOM_MAX), runtime.Allocator_Error.Out_Of_Memory)
+	}
+
+	// P11: `compact` combinations.
+	testing.expect(t, write.compact({}))
+	testing.expect(t, !write.compact({indent = 2}))
+	testing.expect(t, !write.compact({tab = true}))
+	testing.expect(t, !write.compact({indent = 2, tab = true}))
+
+	// P11: `opts.node != ROOT`, `tape.NO_NODE`, and `indent = 255`.
+	doc, berr := json.build(transmute([]u8)string(`{"a":[1,2,3],"b":"leaf"}`))
+	defer json.destroy(&doc)
+	testing.expect_value(t, berr, nil)
+	leaf, p := json.member({&doc, nil}, json.ROOT, "b")
+	testing.expect_value(t, p, tape.Presence.Found)
+	sub, _, serr := json.write(&doc, .Json, {node = leaf})
+	defer delete(sub)
+	testing.expectf(t, serr == nil && string(sub) == `"leaf"`, "subtree write: %q %v", sub, serr)
+	_, _, no_err := json.write(&doc, .Json, {node = tape.NO_NODE})
+	testing.expect_value(t, no_err, json.Write_Error(tape.Bad_Option{"node"}))
+	big_ind, _, ierr := json.write(&doc, .Json, {indent = 255})
+	defer delete(big_ind)
+	testing.expect_value(t, ierr, nil)
 }

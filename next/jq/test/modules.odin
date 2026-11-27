@@ -7,7 +7,6 @@ import "core:os"
 import "core:strings"
 import "core:testing"
 import "stury:jq"
-import "stury:lib/query"
 import "stury:testkit"
 
 // Where the corpus's own modules are, as jq's run-tests passes it with `-L`.
@@ -35,39 +34,16 @@ read_memory :: proc(data: rawptr, path: string, allocator: runtime.Allocator) ->
 
 // Compiles `src` with `modules` and runs it on null with `globals`: its outputs as JSON, joined by a space, then
 // `error: ` and the message if the run failed, or jq's first line for the compile error.
-eval :: proc(t: ^testing.T, src: string, modules: jq.Modules, variables: []string = nil, globals: []string = nil) -> string {
-	prog, errors := jq.compile(src, {modules = modules, variables = variables})
-	defer jq.destroy_program(prog)
-	if len(errors) > 0 {
-		return last_message(errors)
-	}
-	h: query.Heap
-	query.heap_init(&h, context.allocator)
-	defer query.heap_destroy(&h)
-	values := make([]query.Value, len(globals))
-	for text, i in globals {
-		values[i], _ = read_value(&h, text)
-	}
-	run: jq.Run
-	jq.run_init(&run, prog, &h, values)
-	outs := Outputs{h = &h}
-	end := jq.run_value(&run, query.NULL, collect, &outs)
-	shown := make([dynamic]string)
-	for v in outs.vals {
-		append(&shown, show(&h, v))
-		query.release(&h, v)
-	}
-	if end == .Failed {
-		e := query.take_error(&h)
-		append(&shown, strings.concatenate({"error: ", jq.error_message(&h, &e)}))
-		query.destroy_error(&h, &e)
-	}
-	jq.run_destroy(&run)
-	for v in values {
-		query.release(&h, v)
-	}
-	testing.expect_value(t, query.heap_live(&h), u64(0))
-	return strings.join(shown[:], " ")
+eval :: proc(t: ^testing.T, src: string, modules: jq.Modules, variables: []string = nil, globals: []string = nil, loc := #caller_location) -> string {
+	r := eval_jq(t, src, {
+		modules           = modules,
+		variables         = variables,
+		globals           = globals,
+		sep               = " ",
+		allow_compile_err = true,
+		append_err        = true,
+	}, loc = loc)
+	return r.compile_err if r.compile_err != "" else r.out
 }
 
 @(test)

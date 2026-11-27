@@ -1,7 +1,6 @@
 package jq_tests
 
 import "core:mem/virtual"
-import "core:strings"
 import "core:testing"
 import "stury:jq"
 import "stury:lib/query"
@@ -23,60 +22,11 @@ test_zone :: proc(data: rawptr, secs: i64) -> (zone: query.Zone, ok: bool) {
 	return {offset = -5 * 3600, name = "EST"}, true
 }
 
+// The outputs of `program` on `input`, as compact JSON joined by newlines, in the zone of `test_zone` when `zoned`.
 @(private = "file")
-Texts :: struct {
-	h:    ^query.Heap,
-	vals: [dynamic]string,
-}
-
-@(private = "file")
-collect_text :: proc(data: rawptr, v: query.Value, h: ^query.Heap) -> bool {
-	o := (^Texts)(data)
-	out := make([dynamic]u8)
-	_ = query.write_json(h, &out, v)
-	append(&o.vals, string(out[:]))
-	query.release(h, v)
-	return true
-}
-
-@(private = "file")
-failed :: proc(why: string) -> []string {
-	out := make([]string, 1)
-	out[0] = strings.concatenate({"<", why, ">"})
-	return out
-}
-
-// The outputs of `program` on `input`, as compact JSON, in the zone of `test_zone` when `zoned`.
-@(private = "file")
-run_in_zone :: proc(program, input: string, zoned: bool) -> []string {
-	prog, errors := jq.compile(program)
-	defer jq.destroy_program(prog)
-	if len(errors) > 0 {
-		return failed("compile error")
-	}
-	h: query.Heap
-	query.heap_init(&h, context.allocator)
-	defer query.heap_destroy(&h)
-	x, ok := read_value(&h, input)
-	if !ok {
-		return failed("bad input")
-	}
-	hooks := jq.Hooks {
-		zone = test_zone if zoned else nil,
-	}
-	run: jq.Run
-	jq.run_init(&run, prog, &h, nil, &hooks)
-	outs := Texts {
-		h = &h,
-	}
-	end := jq.run_value(&run, x, collect_text, &outs)
-	if end == .Failed {
-		e := query.take_error(&h)
-		append(&outs.vals, strings.concatenate({"error: ", jq.error_message(&h, &e)}))
-		query.destroy_error(&h, &e)
-	}
-	jq.run_destroy(&run)
-	return outs.vals[:]
+run_in_zone :: proc(t: ^testing.T, program, input: string, zoned: bool, loc := #caller_location) -> string {
+	hooks := jq.Hooks{zone = test_zone if zoned else nil}
+	return eval_jq(t, program, {input_json = input, hooks = &hooks, append_err = true}, loc = loc).out
 }
 
 @(private = "file", rodata)
@@ -105,7 +55,7 @@ local_time_follows_the_zone_the_caller_names :: proc(t: ^testing.T) {
 	defer virtual.arena_destroy(&arena)
 	context.allocator = virtual.arena_allocator(&arena)
 	for c in ZONE_CASES {
-		got := strings.join(run_in_zone(c[0], c[1], true), "\n")
+		got := run_in_zone(t, c[0], c[1], true)
 		testing.expectf(t, got == c[2], "%s on %s: got %s, want %s", c[0], c[1], got, c[2])
 	}
 }
@@ -117,6 +67,6 @@ local_time_is_utc_without_a_zone :: proc(t: ^testing.T) {
 	testing.expect(t, suite_arena(&arena) == nil)
 	defer virtual.arena_destroy(&arena)
 	context.allocator = virtual.arena_allocator(&arena)
-	got := strings.join(run_in_zone(`localtime, strflocaltime("%H %Z %z")`, "1700000000", false), "\n")
+	got := run_in_zone(t, `localtime, strflocaltime("%H %Z %z")`, "1700000000", false)
 	testing.expect_value(t, got, "[2023,10,14,22,13,20,2,317]\n\"22 UTC +0000\"")
 }

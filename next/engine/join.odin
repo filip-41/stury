@@ -549,51 +549,31 @@ join_worker_fini :: proc(parent_ctx: rawptr, worker_idx: int, worker_ctx: rawptr
 }
 
 @(private = "file")
-join_eval_bridge :: proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta, emit: Emitter) -> Exec_Error {
+join_bridge_run :: proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta, emit: Emitter, use_each: bool) -> Exec_Error {
 	if ctx == nil {
 		return .Unsupported
 	}
 	h := (^Bridge_Header)(ctx)
 	uctx := slot_effective_user_ctx(h)
-	if h.aux_eval != nil {
-		return h.aux_eval(uctx, h.aux, doc, meta, emit)
+	aux_fn := h.aux_each if use_each else h.aux_eval
+	if aux_fn != nil {
+		return aux_fn(uctx, h.aux, doc, meta, emit)
 	}
-	if !h.is_worker {
-		slot := (^Bridge_Slot)(ctx)
-		if slot.raw_eval != nil {
-			return slot.raw_eval(uctx, doc, meta, emit)
-		}
-	} else {
-		ws := (^Join_Worker_Ctx)(ctx)
-		if ws.slot.raw_eval != nil {
-			return ws.slot.raw_eval(uctx, doc, meta, emit)
-		}
+	raw_eval := (^Bridge_Slot)(ctx).raw_eval if !h.is_worker else (^Join_Worker_Ctx)(ctx).slot.raw_eval
+	if raw_eval != nil {
+		return raw_eval(uctx, doc, meta, emit)
 	}
 	return .Unsupported
 }
 
 @(private = "file")
+join_eval_bridge :: proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta, emit: Emitter) -> Exec_Error {
+	return join_bridge_run(ctx, doc, meta, emit, false)
+}
+
+@(private = "file")
 join_each_bridge :: proc(ctx: rawptr, doc: ^tape.Document, meta: Record_Meta, emit: Emitter) -> Exec_Error {
-	if ctx == nil {
-		return .Unsupported
-	}
-	h := (^Bridge_Header)(ctx)
-	uctx := slot_effective_user_ctx(h)
-	if h.aux_each != nil {
-		return h.aux_each(uctx, h.aux, doc, meta, emit)
-	}
-	if !h.is_worker {
-		slot := (^Bridge_Slot)(ctx)
-		if slot.raw_eval != nil {
-			return slot.raw_eval(uctx, doc, meta, emit)
-		}
-	} else {
-		ws := (^Join_Worker_Ctx)(ctx)
-		if ws.slot.raw_eval != nil {
-			return ws.slot.raw_eval(uctx, doc, meta, emit)
-		}
-	}
-	return .Unsupported
+	return join_bridge_run(ctx, doc, meta, emit, true)
 }
 
 @(private = "file")

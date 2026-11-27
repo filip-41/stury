@@ -1,6 +1,8 @@
 package write_tests
 
+import "base:runtime"
 import "core:testing"
+import "stury:cbor"
 import "stury:json"
 import "stury:lib/core/tape"
 import "stury:lib/ops/write"
@@ -160,4 +162,123 @@ documents_write_a_record :: proc(t: ^testing.T) {
 	streamed, serr := json.writer_end(&w)
 	defer delete(streamed)
 	testing.expectf(t, serr == nil && string(streamed) == "{\"a\":[1,2]}\n{\"a\":1}\n", "json.put: %v %q", serr, streamed)
+}
+
+@(test)
+sequence_and_token_tape_and_tokens_of_regressions :: proc(t: ^testing.T) {
+	testkit.deadline(t)
+
+	// P18: `Sequence` deep nesting past 64 levels inside objects after `.Key`, framed empty done, `max_depth`, and OOM.
+	seq: write.Sequence
+	write.sequence_start(&seq, true, 0, context.allocator)
+	defer write.sequence_drop(&seq)
+	testing.expect(t, write.sequence_done(&seq))
+	for _ in 0 ..< 80 {
+		_, e1 := write.sequence_take(&seq, .Object)
+		testing.expect_value(t, e1, nil)
+		_, e2 := write.sequence_take(&seq, .Key)
+		testing.expect_value(t, e2, nil)
+	}
+	_, ev := write.sequence_take(&seq, .Null)
+	testing.expect_value(t, ev, nil)
+	for _ in 0 ..< 80 {
+		_, ec := write.sequence_take(&seq, .Close)
+		testing.expect_value(t, ec, nil)
+	}
+	testing.expect(t, write.sequence_done(&seq))
+
+	// `max_depth` refusal leaves sequence valid.
+	lim: write.Sequence
+	write.sequence_start(&lim, false, 2, context.allocator)
+	defer write.sequence_drop(&lim)
+	_, _ = write.sequence_take(&lim, .Array)
+	_, _ = write.sequence_take(&lim, .Array)
+	_, deep_err := write.sequence_take(&lim, .Array)
+	dr, dok := deep_err.(write.Refused)
+	testing.expectf(t, dok && dr.why == .Malformed, "max_depth refusal: %v", deep_err)
+	_, ok_val := write.sequence_take(&lim, .Null)
+	testing.expect_value(t, ok_val, nil)
+
+	// P19: `Token_Tape` populates `.Number` `node.spelling` so `tape.number_form` distinguishes floats/exponents/ints.
+	tt: write.Token_Tape
+	testing.expect_value(t, write.token_tape_start(&tt, false, 0, context.allocator), nil)
+	defer write.token_tape_drop(&tt)
+	testing.expect_value(t, write.token_tape_take(&tt, .Array, ""), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .Number, "1.5"), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .Number, "1e2"), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .Number, "42"), nil)
+	testing.expect_value(t, write.token_tape_take(&tt, .Close, ""), nil)
+	tt_doc, derr := write.token_tape_document(&tt)
+	testing.expect_value(t, derr, nil)
+	f0, ok0 := tape.number_form(&tt_doc, 1)
+	f1, ok1 := tape.number_form(&tt_doc, 2)
+	f2, ok2 := tape.number_form(&tt_doc, 3)
+	testing.expectf(t, ok0 && f0.int_digits == 1 && f0.frac_digits == 1 && !f0.exponent, "1.5 form: %v %v", f0, ok0)
+	testing.expectf(t, ok1 && f1.exponent && f1.frac_digits == 0, "1e2 form: %v %v", f1, ok1)
+	testing.expectf(t, ok2 && !f2.point && !f2.exponent && f2.frac_digits == 0, "42 form: %v %v", f2, ok2)
+
+	// P19: `token_tape_document` is idempotent on `framed = true` with >= `MAX_CHILDREN` roots.
+	many: write.Token_Tape
+	testing.expect_value(t, write.token_tape_start(&many, true, 0, context.allocator), nil)
+	defer write.token_tape_drop(&many)
+	total_roots := int(tape.MAX_CHILDREN) + 2
+	for _ in 0 ..< total_roots {
+		testing.expect_value(t, write.token_tape_take(&many, .Null, ""), nil)
+	}
+	d1, e1 := write.token_tape_document(&many)
+	testing.expect_value(t, e1, nil)
+	d2, e2 := write.token_tape_document(&many)
+	testing.expect_value(t, e2, nil)
+	testing.expect_value(t, len(d1.counts), 1)
+	testing.expect_value(t, len(d2.counts), 1)
+	testing.expect_value(t, tape.child_count(&d2, tape.ROOT, d2.nodes[0]), total_roots)
+
+	// P19: `token_tape_take` OOM rollback leaves `t` consistent (a subsequent `.Close` never panics).
+	oom_tt := testkit.sweep_failures(proc(data: rawptr, a: runtime.Allocator) {
+		_ = data
+		tp: write.Token_Tape
+		if err := write.token_tape_start(&tp, true, 0, a); err != nil {
+			return
+		}
+		defer write.token_tape_drop(&tp)
+		for step in ([?]struct{ kind: write.Token_Kind, text: string }{
+			{.Object, ""}, {.Key, "long_key_name"}, {.Array, ""}, {.Number, "1.5"}, {.String, "payload"}, {.Close, ""}, {.Close, ""},
+		}) {
+			if err := write.token_tape_take(&tp, step.kind, step.text); err != nil {
+				// Calling `.Close` after an OOM must never panic even if the open container failed to push.
+				_ = write.token_tape_take(&tp, .Close, "")
+				return
+			}
+		}
+	}, nil)
+	testing.expectf(t, oom_tt.bad == 0 && oom_tt.refused >= 1, "token_tape oom sweep: %v", oom_tt)
+
+	// P20: `tokens_of` rejects container keys before calling `text_of` (no OOB slice even when `lo + n > len(src)`).
+	ck_src := "3"
+	ck_nodes := [?]tape.Node{
+		{kind = .Object, role = .Value, n = 5, spelling = 1},
+		{kind = .Array, role = .Key, lo = 1, n = 3, spelling = 2},
+		{kind = .Number, role = .Value, lo = 0, n = 1},
+		{kind = .Number, role = .Value, lo = 0, n = 1},
+		{kind = .Number, role = .Value, lo = 0, n = 1},
+	}
+	ck_doc := tape.Document{src = transmute([]u8)ck_src, nodes = ck_nodes[:], format = json.as(.Json)}
+	jw: json.Writer
+	testing.expect_value(t, json.writer_start(&jw), nil)
+	defer json.writer_drop(&jw)
+	put_err := json.put(&jw, &ck_doc)
+	pr, pok := put_err.(write.Refused)
+	testing.expectf(t, pok && pr.why == .No_Spelling && pr.node == 1, "container key tokens_of: %v", put_err)
+
+	// P20: `tokens_of` with CBOR tags preserves tags via linear `node_facts`.
+	// CBOR tag 1 (epoch datetime) on uint 10: C1 0A
+	tagged_doc, terr := cbor.build([]u8{0xC1, 0x0A})
+	defer cbor.destroy(&tagged_doc)
+	testing.expect_value(t, terr, nil)
+	cw: cbor.Writer
+	testing.expect_value(t, cbor.writer_start(&cw), nil)
+	testing.expect_value(t, cbor.put(&cw, &tagged_doc), nil)
+	cout, cerr := cbor.writer_end(&cw)
+	defer delete(cout)
+	testing.expectf(t, cerr == nil && len(cout) == 2 && cout[0] == 0xC1 && cout[1] == 0x0A, "tagged cbor put: %x %v", cout, cerr)
 }

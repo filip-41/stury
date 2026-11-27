@@ -49,7 +49,7 @@ numbers_read_their_values :: proc(t: ^testing.T) {
 		{"c4 82 01 c2 41 05", {0, .Wide}},
 	}
 	for r in rows {
-		doc, err := cbor.build(hex(r.hex), allocator = context.temp_allocator)
+		doc, err := cbor.build(testkit.hex(r.hex), allocator = context.temp_allocator)
 		if !testing.expectf(t, err == nil, "%s: %v", r.hex, err) {
 			continue
 		}
@@ -103,7 +103,7 @@ numbers_read_as_their_exact_text :: proc(t: ^testing.T) {
 		{"c5 82 21 c2 41 01", "25e-2"},
 	}
 	for r in rows {
-		doc, err := cbor.build(hex(r.hex), allocator = context.temp_allocator)
+		doc, err := cbor.build(testkit.hex(r.hex), allocator = context.temp_allocator)
 		if !testing.expectf(t, err == nil, "%s: %v", r.hex, err) {
 			continue
 		}
@@ -118,20 +118,20 @@ numbers_read_as_their_exact_text :: proc(t: ^testing.T) {
 		testing.expectf(t, !fits, "%s: a buffer too short", r.hex)
 	}
 	// A bigfloat of the largest exponent spelled has its digits, one past it has none.
-	last, _ := cbor.build(hex("c5 82 19 1388 01"), allocator = context.temp_allocator)
+	last, _ := cbor.build(testkit.hex("c5 82 19 1388 01"), allocator = context.temp_allocator)
 	digits := make([]u8, cbor.text_room(&last, cbor.ROOT), context.temp_allocator)
 	text, fits := cbor.node_text(&last, cbor.ROOT, digits)
 	testing.expect_value(t, len(text), 1506)
 	testing.expect(t, fits)
-	past, _ := cbor.build(hex("c5 82 19 1389 01"), allocator = context.temp_allocator)
+	past, _ := cbor.build(testkit.hex("c5 82 19 1389 01"), allocator = context.temp_allocator)
 	testing.expect_value(t, cbor.text_room(&past, cbor.ROOT), 0)
 	// A bigfloat's exponent past what the readers spell gives no text.
-	doc, _ := cbor.build(hex("c5 82 19 ffff 01"), allocator = context.temp_allocator)
+	doc, _ := cbor.build(testkit.hex("c5 82 19 ffff 01"), allocator = context.temp_allocator)
 	buf: [64]u8
 	_, ok := cbor.node_text(&doc, cbor.ROOT, buf[:])
 	testing.expect(t, !ok)
 	// `number_exact` gives a bignum's value where an integer type holds it.
-	exact, _ := cbor.build(hex("c3 48 7fffffffffffffff"), allocator = context.temp_allocator)
+	exact, _ := cbor.build(testkit.hex("c3 48 7fffffffffffffff"), allocator = context.temp_allocator)
 	i, _, unsigned, held := cbor.number_exact(&exact, cbor.ROOT)
 	testing.expect(t, held && !unsigned && i == min(i64))
 }

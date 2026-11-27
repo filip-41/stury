@@ -162,12 +162,12 @@ msgpack_marshal_errors_deep_and_oom :: proc(t: ^testing.T) {
 	Raw_Holder :: struct {
 		raw: msgpack.Raw,
 	}
-	rsrc := hex("81 a3 726177 92 01 d6 ff 514b67b0")
+	rsrc := testkit.hex("81 a3 726177 92 01 d6 ff 514b67b0")
 	rh: Raw_Holder
 	testing.expect_value(t, msgpack.unmarshal(rsrc, &rh, allocator = context.temp_allocator), nil)
-	testing.expect_value(t, string(rh.raw), string(hex("92 01 d6 ff 514b67b0")))
+	testing.expect_value(t, string(rh.raw), string(testkit.hex("92 01 d6 ff 514b67b0")))
 
-	bad_raw := hex("81 a3 726177 c1")
+	bad_raw := testkit.hex("81 a3 726177 c1")
 	rh_bad: Raw_Holder
 	testing.expect(t, msgpack.unmarshal(bad_raw, &rh_bad, allocator = context.temp_allocator) != nil)
 

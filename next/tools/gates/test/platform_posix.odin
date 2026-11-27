@@ -2,14 +2,6 @@
 package gates_tests
 
 import "core:sys/posix"
-import "core:testing"
-import "stury:testkit"
-
-ONE_MIB :: uint(1 << 20)
-
-run_on_1mib_stack :: proc(t: ^testing.T, count: int, text: []u8, what: string, run: Gate_Read, loc := #caller_location) {
-	testkit.expect_reads_on_thread(t, ONE_MIB, count, text, what, run, loc = loc)
-}
 
 // Returns the process peak resident set size in bytes via POSIX `getrusage`, or 0 on failure.
 max_rss_bytes :: proc() -> u64 {

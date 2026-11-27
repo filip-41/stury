@@ -12,12 +12,6 @@ import "stury:lib/core/tape"
 NO_DECL :: max(u32)
 
 @(private)
-Dtd_Flag :: tape.Markup_Dtd_Flag
-@(private)
-Dtd_Flags :: tape.Markup_Dtd_Flags
-@(private)
-Entity_Flag :: tape.Markup_Entity_Flag
-@(private)
 Entity_Flags :: tape.Markup_Entity_Flags
 @(private)
 Entity :: tape.Markup_Entity

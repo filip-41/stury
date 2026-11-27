@@ -22,34 +22,23 @@ nested_text :: proc(depth: int) -> []u8 {
 	return transmute([]u8)strings.to_string(b)
 }
 
-// Reads the nested text five ways: a verdict, a document, the outermost element's value, a scan, and where a
-// document's root element closes.
 @(private = "file")
 read_nested :: proc(read: int, text: []u8) -> bool {
 	opts := xml.Options{budget = {depth = 200_000}}
-	switch read {
-	case 0:
-		return xml.validate(text, opts = opts) == nil
-	case 1:
-		doc, err := xml.build(text, opts = opts)
-		tape.destroy(&doc)
-		return err == nil
-	case 2:
-		answer, err := xml.find(text, {tape.Name("a"), tape.Name("a")}, opts = opts)
-		return err == nil && answer.outcome == .Found
-	case 3:
-		d, _ := tape.demand_of({{tape.Name("a"), tape.Name("a")}})
-		r, err := xml.scan(text, &d, opts = opts)
-		tape.destroy(&r)
-		tape.destroy(&d)
-		return err == nil
-	case:
-		doc, err := xml.build(text, opts = opts)
-		defer tape.destroy(&doc)
-		a, _ := xml.member({&doc, nil}, xml.ROOT, "a")
-		end, ok := doc.format.close_end(&doc, a)
-		return err == nil && ok && end == u64(len(text))
+	if read < testkit.DEEP_CORE_READS {
+		return testkit.deep_core_read(
+			read, xml.reads(.Xml), xml.as(.Xml), text, opts,
+			{tape.Name("a"), tape.Name("a")},
+			{{tape.Name("a"), tape.Name("a")}},
+			{{tape.Descend{}, tape.Name("a")}},
+			.Concatenated, nil,
+		)
 	}
+	doc, err := xml.build(text, opts = opts)
+	defer tape.destroy(&doc)
+	a, _ := xml.member({&doc, nil}, xml.ROOT, "a")
+	end, ok := doc.format.close_end(&doc, a)
+	return err == nil && ok && end == u64(len(text))
 }
 
 // A thread of one MiB reads a text of 100,000 levels, which the levels past the frame take from the allocator and not
@@ -57,6 +46,6 @@ read_nested :: proc(read: int, text: []u8) -> bool {
 @(test)
 reads_nest_100000_levels_in_one_mib :: proc(t: ^testing.T) {
 	testkit.deadline(t)
-	testkit.expect_reads_on_thread(t, 1 << 20, 5, nested_text(100_000), "elements", read_nested)
+	testkit.expect_reads_on_thread(t, 1 << 20, testkit.DEEP_CORE_READS + 1, nested_text(100_000), "elements", read_nested)
 	free_all(context.temp_allocator)
 }

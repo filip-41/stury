@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:strconv"
 import "core:time"
+import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 import "stury:lib/core/hook"
 import "stury:lib/core/tape"
@@ -94,29 +95,7 @@ copy_span :: #force_no_inline proc "contextless" (h: ^Reader, dest: uintptr, lo:
 // Copies `n` bytes from `src` to `dst`, a short run in overlapping loads of its first and last bytes.
 @(private)
 copy_short :: #force_inline proc "contextless" (dst, src: [^]u8, n: int) {
-	switch {
-	case n > 32:
-		intrinsics.mem_copy_non_overlapping(dst, src, n)
-	case n >= 16:
-		a := intrinsics.unaligned_load((^[16]u8)(src))
-		b := intrinsics.unaligned_load((^[16]u8)(src[n - 16:]))
-		intrinsics.unaligned_store((^[16]u8)(dst), a)
-		intrinsics.unaligned_store((^[16]u8)(dst[n - 16:]), b)
-	case n >= 8:
-		a := intrinsics.unaligned_load((^u64)(src))
-		b := intrinsics.unaligned_load((^u64)(src[n - 8:]))
-		intrinsics.unaligned_store((^u64)(dst), a)
-		intrinsics.unaligned_store((^u64)(dst[n - 8:]), b)
-	case n >= 4:
-		a := intrinsics.unaligned_load((^u32)(src))
-		b := intrinsics.unaligned_load((^u32)(src[n - 4:]))
-		intrinsics.unaligned_store((^u32)(dst), a)
-		intrinsics.unaligned_store((^u32)(dst[n - 4:]), b)
-	case:
-		for i in 0 ..< n {
-			dst[i] = src[i]
-		}
-	}
+	kernel.copy_short(dst, src, n)
 }
 
 // Stores a copy of the text of token `t` at `dest`, false when memory is refused. An empty text allocates nothing.

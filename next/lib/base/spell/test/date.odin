@@ -5,6 +5,16 @@ import "core:time"
 import "stury:lib/base/spell"
 import "stury:testkit"
 
+@(private = "file")
+expect_pred :: proc(t: ^testing.T, pred: proc "contextless" (string) -> bool, good, bad: []string, loc := #caller_location) {
+	for s in good {
+		testing.expectf(t, pred(s), "%q", s, loc = loc)
+	}
+	for s in bad {
+		testing.expectf(t, !pred(s), "%q", s, loc = loc)
+	}
+}
+
 // RFC 3339 date-times read, and a text that breaks the grammar or names no day or time is refused.
 @(test)
 date_times_follow_rfc_3339 :: proc(t: ^testing.T) {
@@ -49,14 +59,7 @@ date_times_follow_rfc_3339 :: proc(t: ^testing.T) {
 		"2013-03-21T20:04:00Z ",
 		"2013-03-21T20:04:00+01:000",
 	}
-	for s in good {
-		ok := spell.is_date_time(s)
-		testing.expectf(t, ok, "%q", s)
-	}
-	for s in bad {
-		ok := spell.is_date_time(s)
-		testing.expectf(t, !ok, "%q", s)
-	}
+	expect_pred(t, spell.is_date_time, good, bad)
 }
 
 // RFC 3339 full-dates enforce proleptic Gregorian leap years and month lengths across 0000..9999.
@@ -96,14 +99,7 @@ full_dates_follow_rfc_3339 :: proc(t: ^testing.T) {
 		"2024-0a-01",
 		"2024-01-0a",
 	}
-	for s in good {
-		ok := spell.is_full_date(s)
-		testing.expectf(t, ok, "%q", s)
-	}
-	for s in bad {
-		ok := spell.is_full_date(s)
-		testing.expectf(t, !ok, "%q", s)
-	}
+	expect_pred(t, spell.is_full_date, good, bad)
 }
 
 // `date_time_nsec` converts UTC offsets, sub-nanosecond truncation, leap seconds, and >64-byte space-separated inputs.
@@ -275,14 +271,7 @@ full_times_follow_rfc_3339 :: proc(t: ^testing.T) {
 		" 12:00:00Z",
 		"12:00:00+01:000",
 	}
-	for s in good {
-		ok := spell.is_full_time(s)
-		testing.expectf(t, ok, "%q", s)
-	}
-	for s in bad {
-		ok := spell.is_full_time(s)
-		testing.expectf(t, !ok, "%q", s)
-	}
+	expect_pred(t, spell.is_full_time, good, bad)
 }
 
 // `date_time_utc` covers the full 0000..9999 year range, sub-second pre-epoch timestamps, offsets, leap seconds, and

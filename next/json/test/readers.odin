@@ -49,7 +49,7 @@ random_container :: proc(object: bool, width, names: int) -> string {
 		if object {
 			n := rand.int_max(names)
 			if n % 3 == 0 && rand.int_max(2) == 0 {
-				fmt.sbprintf(&b, `"k%d":`, n)
+				fmt.sbprintf(&b, `"\u006b%d":`, n)
 			} else {
 				fmt.sbprintf(&b, `"k%d":`, n)
 			}
